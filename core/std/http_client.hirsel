@@ -21,6 +21,29 @@ pub type Request: send {
 
 pub type Error: send = InvalidRequest | State | NoSpace | Connect(NetError) | Write(NetError) | Receive(NetError) | MalformedHead | UnsupportedSwitch | BodyFraming | TooLarge | Deadline | Cancelled
 
+/// Adds an explicit Idempotency-Key as a quoted lower-case hexadecimal string.
+/// Refuses an empty key or a second Idempotency-Key field.
+pub fn idempotency_key(mut headers: List[Header], key: Bytes) -> Result[(), Error] {
+    if list.len(key) == 0 {
+        return Error(InvalidRequest)
+    }
+    for header in headers {
+        if http1.equal_ascii(string.as_bytes(header.name), b"idempotency-key") {
+            return Error(InvalidRequest)
+        }
+    }
+    let mut value: Bytes = list.with_capacity(2 * list.len(key) + 2)
+    list.push(mut value, b'"')
+    for byte in key {
+        let (hi, lo) = hex.encode_byte(byte, false)
+        list.push(mut value, hi)
+        list.push(mut value, lo)
+    }
+    list.push(mut value, b'"')
+    list.push(mut headers, Header(name: "Idempotency-Key", value: Public(take value)))
+    Ok(())
+}
+
 fn append(mut out: Bytes, data: Bytes) -> Result[(), Error] {
     if list.len(data) > order.min(8192, list.capacity(out)) - list.len(out) {
         return Error(TooLarge)

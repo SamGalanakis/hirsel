@@ -210,24 +210,33 @@ fn reply_value[G: send, R: codec, E: codec](mut ctx: Ctx[G], take reply: Reply) 
     }
 }
 
-fn outside_request[G, A: codec, R: codec, E: codec](index: u64, a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits], mode: Mode) -> Begin {
+fn outside_request_identity[A: codec, R, E](index: u64, a: A, identity: Bytes, mode: Mode, cr: std.codec.Codec[R], ce: std.codec.Codec[E]) -> Begin {
     let ca: std.codec.Codec[A] = std.codec.of()
-    let cr: std.codec.Codec[R] = std.codec.of()
-    let ce: std.codec.Codec[E] = std.codec.of()
-    let encoded = must(fingerprint(OUTSIDE, code.identity(f), ca, cr, ce, must(encode(a))))
+    let encoded = must(fingerprint(OUTSIDE, identity, ca, cr, ce, must(encode(a))))
     Begin(index: index, fingerprint: take encoded, mode: mode)
 }
 
-fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take before: Begin, callback: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+fn outside_request[G, A: codec, R: codec, E: codec](index: u64, a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits], mode: Mode) -> Begin {
+    let cr: std.codec.Codec[R] = std.codec.of()
+    let ce: std.codec.Codec[E] = std.codec.of()
+    outside_request_identity(index, a, code.identity(f), mode, cr, ce)
+}
+
+fn keyed_request[G, A: codec, R: codec, E: codec](index: u64, a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits], mode: Mode) -> Begin {
+    let cr: std.codec.Codec[R] = std.codec.of()
+    let ce: std.codec.Codec[E] = std.codec.of()
+    outside_request_identity(index, a, code.identity(f), mode, cr, ce)
+}
+
+fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take before: Begin, invoke: scoped fn(G, StepId, take A) -> Result[R, E] waits) -> Result[R, StepError[E]] waits {
     let copied: Begin = clone(before)
     let attempted: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Enter(take copied))
     match (take attempted)? {
         Ready => (),
         other => return reply_value(mut ctx, take other),
     }
-    let invoke = code.callable(callback)
     let value = match map.get(ctx.grants, ctx.index) {
-        Some(grant) => invoke(grant, take a),
+        Some(grant) => invoke(grant, next_id(ctx), take a),
         None => fail("step wrapper: no grant for outside step"),
     }
     let finished = Finish(step: take before, raw: must(encode(value)))
@@ -235,21 +244,49 @@ fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, ta
     reply_value(mut ctx, (take result)?)
 }
 
+fn unkeyed_outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take request: Begin, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    let invoke = code.callable(f)
+    outside(mut ctx, take a, take request, scoped fn(grant: G, _id: StepId, take arg: A) -> Result[R, E] waits { invoke(grant, take arg) })
+}
+
+fn keyed_outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take request: Begin, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    let invoke = code.callable(f)
+    outside(mut ctx, take a, take request, scoped fn(grant: G, id: StepId, take arg: A) -> Result[R, E] waits { invoke(grant, must(outside_key(id)), take arg) })
+}
+
 pub fn step[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     let request = outside_request(ctx.index, a, f, First)
-    outside(mut ctx, take a, take request, f)
+    unkeyed_outside(mut ctx, take a, take request, f)
 }
 
 pub fn resend[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     if id != next_id(ctx) { return Error(StaleAttempt) }
     let request = outside_request(ctx.index, a, f, Resend)
-    outside(mut ctx, take a, take request, f)
+    unkeyed_outside(mut ctx, take a, take request, f)
 }
 
 pub fn resolve[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits], lookup: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     if id != next_id(ctx) { return Error(StaleAttempt) }
     let request = outside_request(ctx.index, a, f, Lookup)
-    outside(mut ctx, take a, take request, lookup)
+    unkeyed_outside(mut ctx, take a, take request, lookup)
+}
+
+/// Passes the encoded step id to a fresh outside call. Replay returns the stored result.
+pub fn keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    let request = keyed_request(ctx.index, a, f, First)
+    keyed_outside(mut ctx, take a, take request, f)
+}
+
+pub fn resend_keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    if id != next_id(ctx) { return Error(StaleAttempt) }
+    let request = keyed_request(ctx.index, a, f, Resend)
+    keyed_outside(mut ctx, take a, take request, f)
+}
+
+pub fn resolve_keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits], lookup: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    if id != next_id(ctx) { return Error(StaleAttempt) }
+    let request = keyed_request(ctx.index, a, f, Lookup)
+    keyed_outside(mut ctx, take a, take request, lookup)
 }
 
 fn transaction_body[App: inert + send, A: codec, R: codec, E: codec](mut tx: store.Tx, t: Tables, app: App, a: triggers.Attempt, take request: TxRequest, f: StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]]) -> Result[Reply, store.Error] {

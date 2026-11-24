@@ -20,6 +20,9 @@ framing fields and refuses caller-supplied Host, Content-Length,
 Transfer-Encoding, Trailer, Expect and Upgrade. A protected Connection field
 ends reuse because the client cannot tell whether it asks the peer to close.
 
+`idempotency_key(mut headers, key)` adds a quoted hexadecimal `Idempotency-Key`
+field for binary keys. It refuses an empty key or a duplicate field.
+
 `dial(net, address, authority, clock, request, deadline_ns)` connects to a
 numeric `Addr` under the caller's Net grant and writes the first request
 head. `attach` takes an already connected socket and writes the same head.

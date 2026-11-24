@@ -144,7 +144,6 @@ fn decode_reply[R: codec](outcome: runner.Outcome) -> Result[R, Capacity] {
 }
 
 pub type Port: send = Welcome(Sender[Mail]) | Billing(Sender[Payment])
-pub type ChargeRequest: codec + send { id: steps.StepId, card: String }
 
 pub fn send_welcome(port: Port, take email: String) -> Result[u64, WriteError] waits {
     let Welcome(mail) = view port else { fail("sign-up: expected mail grant") }
@@ -153,18 +152,17 @@ pub fn send_welcome(port: Port, take email: String) -> Result[u64, WriteError] w
     Ok(result.unwrap(channel.receive(from)))
 }
 
-pub fn send_charge(port: Port, take request: ChargeRequest) -> Result[u64, WriteError] waits {
+pub fn send_charge(port: Port, key: Bytes, take card: String) -> Result[u64, WriteError] waits {
     let Billing(payment) = view port else { fail("sign-up: expected payment grant") }
     let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
-    let ChargeRequest(id: id, card: take card) = take request
-    result.unwrap(channel.send(payment, Charge(result.unwrap(steps.outside_key(id)), take card, take to)))
+    result.unwrap(channel.send(payment, Charge(clone(key), take card, take to)))
     Ok(result.unwrap(channel.receive(from)))
 }
 
-pub fn find_charge(port: Port, take request: ChargeRequest) -> Result[u64, WriteError] waits {
+pub fn find_charge(port: Port, key: Bytes, take _card: String) -> Result[u64, WriteError] waits {
     let Billing(payment) = view port else { fail("sign-up: expected payment grant") }
     let (to, from): (Sender[Option[u64]], Receiver[Option[u64]]) = channel.new(1u64)
-    result.unwrap(channel.send(payment, Lookup(result.unwrap(steps.outside_key(request.id)), take to)))
+    result.unwrap(channel.send(payment, Lookup(clone(key), take to)))
     match channel.receive(from) {
         Ok(Some(receipt)) => Ok(receipt),
         _ => Error(PaymentUnknown),
@@ -174,12 +172,11 @@ pub fn find_charge(port: Port, take request: ChargeRequest) -> Result[u64, Write
 fn process(mut ctx: steps.Ctx[Port], take arg: Signup) -> Result[RunResult, steps.StepError[WriteError]] waits {
     let Signup(id: id, email: take email, card: take card) = take arg
     let _ = steps.step(mut ctx, take email, code.describe(send_welcome))?
-    let charge = ChargeRequest(id: steps.next_id(ctx), card: take card)
-    let copied: ChargeRequest = clone(charge)
+    let copied: String = clone(card)
     let send = code.describe(send_charge)
-    let attempted = steps.step(mut ctx, take copied, send)
+    let attempted = steps.keyed(mut ctx, take copied, send)
     let _ = match take attempted {
-        Error(InDoubt(step)) => steps.resolve(mut ctx, step, take charge, send, code.describe(find_charge))?,
+        Error(InDoubt(step)) => steps.resolve_keyed(mut ctx, step, take card, send, code.describe(find_charge))?,
         other => (take other)?,
     }
     steps.transaction(mut ctx, id, code.describe(activate))?
@@ -232,11 +229,12 @@ fn client_call[R: codec](conn: wire_client.Conn, slot: u32, take arg: Bytes, pos
 }
 
 // Run with a scratch Dir, then inspect the account and its stored step rows.
-pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout) -> Result[(), Exit] waits {
+fn exercise(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> () waits {
     let mut name = string.with_capacity(64u64)
     string.push(mut name, "signup-")
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let (take services, take mailing, take payments) = scripted_services(tasks)
+    let payment = channel.sender(services.payment)
     let target: triggers.Entry[Signup] = result.unwrap(triggers.granted(code.describe(run)))
     let entries = result.unwrap(trigger_entries(target))
     let trigger_config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
@@ -294,9 +292,38 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
     let paid: Result[Option[Result[u64, WriteError]], store.Error] = steps.recorded(db, h.steps, steps.StepId(run: run_id, index: 1u64))
     if let Ok(Some(Ok(1u64))) = welcome {} else { fail("sign-up: missing welcome receipt") }
     if let Ok(Some(Ok(1u64))) = paid {} else { fail("sign-up: missing payment receipt") }
+    // StepId is the trigger id's fixed-width little-endian fields followed by the step index.
+    let mut key: Bytes = list.with_capacity(44u64)
+    list.put_word_le(mut key, run_id.store_hi)
+    list.put_word_le(mut key, run_id.store_lo)
+    list.put_word_le(mut key, run_id.branch)
+    list.put_word_le(mut key, run_id.version)
+    list.put_word_le(mut key, run_id.index)
+    list.put_word_le(mut key, 1u64)
+    let (to, from): (Sender[Option[u64]], Receiver[Option[u64]]) = channel.new(1u64)
+    result.unwrap(channel.send(payment, Lookup(take key, take to)))
+    if let Ok(Some(1u64)) = channel.receive(from) {} else { fail("sign-up: payment received the wrong step key") }
     result.unwrap(store.close(take db))
     let _ = take mailing
     let _ = take payments
+}
+
+pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout) -> Result[(), Exit] waits {
+    exercise(parent, clock, random, tasks, net)
     result.unwrap(stdout.write(out, "sign-up active; one welcome and one charge\n"))
     Ok(())
+}
+
+@test
+fn keyed_outside_step(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    exercise(parent, clock, random, tasks, net)
+    let mut headers: List[std.http_client.Header] = list.new()
+    if let Ok(()) = std.http_client.idempotency_key(mut headers, b"other") {} else { return Error(()) }
+    if let Error(InvalidRequest) = std.http_client.idempotency_key(mut headers, b"other") {} else { return Error(()) }
+    list.clear(mut headers)
+    std.http_client.idempotency_key(mut headers, b"\x00\xff") ?=> |_| ()
+    let header = view headers[0u64]
+    if header.name != "Idempotency-Key" { return Error(()) }
+    let Public(value) = view header.value else { return Error(()) }
+    if value == b"\"00ff\"" { Ok(()) } else { Error(()) }
 }

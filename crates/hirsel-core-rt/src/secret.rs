@@ -8,6 +8,8 @@ use crate::{
     limit::Payer,
     provider::{Buffer, IoError, Outcome, Provider, Request, STEP_DONE, Step, Wait},
 };
+#[doc(hidden)]
+pub mod agreement;
 pub(crate) mod kdf;
 pub(crate) mod key;
 use hirsel_core_net::{

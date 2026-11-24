@@ -1633,16 +1633,6 @@ impl SyncHost {
     }
 }
 
-fn tape_frames(mut bytes: &[u8]) -> Vec<Frame> {
-    let (mut blocks, _) = Blocks::open(|buf| bytes.read(buf)).unwrap();
-    let mut decoder = Decoder::default();
-    let mut frames = Vec::new();
-    while let Some((flags, payload)) = blocks.next(|buf| bytes.read(buf)).unwrap() {
-        frames.extend(decoder.block(payload, flags & format::END != 0).unwrap());
-    }
-    frames
-}
-
 /// The bypass law on the real host, every S1 operation kind, each issued by
 /// a task through the scheduler. Wrong implementation caught: one op kind
 /// whose Replay reaches the host, or whose recorded answer (value, error,
@@ -2551,3 +2541,10 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
         assert_eq!(no_host.calls.get(), 0);
     }
 }
+
+#[path = "test_frames.rs"]
+mod test_frames;
+use test_frames::tape_frames;
+
+#[path = "registry_tests.rs"]
+mod registry_tests;

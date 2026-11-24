@@ -590,8 +590,12 @@ to `len` bytes. An empty `salt` is the 32 zero bytes of §2.2, which gives the s
 password, `salt`, an empty secret value and associated data, `cost` and `len`. Each keeps
 the `len` result bytes as a new sealed secret. HKDF turns a high-entropy key into keys for
 separate purposes, such as one AEAD key per tenant or per file; Argon2id turns a granted
-passphrase into a key. The runtime is RustCrypto `hkdf` 0.13.0 over `sha2` 0.11.1, and
-`argon2.id`'s wrapper, computing from run-owned memory.
+passphrase into a key. The runtime computes from run-owned memory. HKDF is ring 0.17.14's
+`hkdf::Salt::new(HKDF_SHA256, salt).extract(ikm)`, then `Prk::expand(&[info], len)` and
+`Okm::fill`, with `len` given through a wrapper type implementing `hkdf::KeyType`. ring's
+`expand` fails exactly when `len` exceeds `255 × 32`, the bound the rule below checks
+first, and an empty `salt` is an HMAC key of no bytes, which HMAC pads to the same block as
+32 zero bytes. Argon2id is `argon2.id`'s wrapper.
 
 **The derivation rule.** It governs `derive_hmac_sha256`, `derive_hkdf_sha256` and
 `derive_argon2id` alike. The results, in this order:
@@ -655,8 +659,17 @@ tag) and most file formats store.
 | `Aes128Gcm` | GCM ([NIST SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final)) with AES-128 | 16 bytes | 12 bytes | 16 bytes | `2^36 − 32` bytes |
 | `Aes256Gcm` | GCM with AES-256 | 32 bytes | 12 bytes | 16 bytes | `2^36 − 32` bytes |
 
-The runtime is RustCrypto `chacha20poly1305` 0.11.0 and `aes-gcm` 0.11.1, computing from
-run-owned memory. AES-192, nonces of other lengths and truncated tags are not offered: GCM
+The runtime is ring 0.17.14's `aead`: `UnboundKey::new` with `CHACHA20_POLY1305`,
+`AES_128_GCM` or `AES_256_GCM`, which refuses a key of any other length (the delivered
+`Invalid` below), wrapped in a `LessSafeKey`, with `Nonce::try_assume_unique_for_key`,
+which takes exactly 12 bytes. The longest `plain` column is ring's per-nonce limit for each
+algorithm (its `MAX_IN_OUT_LEN`), which the sink checks before issue. A seal copies `plain`
+into the spare of `out`, encrypts it there with `seal_in_place_separate_tag` and appends
+the tag after it. An open copies the ciphertext into the spare of `out`, decrypts it there
+with `open_in_place_separate_tag` against the tag taken from `sealed`'s last 16 bytes
+(`Tag::try_from`), and extends `out`'s length only when that succeeds, so neither copies
+through any other buffer and nothing is admitted. ring offers no AES-192, no nonce of
+another length and no truncated tag, and none is offered here: GCM
 with a nonce other than 96 bits derives its counter through GHASH, which SP 800-38D
 §8.2 and the attacks on it make the weaker choice, and a short tag weakens every message.
 
@@ -685,8 +698,10 @@ The results, decided in this order:
   program only whether the length matches, which the grant's author chose.
 - `Tampered`, `aead_open` only: `sealed` is shorter than 16 bytes, or the tag does not
   verify. A wrong key, nonce, `aad`, ciphertext byte or tag byte gives the same answer, and
-  nothing more: not which byte, and no plaintext. Nothing is appended, and the runtime
-  decrypts nothing before the tag has verified.
+  nothing more: not which byte, and no plaintext. Nothing is appended. ring decrypts as
+  it authenticates, then compares the tags in constant time and zeroes every decrypted
+  byte when they differ, before the call returns, so no unverified plaintext becomes part
+  of `out` or reaches the program.
 
 The last two are deliveries. Each operation is a provider operation
 ([CAP-5](capabilities.md#cap-5-provider-operations)), as the MAC sink is: its issue and its
@@ -707,9 +722,11 @@ waits.
 **Constant time.** Nothing the sink computes from the key or the plaintext varies in time
 or memory address with their values. ChaCha20 and Poly1305 are fixed sequences of
 additions, rotations, XORs and multiplications. AES runs on the CPU's AES instructions when
-it has them (AES-NI, ARMv8 AES) and otherwise on the crate's bitsliced software, which
-looks up no table. GHASH runs on carry-less multiply instructions or on the crate's
-constant-time software multiply. The tag comparison is constant time. The time may depend
+it has them (AES-NI, ARMv8 AES), otherwise on ring's vector-permute AES (`vpaes`, SSSE3 or
+NEON) or its bitsliced software (`aes_nohw`), none of which looks up a table by secret
+index. GHASH runs on carry-less multiply instructions (PCLMULQDQ, VPCLMULQDQ, ARMv8 PMULL)
+or on ring's constant-time software multiply (its `gcm` fallback, after BearSSL's). The
+tag comparison is constant time (`verify_slices_are_equal`). The time may depend
 on the lengths of `nonce`, `aad` and `plain`, which the program already knows. An engine
 may choose among these paths by CPU; every path gives the same bytes, so by
 [SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU.
@@ -1108,8 +1125,8 @@ and L (more than three).
 | **T6** STARTTLS | S | T1, T3 | `net.join` and `Unjoined` (NET-7) on both engines and in the evaluator's virtual sockets; TLS-1's unread-bytes peek in the OS provider, and a pre-handshake bytes step in peer scripts | TL14–TL16 |
 | **T7** SCRAM | M | T4, T6 | TLS-1's binding value (`binding_out`, the recording's `TLS_CONNECT` delivery); `Scram`, `ScramError`, `scram_sha256`, `scram_final_len`, `scram_verify`; SASLprep with raw fallback; the per-iteration charge; `SCRAM` and `SCRAM_VERIFY` in the OS, scripted and virtual paths and in a recording | SC1–SC9 |
 | **T8** credential grants | M | T4, T7 | the `Cred` type and grant kind, the `imds` and `sts` sources, `cred.fetch` in the OS provider on a host helper, its frames and grant record in a recording, std `cred` | CR1–CR5 |
-| **T9** AEAD sink | M | T4, CK | `AeadAlg`; the `aead(<alg>)` and `open(<alg>)` uses in policy parsing, `narrow` and the canonical text; `aead_seal` and `aead_open` in the OS provider over `chacha20poly1305` 0.11.0 and `aes-gcm` 0.11.1, and in the scripted and virtual paths as the MAC sink is; their issue and delivery frames in a recording | AE1–AE8 |
-| **T10** derivation sinks | M | T4, CK, A2 | `derive_hkdf_sha256` over `hkdf` 0.13.0 and `derive_argon2id` over A2's wrapper, in the OS, scripted and virtual paths; the derivation rule's child set, applied to `derive_hmac_sha256` too; opacity; the child, working-memory and step charges; their frames in a recording | KD1–KD6 |
+| **T9** AEAD sink | M | T4 | `AeadAlg`; the `aead(<alg>)` and `open(<alg>)` uses in policy parsing, `narrow` and the canonical text; `aead_seal` and `aead_open` in the OS provider over ring 0.17.14's `aead` (`LessSafeKey`, sealing and opening in the spare of `out`), and in the scripted and virtual paths as the MAC sink is; their issue and delivery frames in a recording | AE1–AE8 |
+| **T10** derivation sinks | M | T4, A2 | `derive_hkdf_sha256` over ring's `hkdf` and `derive_argon2id` over A2's wrapper, in the OS, scripted and virtual paths; the derivation rule's child set, applied to `derive_hmac_sha256` too; opacity; the child, working-memory and step charges; their frames in a recording | KD1–KD6 |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
 recording is part of its contract. T5, T6 and T7 run in any order once their dependencies land.

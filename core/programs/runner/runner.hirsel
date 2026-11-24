@@ -939,6 +939,7 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Unqualified(reason) => { string.push(mut line, "the object store provider did not pass conditional write qualification: "); string.push(mut line, reason) },
         HistoryMissing(_, _) => string.push(mut line, "the object store history is missing an object"),
         Reclaimed(_) => string.push(mut line, "the requested object store history was reclaimed"),
+        Retired => string.push(mut line, "the Store follower worker has stopped"),
         Missed => string.push(mut line, "a read is waiting for a store frame"),
         Remote(_) => string.push(mut line, "a bucket operation failed"),
         Tiered(reason) => string.push(mut line, match reason {
@@ -956,7 +957,6 @@ fn push_capacity(mut line: String, cap: Capacity) {
     string.push_u64(mut line, cap.available)
     string.push(mut line, " available")
 }
-
 // One line naming why a place did not start and what to change (RUNNER-SPEC §12.1).
 pub fn start_text(problem: StartError) -> String {
     let mut line = string.from("place: ")

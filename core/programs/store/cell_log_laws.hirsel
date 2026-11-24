@@ -308,7 +308,9 @@ fn cell_elision_and_inline_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -
         durable(mut db, receipt)?
     }
     let mut family = followers()
-    let replica = follower(mut family, tasks, log_authority(dir), c, options)?
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let replica = follower(mut family, follower_slot(follower_owner(service)?, plan)?, log_authority(dir), c, options.expect)?
     let mut declarations = declare_follower(replica)
     let followed_cell = declare_cell(mut declarations, "one", std.codec.of_bytes())?
     seal_follower(replica, take declarations)?

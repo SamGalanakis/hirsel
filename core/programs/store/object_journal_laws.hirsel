@@ -96,7 +96,9 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     let _ = checkpoint(mut surviving)?
     let read_source = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
     let mut process = followers()
-    let follower_view = follower(mut process, tasks, object_authority(take read_source, "bucket", BUCKET_LAW_OP_MS), sim.time, options)?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let follower_view = follower(mut process, follower_slot(follower_owner(service)?, plan)?, object_authority(take read_source, "bucket", BUCKET_LAW_OP_MS), sim.time, options.expect)?
     let visible = snapshot_follower(follower_view, Branch(store: saved.store, id: 0))?
     if get(result.unwrap(follower_reader(follower_view, 0u64)), visible, rows, 7)? != Some(clone(value)) || get(result.unwrap(follower_reader(follower_view, 0u64)), visible, rows, 8)? != None {
         fail("the surviving history lost a durable row or exposed a fenced row")
@@ -322,7 +324,9 @@ fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let rows = bucket_law_rows_table(mut writer)?
     let watching = bucket_law_client_lanes(sim, tasks, "s3.test", 812, true, 1)?
     let mut ids = followers()
-    let mut follower_view = follower(mut ids, tasks, object_authority(take watching, "bucket", BUCKET_LAW_OP_MS), sim.time, options)?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut follower_view = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, object_authority(take watching, "bucket", BUCKET_LAW_OP_MS), sim.time, options.expect)?
     let main_line = main_branch(writer)
     let saved = snapshot_follower(follower_view, main_line)?
     let mut inspector = bucket_law_client_lanes(sim, tasks, "s3.test", 813, true, 1)?

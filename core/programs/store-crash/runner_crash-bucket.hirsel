@@ -155,9 +155,16 @@ fn bucket_follow(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: 
     let lanes = std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64)
     let due = std.clock.deadline_after_ms(host.mono_ns(c), 30000u64)
     let connected = result.unwrap(std.object.start(n, tasks, take bucket, take credential, None, System, c, r, lanes, due))
-    let follow_options = result.unwrap(store.sized(Bucket(lanes), 2147483648u64))
+    // Leave half the fixture limit for the client and the native harness.
+    let sizing = result.unwrap(store.sized(Bucket(lanes), runtime.root_limit() / 2))
+    let plan = result.unwrap(store.follower_plan(Bucket(lanes), sizing))
+    let mut plans: List[store.FollowerPlan] = list.with_capacity(1)
+    list.push(mut plans, clone(plan))
+    let service = result.unwrap(store.follower_service(tasks, option.unwrap(store.service_bytes(plans))))
+    let owner = result.unwrap(store.follower_owner(service))
+    let slot = result.unwrap(store.follower_slot(owner, plan))
     let mut ids = store.followers()
-    let mut mirror = result.unwrap(store.follower(mut ids, tasks, store.object_authority(take connected, "bucket", 30000u64), c, follow_options))
+    let mut mirror = result.unwrap(store.follower(mut ids, take slot, store.object_authority(take connected, "bucket", 30000u64), c, sizing.expect))
     let image = result.unwrap(store.fresh(mut mirror, due))
     let mut declaration = store.declare_follower(mirror)
     let handle = result.unwrap(schema(mut declaration))
@@ -168,6 +175,9 @@ fn bucket_follow(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: 
     string.push_u64(mut line, store.version(image))
     string.push_char(mut line, ' ')
     string.push_u64(mut line, accumulated)
+    let _ = take mirror
+    let _ = take owner
+    result.unwrap(store.close_follower_service(take service))
     say(out, take line)
 }
 

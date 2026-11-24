@@ -400,7 +400,9 @@ fn bucket_law_capture(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error
     let options = bucket_law_options(false)
     let source = bucket_law_authority(s, tasks, "s3.test", 2)?
     let mut process = followers()
-    let mut mirror = follower(mut process, tasks, take source, s.time, options)?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut mirror = follower(mut process, follower_slot(follower_owner(service)?, plan)?, take source, s.time, options.expect)?
     let Some(main) = follower_branch(mirror, "main") else {
         fail("the follower did not recover main")
     }
@@ -918,7 +920,9 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), E
     // Writer selection never constrains a read-only follower.
     settings.activation = Some(17)
     settings.binding = Some(list.new())
-    let mut followed = follower(mut source, tasks, object_authority(take read_source, "reader", BUCKET_LAW_OP_MS), sim.time, settings)?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), settings)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut followed = follower(mut source, follower_slot(follower_owner(service)?, plan)?, object_authority(take read_source, "reader", BUCKET_LAW_OP_MS), sim.time, settings.expect)?
     let deadline = std.object.deadline_after_ms(writer.client, BUCKET_LAW_OP_MS)
     let genesis = fresh(mut followed, deadline)?
     let genesis_head = follower_head(followed)?

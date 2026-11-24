@@ -58,7 +58,7 @@ fn history_locator_rows(mut client: std.object.Client, id: StoreId, checkpoint_r
         if item.seq > checkpoint_ref.seq || item.len < 88 || item.len > 88 + 1048576 {
             return Error(disk_fault(file, i * 32, Malformed))
         }
-        let chunk = history_key("l-", item)
+        let chunk = history_read_key("l-", item)?
         let payload = history_read_object(mut client, chunk, item, deadline)?
         let child = disk_allocation(scoped fn() -> Result[DiskFrame, Error] {
             let ctx = history_object_context(chunk, id, 8, item, payload)?
@@ -85,7 +85,7 @@ fn history_locator_rows(mut client: std.object.Client, id: StoreId, checkpoint_r
 
 fn history_locator(mut client: std.object.Client, head: HistoryHead, mark: HistoryMark, raw: Bytes, deadline: u64) -> Result[HistoryLocator, Error] waits {
     let mut state = empty_history_locator()
-    let file = history_key("e-", head.checkpoint)
+    let file = history_read_key("e-", head.checkpoint)?
     history_locator_rows(mut client, head.store, head.checkpoint, file, mark.depth, list.slice(raw, mark.locate_at, mark.locate_end), mut state, deadline)?
     Ok(take state)
 }
@@ -106,7 +106,7 @@ fn history_list_page(mut client: std.object.Client, locator: HistoryLocator, dea
         let file = paged_pack_path(ptr.pack)?
         return Error(disk_fault(file, ptr.offset, Dangling(ptr.stamp)))
     }
-    let path = history_key("p-", item)
+    let path = history_read_key("p-", item)?
     let width: u64 = int.widen(ptr.len)
     if width > PAGE_LIMIT || ptr.offset < 72 || ptr.offset > item.len || 16 + width > item.len - ptr.offset {
         return Error(disk_fault(path, ptr.offset, Malformed))
@@ -177,7 +177,7 @@ fn history_check_list_pack(mut client: std.object.Client, locator: HistoryLocato
     list.sort(mut reached, fn(a: u64, b: u64) -> Order {
         order.compare(a, b)
     })
-    let mut stream = HistoryPackStream(path: history_key("p-", item), reference: item, read_through: 0, offset: 0, available: take data_window, digest: std.check.start())
+    let mut stream = HistoryPackStream(path: history_read_key("p-", item)?, reference: item, read_through: 0, offset: 0, available: take data_window, digest: std.check.start())
     let mut frame_prefix = take bits
     let mut stamp_prefix = take stamps
     history_stream_copy(mut client, deadline, mut stream, 72, mut frame_prefix)?
@@ -231,7 +231,8 @@ fn history_want(mut pending: Map[u64, List[LocatedNeed]], seq: u64, need: Locate
     if let Some(answer) = appended {
         return capacity(answer)
     }
-    let mut needs: List[LocatedNeed] = list.with_capacity(1)
+    let mut needs: List[LocatedNeed] = list.new()
+    capacity(list.try_reserve(mut needs, 1))?
     list.push(mut needs, need)
     capacity(map.try_reserve(mut pending, 1))?
     map.insert(mut pending, seq, take needs)
@@ -253,7 +254,7 @@ fn history_want_roots(mut pending: Map[u64, List[LocatedNeed]], roots: LocatedRo
 
 fn history_load_data_pack(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64) -> Result[(String, LoadedPack), Error] waits {
     let item: HistoryRef = clone(option.unwrap(map.get(locator.rows, seq)))
-    let name = history_key("p-", item)
+    let name = history_read_key("p-", item)?
     let frame_room = if pack.class == 0 {
         PAGE_LIMIT
     } else {
@@ -261,7 +262,7 @@ fn history_load_data_pack(mut client: std.object.Client, locator: HistoryLocator
     }
     let rows: u64 = int.widen(pack.frames)
     if item.len > 72 + rows * (16 + frame_room) + UNKNOWN_ROOM {
-        return Error(disk_fault(name, 0, Malformed))
+        return Error(Corrupt(Fault(file: take name, offset: 0, why: Malformed)))
     }
     let raw = history_read_object(mut client, name, item, deadline)?
     let payloads = disk_allocation(scoped fn() -> Result[Map[u64, DiskFrame], Error] {
@@ -298,7 +299,8 @@ fn history_resolve_page(path: String, pack: LoadedPack, inventory: RecoveryInven
         }
         return Ok(())
     }
-    let image = decode_manifest_page(path, ptr.offset, copied(payload)?, domain, inventory.allow_tiered)?
+    let body: Bytes = capacity(bound bytes round8(list.len(payload)) { clone(payload) })?
+    let image = decode_manifest_page(path, ptr.offset, take body, domain, inventory.allow_tiered)?
     let height = std.page.level(image)
     if let Some(wanted) = expected_level {
         if height != wanted {
@@ -315,6 +317,7 @@ fn history_resolve_page(path: String, pack: LoadedPack, inventory: RecoveryInven
                 }
                 if let Some(_) = std.page.tiered_root_at(image, slot) {
                     validate_cold_root(inventory, child)?
+                    capacity(list.try_reserve(mut kids, 1))?
                     list.push(mut kids, 0u64)
                     continue
                 }
@@ -326,6 +329,7 @@ fn history_resolve_page(path: String, pack: LoadedPack, inventory: RecoveryInven
                     }
                     history_want(mut pending, child.pack, need)?
                 }
+                capacity(list.try_reserve(mut kids, 1))?
                 list.push(mut kids, child.stamp)
             },
             Some(BlobEdge(reference)) => {
@@ -333,6 +337,7 @@ fn history_resolve_page(path: String, pack: LoadedPack, inventory: RecoveryInven
                     return Error(disk_fault(path, ptr.offset, Order))
                 }
                 history_want(mut pending, reference.pack, NeedBlob(reference))?
+                capacity(list.try_reserve(mut blobs, 1))?
                 list.push(mut blobs, reference.stamp)
             },
             None => (),
@@ -383,7 +388,8 @@ fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator,
     if map.len(locator.rows) != map.len(lists.packs) + map.len(lists.class_two) {
         return Error(disk_fault(file, 72, Malformed))
     }
-    let mut seqs: List[u64] = list.with_capacity(map.len(lists.packs))
+    let mut seqs: List[u64] = list.new()
+    capacity(list.try_reserve(mut seqs, map.len(lists.packs)))?
     for (seq, pack) in lists.packs {
         let Some(located) = map.get(locator.rows, seq) else {
             return Error(disk_fault(file, 72, Malformed))
@@ -447,7 +453,7 @@ fn history_paged_load(mut source: ObjectPackRead, head: HistoryHead, ceiling: u6
 fn history_open_checkpoint(mut source: ObjectPackRead, head: HistoryHead, mark: HistoryMark, checkpoint_data: Bytes,
     take manifest: PageManifest, ceiling: u64) -> Result[(JournalReplay, LoadedPageStore), Error] waits {
     source.locator = history_locator(mut source.client, head, mark, checkpoint_data, source.deadline)?
-    let name = history_key("m-", mark.manifest)
+    let name = history_read_key("m-", mark.manifest)?
     let validated = history_validate_manifest(mut source.client, source.locator, source.deadline, head.store, name, take manifest)?
     let loaded = rebuild_page_store(take validated, Some(view source.locator))?
     let initial = disk_allocation(scoped fn() -> Result[State, Error] {

@@ -71,14 +71,24 @@ fn object_install_at(mut db: store.Db, tasks: Tasks, activation: u64, descriptio
     Ok(take identity)
 }
 
-fn read_bucket_activation(mut readers: store.Followers, tasks: Tasks, fixture: RecoveryBucket, seed: u64, opts: store.Options) -> Result[(u64, Bytes), store.Error] waits {
-    let f = store.follower(mut readers, tasks, recovery_bucket_client(fixture, tasks, seed), fixture.time, opts)?
+fn read_bucket_activation(mut readers: store.Followers, tasks: Tasks, fixture: RecoveryBucket, seed: u64,
+    owner: store.FollowerOwner, plan: store.FollowerPlan, expected: Option[store.StoreId]) -> Result[(u64, Bytes), store.Error] waits {
+    let slot = store.follower_slot(owner, plan)?
+    let f = store.follower(mut readers, take slot, recovery_bucket_client(fixture, tasks, seed), fixture.time, expected)?
     runner.follower_release(f, 10)
 }
 
 fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket) -> Result[(), store.Error] waits {
-    let mut options = result.unwrap(store.sized(Bucket(std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)), 2147483648u64))
-    options.group_bytes = 65536
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let mut options = result.unwrap(store.sized_with(Bucket(lanes), 67108864u64,
+        store.Overrides(resident_limit: Some(1048576), journal_limit: None,
+            checkpoint_bytes: Some(65536), pack_bytes: Some(65536),
+            group_bytes: Some(65536), group_commits: None, lock_wait_ms: None)))
+    let plan = result.unwrap(store.follower_plan(Bucket(lanes), options))
+    let mut plans: List[store.FollowerPlan] = list.with_capacity(1)
+    list.push(mut plans, clone(plan))
+    let service = store.follower_service(tasks, option.unwrap(store.service_bytes(plans)))?
+    let owner = store.follower_owner(service)?
     options.head_poll_ms = 10000
     let mut bare = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 1), c, rnd, options)?
     let _ = store.create_table(mut bare, store.spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
@@ -95,7 +105,7 @@ fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucke
     options.expect = Some(store_id)
     options.create = false
     let mut readers = store.followers()
-    let (unmatched, take first_read) = read_bucket_activation(mut readers, tasks, sim, 2, options)?
+    let (unmatched, take first_read) = read_bucket_activation(mut readers, tasks, sim, 2, owner, plan, options.expect)?
     description.n_place = 1048576
     let binding = result.unwrap(runner.identity_digest(description))
     let mut host_test = trace_probe_authority(c, rnd, (store_id.hi, store_id.lo), binding, binding, false)
@@ -106,11 +116,11 @@ fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucke
     let mut hand = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 3), c, rnd, options)?
     let _ = object_install_at(mut hand, tasks, 12, description)?
     store.close(take hand)?
-    let (adopted, take installed_read) = read_bucket_activation(mut readers, tasks, sim, 4, options)?
+    let (adopted, take installed_read) = read_bucket_activation(mut readers, tasks, sim, 4, owner, plan, options.expect)?
     trace_current(mut host_test, adopted, take installed_read)
     expect(adopted == 12 && rooted_at(host_test, image(), 12) && last_activation(host_test) == Some(12), "T1 bucket: OLD was not relaunched at 12")
     expect(collection_keeps(mut host_test, false, true), "T1 bucket: adoption did not leave OLD as the only root")
-    Ok(())
+    store.close_follower_service(take service)
 }
 
 @test

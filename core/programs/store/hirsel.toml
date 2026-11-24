@@ -54,6 +54,7 @@ std = { major = 1 }
 "store-health.hirsel" = "store"
 "store-health-types.hirsel" = "status"
 "store-followers.hirsel" = "store"
+"store-follower-service.hirsel" = "store"
 "store-object-follower.hirsel" = "store"
 "store-layout.hirsel" = "store"
 "store-reexec.hirsel" = "store"
@@ -85,6 +86,7 @@ dirs = ["."]
 "object_cut_laws.hirsel" = "store"
 "object_journal_laws.hirsel" = "store"
 "authority_laws.hirsel" = "store"
+"follower_laws.hirsel" = "store"
 "replication_laws.hirsel" = "store"
 "store_put_laws.hirsel" = "store"
 "store_schema_laws.hirsel" = "store"
@@ -162,3 +164,38 @@ limit = 268435456
 
 [tool.workloads]
 s1 = { module = "main", grants = ["Stdout"] }
+
+# These fixtures hold the simulator or writer and one or more follower grants.
+
+[tests.runs."store@1/store/position_survives_three_cuts"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_branch_position"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_follower"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_follower_steps"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_object_writer"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_retention_witness"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_standalone_import"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_prepared_install"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_binding"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_replication"]
+limit = 167772160
+
+[tests.runs."store@1/store/bucket_test_m2_follower_overlap"]
+limit = 134217728

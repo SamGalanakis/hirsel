@@ -74,11 +74,9 @@ fn replication_advance(mut writer: ReplicationWriter, entry_version: u64, value:
     history_apply_entry(history_key("e-", head.entry), head.store, head.entry, writer.buffers.packet, mut writer.replay, 1048576)
 }
 
-fn replication_open_follower(mut ids: Followers, tasks: Tasks, sim: BucketSim, host_name: String, seed: u64, store: StoreId, op_ms: u64) -> Result[Follower, Error] waits {
+fn replication_open_follower(mut ids: Followers, tasks: Tasks, owner: FollowerOwner, plan: FollowerPlan, sim: BucketSim, host_name: String, seed: u64, store: StoreId, op_ms: u64) -> Result[Follower, Error] waits {
     let client = bucket_law_client_lanes(sim, tasks, host_name, seed, true, 1)?
-    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
-    options.expect = Some(store)
-    follower(mut ids, tasks, object_authority(take client, "bucket", op_ms), sim.time, options)
+    follower(mut ids, follower_slot(owner, plan)?, object_authority(take client, "bucket", op_ms), sim.time, Some(store))
 }
 
 fn replication_mix(previous: Inline[u8, 32], entry_version: u64, value: u64) -> Inline[u8, 32] {
@@ -156,8 +154,11 @@ fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64) -> Result[(), Error]
     let mut writer = replication_writer(tasks, r, sim, seed, None)?
     let store = writer.register.head.store
     let mut ids = followers()
-    let mut first = replication_open_follower(mut ids, tasks, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
-    let mut second = replication_open_follower(mut ids, tasks, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
+    let follow_plan = follower_law_plan(Bucket(bucket_law_lanes(1)), bucket_law_options(false))
+    let service = follower_law_service(tasks, follow_plan, 3)?
+    let owner = follower_owner(service)?
+    let mut first = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
+    let mut second = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
     let mut expected: List[Inline[u8, 32]] = list.with_capacity(7)
     list.push(mut expected,[0u8; 32])
     replication_check("writer", seed, writer.replay.state.tips[0], 0, expected)
@@ -183,7 +184,7 @@ fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64) -> Result[(), Error]
             replication_follow(mut second, "second follower after claim", seed, n - 1, expected)
             // Primary connections are partitioned. The spare endpoint still
             // serves the same register and objects to the remaining nodes.
-            let blocked = replication_open_follower(mut ids, tasks, sim, "s3.test", seed, store, 100)
+            let blocked = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "s3.test", seed, store, 100)
             if let Error(Remote(Retriable(_))) = blocked {} else {
                 replication_failure("restarting follower", seed, n - 1, "partition did not refuse its capture")
             }
@@ -197,7 +198,7 @@ fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64) -> Result[(), Error]
         replication_check("writer", seed, writer.replay.state.tips[0], n, expected)
         replication_follow(mut first, "first follower", seed, n, expected)
         if n == restart {
-            second = replication_open_follower(mut ids, tasks, sim, "spare.test", n, store, BUCKET_LAW_OP_MS)?
+            second = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", n, store, BUCKET_LAW_OP_MS)?
             replication_check("cold follower", seed, second.capture.state.tips[0], n, expected)
         } else {
             replication_check("lagging follower", seed, second.capture.state.tips[0], n - 1, expected)

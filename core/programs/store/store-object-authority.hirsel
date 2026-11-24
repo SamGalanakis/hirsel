@@ -44,7 +44,8 @@ fn history_qualify(mut client: std.object.Client, deadline: u64) -> Result[(), E
     if std.object.proven(client) {
         // The client refuses any answer without the loopback simulator's
         // proof for its credential, so one answered probe qualifies it.
-        let Ok(_) = std.object.bucket_location(mut client, deadline) else {
+        let location = capacity(bound bytes 16 { std.object.bucket_location(mut client, deadline) })?
+        let Ok(_) = location else {
             return Error(Unqualified("sim:proof"))
         }
         return Ok(())
@@ -52,21 +53,26 @@ fn history_qualify(mut client: std.object.Client, deadline: u64) -> Result[(), E
     if !std.object.endpoint_secure(client) {
         return Error(Unqualified("insecure"))
     }
-    let endpoint = std.object.endpoint_host(client)
-    let place = std.object.bucket_config(client)
+    let (take endpoint, take place) = disk_allocation(scoped fn() -> Result[(String, std.object.Bucket), Error] {
+        Ok((std.object.endpoint_host(client), std.object.bucket_config(client)))
+    })?
     if s3_host_matches(endpoint, place.aws_region) {
-        let Ok(algorithm) = std.object.bucket_encryption(mut client, deadline) else {
+        let encryption = capacity(bound bytes 16 { std.object.bucket_encryption(mut client, deadline) })?
+        let Ok(algorithm) = encryption else {
             return Error(Unqualified("aws:encryption"))
         }
         if algorithm == "" || algorithm == "AES256" {
             return Ok(())
         }
-        let mut reason = string.from("aws:")
-        string.push(mut reason, algorithm)
-        return Error(Unqualified(take reason))
+        return disk_allocation(scoped fn() -> Result[(), Error] {
+            let mut reason = string.from("aws:")
+            string.push(mut reason, algorithm)
+            Error(Unqualified(take reason))
+        })
     }
     if endpoint == "fly.storage.tigris.dev" || endpoint == "t3.storage.dev" {
-        let Ok(location) = std.object.bucket_location(mut client, deadline) else {
+        let setting = capacity(bound bytes 16 { std.object.bucket_location(mut client, deadline) })?
+        let Ok(location) = setting else {
             return Error(Unqualified("tigris:location"))
         }
         if string.find(location, 0, ",") != None {
@@ -76,19 +82,23 @@ fn history_qualify(mut client: std.object.Client, deadline: u64) -> Result[(), E
             return Error(Unqualified("tigris:location"))
         }
         // No Single- or Multi-region reply has qualified for the allow-list.
-        let mut reason = string.from("tigris:")
-        string.push(mut reason, location)
-        return Error(Unqualified(take reason))
+        return disk_allocation(scoped fn() -> Result[(), Error] {
+            let mut reason = string.from("tigris:")
+            string.push(mut reason, location)
+            Error(Unqualified(take reason))
+        })
     }
     Error(Unqualified("unknown"))
 }
 
 fn history_check_namespace(capture: HistoryCapture, client: std.object.Client) -> Result[(), Error] {
-    let live_bytes = std.object.bucket_config(client)
-    if capture.config.place.bucket != live_bytes.bucket || capture.config.place.prefix != live_bytes.prefix {
-        return Error(Foreign)
-    }
-    Ok(())
+    disk_allocation(scoped fn() -> Result[(), Error] {
+        let live_bytes = std.object.bucket_config(client)
+        if capture.config.place.bucket != live_bytes.bucket || capture.config.place.prefix != live_bytes.prefix {
+            return Error(Foreign)
+        }
+        Ok(())
+    })
 }
 
 fn history_probe_head(mut client: std.object.Client, cached_tag: std.object.ETag, mut scratch: Bytes, deadline: u64) -> Result[Option[(HistoryCapture, std.object.ETag)], Error] waits {

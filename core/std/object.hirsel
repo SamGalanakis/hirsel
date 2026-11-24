@@ -2186,6 +2186,7 @@ pub opaque type Requests: send {
     simulated: bool,
     proven: bool,
     lanes: List[Sender[LaneMessage]],
+    lane_bytes: u64,
     output: Receiver[LaneEvent],
     next: u64,
     random: Random,
@@ -2233,16 +2234,20 @@ pub type LaneConfig: send {
 }
 
 fn lane_count(config: LaneConfig) -> u64 {
-    if config.requested_lanes == 0 {
-        DEFAULT_LANES
-    } else {
-        config.requested_lanes
+    match config.requested_lanes {
+        0 => DEFAULT_LANES,
+        n => n,
     }
 }
 
 /// The reservation of the lane owner tasks.
 pub fn lane_reservation(config: LaneConfig) -> Option[u64] {
     int.checked_mul(lane_count(config), config.lane_bytes)
+}
+
+/// Tests whether the client's active lanes use this count and grant.
+pub fn matches_lanes(c: Client, config: LaneConfig) -> bool {
+    list.len(c.requests.lanes) == lane_count(config) && c.requests.lane_bytes == config.lane_bytes
 }
 
 /// Starts one owner task per lane. Supply the credential grant as source for
@@ -2261,18 +2266,15 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     let mut inputs: List[Sender[LaneMessage]] = list.with_capacity(lanes)
     let mut workers: List[Task[()]] = list.with_capacity(lanes)
     let mut replies: List[Sender[PoolReply]] = list.with_capacity(lanes + 1)
-    let mut send_credentials: List[Sender[cred.Credentials]] = list.with_capacity(if !has_source(source) {
-        0
-    } else {
-        lanes
-    })
+    let mut send_credentials: List[Sender[cred.Credentials]] = list.new()
+    if has_source(source) {
+        send_credentials = list.with_capacity(lanes)
+    }
     let (pool_tx, pool_rx): (Sender[PoolMessage], Receiver[PoolMessage]) = channel.new(lanes * 2 + 4)
     let bucket_path = request_path(bucket, "", true)
-    let proof: Option[Secret] = if server.proven {
-        match sim.s3.proof_key(credentials_set.secret) {
-            Ok(take key) => Some(take key),
-            Error(_) => return Error(Fatal(Malformed)),
-        }
+    let verified_loopback = server.proven
+    let proof: Option[Secret] = if verified_loopback {
+        Some(sim.s3.proof_key(credentials_set.secret) ?=> |_| Fatal(Malformed))
     } else {
         None
     }
@@ -2313,10 +2315,7 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     }
     let pool = Pool(network: n, clock: c, tasks, server: take server, input: take pool_rx, timer_tx: take pool_tx, replies: take replies, peers: take peers)
     let resolver = task.spawn(tasks, bytes lane_bytes, take pool, pool_loop)
-    let requests = Requests(bucket: take bucket, simulated: false, proven: match proof {
-        Some(_) => true,
-        None => false,
-    }, lanes: take inputs, output: take output, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c)
+    let requests = Requests(bucket: take bucket, simulated: false, proven: verified_loopback, lanes: take inputs, lane_bytes, output: take output, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c)
     let lifetime = Workers(lanes: take workers, resolver: take resolver, renewal: take renewal)
     Ok(Client(requests: take requests, workers: Some(take lifetime)))
 }

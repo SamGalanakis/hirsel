@@ -69,7 +69,10 @@ fn history_length(link: HistoryLink, seq: u64) -> HistoryRef {
 
 fn history_missing_object(path: String, reference: HistoryRef) -> Error {
     let missing_seq = if string.starts_with(path, "e-") { Some(reference.seq) } else { None }
-    HistoryMissing(string.from(path), missing_seq)
+    match (bound bytes round8(string.byte_len(path)) { string.from(path) }) {
+        Ok(take name) => HistoryMissing(take name, missing_seq),
+        Error(problem) => Full(Allocation(problem)),
+    }
 }
 
 fn history_range(mut client: std.object.Client, path: String, reference: HistoryRef, lo: u64, hi: u64, mut buffer: Bytes, deadline: u64) -> Result[(), Error] waits {
@@ -88,23 +91,29 @@ fn history_range(mut client: std.object.Client, path: String, reference: History
     }
 }
 
+fn history_read_key(lead: String, reference: HistoryRef) -> Result[String, Error] {
+    // The longest object key has 60 bytes. The String rounds up to 64.
+    capacity(bound bytes 64 { history_key(lead, reference) })
+}
+
+fn history_link_slots(rows: u64) -> Result[List[HistoryLink], Error] {
+    let charge = size_or(int.checked_mul(rows, 24), 18446744073709551615u64)
+    let mut refs: List[HistoryLink] = capacity(bound bytes charge { list.with_capacity(rows) })?
+    list.fill(mut refs, rows, HistoryLink(epoch: 0, len: 0, digest: 0))
+    Ok(take refs)
+}
+
 fn history_suffix(mut client: std.object.Client, head: HistoryHead, from: HistoryRef, deadline: u64) -> Result[List[HistoryLink], Error] waits {
     let end = head.entry.seq
     if from.seq > end {
         return Error(disk_fault("head", 72, Malformed))
     }
     let row_count = end - from.seq
-    let (take suffix, take room) = disk_allocation(scoped fn() -> Result[(List[HistoryLink], Bytes), Error] {
-        let mut refs: List[HistoryLink] = list.with_capacity(row_count)
-        let vacant = HistoryLink(epoch: 0, len: 0, digest: 0)
-        list.fill(mut refs, row_count, vacant)
-        Ok((take refs, list.with_capacity(112)))
-    })?
-    let mut refs = take suffix
-    let mut prefix_buffer = take room
+    let mut refs = history_link_slots(row_count)?
+    let mut prefix_buffer: Bytes = disk_read_buffer(112)?
     let mut current = head.entry
     while current.seq > from.seq {
-        let name = history_key("e-", current)
+        let name = history_read_key("e-", current)?
         let leaf = HistoryLink(epoch: current.epoch, len: current.len, digest: current.digest)
         let _ = list.set(mut refs, current.seq - from.seq - 1, leaf)
         history_range(mut client, name, current, 0, 112, mut prefix_buffer, deadline)?
@@ -118,9 +127,7 @@ fn history_suffix(mut client: std.object.Client, head: HistoryHead, from: Histor
 }
 
 fn history_read_object(mut client: std.object.Client, path: String, reference: HistoryRef, deadline: u64) -> Result[Bytes, Error] waits {
-    let mut raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        Ok(list.with_capacity(reference.len))
-    })?
+    let mut raw = disk_read_buffer(reference.len)?
     match history_fetch(mut client, path, mut raw, deadline) {
         Ok(_) => (),
         Error(Remote(NotFound)) => return Error(history_missing_object(path, reference)),
@@ -174,7 +181,7 @@ fn history_read_mark(path: String, id: StoreId, reference: HistoryRef, raw: Byte
 }
 
 fn history_checkpoint(mut client: std.object.Client, head: HistoryHead, deadline: u64) -> Result[(HistoryMark, Bytes), Error] waits {
-    let name = history_key("e-", head.checkpoint)
+    let name = history_read_key("e-", head.checkpoint)?
     let raw = history_read_object(mut client, name, head.checkpoint, deadline)?
     let mark = disk_allocation(scoped fn() -> Result[HistoryMark, Error] {
         history_read_mark(name, head.store, head.checkpoint, raw)
@@ -186,7 +193,7 @@ fn history_checkpoint(mut client: std.object.Client, head: HistoryHead, deadline
 }
 
 fn history_read_manifest(mut client: std.object.Client, id: StoreId, mark: HistoryMark, checkpoint_seq: u64, deadline: u64) -> Result[PageManifest, Error] waits {
-    let name = history_key("m-", mark.manifest)
+    let name = history_read_key("m-", mark.manifest)?
     let mut raw = history_read_object(mut client, name, mark.manifest, deadline)?
     let local = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         let ctx = history_object_context(name, id, 1, mark.manifest, raw)?
@@ -236,7 +243,10 @@ fn history_apply_entry(path: String, id: StoreId, reference: HistoryRef, raw: By
         }
         disk_check_frame_kind(path, ctx, current.kind, current.flags, at)?
         if current.kind == 0x0011 || current.kind == 0x0013 {
-            journal_apply(path, mut replay, journal_decode(path, current.kind, list.slice(raw, current.payload, current.end))?)?
+            let event = disk_allocation(scoped fn() -> Result[JournalEvent, Error] {
+                journal_decode(path, current.kind, list.slice(raw, current.payload, current.end))
+            })?
+            journal_apply(path, mut replay, take event)?
             over_ceiling(journal_account(replay)?, ceiling)?
             frames += 1
         } else if disk_kind_limit(current.kind) != None {
@@ -253,7 +263,7 @@ fn history_apply_entry(path: String, id: StoreId, reference: HistoryRef, raw: By
 fn history_apply_suffix(mut client: std.object.Client, head: HistoryHead, after: u64, chain: List[HistoryLink], mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
     for i in 0u64 .. list.len(chain) {
         let reference = history_length(chain[i], after + i + 1)
-        let name = history_key("e-", reference)
+        let name = history_read_key("e-", reference)?
         let raw = history_read_object(mut client, name, reference, deadline)?
         history_apply_entry(name, head.store, reference, raw, mut replay, ceiling)?
     }

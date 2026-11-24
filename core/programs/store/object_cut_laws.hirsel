@@ -261,7 +261,11 @@ fn object_import_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     }
     let cold = deploy_result(bucket_law_authority(sim, tasks, "spare.test", 5))?
     let mut process = followers()
-    let follower_view = deploy_result(follower(mut process, tasks, take cold, sim.time, options))?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), options)
+    let service = deploy_result(follower_law_service(tasks, plan, 1))?
+    let owner = deploy_result(follower_owner(service))?
+    let slot = deploy_result(follower_slot(owner, plan))?
+    let follower_view = deploy_result(follower(mut process, take slot, take cold, sim.time, options.expect))?
     let visible = deploy_result(snapshot_follower(follower_view, Branch(store: id, id: 0)))?
     let view_reader = deploy_result(follower_reader(follower_view, 0))?
     let mut schema = declare_follower(follower_view)
@@ -407,7 +411,11 @@ fn object_prepared_install_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: B
 
     let read_grant = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 3))?
     let mut process = followers()
-    let observer = deploy_result(follower(mut process, tasks, take read_grant, sim.time, options))?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), options)
+    let service = deploy_result(follower_law_service(tasks, plan, 1))?
+    let owner = deploy_result(follower_owner(service))?
+    let slot = deploy_result(follower_slot(owner, plan))?
+    let observer = deploy_result(follower(mut process, take slot, take read_grant, sim.time, options.expect))?
     let capture = deploy_result(follower_head(observer))?
     let visible = deploy_result(snapshot_follower(observer, Branch(store: capture.store, id: 0)))?
     let view_reader = deploy_result(follower_reader(observer, 0))?
@@ -531,7 +539,9 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let d = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
     let mut process = followers()
     options.expect = Some(identity(writer))
-    let installed = follower(mut process, tasks, object_authority(take d, "bucket", BUCKET_LAW_OP_MS), sim.time, options)?
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let installed = follower(mut process, follower_slot(follower_owner(service)?, plan)?, object_authority(take d, "bucket", BUCKET_LAW_OP_MS), sim.time, options.expect)?
     let observed = follower_head(installed)?
     let captured = snapshot_follower(installed, Branch(store: observed.store, id: 0))?
     let mut schema = declare_follower(installed)

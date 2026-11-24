@@ -100,7 +100,7 @@ fn history_text(raw: Bytes, mut cursor: u64, lo: u64, hi: u64, frame_at: u64) ->
     if size < lo || size > hi || size > list.len(raw) - cursor {
         return Error(disk_fault("head", frame_at, Malformed))
     }
-    let text = copied(list.slice(raw, cursor, cursor + size))?
+    let text: Bytes = capacity(bound bytes round8(size) { clone(list.slice(raw, cursor, cursor + size)) })?
     let Ok(take parsed) = string.from_utf8(take text) else {
         return Error(disk_fault("head", frame_at, Malformed))
     }

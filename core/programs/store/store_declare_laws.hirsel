@@ -637,8 +637,11 @@ fn test_follower_projector_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let fixture = projector_fixture(mut destination, Migrate)?
     let limits = Limits(rows: 8, byte_limit: 4096)
     let mut ids = followers()
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let owner = follower_owner(service)?
     let original_generation = {
-        let mut upstream = follower(mut ids, tasks, log_authority(directory), c, options)?
+        let mut upstream = follower(mut ids, follower_slot(owner, plan)?, log_authority(directory), c, options.expect)?
         let rows = followed_rows(upstream)?
         let source_binding = binding(rows, follower_main(upstream))
         let read_handle = follower_reader(upstream, 0)?
@@ -663,7 +666,7 @@ fn test_follower_projector_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
         if !typed_put(mut writer, rows, 1, 10) { return Error(MigrationFault) }
         close(take writer)?
     }
-    let mut reopened = follower(mut ids, tasks, log_authority(directory), c, options)?
+    let mut reopened = follower(mut ids, follower_slot(owner, plan)?, log_authority(directory), c, options.expect)?
     let rows = followed_rows(reopened)?
     let source_binding = binding(rows, follower_main(reopened))
     let read_handle = follower_reader(reopened, 0)?

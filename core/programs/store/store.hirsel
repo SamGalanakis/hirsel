@@ -48,7 +48,7 @@ pub type Fault: send {
 
 pub type StoreCapacity: send = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity) | Cache(Capacity)
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Remote(std.object.Error) | Missed | Tiered(TieredRefusal)
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal)
 
 type Roots = PageRoots
 
@@ -4175,11 +4175,6 @@ type DiskHeader {
     prev_end: u64
 }
 
-fn disk_fault(file: String, at: u64, why: Why) -> Error {
-    let name: String = clone(file)
-    Corrupt(Fault(file: take name, offset: at, why: why))
-}
-
 // Every check starts with the store, file role, file sequence and offset.
 const BINDING_BYTES: u64 = 33
 
@@ -4192,7 +4187,7 @@ fn put_binding(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capa
 }
 
 fn disk_check_start(ctx: DiskContext, offset: u64, head: Bytes) -> Result[std.check.Xxh3, Capacity] {
-    let mut schema_binding: Bytes = list.with_capacity(BINDING_BYTES)
+    let mut schema_binding: Bytes = (bound bytes round8(BINDING_BYTES) { list.with_capacity(BINDING_BYTES) })?
     put_binding(mut schema_binding, ctx, offset)?
     let mut state = std.check.start()
     std.check.add(mut state, schema_binding, 0, BINDING_BYTES)
@@ -4467,33 +4462,6 @@ fn disk_path(lead: String, seq: u64, suffix: String) -> Result[String, Capacity]
     string.push_u64(mut path, seq)
     string.push(mut path, suffix)
     Ok(take path)
-}
-
-fn disk_read_file(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] waits {
-    let mut file = disk_io(host.open(d, path, Read))?
-    let mut out: Bytes = list.new()
-    loop {
-        let size = list.len(out)
-        if size == limit {
-            let mut probe: Bytes = list.with_capacity(1)
-            if disk_io(host.read(mut file, mut probe))? != 0 {
-                return Error(disk_fault(path, size, Malformed))
-            }
-            break
-        }
-        let room = if limit - size < 16384 {
-            limit - size
-        } else {
-            16384u64
-        }
-        let mut chunk: Bytes = list.with_capacity(room)
-        if disk_io(host.read(mut file, mut chunk))? == 0 {
-            break
-        }
-        list.append(mut out, chunk)
-    }
-    disk_io(host.close(take file))?
-    Ok(take out)
 }
 
 fn disk_write_synced(d: Dir, path: String, raw: Bytes) -> Result[(), Error] waits {
@@ -5385,7 +5353,7 @@ fn disk_read_end(file: String, id: StoreId, seq: u64, raw: Bytes) -> Result[u64,
 }
 
 fn disk_end(d: Dir, id: StoreId, seq: u64) -> Result[Option[u64], Error] waits {
-    let path = capacity(disk_path("j-", seq, ".end"))?
+    let path = journal_path(seq, ".end")?
     let raw = match disk_read_file(d, path, 96 + 1048576) {
         Ok(take raw) => take raw,
         Error(Io(NotFound)) => return Ok(None),
@@ -6605,7 +6573,10 @@ fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64,
             return Error(disk_fault(path, at, Truncated))
         }
         if let Some(payload) = frame.payload {
-            consume(mut destination, journal_decode(path, frame.kind, payload)?)?
+            let event = disk_allocation(scoped fn() -> Result[JournalEvent, Error] {
+                journal_decode(path, frame.kind, payload)
+            })?
+            consume(mut destination, take event)?
             accepted += frame.end - at
         }
         at = frame.end
@@ -6774,30 +6745,6 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
     Ok(())
 }
 
-// The lookahead needs only the next HEADER's prev_end. Read that prefix, not
-// a second whole segment, while the current segment's buffer is retained.
-fn journal_header(d: Dir, id: StoreId, seq: u64, flush: bool) -> Result[Option[DiskHeader], Error] waits {
-    let path = capacity(disk_path("j-", seq, ""))?
-    let mut file = match host.open(d, path, Read) {
-        Ok(take file) => take file,
-        Error(NotFound) => return Ok(None),
-        Error(e) => return Error(Io(e))
-    }
-    if flush {
-        disk_io(host.sync(mut file))?
-    }
-    let mut raw: Bytes = list.with_capacity(72)
-    while list.len(raw) < 72 {
-        let mut chunk: Bytes = list.with_capacity(72 - list.len(raw))
-        if disk_io(host.read(mut file, mut chunk))? == 0 {
-            break
-        }
-        list.append(mut raw, chunk)
-    }
-    disk_io(host.close(take file))?
-    Ok(Some(disk_read_header(path, raw, 2, Some(seq), Some(id))?))
-}
-
 type JournalRecovered {
     replay: JournalReplay,
     seq: u64,
@@ -6810,7 +6757,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, flush: bool, take initial: J
     let mut seq = first
     let mut uncovered = 0u64
     loop {
-        let path = capacity(disk_path("j-", seq, ""))?
+        let path = journal_path(seq, "")?
         let file = match host.open(d, path, Read) {
             Ok(take handle) => take handle,
             Error(NotFound) => return Error(disk_fault(path, 0, Header)),
@@ -6874,12 +6821,12 @@ fn journal_following(d: Dir, id: StoreId, seq: u64, flush: bool) -> Result[Optio
         Ok(h) => Ok(h),
         Error(Corrupt(_)) => {
             let beyond = if let Some(following_seq) = int.checked_add(next_seq, 1) {
-                disk_exists(d, capacity(disk_path("j-", following_seq, ""))?)?
+                disk_exists(d, journal_path(following_seq, "")?)?
             } else {
                 false
             }
             if beyond || disk_end(d, id, next_seq)? != None {
-                let next_path = capacity(disk_path("j-", next_seq, ""))?
+                let next_path = journal_path(next_seq, "")?
                 return Error(disk_fault(next_path, 0, Header))
             }
             Ok(None)

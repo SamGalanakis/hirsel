@@ -32,6 +32,8 @@ whether the configured scheme is HTTPS.
 `split` moves the request state and the worker lifetime out of a client.
 `Requests` can move to another task, where `attach` makes it a client again.
 The original task keeps `Workers` until the request task has stopped.
+`matches_lanes` checks the effective lane count and per-lane grant. It treats
+a requested count of zero as the default.
 
 `Meta` carries the object size, an inline ETag, optional CRC64/NVME and an
 optional 16-byte put-id. An ETag holds up to 64 octets and its length. A

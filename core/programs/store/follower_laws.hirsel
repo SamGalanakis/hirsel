@@ -1,0 +1,715 @@
+// The follower fixtures use small histories. Keep the journal sizing floor
+// while reserving only the pack and resident room these histories need.
+fn follower_law_plan(kind: Kind, o: Options) -> FollowerPlan {
+    let mut effective: Options = clone(o)
+    effective.resident_limit = 1048576
+    effective.pack_bytes = 65536
+    effective.checkpoint_bytes = 65536
+    effective.journal_limit = FRAME_LIMIT + effective.checkpoint_bytes
+    effective.group_bytes = 65536
+    result.unwrap(follower_plan(kind, effective))
+}
+
+fn follower_law_service(tasks: Tasks, plan: FollowerPlan, slots: u64) -> Result[FollowerService, Error] waits {
+    let mut plans: List[FollowerPlan] = list.with_capacity(slots)
+    for _ in 0u64 .. slots {
+        list.push(mut plans, clone(plan))
+    }
+    follower_service(tasks, option.unwrap(service_bytes(plans)))
+}
+
+fn bounded_follower_catch_up(take lagged: Follower, budget: u64, due: u64) -> Result[(Follower, Result[Position, Error]), OutOfTime] waits {
+    bound steps budget {
+        let mut active = take lagged
+        let observed = catch_up(mut active, due)
+        (take active, take observed)
+    }
+}
+
+fn follower_catch_up_fits(take lagged: Follower, budget: u64, due: u64, wanted: u64) -> bool waits {
+    match bounded_follower_catch_up(take lagged, budget, due) {
+        Ok((_, Ok(observed))) if observed.version == wanted => true,
+        Error(_) => false,
+        _ => fail("L85: one-GROUP catch-up returned the wrong version or failed"),
+    }
+}
+
+fn follower_steps_group(mut writer: ObjectPackRead, mut held: HistoryRegister, mut buffers: HistoryBuffers,
+    declaration: Bytes, due: u64, wanted: u64) -> Result[(), Error] waits {
+    bucket_m2_law_commit_packet(mut buffers.packet, held.head, wanted)?
+    if let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, declaration, mut buffers, due)? {
+        return Ok(())
+    }
+    fail("L85: the GROUP did not apply")
+}
+
+fn follower_steps_open(mut ids: Followers, owner: FollowerOwner, plan: FollowerPlan, tasks: Tasks, sim: BucketSim, seed: u64) -> Result[Follower, Error] waits {
+    let cold = bucket_law_client_lanes(sim, tasks, "s3.test", seed, true, 1)?
+    follower(mut ids, follower_slot(owner, plan)?, object_authority(take cold, "bucket", BUCKET_LAW_OP_MS), sim.time, None)
+}
+
+fn object_follower_steps_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result[u64, Error] waits {
+    let connected = bucket_law_client_lanes(sim, tasks, "s3.test", 901, true, 1)?
+    let mut source = history_reader(take connected, 0)
+    let mut scratch = history_buffers(1024)?
+    let options = bucket_law_options(true)
+    let declaration = history_config_bytes(HistoryConfig(place: std.object.bucket_config(source.client), level: "bucket"))?
+    let (take opened, _) = history_open_register(mut source, sim.time, r, options, "bucket", mut scratch, BUCKET_LAW_OP_MS)?
+    let mut held = take opened
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), options)
+    let service = follower_law_service(tasks, plan, 2)?
+    let owner = follower_owner(service)?
+    let mut ids = followers()
+    let mut far = follower_steps_open(mut ids, owner, plan, tasks, sim, 902)?
+    let due = std.object.deadline_after_ms(source.client, BUCKET_LAW_OP_MS)
+
+    // Measure the caller on this build. Each probe has exactly one new GROUP.
+    let mut target = 1u64
+    let mut lo = 1u64
+    let mut hi = 4096u64
+    let warm = follower_steps_open(mut ids, owner, plan, tasks, sim, 903)?
+    follower_steps_group(mut source, mut held, mut scratch, declaration, due, target)?
+    if !follower_catch_up_fits(take warm, hi, due, target) {
+        fail("L85: one GROUP exceeded the search range")
+    }
+    while lo < hi {
+        target += 1
+        let short = follower_steps_open(mut ids, owner, plan, tasks, sim, 903 + target)?
+        follower_steps_group(mut source, mut held, mut scratch, declaration, due, target)?
+        let mid = (lo + hi) / 2
+        if follower_catch_up_fits(take short, mid, due, target) { hi = mid } else { lo = mid + 1 }
+    }
+    for wanted in target + 1 .. 129u64 {
+        follower_steps_group(mut source, mut held, mut scratch, declaration, due, wanted)?
+    }
+
+    let published_before = applied(far, follower_main(far))?
+    let unattainable = Position(store: published_before.store, branch: 0, version: 129)
+    let waiting = clock.deadline_after_ms(host.mono_ns(sim.time), 100)
+    if let Error(Behind(reported)) = at_least(mut far, unattainable, waiting) {
+        if reported.version != 0 || applied(far, follower_main(far))?.version != 0 {
+            fail("L85: an expired at_least published an intermediate capture")
+        }
+    } else {
+        fail("L85: at_least accepted a version that was never committed")
+    }
+
+    let cold = bucket_law_client_lanes(sim, tasks, "s3.test", 999, true, 1)?
+    let authority = object_authority(take cold, "bucket", BUCKET_LAW_OP_MS)
+    let slot = follower_slot(owner, plan)?
+    let bounded_open = result.unwrap(bound steps lo {
+        let mut bounded_ids = followers()
+        follower(mut bounded_ids, take slot, take authority, sim.time, None)
+    })?
+    if applied(bounded_open, follower_main(bounded_open))?.version != 128 {
+        fail("L85: bounded open did not replay the complete suffix")
+    }
+    let _ = take bounded_open
+
+    let (take applied_follower, advanced) = result.unwrap(bounded_follower_catch_up(take far, lo, due))
+    if advanced?.version != 128 {
+        fail("L85: the bounded catch-up did not publish the 128th GROUP")
+    }
+    let (take stable, unchanged) = result.unwrap(bounded_follower_catch_up(take applied_follower, lo, due))
+    if unchanged?.version != 128 { fail("L85: the unchanged HEAD moved") }
+    let (take checked, floor_capture) = result.unwrap(bound steps lo {
+        let mut active = take stable
+        let ancestor = follower_floor(mut active, 0)
+        (take active, take ancestor)
+    })
+    if let Some(snap) = floor_capture? {
+        if version(snap) != 0 { fail("L85: wrong floor version") }
+    } else {
+        fail("L85: the checkpoint floor was lost")
+    }
+
+    let mut active = take checked
+    let main_line = follower_main(active)
+    let saved = snapshot_follower(active, main_line)?
+    follower_steps_group(mut source, mut held, mut scratch, declaration, due, 129)?
+    follower_steps_group(mut source, mut held, mut scratch, declaration, due, 131)?
+    if let Error(Corrupt(Fault(why: Gap(131), ..))) = catch_up(mut active, due) {} else {
+        fail("L85: a replay with a bad final GROUP was admitted")
+    }
+    let kept = snapshot_follower(active, main_line)?
+    if version(kept) != 128 || kept.watermark != saved.watermark ||
+        tree_stamp(kept.roots.streams) != tree_stamp(saved.roots.streams) {
+        fail("L85: a partial replay changed the published capture")
+    }
+    close_follower_service(take service)?
+    if let Error(Retired) = catch_up(mut active, due) {} else {
+        fail("L85: the closed service still accepted apply requests")
+    }
+    if applied(active, follower_main(active))?.version != 128 {
+        fail("L85: closing the worker changed the published capture")
+    }
+    Ok(lo)
+}
+
+fn follower_steps_log_floor(d: Dir, c: Clock, r: Random, tasks: Tasks, budget: u64) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut writer = open(tasks, directory, c, r, options)?
+    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 32 {
+        if !typed_put(mut writer, rows, k, k + 1) { fail("L85: log floor write was refused") }
+    }
+    let checkpoint_version = version(snapshot(writer))
+    let _ = checkpoint(mut writer)?
+    if !typed_put(mut writer, rows, 0, 100) { fail("L85: post-checkpoint write was refused") }
+    close(take writer)?
+
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let replica = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(directory), c, None)?
+    let (take active, floor_capture) = result.unwrap(bound steps budget {
+        let mut opened = take replica
+        let ancestor = follower_floor(mut opened, checkpoint_version)
+        (take opened, take ancestor)
+    })
+    let Some(snap) = floor_capture? else { fail("L85: log floor did not produce a checkpoint") }
+    if version(snap) != checkpoint_version || get(follower_reader(active, 0)?, snap, rows, 0)? != Some(1u64) {
+        fail("L85: bounded log floor did not read the historical row")
+    }
+    close_follower_service(take service)
+}
+
+@test
+fn bucket_test_m2_follower_steps(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 258), None, list.new())
+    let observed = object_follower_steps_law(r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    follower_steps_log_floor(d, c, r, tasks, observed?)
+}
+
+fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_lanes(sim, tasks, "s3.test", 1010, true, 1)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut content = string.into_bytes(string.from("payload"))
+    let mut compared = disk_read_buffer(8)?
+    let object_ref = history_new_ref(1, 1, content)
+    for name in ["p-1", "m-1"] {
+        history_create(mut client, name, mut content, mut compared, due)?
+        let refused = capacity(bound bytes 7 {
+            history_read_object(mut client, name, object_ref, due)
+        })?
+        if let Error(Full(Allocation(cause))) = refused {
+            if cause.requested != 8 || cause.available != 7 {
+                fail("L85: rounded destination admission reported the wrong charge")
+            }
+        } else {
+            fail("L85: a one-byte-short destination read was admitted")
+        }
+        let accepted = capacity(bound bytes 8 {
+            history_read_object(mut client, name, object_ref, due)
+        })?
+        if accepted? != content {
+            fail("L85: the exactly funded destination did not read its object")
+        }
+    }
+
+    let observed = HistoryHead(store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)),
+        activation: 0, entry: HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding: [0; 32])
+    let denied = capacity(bound bytes 4096 { history_suffix(mut client, observed, object_ref, due) })?
+    if let Error(Full(Allocation(cause))) = denied {
+        if cause.requested != 4104 || cause.available != 4096 {
+            fail("L85: suffix rows reported the wrong charge")
+        }
+    } else {
+        fail("L85: 171 suffix rows fit in 4,096 bytes")
+    }
+    let accepted = capacity(bound bytes 4096 { history_link_slots(170) })?
+    if list.len(accepted?) != 170 { fail("L85: 170 suffix rows did not fit") }
+    let mut locator = empty_history_locator()
+    let excessive = HistoryRef(seq: 1, epoch: 1, len: 72 + 1048576 + 1, digest: 0)
+    map.insert(mut locator.rows, 1, excessive)
+    let pack = PagePack(class: 0, frames: 0, live: 0, payload_bytes: 0, index: 0)
+    let bad = capacity(bound bytes 64 { history_load_data_pack(mut client, locator, due, observed.store, 1, pack, 1) })?
+    if let Error(Corrupt(Fault(why: Malformed, ..))) = bad {} else {
+        fail("L85: the known format error consumed another key allocation")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_follower_read_admission(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 1010), None, list.new())
+    let verdict = follower_destination_admission(tasks, sim)
+    let trace = bucket_law_finish(take sim)
+    verdict?
+    if trace.writes != 2 || trace.attempts != 4 {
+        fail("L85: the two creates and two exactly funded reads were the only requests")
+    }
+    Ok(())
+}
+
+fn follower_overlap_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let mut options = bucket_law_options(true)
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    let mut writer = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 1101)?, c, r, options)?
+    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut writer, rows, 1, 10) { fail("L85: the first row was refused") }
+    let _ = checkpoint(mut writer)?
+
+    let mut plan = follower_law_plan(Bucket(bucket_law_lanes(0)), options)
+    // The table's two AP15 records take 134 and 126 bytes. Its one
+    // row takes 94. Use the law's ceiling below the public sizing floor.
+    plan.options.resident_limit = 707
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let wrong_lane = bucket_law_client_lanes(sim, tasks, "s3.test", 1103, true, 1)?
+    let refused = follower(mut ids, follower_slot(follower_owner(service)?, plan)?,
+        object_authority(take wrong_lane, "bucket", BUCKET_LAW_OP_MS), sim.time, None)
+    match take refused {
+        Error(Missing(kind)) if kind == "follower_kind" => (),
+        _ => fail("L85: the planned and actual transport lanes did not match"),
+    }
+    let mut replica = follower(mut ids, follower_slot(follower_owner(service)?, plan)?,
+        bucket_law_authority(sim, tasks, "s3.test", 1102)?, sim.time, None)?
+    let main_line = follower_main(replica)
+    let before = snapshot_follower(replica, main_line)?
+    let reading = follower_reader(replica, 0)?
+    let due = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
+    if catch_up(mut replica, due)?.version != 2 {
+        fail("L85: an unchanged head built another account")
+    }
+    if !typed_put(mut writer, rows, 1, 20) { fail("L85: the replacement row was refused") }
+    let _ = checkpoint(mut writer)?
+
+    for _ in 0u64 .. 2 {
+        if let Error(Full(Resident(cause))) = catch_up(mut replica, due) {
+            if cause.requested != 708 || cause.available != 707 {
+                fail("L85: overlapping captures reported the wrong resident charge")
+            }
+        } else {
+            fail("L85: the overlapping capture was admitted")
+        }
+    }
+    let after = snapshot_follower(replica, main_line)?
+    if version(after) != version(before) || after.watermark != before.watermark ||
+        tree_stamp(before.roots.collections) != tree_stamp(after.roots.collections) ||
+        get(reading, after, rows, 1)? != Some(10u64) {
+        fail("L85: a resident refusal changed the published capture")
+    }
+    close_follower_service(take service)?
+    close(take writer)
+}
+
+fn log_follower_overlap_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut writer = open(tasks, directory, c, r, options)?
+    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut writer, rows, 1, 10) { fail("L85: the log row was refused") }
+    let _ = checkpoint(mut writer)?
+    if !typed_put(mut writer, rows, 1, 20) { fail("L85: the log replacement was refused") }
+    close(take writer)?
+
+    let mut plan = follower_law_plan(Directory, options)
+    plan.options.resident_limit = 707
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let mut replica = follower(mut ids, follower_slot(follower_owner(service)?, plan)?,
+        log_authority(directory), c, None)?
+    let due = clock.deadline_after_ms(host.mono_ns(c), BUCKET_LAW_OP_MS)
+    if catch_up(mut replica, due)?.version != 3 {
+        fail("L85: an unchanged log built another state")
+    }
+    if let Error(Full(Resident(cause))) = follower_floor(mut replica, 2) {
+        if cause.requested != 708 || cause.available != 707 {
+            fail("L85: historical log floor reported the wrong overlap")
+        }
+    } else {
+        fail("L85: the historical floor bypassed the overlap ceiling")
+    }
+    close_follower_service(take service)
+}
+
+@test
+fn bucket_test_m2_follower_overlap(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 1101), None, list.new())
+    let verdict = follower_overlap_law(c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    verdict?
+    log_follower_overlap_law(d, c, r, tasks)
+}
+
+@test
+fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // MEM-24: 96 for the command channel, 64 for retirement, and 56
+    // for the registry entry. The service request channel uses 80.
+    let control = 96u64 + 64 + 56
+    let service_room = 80u64
+    let worker_room = 8192u64 + 288
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut tiny = follower_law_plan(Directory, options)
+    tiny.envelope = control + worker_room
+    tiny.root = 8192
+
+    let short = follower_service(tasks, service_room + control + worker_room - 1)?
+    let owner = follower_owner(short)?
+    for _ in 0u64 .. 2 {
+        let denied = follower_slot(owner, tiny)
+        if let Error(Full(Allocation(cause))) = denied {
+            if cause.requested != 8480 || cause.available != 8479 {
+                fail("L85: slot refusal reported the wrong task charge or service room")
+            }
+        } else {
+            fail("L85: the one-byte-short service admitted a slot")
+        }
+    }
+    close_follower_service(take short)?
+
+    let exact = follower_service(tasks, service_room + control + worker_room)?
+    let exact_owner = follower_owner(exact)?
+    let first = follower_slot(exact_owner, tiny)?
+    let _ = take first
+    let second = follower_slot(exact_owner, tiny)?
+    let _ = take second
+    close_follower_service(take exact)?
+
+    let directory = disk_test_directory(d)
+    let memory_options = result.unwrap(sized(Memory, 2097152))
+    let memory_plan = result.unwrap(follower_plan(Memory, memory_options))
+    let memory_service = follower_law_service(tasks, memory_plan, 1)?
+    let unbindable = follower_slot(follower_owner(memory_service)?, memory_plan)?
+    let mut ids = followers()
+    let refusal = follower(mut ids, take unbindable, log_authority(directory), c, None)
+    match take refusal {
+        Error(Missing(kind)) if kind == "follower_kind" => (),
+        _ => fail("L85: a Memory plan bound a directory authority"),
+    }
+    close_follower_service(take memory_service)?
+
+    let db = open(tasks, directory, c, r, options)?
+    let id = identity(db)
+    close(take db)?
+    let plan = follower_law_plan(Directory, options)
+    let before_service = follower_law_room()
+    let service = follower_law_service(tasks, plan, 1)?
+    if before_service - follower_law_room() != 288 + 80 + plan_bytes(plan) {
+        fail("L85: the service retained its startup reply")
+    }
+    let available = follower_owner(service)?
+    let wrong_store = StoreId(hi: id.hi ^ 1, lo: id.lo)
+    let rejected = follower(mut ids, follower_slot(available, plan)?, log_authority(directory), c, Some(wrong_store))
+    if let Error(Foreign) = rejected {} else { fail("L85: the foreign identity was accepted") }
+    let fresh_slot = follower_slot(available, plan)?
+    let before_bind = follower_law_room()
+    let opened = follower(mut ids, take fresh_slot, log_authority(directory), c, Some(id))?
+    if follower_law_room() != before_bind { fail("L85: the worker retained its bind reply") }
+    if opened.open != HISTORY_OPEN_LIMIT | 1 {
+        fail("L85: the failed open drew a follower number")
+    }
+    let captured = snapshot_follower(opened, follower_main(opened))?
+    let duplicate = snapshot_follower(opened, follower_main(opened))?
+    let _ = take opened
+    let retained = follower_slot_shortage(available, plan)
+    if retained.requested != plan.root + 288 || retained.available >= retained.requested {
+        fail("L85: retired worker roots did not stay charged to the service")
+    }
+    let _ = take captured
+    let shared = follower_slot_shortage(available, plan)
+    if shared.requested != retained.requested || shared.available != retained.available {
+        fail("L85: a second Snapshot duplicated the charge or refunded it early")
+    }
+    let _ = take duplicate
+    let again = follower_slot(available, plan)?
+    let _ = take again
+    close_follower_service(take service)
+}
+
+
+fn follower_starter_trial(d: Dir, c: Clock, tasks: Tasks, plan: FollowerPlan, funded: bool) -> Result[(), Error] waits {
+    let service = follower_service(tasks, 80 + plan_bytes(plan))?
+    let requested = follower_slot(follower_owner(service)?, plan)
+    if funded {
+        let mut ids = followers()
+        let opened = follower(mut ids, requested?, log_authority(d), c, None)?
+        let _ = take opened
+    } else {
+        if let Error(Full(Allocation(cause))) = requested {
+            if cause.requested != 746 || cause.available != 745 {
+                fail("L85: the one-byte-short starter reported the wrong provision charge")
+            }
+        } else {
+            fail("L85: the one-byte-short starter provisioned a slot")
+        }
+    }
+    close_follower_service(take service)
+}
+
+@test
+fn follower_starter_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    close(open(tasks, directory, c, r, options)?)?
+    let plan = follower_law_plan(Directory, options)
+    if follower_starter_bytes() != 1034 { fail("L85: the starter peak differs from 288 + 746") }
+    let limit = 80 + plan_bytes(plan) + 1034
+    capacity(bound bytes limit - 1 { follower_starter_trial(directory, c, tasks, plan, false) })??
+    capacity(bound bytes limit { follower_starter_trial(directory, c, tasks, plan, true) })?
+}
+
+fn follower_law_room() -> u64 {
+    let Error(refused) = (bound bytes 18446744073709551615u64 {}) else { fail("L85: unexpectedly unbounded room") }
+    refused.available
+}
+
+fn follower_slot_shortage(owner: FollowerOwner, plan: FollowerPlan) -> Capacity waits {
+    match follower_slot(owner, plan) {
+        Error(Full(Allocation(cause))) => cause,
+        _ => fail("L85: the grant ignored a live Snapshot"),
+    }
+}
+
+type FollowerRetainedBytesJob: send {
+    keep: Sender[(Arc[Bytes], Arc[Bytes])],
+    check_room: Receiver[u64],
+    observed: Sender[u64]
+}
+
+fn follower_check_room(take job: FollowerRetainedBytesJob) waits {
+    // Counted List payloads cost 24 for the carrier and 8 for the count.
+    // The transient capture is a 600-byte allocation owned by this worker.
+    let private_capture: Bytes = list.with_capacity(600)
+    let first: Bytes = list.with_capacity(288)
+    let second: Bytes = list.with_capacity(160)
+    result.unwrap(channel.send(job.keep, (arc.new(take first), arc.new(take second))))
+    while let Ok(expected) = channel.receive(job.check_room) {
+        let Error(refused) = (bound bytes 8193 {}) else { fail("L85: the worker exceeded its limit") }
+        if refused.available != expected {
+            fail("L85: the retained blocks took the wrong number of bytes")
+        }
+        result.unwrap(channel.send(job.observed, refused.available))
+    }
+    if list.capacity(private_capture) != 600 { fail("L85: the capture was lost") }
+}
+
+fn expect_follower_room(to: Sender[u64], from: Receiver[u64], expected: u64) waits {
+    result.unwrap(channel.send(to, expected))
+    if result.unwrap(channel.receive(from)) != expected { fail("L85: wrong remaining worker room") }
+}
+
+fn follower_retained_bytes_trial(tasks: Tasks, release_first: bool) waits {
+    let (keep, snapshot_bytes): (Sender[(Arc[Bytes], Arc[Bytes])], Receiver[(Arc[Bytes], Arc[Bytes])]) = channel.new(1)
+    let (ask, check_room): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let (observed, report): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let work = FollowerRetainedBytesJob(keep: take keep, check_room: take check_room, observed: take observed)
+    result.unwrap(bound bytes 50000 {
+        let worker = task.spawn(tasks, bytes 8192, take work, follower_check_room)
+        let (take a, take b) = result.unwrap(channel.receive(snapshot_bytes))
+        expect_follower_room(ask, report, 7080)
+        if release_first {
+            let duplicate = arc.share(a)
+            expect_follower_room(ask, report, 7080)
+            let _ = take a
+            expect_follower_room(ask, report, 7080)
+            let _ = take duplicate
+            expect_follower_room(ask, report, 7400)
+            let _ = take b
+            let _ = take ask
+            result.unwrap(task.join(take worker))
+        } else {
+            let _ = take ask
+            result.unwrap(task.join(take worker))
+            let Error(refused) = (bound bytes 49489 {}) else { fail("L85: retirement refunded live roots") }
+            if refused.available != 49488 { fail("L85: retirement did not return exactly 49,488 bytes") }
+            let _ = take a
+            let _ = take b
+        }
+        result.unwrap(bound bytes 50000 {})
+    })
+}
+
+@test
+fn follower_retained_bytes(tasks: Tasks) -> Result[(), Error] waits {
+    follower_retained_bytes_trial(tasks, true)
+    follower_retained_bytes_trial(tasks, false)
+    Ok(())
+}
+
+
+fn follower_refusal_retry(r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let mut options = bucket_law_options(true)
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    let mut writer = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 1201)?, sim.time, r, options)?
+    let rows = bucket_law_rows_table(mut writer)?
+    let _ = checkpoint(mut writer)?
+
+    let lanes = bucket_law_lanes(1)
+    let mut plan = follower_law_plan(Bucket(lanes), options)
+    // Fund both fixed read windows and checkpoint metadata. A 256 KiB
+    // body cannot fit under this limit even with every scratch block free.
+    plan.root = 2 * 65536 + 32768
+    plan.envelope = plan.root + 288 + 216
+    let service = follower_law_service(tasks, plan, 1)?
+    let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1202, true, 1)?
+    let mut ids = followers()
+    let mut replica = follower(mut ids, follower_slot(follower_owner(service)?, plan)?,
+        object_authority(take client, "bucket", BUCKET_LAW_OP_MS), sim.time, None)?
+    let main_line = follower_main(replica)
+    let before = snapshot_follower(replica, main_line)?
+    let mut contents: Bytes = list.with_capacity(262144)
+    list.fill(mut contents, 262144, 12u8)
+    let committed = run(mut writer, None, (copy_env(rows), copy_env(contents)), fn(mut tx, envs) -> Result[(), Error] {
+        put(mut tx, envs.0, 1, envs.1)
+    })?
+    let Committed(take done) = take committed else { fail("L85: the large row was refused by its writer") }
+    durable(mut writer, done.ticket)?
+    let _ = checkpoint(mut writer)?
+
+    let due = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
+    let Error(Full(Allocation(first))) = catch_up(mut replica, due) else {
+        fail("L85: the worker did not refuse the large checkpoint")
+    }
+    let Error(Full(Allocation(retried))) = catch_up(mut replica, due) else {
+        fail("L85: a byte refusal closed the worker or exhausted a second grant")
+    }
+    if first.requested < 262144 || first.requested != retried.requested || first.available != retried.available {
+        fail("L85: disposable scratch stayed charged after the failed apply")
+    }
+    let after = snapshot_follower(replica, main_line)?
+    if version(after) != 1 || after.watermark != before.watermark ||
+        get(follower_reader(replica, 0)?, after, rows, 1)? != None {
+        fail("L85: the refused checkpoint changed the published capture")
+    }
+    close_follower_service(take service)?
+    close(take writer)
+}
+
+@test
+fn bucket_test_m2_follower_retry(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 1201), None, list.new())
+    let verdict = follower_refusal_retry(r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    verdict
+}
+
+type FollowerCancelBind: send {
+    slot: FollowerSlot,
+    directory: Dir,
+    clock: Clock,
+    start: Receiver[()],
+    entered: Sender[()]
+}
+
+fn follower_cancel_bind(take job: FollowerCancelBind) waits {
+    let FollowerCancelBind(slot: take slot, directory, clock, start: take start, entered: take entered) = take job
+    result.unwrap(channel.send(entered, ()))
+    result.unwrap(channel.receive(start))
+    let mut ids = followers()
+    let _ = follower(mut ids, take slot, log_authority(directory), clock, None)
+    fail("L85: cancelled bind returned")
+}
+
+@test
+fn follower_cancelled_slot(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let owner = follower_owner(service)?
+    let (directory, take target) = provide.dir(bytes 4096)
+    let mut provider = take target
+    for after_acceptance in [false, true] {
+        let slot = follower_slot(owner, plan)?
+        let (start, go): (Sender[()], Receiver[()]) = channel.new(1)
+        let (entered, announced): (Sender[()], Receiver[()]) = channel.new(1)
+        let input = FollowerCancelBind(slot: take slot, directory, clock: c, start: take go, entered: take entered)
+        let caller = task.spawn(tasks, bytes 4096, take input, follower_cancel_bind)
+        result.unwrap(channel.receive(announced))
+        let pending = if after_acceptance {
+            result.unwrap(channel.send(start, ()))
+            let Some(take call) = provide.next(mut provider) else { fail("L85: bind never reached the provider") }
+            if let SyncDir(..) = provide.dir_op(call) {} else { fail("L85: bind did not sync before recovery") }
+            Some(take call)
+        } else {
+            None
+        }
+        if let Error(Cancelled(_)) = task.cancel_join(take caller) {} else {
+            fail("L85: the caller escaped cancellation")
+        }
+        if let Some(take call) = take pending {
+            // A provider sync may finish after the caller has gone. Let the
+            // worker clean its undeliverable result before checking its refund.
+            let _ = provide.reply(mut provider, take call, provide.dir_reply(Failed(Denied)))
+        }
+        let replacement = follower_slot(owner, plan)?
+        let _ = take replacement
+    }
+    close_follower_service(take service)
+}
+
+type FollowerCancelApply: send {
+    slot: FollowerSlot,
+    capture: Arc[FollowCapture],
+    clock: Clock,
+    published: Sender[Snapshot],
+    hold: Receiver[()]
+}
+
+fn follower_cancel_apply(take job: FollowerCancelApply) waits {
+    let FollowerCancelApply(slot: take slot, capture: take capture, clock: current_clock, published: take published, hold: take hold) = take job
+    let mut replica = Follower(open: HISTORY_OPEN_LIMIT | 1, pager: None, slot: take slot, workers: None,
+        on_log: true, op_ms: 0, clock: current_clock, capture: take capture, stopped: None)
+    let due = clock.deadline_after_ms(host.mono_ns(current_clock), BUCKET_LAW_OP_MS)
+    let _ = result.unwrap(catch_up(mut replica, due))
+    result.unwrap(channel.send(published, result.unwrap(snapshot_follower(replica, follower_main(replica)))))
+    result.unwrap(channel.receive(hold))
+}
+
+fn follower_cancel_capture(id: StoreId, at_version: u64) -> Result[Arc[FollowCapture], Error] {
+    let state = capacity(main_state(empty_roots(), at_version, 0))?
+    follow_capture(id, take state, 0, None, None, at_version)
+}
+
+@test
+fn follower_cancelled_publication(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let id = StoreId(hi: 1, lo: 2)
+    let initial = follower_cancel_capture(id, 3)?
+    let candidate = follower_cancel_capture(id, 4)?
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let plan = follower_law_plan(Directory, options)
+    for after_swap in [false, true] {
+        let (commands, inbox): (Sender[FollowerCommand], Receiver[FollowerCommand]) = channel.new(1)
+        let (retiring, retired): (Sender[()], Receiver[()]) = channel.new(1)
+        let (published, observed): (Sender[Snapshot], Receiver[Snapshot]) = channel.new(1)
+        let (released, hold): (Sender[()], Receiver[()]) = channel.new(1)
+        let slot = FollowerSlot(plan: clone(plan), commands: take commands, retiring: take retiring)
+        let work = FollowerCancelApply(slot: take slot, capture: arc.share(initial), clock: c, published: take published, hold: take hold)
+        let caller = task.spawn(tasks, bytes 4096, take work, follower_cancel_apply)
+        let FollowerCommand(request: take requested, reply: take outlet) = result.unwrap(channel.receive(inbox))
+        let Apply(take previous, _) = box.unbox(take requested) else { fail("L85: expected a catch-up request") }
+        if previous.watermark != 3 { fail("L85: the request did not name the published capture") }
+        result.unwrap(channel.send(outlet, Ok(Captured(Some(arc.share(candidate))))))
+        if after_swap {
+            let _ = take outlet
+            let snapshot_ready = result.unwrap(channel.receive(observed))
+            if let Error(Cancelled(_)) = task.cancel_join(take caller) {} else {
+                fail("L85: the caller escaped cancellation after the swap")
+            }
+            if version(snapshot_ready) != 4 || snapshot_ready.watermark != 4 {
+                fail("L85: cancellation lost a published capture")
+            }
+        } else {
+            // The queued reply is readable, but the caller waits for the
+            // reply sender to close before it may publish.
+            if let Error(Cancelled(_)) = task.cancel_join(take caller) {} else {
+                fail("L85: the caller escaped cancellation before the swap")
+            }
+            if let Error(Closed) = channel.try_receive(observed) {} else {
+                fail("L85: cancellation published the queued candidate")
+            }
+            let _ = take outlet
+        }
+        let _ = take released
+        let _ = take retired
+    }
+    Ok(())
+}

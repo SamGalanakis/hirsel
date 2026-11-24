@@ -74,7 +74,7 @@ pub fn describe_declarations[H](clock: Clock,
 
 pub fn declare_follower(f: Follower) -> Declare {
     let capture = view f.capture
-    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.ceiling, retained: false, changed: false, bindings: list.new())
+    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new())
     new_declaration(Follower, follower_base(f), take plan, true)
 }
 

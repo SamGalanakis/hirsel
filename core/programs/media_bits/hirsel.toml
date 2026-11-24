@@ -8,9 +8,11 @@ std = { major = 1 }
 
 [sources]
 "opus.hirsel" = "opus"
+"vp9.hirsel" = "vp9"
 
 [tests]
 limit = 67108864
 
 [tests.sources]
 "opus-laws.hirsel" = "opus_laws"
+"vp9-laws.hirsel" = "vp9_laws"

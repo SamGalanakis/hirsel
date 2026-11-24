@@ -1,0 +1,191 @@
+// RFC 9628 §4.2. Offsets refer to the RTP payload, starting at its descriptor.
+pub type Error = Truncated | InvalidDescriptor | MissingPictureId | PictureIdTooLarge
+
+pub type PictureId = ShortId(u8) | LongId(u16)
+
+pub type Layer {
+    temporal: u8,
+    spatial: u8,
+    switching_up: bool,
+    inter_layer_dependency: bool,
+    base_picture_index: Option[u8]
+}
+
+pub type Scalability {
+    layers: u8,
+    resolutions_start: Option[u64],
+    picture_group_start: Option[u64],
+    picture_group_count: u8
+}
+
+pub type Descriptor {
+    picture_id: Option[PictureId],
+    layer: Option[Layer],
+    flexible: bool,
+    predicted: bool,
+    first: bool,
+    last: bool,
+    not_upper_layer_reference: bool,
+    reference_diffs: Inline[u8, 3],
+    reference_count: u64,
+    scalability: Option[Scalability],
+    payload_start: u64
+}
+
+fn octet(packet: Bytes, mut at: u64, end: u64) -> Result[u8, Error] {
+    if at == end {
+        return Error(Truncated)
+    }
+    let value = packet[at]
+    at += 1
+    Ok(value)
+}
+
+fn scalability(packet: Bytes, mut at: u64, end: u64) -> Result[Scalability, Error] {
+    let flags = octet(packet, mut at, end)?
+    let layers = (flags >> 5) + 1
+    let resolutions_start = if (flags & 16) != 0 {
+        let layers_wide: u64 = int.widen(layers)
+        let count = layers_wide * 4
+        if count > end - at {
+            return Error(Truncated)
+        }
+        let start = at
+        at += count
+        Some(start)
+    } else {
+        None
+    }
+    let mut groups: u8 = 0
+    let picture_group_start = if (flags & 8) != 0 {
+        groups = octet(packet, mut at, end)?
+        let start = at
+        for index in 0u8 .. groups {
+            let group = octet(packet, mut at, end)?
+            if index == 0 && (group >> 5) != 0 {
+                return Error(InvalidDescriptor)
+            }
+            let refs: u64 = int.widen((group >> 2) & 3)
+            if refs > end - at {
+                return Error(Truncated)
+            }
+            at += refs
+        }
+        Some(start)
+    } else {
+        None
+    }
+    Ok(Scalability(layers: layers, resolutions_start: resolutions_start, picture_group_start: picture_group_start, picture_group_count: groups))
+}
+
+pub fn parse(packet: Bytes) -> Result[Descriptor, Error] {
+    let end = list.len(packet)
+    let mut at: u64 = 0
+    let flags = octet(packet, mut at, end)?
+    let present = (flags & 128) != 0
+    let predicted = (flags & 64) != 0
+    // Receivers ignore F when the Picture ID is absent.
+    let flexible = present && (flags & 16) != 0
+    let picture_id = if present {
+        let hi = octet(packet, mut at, end)?
+        if (hi & 128) != 0 {
+            let lo = octet(packet, mut at, end)?
+            let high: u16 = int.widen(hi & 127)
+            let low: u16 = int.widen(lo)
+            let value = (high << 8) | low
+            Some(LongId(value))
+        } else {
+            Some(ShortId(hi))
+        }
+    } else {
+        None
+    }
+    let layer = if (flags & 32) != 0 {
+        let indices = octet(packet, mut at, end)?
+        let temporal = indices >> 5
+        let spatial = (indices >> 1) & 7
+        let inter_layer = (indices & 1) != 0
+        if (!predicted && temporal != 0) || (spatial == 0 && inter_layer) {
+            return Error(InvalidDescriptor)
+        }
+        let base: Option[u8] = if flexible {
+            None
+        } else {
+            Some(octet(packet, mut at, end)?)
+        }
+        Some(Layer(temporal: temporal, spatial: spatial, switching_up: (indices & 16) != 0, inter_layer_dependency: inter_layer, base_picture_index: base))
+    } else {
+        None
+    }
+    let mut diffs: Inline[u8, 3] =[0, 0, 0]
+    let mut count: u64 = 0
+    if flexible && predicted {
+        let mut more = true
+        while more {
+            if count == 3 {
+                return Error(InvalidDescriptor)
+            }
+            let reference = octet(packet, mut at, end)?
+            let diff = reference >> 1
+            if diff == 0 {
+                return Error(InvalidDescriptor)
+            }
+            diffs[count] = diff
+            count += 1
+            more = (reference & 1) != 0
+        }
+    }
+    let ss = if (flags & 2) != 0 {
+        Some(scalability(packet, mut at, end)?)
+    } else {
+        None
+    }
+    if at == end {
+        return Error(Truncated)
+    }
+    Ok(Descriptor(picture_id: picture_id, layer: layer, flexible: flexible, predicted: predicted, first: (flags & 8) != 0, last: (flags & 4) != 0, not_upper_layer_reference: (flags & 1) != 0, reference_diffs: diffs, reference_count: count, scalability: ss, payload_start: at))
+}
+
+// Keep the encoded width so both the payload and the descriptor keep their offsets.
+pub fn rewrite_picture_id(mut packet: Bytes, value: u16) -> Result[(), Error] {
+    let descriptor = parse(packet)?
+    match descriptor.picture_id {
+        Some(ShortId(_)) => {
+            if value > 127 {
+                return Error(PictureIdTooLarge)
+            }
+            packet[1] = int.narrow(value)
+        },
+        Some(LongId(_)) => {
+            if value > 32767 {
+                return Error(PictureIdTooLarge)
+            }
+            let high: u8 = int.narrow(value >> 8)
+            packet[1] = 128 | high
+            packet[2] = int.narrow(value & 255)
+        },
+        None => {
+            return Error(MissingPictureId)
+        }
+    }
+    Ok(())
+}
+
+// VP9 uncompressed frame header, starting at the first codec byte.
+pub fn is_keyframe(frame: Bytes) -> Result[bool, Error] {
+    if list.len(frame) == 0 {
+        return Error(Truncated)
+    }
+    let first = frame[0]
+    if (first & 192) != 128 {
+        return Error(InvalidDescriptor)
+    }
+    if (first & 48) == 48 {
+        if (first & 8) != 0 {
+            return Error(InvalidDescriptor)
+        }
+        Ok((first & 6) == 0)
+    } else {
+        Ok((first & 12) == 0)
+    }
+}

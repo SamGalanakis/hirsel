@@ -70,6 +70,7 @@ fn bucket_law_sim_holds(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.si
     let mut primary: List[Ip] = list.with_capacity(1)
     list.push(mut primary, address.ip)
     std.sim.net.resolve_as(mut net_model, string.from("bucket.s3.test"), take primary)
+    std.sim.net.handshake_as(mut net_model, string.from("bucket.s3.test"), Ok(Handshake(protocol: Some(0), peer: (0, 0, 0, 0))))
     let mut spare: List[Ip] = list.with_capacity(1)
     list.push(mut spare, bucket_law_spare().ip)
     std.sim.net.resolve_as(mut net_model, string.from("bucket.spare.test"), take spare)
@@ -119,6 +120,21 @@ fn bucket_endpoint_client(endpoint: std.sim.s3.Endpoint, network: Net, time: Clo
         std.object.start(network, tasks, take place, take credentials_set, None, System, time, random, bucket_law_lanes(lanes), deadline)
     }
     match take connected {
+        Ok(take client) => Ok(take client),
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+fn bucket_law_https_client(s: BucketSim, tasks: Tasks, host_name: String, seed: u64) -> Result[std.object.Client, Error] waits {
+    let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
+    let credentials_set = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(s.time), BUCKET_LAW_OP_MS)
+    let mut endpoint = string.from("https://")
+    string.push(mut endpoint, host_name)
+    string.push(mut endpoint, ":8080")
+    let place = std.object.Bucket(endpoint: take endpoint, aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
+    match std.object.start(s.network, tasks, take place, take credentials_set, None, System, s.time, provide.random(seed), bucket_law_lanes(1), deadline) {
         Ok(take client) => Ok(take client),
         Error(take e) => Error(Remote(take e)),
     }
@@ -756,18 +772,16 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
     let mut new_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
     let mut endpoint_only = bucket_law_client(sim, tasks, "s3.test", 3)?
     let deadline = std.object.deadline_after_ms(old, BUCKET_LAW_OP_MS)
-    if let Error(Unqualified(reason)) = history_qualify(mut endpoint_only, deadline) {
-        if reason != "insecure" {
-            fail("unexpected qualification reason")
-        }
-    } else {
-        fail("a loopback endpoint alone qualified as a simulator")
+    if let Error(Endpoint(Insecure)) = history_check_endpoint(mut endpoint_only, deadline) {} else {
+        fail("a plain-http endpoint that is not the simulator was accepted")
     }
-    history_qualify(mut old, deadline)?
-    history_qualify(mut new_client, deadline)?
-    if !s3_host_matches("s3.us-east-1.amazonaws.com", "us-east-1") || s3_host_matches("s3.dualstack.us-east-1.amazonaws.com", "us-east-1") || s3_host_matches("s3.us-east-1.amazonaws.com.example.com", "us-east-1") {
-        fail("S3 host qualification used a partial match")
-    }
+    let _ = take endpoint_only
+    // STORE §12.2: any https endpoint is accepted, whoever runs it.
+    let mut elsewhere = bucket_law_https_client(sim, tasks, "s3.test", 4)?
+    history_check_endpoint(mut elsewhere, deadline)?
+    let _ = take elsewhere
+    history_check_endpoint(mut old, deadline)?
+    history_check_endpoint(mut new_client, deadline)?
     let metadata = history_config_bytes(object_history_config(std.object.bucket_config(old), "bucket"))?
     let mut first = history_buffers(1024)?
     let mut successor = history_buffers(1024)?

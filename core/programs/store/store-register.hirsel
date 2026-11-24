@@ -174,6 +174,39 @@ fn history_genesis_packet(mut raw: Bytes, id: StoreId, kind: u8, manifest: Histo
     history_checkpoint_packet(mut raw, ctx, 1, kind, none, manifest, retained, locator)
 }
 
+// The tag no object carries: If-Match with it must fail on every key.
+const HISTORY_PROBE_TAG: String = "\"hirsel-store-condition-probe\""
+
+fn history_probe_tag() -> std.object.ETag {
+    let text = string.as_bytes(HISTORY_PROBE_TAG)
+    let mut tag = std.object.ETag(octets:[0; 64], len: list.len(text))
+    for i in 0u64 .. tag.len {
+        tag.octets[i] = text[i]
+    }
+    tag
+}
+
+// STORE §12.2: an endpoint that applies a PUT whose condition fails lets two
+// writers both win the head. Before genesis writes a head, both conditions
+// are sent with the immutable entry it just created, so an endpoint that
+// ignores them rewrites identical bytes and nothing changes.
+fn history_check_conditions(mut client: std.object.Client, key: String, mut raw: Bytes, deadline: u64) -> Result[(), Error] waits {
+    let (take absent, take returned) = std.object.store_if_retry(mut client, key, Absent, replace(mut raw, list.new()), deadline)
+    raw = take returned
+    match take absent {
+        Ok(Mismatch) => (),
+        Ok(Applied(_)) => return Error(Endpoint(IgnoresIfNoneMatch)),
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    let (take stale, take again) = std.object.store_if_retry(mut client, key, Match(history_probe_tag()), replace(mut raw, list.new()), deadline)
+    raw = take again
+    match take stale {
+        Ok(Mismatch) => Ok(()),
+        Ok(Applied(_)) => Error(Endpoint(IgnoresIfMatch)),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
 fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryRegister, Error] waits {
     let manifest = history_manifest_packet(mut buffers.packet, id, kind)?
     history_create(mut client, history_key("m-", manifest), mut buffers.packet, mut buffers.compare, deadline)?
@@ -188,7 +221,9 @@ fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: Stor
     capacity(list.try_reserve(mut buffers.packet, bytes_wanted + BINDING_BYTES))?
     capacity(list.try_reserve(mut buffers.compare, bytes_wanted))?
     let base = history_genesis_packet(mut buffers.packet, id, kind, manifest, locator)?
-    history_create(mut client, history_key("e-", base), mut buffers.packet, mut buffers.compare, deadline)?
+    let base_key = history_key("e-", base)
+    history_create(mut client, base_key, mut buffers.packet, mut buffers.compare, deadline)?
+    history_check_conditions(mut client, base_key, mut buffers.packet, deadline)?
     let head = HistoryHead(authority_kind: kind, store: id, pair: HistoryPair(epoch: 1, holder), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
     history_encode_head(mut buffers.body, head, authority)?
     match history_write_head(mut client, Absent, mut buffers.body, mut buffers.witness, deadline) {

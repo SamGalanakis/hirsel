@@ -1,94 +1,35 @@
-fn s3_host_matches(name: String, aws_region: String) -> bool {
-    if name == "s3.amazonaws.com" {
-        return true
-    }
-    let Some(host_label) = string.strip_suffix(name, ".amazonaws.com") else {
-        return false
-    }
-    let Some(label) = string.strip_prefix(host_label, "s3.") else {
-        return false
-    }
-    if label != aws_region {
-        return false
-    }
-    let region_bytes = string.as_bytes(aws_region)
-    let n = list.len(region_bytes)
-    if n < 6 || region_bytes[2] != b'-' {
-        return false
-    }
-    let mut last_dash = 0u64
-    for at in 0u64 .. n {
-        let b = region_bytes[at]
-        if b == b'-' && at > last_dash + 1 {
-            last_dash = at
-        } else if b < b'a' || b > b'z' {
-            // Region numbers follow the second or later dash.
-            if last_dash <= 2 || !int.is_ascii_digit(b) {
-                return false
-            }
-            for digit in list.slice(region_bytes, at, n) {
-                if !int.is_ascii_digit(digit) {
-                    return false
-                }
-            }
-            return at == last_dash + 1
-        }
-    }
-    false
+// Why an object endpoint cannot hold an objects@1 or sim@1 store (§12.2).
+pub type EndpointRefusal: send = Insecure | Unproven | NotSimulator | IgnoresIfNoneMatch | IgnoresIfMatch
+
+pub fn endpoint_refusal_text(reason: EndpointRefusal) -> String {
+    string.from(match reason {
+        Insecure => "the object store endpoint is not https",
+        Unproven => "the loopback endpoint did not answer with the simulator's proof",
+        NotSimulator => "a sim@1 store needs a std.sim.s3 client",
+        IgnoresIfNoneMatch => "the object store endpoint applied a PUT whose If-None-Match condition failed",
+        IgnoresIfMatch => "the object store endpoint applied a PUT whose If-Match condition failed",
+    })
 }
 
-fn history_qualify(mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {
+// STORE §12.2: the live client's transport. The store never asks which
+// company runs the endpoint; conditional writes are checked at genesis.
+fn history_check_endpoint(mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {
     if std.object.simulated(client) {
         return Ok(())
     }
     if std.object.proven(client) {
         // The client refuses any answer without the loopback simulator's
-        // proof for its credential, so one answered probe qualifies it.
+        // proof for its credential, so one answered request proves it.
         let location = capacity(bound bytes 16 { std.object.bucket_location(mut client, deadline) })?
         let Ok(_) = location else {
-            return Error(Unqualified("sim:proof"))
+            return Error(Endpoint(Unproven))
         }
         return Ok(())
     }
     if !std.object.endpoint_secure(client) {
-        return Error(Unqualified("insecure"))
+        return Error(Endpoint(Insecure))
     }
-    let (take endpoint, take place) = disk_allocation(scoped fn() -> Result[(String, std.object.Bucket), Error] {
-        Ok((std.object.endpoint_host(client), std.object.bucket_config(client)))
-    })?
-    if s3_host_matches(endpoint, place.aws_region) {
-        let encryption = capacity(bound bytes 16 { std.object.bucket_encryption(mut client, deadline) })?
-        let Ok(algorithm) = encryption else {
-            return Error(Unqualified("aws:encryption"))
-        }
-        if algorithm == "" || algorithm == "AES256" {
-            return Ok(())
-        }
-        return disk_allocation(scoped fn() -> Result[(), Error] {
-            let mut reason = string.from("aws:")
-            string.push(mut reason, algorithm)
-            Error(Unqualified(take reason))
-        })
-    }
-    if endpoint == "fly.storage.tigris.dev" || endpoint == "t3.storage.dev" {
-        let setting = capacity(bound bytes 16 { std.object.bucket_location(mut client, deadline) })?
-        let Ok(location) = setting else {
-            return Error(Unqualified("tigris:location"))
-        }
-        if string.find(location, 0, ",") != None {
-            return Error(Unqualified("tigris:dual-region"))
-        }
-        if location == "" {
-            return Error(Unqualified("tigris:location"))
-        }
-        // No Single- or Multi-region reply has qualified for the allow-list.
-        return disk_allocation(scoped fn() -> Result[(), Error] {
-            let mut reason = string.from("tigris:")
-            string.push(mut reason, location)
-            Error(Unqualified(take reason))
-        })
-    }
-    Error(Unqualified("unknown"))
+    Ok(())
 }
 
 fn history_check_namespace(capture: HistoryCapture, client: std.object.Client) -> Result[(), Error] {

@@ -107,7 +107,7 @@ type ObjectWriterOpen {
 fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, level_name: String, op_ms: u64, sim: Option[(List[String], LevelSync)], authority_kind: u8) -> Result[ObjectWriterOpen, Error] waits {
     let group_room: u64 = int.widen(options.group_bytes)
     if authority_kind == 2 && !std.object.simulated(read_source.client) {
-        return Error(Unqualified("sim:provider"))
+        return Error(Endpoint(NotSimulator))
     }
     let name_count = match sim { Some((names, _)) => list.len(names), None => 0u64 }
     if name_count > 15 { return Error(Limit(Name)) }

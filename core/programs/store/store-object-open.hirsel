@@ -225,7 +225,7 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
         Error(Remote(NotFound)) => None,
         Error(take failure) => return Error(take failure),
     }
-    if authority_kind == 1 { history_qualify(mut read_source.client, read_source.deadline)? }
+    if authority_kind == 1 { history_check_endpoint(mut read_source.client, read_source.deadline)? }
     let holder = capacity(disk_identity(r))?
     match take selected {
         Some(take capture) => history_open_existing(mut read_source, c, r, holder, take capture, options, requested_levels, authority_kind, mut workspace, prepare_writer),

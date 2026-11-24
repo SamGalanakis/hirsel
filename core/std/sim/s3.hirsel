@@ -1,7 +1,8 @@
 /// One fault per connection, selected before any request octets arrive.
 /// Conflict interrupts an If-Match write. DeleteConflict interposes a delete on If-None-Match.
+/// IgnoreConditions applies every write as if it carried no If-Match or If-None-Match.
 /// CompleteExpired reports an embedded error and ends the upload without publishing it.
-pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | CompleteExpired | MalformedComplete | CutResponse(u64) | RequireResume(u64) | Conflict | DeleteConflict
+pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | CompleteExpired | MalformedComplete | CutResponse(u64) | RequireResume(u64) | Conflict | DeleteConflict | IgnoreConditions
 
 /// Kills the writer's connections at a wire cut. Requests to `address` are
 /// numbered from 1. The first `after` are served. Request `after + 1` is
@@ -246,6 +247,7 @@ fn conditional_failure(rules: Rules, req: sim.s3_wire.WireRequest, mut objects: 
             let _ = map.remove(mut objects, req.target.key)
             return Some(error(409, "ConditionalRequestConflict"))
         },
+        (IgnoreConditions, true) => return None,
         _ => (),
     }
     let old = map.get(objects, req.target.key)
@@ -616,9 +618,6 @@ fn dispatch(rules: Rules, mut bucket: Bucket, req: sim.s3_wire.WireRequest, take
     if req.method == "GET" && req.target.key == "" {
         if map.contains(req.target.query, "location") {
             return reply(200, "<LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">global</LocationConstraint>")
-        }
-        if map.contains(req.target.query, "encryption") {
-            return reply(200, "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>")
         }
         if map.get(req.target.query, "uploads") != None {
             return list_uploads(bucket.uploads, req.target.query)

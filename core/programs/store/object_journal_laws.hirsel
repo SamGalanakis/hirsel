@@ -54,7 +54,7 @@ fn bucket_test_m2_object_journal(c: Clock, r: Random, tasks: Tasks) -> Result[()
 }
 
 fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
-    let first = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let first = bucket_law_https_client(sim, tasks, "s3.test", 1)?
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     options.group_bytes = 65536
     options.head_poll_ms = 10000

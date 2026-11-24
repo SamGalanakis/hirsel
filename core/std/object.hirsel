@@ -62,7 +62,7 @@ pub fn key_text(key: Key) -> String {
     result.unwrap(string.from_utf8(take out))
 }
 
-type Operation: key = Fetch | FetchRange | FetchChanged | Put | PutConditional | PutIf | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads | GetBucketLocation | GetBucketEncryption
+type Operation: key = Fetch | FetchRange | FetchChanged | Put | PutConditional | PutIf | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads | GetBucketLocation
 
 type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
 
@@ -484,7 +484,6 @@ fn method(op: Operation) -> String {
         FetchRange => "GET",
         FetchChanged => "GET",
         GetBucketLocation => "GET",
-        GetBucketEncryption => "GET",
         ListObjects => "GET",
         ListUploads => "GET",
         Head => "HEAD",
@@ -1201,20 +1200,6 @@ fn location_setting(text: String) -> Result[String, Error] {
     xml_decoded(string.slice(text, close + 1, end))
 }
 
-fn encryption_setting(text: String) -> Result[String, Error] {
-    let Some(value) = xml_field(text, "SSEAlgorithm") else {
-        return Error(Fatal(Malformed))
-    }
-    if value == "" || string.find(text, 0, "<ServerSideEncryptionConfiguration") == None || string.find(text, 0, "</ServerSideEncryptionConfiguration>") == None {
-        return Error(Fatal(Malformed))
-    }
-    let begin = option.unwrap(string.find(text, 0, "<SSEAlgorithm>"))
-    if string.find(text, begin + 1, "<SSEAlgorithm>") != None {
-        return Error(Fatal(Malformed))
-    }
-    xml_decoded(value)
-}
-
 fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inline[u8, 16]], op: Operation, status: u16, prefix: String, mut entries: List[Entry], mut buffer: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
     if op == ListObjects && status == 200 {
         return listing(mut c, prefix, mut entries, mut buffer, mut probe, mut scratch)
@@ -1227,24 +1212,13 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
         return Received(NotModified)
     }
     if status < 200 || status >= 300 || fragment(buffer, 0, string.as_bytes("<Error")) != None {
-        if op == GetBucketEncryption && status == 404 {
-            let response = status_failure(status, buffer)
-            if response.code == string.as_bytes("ServerSideEncryptionConfigurationNotFoundError") {
-                return Received(BucketSetting(string.new()))
-            }
-        }
         return interpret_error(op, status, buffer)
     }
-    if op == GetBucketLocation || op == GetBucketEncryption {
+    if op == GetBucketLocation {
         let Ok(take text) = xml_text(buffer) else {
             return Invalid(Fatal(Malformed))
         }
-        let setting = if op == GetBucketLocation {
-            location_setting(text)
-        } else {
-            encryption_setting(text)
-        }
-        return match take setting {
+        return match location_setting(text) {
             Ok(take value) => Received(BucketSetting(take value)),
             Error(take problem) => Invalid(take problem),
         }
@@ -2347,16 +2321,6 @@ pub fn bucket_config(c: Client) -> Bucket {
     clone(c.requests.bucket)
 }
 
-pub fn endpoint_host(c: Client) -> String {
-    let parsed = result.unwrap(uri.parse(c.requests.bucket.endpoint))
-    let Name(host) = option.unwrap(parsed.host) else {
-        fail("object client lost its configured hostname")
-    }
-    let mut name = string.from(string.slice(c.requests.bucket.endpoint, host.start, host.end))
-    string.make_ascii_lower(mut name)
-    take name
-}
-
 pub fn endpoint_secure(c: Client) -> bool {
     string.starts_with(c.requests.bucket.endpoint, "https://")
 }
@@ -2463,10 +2427,6 @@ fn read_bucket_setting(mut c: Client, op: Operation, query: String, deadline_ns:
 
 pub fn bucket_location(mut c: Client, deadline_ns: u64) -> Result[String, Error] waits {
     read_bucket_setting(mut c, GetBucketLocation, "location=", deadline_ns)
-}
-
-pub fn bucket_encryption(mut c: Client, deadline_ns: u64) -> Result[String, Error] waits {
-    read_bucket_setting(mut c, GetBucketEncryption, "encryption=", deadline_ns)
 }
 
 /// A nonempty byte interval, inclusive at lo and exclusive at hi.

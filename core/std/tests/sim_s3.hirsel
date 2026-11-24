@@ -531,7 +531,7 @@ fn has_saved(report: sim.s3.Report, key: String, body: String) -> bool {
 fn typed_sim_endpoint(tasks: Tasks) -> bool waits {
     let (client, _, server, driver) = object_fixture(tasks, 11, "00000000", 412)
     let mut c = take client
-    let correct = object.simulated(c) && object.endpoint_host(c) == "s3.test" && !object.endpoint_secure(c)
+    let correct = object.simulated(c) && !object.endpoint_secure(c)
     let (reply, _) = object.store_if(mut c, "head", Absent, string.into_bytes(string.from("first")), OBJECT_END)
     let _ = take c
     let observed = result.unwrap(task.join(take server))
@@ -723,7 +723,6 @@ fn conditional_head_put(tasks: Tasks) -> bool waits {
 fn object_register_worker(take requests: object.Requests) -> bool waits {
     let mut c = object.attach(take requests, None)
     let location = result.unwrap(object.bucket_location(mut c, OBJECT_END))
-    let encryption = result.unwrap(object.bucket_encryption(mut c, OBJECT_END))
     let (initial, _) = object.store_if(mut c, "head", Absent, string.into_bytes(string.from("first")), OBJECT_END)
     let Ok(Applied(meta)) = initial else {
         return false
@@ -741,7 +740,7 @@ fn object_register_worker(take requests: object.Requests) -> bool waits {
     let Ok(Some(observed)) = changed else {
         return false
     }
-    location == "global" && encryption == "AES256" && intact && observed.etag == next.etag && current == string.as_bytes("next")
+    location == "global" && intact && observed.etag == next.etag && current == string.as_bytes("next")
 }
 
 type HeldWire: send {

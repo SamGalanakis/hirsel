@@ -575,12 +575,14 @@ fn bucket_test_m2_binding(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error
     let _ = bucket_law_finish(take sim)
     outcome
 }
-fn object_conflict_sim(tasks: Tasks, c: Clock, seed: u64, tape: Inline[std.sim.s3.Fault, 16]) -> BucketSim {
-    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(16)
-    let mut words: List[u64] = list.with_capacity(32)
-    for i in 0u64 .. 16 {
+fn object_conflict_sim(tasks: Tasks, c: Clock, seed: u64, tape: Inline[std.sim.s3.Fault, 18]) -> BucketSim {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(18)
+    let mut words: List[u64] = list.with_capacity(36)
+    // world.pick maps word w to the high word of w * 18, so i * stride picks i.
+    let stride = 18446744073709551615u64 / 18 + 1
+    for i in 0u64 .. 18 {
         list.push(mut faults, tape[i])
-        list.push(mut words, i << 60)
+        list.push(mut words, i * stride)
         list.push(mut words, seed)
     }
     let mut streams: List[List[u64]] = list.with_capacity(1)
@@ -657,7 +659,7 @@ fn object_conflict_budget(tasks: Tasks, sim: BucketSim) -> Result[Bytes, Error] 
 }
 
 fn object_conflict_budget_held(attempts: u64, writes: u64) -> bool {
-    attempts == 13 && writes == 3
+    attempts == 15 && writes == 3
 }
 
 @test
@@ -667,32 +669,32 @@ fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Resu
     let conflict: std.sim.s3.Fault = Conflict
     let lost: std.sim.s3.Fault = ResetAfterBody
     let slow: std.sim.s3.Fault = SlowDown
-    let race_tape = [clean, clean, clean, clean, clean, clean, clean, conflict, lost, clean, clean, clean, conflict, clean, clean, clean]
+    let race_tape = [clean, clean, clean, clean, clean, clean, clean, clean, clean, conflict, lost, clean, clean, clean, conflict, clean, clean, clean]
     let race = object_conflict_sim(tasks, c, seed, race_tape)
     let winner = object_conflict_race(tasks, race)
     let raced = bucket_law_finish(take race)
     let expected = winner?
     let stored = option.unwrap(map.get(raced.objects, "head"))
     let captured = history_decode_head(stored.data)?
-    if list.len(raced.head_writes) != 3 || raced.head_writes[2].request != 9 || raced.head_writes[2].data != expected {
+    if list.len(raced.head_writes) != 3 || raced.head_writes[2].request != 11 || raced.head_writes[2].data != expected {
         fail("VP1: the HEAD history missed the applied write whose reply was lost")
     }
     // L54 negative control: replaying with a fresh tag after the lost reply
     // adds a ninth write even when the final bytes happen to agree.
-    if object_conflict_single_advance(3, 9) || !object_conflict_single_advance(captured.head.entry.seq, raced.writes) || stored.data != expected || raced.attempts != 15 {
+    if object_conflict_single_advance(3, 9) || !object_conflict_single_advance(captured.head.entry.seq, raced.writes) || stored.data != expected || raced.attempts != 17 {
         fail("L54: the bucket did not record exactly one generation-3 advance")
     }
 
     // Genesis, five conflicts, then another five attempts with a 503 mixed
     // in. A clean sixth attempt in the mixed run would publish the candidate.
-    let budget_tape = [clean, clean, clean, conflict, conflict, conflict, conflict, conflict, conflict, slow, conflict, conflict, conflict, clean, clean, clean]
+    let budget_tape = [clean, clean, clean, clean, clean, conflict, conflict, conflict, conflict, conflict, conflict, slow, conflict, conflict, conflict, clean, clean, clean]
     let budget = object_conflict_sim(tasks, c, seed, budget_tape)
     let unchanged = object_conflict_budget(tasks, budget)
     let exhausted = bucket_law_finish(take budget)
     let original = unchanged?
     let after = option.unwrap(map.get(exhausted.objects, "head"))
     // Q5 negative control: a separate budget for 503 admits a sixth attempt.
-    if object_conflict_budget_held(14, 3) || !object_conflict_budget_held(exhausted.attempts, exhausted.writes) || after.data != original {
+    if object_conflict_budget_held(16, 3) || !object_conflict_budget_held(exhausted.attempts, exhausted.writes) || after.data != original {
         fail("Q5: mixed retries exceeded five attempts or changed the head")
     }
     Ok(())
@@ -761,6 +763,28 @@ fn bucket_test_claim_cut(c: Clock, r: Random, tasks: Tasks, e: Env, out: Stdout)
     let (_, _, recovered_authority) = after_recovery?
     if recovered_authority != genesis {
         fail("claim cut: AUTHORITY after recovery differs from the genesis bytes")
+    }
+    Ok(())
+}
+
+// STORE §12.2: an endpoint that applies a PUT whose If-None-Match fails is
+// refused at genesis, before any head exists.
+@test
+fn bucket_test_ignored_conditions_refuse_genesis(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
+    list.push(mut faults, IgnoreConditions)
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 2111), None, take faults)
+    let authority = bucket_law_authority(sim, tasks, "s3.test", 1)?
+    let refused = match open_authority(tasks, take authority, sim.time, r, bucket_law_options(true)) {
+        Error(Refusal(error: Endpoint(IgnoresIfNoneMatch), ..)) => true,
+        _ => false,
+    }
+    let report = bucket_law_finish(take sim)
+    if !refused {
+        fail("an endpoint that ignores If-None-Match opened a store")
+    }
+    if map.contains(report.objects, "head") {
+        fail("the refused genesis wrote a head")
     }
     Ok(())
 }

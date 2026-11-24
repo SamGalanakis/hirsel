@@ -11,7 +11,7 @@ pub fn import_authority(take authority: Authority, take source: Preparation, r: 
     let metadata = history_config_bytes(object_history_config(std.object.bucket_config(client), take level_name))?
     let deadline = std.object.deadline_after_ms(client, op_ms)
     let mut workspace = history_buffers(65536)?
-    history_qualify(mut client, deadline)?
+    history_check_endpoint(mut client, deadline)?
     match history_fetch(mut client, "head", mut workspace.witness, deadline) {
         Ok(_) => return Error(Exists("authority")),
         Error(Remote(NotFound)) => (),

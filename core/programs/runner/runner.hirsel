@@ -936,7 +936,7 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Undecided => string.push(mut line, "the object store head write has an unknown outcome"),
         Declared(_) => string.push(mut line, "the durability level differs from the store declaration"),
         NotCurrent(version) => { string.push(mut line, "the store is at activation "); string.push_u64(mut line, version) },
-        Unqualified(reason) => { string.push(mut line, "the object store provider did not pass conditional write qualification: "); string.push(mut line, reason) },
+        Endpoint(reason) => string.push(mut line, store.endpoint_refusal_text(reason)),
         HistoryMissing(_, _) => string.push(mut line, "the object store history is missing an object"),
         Reclaimed(_) => string.push(mut line, "the requested object store history was reclaimed"),
         Retired => string.push(mut line, "the Store follower worker has stopped"),

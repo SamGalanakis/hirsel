@@ -134,7 +134,7 @@ Rule 2 no longer says PROG-9 refuses a generic function: `code.describe` now des
 
 ## CHANGES-v2.50 (Bucket backing; with STORE-SPEC v2.66, lane bucket-backing-t1-2022)
 
-`Backing` gains `Bucket(BucketBacking)`: a Net, a `std.object.Bucket` place (endpoint, region, bucket, prefix, style), `std.cred.Credentials` whose secret is sealed (a `Secret` grant, never plaintext), lane configuration, durability level and per-operation budget. The head task starts the object client and opens the place through `store.open_authority`, the path every objects@1 store takes, so §12.2 qualification runs at every open. A Bucket backing is persistent: it installs and deploys like `Disk`, its store size kind is `Bucket(lanes)`, and a deposed head stops on `Fenced` (§ operation). Placed installs still need `Disk` scratch.
+`Backing` gains `Bucket(BucketBacking)`: a Net, a `std.object.Bucket` place (endpoint, region, bucket, prefix, style), `std.cred.Credentials` whose secret is sealed (a `Secret` grant, never plaintext), lane configuration, durability level and per-operation budget. The head task starts the object client and opens the place through `store.open_authority`, the path every objects@1 store takes, so §12.2's endpoint check runs at every open. A Bucket backing is persistent: it installs and deploys like `Disk`, its store size kind is `Bucket(lanes)`, and a deposed head stops on `Fenced` (§ operation). Placed installs still need `Disk` scratch.
 
 ## CHANGES-v2.49 (Changes.bounds in G2; with STORE-SPEC v2.61, lane w3b-spec-fix-2003)
 

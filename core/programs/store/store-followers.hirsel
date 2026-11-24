@@ -203,7 +203,7 @@ pub fn follower(mut source: Followers, take slot: FollowerSlot, take authority: 
 
 fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object.LaneConfig, kind: u8) -> Result[(FollowerTransport, Option[std.object.Workers], bool, u64, u64), Error] {
     let ObjectAuthorityConfig(client: take client, op_ms, ..) = take config
-    if kind == 2 && !std.object.simulated(client) { return Error(Unqualified("sim:provider")) }
+    if kind == 2 && !std.object.simulated(client) { return Error(Endpoint(NotSimulator)) }
     if !std.object.matches_lanes(client, lanes) { return Error(Missing("follower_kind")) }
     let deadline = std.object.deadline_after_ms(client, op_ms)
     let (take requests, take workers) = std.object.split(take client)

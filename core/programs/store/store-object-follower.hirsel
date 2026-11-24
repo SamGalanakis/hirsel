@@ -87,7 +87,7 @@ fn object_follow_head(mut source: ObjectPackRead, previous: Option[Arc[FollowCap
     if latest.head.authority_kind != source.authority_kind {
         return Error(Unsupported(int.widen(latest.head.authority_kind)))
     }
-    if source.authority_kind == 1 { history_qualify(mut source.client, source.deadline)? }
+    if source.authority_kind == 1 { history_check_endpoint(mut source.client, source.deadline)? }
     history_check_namespace(latest, source.client)?
     Ok(Some((take latest, tag)))
 }

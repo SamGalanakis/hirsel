@@ -46,6 +46,8 @@ use hirsel_core_ir::step_contexts::Summary;
 use hirsel_core_ir::{Callee, FuncId, Identity, Param};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+#[path = "std_release/held.rs"]
+mod held;
 
 const STD_SCHEMA: u32 = 12;
 
@@ -53,14 +55,6 @@ const STD_SCHEMA: u32 = 12;
 /// lends a program's inliner. LLVM's inline cost decides each call site; this
 /// bounds what each program reads and links.
 const LEND_LIMIT: usize = 2000;
-
-/// A plain root a program lowers itself, without its plain callees. Its own
-/// function takes code a caller can bind or makes an owned network wait, whose
-/// private or returnable variant only the program's unit can build.
-fn held_root(module: &hirsel_core_ir::Module, root: FuncId) -> bool {
-    crate::callable_variants::takes_code(module, root)
-        || hirsel_core_ir::returnable::waits_owned(module, root)
-}
 
 /// The source law runner places program modules in the core and std packages.
 fn library(definition: &DefPath) -> bool {
@@ -207,7 +201,7 @@ fn program_side(
     let held = reach(local_roots);
     let roots: Vec<Identity> = units
         .iter()
-        .filter(|(i, u)| plain(i) && !held.contains(*i) && !held_root(u.module(), FuncId(0)))
+        .filter(|(i, u)| plain(i) && !held.contains(*i) && !held::root(u.module(), FuncId(0)))
         .map(|(i, _)| i.clone())
         .collect();
     let reached = reach(roots.clone());
@@ -354,7 +348,7 @@ impl CheckProduct {
         let mut held = BTreeSet::new();
         for (root, _) in &walks {
             let instance = materialized.get(root);
-            if held_root(&*instance.transient_ir()?, instance.function) {
+            if held::root(&*instance.transient_ir()?, instance.function) {
                 held.insert(root.clone());
             }
         }
@@ -647,6 +641,7 @@ fn lower_module(
     let ids: Vec<FuncId> = roots.iter().map(|root| functions[root]).collect();
     let codes: Vec<ContentHash> = ids.iter().map(|&f| module.code_identity(f)).collect();
     let summaries = hirsel_core_ir::step_contexts::specialize_library(&mut module, &ids);
+    held::descriptors(&mut module);
     let mut exports = Vec::with_capacity(roots.len() * 2);
     for ((root, code), summary) in roots.iter().zip(&codes).zip(&summaries) {
         exports.push(root.symbol());

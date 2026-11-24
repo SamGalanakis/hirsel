@@ -274,6 +274,20 @@ export async function laws(codec, only, mutant, entries, http) {
     assert.equal(h.server.calls.length,3);assert.equal(h.client.state,'Retired');
     assert.deepEqual(store.byValue,new Map([[21,1]]));
   };
+  tests.copied_storage_never_remints=async()=>{
+    // Row 6a needs this installation as minter. A copy restored into another
+    // installation holds a touched record with no minter, so its
+    // HistoryUnavailable retires the stream instead of reminting (B2).
+    const h=await setup(new Memory(),{prepare:server=>{server.onCall=()=>{};}});await ready(h);
+    const x=h.client.call(want,bytes(21),x=>x);void x.catch(()=>{});await settle();
+    const copy=new Memory();copy.raw=structuredClone(h.storage.raw);copy.raw.installation=3n;
+    await h.client.close();await settle();
+    const restored=await setup(copy,{prepare:server=>{server.onCall=(f,s)=>server.answer(s,f.values[0],f.values[1],refused('HistoryUnavailable'));}});
+    await ready(restored);await settle();await restored.time.advance(1000);
+    assert.equal(restored.server.calls.length,1);
+    assert.deepEqual(restored.server.calls[0].frame.values[0],h.server.calls[0].frame.values[0]);
+    assert.equal(restored.client.state,'Retired');
+  };
   async function subscribed(decode) {
     const h=await setup();await ready(h);
     const changes=[];

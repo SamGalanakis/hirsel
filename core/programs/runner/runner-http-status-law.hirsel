@@ -27,7 +27,7 @@ fn http_script_answer(position: u64) -> Outcome {
 fn http_status_script(req: std.http.Request, _scratch: Region, mut _body: std.http.Responder, state: HttpStatusScript) -> Result[std.http.Outcome, std.http.HandlerError] {
     let (_, position) = option.unwrap(http_request_identity(req))
     let bytes_out = relay_encode(http_script_answer(position))
-    let response = http_render_stream(req, state.binding, state.reply, RelayOutcome(payload: take bytes_out, replayed: position == 14u64))?
+    let response = http_render_stream(req, state.binding, state.reply, RelayOutcome(payload: take bytes_out, replayed: position == 14u64, expires: None))?
     Ok(Reply(take response))
 }
 

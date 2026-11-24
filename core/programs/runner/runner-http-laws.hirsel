@@ -179,7 +179,7 @@ fn http_law_raw(req: std.http.Request, _scratch: Region, mut resp: std.http.Resp
         RefusedBeforePost(take why) => return http_law_reply(http_law_refused(why), list.new(), false),
         Unanswered(take why) => return http_law_reply(http_law_refused(why), list.new(), false),
     }
-    let RelayOutcome(payload: take body, replayed: replayed) = take delivered
+    let RelayOutcome(payload: take body, replayed: replayed, ..) = take delivered
     let codec: std.codec.Codec[Outcome] = std.codec.of()
     let status = match result.unwrap(std.codec.decode(codec, body)) {
         Returned(_) => 200u16,
@@ -224,7 +224,7 @@ fn http_law_write(mut writer: WriteHalf, input: Bytes, until: Until) waits {
     }
 }
 
-type HttpLawReply { status: u16, outcome: Option[Outcome], replayed: bool, committed: bool, retry: bool, body: Bytes }
+type HttpLawReply { status: u16, outcome: Option[Outcome], replayed: bool, committed: bool, retry: bool, body: Bytes, dedup_until: Option[Bytes] }
 
 fn http_law_post(n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: u32, p: u64,
     data: Bytes, deadline_ms: u32) -> HttpLawReply waits {
@@ -275,6 +275,7 @@ fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: Stri
     let mut replayed = false
     let mut committed = false
     let mut retry = false
+    let mut dedup_until: Option[Bytes] = None
     for field in parsed.fields {
         let name = list.slice(received, field.name.start, field.name.end)
         if std.http1.equal_ascii(name, b"Idempotent-Replayed") {
@@ -286,11 +287,14 @@ fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: Stri
         if std.http1.equal_ascii(name, b"Retry-After") {
             retry = list.slice(received, field.value.start, field.value.end) == b"1"
         }
+        if std.http1.equal_ascii(name, b"Hirsel-Dedup-Until") {
+            dedup_until = Some(std.http.copy_bytes(list.slice(received, field.value.start, field.value.end)))
+        }
     }
     let codec: std.codec.Codec[Outcome] = std.codec.of()
     let payload = list.slice(received, parsed.end, list.len(received))
     let decoded = match std.codec.decode(codec, payload) { Ok(take value) => Some(take value), _ => None }
-    HttpLawReply(status: parsed.status, outcome: take decoded, replayed: replayed, committed: committed, retry: retry, body: std.http.copy_bytes(payload))
+    HttpLawReply(status: parsed.status, outcome: take decoded, replayed: replayed, committed: committed, retry: retry, body: std.http.copy_bytes(payload), dedup_until: take dedup_until)
 }
 
 type HttpLawDrive: send {

@@ -69,15 +69,18 @@ type HttpOpPlace = StaticFn[fn(mut Registry[(), HttpLawHandles]) -> Result[(), R
 
 type HttpOpListener: send {
     relay: Relay, listener: Listener, publisher: Sender[PubIn], clock: Clock, random: Random, tasks: Tasks,
-    place: HttpOpPlace, previous: Option[Describe], stage: u8, stop: Option[Receiver[u64]],
+    place: HttpOpPlace, previous: Option[Describe], retired: Option[HttpRetirements], stage: u8, stop: Option[Receiver[u64]],
 }
 
 fn http_op_serve(take job: HttpOpListener) waits {
     let HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks,
-        place: definition, previous: take previous, stage, stop: take stop) = take job
+        place: definition, previous: take previous, retired: take retired, stage, stop: take stop) = take job
     let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
     let builder: std.router.Builder[HttpConnection[(), HttpLawHandles, ()]] = std.router.builder()
-    let (take generated_routes, take plans) = result.unwrap(http_router(reg, previous, take builder))
+    let (take generated_routes, take plans) = match take retired {
+        Some(take rules) => result.unwrap(http_router_with_retirements(reg, previous, rules, take builder)),
+        None => result.unwrap(http_router(reg, previous, take builder)),
+    }
     let routes = if stage == 2u8 {
         let mut fault_routes: std.router.Builder[HttpConnection[(), HttpLawHandles, ()]] = std.router.builder()
         result.unwrap(std.router.add_tagged(mut fault_routes, "POST", "/old", 1u64, std.router.raw(http_generated_handler)))
@@ -116,7 +119,7 @@ fn http_op_drive(take d: HttpOpDrive) waits {
         RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 1u64, arg_max: 1024u64)))
     let (take listener, address) = result.unwrap(host.listen(d.net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
     let HttpOpDrive(actions: take actions, publisher: take pub_to, net, clock, random, tasks, place: definition, previous: take prior, stage) = take d
-    let job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock, random, tasks, place: definition, previous: take prior, stage, stop: None)
+    let job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock, random, tasks, place: definition, previous: take prior, retired: None, stage, stop: None)
     let server = task.spawn(tasks, bytes 4194304u64, take job, http_op_serve)
     match stage {
         0u8 => {

@@ -75,8 +75,18 @@ fn http_json_reply(status: u16, take data: Bytes, offset: u64, plan: Arc[std.jso
     }
 }
 
+fn http_mark_outcome(mut reply: std.http.Response, req: std.http.Request, mode: Mode, expires: Option[u64]) -> Result[(), std.http.ResponseError] {
+    if mode == Keyed {
+        let Some(at) = expires else { return Ok(()) }
+        let mut value = string.new()
+        if at == 18446744073709551615u64 { string.push(mut value, "never") } else { string.push_u64(mut value, at) }
+        std.http.header(mut reply, b"Hirsel-Dedup-Until", string.into_bytes(take value))?
+    }
+    std.http.mark_committed(mut reply, req)
+}
+
 fn http_render_stream(req: std.http.Request, binding: HttpBinding, plan: Arc[std.json.JsonPlan], take delivered: RelayOutcome) -> Result[std.http.Response, std.http.HandlerError] {
-    let RelayOutcome(payload: take payload, replayed: replayed) = take delivered
+    let RelayOutcome(payload: take payload, replayed: replayed, expires: expires) = take delivered
     let mut offset = 0u64
     let tag = std.codec.take_tag(payload, mut offset, 5u32) ?=> |_| StatusInvalid
     if tag == 0u32 {
@@ -91,7 +101,7 @@ fn http_render_stream(req: std.http.Request, binding: HttpBinding, plan: Arc[std
         let status = if tag_value == 0u32 { binding.ok_status } else { binding.error_status }
         let root = if tag_value == 0u32 { ok } else { error_case }
         let mut reply = http_json_reply(status, take payload, offset, plan, root, replayed)?
-        std.http.mark_committed(mut reply, req)?
+        http_mark_outcome(mut reply, req, binding.mode, expires)?
         return Ok(take reply)
     }
     let co: std.codec.Codec[Outcome] = std.codec.of()
@@ -100,7 +110,7 @@ fn http_render_stream(req: std.http.Request, binding: HttpBinding, plan: Arc[std
         Returned(_) => fail("Returned is rendered from relay backing"),
         Failed(detail) => {
             let mut reply = http_fault(detail, replayed)?
-            std.http.mark_committed(mut reply, req)?
+            http_mark_outcome(mut reply, req, binding.mode, expires)?
             Ok(take reply)
         },
         Refused(take why) => http_refused_attempt(req, take why),
@@ -110,6 +120,7 @@ fn http_render_stream(req: std.http.Request, binding: HttpBinding, plan: Arc[std
 }
 
 fn http_refused_attempt(req: std.http.Request, take why: Refusal) -> Result[std.http.Response, std.http.HandlerError] {
+    if let None = std.http.field(req, b"idempotency-key") { return http_refusal(take why) }
     let kind = match why {
         NoEntry => b"no_entry",
         NotAllowed => b"not_allowed",

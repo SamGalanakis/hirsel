@@ -123,6 +123,7 @@ fn sweep_head_streams(mut db: store.Db, busy: Map[Bytes, Worker], waiting: List[
 // answered commitless (V3), Refused(HistoryUnavailable) or Refused(RequestMismatch), and
 // neither marks the stream.
 fn begin[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request) -> Result[(), store.Error] waits {
+    if !none(q.claim) { return begin_keyed_request(mut hd, take q) }
     let name = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
     let a = match admit_head_stream(mut hd.db, hd.busy, hd.waiting, name, q.p, q.digest) {
         Ok(take x) => take x,
@@ -148,4 +149,41 @@ fn refuse_admitted[G: send, H: shareable + inert + send](mut hd: Head[G, H], tak
     let name = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
     store.release_stream_admit(mut hd.db, name, q.p)?
     commitless(mut hd, take q, Refused(take reason))
+}
+
+fn worker[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
+    let owner = latest.read(q.identity).number
+    let Request(stream: take stream, p: p, digest: d, reply_to: take to, ..) = take q
+    let mut waiters: List[CallWaiter] = list.new()
+    list.push(mut waiters, CallWaiter(owner: owner, target: take to))
+    let named: Bytes = clone(stream)
+    map.insert(mut hd.busy, take named, Worker(p: p, digest: d, version: version, outcome: take o, waiters: take waiters))
+    list.push(mut hd.group, take stream)
+    hd.last = Some(t)
+    Ok(())
+}
+
+// V3: a commitless answer goes at once, in a snapshot-less Release behind every earlier
+// Release on the one FIFO to the publisher, held ones included.
+fn commitless[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome) -> Result[(), store.Error] waits {
+    publish_commitless(mut hd, take q, take o, false)
+}
+
+fn publish_commitless[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome, replayed: bool) -> Result[(), store.Error] waits {
+    publish_reply_with_expiry(mut hd, take q, take o, replayed, None)
+}
+
+fn publish_reply_with_expiry[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome,
+    replayed: bool, expires: Option[u64]) -> Result[(), store.Error] waits {
+    let owner = latest.read(q.identity).number
+    let Request(stream: take stream, p: p, reply_to: take to, ..) = take q
+    let mut answers: List[CallAnswer] = list.new()
+    list.push(mut answers, call_answer_with_expiry(CallWaiter(owner: owner, target: take to), stream, p, take o, replayed, expires))
+    let release = Release(version: 0u64, snapshot: None, answers: take answers)
+    if list.len(hd.held) != 0u64 {
+        list.push(mut hd.held, Loose(take release))
+    } else {
+        publish_release(mut hd, take release)
+    }
+    Ok(())
 }

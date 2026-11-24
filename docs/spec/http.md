@@ -1503,7 +1503,9 @@ Keyed claims live in the store's **control section**, beside `stream_ops`, not i
 
 **What a claim promises.**
 - A claim is live from admission until `retention_ms` after its reply run's `at`. After that the key is free, and a request with it is a **new operation**. Stripe, Restate, Temporal and Powertools all end the same way.
-- The contract is written into OpenAPI (`x-hirsel-retention-ms`). A binding must set `retention_ms` at least as long as its sender's retry horizon.
+- The published deadline is exclusive at the deciding admission's keyed time. A Replied claim is live when that admission reads an `at` below `expires_ms`, or any `at` for `NEVER`. A delivery that arrives before the deadline can still reach the writer at or after it.
+- A fresh or replayed reply marked `Idempotent-Outcome: committed` carries `Hirsel-Dedup-Until` with the stored decimal `expires_ms` or `never`. Pre-admission refusals and replies that leave the claim Admitted omit the header.
+- OpenAPI publishes `x-hirsel-retention-ms` and `x-hirsel-dedup: "horizon"`. A binding must set `retention_ms` at least as long as the sender's automatic retry and supported manual redelivery windows.
 - A tombstone would only move the cliff, at the cost of a row per key, so there is none.
 
 **The clock.** Retention is wall-clock time, because it has to survive restarts, read through the nondecreasing keyed time (K-4). Moving the wall clock backwards does not move keyed time: rows already judged expired stay expired, rows not yet judged keep their expiry, and replies written meanwhile measure retention from the floor, so the rollback lengthens retention by its size. Moving it forwards shortens retention, and for good: one commit at a far-future reading raises `at` for every later decision, expiring finite rows early and giving later replies `NEVER` once `at` passes 2^64 − 1 − `retention_ms`. Every body's `at` (CallInfo) already carries that cost. Both are the stated cost; neither lets a claim judged dead come back.

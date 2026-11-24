@@ -7,6 +7,12 @@ type HttpAssemblyError = RequestBody(std.http.BodyError) | MediaType | BadArgume
 
 fn http_assemble(req: std.http.Request, mut resp: std.http.Responder, plan: std.json.JsonPlan,
     binding: HttpBinding, alias: bool) -> Result[Bytes, HttpAssemblyError] waits {
+    let (take arguments, has_body) = http_argument_sources(plan, binding, alias)
+    let body = http_request_body(req, mut resp, has_body)?
+    http_assemble_fields(req, plan, binding, take arguments, body, has_body)
+}
+
+fn http_argument_sources(plan: std.json.JsonPlan, binding: HttpBinding, alias: bool) -> (Map[String, HttpArgument], bool) {
     let root = plan.facts[plan.root].form
     let mut arguments: Map[String, HttpArgument] = map.new()
     let mut has_body = false
@@ -20,7 +26,11 @@ fn http_assemble(req: std.http.Request, mut resp: std.http.Responder, plan: std.
             map.insert(mut arguments, string.from(field.name), HttpArgument(source: source, shape: field.shape))
         }
     }
-    let body = http_request_body(req, mut resp, has_body)?
+    (take arguments, has_body)
+}
+
+fn http_assemble_fields(req: std.http.Request, plan: std.json.JsonPlan, binding: HttpBinding,
+    take arguments: Map[String, HttpArgument], body: String, has_body: bool) -> Result[Bytes, HttpAssemblyError] {
     let assembled = bound bytes binding.arg_max {
         let assembled_field = bound steps binding.steps { http_argument_bytes(req, plan, arguments, body, has_body) }
         match take assembled_field {
@@ -40,20 +50,25 @@ fn http_argument_source(source: Source, alias: bool) -> Source {
 
 fn http_request_body(req: std.http.Request, mut resp: std.http.Responder, has_body: bool) -> Result[String, HttpAssemblyError] waits {
     if has_body && !http_json_content_type(req) { return Error(MediaType) }
+    let body = http_request_body_bytes(req, mut resp, has_body)?
+    Ok(string.from_utf8(take body) ?=> |_| BadArgument(2u32))
+}
+
+fn http_request_body_bytes(req: std.http.Request, mut resp: std.http.Responder, allow_body: bool) -> Result[Bytes, HttpAssemblyError] waits {
     if let Some(inline) = std.http.inline_body(req) {
-        if !has_body && list.len(inline) != 0u64 { return Error(BadArgument(1u32)) }
-        return Ok(string.from_utf8(std.http.copy_bytes(inline)) ?=> |_| BadArgument(2u32))
+        if !allow_body && list.len(inline) != 0u64 { return Error(BadArgument(1u32)) }
+        return Ok(std.http.copy_bytes(inline))
     }
-    let mut chunk: Bytes = list.with_capacity(if has_body { 4096u64 } else { 1u64 })
+    let mut chunk: Bytes = list.with_capacity(if allow_body { 4096u64 } else { 1u64 })
     let mut body: Bytes = list.new()
     loop {
         let n = std.http.read(mut resp, mut chunk) ?=> RequestBody
         if n == 0u64 { break }
-        if !has_body { return Error(BadArgument(1u32)) }
+        if !allow_body { return Error(BadArgument(1u32)) }
         list.append(mut body, chunk)
         list.clear(mut chunk)
     }
-    Ok(string.from_utf8(take body) ?=> |_| BadArgument(2u32))
+    Ok(take body)
 }
 
 fn http_json_content_type(req: std.http.Request) -> bool {

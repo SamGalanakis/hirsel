@@ -59,6 +59,9 @@ and returns `Repeated` for a second occurrence of the decoded name. It
 reports malformed escapes and invalid decoded text as `Escape` and `Utf8`.
 Values of unrelated parameters are skipped.
 
+`header_at(request, index)` borrows the actual header name and value at a
+zero-based index in receipt order. Repeated fields retain their own positions.
+
 `inline_body` borrows a short fixed-length body already in the read buffer.
 Otherwise `read(mut body, mut buffer)` copies decoded body bytes into the
 buffer's spare capacity and returns zero at EOF. The first read of a pending

@@ -298,7 +298,7 @@ fn admitted(take caller: Caller, expires_at_ms: Option[u64], take entries: List[
 }
 
 pub type CallWant: send { key: Bytes, stream: StreamId, p: u64, arg: Bytes, deadline_ms: u32 }
-pub opaque type Send: send { stream: store.StreamKey, key: Bytes, p: u64, arg: Bytes, digest: store.RequestDigest, deadline: u64, budget: u64, expires_at_ms: Option[u64] }
+pub opaque type Send: send { stream: store.StreamKey, key: Bytes, p: u64, arg: Bytes, digest: store.RequestDigest, deadline: u64, budget: u64, expires_at_ms: Option[u64], claim: Option[Bytes] }
 
 pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take want: CallWant) -> Result[Send, Refusal] {
     let CallWant(key: take key, stream: stream_id, p: p, arg: take arg, deadline_ms: relative) = take want
@@ -323,14 +323,14 @@ fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admi
     let subject_size = list.len(a.caller.subject)
     if subject_size > SUBJECT_MAX { return Error(Budget(Room(requested: subject_size, available: SUBJECT_MAX))) }
     let stream = store.StreamKey(caller: clone(a.caller), id: stream_id)
-    Ok(Send(stream: take stream, key: take key, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget, expires_at_ms: a.expires_at_ms))
+    Ok(Send(stream: take stream, key: take key, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget, expires_at_ms: a.expires_at_ms, claim: None))
 }
 
 fn prepared_request(lease: HeadLease, take seed: Option[Arc[OwnerNumber]], take prepared: Send, take target: ReplyTarget) -> Req {
-    let stream = result.unwrap(store.stream_key_bytes(prepared.stream))
-    let Send(stream: store.StreamKey(caller: take caller, id: stream_id), key: take key, p: p, arg: take arg, digest: digest, deadline: deadline, ..) = take prepared
+    let stream = if none(prepared.claim) { result.unwrap(store.stream_key_bytes(prepared.stream)) } else { list.new() }
+    let Send(stream: store.StreamKey(caller: take caller, id: stream_id), key: take key, p: p, arg: take arg, digest: digest, deadline: deadline, claim: take claim, ..) = take prepared
     Req(e: Requested(Request(caller: take caller, stream: take stream, stream_id: stream_id, p: p, key: take key, arg: take arg, digest: digest,
-        deadline: deadline, reply_to: take target, live: latest.handle(lease.live), identity: latest.handle(lease.identity), seed: take seed)))
+        deadline: deadline, claim: take claim, reply_to: take target, live: latest.handle(lease.live), identity: latest.handle(lease.identity), seed: take seed)))
 }
 
 fn stream_time(head: Sender[HeadInput]) -> Option[StreamTime] waits {

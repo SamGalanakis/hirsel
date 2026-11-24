@@ -785,25 +785,33 @@ pub fn field(r: Request, name: Bytes) -> Option[View[Bytes]] in r {
     field_at(r, name, 0)
 }
 
+/// Returns an actual header field in its received order, including repetitions.
+pub fn header_at(r: Request, index: u64) -> Option[(View[Bytes], View[Bytes])] in r {
+    if index >= r.head.count {
+        return None
+    }
+    let received = r.head.fields[index]
+    Some((part(r.input, received.name), part(r.input, received.value)))
+}
+
 pub fn field_at(r: Request, name: Bytes, index: u64) -> Option[View[Bytes]] in r {
     if http1.equal_ascii(name, string.as_bytes("host")) {
         if index != 0 {
             return None
         }
-        return match r.meta.authority {
-            Some(s) => Some(part(r.input, s)),
-            None => None,
-        }
+        let span = r.meta.authority?
+        return Some(part(r.input, span))
     }
     let mut remaining = index
     for i in 0u64 .. r.head.count {
-        let f = r.head.fields[i]
-        if http1.equal_ascii(part(r.input, f.name), name) {
-            if remaining == 0 {
-                return Some(part(r.input, f.value))
-            }
-            remaining -= 1
+        let (received, value) = option.unwrap(header_at(r, i))
+        if !http1.equal_ascii(received, name) {
+            continue
         }
+        if remaining == 0 {
+            return Some(value)
+        }
+        remaining -= 1
     }
     None
 }
@@ -816,26 +824,9 @@ pub fn inline_body(r: Request) -> Option[View[Bytes]] in r {
     r.inline_body
 }
 
-fn upgrade_protocol(protocol: Bytes) -> bool {
-    let n = list.len(protocol)
-    if n == 0 {
-        return false
-    }
-    let mut version = false
-    for i in 0u64 .. n {
-        let c = protocol[i]
-        if c == b'/' && !version && i != 0 && i + 1 != n {
-            version = true
-        } else if !http1.token(c) {
-            return false
-        }
-    }
-    true
-}
-
 pub fn upgrade_offer(r: Request, protocol: String) -> Result[u64, HandlerError] {
     let offered = string.as_bytes(protocol)
-    if !r.meta.upgrade_requested || !upgrade_protocol(offered) {
+    if !r.meta.upgrade_requested || !http1.valid_upgrade_protocol(offered) {
         return Error(InvalidUpgrade)
     }
     for i in 0u64 .. r.head.count {

@@ -146,11 +146,11 @@ fn collect_answers(mut waiting: List[Replies], mut relay: List[Option[RelayTell]
     for take answer in answers {
         match take answer {
             CallAnswer(take recipient, take row) => keep_wire_answer(mut waiting, take recipient, take row),
-            RelayAnswer(take recipient, take outcome, replayed) => {
+            RelayAnswer(take recipient, take outcome, replayed, expires) => {
                 let RelayRecipient(to: take to, position: position, backing: take storage) = take recipient
                 let mut backing = take storage
                 relay_fill(outcome, mut backing)
-                let result = RelayOutcome(payload: take backing, replayed: replayed)
+                let result = RelayOutcome(payload: take backing, replayed: replayed, expires: expires)
                 list.push(mut relay, Some(RelayTell(to: take to, position: position, result: take result)))
             },
         }

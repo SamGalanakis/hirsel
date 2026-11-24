@@ -46,7 +46,7 @@ pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes, Bytes)
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
 pub type Selection: send = Current(u64) | Reopen | Install | InstallAt(u64)
 pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | InstallUncertain(store.Error)
-    | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String)
+    | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoWire(Bytes)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining | Paused
@@ -202,6 +202,10 @@ pub fn operate_report[G: send, H: shareable + inert + send, S: send, B: send](ta
 fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
+    if let Some(take problem) = check_keyed_wire(p.place, n_place, p.wire) {
+        if let Some(_) = launch.install { return finish_install(Error(Open(take problem))) }
+        return Error(Open(take problem))
+    }
     if launch.dry_run && !launch_emit(b"hirsel dry-run\n") { return Error(Missing("dry-run report output")) }
     let sized_store = place_store(p, report)
     let (take options, _, store_bytes, take follower_plan) = match take sized_store {
@@ -1004,6 +1008,7 @@ pub fn start_text(problem: StartError) -> String {
             string.push_u64(mut line, saved)
         },
         Open(KeyedOpChanged(name, field)) => keyed_open_report(mut line, name, field),
+        Open(KeyedNoWire(name)) => keyed_open_report(mut line, name, "needs a wire grant"),
         Open(InstallUncertain(e)) => { string.push(mut line, "install outcome unknown: "); push_store_error(mut line, e) },
         Open(InstallVersion(next)) => {
             string.push(mut line, "the next install activation is ")
@@ -1158,6 +1163,7 @@ type Request: send {
     arg: Bytes,
     digest: store.RequestDigest,
     deadline: u64,
+    claim: Option[Bytes],
     reply_to: ReplyTarget,
     live: Latest[HeadLife],
     identity: Latest[OwnerNumber],
@@ -1168,13 +1174,17 @@ type Recipient: send { owner: u64, to: Sender[WireEvent] }
 
 type ReplyTarget: send = WireReply(Sender[WireEvent]) | RelayReply(RelayRecipient)
 type CallWaiter: send { owner: u64, target: ReplyTarget }
-type CallAnswer: send = CallAnswer(Recipient, KeyedDone) | RelayAnswer(RelayRecipient, Outcome, bool)
+type CallAnswer: send = CallAnswer(Recipient, KeyedDone) | RelayAnswer(RelayRecipient, Outcome, bool, Option[u64])
 
 fn call_answer(take waiter: CallWaiter, stream: Bytes, p: u64, take outcome: Outcome, replayed: bool) -> CallAnswer {
+    call_answer_with_expiry(take waiter, stream, p, take outcome, replayed, None)
+}
+
+fn call_answer_with_expiry(take waiter: CallWaiter, stream: Bytes, p: u64, take outcome: Outcome, replayed: bool, expires: Option[u64]) -> CallAnswer {
     let CallWaiter(owner: owner, target: take target) = take waiter
     match take target {
         WireReply(take to) => CallAnswer(Recipient(owner: owner, to: take to), KeyedDone(stream: clone(stream), p: p, outcome: take outcome)),
-        RelayReply(take recipient) => RelayAnswer(take recipient, take outcome, replayed),
+        RelayReply(take recipient) => RelayAnswer(take recipient, take outcome, replayed, expires),
     }
 }
 
@@ -2029,6 +2039,7 @@ fn settle_probe(inbox: Receiver[HeadInput]) -> Option[HeadInput] waits {
 }
 
 fn close_head_admission[G: send, H: shareable + inert + send](mut head: Head[G, H]) -> Result[(), store.Error] waits {
+    close_keyed_admission(mut head)?
     // A parked call is cancelled; its position stays Admitted and is re-admitted as Abandoned.
     let parked = replace(mut head.parked, list.new())
     for take entry in take parked {
@@ -2153,7 +2164,8 @@ fn pause_progress[G: send, H: shareable + inert + send](mut head: Head[G, H], mu
 }
 
 fn head_is_idle[G: send, H: shareable + inert + send](head: Head[G, H], idle: u64) -> Result[bool, store.Error] waits {
-    if map.len(head.busy) != 0u64 || list.len(head.waiting) != 0u64 || list.len(head.parked) != 0u64 || store.export_leased(head.db) { return Ok(false) }
+    if map.len(head.busy) != 0u64 || list.len(head.waiting) != 0u64 || list.len(head.parked) != 0u64 ||
+        keyed_work_pending(head) || store.export_leased(head.db) { return Ok(false) }
     if let Some(drive) = head.trigger_drive {
         if map.len(drive.active) != 0u64 { return Ok(false) }
         if let Some(due) = next_trigger_due(head.db, drive.tables)? {
@@ -2168,7 +2180,7 @@ fn head_arrival[G: send, H: shareable + inert + send](mut hd: Head[G, H], take m
     let Req(e: take e) = take message
     match take e {
         Requested(take q) => {
-            see_anonymous(mut hd.anonymous, q.caller)
+            if none(q.claim) { see_anonymous(mut hd.anonymous, q.caller) }
             refresh_waiting(mut hd, true)
             if latest.read(q.live).active {
                 let mut req = take q
@@ -2211,6 +2223,10 @@ fn refresh_waiting[G: send, H: shareable + inert + send](mut hd: Head[G, H], unp
 // worker's, and is otherwise answered Refused(RequestMismatch) as V3 without running (v2.11.3);
 // another position waits.
 fn route_admission[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, closed: bool) -> Result[(), store.Error] waits {
+    if !none(q.claim) {
+        if closed { return commitless(mut hd, take q, Refused(Overloaded)) }
+        return begin_keyed_request(mut hd, take q)
+    }
     let running = match map.get(hd.busy, q.stream) {
         Some(w) => Some((w.p, w.digest == q.digest)),
         None => None,
@@ -2353,38 +2369,6 @@ fn duplicate_reply[G: send, H: shareable + inert + send](mut hd: Head[G, H], tak
     }
     // A duplicate gets its saved reply as it was committed (ruling 73 as amended).
     publish_commitless(mut hd, take q, take outcome, true)
-}
-
-fn worker[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
-    let owner = latest.read(q.identity).number
-    let Request(stream: take stream, p: p, digest: d, reply_to: take to, ..) = take q
-    let mut waiters: List[CallWaiter] = list.new()
-    list.push(mut waiters, CallWaiter(owner: owner, target: take to))
-    let named: Bytes = clone(stream)
-    map.insert(mut hd.busy, take named, Worker(p: p, digest: d, version: version, outcome: take o, waiters: take waiters))
-    list.push(mut hd.group, take stream)
-    hd.last = Some(t)
-    Ok(())
-}
-
-// V3: a commitless answer goes at once, in a snapshot-less Release behind every earlier
-// Release on the one FIFO to the publisher, held ones included.
-fn commitless[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome) -> Result[(), store.Error] waits {
-    publish_commitless(mut hd, take q, take o, false)
-}
-
-fn publish_commitless[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome, replayed: bool) -> Result[(), store.Error] waits {
-    let owner = latest.read(q.identity).number
-    let Request(stream: take stream, p: p, reply_to: take to, ..) = take q
-    let mut answers: List[CallAnswer] = list.new()
-    list.push(mut answers, call_answer(CallWaiter(owner: owner, target: take to), stream, p, take o, replayed))
-    let release = Release(version: 0u64, snapshot: None, answers: take answers)
-    if list.len(hd.held) != 0u64 {
-        list.push(mut hd.held, Loose(take release))
-    } else {
-        publish_release(mut hd, take release)
-    }
-    Ok(())
 }
 
 type Held = Sealed(store.Ticket, u64, store.Snapshot, List[Bytes]) | Loose(Release)
@@ -3306,7 +3290,7 @@ pub fn head_request(take author: Caller, stream_id: StreamId, p: u64, take key: 
     let identity = latest.new(take blank)
     let seed = arc.new(OwnerNumber(number: 0u64))
     Req(e: Requested(Request(caller: take author, stream: take stream, stream_id: stream_id, p: p, key: take key, arg: take arg, digest: digest,
-        deadline: 18446744073709551615u64, reply_to: WireReply(take reply_to), live: take live, identity: take identity, seed: Some(take seed))))
+        deadline: 18446744073709551615u64, claim: None, reply_to: WireReply(take reply_to), live: take live, identity: take identity, seed: Some(take seed))))
 }
 
 pub fn head_outcome(take event: WireEvent) -> Option[KeyedDone] {

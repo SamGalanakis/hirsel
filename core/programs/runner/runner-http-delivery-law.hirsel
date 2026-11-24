@@ -7,22 +7,34 @@ fn l15_timers(tasks: Tasks) waits {
     let key = http_law_key(reg.exported[0u64])
     let cfg = RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 6u64, arg_max: 1024u64)
     let reserve = option.unwrap(relay_bytes(reg, cfg))
-    // Twelve RelayEvents cost 64 + 12 * 177. The two empty credit queues cost 128.
+    // Twelve RelayEvents cost 64 + 12 * 209. The new claim slot is a
+    // 24-byte Bytes plus an 8-byte variant tag. The two credit queues cost 128.
     // HeadLease costs 56 fields + 32 cause, two 32-byte roots and three 16-byte Arc nodes.
     // Two send slots cost 2 * 56, and their alarms cost 2 * (288 + 4096).
-    // Six positions cost round8(6 * 89) for the records. Each also costs
+    // Six positions cost round8(6 * 90) for the records. Each also costs
     // 16 owner seed + 64 subject + 2 * 88 for the widened stream keys
     // + 8192 reply + 1024 argument + the longest rounded registry key.
     // Three delivered buffers cost 3 * 8192. Startup adds 288 for the task record,
-    // 64 + 96 for its ready channel and round8(6 * 65) = 392 for pending tells.
+    // 64 + 96 for its ready channel and round8(6 * 81) = 488 for pending tells.
+    // The optional reply expiry adds 8 bytes for the value and 8 for the tag.
     let mut longest = 0u64
     for entry in reg.exported {
         // Each key is the exported identity followed by two eight-byte codec fingerprints.
         let length = list.len(entry.described.identity) + 16u64
         longest = order.max(longest, length)
     }
-    let expected = 94180u64 + 6u64 * ((longest + 7u64) / 8u64 * 8u64)
-    if reserve != expected { fail("L15 relay allowance differs from its hand derivation") }
+    let expected = 94668u64 + 6u64 * ((longest + 7u64) / 8u64 * 8u64)
+    if reserve != expected {
+        let mut detail = string.from("L15 relay allowance ")
+        string.push_u64(mut detail, reserve)
+        string.push(mut detail, " differs from hand derivation ")
+        string.push_u64(mut detail, expected)
+        for width in [bytes[RelayEvent], bytes[RelayPosition], bytes[Option[RelayTell]]] {
+            string.push(mut detail, " ")
+            string.push_u64(mut detail, width)
+        }
+        fail(take detail)
+    }
     let mut maximum: Bytes = list.with_capacity(MAX_RETURNED_BYTES)
     list.fill(mut maximum, MAX_RETURNED_BYTES, b'x')
     let returned = Returned(take maximum)
@@ -288,7 +300,7 @@ fn l15_told(take message: HeadInput, answer: Outcome) -> RelayEvent {
     let RelayRecipient(to: _, position, backing: take buffer) = take destination
     let mut backing = take buffer
     relay_fill(answer, mut backing)
-    RelayTold(position, RelayOutcome(payload: take backing, replayed: false))
+    RelayTold(position, RelayOutcome(payload: take backing, replayed: false, expires: None))
 }
 
 @test
@@ -329,7 +341,7 @@ fn l15_native(take job: L15Drive) waits {
     let (take endpoint, take relay_task, take joined) = l15_start_relay(reg, intercept, pub_to, clock, tasks, cfg)
     let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
     let seed = HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks,
-        place: code.describe(l15_place), previous: None, stage: 0u8, stop: None)
+        place: code.describe(l15_place), previous: None, retired: None, stage: 0u8, stop: None)
     let server = task.spawn(tasks, bytes 4194304u64, take seed, http_op_serve)
     if reopening {
         for stream_id in 1u32 .. 4u32 {
@@ -408,7 +420,7 @@ fn l15_start_relay(reg: Registry[(), HttpLawHandles], head: Sender[HeadInput], p
     let key_max = relay_key_max(reg)
     let seed = RelayStart(to: take ready, head: channel.sender(head), clock: clock, tasks: tasks, config: cfg,
         inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: key_max)
-    let child = task.spawn(tasks, bytes option.unwrap(relay_child_bytes(cfg, key_max)), L15Relay(seed: take seed, joined: take join_to), l15_relay)
+    let child = task.spawn(tasks, bytes option.unwrap(relay_child_bytes(cfg, key_max, false)), L15Relay(seed: take seed, joined: take join_to), l15_relay)
     let endpoint = result.unwrap(channel.receive(from))
     let held: List[Option[RelayTell]] = list.with_capacity(cfg.positions_max)
     result.unwrap(channel.send(pub_to, PubIn(e: RelayJoined(take held))))
@@ -423,11 +435,11 @@ fn l15_head_request(from: Receiver[HeadInput]) -> HeadInput waits {
 
 fn l15_forward(to: Sender[HeadInput], during: Sender[RelayEvent], take msg: HeadInput) -> Sender[RelayEvent] waits {
     let RunRequest(Req(e: Requested(take req))) = take msg else { fail("L15 expected a relay request") }
-    let Request(caller: take caller, stream: take stream_bytes, stream_id, p, key: take key, arg: take arg, digest, deadline,
+    let Request(caller: take caller, stream: take stream_bytes, stream_id, p, key: take key, arg: take arg, digest, deadline, claim: take claim,
         reply_to: RelayReply(RelayRecipient(to: take answer_to, position, backing: take backing)),
         live: take live, identity: take identity, seed: take seed) = take req else { fail("L15 expected relay reply authority") }
     let target = RelayReply(RelayRecipient(to: channel.sender(during), position, backing: take backing))
-    let request = Request(caller: take caller, stream: take stream_bytes, stream_id, p, key: take key, arg: take arg, digest, deadline,
+    let request = Request(caller: take caller, stream: take stream_bytes, stream_id, p, key: take key, arg: take arg, digest, deadline, claim: take claim,
         reply_to: take target, live: take live, identity: take identity, seed: take seed)
     result.unwrap(channel.send(to, RunRequest(Req(e: Requested(take request)))))
     take answer_to
@@ -537,7 +549,7 @@ fn l15_retire_drive(take seed: L15RetireDrive) waits {
     let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
     let (stop, stop_from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     let job = HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks,
-        place: code.describe(l15_place), previous: None, stage: 2u8, stop: Some(take stop_from))
+        place: code.describe(l15_place), previous: None, retired: None, stage: 2u8, stop: Some(take stop_from))
     let server = task.spawn(tasks, bytes 4194304u64, take job, http_op_serve)
     let until = std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64)
     let mut client = result.unwrap(std.http_client.open(net, address, "a", clock, until))
@@ -638,5 +650,108 @@ fn http_request_retire_after_forward(parent: Dir, clock: Clock, random: Random, 
     }
     result.unwrap(store.close(take after))
     result.unwrap(std.dir.remove_all(parent, location))
+    Ok(())
+}
+
+fn keyed_http_claim(_grant: (), request: ClaimRequest) -> Result[Claimed, ()] {
+    if list.len(request.headers) != 1 || request.headers[0].0 != "authorization" {
+        return Error(())
+    }
+    let token = view request.headers[0].1
+    let key = if token == b"token" { b"one" }
+        else if token == b"other" { b"other" }
+        else { return Error(()) }
+    Ok(Claimed(caller: store.Caller(issuer: 7u8, subject: b"law"), key: take key))
+}
+
+fn keyed_http_law_claim() -> Claim[()] {
+    let mut headers: List[String] = list.new()
+    list.push(mut headers, "authorization")
+    Claim(f: code.describe(keyed_http_claim), headers: take headers, claim_bytes: 8192, claim_steps: DEFAULT_STEPS)
+}
+
+fn keyed_http_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    transact(mut r, code.describe(http_op_increment), 65536u64, DEFAULT_STEPS)?
+    let mut binding = http_op_binding(r, "increment", "/old", 201u16)
+    binding.mode = Keyed
+    bind_keyed(mut r, take binding, KeyedRule(claim: keyed_http_law_claim(), retention_ms: 10000, keys_max: 4, principal_keys_max: 4))
+}
+
+fn keyed_http_retired(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    bind_retired(mut r, "increment", Post, "/old", Retirement(claim: keyed_http_law_claim(), keys_max: 4))
+}
+
+type KeyedHttpLawDrive: send {
+    head: Sender[HeadInput], publisher: Sender[PubIn], clock: Clock, random: Random, tasks: Tasks, net: Net,
+    retired: Option[HttpRetirements]
+}
+
+fn keyed_http_law_drive(take job: KeyedHttpLawDrive) waits {
+    let KeyedHttpLawDrive(head: take head, publisher: take pub_to, clock, random, tasks, net, retired: take retired) = take job
+    let reopening = !none(retired)
+    let definition: HttpOpPlace = if reopening { code.describe(keyed_http_retired) } else { code.describe(keyed_http_place) }
+    let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+    let (take relay, take relay_task) = result.unwrap(start_relay(reg, head, pub_to, clock, tasks,
+        RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 2u64, arg_max: 1024u64)))
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let server_job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock, random, tasks,
+        place: definition, previous: None, retired: take retired, stage: 0u8, stop: None)
+    let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
+    let rejected = http_law_post(net, clock, address, "/old", b"bad", 0u32, 0u64, b"{}", 1000u32)
+    if rejected.status != 401u16 || rejected.committed || !none(rejected.dedup_until) { fail("claim refusal was presented as a committed reply") }
+    let first = http_law_post(net, clock, address, "/old", b"token", 0u32, 0u64, b"{}", 1000u32)
+    if first.status != 201u16 || !first.committed || first.replayed != reopening || first.body != b"\"1\"" || first.dedup_until != Some(b"10100") {
+        fail("keyed route did not commit one effect")
+    }
+    let duplicate = http_law_post(net, clock, address, "/.hirsel/op/increment", b"token", 1u32, 0u64, b"{\"name\":\"saved\"}", 1000u32)
+    if duplicate.status != 201u16 || !duplicate.committed || !duplicate.replayed || duplicate.body != first.body ||
+        duplicate.dedup_until != first.dedup_until {
+        fail("alias did not return the original claim's saved reply")
+    }
+    let mismatch = http_law_post(net, clock, address, "/old", b"token", 2u32, 0u64, b"{\"name\":\"wrong\"}", 1000u32)
+    if mismatch.status != 422u16 || mismatch.committed || !none(mismatch.dedup_until) || mismatch.body != b"{\"refused\":\"request_mismatch\"}" {
+        fail("different arguments reached the body of a live claim")
+    }
+    if reopening {
+        let absent = http_law_post(net, clock, address, "/.hirsel/op/increment", b"other", 3u32, 0u64, b"{}", 1000u32)
+        if absent.status != 500u16 || absent.committed || !none(absent.dedup_until) || absent.body != b"{\"fault\":\"gone\"}" {
+            fail("absent retired claim was presented as a committed reply")
+        }
+    }
+    let _ = std.task.cancel_join(take server)
+    let _ = std.task.cancel_join(take relay_task)
+    let _ = take head
+}
+
+fn keyed_http_law_cycle(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, reopening: bool) waits {
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    options.create = !reopening
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
+    let definition: HttpOpPlace = if reopening { code.describe(keyed_http_retired) } else { code.describe(keyed_http_place) }
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let retired = if reopening { Some(result.unwrap(http_retirements(db, reg))) } else { None }
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let mail = result.unwrap(mailbox(16u64))
+    let seed = KeyedHttpLawDrive(head: take head, publisher: post(mail), clock, random, tasks, net, retired: take retired)
+    let work = task.spawn(tasks, bytes 16777216u64, take seed, keyed_http_law_drive)
+    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail,
+        tasks, 1048576u64, None, None)
+    if let Error(take problem) = started { fail(start_text(Open(take problem))) }
+    match task.join(take work) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+}
+
+@test
+fn keyed_http_claim_route_and_alias(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let (clock, take wall) = provide.clock(0u64, 100u64)
+    keyed_http_law_cycle(dir, clock, random, tasks, net, false)
+    keyed_http_law_cycle(dir, clock, random, tasks, net, true)
+    let _ = take wall
+    result.unwrap(std.dir.remove_all(d, name))
     Ok(())
 }

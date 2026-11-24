@@ -25,11 +25,29 @@ fn openapi_write_schema(mut doc: String, plan: std.json.JsonPlan, index: u64, ro
 fn openapi_binding(mut doc: String, op: HttpOperation, index: u64) {
     let binding = view op.binding
     let input = view op.input
+    let transactional = binding.mode == Stream || binding.mode == Keyed
     string.push(mut doc, "{\"operationId\":")
     let mut operation_id = string.from(binding.op)
-    if binding.mode == Stream && !op.alias { string.push(mut operation_id, ".route") }
+    if transactional && !op.alias { string.push(mut operation_id, ".route") }
     openapi_text(mut doc, operation_id)
-    string.push(mut doc, ",\"parameters\":[{\"name\":\"Authorization\",\"in\":\"header\",\"schema\":{\"type\":\"string\"}}")
+    if let Some(retention) = op.retention_ms {
+        string.push(mut doc, ",\"x-hirsel-retention-ms\":")
+        string.push_u64(mut doc, retention)
+        string.push(mut doc, ",\"x-hirsel-dedup\":\"horizon\"")
+    }
+    string.push(mut doc, ",\"parameters\":[")
+    let mut first_parameter = true
+    if binding.mode != Keyed {
+        string.push(mut doc, "{\"name\":\"Authorization\",\"in\":\"header\",\"schema\":{\"type\":\"string\"}}")
+        first_parameter = false
+    }
+    for name in op.claim_headers {
+        if !first_parameter { string.push(mut doc, ",") }
+        first_parameter = false
+        string.push(mut doc, "{\"name\":")
+        openapi_text(mut doc, name)
+        string.push(mut doc, ",\"in\":\"header\",\"schema\":{\"type\":\"string\"}}")
+    }
     if binding.mode == Stream {
         string.push(mut doc, ",{\"name\":\"Idempotency-Key\",\"in\":\"header\",\"required\":true,\"schema\":{\"type\":\"string\"}},{\"name\":\"Hirsel-Expected-Caller\",\"in\":\"header\",\"schema\":{\"type\":\"string\",\"contentEncoding\":\"base64\"}}")
     }
@@ -43,7 +61,9 @@ fn openapi_binding(mut doc: String, op: HttpOperation, index: u64) {
                 list.push(mut body_fields, clone(field))
                 continue
             }
-            string.push(mut doc, ",{\"name\":")
+            if !first_parameter { string.push(mut doc, ",") }
+            first_parameter = false
+            string.push(mut doc, "{\"name\":")
             openapi_text(mut doc, field.name)
             string.push(mut doc, if source == Path { ",\"in\":\"path\",\"required\":true,\"schema\":" } else { ",\"in\":\"query\",\"schema\":" })
             let mut role = string.from("param-")
@@ -62,14 +82,14 @@ fn openapi_binding(mut doc: String, op: HttpOperation, index: u64) {
     }
     string.push(mut doc, ",\"responses\":{")
     let output = view op.output
-    let (ok, error_case) = if binding.mode == Stream {
+    let (ok, error_case) = if transactional {
         let Outcome(success, failure) = output.shapes[output.facts[output.root].form] else {
             fail("transact result has a Result shape")
         }
         (success, failure)
     } else { (output.root, output.root) }
     openapi_reply(mut doc, op, index, binding.ok_status, ok, "ok")
-    if binding.mode == Stream {
+    if transactional {
         string.push(mut doc, ",")
         openapi_reply(mut doc, op, index, binding.error_status, error_case, "error")
     }
@@ -80,7 +100,7 @@ fn openapi_binding(mut doc: String, op: HttpOperation, index: u64) {
         (422u16, "Request mismatch"), (500u16, "Fault"), (502u16, "In doubt"), (503u16, "Capacity"),
         (504u16, "Send deadline"),
     ] {
-        if binding.mode == Stream && status == binding.error_status { continue }
+        if transactional && status == binding.error_status { continue }
         string.push(mut doc, ",\"")
         string.push_u64(mut doc, int.widen(status))
         string.push(mut doc, "\":{\"description\":")
@@ -98,7 +118,7 @@ fn openapi_reply(mut doc: String, op: HttpOperation, index: u64, status: u16, ro
     string.push_u64(mut doc, int.widen(status))
     string.push(mut doc, "\":{\"description\":")
     openapi_text(mut doc, if role == "ok" { "Result" } else { "Application error or protocol refusal" })
-    if op.binding.mode == Stream {
+    if op.binding.mode == Stream || op.binding.mode == Keyed {
         string.push(mut doc, ",\"headers\":{\"Idempotent-Outcome\":{\"schema\":{\"type\":\"string\",\"const\":\"committed\"}},\"Idempotent-Replayed\":{\"schema\":{\"type\":\"string\",\"const\":\"true\"}}}")
     }
     string.push(mut doc, ",\"content\":{")

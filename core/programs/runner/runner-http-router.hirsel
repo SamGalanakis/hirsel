@@ -5,6 +5,8 @@ type HttpOperation: shareable + send {
     projections: Arc[List[HttpSlotPlan]],
     kind: Kind,
     alias: bool,
+    retention_ms: Option[u64],
+    claim_headers: List[String],
 }
 
 pub opaque type HttpRoutes: shareable + send {
@@ -83,24 +85,50 @@ fn compile_http_operation(saved: HttpDescribe, entry: Exported, alias: bool) -> 
         list.push(mut projections, HttpSlotPlan(name: take name, key: arc.new(take key), value: arc.new(take value)))
     }
     Ok(HttpOperation(binding: clone(saved.binding), input: arc.new(take args), output: arc.new(take output),
-        projections: arc.new(take projections), kind: entry.described.kind, alias: alias))
+        projections: arc.new(take projections), kind: entry.described.kind, alias: alias, retention_ms: None, claim_headers: list.new()))
+}
+
+fn compile_keyed_operation(name: Bytes, route: String, policy: store.KeyedPolicy, alias: bool) -> Result[HttpOperation, BindCheck] {
+    let codec: std.codec.Codec[KeyedEntryRecord] = std.codec.of()
+    let record = std.codec.decode(codec, policy.record) ?=> |_| Shape(0u8, 0u8)
+    let mut defaults: List[std.codec.SchemaDefault] = list.with_capacity(list.len(record.defaults))
+    for item in record.defaults {
+        list.push(mut defaults, std.codec.SchemaDefault(def: item.definition, field: string.from(item.field), value: std.http.copy_bytes(item.payload)))
+    }
+    let restored = std.codec.restore_schema(record.args, take defaults) ?=> |_| Shape(0u8, 0u8)
+    let args = std.json.prepare_schema(take restored, Strict) ?=> binding_shape
+    let output = bind_shape(record.output)?
+    let binding = HttpBinding(op: (string.from_utf8(clone(name)) ?=> |_| Op), method: record.method, path: string.from(route),
+        entry: clone(record.entry), fields: clone(record.fields), mode: Keyed, ok_status: record.ok_status, error_status: record.error_status,
+        body_max: record.body_max, arg_max: policy.arg_max, deadline_ms: record.deadline_ms, steps: record.s_e)
+    Ok(HttpOperation(binding: take binding, input: arc.new(take args), output: arc.new(take output),
+        projections: arc.new(list.new()), kind: Transact, alias: alias, retention_ms: Some(policy.retention_ms), claim_headers: clone(record.headers)))
 }
 
 fn add_http_operation[G: send, H: shareable + inert + send, B: send](
     mut builder: std.router.Builder[HttpConnection[G, H, B]], mut plan: HttpRoutes,
     entry: Exported, saved: HttpDescribe, alias: bool) -> Result[(), BindError] {
     let operation = compile_http_operation(saved, entry, alias) ?=> |take check| BindError(op: string.from(saved.binding.op), check: take check)
-    let mut route_desc: std.router.Route[HttpConnection[G, H, B]] = std.router.raw(http_generated_handler)
-    route_desc.body_max = Some(saved.binding.body_max)
-    // The promoted owner's reservation is computed from the server's output
-    // capacity and the bounded seed actually handed over by this request.
-    if saved.binding.mode == Subscribe { route_desc.stream_bytes = Some(18446744073709551615u64) }
-    let failure = scoped fn(take _cause: std.router.AddError) -> BindError { BindError(op: string.from(saved.binding.op), check: Route) }
-    let tag = list.len(plan.operations) + 1u64
-    if alias {
-        std.router.add_tagged(mut builder, "POST", operation_path(saved.binding.op), tag, take route_desc) ?=> failure
-    } else {
-        std.router.add_with_finish(mut builder, http_method(saved.binding.method), saved.binding.path, tag, take route_desc, Some(http_read_finished)) ?=> failure
+    add_compiled_http_operation(mut builder, mut plan, take operation)
+}
+
+fn add_compiled_http_operation[G: send, H: shareable + inert + send, B: send](
+    mut builder: std.router.Builder[HttpConnection[G, H, B]], mut plan: HttpRoutes,
+    take operation: HttpOperation) -> Result[(), BindError] {
+    {
+        let binding = view operation.binding
+        let mut route_desc: std.router.Route[HttpConnection[G, H, B]] = std.router.raw(http_generated_handler)
+        route_desc.body_max = Some(binding.body_max)
+        // The promoted owner's reservation is computed from the server's output
+        // capacity and the bounded seed actually handed over by this request.
+        if binding.mode == Subscribe { route_desc.stream_bytes = Some(18446744073709551615u64) }
+        let failure = scoped fn(take _cause: std.router.AddError) -> BindError { BindError(op: string.from(binding.op), check: Route) }
+        let tag = list.len(plan.operations) + 1u64
+        if operation.alias {
+            std.router.add_tagged(mut builder, "POST", operation_path(binding.op), tag, take route_desc) ?=> failure
+        } else {
+            std.router.add_with_finish(mut builder, http_method(binding.method), binding.path, tag, take route_desc, Some(http_read_finished)) ?=> failure
+        }
     }
     list.push(mut plan.operations, take operation)
     Ok(())
@@ -110,6 +138,29 @@ fn add_http_operation[G: send, H: shareable + inert + send, B: send](
 /// previous activation's gone-entry aliases.
 pub fn http_router[G: send, H: shareable + inert + send, B: send](registered: Registry[G, H], previous: Option[Describe],
     take routes: std.router.Builder[HttpConnection[G, H, B]]) -> Result[(std.router.Router[HttpConnection[G, H, B]], Arc[HttpRoutes]), BindError] {
+    let empty = HttpRetirements(policies: map.new())
+    http_router_with_retirements(registered, previous, empty, take routes)
+}
+
+pub opaque type HttpRetirements: send { policies: Map[Bytes, store.KeyedPolicy] }
+
+/// Loads the immutable policies used to assemble and render retired routes.
+pub fn http_retirements[G: send, H: shareable + inert + send](db: store.Db, registered: Registry[G, H]) -> Result[HttpRetirements, OpenError] {
+    check_keyed_registrations(db, registered)?
+    let mut policies: Map[Bytes, store.KeyedPolicy] = map.new()
+    for (name, keyed) in registered.keyed {
+        if none(keyed.policy) {
+            if let Some(take saved) = store.keyed_policy(db, name) ?=> Store {
+                map.insert(mut policies, clone(name), take saved)
+            }
+        }
+    }
+    Ok(HttpRetirements(policies: take policies))
+}
+
+pub fn http_router_with_retirements[G: send, H: shareable + inert + send, B: send](registered: Registry[G, H],
+    previous: Option[Describe], retired: HttpRetirements, take routes: std.router.Builder[HttpConnection[G, H, B]]
+) -> Result[(std.router.Router[HttpConnection[G, H, B]], Arc[HttpRoutes]), BindError] {
     let mut builder = take routes
     std.router.clear_tags(mut builder)
     let mut plan = HttpRoutes(operations: list.new(), openapi: arc.new(list.new()), gone: list.new())
@@ -119,11 +170,26 @@ pub fn http_router[G: send, H: shareable + inert + send, B: send](registered: Re
         add_http_operation(mut builder, mut plan, entry, saved, false)?
         if saved.binding.mode == Stream { add_http_operation(mut builder, mut plan, entry, saved, true)? }
     }
+    for (name, keyed) in registered.keyed {
+        let policy = match view keyed.policy {
+            Some(saved) => Some(saved),
+            None => map.get(retired.policies, name),
+        }
+        if let Some(saved) = policy {
+            for alias in [false, true] {
+                let operation = compile_keyed_operation(name, keyed.route, saved, alias) ?=> |take check| {
+                    BindError(op: result.unwrap(string.from_utf8(clone(name))), check: take check)
+                }
+                add_compiled_http_operation(mut builder, mut plan, take operation)?
+            }
+        }
+    }
     if let Some(prior) = previous {
         plan.gone = previous_http_keys(registered, prior)
         for saved in prior.bindings {
             let key = view saved.binding.entry
-            if saved.binding.mode != Stream || http_has_op(registered.bindings, saved.binding.op) || map.contains(registered.slots, key) {
+            if saved.binding.mode != Stream || http_has_op(registered.bindings, saved.binding.op) ||
+                map.contains(registered.keyed, string.as_bytes(saved.binding.op)) || map.contains(registered.slots, key) {
                 continue
             }
             let index = find_binding_entry(prior.exported, key) ?=> |_| BindError(op: string.from(saved.binding.op), check: NoEntry)
@@ -205,6 +271,9 @@ fn http_generated_handler[G: send, H: shareable + inert + send, B: send](req: st
     mut resp: std.http.Responder, state: HttpConnection[G, H, B]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     let operation = view state.routes.operations[std.http.route_tag(req) - 1u64]
     let binding = view operation.binding
+    if binding.mode == Keyed {
+        return http_keyed_handler(req, mut resp, state, operation)
+    }
     if binding.mode == Subscribe && !http_accepts_events(req) {
         return Ok(Reply(http_reply(406u16, "", false, false, false)?))
     }
@@ -275,6 +344,124 @@ fn http_accepts_events(req: std.http.Request) -> bool {
         index += 1u64
     }
     false
+}
+
+type ClaimJob[G: send]: send {
+    seed: G,
+    derive: StaticFn[fn(G, ClaimRequest) -> Result[Claimed, ()] waits],
+    request: ClaimRequest,
+    steps: u64
+}
+
+resource type ClaimCompletionSignal: send { to: Sender[Option[Claimed]], sent: bool } drop(completion) {
+    if !completion.sent { let _ = channel.try_send(completion.to, None) }
+}
+
+fn run_http_claim[G: send](take job: ClaimJob[G]) -> Option[Claimed] waits {
+    let ClaimJob(seed: take seed, derive, request: take request, steps) = take job
+    let invoke = code.callable(derive)
+    let attempted = bound steps steps { invoke(seed, request) }
+    match take attempted {
+        Ok(Ok(take claimed)) if claimed.caller.issuer != 1u8 && list.len(claimed.caller.subject) <= SUBJECT_MAX => Some(take claimed),
+        _ => None,
+    }
+}
+
+fn claim_job_reply[G: send](take work: (ClaimJob[G], ClaimCompletionSignal)) waits {
+    let (take job, take signal) = take work
+    let mut completion = take signal
+    let outcome = run_http_claim(take job)
+    let _ = channel.try_send(completion.to, take outcome)
+    completion.sent = true
+}
+
+fn derive_http_claim[G: send](req: std.http.Request, body: Bytes, grant: WireGrant[G], claim: Claim[G],
+    tasks: Tasks, clock: Clock, deadline: u64) -> Option[Claimed] waits {
+    let copied = bound bytes claim.claim_bytes {
+        isolate(scoped fn() -> ClaimJob[G] {
+            let mut headers: List[(String, Bytes)] = list.new()
+            let mut i = 0u64
+            while let Some((name, value)) = std.http.header_at(req, i) {
+                for listed in claim.headers {
+                    if std.http1.equal_ascii(name, string.as_bytes(listed)) {
+                        list.push(mut headers, (string.from(listed), std.http.copy_bytes(value)))
+                        break
+                    }
+                }
+                i += 1
+            }
+            let request = ClaimRequest(headers: take headers, body: std.http.copy_bytes(body))
+            ClaimJob(seed: (grant.duplicate)(grant.value), derive: claim.f, request: take request, steps: claim.claim_steps)
+        })
+    }
+    let Ok(Ok(Ok(take job))) = take copied else { return None }
+    let (to, from): (Sender[Option[Claimed]], Receiver[Option[Claimed]]) = channel.new(1u64)
+    let Ok(take completion) = ClaimCompletionSignal(to: channel.sender(to), sent: false) else { return None }
+    let alarm = std.clock.alarm(tasks, clock, deadline, to, None)
+    let runner: fn(take (ClaimJob[G], ClaimCompletionSignal)) -> () waits = claim_job_reply
+    let Ok(take child) = task.try_spawn(tasks, bytes claim.claim_bytes, (take job, take completion), runner) else {
+        let _ = std.task.cancel_join(take alarm)
+        return None
+    }
+    let result = channel.receive(from)
+    let _ = std.task.cancel_join(take child)
+    let _ = std.task.cancel_join(take alarm)
+    match take result { Ok(take value) => take value, Error(_) => None }
+}
+
+fn http_keyed_handler[G: send, H: shareable + inert + send, B: send](req: std.http.Request, mut resp: std.http.Responder,
+    state: HttpConnection[G, H, B], operation: HttpOperation) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let arrived = host.mono_ns(state.clock)
+    let binding = view operation.binding
+    let horizon = std.order.min(std.http.handler_deadline(req), std.clock.deadline_after_ms(arrived, binding.deadline_ms))
+    let name = string.as_bytes(binding.op)
+    let Some(registered) = map.get(state.registered.keyed, name) else {
+        return Ok(Reply(http_refusal(NoEntry)?))
+    }
+    let Some(supplied) = view state.wire else { return Ok(Reply(http_reply(401u16, "", false, false, false)?)) }
+    let Some(grant) = view supplied.grant else { return Ok(Reply(http_reply(401u16, "", false, false, false)?)) }
+    let body = match http_request_body_bytes(req, mut resp, true) {
+        Ok(take value) => take value,
+        Error(take problem) => return Ok(Reply(http_assembly_error(take problem)?)),
+    }
+    if host.mono_ns(state.clock) >= horizon { return Ok(Reply(http_refusal(Deadline)?)) }
+    let classified = derive_http_claim(req, body, grant, registered.claim, state.tasks, state.clock, horizon)
+    if host.mono_ns(state.clock) >= horizon { return Ok(Reply(http_refusal(Deadline)?)) }
+    let Some(take derived) = take classified else {
+        return Ok(Reply(http_reply(401u16, "", false, false, false)?))
+    }
+    let Claimed(caller: take caller, key: take claim_key) = take derived
+    if list.len(claim_key) == 0 || list.len(claim_key) > 255 {
+        return Ok(Reply(http_reply(400u16, "", false, false, false)?))
+    }
+    for byte in claim_key {
+        if byte < 0x21 || byte > 0x7e { return Ok(Reply(http_reply(400u16, "", false, false, false)?)) }
+    }
+    let (take arguments, has_body) = http_argument_sources(operation.input, binding, operation.alias)
+    if has_body && !http_json_content_type(req) { return Ok(Reply(http_assembly_error(MediaType)?)) }
+    if !has_body && list.len(body) != 0 { return Ok(Reply(http_assembly_error(BadArgument(1u32))?)) }
+    let Ok(take text) = string.from_utf8(take body) else { return Ok(Reply(http_assembly_error(BadArgument(2u32))?)) }
+    let raw = match http_assemble_fields(req, operation.input, binding, take arguments, text, has_body) {
+        Ok(take value) => take value,
+        Error(take problem) => return Ok(Reply(http_assembly_error(take problem)?)),
+    }
+    if list.len(raw) > state.budget {
+        return Ok(Reply(http_refusal(Budget(Room(requested: list.len(raw), available: state.budget)))?))
+    }
+    if let Some(policy) = registered.policy {
+        if let Some(check) = map.get(state.registered.checks, binding.entry) {
+            if let Some(take problem) = (check.validate)(raw, policy.arg_max) {
+                return Ok(Reply(http_refusal(take problem)?))
+            }
+        }
+    }
+    if host.mono_ns(state.clock) >= horizon { return Ok(Reply(http_refusal(Deadline)?)) }
+    let digest = store.request_digest(binding.entry, raw)
+    let stream = store.StreamKey(caller: take caller, id: store.StreamId(t: 0, n: 0))
+    let sent = Send(stream: take stream, key: clone(name), p: 0, arg: take raw, digest, deadline: horizon,
+        budget: state.budget, expires_at_ms: None, claim: Some(take claim_key))
+    let delivered = relay_call(state.relay, take sent, state.clock, state.tasks, std.http.handler_deadline(req))
+    Ok(Reply(http_render_delivery(req, binding, operation.output, take delivered)?))
 }
 
 fn http_retire_subject(subject: Option[Bytes]) -> Option[Bytes] { clone(subject) }

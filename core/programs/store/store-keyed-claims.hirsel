@@ -55,6 +55,13 @@ pub fn claim_key_bytes(key: ClaimKey) -> Result[Bytes, Error] {
     Ok(take full)
 }
 
+/// The stored horizon for a replied claim, including the NEVER sentinel.
+pub fn claim_reply_expiry(db: Db, address: Bytes) -> Result[Option[u64], Error] {
+    let Some(raw) = keyed_lookup(db.heads[0u64].roots.keyed, CLAIMS, address) else { return Ok(None) }
+    let row = claim_parse(raw)?
+    Ok(if row.replied { Some(row.expiry) } else { None })
+}
+
 fn op_claim_key(op: Bytes) -> Result[Bytes, Error] {
     let len = list.len(op)
     if len == 0 || len > 64 { return Error(Limit(Key)) }

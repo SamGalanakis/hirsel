@@ -11,7 +11,7 @@ use crate::{
     secret::{Origin, Secret},
     tasks::Outside,
 };
-use hirsel_core_net::{CredGrant, CredSource, SecretPolicy, StsSource};
+use hirsel_core_net::{CredGrant, CredSource, SecretPolicy, StsSource, secret_aead::SecretBytes};
 use rustls::{
     ClientConfig,
     client::UnbufferedClientConnection,
@@ -97,7 +97,7 @@ pub(crate) struct Fetched {
     pub(crate) key_id: Zeroizing<Vec<u8>>,
     pub(crate) token: Zeroizing<Vec<u8>>,
     /// Absent on replay: the designation has no bytes behind it.
-    pub(crate) secret: Option<Arc<Zeroizing<Vec<u8>>>>,
+    pub(crate) secret: Option<Arc<SecretBytes>>,
     pub(crate) expires_ns: u64,
 }
 
@@ -473,7 +473,7 @@ fn imds(at: SocketAddrV4, deadline: Option<u64>) -> Answer {
         key_id: exact(member(json, b"AccessKeyId")?),
         token: exact(member(json, b"Token")?),
         expires_ns: expiry(member(json, b"Expiration")?)?,
-        secret: Some(Arc::new(exact(secret))),
+        secret: Some(Arc::new(SecretBytes::new(exact(secret)))),
     };
     Ok(fetched)
 }
@@ -613,7 +613,7 @@ fn assume_role(source: &StsSource, deadline: Option<u64>) -> Answer {
         key_id: exact(text(element(credentials, b"AccessKeyId")?)?),
         token: exact(text(element(credentials, b"SessionToken")?)?),
         expires_ns: expiry(text(element(credentials, b"Expiration")?)?)?,
-        secret: Some(Arc::new(exact(secret))),
+        secret: Some(Arc::new(SecretBytes::new(exact(secret)))),
     })
 }
 

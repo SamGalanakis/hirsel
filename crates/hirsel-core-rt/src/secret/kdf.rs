@@ -11,7 +11,7 @@ pub(crate) struct KdfRequest<'a> {
     pub(crate) derivation: Option<Derivation>,
     #[cfg(feature = "record")]
     pub(crate) child: &'a SecretPolicy,
-    output: Option<Arc<Zeroizing<Vec<u8>>>>,
+    output: Option<Arc<SecretBytes>>,
 }
 
 pub(crate) const KDF_PROVIDER: Provider = Provider {
@@ -30,7 +30,7 @@ unsafe extern "C" fn kdf_issue(_: *mut u8, request: *mut Request, _: u64) -> Ste
             .derive(key, args.salt_or_prefix, args.info_or_data);
     let outcome = match derived {
         Ok(bytes) => {
-            args.output = Some(Arc::new(bytes));
+            args.output = Some(Arc::new(SecretBytes::new(bytes)));
             Outcome::default()
         }
         Err(Argon2Error::Params) => INVALID,

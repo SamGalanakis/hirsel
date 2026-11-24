@@ -75,8 +75,11 @@ fn aead_grant_uses_and_refusals_record_and_replay() {
                 let wrong_len = registry.register(Secret {
                     origin: Origin::Sealed(0),
                     policy: SecretPolicy::parse(policy).unwrap(),
-                    bytes: (mode == Mode::Record)
-                        .then(|| std::sync::Arc::new(zeroize::Zeroizing::new(vec![7; 16]))),
+                    bytes: (mode == Mode::Record).then(|| {
+                        std::sync::Arc::new(hirsel_core_net::secret_aead::SecretBytes::new(
+                            zeroize::Zeroizing::new(vec![7; 16]),
+                        ))
+                    }),
                     seal: None,
                 });
                 drop(registry);

@@ -36,7 +36,7 @@ use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, RecipeRow, Repr, TypeRef, charge,
     cleanup_class, compute, field_size, map_entry,
 };
-use hirsel_core_net::{Name, SecretGrant, SecretPolicy, SecretUse};
+use hirsel_core_net::{Name, SecretGrant, SecretPolicy, SecretUse, secret_aead::SecretBytes};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use zeroize::Zeroizing;
@@ -451,7 +451,7 @@ enum Due {
 #[derive(Clone)]
 struct EvalSecret {
     policy: SecretPolicy,
-    bytes: Arc<Zeroizing<Vec<u8>>>,
+    bytes: Arc<SecretBytes>,
     /// The seal's token, shared by every designation of the bytes.
     seal: Arc<()>,
 }
@@ -4307,7 +4307,7 @@ impl Machine<'_> {
         self.designate(
             EvalSecret {
                 policy,
-                bytes: Arc::new(bytes),
+                bytes: Arc::new(SecretBytes::new(bytes)),
                 seal,
             },
             (payer, 0),

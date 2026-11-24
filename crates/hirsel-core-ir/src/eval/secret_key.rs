@@ -69,7 +69,7 @@ impl Machine<'_> {
                 let key = self.designate(
                     EvalSecret {
                         policy: requested,
-                        bytes: Arc::new(plain),
+                        bytes: Arc::new(SecretBytes::new(plain)),
                         seal,
                     },
                     (payer, 0),

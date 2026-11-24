@@ -10,7 +10,9 @@ use crate::{
 };
 pub(crate) mod kdf;
 pub(crate) mod key;
-use hirsel_core_net::{Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse};
+use hirsel_core_net::{
+    Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse, secret_aead::SecretBytes,
+};
 pub use kdf::hirsel_core_secret_derive_hmac_sha256;
 use key::key_issue;
 use std::{
@@ -67,7 +69,7 @@ impl Origin {
 pub(crate) struct Secret {
     pub(crate) origin: Origin,
     pub(crate) policy: SecretPolicy,
-    pub(crate) bytes: Option<Arc<Zeroizing<Vec<u8>>>>,
+    pub(crate) bytes: Option<Arc<SecretBytes>>,
     /// A sealed secret's charge, shared by every designation of its bytes.
     pub(crate) seal: Option<Arc<ChargeCell>>,
 }
@@ -102,7 +104,7 @@ impl Granted {
             secret: Secret {
                 origin: Origin::Granted(index),
                 policy: SecretPolicy::parse(&record.policy)?,
-                bytes: Some(Arc::new(bytes)),
+                bytes: Some(Arc::new(SecretBytes::new(bytes))),
                 seal: None,
             },
             record,
@@ -389,7 +391,7 @@ fn admit_size(payer: Payer, size: Option<u64>) -> Result<Charge, Outcome> {
 unsafe fn store_sealed(
     context: *mut Context,
     policy: SecretPolicy,
-    bytes: Option<Arc<Zeroizing<Vec<u8>>>>,
+    bytes: Option<Arc<SecretBytes>>,
     charge: Charge,
     origin: Option<Origin>,
 ) -> Outcome {
@@ -443,7 +445,7 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
             Ok(charge) => charge,
             Err(error) => return error,
         };
-        let owned = Arc::new(Zeroizing::new(bytes.to_vec()));
+        let owned = Arc::new(SecretBytes::new(Zeroizing::new(bytes.to_vec())));
         if (*source).capacity != 0 && (*source).len != 0 {
             std::slice::from_raw_parts_mut((*source).data, (*source).len).zeroize();
         }

@@ -2,9 +2,15 @@
 
 use crate::{SecretUse, key_wrap::KeyFailure};
 use ring::aead;
-use std::mem::MaybeUninit;
+use std::{mem::MaybeUninit, ops::Deref, sync::OnceLock};
+use zeroize::Zeroizing;
 
 const TAG_LEN: usize = 16;
+
+#[cfg(test)]
+thread_local! {
+    static EXPANSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AeadAlg {
@@ -64,6 +70,38 @@ pub struct AeadInput<'a> {
     pub bytes: &'a [u8],
 }
 
+/// Owned bytes shared by the designations of a Secret. Cache an expanded key
+/// only when an authorized sink first uses that algorithm. The cache belongs
+/// to the bytes, so narrowing and sharing a designation do not expand again.
+pub struct SecretBytes {
+    bytes: Zeroizing<Vec<u8>>,
+    aead: [OnceLock<Result<Box<aead::LessSafeKey>, KeyFailure>>; 3],
+}
+
+impl SecretBytes {
+    pub fn new(bytes: Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            bytes,
+            aead: Default::default(),
+        }
+    }
+
+    fn key(&self, alg: AeadAlg) -> Result<&aead::LessSafeKey, KeyFailure> {
+        self.aead[usize::from(alg.case())]
+            .get_or_init(|| expand(alg, &self.bytes).map(Box::new))
+            .as_deref()
+            .map_err(|&failure| failure)
+    }
+}
+
+impl Deref for SecretBytes {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
 /// The size to reserve in the caller's spare capacity before issuing a sink.
 pub fn output_len(
     policy: SecretUse,
@@ -98,10 +136,8 @@ pub fn output_len(
 impl AeadInput<'_> {
     /// Run inside the provider. `out` is the spare selected by `output_len`.
     /// The caller publishes its bytes only on success.
-    pub fn apply(&self, key: &[u8], out: &mut [MaybeUninit<u8>]) -> Result<(), KeyFailure> {
-        let key =
-            aead::UnboundKey::new(self.alg.algorithm(), key).map_err(|_| KeyFailure::Invalid)?;
-        let key = aead::LessSafeKey::new(key);
+    pub fn apply(&self, key: &SecretBytes, out: &mut [MaybeUninit<u8>]) -> Result<(), KeyFailure> {
+        let key = key.key(self.alg)?;
         let nonce =
             aead::Nonce::try_assume_unique_for_key(self.nonce).map_err(|_| KeyFailure::Invalid)?;
         let aad = aead::Aad::from(self.aad);
@@ -130,4 +166,47 @@ impl AeadInput<'_> {
         }
         Ok(())
     }
+}
+
+fn expand(alg: AeadAlg, key: &[u8]) -> Result<aead::LessSafeKey, KeyFailure> {
+    #[cfg(test)]
+    EXPANSIONS.update(|n| n + 1);
+
+    let key = aead::UnboundKey::new(alg.algorithm(), key).map_err(|_| KeyFailure::Invalid)?;
+    Ok(aead::LessSafeKey::new(key))
+}
+
+#[cfg(test)]
+#[test]
+fn seal_and_open_expand_one_key() {
+    // SP 800-38D AES-128-GCM with a zero key, IV and plaintext block.
+    const CIPHERTEXT_AND_TAG: [u8; 32] = [
+        0x03, 0x88, 0xda, 0xce, 0x60, 0xb6, 0xa3, 0x92, 0xf3, 0x28, 0xc2, 0xb9, 0x71, 0xb2, 0xfe,
+        0x78, 0xab, 0x6e, 0x47, 0xd4, 0x2c, 0xec, 0x13, 0xbd, 0xf5, 0x3a, 0x67, 0xb2, 0x12, 0x57,
+        0xbd, 0xdf,
+    ];
+    let key = SecretBytes::new(Zeroizing::new(vec![0; 16]));
+    let plain = [0; 16];
+    let nonce = [0; 12];
+    let mut op = AeadInput {
+        alg: AeadAlg::Aes128Gcm,
+        mode: AeadMode::Seal,
+        nonce: &nonce,
+        aad: &[],
+        bytes: &plain,
+    };
+    let mut sealed = [MaybeUninit::uninit(); 32];
+    op.apply(&key, &mut sealed).unwrap();
+    // SAFETY: apply initialized all 32 bytes of the output on success.
+    let sealed = sealed.map(|byte| unsafe { byte.assume_init() });
+    assert_eq!(sealed, CIPHERTEXT_AND_TAG);
+
+    op.mode = AeadMode::Open;
+    op.bytes = &sealed;
+    let mut opened = [MaybeUninit::uninit(); 16];
+    op.apply(&key, &mut opened).unwrap();
+    // SAFETY: apply initialized all 16 bytes of the output on success.
+    let opened = opened.map(|byte| unsafe { byte.assume_init() });
+    assert_eq!(opened, plain);
+    assert_eq!(EXPANSIONS.get(), 1);
 }

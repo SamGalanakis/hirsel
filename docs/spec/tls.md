@@ -1067,8 +1067,8 @@ Datagram security protocols seal every packet under a long-lived key. QUIC
 ([RFC 9147](https://www.rfc-editor.org/rfc/rfc9147)), and SRTP and SRTCP
 ([RFC 3711](https://www.rfc-editor.org/rfc/rfc3711), [RFC 7714](https://www.rfc-editor.org/rfc/rfc7714))
 do this thousands of times a second. They also agree a fresh key with each peer and mask
-packet numbers. TLS-5's AEAD sink suits file formats: it expands the key on every call, and
-the caller picks the nonce. TLS-8 adds what the packet protocols need:
+packet numbers. TLS-5's AEAD sink suits file formats: it caches each expanded key with
+the owned secret bytes, and the caller picks the nonce. TLS-8 adds what packet protocols need:
 
 - an ephemeral **key share** for X25519 or P-256 agreement;
 - a **key schedule** per protocol, which takes the share and the peer's public key and

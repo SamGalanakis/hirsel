@@ -266,7 +266,9 @@ pub unsafe extern "C" fn hirsel_core_secret_unwrap(
             Secret {
                 origin,
                 policy: requested,
-                bytes: plain.into_inner().map(Arc::new),
+                bytes: plain
+                    .into_inner()
+                    .map(|bytes| Arc::new(SecretBytes::new(bytes))),
                 seal: Some(ChargeCell::new(charge)),
             },
             None,

@@ -78,10 +78,6 @@ fn transact_replay[H: shareable + inert + send, A, R, E](record: store.Recorded,
     transact_reply(mut tx, env)
 }
 
-fn resume_transact[H: shareable + inert + send, A, R, E](mut db: store.Db, take parked: store.Parked, env: TransactBody[H, A, R, E]) -> Result[store.Served, store.ServeError] waits {
-    store.resume_parked(mut db, take parked, env, transact_reply)
-}
-
 fn run_trigger_body[H: shareable + inert + send, A, R, E](mut tx: store.Tx, env: (TransactBody[H, A, R, E], triggers.Tables, triggers.Pending, u64)) -> Result[(), TriggerBodyError] {
     // The wall can move backwards between the scheduler's sample and this transaction.
     if store.info(mut tx).at < triggers.due_time(env.2) { return Error(NotDue) }
@@ -143,7 +139,7 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
     }
     let resume_entry = fn(mut db: store.Db, take parked: store.Parked, h: H, author: Caller, arg: Bytes) -> Result[store.Served, store.ServeError] waits {
         let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
-        resume_transact(mut db, take parked, env)
+        store.resume_parked(mut db, take parked, env, transact_reply)
     }
     let trigger = fn(mut db: store.Db, h: H, author: Caller, tables: triggers.Tables, pending: triggers.Pending) -> Result[store.Outcome[(), TriggerBodyError], store.Error] waits {
         let body = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(triggers.argument(pending)))

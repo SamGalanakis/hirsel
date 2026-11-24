@@ -24,6 +24,11 @@ fn match_vector(alg: AeadAlg, policy: String, mode: u8, key: Bytes, nonce: Bytes
     }
 }
 
+fn field_end(data: Bytes, len_at: u64, start: u64) -> u64 {
+    let len: u16 = list.word_le(data, len_at)
+    start + int.widen(len)
+}
+
 // Each row has an algorithm, a mode, five little-endian u16 field lengths
 // and the byte fields in order. Return the first failing row, or zero.
 fn check_vectors(data: Bytes) -> u64 {
@@ -41,11 +46,11 @@ fn check_vectors(data: Bytes) -> u64 {
         }
         let mode = data[pos + 1]
         let start = pos + 12
-        let key_end = start + int.widen(list.word_le[u16](data, pos + 2))
-        let nonce_end = key_end + int.widen(list.word_le[u16](data, pos + 4))
-        let aad_end = nonce_end + int.widen(list.word_le[u16](data, pos + 6))
-        let plain_end = aad_end + int.widen(list.word_le[u16](data, pos + 8))
-        let end = plain_end + int.widen(list.word_le[u16](data, pos + 10))
+        let key_end = field_end(data, pos + 2, start)
+        let nonce_end = field_end(data, pos + 4, key_end)
+        let aad_end = field_end(data, pos + 6, nonce_end)
+        let plain_end = field_end(data, pos + 8, aad_end)
+        let end = field_end(data, pos + 10, plain_end)
         if !match_vector(alg, policy, mode, list.slice(data, start, key_end), list.slice(data, key_end, nonce_end), list.slice(data, nonce_end, aad_end), list.slice(data, aad_end, plain_end), list.slice(data, plain_end, end)) {
             return row
         }

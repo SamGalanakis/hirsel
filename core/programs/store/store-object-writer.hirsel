@@ -102,9 +102,7 @@ type ObjectWriterOpen {
 
 fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, level_name: String, op_ms: u64) -> Result[ObjectWriterOpen, Error] waits {
     let group_room: u64 = int.widen(options.group_bytes)
-    let metadata = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        history_config_bytes(HistoryConfig(place: std.object.bucket_config(read_source.client), level: string.from(level_name)))
-    })?
+    let genesis_authority = history_genesis_authority(read_source.client, level_name)?
     let mut workspace = history_buffers(object_writer_entry_room(group_room))?
     let (take channels, (take start, take starting), take health_state, (take health_tx, take health_rx)) =
         disk_allocation(scoped fn() -> Result[(JournalChannels, (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]), Latest[Health], (Sender[()], Receiver[()])), Error] {
@@ -132,7 +130,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         Ok(HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, sweep: sweep_start(), pages: take pages))
     })?
     let held_options = disk_allocation(scoped fn() -> Result[Options, Error] { Ok(clone(options)) })?
-    let (take register, _, take started) = history_open_with(mut read_source, c, r, options, level_name, mut workspace, op_ms, scoped fn(id: StoreId, replay: JournalReplay) -> Result[Db, Error] {
+    let (take register, _, take started, take metadata) = history_open_with(mut read_source, c, r, options, level_name, take genesis_authority, mut workspace, op_ms, scoped fn(id: StoreId, replay: JournalReplay) -> Result[Db, Error] {
         let state = copy_follow_state(replay.state)?
         let mut prepared = disk_allocation(scoped fn() -> Result[Db, Error] { Ok(empty_db(c, id, options)) })?
         open_heads(mut prepared, take state)?

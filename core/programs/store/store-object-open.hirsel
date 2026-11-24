@@ -85,7 +85,7 @@ fn history_check_empty(mut client: std.object.Client, deadline: u64) -> Result[(
     }
 }
 
-fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: StoreId, options: Options, requested_level: String, mut workspace: HistoryBuffers, deadline: u64, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T), Error] waits {
+fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: StoreId, options: Options, take authority: Bytes, mut workspace: HistoryBuffers, deadline: u64, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T, Bytes), Error] waits {
     if !options.create || (options.activation != None && options.activation != Some(0u64)) {
         return Error(NotFound)
     }
@@ -100,8 +100,6 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
     over_ceiling(journal_account(initial)?, options.resident_limit)?
     let id = capacity(disk_identity(r))?
     let admitted = prepare_writer(id, initial)?
-    let place = std.object.bucket_config(client)
-    let authority = history_config_bytes(HistoryConfig(place: take place, level: string.from(requested_level)))?
     let created = history_publish_genesis(mut client, id, holder, authority, mut workspace, deadline)
     let mut register = match take created {
         Ok(take granted) => take granted,
@@ -109,7 +107,7 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
         Error(take problem) => return Error(take problem),
     }
     history_advance_claim(mut client, mut register, authority, mut workspace, deadline)?
-    Ok((take register, take initial, take admitted))
+    Ok((take register, take initial, take admitted, take authority))
 }
 
 fn history_advance_claim(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
@@ -132,7 +130,7 @@ fn history_claim_retry(c: Clock, r: Random, mut entropy: Bytes, pause: u64, dead
 
 // Recover and prepare_writer the state while the incumbent still holds the claim.
 // The returned register has already advanced its CLAIM entry.
-fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: HistoryCapture, options: Options, requested_level: String, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T), Error] waits {
+fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: HistoryCapture, options: Options, requested_level: String, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T, Bytes), Error] waits {
     let pair = first.head.pair
     let mut selected = take first
     let mut admitted: Option[(HistoryHead, JournalReplay)] = None
@@ -177,7 +175,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
             HistoryClaimed(take result) => {
                 let mut register = take result
                 history_advance_claim(mut read_source.client, mut register, authority, mut workspace, read_source.deadline)?
-                return Ok((take register, take replay, take admitted_state))
+                return Ok((take register, take replay, take admitted_state, take authority))
             },
             HistoryClaimMoved(backoff) => {
                 if options.claim_ms == 0 {
@@ -205,11 +203,18 @@ fn history_rebase_suffix(mut read_source: ObjectPackRead, head: HistoryHead, fro
 
 
 fn history_open_register(mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: HistoryBuffers, op_ms: u64) -> Result[(HistoryRegister, JournalReplay), Error] waits {
-    let (take register, take replay, _) = history_open_with(mut read_source, c, r, options, requested_level, mut workspace, op_ms, fn(id: StoreId, initial: JournalReplay) -> Result[(), Error] { Ok(()) })?
+    let authority = history_genesis_authority(read_source.client, requested_level)?
+    let (take register, take replay, _, _) = history_open_with(mut read_source, c, r, options, requested_level, take authority, mut workspace, op_ms, fn(id: StoreId, initial: JournalReplay) -> Result[(), Error] { Ok(()) })?
     Ok((take register, take replay))
 }
 
-fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: HistoryBuffers, op_ms: u64, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T), Error] waits {
+fn history_genesis_authority(client: std.object.Client, declared_level: String) -> Result[Bytes, Error] {
+    disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        history_config_bytes(HistoryConfig(place: std.object.bucket_config(client), level: string.from(declared_level)))
+    })
+}
+
+fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, take genesis_authority: Bytes, mut workspace: HistoryBuffers, op_ms: u64, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T, Bytes), Error] waits {
     let claim_ms = if options.claim_ms == 0 { op_ms } else { options.claim_ms }
     read_source.deadline = std.object.deadline_after_ms(read_source.client, claim_ms)
     let observed = history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline)
@@ -222,6 +227,6 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
     let holder = capacity(disk_identity(r))?
     match take selected {
         Some(take capture) => history_open_existing(mut read_source, c, r, holder, take capture, options, requested_level, mut workspace, prepare_writer),
-        None => history_open_genesis(mut read_source.client, r, holder, options, requested_level, mut workspace, read_source.deadline, prepare_writer),
+        None => history_open_genesis(mut read_source.client, r, holder, options, take genesis_authority, mut workspace, read_source.deadline, prepare_writer),
     }
 }

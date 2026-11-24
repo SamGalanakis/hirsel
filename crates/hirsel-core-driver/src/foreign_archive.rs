@@ -200,12 +200,8 @@ impl ForeignDefinitions<'_> {
         recipe: &crate::tool_inputs::LinkRecipe,
     ) -> Result<(), AdmissionError> {
         self.check_link_input(&std::fs::read(runtime)?, "the runtime")?;
-        let closure = crate::link_closure::closure(
-            &recipe.args,
-            crate::tool_inputs::INPUT_MARKER,
-            crate::tool_inputs::SUPPORT_LIBS,
-            true,
-        )?;
+        let closure =
+            crate::link_closure::closure(&recipe.args, crate::tool_inputs::INPUT_MARKER, true)?;
         for input in closure.binaries {
             self.check_link_input(
                 &std::fs::read(&input)?,

@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 pub(super) fn direct_link(
     recipe: &crate::tool_inputs::LinkRecipe,
     inputs: &[PathBuf],
-    support_libs: &[&str],
     output: &Path,
     optimize: bool,
     debug_lines: bool,
@@ -54,9 +53,6 @@ pub(super) fn direct_link(
         if argument == crate::tool_inputs::INPUT_MARKER {
             for input in inputs {
                 process.arg(std::path::absolute(input)?);
-            }
-            for library in support_libs {
-                process.arg(library);
             }
             inserted = true;
         } else {

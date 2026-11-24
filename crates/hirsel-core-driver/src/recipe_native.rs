@@ -1867,7 +1867,7 @@ impl Publication {
         let emitter = emitter(&options, tools.runtime, &target)?;
         use std::os::unix::ffi::OsStrExt;
         let fingerprint = key(
-            "hirsel.assembly-environment.v1",
+            "hirsel.assembly-environment.v2",
             &(
                 std.as_ref().map(|std| std.key),
                 // The bodies the program imports shape its code.
@@ -1879,7 +1879,6 @@ impl Publication {
                 tools.runtime,
                 tools.environment,
                 link.identity,
-                DIRECT_LINK_SUPPORT_LIBS,
                 options.debug_lines,
                 options.recording,
                 &options.replay,

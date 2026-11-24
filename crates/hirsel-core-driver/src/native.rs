@@ -26,7 +26,6 @@ use cleanup::result_cleanup;
 use link::direct_link;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
-use crate::tool_inputs::SUPPORT_LIBS as DIRECT_LINK_SUPPORT_LIBS;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum Backend {
     Cranelift,
@@ -1643,10 +1642,6 @@ fn link_objects(
     assembly: Option<(ContentHash, ContentHash)>,
 ) -> Result<Linked, NativeStop> {
     let revision = hirsel_core_ir::code_revision(address);
-    let support_libs = match &options.link {
-        Link::Driver(_) => DIRECT_LINK_SUPPORT_LIBS,
-        Link::Installed(_) => &[],
-    };
     // The executable key includes the mode-specific lld options.
     let link_mode = if options.optimize {
         "release-link-gc-icf-sites-after-unwind"
@@ -1661,12 +1656,11 @@ fn link_objects(
     let link_key = match assembly {
         Some(assembly) => key("hirsel.recipe-final-link.v3", &assembly)?,
         None => key(
-            "hirsel.core-executable.v7",
+            "hirsel.core-executable.v8",
             &(
                 compiler_identity()?,
                 toolchain,
                 recipe.identity,
-                support_libs,
                 entry_plan,
                 &identities,
                 &archive_pins,
@@ -1864,12 +1858,11 @@ fn link_objects(
                         )
                         .collect();
                 let frame = key(
-                    "hirsel.incremental-link-frame.v1",
+                    "hirsel.incremental-link-frame.v2",
                     &(
                         &recipe.identity,
                         &recipe.linker,
                         &recipe.args,
-                        support_libs,
                         &archive_pins,
                         &options.runtime,
                         &options.target,
@@ -1885,7 +1878,6 @@ fn link_objects(
                 direct_link(
                     recipe,
                     &inputs,
-                    support_libs,
                     &output,
                     options.optimize,
                     options.debug_lines,
@@ -2454,16 +2446,7 @@ fn f5 = n5 g5 extern
                 .unwrap();
             inputs.push(options.runtime.clone());
             let output = path("program");
-            direct_link(
-                &recipe,
-                &inputs,
-                DIRECT_LINK_SUPPORT_LIBS,
-                &output,
-                false,
-                false,
-                false,
-            )
-            .unwrap();
+            direct_link(&recipe, &inputs, &output, false, false, false).unwrap();
             if profile {
                 let profile_path = dir.path().join(format!("foreign-{backend:?}.hprof"));
                 let raw = tempfile::NamedTempFile::new_in(dir.path()).unwrap();

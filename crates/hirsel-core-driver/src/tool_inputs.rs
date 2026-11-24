@@ -13,9 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
-const LINK_RECIPE_SCHEMA: u32 = 6;
-/// The libraries every direct link appends at the input marker.
-pub(crate) const SUPPORT_LIBS: &[&str] = &["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"];
+const LINK_RECIPE_SCHEMA: u32 = 7;
 const TOOLCHAIN_SCHEMA: u32 = 2;
 #[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct RecipeFile {
@@ -432,7 +430,7 @@ fn installed_toolchain(
             args.push(arg.clone());
         }
     }
-    let closure = crate::link_closure::closure(&args, INPUT_MARKER, &[], true)
+    let closure = crate::link_closure::closure(&args, INPUT_MARKER, true)
         .map_err(|error| refused(error.to_string()))?;
     let mut paths = closure.files;
     paths.push(linker.clone());
@@ -1008,7 +1006,7 @@ fn capture_link_recipe_with(
         argv = filtered;
     }
     let mut args = Vec::with_capacity(argv.len() + 1);
-    let mut marker = false;
+    let mut marker = None;
     let mut i = 0;
     while i < argv.len() {
         let arg = &argv[i];
@@ -1036,26 +1034,26 @@ fn capture_link_recipe_with(
             // capture could not replay (a gcc `cc1` and `as` pair rather
             // than a clang `-cc1`): folding it into the marker would drop a
             // link input and link a different program.
-            if marker {
+            if marker.replace(args.len()).is_some() {
                 return Err(io::Error::other(format!(
                     "link recipe capture through {} cannot replay the compile of a link source the driver adds; name a clang driver",
                     driver.display()
                 )));
             }
-            args.push(INPUT_MARKER.into());
-            marker = true;
         } else {
             args.push(arg.clone());
         }
         i += 1;
     }
-    if !marker {
-        let at = args
-            .iter()
+    let marker = marker.unwrap_or_else(|| {
+        args.iter()
             .position(|arg| arg == "-lc" || arg == "--as-needed")
-            .unwrap_or(args.len());
-        args.insert(at, INPUT_MARKER.into());
-    }
+            .unwrap_or(args.len())
+    });
+    args.insert(marker, INPUT_MARKER.into());
+    // These libraries follow the request objects in the driver's link order.
+    let support = ["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"];
+    args.splice(marker + 1..marker + 1, support.map(str::to_owned));
     // The driver's configuration files decide its argv: a changed one
     // captures again.
     let configuration = stderr
@@ -1105,14 +1103,13 @@ fn recipe_files(
     args: &[String],
     configuration: impl Iterator<Item = PathBuf>,
 ) -> io::Result<(Vec<RecipeFile>, Vec<PathBuf>)> {
-    let closure =
-        crate::link_closure::closure(args, INPUT_MARKER, SUPPORT_LIBS, false).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                host_link_input_error(error)
-            } else {
-                error
-            }
-        })?;
+    let closure = crate::link_closure::closure(args, INPUT_MARKER, false).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            host_link_input_error(error)
+        } else {
+            error
+        }
+    })?;
     let mut paths = closure.files;
     paths.push(linker.to_owned());
     paths.extend(configuration);

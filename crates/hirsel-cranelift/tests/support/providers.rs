@@ -2,6 +2,10 @@
 //! beneath the real runtime adapters. No provider export is mocked.
 use super::*;
 
+/// The last host operation code providers.c models (file, stdio and sleep
+/// rows). Later rows' request shapes are not modeled by its C world.
+const LAST_MODELED_OP: u8 = 18;
+
 struct Run {
     function: FuncId,
     args: Vec<u64>,
@@ -285,36 +289,37 @@ fn every_host_row_preserves_c_fields_and_status() {
         .iter()
         .copied()
         .filter(|op| {
-            !matches!(
-                op,
-                HostOp::Connect
-                    | HostOp::Listen
-                    | HostOp::Accept
-                    | HostOp::RecvBounded
-                    | HostOp::RecvReady
-                    | HostOp::SendPair
-                    | HostOp::NetNarrow
-                    | HostOp::NetNarrowTls
-                    | HostOp::NetNarrowResolve
-                    | HostOp::Resolve
-                    | HostOp::CredFetch
-                    | HostOp::TlsConnect
-                    | HostOp::SendSecret
-                    | HostOp::SecretSeal
-                    | HostOp::SecretNarrow
-                    | HostOp::SecretHmac
-                    | HostOp::SecretDeriveHmac
-                    | HostOp::SecretVerifyHmac
-                    | HostOp::SecretWrap
-                    | HostOp::SecretUnwrap
-                    | HostOp::SecretSign
-                    | HostOp::NetSplit
-                    | HostOp::StdinRead
-                    | HostOp::EnvGet
-                    | HostOp::EnvLen
-                    | HostOp::EnvName
-                    | HostOp::EnvNarrow
-            )
+            op.code() <= LAST_MODELED_OP
+                && !matches!(
+                    op,
+                    HostOp::Connect
+                        | HostOp::Listen
+                        | HostOp::Accept
+                        | HostOp::RecvBounded
+                        | HostOp::RecvReady
+                        | HostOp::SendPair
+                        | HostOp::NetNarrow
+                        | HostOp::NetNarrowTls
+                        | HostOp::NetNarrowResolve
+                        | HostOp::Resolve
+                        | HostOp::CredFetch
+                        | HostOp::TlsConnect
+                        | HostOp::SendSecret
+                        | HostOp::SecretSeal
+                        | HostOp::SecretNarrow
+                        | HostOp::SecretHmac
+                        | HostOp::SecretDeriveHmac
+                        | HostOp::SecretVerifyHmac
+                        | HostOp::SecretWrap
+                        | HostOp::SecretUnwrap
+                        | HostOp::SecretSign
+                        | HostOp::NetSplit
+                        | HostOp::StdinRead
+                        | HostOp::EnvGet
+                        | HostOp::EnvLen
+                        | HostOp::EnvName
+                        | HostOp::EnvNarrow
+                )
         })
         .enumerate()
     {
@@ -391,36 +396,37 @@ fn every_host_row_preserves_c_fields_and_status() {
         .iter()
         .copied()
         .filter(|op| {
-            !matches!(
-                op,
-                HostOp::Connect
-                    | HostOp::Listen
-                    | HostOp::Accept
-                    | HostOp::RecvBounded
-                    | HostOp::RecvReady
-                    | HostOp::SendPair
-                    | HostOp::NetNarrow
-                    | HostOp::NetNarrowTls
-                    | HostOp::NetNarrowResolve
-                    | HostOp::Resolve
-                    | HostOp::CredFetch
-                    | HostOp::TlsConnect
-                    | HostOp::SendSecret
-                    | HostOp::SecretSeal
-                    | HostOp::SecretNarrow
-                    | HostOp::SecretHmac
-                    | HostOp::SecretDeriveHmac
-                    | HostOp::SecretVerifyHmac
-                    | HostOp::SecretWrap
-                    | HostOp::SecretUnwrap
-                    | HostOp::SecretSign
-                    | HostOp::NetSplit
-                    | HostOp::StdinRead
-                    | HostOp::EnvGet
-                    | HostOp::EnvLen
-                    | HostOp::EnvName
-                    | HostOp::EnvNarrow
-            )
+            op.code() <= LAST_MODELED_OP
+                && !matches!(
+                    op,
+                    HostOp::Connect
+                        | HostOp::Listen
+                        | HostOp::Accept
+                        | HostOp::RecvBounded
+                        | HostOp::RecvReady
+                        | HostOp::SendPair
+                        | HostOp::NetNarrow
+                        | HostOp::NetNarrowTls
+                        | HostOp::NetNarrowResolve
+                        | HostOp::Resolve
+                        | HostOp::CredFetch
+                        | HostOp::TlsConnect
+                        | HostOp::SendSecret
+                        | HostOp::SecretSeal
+                        | HostOp::SecretNarrow
+                        | HostOp::SecretHmac
+                        | HostOp::SecretDeriveHmac
+                        | HostOp::SecretVerifyHmac
+                        | HostOp::SecretWrap
+                        | HostOp::SecretUnwrap
+                        | HostOp::SecretSign
+                        | HostOp::NetSplit
+                        | HostOp::StdinRead
+                        | HostOp::EnvGet
+                        | HostOp::EnvLen
+                        | HostOp::EnvName
+                        | HostOp::EnvNarrow
+                )
         })
         .enumerate()
     {

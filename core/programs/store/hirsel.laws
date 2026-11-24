@@ -197,6 +197,7 @@ store@1/store/test_l68_lazy_directory_inventory src=ea47ef1349f76992 sig=4809440
 store@1/store/test_l68_replay_branch_accounts src=2cf168464a130b38 sig=f9a400e2f884ba86 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_replay_overlay_table src=5c1366170259a19c sig=7d827ba5ee2d9ce1 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_resident_images_ignore_cold_slots src=b2cbb1850a7afc5f sig=e18318497613195c run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/test_l68_served_write_to_cold_tiered src=f8f8e61deac003ee sig=29d87a7f391f985c run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l68_trim_preserves_untouched_cold_slots src=736f78febff76090 sig=a09b3eb57c127284 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l69_lineage_last_holder_ghost_and_adopt src=a3dd00aa6c040f96 sig=afcc8c6ced4c3470 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l70_cache_overlap src=d009b9bf0f2e481c sig=6737fe2e362db439 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

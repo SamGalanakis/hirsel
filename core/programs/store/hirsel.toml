@@ -173,6 +173,9 @@ limit = 268435456
 [tests.runs."store@1/store/test_l68_cut_emits_hot_tiered_write"]
 limit = 268435456
 
+[tests.runs."store@1/store/test_l68_served_write_to_cold_tiered"]
+limit = 268435456
+
 [tests.runs."store@1/store/bucket_test_l4_cuts"]
 limit = 536870912
 

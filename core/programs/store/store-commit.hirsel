@@ -18,8 +18,8 @@ fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[
         }
         let mut roots = share_roots(base)
         let mut stamp_out = first
-        materialize_rows(mut roots.collections, ran.edits, first, mut stamp_out)?
-        materialize_rows(mut roots.streams, ran.replies, first, mut stamp_out)?
+        materialize_rows(mut roots.collections, ran.edits, false, first, mut stamp_out)?
+        materialize_rows(mut roots.streams, ran.replies, false, first, mut stamp_out)?
         canonical_roots(mut roots)?
         Ok((take roots, stamp_out))
     })?
@@ -310,7 +310,10 @@ fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecor
 
 // Charge page preparation to the existing call scope when the caller
 // supplied a byte or step grant. Only application is outside that scope.
-fn prepare_metered_pages[R, A](base: PageTree, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
+// Memory rows apply first; the Tiered plan then stages its collections over
+// that tree, and its tree is the commit's collection map. Every stamp drawn
+// here is raised into `issued`, so the watermark covers it.
+fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
     match take finished {
         RolledBack(take outcome) => Ok(RolledBack(take outcome)),
         DraftFault(take problem) => Ok(DraftFault(take problem)),
@@ -318,14 +321,69 @@ fn prepare_metered_pages[R, A](base: PageTree, attempt: Option[core.Cell[TieredT
             let mut prepared = take staged
             let first = prepared.first_stamp
             let mut draw = first
-            materialize_rows(mut prepared.roots.collections, prepared.ops, first, mut draw)?
-            materialize_rows(mut prepared.roots.streams, prepared.stream_ops, first, mut draw)?
+            let memory_only = match attempt {
+                Some(_) => true,
+                None => false,
+            }
+            materialize_rows(mut prepared.roots.collections, prepared.ops, memory_only, first, mut draw)?
+            materialize_rows(mut prepared.roots.streams, prepared.stream_ops, false, first, mut draw)?
+            if let Some(record) = attempt {
+                if let Some(take tiered_plan) = plan_tiered_edits(prepared.roots.collections, record, pins, prepared.ops, draw)? {
+                    prepared.roots.collections = share_page_tree(tiered_plan.tree)
+                    draw = tiered_plan.next_stamp
+                    prepared.plan = Some(take tiered_plan)
+                }
+            }
             canonical_roots(mut prepared.roots)?
             prepared.prepared_roots = true
-            if let Some(record) = attempt {
-                prepared.plan = plan_tiered_edits(base, record, pins, prepared.ops, draw)?
+            let drawn = draw - 1
+            let high = cell.replace(issued, drawn)
+            if high > drawn {
+                let _ = cell.replace(issued, high)
             }
             Ok(Prepared(take prepared))
         },
     }
+}
+
+// With `memory_only`, rows of Tiered collections are left to the Tiered
+// write plan, which stages them through the attempt's resolver.
+fn materialize_rows(mut tree: PageTree, operations: DataRows, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
+    let order = capacity(data_order(operations))?
+    for slot_order in 0u64 .. operations.count {
+        let op = ordered_row(operations, order, slot_order)
+        if let Some(_) = op.trim {
+            continue
+        }
+        if memory_only && tiered_data_key(tree, op.key) {
+            continue
+        }
+        if tree_domain(tree) == CollectionMap {
+            let kind = collection_kind(tree, list.slice(op.key, 0, 4))
+            if kind == Some(3u8) {
+                match op.value {
+                    Some(PageValue(raw)) => apply_cell(mut tree, op.key, Some(view raw), None, first, mut draw)?,
+                    Some(BlobBody(raw)) => apply_cell(mut tree, op.key, Some(view raw), Some(view raw), first, mut draw)?,
+                    None => apply_cell(mut tree, op.key, None, None, first, mut draw)?,
+                }
+                continue
+            }
+            if kind == Some(4u8) {
+                match op.value {
+                    Some(PageValue(raw)) => apply_log_append(mut tree, op.key, raw, None, first, mut draw)?,
+                    Some(BlobBody(raw)) => apply_log_append(mut tree, op.key, raw, Some(view raw), first, mut draw)?,
+                    None => fail("store: Log append has no value"),
+                }
+                continue
+            }
+        }
+        match op.value {
+            Some(PageValue(raw)) => put_page_row(mut tree, op.key, raw, first, mut draw)?,
+            Some(BlobBody(raw)) => put_shared_page_row(mut tree, op.key, raw, first, mut draw)?,
+            None => {
+                let _ = remove_page_row(mut tree, op.key, first, mut draw)?
+            },
+        }
+    }
+    Ok(())
 }

@@ -191,3 +191,58 @@ fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks
     }
     close(take reopened)
 }
+
+// Production apply over a Cold Tiered root: a served put and a served
+// delete edit the class-3 leaf through the Tiered plan, the cut emits the
+// edited leaf, and a reopen reads the acknowledged rows back.
+@test
+fn test_l68_served_write_to_cold_tiered(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 10u32)?
+        put(mut tx, handle, 3u64, 30u32)?
+        put(mut tx, handle, 5u64, 50u32)
+    })? else {
+        fail("L68: fixture inserts did not commit")
+    }
+    let pack_seq = disk_state(db).pages.next_pack
+    match db.disk {
+        Some(mut state) => {
+            state.pages.next_pack = pack_seq + 1
+        },
+        None => fail("L68: the fixture store is on disk"),
+    }
+    l62_prepare_snapshot_pages(mut db, d, rows.id, pack_seq)?
+    let _ = cut_install(mut db, NoHolderChange)?
+    close(take db)?
+
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let handle_cold = table(mut cold, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut cold, Some(100000), copy_env(handle_cold), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 3u64, 33u32)?
+        let _ = delete(mut tx, handle, 1u64)?
+        Ok(())
+    })? else {
+        fail("L68: the served write to the Cold Tiered collection commits")
+    }
+    let _ = checkpoint(mut cold)?
+    close(take cold)?
+
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows_again = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(done) = run(mut reopened, Some(100000), copy_env(rows_again), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(Option[u32], Option[u32], Option[u32]), Error] {
+        Ok((fetch(tx, handle, 1u64)?, fetch(tx, handle, 3u64)?, fetch(tx, handle, 5u64)?))
+    })? else {
+        fail("L68: a read of the reopened Tiered collection commits")
+    }
+    if done.value != (None, Some(33u32), Some(50u32)) {
+        fail("L68: the served put and delete survive the cut and reopen")
+    }
+    if accounts(reopened).tiered != 172 {
+        fail("L68: the Tiered account covers the two remaining rows")
+    }
+    close(take reopened)
+}

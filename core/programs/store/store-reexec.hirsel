@@ -212,7 +212,7 @@ fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
                 let staged = draft_body(db, registry, base, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[R, R] {
                     body(call, mut tx)
                 })
-                match prepare_metered_pages(base.collections, attempt, pins, take staged) {
+                match prepare_metered_pages(issued, attempt, pins, take staged) {
                     Ok(take ready) => take ready,
                     Error(Full(problem)) => RolledBack(Refused(problem)),
                     Error(_) => fail("store: invalid re-run pages"),

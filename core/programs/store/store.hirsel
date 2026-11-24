@@ -1299,7 +1299,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
         let perform = scoped fn() -> Finished[R, A] {
             let staged = draft_body(db, db.indexes, db.heads[i].roots, ci, keep_reply, reads, issued, attempt, pins, body)
             let prepared = if let Some(_) = steps {
-                match prepare_metered_pages(db.heads[i].roots.collections, attempt, pins, take staged) {
+                match prepare_metered_pages(issued, attempt, pins, take staged) {
                     Ok(take ready) => take ready,
                     Error(Full(problem)) => RolledBack(Refused(problem)),
                     Error(take problem) => DraftFault(take problem),
@@ -2040,43 +2040,6 @@ fn newest_layer(below: List[Arc[Staged]], streams: bool, key: Bytes) -> Option[u
 
 // Applies the rows in key order, the order their journal frame records and
 // replay applies them, so a commit splits and merges pages as recovery does.
-fn materialize_rows(mut tree: PageTree, operations: DataRows, first: u64, mut draw: u64) -> Result[(), Error] {
-    let order = capacity(data_order(operations))?
-    for slot_order in 0u64 .. operations.count {
-        let op = ordered_row(operations, order, slot_order)
-        if let Some(_) = op.trim {
-            continue
-        }
-        if tree_domain(tree) == CollectionMap {
-            let kind = collection_kind(tree, list.slice(op.key, 0, 4))
-            if kind == Some(3u8) {
-                match op.value {
-                    Some(PageValue(raw)) => apply_cell(mut tree, op.key, Some(view raw), None, first, mut draw)?,
-                    Some(BlobBody(raw)) => apply_cell(mut tree, op.key, Some(view raw), Some(view raw), first, mut draw)?,
-                    None => apply_cell(mut tree, op.key, None, None, first, mut draw)?,
-                }
-                continue
-            }
-            if kind == Some(4u8) {
-                match op.value {
-                    Some(PageValue(raw)) => apply_log_append(mut tree, op.key, raw, None, first, mut draw)?,
-                    Some(BlobBody(raw)) => apply_log_append(mut tree, op.key, raw, Some(view raw), first, mut draw)?,
-                    None => fail("store: Log append has no value"),
-                }
-                continue
-            }
-        }
-        match op.value {
-            Some(PageValue(raw)) => put_page_row(mut tree, op.key, raw, first, mut draw)?,
-            Some(BlobBody(raw)) => put_shared_page_row(mut tree, op.key, raw, first, mut draw)?,
-            None => {
-                let _ = remove_page_row(mut tree, op.key, first, mut draw)?
-            },
-        }
-    }
-    Ok(())
-}
-
 fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
     let mut tree = share_page_tree(tx.roots.collections)
     let Some(first) = int.checked_add(tx.ids, 1) else {
@@ -2084,9 +2047,9 @@ fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
     }
     let mut draw = first
     for layer in tx.below {
-        materialize_rows(mut tree, layer.ops.rows, first, mut draw)?
+        materialize_rows(mut tree, layer.ops.rows, false, first, mut draw)?
     }
-    materialize_rows(mut tree, tx.ops.rows, first, mut draw)?
+    materialize_rows(mut tree, tx.ops.rows, false, first, mut draw)?
     Ok(take tree)
 }
 

@@ -318,9 +318,9 @@ fn require_memory_manifest(m: PageManifest) -> Result[(), Error] {
     require_unarchived_manifest(m)
 }
 
-// The lineage and archive plans (M3 S7) have no reader yet.
+// The archive plan (M3 S7) has no reader yet.
 fn require_unarchived_manifest(m: PageManifest) -> Result[(), Error] {
-    if m.lineage.stamp != 0 || m.archive.stamp != 0 || m.archive_on != 0 || m.archive_drop != 0 {
+    if m.archive.stamp != 0 || m.archive_on != 0 || m.archive_drop != 0 {
         return Error(Unsupported(0x0031))
     }
     Ok(())

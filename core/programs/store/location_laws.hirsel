@@ -3,7 +3,7 @@
 // pack may repeat a live stamp and still count toward that pack's totals.
 type LawLocationSource: key = LawPage(u64) | LawBranch(u64, u8) | LawPin(String, u8) | LawList(u8)
 
-type LawLocationTree: key = LawCollections | LawData | LawPacks | LawRetired
+type LawLocationTree: key = LawCollections | LawData | LawPacks | LawRetired | LawRows
 
 type LawLocationFrame {
     place: std.page.PagePtr,
@@ -158,6 +158,8 @@ fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePt
             } else if tree == LawCollections {
                 child_tree = LawData
                 law_read_location_ptr(page, cell + 3)
+            } else if class == 2 && tree == LawRows {
+                continue
             } else if class == 2 {
                 law_read_location_list_row(mut graph, tree, page, row, cell)
                 continue
@@ -199,6 +201,10 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     let mut graph = LawLocationGraph(next_pack: list.word_le(raw, 128), next_stamp: list.word_le(raw, 112), physical: map.new(), packs: map.new(), listed: map.new(), retired: map.new(), frames: map.new(), incoming: map.new())
     law_follow_location(d, mut graph, law_read_location_ptr(raw, 324), 2, LawPacks, LawList(0))?
     law_follow_location(d, mut graph, law_read_location_ptr(raw, 360), 2, LawRetired, LawList(1))?
+    // `lineage` at 168 and `deferred_frees` at 204: class-2 trees whose rows
+    // name no pack the inventory counts.
+    law_follow_location(d, mut graph, law_read_location_ptr(raw, 168), 2, LawRows, LawList(3))?
+    law_follow_location(d, mut graph, law_read_location_ptr(raw, 204), 2, LawRows, LawList(2))?
     let branches = read_le(raw, 396, 4)
     let mut at = 400u64
     for _ in 0u64 .. branches {

@@ -87,3 +87,54 @@ fn l69_adopt_origin(frame: ReplacedFrame) -> Result[(), Error] {
     }
     Ok(())
 }
+
+// §13.6 "Fork rows": a journaled fork's watermark survives only in its FORK
+// frame until a cut publishes its row. Reopen replays the frame, the cut
+// writes (beta, main, w, 0), and the next reopen reads it back. Deleting
+// beta leaves the row no dependent, so the deleting cut removes it.
+@test
+fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let root = disk_test_directory(d)
+    let mut db = open(tasks, root, c, r, journal_crash_options())?
+    let mut declaring = declare(db, Migrate)?
+    let events = declare_log(mut declaring, "events", std.codec.of_bytes())?
+    let _ = seal(mut db, take declaring)?
+    let Committed(_) = run(mut db, None, copy_env(events), fn(mut tx: Tx, l: Log[Bytes]) -> Result[(), Error] {
+        let mut body: Bytes = list.with_capacity(3)
+        list.fill(mut body, 3, 7)
+        let _ = append(mut tx, l, body)?
+        Ok(())
+    })? else {
+        fail("lineage: the fixture append commits")
+    }
+    // §13.1: a FORK's watermark is the first stamp not yet issued.
+    let watermark = db.next_node + 1
+    let main = snapshot(db)
+    let (beta, _) = fork(mut db, "beta", main)?
+    close(take db)?
+
+    let mut replayed = open(tasks, root, c, r, journal_crash_options())?
+    let _ = checkpoint(mut replayed)?
+    close(take replayed)?
+
+    let mut reopened = open(tasks, root, c, r, journal_crash_options())?
+    let expected = LineageFork(child: beta.id, parent: 0, watermark: watermark, adopted: false)
+    let published = {
+        let forks = disk_state(reopened).pages.lists.rows.forks
+        map.len(forks) == 1 && match map.get(forks, beta.id) {
+            Some(row) => row == expected,
+            None => false,
+        }
+    }
+    if !published {
+        fail("lineage: the cut publishes beta's row with its FORK watermark")
+    }
+    let _ = delete_branch(mut reopened, beta)?
+    close(take reopened)?
+
+    let deleted = open(tasks, root, c, r, journal_crash_options())?
+    if map.len(disk_state(deleted).pages.lists.rows.forks) != 0 {
+        fail("lineage: a deleted branch's row with no dependent is removed")
+    }
+    close(take deleted)
+}

@@ -378,12 +378,18 @@ fn history_validate_manifest(mut client: std.object.Client, locator: HistoryLoca
 
 fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, file: String, take manifest: PageManifest, allow_tiered: bool) -> Result[ValidatedPageManifest, Error] waits {
     let blank = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
-    let mut lists = ListedPages(allow_tiered: allow_tiered, packs: map.new(), retired: map.new(), deferred: list.new(), class_two: map.new(), live_graph: take blank)
+    let mut lists = empty_listed_pages(allow_tiered, take blank)
     let mut final_item: Option[u64] = None
     read_page_list(mut client, id, manifest, manifest.pack_root, None, PackList, mut final_item, mut lists,
         scoped fn(mut reader_client: std.object.Client, store_id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
             history_list_page(mut reader_client, locator, deadline, store_id, ptr)
         })?
+    final_item = None
+    read_page_list(mut client, id, manifest, manifest.lineage, None, LineageList, mut final_item, mut lists,
+        scoped fn(mut reader_client: std.object.Client, store_id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
+            history_list_page(mut reader_client, locator, deadline, store_id, ptr)
+        })?
+    validate_lineage_forks(file, manifest, lists.lineage.forks)?
     for (seq, _) in lists.class_two {
         if map.contains(lists.packs, seq) || !map.contains(locator.rows, seq) {
             return Error(disk_fault(file, 72, Malformed))
@@ -433,10 +439,10 @@ fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator,
         let name = paged_pack_path(seq)?
         return Error(disk_fault(name, offset, Dangling(stamp)))
     }
-    let ListedPages(packs: take inventory, retired: take retired, live_graph: take graph, ..) = take lists
+    let ListedPages(packs: take inventory, retired: take retired, lineage: take lineage, live_graph: take graph, ..) = take lists
     let mut ordered = take graph
     history_graph_order(mut ordered)
-    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, graph: take ordered, allow_tiered: allow_tiered))
+    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, lineage: take lineage, graph: take ordered, allow_tiered: allow_tiered))
 }
 
 fn history_paged_capture(mut source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[JournalReplay, Error] waits {

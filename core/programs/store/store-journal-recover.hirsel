@@ -118,10 +118,12 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
     let charge = branch_root_bytes(name, roots)
     if charge > META_LIMIT - replay.record_bytes { return Error(disk_fault(file, 0, Malformed)) }
     capacity(list.try_reserve(mut replay.state.tips, 1))?
+    capacity(list.try_reserve(mut replay.forked, 1))?
     capacity(map.try_reserve(mut replay.names, 1))?
     map.insert(mut replay.names, take key, id)
     list.push(mut replay.state.tips, Tip(id: id, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: forked_at, at: at))
     replay.record_bytes += charge
+    list.push(mut replay.forked, LineageFork(child: id, parent: parent, watermark: watermark, adopted: false))
     replay.state.next_branch = id + 1
     replay.next_node = order.max(replay.next_node, watermark - 1)
     replay.tiered.exact = false

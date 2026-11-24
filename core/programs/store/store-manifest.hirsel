@@ -566,6 +566,7 @@ type ValidatedPageManifest {
     manifest: PageManifest,
     inventory: Map[u64, PagePack],
     retired: Map[u64, ()],
+    lineage: Lineage,
     graph: PageGraph,
     allow_tiered: bool
 }
@@ -577,7 +578,7 @@ fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> R
 
 fn validate_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_tiered: bool) -> Result[ValidatedPageManifest, Error] waits {
     let graph = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
-    let mut lists = ListedPages(allow_tiered: allow_tiered, packs: map.new(), retired: map.new(), deferred: list.new(), class_two: map.new(), live_graph: take graph)
+    let mut lists = empty_listed_pages(allow_tiered, take graph)
     let mut final_item: Option[u64] = None
     let mut directory = d
     read_page_list(mut directory, id, manifest, manifest.pack_root, None, PackList, mut final_item, mut lists, read_list_page)?
@@ -585,6 +586,9 @@ fn validate_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, al
     read_page_list(mut directory, id, manifest, manifest.retirement_root, None, RetiredList, mut final_item, mut lists, read_list_page)?
     final_item = None
     read_page_list(mut directory, id, manifest, manifest.deferred_frees, None, DeferredList, mut final_item, mut lists, read_list_page)?
+    final_item = None
+    read_page_list(mut directory, id, manifest, manifest.lineage, None, LineageList, mut final_item, mut lists, read_list_page)?
+    validate_lineage_forks("MANIFEST", manifest, lists.lineage.forks)?
     for (seq, _) in lists.class_two {
         if map.contains(lists.packs, seq) || map.contains(lists.retired, seq) {
             return Error(disk_fault("MANIFEST", 72, Malformed))
@@ -617,8 +621,8 @@ fn validate_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, al
         }
         Ok(take candidate)
     })?
-    let ListedPages(packs: take inventory, retired: take retired, ..) = take lists
-    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, graph: take resolved, allow_tiered: allow_tiered))
+    let ListedPages(packs: take inventory, retired: take retired, lineage: take lineage, ..) = take lists
+    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, lineage: take lineage, graph: take resolved, allow_tiered: allow_tiered))
 }
 
 fn cleanup_page_manifest(d: Dir, validated: ValidatedPageManifest) -> Result[(), Error] waits {

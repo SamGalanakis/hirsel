@@ -15,7 +15,7 @@ type LineageCell: key {
 
 type LineageRow: send = ForkRow(LineageFork) | CellRow(LineageCell, u64)
 
-fn lineage_entry(row: LineageRow) -> std.page.Entry {
+fn lineage_row(row: LineageRow) -> std.page.Row {
     let (take key, take value) = match row {
         ForkRow(fork_row) => {
             let mut encoded_key: Bytes = list.with_capacity(5)
@@ -40,7 +40,8 @@ fn lineage_entry(row: LineageRow) -> std.page.Entry {
             (take encoded_key, take encoded_value)
         },
     }
-    std.page.Entry(key: take key, cell: InlineValue(take value))
+    let charge = 62 + list.len(key) + list.len(value)
+    std.page.Row(key: take key, value: take value, charge: charge)
 }
 
 fn decode_lineage_row(file: String, at: u64, key: Bytes, value: Bytes) -> Result[LineageRow, Error] {
@@ -67,7 +68,7 @@ fn decode_lineage_row(file: String, at: u64, key: Bytes, value: Bytes) -> Result
     }
 }
 
-type Lineage: send {
+type Lineage: shareable + send {
     forks: Map[u32, LineageFork],
     cells: Map[LineageCell, u64]
 }
@@ -339,4 +340,102 @@ fn adopt_lineage_cells(mut lineage: Lineage, holders: LineageHolders, mut packs:
     }
     lineage.cells = take kept
     Ok(())
+}
+
+fn empty_lineage() -> Lineage {
+    Lineage(forks: map.new(), cells: map.new())
+}
+
+fn same_lineage(a: Lineage, b: Lineage) -> bool {
+    if map.len(a.forks) != map.len(b.forks) || map.len(a.cells) != map.len(b.cells) {
+        return false
+    }
+    for (child, fork_row) in a.forks {
+        match map.get(b.forks, child) {
+            Some(other) if other == fork_row => (),
+            _ => return false,
+        }
+    }
+    for (cell, live_bytes) in a.cells {
+        match map.get(b.cells, cell) {
+            Some(other) if other == live_bytes => (),
+            _ => return false,
+        }
+    }
+    true
+}
+
+// The published `lineage` tree, rebuilt whole whenever its rows change.
+// Keys sort fork rows (0x01) before cells (0x02).
+fn build_lineage_tree(rows: Lineage, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] {
+    let mut built: List[std.page.Row] = list.new()
+    capacity(list.try_reserve(mut built, map.len(rows.forks) + map.len(rows.cells)))?
+    for (_, fork_row) in rows.forks {
+        list.push(mut built, lineage_row(ForkRow(fork_row)))
+    }
+    for (cell, live_bytes) in rows.cells {
+        list.push(mut built, lineage_row(CellRow(cell, live_bytes)))
+    }
+    list.sort(mut built, fn(a: std.page.Row, b: std.page.Row) -> Order {
+        order.compare(a.key, b.key)
+    })
+    let tree = page_result(std.page.bulk(built, Unprefixed, 1024, mut next_stamp))?
+    match take tree {
+        Some(take root) => Ok(take root),
+        None => Ok(std.page.empty(0, 0, Unprefixed)),
+    }
+}
+
+fn queued_branch_ids(root: Arc[std.page.Page], mut out: List[u32]) -> Result[(), Error] {
+    let image = std.page.image_of(root)
+    for slot in 0u64 .. std.page.count(image) {
+        if std.page.level(image) != 0 {
+            queued_branch_ids(option.unwrap(std.page.child(root, slot)), mut out)?
+            continue
+        }
+        let value = option.unwrap(std.page.value_at(root, slot))
+        let owner: u32 = list.word_le(value, 1)
+        capacity(list.try_reserve(mut out, 1))?
+        list.push(mut out, owner)
+    }
+    Ok(())
+}
+
+// The fork rows a cut publishes (§13.6 "Fork rows"): the installed rows,
+// a row for each fork the cut is the first to cover, `adopt`'s flag, then
+// every row with no dependent removed. Dependents are counted after T8 step
+// 3's transfer: `holders` names each participant's branch (heads, then pins)
+// and `queued` this cut's added rows.
+fn cut_lineage_rows(db: Db, delta: HolderDelta, holders: List[u32], queued: List[DeferredFree]) -> Result[Lineage, Error] {
+    let pages = disk_state(db).pages
+    let mut rows = disk_allocation(scoped fn() -> Result[Lineage, Error] {
+        Ok(clone(pages.lists.rows))
+    })?
+    capacity(map.try_reserve(mut rows.forks, list.len(pages.forked)))?
+    for fork_row in pages.forked {
+        map.insert(mut rows.forks, fork_row.child, fork_row)
+    }
+    if let ReplaceMain(_, Some(slot)) = delta {
+        let _ = map.update(mut rows.forks, db.heads[slot].id, fn(mut fork_row: LineageFork) {
+            fork_row.adopted = true
+        })
+    }
+    let mut dependents: List[u32] = list.new()
+    capacity(list.try_reserve(mut dependents, list.len(holders)))?
+    for branch_id in holders {
+        list.push(mut dependents, branch_id)
+    }
+    queued_branch_ids(pages.lists.deferred, mut dependents)?
+    prune_lineage_forks(mut rows.forks, dependents, list.new(), list.new(), queued)
+    Ok(take rows)
+}
+
+// A fork the next cut is the first to publish: a journaled fork's FORK
+// watermark, or a cut-path fork's capture watermark.
+fn note_fork_row(mut db: Db, fork_row: LineageFork) -> Result[(), Error] {
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
+        capacity(list.try_reserve(mut state.pages.forked, 1))?
+        list.push(mut state.pages.forked, fork_row)
+        Ok(())
+    })
 }

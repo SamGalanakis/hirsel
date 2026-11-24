@@ -757,14 +757,6 @@ fn cut_install(mut db: Db, take delta: HolderDelta) -> Result[Ticket, Error] wai
     Ok(commit_ticket)
 }
 
-fn branch_record_bytes(name: String) -> u64 {
-    143 + string.byte_len(name)
-}
-
-fn pin_record_bytes(name: String) -> u64 {
-    130 + string.byte_len(name)
-}
-
 fn branch_root_bytes(name: String, roots: Roots) -> u64 {
     branch_record_bytes(name) + keyed_root_record_bytes(roots.keyed)
 }
@@ -810,6 +802,7 @@ pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket)
         return fork_live(mut db, name, slot)
     }
     db.next_branch += 1
+    if is_disk(db) { note_fork_row(mut db, LineageFork(child: id, parent: from.branch, watermark: from.watermark, adopted: false))? }
     let (take head, take indexed_name) = disk_allocation(scoped fn() -> Result[(Head, String), Error] {
         Ok((Head(id: id, name: string.from(name), parent: from.branch, forked_at: from.head, roots: share_roots(from.roots), head: from.head, at: at, following: None), string.from(name)))
     })?
@@ -826,12 +819,13 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
         }
     }
     let id = db.next_branch
+    let watermark = stamp_after(db.next_node)?
     let (take head, take indexed_name, take frame) = disk_allocation(scoped fn() -> Result[(Head, String, Option[Bytes]), Error] {
         let source = db.heads[parent]
         let head = Head(id: id, name: string.from(name), parent: source.id, forked_at: source.head, roots: share_roots(source.roots), head: source.head, at: source.at, following: None)
         let frame: Option[Bytes] = if disk {
             let context = DiskContext(store: db.store, role: 2, seq: db.file_seq)
-            Some(capacity(encode_fork(context, db.file_end, head, stamp_after(db.next_node)?))?)
+            Some(capacity(encode_fork(context, db.file_end, head, watermark))?)
         } else {
             None
         }
@@ -861,6 +855,9 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     let fork_ticket = Ticket(store: store, open: opened, mark: Journal(sequence, id, head.head))
     if disk {
         durable(mut db, fork_ticket)?
+    }
+    if disk {
+        note_fork_row(mut db, LineageFork(child: id, parent: head.parent, watermark: watermark, adopted: false))?
     }
     install_head(mut db, take head, take indexed_name)
     db.changes += 1
@@ -4351,7 +4348,8 @@ type PageDisk: send {
     lists: PagedLists,
     owners: Map[IncomingEdge, u64],
     carried: List[u64],
-    deferred: Option[u64]
+    deferred: Option[u64],
+    forked: List[LineageFork]
 }
 
 type DiskStartup: send {
@@ -4452,7 +4450,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
             let (take segment, take end_file) = disk_new_segment(d, id, 1, 0)?
             disk_publish_manifest(d, id, manifest)?
             let genesis = capacity(main_state(empty_roots(), 0, 0))?
-            let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None)
+            let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None, forked: list.new())
             return Ok(DiskStartup(store: id, fence: 0, state: take genesis, live: 0, tiered: 0, resident_pages: 0, uncovered: 0, next_node: 0, next_table: 1, generation: 1, cut_first: 1, recorded_after: 0, seq: 1, segment: take segment, end_file: take end_file, pages: take pages))
         },
         Error(take problem) => return Error(take problem),
@@ -4469,7 +4467,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
     let recovered = journal_recover(d, loaded.store, loaded.manifest.first_live, Locked, take initial)?
     let JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
     let live_bytes = journal_account(replay)?
-    let JournalReplay(state: take state, next_node: next_node, tiered: tiered, ..) = take replay
+    let JournalReplay(state: take state, next_node: next_node, tiered: tiered, forked: take forked, ..) = take replay
     over_ceiling(live_bytes, options.resident_limit)?
     let resident_pages = disk_allocation(scoped fn() -> Result[u64, Error] {
         let roots = capacity(state_roots(state))?
@@ -4484,7 +4482,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
     disk_io(host.sync_dir(d))?
     let (take segment, take end_file) = disk_new_segment(d, loaded.store, seq, last_end)?
     let DiskLoaded(store: id, manifest: take manifest, lists: take lists, locations: take locations, ..) = take loaded
-    let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None)
+    let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: take forked)
     Ok(DiskStartup(store: id, fence: manifest.fence, state: take state, live: live_bytes, tiered: tiered.total, resident_pages: resident_pages, uncovered: uncovered, next_node: next_node, next_table: manifest.next_table, generation: manifest.generation, cut_first: manifest.first_live, recorded_after: recorded_after, seq: seq, segment: take segment, end_file: take end_file, pages: take pages))
 }
 
@@ -4837,7 +4835,7 @@ fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option
         }
     }
     let installed_lists: PagedLists = clone(layout.lists.roots)
-    Ok((PageDisk(next_pack: layout.lists.run_packs.next_pack, locations: take locations, lists: take installed_lists, owners: take owners, carried: take carried, deferred: deferred), take plan))
+    Ok((PageDisk(next_pack: layout.lists.run_packs.next_pack, locations: take locations, lists: take installed_lists, owners: take owners, carried: take carried, deferred: deferred, forked: list.new()), take plan))
 }
 
 fn cut_io_error(mut db: Db, take problem: Error) -> Error {
@@ -4917,6 +4915,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     })?
     let CutParticipants(holders: take participants_held, roots: take roots, branches: take branches) = take participants
     let mut staged = stage_tiered_cut(db, take roots, branches, pack_bytes)?
+    let lineage_rows = cut_lineage_rows(db, delta, branches, staged.queued)?
     db.next_node = staged.stamp_end - 1
     let holders = sealed_cut_holders(take participants_held, staged)?
     let mut base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, staged.roots)?
@@ -4932,7 +4931,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     let attempt = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
         let cut_plan = {
             let installed = disk_state(db).pages
-            plan_page_cut(base, holders, installed.lists, staged.queued, Some(view installed.carried), staged.next_pack, pack_bytes, marks, relocated, mut stamp)?
+            plan_page_cut(base, holders, installed.lists, staged.queued, lineage_rows, Some(view installed.carried), staged.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
         let mut buffers = cut_output_buffers(cut_plan, manifest_bytes, limit)?
         // A retry after emission reuses the segment created by the first attempt.
@@ -5478,7 +5477,8 @@ type JournalReplay {
     names: Map[String, u32],
     record_bytes: u64,
     next_node: u64,
-    tiered: ReplayTieredAccount
+    tiered: ReplayTieredAccount,
+    forked: List[LineageFork]
 }
 
 fn journal_replay(take state: State, next_node: u64) -> Result[JournalReplay, Error] {
@@ -5496,7 +5496,7 @@ fn journal_replay(take state: State, next_node: u64) -> Result[JournalReplay, Er
         Ok((take names, total))
     })?
     let tiered = ReplayTieredAccount(total: 0, exact: list.len(state.tips) == 1 && list.len(state.pins) == 0)
-    Ok(JournalReplay(state: take state, names: take names, record_bytes: total, next_node: next_node, tiered: tiered))
+    Ok(JournalReplay(state: take state, names: take names, record_bytes: total, next_node: next_node, tiered: tiered, forked: list.new()))
 }
 
 fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp], mut account: ReplayTieredAccount) -> Result[(), Error] {

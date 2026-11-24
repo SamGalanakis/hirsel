@@ -525,3 +525,11 @@ pub fn sim_level_reservation(declaration: SimLevels) -> u64 {
     if list.len(declaration.weak) == 0 { return 0 }
     sim_level_bytes(declaration.weak)
 }
+
+fn branch_record_bytes(name: String) -> u64 {
+    143 + string.byte_len(name)
+}
+
+fn pin_record_bytes(name: String) -> u64 {
+    130 + string.byte_len(name)
+}

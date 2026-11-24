@@ -97,7 +97,7 @@ fn rebuild_page_store(take validated: ValidatedPageManifest, locator: Option[Vie
     let locations = disk_allocation(scoped fn() -> Result[PageLocations, Error] {
         rebuild_page_locations(validated)
     })?
-    let ValidatedPageManifest(manifest: take manifest, graph: take resolved, allow_tiered, ..) = take validated
+    let ValidatedPageManifest(manifest: take manifest, graph: take resolved, lineage: take rows, allow_tiered, ..) = take validated
     let mut graph = take resolved
     let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
         Ok(std.page.empty(0, 0, Collection))
@@ -127,7 +127,13 @@ fn rebuild_page_store(take validated: ValidatedPageManifest, locator: Option[Vie
             let PageTree(root: take queue, ..) = attach_page_tree(pages, manifest.deferred_frees, Unprefixed, 1024, None)
             take queue
         }
-        Ok((take all, PagedLists(packs: take packs, retired: take retired, deferred: deferred, deferred_next: manifest.deferred_next)))
+        let lineage = if manifest.lineage.stamp == 0 && manifest.retirement_root.stamp == 0 {
+            arc.share(retired)
+        } else {
+            let PageTree(root: take tree, ..) = attach_page_tree(pages, manifest.lineage, Unprefixed, 1024, None)
+            take tree
+        }
+        Ok((take all, PagedLists(packs: take packs, retired: take retired, deferred: deferred, deferred_next: manifest.deferred_next, lineage: lineage, rows: clone(rows))))
     })?
     Ok(LoadedPageStore(manifest: take manifest, holders: take holders, lists: take lists, locations: take locations))
 }

@@ -133,6 +133,7 @@ pub fn count[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bou
 fn open_scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[Rows[K, V], Error] waits {
     read_access(r, s)?
     if !same(s.store, t.store) { return Error(Foreign) }
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let captured: Snapshot = clone(s)
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
@@ -150,6 +151,7 @@ pub fn scan_reverse[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], 
 pub fn find[J, K, V](r: Reader, s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] waits {
     read_access(r, s)?
     if !same(s.store, ix.store) { return Error(Foreign) }
+    readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?
     let captured: Snapshot = clone(s)
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?

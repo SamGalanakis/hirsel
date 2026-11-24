@@ -1,0 +1,98 @@
+// L56 over a Tiered objects@1 store. Wire this source into [tests.sources]
+// with the cold-path fixture in S3–S6. The Reader, pager, and lease machinery
+// must generate these errors. The publisher uses its normal read functions.
+type S3ReadCase {
+    problem: FailedRead,
+    phase: ReadPhase
+}
+
+type S3ReadTrial {
+    board: Board[(), Qh],
+    rounds: RoundRegister,
+    joined: List[Joiner],
+    owner: FailedReadOwner,
+    other: FailedReadOwner,
+    release: store.Snapshot,
+    answers: List[Answer],
+    subscription: SubscriptionInput
+}
+
+// Prepare a durable base with sub 1 and an unsent unit showing rows 1 and 2.
+// Its release revokes the caller at row 0 and changes enough data for two
+// shared pages. The fixture places the required cold edge in the second page,
+// after the first rerun row, or after the first G3 image row, respectively.
+// S6 expires the historical capture for Reclaimed. S4 exhausts GET attempts
+// using the S3 endpoint for Remote, and fails the local cold read for Io.
+// The trial's Register is already at the base. Its two owed answers are
+// positions 17 and 18, and the second owner is joined outside the failed view.
+type OpenS3ReadTrial = scoped fn(std.sim.s3.Endpoint, S3ReadCase) -> Result[S3ReadTrial, store.Error] waits
+
+fn observe_s3_read_failure(take trial: S3ReadTrial, fault: S3ReadCase) -> bool waits {
+    let S3ReadTrial(board: take board, rounds: take reserved, joined: take sessions, owner: take owner,
+        other: take other, release: take committed, answers: take answers, subscription: take input) = take trial
+    let mut b = take board
+    let mut rounds = take reserved
+    let mut joined = take sessions
+    let register = latest.handle(rounds.round)
+    let a = store.version(b.base)
+    if !release_load(register, owner.fence, a) { return false }
+    let mut owes: List[Owe] = list.new()
+    let mut waiting: List[Replies] = list.new()
+    keep_answers(mut waiting, take answers)
+    let at = if fault.phase == SubscribeRead {
+        publish_wire_subscription(mut b, mut joined, mut owes, 1u64, 1u32, 2u64, take input)
+        if latest.read(register).at != a || release_load(register, owner.fence, a) { return false }
+        a
+    } else {
+        let version = store.version(committed)
+        b.newest = Some(take committed)
+        let mut fenced = Fenced(sessions: list.new(), all: false)
+        owes = round(mut b, mut fenced)
+        fence_before_round(mut joined, take fenced, version, mut rounds, scoped fn() {
+            if latest.read(register).at != a || latest.read(owner.fence).latest != version {
+                fail("L56 cold read: R advanced before the affected fence")
+            }
+        })
+        if latest.read(register).at != version || release_load(register, owner.fence, a) { return false }
+        version
+    }
+    if !release_load(register, other.fence, a) { return false }
+    settle(mut b.subs, mut joined, mut waiting, take owes, at)
+    if !failed_read_reset(owner, at) { return false }
+    settle(mut b.subs, mut joined, mut waiting, list.new(), at)
+    if let Error(Empty) = channel.try_receive(owner.from) {} else { return false }
+
+    // The failed cold read is one-shot. The next subscription uses the last
+    // Released snapshot and must complete as one whole image at that base.
+    let restarted = at_base_generation(mut b, 1u64, 1u32, 3u64, failed_read_sub())
+    let rows = if fault.phase == SubscribeRead { 2u64 } else { 0u64 }
+    restarted.version == at && list.len(restarted.complete) == 1u64 &&
+        restarted.complete[0u64] == 1u32 && list.len(restarted.rows) == rows
+}
+
+fn s3_l56_case(tasks: Tasks, clock: Clock, take config: std.sim.s3.Config,
+    take plan: std.sim.world.Plan, fault: S3ReadCase, open_trial: OpenS3ReadTrial) -> bool waits {
+    let (endpoint, take running) = std.sim.s3.start_service(tasks, take config, take plan, clock, 1048576u64, 33554432u64)
+    let mut server = take running
+    let passed = match open_trial(endpoint, fault) {
+        Ok(take trial) => observe_s3_read_failure(take trial, fault),
+        Error(_) => false,
+    }
+    task.cancel(mut server)
+    let _ = task.join(take server)
+    passed
+}
+
+fn s3_l56_cases() -> Inline[S3ReadCase, 9] {
+    [
+        S3ReadCase(problem: ReclaimedBlock, phase: ChangesPage),
+        S3ReadCase(problem: ReclaimedBlock, phase: ViewRead),
+        S3ReadCase(problem: ReclaimedBlock, phase: SubscribeRead),
+        S3ReadCase(problem: RemoteRead, phase: ChangesPage),
+        S3ReadCase(problem: RemoteRead, phase: ViewRead),
+        S3ReadCase(problem: RemoteRead, phase: SubscribeRead),
+        S3ReadCase(problem: DeviceRead, phase: ChangesPage),
+        S3ReadCase(problem: DeviceRead, phase: ViewRead),
+        S3ReadCase(problem: DeviceRead, phase: SubscribeRead),
+    ]
+}

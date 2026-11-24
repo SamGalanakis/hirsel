@@ -6,14 +6,7 @@ const stamp: String = "20130524T000000Z"
 
 const host_name: String = "s3.test"
 
-type Server: send {
-    config: sim.s3.Config,
-    plan: sim.world.Plan,
-    time: Clock,
-    port: Served[NetOp]
-}
-
-type Wire {
+type Wire: send {
     network: Net,
     time: Clock,
     key: Secret,
@@ -29,12 +22,6 @@ type WireReply {
     status: u16,
     fields: Map[String, String],
     data: Bytes
-}
-
-fn live_server(take input: Server) -> sim.s3.Report waits {
-    let Server(config: take config, plan: take initial, time, port: take port) = take input
-    let mut plan = take initial
-    sim.s3.serve(config, mut plan, time, take port)
 }
 
 fn live_clock(take input: sim.world.World) waits {
@@ -63,6 +50,11 @@ fn signing_key() -> Secret {
 }
 
 fn fixture(tasks: Tasks, seed: u64, choices: List[u64], dialect: u16) -> (Wire, Task[sim.s3.Report], Task[()]) {
+    let (take wire, _, take server, take driver) = wire_fixture(tasks, seed, choices, dialect, list.new())
+    (take wire, take server, take driver)
+}
+
+fn wire_fixture(tasks: Tasks, seed: u64, choices: List[u64], dialect: u16, take holds: List[sim.s3.Hold]) -> (Wire, sim.s3.Endpoint, Task[sim.s3.Report], Task[()]) {
     let address = Addr(ip: V4(2130706433), port: 8080)
     let mut first = sim.net.new(sim.net.defaults())
     let mut second = sim.net.new(sim.net.defaults())
@@ -92,12 +84,11 @@ fn fixture(tasks: Tasks, seed: u64, choices: List[u64], dialect: u16) -> (Wire, 
     let plan = sim.world.plan_from(sim.world.Script(tail_seed: seed, streams: take scripts), 0)
     let key = signing_key()
     let verify = result.unwrap(secret.narrow(key, "verify"))
-    let config = sim.s3.Config(address: address, cut: None, network: take first, after_resolve: Some(take second), credential: string.from(access), signing_key: take verify, faults: take faults, exists_status: dialect, fragment_bytes: 64, max_body: 65536)
+    let config = sim.s3.Config(address: address, cut: None, network: take first, after_resolve: Some(take second), credential: string.from(access), signing_key: take verify, faults: take faults, holds: take holds, exists_status: dialect, fragment_bytes: 64, max_body: 65536)
     let (world, time) = sim.world.new(seed, 0, 0)
-    let (network, port) = provide.net(bytes 131072)
     let driver = task.spawn(tasks, bytes 65536, take world, live_clock)
-    let server = task.spawn(tasks, bytes 8388608, Server(config: take config, plan: take plan, time: time, port: take port), live_server)
-    (Wire(network: network, time: time, key: take key, address: address), take server, take driver)
+    let (endpoint, take server) = sim.s3.start_service(tasks, take config, take plan, time, 131072, 8388608)
+    (Wire(network: sim.s3.endpoint_network(endpoint), time: time, key: take key, address: address), endpoint, take server, take driver)
 }
 
 fn header(name: String, value: String) -> http_client.Header {
@@ -517,7 +508,7 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
     let mut scripts: List[List[u64]] = list.with_capacity(1)
     list.push(mut scripts, take words)
     let plan = sim.world.plan_from(sim.world.Script(tail_seed: seed, streams: take scripts), 0)
-    let config = sim.s3.Config(address, cut: None, network: take net_model, after_resolve: None, credential: string.from(access), signing_key: take verify, faults: take faults, exists_status: dialect, fragment_bytes: 64, max_body: 65536)
+    let config = sim.s3.Config(address, cut: None, network: take net_model, after_resolve: None, credential: string.from(access), signing_key: take verify, faults: take faults, holds: list.new(), exists_status: dialect, fragment_bytes: 64, max_body: 65536)
     let (world, time) = sim.world.new(seed, 0, 1369353600000)
     let driver = task.spawn(tasks, bytes 65536, take world, live_clock)
     let (endpoint, server_task) = sim.s3.start_service(tasks, take config, take plan, time, 131072, 8388608)
@@ -751,6 +742,60 @@ fn object_register_worker(take requests: object.Requests) -> bool waits {
         return false
     }
     location == "global" && encryption == "AES256" && intact && observed.etag == next.etag && current == string.as_bytes("next")
+}
+
+type HeldWire: send {
+    wire: Wire,
+    path: String
+}
+
+fn put_held(take w: HeldWire) -> Option[u16] waits {
+    s3_call(w.wire, "PUT", w.path)
+}
+
+fn s3_call(w: Wire, method: String, path: String) -> Option[u16] waits {
+    let payload = string.as_bytes(if method == "PUT" {
+        "payload"
+    } else {
+        ""
+    })
+    let req = signed_request(w, method, path, list.new(), payload)
+    match fetch_wire(w, req, payload, 1000000000) {
+        Ok(reply) => Some(reply.status),
+        Error(_) => None,
+    }
+}
+
+fn held_wire(wire: Wire, path: String) -> HeldWire {
+    HeldWire(wire: Wire(network: wire.network, time: wire.time, key: secret.share(wire.key), address: wire.address), path: string.from(path))
+}
+
+// expect: run held_requests(tasks) = true
+fn held_requests(tasks: Tasks) -> bool waits {
+    let mut holds: List[sim.s3.Hold] = list.new()
+    list.push(mut holds, sim.s3.Hold(method: "PUT", key: "head", from: 1, count: 1, until: Requested("GET", "mark", 1), then: Apply))
+    list.push(mut holds, sim.s3.Hold(method: "PUT", key: "drop", from: 1, count: 1, until: Applied("PUT", "head", 1), then: Drop))
+    list.push(mut holds, sim.s3.Hold(method: "PUT", key: "timed", from: 1, count: 1, until: At(50000000), then: ApplyLoseReply))
+    let (take wire, endpoint, take server, take driver) = wire_fixture(tasks, 31, sequence("000000000000"), 412, take holds)
+    let parked = task.spawn(tasks, bytes 1048576, held_wire(wire, "/head"), put_held)
+    result.unwrap(sim.s3.requested(endpoint, "PUT", "head", 1))
+    let hidden = s3_call(wire, "GET", "/head")
+    let discarded = task.spawn(tasks, bytes 1048576, held_wire(wire, "/drop"), put_held)
+    result.unwrap(sim.s3.requested(endpoint, "PUT", "drop", 1))
+    let marker = s3_call(wire, "GET", "/mark")
+    let completed = result.unwrap(task.join(take parked))
+    let lost = result.unwrap(task.join(take discarded))
+    let timed = s3_call(wire, "PUT", "/timed")
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    if hidden != Some(404) || marker != Some(404) || completed != Some(200) || lost != None || timed != None {
+        return false
+    }
+    if !has_saved(observed, "head", "payload") || map.contains(observed.objects, "drop") || !has_saved(observed, "timed", "payload") || list.len(observed.requests) != 4 || list.len(observed.head_writes) != 1 {
+        return false
+    }
+    let history = view observed.requests
+    history[0].method == "GET" && history[0].key == "head" && history[0].status == 404 && !history[0].applied && history[1].request == observed.head_writes[0].request && history[1].applied && history[2].key == "mark" && history[3].key == "timed" && history[3].at_ns == 50000000
 }
 
 // expect: run object_register_reads_on_worker(tasks) = true

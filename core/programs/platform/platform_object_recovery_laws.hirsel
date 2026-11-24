@@ -35,7 +35,7 @@ fn recovery_bucket(tasks: Tasks, real: Clock) -> RecoveryBucket {
     let _ = bytebuf.append_inline(mut signing_bytes, sample, 0, 32)
     let signing_key = result.unwrap(secret.seal(take signing_bytes, "verify"))
     let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", signing_key: take signing_key,
-        faults: list.new(), exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
+        faults: list.new(), holds: list.new(), exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
     let (take world, time) = std.sim.world.new(seed, 0, 1369353600000)
     let (stopping, stop_from): (Sender[()], Receiver[()]) = channel.new(1)
     let clock_task = task.spawn(tasks, bytes 65536, RecoveryBucketClock(world: take world, stop_from: take stop_from, real), recovery_bucket_clock)

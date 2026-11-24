@@ -1165,14 +1165,6 @@ fn blob_credentials() -> std.cred.Credentials {
     std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
 }
 
-type BlobServer: send { config: std.sim.s3.Config, clock: Clock, port: Served[NetOp], seed: u64 }
-
-fn blob_server(take setup: BlobServer) -> std.sim.s3.Report waits {
-    let BlobServer(config: take cfg, clock, port: take port, seed) = take setup
-    let mut plan = std.sim.world.plan(seed)
-    std.sim.s3.serve(cfg, mut plan, clock, take port)
-}
-
 fn blob_fixture(tasks: Tasks, clock: Clock, random: Random, capacity: u64, seed: u64) -> (BlobFixture, Task[std.sim.s3.Report]) {
     let address = Addr(ip: V4(127u32 << 24 | 1u32), port: 8080u16)
     let mut network = std.sim.net.new(std.sim.net.defaults())
@@ -1192,10 +1184,9 @@ fn blob_fixture(tasks: Tasks, clock: Clock, random: Random, capacity: u64, seed:
     let verify = result.unwrap(secret.derive_hmac_sha256(service_key, list.new(), string.as_bytes("aws4_request"), "verify"))
     let cfg = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None,
         credential: take scope, signing_key: take verify,
-        faults: list.new(), exists_status: 412u16, fragment_bytes: 8192u64, max_body: capacity)
-    let (network_grant, port) = provide.net(bytes 262144u64)
-    let server = task.spawn(tasks, bytes 8388608u64, BlobServer(config: take cfg, clock, port: take port, seed), blob_server)
-    (BlobFixture(net: network_grant, tasks, clock, random, cut: None, peer: None), take server)
+        faults: list.new(), holds: list.new(), exists_status: 412u16, fragment_bytes: 8192u64, max_body: capacity)
+    let (endpoint, take server) = std.sim.s3.start_service(tasks, take cfg, std.sim.world.plan(seed), clock, 262144u64, 8388608u64)
+    (BlobFixture(net: std.sim.s3.endpoint_network(endpoint), tasks, clock, random, cut: None, peer: None), take server)
 }
 
 fn blob_client(f: BlobFixture) -> Result[std.object.Client, harness.Fault] waits {

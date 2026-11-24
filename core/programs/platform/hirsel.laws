@@ -3,12 +3,12 @@ platform@1/launcher/session_vectors src=0dbb9ad5c26e70b4 sig=3fbd8b1b376f6cd6 ru
 platform@1/local_laws/test_local_genesis_recovers src=e07f35d703561666 sig=942cfb430c2f7dc6 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_idle_unload src=89f26225b5586810 sig=cdeed467f8147546 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_one_head src=264faecd5fcb6aba sig=b1571667df6eea75 run=d58926ede9b57167 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_reopen_keeps src=73fdd797317264bf sig=5504bdda1dd3d87e run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_reopen_keeps src=73fdd797317264bf sig=60839daa4f74ac55 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_route_during_unload src=87affbc58afa165c sig=c2ea8d3c490a8be8 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_platform_serve_budgets src=75b96fbd5600f3bd sig=fc6f60d2ac3418fa run=ad4c20fab40b1abf bug=- oracle=- rows=pending
 platform@1/operator/operator_vectors src=bae2230b65e828ad sig=3704698d8e4b3c5f run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/platform/activation_window_recovers src=6258c61b7c8d273a sig=feeeb5c30f30c18b run=b1818af2b24835d3 bug=- oracle=- rows=pending
-platform@1/platform/bucket_hand_install_adopts_at_12 src=247ea9eb47cc2609 sig=8395cf8a3080d5e7 run=dbf6722727633166 bug=- oracle=- rows=pending
+platform@1/platform/bucket_hand_install_adopts_at_12 src=2f509dc600e13748 sig=4d1ef8443284ff7e run=dbf6722727633166 bug=- oracle=- rows=pending
 platform@1/platform/cutover_survives_host_loss src=de63d53fb44dc030 sig=8171ec59417fc940 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_admission_policy src=ab4decacea6c1cfb sig=e93763420f77f0a1 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_drift_retry src=a03e65e349330f80 sig=08a36e0df9e768b6 run=b1818af2b24835d3 bug=- oracle=- rows=pending

@@ -71,7 +71,7 @@ fn bucket_law_sim_plan(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim
     std.sim.net.resolve_as(mut net_model, string.from("bucket.spare.test"), take spare)
     let key = bucket_law_signing_key()
     let verify = result.unwrap(secret.narrow(key, "verify"))
-    let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
+    let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, holds: list.new(), exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
     let (world, time) = std.sim.world.new(seed, 0, 1369353600000)
     let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
     let driver = task.spawn(tasks, bytes 65536, BucketSimClock(world: take world, stop: take stopping, real), bucket_law_clock)

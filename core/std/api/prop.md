@@ -352,6 +352,29 @@ prop: generator failed at case i
 
 During shrinking, a candidate whose generator fails is rejected.
 
+## Witnesses and law observation
+
+Planned for Verification Phase 1.3.
+
+```hirsel
+pub fn sometimes(label: String, cond: bool) -> bool
+```
+
+`sometimes` returns `cond` unchanged and costs what any call costs in every build. Under
+`hirsel test --laws` the runner counts, per test and label, the calls where `cond` was true,
+and a baseline comparison is red when a label's count falls to 0 or the label disappears
+([law table](../../../docs/laws.md#rows)). Calling it is optional; a law without it reports
+`no reach declared`. No program can read a count.
+
+The runner observes the returns of `search`, `check`, `all`, `check_tasks`, `check_corpus`
+and `check_tasks_corpus`, and reports a strength row (`held`, `truncated`, `vacuous`,
+`sampled`, `gave up`, `falsified`) beside pass and fail. A law that swallows `Truncated` or
+`Held(0, d)` with a catch-all arm still passes, but its row says so. Nothing here changes
+`AllOutcome`, `Outcome` or any report line.
+
+Version note (2026-11-24, verify-phase-spec-2034): adds planned `sometimes` and law
+observation. Existing signatures and outcomes are unchanged.
+
 ## Report and replay
 
 The report is one line, raised as `fail` from `std.prop`. So the site the runtime

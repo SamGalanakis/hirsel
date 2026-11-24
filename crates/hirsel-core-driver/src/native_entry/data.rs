@@ -49,10 +49,14 @@ fn define(
     let (name, linkage) = if let Some(name) = name {
         (name, Linkage::Export)
     } else {
-        local = format!(
-            "__hirsel_data_{}",
-            object.declarations().get_data_objects().count()
-        );
+        // The next data object's index. The declarations' iterator knows
+        // its length; counting it would make an entry of n carriers cost n².
+        let declared = object.declarations().get_data_objects();
+        let count = match declared.size_hint() {
+            (low, Some(high)) if low == high => low,
+            _ => declared.count(),
+        };
+        local = format!("__hirsel_data_{count}");
         (local.as_str(), Linkage::Local)
     };
     let id = object

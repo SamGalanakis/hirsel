@@ -26,8 +26,8 @@ LAWS = ('frames', 'paged_manifest', 'page_emission', 'paged_inventory', 'page_lo
 # Orchestrator ruling: these evaluator assembly defects ride with owner914.
 # Execute and report every law; only this exact failure family is nonblocking.
 ASSEMBLY_OWNER = 'core-ops-914'
-# L55's log@1 follower cases: one uncut run each, the adapter staging the writer.
-FOLLOWER_SCENARIOS = ('follower-durable', 'follower-boundary')
+# Log@1 live reads: one uncut run each, the adapter staging the writer.
+LIVE_READ_SCENARIOS = ('follower-durable', 'follower-boundary', 'read-only-durable')
 KNOWN_ASSEMBLY = frozenset({'opening', 'db', 'db_refusal', 'schema_refusal', 'pack_bound'})
 
 
@@ -46,7 +46,7 @@ def main():
     p.add_argument('--cc', type=Path)
     p.add_argument('--bridge', type=Path, default=os.environ.get('HIRSEL_STORE_CRASH_BRIDGE'))
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm', 'llvm-release'])
-    p.add_argument('--crash-scenario', choices=SCENARIOS + FOLLOWER_SCENARIOS)
+    p.add_argument('--crash-scenario', choices=SCENARIOS + LIVE_READ_SCENARIOS)
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = p.parse_args()
@@ -77,11 +77,11 @@ def main():
                 if args.compiler is None or args.runtime is None or args.bridge is None:
                     p.error('native backends require --compiler, --runtime and --bridge')
                 try:
-                    follower = args.crash_scenario in FOLLOWER_SCENARIOS
-                    cases = () if follower else (args.crash_scenario,) if args.crash_scenario else SCENARIOS
-                    count_only = (args.crash_scenario,) if follower else () if args.crash_scenario else (
+                    live_read = args.crash_scenario in LIVE_READ_SCENARIOS
+                    cases = () if live_read else (args.crash_scenario,) if args.crash_scenario else SCENARIOS
+                    count_only = (args.crash_scenario,) if live_read else () if args.crash_scenario else (
                         'checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals',
-                        'watermark-absent', 'watermark-torn', *FOLLOWER_SCENARIOS)
+                        'watermark-absent', 'watermark-torn', *LIVE_READ_SCENARIOS)
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
                                        args.cc, crash_manifest, work, engine, scenarios=cases,
                                        count_only=count_only)

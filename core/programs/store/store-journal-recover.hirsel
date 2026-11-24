@@ -7,23 +7,17 @@ type JournalRecovered {
 
 // How a recovery pass reads the journal (§3.2, §3.4, §12.5). `Locked` is the
 // opener's, under LOCK: no writer runs, so a boundary past the stat size is
-// damage. The live reads run beside a writer: a boundary newer than the stat
-// refreshes the size on the same handle first, and `LiveDurable` (a log@1
-// follower) syncs each segment before its stat and the terminal segment again
-// after reading it, so every frame it applies is durable before it publishes.
-type JournalRead = Locked | Live | LiveDurable
-
-fn journal_read_flush(read: JournalRead) -> bool {
-    match read {
-        Live => false,
-        _ => true,
-    }
-}
+// damage. `Live` (a read-only open or a log@1 follower) may run beside a
+// writer: a boundary newer than the stat refreshes the size on the same handle
+// first. Both sync each segment before its stat; `Live` also syncs the terminal
+// segment again after reading it, so every frame it applies is durable before
+// it returns.
+type JournalRead = Locked | Live
 
 fn journal_read_live(read: JournalRead) -> bool {
     match read {
         Locked => false,
-        _ => true,
+        Live => true,
     }
 }
 
@@ -40,7 +34,6 @@ fn journal_refresh_size(mut input: JournalInput, read: JournalRead, boundary: Op
 }
 
 fn journal_recover(d: Dir, id: StoreId, first: u64, read: JournalRead, take initial: JournalReplay) -> Result[JournalRecovered, Error] waits {
-    let flush = journal_read_flush(read)
     let mut replay = take initial
     let mut seq = first
     let mut uncovered = 0u64
@@ -51,8 +44,8 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, read: JournalRead, take init
             Error(NotFound) => return Error(disk_fault(path, 0, Header)),
             Error(e) => return Error(Io(e))
         }
-        let mut source = journal_input(take file, flush)?
-        let following = journal_following(d, id, seq, flush)?
+        let mut source = journal_input(take file, true)?
+        let following = journal_following(d, id, seq, true)?
         let boundary = match following {
             Some(h) => Some(h.prev_end),
             None => disk_end(d, id, seq)?
@@ -67,11 +60,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, read: JournalRead, take init
         })
         let JournalInput(file: take consumed_file, ..) = take source
         let mut consumed = take consumed_file
-        let barrier = match read {
-            LiveDurable => final_item,
-            _ => false,
-        }
-        if barrier {
+        if final_item && journal_read_live(read) {
             if let Ok(_) = scanned {
                 // §3.2: the writer may have written frames inside the stat
                 // size after this pass's sync, before their group sync ran.

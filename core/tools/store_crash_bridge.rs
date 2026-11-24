@@ -65,9 +65,9 @@ struct Bridge {
     staged: Option<StagedCommit>,
 }
 
-/// A writer COMMIT the follower law stages through stdout ("STAGE").
-/// It lands when the follower's recovery pass stats the segment, the
-/// second stat of that name after staging; the witness takes the first.
+/// A writer COMMIT the live read law stages through stdout ("STAGE").
+/// It lands during the recovery stat. A follower takes one earlier stat
+/// for its witness.
 struct StagedCommit {
     segment: String,
     at: usize,
@@ -75,12 +75,17 @@ struct StagedCommit {
     /// With an END image: write and sync both after the stat's size is
     /// taken. Without: write the frame unsynced before the stat returns.
     end: Option<Vec<u8>>,
-    stats: u32,
+    stats_until_commit: u8,
 }
 
 impl StagedCommit {
     fn parse(raw: &[u8]) -> Self {
-        let boundary = raw[0] == 1;
+        let (boundary, stats_until_commit) = match raw[0] {
+            0 => (false, 2),
+            1 => (true, 2),
+            2 => (false, 1),
+            _ => panic!("unknown STAGE scenario"),
+        };
         let at = u64::from_le_bytes(raw[1..9].try_into().unwrap()) as usize;
         let name_len = raw[9] as usize;
         let segment = std::str::from_utf8(&raw[10..10 + name_len])
@@ -96,7 +101,7 @@ impl StagedCommit {
             at,
             frame,
             end: boundary.then_some(end),
-            stats: 0,
+            stats_until_commit,
         }
     }
 }
@@ -137,7 +142,10 @@ impl Bridge {
         self.fs.inode(name).is_some()
     }
     fn apply(&mut self, op: Op<'_>) -> bool {
-        assert!(self.read_only.is_none(), "read-only open issued {op:?}");
+        assert!(
+            self.read_only.is_none() || matches!(op, Op::Sync(name) if is_segment(name)),
+            "read-only open issued {op:?}"
+        );
         if self.phase == 1 && self.events == self.cut {
             self.crashed = true;
         }
@@ -332,10 +340,11 @@ impl Bridge {
                     .name
                     .clone();
                 let due = self.staged.as_mut().is_some_and(|staged| {
-                    if staged.segment == name {
-                        staged.stats += 1;
+                    if staged.segment != name || staged.stats_until_commit == 0 {
+                        return false;
                     }
-                    staged.segment == name && staged.stats == 2
+                    staged.stats_until_commit -= 1;
+                    staged.stats_until_commit == 0
                 });
                 let mut size = self.fs.read(&name).unwrap_or(&[]).len() as u64;
                 if due {
@@ -844,7 +853,10 @@ pub unsafe extern "C" fn store_crash_free(p: *mut c_void) {
         "final run leaked provider file handles"
     );
     if let Some(staged) = &bridge.staged {
-        assert!(staged.stats >= 2, "the staged COMMIT was never applied");
+        assert_eq!(
+            staged.stats_until_commit, 0,
+            "the staged COMMIT was never applied"
+        );
     }
     if let Some(before) = &bridge.read_only {
         assert_eq!(*before, bridge.fs.snapshot(), "read-only directory changed");

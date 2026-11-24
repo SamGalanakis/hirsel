@@ -7,9 +7,9 @@ use hirsel_core_net::{
 };
 use zeroize::Zeroizing;
 
-const INVALID: u64 = 0;
-const ACCEPTED: u64 = 1;
-const ISSUED: u64 = 2;
+pub(crate) const INVALID: u64 = 0;
+pub(crate) const ACCEPTED: u64 = 1;
+pub(crate) const ISSUED: u64 = 2;
 
 pub(crate) struct Call<'a> {
     pub(crate) canonical: &'a [u8],
@@ -47,14 +47,18 @@ pub unsafe fn decide<C>(
     pending: &mut Option<(ShareTicket<C>, C)>,
     mut agree: impl FnMut() -> Option<Zeroizing<[u8; 32]>>,
     site: u64,
-) -> Outcome {
+) -> (Outcome, Option<Zeroizing<[u8; 32]>>) {
+    let mut accepted = None;
     let mut live = || {
         let (ticket, charge) = pending.take().unwrap();
         let Some(shared) = agree() else {
             return INVALID;
         };
         match ticket.resolve(side, &shared, charge) {
-            RegistryVerdict::Accepted => ACCEPTED,
+            RegistryVerdict::Accepted => {
+                accepted = Some(shared);
+                ACCEPTED
+            }
             RegistryVerdict::Issued => ISSUED,
         }
     };
@@ -81,12 +85,12 @@ pub unsafe fn decide<C>(
         && let Some((ticket, charge)) = pending.take()
     {
         let verdict = match result.value {
-            INVALID => return result,
+            INVALID => return (result, None),
             ACCEPTED => RegistryVerdict::Accepted,
             ISSUED => RegistryVerdict::Issued,
             _ => unreachable!("the tape decoder validates the verdict"),
         };
         ticket.replay(side, verdict, charge);
     }
-    result
+    (result, accepted)
 }

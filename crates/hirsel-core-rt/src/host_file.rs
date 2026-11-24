@@ -119,7 +119,7 @@ pub(crate) struct RunGrants {
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
     pub(crate) media_charges: Arc<crate::media::Charges>,
     pub(crate) agreements:
-        Arc<hirsel_core_net::agreement_registry::AgreementRegistry<Arc<crate::secret::ChargeCell>>>,
+        Arc<hirsel_core_net::agreement_registry::AgreementRegistry<crate::media::Payment>>,
     pub(crate) cells: crate::provide::Cells,
 }
 

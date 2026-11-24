@@ -37,6 +37,10 @@ pub(super) unsafe fn record_out(
         payload: vec![],
     };
     let mut answer = o;
+    if r.operation == MEDIA_AGREEMENT {
+        // The ordinal names the schedule; the frame's value stays the verdict.
+        answer.written = live.schedule.events + 1;
+    }
     let mut created = None;
     if ok && udp_operation(r.operation) {
         let mut handles = Vec::new();

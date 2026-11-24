@@ -1,18 +1,23 @@
 //! Evaluator adapters for the deterministic QUIC Initial schedule and packet operations.
 use super::*;
 use hirsel_core_net::{
+    agreement_registry::RegistryVerdict,
     packet_aead::{self, PacketError, PacketLengths},
     packet_cipher::{HeaderMask, PacketCipher, TAG_LEN},
     packet_epoch::{self, Epoch, IssueError},
-    packet_nonce::{ReceiverNonce, SenderCounter},
+    packet_nonce::{NonceFormat, ReceiverNonce, SenderCounter},
     secret_aead::AeadAlg,
-    tls_kdf::Side,
+    tls_kdf::{Side, Tls13Handshake, TlsHash},
 };
 use std::mem::MaybeUninit;
 
 pub(super) enum Payload {
     Share(key_share::Share),
-    Schedule { epoch: Epoch<Limit>, space: u64 },
+    Schedule {
+        epoch: Epoch<Limit>,
+        space: u64,
+        _handshake: Option<Tls13Handshake>,
+    },
     Sealer(SenderCounter, AeadAlg, PacketCipher),
     Opener(ReceiverNonce, AeadAlg, PacketCipher),
     Mask(HeaderMask),
@@ -22,6 +27,19 @@ pub(super) struct Media {
     owner: Limit,
     payload: Payload,
 }
+
+pub(super) struct RegistryCharge {
+    payer: Limit,
+    queue: Arc<Mutex<Vec<Limit>>>,
+}
+
+impl Drop for RegistryCharge {
+    fn drop(&mut self) {
+        self.queue.lock().unwrap().push(self.payer.clone());
+    }
+}
+
+const REGISTRY_CHARGE: u64 = 48;
 
 fn issue_error(error: IssueError) -> Vec<u64> {
     match error {
@@ -45,7 +63,11 @@ impl Machine<'_> {
     pub(super) fn drop_media(&mut self, id: u64) {
         let Media { owner, payload } = self.world.media[id as usize].take().unwrap();
         let bytes = match payload {
-            Payload::Share(_share) => 64,
+            Payload::Share(share) => {
+                drop(share);
+                self.refund_registry();
+                64
+            }
             Payload::Schedule { epoch, .. } => {
                 for paid in epoch.into_ledger() {
                     self.refund(paid, packet_epoch::DOMAIN_CHARGE);
@@ -78,13 +100,21 @@ impl Machine<'_> {
                     }));
                 }
                 let epoch = Epoch::quic_initial(side, self.carrier_bytes(a[1])).unwrap();
-                Ok(self.media_hold(payer, Payload::Schedule { epoch, space: 0 }))
+                Ok(self.media_hold(
+                    payer,
+                    Payload::Schedule {
+                        epoch,
+                        space: 0,
+                        _handshake: None,
+                    },
+                ))
             }
             HostOp::ScheduleImportTraffic => Ok(self.import_traffic(payer, a)),
+            HostOp::ScheduleTls13 => Ok(self.tls13(payer, a)),
             HostOp::ScheduleSealer | HostOp::ScheduleOpener | HostOp::ScheduleHeaderMask => {
                 let slot = a[0] as usize;
                 let mut held = self.world.media[slot].take().unwrap();
-                let Payload::Schedule { epoch, space } = &mut held.payload else {
+                let Payload::Schedule { epoch, space, .. } = &mut held.payload else {
                     unreachable!()
                 };
                 if a[1] != *space {
@@ -146,6 +176,85 @@ impl Machine<'_> {
         }
     }
 
+    fn refund_registry(&mut self) {
+        let refunds = std::mem::take(&mut *self.world.agreement_refunds.lock().unwrap());
+        for payer in refunds {
+            self.refund(payer, REGISTRY_CHARGE);
+        }
+    }
+
+    fn tls13(&mut self, payer: Limit, a: &[u64]) -> Vec<u64> {
+        let before_issue = |error| {
+            let mut row = issue_error(error);
+            row[2] = 1;
+            row
+        };
+        let Some((format, algorithm)) = packet_epoch::traffic_profile(a[0], a[1]) else {
+            return before_issue(IssueError::Invalid);
+        };
+        let hash = TlsHash::for_aead(algorithm);
+        if self.carrier_bytes(a[5]).len() != hash.output_len() {
+            return before_issue(IssueError::Invalid);
+        }
+        let requested = packet_epoch::SCHEDULE_CHARGE + REGISTRY_CHARGE;
+        if let Err(available) = self.admit(&payer, requested) {
+            return before_issue(IssueError::Capacity {
+                requested,
+                available,
+            });
+        }
+        let Media { owner, payload } = self.world.media[a[3] as usize].take().unwrap();
+        let Payload::Share(key_share::Share { key, ticket }) = payload else {
+            unreachable!("checked KeyShare");
+        };
+        self.refund(owner, 64);
+        let charge = RegistryCharge {
+            payer: payer.clone(),
+            queue: self.world.agreement_refunds.clone(),
+        };
+        let side = if a[2] == 0 {
+            Side::Client
+        } else {
+            Side::Server
+        };
+        let shared = key.agree(self.carrier_bytes(a[4]));
+        let result = match shared {
+            Some(shared) => match ticket.resolve(side, &shared, charge) {
+                RegistryVerdict::Accepted => Ok(shared),
+                RegistryVerdict::Issued => Err(IssueError::Issued),
+            },
+            None => {
+                drop((ticket, charge));
+                Err(IssueError::Invalid)
+            }
+        };
+        self.refund_registry();
+        let shared = match result {
+            Ok(shared) => shared,
+            Err(error) => {
+                self.refund(payer, packet_epoch::SCHEDULE_CHARGE);
+                return issue_error(error);
+            }
+        };
+        let labels = packet_epoch::tls13_labels(format).unwrap();
+        let handshake =
+            Tls13Handshake::new(hash, labels, &shared, self.carrier_bytes(a[5])).unwrap();
+        let format = if format == NonceFormat::QuicMultipath {
+            NonceFormat::Quic
+        } else {
+            format
+        };
+        let epoch = Epoch::traffic(format, algorithm, side, Some(handshake.traffic()));
+        self.media_hold(
+            payer,
+            Payload::Schedule {
+                epoch,
+                space: 1,
+                _handshake: Some(handshake),
+            },
+        )
+    }
+
     fn import_traffic(&mut self, payer: Limit, args: &[u64]) -> Vec<u64> {
         use hirsel_core_net::{ImportKind, ImportRefusal, packet_epoch::traffic_profile};
         let key = args[2];
@@ -189,7 +298,14 @@ impl Machine<'_> {
         drop(bytes);
         self.secret_drop(key);
         match epoch {
-            Ok(epoch) => self.media_hold(payer, Payload::Schedule { epoch, space: 2 }),
+            Ok(epoch) => self.media_hold(
+                payer,
+                Payload::Schedule {
+                    epoch,
+                    space: 2,
+                    _handshake: None,
+                },
+            ),
             Err(_) => {
                 self.refund(payer, request);
                 issue_error(IssueError::Invalid)

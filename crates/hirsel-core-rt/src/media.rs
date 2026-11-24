@@ -1,4 +1,5 @@
 //! Owned media state is pinned independently of the one-word resource carrier.
+mod agreement;
 use crate::Context;
 
 #[cfg(feature = "record")]
@@ -89,6 +90,12 @@ unsafe fn loan<'a, T>(handle: u64) -> &'a T {
 /// The live handle's slot contains T and the caller lends it exclusively.
 unsafe fn loan_mut<'a, T>(handle: u64) -> &'a mut T {
     unsafe { &mut (*(handle as *mut Slot<T>)).value }
+}
+
+/// # Safety
+/// The uniquely owned handle contains T and moves to this call.
+unsafe fn take<T>(handle: u64) -> T {
+    unsafe { Box::from_raw(handle as *mut Slot<T>) }.value
 }
 
 /// # Safety

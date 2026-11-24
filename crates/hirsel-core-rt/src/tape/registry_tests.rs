@@ -38,7 +38,7 @@ unsafe extern "C" fn construct(context: *mut crate::Context, _: *mut u8, input: 
     let job = unsafe { &mut **input.cast::<*mut Constructor>() };
     let peer = job.peer;
     // SAFETY: the task pins its request and shares no writable operand.
-    let answer = unsafe {
+    let (answer, _) = unsafe {
         crate::secret::agreement::decide(
             context,
             &job.input,

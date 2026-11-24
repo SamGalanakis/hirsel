@@ -15,6 +15,13 @@ pub enum TlsHash {
 }
 
 impl TlsHash {
+    pub fn for_aead(algorithm: AeadAlg) -> Self {
+        match algorithm {
+            AeadAlg::Aes128Gcm | AeadAlg::ChaCha20Poly1305 => Self::Sha256,
+            AeadAlg::Aes256Gcm => Self::Sha384,
+        }
+    }
+
     pub const fn output_len(self) -> usize {
         match self {
             Self::Sha256 => 32,
@@ -175,10 +182,7 @@ pub struct Tls13PacketKeys {
 
 impl Tls13PacketKeys {
     pub(super) fn import(labels: Tls13Labels, algorithm: AeadAlg, secret: &[u8]) -> Option<Self> {
-        let hash = match algorithm {
-            AeadAlg::Aes128Gcm | AeadAlg::ChaCha20Poly1305 => TlsHash::Sha256,
-            AeadAlg::Aes256Gcm => TlsHash::Sha384,
-        };
+        let hash = TlsHash::for_aead(algorithm);
         if secret.len() != hash.output_len() {
             return None;
         }

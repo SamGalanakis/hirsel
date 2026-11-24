@@ -6,11 +6,11 @@ use hirsel_core_net::{
     key_agreement::{Group, KeyShare},
 };
 
-struct Share {
-    _key: Option<KeyShare>,
-    _ticket: ShareTicket<Arc<ChargeCell>>,
-    _origin: (u8, u64),
-    _charge: crate::media::Payment,
+pub(crate) struct Share {
+    pub(crate) key: Option<KeyShare>,
+    pub(crate) ticket: ShareTicket<crate::media::Payment>,
+    pub(crate) origin: (u8, u64),
+    pub(crate) charge: crate::media::Payment,
 }
 
 pub(crate) struct Generation {
@@ -127,10 +127,10 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
         let origin = origin.map_or_else(|| (0, ticket.ordinal()), |ordinal| (1, ordinal));
         (*public).len = buffer.len;
         let value = crate::media::hold(Share {
-            _key: call.key,
-            _ticket: ticket,
-            _origin: origin,
-            _charge: charge,
+            key: call.key,
+            ticket,
+            origin,
+            charge,
         });
         Outcome {
             value,

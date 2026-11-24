@@ -136,6 +136,7 @@ host_ops! {
     PACKET_MASK = 150,
     MEDIA_CAPTURE = 151,
     SCHEDULE_IMPORT_TRAFFIC = 152,
+    SCHEDULE_TLS13 = 153,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

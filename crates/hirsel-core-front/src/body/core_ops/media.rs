@@ -9,8 +9,8 @@ impl Cx<'_, '_, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        if op == HostOp::ScheduleImportTraffic {
-            return self.runtime_import_traffic(f, values, result, n);
+        if matches!(op, HostOp::ScheduleTls13 | HostOp::ScheduleImportTraffic) {
+            return self.runtime_media_constructor(op, f, values, result, n);
         }
         let mut operands: Vec<ValueId> = values.iter().copied().collect::<Option<_>>()?;
         let word = Ty::Scalar(Scalar::U64);
@@ -86,15 +86,15 @@ impl Cx<'_, '_, '_> {
         word
     }
 
-    fn runtime_import_traffic(
+    fn runtime_media_constructor(
         &mut self,
+        op: HostOp,
         f: usize,
         values: &[Option<ValueId>],
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
         let profile_ty = self.p.fns[f].params[0].ty;
-        let secret_ty = self.p.fns[f].params[1].ty;
         let (_, at) = self.runtime_place(profile_ty, values[0], n)?;
         let word = Ty::Scalar(Scalar::U64);
         let profile = self.case_as_word(at, n);
@@ -119,16 +119,24 @@ impl Cx<'_, '_, '_> {
         }
         self.start(suite_join);
         let suite = self.block_params(suite_join)[0];
-        let secret = values[1]?;
-        let key = self.runtime_key(secret, n);
-        // The adapter owns the designation through failure. Refusals before
-        // issue transfer the same holder back in the error payload.
-        self.consume(Some(secret), n);
-        let [handle, tag, returned, available] = self.runtime_row(
-            RtOp::Host(HostOp::ScheduleImportTraffic),
-            &[Arg::Value(profile), Arg::Value(suite), Arg::Value(key)],
-            n,
-        )?;
+        let mut args = vec![Arg::Value(profile), Arg::Value(suite)];
+        let owned_index = if op == HostOp::ScheduleTls13 {
+            let (_, at) = self.runtime_place(self.p.fns[f].params[1].ty, values[1], n)?;
+            args.push(Arg::Value(self.case_as_word(at, n)));
+            2
+        } else {
+            1
+        };
+        let input_ty = self.p.fns[f].params[owned_index].ty;
+        let input = values[owned_index]?;
+        args.push(Arg::Value(self.runtime_key(input, n)));
+        for value in &values[owned_index + 1..] {
+            args.push(Arg::Value((*value)?));
+        }
+        // The adapter takes custody at the call boundary and returns the
+        // same holder on refusals before issue.
+        self.consume(Some(input), n);
+        let [handle, tag, returned, available] = self.runtime_row(RtOp::Host(op), &args, n)?;
         let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 0, n)?;
         self.runtime_result(
             result,
@@ -163,7 +171,7 @@ impl Cx<'_, '_, '_> {
                 let join = cx.new_block(&[]);
                 cx.runtime_branch(returns, yes, no, n);
                 cx.start(yes);
-                cx.runtime_case_payload(option, 1, secret_ty, Some(secret), n);
+                cx.runtime_case_payload(option, 1, input_ty, Some(input), n);
                 cx.jump(join, &[], n);
                 cx.start(no);
                 cx.inst(

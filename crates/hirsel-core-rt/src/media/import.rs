@@ -134,6 +134,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_traffic(
         epoch,
         space: 2,
         origin,
+        _handshake: None,
         _charge: charge,
     })
 }

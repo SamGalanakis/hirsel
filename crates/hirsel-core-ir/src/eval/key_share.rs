@@ -1,8 +1,12 @@
 use super::*;
-use hirsel_core_net::key_agreement::{Group, KeyShare};
+use hirsel_core_net::{
+    agreement_registry::ShareTicket,
+    key_agreement::{Group, KeyShare},
+};
 
 pub(super) struct Share {
-    _key: KeyShare,
+    pub(super) key: KeyShare,
+    pub(super) ticket: ShareTicket<media::RegistryCharge>,
 }
 
 impl Machine<'_> {
@@ -44,6 +48,11 @@ impl Machine<'_> {
         };
         self.put(dst + len, point);
         self.store(a[2] + 8, 8, len + size);
-        Ok(self.media_hold(payer, media::Payload::Share(Share { _key: key })))
+        let ticket = self
+            .world
+            .agreements
+            .new_share()
+            .ok_or(Stop::Cause("Bounds"))?;
+        Ok(self.media_hold(payer, media::Payload::Share(Share { key, ticket })))
     }
 }

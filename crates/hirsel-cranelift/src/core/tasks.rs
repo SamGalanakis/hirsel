@@ -333,6 +333,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretKeyShare
                     | HostOp::ScheduleQuicInitial
                     | HostOp::ScheduleImportTraffic
+                    | HostOp::ScheduleTls13
                     | HostOp::ScheduleSealer
                     | HostOp::ScheduleOpener
                     | HostOp::ScheduleHeaderMask

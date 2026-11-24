@@ -317,6 +317,8 @@ pub(super) unsafe fn replay_out(
             // SAFETY: RESOLVE pins the list with at least count spare slots.
             unsafe { crate::resolve::append(&mut r.buffer, &addresses) };
         }
+    } else if op == MEDIA_AGREEMENT {
+        o.written = live.schedule.events;
     } else if op == MEDIA_CAPTURE {
         // SAFETY: the operation pins its descriptor and its output carrier.
         if !unsafe { crate::media::capture::valid(r, &out, live.schedule.events) } {

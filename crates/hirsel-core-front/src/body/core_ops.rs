@@ -5,6 +5,7 @@ use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
 use hirsel_core_layout::flow::Op as FlowOp;
 mod argon2;
+mod binding;
 mod cell;
 mod charge;
 mod conn;
@@ -17,6 +18,8 @@ mod provide;
 mod secret_kdf;
 mod secret_key;
 mod udp_runtime;
+pub(crate) use binding::binding;
+pub(super) use binding::simd_call;
 #[cfg(test)]
 pub(crate) use declarations::{assert_declarations, assert_no_ambient_input};
 
@@ -546,55 +549,7 @@ operations! {
     ("host", "udp_local_addr", Lane::Runtime(Kernel::Net(HostOp::UdpLocalAddr)), "B", "media-w0-udp-build-2280", false),
     ("sha1", "compress", Lane::Value, "A", "sha1-hardware", false),
     ("sha1", "block", Lane::Value, "A", "sha1-hardware", false),
-}
-
-pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
-    if f.path.package_is("runner", "1")
-        && f.path.0.modules == ["runner"]
-        && matches!(
-            f.path.0.name.as_str(),
-            "launch_word" | "launch_text" | "launch_emit" | "launch_socket" | "launch_scratch"
-        )
-    {
-        return Some(match f.path.0.name.as_str() {
-            "launch_word" => u16::MAX,
-            "launch_text" => u16::MAX - 1,
-            "launch_emit" => u16::MAX - 2,
-            "launch_socket" => u16::MAX - 3,
-            _ => u16::MAX - 4,
-        });
-    }
-    if !f.path.package_is("core", "1") || f.body.is_some() {
-        return None;
-    }
-    let [module] = f.path.0.modules.as_slice() else {
-        return None;
-    };
-    // Each bound operation's first row, by its core module and name.
-    static BOUND: std::sync::OnceLock<rustc_hash::FxHashMap<(&str, &str), u16>> =
-        std::sync::OnceLock::new();
-    let bound = BOUND.get_or_init(|| {
-        let mut bound = rustc_hash::FxHashMap::default();
-        for (i, entry) in OPERATIONS.iter().enumerate() {
-            if matches!(
-                entry.lane,
-                Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_) | Lane::Charge(_)
-            ) {
-                bound.entry((entry.module, entry.name)).or_insert(i as u16);
-            }
-        }
-        bound
-    });
-    bound
-        .get(&(module.as_str(), f.path.0.name.as_str()))
-        .copied()
-}
-
-pub(super) fn simd_call(row: Option<u16>) -> Option<SimdCall> {
-    match OPERATIONS.get(row? as usize)?.lane {
-        Lane::Simd(op) => Some(op),
-        _ => None,
-    }
+    ("schedule", "tls13", Lane::Runtime(Kernel::Media(HostOp::ScheduleTls13)), "A", "media-w0-crypto-build-2282", false),
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {

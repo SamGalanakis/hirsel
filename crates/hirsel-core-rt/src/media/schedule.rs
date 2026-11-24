@@ -8,7 +8,7 @@ use hirsel_core_net::{
     packet_epoch::{DOMAIN_CHARGE, Epoch, IssueError, SCHEDULE_CHARGE},
     packet_nonce::{ReceiverNonce, SenderCounter},
     secret_aead::AeadAlg,
-    tls_kdf::Side,
+    tls_kdf::{Side, Tls13Handshake},
 };
 
 const INITIAL: u64 = 0;
@@ -18,6 +18,7 @@ pub(super) struct Schedule {
     pub(super) epoch: Epoch<Paid>,
     pub(super) space: u64,
     pub(super) origin: u64,
+    pub(super) _handshake: Option<Tls13Handshake>,
     pub(super) _charge: Paid,
 }
 
@@ -59,6 +60,12 @@ pub(super) fn refusal(error: IssueError) -> Outcome {
         written,
         ..Outcome::default()
     }
+}
+
+pub(super) fn before_issue(error: IssueError) -> Outcome {
+    let mut outcome = refusal(error);
+    outcome.error.code = 1; // Custody returned before issue.
+    outcome
 }
 
 pub(super) fn admit(context: &Context, requested: u64) -> Result<Charge, u64> {
@@ -120,6 +127,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_quic_initial(
             epoch: initial,
             space: INITIAL,
             origin: 0,
+            _handshake: None,
             _charge: charge,
         })
     }

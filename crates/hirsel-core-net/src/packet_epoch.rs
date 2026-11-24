@@ -88,6 +88,15 @@ pub fn traffic_profile(profile: u64, suite: u64) -> Option<(NonceFormat, AeadAlg
     Some((format, algorithm))
 }
 
+pub fn tls13_labels(format: NonceFormat) -> Option<Tls13Labels> {
+    Some(match format {
+        NonceFormat::Quic | NonceFormat::QuicMultipath => Tls13Labels::Quic,
+        NonceFormat::Tls13 => Tls13Labels::Tls,
+        NonceFormat::Dtls13 => Tls13Labels::Dtls,
+        _ => return None,
+    })
+}
+
 impl<C> Epoch<C> {
     pub fn import_traffic(
         format: NonceFormat,
@@ -117,12 +126,7 @@ impl<C> Epoch<C> {
             ImportUse::TrafficReceive => false,
             _ => return Err(ImportError::Denied),
         };
-        let labels = match format {
-            NonceFormat::Quic | NonceFormat::QuicMultipath => Tls13Labels::Quic,
-            NonceFormat::Tls13 => Tls13Labels::Tls,
-            NonceFormat::Dtls13 => Tls13Labels::Dtls,
-            _ => return Err(ImportError::Invalid),
-        };
+        let labels = tls13_labels(format).ok_or(ImportError::Invalid)?;
         let live = match secret {
             Some(secret) => DirectionKeys::Live(
                 Tls13PacketKeys::import(labels, algorithm, secret).ok_or(ImportError::Invalid)?,
@@ -139,17 +143,30 @@ impl<C> Epoch<C> {
 
     pub fn quic_initial(side: Side, dcid: &[u8]) -> Option<Self> {
         let traffic = Tls13Traffic::quic_initial(dcid)?;
+        Some(Self::traffic(
+            NonceFormat::Quic,
+            AeadAlg::Aes128Gcm,
+            side,
+            Some(&traffic),
+        ))
+    }
+
+    pub fn traffic(
+        format: NonceFormat,
+        algorithm: AeadAlg,
+        side: Side,
+        traffic: Option<&Tls13Traffic>,
+    ) -> Self {
         let peer = match side {
             Side::Client => Side::Server,
             Side::Server => Side::Client,
         };
-        let algorithm = AeadAlg::Aes128Gcm;
-        Some(Self::new(
-            NonceFormat::Quic,
-            algorithm,
-            DirectionKeys::Live(traffic.packet_keys(side, algorithm)),
-            DirectionKeys::Live(traffic.packet_keys(peer, algorithm)),
-        ))
+        let keys = |sender| {
+            traffic.map_or(DirectionKeys::Opaque, |traffic| {
+                DirectionKeys::Live(traffic.packet_keys(sender, algorithm))
+            })
+        };
+        Self::new(format, algorithm, keys(side), keys(peer))
     }
 
     /// The evaluator applies refunds through its task scheduler.

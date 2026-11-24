@@ -16,10 +16,12 @@ fn sse_law_units(h: SseLawTables) -> store.Table[u32, ()] { clone(h.unit_rows) }
 
 fn sse_law_options(h: SseLawTables) -> store.Table[u32, Option[u32]] { clone(h.option_rows) }
 
-fn sse_law_query(_tx: store.Tx, h: SseLawTables, take _arg: ()) -> Result[Answer[()], Capacity] {
+type SseLawValue: codec {}
+
+fn sse_law_query(_tx: store.Tx, h: SseLawTables, take _arg: ()) -> Result[Answer[SseLawValue], Capacity] {
     let mut visible = covers()
     store_cover_unit(mut visible, h)?
-    Ok(Answer(value: (), covers: take visible))
+    Ok(Answer(value: SseLawValue(), covers: take visible))
 }
 
 fn store_cover_unit(mut c: CoverSet, h: SseLawTables) -> Result[(), Capacity] {
@@ -138,15 +140,9 @@ fn sse_law_publish(to: Sender[PubIn], db: store.Db) waits {
 
 fn sse_law_expected(version: u64, initial: bool, present: Option[bool]) -> Bytes {
     let mut text = string.from(if initial { "retry: 1000\n\nevent: batch\ndata: " } else { "event: batch\ndata: " })
-    sse_law_append_batch(mut text, version, initial, present)
-    string.push(mut text, "\n\n")
-    std.http.copy_bytes(string.as_bytes(text))
-}
-
-fn sse_law_append_batch(mut text: String, version: u64, complete: bool, present: Option[bool]) {
     string.push(mut text, "{\"version\":\"")
     string.push_u64(mut text, version)
-    string.push(mut text, if complete { "\",\"complete\":[0],\"groups\":[{\"sub\":0,\"value\":null,\"rows\":[" }
+    string.push(mut text, if initial { "\",\"complete\":[0],\"groups\":[{\"sub\":0,\"value\":{},\"rows\":[" }
         else { "\",\"complete\":[],\"groups\":[{\"sub\":0,\"rows\":[" })
     if let Some(exists) = present {
         string.push(mut text, "{\"slot\":\"unit\",\"table\":\"units\",\"key\":1,")
@@ -154,17 +150,17 @@ fn sse_law_append_batch(mut text: String, version: u64, complete: bool, present:
         string.push(mut text, "{\"slot\":\"option\",\"table\":\"options\",\"key\":2,")
         string.push(mut text, if exists { "\"present\":true,\"value\":null}" } else { "\"present\":false}" })
     }
-    string.push(mut text, "]}],\"outcomes\":[]}")
+    string.push(mut text, "]}],\"outcomes\":[]}\n\n")
+    std.http.copy_bytes(string.as_bytes(text))
 }
 
-fn sse_law_read(n: Net, c: Clock, addr: Addr, version: u64, present: Option[bool]) waits {
+fn sse_law_check_read(n: Net, c: Clock, addr: Addr, completing: Bytes) waits {
     let mut read = sse_law_dial(n, c, addr, "/read", false)
     result.unwrap(std.http_client.finish_request(mut read, 4096u64))
     if std.http_client.status(std.http_client.head(read)) != 200u16 { fail("L16 one-shot status") }
     let body = sse_law_body(mut read)
-    let mut expected = string.new()
-    sse_law_append_batch(mut expected, version, true, present)
-    if body != string.as_bytes(expected) { fail("L16 one-shot Batch") }
+    let data = list.len(b"retry: 1000\n\nevent: batch\ndata: ")
+    if body != list.slice(completing, data, list.len(completing) - 2u64) { fail("L16 one-shot body differs from completing SSE data") }
 }
 
 @test
@@ -186,12 +182,13 @@ fn test_l16(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     let mut first = sse_law_dial(n, c, address, "/events", false)
     result.unwrap(std.http_client.finish_request(mut first, 65536u64))
     if std.http_client.status(std.http_client.head(first)) != 200u16 { fail("L16 expected SSE head") }
-    if sse_law_event(mut first) != sse_law_expected(first_version, true, None) { fail("L16 empty initial Batch") }
+    if sse_law_event(mut first) != sse_law_expected(first_version, true, None) {
+        fail("L16 empty initial Batch must decode the zero-byte record")
+    }
     sse_law_update(mut db, tables, false)
     let inserted = store.version(store.snapshot(db))
     sse_law_publish(pub_in, db)
     if sse_law_event(mut first) != sse_law_expected(inserted, false, Some(true)) { fail("L16 present null rows") }
-    sse_law_read(n, c, address, inserted, Some(true))
     std.http_client.close(take first)
     let mut resumed = sse_law_dial(n, c, address, "/events", true)
     result.unwrap(std.http_client.finish_request(mut resumed, 65536u64))
@@ -207,11 +204,12 @@ fn test_l16(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
         string.push(mut problem, result.unwrap(string.from_utf8(take recovered)))
         fail(take problem)
     }
+    sse_law_check_read(n, c, address, recovered)
     sse_law_update(mut db, tables, true)
     let removed = store.version(store.snapshot(db))
     sse_law_publish(pub_in, db)
     if sse_law_event(mut resumed) != sse_law_expected(removed, false, Some(false)) { fail("L16 removed rows") }
-    sse_law_read(n, c, address, removed, None)
+    sse_law_check_read(n, c, address, sse_law_expected(removed, true, None))
     std.http_client.close(take resumed)
     let (limited_addr, take limited_stop, take limited_server) = sse_law_start(pub_in, n, c, r, tasks, 40u64)
     let mut reset_client = sse_law_dial(n, c, limited_addr, "/events", false)

@@ -104,13 +104,13 @@ front and handed over as plaintext. The front routes by SNI (the TURN URL's host
 text assumes no TURN ALPN, since browsers do not send one reliably.
 
 **Dependency H1, host TLS ingress for a stream listener** (owner: the runner and launch
-track): [launch.md, "Stream ingress behind a TLS front"](launch.md#stream-ingress-behind-a-tls-front).
-A separate TLS front routes by SNI, with no ALPN, and prepends a PROXY protocol v2 header.
-On an H1 listener the header is required: `proxy.accept` closes an untrusted peer, a missing
-or malformed header, a LOCAL command and an oversized header before any byte reaches the
-`Framer`. Its `source` is `Origin.client` (XOR-MAPPED-ADDRESS, nonce, quotas), and its
-`destination` is the server's local address in the nonce. A TLS close reaches the relay as
-`disconnected`. Slice U6 below builds the decoder `proxy.step`.
+track, not this text). A TLS front that hands an accepted plaintext stream to a non-HTTP
+listener must also give the program the client's real address, which the Allocate response
+returns as XOR-MAPPED-ADDRESS and which the nonce and quotas bind to. H1 is either an
+in-process terminator whose accepted `Addr` is the client's, or a separate front that
+prepends a PROXY protocol v2 header, read only from trusted ingress prefixes as RUNNER-SPEC
+reads `X-Forwarded-For` (R2-g). Slice U6 below builds the v2 header decoder as a generic
+std primitive; H1's host side is outside this text.
 
 **What works without H1:** TURN over TCP on a dedicated address's port 443, and over UDP.
 That reaches the first two network classes, exactly what ICE-TCP would have reached.
@@ -729,7 +729,7 @@ Sizes are S (under a day of one lane), M (one to three days) and L (more than th
 | **U3** relay server | L | U2 | TURN-7 Allocate, Refresh, CreatePermission, ChannelBind, Send, Data, ChannelData; pool; timers; in-place framing | `allocate_check_order`, `unsupported_answers`, `lifetimes_exact`, `permissions_by_ip`, `channel_rules` |
 | **U4** relay policy, quota, revocation | M | U3 | TURN-7 policy and `default_deny`, quota, capacity; TURN-9 | `peer_policy`, `quota_and_capacity`, `revoke_drops_paths` |
 | **U5** streams and simulation | M | U3 | TURN-8 `Framer`; stream origins; the sim runs | `stream_framing`, `sim_relay_loss` |
-| **U6** PROXY v2 header | S | — | `proxy.step`, the generic sans-IO PROXY protocol v2 header decoder of [launch.md H1](launch.md#the-header-required-checked-consumed-exactly); `proxy.accept` and the front are H1's slices | the decoder half of `proxy_v2_header` (launch.md H1 laws) |
+| **U6** PROXY v2 header | S | — | a generic sans-IO PROXY protocol v2 header decoder in std, with the trusted-prefix rule of RUNNER-SPEC R2-g; the H1 host side is not this slice | one law in its own std laws: the v2 specification's examples by hand, an untrusted source ignored |
 | **U7** interop and cost | M | U4, U5 | `interop.py` against coturn and Pion from `/tmp` clones; counted-allocator run | `interop_coturn`, `interop_pion`, the cost targets |
 | **U8** SFU wiring | S | U4, webrtc S3 | the SFU's deployment runs the relay as a sibling place; signaling mints TURN credentials beside ICE ones and forwards revokes to the relay (TURN-9) | webrtc's browser end-to-end case with `iceTransportPolicy: "relay"` over UDP and TCP |
 

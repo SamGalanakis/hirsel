@@ -51,6 +51,15 @@ fn channel_rows_preserve_values_charges_and_closed_errors() {
             eval::Outcome::Returned(vec![1113]),
             0,
         ),
+        // A queued item holds the channel's own last Sender. Cleaning it at the
+        // receiver's drop ends the channel exactly once, after the queue is
+        // clean (CONC-9): no reentrant second refund, nothing left held.
+        (
+            "type Note: send { back: Sender[Note] }\nfn close_note(take rx: Receiver[Note]) {}\nfn close_back(take tx: Sender[Note]) {}\nfn f() -> u64 { let (tx,rx): (Sender[Note], Receiver[Note]) = channel.new(1); let back = channel.sender(tx); result.unwrap(channel.try_send(tx, Note(back: take back))); close_back(take tx); close_note(take rx); 1u64 }".to_owned(),
+            1000,
+            eval::Outcome::Returned(vec![1]),
+            0,
+        ),
         (
             "fn f() -> u64 waits { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(1); close(take rx); match channel.send(tx,17u64) { Ok(()) => 0u64, Error(Closed(x)) => x } }".to_owned(),
             1000,

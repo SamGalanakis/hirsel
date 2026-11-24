@@ -11,6 +11,7 @@
 //! producer's code. Provider rows run against a modelled provider ([`World`]).
 
 mod argon2;
+mod chan;
 mod conn;
 mod crc;
 mod frame;
@@ -25,6 +26,7 @@ mod secret_kdf;
 mod secret_key;
 mod sha1;
 mod sha256;
+use chan::{Chan, End};
 use crc::{crc_combine, crc_zero_byte};
 use sha256::sha256_blocks;
 mod sha512;
@@ -938,16 +940,6 @@ impl Machine<'_> {
         self.sched.next += 1;
         id
     }
-}
-struct Chan {
-    id: u64,
-    item: TypeRef,
-    cap: u64,
-    queue: VecDeque<Vec<u8>>,
-    senders: u64,
-    receiver: bool,
-    charge: u64,
-    limit: Option<Limit>,
 }
 /// A `Latest[T]` root: the current `Arc[T]` node, admitted at `LATEST_ROOT`.
 struct Latest {
@@ -4970,7 +4962,7 @@ impl Machine<'_> {
             }
             FieldTy::Handle(Handle::Receiver) => {
                 let i = ((self.load(at, 8) - CHAN_BASE) / 2) as usize;
-                self.chans[i].receiver = false;
+                self.chans[i].receiver = End::Cleaning;
                 t.shield += 1;
                 self.event(CLOSE, self.chans[i].id, 1);
                 self.wake(Condition::Send(i));
@@ -4981,6 +4973,7 @@ impl Machine<'_> {
                     self.put(tmp, &bytes);
                     failed |= self.drop_value(t, tmp, self.chans[i].item);
                 }
+                self.chans[i].receiver = End::Gone;
                 self.chan_freed(i);
                 t.shield -= 1;
                 failed
@@ -5183,41 +5176,6 @@ impl Machine<'_> {
             self.free_as(node, charge, None, "a shared node");
         }
     }
-    /// Take channel `i`'s front item into `dest`, or return false when its queue is
-    /// empty. The slot it frees wakes this channel's senders in park order.
-    fn take(&mut self, i: usize, dest: u64) -> bool {
-        let Some(bytes) = self.chans[i].queue.pop_front() else {
-            return false;
-        };
-        self.put(dest, &bytes);
-        self.event(RECEIVE, self.chan_id(i), 0);
-        self.wake(Condition::Send(i));
-        true
-    }
-    /// Put an item on channel `i` unless it is closed (2) or full (1): native
-    /// `publish`, which wakes a receiver parked on this channel.
-    fn publish(&mut self, i: usize, value: u64, item: TypeId) -> u64 {
-        if !self.chans[i].receiver {
-            return 2;
-        }
-        if self.chans[i].queue.len() as u64 == self.chans[i].cap {
-            return 1;
-        }
-        let n = self.held(TypeRef(item.0)) as usize;
-        let bytes = self.get(value, n).to_vec();
-        self.chans[i].queue.push_back(bytes);
-        self.event(PUBLISH, self.chan_id(i), 0);
-        self.wake(Condition::Receive(i));
-        0
-    }
-    fn chan_freed(&mut self, i: usize) {
-        let c = &mut self.chans[i];
-        if c.senders == 0 && !c.receiver {
-            let (l, n) = (c.limit.take().unwrap(), c.charge);
-            self.refund(l, n);
-        }
-    }
-
     fn take_steps(&mut self, t: &mut Task, mut count: u64) -> X<()> {
         while count != 0 {
             let Some(bound) = t.step_bounds.last_mut() else {
@@ -5784,7 +5742,7 @@ impl Machine<'_> {
                             cap: a[0],
                             queue: VecDeque::new(),
                             senders: 1,
-                            receiver: true,
+                            receiver: End::Open,
                             charge,
                             limit: Some(cur.clone()),
                         });

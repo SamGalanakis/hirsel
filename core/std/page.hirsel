@@ -2349,7 +2349,18 @@ fn split_insert(page: Page, incoming: PageSlot, rightmost: bool, mut next: u64) 
 
 // The boolean tracks a decrease in this page's sealed size. Child totals alone
 // do not change a branch's size, so only a rebuilt branch can pass it upward.
-fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmost: bool, mut next: u64) -> Result[(Option[List[PagePiece]], bool), Error] {
+fn resident_edit_frame(_place: PagePtr) -> Result[Arc[Page], Error] {
+    fail("page: cold child requires a resolver")
+}
+
+fn edit_page(slot: Slot, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[Arc[Page], Error] {
+    match slot {
+        HotPage(page) => Ok(arc.share(page)),
+        ColdPage(place) => load(place),
+    }
+}
+
+fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmost: bool, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[(Option[List[PagePiece]], bool), Error] {
     let Some(slot) = descend(page.image, incoming.row.key) else {
         let (position, hit) = search(page.image, incoming.row.key)
         let extends = rightmost && !hit && position == count(page.image)
@@ -2360,9 +2371,18 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmo
         return Ok((None, edit == Shrunk))
     }
     let extends = rightmost && slot + 1 == count(page.image)
+    let mut loaded: Option[Arc[Page]] = None
     let (take revised, shrank) = match page.kids[slot] {
-        HotPage(mut kid) => insert_path(mut kid, incoming, private_from, extends, mut next)?,
-        ColdPage(_) => fail("page: cold child requires a resolver"),
+        HotPage(mut kid) => insert_path(mut kid, incoming, private_from, extends, mut next, load)?,
+        ColdPage(place) => {
+            let mut opened = load(place)?
+            let edited = insert_path(mut opened, incoming, private_from, extends, mut next, load)?
+            loaded = Some(take opened)
+            take edited
+        },
+    }
+    if let Some(take opened) = take loaded {
+        page.kids[slot] = HotPage(take opened)
     }
     if child_loose(page.kids[slot]) {
         page.loose_below = true
@@ -2378,7 +2398,7 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmo
         refresh_child(mut page, slot)
         return Ok((None, false))
     }
-    let rebuilt = rebalance_child(mut page, slot, mut next)?
+    let rebuilt = rebalance_child(mut page, slot, mut next, load)?
     let smaller = if let Some(parts) = view rebuilt {
         list.len(parts) == 1 && sealed_size(parts[0].root.image) < sealed_size(page.image)
     } else {
@@ -2387,12 +2407,12 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmo
     Ok((take rebuilt, smaller))
 }
 
-fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, rightmost: bool, mut next: u64) -> Result[(Option[List[PagePiece]], bool), Error] {
+fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, rightmost: bool, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[(Option[List[PagePiece]], bool), Error] {
     let prior = stamp(root.image)
     if prior != 0 && prior >= private_from {
         let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(Option[List[PagePiece]], bool), Error] {
             stamp_replay_edit(mut page, private_from, mut next)?
-            insert_private(mut page, incoming, private_from, rightmost, mut next)
+            insert_private(mut page, incoming, private_from, rightmost, mut next, load)
         })
         if let Some(take result) = take update {
             return take result
@@ -2400,11 +2420,11 @@ fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, right
     }
     root = copy_with_stamp(root, take_stamp(mut next)?)
     option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(Option[List[PagePiece]], bool), Error] {
-        insert_private(mut page, incoming, private_from, rightmost, mut next)
+        insert_private(mut page, incoming, private_from, rightmost, mut next, load)
     }))
 }
 
-fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
+fn rebalance_child(mut page: Page, slot: u64, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[Option[List[PagePiece]], Error] {
     let lvl = level(hot_child(page.kids[slot]).image)
     let n = count(hot_child(page.kids[slot]).image)
     let siblings = count(page.image)
@@ -2424,9 +2444,11 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[Li
         slot
     }
     let right = left + 1
-    let mut merged = owned_slots(hot_child(page.kids[left]))
+    let left_page = edit_page(page.kids[left], load)?
+    let mut merged = owned_slots(left_page)
     let first_right = list.len(merged)
-    let mut right_items = owned_slots(hot_child(page.kids[right]))
+    let right_page = edit_page(page.kids[right], load)?
+    let mut right_items = owned_slots(right_page)
     if lvl != 0 {
         right_items[0u64].row.key = option.unwrap(key_at(page.image, right))
     }
@@ -2465,14 +2487,23 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[Li
     Ok(Some(build_pieces(parent, domain, level(page.image), false, mut next)?))
 }
 
-fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
+fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[Option[List[PagePiece]], Error] {
     let Some(slot) = descend(page.image, key) else {
         private_delete(mut page, key)
         return Ok(None)
     }
+    let mut loaded: Option[Arc[Page]] = None
     let revised = match page.kids[slot] {
-        HotPage(mut kid) => remove_path(mut kid, key, private_from, mut next)?,
-        ColdPage(_) => fail("page: cold child requires a resolver"),
+        HotPage(mut kid) => remove_path(mut kid, key, private_from, mut next, load)?,
+        ColdPage(place) => {
+            let mut opened = load(place)?
+            let edited = remove_path(mut opened, key, private_from, mut next, load)?
+            loaded = Some(take opened)
+            take edited
+        },
+    }
+    if let Some(take opened) = take loaded {
+        page.kids[slot] = HotPage(take opened)
     }
     if child_loose(page.kids[slot]) {
         page.loose_below = true
@@ -2481,18 +2512,18 @@ fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) 
         page.loose_below = true
         if list.len(parts) == 1 {
             page.kids[slot] = HotPage(arc.share(parts[0].root))
-            return rebalance_child(mut page, slot, mut next)
+            return rebalance_child(mut page, slot, mut next, load)
         }
         return adopt_children(mut page, slot, parts, false, mut next)
     }
-    rebalance_child(mut page, slot, mut next)
+    rebalance_child(mut page, slot, mut next, load)
 }
 
-fn remove_path(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
+fn remove_path(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[Option[List[PagePiece]], Error] {
     if stamp(root.image) >= private_from {
         let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[PagePiece]], Error] {
             stamp_replay_edit(mut page, private_from, mut next)?
-            remove_private(mut page, key, private_from, mut next)
+            remove_private(mut page, key, private_from, mut next, load)
         })
         if let Some(take result) = take update {
             return take result
@@ -2500,7 +2531,7 @@ fn remove_path(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64
     }
     root = copy_with_stamp(root, take_stamp(mut next)?)
     option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[PagePiece]], Error] {
-        remove_private(mut page, key, private_from, mut next)
+        remove_private(mut page, key, private_from, mut next, load)
     }))
 }
 
@@ -2517,20 +2548,26 @@ fn finish_split(mut root: Arc[Page], parts: List[PagePiece], mut next: u64) -> R
 
 /// Delete one row, rebalancing its path and collapsing a unary root.
 pub fn remove(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64) -> Result[bool, Error] {
-    remove_to(mut root, key, None, private_from, mut next)
+    remove_to(mut root, key, None, private_from, mut next, resident_edit_frame)
 }
 
 /// Delete one row, using the caller's stamp-zero empty leaf of the same domain
 /// if the root becomes empty.
 pub fn remove_with_empty(mut root: Arc[Page], key: Bytes, empty_root: Arc[Page], private_from: u64, mut next: u64) -> Result[bool, Error] {
-    remove_to(mut root, key, Some(view empty_root), private_from, mut next)
+    remove_to(mut root, key, Some(view empty_root), private_from, mut next, resident_edit_frame)
 }
 
-fn remove_to(mut root: Arc[Page], key: Bytes, empty_root: Option[View[Arc[Page]]], private_from: u64, mut next: u64) -> Result[bool, Error] {
-    if !contains_row(root, key) {
+/// Delete a row in a private candidate. A Cold child needed for the edit
+/// is supplied by the caller's verified page resolver.
+pub fn remove_resolved(mut root: Arc[Page], key: Bytes, empty_root: Arc[Page], private_from: u64, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[bool, Error] {
+    remove_to(mut root, key, Some(view empty_root), private_from, mut next, load)
+}
+
+fn remove_to(mut root: Arc[Page], key: Bytes, empty_root: Option[View[Arc[Page]]], private_from: u64, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[bool, Error] {
+    if !contains_row(root, key, load)? {
         return Ok(false)
     }
-    if let Some(parts) = remove_path(mut root, key, private_from, mut next)? {
+    if let Some(parts) = remove_path(mut root, key, private_from, mut next, load)? {
         finish_split(mut root, parts, mut next)?
     }
     if count(root.image) == 0 {
@@ -2539,37 +2576,43 @@ fn remove_to(mut root: Arc[Page], key: Bytes, empty_root: Option[View[Arc[Page]]
             None => empty(0, 0, root.image.domain),
         }
     } else if count(root.image) == 1 && level(root.image) != 0 {
-        root = arc.share(hot_child(root.kids[0u64]))
+        root = edit_page(root.kids[0u64], load)?
     }
     Ok(true)
 }
 
-fn contains_row(root: Arc[Page], key: Bytes) -> bool {
+fn contains_row(root: Arc[Page], key: Bytes, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[bool, Error] {
     if let Some(slot) = descend(root.image, key) {
-        return contains_row(hot_child(root.kids[slot]), key)
+        return contains_row(edit_page(root.kids[slot], load)?, key, load)
     }
     let (_, hit) = search(root.image, key)
-    hit
+    Ok(hit)
 }
 
 /// Upsert one row, copying a shared path and keeping private pages editable.
 /// Collection descriptors supply the collection root as their owning child.
 /// Replay passes zero to re-stamp unique pages outside a live store.
 pub fn insert(mut root: Arc[Page], key: Bytes, value: Bytes, descriptor: Option[Arc[Page]], inline: u64, private_from: u64, mut next: u64) -> Result[(), Error] {
-    insert_value(mut root, key, value, None, descriptor, inline, private_from, false, mut next)
+    insert_value(mut root, key, value, None, descriptor, inline, private_from, false, mut next, resident_edit_frame)
 }
 
 /// Share the value body with the journal operation when the row uses a BLOB.
 pub fn insert_shared(mut root: Arc[Page], key: Bytes, value: Arc[Bytes], inline: u64, private_from: u64, mut next: u64) -> Result[(), Error] {
-    insert_value(mut root, key, value, Some(view value), None, inline, private_from, false, mut next)
+    insert_value(mut root, key, value, Some(view value), None, inline, private_from, false, mut next, resident_edit_frame)
 }
 
 /// Append the greatest key, packing the left piece of an overflowing page.
 pub fn append_row(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[View[Arc[Bytes]]], inline: u64, private_from: u64, mut next: u64) -> Result[(), Error] {
-    insert_value(mut root, key, value, shared, None, inline, private_from, true, mut next)
+    insert_value(mut root, key, value, shared, None, inline, private_from, true, mut next, resident_edit_frame)
 }
 
-fn insert_value(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[View[Arc[Bytes]]], descriptor: Option[Arc[Page]], inline: u64, private_from: u64, rightmost: bool, mut next: u64) -> Result[(), Error] {
+/// Stage a row in a private candidate, resolving Cold child pages through
+/// the caller's verified pins. Rightmost mode uses the Log append split rule.
+pub fn insert_shared_resolved(mut root: Arc[Page], key: Bytes, value: Arc[Bytes], inline: u64, private_from: u64, rightmost: bool, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[(), Error] {
+    insert_value(mut root, key, value, Some(view value), None, inline, private_from, rightmost, mut next, load)
+}
+
+fn insert_value(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[View[Arc[Bytes]]], descriptor: Option[Arc[Page]], inline: u64, private_from: u64, rightmost: bool, mut next: u64, load: scoped fn(PagePtr) -> Result[Arc[Page], Error]) -> Result[(), Error] {
     let domain = root.image.domain
     let n = list.len(value)
     if inline > INLINE_MAX || n > VALUE_MAX || list.len(key) > key_limit(domain) {
@@ -2589,11 +2632,11 @@ fn insert_value(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[Vi
         }
         PageSlot(row: Entry(key: clone(key), cell: BlobValue(edge)), kid: None, blob: Some(HotBlob(take shared_body)))
     }
-    let (take revised, _) = insert_path(mut root, incoming, private_from, rightmost, mut next)?
+    let (take revised, _) = insert_path(mut root, incoming, private_from, rightmost, mut next, load)?
     if let Some(parts) = view revised {
         finish_split(mut root, parts, mut next)?
         if level(root.image) != 0 && count(root.image) == 1 {
-            root = arc.share(hot_child(root.kids[0u64]))
+            root = edit_page(root.kids[0u64], load)?
         }
     }
     Ok(())

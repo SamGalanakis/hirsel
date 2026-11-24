@@ -817,3 +817,75 @@ fn test_l70_pager_admits_cache_backing(d: Dir, tasks: Tasks) -> Result[(), Error
     let _ = result.unwrap(task.join(take worker))
     Ok(())
 }
+
+fn l63_edit_leaf(first_key: u64, n: u64, widths: (u64, u64), stamp: u64) -> Result[Arc[std.page.Page], Error] {
+    let mut rows: List[std.page.Entry] = list.with_capacity(n)
+    for offset in 0u64 .. n {
+        let width = if offset == 0 { widths.0 } else { widths.1 }
+        let mut bytes_out: Bytes = list.with_capacity(width)
+        list.fill(mut bytes_out, width, 111u8)
+        list.push(mut rows, std.page.Entry(key: key_word(first_key + offset), cell: InlineValue(take bytes_out)))
+    }
+    let image = page_result(std.page.encode(rows, 0, stamp, Collection))?
+    page_result(std.page.attach(take image, list.new(), list.new()))
+}
+
+@test
+fn test_l63_resolved_edits_follow_candidate_neighbors() -> Result[(), Error] {
+    let left_leaf = l63_edit_leaf(10, 3, (1000u64, 32u64), 40)?
+    let middle_leaf = l63_edit_leaf(20, 1, (32u64, 32u64), 41)?
+    let right_leaf = l63_edit_leaf(30, 4, (1005u64, 1005u64), 42)?
+    let left = std.page.PagePtr(pack: 8, offset: 72, len: 1116, checksum: 11, stamp: 40)
+    let middle = std.page.PagePtr(pack: 8, offset: 1204, len: 71, checksum: 12, stamp: 41)
+    let right = std.page.PagePtr(pack: 8, offset: 1291, len: 4079, checksum: 13, stamp: 42)
+    let mut branches: List[std.page.Entry] = list.with_capacity(3)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 3, charge: 1298))))
+    list.push(mut branches, std.page.Entry(key: key_word(20), cell: Child(std.page.Branch(child: middle, rows: 1, charge: 110))))
+    list.push(mut branches, std.page.Entry(key: key_word(30), cell: Child(std.page.Branch(child: right, rows: 4, charge: 4344))))
+    let image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let mut root = page_result(std.page.attach_cold(take image))?
+    let blank = std.page.empty(0, 0, Collection)
+    let mut ids = 51u64
+    let removed_large = page_result(std.page.remove_resolved(mut root, key_word(10), blank, 51, mut ids, scoped fn(place: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
+        if place == left {
+            Ok(arc.share(left_leaf))
+        } else if place == middle {
+            Ok(arc.share(middle_leaf))
+        } else {
+            fail("L63: first edit needs only B and C")
+        }
+    }))?
+    if !removed_large || std.page.count(std.page.image_of(root)) != 2 {
+        fail("L63: removing the wide row must merge B with C")
+    }
+    let mut calls = 0u64
+    let removed_small = page_result(std.page.remove_resolved(mut root, key_word(11), blank, 51, mut ids, scoped fn(place: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
+        if place != right {
+            fail("L63: the merged page has just one Cold neighbor")
+        }
+        calls += 1
+        Ok(arc.share(right_leaf))
+    }))?
+    {
+        let Some(ColdPage(inherited)) = std.page.child_slot(root, 1) else {
+            fail("L63: checking a neighbor must keep its Cold slot intact")
+        }
+        if !removed_small || calls != 1 || inherited != right || std.page.totals(root) != (6u64, 4564u64) {
+            fail("L63: the second edit must consult D and keep its slot")
+        }
+    }
+    let value = arc.new(string.into_bytes(string.from("stored")))
+    page_result(std.page.insert_shared_resolved(mut root, key_word(30), value, 1024, 51, false, mut ids, scoped fn(place: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
+        if place != right {
+            fail("L63: this update only replaces D")
+        }
+        Ok(arc.share(right_leaf))
+    }))?
+    let Some(stored) = std.page.lookup(root, key_word(30)) else {
+        fail("L63: update did not expose the edited row")
+    }
+    if list.compare_bytes(stored, value) != Equal || std.page.totals(root) != (6u64, 3564u64) {
+        fail("L63: update changed the count or the wrong charge")
+    }
+    Ok(())
+}

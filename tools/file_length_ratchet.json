@@ -79,8 +79,8 @@
     "lines": 1374
   },
   "core/std/page.hirsel": {
-    "lines": 3546,
-    "raise_revision": 13,
+    "lines": 3589,
+    "raise_revision": 14,
     "reason": "m3-s3-slots-2010"
   },
   "core/std/prop.hirsel": {

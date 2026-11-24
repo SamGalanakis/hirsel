@@ -13,8 +13,7 @@ fn shared_input(key: Bytes, limit: u64, issuer: u8, refund: Sender[u64]) -> Subs
     SubscriptionInput(room: Some(take lease), key: clone(key), arg: no_arg(), caller: store.Caller(issuer: issuer, subject: list.new()))
 }
 
-@test
-fn test_shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
+fn shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 67108864u64)))
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u64())))
     let h = result.unwrap(subs_handles(mut db))
@@ -60,8 +59,13 @@ fn test_shared_view_once(clock: Clock, random: Random) -> Result[(), String] wai
     Ok(())
 }
 
+@test
+fn test_shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
+    shared_view_once(clock, random)
+}
+
 pub fn law_shared_view_once(clock: Clock, random: Random) -> bool waits {
-    match test_shared_view_once(clock, random) {
+    match shared_view_once(clock, random) {
         Ok(()) => true,
         Error(_) => false,
     }

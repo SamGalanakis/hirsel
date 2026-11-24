@@ -5,6 +5,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::time::Instant;
 
+pub(crate) mod trace;
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Stage {
     pub name: &'static str,
@@ -562,6 +564,7 @@ impl Meter {
     }
     pub fn finish(&mut self, name: &'static str) {
         self.pause();
+        crate::meter::trace::mark(name);
         let now = Instant::now();
         let value = self.counter.as_ref().and_then(|c| match c.read() {
             Ok(n) => Some(n),

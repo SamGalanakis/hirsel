@@ -209,7 +209,7 @@ impl fmt::Display for NativeStop {
             } => write!(f, "emit {definition}: {message}"),
             Self::Link(s) => write!(f, "link: {s}"),
             Self::Input(e) => write!(f, "input: {e}"),
-            Self::Output { error, .. } => f.write_str(&output_stop(error)),
+            Self::Output { error, .. } => f.write_str(&crate::executable::output_stop(error)),
         }
     }
 }
@@ -1480,7 +1480,7 @@ fn bound_entry_abi(
 
 /// Runtime CAP-4 kind numbers. Args is always supplied by the process constructor.
 pub fn grant_kind(name: &str) -> Option<u8> {
-    recipe_build::kind(name)
+    recipe_grants::kind(name)
 }
 
 #[cfg(test)]
@@ -1521,6 +1521,7 @@ fn link_objects(
     revisions: impl FnOnce() -> Result<BTreeMap<Identity, ContentHash>, NativeStop>,
     assembly: Option<(ContentHash, ContentHash)>,
 ) -> Result<Linked, NativeStop> {
+    let _phase = crate::meter::trace::span("link objects");
     let revision = hirsel_core_ir::code_revision(address);
     // The executable key includes the mode-specific lld options.
     let link_mode = if options.optimize {
@@ -1671,6 +1672,7 @@ fn link_objects(
         let (runtime_sources, spawns_units) =
             crate::native_entry::runtime_sources(&sources, sources_key, &members, &keys)?;
         let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<Vec<u8>, NativeStop> {
+            let _phase = crate::meter::trace::span("entry object");
             let bytes = entry_plan
                 .emit(
                     &options.target,
@@ -1736,11 +1738,13 @@ fn link_objects(
                     })
                     .transpose()?;
                 if let Some((frame, objects)) = &incremental {
+                    let _phase = crate::meter::trace::span("link patch");
                     if let Some(image) = crate::incremental_link::patch(*frame, objects)? {
                         patched.set(true);
                         return Ok(image);
                     }
                 }
+                let _phase = crate::meter::trace::span("full link");
                 let bundle = members.bundle()?.path();
                 inputs.insert(1, bundle.clone());
                 direct_link(
@@ -1785,15 +1789,18 @@ fn link_objects(
         counters.link_patched = u64::from(patched.get());
         drop(members);
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
-        let debug = crate::native_debug::bind_detached(
-            &rows,
-            &sources,
-            sources_key,
-            entry_plan.release_debug_sites,
-            entry_plan.remarks,
-            &bytes,
-        )
-        .map_err(bind_error)?;
+        let debug = {
+            let _phase = crate::meter::trace::span("detached DWARF");
+            crate::native_debug::bind_detached(
+                &rows,
+                &sources,
+                sources_key,
+                entry_plan.release_debug_sites,
+                entry_plan.remarks,
+                &bytes,
+            )
+            .map_err(bind_error)?
+        };
         let binary = NativeImage { bytes, debug };
         binary.publish(&store, link_key)?;
         (binary, true)
@@ -1830,18 +1837,6 @@ fn link_objects(
         }),
     }
 }
-/// How a request reports that writing its executable to the output failed.
-pub(crate) fn output_stop(error: &io::Error) -> String {
-    format!("output: {error}")
-}
-/// Write a checked executable's `bytes` to `output`, its directory made.
-pub(crate) fn deliver(output: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
-    crate::executable::write(output, bytes, 0o755)
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

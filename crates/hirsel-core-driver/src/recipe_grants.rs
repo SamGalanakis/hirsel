@@ -1,8 +1,23 @@
 //! The authority a recipe's grants give, as lines two recipes can be diffed by.
-use super::recipe_build::grant_name;
 use super::selection;
 use hirsel_core_ir::release_recipe::{GrantKind, Recipe};
 use std::collections::BTreeSet;
+
+pub(super) const GRANT_NAMES: [&str; 15] = [
+    "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
+    "Args", "Secret", "Foreign", "Exec", "Cred",
+];
+
+pub(super) fn kind(name: &str) -> Option<u8> {
+    GRANT_NAMES
+        .iter()
+        .position(|kind| *kind == name)
+        .map(|i| i as u8)
+}
+
+pub(super) fn grant_name(kind: GrantKind) -> &'static str {
+    GRANT_NAMES[kind as usize]
+}
 
 /// One line per authority a recipe's grants give (launch.md "Publish and assemble"): each
 /// value of a Dir, Net, Env or Foreign grant, a whole Exec, Secret or Cred binding with

@@ -452,6 +452,7 @@ fn lock(store: &Path) -> io::Result<Option<std::fs::File>> {
 pub(crate) fn answer(outcome: &Outcome) {
     let _ = io::stdout().flush();
     let _ = io::stderr().flush();
+    crate::meter::trace::finish();
     let Some(mut stream) = CLIENT.with_borrow_mut(Option::take) else {
         return;
     };
@@ -554,6 +555,7 @@ fn serve_requests(
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let toolchain = Toolchain::current()?;
     let env = environment();
+    let trace_phases = std::env::var_os("HIRSEL_TRACE_REQUEST_PHASES").is_some_and(|v| v == "1");
     // A client that hangs up mid-answer is an error on the write, not a signal.
     // SAFETY: SIG_IGN installs no handler.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
@@ -604,8 +606,12 @@ fn serve_requests(
         drop(fds);
         let cwd = PathBuf::from(OsString::from_vec(request.cwd));
         CLIENT.with_borrow_mut(|client| *client = stream.try_clone().ok());
+        if trace_phases {
+            crate::meter::trace::begin();
+        }
         let outcome = if std::env::set_current_dir(&cwd).is_ok() {
             sets.begin(route.unwrap().input.absolute(&cwd));
+            crate::meter::trace::mark("working set ready");
             let args = request.args;
             std::panic::catch_unwind(move || crate::request::serve(args))
         } else {

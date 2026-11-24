@@ -1,5 +1,6 @@
 //! Publish the checked program and assemble its recipe with a local toolchain.
 
+use super::recipe_grants::{GRANT_NAMES, grant_name, kind};
 use super::std_release::{StdSide, std_side};
 use super::*;
 use crate::code_admission::{
@@ -234,18 +235,6 @@ pub struct Publication {
     link_archives: LinkArchives,
 }
 
-const GRANT_NAMES: [&str; 15] = [
-    "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
-    "Args", "Secret", "Foreign", "Exec", "Cred",
-];
-
-pub(super) fn kind(name: &str) -> Option<u8> {
-    GRANT_NAMES
-        .iter()
-        .position(|kind| *kind == name)
-        .map(|i| i as u8)
-}
-
 impl CheckProduct {
     pub fn publish_release(
         &self,
@@ -255,6 +244,7 @@ impl CheckProduct {
         store: &CodeStore,
         n_place: u64,
     ) -> Result<Publication, NativeStop> {
+        let _phase = crate::meter::trace::span("recipe publication");
         reached.require()?;
         if options.recording
             && let Some(stop) = reached.recording_stop(self, entry)?
@@ -343,6 +333,7 @@ impl CheckProduct {
         index: Option<&Memos>,
         defer_modules: bool,
     ) -> Result<Released, NativeStop> {
+        let _phase = crate::meter::trace::span("release units");
         let instances = reached.require()?;
         let anchored = instances
             .iter()
@@ -844,10 +835,6 @@ fn select_archive<'a>(
         ))
         .into()
     })
-}
-
-pub(super) fn grant_name(kind: GrantKind) -> &'static str {
-    GRANT_NAMES[kind as usize]
 }
 
 fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
@@ -1600,6 +1587,7 @@ impl Publication {
         std: Option<StdSide>,
         library: Option<&Path>,
     ) -> Result<BuildProduct, NativeStop> {
+        let _phase = crate::meter::trace::span("native assembly");
         let mut counters = counters;
         counters.std_lowered = std.as_ref().map_or(0, |std| std.lowered);
         let entry_identity = self.recipe.entry.clone();

@@ -177,13 +177,18 @@ impl NativeImage {
     }
 
     pub(crate) fn publish(&self, store: &crate::Store, key: ContentHash) -> io::Result<()> {
-        store.put_keyed(Self::debug_key(key), &self.debug)?;
-        store.put_keyed(key, &self.bytes)
+        {
+            let _phase = crate::meter::trace::span("DWARF cache publication");
+            store.put_keyed(Self::debug_key(key), &self.debug)?;
+        }
+        let _phase = crate::meter::trace::span("executable cache publication");
+        store.put_keyed_executable(key, &self.bytes)
     }
 
     pub(crate) fn deliver(&self, path: &Path) -> io::Result<()> {
+        let _phase = crate::meter::trace::span("output delivery");
         deliver(path, &self.bytes, &self.debug)?;
-        crate::native::deliver(path, &self.bytes)
+        crate::executable::deliver(path, &self.bytes)
     }
 }
 

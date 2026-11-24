@@ -316,6 +316,7 @@ impl CheckProduct {
         entry: &DefPath,
         options: &NativeOptions,
     ) -> io::Result<Reachable<'_>> {
+        let _phase = crate::meter::trace::span("reach");
         let limit = options.instance_limit;
         if !crate::resident::serving() {
             return hirsel_core_ids::published::catch_io(|| {
@@ -370,6 +371,7 @@ impl CheckProduct {
         options: &NativeOptions,
         damaged: &BTreeSet<Identity>,
     ) -> io::Result<Reachable<'_>> {
+        let _phase = crate::meter::trace::span("reach");
         let inputs = crate::native::native_inputs(self, options)?;
         let mut reached = hirsel_core_ids::published::catch_io(|| {
             let Some(records) = inputs.records.as_ref() else {
@@ -593,16 +595,19 @@ impl CheckProduct {
         let mut materialized = crate::instances::InstanceSet::for_reach(compact_recipe);
         let roots = [Identity::plain(entry.clone())];
         let prior = records.and_then(|(_, p, _)| p);
-        let instances = match records {
-            Some((records, _, damaged)) => {
-                let expand = crate::instances::Expand {
-                    prior: prior.and_then(|(p, _, _)| p),
-                    changed: prior.map_or(&[], |(_, c, _)| c),
-                    damaged,
-                };
-                self.instances_over_records(roots, limit, &mut materialized, records, expand)
+        let instances = {
+            let _phase = crate::meter::trace::span("instance walk");
+            match records {
+                Some((records, _, damaged)) => {
+                    let expand = crate::instances::Expand {
+                        prior: prior.and_then(|(p, _, _)| p),
+                        changed: prior.map_or(&[], |(_, c, _)| c),
+                        damaged,
+                    };
+                    self.instances_over_records(roots, limit, &mut materialized, records, expand)
+                }
+                None => self.instances_into(roots, limit, &mut materialized),
             }
-            None => self.instances_into(roots, limit, &mut materialized),
         };
         let image_directory = self.image.as_ref().map(|i| i.directory()).transpose()?;
         let constants = match prior {

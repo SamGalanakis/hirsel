@@ -91,7 +91,7 @@ impl Report {
             Err(NativeStop::Output { product, error }) => (
                 None,
                 Some(*product),
-                Some(crate::native::output_stop(&error)),
+                Some(crate::executable::output_stop(&error)),
             ),
             Err(error) => {
                 if let NativeStop::ForeignRecording { site, .. } = &error {

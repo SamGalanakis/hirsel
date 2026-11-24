@@ -497,10 +497,24 @@ impl Store {
     /// file by a rename and a reader sees one whole frame or none. The
     /// frame is written around the borrowed payload without copying it.
     pub(crate) fn put_keyed(&self, key: ContentHash, payload: &[u8]) -> io::Result<()> {
+        self.put_keyed_record(key, payload, false)
+    }
+
+    pub(crate) fn put_keyed_executable(&self, key: ContentHash, payload: &[u8]) -> io::Result<()> {
+        self.put_keyed_record(key, payload, true)
+    }
+
+    fn put_keyed_record(
+        &self,
+        key: ContentHash,
+        payload: &[u8],
+        executable: bool,
+    ) -> io::Result<()> {
         let header = Self::header();
         let mut trailer = [0; TRAILER];
         trailer[..8].copy_from_slice(&(payload.len() as u64).to_le_bytes());
         {
+            let _phase = executable.then(|| crate::meter::trace::span("executable checksum"));
             hirsel_core_front::cost_scope!("non-check", "archive write and digest");
             let mut check = XxHash3_64::new();
             check.write(&header);
@@ -509,6 +523,7 @@ impl Store {
             trailer[8..16].copy_from_slice(&check.finish().to_le_bytes());
         }
         trailer[16..].copy_from_slice(&key.0);
+        let _phase = executable.then(|| crate::meter::trace::span("executable record write"));
         self.publish(&self.path(key), [&header, payload, &trailer])?;
         wrote("record");
         Ok(())

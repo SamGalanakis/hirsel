@@ -1709,7 +1709,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         match assembled {
             Ok(native) => Some(native),
             Err(crate::NativeStop::Output { product, error }) => {
-                stopped = Some(crate::native::output_stop(&error));
+                stopped = Some(crate::executable::output_stop(&error));
                 undelivered = Some(*product);
                 None
             }
@@ -1842,7 +1842,7 @@ fn answer_hit(
             match binary.deliver(path) {
                 Ok(()) => Some(product),
                 Err(error) => {
-                    stopped = Some(crate::native::output_stop(&error));
+                    stopped = Some(crate::executable::output_stop(&error));
                     None
                 }
             }

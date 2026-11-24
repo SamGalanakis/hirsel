@@ -58,6 +58,18 @@ pub(crate) fn write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     })
 }
 
+/// How a request reports that writing its executable to the output failed.
+pub(crate) fn output_stop(error: &io::Error) -> String {
+    format!("output: {error}")
+}
+/// Write a checked executable's `bytes` to `output`, its directory made.
+pub(crate) fn deliver(output: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    write(output, bytes, 0o755)
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;

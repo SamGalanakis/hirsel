@@ -751,3 +751,45 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     }
     Ok(())
 }
+
+@test
+fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
+    let owner = StoreId(hi: 3, lo: 4)
+    let base = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 111, stamp: 40)
+    let mut descriptor = collection_header(40, 3, 258, 4, 1)?
+    list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(base))
+    list.put_word_le(mut descriptor, 4u64)
+    list.put_word_le(mut descriptor, 1u64)
+    let id = prefix(9)?
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: clone(id), cell: InlineValue(take descriptor)))
+    let image = page_result(std.page.encode(rows, 0, 100, CollectionMap))?
+    let mut children: List[std.page.Slot] = list.with_capacity(1)
+    list.push(mut children, ColdPage(base))
+    let mut tree = new_page_tree(CollectionMap, 1024)
+    tree.root = page_result(std.page.attach(take image, take children, list.new()))?
+
+    let mut account = ReplayTieredAccount(total: 258, exact: true, ordinal: 0)
+    let mut ids = 101u64
+    let before = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 1, next: 4)))
+    let trim = JournalOp(key: take id, value: None, prior: 0, trim: Some(JournalTrim(floor: 2, dropped: 86)))
+    replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 1, branch: 0), before, trim)?;
+
+    // There is no pager to answer. The former first row is in the base but
+    // the new descriptor masks it. A retained row still needs the pager.
+    let (requests, receiver): (Sender[TieredPagerMessage], Receiver[TieredPagerMessage]) = channel.new(1)
+    let _ = take receiver
+    let source = TieredPageSource(pager: take requests, packs: std.omap.new(), next_stamp: ids, deadline: 0)
+    let grant = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: VALUE_LIMIT + 1048576))
+    let root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
+    let Ok(None) = read_tiered_point(source, grant, root, tree, log_key(9, 1)?, 2) else {
+        fail("L62: a trimmed row must not reach the Cold base")
+    }
+    let Ok(None) = read_tiered_point(source, grant, root, tree, log_key(9, 4)?, 2) else {
+        fail("L62: a key at next_seq must not reach the Cold base")
+    }
+    let Error(Io(Closed)) = read_tiered_point(source, grant, root, tree, log_key(9, 2)?, 2) else {
+        fail("L62: masking bypassed the Cold base inside the Log bounds")
+    }
+    Ok(())
+}

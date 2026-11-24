@@ -13,14 +13,24 @@ fn read_tiered_point(source: TieredPageSource, root_grant: Arc[TieredReaderGrant
     if list.len(logical) < 4 {
         return Ok(None)
     }
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) else {
+        return Ok(None)
+    }
+    if descriptor[52u64] == 4 {
+        if list.len(logical) != 12 {
+            return Ok(None)
+        }
+        let sequence: u64 = list.word_be(logical, 4)
+        let window = descriptor_bounds(descriptor)
+        if sequence < window.first || sequence >= window.next {
+            return Ok(None)
+        }
+    }
     if let Some(row) = tiered_replayed_row(tree, logical) {
         return match row.now {
             ReplayPut(value) => Ok(Some(arc.share(value))),
             ReplayAbsent => Ok(None),
         }
-    }
-    let Some((edge, _)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) else {
-        return Ok(None)
     }
     let key = list.slice(logical, 4, list.len(logical))
     let mut pins = empty_tiered_pins(root, root_grant.pin_bytes)

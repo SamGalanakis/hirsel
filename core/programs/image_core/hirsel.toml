@@ -1,0 +1,23 @@
+[package]
+name = "image_core"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+media_container = { major = 1, path = "../media_container" }
+
+[sources]
+"image.hirsel" = "image"
+"jpeg.hirsel" = "image"
+"webp.hirsel" = "image"
+"gif_header.hirsel" = "image"
+"avif_header.hirsel" = "image"
+"metadata.hirsel" = "image"
+
+[tests]
+limit = 16777216
+grants = []
+
+[tests.sources]
+"probe_laws.hirsel" = "tests"

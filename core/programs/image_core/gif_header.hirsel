@@ -1,0 +1,95 @@
+fn gif_table_size(flags: u8) -> u64 {
+    let power: u64 = int.widen(flags & 7)
+    if flags & 128 == 0 {
+        0
+    } else {
+        3 << (power + 1)
+    }
+}
+
+fn gif_skip(input: Bytes, start: u64) -> Result[u64, Error] {
+    let n = list.len(input)
+    let mut at = start
+    while at < n {
+        let count: u64 = int.widen(input[at])
+        at += 1
+        if count == 0 {
+            return Ok(at)
+        }
+        if count > n - at {
+            return Error(Truncated)
+        }
+        at += count
+    }
+    Error(Truncated)
+}
+
+fn probe_gif(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
+    let n = list.len(input)
+    if n < 13 {
+        return Error(Truncated)
+    }
+    let ver: u16 = list.word_be(input, 4)
+    if ver != 0x3761 && ver != 0x3961 {
+        return Error(Malformed)
+    }
+    let w: u32 = int.widen(tiff_short(input, 6, true))
+    let h: u32 = int.widen(tiff_short(input, 8, true))
+    check_size(w, h, 1, limits)?
+    let mut header = info(Gif, w, h, 8, false)
+    let global = gif_table_size(input[10])
+    let mut at = 13 + global
+    let mut frames = 0u32
+    while at < n {
+        let tag = input[at]
+        at += 1
+        if tag == 0x3b {
+            if at != n || frames == 0 {
+                return Error(Malformed)
+            }
+            header.frame_count = frames
+            return Ok(header)
+        } else if tag == 0x21 {
+            if at == n {
+                return Error(Truncated)
+            }
+            let extension = input[at]
+            at += 1
+            if extension == 0xf9 {
+                if n - at < 6 || input[at] != 4 || input[at + 5] != 0 {
+                    return Error(Malformed)
+                }
+                header.has_alpha = header.has_alpha || input[at + 1] & 1 != 0
+            }
+            at = gif_skip(input, at)?
+        } else if tag == 0x2c {
+            if n - at < 9 {
+                return Error(Truncated)
+            }
+            if frames == limits.max_frames {
+                return Error(FrameLimit)
+            }
+            frames += 1
+            check_size(w, h, frames, limits)?
+            let x: u32 = int.widen(tiff_short(input, at, true))
+            let y: u32 = int.widen(tiff_short(input, at + 2, true))
+            let fw: u32 = int.widen(tiff_short(input, at + 4, true))
+            let fh: u32 = int.widen(tiff_short(input, at + 6, true))
+            if fw == 0 || fh == 0 || x >= w || y >= h || fw > w - x || fh > h - y {
+                return Error(Malformed)
+            }
+            let local = gif_table_size(input[at + 8])
+            at += 9 + local
+            if at >= n {
+                return Error(Truncated)
+            }
+            if (local == 0 && global == 0) || input[at] < 2 || input[at] > 8 {
+                return Error(Malformed)
+            }
+            at = gif_skip(input, at + 1)?
+        } else {
+            return Error(Malformed)
+        }
+    }
+    Error(Truncated)
+}

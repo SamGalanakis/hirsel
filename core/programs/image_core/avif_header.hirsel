@@ -1,0 +1,331 @@
+fn avif_box(input: Bytes, at: u64, limit: u64) -> Result[media_container.mp4.BoxHeader, Error] {
+    match media_container.mp4.read_box(input, at, limit, true) {
+        Ok(value) => Ok(value),
+        Error(Truncated) => Error(Truncated),
+        Error(_) => Error(Malformed),
+    }
+}
+
+fn avif_brand(input: Bytes, at: u64, end: u64) -> Result[(), Error] {
+    if end - at < 8 || (end - at) % 4 != 0 {
+        return Error(Malformed)
+    }
+    let mut brand: u32 = list.word_be(input, at)
+    let mut still = brand == 0x61766966
+    if brand == 0x61766973 {
+        return Error(Unsupported)
+    }
+    let mut next = at + 8
+    while next < end {
+        brand = list.word_be(input, next)
+        if brand == 0x61766973 {
+            return Error(Unsupported)
+        }
+        still = still || brand == 0x61766966
+        next += 4
+    }
+    if still {
+        Ok(())
+    } else {
+        Error(UnknownFormat)
+    }
+}
+
+type BoxRange {
+    start: u64,
+    end: u64
+}
+
+fn empty_range() -> BoxRange {
+    BoxRange(start: 0, end: 0)
+}
+
+fn unique_range(previous: BoxRange, body: u64, end: u64) -> Result[BoxRange, Error] {
+    if previous.start != 0 {
+        Error(Malformed)
+    } else {
+        Ok(BoxRange(start: body, end: end))
+    }
+}
+
+fn probe_avif(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
+    let n = list.len(input)
+    let ftyp = avif_box(input, 0, n)?
+    avif_brand(input, media_container.mp4.box_body(ftyp), media_container.mp4.box_next(ftyp))?
+    let mut at = media_container.mp4.box_next(ftyp)
+    let mut meta = empty_range()
+    let mut media = false
+    while at < n {
+        let box = avif_box(input, at, n)?
+        at = media_container.mp4.box_next(box)
+        let tag = media_container.mp4.box_kind(box)
+        if tag == 0x6d657461 {
+            meta = unique_range(meta, media_container.mp4.box_body(box), at)?
+        } else if tag == 0x6d646174 {
+            media = media || at > media_container.mp4.box_body(box)
+        } else if tag == 0x6d6f6f76 {
+            return Error(Unsupported)
+        }
+    }
+    if meta.end - meta.start < 4 {
+        return Error(Malformed)
+    }
+    let version: u32 = list.word_be(input, meta.start)
+    if version != 0 {
+        return Error(Unsupported)
+    }
+    avif_meta(input, meta.start + 4, meta.end, media, limits)
+}
+
+fn avif_meta(input: Bytes, start: u64, end: u64, has_mdat: bool, limits: Limits) -> Result[ImageInfo, Error] {
+    let mut media = has_mdat
+    let mut at = start
+    let mut primary = 0u32
+    let mut iprp = empty_range()
+    while at < end {
+        let box = avif_box(input, at, end)?
+        let body = media_container.mp4.box_body(box)
+        at = media_container.mp4.box_next(box)
+        let tag = media_container.mp4.box_kind(box)
+        if tag == 0x7069746d {
+            if primary != 0 || at - body < 6 {
+                return Error(Malformed)
+            }
+            let version: u32 = list.word_be(input, body)
+            if version == 0 && at - body == 6 {
+                primary = int.widen(tiff_short(input, body + 4, false))
+            } else if version == 0x01000000 && at - body == 8 {
+                primary = list.word_be(input, body + 4)
+            } else {
+                return Error(Malformed)
+            }
+            if primary == 0 {
+                return Error(Malformed)
+            }
+        } else if tag == 0x69707270 {
+            iprp = unique_range(iprp, body, at)?
+        } else if tag == 0x69646174 {
+            media = media || at > body
+        }
+    }
+    if primary == 0 || iprp.start == 0 || !media {
+        return Error(Malformed)
+    }
+    avif_properties(input, primary, iprp, limits)
+}
+
+fn avif_properties(input: Bytes, primary: u32, iprp: BoxRange, limits: Limits) -> Result[ImageInfo, Error] {
+    let mut box_at = iprp.start
+    let mut props = empty_range()
+    let mut associations = empty_range()
+    while box_at < iprp.end {
+        let box = avif_box(input, box_at, iprp.end)?
+        let body = media_container.mp4.box_body(box)
+        box_at = media_container.mp4.box_next(box)
+        let tag = media_container.mp4.box_kind(box)
+        if tag == 0x6970636f {
+            props = unique_range(props, body, box_at)?
+        } else if tag == 0x69706d61 {
+            associations = unique_range(associations, body, box_at)?
+        }
+    }
+    if props.start == 0 || associations.end - associations.start < 8 {
+        return Error(Malformed)
+    }
+    let mut prop_at = props.start
+    let mut count = 0u64
+    let mut offsets: Inline[u64, 128] =[0; 128]
+    while prop_at < props.end {
+        count += 1
+        if count < 128 {
+            offsets[count] = prop_at
+        }
+        let box = avif_box(input, prop_at, props.end)?
+        prop_at = media_container.mp4.box_next(box)
+        if media_container.mp4.box_kind(box) == 0x69737065 {
+            let (w, h) = avif_ispe(input, media_container.mp4.box_body(box), prop_at)?
+            check_size(w, h, 1, limits)?
+        }
+    }
+    let start = associations.start
+    let end = associations.end
+    let flags: u32 = list.word_be(input, start)
+    if flags & 0xfefffffe != 0 {
+        return Error(Unsupported)
+    }
+    let id_size: u64 = if flags >> 24 == 0 {
+        2
+    } else {
+        4
+    }
+    let index_size: u64 = if flags & 1 == 0 {
+        1
+    } else {
+        2
+    }
+    let records: u32 = list.word_be(input, start + 4)
+    let mut at = start + 8
+    let mut found = false
+    let mut header = info(Avif, 0, 0, 8, false)
+    let mut rotation = 0u8
+    let mut mirror = 0u8
+    for _ in 0u32 .. records {
+        if end - at < id_size + 1 {
+            return Error(Truncated)
+        }
+        let id: u32 = if id_size == 2 {
+            int.widen(tiff_short(input, at, false))
+        } else {
+            list.word_be(input, at)
+        }
+        let len: u64 = int.widen(input[at + id_size])
+        at += id_size + 1
+        if len * index_size > end - at || (id == primary && found) {
+            return Error(Malformed)
+        }
+        for _ in 0u64 .. len {
+            let bits: u16 = if index_size == 1 {
+                int.widen(input[at])
+            } else {
+                list.word_be(input, at)
+            }
+            let mask: u16 = if index_size == 1 {
+                0x7f
+            } else {
+                0x7fff
+            }
+            let index: u64 = int.widen(bits & mask)
+            if index > count {
+                return Error(Malformed)
+            }
+            if index != 0 {
+                let mut location = props.start
+                if index < 128 {
+                    location = offsets[index]
+                } else {
+                    for _ in 1u64 .. index {
+                        location = media_container.mp4.box_next(avif_box(input, location, props.end)?)
+                    }
+                }
+                let box = avif_box(input, location, props.end)?
+                let kind = media_container.mp4.box_kind(box)
+                let body = media_container.mp4.box_body(box)
+                let body_end = media_container.mp4.box_next(box)
+                if id == primary {
+                    if kind == 0x69726f74 {
+                        if body_end - body != 1 || input[body] > 3 || rotation != 0 {
+                            return Error(Malformed)
+                        }
+                        rotation = input[body] + 1
+                    } else if kind == 0x696d6972 {
+                        if body_end - body != 1 || input[body] > 1 || mirror != 0 {
+                            return Error(Malformed)
+                        }
+                        mirror = input[body] + 1
+                    } else {
+                        avif_property(input, kind, body, body_end, bits > mask, mut header)?
+                    }
+                } else if kind == 0x61757843 {
+                    if body_end - body >= 48 && avif_alpha_urn(input, body + 4) {
+                        header.has_alpha = true
+                    }
+                }
+            }
+            at += index_size
+        }
+        found = found || id == primary
+    }
+    if at != end || !found || header.width == 0 {
+        return Error(Malformed)
+    }
+    let i: u64 = if rotation == 0 {
+        0
+    } else {
+        int.widen(rotation - 1)
+    }
+    let j: u64 = int.widen(mirror)
+    // Rows are no reflection, reflection about the horizontal axis, and
+    // reflection about the vertical axis, after a counterclockwise rotation.
+    let orientations: Inline[u8, 12] =[1, 8, 3, 6, 4, 5, 2, 7, 2, 7, 4, 5]
+    header.orientation = orientations[j * 4 + i]
+    Ok(header)
+}
+
+fn avif_ispe(input: Bytes, start: u64, end: u64) -> Result[(u32, u32), Error] {
+    if end - start != 12 {
+        return Error(Malformed)
+    }
+    let full: u32 = list.word_be(input, start)
+    let w: u32 = list.word_be(input, start + 4)
+    let h: u32 = list.word_be(input, start + 8)
+    if full != 0 {
+        return Error(Unsupported)
+    }
+    Ok((w, h))
+}
+
+fn avif_property(input: Bytes, kind: u32, start: u64, end: u64, essential: bool, mut header: ImageInfo) -> Result[(), Error] {
+    let n = end - start
+    if kind == 0x69737065 {
+        if header.width != 0 {
+            return Error(Malformed)
+        }
+        let (w, h) = avif_ispe(input, start, end)?
+        header.width = w
+        header.height = h
+    } else if kind == 0x70697869 {
+        if n < 6 {
+            return Error(Malformed)
+        }
+        let channels: u64 = int.widen(input[start + 4])
+        let depth = input[start + 5]
+        if n != channels + 5 || (channels != 1 && channels != 3) || (depth != 8 && depth != 10 && depth != 12) {
+            return Error(Malformed)
+        }
+        for i in 1u64 .. channels {
+            if input[start + 5 + i] != depth {
+                return Error(Unsupported)
+            }
+        }
+        header.bit_depth = depth
+    } else if kind == 0x636f6c72 {
+        if n < 4 {
+            return Error(Malformed)
+        }
+        let color: u32 = list.word_be(input, start)
+        if color == 0x6e636c78 {
+            if n != 11 {
+                return Error(Malformed)
+            }
+            let primaries = tiff_short(input, start + 4, false)
+            let transfer = tiff_short(input, start + 6, false)
+            if transfer == 13 && !has_icc(header) {
+                if primaries == 1 {
+                    header.color_space = Srgb
+                } else if primaries == 12 {
+                    header.color_space = DisplayP3
+                }
+            }
+        } else if color == 0x70726f66 || color == 0x72494343 {
+            if has_icc(header) {
+                return Error(Malformed)
+            }
+            icc_header(input, start + 4, end)?
+            header.icc_profile = Some(IccProfile(start: start + 4, end: end, storage: Raw))
+            header.color_space = EmbeddedIcc
+        }
+    } else if essential && kind != 0x61763143 && kind != 0x636c6c69 && kind != 0x6d646376 {
+        return Error(Unsupported)
+    }
+    Ok(())
+}
+
+fn avif_alpha_urn(input: Bytes, at: u64) -> bool {
+    let word0: u64 = list.word_be(input, at + 0)
+    let word8: u64 = list.word_be(input, at + 8)
+    let word16: u64 = list.word_be(input, at + 16)
+    let word24: u64 = list.word_be(input, at + 24)
+    let word32: u64 = list.word_be(input, at + 32)
+    let word40: u32 = list.word_be(input, at + 40)
+    word0 == 0x75726e3a6d706567 && word8 == 0x3a6d706567423a63 && word16 == 0x6963703a73797374 && word24 == 0x656d733a61757869 && word32 == 0x6c696172793a616c && word40 == 0x70686100
+}

@@ -81,7 +81,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let definitions = product.definitions.values().map(|d| {
         let ir = d.ir()?;
         let definition = definitions_by_path[&d.definition];
-        let file = product.files.iter().find(|f| f.module == definition.site.module).unwrap();
+        let file = product
+            .files
+            .iter()
+            .find(|f| Some(f.file) == definition.site.source)
+            .expect("checked definition site has a source file");
         let item = file.syntax.item(definition.site.item as usize);
         let mut instance_refs = Vec::new();
         let mut instance_bodies = Vec::new();

@@ -9,6 +9,11 @@ store = { major = 1, path = "../store" }
 
 [sources]
 "runner.hirsel" = "runner"
+"runner-wire-io.hirsel" = "runner"
+"runner-wire-owner.hirsel" = "runner"
+"runner-wire-listener.hirsel" = "runner"
+"runner-wire-service.hirsel" = "runner"
+"runner-wire-output.hirsel" = "runner"
 "runner-managed-head.hirsel" = "runner"
 "runner-schema.hirsel" = "runner"
 "runner-dry-run.hirsel" = "runner"

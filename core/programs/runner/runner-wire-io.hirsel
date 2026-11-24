@@ -1,0 +1,528 @@
+pub const WIRE_OWNER_LIMIT: u64 = 10000u64
+
+pub const WIRE_OWNER_FLOOR: u64 = 65536u64
+
+const WIRE_OVERHEAD: u64 = 67108864u64
+
+const WIRE_SESSION_CEILING: u64 = 16777216u64
+
+pub const WIRE_POOL_BYTES: u64 = 384u64 * 1024u64 * 1024u64
+
+const WIRE_STANDALONE_SLOTS: u64 = 2u64
+
+pub type WireConfig: send {
+    n_pool: u64,
+    n_granted: u64,
+    max_subs: u64,
+    socket: std.wsock.Config,
+    q: u64,
+    budget: u64,
+    n_service: u64,
+    n_relay: u64,
+    site: Option[std.wsock.Site]
+}
+
+pub fn wire_defaults(n_service: u64) -> WireConfig {
+    WireConfig(n_pool: WIRE_POOL_BYTES, n_granted: 0u64, max_subs: 128u64, socket: std.wsock.defaults(), q: 4, budget: 1048576, n_service: n_service, n_relay: 0u64, site: None)
+}
+
+fn wire_owner_task_bytes() -> u64 {
+    option.unwrap(charge.task(bytes[Result[(), std.wsock.Error]], 0u64))
+}
+
+fn wire_round(n: u64) -> u64 {
+    option.unwrap(charge.round(n))
+}
+
+// The reader grant covers its state, the receive loan and a same-sized settling buffer.
+pub fn reader_bytes() -> u64 {
+    4096u64 + 2u64 * wire_round(std.wsock.RECEIVE_LOAN_BYTES)
+}
+
+fn wire_outcome_reserve(c: WireConfig) -> u64 {
+    // The largest fixed encoded Done is a 12-byte stream/position prefix and a 24-byte outcome.
+    (1u64 + c.q) * (DONE_MAX + 48u64)
+}
+
+fn wire_service_job_bytes(c: WireConfig) -> u64 {
+    c.n_service + 6u64 * c.socket.max_frame + 32768u64
+}
+
+fn wire_variable_peak(c: WireConfig) -> u64 {
+    let m = c.socket.max_frame
+    let units = 1u64 + c.q
+    // Read credits bound typed inbox/deferred values. Head positions retain
+    // a key and argument each, both at most one frame, plus stream and caller.
+    let frames = option.unwrap(charge.seq(bytes[(Frame, WirePending)], units))
+    let requests = option.unwrap(charge.seq(bytes[Request], units))
+    let caller = wire_round(SUBJECT_MAX)
+    let stream = wire_round(SUBJECT_MAX + 18u64)
+    let input = units * (6u64 * m + caller + stream) + frames + requests
+    let transport = wire_round(3u64 * m / 2u64) + 2u64 * wire_round(m + 14u64)
+    let retained = 4u64 * m + 2u64 * c.budget + wire_outcome_reserve(c)
+    input + transport + retained + wire_service_job_bytes(c) + 32768u64
+}
+
+pub const DONE_MAX: u64 = 8192
+
+const MAX_RETURNED_BYTES: u64 = DONE_MAX - 32u64
+
+// WIRE W3b. The service owns admission, dedup and outcomes.
+// Each owner holds the one publisher sender. Another transport calls the same dispatch.
+pub type ServiceInput: send = WAttach(Ip, Sender[WireEvent], Sender[PubIn]) | WClient(Frame, u64) | WRunner(Notice) | WGrantedDone(Tick, Outcome) | WPrepared(Box[ServicePlan]) | WDrained | WSent | WDropped | WPoll(bool) | WClose(u64) | WForce
+
+pub type Service[C: send]: send {
+    context: C,
+    step: fn(mut C, mut WireWork, take ServiceInput) -> Result[Option[Frame], u16],
+    ready: fn(C) -> bool,
+    finish: fn(mut C) -> Option[PubIn],
+    check: fn(C, Frame) -> Option[u16],
+    retirement: Option[WireRetirement],
+    flush_subscriptions: fn(mut C, mut WireWork) waits
+}
+
+pub fn dispatch[C: send](mut service: Service[C], take frame: Frame) -> Result[Option[Frame], u16] {
+    let mut work = wire_work()
+    (service.step)(mut service.context, mut work, WClient(take frame, 0u64))
+}
+
+pub fn writer_bytes() -> u64 {
+    4096u64
+}
+
+pub opaque type WireEvent: send {
+    e: WireInput
+}
+
+fn wire_event(take e: WireInput) -> WireEvent {
+    WireEvent(e: take e)
+}
+
+type WireInput: send = RegrantRoom | BellRoom(RoomBell) | RoomPassDone | SentRoom(Box[std.wsock.Writer], Box[RoomLiveBuffer]) | Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[BoundCaller], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | AuthExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
+
+type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(Box[std.websocket.Control]) | Ponged | PeerClosed(Box[std.websocket.Control])
+
+type WireParsed: send {
+    reader: Box[std.wsock.Reader],
+    packet: Result[Option[WirePacket], std.wsock.Error]
+}
+
+type WireAllocation[C: send]: send = Decode(Box[std.wsock.Reader], u64, Sender[WireParsed]) | Encode(Frame, List[OwedGroup], Sender[Result[Bytes, std.wsock.Error]]) | AllocateService(Box[Service[C]], ServiceAllocation, Sender[Option[AllocatedState[C]]])
+
+type WirePool[C: send]: send {
+    inbox: Receiver[WireAllocation[C]],
+    config: std.wsock.Config,
+    clock: Clock,
+    service_bytes: u64,
+    allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]
+}
+
+pub type ServiceAllocation: send = AcceptHello(Option[Caller]) | PlanCall | ValidateSubscribe(u32, u32, Bytes, Option[Bytes]) | DeliverUpdate(DeliveryJob)
+
+pub opaque type DeliveryJob: send {
+    updates: List[Update],
+    output: List[WireOutput],
+    drain: Option[Latest[Option[DrainWindow]]]
+}
+
+type AllocatedState[C: send]: send {
+    service: Box[Service[C]],
+    status: Result[Box[ServicePlan], u16]
+}
+
+type ServiceAllocationJob[C: send]: send {
+    service: Box[Service[C]],
+    plan: ServiceAllocation
+}
+
+fn wire_allocate_job[C: send](take job: ServiceAllocationJob[C], allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> AllocatedState[C] {
+    let ServiceAllocationJob(service: take owned, plan: take plan) = take job
+    let mut session = take owned
+    let status: Result[Box[ServicePlan], u16] = match allocate(mut session.context, take plan) {
+        Ok(take result_plan) => Ok(box.new(take result_plan)),
+        Error(code) => Error(code),
+    }
+    AllocatedState(service: take session, status: status)
+}
+
+fn wire_parse(mut reader: std.wsock.Reader, at: u64, clock: Clock) -> Result[Option[WirePacket], std.wsock.Error] {
+    match std.wsock.decode_buffered(mut reader)? {
+        None => Ok(None),
+        Some(Need) => Ok(Some(Fragment)),
+        Some(Ping(control)) => Ok(Some(Pinged(box.new(control)))),
+        Some(Pong(_)) => Ok(Some(Ponged)),
+        Some(Closed(control)) => Ok(Some(PeerClosed(box.new(control)))),
+        Some(Reject(code)) => Error(Protocol(code)),
+        Some(Text(_)) => Error(Protocol(1003u16)),
+        Some(Ended) => Error(Eof),
+        Some(Message(take payload)) => {
+            match wire_decode(payload) {
+                Ok(take frame) => {
+                    let arrived = match frame {
+                        Hello(_, _) => host.mono_ns(clock),
+                        _ => at
+                    }
+                    Ok(Some(Decoded(take frame, arrived)))
+                },
+                Error(code) => Error(Protocol(code)),
+            }
+        },
+    }
+}
+
+fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
+    let WirePool(inbox: take inbox, config: config, clock: clock, service_bytes: service_bytes, allocate: take allocate) = take pool
+    let encoder = match std.wsock.outbound(Server, config, None) {
+        Ok(out) => out,
+        Error(_) => return
+    }
+    while let Ok(take work) = channel.receive(inbox) {
+        match take work {
+            Decode(take input, at, take to) => {
+                let mut reader = take input
+                let packet = wire_parse(mut reader, at, clock)
+                let _ = channel.try_send(to, WireParsed(reader: take reader, packet: take packet))
+            },
+            Encode(take frame, take groups, take to) => {
+                let encoded_frame = encode_published_frame(encoder, frame, groups)
+                let _ = channel.try_send(to, take encoded_frame)
+            },
+            AllocateService(take owned, take plan, take to) => {
+                // A bounded, isolated step: its body takes the job from a slot charged to the bound, so a failure drops the session (None).
+                let ran = bound bytes service_bytes {
+                    let (wire_slot, job): (Sender[ServiceAllocationJob[C]], Receiver[ServiceAllocationJob[C]]) = channel.new(1u64)
+                    let _ = channel.try_send(wire_slot, ServiceAllocationJob(service: take owned, plan: take plan))
+                    isolate(scoped fn() -> Option[AllocatedState[C]] {
+                        match channel.try_receive(job) {
+                            Ok(take next) => Some(wire_allocate_job(take next, allocate)),
+                            _ => None
+                        }
+                    })
+                }
+                let returned = match take ran {
+                    Ok(Ok(Ok(take completed))) => take completed,
+                    _ => None
+                }
+                let _ = channel.try_send(to, take returned)
+            },
+        }
+    }
+}
+
+/// One whole binary frame for f, its codec bytes written once behind the header.
+pub fn wire_encode(out: std.wsock.Outbound, f: Frame) -> Result[Bytes, std.wsock.Error] {
+    let codec: std.codec.Codec[Frame] = std.codec.of()
+    std.wsock.try_encode_with(out, codec, f, wire_output_size(f))
+}
+
+fn start_wire_pool[C: send](tasks: Tasks, c: WireConfig, clock: Clock, n: u64, slot_capacity: u64, take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[(Sender[WireAllocation[C]], Task[()]), Capacity] {
+    let (to, inbox): (Sender[WireAllocation[C]], Receiver[WireAllocation[C]]) = channel.new(slot_capacity)
+    // Hello key growth is bounded by the wire payload, rounded identities and the
+    // list of Bytes handles; the place's one Registry is in `allocate`, made outside.
+    let pool = WirePool(inbox: take inbox, config: c.socket, clock: clock, service_bytes: wire_service_job_bytes(c), allocate: take allocate)
+    let run: fn(take WirePool[C]) -> () waits = wire_pool
+    let handle = task.spawn(tasks, bytes n, take pool, run)
+    Ok((take to, take handle))
+}
+
+fn wire_pack[C: send](pool: Sender[WireAllocation[C]], to: Sender[Result[Bytes, std.wsock.Error]], inbox: Receiver[Result[Bytes, std.wsock.Error]], take frame: Frame, take tapes: List[OwedGroup]) -> Result[Bytes, std.wsock.Error] waits {
+    if let Error(_) = channel.try_send(pool, Encode(take frame, take tapes, channel.sender(to))) {
+        return Error(Protocol(1013u16))
+    }
+    match channel.receive(inbox) {
+        Ok(Error(Allocation(_))) => Error(Protocol(1013u16)),
+        Ok(take result) => take result,
+        Error(_) => Error(Protocol(1013u16)),
+    }
+}
+
+fn wire_allocate[C: send](pool: Sender[WireAllocation[C]], to: Sender[Option[AllocatedState[C]]], inbox: Receiver[Option[AllocatedState[C]]], take service: Box[Service[C]], take plan: ServiceAllocation) -> Option[AllocatedState[C]] waits {
+    match channel.try_send(pool, AllocateService(take service, take plan, channel.sender(to))) {
+        Ok(()) => match channel.receive(inbox) {
+            Ok(take returned) => take returned,
+            Error(_) => None
+        },
+        Error(Full(AllocateService(take back, _, _))) => Some(AllocatedState(service: take back, status: Error(1013u16))),
+        Error(Closed(AllocateService(take back, _, _))) => Some(AllocatedState(service: take back, status: Error(1013u16))),
+        _ => None,
+    }
+}
+
+// Read credits cover the inbox and a reader blocked on handing off a packet.
+type WireRead[C: send]: send {
+    reader: Box[std.wsock.Reader],
+    to: Sender[WireEvent],
+    credits: Receiver[()],
+    clock: Clock,
+    config: std.wsock.Config,
+    pool: Sender[WireAllocation[C]]
+}
+
+// A staged frame: its deadline, whether a Close may still follow, its first-write notice.
+type WireWrite: send {
+    live: Option[Box[RoomLiveBuffer]],
+    cursor: u64,
+    writer: Box[std.wsock.Writer],
+    to: Sender[WireEvent],
+    out: std.wsock.Outbound,
+    clock: Clock,
+    config: std.wsock.Config,
+    end: u64,
+    can_close: bool,
+    close: bool,
+    report: Option[Sender[u64]]
+}
+
+// One encoded frame to write. A content unit carries its version and handles to the
+// round register and its session's fence root; the owner applies the release check before
+// its first byte (§3).
+type WireUnit: send {
+    frame: Bytes,
+    check: Option[WireCheck],
+    write_ack: bool
+}
+
+type WireCheck: send {
+    version: u64,
+    round: Latest[RoundAt],
+    fence: Latest[Fence]
+}
+
+// A content unit is built only with both handles; the owner has them from the join that let
+// the content in, so a missing one is a broken invariant and ends the session, unwritten.
+fn wire_unit(work: WireWork, take frame: Bytes, check: Option[u64], report_writes: bool) -> WireUnit {
+    let checked = match check {
+        Some(version) => match work.round {
+            Some(register) => match work.fence {
+                Some(fence) => Some(WireCheck(version: version, round: latest.handle(register), fence: latest.handle(fence))),
+                None => fail("runner: a content unit without its fence"),
+            },
+            None => fail("runner: a content unit without the round register"),
+        },
+        None => None,
+    }
+    let mut write_ack = false
+    if report_writes {
+        for mark in work.sending {
+            if let WriteUnit(_) = mark {
+                write_ack = true;
+                break
+            }
+        }
+    }
+    WireUnit(frame: take frame, check: take checked, write_ack: write_ack)
+}
+
+fn wire_return_reader(to: Sender[WireEvent], take control: Box[std.websocket.Control], take input: Box[std.wsock.Reader]) -> () waits {
+    let mut reader = take input
+    std.wsock.finish_read(mut reader)
+    let _ = channel.send(to, wire_event(ReadClosed(take control, take reader)))
+}
+
+fn wire_read[C: send](take x: WireRead[C]) -> () waits {
+    let WireRead(reader: take initial, to: take to, credits: take credits, clock: clock, config: config, pool: take pool) = take x
+    let (reply, packets): (Sender[WireParsed], Receiver[WireParsed]) = channel.new(1u64)
+    let mut r = take initial
+    let mut probing = false
+    loop {
+        match channel.try_receive(credits) {
+            Ok(_) => {},
+            Error(Closed) => return,
+            Error(Empty) => {
+                if let Error(_) = std.wsock.settle(mut r) {
+                    wire_return_reader(to, wire_close_control(1013u16), take r);
+                    return
+                }
+                if let Error(_) = channel.receive(credits) {
+                    return
+                }
+            },
+        }
+        let next: WireInput = loop {
+            let end = std.clock.deadline_after_ms(host.mono_ns(clock), config.idle_ms)
+            let packet = loop {
+                match channel.try_send(pool, Decode(take r, host.mono_ns(clock), channel.sender(reply))) {
+                    Ok(()) => {},
+                    Error(Full(Decode(take back, _, _))) => {
+                        wire_return_reader(to, wire_close_control(1013u16), take back);
+                        return
+                    },
+                    Error(_) => return,
+                }
+                let WireParsed(reader: take returned, packet: take attempted) = match channel.receive(packets) {
+                    Ok(take frame) => take frame,
+                    Error(_) => return,
+                }
+                r = take returned
+                match take attempted {
+                    Ok(None) => {},
+                    take complete => break take complete,
+                }
+                match std.wsock.refill(mut r, At(clock, end)) {
+                    Ok(()) => if host.mono_ns(clock) >= end {
+                        break Error(Network(TimedOut))
+                    },
+                    Error(e) => break Error(e),
+                }
+            }
+            match take packet {
+                Ok(Some(Fragment)) => {
+                    probing = false
+                },
+                Ok(Some(Ponged)) => {
+                    probing = false
+                },
+                Ok(Some(Decoded(take frame, at))) => {
+                    probing = false;
+                    break Input(take frame, at)
+                },
+                Ok(Some(Pinged(take control))) => {
+                    probing = false;
+                    break Control(10u8, take control)
+                },
+                Ok(Some(PeerClosed(take control))) => {
+                    wire_return_reader(to, take control, take r);
+                    return
+                },
+                Error(Protocol(code)) => {
+                    wire_return_reader(to, wire_close_control(code), take r);
+                    return
+                },
+                Error(Allocation(_)) => {
+                    wire_return_reader(to, wire_close_control(1013u16), take r);
+                    return
+                },
+                Error(Network(TimedOut)) => {
+                    if probing {
+                        wire_return_reader(to, wire_close_control(1001u16), take r);
+                        return
+                    }
+                    probing = true
+                    break Control(9u8, box.new(std.websocket.Control(data:[0u8; 125], len: 0u64)))
+                },
+                _ => {
+                    wire_return_reader(to, wire_close_control(1001u16), take r);
+                    return
+                },
+            }
+        }
+        if let Error(_) = channel.send(to, wire_event(take next)) {
+            return
+        }
+    }
+}
+
+// Writes x's staged frame; without `wait`, Ok(false) is a send that would block (v2.44).
+fn wire_push_frame(mut x: WireWrite, wait: bool) -> Result[bool, u16] waits {
+    loop {
+        let until = if wait {
+            x.end
+        } else {
+            0u64
+        }
+        let flushed: Result[bool, std.wsock.Error] = if wait && host.mono_ns(x.clock) >= until {
+            Error(Network(TimedOut))
+        } else {
+            wire_flush_frame(mut x, until)
+        }
+        match flushed {
+            Ok(true) => break,
+            Ok(false) => {},
+            Error(Network(TimedOut)) => {
+                if !wait {
+                    return Ok(false)
+                }
+                if !x.can_close {
+                    return Error(1001u16)
+                }
+                // The Close frame cannot overtake a partial frame. Give the
+                // sole writer the same close deadline as the owner.
+                x.end = std.clock.deadline_after_ms(x.end, x.config.close_ms)
+                x.can_close = false
+                if let Error(_) = channel.send(x.to, wire_event(WriteTimedOut(x.end))) {
+                    return Error(1001u16)
+                }
+            },
+            Error(_) => return Error(1001u16),
+        }
+    }
+    if let Some(take report) = replace(mut x.report, None) {
+        let _ = channel.try_send(report, host.mono_ns(x.clock))
+    }
+    Ok(true)
+}
+
+fn wire_written(take x: WireWrite) -> WireInput {
+    let WireWrite(live: take room_buffer, writer: take writer, to: _, report: _, close: close, ..) = take x
+    if let Some(take live) = take room_buffer {
+        return SentRoom(take writer, take live)
+    }
+    if close {
+        WriteClosed(take writer)
+    } else {
+        Sent(take writer)
+    }
+}
+
+// The writer child finishes one blocked frame, returns the Writer with its event, and exits.
+fn wire_write(take x: WireWrite) -> () waits {
+    let to = channel.sender(x.to)
+    let mut w = take x
+    let done = match wire_push_frame(mut w, true) {
+        Ok(_) => wire_written(take w),
+        Error(code) => Ended(code)
+    }
+    let _ = channel.send(to, wire_event(take done))
+}
+
+// Spawns the writer only for a send that would block. A refused spawn ends the session with
+// 1001, as a write error does: part of the frame may be on the wire, so no Close can follow.
+fn wire_start(tasks: Tasks, take x: WireWrite) -> Result[Task[()], WireInput] waits {
+    let mut w = take x
+    match wire_push_frame(mut w, false) {
+        Ok(true) => Error(wire_written(take w)),
+        Ok(false) => match task.try_spawn(tasks, bytes writer_bytes(), take w, wire_write) {
+            Ok(take h) => Ok(take h),
+            Error(_) => Error(Ended(1001u16))
+        },
+        Error(code) => Error(Ended(code)),
+    }
+}
+
+// busy is set from staging until Sent or Dropped, so the session holds one frame to write.
+fn wire_ready(busy: bool) -> bool {
+    !busy
+}
+
+// Tokio JoinSet::shutdown aborts all before draining. Goose's contained
+// workers release on wait, but lack cancellation. Both children are unshielded.
+fn wire_join(take first: Task[()], take second: Option[Task[()]]) -> () waits {
+    let mut reader = take first
+    task.cancel(mut reader)
+    if let Some(take h) = take second {
+        let mut writer = take h;
+        task.cancel(mut writer);
+        let _ = task.join(take writer)
+    }
+    let _ = task.join(take reader)
+}
+
+pub fn wire_publish(to: Sender[WireEvent], take frame: Frame) -> Result[(), SendError[WireEvent]] {
+    channel.try_send(to, wire_event(Published(take frame)))
+}
+
+fn wire_close_control(code: u16) -> Box[std.websocket.Control] {
+    let mut data: Inline[u8, 125] =[0u8; 125]
+    data[0u64] = int.narrow(code >> 8u16)
+    data[1u64] = int.truncate(code)
+    box.new(std.websocket.Control(data: data, len: 2u64))
+}
+
+fn wire_close_payload(code: u16) -> Bytes {
+    let mut b: Bytes = list.with_capacity(2u64)
+    let high: u8 = int.narrow(code >> 8u16)
+    let low: u8 = int.truncate(code)
+    list.push(mut b, high)
+    list.push(mut b, low)
+    b
+}

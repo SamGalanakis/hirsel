@@ -1,0 +1,476 @@
+fn wire_units[G: send, B: send](s: WireSession[G, B]) -> u64 {
+    let mut units = 0u64
+    for (_, h) in s.held {
+        let live = list.len(h.owed) + h.queued
+        units += if h.forwarded && live == 0u64 {
+            1u64
+        } else {
+            live
+        }
+    }
+    if let Some(p) = s.pending {
+        if p.grows {
+            units += 1u64
+        }
+    }
+    units
+}
+
+fn wire_output_charge(f: Frame, reserved: bool) -> u64 {
+    // Slot and V1 marks already hold the outcome reserve through handoff.
+    match f {
+        Batch(_, complete, groups, done) => 24u64 + 4u64 * list.len(complete) + retained_groups_charge(groups) + (if reserved {
+            0u64
+        } else {
+            wire_done_bytes(done)
+        }),
+        Reset(_, _) => if reserved {
+            16u64
+        } else {
+            wire_output_size(f)
+        },
+        _ => wire_output_size(f),
+    }
+}
+
+fn wire_queued_bytes(output: List[WireOutput]) -> u64 {
+    let mut size = option.unwrap(charge.seq(bytes[WireOutput], list.capacity(output)))
+    for o in output {
+        size += wire_output_charge(o.frame, list.len(o.marks) != 0u64) + cached_charge(o.tapes)
+    }
+    size
+}
+
+fn wire_queue_external(mut work: WireWork, c: WireConfig, take frame: Frame, check: Option[u64]) -> Result[(), std.wsock.Error] {
+    if wire_output_size(frame) > c.socket.max_frame {
+        return Error(Protocol(1009u16))
+    }
+    if list.len(work.output) >= 1u64 + c.q || wire_queued_bytes(work.output) + wire_output_charge(frame, false) > c.budget {
+        return Error(Busy)
+    }
+    let item = WireOutput(frame: take frame, tapes: list.new(), marks: list.new(), generations: list.new(), external: true, check: check)
+    list.push(mut work.output, take item)
+    Ok(())
+}
+
+fn wire_queue(mut output: List[WireOutput], take frame: Frame, take marks: List[WireMark], take generations: List[(u32, u64)]) {
+    wire_queue_checked(mut output, take frame, take marks, take generations, None)
+}
+
+fn wire_queue_checked(mut output: List[WireOutput], take frame: Frame, take marks: List[WireMark], take generations: List[(u32, u64)], check: Option[u64]) {
+    list.push(mut output, WireOutput(frame: take frame, tapes: list.new(), marks: take marks, generations: take generations, external: false, check: check))
+}
+
+fn wire_refused[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, stream: StreamId, p: u64, take why: Refusal) -> Result[(), u16] {
+    if s.refusals >= 1u64 + s.config.q {
+        return Error(1008u16)
+    }
+    s.refusals += 1u64
+    let mut done: List[Done] = list.new()
+    list.push(mut done, Done(stream: stream, p: p, outcome: Refused(take why)))
+    let mut marks: List[WireMark] = list.new()
+    list.push(mut marks, V1)
+    let version = s.last
+    wire_queue(mut work.output, Batch(version, list.new(), list.new(), take done), take marks, list.new())
+    Ok(())
+}
+
+fn wire_row[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, key: Bytes, stream: StreamId, p: u64, version: u64, take outcome: Outcome) {
+    let mut done: List[Done] = list.new()
+    list.push(mut done, Done(stream: stream, p: p, outcome: take outcome))
+    let mut marks: List[WireMark] = list.new()
+    list.push(mut marks, Unit(clone(key)))
+    wire_queue(mut work.output, Batch(version, list.new(), list.new(), take done), take marks, list.new())
+}
+
+fn wire_reset[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], version: u64) -> Result[(), u16] {
+    if s.reset_seen {
+        return Error(1008u16)
+    }
+    s.reset_seen = true
+    wire_reset_rows(mut s, mut output, version, list.new(), list.new())
+}
+
+fn wire_reset_rows[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], version: u64, take latest_done: List[Done], take latest_marks: List[WireMark]) -> Result[(), u16] {
+    let mut done: List[Done] = list.new()
+    let mut marks: List[WireMark] = list.new()
+    let all = replace(mut output, list.new())
+    for take o in take all {
+        if o.external {
+            list.push(mut output, take o)
+            continue
+        }
+        let WireOutput(frame: take f, marks: take held, ..) = take o
+        for take m in take held {
+            list.push(mut marks, take m)
+        }
+        match take f {
+            Batch(_, _, _, take ds) => for take d in take ds {
+                list.push(mut done, take d)
+            },
+            Reset(_, take ds) => for take d in take ds {
+                list.push(mut done, take d)
+            },
+            _ => {},
+        }
+    }
+    for take d in latest_done {
+        list.push(mut done, take d)
+    }
+    for take m in latest_marks {
+        list.push(mut marks, take m)
+    }
+    let _ = replace(mut s.subs, list.new())
+    let _ = replace(mut s.pub_subs, list.new())
+    wire_leave(mut s)
+    s.joined = None
+    let _ = replace(mut s.joining, None)
+    let _ = replace(mut s.subscription, None)
+    wire_queue(mut output, Reset(version, take done), take marks, list.new())
+    Ok(())
+}
+
+fn wire_drop_stale(mut generations: List[(u32, u64)], active: List[(u32, u64)]) -> bool {
+    let mut index = list.len(generations)
+    let mut changed = false
+    while index != 0u64 {
+        index -= 1u64
+        let (sub, generation) = generations[index]
+        if sub_generation(active, sub) != Some(generation) {
+            let _ = list.remove(mut generations, index)
+            changed = true
+        }
+    }
+    changed
+}
+
+fn wire_current_output(active: List[(u32, u64)], take output: WireOutput) -> Option[WireOutput] {
+    if output.external {
+        return Some(take output)
+    }
+    let mut next = take output
+    if let Ended(sub, _) = next.frame {
+        // A terminal frame has no active subscription unless the id was reused.
+        if let Some(generation) = sub_generation(active, sub) {
+            if sub_generation(next.generations, sub) != Some(generation) {
+                return None
+            }
+        }
+        return Some(take next)
+    }
+    if !wire_drop_stale(mut next.generations, active) {
+        return Some(take next)
+    }
+    let live: List[(u32, u64)] = clone(next.generations)
+    filter_output_groups(take next, live, true)
+}
+
+// A `complete` replaces its sub's image from empty (v2.20 item 5), so whatever the owner still
+// holds of the same instance ahead of it, rows or an earlier `complete`, is superseded and goes
+// before `budget` is checked: the rows a Reset weighs are coalesced (§3). Outcomes, their marks
+// and other subs' content stay.
+fn wire_supersede(mut output: List[WireOutput], replacing: List[(u32, u64)]) {
+    let mut kept = 0u64
+    for index in 0u64 .. list.len(output) {
+        let empty = WireOutput(frame: Reset(0u64, list.new()), tapes: list.new(), marks: list.new(), generations: list.new(), external: false, check: None)
+        let queued = list.set(mut output, index, take empty)
+        if let Some(take current) = wire_superseded(take queued, replacing) {
+            let _ = list.set(mut output, kept, take current)
+            kept += 1u64
+        }
+    }
+    while list.len(output) > kept {
+        let _ = list.pop(mut output)
+    }
+}
+
+fn wire_superseded(take output: WireOutput, replacing: List[(u32, u64)]) -> Option[WireOutput] {
+    if output.external {
+        return Some(take output)
+    }
+    let mut next = take output
+    if let Batch(_, _, _, _) = next.frame {} else {
+        return Some(take next)
+    }
+    let mut gone: List[(u32, u64)] = list.new()
+    let mut index = list.len(next.generations)
+    while index != 0u64 {
+        index -= 1u64
+        let (sub, generation) = next.generations[index]
+        if sub_generation(replacing, sub) == Some(generation) {
+            let _ = list.remove(mut next.generations, index)
+            list.push(mut gone, (sub, generation))
+        }
+    }
+    if list.len(gone) == 0u64 {
+        return Some(take next)
+    }
+    filter_output_groups(take next, gone, false)
+}
+
+fn wire_prune_output[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], retired: Option[u32]) {
+    let mut kept = 0u64
+    for index in 0u64 .. list.len(output) {
+        let empty = WireOutput(frame: Reset(0u64, list.new()), tapes: list.new(), marks: list.new(), generations: list.new(), external: false, check: None)
+        let queued = list.set(mut output, index, take empty)
+        if !queued.external {
+            if let Ended(sub, _) = queued.frame {
+                if retired == Some(sub) {
+                    continue
+                }
+            }
+        }
+        if let Some(take current) = wire_current_output(s.subs, take queued) {
+            let _ = list.set(mut output, kept, take current)
+            kept += 1u64
+        }
+    }
+    while list.len(output) > kept {
+        let _ = list.pop(mut output)
+    }
+}
+
+// A content unit's Outcome rows are copied before it is handed out, so a Dropped Reset can
+// carry them (§3); a copy that cannot be made closes the session (1013) rather than send the
+// unit unchecked or lose the rows.
+fn wire_take_output[G: send, B: send](s: WireSession[G, B], mut work: WireWork) -> Result[Option[Frame], u16] {
+    let selected = loop {
+        if list.len(work.output) == 0u64 {
+            return Ok(None)
+        }
+        let next = list.remove(mut work.output, 0u64)
+        if let Some(take current) = wire_current_output(s.subs, take next) {
+            break take current
+        }
+    }
+    let WireOutput(frame: take pending_frame, tapes: take tapes, marks: take marks, check: check, ..) = take selected
+    let f = if work.splice {
+        work.packing = take tapes
+        take pending_frame
+    } else {
+        materialize_frame(take pending_frame, tapes)
+    }
+    work.sending = take marks
+    work.check = check
+    work.sending_done = list.new()
+    work.sending_complete = wire_carries_complete(f)
+    if let Some(_) = check {
+        if let Batch(_, _, _, done) = f {
+            if list.len(done) != 0u64 {
+                let copied: List[Done] = clone(done)
+                {
+                    work.sending_done = take copied
+                }
+            }
+        }
+    }
+    Ok(Some(take f))
+}
+
+// v2.19 (§3): the writer dropped the content unit it was handed. Every content component
+// the owner holds goes; every Outcome row, the dropped unit's included, rides in one Reset
+// that never counts toward the protocol-error close.
+fn wire_dropped[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) -> Result[(), u16] {
+    let marks = replace(mut work.sending, list.new())
+    let done = replace(mut work.sending_done, list.new())
+    work.check = None
+    work.sending_complete = false
+    let version = s.last
+    wire_reset_rows(mut s, mut work.output, version, take done, take marks)
+}
+
+fn wire_sent[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) {
+    work.check = None
+    work.sending_complete = false
+    work.sending_done = list.new()
+    let marks = replace(mut work.sending, list.new())
+    for take mark in take marks {
+        let key = match take mark {
+            V1 => {
+                s.refusals -= 1u64;
+                continue
+            },
+            Unit(take key) => take key,
+            WriteUnit(take key) => take key,
+        }
+        if let Some(take found) = map.remove(mut s.held, key) {
+            let mut h = take found
+            h.queued -= 1u64
+            if h.forwarded || h.queued != 0u64 || list.len(h.owed) != 0u64 {
+                map.insert(mut s.held, take key, take h)
+            }
+        }
+    }
+}
+
+fn wire_update[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, take upd: Update) -> Result[(), u16] {
+    let mut completed: List[u64] = list.new()
+    let result = wire_stage_update(mut s, mut work.output, mut completed, work.drain, take upd)
+    for id in completed {
+        let _ = map.remove(mut work.timers, id)
+    }
+    result
+}
+
+fn wire_stage_update[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], mut completed: List[u64], drain: Option[Latest[Option[DrainWindow]]], take upd: Update) -> Result[(), u16] {
+    let Update(version: at, content: take content, outcomes: take answers) = take upd
+    let mut done: List[Done] = list.new()
+    let mut marks: List[WireMark] = list.new()
+    for answer in answers {
+        wire_answer(mut s, mut completed, drain, answer, mut done, mut marks)?
+    }
+    let current = match content {
+        Some(o) => match s.joined {
+            Some(who) => who == o.session,
+            _ => false
+        },
+        None => false,
+    }
+    if !current && list.len(done) == 0u64 {
+        return Ok(())
+    }
+    s.last = if at > s.last {
+        at
+    } else {
+        s.last
+    }
+    let version = s.last
+    let mut live_groups: List[OwedGroup] = list.new()
+    let mut live_complete: List[u32] = list.new()
+    let mut ended: List[TerminalUpdate] = list.new()
+    let mut generations: List[(u32, u64)] = list.new()
+    let mut computed = 0u64
+    if current {
+        let Owe(session: _, version: content_version, generations: take stamps, complete: take complete, groups: take groups, ended: take stopped, reset: reset, read_failed: failed, ..) = option.unwrap(take content)
+        computed = content_version
+        s.completes += list.len(complete)
+        if reset {
+            if !failed && s.reset_seen {
+                return Error(1008u16)
+            }
+            if !failed {
+                s.reset_seen = true
+            }
+            return wire_reset_rows(mut s, mut output, version, take done, take marks)
+        }
+        generations = take stamps
+        let _ = wire_drop_stale(mut generations, s.subs)
+        for take group in groups {
+            if let Some(_) = sub_generation(generations, group.sub) {
+                list.push(mut live_groups, take group)
+            }
+        }
+        for sub in complete {
+            if let Some(_) = sub_generation(generations, sub) {
+                list.push(mut live_complete, sub)
+            }
+        }
+        ended = take stopped
+    }
+    let reserve = wire_outcome_reserve(s.config)
+    let envelope = 24u64 + 4u64 * list.len(live_complete)
+    let allowance = int.saturating_sub(s.config.socket.max_frame, reserve + envelope)
+    let requested = cached_groups_size(live_groups)
+    if requested > allowance {
+        if list.len(live_complete) == 0u64 {
+            if s.reset_seen {
+                return Error(1008u16)
+            }
+            s.reset_seen = true
+            return wire_reset_rows(mut s, mut output, version, take done, take marks)
+        }
+        for sub in live_complete {
+            wire_end(mut s, mut output, sub, Refused(Budget(Room(requested: requested, available: allowance))))
+        }
+        live_complete = list.new()
+        live_groups = list.new()
+        generations = list.new()
+    }
+    if list.len(live_complete) != 0u64 {
+        let mut replacing: List[(u32, u64)] = list.new()
+        for sub in live_complete {
+            if let Some(generation) = sub_generation(generations, sub) {
+                list.push(mut replacing, (sub, generation))
+            }
+        }
+        wire_supersede(mut output, replacing)
+    }
+    if list.len(live_groups) != 0u64 || list.len(live_complete) != 0u64 || list.len(done) != 0u64 {
+        let charge = 24u64 + 4u64 * list.len(live_complete) + cached_charge(live_groups) + (if list.len(marks) != 0u64 {
+            0u64
+        } else {
+            wire_done_bytes(done)
+        })
+        if wire_queued_bytes(output) + charge > s.config.budget {
+            wire_prune_output(mut s, mut output, None)
+            if wire_queued_bytes(output) + charge > s.config.budget {
+                if s.reset_seen {
+                    return Error(1008u16)
+                }
+                s.reset_seen = true
+                return wire_reset_rows(mut s, mut output, version, take done, take marks)
+            }
+        }
+        let check = if list.len(live_groups) != 0u64 || list.len(live_complete) != 0u64 {
+            Some(computed)
+        } else {
+            None
+        }
+        let frame: Frame = Batch(version, take live_complete, list.new(), take done)
+        list.push(mut output, WireOutput(frame: take frame, tapes: take live_groups, marks: take marks, generations: take generations, external: false, check: check))
+    }
+    for take e in ended {
+        let TerminalUpdate(sub, generation, version: checked_at, outcome: take why) = take e
+        if sub_generation(s.subs, sub) == Some(generation) {
+            wire_forget_sub(mut s, sub)
+            wire_end_checked(mut s, mut output, sub, take why, Some(checked_at))
+        }
+    }
+    Ok(())
+}
+
+fn wire_answer[G: send, B: send](mut s: WireSession[G, B], mut completed: List[u64], drain: Option[Latest[Option[DrainWindow]]], told: KeyedDone, mut done: List[Done], mut marks: List[WireMark]) -> Result[(), u16] {
+    if wire_cut_at(drain, s.clock) {
+        return Ok(())
+    }
+    // A pre-W3c stored reply can exceed today's producer bound. Preserve its
+    // bytes in the store and fail delivery explicitly before retaining its row.
+    if let Returned(b) = told.outcome {
+        if list.len(b) > MAX_RETURNED_BYTES {
+            return Error(1009u16)
+        }
+    }
+    let key = slot_key(told.stream, told.p)
+    if let Some(take found) = map.remove(mut s.held, key) {
+        let mut h = take found
+        h.forwarded = false
+        let owed = replace(mut h.owed, list.new())
+        let count = list.len(owed)
+        h.queued += count
+        for take owing in owed {
+            let WireOwed(generation: generation, reply: take backing) = take owing
+            list.push(mut completed, generation)
+            let outcome: Outcome = match told.outcome {
+                Returned(payload) => {
+                    let mut reply = take backing
+                    list.append(mut reply, payload)
+                    let updated: Outcome = Returned(take reply)
+                    take updated
+                },
+                _ => clone(told.outcome),
+            }
+            let mark_key: Bytes = clone(key)
+            let mark: WireMark = match outcome {
+                Returned(_) => WriteUnit(take mark_key),
+                Failed(_) => WriteUnit(take mark_key),
+                _ => Unit(take mark_key),
+            }
+            list.push(mut done, Done(stream: h.stream, p: h.p, outcome: take outcome))
+            list.push(mut marks, take mark)
+        }
+        if h.queued != 0u64 {
+            map.insert(mut s.held, take key, take h)
+        }
+    }
+    Ok(())
+}

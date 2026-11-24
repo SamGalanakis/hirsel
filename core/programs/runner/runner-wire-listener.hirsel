@@ -1,0 +1,446 @@
+// The accept loop retains at most max_sessions owner handles and reaps completed
+// ones on the next acceptance. Upgrade runs in the owner, so a stalled HTTP
+// client cannot prevent the listener accepting another connection.
+type WireAccept[C: send]: send {
+    socket: Socket,
+    peer: Ip,
+    accepted: u64,
+    wire_slot: std.wsock.Pending,
+    proxies: List[std.wsock.Prefix],
+    service: Box[Service[C]],
+    publisher: Sender[PubIn],
+    c: WireConfig,
+    clock: Clock,
+    tasks: Tasks,
+    control: Option[OwnerControl],
+    completion: OwnerCompletion,
+    allocation: Sender[WireAllocation[C]],
+    report: Option[Stderr],
+}
+
+fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] waits {
+    let WireAccept(completion: take completion, socket: take socket, peer: peer, accepted: accepted, wire_slot: take wire_slot, proxies: take proxies, service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks, control: take control, allocation: take allocation, report: report) = take x
+    let admission = scoped fn(ip: Ip) -> bool {
+        match control {
+            Some(life) => !closing_at(life.drain, clock),
+            None => true
+        }
+    }
+    let raw = scoped fn(path: Bytes) -> Result[Option[(bool, String)], Capacity] {
+        if path != string.as_bytes("/hirsel/status") {
+            return Ok(None)
+        }
+        match control {
+            Some(life) => Ok(Some(status_response(latest.read(life.status))?)),
+            None => Ok(None),
+        }
+    }
+    let received = std.wsock.server_with_site_report(take socket, take wire_slot, peer, proxies, c.socket, clock, accepted, c.site, raw, admission, report)
+    let _ = take proxies
+    let ended: Result[(), std.wsock.Error] = match take received {
+        Ok(Some(take up)) => {
+            if let Retired(_) = up.protocol {
+                close_retired_upgrade(take up, c.socket, clock)
+            } else {
+                return wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control, allocate: None), take allocation, Served(take completion))
+            }
+        },
+        Ok(None) => Ok(()),
+        Error(e) => Error(e),
+    }
+    wire_tail(Served(take completion), take allocation, 0u64)
+    ended
+}
+
+type ServeInput: send = AcceptedSocket(Socket, Ip, u64) | AcceptEnded(NetError) | OwnerReady(u64, Sender[WireEvent], Sender[()]) | OwnerEnded(u64, u64) | ServeStart | ServeWake | ServeRetire | CheckServeIdle | AcceptIdle
+
+type OwnerControl: send {
+    id: u64,
+    to: Sender[ServeInput],
+    drain: Latest[Option[DrainWindow]],
+    status: Latest[Status],
+    first_write: Option[Sender[u64]]
+}
+
+fn copy_write_notice(notice: Option[Sender[u64]]) -> Option[Sender[u64]] {
+    match notice {
+        Some(to) => Some(channel.sender(to)),
+        None => None
+    }
+}
+
+resource type OwnerCompletion: send {
+    to: Sender[ServeInput],
+    id: u64,
+    abandoned: u64
+} drop(completion) {
+    let _ = channel.try_send(completion.to, OwnerEnded(completion.id, completion.abandoned))
+}
+
+type Acceptor: send {
+    listener: Listener,
+    clock: Clock,
+    interrupt: Clock,
+    to: Sender[ServeInput],
+    permit: Receiver[u64]
+}
+
+fn accept_sockets(take seed: Acceptor) -> () waits {
+    let Acceptor(listener: take listener, clock: clock, interrupt: interrupt, to: take to, permit: take permit) = take seed
+    let mut bound_listener = take listener
+    while let Ok(at) = channel.receive(permit) {
+        let until: Until = if at == 0u64 {
+            Never
+        } else {
+            At(interrupt, at)
+        }
+        match host.accept(mut bound_listener, until) {
+            Ok((take socket, peer)) => if let Error(_) = channel.send(to, AcceptedSocket(take socket, peer.ip, host.mono_ns(clock))) {
+                return
+            },
+            Error(TimedOut) if at != 0u64 => if let Error(_) = channel.send(to, AcceptIdle) {
+                return
+            },
+            Error(problem) => {
+                let _ = channel.send(to, AcceptEnded(problem));
+                return
+            },
+        }
+    }
+}
+
+type ManagedRefusal: send {
+    socket: Socket,
+    clock: Clock,
+    until: u64,
+    completion: OwnerCompletion
+}
+
+fn refuse_managed_socket(take seed: ManagedRefusal) -> () waits {
+    let ManagedRefusal(socket: take socket, clock: clock, until: until, completion: take completion) = take seed
+    let _ = std.wsock.refuse_socket(take socket, 503u16, At(clock, until))
+    let _ = take completion
+}
+
+type SessionTask {
+    handle: Task[Result[(), std.wsock.Error]],
+    wake: Option[Sender[WireEvent]],
+    retirement: Option[WireRetirement]
+}
+
+type ServeTransport {
+    listener: Listener,
+    config: WireConfig,
+    tasks: Tasks,
+    clock: Clock,
+    limit: u64,
+    room_owner_bytes: u64,
+    proxies: List[std.wsock.Prefix],
+    publisher: Sender[PubIn],
+    inbox: Receiver[ServeInput],
+    to: Sender[ServeInput],
+}
+
+type ServeDrain {
+    events: Sender[LifeEvent],
+    window: Latest[Option[DrainWindow]],
+    status: Latest[Status],
+    idle: Option[u64],
+    first_write: Option[Sender[u64]],
+    report: Option[Stderr]
+}
+
+fn serve_closing(lifecycle: Option[ServeDrain], clock: Clock) -> bool {
+    match lifecycle {
+        Some(control) => closing_at(control.window, clock),
+        _ => false
+    }
+}
+
+type ServePlace[G: send, H: shareable + inert + send, B: send]: send {
+    listener: Listener,
+    config: WireConfig,
+    tasks: Tasks,
+    clock: Clock,
+    random: Random,
+    wire: Option[Wire[G, B]],
+    max_sessions: u64,
+    proxies: List[std.wsock.Prefix],
+    target: String,
+    publisher: Sender[PubIn],
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    n_place: u64,
+    rooms: RoomPlan,
+    head: Sender[HeadInput],
+    inbox: Receiver[ServeInput],
+    to: Sender[ServeInput],
+    events: Sender[LifeEvent],
+    drain: Latest[Option[DrainWindow]],
+    status: Latest[Status],
+    idle: Option[u64],
+    first_write: Option[Sender[u64]],
+    report: Option[Stderr],
+}
+
+fn run_serve_place[G: send, H: shareable + inert + send, B: send](take seed: ServePlace[G, H, B]) -> () waits {
+    let events = channel.sender(seed.events)
+    let serving = supervise_serve(take seed)
+    let _ = channel.send(events, ServeEnded(take serving))
+}
+
+fn supervise_serve[G: send, H: shareable + inert + send, B: send](take seed: ServePlace[G, H, B]) -> Result[u64, StartError] waits {
+    let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, random: random, wire: take session_wire, max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place, rooms, head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write, report: report) = take seed
+    let registered = match placed(place, n_place) {
+        Ok(take r) => take r,
+        Error(take problem) => return Error(Open(Place(take problem)))
+    }
+    let relay = start_room_relay(rooms, config, limit, pub_to, tasks, random)?
+    let make: scoped[view] fn() -> Service[WireSession[G, B]] = fn() -> Service[WireSession[G, B]] {
+        let mut service = wire_service_with_head(random, copy_wire(session_wire), LifecycleHead(channel.sender(head_to)), clock, tasks, config, clone(target))
+        if let Some((ports, _)) = relay {
+            service.context.room_link = Some(copy_room_link(ports))
+        }
+        take service
+    }
+    let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, limit: limit, room_owner_bytes: rooms.owner_bytes, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
+    let served = serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status, idle: idle, first_write: take first_write, report: report)), make, wire_allocator(take registered, n_place))
+    if let Some((_, take relay_task)) = take relay {
+        let _ = task.cancel_join(take relay_task)
+    }
+    match take served {
+        Ok(count) => Ok(count),
+        Error(Allocation(cap)) => Error(Full(cap)),
+        Error(Network(problem)) => Error(Listen(problem)),
+        _ => Error(Missing("socket")),
+    }
+}
+
+fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[ServeDrain], make: scoped[view] fn() -> Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[u64, std.wsock.Error] waits {
+    let ServeTransport(listener: take listener, config: config, tasks: tasks, clock: time, limit: limit, room_owner_bytes, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to) = take seed
+    let pool = std.wsock.pending(config.socket)?
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, time, config.n_pool, 1024u64, take allocate)
+    let (allocation, allocation_task) = match take allocated {
+        Ok(take pair) => take pair,
+        Error(cap) => return Error(Allocation(cap)),
+    }
+    let (permit, permits): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    // Advancing this clock interrupts a blocked accept only for an idle vote.
+    let (interrupt, interrupt_hand) = provide.clock(0u64, 0u64)
+    let mut accept_clock = take interrupt_hand
+    let mut accept_at = match lifecycle {
+        Some(control) if !none(control.idle) => 1u64,
+        _ => 0u64
+    }
+    let acceptor = Acceptor(listener: take listener, clock: time, interrupt: interrupt, to: channel.sender(to), permit: take permits)
+    let mut accepting: Option[Task[()]] = Some(task.spawn(tasks, bytes 8192u64, take acceptor, accept_sockets))
+    if let Some(control) = lifecycle {
+        if let Error(_) = channel.send(control.events, ServePrepared) {
+            return Ok(0u64)
+        }
+        if let Ok(ServeStart) = channel.receive(inbox) {} else {
+            return Ok(0u64)
+        }
+    }
+    let _ = channel.try_send(permit, accept_at)
+    let mut owners: Map[u64, SessionTask] = map.new()
+    let mut refusing: Map[u64, Task[()]] = map.new()
+    let mut serial = 0u64
+    let mut abandoned = 0u64
+    let mut retiring = false
+    let mut idle = false
+    let mut checking_idle = false
+    loop {
+        if retiring || serve_closing(lifecycle, time) {
+            if let Some(take accept_task) = replace(mut accepting, None) {
+                let mut counted = take accept_task
+                task.cancel(mut counted)
+                let _ = task.join(take counted)
+                let _ = replace(mut refusing, map.new())
+                let mut closing_ids: List[u64] = list.new()
+                for (id, owner_task) in owners {
+                    match owner_task.wake {
+                        Some(wake) => {
+                            if retiring {
+                                let _ = channel.send(wake, wire_event(RetireWire))
+                            } else {
+                                let _ = channel.try_send(wake, wire_event(DrainWake))
+                            }
+                        },
+                        None => list.push(mut closing_ids, id),
+                    }
+                }
+                for id in closing_ids {
+                    let _ = map.remove(mut owners, id)
+                }
+            }
+            if map.len(owners) == 0u64 {
+                return Ok(abandoned)
+            }
+        }
+        if let Some(control) = lifecycle {
+            if !none(control.idle) {
+                let eligible = map.len(owners) == 0u64
+                if idle != eligible {
+                    idle = eligible
+                    let _ = channel.send(control.events, ServeIdle(idle))
+                }
+            }
+        }
+        let event = match channel.receive(inbox) {
+            Ok(take event) => take event,
+            Error(_) => return Ok(abandoned)
+        }
+        match take event {
+            ServeStart => (),
+            CheckServeIdle => if let Some(control) = lifecycle {
+                if idle && none(drain_window(latest.read(control.window))) {
+                    checking_idle = true
+                    clock.advance_to(mut accept_clock, accept_at)
+                    accept_at += 1u64
+                } else {
+                    idle_vote(control.events, false, false)
+                }
+            },
+            AcceptIdle => if let Some(control) = lifecycle {
+                // The acceptor has returned to its permit channel. Leave it
+                // there while the head votes and, on acceptance, through drain.
+                if checking_idle {
+                    checking_idle = false
+                    idle_vote(control.events, false, idle && none(drain_window(latest.read(control.window))))
+                }
+                if !serve_closing(lifecycle, time) {
+                    let _ = channel.try_send(permit, accept_at)
+                }
+            },
+            ServeRetire => {
+                retiring = true
+            },
+            ServeWake => for (_, owner_task) in owners {
+                if let Some(wake) = owner_task.wake {
+                    let _ = channel.try_send(wake, wire_event(DrainWake))
+                }
+            },
+            AcceptEnded(problem) => if !retiring && !serve_closing(lifecycle, time) {
+                return Error(Network(problem))
+            },
+            OwnerReady(id, take wake, take acknowledgement) => {
+                if !retiring && !serve_closing(lifecycle, time) {
+                    if let Some(take owner_task) = map.remove(mut owners, id) {
+                        let mut promoted = take owner_task
+                        promoted.wake = Some(take wake)
+                        map.insert(mut owners, id, take promoted)
+                        let _ = channel.try_send(acknowledgement, ())
+                    }
+                }
+            },
+            OwnerEnded(id, count) => {
+                abandoned += count
+                if let Some(SessionTask(handle: take handle, wake: _, retirement: take retirement)) = map.remove(mut owners, id) {
+                    let _ = task.join(take handle)
+                    wire_retire(take retirement)
+                }
+                if let Some(take handle) = map.remove(mut refusing, id) {
+                    let _ = task.join(take handle)
+                }
+            },
+            AcceptedSocket(take socket, peer, at) => {
+                if checking_idle {
+                    checking_idle = false
+                    if let Some(control) = lifecycle {
+                        idle_vote(control.events, false, false)
+                    }
+                }
+                if retiring || serve_closing(lifecycle, time) {
+                    continue
+                }
+                if idle {
+                    idle = false
+                    if let Some(control) = lifecycle {
+                        let _ = channel.send(control.events, ServeIdle(false))
+                    }
+                }
+                let _ = channel.try_send(permit, accept_at)
+                let id = serial
+                serial += 1u64
+                let pending: Option[std.wsock.Pending] = if map.len(owners) >= limit {
+                    None
+                } else {
+                    match std.wsock.acquire(pool) {
+                        Ok(take wire_slot) => take wire_slot,
+                        _ => None
+                    }
+                }
+                let wire_slot = match take pending {
+                    Some(take wire_slot) => take wire_slot,
+                    None => {
+                        start_socket_refusal(tasks, take socket, time, at, config, to, id, mut refusing);
+                        continue
+                    },
+                }
+                let copied: List[std.wsock.Prefix] = clone(proxies)
+                let prefixes = take copied
+                let made = bound bytes config.n_service {
+                    make()
+                }
+                let service = match take made {
+                    Ok(take instance) => take instance,
+                    Error(_) => {
+                        start_socket_refusal(tasks, take socket, time, at, config, to, id, mut refusing);
+                        continue
+                    }
+                }
+                let mut opening_service = take service
+                let retirement = replace(mut opening_service.retirement, None)
+                let boxed = box.new(take opening_service)
+                let completion = match OwnerCompletion(to: channel.sender(to), id: id, abandoned: 0u64) {
+                    Ok(take completion) => take completion,
+                    Error(_) => continue
+                }
+                let control: Option[OwnerControl] = match lifecycle {
+                    Some(life) => Some(OwnerControl(id: id, to: channel.sender(to), drain: latest.handle(life.window), status: latest.handle(life.status), first_write: copy_write_notice(life.first_write))),
+                    _ => None,
+                }
+                let job = WireAccept(socket: take socket, peer: peer, accepted: at, wire_slot: take wire_slot, proxies: take prefixes, service: take boxed, publisher: channel.sender(pub_to), c: config, clock: time, tasks: tasks, control: take control, completion: take completion, allocation: channel.sender(allocation), report: match lifecycle {
+                    Some(life) => life.report,
+                    None => None
+                })
+                let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
+                let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - wire_owner_task_bytes() + config.n_granted + room_owner_bytes), take job, run)
+                map.insert(mut owners, id, SessionTask(handle: take handle, wake: None, retirement: take retirement))
+            },
+        }
+    }
+}
+
+fn start_socket_refusal(tasks: Tasks, take socket: Socket, clock: Clock, at: u64, config: WireConfig, to: Sender[ServeInput], id: u64, mut refusing: Map[u64, Task[()]]) {
+    if map.len(refusing) >= 16u64 {
+        return
+    }
+    if let Ok(take completion) = OwnerCompletion(to: channel.sender(to), id: id, abandoned: 0u64) {
+        let job = ManagedRefusal(socket: take socket, clock: clock, until: std.clock.deadline_after_ms(at, config.socket.upgrade_ms), completion: take completion)
+        let _ = map.insert(mut refusing, id, task.spawn(tasks, bytes 16384u64, take job, refuse_managed_socket))
+    }
+}
+
+pub fn serve_wire[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], make: scoped[view] fn() -> Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[(), std.wsock.Error] waits {
+    if max_sessions == 0u64 || max_sessions > WIRE_OWNER_LIMIT || !wire_configuration(c) {
+        return Error(Configuration)
+    }
+    // The caller supplies an allocator that already owns its Registry.
+    let required = match serving_bytes(c, max_sessions, 0u64) {
+        Ok(total) => total,
+        Error(cap) => return Error(Allocation(cap))
+    }
+    let served: Result[Result[(), std.wsock.Error], Capacity] = bound bytes required {
+        let (to, inbox): (Sender[ServeInput], Receiver[ServeInput]) = channel.new(serve_inbox_capacity(max_sessions))
+        let transport = ServeTransport(listener: take listener, config: c, tasks: tasks, clock: clock, limit: max_sessions, room_owner_bytes: 0u64, proxies: take proxies, publisher: channel.sender(to_publisher), inbox: take inbox, to: take to)
+        match serve_sockets(take transport, None, make, take allocate) {
+            Ok(_) => Ok(()),
+            Error(problem) => Error(problem)
+        }
+    }
+    match take served {
+        Ok(take ended) => take ended,
+        Error(cap) => Error(Allocation(cap))
+    }
+}

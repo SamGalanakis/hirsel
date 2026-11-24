@@ -1,0 +1,945 @@
+type WireOwner[C: send]: send {
+    upgraded: std.wsock.Upgraded,
+    service: Box[Service[C]],
+    publisher: Sender[PubIn],
+    config: WireConfig,
+    clock: Clock,
+    tasks: Tasks,
+    managed: Option[OwnerControl],
+    allocate: Option[own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]]
+}
+
+fn wire_connection_pool_bytes(c: WireConfig) -> u64 {
+    order.min(c.n_pool, wire_variable_peak(c))
+}
+
+// What the owner holds for whoever started it until it ends: the accept
+// loop's completion, or a lone connection's own allocation pool task.
+type WireTail = Served(OwnerCompletion) | Pooled(Task[()])
+
+// Ends the owner's hold: the completion reports the count of sends its work
+// abandoned, or the pool task is dropped; then the pool sender goes.
+fn wire_tail[C: send](take tail: WireTail, take pool: Sender[WireAllocation[C]], abandoned: u64) {
+    match take tail {
+        Served(take completion) => {
+            let mut report = take completion
+            report.abandoned = abandoned
+        },
+        Pooled(take holding) => {
+            let _ = take holding
+        },
+    }
+    let _ = take pool
+}
+
+// The owner's steady phase owns all it needs, so nothing of the setup is
+// left to finish after it, and the task enters it in place of its setup's
+// frames (returnable.rs, transfer sites).
+type WireSteady[C: send] {
+    st: WireLoop[C],
+    service: Box[Service[C]],
+    pool: Sender[WireAllocation[C]],
+    tail: WireTail
+}
+
+// The owner's state across its event loop. wire_owner_setup builds it and
+// returns, so the setup's temporaries leave the stack before the loop runs, and
+// each event kind is handled in a call of its own, so the loop's frame holds
+// one event's temporaries rather than every arm's.
+type WireLoop[C: send] {
+    apply_input: fn(mut C, mut WireWork, take ServiceInput) -> Result[Option[Frame], u16],
+    work: WireWork,
+    c: WireConfig,
+    clock: Clock,
+    tasks: Tasks,
+    managed: Option[OwnerControl],
+    pub_to: Sender[PubIn],
+    to: Sender[WireEvent],
+    inbox: Receiver[WireEvent],
+    credit: Sender[()],
+    out: std.wsock.Outbound,
+    first_write: Option[Sender[u64]],
+    done: Option[WireEvent],
+    encoded_to: Sender[Result[Bytes, std.wsock.Error]],
+    encoded_from: Receiver[Result[Bytes, std.wsock.Error]],
+    allocation_to: Sender[Option[AllocatedState[C]]],
+    allocation_from: Receiver[Option[AllocatedState[C]]],
+    encoder: std.wsock.Outbound,
+    rh: Task[()],
+    wh: Option[Task[()]],
+    lease: Option[std.wsock.Pending],
+    hello_at: Option[u64],
+    hello_seen: bool,
+    hello_alarm: Option[Task[()]],
+    // The binding's session expiry (exclusive, Unix ms) and its idle alarm; transport only (CHANGES-v2.57).
+    auth_end: Option[u64],
+    auth_alarm: Option[Task[()]],
+    run: u64,
+    held: Option[WireEvent],
+    held_credit: bool,
+    deferred: List[(Frame, u64)],
+    busy: bool,
+    control: Option[Bytes],
+    closing: bool,
+    alarm: Option[Task[()]],
+    room_pass: Option[u64],
+    read_back: Option[Box[std.wsock.Reader]],
+    writer: Option[Box[std.wsock.Writer]],
+    read_closed: bool,
+    write_closed: bool,
+    close_at: Option[u64],
+    expired: bool,
+}
+
+// What one step of the owner's loop asks of it: go on with this frame (if
+// any), start the next event, or leave the loop with this result.
+type WireStep = Go(Option[Frame]) | Again | Stop(Result[(), std.wsock.Error])
+
+fn wire_owner[C: send](take x: WireOwner[C], take pool: Sender[WireAllocation[C]], take tail: WireTail) -> Result[(), std.wsock.Error] waits {
+    let (take st, take service) = match wire_owner_setup(take x, pool) {
+        Ok(take ready) => take ready,
+        Error(take done) => {
+            wire_tail(take tail, take pool, 0u64)
+            return take done
+        },
+    }
+    wire_owner_run(WireSteady(st: take st, service: take service, pool: take pool, tail: take tail))
+}
+
+// Error(r) is the owner's result when it ends before its loop.
+fn wire_owner_setup[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]]) -> Result[(WireLoop[C], Box[Service[C]]), Result[(), std.wsock.Error]] waits {
+    let WireOwner(upgraded: take up, service: take initial_service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take managed, allocate: _) = take x
+    let std.wsock.Upgraded(reader: take reader, writer: take writer, source: source, timers: timers, pending: take pending, ..) = take up
+    let lease = Some(take pending)
+    let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64 + c.q)
+    if let Some(life) = managed {
+        let (ready_to, ready_from): (Sender[()], Receiver[()]) = channel.new(1u64)
+        if let Error(_) = channel.send(life.to, OwnerReady(life.id, channel.sender(to), take ready_to)) {
+            return Error(Ok(()))
+        }
+        if let Error(_) = channel.receive(ready_from) {
+            return Error(Ok(()))
+        }
+    }
+    let (credit, credits): (Sender[()], Receiver[()]) = channel.new(1u64 + c.q)
+    for _ in 0u64 .. 1u64 + c.q {
+        let _ = channel.try_send(credit, ())
+    }
+    let (encoded_to, encoded_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
+    let (allocation_to, allocation_from): (Sender[Option[AllocatedState[C]]], Receiver[Option[AllocatedState[C]]]) = channel.new(1u64)
+    let out = match std.wsock.outbound(Server, c.socket, None) {
+        Ok(o) => o,
+        Error(e) => return Error(Error(e))
+    }
+    let encoder = match std.wsock.outbound(Server, c.socket, None) {
+        Ok(o) => o,
+        Error(e) => return Error(Error(e))
+    }
+    let reading = WireRead(reader: box.new(take reader), to: channel.sender(to), credits: take credits, clock: clock, config: c.socket, pool: channel.sender(pool))
+    let read_task: fn(take WireRead[C]) -> () waits = wire_read
+    let mut rh = task.spawn(tasks, bytes reader_bytes(), take reading, read_task)
+    let first_write = match managed {
+        Some(life) => copy_write_notice(life.first_write),
+        None => None
+    }
+    let mut service = take initial_service
+    let apply_input = service.step
+    let mut work = wire_work()
+    work.splice = true
+    if let Some(life) = managed {
+        work.drain = Some(latest.handle(life.drain))
+    }
+    if let Error(code) = apply_input(mut service.context, mut work, WAttach(source, channel.sender(to), channel.sender(pub_to))) {
+        wire_join(take rh, None);
+        return Error(Error(Protocol(code)))
+    }
+    let hello_at = std.wsock.hello_deadline(timers)
+    let mut hello_alarm: Option[Task[()]] = None
+    if let Some(at) = hello_at {
+        let h = std.clock.alarm(tasks, clock, at, to, wire_event(HelloExpired))
+        hello_alarm = Some(take h)
+    }
+    let st = WireLoop(apply_input: apply_input, work: take work, c: c, clock: clock, tasks: tasks, managed: take managed, pub_to: take pub_to, to: take to, inbox: take inbox, credit: take credit, out: out, first_write: take first_write, done: None, encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from, encoder: encoder, rh: take rh, wh: None, lease: take lease, hello_at: hello_at, hello_seen: false, hello_alarm: take hello_alarm, auth_end: None, auth_alarm: None, run: 0u64, held: None, held_credit: false, deferred: list.new(), busy: false, control: None, closing: false, alarm: None, room_pass: None, read_back: None, writer: Some(box.new(take writer)), read_closed: false, write_closed: false, close_at: None, expired: false)
+    Ok((take st, take service))
+}
+
+fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Error] waits {
+    let WireSteady(st: take initial, service: take initial_service, pool: take pool, tail: take tail) = take job
+    let mut abandoned = 0u64
+    let mut st = take initial
+    let mut service = take initial_service
+    // Every normal exit goes through wire_join, including service refusal and
+    // either child's Ended. Cancellation uses CONC-8 on the two owned handles.
+    let result: Result[(), std.wsock.Error] = loop {
+        wire_owner_join(mut st, mut service)
+        if !wire_post(mut st.work) {
+            wire_owner_refuse(mut st, 1011u16)
+        }
+        let received = match wire_owner_next(mut st, mut service) {
+            Some(take e) => take e,
+            None => break Ok(()),
+        }
+        wire_room_drain(mut st.work)
+        let frame = match take received {
+            Input(take f, at) => {
+                if st.closing {
+                    let _ = channel.try_send(st.credit, ());
+                    continue
+                }
+                // Taking a client frame is the session's last admission point.
+                if wire_auth_lapsed(mut st) {
+                    let _ = channel.try_send(st.credit, ())
+                    let refused: Option[Frame] = None
+                    refused
+                } else {
+                    let arrival = match f {
+                        Call(..) => host.mono_ns(st.clock),
+                        _ => at
+                    }
+                    match wire_owner_input(mut st, take service, pool, take f, arrival) {
+                        Some((take kept, take outcome)) => {
+                            service = take kept
+                            match take outcome {
+                                Go(take next) => take next,
+                                Again => continue,
+                                Stop(take r) => break take r
+                            }
+                        },
+                        None => {
+                            let lost = wire_owner_lost(take st)
+                            wire_tail(take tail, take pool, 0u64)
+                            return lost
+                        },
+                    }
+                }
+            },
+            FromRunner(take e) => {
+                if st.closing {
+                    continue
+                }
+                match wire_owner_runner(mut st, take service, pool, take e) {
+                    Some((take kept, take next)) => {
+                        service = take kept;
+                        take next
+                    },
+                    None => {
+                        let lost = wire_owner_lost(take st)
+                        wire_tail(take tail, take pool, 0u64)
+                        return lost
+                    },
+                }
+            },
+            HelloBound(take given, sample) => {
+                st.work.stream_time = sample
+                let _ = replace(mut st.work.asking, None)
+                let mut auth_end: Option[u64] = None
+                let identity_result = match unexpired(st.clock, take given) {
+                    Some(BoundCaller(caller: take caller, expires_at_ms: end)) => {
+                        auth_end = end;
+                        Some(take caller)
+                    },
+                    None => None,
+                }
+                match wire_owner_hello(mut st, take service, pool, take identity_result) {
+                    Some(take kept) => {
+                        service = take kept
+                        if let Some(end) = auth_end {
+                            if !st.closing {
+                                st.auth_end = Some(end)
+                                let h = std.clock.wall_alarm(st.tasks, st.clock, end, st.to, wire_event(AuthExpired))
+                                st.auth_alarm = Some(take h)
+                            }
+                        }
+                        None
+                    },
+                    None => {
+                        let lost = wire_owner_lost(take st)
+                        wire_tail(take tail, take pool, 0u64)
+                        return lost
+                    },
+                }
+            },
+            GrantedDone(take tick, take outcome) => {
+                if st.closing {
+                    continue
+                }
+                match (st.apply_input)(mut service.context, mut st.work, WGrantedDone(take tick, take outcome)) {
+                    Ok(take f) => take f,
+                    Error(code) => {
+                        wire_owner_refuse(mut st, code);
+                        None
+                    },
+                }
+            },
+            JoinReady => None,
+            RegrantRoom => None,
+            RoomPassDone => None,
+            BellRoom(token) => {
+                wire_room_bell(st.work, token);
+                None
+            },
+            SentRoom(take writer, take sent) => {
+                wire_room_sent(mut st, take writer, take sent);
+                None
+            },
+            DrainWake => None,
+            HttpStream(_) => None,
+            AuthExpired => {
+                if st.closing || !wire_auth_lapsed(mut st) {
+                    continue
+                }
+                None
+            },
+            HelloExpired => {
+                if st.hello_seen {
+                    continue
+                }
+                wire_owner_refuse(mut st, 1008u16)
+                None
+            },
+            Published(take f) => {
+                if st.closing {
+                    continue
+                };
+                Some(take f)
+            },
+            Control(op, payload) => match wire_owner_control(mut st, op, payload) {
+                Go(take next) => take next,
+                Again => continue,
+                Stop(take r) => break take r
+            },
+            Sent(take returned) => {
+                st.writer = Some(take returned)
+                if let Some(take h) = replace(mut st.wh, None) {
+                    let _ = task.join(take h)
+                }
+                st.busy = false
+                let _ = (st.apply_input)(mut service.context, mut st.work, WSent)
+                None
+            },
+            Dropped => {
+                st.busy = false
+                if let Error(code) = (st.apply_input)(mut service.context, mut st.work, WDropped) {
+                    wire_owner_refuse(mut st, code)
+                }
+                None
+            },
+            WriteTimedOut(end) => match wire_owner_write_timeout(mut st, end) {
+                Go(take next) => take next,
+                Again => continue,
+                Stop(take r) => break take r
+            },
+            ReadClosed(payload, take returned) => match wire_owner_read_closed(mut st, payload, take returned) {
+                Go(take next) => take next,
+                Again => continue,
+                Stop(take r) => break take r
+            },
+            WriteClosed(take returned) => {
+                st.writer = Some(take returned)
+                if let Some(take h) = replace(mut st.wh, None) {
+                    let _ = task.join(take h)
+                }
+                st.write_closed = true
+                if st.read_closed {
+                    break Ok(())
+                }
+                None
+            },
+            Ended(_) => break Ok(()),
+            RetireWire => {
+                wire_owner_refuse(mut st, 1012u16)
+                None
+            },
+        }
+        if !st.busy && !st.closing {
+            let flush_subscriptions = service.flush_subscriptions
+            flush_subscriptions(mut service.context, mut st.work)
+        }
+        let outgoing = match wire_owner_poll(mut st, mut service, take frame) {
+            Go(take next) => take next,
+            Again => continue,
+            Stop(take r) => break take r
+        }
+        match wire_owner_send(mut st, mut service, pool, take outgoing) {
+            Stop(take r) => break take r,
+            _ => {}
+        }
+    }
+    if st.expired {
+        abandoned = st.work.abandoned
+    }
+    let ended = wire_owner_end(take st, mut service, take result)
+    let _ = take service
+    wire_tail(take tail, take pool, abandoned)
+    ended
+}
+
+// v2.22 (§3): the owner's Join goes into PubIn with a waiting send, like connect's. The
+// publisher never waits on an owner, so the wait is at most one drain; the owner holds no sub
+// and no content of this join until it is admitted. A closed inbox drops the Join, and the
+// next poll refuses its first Subscribe.
+fn wire_join_send(mut work: WireWork, to: Sender[PubIn]) waits {
+    if let Some(take join) = replace(mut work.join, None) {
+        let _ = channel.send(to, take join)
+    }
+}
+
+// v2.23: the requests a full head inbox did not take go in with a waiting send, in order. The
+// head never waits on an owner (it answers through the publisher, which never waits on one
+// either), so the wait ends when the head takes its next message. False when the head is gone.
+fn wire_post(mut work: WireWork) -> bool waits {
+    if list.len(work.posts) == 0u64 {
+        return true
+    }
+    let head = match work.head {
+        Some(lease) => copy_wire_head(lease.head),
+        None => fail("runner: missing head lease")
+    }
+    while list.len(work.posts) != 0u64 {
+        let req = list.remove(mut work.posts, 0u64)
+        let sent = match head {
+            LifecycleHead(to) => match channel.send(to, RunRequest(take req)) {
+                Ok(()) => true,
+                Error(_) => false
+            },
+        }
+        if !sent {
+            work.posts = list.new();
+            return false
+        }
+    }
+    true
+}
+
+fn wire_owner_join[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) waits {
+    if let None = st.work.join {
+        return
+    }
+    wire_join_send(mut st.work, st.pub_to)
+    let _ = (st.apply_input)(mut service.context, mut st.work, WPoll(false))
+}
+
+// The next event, or None when the loop ends: the inbox closed, or the work's
+// cut passed (the owner then expires).
+fn wire_owner_next[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) -> Option[WireInput] waits {
+    let event = if let Some(take e) = replace(mut st.done, None) {
+        take e
+    } else if (service.ready)(service.context) && list.len(st.deferred) != 0u64 {
+        let (take pending_frame, at) = list.remove(mut st.deferred, 0u64)
+        wire_event(Input(take pending_frame, at))
+    } else if let Some(take e) = replace(mut st.held, None) {
+        take e
+    } else if let Some(take e) = wire_room_pass(mut st, mut service) {
+        take e
+    } else {
+        let e = match channel.try_receive(st.inbox) {
+            Ok(take e) => take e,
+            Error(Empty) => {
+                st.run = 0u64;
+                match channel.receive(st.inbox) {
+                    Ok(take e) => take e,
+                    Error(_) => return None
+                }
+            },
+            _ => return None,
+        }
+        if wire_taken(mut st.run, 1u64 + st.c.q) {
+            let _ = (st.apply_input)(mut service.context, mut st.work, WDrained)
+        }
+        take e
+    }
+    if wire_owner_cut(mut st, mut service) {
+        return None
+    }
+    if let Some(life) = st.managed {
+        if let Some(window) = drain_window(latest.read(life.drain)) {
+            if host.mono_ns(st.clock) >= window.admission && (match st.work.deadline {
+                None => true,
+                _ => false
+            }) {
+                let _ = (st.apply_input)(mut service.context, mut st.work, WClose(window.deadline))
+            }
+        }
+    }
+    let WireEvent(e: take received) = take event
+    Some(take received)
+}
+
+// Whether the work's cut has passed; the service is then forced and the owner
+// expires.
+fn wire_owner_cut[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) -> bool {
+    if !wire_cut(st.work, st.clock) {
+        return false
+    }
+    let _ = (st.apply_input)(mut service.context, mut st.work, WForce)
+    st.expired = true
+    true
+}
+
+// Queues a close with this code and starts closing.
+fn wire_owner_refuse[C: send](mut st: WireLoop[C], code: u16) {
+    st.control = Some(result.unwrap(std.wsock.encode(mut st.encoder, true, 8u8, wire_close_payload(code))))
+    st.closing = true
+}
+
+// The service's answer to a frame from the client. None when the allocation
+// pool is gone with the service.
+fn wire_owner_input[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take f: Frame, at: u64) -> Option[(Box[Service[C]], WireStep)] waits {
+    let mut service = take held
+    let mut checked = (service.check)(service.context, f)
+    if let Hello(_, _) = f {
+        if !st.hello_seen {
+            if let Some(end) = st.hello_at {
+                if at >= end {
+                    checked = Some(1008u16)
+                }
+            }
+            st.hello_seen = true
+        }
+    }
+    if match checked {
+        None => true,
+        _ => false
+    } && !(service.ready)(service.context) {
+        list.push(mut st.deferred, (take f, at))
+        return Some((take service, Again))
+    }
+    if let Hello(_, _) = f {
+        let _ = replace(mut st.hello_alarm, None)
+    }
+    let handled: Result[Option[Frame], u16] = match checked {
+        Some(code) => Error(code),
+        None => if let Subscribe(sub, wire_slot, take arg, take resume) = f {
+            let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take service, ValidateSubscribe(sub, wire_slot, take arg, take resume)) {
+                Some(take returned) => take returned,
+                None => return None,
+            }
+            service = take restored
+            match take status {
+                Ok(take plan) => (st.apply_input)(mut service.context, mut st.work, WPrepared(take plan)),
+                Error(code) => Error(code),
+            }
+        } else {
+            (st.apply_input)(mut service.context, mut st.work, WClient(take f, at))
+        },
+    }
+    if st.work.plan_call {
+        st.work.plan_call = false
+        match wire_owner_call(mut st, take service, pool) {
+            Some((take kept, take next)) => {
+                service = take kept
+                let _ = channel.try_send(st.credit, ())
+                return Some((take service, Go(take next)))
+            },
+            None => return None,
+        }
+    }
+    if (service.ready)(service.context) {
+        let _ = channel.try_send(st.credit, ())
+    } else {
+        st.held_credit = true
+    }
+    let outcome = match take handled {
+        Ok(take next) => Go(take next),
+        Error(code) => {
+            let payload = wire_close_payload(code)
+            match std.wsock.encode(mut st.encoder, true, 8u8, payload) {
+                Ok(take refused) => {
+                    st.control = Some(take refused)
+                },
+                Error(e) => return Some((take service, Stop(Error(e)))),
+            }
+            st.closing = true
+            Go(None)
+        },
+    }
+    Some((take service, take outcome))
+}
+
+// The service's answer to a publisher notice. None when the allocation pool is
+// gone with the service.
+fn wire_owner_runner[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take e: Notice) -> Option[(Box[Service[C]], Option[Frame])] waits {
+    let mut service = take held
+    let applied = if let Notice(e: Updated(take published)) = e {
+        // Content of a fresh join can come before the owner has seen its Admit.
+        let _ = (st.apply_input)(mut service.context, mut st.work, WPoll(false))
+        let drain: Option[Latest[Option[DrainWindow]]] = match st.work.drain {
+            Some(root) => Some(latest.handle(root)),
+            None => None
+        }
+        let output = replace(mut st.work.output, list.new())
+        let mut updates: List[Update] = list.new()
+        list.push(mut updates, take published)
+        wire_take_updates(mut st, mut service, mut updates)
+        let job = DeliveryJob(updates: take updates, output: take output, drain: take drain)
+        let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take service, DeliverUpdate(take job)) {
+            Some(take returned) => take returned,
+            None => return None,
+        }
+        service = take restored
+        match take status {
+            Ok(take plan) => (st.apply_input)(mut service.context, mut st.work, WPrepared(take plan)),
+            Error(code) => Error(code),
+        }
+    } else {
+        (st.apply_input)(mut service.context, mut st.work, WRunner(take e))
+    }
+    let next = match take applied {
+        Ok(take f) => take f,
+        Error(code) => {
+            wire_owner_refuse(mut st, code);
+            None
+        },
+    }
+    Some((take service, take next))
+}
+
+// §3 "Repair": the publisher's Updates already queued behind this one are taken in the same
+// run, in inbox order, and staged by one delivery job, so an owner whose staging falls behind
+// the publisher's rounds takes its backlog at once instead of one job per round.
+fn wire_take_updates[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], mut updates: List[Update]) {
+    let wakes = wire_take_queued(st.inbox, mut st.run, 1u64 + st.c.q, mut updates, mut st.held)
+    if wakes != 0u64 {
+        let _ = (st.apply_input)(mut service.context, mut st.work, WDrained)
+    }
+}
+
+// Takes queued Updates into `updates` until it holds `capacity`, the inbox is empty, or an
+// event of another kind comes; that event is kept in `held` and handled next. Each take
+// counts toward the drain wake as any take does; returns the wakes due.
+fn wire_take_queued(inbox: Receiver[WireEvent], mut run: u64, capacity: u64, mut updates: List[Update], mut held: Option[WireEvent]) -> u64 {
+    let mut wakes = 0u64
+    while list.len(updates) < capacity {
+        let e = match channel.try_receive(inbox) {
+            Ok(take e) => take e,
+            _ => return wakes
+        }
+        if wire_taken(mut run, capacity) {
+            wakes += 1u64
+        }
+        match take e {
+            WireEvent(e: FromRunner(Notice(e: Updated(take more)))) => list.push(mut updates, take more),
+            take other => {
+                held = Some(take other);
+                return wakes
+            },
+        }
+    }
+    wakes
+}
+
+// Installs the Hello binding's result through the allocation pool.
+fn wire_owner_hello[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take identity_result: Option[Caller]) -> Option[Box[Service[C]]] waits {
+    let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take held, AcceptHello(take identity_result)) {
+        Some(take returned) => take returned,
+        None => return None,
+    }
+    if let Error(code) = status {
+        wire_owner_refuse(mut st, code)
+    }
+    Some(take restored)
+}
+
+// Prepares a call under the allocation pool's budget.
+fn wire_owner_call[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]]) -> Option[(Box[Service[C]], Option[Frame])] waits {
+    let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take held, PlanCall) {
+        Some(take returned) => take returned,
+        None => return None,
+    }
+    let mut service = take restored
+    let applied = match take status {
+        Ok(take plan) => (st.apply_input)(mut service.context, mut st.work, WPrepared(take plan)),
+        Error(code) => Error(code),
+    }
+    let next = match take applied {
+        Ok(take f) => take f,
+        Error(code) => {
+            wire_owner_refuse(mut st, code);
+            None
+        },
+    }
+    Some((take service, take next))
+}
+
+fn wire_owner_control[C: send](mut st: WireLoop[C], op: u8, payload: Box[std.websocket.Control]) -> WireStep {
+    let _ = channel.try_send(st.credit, ())
+    if st.closing {
+        return Again
+    }
+    let mut b: Bytes = list.with_capacity(125u64)
+    for i in 0u64 .. payload.len {
+        let _ = list.push(mut b, payload.data[i])
+    }
+    match std.wsock.encode(mut st.encoder, true, op, b) {
+        Ok(take encoded_control) => {
+            st.control = Some(take encoded_control)
+        },
+        Error(e) => return Stop(Error(e)),
+    }
+    if op == 8u8 {
+        st.closing = true
+    }
+    Go(None)
+}
+
+fn wire_owner_write_timeout[C: send](mut st: WireLoop[C], end: u64) -> WireStep {
+    if !st.closing {
+        st.close_at = Some(end)
+        match std.wsock.encode(mut st.encoder, true, 8u8, wire_close_payload(1001u16)) {
+            Ok(take close_frame) => {
+                st.control = Some(take close_frame)
+            },
+            Error(e) => return Stop(Error(e)),
+        }
+        st.closing = true
+    }
+    Go(None)
+}
+
+fn wire_owner_read_closed[C: send](mut st: WireLoop[C], payload: Box[std.websocket.Control], take returned: Box[std.wsock.Reader]) -> WireStep {
+    st.read_back = Some(take returned)
+    st.read_closed = true
+    if st.write_closed {
+        return Stop(Ok(()))
+    }
+    if !st.closing {
+        let mut b: Bytes = list.with_capacity(125u64)
+        for i in 0u64 .. payload.len {
+            list.push(mut b, payload.data[i])
+        }
+        match std.wsock.encode(mut st.encoder, true, 8u8, b) {
+            Ok(take close_bytes) => {
+                st.control = Some(take close_bytes)
+            },
+            Error(e) => return Stop(Error(e)),
+        }
+    }
+    st.closing = true
+    Go(None)
+}
+
+// After an event: queues its frame, polls the service, and decides the frame to
+// write now, if any.
+fn wire_owner_poll[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], take frame: Option[Frame]) -> WireStep {
+    if wire_owner_cut(mut st, mut service) {
+        return Stop(Ok(()))
+    }
+    let mut outgoing: Option[Frame] = None
+    if !st.closing {
+        if let Some(take f) = take frame {
+            if let Error(e) = wire_queue_external(mut st.work, st.c, take f, None) {
+                return Stop(Error(e))
+            }
+        }
+        let writable = wire_ready(st.busy) && !st.write_closed && none(st.control) && (list.len(st.work.output) == 0u64 || !st.work.output[0u64].external)
+        match (st.apply_input)(mut service.context, mut st.work, WPoll(writable)) {
+            Ok(Some(take f)) => {
+                if writable {
+                    outgoing = Some(take f)
+                } else {
+                    let held_check = replace(mut st.work.check, None)
+                    if let Error(e) = wire_queue_external(mut st.work, st.c, take f, held_check) {
+                        return Stop(Error(e))
+                    }
+                }
+            },
+            Ok(None) => {},
+            Error(code) => wire_owner_refuse(mut st, code),
+        }
+    }
+    if st.held_credit && (service.ready)(service.context) {
+        let _ = channel.try_send(st.credit, ());
+        st.held_credit = false
+    }
+    if !st.closing && map.len(st.work.timers) == 0u64 && wire_ready(st.busy) && list.len(st.work.output) == 0u64 && (service.ready)(service.context) && list.len(st.deferred) == 0u64 {
+        if let Some(_) = st.work.deadline {
+            if let None = outgoing {
+                wire_owner_refuse(mut st, 1001u16)
+            }
+        }
+    }
+    Go(take outgoing)
+}
+
+// Packs and offers the next data frame or the queued control frame, and arms
+// the close alarm once closing.
+fn wire_owner_send[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], pool: Sender[WireAllocation[C]], take outgoing: Option[Frame]) -> WireStep waits {
+    let mut data_frame: Option[(Bytes, bool, Option[u64])] = None
+    // Outbound delivery is the second check: nothing reaches the client past expiry.
+    let _ = wire_auth_lapsed(mut st)
+    if wire_ready(st.busy) && !st.write_closed && !st.closing && none(st.control) {
+        let next = match take outgoing {
+            Some(take f) => Some(take f),
+            None => if list.len(st.work.output) != 0u64 && st.work.output[0u64].external {
+                let WireOutput(frame: take f, check: held_check, ..) = list.remove(mut st.work.output, 0u64)
+                st.work.check = held_check
+                Some(take f)
+            } else {
+                None
+            },
+        }
+        if let Some(take f) = take next {
+            let welcome = match f {
+                Welcome(..) => true,
+                _ => false
+            }
+            let check = replace(mut st.work.check, None)
+            let groups = replace(mut st.work.packing, list.new())
+            match wire_pack(pool, st.encoded_to, st.encoded_from, take f, take groups) {
+                Ok(take b) => {
+                    data_frame = Some((take b, welcome, check))
+                },
+                Error(Protocol(1013u16)) => {
+                    match std.wsock.encode(mut st.encoder, true, 8u8, wire_close_payload(1013u16)) {
+                        Ok(take refused) => {
+                            st.control = Some(take refused)
+                        },
+                        Error(e) => return Stop(Error(e)),
+                    }
+                    st.closing = true
+                },
+                Error(e) => return Stop(Error(e)),
+            }
+            if wire_owner_cut(mut st, mut service) {
+                return Stop(Ok(()))
+            }
+        }
+    }
+    let unarmed = match st.alarm {
+        None => true,
+        _ => false
+    }
+    if st.closing && unarmed {
+        let own_close = match st.close_at {
+            Some(end) => end,
+            None => std.clock.deadline_after_ms(host.mono_ns(st.clock), st.c.socket.close_ms),
+        }
+        let deadline = match st.work.deadline {
+            Some(cut) => if cut < own_close {
+                cut
+            } else {
+                own_close
+            },
+            None => own_close
+        }
+        st.close_at = Some(deadline)
+        let h = std.clock.alarm(st.tasks, st.clock, deadline, st.to, wire_event(Ended(1001u16)))
+        st.alarm = Some(take h)
+    }
+    if wire_ready(st.busy) && !st.write_closed {
+        if let Some(take b) = replace(mut st.control, None) {
+            st.room_pass = None
+            wire_owner_write(mut st, WireUnit(frame: take b, check: None, write_ack: false))
+            return Again
+        }
+        if let Some((take packed, welcome, check)) = take data_frame {
+            st.room_pass = None
+            // The check version travels with the unit; WSent or WDropped clears the copy.
+            st.work.check = check
+            let unit = wire_unit(st.work, take packed, check, !none(st.first_write))
+            wire_owner_write(mut st, take unit)
+            if welcome {
+                if let Some(take accepted) = replace(mut st.lease, None) {
+                    std.wsock.hello_accepted(take accepted)
+                }
+            }
+        } else if !st.closing && list.len(st.work.output) == 0u64 && wire_room_offer(mut st) {
+            return Again
+        }
+    }
+    Go(None)
+}
+
+// Stages one unit after its release check (§3) and writes it without waiting; its Sent,
+// Dropped or end is the owner's next event.
+fn wire_owner_write[C: send](mut st: WireLoop[C], take u: WireUnit) waits {
+    let WireUnit(frame: take frame, check: take check, write_ack: write_ack) = take u
+    st.busy = true
+    if let Some(c) = check {
+        if !release_load(c.round, c.fence, c.version) {
+            st.done = Some(wire_event(Dropped));
+            return
+        }
+    }
+    let mut writer = match replace(mut st.writer, None) {
+        Some(take w) => take w,
+        None => fail("runner: a write while the writer is out")
+    }
+    let close = list.len(frame) != 0u64 && frame[0u64] & 15u8 == 8u8
+    let end = if close {
+        std.clock.deadline_after_ms(host.mono_ns(st.clock), st.c.socket.close_ms)
+    } else {
+        int.saturating_add(host.mono_ns(st.clock), std.wsock.MESSAGE_NS)
+    }
+    let _ = std.wsock.stage(mut writer, take frame)
+    let report = if write_ack {
+        replace(mut st.first_write, None)
+    } else {
+        None
+    }
+    let x = WireWrite(live: None, cursor: 0u64, writer: take writer, to: channel.sender(st.to), out: st.out, clock: st.clock, config: st.c.socket, end: end, can_close: !close, close: close, report: take report)
+    match wire_start(st.tasks, take x) {
+        Ok(take h) => {
+            st.wh = Some(take h)
+        },
+        Error(take e) => {
+            st.done = Some(wire_event(take e))
+        }
+    }
+}
+
+// The allocation pool went with the service: join both children and refuse.
+fn wire_owner_lost[C: send](take st: WireLoop[C]) -> Result[(), std.wsock.Error] waits {
+    // Every owned field stays bound, so it drops after the join as it did
+    // when the loop was inline.
+    let WireLoop(pub_to: take pub_to, managed: take managed, lease: take lease, to: take to, inbox: take inbox, credit: take credit, first_write: take first_write, done: take done, encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from, encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, auth_alarm: take auth_alarm, deferred: take deferred, held: take held, control: take control, alarm: take alarm, read_back: take read_back, writer: take write_back, write_closed: write_closed, clock: clock, close_at: close_at, expired: expired, ..) = take st
+    wire_join(take rh, take wh)
+    wire_room_done(take work)
+    Error(Protocol(1013u16))
+}
+
+fn wire_owner_end[C: send](take st: WireLoop[C], mut service: Box[Service[C]], take result: Result[(), std.wsock.Error]) -> Result[(), std.wsock.Error] waits {
+    // Every owned field stays bound, so it drops at the end as it did when the
+    // loop was inline; only copyable fields are left out.
+    let WireLoop(pub_to: take pub_to, managed: take managed, lease: take lease, to: take to, inbox: take inbox, credit: take credit, first_write: take first_write, done: take done, encoded_to: take encoded_to, encoded_from: take encoded_from, allocation_to: take allocation_to, allocation_from: take allocation_from, encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, auth_alarm: take auth_alarm, deferred: take deferred, held: take held, control: take control, alarm: take alarm, read_back: take read_back, writer: take write_back, write_closed: write_closed, clock: clock, close_at: close_at, expired: expired, ..) = take st
+    if let Some(take h) = take alarm {
+        let mut timing = take h
+        task.cancel(mut timing)
+        wire_join(take rh, take wh)
+        let _ = task.join(take timing)
+    } else {
+        wire_join(take rh, take wh)
+    }
+    wire_room_done(take work)
+    if !expired && write_closed && (match managed {
+        None => true,
+        _ => false
+    }) {
+        if let Some(take returned_reader) = take read_back {
+            if let Some(take returned_writer) = take write_back {
+                if let Some(deadline) = close_at {
+                    let _ = std.wsock.finish(box.unbox(take returned_writer), box.unbox(take returned_reader), clock, deadline)
+                }
+            }
+        }
+    }
+    wire_finish_owner(mut service, pub_to)
+    result
+}
+
+// At most one inbox capacity of uninterrupted takes between publisher wakes.
+fn wire_taken(mut run: u64, capacity: u64) -> bool {
+    run += 1u64
+    if run == capacity {
+        run = 0u64;
+        true
+    } else {
+        false
+    }
+}
+
+fn wire_finish_owner[C: send](mut service: Service[C], pub_to: Sender[PubIn]) {
+    if let Some(take left) = (service.finish)(mut service.context) {
+        let _ = channel.try_send(pub_to, take left)
+    }
+}

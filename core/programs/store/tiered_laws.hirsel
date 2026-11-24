@@ -707,8 +707,7 @@ fn test_l62_root_scoped_pins() -> Result[(), Error] {
     Ok(())
 }
 
-@test
-fn test_l68_lazy_collection_root() -> Result[(), Error] {
+fn l68_collection_map_wire() -> Bytes {
     // Hand-laid AP7 map leaf: header 24, prefix 4, inline entry 61,
     // and one 2-byte slot. Its table root belongs to another pack.
     let mut raw: Bytes = list.with_capacity(91)
@@ -730,6 +729,12 @@ fn test_l68_lazy_collection_root() -> Result[(), Error] {
     list.put_word_le(mut raw, 78u64)
     list.put_word_le(mut raw, 0x00000101u32)
     list.put_word_le(mut raw, 28u16)
+    take raw
+}
+
+@test
+fn test_l68_lazy_collection_root() -> Result[(), Error] {
+    let raw = l68_collection_map_wire()
     let disk_image = page_result(std.page.decode(clone(raw), CollectionMap))?
     let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
     let mut slots: List[std.page.Slot] = list.new()
@@ -746,6 +751,73 @@ fn test_l68_lazy_collection_root() -> Result[(), Error] {
     }
     let Error(Unsupported(0x0021)) = decode_located_page("p-9", 72, take raw, CollectionMap) else {
         fail("L68: the eager opener accepted a Tiered descriptor")
+    }
+    Ok(())
+}
+
+fn l68_write_page_pack(d: Dir, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
+    let context = DiskContext(store: owner, role: 3, seq: seq)
+    let width: u32 = int.truncate(list.len(payload_bytes))
+    let mut frame: Bytes = list.with_capacity(16 + list.len(payload_bytes) + BINDING_BYTES)
+    list.put_word_le(mut frame, 0x0021u16)
+    list.put_word_le(mut frame, 1u16)
+    list.put_word_le(mut frame, width)
+    list.put_word_le(mut frame, 0u64)
+    list.append(mut frame, payload_bytes)
+    capacity(seal_frame(mut frame, context, 72))?
+    let mut pack_bytes = capacity(disk_header_bytes(context, 0, 0))?
+    list.append(mut pack_bytes, frame)
+    disk_write_synced(d, paged_pack_path(seq)?, pack_bytes)?
+    Ok(std.page.PagePtr(pack: seq, offset: 72, len: width, checksum: std.check.xxh3(payload_bytes, 0, list.len(payload_bytes)), stamp: stamp))
+}
+
+fn l68_inventory_wire(class_three_end: u64) -> Result[Bytes, Error] {
+    let mut records: List[std.page.Entry] = list.with_capacity(2)
+    let cold = PagePack(class: 3, frames: 1, live: 80, payload_bytes: 220, index: class_three_end)
+    let warm = PagePack(class: 0, frames: 1, live: 91, payload_bytes: 91, index: 0)
+    list.push(mut records, std.page.Entry(key: key_word(8), cell: InlineValue(encode_pack_row(cold))))
+    list.push(mut records, std.page.Entry(key: key_word(9), cell: InlineValue(encode_pack_row(warm))))
+    let image = page_result(std.page.encode(records, 0, 101, Unprefixed))?
+    copied(std.page.payload(image))
+}
+
+@test
+fn test_l68_lazy_directory_inventory(d: Dir) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let mut manifest = page_manifest_empty()
+    manifest.next_pack = 11
+    manifest.next_stamp = 102
+    manifest.next_table = 10
+    manifest.account_tiered = 78
+    manifest.branches[0u64].roots.collections = l68_write_page_pack(fixtures, owner, 9, 100, l68_collection_map_wire())?
+    manifest.pack_root = l68_write_page_pack(fixtures, owner, 10, 101, l68_inventory_wire(168)?)?
+    // There is no p-8 to read. The root and inventory must come only from
+    // the Memory map and list pages.
+    let verified = validate_directory_graph(fixtures, owner, clone(manifest), true)?
+    let loaded = rebuild_page_store(take verified)?
+    let Some((ColdPage(ptr), row)) = std.page.collection_slot(loaded.holders[0u64].collections.root, prefix(9)?) else {
+        fail("L68: recovery forced or discarded the Cold root")
+    }
+    let rows: u64 = list.word_le(row, 36)
+    if ptr != std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40) || rows != 1 {
+        fail("L68: recovery did not preserve the root pointer and row count")
+    }
+    let Some(cold) = disk_index_get(loaded.locations.packs, 8u64) else {
+        fail("L68: recovery dropped the Cold pack inventory")
+    }
+    if cold.live != 80 {
+        fail("L68: recovery reset the Cold pack's live bytes")
+    }
+    if let Some(_) = disk_index_get(loaded.locations.frames, 40u64) {
+        fail("L68: recovery indexed the Cold page in RAM")
+    }
+    manifest.pack_root = l68_write_page_pack(fixtures, owner, 10, 101, l68_inventory_wire(167)?)?
+    let Error(Corrupt(Fault(file: bad_pack, why: Malformed, ..))) = validate_directory_graph(fixtures, owner, take manifest, true) else {
+        fail("L68: a root crossing the pack's index was accepted")
+    }
+    if bad_pack != "p-8" {
+        fail("L68: the invalid extent was attributed to the wrong pack")
     }
     Ok(())
 }

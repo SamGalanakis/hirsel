@@ -358,7 +358,7 @@ fn history_graph_order(mut graph: PageGraph) {
 fn history_validate_manifest(mut source: ObjectPackRead, id: StoreId, file: String, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
     require_memory_manifest(manifest)?
     let blank = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
-    let mut lists = ListedPages(packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take blank)
+    let mut lists = ListedPages(allow_tiered: false, packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take blank)
     let mut final_item: Option[u64] = None
     read_page_list(mut source, id, manifest, manifest.pack_root, None, false, mut final_item, mut lists, history_list_page)?
     for (seq, _) in lists.class_two {

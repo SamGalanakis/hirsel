@@ -227,13 +227,25 @@ pub fn has_tiered_roots(image: Image) -> bool {
         return false
     }
     for slot in 0u64 .. count(image) {
-        let at = entry_at(image, slot)
-        let descriptor = at + 5 + u16_at(image.raw, at)
-        if image.raw[descriptor + 53] == 1 {
+        if let Some(_) = tiered_root_at(image, slot) {
             return true
         }
     }
     false
+}
+
+/// Return the Tiered root pointer, including an empty root's zero pointer.
+pub fn tiered_root_at(image: Image, slot: u64) -> Option[PagePtr] {
+    if image.domain != CollectionMap || level(image) != 0 || slot >= count(image) {
+        return None
+    }
+    let at = entry_at(image, slot)
+    let descriptor = at + 5 + u16_at(image.raw, at)
+    if image.raw[descriptor + 53] == 1 {
+        Some(ptr_at(image.raw, descriptor))
+    } else {
+        None
+    }
 }
 
 pub fn image_of(page: Arc[Page]) -> View[Image] in page {

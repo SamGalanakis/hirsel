@@ -23,16 +23,19 @@ fn attach_page_graph(mut graph: PageGraph, empty_collection: Arc[std.page.Page])
                 let mut blobs: List[std.page.BlobSlot] = list.new()
                 capacity(list.try_reserve(mut kids, list.len(children)))?
                 capacity(list.try_reserve(mut blobs, list.len(refs)))?
-                for child in children {
-                    let attached = if child == 0 {
-                        arc.share(empty_collection)
-                    } else {
-                        let Some(page) = map.get(pages, child) else {
-                            fail("missing validated child")
-                        }
-                        arc.share(page)
+                for slot in 0u64 .. list.len(children) {
+                    let child = children[slot]
+                    let attached: std.page.Slot = match std.page.tiered_root_at(image, slot) {
+                        Some(ptr) if ptr.stamp != 0 => ColdPage(ptr),
+                        _ if child == 0 => HotPage(arc.share(empty_collection)),
+                        _ => {
+                            let Some(page) = map.get(pages, child) else {
+                                fail("missing validated child")
+                            }
+                            HotPage(arc.share(page))
+                        },
                     }
-                    list.push(mut kids, HotPage(take attached))
+                    list.push(mut kids, take attached)
                 }
                 for body in refs {
                     let Some(value) = map.get(bodies, body) else {

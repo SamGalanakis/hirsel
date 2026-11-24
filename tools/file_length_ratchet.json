@@ -79,9 +79,9 @@
     "lines": 1374
   },
   "core/std/page.hirsel": {
-    "lines": 3439,
-    "raise_revision": 8,
-    "reason": "cell-log-build-2018"
+    "lines": 3451,
+    "raise_revision": 9,
+    "reason": "m3-s3-slots-2010"
   },
   "core/std/prop.hirsel": {
     "lines": 1743

@@ -141,7 +141,9 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
     let mut known = new_page_locations()
     for (seq, pack) in validated.inventory {
         let mut loaded: PagePack = clone(pack)
-        loaded.live = 0
+        if loaded.class < 3 {
+            loaded.live = 0
+        }
         capacity(disk_index_put(mut known.packs, seq, loaded, pack_edge_charge))?
     }
     for stamp in validated.graph.postorder {

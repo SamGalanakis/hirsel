@@ -336,6 +336,7 @@ fn index_pack_frames(path: String, ctx: DiskContext, pack: PagePack, next_stamp:
 }
 
 type ListedPages {
+    allow_tiered: bool,
     packs: Map[u64, PagePack],
     retired: Map[u64, ()],
     class_two: Map[u64, List[u64]],
@@ -390,12 +391,16 @@ fn check_page_pointer(path: String, ptr: std.page.PagePtr, raw: Bytes) -> Result
 }
 
 fn decode_located_page(path: String, offset: u64, take raw: Bytes, domain: std.page.Domain) -> Result[std.page.Image, Error] {
+    decode_manifest_page(path, offset, take raw, domain, false)
+}
+
+fn decode_manifest_page(path: String, offset: u64, take raw: Bytes, domain: std.page.Domain, allow_tiered: bool) -> Result[std.page.Image, Error] {
     let image = std.page.decode(take raw, domain) ?=> |problem| match problem {
         UnsupportedPage => Unsupported(0x0021),
         _ => disk_fault(path, offset, Malformed),
     }
     // The eager opener cannot attach a Tiered root, even if that root is empty.
-    if std.page.has_tiered_roots(image) {
+    if !allow_tiered && std.page.has_tiered_roots(image) {
         return Error(Unsupported(0x0021))
     }
     Ok(take image)
@@ -491,7 +496,7 @@ fn read_page_list[S](mut source: S, id: StoreId, manifest: PageManifest, ptr: st
                 } else {
                     capacity(map.try_reserve(mut lists.packs, 1))?
                     let pack = pack_record(path, ptr.offset, raw)?
-                    if pack.class >= 3 {
+                    if !lists.allow_tiered && pack.class >= 3 {
                         return Error(Unsupported(0x0023))
                     }
                     map.insert(mut lists.packs, seq, pack)
@@ -541,6 +546,8 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
     Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live, payload_bytes: checked_pack.payload_bytes, index: 0))
 }
 
+// A zero child stamp is either an empty collection or an edge owned by the
+// Tiered descriptor. Neither creates an incoming edge in PageLocations.
 type ReadFrame = ReadPage(std.page.Image, List[u64], List[u64]) | ReadBlob(Bytes)
 
 type PageGraph {
@@ -589,7 +596,28 @@ fn resolve_blob_frame(path: String, pack: LoadedPack, reference: std.page.BlobRe
     graph_add(mut graph, loc.stamp, ReadBlob(take value))
 }
 
-fn resolve_data_page(packs: Map[u64, LoadedPack], ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], mut graph: PageGraph) -> Result[(), Error] {
+scoped type RecoveryInventory {
+    packs: View[Map[u64, PagePack]],
+    next_stamp: u64,
+    allow_tiered: bool
+}
+
+fn validate_cold_root(inventory: RecoveryInventory, ptr: std.page.PagePtr) -> Result[(), Error] {
+    if ptr.stamp == 0 {
+        return Ok(())
+    }
+    let path = paged_pack_path(ptr.pack)?
+    let Some(pack) = map.get(inventory.packs, ptr.pack) else {
+        return Error(disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
+    }
+    let width: u64 = int.widen(ptr.len)
+    if pack.class != 3 || ptr.stamp >= inventory.next_stamp || width < 24 || width > PAGE_LIMIT || ptr.offset < 72 || ptr.offset >= pack.index || 16 + width > pack.index - ptr.offset {
+        return Error(disk_fault(path, ptr.offset, Malformed))
+    }
+    Ok(())
+}
+
+fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], mut graph: PageGraph) -> Result[(), Error] {
     if ptr.stamp == 0 {
         return Ok(())
     }
@@ -623,7 +651,7 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], ptr: std.page.PagePtr, domain:
         }
         return Error(disk_fault(path, ptr.offset, Malformed))
     }
-    let image = decode_located_page(path, ptr.offset, copied(payload)?, domain)?
+    let image = decode_manifest_page(path, ptr.offset, copied(payload)?, domain, inventory.allow_tiered)?
     let height = std.page.level(image)
     if let Some(wanted) = expected_level {
         if height != wanted {
@@ -637,13 +665,18 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], ptr: std.page.PagePtr, domain:
             Some(PageEdge(child)) => {
                 if child.stamp != 0 {
                     page_edge_order(path, ptr, child)?
-                    if height == 0 {
-                        resolve_data_page(packs, child, Collection, None, mut graph)?
-                    } else {
-                        resolve_data_page(packs, child, domain, Some(height - 1), mut graph)?
-                    }
                 }
-                list.push(mut kids, child.stamp)
+                if let Some(_) = std.page.tiered_root_at(image, slot) {
+                    validate_cold_root(inventory, child)?
+                    list.push(mut kids, 0u64)
+                } else {
+                    if height == 0 {
+                        resolve_data_page(packs, inventory, child, Collection, None, mut graph)?
+                    } else {
+                        resolve_data_page(packs, inventory, child, domain, Some(height - 1), mut graph)?
+                    }
+                    list.push(mut kids, child.stamp)
+                }
             },
             Some(BlobEdge(reference)) => {
                 resolve_blob(packs, reference, mut graph)?
@@ -655,10 +688,10 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], ptr: std.page.PagePtr, domain:
     graph_add(mut graph, ptr.stamp, ReadPage(take image, take kids, take blobs))
 }
 
-fn resolve_data_roots(packs: Map[u64, LoadedPack], roots: LocatedRoots, mut graph: PageGraph) -> Result[(), Error] {
-    resolve_data_page(packs, roots.collections, CollectionMap, None, mut graph)?
-    resolve_data_page(packs, roots.streams, Unprefixed, None, mut graph)?
-    resolve_data_page(packs, roots.catalog, Unprefixed, None, mut graph)
+fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, roots: LocatedRoots, mut graph: PageGraph) -> Result[(), Error] {
+    resolve_data_page(packs, inventory, roots.collections, CollectionMap, None, mut graph)?
+    resolve_data_page(packs, inventory, roots.streams, Unprefixed, None, mut graph)?
+    resolve_data_page(packs, inventory, roots.catalog, Unprefixed, None, mut graph)
 }
 
 type ValidatedPageManifest {
@@ -670,8 +703,12 @@ type ValidatedPageManifest {
 
 fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
     require_memory_manifest(manifest)?
+    validate_directory_graph(d, id, take manifest, false)
+}
+
+fn validate_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_tiered: bool) -> Result[ValidatedPageManifest, Error] waits {
     let graph = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
-    let mut lists = ListedPages(packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take graph)
+    let mut lists = ListedPages(allow_tiered: allow_tiered, packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take graph)
     let mut final_item: Option[u64] = None
     let mut directory = d
     read_page_list(mut directory, id, manifest, manifest.pack_root, None, false, mut final_item, mut lists, read_list_page)?
@@ -689,7 +726,7 @@ fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> R
         map.insert(mut lists.packs, seq, pack)
     }
     for (seq, pack) in lists.packs {
-        if pack.class != 2 {
+        if pack.class < 2 {
             let loaded = disk_load_page_pack(d, id, seq, pack, manifest.next_stamp)?
             capacity(map.try_reserve(mut data, 1))?
             map.insert(mut data, seq, take loaded)
@@ -697,11 +734,12 @@ fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> R
     }
     let resolved = disk_allocation(scoped fn() -> Result[PageGraph, Error] {
         let mut candidate: PageGraph = clone(lists.live_graph)
+        let inventory = RecoveryInventory(packs: view lists.packs, next_stamp: manifest.next_stamp, allow_tiered: allow_tiered)
         for item in manifest.branches {
-            resolve_data_roots(data, item.roots, mut candidate)?
+            resolve_data_roots(data, inventory, item.roots, mut candidate)?
         }
         for held in manifest.pins {
-            resolve_data_roots(data, held.roots, mut candidate)?
+            resolve_data_roots(data, inventory, held.roots, mut candidate)?
         }
         Ok(take candidate)
     })?

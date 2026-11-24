@@ -283,7 +283,7 @@ A baseline per-build row is satisfied by any row except a negative one. A line m
 `pending` in the working tree is compared against FILE all the same. A stronger
 row passes the comparison.
 
-**Narrowed runs are refused.** `--laws-baseline` refuses `--filter`, `--seed`, `--sim`,
+**Narrowed runs are refused.** `--laws-baseline` refuses `--filter`, `--exact`, `--seed`, `--sim`,
 `--seeds`, `--property-corpus` and `--replay` with
 `test: --laws-baseline compares a full run; drop OPTION`, and exits 2 as any refused
 argument does. A focused run uses `--laws` and

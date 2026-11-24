@@ -29,6 +29,7 @@ pub enum OptionId {
     Dir,
     Grant,
     Filter,
+    TestExact,
     TestJobs,
     Interface,
     ForeignHeader,
@@ -905,6 +906,13 @@ static OPTIONS: &[OptionSpec] = &[
         "Select test definition paths containing TEXT."
     ),
     option!(
+        TestExact,
+        ["--exact"],
+        Some("DEFINITION"),
+        ["test"],
+        "Select a full test definition path (package@version/module/name). Repeat to select more tests. Conflicts with --filter."
+    ),
+    option!(
         TestJobs,
         ["-j"],
         Some("N"),
@@ -1174,22 +1182,12 @@ pub enum Action {
     Version,
     Invoke(Invocation),
 }
-pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
-    COMMANDS
-        .iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| format!("unknown command `{name}`; use help"))
-}
 #[path = "cli_help.rs"]
 mod help_text;
-use help_text::applies;
 pub use help_text::help;
+pub(crate) use help_text::named;
+use help_text::{applies, is_help};
 
-fn is_help(name: &str) -> bool {
-    OPTIONS
-        .iter()
-        .any(|option| option.id == OptionId::Help && option.names.contains(&name))
-}
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
     let mut arguments = arguments.into_iter().peekable();
     let Some(mut name) = arguments.next() else {

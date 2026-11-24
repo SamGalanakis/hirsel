@@ -193,12 +193,15 @@ def output_name(definition):
 
 
 def run_preparation(command, scratch, report, expected):
+    for definition in expected:
+        command.extend(['--exact', definition])
     with report.open('w') as log:
         result = subprocess.run(command, stdout=log, cwd=scratch)
     if result.returncode not in (0, 1):
         raise ValueError(f'preparation exited {result.returncode}; see {report}')
-    rows = {row['definition']: row for row in json.loads(report.read_text())['tests']}
-    if rows.keys() != set(expected):
+    tests = json.loads(report.read_text())['tests']
+    rows = {row['definition']: row for row in tests}
+    if len(tests) != len(rows) or rows.keys() != set(expected):
         raise ValueError(f'preparation did not discover exactly the campaign entries; see {report}')
     return rows
 
@@ -223,14 +226,13 @@ def prepare(compiler, work, kind, group, jobs, seeds):
         for index, definition in enumerate(entries.values()):
             report = scratch / f'prepare-{index}.json'
             reports[definition] = report
-            rows.update(run_preparation(command + [str(programs / kind), '--filter', definition],
+            rows.update(run_preparation(command + [str(programs / kind)],
                                         scratch, report, [definition]))
     elif kind == 'postgres':
         package = scratch / 'postgres'
         shutil.copytree(ROOT / 'core/programs/postgres', package, ignore=shutil.ignore_patterns('hirsel.lock'))
         entries = {law: law for law in group}
-        selector = '/sim_tests/' if len(group) == len(POSTGRES) else next(iter(group))
-        command.extend([str(package), '--filter', selector])
+        command.append(str(package))
     else:
         inputs, entries = (contract_inputs if kind == 'contracts' else runner_inputs)(group, scratch)
         manifest = scratch / 'inputs.json'
@@ -238,7 +240,7 @@ def prepare(compiler, work, kind, group, jobs, seeds):
         limits = {case.root_limit for case in group.values()} if kind == 'contracts' else {64 << 20}
         limit, = limits
         command.extend(['--inputs', str(manifest), '--source-core', '--source-std',
-                        '--filter', '/campaign_', '--limit', str(limit),
+                        '--limit', str(limit),
                         '--grant', 'Tasks', '--grant', f'Env={SEED}'])
     if kind not in PACKAGE_LAWS:
         print(f'Preparing {len(entries)} {kind} laws', flush=True)

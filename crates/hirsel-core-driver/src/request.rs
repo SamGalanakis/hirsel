@@ -299,6 +299,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut n_place = None;
     let mut place_timeout = Duration::from_secs(10);
     let mut test_filter = None;
+    let mut test_exact = Vec::new();
     let mut test_jobs = None;
     let mut test_timeout = None;
     let mut test_sim = false;
@@ -399,6 +400,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::Dir => grants.directories.push(value),
             Opt::Grant => grants.grant(&value)?,
             Opt::Filter => test_filter = Some(value),
+            Opt::TestExact => test_exact.push(
+                hirsel_core_ids::DefPath::from_full(&value)
+                    .ok_or("--exact expects a full definition path")?,
+            ),
             Opt::TestJobs => {
                 test_jobs = Some(
                     value
@@ -521,9 +526,13 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
         }
     }
+    if test_filter.is_some() && !test_exact.is_empty() {
+        return Err("test: --filter and --exact cannot be combined".into());
+    }
     if law_baseline.is_some() {
         for (narrowed, option) in [
             (test_filter.is_some(), "--filter"),
+            (!test_exact.is_empty(), "--exact"),
             (test_seed.is_some(), "--seed"),
             (test_sim, "--sim"),
             (test_seeds.is_some(), "--seeds"),
@@ -732,7 +741,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         _ => return Err("--emulator and --sysroot must be supplied together".into()),
     };
     if test_command && entry.is_some() {
-        return Err("test selects marked functions with --filter, not --entry".into());
+        return Err("test selects marked functions with --filter or --exact, not --entry".into());
     }
     let executable = std::env::current_exe()?;
     let installed = crate::installation::Installed::discover(&executable)?;
@@ -1444,6 +1453,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 test_filter
                     .as_ref()
                     .is_none_or(|filter: &String| path.to_string().contains(filter.as_str()))
+                    && (test_exact.is_empty() || test_exact.contains(path))
             })
             .cloned()
             .collect();
@@ -2040,17 +2050,4 @@ pub(crate) fn serve(args: Vec<String>) -> Outcome {
 }
 
 #[cfg(test)]
-mod net_grant_tests {
-    #[test]
-    fn bare_net_grant_is_refused_before_discovery_with_the_rule_syntax() {
-        let result = super::run(
-            ["run", "unused", "--grant", "Net"]
-                .map(str::to_owned)
-                .to_vec(),
-        );
-        let error = result
-            .err()
-            .expect("a bare Net grant cannot confer authority");
-        assert!(error.to_string().contains(hirsel_core_net::RULE_SYNTAX));
-    }
-}
+mod net_grant_tests;

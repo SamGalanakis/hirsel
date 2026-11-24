@@ -1,5 +1,18 @@
 use super::{COMMANDS, CommandSpec, OPTIONS, OptionId, OptionSpec};
 
+pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
+    COMMANDS
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| format!("unknown command `{name}`; use help"))
+}
+
+pub(super) fn is_help(name: &str) -> bool {
+    OPTIONS
+        .iter()
+        .any(|option| option.id == OptionId::Help && option.names.contains(&name))
+}
+
 pub(super) fn applies(option: &OptionSpec, command: &CommandSpec) -> bool {
     (command.name == "dev"
         && matches!(

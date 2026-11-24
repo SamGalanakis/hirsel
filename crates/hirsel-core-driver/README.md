@@ -397,8 +397,11 @@ provide a synchronized run observer before using it.
 Installed dependency tests are not rediscovered. Tests take only unmarked
 capabilities, no `Args` or type parameters, and return `Result[(), E]`; only
 other tests may refer to them. A test retains normal access to its module's
-private helpers. `--filter <substring>` matches the full definition path; the
-driver visits matching paths in lexical order. No matching test exits 2.
+private helpers. `--filter <substring>` matches any full definition path
+containing the substring. `--exact <definition>` matches the complete path,
+such as `app@1/main/smoke`. Repeat `--exact` to select multiple paths.
+The selectors are mutually exclusive. The driver visits matching paths in
+lexical order. No matching test exits 2.
 
 Each selected test builds through the ordinary reachable closure and runs in
 its own process. When `hirsel.toml` declares `[tests]`, its `limit`, `dirs`, and `grants`

@@ -53,7 +53,7 @@ type FollowerCommand: send {
 type FollowerSource = DirectorySource(Dir) | ObjectSource(ObjectPackRead)
 
 fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result[FollowerResponse, Error] waits {
-    let (take command, take answer) = capacity(bound bytes FOLLOWER_REQUEST_BYTES {
+    let (take command, take answer) = capacity(bound bytes follower_request_bytes() {
         let (outlet, inbox): (Sender[Result[FollowerResponse, Error]], Receiver[Result[FollowerResponse, Error]]) = channel.new(1)
         (FollowerCommand(request: box.new(take request), reply: take outlet), take inbox)
     })?
@@ -64,8 +64,7 @@ fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result
 }
 
 fn follow_capture(id: StoreId, take state: State, resident: u64, remote: Option[ObjectFollowHead], log_input: Option[LogFollowWitness], watermark: u64) -> Result[Arc[FollowCapture], Error] {
-    // MEM-24: two 24-byte Lists, two u32 fields and an 8-byte count.
-    let shared = capacity(bound bytes 64 { arc.new(take state) })?
+    let shared = capacity(bound bytes option.unwrap(charge.counted(bytes[State])) { arc.new(take state) })?
     disk_allocation(scoped fn() -> Result[Arc[FollowCapture], Error] {
         Ok(arc.new(FollowCapture(store: id, state: arc.share(shared), resident, remote, log_input, watermark)))
     })

@@ -303,11 +303,13 @@ pub fn follower_plan(kind: Kind, o: Options) -> Result[FollowerPlan, Shortage] {
     let (take sized_options, total) = sized_reservation(kind, 18446744073709551615u64, effective)?
     let transport = if let Bucket(lanes) = kind { option.unwrap(std.object.lane_reservation(lanes)) } else { 0u64 }
     let envelope = total - transport
-    let overhead = FOLLOWER_CONTROL_BYTES + FOLLOWER_TASK_BYTES
+    let control = follower_control_bytes()
+    let task_bytes = follower_task_bytes(0)
+    let overhead = control + task_bytes
     if envelope < overhead {
         let mut parts: List[(String, u64)] = list.with_capacity(2)
-        add_size(mut parts, "follower_control", FOLLOWER_CONTROL_BYTES)
-        add_size(mut parts, "follower_task", FOLLOWER_TASK_BYTES)
+        add_size(mut parts, "follower_control", control)
+        add_size(mut parts, "follower_task", task_bytes)
         return Error(shortage(envelope, take parts))
     }
     let mut effective_options = take sized_options
@@ -323,7 +325,7 @@ pub fn plan_bytes(p: FollowerPlan) -> u64 {
 }
 
 pub fn service_bytes(plans: List[FollowerPlan]) -> Option[u64] {
-    let mut room = FOLLOWER_SERVICE_BYTES
+    let mut room = follower_service_bytes()
     for plan in plans {
         room = int.checked_add(room, plan.envelope)?
     }
@@ -332,8 +334,8 @@ pub fn service_bytes(plans: List[FollowerPlan]) -> Option[u64] {
 
 
 pub fn follower_starter_bytes() -> u64 {
-    FOLLOWER_TASK_BYTES + order.max(FOLLOWER_STARTUP_REPLY_BYTES,
-        order.max(FOLLOWER_PROVISION_BYTES, FOLLOWER_REQUEST_BYTES))
+    follower_task_bytes(0) + order.max(follower_startup_reply_bytes(),
+        order.max(follower_provision_bytes(), follower_request_bytes()))
 }
 
 // Two Latest roots, their initial Arc payloads, and the lifetime channel.

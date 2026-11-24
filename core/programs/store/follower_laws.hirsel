@@ -194,21 +194,23 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     let mut client = bucket_law_client_lanes(sim, tasks, "s3.test", 1010, true, 1)?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let mut content = string.into_bytes(string.from("payload"))
-    let mut compared = disk_read_buffer(8)?
+    // MEM-24 rounds the 7-byte payload to 8 bytes.
+    let destination = option.unwrap(charge.seq(bytes[u8], list.len(content)))
+    let mut compared = disk_read_buffer(destination)?
     let object_ref = history_new_ref(1, 1, content)
     for name in["p-1", "m-1"] {
         history_create(mut client, name, mut content, mut compared, due)?
-        let refused = capacity(bound bytes 7 {
+        let refused = capacity(bound bytes destination - 1 {
             history_read_object(mut client, name, object_ref, due)
         })?
         if let Error(Full(Allocation(cause))) = refused {
-            if cause.requested != 8 || cause.available != 7 {
+            if cause.requested != destination || cause.available != destination - 1 {
                 fail("L85: rounded destination admission reported the wrong charge")
             }
         } else {
             fail("L85: a one-byte-short destination read was admitted")
         }
-        let accepted = capacity(bound bytes 8 {
+        let accepted = capacity(bound bytes destination {
             history_read_object(mut client, name, object_ref, due)
         })?
         if accepted? != content {
@@ -216,11 +218,13 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
         }
     }
     let observed = HistoryHead(authority_kind: 1, store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)), activation: 0, entry: HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding:[0; 32])
+    // 171 links at three u64 fields each need 4,104 bytes.
+    let suffix = option.unwrap(charge.seq(bytes[HistoryLink], observed.entry.seq - object_ref.seq))
     let denied = capacity(bound bytes 4096 {
         history_suffix(mut client, observed, object_ref, due)
     })?
     if let Error(Full(Allocation(cause))) = denied {
-        if cause.requested != 4104 || cause.available != 4096 {
+        if cause.requested != suffix || cause.available != 4096 {
             fail("L85: suffix rows reported the wrong charge")
         }
     } else {
@@ -236,7 +240,9 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     let excessive = HistoryRef(seq: 1, epoch: 1, len: 72 + 1048576 + 1, digest: 0)
     map.insert(mut locator.rows, 1, excessive)
     let pack = PagePack(class: 0, frames: 0, live: 0, payload_bytes: 0, index: 0)
-    let bad = capacity(bound bytes 64 {
+    // The longest object key has 60 bytes, rounded to 64.
+    let key_room = option.unwrap(charge.round(60))
+    let bad = capacity(bound bytes key_room {
         history_load_data_pack(mut client, locator, due, observed.store, 1, pack, 1)
     })?
     if let Error(Corrupt(Fault(why: Malformed, ..))) = bad {} else {
@@ -353,21 +359,24 @@ fn bucket_test_m2_follower_overlap(d: Dir, c: Clock, r: Random, tasks: Tasks, se
 
 @test
 fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    // MEM-24: 96 for the command channel, 64 for retirement, and 56
-    // for the registry entry. The service request channel uses 80.
-    let control = 96u64 + 64 + 56
-    let service_room = 80u64
-    let worker_room = 8192u64 + 288
+    // Q = (64 + 8 + 24) + 64 + (16 + 24 + 16) = 216 for the
+    // command channel, retirement channel and boxed registry entry.
+    // S = 64 + 8 + 8 = 80 for the service's request channel.
+    // Task admission for an 8,192-byte grant is 256 + 32 + 8,192 = 8,480.
+    let grant = 8192u64
+    let control = follower_control_bytes()
+    let service_room = option.unwrap(service_bytes(list.new()))
+    let worker_room = follower_task_bytes(grant)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut tiny = follower_law_plan(Directory, options)
     tiny.envelope = control + worker_room
-    tiny.root = 8192
+    tiny.root = grant
     let short = follower_service(tasks, service_room + control + worker_room - 1)?
     let owner = follower_owner(short)?
     for _ in 0u64 .. 2 {
         let denied = follower_slot(owner, tiny)
         if let Error(Full(Allocation(cause))) = denied {
-            if cause.requested != 8480 || cause.available != 8479 {
+            if cause.requested != worker_room || cause.available != worker_room - 1 {
                 fail("L85: slot refusal reported the wrong task charge or service room")
             }
         } else {
@@ -400,7 +409,7 @@ fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
     let plan = follower_law_plan(Directory, options)
     let before_service = follower_law_room()
     let service = follower_law_service(tasks, plan, 1)?
-    if before_service - follower_law_room() != 288 + 80 + plan_bytes(plan) {
+    if before_service - follower_law_room() != follower_task_bytes(service_room + plan_bytes(plan)) {
         fail("L85: the service retained its startup reply")
     }
     let available = follower_owner(service)?
@@ -422,7 +431,7 @@ fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
     let duplicate = snapshot_follower(opened, follower_main(opened))?
     let _ = take opened
     let retained = follower_slot_shortage(available, plan)
-    if retained.requested != plan.root + 288 || retained.available >= retained.requested {
+    if retained.requested != follower_task_bytes(plan.root) || retained.available >= retained.requested {
         fail("L85: retired worker roots did not stay charged to the service")
     }
     let _ = take captured
@@ -458,7 +467,7 @@ fn follower_request_charge(d: Dir) -> u64 {
 
 fn follower_starter_trial(d: Dir, c: Clock, tasks: Tasks, plan: FollowerPlan, provision: u64, funded: bool) -> Result[(), Error] waits {
     let initial_room = follower_law_room()
-    let service = follower_service(tasks, 80 + plan_bytes(plan))?
+    let service = follower_service(tasks, follower_service_bytes() + plan_bytes(plan))?
     let service_room = if funded {
         provision
     } else {
@@ -510,19 +519,25 @@ fn follower_starter_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let directory = disk_test_directory(d)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let plan = follower_law_plan(Directory, options)
+    // I = 64 + (8 + max(24, 56)) = 128 for the startup reply.
+    // P = round8(330 + 24) + (64 + 8 + 378) = 810. The plan
+    // is 24 + 290 + 8 + 8, and the slot adds two 24-byte senders.
     let provision = follower_provision_charge(plan)
-    if FOLLOWER_PROVISION_BYTES != provision {
-        fail("L85: FOLLOWER_PROVISION_BYTES differs from the box and reply charge")
+    if follower_provision_bytes() != provision {
+        fail("L85: the provision price differs from the box and reply charge")
     }
+    // K = round8(8 + 242 + 24 + 8) + (64 + 8 + 304) = 664.
+    // The widest response has 16 + 236 + 36 bytes of fields and two tags.
     let request = follower_request_charge(directory)
-    if FOLLOWER_REQUEST_BYTES != request {
-        fail("L85: FOLLOWER_REQUEST_BYTES differs from the box and reply charge")
+    if follower_request_bytes() != request {
+        fail("L85: the request price differs from the box and reply charge")
     }
-    if follower_starter_bytes() != 288 + provision {
+    // The starter pays 256 + 32 + max(128, 810, 664) = 1,098.
+    if follower_starter_bytes() != follower_task_bytes(0) + provision {
         fail("L85: the starter peak differs from the task and provision charges")
     }
     close(open(tasks, directory, c, r, options)?)?
-    let limit = 80 + plan_bytes(plan) + 288 + provision
+    let limit = option.unwrap(service_bytes(list.new())) + plan_bytes(plan) + follower_starter_bytes()
     capacity(bound bytes limit - 1 {
         follower_starter_trial(directory, c, tasks, plan, provision, false)
     })??
@@ -580,37 +595,50 @@ fn expect_follower_room(to: Sender[u64], from: Receiver[u64], expected: u64) wai
 }
 
 fn follower_retained_bytes_trial(tasks: Tasks, release_first: bool) waits {
+    // The two Arc nodes charge 24 bytes for each list and 8 for each
+    // count, plus 288 and 160 bytes of storage, for 320 and 192 bytes.
+    // With the 600-byte private capture, 8,192 - 320 - 192 - 600 = 7,080.
+    // Dropping the first node leaves 7,400. After retirement, the two
+    // retained nodes leave 50,000 - 320 - 192 = 49,488 bytes.
+    let carrier = option.unwrap(charge.counted(bytes[Bytes]))
+    let first = carrier + option.unwrap(charge.seq(bytes[u8], 288))
+    let second = carrier + option.unwrap(charge.seq(bytes[u8], 160))
+    let capture = option.unwrap(charge.seq(bytes[u8], 600))
+    let grant = 8192u64
+    let limit = 50000u64
+    let held = grant - first - second - capture
+    let retired = limit - first - second
     let (keep, snapshot_bytes): (Sender[(Arc[Bytes], Arc[Bytes])], Receiver[(Arc[Bytes], Arc[Bytes])]) = channel.new(1)
     let (ask, check_room): (Sender[u64], Receiver[u64]) = channel.new(1)
     let (observed, report): (Sender[u64], Receiver[u64]) = channel.new(1)
     let work = FollowerRetainedBytesJob(keep: take keep, check_room: take check_room, observed: take observed)
-    result.unwrap(bound bytes 50000 {
-        let worker = task.spawn(tasks, bytes 8192, take work, follower_check_room)
+    result.unwrap(bound bytes limit {
+        let worker = task.spawn(tasks, bytes grant, take work, follower_check_room)
         let (take a, take b) = result.unwrap(channel.receive(snapshot_bytes))
-        expect_follower_room(ask, report, 7080)
+        expect_follower_room(ask, report, held)
         if release_first {
             let duplicate = arc.share(a)
-            expect_follower_room(ask, report, 7080)
+            expect_follower_room(ask, report, held)
             let _ = take a
-            expect_follower_room(ask, report, 7080)
+            expect_follower_room(ask, report, held)
             let _ = take duplicate
-            expect_follower_room(ask, report, 7400)
+            expect_follower_room(ask, report, held + first)
             let _ = take b
             let _ = take ask
             result.unwrap(task.join(take worker))
         } else {
             let _ = take ask
             result.unwrap(task.join(take worker))
-            let Error(refused) = (bound bytes 49489 {}) else {
+            let Error(refused) = (bound bytes retired + 1 {}) else {
                 fail("L85: retirement refunded live roots")
             }
-            if refused.available != 49488 {
-                fail("L85: retirement did not return exactly 49,488 bytes")
+            if refused.available != retired {
+                fail("L85: retirement did not return the room left after the retained roots")
             }
             let _ = take a
             let _ = take b
         }
-        result.unwrap(bound bytes 50000 {})
+        result.unwrap(bound bytes limit {})
     })
 }
 
@@ -633,7 +661,7 @@ fn follower_refusal_retry(r: Random, tasks: Tasks, sim: BucketSim) -> Result[(),
     // Fund both fixed read windows and checkpoint metadata. A 256 KiB
     // body cannot fit under this limit even with every scratch block free.
     plan.root = 2 * 65536 + 32768
-    plan.envelope = plan.root + 288 + 216
+    plan.envelope = follower_task_bytes(plan.root) + follower_control_bytes()
     let service = follower_law_service(tasks, plan, 1)?
     let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1202, true, 1)?
     let mut ids = followers()

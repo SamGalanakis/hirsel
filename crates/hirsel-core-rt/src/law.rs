@@ -33,12 +33,13 @@ struct Row {
     failure: u64,
 }
 
-pub(crate) struct Run(PathBuf);
+pub(crate) struct Run(PathBuf, *const crate::abi_sites::SourceTable);
 
 impl Run {
     /// # Safety
-    /// Before other threads start and before any environment grant is snapshotted.
-    pub(crate) unsafe fn start() -> Option<Self> {
+    /// Call before threads start and before any environment grant is snapshotted.
+    /// The launcher pins the source table through the returned guard.
+    pub(crate) unsafe fn start(sources: *const crate::abi_sites::SourceTable) -> Option<Self> {
         let path = std::env::var_os("HIRSEL_LAWS");
         // SAFETY: caller starts observation at single-threaded process entry.
         unsafe { std::env::remove_var("HIRSEL_LAWS") };
@@ -48,7 +49,7 @@ impl Run {
             rows: Vec::new(),
             witnesses: BTreeMap::new(),
         });
-        Some(Self(path.into()))
+        Some(Self(path.into(), sources))
     }
 
     fn write(&self, observation: &Observation) -> std::io::Result<()> {
@@ -59,58 +60,35 @@ impl Run {
             .mode(0o600)
             .open(&self.0)?;
         let mut output = BufWriter::new(file);
-        writeln!(output, "hirsel-laws-observation 1")?;
-        let mut sites = BTreeMap::new();
-        for row in rows {
-            sites.entry((row.callee, row.site)).or_insert(0);
-        }
-        let mut previous = None;
-        let mut ordinal = 0;
-        for (&(callee, _), number) in &mut sites {
-            if previous != Some(callee) {
-                previous = Some(callee);
-                ordinal = 0;
-            }
-            ordinal += 1;
-            *number = ordinal;
-        }
+        writeln!(output, "hirsel-laws-observation 2")?;
         for row in rows {
             let name = CALLEES[row.callee as usize];
-            let ordinal = sites[&(row.callee, row.site)];
-            let class = row.class;
-            write!(output, "{name}#{ordinal} {class}")?;
-            match class {
-                "held" | "vacuous" | "truncated" | "gave up" => {
-                    write!(output, " {}/{}", row.first, row.second)?
-                }
-                "sampled" | "unbounded" => write!(output, " {}", row.first)?,
-                _ => {}
-            }
-            if class == "truncated" {
-                if row.first + row.second == row.bounds[0] {
-                    write!(output, " cases={}", row.bounds[0])?;
-                } else {
-                    write!(output, " max_choices/gen_steps (per build)")?;
-                }
-            }
-            writeln!(output)?;
+            // SAFETY: startup pins the source table until this guard finishes.
+            let location = unsafe { crate::abi_sites::format_site(row.site, self.1) };
+            write!(output, "row\t{name}\t")?;
+            write_hex(&mut output, location.as_deref().unwrap_or_default())?;
             let [cases, max_choices, max_rejects, gen_steps] = row.bounds;
             writeln!(
                 output,
-                "\t{}\t{cases}\t{max_choices}\t{max_rejects}\t{gen_steps}\t{}",
-                row.site, row.failure
+                "\t{}\t{}\t{}\t{}\t{cases}\t{max_choices}\t{max_rejects}\t{gen_steps}",
+                row.class, row.first, row.second, row.failure
             )?;
         }
         for (label, count) in &observation.witnesses {
             write!(output, "witness\t{count}\t")?;
-            for byte in label.bytes() {
-                write!(output, "{byte:02x}")?;
-            }
+            write_hex(&mut output, label)?;
             writeln!(output)?;
         }
         writeln!(output, "end")?;
         output.flush()
     }
+}
+
+fn write_hex(output: &mut impl Write, text: &str) -> std::io::Result<()> {
+    for byte in text.bytes() {
+        write!(output, "{byte:02x}")?;
+    }
+    Ok(())
 }
 
 impl Drop for Run {

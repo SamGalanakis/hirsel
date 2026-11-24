@@ -7,7 +7,7 @@ use std::{
     process::{ExitStatus, Output},
 };
 
-const TEST_PASS_SCHEMA: u32 = 2;
+const TEST_PASS_SCHEMA: u32 = 3;
 
 /// Reused passes of determined tests (PROG-4).
 pub struct TestCache {
@@ -26,20 +26,27 @@ impl TestCache {
         PackageProduct::default_cache().join("test-results")
     }
 
-    pub(super) fn get(&self, key: ContentHash) -> Option<Output> {
+    pub(super) fn get(&self, key: ContentHash, observe: bool) -> Option<(Output, LawReport)> {
         let bytes = self.store.get(key).ok()??;
-        let (TEST_PASS_SCHEMA, stdout, stderr) = crate::decode(&bytes)? else {
+        let (TEST_PASS_SCHEMA, stdout, stderr, laws) = crate::decode(&bytes)? else {
             return None;
         };
-        Some(Output {
-            status: ExitStatus::from_raw(0),
-            stdout,
-            stderr,
-        })
+        if observe && !matches!(laws, LawReport::Observed(_)) {
+            return None;
+        }
+        Some((
+            Output {
+                status: ExitStatus::from_raw(0),
+                stdout,
+                stderr,
+            },
+            laws,
+        ))
     }
 
-    pub(super) fn put(&self, key: ContentHash, output: &Output) {
-        if let Ok(bytes) = crate::encode(&(TEST_PASS_SCHEMA, &output.stdout, &output.stderr)) {
+    pub(super) fn put(&self, key: ContentHash, output: &Output, laws: &LawReport) {
+        if let Ok(bytes) = crate::encode(&(TEST_PASS_SCHEMA, &output.stdout, &output.stderr, laws))
+        {
             let _ = self.store.put_keyed(key, &bytes);
         }
     }
@@ -81,3 +88,4 @@ pub(super) fn test_key(
     )
     .ok()
 }
+use super::LawReport;

@@ -169,9 +169,8 @@ Use `--rerun` to execute every selected test and refresh passing results, `-j N`
 run tests in parallel, and `--sim` / `--seed` / `--seeds` / `--property-corpus` for
 deterministic simulation and property campaigns.
 
-Planned for Verification Phase 1.3 ([law table](laws.md)):
-`hirsel test app --laws` <!-- doc-ref: planned --> adds a strength column (held, truncated,
-vacuous, …) beside pass and fail; `--write-laws` <!-- doc-ref: planned --> rewrites the rows
+`hirsel test app --laws` adds a strength column (held, truncated, vacuous, …) beside pass
+and fail ([law table](laws.md)). The planned `--write-laws` <!-- doc-ref: planned --> rewrites the rows
 of the tests it ran in `hirsel.laws`; `--laws-baseline FILE` <!-- doc-ref: planned -->
 compares a full run with the lock exported from the approved ref and exits 1 on a weaker
 row. `hirsel laws check app` <!-- doc-ref: planned --> checks lock currency without running

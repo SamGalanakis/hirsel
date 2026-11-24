@@ -142,13 +142,13 @@ for opted-in properties. It verifies a saved minimized case in a fresh run
 before searching and bypasses pass reuse for the invocation. The corpus
 directory is outside the test's grants.
 
-With `--laws` <!-- doc-ref: planned --> (planned, [law table](../laws.md)), the runner also reports a strength row per
+With `--laws` ([law table](../laws.md)), the runner also reports a strength row per
 test beside this outcome: how strong the evidence of the test's `std.prop` and `std.model`
 calls was (held, truncated, vacuous, closed, to depth, …). A row never changes the outcome
-above, and no program reads it (R28). Under `--laws` <!-- doc-ref: planned --> a pass is reused only together with the
+above, and no program reads it (R28). Under `--laws` a pass is reused only together with the
 rows recorded with it; otherwise the test is executed.
 
-Version note (2026-11-24, verify-phase-spec-2034): adds the planned `--laws` <!-- doc-ref: planned --> strength row
+Version note (2026-11-24, verify-observer-2037): adds the `--laws` strength row
 beside the PROG-4 outcome and its reuse condition. The outcome rules are unchanged.
 
 In `hirsel.toml`, use plural `grants` and `dirs` in `[tests]` or an individual

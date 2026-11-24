@@ -31,9 +31,9 @@ the recording runtime. These commands make one:
 | `hirsel run app --record PATH [grants] [-- arguments...]` | builds the recording build and runs it with recording on, into PATH |
 | `hirsel replay app --tape PATH` | builds the recording build and replays PATH with it |
 | `hirsel test app --limit N --replay` | runs each selected test in the recording build, recording on, then replays it ([Testing with recordings](#testing-with-recordings)) |
-| `hirsel test app --limit N --laws` (planned) | runs each selected test in the recording build with law observation on ([law table](laws.md#observation)) |
+| `hirsel test app --limit N --laws` | observes law outcomes in selected tests ([law table](laws.md#observation)) |
 
-**Law observation** (planned, Verification Phase 1.3) is part of the recording runtime. A
+**Law observation** is part of the recording runtime. A
 recording executable started with `HIRSEL_LAWS=PATH` writes into PATH the settled outcomes of
 outermost `std.prop` and `std.model` engine calls, as [law table](laws.md) says. The observer
 captures the outcome on return or, for a failing check, immediately before the engine raises its
@@ -47,11 +47,12 @@ recording build, so CAP-9 keeps one build switch.
 Version note (2026-11-24, verify-observer-2037): defines the observation point for
 an engine check that raises a failure.
 
-A program whose entry reaches a foreign function has no recording build. Each of these
-commands refuses it before building, reading a tape or running native code, as
+A program whose entry reaches a foreign function has no recording build. Recording and
+replay commands refuse it before building, reading a tape or running native code, as
 [FFI-8](spec/foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)
 says: `hirsel replay` exits 2 with `replay: refused: FFI-8: …`, and `hirsel test --replay`
-fails each foreign-reaching test alone.
+fails each foreign-reaching test alone. `hirsel test --laws` runs those tests in the
+ordinary build and reports `unobserved (FFI-8)`.
 
 `--release`, `--backend` and `--target` select the engine, optimisation and target of a
 recording build as they do for any other build.

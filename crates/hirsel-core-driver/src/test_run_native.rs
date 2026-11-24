@@ -909,17 +909,79 @@ fn prop_law_recorder_captures_settled_outcomes() {
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let tests = json["tests"].as_array().unwrap();
     assert_eq!(tests.len(), 4);
-    for (test, expected, passed) in [
-        ("catch_all", "all#1 truncated 5/0 cases=5", true),
-        ("discards", "all#1 vacuous 0/4", true),
-        ("exhaustive", "all#1 held 10/0", true),
-        ("falsified", "check#1 falsified", false),
+    for (test, callee, class, numbers, bound, passed) in [
+        ("catch_all", "all", "truncated", Some([5, 0]), Some("cases=5"), true),
+        ("discards", "all", "vacuous", Some([0, 4]), None, true),
+        ("exhaustive", "all", "held", Some([10, 0]), None, true),
+        ("falsified", "check", "falsified", None, None, false),
     ] {
         let row = tests.iter().find(|r| r["definition"] == format!("app@1/main/{test}")).unwrap();
         assert_eq!(row["passed"], passed, "{row}");
-        let raw = row["law_observation"].as_str().expect("recording summary");
-        assert_eq!(raw.lines().skip(1).filter(|line| !line.starts_with('\t') && *line != "end").collect::<Vec<_>>(), [expected], "{row}");
+        let [observed] = row["laws"].as_array().unwrap().as_slice() else { panic!("expected one observed law: {row}") };
+        assert_eq!(observed["callee"], callee);
+        assert_eq!(observed["site"], format!("app@1/main/{test}#1"));
+        assert_eq!(observed["class"], class);
+        assert_eq!(observed["bound"], serde_json::json!(bound));
+        if let Some(numbers) = numbers {
+            assert_eq!(observed["numbers"], serde_json::json!(numbers));
+        }
     }
+}
+
+#[test]
+fn prop_law_table_reports_and_reuses_rows() {
+    let law = prop_law_package();
+    law.write("app/main.hirsel", format!("{PROP_LAW_PACKAGE}{}", r#"
+fn second_site(first: bool) {
+    if first {
+        let _ = std.prop.all(std.prop.config(), std.prop.u64_in(0, 9), ok)
+    }
+    let mut c = std.prop.config()
+    c.cases = 10
+    let _ = std.prop.all(c, std.prop.u64_in(0, 9), ok)
+}
+
+@test
+fn exact_limit() -> Result[(), ()] {
+    second_site(false)
+    Ok(())
+}
+
+@test
+fn step_bound() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.gen_steps = 0
+    let _ = std.prop.all(c, std.prop.u64_in(0, 9), ok)
+    Ok(())
+}
+"#));
+    let (status, text, stderr) = law.run(&["test", "app", "--laws"]);
+    assert_eq!(status, Some(1), "{text}\n{stderr}");
+    for line in [
+        "all  catch_all#1  truncated (run 5, discarded 0; cases=5)",
+        "all  discards#1  vacuous (run 0, discarded 4)",
+        "all  exhaustive#1  held (run 10, discarded 0)",
+        "all  second_site#2  held (run 10, discarded 0)",
+        "all  step_bound#1  truncated (run 0, discarded 0; max_choices/gen_steps) (per build)",
+    ] {
+        assert!(text.lines().any(|actual| actual.trim() == line), "missing {line}:\n{text}");
+    }
+    let json_run = |extra: &[&str]| {
+        let mut args = vec!["test", "app", "--laws", "--json", "--filter", "exact_limit"];
+        args.extend_from_slice(extra);
+        let stdout = PackageLaw::pass(law.run(&args));
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        json["tests"][0].clone()
+    };
+    let executed = json_run(&["--rerun"]);
+    let reused = json_run(&[]);
+    assert_eq!(executed["source"], "executed");
+    assert_eq!(reused["source"], "cached");
+    assert_eq!(reused["laws"], executed["laws"]);
+    assert_eq!(reused["laws"], serde_json::json!([{
+        "callee": "all", "site": "app@1/main/second_site#2", "class": "held",
+        "numbers": [10, 0], "bound": null, "per_build": false, "witnessed": {}
+    }]));
 }
 
 #[test]

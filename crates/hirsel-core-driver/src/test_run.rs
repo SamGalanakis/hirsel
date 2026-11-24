@@ -9,8 +9,8 @@ mod cache;
 mod laws;
 pub use cache::TestCache;
 use cache::test_key;
+use laws::LawCapture;
 pub(crate) use laws::LawReport;
-use laws::{law_file, law_report};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
@@ -259,7 +259,7 @@ struct TestProcess<'a> {
     pass: Option<(&'a TestCache, ContentHash)>,
     /// Removed once the run is collected.
     _directory: tempfile::TempDir,
-    laws: Option<(tempfile::TempDir, PathBuf)>,
+    laws: Option<LawCapture>,
     foreign: bool,
 }
 
@@ -277,13 +277,14 @@ impl TestProcess<'_> {
             } else {
                 self.laws
                     .as_ref()
-                    .map_or_else(LawReport::default, |(_, file)| law_report(file))
+                    .map_or_else(LawReport::default, LawCapture::report)
             },
         };
         if outcome.passed()
+            && (self.laws.is_none() || matches!(outcome.laws, LawReport::Observed(_)))
             && let Some((cache, key)) = self.pass
         {
-            cache.put(key, &outcome.output);
+            cache.put(key, &outcome.output, &outcome.laws);
         }
         Ok((outcome, Source::Executed))
     }
@@ -680,7 +681,7 @@ impl CheckProduct {
             .filter(|_| {
                 matches!(runner, Runner::Native)
                     && reached.foreign_functions().next().is_none()
-                    && !options.recording
+                    && (!options.recording || laws.is_some())
                     && options.replay.is_none()
                     && options.logical_charge_report.is_none()
             })
@@ -696,7 +697,7 @@ impl CheckProduct {
             });
         if !rerun
             && let Some((cache, key)) = pass
-            && let Some(output) = cache.get(key)
+            && let Some((output, laws)) = cache.get(key, laws.is_some())
         {
             return Ok(TestLaunch::Cached(TestOutcome {
                 definition: test.clone(),
@@ -704,7 +705,7 @@ impl CheckProduct {
                 timed_out: false,
                 wall_time: Duration::ZERO,
                 corpus: None,
-                laws: LawReport::Unobserved,
+                laws,
             }));
         }
         let built = if options.foreign_grants.is_empty() || options.recording {
@@ -738,9 +739,11 @@ impl CheckProduct {
             command.env(SEED_ENV, seed.to_string());
         }
         let directory = private_directory(&mut command)?;
-        let laws = (laws.is_some() && !foreign)
-            .then(|| law_file(&mut command))
-            .transpose()?;
+        let observe = laws.is_some() && !foreign;
+        let laws = observe
+            .then(|| LawCapture::attach(&mut command, self, test, options.instance_limit))
+            .flatten();
+        let pass = pass.filter(|_| !observe || laws.is_some());
         Ok(TestLaunch::Run(TestProcess {
             command,
             executable,
@@ -834,12 +837,14 @@ impl CheckProduct {
             grant.approve(&mut cmd);
         }
         cmd.env("HIRSEL_RECORD", &tape_path);
-        let observation = laws.then(|| law_file(&mut cmd)).transpose()?;
+        let observation = laws
+            .then(|| LawCapture::attach(&mut cmd, self, test, options.instance_limit))
+            .flatten();
         let directory = private_directory(&mut cmd)?;
         let (output, timed_out, wall_time) = execute(&mut cmd, timeout)?;
         let laws = observation
             .as_ref()
-            .map_or_else(LawReport::default, |(_, file)| law_report(file));
+            .map_or_else(LawReport::default, LawCapture::report);
         drop(directory);
         if timed_out || !output.status.success() {
             return Ok(TestOutcome {

@@ -29,7 +29,8 @@ fn law_observation_preserves_native_observations() {
             let row = row.as_object_mut().unwrap();
             row.remove("wall_ms");
             if !flags.is_empty() {
-                assert!(row.remove("law_observation").unwrap().as_str().unwrap().starts_with("hirsel-laws-observation 1\n"));
+                assert_eq!(row.remove("laws").unwrap().as_array().unwrap().len(), 1);
+                row.remove("law_strength");
             }
         }
         (json, stderr)

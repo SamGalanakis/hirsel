@@ -1,7 +1,7 @@
 # Law table and law lock
 
-Planned for Verification Phase 1.3; not built. The build list is
-`hirsel-briefs/verify-phase-spec-2034/BUILD-ITEMS.md`.
+The law table is available in `hirsel test --laws`. The remaining lock and baseline
+items are in `hirsel-briefs/verify-phase-spec-2034/BUILD-ITEMS.md`.
 
 Version note (2026-11-24, verify-phase-spec-2034): first text. This document specifies the
 2026-11-22 ratified item 3 (`hirsel.laws`, the verdict table that never rounds up) as
@@ -200,6 +200,9 @@ ok   store.tests.model_lease    executed   to depth 6
 The test's strength is its weakest row, with `none` when it has no rows. `--json` adds a
 `laws` array per test, where each element has `callee`, `site`, `class`, `numbers`,
 `bound`, `per_build` and `witnessed`.
+
+Version note (2026-11-24, verify-observer-2037): implements call-site rows, JSON output
+and pass reuse with recorded observations.
 
 ## The lock file
 

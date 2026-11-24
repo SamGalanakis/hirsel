@@ -1421,10 +1421,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                     let corpus_note = outcome.corpus.map_or_else(String::new, |state| {
                         format!(" [property corpus {state}]")
                     });
+                    let strength = test_laws.then(|| outcome.laws.strength());
+                    let laws_note = strength.map_or_else(String::new, |class| format!(" {class}"));
                     if !json {
                         if let Some(wall_ms) = wall_ms {
                             if passed {
-                                println!("pass {source} {label}{corpus_note} ({wall_ms:.3} ms)");
+                                println!("pass {source} {label}{corpus_note}{laws_note} ({wall_ms:.3} ms)");
                             } else {
                                 let mut reason = if outcome.timed_out {
                                     "execution timed out".to_owned()
@@ -1440,41 +1442,35 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                                             .join(" | "),
                                     );
                                 }
-                                println!("fail {source} {label}{corpus_note}: {reason} ({wall_ms:.3} ms)");
+                                println!("fail {source} {label}{corpus_note}{laws_note}: {reason} ({wall_ms:.3} ms)");
                                 for line in String::from_utf8_lossy(&outcome.output.stdout).lines() {
                                     println!("  stdout: {line}");
                                 }
                             }
                         } else {
-                            println!("pass {source} {label}");
+                            println!("pass {source} {label}{laws_note}");
                         }
                     }
                     let mut row = serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms});
                     if let Some(state) = outcome.corpus {
                         row["property_corpus"] = state.into();
                     }
-                    if test_laws {
-                        match outcome.laws {
-                            crate::test_run::LawReport::Observed(summary) => {
-                                if !json {
-                                    crate::test_run::LawReport::print(&summary);
-                                }
-                                row["law_observation"] = summary.into();
-                            }
-                            state => {
-                                let note = state.unobserved();
-                                if !json {
-                                    println!("  {note}");
-                                }
-                                row["law_observation"] = note.into();
-                            }
+                    if let Some(strength) = strength {
+                        if !json {
+                            outcome.laws.print();
                         }
+                        row["law_strength"] = strength.into();
+                        row["laws"] = serde_json::json!(outcome.laws.rows());
                     }
                     row
                 }
                 Err(error) => {
                     failed = true;
                     let mut row = serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null});
+                    if test_laws {
+                        row["law_strength"] = if matches!(error, crate::NativeStop::ForeignRecording { .. }) { "unobserved (FFI-8)" } else { "unobserved" }.into();
+                        row["laws"] = serde_json::json!([]);
+                    }
                     if let crate::NativeStop::ForeignRecording { site, .. } = &error {
                         row["site"] = site.as_str().into();
                         if !json {

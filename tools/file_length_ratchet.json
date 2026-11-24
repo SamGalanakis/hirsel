@@ -192,8 +192,8 @@
     "lines": 2184
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
-    "lines": 4308,
-    "raise_revision": 1,
+    "lines": 4309,
+    "raise_revision": 2,
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/request.rs": {
@@ -218,8 +218,8 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 2813,
-    "raise_revision": 3,
+    "lines": 2875,
+    "raise_revision": 4,
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/tests.rs": {

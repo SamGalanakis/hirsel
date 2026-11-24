@@ -136,6 +136,7 @@ is the most any build charges for the allocation (MEM-28):
 | `Shared` node ([CONC-15](tasks.md#conc-15-units)) | the payload's size + 40, rounded up to 8; the buffers the payload holds keep their own charges |
 | `log.new` node | 24 |
 | a log's entries | as `List[E]` storage |
+| `cell.new` node | `T`'s size, rounded up to 8, as a `Box[T]` node; the blocks `T` holds keep their own charges |
 | a flow port | `cap × (16 + size(T)) + 64`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a flow stage | `m + size(X) + 320`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |
 | a virtual provider's port or cell ([core](core.md#provide)) | a port: its room `n`, from the constructing task's limit, refunded when the port is gone; a cell: 32, from the current limit, held until the run ends as a narrowed grant's rule storage is, since its plain capability can be copied anywhere |

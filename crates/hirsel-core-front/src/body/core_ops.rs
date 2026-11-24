@@ -5,6 +5,7 @@ use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
 use hirsel_core_layout::flow::Op as FlowOp;
 mod argon2;
+mod cell;
 mod charge;
 mod conn;
 mod flow;
@@ -72,6 +73,7 @@ pub(crate) enum Kernel {
     CodeCallable,
     CodeDescribe,
     Flow(FlowOp),
+    Cell(cell::CellOp),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,6 +136,11 @@ operations! {
     ("log", "new", Lane::Runtime(Kernel::LogNew), "B", "core-ops-914", false),
     ("log", "append", Lane::Runtime(Kernel::LogAppend), "B", "core-ops-914", false),
     ("log", "finish", Lane::Runtime(Kernel::LogFinish), "B", "core-ops-914", false),
+    ("cell", "new", Lane::Runtime(Kernel::Cell(cell::CellOp::New)), "B", "cell-2140", false),
+    ("cell", "get", Lane::Runtime(Kernel::Cell(cell::CellOp::Get)), "B", "cell-2140", false),
+    ("cell", "replace", Lane::Runtime(Kernel::Cell(cell::CellOp::Replace)), "B", "cell-2140", false),
+    ("cell", "with", Lane::Runtime(Kernel::Cell(cell::CellOp::With)), "B", "cell-2140", false),
+    ("cell", "into_inner", Lane::Runtime(Kernel::Cell(cell::CellOp::IntoInner)), "B", "cell-2140", false),
     ("code", "describe", Lane::Runtime(Kernel::CodeDescribe), "A", "core-check-callables-913", false),
     ("code", "identity", Lane::Runtime(Kernel::CodeIdentity), "A", "core-ops-914", false),
     ("code", "revision", Lane::Runtime(Kernel::CodeRevision), "A", "core-ops-914", false),
@@ -1017,6 +1024,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 None
             }
             Kernel::Flow(op) => self.runtime_flow(op, types, vals, result, n),
+            Kernel::Cell(op) => self.runtime_cell(op, types, vals, result, n),
         }
     }
 
@@ -1695,6 +1703,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::CodeRevision
             | Kernel::CodeCallable
             | Kernel::CodeDescribe
+            | Kernel::Cell(_)
             | Kernel::Flow(_) => false,
         }
     }

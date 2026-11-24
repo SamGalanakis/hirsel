@@ -453,7 +453,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse_compared("LANG-12", at, "region", "type", message);
                 return ERROR;
             }
-            if decl.role == Some(Role::Log) && self.element_refused(at, t) {
+            if matches!(decl.role, Some(Role::Log | Role::Cell)) && self.element_refused(at, t) {
                 return ERROR;
             }
             if !decl.structural && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped {

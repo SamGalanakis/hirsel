@@ -304,6 +304,9 @@ pub opaque type Causes
 
 pub opaque type Log[E]
 
+// A task-local cell: one value, written through a view (MEM-29).
+pub opaque type Cell[T]
+
 pub opaque type StaticFn[F]
 
 pub type Cause {

@@ -316,8 +316,8 @@ its calls only view ([LANG-14](language.md#lang-14-captures)), so the body may c
 
 So if `body` fails, every place outside it that it reached through a view holds the value
 that was installed in it at entry. Effects that do not install into such a place persist,
-and are not undone. They include appends to a log
-([MEM-29](memory.md#mem-29-append-only-logs)), sends on a channel and the queue changes
+and are not undone. They include appends to a log and changes to a cell
+([MEM-29](memory.md#mem-29-append-only-logs-and-task-local-cells)), sends on a channel and the queue changes
 they make ([CONC-4](tasks.md#conc-4-channels)), provider operations already issued
 ([CAP-5](capabilities.md#cap-5-provider-operations)), counted holders' counts
 ([MEM-16](memory.md#mem-16-counting)) and bytes allocated in an outer region, which stay

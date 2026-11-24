@@ -1252,7 +1252,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             // MEM-29 holds at every call, also for a parameter absent from the result.
             if self.outside_vector(n, t, "a type argument") == ERROR && t != ERROR
-                || crate::element::parameter(&p.fns[f].path) && self.element_refused(n, t)
+                || crate::element::parameter(&p.fns[f].path, i) && self.element_refused(n, t)
             {
                 return;
             }

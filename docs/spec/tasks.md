@@ -262,7 +262,8 @@ test after every other holder's release ([MEM-15](memory.md#mem-15-arc)).
 ### CONC-12: No shared mutable state
 
 v1 has no mutable value reachable from two tasks, except a `Latest` root (CONC-13), which
-holds an `Arc`: no mutable statics, no cells, no mutexes, no atomics, and no write through
+holds an `Arc`: no mutable statics, no cell reachable from two tasks (a `Cell`,
+[MEM-29](memory.md#mem-29-append-only-logs-and-task-local-cells), is never `send`), no mutexes, no atomics, and no write through
 the view an `Arc` gives ([OWN-12](ownership.md#own-12-assignment)). `arc.with_unique`
 writes an `Arc` payload only while its count is 1, when no other task reaches it
 ([MEM-15](memory.md#mem-15-arc)). Top-level `const` values are plain and immutable.

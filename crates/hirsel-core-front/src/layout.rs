@@ -325,16 +325,15 @@ impl<T: TyRead> Shapes<'_, T> {
                             None,
                         );
                     }
-                    // A log owns one boxed List carrier.  The source Log[E] declaration
-                    // has E as its only argument; construct the corresponding List[E]
-                    // row here so the box shape is the same row used by list kernels.
-                    Some(Role::Log) => {
-                        let list = self
-                            .decls
-                            .iter()
-                            .position(|d| d.role == Some(Role::List))
-                            .map(|d| crate::types::DeclId(d as u32))?;
-                        let list = self.types.mk(TyKind::Adt(list, vec![args[0]]));
+                    // A log owns one boxed List carrier, a cell one boxed `T` (MEM-29);
+                    // the box shape of `List[E]` is the row the list kernels use.
+                    Some(role @ (Role::Log | Role::Cell)) => {
+                        let list = self.decls.iter().position(|d| d.role == Some(Role::List));
+                        let list = list.map(|d| crate::types::DeclId(d as u32))?;
+                        let list = match role {
+                            Role::Log => self.types.mk(TyKind::Adt(list, vec![args[0]])),
+                            _ => args[0],
+                        };
                         let node = FieldTy::Box(self.shape(list)?);
                         let body = record(vec![("node", node)]);
                         return self.fill(r, ty, LRepr::Own, body, None, None);
@@ -678,7 +677,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
                 Some(Role::FrozenBytes) => FieldTy::FrozenBytes,
-                Some(Role::Map | Role::Log) => FieldTy::Inline(self.shape(ty)?),
+                Some(Role::Map | Role::Log | Role::Cell) => FieldTy::Inline(self.shape(ty)?),
                 Some(Role::StaticFn | Role::FlowEndpoint) => FieldTy::Scalar(Scalar::U64),
                 Some(Role::Capability) => FieldTy::Handle(Handle::Capability),
                 Some(Role::ForeignHandle) => FieldTy::Inline(self.shape(ty)?),

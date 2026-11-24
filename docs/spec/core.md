@@ -41,7 +41,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `conn` | [conn](../../core/core/conn.hirsel) | CONC-17 |
 | `latest` | [latest](../../core/core/latest.hirsel) | CONC-13 |
 | `shared` | [shared](../../core/core/shared.hirsel) | CONC-15 |
-| `log` | [log](../../core/core/log.hirsel) | MEM-29 |
+| `log`, `cell` | [log](../../core/core/log.hirsel), [cell](../../core/core/cell.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
 | `provide`, `clock`, `process` | [provide](../../core/core/provide.hirsel), [clock](../../core/core/clock.hirsel), [process](../../core/core/process.hirsel) | CAP-2, CAP-5, CONC-7, FAIL-13, FAIL-15, MEM-24, TLS-5; [Provide](#provide) |
@@ -123,6 +123,7 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `Site` | plain | `shareable`, `send`, `key` | 8 | nothing |
 | `Causes` | own | `send` | 8 | opaque owner |
 | `Log[E]` | own | none | 8 | opaque owner, and E's |
+| `Cell[T]` | own | none | 8 | opaque owner, and T's |
 | `StaticFn[F]` | plain | `shareable`, `send`, `key` | 8 | nothing |
 
 Flow endpoints are usable with the flow that created them. `Wire` has cases
@@ -141,8 +142,8 @@ a `Cause`, whose `kind` is a `CauseKind`. The core declarations
 that have bodies (`Option`, `Result`, `Capacity`, `OutOfTime`, the error types) have the summaries OWN-2
 computes, with `Option` and `Result` taking bounds as tuples do. `Task[R]` is never `send`
 ([CONC-2](tasks.md#conc-2-the-send-bound)); its parameter's `R: send` constrains the
-result, not the handle. `Log[E]` is a handle to a separately admitted node that owns its
-entries ([MEM-29](memory.md#mem-29-append-only-logs)), and `StaticFn[F]` designates static
+result, not the handle. `Log[E]` and `Cell[T]` are handles to separately admitted nodes
+that own a log's entries and a cell's payload ([MEM-29](memory.md#mem-29-append-only-logs-and-task-local-cells)), and `StaticFn[F]` designates static
 identity bytes, a revision and a function ([PROG-9](programs.md#prog-9-code-descriptors)).
 
 ## Contracts the signatures do not state

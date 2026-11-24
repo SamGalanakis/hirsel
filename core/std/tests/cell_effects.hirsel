@@ -1,0 +1,33 @@
+// Cell[T] (MEM-29) in code outside package core, where loops take steps (MEM-30).
+fn add_then_spin(mut n: u64, take by: u64) {
+    n += by;
+    loop {}
+}
+
+// A cell is a persisting effect (FAIL-16): a caught failure inside isolate and a caught
+// step stop inside an inner bound keep what was installed before them. The callback
+// installs before it spins, so the result does not depend on where the stop lands.
+// expect: run persists_across_caught_stops() = 111
+fn persists_across_caught_stops() -> u64 {
+    let c = cell.new(0u64)
+    let failed = isolate(fn() {
+        cell.set(c, 1);
+        fail("after the set")
+    })
+    if let Ok(Ok(())) = take failed {
+        return 0
+    }
+    let stopped = bound steps 1000 {
+        cell.with(c, 10u64, add_then_spin)
+    }
+    if let Ok(_) = stopped {
+        return 0
+    }
+    let again = bound steps 1000 {
+        cell.with(c, 100u64, add_then_spin)
+    }
+    if let Ok(_) = again {
+        return 0
+    }
+    cell.into_inner(take c)
+}

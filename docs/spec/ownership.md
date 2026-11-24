@@ -365,7 +365,7 @@ mutable view. While a view lives, no permitted operation, through the view or th
 other alias, writes, moves or frees storage the view exposes, a view in a result anchored
 to a `mut` parameter (OWN-20) included; an operation given a view may still change hidden
 bookkeeping that no view exposes: a counted holder's count, a channel's queue, a region's
-bookkeeping, the host. A log's entries ([MEM-29](memory.md#mem-29-append-only-logs)) are such state. Where a plain `T` is expected, a `View[T]` of a
+bookkeeping, the host. A log's entries and a cell's payload ([MEM-29](memory.md#mem-29-append-only-logs-and-task-local-cells)) are such state. Where a plain `T` is expected, a `View[T]` of a
 plain `T` reads as the value. A region value used where a view is expected is that view
 ([OWN-25](#own-25-region-values-are-read-as-views)).
 
@@ -538,10 +538,11 @@ fn steal(mut xs: List[u64]) -> List[u64] { take xs }       // refused: OWN-11
 A **writable place** is a slot that is writable ([OWN-5](#own-5-availability)), or a
 field, tuple component, `List` element, `Inline` element or `Box` payload of a writable place, or the
 payload of the variant a `mut` pattern binding selected in it ([OWN-15](#own-15-match-on-an-owned-value)); nothing
-reached through a view, a counted value or a region value is one. The one exception is
-an `Rc` or `Arc` payload lent by `rc.with_unique` or `arc.with_unique` ([MEM-15](memory.md#mem-15-arc)): it is
-reached as the callback's `mut` parameter, which is a writable slot, and only after the
-count has been found to be 1. `q` must be a writable
+reached through a view, a counted value or a region value is one. There are two exceptions,
+each reached as a callback's `mut` parameter, which is a writable slot: an `Rc` or `Arc`
+payload lent by `rc.with_unique` or `arc.with_unique` ([MEM-15](memory.md#mem-15-arc)),
+only after the count has been found to be 1, and a cell's payload lent by `cell.with`
+([MEM-29](memory.md#mem-29-append-only-logs-and-task-local-cells)), whose callback can name the cell by no other path. `q` must be a writable
 place, except that a `let` slot declared without an initializer is assigned while it is
 uninit. Any other assignment is refused here, at `q`.
 `q = e` resolves the writable place `q`, evaluates `e`, installs the value and drops the old

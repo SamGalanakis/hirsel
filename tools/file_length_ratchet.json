@@ -255,9 +255,9 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 4146,
-    "raise_revision": 5,
-    "reason": "crypto-argon2-2130"
+    "lines": 4122,
+    "raise_revision": 6,
+    "reason": "cell-2140"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
     "lines": 2866,
@@ -299,9 +299,9 @@
     "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/decls.rs": {
-    "lines": 3822,
-    "raise_revision": 2,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 3821,
+    "raise_revision": 3,
+    "reason": "cell-2140"
   },
   "crates/hirsel-core-front/src/layout.rs": {
     "lines": 1047,

@@ -1,0 +1,52 @@
+// MEM-29: a Cell's element and `cell.with`'s argument meet LANG-14's capture mask; the
+// callback is a capture-free plain fn whose result anchors nothing; the cell is re-entered
+// through no argument of its own call; and it is never shared, sent or cloned.
+// expect: refuse MEM-29 at 38:17
+// expect: refuse MEM-29 at 39:69
+// expect: refuse MEM-29 at 40:56
+// expect: refuse OWN-9 at 41:55
+// expect: refuse OWN-9 at 42:55
+// expect: refuse LANG-13 at 43:70
+// expect: refuse LANG-13 at 44:89
+// expect: refuse LANG-13 at 45:93
+// expect: refuse LANG-13 at 46:53
+// expect: refuse LANG-12 at 47:48
+// expect: refuse LANG-12 at 48:48
+// expect: refuse MEM-17 at 49:40
+// expect: refuse CONC-2 at 50:83
+// expect: refuse CONC-2 at 51:23
+// expect: refuse LANG-12 at 52:49
+// expect: cause OWN-9 at 41:55 from 41:52
+// expect: cause OWN-9 at 42:55 from 42:50
+// expect: compared MEM-29 at 38:17 | core@1/core/Dir | no resource, capability, view, scoped value or region reference
+// expect: compared MEM-29 at 39:69 | core@1/core/Sender[u64] | no resource, capability, view, scoped value or region reference
+// expect: compared MEM-29 at 40:56 | core@1/core/Receiver[u64] | no resource, capability, view, scoped value or region reference
+// expect: compared LANG-13 at 43:70 | own fn | fn
+// expect: compared LANG-13 at 44:89 | own fn(mut u64, take u64) -> u64 | fn(mut u64, take u64) -> u64
+// expect: compared LANG-13 at 45:93 | fn(mut u64, take u64) -> u64 waits | fn(mut u64, take u64) -> u64
+// expect: compared LANG-12 at 47:48 | core@1/core/Cell[u64] | shareable
+// expect: compared LANG-12 at 48:48 | core@1/core/Cell[u64] | shareable + send
+// expect: compared CONC-2 at 50:83 | core@1/core/Cell[u64] | send
+// expect: compared CONC-2 at 51:23 | core@1/core/Cell[u64] | send
+// expect: compared LANG-12 at 52:49 | core@1/core/List[u64] | plain
+fn reenter(mut n: u64, take c: Cell[u64]) -> u64 { n }
+fn keep(mut n: u64, take s: Sender[u64]) -> u64 { n }
+fn view_out(mut n: u64, take a: u64) -> View[u64] in n { view n }
+fn run(take c: Cell[u64]) -> u64 { 0 }
+type Holder { c: Cell[u64] }
+fn holder(mut n: u64, take h: Holder) -> u64 { n }
+fn dirs(c: Cell[Dir]) {}
+fn senders(c: Cell[u64], take s: Sender[u64]) -> u64 { cell.with(c, take s, keep) }
+fn receivers(take r: Receiver[u64]) { let c = cell.new(take r) }
+fn self_take(take c: Cell[u64]) -> u64 { cell.with(c, take c, reenter) }
+fn field_take(take h: Holder) -> u64 { cell.with(h.c, take h, holder) }
+fn capturing(c: Cell[u64]) -> u64 { let k = 3u64; cell.with(c, 1u64, fn(mut n: u64, take a: u64) -> u64 { n + k }) }
+fn owned(c: Cell[u64], f: own fn(mut u64, take u64) -> u64) -> u64 { cell.with(c, 1u64, f) }
+fn waiting(c: Cell[u64], f: fn(mut u64, take u64) -> u64 waits) -> u64 { cell.with(c, 1u64, f) }
+fn leaks(c: Cell[u64]) { let v = cell.with(c, 1u64, view_out) }
+fn counted(take c: Cell[u64]) { let r = rc.new(take c) }
+fn atomic(take c: Cell[u64]) { let r = arc.new(take c) }
+fn copied(c: Cell[u64]) -> Cell[u64] { clone(c) }
+fn spawned(tasks: Tasks, take c: Cell[u64]) { let t = task.spawn(tasks, bytes 64, take c, run) }
+type Sendable: send { c: Cell[u64] }
+fn plain_get(c: Cell[List[u64]]) -> List[u64] { cell.get(c) }

@@ -265,6 +265,20 @@ pub(super) unsafe fn replay_out(
             // SAFETY: RESOLVE pins the list with at least count spare slots.
             unsafe { crate::resolve::append(&mut r.buffer, &addresses) };
         }
+    } else if op == MEDIA_P256_KEY {
+        let point: &[u8; hirsel_core_net::p256_key::PUBLIC_LEN] = out
+            .payload
+            .as_slice()
+            .try_into()
+            .map_err(|_| Fault::Corrupt)?;
+        if !ok || out.value != live.schedule.events || point[0] != 4 {
+            return Err(Fault::Corrupt);
+        }
+        space
+            .ok_or(Fault::Corrupt)?
+            .require([point.len() as u64, 0])?;
+        // SAFETY: the delivery has the exact point size and fits the writable spare.
+        unsafe { crate::secret::p256_generation::append_point(&mut r.buffer, point) };
     } else if op == SECRET_KDF {
         if ok {
             if out.value != live.schedule.events {

@@ -1,4 +1,16 @@
-use super::{Args, Request, put_varint};
+use super::{Args, Provider, Request, put_varint};
+
+pub(super) fn inline_sink(op: u8) -> Option<Provider> {
+    use crate::provider::{MEDIA_AGREEMENT, MEDIA_P256_KEY, SCRAM_VERIFY, SECRET_KDF, SECRET_MAC};
+    Some(match op {
+        SECRET_MAC => crate::secret::MAC_PROVIDER,
+        SECRET_KDF => crate::secret::kdf::KDF_PROVIDER,
+        MEDIA_AGREEMENT => crate::secret::agreement::AGREEMENT_PROVIDER,
+        MEDIA_P256_KEY => crate::secret::p256_generation::PROVIDER,
+        SCRAM_VERIFY => crate::scram::VERIFY_PROVIDER,
+        _ => return None,
+    })
+}
 
 /// A key operation's canonical arguments: each Secret's origin and policy,
 /// never its bytes, then the operation's public operands and the spare.
@@ -30,6 +42,7 @@ pub(super) unsafe fn key_args(r: &Request) -> Args {
         } => {
             head.push(alg.case());
             put_varint(&mut head, *random);
+            put_varint(&mut head, (r.buffer.capacity - r.buffer.len) as u64);
             msg
         }
         KeyOp::Aead { input, .. } => {

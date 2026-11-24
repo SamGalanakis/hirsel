@@ -122,6 +122,7 @@ pub enum HostOp {
     SecretVerifyHmacSha512 = 128,
     SecretJwsHmacSign = 129,
     SecretJwsHmacVerify = 130,
+    SecretP256Key = hirsel_core_ids::host_op::MEDIA_P256_KEY as isize,
 }
 
 impl HostOp {
@@ -221,6 +222,7 @@ impl HostOp {
         HostOp::SecretWrap,
         HostOp::SecretUnwrap,
         HostOp::SecretSign,
+        HostOp::SecretP256Key,
         HostOp::SecretAeadSeal,
         HostOp::SecretAeadOpen,
         HostOp::RecvBounded,
@@ -376,6 +378,7 @@ impl HostOp {
             HostOp::SecretWrap => "secret_wrap",
             HostOp::SecretUnwrap => "secret_unwrap",
             HostOp::SecretSign => "secret_sign",
+            HostOp::SecretP256Key => "secret_p256_key",
             HostOp::SecretAeadSeal => "secret_aead_seal",
             HostOp::SecretAeadOpen => "secret_aead_open",
             HostOp::NetSplit => "net_split",
@@ -467,6 +470,7 @@ impl HostOp {
             Self::SecretWrap => "hirsel_core_secret_wrap",
             Self::SecretUnwrap => "hirsel_core_secret_unwrap",
             Self::SecretSign => "hirsel_core_secret_sign",
+            Self::SecretP256Key => "hirsel_core_secret_p256_key",
             Self::SecretAeadSeal => "hirsel_core_secret_aead_seal",
             Self::SecretAeadOpen => "hirsel_core_secret_aead_open",
             Self::NetSplit => "hirsel_core_net_split",
@@ -518,6 +522,18 @@ impl HostOp {
         }
     }
 
+    pub const fn is_secret_key(self) -> bool {
+        matches!(
+            self,
+            Self::SecretWrap
+                | Self::SecretUnwrap
+                | Self::SecretSign
+                | Self::SecretP256Key
+                | Self::SecretAeadSeal
+                | Self::SecretAeadOpen
+        )
+    }
+
     /// Whether a Secret MAC operation returns a tag instead of a verdict.
     pub const fn secret_mac_signs(self) -> bool {
         matches!(
@@ -557,6 +573,7 @@ impl HostOp {
                 | HostOp::SecretWrap
                 | HostOp::SecretUnwrap
                 | HostOp::SecretSign
+                | HostOp::SecretP256Key
                 | HostOp::SecretAeadSeal
                 | HostOp::SecretAeadOpen
                 | HostOp::NetSplit

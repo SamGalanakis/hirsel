@@ -92,6 +92,7 @@ pub(crate) fn cancellation_point(operation: u8) -> bool {
             | MONO_NS
             | SECRET_MAC
             | SECRET_KDF
+            | MEDIA_P256_KEY
             | SCRAM_VERIFY
             | crate::foreign::handles::RELEASE_WAIT_OP
     )

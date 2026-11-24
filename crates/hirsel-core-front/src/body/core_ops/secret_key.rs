@@ -12,10 +12,15 @@ impl Cx<'_, '_, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u = Ty::Scalar(Scalar::U64);
-        let mut operands = vec![self.runtime_key(vals[0]?, n)];
+        let first = vals[0]?;
+        let mut operands = vec![if op == HostOp::SecretP256Key {
+            first
+        } else {
+            self.runtime_key(first, n)
+        }];
         match op {
             HostOp::SecretWrap => operands.extend([self.runtime_key(vals[1]?, n), vals[2]?]),
-            HostOp::SecretUnwrap => operands.extend([vals[1]?, vals[2]?]),
+            HostOp::SecretUnwrap | HostOp::SecretP256Key => operands.extend([vals[1]?, vals[2]?]),
             HostOp::SecretSign | HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => {
                 let (_, at) = self.runtime_place(self.p.fns[f].params[1].ty, vals[1], n)?;
                 let tag = self.net_case(at, n);

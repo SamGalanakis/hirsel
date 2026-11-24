@@ -1,10 +1,19 @@
-use super::{Cell, Context, files};
-use crate::provider::{Buffer, IoError, Outcome};
+use super::{Cell, Context, cell, files, lock};
+use crate::provider::{Buffer, IoError, Outcome, Provider};
 use hirsel_core_layout::charge::PROVIDE_CELL;
 use hirsel_core_net::random_stream::RandomStream;
 use std::{slice, sync::Mutex};
 
 pub(crate) const TAPE_BOUNDS: u8 = 255;
+
+/// # Safety
+/// This provider is a run-pinned virtual Random cell.
+pub(crate) unsafe fn fill_virtual(provider: &Provider, out: &mut [u8]) -> Result<(), ()> {
+    let Cell::Random(random) = (unsafe { cell(provider.state) }) else {
+        unreachable!("a Random cell");
+    };
+    lock(random).fill(out).then_some(()).ok_or(())
+}
 
 /// # Safety
 /// A running context and a pinned, initialized Bytes carrier consumed by the caller.

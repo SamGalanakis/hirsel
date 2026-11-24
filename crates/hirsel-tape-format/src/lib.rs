@@ -293,6 +293,9 @@ impl Out {
             return Err(Corrupt);
         }
         let value = c.varint()?;
+        if op == op::MEDIA_P256_KEY && (status != OK || value == 0) {
+            return Err(Corrupt);
+        }
         if op == op::MEDIA_AGREEMENT && (status != OK || value > 2) {
             return Err(Corrupt);
         }

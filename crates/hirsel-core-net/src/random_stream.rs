@@ -12,6 +12,12 @@ pub enum RandomStream {
 }
 
 impl RandomStream {
+    /// Keep every byte and the cursor unchanged if the stream is too short.
+    pub fn fill(&mut self, out: &mut [u8]) -> bool {
+        // SAFETY: draw writes only initialized u8 values and never retains out.
+        let out = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast(), out.len()) };
+        self.draw(out)
+    }
     pub fn tape(bytes: Vec<u8>) -> Self {
         Self::Tape {
             bytes: Zeroizing::new(bytes),

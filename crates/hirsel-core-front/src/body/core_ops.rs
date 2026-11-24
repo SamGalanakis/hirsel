@@ -455,6 +455,7 @@ operations! {
     ("secret", "wrap", Lane::Runtime(Kernel::Net(HostOp::SecretWrap)), "B", "secret-wrap-sign-1781", false),
     ("secret", "unwrap", Lane::Runtime(Kernel::Net(HostOp::SecretUnwrap)), "B", "secret-wrap-sign-1781", false),
     ("secret", "sign", Lane::Runtime(Kernel::Net(HostOp::SecretSign)), "B", "secret-wrap-sign-1781", false),
+    ("secret", "p256_key", Lane::Runtime(Kernel::Net(HostOp::SecretP256Key)), "B", "media-w0-crypto-build-2282", false),
     ("secret", "aead_seal", Lane::Runtime(Kernel::Net(HostOp::SecretAeadSeal)), "B", "crypto-aead-2123", false),
     ("secret", "aead_open", Lane::Runtime(Kernel::Net(HostOp::SecretAeadOpen)), "B", "crypto-aead-2123", false),
     ("secret", "render", Lane::Runtime(Kernel::SecretRender), "A", "tls-t4-1447", false),
@@ -3351,14 +3352,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ) {
             return self.runtime_secret_mac(op, f, vals, result, n);
         }
-        if matches!(
-            op,
-            HostOp::SecretWrap
-                | HostOp::SecretUnwrap
-                | HostOp::SecretSign
-                | HostOp::SecretAeadSeal
-                | HostOp::SecretAeadOpen
-        ) {
+        if op.is_secret_key() {
             return self.runtime_secret_key(op, f, vals, result, n);
         }
         if matches!(

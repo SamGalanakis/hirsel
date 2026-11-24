@@ -1,9 +1,88 @@
 use super::*;
 
 impl Machine<'_> {
+    pub(super) fn store_sealed(
+        &mut self,
+        policy: SecretPolicy,
+        bytes: Zeroizing<Vec<u8>>,
+        payer: Limit,
+        charge: u64,
+        opaque: bool,
+    ) -> u64 {
+        let seal = Arc::new(());
+        self.world
+            .seals
+            .push((Arc::downgrade(&seal), payer.clone(), charge));
+        self.designate(
+            EvalSecret {
+                opaque,
+                policy,
+                bytes: Arc::new(SecretBytes::new(bytes)),
+                seal,
+            },
+            (payer, 0),
+        )
+    }
+
+    pub(super) fn secret_p256_key(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
+        use hirsel_core_net::{
+            key_wrap::KeyFailure,
+            p256_key::{self, DOCUMENT_LEN, PUBLIC_LEN},
+        };
+        const USE: &str = "sign(p256)";
+        if self.carrier_bytes(a[1]) != USE.as_bytes() {
+            return Ok(vec![0, 2, 0, 0]);
+        }
+        let (_, data, len, cap) = self.carrier(a[2]);
+        let spare = cap - len;
+        if spare < PUBLIC_LEN as u64 {
+            return Ok(vec![PUBLIC_LEN as u64, 4, 0, spare]);
+        }
+        let charge = SecretGrant::logical_size(&[], DOCUMENT_LEN as u64).unwrap();
+        let payer = t.limits.last().unwrap().clone();
+        if let Err(available) = self.admit(&payer, charge) {
+            return Ok(vec![charge, 4, 0, available]);
+        }
+        let mut point = [0; PUBLIC_LEN];
+        let cell = self.cell(a[0]);
+        let document = if let Some(cell) = cell {
+            let VirtualCell::Random(stream) = &mut self.world.cells[cell] else {
+                unreachable!("a Random cell");
+            };
+            match p256_key::generate_virtual(
+                |draw| stream.fill(draw).then_some(()).ok_or(()),
+                &mut point,
+            ) {
+                Ok(document) => document,
+                Err(()) => {
+                    self.refund(payer, charge);
+                    return Err(Stop::Cause("Bounds"));
+                }
+            }
+        } else {
+            match p256_key::generate_host(&mut point) {
+                Ok(document) => document,
+                Err(KeyFailure::Provider(reason)) => {
+                    std::panic::resume_unwind(Box::new(RunStop(reason)))
+                }
+                Err(_) => unreachable!("ring generation only fails at the provider"),
+            }
+        };
+        let key = self.store_sealed(
+            SecretPolicy::parse(USE).unwrap(),
+            Zeroizing::new(document.to_vec()),
+            payer,
+            charge,
+            cell.is_none(),
+        );
+        self.put(data + len, &point);
+        self.store(a[2] + 8, 8, len + PUBLIC_LEN as u64);
+        Ok(vec![key, 0, 0, 0])
+    }
+
     /// `secret.wrap`, `unwrap` and `sign` (native `secret.rs` key
     /// operations): error tag 1 Denied, 2 Invalid, 3 Tampered, 4 Capacity.
-    /// Every evaluator Secret is sealed, so no KEK or secret is opaque.
+    /// Host-generated signing keys are opaque even to the evaluator.
     pub(super) fn secret_key(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
         use hirsel_core_net::key_wrap::{self, KeyFailure, SignAlg, SigningRandom};
         let fail = |f: KeyFailure| {
@@ -28,6 +107,9 @@ impl Machine<'_> {
         let (produced, out) = match op {
             HostOp::SecretWrap => {
                 let s = self.secret(a[1]).unwrap();
+                if s.opaque && !key.opaque {
+                    return fail(KeyFailure::Denied);
+                }
                 let blob = key_wrap::wrap_with_salt(
                     &key.bytes,
                     &s.policy.text(),
@@ -43,6 +125,9 @@ impl Machine<'_> {
                 } else {
                     SigningRandom::Host
                 };
+                if alg == SignAlg::P256 && source == SigningRandom::Virtual && key.opaque {
+                    return fail(KeyFailure::Denied);
+                }
                 (
                     key_wrap::sign(alg, &key.bytes, self.carrier_bytes(a[3]), source),
                     a[4],
@@ -76,6 +161,7 @@ impl Machine<'_> {
                     .push((Arc::downgrade(&seal), payer.clone(), charge));
                 let key = self.designate(
                     EvalSecret {
+                        opaque: key.opaque,
                         policy: requested,
                         bytes: Arc::new(SecretBytes::new(plain)),
                         seal,

@@ -17,7 +17,7 @@ pub(crate) fn is_key_mode(mode: u8) -> bool {
 
 /// `KeyError` as an outcome's error tag: the case index plus one.
 const KEY_DENIED: u8 = 1;
-const KEY_INVALID: u8 = 2;
+pub(super) const KEY_INVALID: u8 = 2;
 const KEY_TAMPERED: u8 = 3;
 const KEY_CAPACITY: u8 = 4;
 
@@ -47,14 +47,14 @@ pub(crate) struct KeyRequest<'a> {
     pub(crate) op: KeyOp<'a>,
 }
 
-fn key_error(tag: u8) -> Outcome {
+pub(super) fn key_error(tag: u8) -> Outcome {
     Outcome {
         error: IoError { tag, code: 0 },
         ..Outcome::default()
     }
 }
 
-fn key_failure(failure: hirsel_core_net::key_wrap::KeyFailure) -> Outcome {
+pub(super) fn key_failure(failure: hirsel_core_net::key_wrap::KeyFailure) -> Outcome {
     use hirsel_core_net::key_wrap::KeyFailure;
     key_error(match failure {
         KeyFailure::Denied => KEY_DENIED,
@@ -64,7 +64,7 @@ fn key_failure(failure: hirsel_core_net::key_wrap::KeyFailure) -> Outcome {
     })
 }
 
-fn key_capacity(requested: usize, available: usize) -> Outcome {
+pub(super) fn key_capacity(requested: usize, available: usize) -> Outcome {
     Outcome {
         value: requested as u64,
         written: available as u64,

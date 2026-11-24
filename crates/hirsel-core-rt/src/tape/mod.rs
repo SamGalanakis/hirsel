@@ -1618,13 +1618,8 @@ unsafe fn source_handle(request: &Request, inner: Inner) -> u64 {
 /// A first non-ready answer opens W explicitly. Subsequent callbacks keep
 /// that WAIT open until the scheduler records WAKE, or cancellation closes W.
 unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
-    // This operation has only immediate frames, in both modes.
-    if unsafe {
-        matches!(
-            (*r).operation,
-            SECRET_MAC | SECRET_KDF | MEDIA_AGREEMENT | SCRAM_VERIFY
-        )
-    } {
+    // TLS sinks have only immediate frames in both modes.
+    if secret::inline_sink(unsafe { (*r).operation }).is_some() {
         return Wait::default();
     }
     let cell = cell_of(state);
@@ -1780,25 +1775,12 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
             }
         };
     }
-    let inner = match r.operation {
-        SECRET_MAC => Inner {
-            provider: crate::secret::MAC_PROVIDER,
+    let inner = secret::inline_sink(r.operation)
+        .map(|provider| Inner {
+            provider,
             handle: 0,
-        },
-        SECRET_KDF => Inner {
-            provider: crate::secret::kdf::KDF_PROVIDER,
-            handle: 0,
-        },
-        MEDIA_AGREEMENT => Inner {
-            provider: crate::secret::agreement::AGREEMENT_PROVIDER,
-            handle: 0,
-        },
-        SCRAM_VERIFY => Inner {
-            provider: crate::scram::VERIFY_PROVIDER,
-            handle: 0,
-        },
-        _ => live.objects[ordinal - 1].inner.unwrap(),
-    };
+        })
+        .unwrap_or_else(|| live.objects[ordinal - 1].inner.unwrap());
     let before = r.buffer.len;
     drop(s);
     // SAFETY: address operations pin their permission result through delivery.
@@ -1837,7 +1819,10 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         return step;
     }
     let mut outcome = step.outcome;
-    if r.operation == SECRET_KDF && outcome.error == IoError::OK && outcome.status == 0 {
+    if matches!(r.operation, SECRET_KDF | MEDIA_P256_KEY)
+        && outcome.error == IoError::OK
+        && outcome.status == 0
+    {
         // The new designation follows this delivery's tape position, even if
         // another unit installs its handle in the Secret table first.
         outcome.value = live.schedule.events + 1;
@@ -2146,10 +2131,9 @@ unsafe fn replay(
         if let Some(space) = space {
             rep.pending_reads.insert(r as *mut Request as usize, space);
         }
-        if matches!(
-            op,
-            SECRET_MAC | SECRET_KDF | MEDIA_AGREEMENT | SCRAM_VERIFY | EXEC_SPAWN | EXEC_SIGNAL
-        ) || (unix_operation(op) && !unix::can_park(op))
+        if secret::inline_sink(op).is_some()
+            || matches!(op, EXEC_SPAWN | EXEC_SIGNAL)
+            || (unix_operation(op) && !unix::can_park(op))
             || (op == CLOSE && matches!(r.mode, crate::exec_runtime::PROC_CLOSE | 0x40..=0x42))
         {
             return Err(Fault::Corrupt);

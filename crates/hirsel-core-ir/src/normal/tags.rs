@@ -529,6 +529,7 @@ tags!(HostOp {
     143 => UdpSend,
     144 => UdpLocalAddr,
     145 => UdpFillPackets,
+    146 => SecretP256Key,
 });
 
 tags!(RaiseCause {

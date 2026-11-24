@@ -42,10 +42,11 @@ impl Machine<'_> {
             self.carrier_bytes(a[2])
         };
         let derived = derivation.derive(&parent.bytes, self.carrier_bytes(a[1]), data);
+        let opaque = parent.opaque;
         self.refund(payer.clone(), working);
         match derived {
             Ok(bytes) => {
-                let key = self.store_sealed(policy, bytes, payer, child);
+                let key = self.store_sealed(policy, bytes, payer, child, opaque);
                 Ok(vec![key, 0, 0, 0])
             }
             Err(Error::Params) => {

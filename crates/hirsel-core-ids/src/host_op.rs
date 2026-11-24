@@ -123,6 +123,7 @@ host_ops! {
     UDP_SEND = 137,
     UDP_LOCAL_ADDR = 138,
     UDP_FILL_PACKETS = 139,
+    MEDIA_P256_KEY = 140,
 }
 
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.

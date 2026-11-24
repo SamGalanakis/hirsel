@@ -112,3 +112,68 @@ fn host_p256_key_load_rng_failure_ends_run() {
         "{stderr}"
     );
 }
+
+#[test]
+fn host_p256_generation_and_signing_rng_failure_end_run() {
+    const CASE: &str = "HIRSEL_TEST_P256_GENERATE_OR_SIGN_RNG_FAILURE";
+    const TEST: &str =
+        "secret::key::rng_tests::host_p256_generation_and_signing_rng_failure_end_run";
+    const RETURNED: &str = "provider returned after RNG failure";
+    if let Ok(stage) = std::env::var(CASE) {
+        use hirsel_core_net::p256_key::HostSigner;
+        if stage == "generation" {
+            let mut public = [0; 65];
+            let mut call = crate::secret::p256_generation::Generation {
+                random: 0,
+                document: None,
+            };
+            let mut request = Request {
+                operation: crate::provider::MEDIA_P256_KEY,
+                mode: 0,
+                handle: 0,
+                path: (&raw mut call).cast(),
+                path_len: std::mem::size_of_val(&call),
+                buffer: Buffer {
+                    data: public.as_mut_ptr(),
+                    len: 0,
+                    capacity: public.len(),
+                },
+                site: 0,
+            };
+            fail_getrandom();
+            let provider = crate::secret::p256_generation::PROVIDER;
+            // SAFETY: each operand is pinned and private to the test task.
+            let _ = unsafe { crate::provider::issue(&provider, &mut request, 0) };
+        } else {
+            let doc = EcdsaKeyPair::generate_pkcs8(
+                &ECDSA_P256_SHA256_FIXED_SIGNING,
+                &SystemRandom::new(),
+            )
+            .unwrap();
+            let key = HostSigner::load(doc.as_ref()).unwrap();
+            fail_getrandom();
+            if let Err(error) = key.sign(b"sample") {
+                let _ = key_failure(error);
+            }
+        }
+        eprintln!("{RETURNED}");
+        return;
+    }
+    for (stage, diagnostic) in [
+        (
+            "generation",
+            "secret.p256_key: P-256 generation: ring Unspecified",
+        ),
+        ("signing", "secret.sign: P-256 signing: ring Unspecified"),
+    ] {
+        let output = crate::test_process::command()
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CASE, stage)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains(RETURNED), "{stage}: {stderr}");
+        assert_eq!(output.status.code(), Some(102), "{stage}: {stderr}");
+        assert!(stderr.contains(diagnostic), "{stage}: {stderr}");
+    }
+}

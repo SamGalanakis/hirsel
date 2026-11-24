@@ -12,6 +12,7 @@ use crate::{
 pub mod agreement;
 pub(crate) mod kdf;
 pub(crate) mod key;
+pub(crate) mod p256_generation;
 use hirsel_core_net::{
     HmacSha2, Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse,
     secret_aead::SecretBytes,
@@ -42,6 +43,7 @@ pub(crate) enum Origin {
     /// A credential fetch (TLS-7), whose bytes the host sealed, designated
     /// by its delivery position under a tape (0 otherwise).
     Fetched(u64),
+    GeneratedP256(u64),
 }
 
 impl Origin {
@@ -49,7 +51,7 @@ impl Origin {
     /// derived or unwrapped from one (TLS-5).
     pub(crate) fn opaque(self) -> bool {
         match self {
-            Self::Granted(_) | Self::Fetched(_) => true,
+            Self::Granted(_) | Self::Fetched(_) | Self::GeneratedP256(_) => true,
             Self::Sealed(_) => false,
             Self::Derived { opaque, .. } | Self::Unwrapped { opaque, .. } => opaque,
         }
@@ -64,6 +66,7 @@ impl Origin {
             Self::Derived { ordinal, .. } => (2, ordinal),
             Self::Unwrapped { ordinal, .. } => (3, ordinal),
             Self::Fetched(ordinal) => (4, ordinal),
+            Self::GeneratedP256(ordinal) => (5, ordinal),
         }
     }
 }

@@ -457,6 +457,7 @@ enum Due {
 }
 #[derive(Clone)]
 struct EvalSecret {
+    opaque: bool,
     policy: SecretPolicy,
     bytes: Arc<SecretBytes>,
     /// The seal's token, shared by every designation of the bytes.
@@ -4261,7 +4262,7 @@ impl Machine<'_> {
         if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
             return vec![charge, 2, 0, available];
         }
-        let (bytes, seal) = if op == HostOp::SecretSeal {
+        let (bytes, seal, opaque) = if op == HostOp::SecretSeal {
             let data = self.load(a[0], 8);
             let bytes = Zeroizing::new(self.carrier_bytes(a[0]).to_vec());
             if !bytes.is_empty() && self.load(a[0] + 16, 8) != 0 {
@@ -4269,15 +4270,16 @@ impl Machine<'_> {
                 use zeroize::Zeroize;
                 self.mem[block].bytes[offset..offset + bytes.len()].zeroize();
             }
-            let key = self.store_sealed(policy, bytes, payer.clone(), charge);
+            let key = self.store_sealed(policy, bytes, payer.clone(), charge, false);
             return vec![key, 0, 0, 0];
         } else {
             let parent = self.secret(a[0]).unwrap();
-            (parent.bytes.clone(), parent.seal.clone())
+            (parent.bytes.clone(), parent.seal.clone(), parent.opaque)
         };
         let payer = payer.clone();
         let key = self.designate(
             EvalSecret {
+                opaque,
                 policy,
                 bytes,
                 seal,
@@ -4285,27 +4287,6 @@ impl Machine<'_> {
             (payer, charge),
         );
         vec![key, 0, 0, 0]
-    }
-
-    fn store_sealed(
-        &mut self,
-        policy: SecretPolicy,
-        bytes: Zeroizing<Vec<u8>>,
-        payer: Limit,
-        charge: u64,
-    ) -> u64 {
-        let seal = Arc::new(());
-        self.world
-            .seals
-            .push((Arc::downgrade(&seal), payer.clone(), charge));
-        self.designate(
-            EvalSecret {
-                policy,
-                bytes: Arc::new(SecretBytes::new(bytes)),
-                seal,
-            },
-            (payer, 0),
-        )
     }
 
     fn secret(&self, key: u64) -> Option<&EvalSecret> {
@@ -4383,6 +4364,7 @@ impl Machine<'_> {
                 return Ok(vec![0, 1, 0, 0]);
             }
             narrowed.push(EvalSecret {
+                opaque: secret.opaque,
                 policy: SecretPolicy::exactly(name),
                 bytes: secret.bytes.clone(),
                 seal: secret.seal.clone(),
@@ -4550,6 +4532,7 @@ impl Machine<'_> {
             | HostOp::SecretVerifyHmac
             | HostOp::SecretJwsHmacSign
             | HostOp::SecretJwsHmacVerify => return self.secret_mac(t, op, a),
+            HostOp::SecretP256Key => return self.secret_p256_key(t, a),
             HostOp::SecretWrap | HostOp::SecretUnwrap | HostOp::SecretSign => {
                 return Ok(self.secret_key(t, op, a));
             }
@@ -4622,6 +4605,7 @@ impl Machine<'_> {
             | HostOp::SecretWrap
             | HostOp::SecretUnwrap
             | HostOp::SecretSign
+            | HostOp::SecretP256Key
             | HostOp::SecretAeadSeal
             | HostOp::SecretAeadOpen
             | HostOp::EnvGet

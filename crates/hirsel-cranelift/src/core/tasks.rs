@@ -343,6 +343,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretWrap
                     | HostOp::SecretUnwrap
                     | HostOp::SecretSign
+                    | HostOp::SecretP256Key
                     | HostOp::SecretAeadSeal
                     | HostOp::SecretAeadOpen
                     | HostOp::StdinRead

@@ -1304,9 +1304,6 @@ impl RtOp {
                     HostOp::UnixAccept | HostOp::RecvReady | HostOp::ExecWait => {
                         (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome)
                     }
-                    HostOp::DatagramBind | HostOp::DatagramConnect => {
-                        (vec![V(u64_), V(p), V(p)], outcome)
-                    }
                     HostOp::DatagramSend | HostOp::DatagramRecv => {
                         (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }
@@ -1385,6 +1382,9 @@ impl RtOp {
                     | HostOp::SecretVerifyHmacSha384
                     | HostOp::SecretVerifyHmacSha512
                     | HostOp::SecretUnwrap
+                    | HostOp::SecretP256Key
+                    | HostOp::DatagramBind
+                    | HostOp::DatagramConnect
                     | HostOp::ScramFinalLen
                     | HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify => {

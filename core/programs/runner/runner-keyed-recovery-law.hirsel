@@ -20,6 +20,13 @@ fn recovery_law_policy() -> store.KeyedPolicy {
 
 fn recovery_law_tick(take job: (ClockHand, Sender[HeadInput])) waits {
     let (take handed, take stop_to) = take job
+    recovery_law_ticks((take handed, take stop_to, 1000000000u64))
+}
+
+// Advances the idle clock through each due timer until `last` (mono ns), so
+// the head's recovery timer fires with an empty inbox, then finishes the head.
+fn recovery_law_ticks(take job: (ClockHand, Sender[HeadInput], u64)) waits {
+    let (take handed, take stop_to, last) = take job
     let mut ticks = take handed
     let mut reached_tick = false
     while !reached_tick {
@@ -27,7 +34,7 @@ fn recovery_law_tick(take job: (ClockHand, Sender[HeadInput])) waits {
             break
         }
         clock.advance_to(mut ticks, due)
-        reached_tick = due >= 1000000000u64
+        reached_tick = due >= last
     }
     let _ = clock.idle(mut ticks)
     let _ = channel.send(stop_to, HeadFinish)
@@ -104,7 +111,9 @@ fn retired_quota_checked_before_idle_keyed_recovery(d: Dir, random: Random, task
 
 fn recovery_law_order(mut queue: ClaimQueue) -> List[Bytes] {
     let mut seen: List[Bytes] = list.new()
-    while let Some(take key) = dequeue_recovery(mut queue) { list.push(mut seen, take key) }
+    while let Some(take key) = dequeue_recovery(mut queue) {
+        list.push(mut seen, take key)
+    }
     take seen
 }
 
@@ -118,16 +127,28 @@ fn recovery_queue_runs_each_claim_once() -> Result[(), ()] {
     enqueue_recovery(mut queue, b"a")
     enqueue_recovery(mut queue, b"a")
     enqueue_recovery(mut queue, b"b")
-    if std.omap.len(queue.fifo) != 2 { fail("a twice-enqueued claim holds two queue entries") }
+    if std.omap.len(queue.fifo) != 2 {
+        fail("a twice-enqueued claim holds two queue entries")
+    }
     // a is at the front and refused: it re-enters behind b.
-    if recovery_refused(mut queue, b"a") { fail("one refusal ended the claim") }
+    if recovery_refused(mut queue, b"a") {
+        fail("one refusal ended the claim")
+    }
     let order = recovery_law_order(mut queue)
-    if list.len(order) != 2 || order[0] != b"b" || order[1] != b"a" { fail("a refused front kept the queue blocked") }
+    if list.len(order) != 2 || order[0] != b"b" || order[1] != b"a" {
+        fail("a refused front kept the queue blocked")
+    }
     // Dequeued and enqueued again, a keeps its count: refusals 2 and 3.
     enqueue_recovery(mut queue, b"a")
-    if recovery_refused(mut queue, b"a") { fail("the second refusal ended the claim") }
-    if !recovery_refused(mut queue, b"a") { fail("refusals reset on re-enqueue: the third did not end the claim") }
-    if std.omap.len(queue.fifo) != 0 { fail("an ended claim stayed queued") }
+    if recovery_refused(mut queue, b"a") {
+        fail("the second refusal ended the claim")
+    }
+    if !recovery_refused(mut queue, b"a") {
+        fail("refusals reset on re-enqueue: the third did not end the claim")
+    }
+    if std.omap.len(queue.fifo) != 0 {
+        fail("an ended claim stayed queued")
+    }
     // Stale entry: c is queued, then replied by a client's run. Only a (ended) and b
     // (dequeued, not yet replied) keep members.
     enqueue_recovery(mut queue, b"c")
@@ -135,5 +156,71 @@ fn recovery_queue_runs_each_claim_once() -> Result[(), ()] {
     if std.omap.len(queue.fifo) != 0 || std.omap.len(queue.members) != 2 {
         fail("a claim replied before its turn left a queue entry")
     }
+    Ok(())
+}
+
+fn recovery_law_reply(mut db: store.Db, entry: Bytes, raw: Bytes, key: Bytes) -> u64 waits {
+    let claim = store.ClaimKey(op: b"increment", caller: store.Caller(issuer: 7u8, subject: b"law"), key: clone(key))
+    let no_policy: Option[store.KeyedPolicy] = None
+    let Ok(Duplicate(reply_bytes)) = store.admit_claim(mut db, claim, store.request_digest(entry, raw), raw, take no_policy) else {
+        fail("a claim found at a quiet reopen was not replied by the recovery timer")
+    }
+    let outcomes: std.codec.Codec[Outcome] = std.codec.of()
+    let Ok(Returned(value)) = std.codec.decode(outcomes, reply_bytes) else {
+        fail("a recovered bound claim did not record its body's outcome")
+    }
+    let results: std.codec.Codec[Result[u64, ()]] = std.codec.of()
+    let Ok(Ok(count)) = std.codec.decode(results, value) else {
+        fail("a recovered bound claim's reply was not its body's Ok")
+    }
+    count
+}
+
+// L21r end to end (http.md H9, K-8): two Admitted claims of a bound keyed op,
+// left ownerless by a crash after admission, are found at a quiet reopen and
+// run by the recovery timer with no client retry and no other traffic. Each
+// body runs once: the two replies are the shared counter's values 1 and 2,
+// in either order.
+@test
+fn quiet_reopen_recovers_bound_claims_once(d: Dir, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let (time, take clock_handle) = provide.clock(0u64, 100u64)
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let definition: HttpOpPlace = code.describe(keyed_http_place)
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut seeded = result.unwrap(store.open(tasks, dir, time, random, options))
+    let (take seed_reg, _, _, _) = result.unwrap(head_prepare(mut seeded, Install, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let entry = http_law_key(seed_reg.exported[0u64])
+    let inputs: std.codec.Codec[HttpOpInput] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(inputs, HttpOpInput(name: "saved"), mut raw))
+    let Some(KeyedRegistration(policy: Some(policy), ..)) = map.get(seed_reg.keyed, b"increment") else {
+        fail("the keyed op has no policy")
+    }
+    for key in[b"held", b"other"] {
+        let claim = store.ClaimKey(op: b"increment", caller: store.Caller(issuer: 7u8, subject: b"law"), key: clone(key))
+        let Ok(Accepted(_)) = store.admit_claim(mut seeded, claim, store.request_digest(entry, raw), raw, Some(clone(policy))) else {
+            fail("a seeded claim did not admit")
+        }
+    }
+    result.unwrap(store.close(take seeded))
+    options.create = false
+    let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let mail = result.unwrap(mailbox(16u64))
+    let driving = task.spawn(tasks, bytes 65536u64, (take clock_handle, take head, 2000000000u64), recovery_law_ticks)
+    if let Error(take problem) = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None) {
+        fail(start_text(Open(take problem)))
+    }
+    let _ = task.join(take driving)
+    let mut finished = result.unwrap(store.open(tasks, dir, time, random, options))
+    let held = recovery_law_reply(mut finished, entry, raw, b"held")
+    let other = recovery_law_reply(mut finished, entry, raw, b"other")
+    if !((held == 1u64 && other == 2u64) || (held == 2u64 && other == 1u64)) {
+        fail("the recovery timer ran a claim's body other than once")
+    }
+    result.unwrap(store.close(take finished))
+    result.unwrap(std.dir.remove_all(d, name))
     Ok(())
 }

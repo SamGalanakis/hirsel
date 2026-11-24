@@ -1,7 +1,7 @@
 hirsel.laws 1
 media_container@1/tests/clip_vod_uses_preceding_idr src=dd6b7323cb316b6e sig=24507da054ca058d run=acdd7fe37d41c86f bug=804c0270bae90bbd oracle=12c8cfb49526835e rows=pending
-media_container@1/tests/mp4_reference src=ac4e7592080be97d sig=3b5ed8807a3e6328 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-media_container@1/tests/ogg_opus_reference src=695643450ead342a sig=85bb3cfd26a993a5 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+media_container@1/tests/mp4_reference src=ac4e7592080be97d sig=16a0af52faa407d7 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+media_container@1/tests/ogg_opus_reference src=695643450ead342a sig=373c3488ca9beccc run=acdd7fe37d41c86f bug=- oracle=- rows=pending
 media_container@1/tests/relocate_vod_and_segment_index src=060a9c490008e931 sig=0b21f8c2e6e62eba run=acdd7fe37d41c86f bug=0530b3a80303e6ca oracle=cdfe91416364399e rows=pending
 media_container@1/tests/sparse_vod_sample_tables src=dcaee46ae7bba70c sig=228a162818b73f55 run=acdd7fe37d41c86f bug=697898387531a25b oracle=8a2531a56a9946c3 rows=pending
 media_container@1/tests/tkhd_display_rotation src=9025b6861bf2ba3d sig=979577d6c72171c2 run=acdd7fe37d41c86f bug=cf96d6cfc348ea49 oracle=830e5c25af7e2601 rows=pending

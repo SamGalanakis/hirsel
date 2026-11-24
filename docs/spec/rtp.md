@@ -748,8 +748,8 @@ both with one cursor that only moves forward:
 - `Prefix`: the 8-byte prefix does not fit.
 - Chunks are read until they represent exactly the status count. A run-length chunk with
   length 0 represents no status and is consumed (its 2 bytes are the progress). A run of
-  `S = 11` is `Symbol`. A vector's symbols past the status count are clipped and ignored. A
-  `11` symbol inside the count is `Symbol`. A chunk that does not fit is `Chunk`.
+  `S = 11` is `Symbol`. A run's or a vector's statuses past the status count are clipped and
+  ignored. A `11` symbol inside the count is `Symbol`. A chunk that does not fit is `Chunk`.
 - Then one delta per received status, each inside the FCI, else `Deltas`.
 - After the last delta at most 3 bytes may remain, each 0, else `Tail` (RTCP padding, when
   `P` is set, was already removed by `check`).
@@ -766,8 +766,8 @@ is the remote arrival time in microseconds on the remote clock, or `None` for a 
 reported lost. Only differences between arrival times mean anything.
 
 - The base sequence number is extended with `seq.estimate` against the highest assigned,
-  and the reference time with `estimate24` against the last report's. A base that extends to
-  anything but `Index` is skipped whole.
+  and the reference time with `estimate24` against the last report's (0 before the first).
+  A base that extends to anything but `Index` is skipped whole.
 - A reported number whose record has left the ring is skipped.
 - **Overlap.** Reports may overlap (draft §3.1.1). Each send record keeps its receipt state:
   unreported, lost, or received. A packet reported received is emitted once, the first
@@ -776,9 +776,11 @@ reported lost. Only differences between arrival times mean anything.
   emitted once.
 
 **Receiving.** A `RecvLog` records each arrival by its extended transport number in a ring
-of `slots`. `write` builds one feedback packet from the first unreported number to the
-highest received, and advances past what it reported. Its choices are fixed, so its
-output can be derived by hand:
+of `slots`; a number already reported, a repeat, or one `slots` or more below the highest is
+ignored. `write` builds one feedback packet from the first unreported number (before the
+first write, the lowest seen; never one that has left the ring) to the highest received, and
+advances past what it reported. With nothing to report it writes nothing and answers 0. Its
+choices are fixed, so its output can be derived by hand:
 
 - **Times are quantized once.** Each arrival is `q = floor((at_ns − origin) / 250_000)`, with
   `origin` the first arrival the log saw. The full reference is `R = floor(q_first / 256)`,
@@ -793,9 +795,11 @@ output can be derived by hand:
   start there: a run-length chunk of `min(run, 8191)` when `run >= 14`; else a 1-bit vector
   of the next `min(14, left)` symbols when none of them is large; else a 2-bit vector of the
   next `min(7, left)`. Unused symbol bits are 0.
-- The packet ends early when the next chunk and its deltas would exceed `max` bytes or the
-  status count would pass 65,535. When `max` cannot hold the header, prefix and one status
-  with its delta, `write` answers `Capacity` and advances nothing.
+- The packet ends early when the status count would pass 65,535, or when the next chunk and
+  its deltas would make the packet exceed `max` bytes: then it ends at the last of that
+  chunk's statuses that fits, and its last chunk is chosen by the same rule over those
+  statuses. When `max` cannot hold the header, prefix and one status with its delta, or
+  `out`'s spare cannot hold the packet, `write` answers `Capacity` and advances nothing.
 - The FCI is zero-padded to a 4-byte boundary, and `P` stays clear, so the packet may sit
   anywhere in a compound. `str0m` pads with RTCP padding and sets `P`
   (`src/rtp/rtcp/twcc.rs:217-226`). The parser accepts both.

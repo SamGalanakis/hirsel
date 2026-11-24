@@ -705,6 +705,191 @@ fn rtcp_compound_rules() -> Result[(), ()] {
     if result.unwrap(rtcp.write_fir(1, 2, 7, mut fb)) != 20 || fb != fir() {
         fail("FIR bytes")
     }
+    // TWCC with four statuses (0xBC00) and deltas 00 30 2C 50: 14 FCI bytes.
+    // Its FCI may end up to 3 bytes before RTCP padding, not 4; with one
+    // delta short it overruns into the padding.
+    accepted(twcc_pkt(b"\xaf\xcd\x00\x06", b"\x00\x0a\x00\x04\x00\x00\x00\x00\xbc\x00\x00\x30\x2c\x50\x00\x02"), Reduced, 1)
+    accepted(twcc_pkt(b"\xaf\xcd\x00\x07", b"\x00\x0a\x00\x04\x00\x00\x00\x00\xbc\x00\x00\x30\x2c\x50\x00\x00\x00\x00\x00\x03"), Reduced, 1)
+    refused(twcc_pkt(b"\xaf\xcd\x00\x07", b"\x00\x0a\x00\x04\x00\x00\x00\x00\xbc\x00\x00\x30\x2c\x50\x00\x00\x00\x00\x00\x02"), Reduced, Body(205))
+    refused(short_delta(), Reduced, Body(205))
+    Ok(())
+}
+
+// A TWCC packet from sender 1 about media 2.
+fn twcc_pkt(head: Bytes, fci: Bytes) -> Bytes {
+    let mut b: Bytes = list.with_capacity(64)
+    list.append(mut b, head)
+    list.append(mut b, b"\x00\x00\x00\x01\x00\x00\x00\x02")
+    list.append(mut b, fci)
+    b
+}
+
+// Four statuses with three of their four deltas, then 3 bytes of padding.
+fn short_delta() -> Bytes {
+    twcc_pkt(b"\xaf\xcd\x00\x06", b"\x00\x0a\x00\x04\x00\x00\x00\x00\xbc\x00\x00\x30\x2c\x00\x00\x03")
+}
+
+// A send log that has assigned transport numbers 0 to n - 1, number i sent
+// at i us with 1200 bytes.
+fn sent(n: u64) -> twcc.SendLog {
+    let mut s = result.unwrap(twcc.send_log(64))
+    let mut i = 0u64
+    while i < n {
+        let _ = twcc.assign(mut s, i * 1000, 1200)
+        i += 1
+    }
+    s
+}
+
+fn feed(mut s: twcc.SendLog, pkt: Bytes, mut out: List[twcc.Acked]) -> u64 {
+    result.unwrap(twcc.on_feedback(mut s, pkt, only(pkt), 64, mut out))
+}
+
+fn arrival(index: u64, us: Option[i64]) -> twcc.Acked {
+    twcc.Acked(index: index, sent_ns: index * 1000, size: 1200, arrived_us: us)
+}
+
+fn written(mut r: twcc.RecvLog) -> Bytes {
+    let mut out: Bytes = list.with_capacity(512)
+    let size = result.unwrap(twcc.write(mut r, 1, 2, 1500, mut out))
+    if size != list.len(out) {
+        fail("write answered another length")
+    }
+    out
+}
+
+/// bug: Quantize, chunk or encode arrivals so that a receiver reads other times, refuse for room after changing state, or count a receipt twice or turn it into a loss.
+/// oracle: draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3.1, by hand, on the arrivals of str0m twcc.rs:1529-1549 (numbers 10 to 13 at 0, 12, 23 and 43 ms): one 1-bit vector of four received symbols, 0b10_1111_0000000000 = 0xBC00, and deltas 0, 48, 44 and 80 in 250 us units; FCI 14 bytes padded to 16, so 28 bytes and length 6.
+@test
+fn twcc_report_bytes() -> Result[(), ()] {
+    let mut r = result.unwrap(twcc.recv_log(64))
+    twcc.on_packet(mut r, 10, 0)
+    twcc.on_packet(mut r, 11, 12000000)
+    twcc.on_packet(mut r, 12, 23000000)
+    twcc.on_packet(mut r, 13, 43000000)
+    let out = written(mut r)
+    if out != twcc_pkt(b"\x8f\xcd\x00\x06", b"\x00\x0a\x00\x04\x00\x00\x00\x00\xbc\x00\x00\x30\x2c\x50\x00\x00") {
+        fail("TWCC report bytes")
+    }
+    if list.len(written(mut r)) != 0 {
+        fail("a report was written twice")
+    }
+    let mut s = sent(14)
+    let mut acked: List[twcc.Acked] = list.with_capacity(8)
+    // Number 10 reported lost first: base 10, count 1, a run of one 00.
+    let lost = twcc_pkt(b"\x8f\xcd\x00\x05", b"\x00\x0a\x00\x01\x00\x00\x00\x00\x00\x01\x00\x00")
+    if feed(mut s, lost, mut acked) != 1 || acked[0] != arrival(10, None) {
+        fail("loss report")
+    }
+    list.clear(mut acked)
+    let Error(Capacity(_)) = twcc.on_feedback(mut s, out, only(out), 3, mut acked) else {
+        fail("four statuses accepted under a bound of 3")
+    }
+    if list.len(acked) != 0 {
+        fail("refusal for room appended")
+    }
+    if feed(mut s, out, mut acked) != 4 || acked[0] != arrival(10, Some(0)) || acked[1] != arrival(11, Some(12000)) || acked[2] != arrival(12, Some(23000)) || acked[3] != arrival(13, Some(43000)) {
+        fail("arrivals after the refusal")
+    }
+    list.clear(mut acked)
+    if feed(mut s, out, mut acked) != 0 || feed(mut s, lost, mut acked) != 0 || list.len(acked) != 0 {
+        fail("an overlapping report counted again")
+    }
+    Ok(())
+}
+
+fn expect_refused(pkt: Bytes, expected: Bytes) {
+    let p = only(pkt)
+    let mut s = sent(16)
+    let mut acked: List[twcc.Acked] = list.with_capacity(8)
+    let got = match twcc.parse(pkt, p) {
+        Error(Chunk) => b"Chunk",
+        Error(Symbol) => b"Symbol",
+        Error(Deltas) => b"Deltas",
+        Error(Tail) => b"Tail",
+        _ => b"other",
+    }
+    let Error(_) = twcc.on_feedback(mut s, pkt, p, 64, mut acked) else {
+        fail("invalid FCI fed")
+    }
+    if got != expected || list.len(acked) != 0 {
+        fail("invalid FCI refused wrongly or emitted")
+    }
+}
+
+/// bug: Pick the wrong chunk form or symbol, misread a negative delta, carry a delta that does not fit, lose the reference time across its 24-bit wrap or a full revolution, or accept an FCI outside the draft's grammar.
+/// oracle: draft-holmer-rmcat-transport-wide-cc-extensions-01 section 3.1, by hand. 221 small statuses are the run 0b0_01_0000011011101 = 0x20DD. Arrivals 1 ms apart in the order 11, 10 give 10 q 4 and 11 q 0: 2-bit symbols 01 10 = 0xD800, deltas 04 and -4 = FF FC. 8.2 s is q 32800 > 32767, so the next packet has reference 128 and first delta 32. 0xFFFFFF then 0 is 64 ms later. q = 2^32 + 1 is reference 2^24 (wire 0) and delta 1, reached by references 2^22 apart.
+@test
+fn twcc_chunks() -> Result[(), ()] {
+    let mut run = result.unwrap(twcc.recv_log(512))
+    let mut i = 0u64
+    while i < 221 {
+        twcc.on_packet(mut run, int.narrow(i), i * 1000000)
+        i += 1
+    }
+    let long = written(mut run)
+    if list.len(long) != 244 || list.slice(long, 12, 22) != b"\x00\x00\x00\xdd\x00\x00\x00\x00\x20\xdd" {
+        fail("221 small statuses")
+    }
+    let mut two = result.unwrap(twcc.recv_log(16))
+    twcc.on_packet(mut two, 11, 1000000000)
+    twcc.on_packet(mut two, 10, 1001000000)
+    let back = written(mut two)
+    if back != twcc_pkt(b"\x8f\xcd\x00\x06", b"\x00\x0a\x00\x02\x00\x00\x00\x00\xd8\x00\x04\xff\xfc\x00\x00\x00") {
+        fail("negative delta chunk")
+    }
+    let mut s = sent(12)
+    let mut acked: List[twcc.Acked] = list.with_capacity(8)
+    if feed(mut s, back, mut acked) != 2 || acked[0] != arrival(10, Some(1000)) || acked[1] != arrival(11, Some(0)) {
+        fail("negative delta read back")
+    }
+    let mut gap = result.unwrap(twcc.recv_log(16))
+    twcc.on_packet(mut gap, 1, 0)
+    twcc.on_packet(mut gap, 2, 8200000000)
+    if written(mut gap) != twcc_pkt(b"\x8f\xcd\x00\x05", b"\x00\x01\x00\x01\x00\x00\x00\x00\xa0\x00\x00\x00") || written(mut gap) != twcc_pkt(b"\x8f\xcd\x00\x05", b"\x00\x02\x00\x01\x00\x00\x80\x01\xa0\x00\x20\x00") {
+        fail("8.2 s delta did not end the packet")
+    }
+    let mut wrap = sent(2)
+    list.clear(mut acked)
+    feed(mut wrap, twcc_pkt(b"\x8f\xcd\x00\x05", b"\x00\x00\x00\x01\xff\xff\xff\x00\xa0\x00\x00\x00"), mut acked)
+    feed(mut wrap, twcc_pkt(b"\x8f\xcd\x00\x05", b"\x00\x01\x00\x01\x00\x00\x00\x01\xa0\x00\x00\x00"), mut acked)
+    let (Some(before), Some(after)) = (acked[0].arrived_us, acked[1].arrived_us) else {
+        fail("wrapped reference lost an arrival")
+    }
+    if list.len(acked) != 2 || after - before != 64000 {
+        fail("reference time did not extend across its wrap")
+    }
+    let mut rev = result.unwrap(twcc.recv_log(16))
+    let mut far = sent(6)
+    let steps =[0u64, 1073741824u64, 2147483648u64, 3221225472u64, 4294967297u64]
+    let mut last: Bytes = list.new()
+    i = 0
+    while i < 5 {
+        let q = steps[i]
+        twcc.on_packet(mut rev, int.narrow(i + 1), q * 250000)
+        last = written(mut rev)
+        list.clear(mut acked)
+        let us: i64 = int.narrow(q * 250)
+        if feed(mut far, last, mut acked) != 1 || acked[0] != arrival(i + 1, Some(us)) {
+            fail("arrival across a revolution")
+        }
+        i += 1
+    }
+    if last != twcc_pkt(b"\x8f\xcd\x00\x05", b"\x00\x05\x00\x01\x00\x00\x00\x04\xa0\x00\x01\x00") {
+        fail("full revolution bytes")
+    }
+    // A zero-length run, then a vector of two received statuses.
+    let zero = twcc_pkt(b"\x8f\xcd\x00\x06", b"\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\xb0\x00\x01\x02\x00\x00")
+    let mut z = sent(2)
+    list.clear(mut acked)
+    if result.unwrap(twcc.parse(zero, only(zero))) != 2 || feed(mut z, zero, mut acked) != 2 || acked[0] != arrival(0, Some(250)) || acked[1] != arrival(1, Some(750)) {
+        fail("zero-length run chunk")
+    }
+    expect_refused(twcc_pkt(b"\xaf\xcd\x00\x05", b"\x00\x0a\x00\x04\x00\x00\x00\x00\xbc\x00\x00\x03"), b"Chunk")
+    expect_refused(twcc_pkt(b"\x8f\xcd\x00\x05", b"\x00\x00\x00\x01\x00\x00\x00\x00\xf0\x00\x00\x00"), b"Symbol")
+    expect_refused(twcc_pkt(b"\x8f\xcd\x00\x05", b"\x00\x00\x00\x01\x00\x00\x00\x00\x60\x01\x00\x00"), b"Symbol")
+    expect_refused(short_delta(), b"Deltas")
+    expect_refused(twcc_pkt(b"\xaf\xcd\x00\x06", b"\x00\x00\x00\x01\x00\x00\x00\x00\xa0\x00\x00\x01\x01\x01\x01\x01"), b"Tail")
     Ok(())
 }
 

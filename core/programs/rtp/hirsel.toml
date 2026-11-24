@@ -10,6 +10,7 @@ charge = "charge-v1"
 "rtcp.hirsel" = "rtcp"
 "history.hirsel" = "history"
 "rtx.hirsel" = "rtx"
+"twcc.hirsel" = "twcc"
 
 [tests]
 limit = 67108864

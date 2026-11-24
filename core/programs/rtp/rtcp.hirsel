@@ -200,7 +200,8 @@ fn item(pkt: Bytes, pt: u8, count: u8, padded: bool, body: u64, end: u64) -> Res
         return Ok(Nack(sender, media))
     }
     if pt == RTPFB {
-        // The 8-byte prefix of transport-wide feedback; its chunks are RTP-8's.
+        // The 8-byte prefix of transport-wide feedback; check runs RTP-8's
+        // parser on the rest.
         if fci < 8 {
             return Error(Body(pt))
         }
@@ -274,6 +275,11 @@ pub fn check(pkt: Bytes, mode: Mode) -> Result[u64, Error] {
     let mut sender: Option[u32] = None
     let mut named = false
     while let Some(p) = next(pkt, mut at)? {
+        if let Twcc(_, _) = p.item {
+            if let Error(_) = twcc.parse(pkt, p) {
+                return Error(Body(RTPFB))
+            }
+        }
         if packets == 0 {
             sender = sender_ssrc(p.item)
             if mode == Compound {

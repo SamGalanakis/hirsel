@@ -1,0 +1,587 @@
+pub type Acked: key {
+    index: u64,
+    sent_ns: u64,
+    size: u32,
+    arrived_us: Option[i64]
+}
+
+pub type Error = Prefix | Chunk | Symbol | Deltas | Tail | Capacity(Capacity) | Buffer
+
+type State: key = Unreported | Lost | Received
+
+// tag is the extended transport number plus one; 0 is an empty slot.
+type Sent {
+    tag: u64,
+    sent_ns: u64,
+    size: u32,
+    state: State
+}
+
+pub opaque type SendLog {
+    ring: List[Sent],
+    next: u64,
+    reference: i64
+}
+
+// q is the arrival in 250 us units from the log's origin.
+type Arrival {
+    tag: u64,
+    q: i64
+}
+
+// next is the first unreported number; before the first write it is the
+// lowest number seen.
+pub opaque type RecvLog {
+    ring: List[Arrival],
+    seen: bool,
+    origin: u64,
+    highest: u64,
+    next: u64,
+    reported: bool,
+    count: u8
+}
+
+// One packet status chunk, clipped to the statuses still to read.
+type Chunk = Run(u8, u64) | Vector(u16, u8, u64)
+
+// A chunk the writer chose: its word, how many statuses it covers, the q of
+// its last received status, and its cost: the chunk and its deltas in bytes.
+type Plan {
+    word: u16,
+    n: u64,
+    prev: i64,
+    cost: u64
+}
+
+const RTPFB: u8 = 205
+
+const QUANTUM_NS: u64 = 250000
+
+const MAX_RUN: u64 = 8191
+
+const MAX_STATUSES: u64 = 65535
+
+fn none(slots: u32) -> Result[(), Capacity] {
+    if slots == 0 {
+        return Error(Capacity(requested: 0, available: 0))
+    }
+    Ok(())
+}
+
+pub fn send_log(slots: u32) -> Result[SendLog, Capacity] {
+    none(slots)?
+    let n: u64 = int.widen(slots)
+    let mut ring: List[Sent] = list.new()
+    list.try_reserve(mut ring, n)?
+    let mut i = 0u64
+    while i < n {
+        list.push(mut ring, Sent(tag: 0, sent_ns: 0, size: 0, state: Unreported))
+        i += 1
+    }
+    Ok(SendLog(ring: ring, next: 0, reference: 0))
+}
+
+pub fn assign(mut s: SendLog, sent_ns: u64, size: u32) -> u16 {
+    let index = s.next
+    s.ring[index % list.len(s.ring)] = Sent(tag: index + 1, sent_ns: sent_ns, size: size, state: Unreported)
+    s.next += 1
+    int.truncate(index)
+}
+
+// The first byte of the FCI, after both SSRCs.
+fn fci(pkt: Bytes, p: rtcp.Packet) -> Result[u64, Error] {
+    if list.len(pkt) != p.len || p.end > p.len || p.body > p.end {
+        return Error(Buffer)
+    }
+    let Twcc(_, _) = p.item else {
+        return Error(Buffer)
+    }
+    if p.end - p.body < 16 {
+        return Error(Prefix)
+    }
+    Ok(p.body + 8)
+}
+
+// Symbol j of a vector chunk: 0 not received, 1 small delta, 2 large delta.
+fn symbol(word: u16, bits: u8, j: u64) -> u8 {
+    let k: u16 = int.narrow(j)
+    if bits == 1 {
+        int.truncate((word >> (13 - k)) & 1)
+    } else {
+        int.truncate((word >> (12 - 2 * k)) & 3)
+    }
+}
+
+fn chunk(pkt: Bytes, mut at: u64, end: u64, left: u64) -> Result[Chunk, Error] {
+    if end - at < 2 {
+        return Error(Chunk)
+    }
+    let word: u16 = list.word_be(pkt, at)
+    if word >> 15 == 0 {
+        let s: u8 = int.truncate((word >> 13) & 3)
+        if s == 3 {
+            return Error(Symbol)
+        }
+        let run: u64 = int.widen(word & 0x1fff)
+        at += 2
+        return Ok(Run(s, if run < left {
+            run
+        } else {
+            left
+        }))
+    }
+    let bits = if (word & 0x4000) != 0 {
+        2u8
+    } else {
+        1u8
+    }
+    let size = if bits == 1 {
+        14u64
+    } else {
+        7u64
+    }
+    let n = if size < left {
+        size
+    } else {
+        left
+    }
+    let mut j = 0u64
+    while j < n {
+        if symbol(word, bits, j) == 3 {
+            return Error(Symbol)
+        }
+        j += 1
+    }
+    at += 2
+    Ok(Vector(word, bits, n))
+}
+
+fn chunk_symbol(c: Chunk, j: u64) -> u8 {
+    match c {
+        Run(s, _) => s,
+        Vector(word, bits, _) => symbol(word, bits, j),
+    }
+}
+
+fn chunk_len(c: Chunk) -> u64 {
+    match c {
+        Run(_, n) => n,
+        Vector(_, _, n) => n,
+    }
+}
+
+// Validate the FCI and answer its first byte, its status count and where
+// its deltas start. One forward cursor, never past the unpadded end.
+fn layout(pkt: Bytes, p: rtcp.Packet) -> Result[(u64, u64, u64), Error] {
+    let from = fci(pkt, p)?
+    let raw: u16 = list.word_be(pkt, from + 2)
+    let count: u64 = int.widen(raw)
+    let mut left = count
+    let mut at = from + 8
+    let mut deltas = 0u64
+    while left > 0 {
+        let c = chunk(pkt, mut at, p.end, left)?
+        let n = chunk_len(c)
+        match c {
+            Run(s, _) => {
+                let size: u64 = int.widen(s)
+                deltas += size * n
+            },
+            Vector(_, _, _) => {
+                let mut j = 0u64
+                while j < n {
+                    let size: u64 = int.widen(chunk_symbol(c, j))
+                    deltas += size
+                    j += 1
+                }
+            },
+        }
+        left -= n
+    }
+    let start = at
+    if deltas > p.end - at {
+        return Error(Deltas)
+    }
+    at += deltas
+    if p.end - at > 3 {
+        return Error(Tail)
+    }
+    while at < p.end {
+        if pkt[at] != 0 {
+            return Error(Tail)
+        }
+        at += 1
+    }
+    Ok((from, count, start))
+}
+
+pub fn parse(pkt: Bytes, p: rtcp.Packet) -> Result[u32, Error] {
+    let (_, count, _) = layout(pkt, p)?
+    Ok(int.narrow(count))
+}
+
+// Record a status for number i and append an Acked when its state changes.
+fn mark(mut s: SendLog, i: u64, arrived: Option[i64], mut out: List[Acked]) -> u64 {
+    let at = i % list.len(s.ring)
+    let r = s.ring[at]
+    if r.tag != i + 1 {
+        return 0
+    }
+    let state = match arrived {
+        None => Lost,
+        Some(_) => Received,
+    }
+    if r.state == Received || (r.state == Lost && state == Lost) {
+        return 0
+    }
+    s.ring[at] = Sent(tag: r.tag, sent_ns: r.sent_ns, size: r.size, state: state)
+    list.push(mut out, Acked(index: i, sent_ns: r.sent_ns, size: r.size, arrived_us: arrived))
+    1
+}
+
+pub fn on_feedback(mut s: SendLog, pkt: Bytes, p: rtcp.Packet, max: u32, mut out: List[Acked]) -> Result[u64, Error] {
+    let (from, count, deltas) = layout(pkt, p)?
+    let cap: u64 = int.widen(max)
+    let room = list.capacity(out) - list.len(out)
+    if count > cap || count > room {
+        return Error(Capacity(Capacity(requested: count, available: if cap < room {
+            cap
+        } else {
+            room
+        })))
+    }
+    let base: u16 = list.word_be(pkt, from)
+    let high: u32 = int.widen(pkt[from + 4])
+    let mid: u32 = int.widen(pkt[from + 5])
+    let low: u32 = int.widen(pkt[from + 6])
+    s.reference = seq.estimate24(s.reference, (high << 16) | (mid << 8) | low)
+    if s.next == 0 {
+        return Ok(0)
+    }
+    let Index(first) = seq.estimate(s.next - 1, base) else {
+        return Ok(0)
+    }
+    // Arrival time in 250 us units on the remote clock.
+    let mut time = s.reference * 256
+    let mut d = deltas
+    let mut at = from + 8
+    let mut left = count
+    let mut i = first
+    let mut appended = 0u64
+    while left > 0 {
+        let c = chunk(pkt, mut at, p.end, left)?
+        let n = chunk_len(c)
+        let mut j = 0u64
+        while j < n {
+            let sym = chunk_symbol(c, j)
+            let arrived: Option[i64] = if sym == 0 {
+                None
+            } else if sym == 1 {
+                let small: i64 = int.widen(pkt[d])
+                time += small
+                d += 1
+                Some(time * 250)
+            } else {
+                let raw: u16 = list.word_be(pkt, d)
+                let wide: i64 = int.widen(raw)
+                time += if wide >= 32768 {
+                    wide - 65536
+                } else {
+                    wide
+                }
+                d += 2
+                Some(time * 250)
+            }
+            appended += mark(mut s, i, arrived, mut out)
+            i += 1
+            j += 1
+        }
+        left -= n
+    }
+    Ok(appended)
+}
+
+pub fn recv_log(slots: u32) -> Result[RecvLog, Capacity] {
+    none(slots)?
+    let n: u64 = int.widen(slots)
+    let mut ring: List[Arrival] = list.new()
+    list.try_reserve(mut ring, n)?
+    let mut i = 0u64
+    while i < n {
+        list.push(mut ring, Arrival(tag: 0, q: 0))
+        i += 1
+    }
+    Ok(RecvLog(ring: ring, seen: false, origin: 0, highest: 0, next: 0, reported: false, count: 0))
+}
+
+fn quantize(at_ns: u64, origin: u64) -> i64 {
+    if at_ns >= origin {
+        int.narrow((at_ns - origin) / QUANTUM_NS)
+    } else {
+        let before: i64 = int.narrow((origin - at_ns + QUANTUM_NS - 1) / QUANTUM_NS)
+        -before
+    }
+}
+
+pub fn on_packet(mut r: RecvLog, number: u16, at_ns: u64) {
+    let slots = list.len(r.ring)
+    let i = if r.seen {
+        let Index(i) = seq.estimate(r.highest, number) else {
+            return
+        }
+        i
+    } else {
+        r.seen = true
+        r.origin = at_ns
+        r.highest = int.widen(number)
+        r.next = int.widen(number)
+        int.widen(number)
+    }
+    if (r.reported && i < r.next) || (i < r.highest && r.highest - i >= slots) {
+        return
+    }
+    let at = i % slots
+    if r.ring[at].tag == i + 1 {
+        return
+    }
+    r.ring[at] = Arrival(tag: i + 1, q: quantize(at_ns, r.origin))
+    if i > r.highest {
+        r.highest = i
+    }
+    if !r.reported && i < r.next {
+        r.next = i
+    }
+}
+
+// The symbol of number i after a received number with q prev, and the q
+// after it. None when i was received with a delta no chunk can carry.
+fn status(r: RecvLog, i: u64, prev: i64) -> Option[(u8, i64)] {
+    let a = r.ring[i % list.len(r.ring)]
+    if a.tag != i + 1 {
+        return Some((0u8, prev))
+    }
+    let d = a.q - prev
+    if d >= 0 && d <= 255 {
+        Some((1u8, a.q))
+    } else if d >= -32768 && d <= 32767 {
+        Some((2u8, a.q))
+    } else {
+        None
+    }
+}
+
+// Up to most statuses from at, below limit and before a delta that no
+// chunk can carry: (statuses, delta bytes, any large, q after them).
+fn scan(r: RecvLog, at: u64, limit: u64, most: u64, prev: i64) -> (u64, u64, bool, i64) {
+    let mut n = 0u64
+    let mut cost = 0u64
+    let mut large = false
+    let mut p = prev
+    while n < most && at + n < limit {
+        let Some((s, q)) = status(r, at + n, p) else {
+            break
+        }
+        let size: u64 = int.widen(s)
+        cost += size
+        large = large || s == 2
+        p = q
+        n += 1
+    }
+    (n, cost, large, p)
+}
+
+// The greedy chunk at at, or None when at's delta ends the packet.
+fn choose(r: RecvLog, at: u64, limit: u64, prev: i64) -> Option[Plan] {
+    let Some((first, _)) = status(r, at, prev) else {
+        return None
+    }
+    let mut run = 0u64
+    let mut run_cost = 0u64
+    let mut p = prev
+    while run < MAX_RUN && at + run < limit {
+        let Some((s, q)) = status(r, at + run, p) else {
+            break
+        }
+        if s != first {
+            break
+        }
+        let size: u64 = int.widen(s)
+        run_cost += size
+        p = q
+        run += 1
+    }
+    if run >= 14 {
+        let sym: u16 = int.widen(first)
+        let len: u16 = int.narrow(run)
+        return Some(Plan(word: (sym << 13) | len, n: run, prev: p, cost: 2 + run_cost))
+    }
+    let (wide, wide_cost, large, wide_prev) = scan(r, at, limit, 14, prev)
+    let (n, cost, bits, last) = if large {
+        let (narrow, narrow_cost, _, narrow_prev) = scan(r, at, limit, 7, prev)
+        (narrow, narrow_cost, 2u8, narrow_prev)
+    } else {
+        (wide, wide_cost, 1u8, wide_prev)
+    }
+    let mut word: u16 = if bits == 1 {
+        0x8000
+    } else {
+        0xc000
+    }
+    let mut q = prev
+    let mut j = 0u64
+    while j < n {
+        let Some((s, next)) = status(r, at + j, q) else {
+            fail("a scanned status has no symbol")
+        }
+        let sym: u16 = int.widen(s)
+        let k: u16 = int.narrow(j)
+        word = word | if bits == 1 {
+            sym << (13 - k)
+        } else {
+            sym << (12 - 2 * k)
+        }
+        q = next
+        j += 1
+    }
+    Some(Plan(word: word, n: n, prev: last, cost: 2 + cost))
+}
+
+// Header, both SSRCs, then the FCI zero-padded to a 32-bit boundary.
+fn packet_size(chunks: u64) -> u64 {
+    12 + (8 + chunks + 3) / 4 * 4
+}
+
+fn floor256(q: i64) -> i64 {
+    if q >= 0 {
+        q / 256
+    } else {
+        -((255 - q) / 256)
+    }
+}
+
+pub fn write(mut r: RecvLog, sender: u32, media: u32, max: u64, mut out: Bytes) -> Result[u64, Capacity] {
+    if !r.seen || r.next > r.highest {
+        return Ok(0)
+    }
+    let slots = list.len(r.ring)
+    let start = if r.highest - r.next >= slots {
+        r.highest - slots + 1
+    } else {
+        r.next
+    }
+    let mut limit = if r.highest + 1 - start > MAX_STATUSES {
+        start + MAX_STATUSES
+    } else {
+        r.highest + 1
+    }
+    // The reference time is that of the first received status.
+    let mut reference = 0i64
+    let mut i = start
+    while i < limit {
+        let a = r.ring[i % slots]
+        if a.tag == i + 1 {
+            reference = floor256(a.q)
+            break
+        }
+        i += 1
+    }
+    let base = reference * 256
+    let mut at = start
+    let mut cost = 0u64
+    let mut prev = base
+    while at < limit {
+        let Some(c) = choose(r, at, limit, prev) else {
+            break
+        }
+        if packet_size(cost + c.cost) > max {
+            // Cut the packet to the statuses of this chunk that fit.
+            let mut k = 0u64
+            let mut used = 2u64
+            let mut p = prev
+            while k < c.n {
+                let Some((s, q)) = status(r, at + k, p) else {
+                    break
+                }
+                let size: u64 = int.widen(s)
+                if packet_size(cost + used + size) > max {
+                    break
+                }
+                used += size
+                p = q
+                k += 1
+            }
+            if k == 0 {
+                break
+            }
+            limit = at + k
+            continue
+        }
+        cost += c.cost
+        at += c.n
+        prev = c.prev
+    }
+    let end = at
+    if end == start {
+        let Some((s, _)) = status(r, start, base) else {
+            fail("the first status has no symbol")
+        }
+        let size: u64 = int.widen(s)
+        return Error(Capacity(requested: packet_size(2 + size), available: max))
+    }
+    let size = packet_size(cost)
+    let spare = list.capacity(out) - list.len(out)
+    if size > spare {
+        return Error(Capacity(requested: size, available: spare))
+    }
+    list.push(mut out, 0x8fu8)
+    list.push(mut out, RTPFB)
+    let words: u16 = int.narrow(size / 4 - 1)
+    list.put_word_be(mut out, words)
+    list.put_word_be(mut out, sender)
+    list.put_word_be(mut out, media)
+    let first: u16 = int.truncate(start)
+    let count: u16 = int.narrow(end - start)
+    list.put_word_be(mut out, first)
+    list.put_word_be(mut out, count)
+    let wire: u32 = int.narrow(reference & 0xffffff)
+    list.push(mut out, int.truncate(wire >> 16))
+    list.push(mut out, int.truncate(wire >> 8))
+    list.push(mut out, int.truncate(wire))
+    list.push(mut out, r.count)
+    at = start
+    prev = base
+    while at < end {
+        let Some(c) = choose(r, at, end, prev) else {
+            fail("a planned chunk has no symbol")
+        }
+        list.put_word_be(mut out, c.word)
+        at += c.n
+        prev = c.prev
+    }
+    prev = base
+    i = start
+    while i < end {
+        let a = r.ring[i % slots]
+        if a.tag == i + 1 {
+            let d = a.q - prev
+            if d >= 0 && d <= 255 {
+                list.push(mut out, int.narrow(d))
+            } else {
+                // A large delta as a two's-complement 16-bit value.
+                let bits: u16 = int.narrow(if d < 0 {
+                    d + 65536
+                } else {
+                    d
+                })
+                list.put_word_be(mut out, bits)
+            }
+            prev = a.q
+        }
+        i += 1
+    }
+    list.fill(mut out, size - 12 - 8 - cost, 0u8)
+    r.next = end
+    r.reported = true
+    r.count = int.wrapping_add(r.count, 1u8)
+    Ok(size)
+}

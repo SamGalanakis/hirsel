@@ -426,14 +426,20 @@ pub fn try_encode_with[T](out: Outbound, coding: codec.Codec[T], x: T, n: u64) -
 
 /// Writes a binary payload after the header. n is its exact encoded length.
 pub fn try_encode_parts(out: Outbound, n: u64, append: scoped fn(mut Bytes) -> Result[(), u16]) -> Result[Bytes, Error] {
-    if n > out.max { return Error(Protocol(1009)) }
-    if out.role == Client { return Error(Configuration) }
+    if n > out.max {
+        return Error(Protocol(1009))
+    }
+    if out.role == Client {
+        return Error(Configuration)
+    }
     let mut b: Bytes = list.new()
     list.try_reserve(mut b, n + 14) ?=> Allocation
     websocket.binary_head(out.encoder, n, mut b) ?=> Protocol
     let start = list.len(b)
     append(mut b) ?=> Protocol
-    if list.len(b) - start != n { return Error(Protocol(1011)) }
+    if list.len(b) - start != n {
+        return Error(Protocol(1011))
+    }
     Ok(take b)
 }
 
@@ -568,7 +574,7 @@ pub fn decode_buffered(mut r: Reader) -> Result[Option[websocket.Event], Error] 
 
 /// Bytes lent per receive. A reader holds a loan only between readiness and
 /// the point where its decoded bytes are used up or settled.
-const SCRATCH: u64 = 8192
+pub const RECEIVE_LOAN_BYTES: u64 = 8192
 
 /// The unread bytes of input from at, in storage of exactly their length.
 fn unread(input: Bytes, at: u64) -> Result[Bytes, Error] {
@@ -625,10 +631,10 @@ pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
             // The loan is the reader's own input, released by assignment, so
             // nothing here is promoted to frame storage and the reader's task
             // gives its stack back while it waits (ir returnable.rs).
-            if let Error(c) = list.try_reserve(mut r.input, SCRATCH) {
+            if let Error(c) = list.try_reserve(mut r.input, RECEIVE_LOAN_BYTES) {
                 return Error(Allocation(c))
             }
-            match host.recv_bounded(mut r.half, mut r.input, SCRATCH, read_until) {
+            match host.recv_bounded(mut r.half, mut r.input, RECEIVE_LOAN_BYTES, read_until) {
                 Ok(0) => return Error(Eof),
                 Ok(_) => return Ok(()),
                 Error(TimedOut) => if !expired(read_until) {
@@ -832,7 +838,7 @@ pub fn server_with_site_report(take socket: Socket, take slot: Pending, peer: Ip
     }
     let Request(writer: take output, input: take input, head: take head, path_end, deadline, ..) = take request
     let mut writer = take output
-    wsock_site.serve(mut writer, deadline, option.unwrap(site), list.slice(input, head.target.start, path_end), fetch, head_only, order.min(SCRATCH, config.max_frame), report)?
+    wsock_site.serve(mut writer, deadline, option.unwrap(site), list.slice(input, head.target.start, path_end), fetch, head_only, order.min(RECEIVE_LOAN_BYTES, config.max_frame), report)?
     Ok(None)
 }
 

@@ -252,8 +252,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     let serving_total = match serving_bytes(wire_config, limit, n_place) { Ok(total) => total, Error(cap) => return Error(Full(cap)) }
     let serve_slots = serve_inbox_capacity(limit)
     // The supervisor allocates this channel before the serving task starts.
-    // OwnerReady has the largest message: its tag, id and two senders cost 64 B.
-    let serving_reserve = serving_total - (64u64 + serve_slots * 64u64)
+    let serving_reserve = serving_total - option.unwrap(charge.channel(bytes[ServeInput], serve_slots))
     let (serve_to, inbox_serve): (Sender[ServeInput], Receiver[ServeInput]) = channel.new(serve_slots)
     let initial: Option[DrainWindow] = None
     let root = arc.new(initial)
@@ -3816,25 +3815,24 @@ type New: codec { balance: u64, bonus: u64 = 7u64 }
 
 pub const WIRE_OWNER_LIMIT: u64 = 10000u64
 pub const WIRE_OWNER_FLOOR: u64 = 65536u64
-const WIRE_OWNER_TASK_BYTES: u64 = 320u64
 const WIRE_OVERHEAD: u64 = 67108864u64
 const WIRE_SESSION_CEILING: u64 = 16777216u64
 pub const WIRE_POOL_BYTES: u64 = 384u64 * 1024u64 * 1024u64
+const WIRE_STANDALONE_SLOTS: u64 = 2u64
 pub type WireConfig: send { n_pool: u64, n_granted: u64, max_subs: u64, socket: std.wsock.Config, q: u64, budget: u64, n_service: u64, site: Option[std.wsock.Site] }
 
 pub fn wire_defaults(n_service: u64) -> WireConfig {
     WireConfig(n_pool: WIRE_POOL_BYTES, n_granted: 0u64, max_subs: 128u64, socket: std.wsock.defaults(), q: 4, budget: 1048576, n_service: n_service, site: None)
 }
 
-fn wire_round(n: u64) -> u64 { (n + 7u64) & 0xfffffffffffffff8u64 }
+fn wire_owner_task_bytes() -> u64 { option.unwrap(charge.task(bytes[Result[(), std.wsock.Error]], 0u64)) }
+fn wire_round(n: u64) -> u64 { option.unwrap(charge.round(n)) }
 
-// The reader child's own state, plus its receive loan (std.wsock.refill's 8192
-// bytes) and, while settle copies the unread tail out of that loan, the tail's
-// storage of at most 8192 bytes more (§3, Reader child).
-const WSOCK_LOAN: u64 = 8192u64
-pub fn reader_bytes() -> u64 { 4096u64 + 2u64 * WSOCK_LOAN }
+// The reader grant covers its state, the receive loan and a same-sized settling buffer.
+pub fn reader_bytes() -> u64 { 4096u64 + 2u64 * wire_round(std.wsock.RECEIVE_LOAN_BYTES) }
 
 fn wire_outcome_reserve(c: WireConfig) -> u64 {
+    // The largest fixed encoded Done is a 12-byte stream/position prefix and a 24-byte outcome.
     (1u64 + c.q) * (DONE_MAX + 36u64)
 }
 
@@ -3847,7 +3845,11 @@ fn wire_variable_peak(c: WireConfig) -> u64 {
     let units = 1u64 + c.q
     // Read credits bound typed inbox/deferred values. Head positions retain
     // a key and argument each, both at most one frame, plus stream and caller.
-    let input = units * (4u64 * m + 128u64) + units * (2u64 * m + 256u64)
+    let frames = option.unwrap(charge.seq(bytes[(Frame, WirePending)], units))
+    let requests = option.unwrap(charge.seq(bytes[Request], units))
+    let caller = wire_round(SUBJECT_MAX)
+    let stream = wire_round(SUBJECT_MAX + 6u64)
+    let input = units * (6u64 * m + caller + stream) + frames + requests
     let transport = wire_round(3u64 * m / 2u64) + 2u64 * wire_round(m + 14u64)
     let retained = 4u64 * m + 2u64 * c.budget + wire_outcome_reserve(c)
     input + transport + retained + wire_service_job_bytes(c) + 32768u64
@@ -3919,8 +3921,6 @@ pub fn dispatch[C: send](mut service: Service[C], take frame: Frame) -> Result[O
 
 pub fn writer_bytes() -> u64 { 4096u64 }
 
-// The owner result has charge-v1 size 32. Its 320-byte task
-// record is part of the floor, which also covers its child tasks.
 pub fn serving_bytes(c: WireConfig, owners: u64, n_place: u64) -> Result[u64, Capacity] {
     if c.n_granted > WIRE_SESSION_CEILING { return Error(Capacity(requested: c.n_granted, available: WIRE_SESSION_CEILING)) }
     if owners > WIRE_OWNER_LIMIT { return Error(Capacity(requested: owners, available: WIRE_OWNER_LIMIT)) }
@@ -4222,18 +4222,18 @@ fn wire_close_payload(code: u16) -> Bytes {
 
 type WireOwner[C: send]: send { upgraded: std.wsock.Upgraded, service: Box[Service[C]], publisher: Sender[PubIn], config: WireConfig, clock: Clock, tasks: Tasks, managed: Option[OwnerControl], allocate: Option[own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]] }
 
-fn wire_connection_pool_bytes(c: WireConfig) -> u64 {
-    let peak = wire_variable_peak(c)
-    if c.n_pool < peak { c.n_pool } else { peak }
-}
+fn wire_connection_pool_bytes(c: WireConfig) -> u64 { order.min(c.n_pool, wire_variable_peak(c)) }
 
-// Serves an already upgraded connection. W3c constructs the service at Hello;
-// its sender joins the one publisher inbox lazily at the first Subscribe.
+// W3c constructs the service at Hello and joins the publisher at the first Subscribe.
 pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded, take service: Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16], to_publisher: Sender[PubIn], c: WireConfig, clock: Clock) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
     let boxed = box.new(take service)
     let x = WireOwner(upgraded: take upgraded, service: take boxed, publisher: channel.sender(to_publisher), config: c, clock: clock, tasks: tasks, managed: None, allocate: Some(take allocate))
     let run: fn(take WireOwner[C]) -> Result[(), std.wsock.Error] waits = wire_connection_owner
-    let allowance = if wire_configuration(c) { WIRE_OWNER_FLOOR - WIRE_OWNER_TASK_BYTES + c.n_granted + wire_connection_pool_bytes(c) + 8192u64 } else { 0u64 }
+    let allowance = if wire_configuration(c) {
+        let pool = option.unwrap(charge.task(bytes[()], wire_connection_pool_bytes(c)))
+        let inbox = option.unwrap(charge.channel(bytes[WireAllocation[C]], WIRE_STANDALONE_SLOTS))
+        WIRE_OWNER_FLOOR - wire_owner_task_bytes() + c.n_granted + pool + inbox
+    } else { 0u64 }
     Ok(task.spawn(tasks, bytes allowance, take x, run))
 }
 
@@ -4246,8 +4246,7 @@ fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.
     let c = x.config
     let mut owner = take x
     let allocate = match replace(mut owner.allocate, None) { Some(take a) => take a, None => return Error(Configuration) }
-    // The reader and owner each wait for their single allocation request.
-    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(owner.tasks, c, owner.clock, wire_connection_pool_bytes(c), 2u64, take allocate)
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(owner.tasks, c, owner.clock, wire_connection_pool_bytes(c), WIRE_STANDALONE_SLOTS, take allocate)
     let (take to, take holding) = match take allocated {
         Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)),
     }
@@ -5110,7 +5109,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     service: take boxed, publisher: channel.sender(pub_to), c: config, clock: time, tasks: tasks,
                     control: take control, completion: take completion, allocation: channel.sender(allocation), report: match lifecycle { Some(life) => life.report, None => None })
                 let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
-                let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - WIRE_OWNER_TASK_BYTES + config.n_granted), take job, run)
+                let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - wire_owner_task_bytes() + config.n_granted), take job, run)
                 map.insert(mut owners, id, SessionTask(handle: take handle, wake: None))
             },
         }
@@ -5376,7 +5375,7 @@ fn wire_output_charge(f: Frame, reserved: bool) -> u64 {
 }
 
 fn wire_queued_bytes(output: List[WireOutput]) -> u64 {
-    let mut size = wire_round(169u64 * list.capacity(output))
+    let mut size = option.unwrap(charge.seq(bytes[WireOutput], list.capacity(output)))
     for o in output {
         size += wire_output_charge(o.frame, list.len(o.marks) != 0u64) + cached_charge(o.tapes)
     }

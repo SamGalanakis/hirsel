@@ -7,10 +7,34 @@ fn l15_timers(tasks: Tasks) waits {
     let key = http_law_key(reg.exported[0u64])
     let cfg = RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 6u64, arg_max: 1024u64)
     let reserve = option.unwrap(relay_bytes(reg, cfg))
+    // Ten RelayEvents cost 64 + 10 * 185. The empty credits cost 64.
+    // HeadLease costs 56 fields + 32 cause, two 32-byte roots and three 16-byte Arc nodes.
+    // Two send slots cost 2 * 56, and their alarms cost 2 * (288 + 4096).
+    // Each position costs 72 record + 16 owner seed + 64 subject + 2 * 72 streams
+    // + 8192 reply + 1024 argument + the longest rounded registry key.
+    // Three delivered buffers cost 3 * 8192. Startup adds 288 for the task record,
+    // 64 + 48 for its ready channel and round8(6 * 65) = 392 for pending tells.
+    let mut longest = 0u64
+    for entry in reg.exported {
+        // Each key is the exported identity followed by two eight-byte codec fingerprints.
+        let length = list.len(entry.described.identity) + 16u64
+        longest = order.max(longest, length)
+    }
+    let expected = 93498u64 + 6u64 * ((longest + 7u64) / 8u64 * 8u64)
+    if reserve != expected { fail("L15 relay allowance differs from its hand derivation") }
     let mut maximum: Bytes = list.with_capacity(MAX_RETURNED_BYTES)
     list.fill(mut maximum, MAX_RETURNED_BYTES, b'x')
     let returned = Returned(take maximum)
     let (head_to, head_from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(6u64)
+    let (pub_to, pub_from): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
+    let short_start = bound bytes (expected - 1u64) { start_relay(reg, head_to, pub_to, time, tasks, cfg) }
+    if let Ok(Error(Overloaded)) = short_start {} else { fail("L15 relay admitted one byte below its allowance") }
+    if let Error(Empty) = channel.try_receive(pub_from) {} else { fail("L15 refused relay joined the publisher") }
+    let started = bound bytes expected { start_relay(reg, head_to, pub_to, time, tasks, cfg) }
+    let (take endpoint, take owner_task) = result.unwrap(result.unwrap(take started))
+    if let Ok(PubIn(e: RelayJoined(_))) = channel.try_receive(pub_from) {} else { fail("L15 admitted relay did not join the publisher") }
+    let _ = std.task.cancel_join(take owner_task)
+    let _ = take endpoint
     let checked = bound bytes reserve {
         let (to, from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(option.unwrap(relay_inbox_size(cfg)))
         let own_head = result.unwrap(head_lease(LifecycleHead(channel.sender(head_to))))

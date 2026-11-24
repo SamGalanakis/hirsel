@@ -1,10 +1,3 @@
-const RELAY_SEND_RECORD: u64 = 64u64
-const RELAY_TIMER_BYTES: u64 = 4384u64
-const RELAY_POSITION_RECORD: u64 = 72u64
-const RELAY_OWNER_SEED_BYTES: u64 = 16u64
-const RELAY_INBOX_ITEM: u64 = 256u64
-const RELAY_TELL_ITEM: u64 = 64u64
-const RELAY_OWNER_BYTES: u64 = 128u64
 const RELAY_POSITIONS_PER_CALLER: u64 = 5u64
 
 pub type RelayConfig: send {
@@ -62,32 +55,45 @@ fn relay_inbox_size(c: RelayConfig) -> Option[u64] {
     int.checked_add(int.checked_add(c.http_max, c.sends_max)?, c.positions_max)
 }
 
-fn relay_round(bytes_reserved: u64) -> Option[u64] {
-    Some(int.checked_add(bytes_reserved, 7u64)? & 0xfffffffffffffff8u64)
+fn head_lease_bytes() -> u64 {
+    let fields = bytes[(WireHead, Latest[HeadLife], Arc[HeadLife], Latest[OwnerNumber])]
+    let block = option.unwrap(charge.block(fields, 0u64))
+    let roots = 2u64 * option.unwrap(charge.latest())
+    let life = 2u64 * option.unwrap(charge.counted(bytes[HeadLife]))
+    block + roots + life + option.unwrap(charge.counted(bytes[OwnerNumber]))
 }
 
 fn relay_position_bytes(arg_max: u64, key_max: u64) -> Option[u64] {
     // One stream backing for the slot table and one for the request, both made here.
-    let stream = relay_round(SUBJECT_MAX + 6u64)?
-    let fixed = RELAY_POSITION_RECORD + RELAY_OWNER_SEED_BYTES + SUBJECT_MAX + 2u64 * stream + DONE_MAX
-    let payload = int.checked_add(relay_round(arg_max)?, relay_round(key_max)?)?
+    let stream = charge.round(SUBJECT_MAX + 6u64)?
+    let seed = charge.counted(bytes[OwnerNumber])?
+    let fixed = seed + charge.round(SUBJECT_MAX)? + 2u64 * stream + charge.round(DONE_MAX)?
+    let payload = int.checked_add(charge.round(arg_max)?, charge.round(key_max)?)?
     int.checked_add(fixed, payload)
 }
 
 fn relay_child_bytes(c: RelayConfig, key_max: u64) -> Option[u64] {
-    let inbox = int.checked_mul(relay_inbox_size(c)?, RELAY_INBOX_ITEM)?
-    let sends = int.checked_mul(c.sends_max, RELAY_SEND_RECORD + RELAY_TIMER_BYTES)?
+    let inbox = charge.channel(bytes[RelayEvent], relay_inbox_size(c)?)?
+    let credits = charge.channel(bytes[()], c.http_max)?
+    let sends = charge.seq(bytes[RelaySend], c.sends_max)?
+    let timers = int.checked_mul(c.sends_max, charge.task(bytes[()], 4096u64)?)?
+    let records = charge.seq(bytes[RelayPosition], c.positions_max)?
     let positions = int.checked_mul(c.positions_max, relay_position_bytes(c.arg_max, key_max)?)?
-    let delivered = int.checked_mul(int.checked_add(c.http_max, 1u64)?, DONE_MAX)?
-    let mut total = RELAY_OWNER_BYTES + 128u64
-    for part in [inbox, sends, positions, delivered] { total = int.checked_add(total, part)? }
+    let delivered = int.checked_mul(int.checked_add(c.http_max, 1u64)?, charge.round(DONE_MAX)?)?
+    let mut total = head_lease_bytes()
+    for part in [inbox, credits, sends, timers, records, positions, delivered] { total = int.checked_add(total, part)? }
     Some(total)
 }
 
 pub fn relay_bytes[G: send, H: shareable + inert + send](r: Registry[G, H], c: RelayConfig) -> Option[u64] {
-    let child = relay_child_bytes(c, relay_key_max(r))?
-    let pending_bytes = int.checked_mul(c.positions_max, RELAY_TELL_ITEM)?
-    int.checked_add(int.checked_add(child, pending_bytes)?, 400u64)
+    relay_start_bytes(c, relay_child_bytes(c, relay_key_max(r))?)
+}
+
+fn relay_start_bytes(c: RelayConfig, child: u64) -> Option[u64] {
+    let owner = charge.task(bytes[()], child)?
+    let ready = charge.channel(bytes[Relay], 1u64)?
+    let pending = charge.seq(bytes[Option[RelayTell]], c.positions_max)?
+    int.checked_add(int.checked_add(owner, ready)?, pending)
 }
 
 // The place starts the relay beside the head and publisher. It posts the join in
@@ -98,13 +104,17 @@ pub fn start_relay[G: send, H: shareable + inert + send](r: Registry[G, H], head
     let key_max = relay_key_max(r)
     let Some(child_bytes) = relay_child_bytes(c, key_max) else { return Error(Overloaded) }
     let Some(inbox_size) = relay_inbox_size(c) else { return Error(Overloaded) }
-    let (to, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
-    let setup = RelayStart(to: take to, head: channel.sender(head), clock: clock, tasks: tasks, config: c, inbox_size: inbox_size, key_max: key_max)
-    let child = task.try_spawn(tasks, bytes child_bytes, take setup, relay_owner) ?=> |(_, _)| Overloaded
-    let endpoint = channel.receive(from) ?=> |_| Overloaded
-    let pending: List[Option[RelayTell]] = list.with_capacity(c.positions_max)
-    channel.send(pub_to, PubIn(e: RelayJoined(take pending))) ?=> |_| Overloaded
-    Ok((take endpoint, take child))
+    let Some(total) = relay_start_bytes(c, child_bytes) else { return Error(Overloaded) }
+    let started: Result[Result[(Relay, Task[()]), Refusal], Capacity] = bound bytes total {
+        let (to, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
+        let setup = RelayStart(to: take to, head: channel.sender(head), clock: clock, tasks: tasks, config: c, inbox_size: inbox_size, key_max: key_max)
+        let child = task.try_spawn(tasks, bytes child_bytes, take setup, relay_owner) ?=> |(_, _)| Overloaded
+        let endpoint = channel.receive(from) ?=> |_| Overloaded
+        let pending: List[Option[RelayTell]] = list.with_capacity(c.positions_max)
+        channel.send(pub_to, PubIn(e: RelayJoined(take pending))) ?=> |_| Overloaded
+        Ok((take endpoint, take child))
+    }
+    started ?=> |_| Overloaded
 }
 
 pub fn relay_endpoint(r: Relay) -> Relay {

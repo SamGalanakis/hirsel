@@ -20,6 +20,41 @@ impl LawReport {
             "unobserved"
         }
     }
+
+    pub(crate) fn print(summary: &str) {
+        for line in summary
+            .lines()
+            .skip(1)
+            .filter(|line| *line != "end" && !line.starts_with('\t'))
+        {
+            if let Some(witness) = line.strip_prefix("witness\t") {
+                let Some((count, label)) = witness.split_once('\t') else {
+                    continue;
+                };
+                let Some(label) = witness_label(label) else {
+                    continue;
+                };
+                if label.is_empty() || label.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                    println!("  sometimes {label:?} {count}");
+                } else {
+                    println!("  sometimes {label} {count}");
+                }
+            } else {
+                println!("  {line}");
+            }
+        }
+    }
+}
+
+fn witness_label(hex: &str) -> Option<String> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    String::from_utf8(bytes).ok()
 }
 
 pub(super) fn law_file(command: &mut Command) -> io::Result<(tempfile::TempDir, PathBuf)> {

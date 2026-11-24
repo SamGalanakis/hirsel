@@ -535,6 +535,11 @@ pub fn config() -> Config {
     Config(seed: 0, cases: 100, max_choices: 4096, max_rejects: 1000, max_shrinks: 1000, gen_steps: 1000000, case_steps: 10000000, case_bytes: 262144, sim_seed: None, replay: None)
 }
 
+/// Returns `cond`. The law observer counts true calls under `label`.
+pub fn sometimes(label: String, cond: bool) -> bool {
+    cond
+}
+
 pub fn replay(take c: Config, text: String) -> Config {
     let mut next = take c
     next.replay = Some(string.from(text))

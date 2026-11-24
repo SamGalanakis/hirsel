@@ -36,6 +36,21 @@ impl Function<'_, '_, '_> {
         hook: Option<&c::law::Hook>,
     ) -> Result<()> {
         use hirsel_core_layout::law;
+        if let Some(hook) = hook
+            && let Some(predicate) = hook.predicate
+        {
+            let label = self.get(hook.value);
+            let predicate = self.get(predicate);
+            self.calls.c(
+                self.object,
+                &mut self.b,
+                "hirsel_core_law_witness",
+                &[Ty::Ptr, Ty::Scalar(Scalar::Bool)],
+                &[],
+                &[label, predicate],
+            )?;
+            return Ok(());
+        }
         let callee = self
             .b
             .ins()

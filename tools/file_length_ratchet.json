@@ -84,7 +84,9 @@
     "reason": "m3-s3-slots-2010"
   },
   "core/std/prop.hirsel": {
-    "lines": 1743
+    "lines": 1748,
+    "raise_revision": 1,
+    "reason": "verify-observer-2037"
   },
   "core/std/regex.hirsel": {
     "lines": 14386,
@@ -216,8 +218,8 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 2770,
-    "raise_revision": 2,
+    "lines": 2813,
+    "raise_revision": 3,
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/tests.rs": {

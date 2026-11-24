@@ -69,8 +69,8 @@ its row.
 - `std.model.explore`, `check`, `conforms` and `conforms_check`
   ([model](../core/std/api/model.md)).
 
-When one of them calls another, for example `check` calling `search`, only the outermost
-call is observed.
+When one engine call invokes another, for example `check` calling `search`, the observer
+records the outermost outcome. Explicit `sometimes` witnesses count even inside an engine call.
 
 **What is observed.** The observer reads the outcome when the engine settles it, on
 return or, for a failing check, immediately before the engine raises its own failure:

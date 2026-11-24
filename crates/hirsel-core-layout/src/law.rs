@@ -8,6 +8,7 @@ pub const SETTLED_CHECK: u64 = 2;
 pub const LEAVE: u64 = 3;
 pub const CORPUS_FAILURE: u64 = 4;
 pub const DELEGATE: u64 = 5;
+pub const WITNESS: u64 = 6;
 
 pub const ALL: u64 = 0;
 pub const SEARCH: u64 = 1;

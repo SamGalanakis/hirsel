@@ -1457,9 +1457,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                         match outcome.laws {
                             crate::test_run::LawReport::Observed(summary) => {
                                 if !json {
-                                    for line in summary.lines().skip(1).filter(|line| *line != "end" && !line.starts_with('\t')) {
-                                        println!("  {line}");
-                                    }
+                                    crate::test_run::LawReport::print(&summary);
                                 }
                                 row["law_observation"] = summary.into();
                             }

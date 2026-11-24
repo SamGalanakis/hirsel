@@ -354,8 +354,6 @@ During shrinking, a candidate whose generator fails is rejected.
 
 ## Witnesses and law observation
 
-Planned for Verification Phase 1.3.
-
 ```hirsel
 pub fn sometimes(label: String, cond: bool) -> bool
 ```
@@ -372,8 +370,8 @@ and `check_tasks_corpus`, and reports a strength row (`held`, `truncated`, `vacu
 `Held(0, d)` with a catch-all arm still passes, but its row says so. Nothing here changes
 `AllOutcome`, `Outcome` or any report line.
 
-Version note (2026-11-24, verify-phase-spec-2034): adds planned `sometimes` and law
-observation. Existing signatures and outcomes are unchanged.
+Version note (2026-11-24, verify-observer-2037): adds `sometimes` witnesses to the
+recording build.
 
 ## Report and replay
 

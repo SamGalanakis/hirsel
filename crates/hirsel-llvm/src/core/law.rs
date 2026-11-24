@@ -32,6 +32,17 @@ impl FunctionEmitter<'_> {
         hook: Option<&hirsel_core_ir::law::Hook>,
     ) {
         use hirsel_core_layout::law;
+        if let Some(hook) = hook
+            && let Some(predicate) = hook.predicate
+        {
+            let label = self.numeric(hook.value);
+            let predicate = self.numeric(predicate);
+            self.runtime_void(
+                "hirsel_core_law_witness",
+                &[ptr(label), arg(Type::I8, predicate)],
+            );
+            return;
+        }
         let (value, descriptor, len) = if let Some(hook) = hook {
             let name = format!("hirsel.law.{}.{operation}", self.function.unwrap().0);
             self.items.global(Global {

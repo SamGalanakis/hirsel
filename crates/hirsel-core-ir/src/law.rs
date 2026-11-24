@@ -21,13 +21,14 @@ pub fn observes(definition: &DefPath) -> bool {
     callee(definition).is_some()
         || matches!(
             prop_name(definition),
-            Some("finish_check" | "corpus_report")
+            Some("finish_check" | "corpus_report" | "sometimes")
         )
 }
 
 pub struct Hook {
     pub operation: u64,
     pub value: ValueId,
+    pub predicate: Option<ValueId>,
     pub words: Vec<u64>,
 }
 
@@ -78,6 +79,7 @@ impl Hooks {
             let entry = Hook {
                 operation: law::ENTER,
                 value: params[usize::from(signature.dest.is_some()) + i],
+                predicate: None,
                 words: ["cases", "max_choices", "max_rejects", "gen_steps"]
                     .map(|name| field(module, layouts, config, name))
                     .to_vec(),
@@ -85,6 +87,7 @@ impl Hooks {
             let result = matches!(callee, law::ALL | law::SEARCH).then(|| Hook {
                 operation: law::OUTCOME,
                 value: params[0],
+                predicate: None,
                 words: outcome(
                     module,
                     layouts,
@@ -99,6 +102,19 @@ impl Hooks {
             });
         }
         let (operation, parameter) = match prop_name(definition)? {
+            "sometimes" => {
+                return Some(Self {
+                    callee: None,
+                    start,
+                    result: None,
+                    entry: Hook {
+                        operation: law::WITNESS,
+                        value: params[0],
+                        predicate: Some(params[1]),
+                        words: Vec::new(),
+                    },
+                });
+            }
             "finish_check" => (law::SETTLED_CHECK, 0),
             "corpus_report" => (law::CORPUS_FAILURE, 2),
             _ => return None,
@@ -121,6 +137,7 @@ impl Hooks {
             entry: Hook {
                 operation,
                 value: params[usize::from(signature.dest.is_some()) + parameter],
+                predicate: None,
                 words,
             },
             result: None,

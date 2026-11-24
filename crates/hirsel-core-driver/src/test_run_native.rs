@@ -923,6 +923,49 @@ fn prop_law_recorder_captures_settled_outcomes() {
 }
 
 #[test]
+fn prop_witness_counts_include_zero_and_spawned_tasks() {
+    let law = PackageLaw::new();
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\ngrants = [\"Tasks\"]");
+    law.write("app/main.hirsel", r#"
+fn sometimes_big(x: u64) -> Result[(), String] {
+    if std.prop.sometimes("big", x > 100) { Error(string.from("outside range")) } else { Ok(()) }
+}
+
+@test
+fn no_big_numbers() -> Result[(), ()] {
+    match std.prop.all(std.prop.config(), std.prop.u64_in(0, 9), sometimes_big) {
+        Held(10, 0) => Ok(()),
+        _ => Error(()),
+    }
+}
+
+fn observe_child(take input: u64) -> Result[(), String] {
+    if std.prop.sometimes("t", true) { Ok(()) } else { Error(string.from("lost condition")) }
+}
+
+fn spawn_witness(take sample: std.prop.Case[u64]) -> Result[(), String] waits {
+    let input = sample.value
+    let child = task.spawn(sample.tasks, bytes 65536, take input, observe_child)
+    match task.join(take child) {
+        Ok(Ok(())) => Ok(()),
+        _ => Error(string.from("child failed")),
+    }
+}
+
+@test
+fn across_tasks(tasks: Tasks) -> Result[(), ()] waits {
+    let mut c = std.prop.config()
+    c.cases = 4
+    std.prop.check_tasks(tasks, c, std.prop.u64_in(0, 9), spawn_witness)
+}
+"#);
+    for jobs in ["1", "2", "4"] {
+        let stdout = PackageLaw::pass(law.run(&["test", "app", "--laws", "-j", jobs]));
+        assert_eq!(stdout.lines().filter(|line| line.trim_start().starts_with("sometimes ")).map(str::trim).collect::<Vec<_>>(), ["sometimes t 4", "sometimes big 0"], "-j {jobs}: {stdout}");
+    }
+}
+
+#[test]
 fn package_run_uses_explicit_checkout_std_source() {
     let mut law = PackageLaw::new();
     law.write("core/std/source_probe.hirsel", r#"

@@ -12,6 +12,7 @@ static ACTIVE: Mutex<Option<Observation>> = Mutex::new(None);
 struct Observation {
     calls: BTreeMap<usize, ActiveCall>,
     rows: Vec<Row>,
+    witnesses: BTreeMap<String, u64>,
 }
 
 struct ActiveCall {
@@ -45,11 +46,13 @@ impl Run {
         *ACTIVE.lock().unwrap() = Some(Observation {
             calls: BTreeMap::new(),
             rows: Vec::new(),
+            witnesses: BTreeMap::new(),
         });
         Some(Self(path.into()))
     }
 
-    fn write(&self, rows: &[Row]) -> std::io::Result<()> {
+    fn write(&self, observation: &Observation) -> std::io::Result<()> {
+        let rows = &observation.rows;
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -98,6 +101,13 @@ impl Run {
                 row.site, row.failure
             )?;
         }
+        for (label, count) in &observation.witnesses {
+            write!(output, "witness\t{count}\t")?;
+            for byte in label.bytes() {
+                write!(output, "{byte:02x}")?;
+            }
+            writeln!(output)?;
+        }
         writeln!(output, "end")?;
         output.flush()
     }
@@ -106,8 +116,42 @@ impl Run {
 impl Drop for Run {
     fn drop(&mut self) {
         if let Some(observation) = ACTIVE.lock().unwrap().take() {
-            let _ = self.write(&observation.rows);
+            let _ = self.write(&observation);
         }
+    }
+}
+
+/// Read a witness label while its loan is live. Only copied label bytes and the
+/// observed count can outlive this hook.
+///
+/// # Safety
+/// `label` borrows an initialized String carrier and its UTF-8 bytes through the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_law_witness(label: *const u8, cond: u8) {
+    let mut active = ACTIVE.lock().unwrap();
+    let Some(observation) = active.as_mut() else {
+        return;
+    };
+    // SAFETY: String uses the native sequence carrier (data pointer, byte length, capacity).
+    let label = unsafe {
+        let len = label.add(8).cast::<usize>().read_unaligned();
+        if len == 0 {
+            ""
+        } else {
+            let bytes = label.cast::<*const u8>().read_unaligned();
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(bytes, len))
+        }
+    };
+    if let Some(count) = observation.witnesses.get_mut(label) {
+        if let Some(next) = count.checked_add(u64::from(cond != 0)) {
+            *count = next;
+        } else {
+            *active = None;
+        }
+    } else {
+        observation
+            .witnesses
+            .insert(label.to_owned(), u64::from(cond != 0));
     }
 }
 

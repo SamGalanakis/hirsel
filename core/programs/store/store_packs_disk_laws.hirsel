@@ -91,7 +91,7 @@ fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
     let installed = empty_paged_lists()
     let mut manifest = page_manifest_empty()
     let carried: List[u64] = list.new()
-    let cut_plan = plan_page_cut(base, holders, installed, list.new(), empty_lineage(), Some(view carried), 1, 512, map.new(), None, mut next_stamp)?
+    let cut_plan = plan_page_cut(base, holders, installed, no_cut_queue(), empty_lineage(), Some(view carried), 1, 512, map.new(), None, mut next_stamp)?
     let mut buffers = cut_output_buffers(cut_plan, page_manifest_file_size(page_manifest_size(manifest), manifest.fence), page_manifest_file_size(MANIFEST_LIMIT, 1))?
     let layout = write_page_cut(directory, id, take cut_plan, mut buffers)?
     manifest.generation = 2

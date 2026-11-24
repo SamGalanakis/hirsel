@@ -318,7 +318,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[(PageDisk, HistoryLocator, u64), Error] waits {
         let cut_plan = {
             let installed = disk_state(db).pages
-            plan_page_cut(base, participants.holders, installed.lists, list.new(), cut_lineage_rows(db, delta, participants.branches, list.new())?, None, lane.next_pack, pack_bytes, marks, relocated, mut stamp)?
+            plan_page_cut(base, participants.holders, installed.lists, no_cut_queue(), cut_lineage_rows(db, delta, participants.branches, list.new())?, None, lane.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
         let mut buffers = cut_output_buffers(cut_plan, manifest_bytes, limit)?
         // Once upload starts, this epoch must never issue these numbers again,

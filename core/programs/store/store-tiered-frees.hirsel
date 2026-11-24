@@ -86,6 +86,16 @@ type TieredDrainKill: send {
 }
 
 fn tiered_drain_page(cut: TieredPageSource, ptr: std.page.PagePtr, branch_id: u32, mut queue: TieredDeferredQueue) -> Result[(), Error] waits {
+    let mut children: List[DeferredFree] = list.new()
+    queue_page_children(cut, ptr, branch_id, mut children)?
+    for take child in take children {
+        let _ = enqueue_tiered_free(mut queue, take child)?
+    }
+    Ok(())
+}
+
+// A drained page hands its child pages, or a leaf its blobs, to the queue.
+fn queue_page_children(cut: TieredPageSource, ptr: std.page.PagePtr, branch_id: u32, mut out: List[DeferredFree]) -> Result[(), Error] waits {
     let frame = fold_frame_at(cut, TieredPage(ptr))?
     let image = std.page.image_of(fold_page(frame))
     for slot in 0u64 .. std.page.count(image) {
@@ -95,7 +105,8 @@ fn tiered_drain_page(cut: TieredPageSource, ptr: std.page.PagePtr, branch_id: u3
             None => None,
         }
         if let Some(take child) = take edge {
-            let _ = enqueue_tiered_free(mut queue, DeferredFree(branch_id: branch_id, target: take child))?
+            capacity(list.try_reserve(mut out, 1))?
+            list.push(mut out, DeferredFree(branch_id: branch_id, target: take child))
         }
     }
     Ok(())
@@ -136,4 +147,63 @@ fn drain_tiered_frees(cut: TieredPageSource, mut queue: TieredDeferredQueue, rew
         list.push(mut killed, TieredDrainKill(branch_id: row.branch_id, frame: replaced))
     }
     Ok(take killed)
+}
+
+// T8 steps 3 and 4: the rows a cut adds at `deferred_next` onward, in order,
+// and the sequences its drain consumed, installed or added.
+type CutQueue: send {
+    added: List[DeferredFree],
+    drained: List[u64],
+    kills: List[TieredDrainKill]
+}
+
+fn no_cut_queue() -> CutQueue {
+    CutQueue(added: list.new(), drained: list.new(), kills: list.new())
+}
+
+fn queued_free(value: Bytes) -> DeferredFree {
+    let branch_id: u32 = list.word_le(value, 1)
+    let target = match value[0u64] {
+        0 => TieredPage(result.unwrap(std.page.decode_ptr(list.slice(value, 5, 41)))),
+        _ => TieredBlob(result.unwrap(std.page.decode_ref(list.slice(value, 5, 47)))),
+    }
+    DeferredFree(branch_id: branch_id, target: take target)
+}
+
+fn drain_queue_row(cut: TieredPageSource, seq: u64, row: DeferredFree, mut queue: CutQueue, mut pages: u64) -> Result[(), Error] waits {
+    let frame = match row.target {
+        TieredPage(ptr) => {
+            queue_page_children(cut, ptr, row.branch_id, mut queue.added)?
+            pages += 1
+            replaced_page(ptr)
+        },
+        TieredBlob(body) => replaced_blob(body),
+    }
+    capacity(list.try_reserve(mut queue.drained, 1))?
+    capacity(list.try_reserve(mut queue.kills, 1))?
+    list.push(mut queue.drained, seq)
+    list.push(mut queue.kills, TieredDrainKill(branch_id: row.branch_id, frame: frame))
+    Ok(())
+}
+
+// T8 step 4 (§13.6 "Deferred frees"): oldest first, up to `budget` pages of
+// the installed rows and then this cut's added rows, the first at `next_seq`.
+// A drained page's children join the end and may drain at this cut. Nothing
+// rewrites a row yet, because no compaction moves a Tiered frame.
+fn drain_cut_queue(cut: TieredPageSource, installed: Arc[std.page.Page], next_seq: u64, mut queue: CutQueue, budget: u64) -> Result[(), Error] waits {
+    let mut pages = 0u64
+    let mut cursor = std.page.cursor_open(arc.share(installed), None, true, false)
+    while pages < budget {
+        let Some(row) = std.page.cursor_next(mut cursor) else {
+            break
+        }
+        drain_queue_row(cut, list.word_be(row.key, 0), queued_free(row.value), mut queue, mut pages)?
+    }
+    let mut at = 0u64
+    while pages < budget && at < list.len(queue.added) {
+        let row: DeferredFree = clone(queue.added[at])
+        drain_queue_row(cut, next_seq + at, row, mut queue, mut pages)?
+        at += 1
+    }
+    Ok(())
 }

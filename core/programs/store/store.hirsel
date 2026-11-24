@@ -4887,7 +4887,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     let holders = sealed_cut_holders(take participants_held, staged)?
     let mut base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, staged.roots)?
     list_tiered_cut(mut base.locations, staged)?
-    let lineage_rows = settle_lineage_kills(cut_lineage_rows(db, delta, branches, staged.queued)?, db, delta, mut base.locations.packs)?
+    let lineage_rows = settle_lineage_kills(cut_lineage_rows(db, delta, branches, staged.queue.added)?, db, delta, staged.queue.kills, mut base.locations.packs)?
     over_ceiling(base.account, available_resident(db))?
     let manifest_bytes = cut_manifest_size(db, delta)
     let d = log_directory(db)?
@@ -4899,7 +4899,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     let attempt = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
         let cut_plan = {
             let installed = disk_state(db).pages
-            plan_page_cut(base, holders, installed.lists, staged.queued, lineage_rows, Some(view installed.carried), staged.next_pack, pack_bytes, marks, relocated, mut stamp)?
+            plan_page_cut(base, holders, installed.lists, staged.queue, lineage_rows, Some(view installed.carried), staged.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
         let mut buffers = cut_output_buffers(cut_plan, manifest_bytes, limit)?
         // A retry after emission reuses the segment created by the first attempt.

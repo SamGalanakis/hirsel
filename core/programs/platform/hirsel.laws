@@ -1,4 +1,5 @@
 hirsel.laws 1
+<<<<<<< HEAD
 platform@1/launcher/session_vectors src=643f08b75774b170 sig=943930fc32285757 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_genesis_recovers src=685ffce2afeb9fe9 sig=8101978df368745a run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_idle_unload src=44d2d72412e11e46 sig=db4e6d8754e45dd9 run=d58926ede9b57167 bug=- oracle=- rows=pending
@@ -11,6 +12,20 @@ platform@1/platform/activation_window_recovers src=6258c61b7c8d273a sig=b93e7f99
 platform@1/platform/bucket_activation_witness_distinguishes_prepared src=cc082b9fc99b3ee1 sig=2f3d862637ad8ff3 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 platform@1/platform/bucket_hand_install_adopts_at_12 src=eaaab1dc3308b19b sig=a89459ecd951557c run=dbf6722727633166 bug=- oracle=- rows=pending
 platform@1/platform/bucket_moved_activation_recovery src=3b0773b4464323f4 sig=b700b3c41bb743c4 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+=======
+platform@1/launcher/session_vectors src=643f08b75774b170 sig=a702e2a53f7d53fd run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_genesis_recovers src=685ffce2afeb9fe9 sig=fd691fc196f71265 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_idle_unload src=44d2d72412e11e46 sig=ec6325f5729e6fe9 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_one_head src=f7acc5a529061ae0 sig=69319602512cfb2b run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_reopen_keeps src=375ba1555a62d4cc sig=add0f0e671bd568d run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_route_during_unload src=16e06887135bce1a sig=cd5ae5ba6a912d84 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/local_laws/test_platform_serve_budgets src=75b96fbd5600f3bd sig=7da3a287dc32b948 run=ad4c20fab40b1abf bug=- oracle=- rows=pending
+platform@1/operator/operator_vectors src=c84873355210ce3b sig=df6dd695b80e8f4f run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+platform@1/platform/activation_window_recovers src=6258c61b7c8d273a sig=b93e7f9966f1aaa2 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+platform@1/platform/bucket_activation_witness_distinguishes_prepared src=cc082b9fc99b3ee1 sig=48c5a794ae7899f3 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+platform@1/platform/bucket_hand_install_adopts_at_12 src=eaaab1dc3308b19b sig=904ab40d4037bb7b run=dbf6722727633166 bug=- oracle=- rows=pending
+platform@1/platform/bucket_moved_activation_recovery src=3b0773b4464323f4 sig=f0d6e0b63ec493a3 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+>>>>>>> 62b4e79d (Drain the deferred-free queue at each cut and file the drained frames)
 platform@1/platform/cutover_survives_host_loss src=8ddf134b88d7e695 sig=f07034794cb4fe90 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_admission_policy src=ab4decacea6c1cfb sig=524ae9e5bc007d28 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_drift_retry src=3af4467f2f9d8665 sig=fdc2cff02080fd7c run=b1818af2b24835d3 bug=- oracle=- rows=pending

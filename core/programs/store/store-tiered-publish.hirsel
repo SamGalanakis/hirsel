@@ -21,8 +21,8 @@ type TieredCutStage: send {
     // The fold released a replay overlay, so the holders take these roots
     // even when the fold emitted nothing.
     folded: bool,
-    // T8 step 3's added rows, in fold order.
-    queued: List[DeferredFree]
+    // T8 step 3's added rows, live then fold order, and step 4's drain.
+    queue: CutQueue
 }
 
 fn tiered_cut_stage_empty(cut_stage: TieredCutStage) -> bool {
@@ -107,9 +107,10 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     let mut queued: List[DeferredFree] = list.new()
     queue_live_dropped(disk_state(db).tiered_dirty.dropped, mut seen, mut queued)?
     let folded = fold_cut_roots(pager, mut roots, branches, mut next_stamp, mut seen, mut queued)?
+    let queue = drain_cut(db, pager, take queued, next_stamp)?
     let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = tiered_cut_frames(roots)?
     if list.len(pages) == 0 && !folded {
-        return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, queued: take queued))
+        return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, queue: take queue))
     }
     let blob_run = layout_tiered_packs(take blobs, 4, first_pack, cap)?
     let page_run = layout_tiered_packs(take pages, 3, blob_run.next_pack, cap)?
@@ -123,7 +124,25 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
         let collections = seal_holder_tiered(held.collections, emitted)?
         list.push(mut sealed, PageRoots(collections: take collections, streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog), keyed: share_keyed_pages(held.keyed)))
     }
-    Ok(TieredCutStage(packs: take packs, roots: take sealed, next_pack: page_run.next_pack, stamp_end: next_stamp, folded: folded, queued: take queued))
+    Ok(TieredCutStage(packs: take packs, roots: take sealed, next_pack: page_run.next_pack, stamp_end: next_stamp, folded: folded, queue: take queue))
+}
+
+// T8 step 4 reads queued pages through the installed inventory. A cut with
+// an empty queue, or a zero `free_budget`, reads nothing.
+fn drain_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], take added: List[DeferredFree], next_stamp: u64) -> Result[CutQueue, Error] waits {
+    let mut queue = CutQueue(added: take added, drained: list.new(), kills: list.new())
+    let installed = disk_state(db).pages
+    let budget = disk_state(db).options.free_budget
+    if budget == 0 || (std.page.count(std.page.image_of(installed.lists.deferred)) == 0 && list.len(queue.added) == 0) {
+        return Ok(take queue)
+    }
+    let Some(requests) = pager else {
+        return Error(Io(Closed))
+    }
+    let paging = recovered_tiered_inventory(installed.locations, None, db.checkpointed)?
+    let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
+    drain_cut_queue(source, installed.lists.deferred, installed.lists.deferred_next, mut queue, budget)?
+    Ok(take queue)
 }
 
 // `note_held_roots` lists each participant's collection map first.

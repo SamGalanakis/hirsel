@@ -40,7 +40,7 @@ fn history_import_base(mut client: std.object.Client, draft: Db, options: Option
     let base = page_retry_base(blank, map.new(), participants.holders, participants.roots)?
     over_ceiling(base.account, options.resident_limit)?
     let mut next_stamp = stamp_after(draft.next_node)?
-    let cut_plan = plan_page_cut(base, participants.holders, empty_paged_lists(), list.new(), empty_lineage(), None, 1, options.pack_bytes, map.new(), None, mut next_stamp)?
+    let cut_plan = plan_page_cut(base, participants.holders, empty_paged_lists(), no_cut_queue(), empty_lineage(), None, 1, options.pack_bytes, map.new(), None, mut next_stamp)?
     let limit = order.max(options.pack_bytes, page_manifest_file_size(MANIFEST_LIMIT, 1))
     let mut buffers = cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), limit)?
     let no_packs = empty_history_locator()

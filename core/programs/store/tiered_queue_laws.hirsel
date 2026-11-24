@@ -77,6 +77,12 @@ fn l87_queue(db: Db) -> Result[List[(u64, DeferredFree)], Error] {
     Ok(take rows)
 }
 
+fn l87_options(floor: u64, budget: u64) -> Result[Options, Error] {
+    let mut options = l70_open_options(floor)?
+    options.free_budget = budget
+    Ok(take options)
+}
+
 // L87 (a) through the cut (§13.6a T8 step 3): a journaled floor reopens as
 // a replay overlay; the fold cut detaches the whole first Cold leaf without
 // reading it and queues exactly that location for main. A second, idle cut
@@ -85,7 +91,7 @@ fn l87_queue(db: Db) -> Result[List[(u64, DeferredFree)], Error] {
 fn test_l87_fold_cut_queues_detached_leaf(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
     let events = l87_cold_log(d, c, r, tasks, floor, 120)?
-    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let mut cold = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let (leaf, trim) = l87_first_leaf(d, cold, events.binding.id)?
     let Committed(_) = run(mut cold, Some(100000), copy_env((events, trim)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
         trim_before(mut tx, env.0, env.1)
@@ -94,12 +100,12 @@ fn test_l87_fold_cut_queues_detached_leaf(d: Dir, c: Clock, r: Random, tasks: Ta
     }
     close(take cold)?
 
-    let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let mut replayed = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let _ = checkpoint(mut replayed)?
     let _ = checkpoint(mut replayed)?
     close(take replayed)?
 
-    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let reopened = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let queued = l87_queue(reopened)?
     if list.len(queued) != 1 || disk_state(reopened).pages.lists.deferred_next != 1 {
         fail("L87: the fold queues one detached subtree")
@@ -124,7 +130,7 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     let floor = 182375272u64
     let appended = 400u64
     let events = l87_cold_log(d, c, r, tasks, floor, appended)?
-    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let mut db = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let collection = events.binding.id
     let (leaf, trim) = l87_first_leaf(d, db, collection)?
     let first_events: Log[Bytes] = clone(events)
@@ -158,7 +164,7 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
         }
     }
     close(take db)?
-    db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    db = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let Committed(_) = run(mut db, Some(100000), copy_env((events, appended)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
         trim_before(mut tx, env.0, env.1)
     })? else {
@@ -214,7 +220,7 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     let _ = checkpoint(mut db)?
     close(take db)?
 
-    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let reopened = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let queued = l87_queue(reopened)?
     let expected = 1 + list.len(dropped)
     if list.len(queued) != expected || disk_state(reopened).pages.lists.deferred_next != expected {
@@ -229,6 +235,92 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
         if seq != at || row.branch_id != 0 || target != wanted {
             fail("L87: the queue names each detached Cold page in order at its exact location")
         }
+    }
+    close(take reopened)
+}
+
+// L87 drain (§13.6 "Deferred frees", §13.6a T8 step 4). A whole-Log trim
+// after a reopen loses the Cold root and every leaf. With `free_budget` 1,
+// each cut drains exactly one queued page, oldest first, and files it dead on
+// main: after every cut, the pack's `live` is its laid-out payload less each
+// lost page that no queue row still names. A queued root hands its leaves to
+// the queue's end. After the last drain the queue reopens empty.
+@test
+fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let appended = 400u64
+    let events = l87_cold_log(d, c, r, tasks, floor, appended)?
+    let mut db = open(tasks, d, c, r, l87_options(floor, 1)?)?
+    let root = l69_cold_root(db, events.binding.id)?
+    let mut detached: List[std.page.PagePtr] = list.new()
+    list.push(mut detached, root)
+    {
+        let path = paged_pack_path(root.pack)?
+        let wire = disk_read_file(d, path, 1048576)?
+        let frame = read_tiered_frame(path, db.store, TieredPage(root), wire, 0, stamp_after(db.next_node)?)?
+        let page = fold_page(frame)
+        for slot in 0u64 .. std.page.count(std.page.image_of(page)) {
+            let Some(ColdPage(child)) = std.page.child_slot(page, slot) else {
+                fail("L87: the cut leaves every leaf Cold")
+            }
+            list.push(mut detached, child)
+        }
+    }
+    let mut total = 0u64
+    for ptr in detached {
+        if ptr.pack != root.pack {
+            fail("L87: one cut lays the Log out in one class-3 pack")
+        }
+        total += int.widen(ptr.len)
+    }
+    let laid_out = l69_pack_live(db, root.pack)
+    let Committed(_) = run(mut db, Some(100000), copy_env((events, appended)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+        trim_before(mut tx, env.0, env.1)
+    })? else {
+        fail("L87: the whole-Log trim commits")
+    }
+    let mut cuts = 0u64
+    loop {
+        let _ = checkpoint(mut db)?
+        cuts += 1
+        if cuts == 1 {
+            close(take db)?
+            db = open(tasks, d, c, r, l87_options(floor, 1)?)?
+        }
+        let queued = l87_queue(db)?
+        let mut kept = 0u64
+        for (_, row) in queued {
+            let TieredPage(target) = row.target else {
+                fail("L87: a Log trim queues pages only")
+            }
+            let mut hits = 0u64
+            for ptr in detached {
+                if ptr == target {
+                    hits += 1
+                }
+            }
+            if hits != 1 || row.branch_id != 0 {
+                fail("L87: each queue row names one lost page of main")
+            }
+            kept += int.widen(target.len)
+        }
+        if disk_state(db).pages.lists.deferred_next - list.len(queued) != cuts {
+            fail("L87: each cut drains exactly one queued page")
+        }
+        if l69_pack_live(db, root.pack) != laid_out - (total - kept) {
+            fail("L87: a page leaves live once, when it is filed or drained")
+        }
+        if list.len(queued) == 0 {
+            break
+        }
+        if cuts > 2 * list.len(detached) {
+            fail("L87: the drain finishes")
+        }
+    }
+    close(take db)?
+    let reopened = open(tasks, d, c, r, l87_options(floor, 1)?)?
+    if list.len(l87_queue(reopened)?) != 0 || l69_pack_live(reopened, root.pack) != laid_out - total {
+        fail("L87: the drained queue and the pack's live reopen")
     }
     close(take reopened)
 }

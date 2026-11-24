@@ -1,0 +1,103 @@
+pub type Error = Short | Version | Csrc | Extension | Padding | Buffer | Index
+
+pub type Block = NoBlock | OneByte(at: u64, len: u64) | TwoByte(at: u64, len: u64) | Opaque(profile: u16, at: u64, len: u64)
+
+pub type Header {
+    marker: bool,
+    pt: u8,
+    seq: u16,
+    ts: u32,
+    ssrc: u32,
+    csrcs: u8,
+    padded: bool,
+    block: Block,
+    end: u64,
+    len: u64
+}
+
+pub type Fields {
+    marker: bool,
+    pt: u8,
+    seq: u16,
+    ts: u32,
+    ssrc: u32
+}
+
+pub type WriteError = Capacity(Capacity) | Form
+
+pub fn parse(pkt: Bytes) -> Result[Header, Error] {
+    let len = list.len(pkt)
+    if len < 12 {
+        return Error(Short)
+    }
+    let flags = pkt[0]
+    if flags >> 6 != 2 {
+        return Error(Version)
+    }
+    let cc = flags & 15
+    let csrcs: u64 = int.widen(cc)
+    if 4 * csrcs > len - 12 {
+        return Error(Csrc)
+    }
+    let mut end = 12 + 4 * csrcs
+    let mut block = NoBlock
+    if (flags & 16) != 0 {
+        if 4 > len - end {
+            return Error(Extension)
+        }
+        let profile: u16 = list.word_be(pkt, end)
+        let words: u16 = list.word_be(pkt, end + 2)
+        let at = end + 4
+        let count: u64 = int.widen(words)
+        let size = 4 * count
+        if size > len - at {
+            return Error(Extension)
+        }
+        block = if profile == 0xbede {
+            OneByte(at: at, len: size)
+        } else if (profile & 0xfff0) == 0x1000 {
+            TwoByte(at: at, len: size)
+        } else {
+            Opaque(profile: profile, at: at, len: size)
+        }
+        end = at + size
+    }
+    Ok(Header(marker: (pkt[1] & 128) != 0, pt: pkt[1] & 127, seq: list.word_be(pkt, 2), ts: list.word_be(pkt, 4), ssrc: list.word_be(pkt, 8), csrcs: cc, padded: (flags & 32) != 0, block: block, end: end, len: len))
+}
+
+pub fn payload(h: Header, pkt: Bytes) -> Result[(u64, u64), Error] {
+    if list.len(pkt) != h.len || h.end < 12 || h.end > h.len {
+        return Error(Buffer)
+    }
+    let size = h.len - h.end
+    if !h.padded {
+        return Ok((h.end, size))
+    }
+    if size == 0 {
+        return Error(Padding)
+    }
+    let pad: u64 = int.widen(pkt[h.len - 1])
+    if pad == 0 || pad > size {
+        return Error(Padding)
+    }
+    Ok((h.end, size - pad))
+}
+
+pub fn csrc(h: Header, pkt: Bytes, i: u8) -> Result[u32, Error] {
+    if list.len(pkt) != h.len {
+        return Error(Buffer)
+    }
+    if i >= h.csrcs || i >= 15 {
+        return Error(Index)
+    }
+    let slot: u64 = int.widen(i)
+    let at = 12 + 4 * slot
+    if h.end > h.len || at > h.end || 4 > h.end - at {
+        return Error(Buffer)
+    }
+    Ok(list.word_be(pkt, at))
+}
+
+pub fn write(f: Fields, exts: View[ext.ExtWriter], mut out: Bytes) -> Result[u64, WriteError] {
+    ext.write_header(f, exts, mut out)
+}

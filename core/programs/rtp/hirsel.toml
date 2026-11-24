@@ -1,0 +1,15 @@
+[package]
+name = "rtp"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"header.hirsel" = "header"
+"seq.hirsel" = "seq"
+"ext.hirsel" = "ext"
+
+[tests]
+limit = 67108864
+
+[tests.sources]
+"laws.hirsel" = "laws"

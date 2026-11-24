@@ -1,0 +1,372 @@
+pub type Kind: key = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq
+
+pub type Form: key = OneOnly | TwoOnly | Mixed
+
+pub type Error = Overrun | Value(Kind) | Buffer
+
+pub type MapError = BadId | IdTaken | KindTaken | Full | Value(Kind)
+
+pub type Element {
+    id: u8,
+    at: u64,
+    len: u64
+}
+
+pub opaque type ExtMap {
+    form: Form,
+    ids: Inline[u8, 6],
+    voice: bool
+}
+
+type Entry {
+    id: u8,
+    len: u8
+}
+
+pub opaque type ExtWriter {
+    form: Form,
+    conflicting_forms: bool,
+    one_byte: bool,
+    entries: Inline[Entry, 16],
+    data: Inline[u8, 256],
+    count: u64,
+    used: u64
+}
+
+pub fn map(form: Form) -> ExtMap {
+    ExtMap(form: form, ids:[0u8; 6], voice: false)
+}
+
+fn slot(k: Kind) -> u64 {
+    match k {
+        Mid => 0,
+        Rid => 1,
+        RepairedRid => 2,
+        AudioLevel => 3,
+        AbsSendTime => 4,
+        TransportSeq => 5,
+    }
+}
+
+fn valid_id(form: Form, id: u8) -> bool {
+    id != 0 && (form != OneOnly || id <= 14)
+}
+
+pub fn bind(mut m: ExtMap, id: u8, k: Kind) -> Result[(), MapError] {
+    if !valid_id(m.form, id) {
+        return Error(BadId)
+    }
+    for existing in m.ids {
+        if existing == id {
+            return Error(IdTaken)
+        }
+    }
+    let at = slot(k)
+    if m.ids[at] != 0 {
+        return Error(KindTaken)
+    }
+    m.ids[at] = id
+    Ok(())
+}
+
+pub fn vad(mut m: ExtMap, on: bool) {
+    m.voice = on
+}
+
+fn block_fits(h: header.Header, start: u64, len: u64) -> bool {
+    start >= 16 && h.end <= h.len && start <= h.end && len <= h.end - start
+}
+
+// The cursor is relative to the start of the extension block. The returned
+// value offset is relative to the packet.
+pub fn next(pkt: Bytes, h: header.Header, mut at: u64) -> Result[Option[Element], Error] {
+    if list.len(pkt) != h.len {
+        return Error(Buffer)
+    }
+    let (start, len, one_byte) = match h.block {
+        NoBlock => {
+            at = 0
+            return Ok(None)
+        },
+        Opaque(len: size, ..) => {
+            at = size
+            return Ok(None)
+        },
+        OneByte(at: start, len: len) => (start, len, true),
+        TwoByte(at: start, len: len) => (start, len, false),
+    }
+    if !block_fits(h, start, len) {
+        return Error(Overrun)
+    }
+    let mut pos = at
+    while pos < len {
+        let first = pkt[start + pos]
+        pos += 1
+        if first == 0 {
+            continue
+        }
+        let (id, octets) = if one_byte {
+            let id = first >> 4
+            if id == 0 || id == 15 {
+                at = len
+                return Ok(None)
+            }
+            (id, (first & 15) + 1)
+        } else {
+            if pos == len {
+                return Error(Overrun)
+            }
+            let size = pkt[start + pos]
+            pos += 1
+            (first, size)
+        }
+        let size: u64 = int.widen(octets)
+        if size > len - pos {
+            return Error(Overrun)
+        }
+        at = pos + size
+        return Ok(Some(Element(id: id, at: start + pos, len: size)))
+    }
+    at = len
+    Ok(None)
+}
+
+pub fn find(m: ExtMap, pkt: Bytes, h: header.Header, k: Kind) -> Result[Option[Element], Error] {
+    let id = m.ids[slot(k)]
+    let mut at = 0u64
+    let mut found: Option[Element] = None
+    while let Some(e) = next(pkt, h, mut at)? {
+        if e.id == id {
+            if let None = found {
+                found = Some(e)
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn value_in_block(h: header.Header, e: Element) -> bool {
+    let (start, size) = match h.block {
+        OneByte(at: start, len: size) => (start, size),
+        TwoByte(at: start, len: size) => (start, size),
+        _ => return false,
+    }
+    if !block_fits(h, start, size) || e.at <= start {
+        return false
+    }
+    let offset = e.at - start
+    offset <= size && e.len <= size - offset
+}
+
+fn alphanumeric(b: u8) -> bool {
+    (b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z') || (b >= b'0' && b <= b'9')
+}
+
+fn valid_token(b: u8, mid: bool) -> bool {
+    alphanumeric(b) || (mid && (b == b'!' || (b >= b'#' && b <= b'\'') || b == b'*' || b == b'+' || b == b'-' || b == b'.' || (b >= b'^' && b <= b'`') || (b >= b'{' && b <= b'~')))
+}
+
+fn valid_value(value: Bytes, from: u64, len: u64, k: Kind) -> bool {
+    match k {
+        AudioLevel => return len == 1,
+        AbsSendTime => return len == 3,
+        TransportSeq => return len == 2,
+        _ => {},
+    }
+    if len == 0 || len > 255 {
+        return false
+    }
+    let mid = k == Mid
+    let mut i = 0u64
+    while i < len {
+        if !valid_token(value[from + i], mid) {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+fn check_value(pkt: Bytes, h: header.Header, e: Element, k: Kind) -> Result[(), Error] {
+    if list.len(pkt) != h.len {
+        return Error(Buffer)
+    }
+    if !value_in_block(h, e) || !valid_value(pkt, e.at, e.len, k) {
+        return Error(Value(k))
+    }
+    Ok(())
+}
+
+pub fn audio_level(m: ExtMap, pkt: Bytes, h: header.Header, e: Element) -> Result[(Option[bool], u8), Error] {
+    check_value(pkt, h, e, AudioLevel)?
+    let b = pkt[e.at]
+    Ok((if m.voice {
+        Some((b & 128) != 0)
+    } else {
+        None
+    }, b & 127))
+}
+
+pub fn abs_send_time(pkt: Bytes, h: header.Header, e: Element) -> Result[u32, Error] {
+    check_value(pkt, h, e, AbsSendTime)?
+    let high: u32 = int.widen(pkt[e.at])
+    let low: u16 = list.word_be(pkt, e.at + 1)
+    Ok((high << 16) | int.widen(low))
+}
+
+pub fn transport_seq(pkt: Bytes, h: header.Header, e: Element) -> Result[u16, Error] {
+    check_value(pkt, h, e, TransportSeq)?
+    Ok(list.word_be(pkt, e.at))
+}
+
+pub fn token(pkt: Bytes, h: header.Header, k: Kind, e: Element) -> Result[Element, Error] {
+    if list.len(pkt) != h.len {
+        return Error(Buffer)
+    }
+    if k != Mid && k != Rid && k != RepairedRid {
+        return Error(Value(k))
+    }
+    check_value(pkt, h, e, k)?
+    Ok(e)
+}
+
+pub fn writer() -> ExtWriter {
+    ExtWriter(form: Mixed, conflicting_forms: false, one_byte: true, entries:[Entry(id: 0, len: 0); 16], data:[0u8; 256], count: 0, used: 0)
+}
+
+fn reserve_element(mut w: ExtWriter, form: Form, id: u8, len: u64) -> Result[u64, MapError] {
+    if w.count == 16 || len > 256 - w.used {
+        return Error(Full)
+    }
+    let start = w.used
+    if w.count == 0 {
+        w.form = form
+    } else if w.form != form {
+        w.conflicting_forms = true
+    }
+    w.one_byte = w.one_byte && id <= 14 && len >= 1 && len <= 16
+    w.entries[w.count] = Entry(id: id, len: int.narrow(len))
+    w.count += 1
+    w.used += len
+    Ok(start)
+}
+
+fn fits(value: Bytes, from: u64, len: u64) -> bool {
+    let size = list.len(value)
+    from <= size && len <= size - from
+}
+
+fn copy_element(mut w: ExtWriter, form: Form, id: u8, value: Bytes, from: u64, len: u64) -> Result[(), MapError] {
+    let start = reserve_element(mut w, form, id, len)?
+    let mut i = 0u64
+    while i < len {
+        w.data[start + i] = value[from + i]
+        i += 1
+    }
+    Ok(())
+}
+
+pub fn put(mut w: ExtWriter, m: ExtMap, k: Kind, value: Bytes, from: u64, len: u64) -> Result[(), MapError] {
+    let id = m.ids[slot(k)]
+    if id == 0 {
+        return Ok(())
+    }
+    if !fits(value, from, len) || !valid_value(value, from, len, k) {
+        return Error(Value(k))
+    }
+    copy_element(mut w, m.form, id, value, from, len)
+}
+
+pub fn put_level(mut w: ExtWriter, m: ExtMap, voice: bool, level: u8) -> Result[(), MapError] {
+    let id = m.ids[slot(AudioLevel)]
+    if id == 0 {
+        return Ok(())
+    }
+    if level > 127 {
+        return Error(Value(AudioLevel))
+    }
+    let start = reserve_element(mut w, m.form, id, 1)?
+    w.data[start] = if m.voice && voice {
+        level | 128
+    } else {
+        level
+    }
+    Ok(())
+}
+
+pub fn put_other(mut w: ExtWriter, m: ExtMap, id: u8, value: Bytes, from: u64, len: u64) -> Result[(), MapError] {
+    if !valid_id(m.form, id) {
+        return Error(BadId)
+    }
+    if len > 255 || !fits(value, from, len) {
+        return Error(Full)
+    }
+    copy_element(mut w, m.form, id, value, from, len)
+}
+
+// Keep the writer's representation private across the header.write boundary.
+pub fn write_header(f: header.Fields, w: View[ExtWriter], mut out: Bytes) -> Result[u64, header.WriteError] {
+    if f.pt > 127 || w.conflicting_forms || (w.form == OneOnly && !w.one_byte) {
+        return Error(Form)
+    }
+    let has_block = w.count != 0
+    let one_byte = w.form != TwoOnly && w.one_byte
+    let overhead = if one_byte {
+        1u64
+    } else {
+        2u64
+    }
+    let elements_len = w.used + w.count * overhead
+    let words = (elements_len + 3) / 4
+    let size = if has_block {
+        16 + words * 4
+    } else {
+        12
+    }
+    let available = list.capacity(out) - list.len(out)
+    if size > available {
+        return Error(Capacity(Capacity(requested: size, available: available)))
+    }
+    list.push(mut out, if has_block {
+        0x90u8
+    } else {
+        0x80u8
+    })
+    list.push(mut out, if f.marker {
+        f.pt | 128
+    } else {
+        f.pt
+    })
+    list.put_word_be(mut out, f.seq)
+    list.put_word_be(mut out, f.ts)
+    list.put_word_be(mut out, f.ssrc)
+    if has_block {
+        list.put_word_be(mut out, if one_byte {
+            0xbedeu16
+        } else {
+            0x1000u16
+        })
+        let word_count: u16 = int.narrow(words)
+        list.put_word_be(mut out, word_count)
+        let mut value_at = 0u64
+        let mut i = 0u64
+        while i < w.count {
+            let e = w.entries[i]
+            if one_byte {
+                list.push(mut out, (e.id << 4) | (e.len - 1))
+            } else {
+                list.push(mut out, e.id)
+                list.push(mut out, e.len)
+            }
+            let len: u64 = int.widen(e.len)
+            let end = value_at + len
+            while value_at < end {
+                list.push(mut out, w.data[value_at])
+                value_at += 1
+            }
+            i += 1
+        }
+        list.fill(mut out, words * 4 - elements_len, 0u8)
+    }
+    Ok(size)
+}

@@ -1,0 +1,331 @@
+fn chrome() -> Bytes {
+    // hb1 in str0m 2ada76a, src/rtp/header.rs.
+    b"\xb0\x6f\xb7\x98\x00\x00\x27\x10\x2e\x57\x15\xf9\xbe\xde\x00\x04\x10\xaa\x22\xfe\x20\x6a\x31\x00\x00\x42xYj\x00\x00\x00\x01\x02\x03\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0c"
+}
+
+fn fields() -> header.Fields {
+    header.Fields(marker: true, pt: 96, seq: 0x1234, ts: 3000, ssrc: 0xbeef)
+}
+
+fn found(m: ext.ExtMap, pkt: Bytes, h: header.Header, k: ext.Kind) -> ext.Element {
+    let Some(e) = result.unwrap(ext.find(m, pkt, h, k)) else {
+        fail("negotiated extension missing")
+    }
+    e
+}
+
+/// bug: Decode the Chrome packet's fixed fields, payload offset or mapped extensions incorrectly.
+/// oracle: str0m 2ada76a, src/rtp/header.rs, hb1 and its expected header.
+@test
+fn header_chrome_vector() -> Result[(), ()] {
+    let pkt = chrome()
+    let h = result.unwrap(header.parse(pkt))
+    if h.marker || h.pt != 111 || h.seq != 47000 || h.ts != 10000 || h.ssrc != 777459193 || h.csrcs != 0 || !h.padded || h.end != 32 || h.len != 48 {
+        fail("Chrome fixed header")
+    }
+    let OneByte(at: at, len: len) = h.block else {
+        fail("Chrome extension profile")
+    }
+    if at != 16 || len != 16 {
+        fail("Chrome extension extent")
+    }
+    let (start, size) = result.unwrap(header.payload(h, pkt))
+    if start != 32 || size != 4 || list.slice(pkt, start, start + size) != b"\x01\x02\x03\x04" {
+        fail("Chrome payload and padding")
+    }
+    let mut m = ext.map(Mixed)
+    result.unwrap(ext.bind(mut m, 1, AudioLevel))
+    result.unwrap(ext.bind(mut m, 2, AbsSendTime))
+    result.unwrap(ext.bind(mut m, 3, TransportSeq))
+    result.unwrap(ext.bind(mut m, 4, Mid))
+    ext.vad(mut m, true)
+    let level = result.unwrap(ext.audio_level(m, pkt, h, found(m, pkt, h, AudioLevel)))
+    let abs = result.unwrap(ext.abs_send_time(pkt, h, found(m, pkt, h, AbsSendTime)))
+    let seq = result.unwrap(ext.transport_seq(pkt, h, found(m, pkt, h, TransportSeq)))
+    let mid = result.unwrap(ext.token(pkt, h, Mid, found(m, pkt, h, Mid)))
+    if level != (Some(true), 42u8) || abs != 0xfe206a || seq != 0 || mid.at != 26 || mid.len != 3 || list.slice(pkt, 26, 29) != b"xYj" {
+        fail("Chrome extension values")
+    }
+    Ok(())
+}
+
+fn expect_padding(pkt: Bytes) {
+    let h = result.unwrap(header.parse(pkt))
+    let Error(Padding) = header.payload(h, pkt) else {
+        fail("invalid padding accepted")
+    }
+}
+
+/// bug: Read a missing pad count, admit zero or oversized counts, or refuse a padding-only packet.
+/// oracle: RFC 3550 section 5.1.
+@test
+fn padding_counts() -> Result[(), ()] {
+    let bare = b"\xa0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    expect_padding(bare)
+    expect_padding(b"\xa0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+    expect_padding(b"\xa0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02")
+    let padded = b"\xa0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+    if result.unwrap(header.payload(result.unwrap(header.parse(padded)), padded)) != (12u64, 0u64) {
+        fail("padding-only payload")
+    }
+    Ok(())
+}
+
+fn stopped(pkt: Bytes) {
+    let h = result.unwrap(header.parse(pkt))
+    let mut at = 0u64
+    let Ok(None) = ext.next(pkt, h, mut at) else {
+        fail("reserved ID did not end the walk")
+    }
+    let Ok(None) = ext.next(pkt, h, mut at) else {
+        fail("reserved ID stop was not terminal")
+    }
+    if at != 4 {
+        fail("terminal cursor did not reach the block end")
+    }
+}
+
+/// bug: Misread extension lengths or accept a reserved one-byte ID or an invalid token.
+/// oracle: RFC 8285 sections 4.2, 4.3 and 6, RFC 8852 section 3, RFC 9143 section 15 and RFC 6464 sections 3 and 4.
+@test
+fn extension_forms() -> Result[(), ()] {
+    let pkt = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x06\x00\x07\x00\x14\x11abcdefghijklmnopq\x08\x01"
+    let h = result.unwrap(header.parse(pkt))
+    let mut at = 0u64
+    let Some(zero) = result.unwrap(ext.next(pkt, h, mut at)) else {
+        fail("zero-length two-byte element missing")
+    }
+    if zero.id != 7 || zero.at != 19 || zero.len != 0 || at != 3 {
+        fail("zero-length element range or cursor")
+    }
+    let Some(long) = result.unwrap(ext.next(pkt, h, mut at)) else {
+        fail("17-byte RID missing")
+    }
+    let rid = result.unwrap(ext.token(pkt, h, Rid, long))
+    if rid.id != 20 || rid.at != 21 || rid.len != 17 || at != 22 {
+        fail("two-byte RID range or cursor")
+    }
+    let Error(Overrun) = ext.next(pkt, h, mut at) else {
+        fail("extension overrun accepted")
+    }
+    if at != 22 {
+        fail("overrun advanced the cursor")
+    }
+    stopped(b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbe\xde\x00\x01\xf0\x10a\x00")
+    stopped(b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbe\xde\x00\x01\x03\x10a\x00")
+    let mut one = ext.map(OneOnly)
+    let Error(BadId) = ext.bind(mut one, 16, Mid) else {
+        fail("OneOnly map accepted ID 16")
+    }
+    let mut mixed = ext.map(Mixed)
+    result.unwrap(ext.bind(mut mixed, 16, Mid))
+    let values = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x0f\x00\x05\x10\x07audio-1\x01\x03a_b\x02\x01\xaa\x00\x00\x00"
+    let vh = result.unwrap(header.parse(values))
+    let mid = found(mixed, values, vh, Mid)
+    if result.unwrap(ext.token(values, vh, Mid, mid)).len != 7 {
+        fail("MID token rejected")
+    }
+    let Error(Value(Rid)) = ext.token(values, vh, Rid, ext.Element(id: 1, at: 27, len: 3)) else {
+        fail("RID containing underscore accepted")
+    }
+    let e = ext.Element(id: 2, at: 32, len: 1)
+    ext.vad(mut mixed, true)
+    if result.unwrap(ext.audio_level(mixed, values, vh, e)) != (Some(true), 42u8) {
+        fail("audio level with VAD")
+    }
+    ext.vad(mut mixed, false)
+    if result.unwrap(ext.audio_level(mixed, values, vh, e)) != (None, 42u8) {
+        fail("audio level without VAD")
+    }
+    let Error(Value(AudioLevel)) = ext.audio_level(mixed, values, vh, ext.Element(id: 2, at: 32, len: 2)) else {
+        fail("two-byte audio level accepted")
+    }
+    Ok(())
+}
+
+fn egress_map(form: ext.Form, voice: bool) -> ext.ExtMap {
+    let mut m = ext.map(form)
+    result.unwrap(ext.bind(mut m, 1, AudioLevel))
+    result.unwrap(ext.bind(mut m, 2, TransportSeq))
+    result.unwrap(ext.bind(mut m, 3, Rid))
+    ext.vad(mut m, voice)
+    m
+}
+
+fn short_values(m: ext.ExtMap) -> ext.ExtWriter {
+    let mut w = ext.writer()
+    result.unwrap(ext.put_level(mut w, m, true, 42))
+    result.unwrap(ext.put(mut w, m, TransportSeq, b"\x00\x12\x34", 1, 2))
+    w
+}
+
+fn check_egress(w: View[ext.ExtWriter], expected: Bytes) {
+    let mut out: Bytes = list.with_capacity(64)
+    if result.unwrap(header.write(fields(), w, mut out)) != list.len(expected) || out != expected {
+        fail("egress wire bytes")
+    }
+    let h = result.unwrap(header.parse(out))
+    if !h.marker || h.pt != 96 || h.seq != 0x1234 || h.ts != 3000 || h.ssrc != 0xbeef || h.padded || h.csrcs != 0 || h.end != list.len(expected) {
+        fail("egress fixed header")
+    }
+}
+
+/// bug: Choose the wrong negotiated form, write incorrect extension bytes, or append on refusal.
+/// oracle: RFC 8285 sections 4.2 and 4.3 and RFC 6464 section 3. Two-byte long payload is 3 + 4 + 19 = 26 bytes, rounded to 28.
+@test
+fn egress_form() -> Result[(), ()] {
+    let mixed = egress_map(Mixed, true)
+    let mut w = short_values(mixed)
+    check_egress(view w, b"\x90\xe0\x12\x34\x00\x00\x0b\xb8\x00\x00\xbe\xef\xbe\xde\x00\x02\x10\xaa\x21\x12\x34\x00\x00\x00")
+    let rid = b"abcdefghijklmnopq"
+    result.unwrap(ext.put(mut w, mixed, Rid, rid, 0, 17))
+    check_egress(view w, b"\x90\xe0\x12\x34\x00\x00\x0b\xb8\x00\x00\xbe\xef\x10\x00\x00\x07\x01\x01\xaa\x02\x02\x12\x34\x03\x11abcdefghijklmnopq\x00\x00")
+    let two = short_values(egress_map(TwoOnly, true))
+    check_egress(view two, b"\x90\xe0\x12\x34\x00\x00\x0b\xb8\x00\x00\xbe\xef\x10\x00\x00\x02\x01\x01\xaa\x02\x02\x12\x34\x00")
+    let one = egress_map(OneOnly, false)
+    let mut short = short_values(one)
+    check_egress(view short, b"\x90\xe0\x12\x34\x00\x00\x0b\xb8\x00\x00\xbe\xef\xbe\xde\x00\x02\x10\x2a\x21\x12\x34\x00\x00\x00")
+    let mut out: Bytes = list.with_capacity(16)
+    list.push(mut out, 0xff)
+    let Error(Capacity(c)) = header.write(fields(), view short, mut out) else {
+        fail("header written without spare")
+    }
+    if c.requested != 24 || c.available != list.capacity(out) - 1 || out != b"\xff" {
+        fail("capacity refusal was not atomic")
+    }
+    result.unwrap(ext.put(mut short, one, Rid, rid, 0, 17))
+    let Error(Form) = header.write(fields(), view short, mut out) else {
+        fail("OneOnly writer accepted a 17-byte value")
+    }
+    if out != b"\xff" {
+        fail("form refusal was not atomic")
+    }
+    let empty = ext.writer()
+    check_egress(view empty, b"\x80\xe0\x12\x34\x00\x00\x0b\xb8\x00\x00\xbe\xef")
+    let mut other = ext.writer()
+    result.unwrap(ext.put_other(mut other, mixed, 7, b"", 0, 0))
+    check_egress(view other, b"\x90\xe0\x12\x34\x00\x00\x0b\xb8\x00\x00\xbe\xef\x10\x00\x00\x01\x07\x00\x00\x00")
+    Ok(())
+}
+
+fn expect_index(highest: u64, wire: u16, expected: u64) {
+    let Index(i) = seq.estimate(highest, wire) else {
+        fail("expected an index in the SRTP range")
+    }
+    if i != expected {
+        fail("wrong sequence cycle")
+    }
+}
+
+/// bug: Choose the wrong rollover counter at a wrap or a tie, or wrap the 48-bit index.
+/// oracle: RFC 3711 Appendix A. ROC stays at 1 for differences of exactly 32768 in either direction.
+@test
+fn index_estimate() -> Result[(), ()] {
+    expect_index(65535, 0, 65536)
+    expect_index(65536, 65535, 65535)
+    expect_index(65636, 32868, 98404)
+    expect_index(65636, 32869, 32869)
+    expect_index(105536, 7232, 72768)
+    expect_index(105536, 7231, 138303)
+    expect_index(65536, 40000, 40000)
+    let Before = seq.estimate(0, 65535) else {
+        fail("index below zero accepted")
+    }
+    let Beyond = seq.estimate(281474976710655, 0) else {
+        fail("index above the SRTP limit accepted")
+    }
+    if seq.estimate32(0, 0xffffffff) != -1 || seq.estimate32(-1, 0) != 0 || seq.estimate24(16777215, 0) != 16777216 || seq.estimate24(0, 0xffffff) != -1 {
+        fail("signed timestamp or TWCC rollover")
+    }
+    Ok(())
+}
+
+/// bug: Use the wrong packet's view or read past a truncated header, CSRC list or extension element.
+/// oracle: RFC 3550 section 5.1 and RFC 8285 sections 4.2 and 4.3. Chrome's complete header takes 32 bytes.
+@test
+fn bounded_views() -> Result[(), ()] {
+    let raw = chrome()
+    let mut n = 0u64
+    while n < 48 {
+        match header.parse(list.slice(raw, 0, n)) {
+            Error(Short) if n < 12 => {},
+            Error(Extension) if n >= 12 && n < 32 => {},
+            Ok(h) if n >= 32 && h.end == 32 && h.len == n => {},
+            _ => fail("wrong result on Chrome packet prefix"),
+        }
+        n += 1
+    }
+    let csrcs = b"\x82\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08"
+    let ch = result.unwrap(header.parse(csrcs))
+    if result.unwrap(header.csrc(ch, csrcs, 1)) != 0x05060708 {
+        fail("second CSRC")
+    }
+    let Error(Index) = header.csrc(ch, csrcs, 2) else {
+        fail("CSRC index outside the view accepted")
+    }
+    let Error(Csrc) = header.parse(list.slice(csrcs, 0, 19)) else {
+        fail("truncated CSRC list accepted")
+    }
+    let Error(Version) = header.parse(b"\x7f\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00") else {
+        fail("version was checked after the CSRC count")
+    }
+    let h = result.unwrap(header.parse(raw))
+    let short = list.slice(raw, 0, 47)
+    let mut at = 0u64
+    let mut m = ext.map(Mixed)
+    let e = ext.Element(id: 1, at: 17, len: 1)
+    let Error(Buffer) = header.payload(h, short) else {
+        fail("payload accepted a mismatched buffer")
+    }
+    let Error(Buffer) = header.csrc(h, short, 0) else {
+        fail("CSRC accepted a mismatched buffer")
+    }
+    let Error(Buffer) = ext.next(short, h, mut at) else {
+        fail("extension walk accepted a mismatched buffer")
+    }
+    let Error(Buffer) = ext.find(m, short, h, Mid) else {
+        fail("extension lookup accepted a mismatched buffer")
+    }
+    let Error(Buffer) = ext.audio_level(m, short, h, e) else {
+        fail("audio level accepted a mismatched buffer")
+    }
+    let Error(Buffer) = ext.abs_send_time(short, h, e) else {
+        fail("abs-send-time accepted a mismatched buffer")
+    }
+    let Error(Buffer) = ext.transport_seq(short, h, e) else {
+        fail("transport sequence accepted a mismatched buffer")
+    }
+    let Error(Buffer) = ext.token(short, h, Mid, e) else {
+        fail("token accepted a mismatched buffer")
+    }
+    if at != 0 {
+        fail("buffer refusal advanced the cursor")
+    }
+    let last_id = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x01\x00\x00\x00\x01"
+    let Error(Overrun) = ext.next(last_id, result.unwrap(header.parse(last_id)), mut at) else {
+        fail("two-byte ID accepted without its length byte")
+    }
+    if at != 0 {
+        fail("trailing ID refusal advanced the cursor")
+    }
+    let overrun = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbe\xde\x00\x01\x10a\x2f\x00"
+    result.unwrap(ext.bind(mut m, 1, Mid))
+    let Error(Overrun) = ext.find(m, overrun, result.unwrap(header.parse(overrun)), Mid) else {
+        fail("lookup stopped before the overrun")
+    }
+    let Error(Value(TransportSeq)) = ext.transport_seq(raw, h, ext.Element(id: 3, at: 31, len: 2)) else {
+        fail("value reader crossed into payload")
+    }
+    let opaque_packet = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x20\x00\x00\x01\x10a\x00\x00"
+    let oh = result.unwrap(header.parse(opaque_packet))
+    let Opaque(profile: 0x2000, at: 16, len: 4) = oh.block else {
+        fail("opaque profile was not preserved")
+    }
+    let Ok(None) = ext.next(opaque_packet, oh, mut at) else {
+        fail("read an element from an opaque profile")
+    }
+    if at != 4 {
+        fail("opaque block did not leave a terminal cursor")
+    }
+    Ok(())
+}

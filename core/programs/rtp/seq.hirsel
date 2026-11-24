@@ -1,0 +1,52 @@
+pub type Index = Index(u64) | Before | Beyond
+
+const LAST_INDEX: u64 = 0xffffffffffff
+
+pub fn nearest(highest: i64, wire: u64, bits: u8) -> i64 {
+    if bits != 16 && bits != 24 && bits != 32 {
+        fail("RTP counter width must be 16, 24 or 32")
+    }
+    let width: i64 = int.widen(bits)
+    let period = 1i64 << width
+    if wire >= int.narrow(period) {
+        fail("wire value exceeds the RTP counter width")
+    }
+    let low = highest & (period - 1)
+    let raw: i64 = int.narrow(wire)
+    let delta = raw - low
+    let half = period / 2
+    // Use a bounded signed delta so even a negative highest needs no ROC product.
+    let step = if delta > half {
+        delta - period
+    } else if delta < -half {
+        delta + period
+    } else {
+        delta
+    }
+    highest + step
+}
+
+pub fn estimate(highest: u64, s: u16) -> Index {
+    // Even subtracting half a cycle cannot bring these inputs into range.
+    if highest > LAST_INDEX + 32768 {
+        return Beyond
+    }
+    let candidate = nearest(int.narrow(highest), int.widen(s), 16)
+    if candidate < 0 {
+        return Before
+    }
+    let index: u64 = int.narrow(candidate)
+    if index > LAST_INDEX {
+        Beyond
+    } else {
+        Index(index)
+    }
+}
+
+pub fn estimate32(highest: i64, t: u32) -> i64 {
+    nearest(highest, int.widen(t), 32)
+}
+
+pub fn estimate24(highest: i64, r: u32) -> i64 {
+    nearest(highest, int.widen(r), 24)
+}

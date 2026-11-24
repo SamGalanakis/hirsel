@@ -44,7 +44,7 @@ fn request_site(d: Dir, tasks: Tasks, clock: Clock, network: Net, request: Strin
     let accepted = host.accept(mut accepting, deadline)
     let (take socket, peer) = result.unwrap(take accepted)
     let job = SiteRequest(socket: take socket, peer: peer.ip, site: std.wsock.Site(dir: d, find: find_asset), clock: clock, config: config, pending: take pending)
-    let child = task.spawn(tasks, bytes runner.WIRE_OWNER_FLOOR, take job, serve_site)
+    let child = task.spawn(tasks, bytes (runner.WIRE_OWNER_FLOOR - 320u64), take job, serve_site)
     let (take input, take output) = net.split(take client)
     let mut writer = take output
     let text = string.as_bytes(request)
@@ -92,6 +92,26 @@ fn test_site_request_target_and_head(d: Dir, tasks: Tasks, clock: Clock, network
     let switching = string.as_bytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
     if upgraded != switching {
         return Error("Upgrade must match /hirsel with a query")
+    }
+    Ok(())
+}
+
+@test
+fn test_site_streams_large_asset(d: Dir, tasks: Tasks, clock: Clock, network: Net) -> Result[(), String] waits {
+    let mut temp = string.with_capacity(32u64)
+    let dir = result.unwrap(std.dir.create_temp(d, mut temp))
+    let size = 1048576u64
+    let mut payload: Bytes = list.with_capacity(size)
+    for i in 0u64 .. size {
+        list.push(mut payload, int.truncate(i + i / 8192u64))
+    }
+    result.unwrap(std.file.write(dir, "app.js", payload))
+    let response = request_site(dir, tasks, clock, network, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", size + 1024u64)
+    result.unwrap(std.dir.remove_all(d, temp))
+    let head = string.as_bytes("HTTP/1.1 200 OK\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: application/javascript\r\nContent-Length: 1048576\r\n\r\n")
+    let offset = list.len(head)
+    if list.len(response) != offset + size || list.slice(response, 0u64, offset) != head || list.slice(response, offset, list.len(response)) != payload {
+        return Error("GET must stream the entire asset with its original Content-Length")
     }
     Ok(())
 }

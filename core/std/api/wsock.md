@@ -30,6 +30,13 @@ its socket halves inside wsock. `client` uses sixteen
 bytes from host.random for its challenge, requires hirsel.3, rejects extensions,
 and keeps response read-ahead the same way. It returns `Connected` and a client encoder.
 
+`server_with_site` serves GET and HEAD on the listener before upgrading.
+It passes the path without query or fragment to the site selector and uses the
+same path for upgrade routing. It streams regular files with one buffer of at
+most 8192 bytes, capped by `Config.max_frame`. HEAD sends the GET headers with
+no body. `server_with_site_report` accepts stderr authority for one diagnostic
+per asset failure. Runner supplies it through `operate_report`.
+
 `read` drives the pure decoder over the ReadHalf. An idle reader holds no
 receive buffer: `refill` returns its input, waits with `host.recv_ready`
 ([NET-1](../../../docs/spec/net.md#net-1-socket-operation-declarations)), and

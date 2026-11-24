@@ -341,7 +341,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
                     let serving_config = ServePlace(listener: take listener, config: wire_config, tasks: tasks, clock: clock, random: random, wire: take session_wire,
                         max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place, n_place: n_place,
                         head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain),
-                        status: latest.handle(status), idle: idle, first_write: match hosting { Some(host) => Some(channel.sender(host.ack)), None => None })
+                        status: latest.handle(status), idle: idle, first_write: match hosting { Some(host) => Some(channel.sender(host.ack)), None => None }, report: report)
                     let run: fn(take ServePlace[G, H, B]) -> () waits = run_serve_place
                     serving = Some(task.spawn(tasks, bytes serving_reserve, take serving_config, run))
                 }
@@ -5240,12 +5240,12 @@ fn wire_finish_owner[C: send](mut service: Service[C], pub_to: Sender[PubIn]) {
 type WireAccept[C: send]: send {
     socket: Socket, peer: Ip, accepted: u64, wire_slot: std.wsock.Pending, proxies: List[std.wsock.Prefix],
     service: Box[Service[C]], publisher: Sender[PubIn], c: WireConfig, clock: Clock, tasks: Tasks,
-    control: Option[OwnerControl], completion: OwnerCompletion, allocation: Sender[WireAllocation[C]],
+    control: Option[OwnerControl], completion: OwnerCompletion, allocation: Sender[WireAllocation[C]], report: Option[Stderr],
 }
 
 fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] waits {
     let WireAccept(completion: take completion, socket: take socket, peer: peer, accepted: accepted, wire_slot: take wire_slot, proxies: take proxies,
-        service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks, control: take control, allocation: take allocation) = take x
+        service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks, control: take control, allocation: take allocation, report: report) = take x
     let admission = scoped fn(ip: Ip) -> bool {
         match control { Some(life) => !closing_at(life.drain, clock), None => true }
     }
@@ -5256,7 +5256,7 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
             None => Ok(None),
         }
     }
-    let received = std.wsock.server_with_site(take socket, take wire_slot, peer, proxies, c.socket, clock, accepted, c.site, raw, admission)
+    let received = std.wsock.server_with_site_report(take socket, take wire_slot, peer, proxies, c.socket, clock, accepted, c.site, raw, admission, report)
     let _ = take proxies
     let ended: Result[(), std.wsock.Error] = match take received {
         Ok(Some(take up)) => return wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control, allocate: None), take allocation, Served(take completion)),
@@ -5309,7 +5309,7 @@ type ServeTransport {
     limit: u64, proxies: List[std.wsock.Prefix], publisher: Sender[PubIn], inbox: Receiver[ServeInput], to: Sender[ServeInput],
 }
 
-type ServeDrain { events: Sender[LifeEvent], window: Latest[Option[DrainWindow]], status: Latest[Status], idle: Option[u64], first_write: Option[Sender[u64]] }
+type ServeDrain { events: Sender[LifeEvent], window: Latest[Option[DrainWindow]], status: Latest[Status], idle: Option[u64], first_write: Option[Sender[u64]], report: Option[Stderr] }
 
 fn serve_closing(lifecycle: Option[ServeDrain], clock: Clock) -> bool {
     match lifecycle { Some(control) => closing_at(control.window, clock), _ => false }
@@ -5319,7 +5319,7 @@ type ServePlace[G: send, H: shareable + inert + send, B: send]: send {
     listener: Listener, config: WireConfig, tasks: Tasks, clock: Clock, random: Random, wire: Option[Wire[G, B]],
     max_sessions: u64, proxies: List[std.wsock.Prefix], target: String, publisher: Sender[PubIn],
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[HeadInput],
-    inbox: Receiver[ServeInput], to: Sender[ServeInput], events: Sender[LifeEvent], drain: Latest[Option[DrainWindow]], status: Latest[Status], idle: Option[u64], first_write: Option[Sender[u64]],
+    inbox: Receiver[ServeInput], to: Sender[ServeInput], events: Sender[LifeEvent], drain: Latest[Option[DrainWindow]], status: Latest[Status], idle: Option[u64], first_write: Option[Sender[u64]], report: Option[Stderr],
 }
 
 fn run_serve_place[G: send, H: shareable + inert + send, B: send](take seed: ServePlace[G, H, B]) -> () waits {
@@ -5331,14 +5331,14 @@ fn run_serve_place[G: send, H: shareable + inert + send, B: send](take seed: Ser
 fn supervise_serve[G: send, H: shareable + inert + send, B: send](take seed: ServePlace[G, H, B]) -> Result[u64, StartError] waits {
     let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, random: random, wire: take session_wire,
         max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place,
-        head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write) = take seed
+        head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write, report: report) = take seed
     let registered = match placed(place, n_place) { Ok(take r) => take r, Error(take problem) => return Error(Open(Place(take problem))) }
     let make: scoped[view] fn() -> Service[WireSession[G, B]] = fn() -> Service[WireSession[G, B]] {
         wire_service_with_head(random, copy_wire(session_wire), LifecycleHead(channel.sender(head_to)), clock, tasks, config, clone(target))
     }
     let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock,
         limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
-    match serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status, idle: idle, first_write: take first_write)), make, wire_allocator(take registered, n_place)) {
+    match serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status, idle: idle, first_write: take first_write, report: report)), make, wire_allocator(take registered, n_place)) {
         Ok(count) => Ok(count), Error(Allocation(cap)) => Error(Full(cap)), Error(Network(problem)) => Error(Listen(problem)), _ => Error(Missing("socket")),
     }
 }
@@ -5470,8 +5470,8 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     Some(life) => Some(OwnerControl(id: id, to: channel.sender(to), drain: latest.handle(life.window), status: latest.handle(life.status), first_write: copy_write_notice(life.first_write))), _ => None,
                 }
                 let job = WireAccept(socket: take socket, peer: peer, accepted: at, wire_slot: take wire_slot, proxies: take prefixes,
-                    service: take boxed, publisher: channel.sender(pub_to), c: config,
-                    clock: time, tasks: tasks, control: take control, completion: take completion, allocation: channel.sender(allocation))
+                    service: take boxed, publisher: channel.sender(pub_to), c: config, clock: time, tasks: tasks,
+                    control: take control, completion: take completion, allocation: channel.sender(allocation), report: match lifecycle { Some(life) => life.report, None => None })
                 let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
                 let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - WIRE_OWNER_TASK_BYTES + config.n_granted), take job, run)
                 map.insert(mut owners, id, SessionTask(handle: take handle, wake: None))

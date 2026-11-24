@@ -1,0 +1,130 @@
+// One static response on the WebSocket listener before any protocol upgrade.
+pub fn send_response(mut w: WriteHalf, head: Bytes, body: Bytes, deadline: Until) -> Result[(), wsock.Error] waits {
+    let mut at: u64 = 0
+    let split = list.len(head)
+    while at != split + list.len(body) {
+        let expired = match deadline {
+            At(clock, end) => host.mono_ns(clock) >= end,
+            Never => false
+        }
+        if expired {
+            return Error(Network(TimedOut))
+        }
+        let prefix = list.slice(head, order.min(at, split), split)
+        let tail = list.slice(body, int.saturating_sub(at, split), list.len(body))
+        match host.send_pair(mut w, prefix, tail, deadline) {
+            Ok(n) => {
+                at += n
+            },
+            Error(e) => return Error(Network(e))
+        }
+    }
+    Ok(())
+}
+
+pub fn static_head(ready: bool, content_type: String, size: u64) -> String {
+    let mut head = string.from(if ready {
+        "HTTP/1.1 200 OK"
+    } else {
+        "HTTP/1.1 503 Service Unavailable"
+    })
+    string.push(mut head, "\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: ")
+    string.push(mut head, content_type)
+    string.push(mut head, "\r\nContent-Length: ")
+    string.push_u64(mut head, size)
+    string.push(mut head, "\r\n\r\n")
+    take head
+}
+
+pub fn serve(mut writer: WriteHalf, deadline: Until, site: wsock.Site, path: Bytes, fetch: bool, head_only: bool, chunk: u64, report: Option[Stderr]) -> Result[(), wsock.Error] waits {
+    let found = if fetch {
+        isolate(scoped fn() -> Option[wsock.Asset] {
+            (site.find)(path)
+        })
+    } else {
+        Ok(Ok(None))
+    }
+    let asset = match take found {
+        Ok(Ok(Some(take item))) => take item,
+        Ok(Ok(None)) => return wsock.refuse(mut writer, 404u16, deadline),
+        _ => return asset_failed(mut writer, deadline, report, "wsock: could not select site asset\n"),
+    }
+    serve_asset(mut writer, deadline, site.dir, asset, chunk, head_only, report)
+}
+
+fn asset_diagnostic(report: Option[Stderr], line: String) -> () waits {
+    if let Some(errors) = report {
+        let _ = stderr.write(errors, line)
+    }
+}
+
+fn asset_failed(mut writer: WriteHalf, deadline: Until, report: Option[Stderr], line: String) -> Result[(), wsock.Error] waits {
+    let sent = wsock.refuse(mut writer, 500u16, deadline)
+    asset_diagnostic(report, line)
+    sent?
+    Error(Http(500u16))
+}
+
+fn serve_asset(mut writer: WriteHalf, deadline: Until, dir: Dir, asset: wsock.Asset, chunk: u64, head_only: bool, report: Option[Stderr]) -> Result[(), wsock.Error] waits {
+    let mut input_file = match file.open(dir, asset.name, Read) {
+        Ok(take opened) => take opened,
+        Error(NotFound) => {
+            wsock.refuse(mut writer, 404, deadline)?
+            return Ok(())
+        },
+        Error(_) => return asset_failed(mut writer, deadline, report, "wsock: could not open site asset\n"),
+    }
+    let size = match file.stat(mut input_file) {
+        Ok(Stat(kind: File, size, ..)) => size,
+        _ => return asset_failed(mut writer, deadline, report, "wsock: could not stat regular site asset\n"),
+    }
+    let built = isolate(scoped fn() -> String {
+        static_head(true, asset.content_type, size)
+    })
+    let header = match take built {
+        Ok(Ok(take value)) => take value,
+        _ => return asset_failed(mut writer, deadline, report, "wsock: could not allocate site response headers\n"),
+    }
+    if head_only || size == 0u64 {
+        if let Error(_) = file.close(take input_file) {
+            return asset_failed(mut writer, deadline, report, "wsock: could not close site asset\n")
+        }
+        let sent = send_response(mut writer, string.as_bytes(header), string.as_bytes(""), deadline)
+        if let Error(_) = sent {
+            asset_diagnostic(report, "wsock: could not send site response\n")
+        }
+        return sent
+    }
+    let mut chunk_bytes: Bytes = list.new()
+    if let Error(_) = list.try_reserve(mut chunk_bytes, chunk) {
+        return asset_failed(mut writer, deadline, report, "wsock: could not allocate site response buffer\n")
+    }
+    let mut left = size
+    while left != 0u64 {
+        list.clear(mut chunk_bytes)
+        let count = match file.read_into(mut input_file, mut chunk_bytes) {
+            Ok(n) if n != 0u64 => order.min(n, left),
+            _ if left == size => return asset_failed(mut writer, deadline, report, "wsock: could not read site asset\n"),
+            _ => {
+                // The response head is committed. Closing leaves a short Content-Length.
+                asset_diagnostic(report, "wsock: site asset ended before Content-Length\n")
+                return Error(Http(500u16))
+            },
+        }
+        let prefix = if left == size {
+            string.as_bytes(header)
+        } else {
+            string.as_bytes("")
+        }
+        if let Error(problem) = send_response(mut writer, prefix, list.slice(chunk_bytes, 0u64, count), deadline) {
+            asset_diagnostic(report, "wsock: could not send site response\n")
+            return Error(problem)
+        }
+        left -= count
+    }
+    if let Error(_) = file.close(take input_file) {
+        asset_diagnostic(report, "wsock: could not close site asset\n")
+        return Error(Http(500u16))
+    }
+    Ok(())
+}

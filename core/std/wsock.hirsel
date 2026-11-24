@@ -680,25 +680,6 @@ fn buffer(n: u64) -> Result[Bytes, Error] {
     Ok(take allocation)
 }
 
-fn send_response(mut w: WriteHalf, head: Bytes, body: Bytes, deadline: Until) -> Result[(), Error] waits {
-    let mut at: u64 = 0
-    let split = list.len(head)
-    while at != split + list.len(body) {
-        if expired(deadline) {
-            return Error(Network(TimedOut))
-        }
-        let prefix = list.slice(head, order.min(at, split), split)
-        let tail = list.slice(body, int.saturating_sub(at, split), list.len(body))
-        match host.send_pair(mut w, prefix, tail, deadline) {
-            Ok(n) => {
-                at += n
-            },
-            Error(e) => return Error(Network(e))
-        }
-    }
-    Ok(())
-}
-
 /// Bounded HTTP refusal. It is sent before releasing the socket halves.
 pub fn refuse(mut w: WriteHalf, code: u16, deadline: Until) -> Result[(), Error] waits {
     let b = if code == 503 {
@@ -709,10 +690,12 @@ pub fn refuse(mut w: WriteHalf, code: u16, deadline: Until) -> Result[(), Error]
         string.as_bytes("HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: 13\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
     } else if code == 404 {
         string.as_bytes("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+    } else if code == 500 {
+        string.as_bytes("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
     } else {
         string.as_bytes("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
     }
-    send_response(mut w, b, string.as_bytes(""), deadline)
+    wsock_site.send_response(mut w, b, string.as_bytes(""), deadline)
 }
 
 /// Refuses an accepted socket without exposing its halves to a transport caller.
@@ -807,6 +790,11 @@ fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_n
 /// Serve one request. The raw GET and HEAD handler runs before the upgrade's source policy.
 /// Raw and static responses close the connection.
 pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], raw: scoped fn(Bytes) -> Result[Option[(bool, String)], Capacity], admit: scoped fn(Ip) -> bool waits) -> Result[Option[Upgraded], Error] waits {
+    server_with_site_report(take socket, take slot, peer, ingress, config, clock, accepted_ns, site, raw, admit, None)
+}
+
+/// As server_with_site, with optional stderr authority for static response failures.
+pub fn server_with_site_report(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], raw: scoped fn(Bytes) -> Result[Option[(bool, String)], Capacity], admit: scoped fn(Ip) -> bool waits, report: Option[Stderr]) -> Result[Option[Upgraded], Error] waits {
     let request = receive_request(take socket, config, clock, accepted_ns)?
     let (head_only, fetch) = {
         let method = list.slice(request.input, request.head.method.start, request.head.method.end)
@@ -819,10 +807,10 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
             Error(c) => return Error(Allocation(c)),
         }
         if let Some((ready, take body)) = take response {
-            let header = static_head(ready, "application/json", list.len(string.as_bytes(body)))
+            let header = wsock_site.static_head(ready, "application/json", list.len(string.as_bytes(body)))
             let Request(writer: take output, deadline, ..) = take request
             let mut writer = take output
-            send_response(mut writer, string.as_bytes(header), if head_only {
+            wsock_site.send_response(mut writer, string.as_bytes(header), if head_only {
                 string.as_bytes("")
             } else {
                 string.as_bytes(body)
@@ -838,51 +826,10 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
         let upgraded = upgrade_request(take request, take slot, peer, ingress, config, clock, admit)?
         return Ok(Some(take upgraded))
     }
-    let web = option.unwrap(site)
-    let asset = if fetch {
-        (web.find)(list.slice(request.input, request.head.target.start, request.path_end))
-    } else {
-        None
-    }
-    let Request(writer: take output, deadline, ..) = take request
+    let Request(writer: take output, input: take input, head: take head, path_end, deadline, ..) = take request
     let mut writer = take output
-    let Some(take selected) = take asset else {
-        refuse(mut writer, 404, deadline)?
-        return Ok(None)
-    }
-    let body = match file.read(web.dir, selected.name) {
-        Ok(take data) => take data,
-        Error(Io(NotFound)) => {
-            refuse(mut writer, 404, deadline)?
-            return Ok(None)
-        },
-        Error(_) => {
-            send_response(mut writer, string.as_bytes("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"), string.as_bytes(""), deadline)?
-            return Ok(None)
-        },
-    }
-    let built_header = static_head(true, selected.content_type, list.len(body))
-    let header = built_header
-    send_response(mut writer, string.as_bytes(header), if head_only {
-        string.as_bytes("")
-    } else {
-        body
-    }, deadline)?
+    wsock_site.serve(mut writer, deadline, option.unwrap(site), list.slice(input, head.target.start, path_end), fetch, head_only, order.min(SCRATCH, config.max_frame), report)?
     Ok(None)
-}
-
-fn static_head(ready: bool, content_type: String, size: u64) -> String {
-    let mut head = string.from(if ready {
-        "HTTP/1.1 200 OK"
-    } else {
-        "HTTP/1.1 503 Service Unavailable"
-    })
-    string.push(mut head, "\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Type: ")
-    string.push(mut head, content_type)
-    string.push(mut head, "\r\nContent-Length: ")
-    string.push_u64(mut head, size)
-    string.push(mut head, "\r\n\r\n")
-    take head
 }
 
 fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
@@ -904,7 +851,7 @@ fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress:
                 let _ = refuse(mut writer, 503, deadline)
                 return Error(Http(503))
             }
-            send_response(mut writer, response, string.as_bytes(""), deadline)?
+            wsock_site.send_response(mut writer, response, string.as_bytes(""), deadline)?
             let kept = unread(input, end)?
             Ok(Upgraded(reader: Reader(half: take reader, input: take kept, cursor: 0, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
         },
@@ -938,7 +885,7 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
     let request = websocket.request(host_name, nonce, true) ?=> Http
     let mut key: Bytes = list.new()
     base64.encode(nonce, mut key)
-    send_response(mut output_half, request, string.as_bytes(""), deadline)?
+    wsock_site.send_response(mut output_half, request, string.as_bytes(""), deadline)?
     let mut input = buffer(8192)?
     let mut attempted = false
     loop {

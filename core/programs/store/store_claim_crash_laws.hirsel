@@ -577,11 +577,16 @@ fn claim_liveness_before_digest() -> Result[(), Error] waits {
     let Mismatch = admit_claim(mut db, first, other, b"other", Some(clone(policy)))? else {
         fail("a live Replied claim accepted another digest")
     }
-    // At expiry both rows are expired but unreclaimed. The scope is full, so
-    // this admission reclaims in its own commit.
+    // At expiry the scope is full of expired rows: a third key's admission
+    // reclaims both in its own commit, after which the first key is new.
     clock.set_wall(mut wall, 150)
+    let Accepted(take third) = admit_claim(mut db, claim_law_key(b"three"), digest, b"args", Some(clone(policy)))? else {
+        fail("a full scope of expired rows did not reclaim")
+    }
+    if claim_law_expiry(db, first)? != None || claim_law_expiry(db, second)? != None { fail("reclaim left an expired row") }
+    let _ = conclude_claim(mut db, take third, b"done")?
     let Accepted(take renewed) = admit_claim(mut db, first, other, b"other", Some(clone(policy)))? else {
-        fail("an expired claim with another digest was a mismatch (with reclaim)")
+        fail("a reclaimed claim with another digest was a mismatch")
     }
     let _ = conclude_claim(mut db, take renewed, b"again")?
     // After expiry, without reclaim: the scope has room, so no reclaim runs.
@@ -621,10 +626,10 @@ fn claim_reserve_run(mut db: Db, rows: Table[u64, Bytes], take completion: Compl
 
 // Fill application rows until each width is refused, so free resident room
 // outside the keyed credit is under the last width.
-fn claim_reserve_fill(mut db: Db, rows: Table[u64, Bytes], c: Clock) -> Result[(), Error] waits {
+fn claim_reserve_fill(mut db: Db, rows: Table[u64, Bytes], c: Clock, first_slot: u64) -> Result[(), Error] waits {
     let keep: Option[fn(Error) -> bool] = None
     let widths: Inline[u64, 4] = [1048576u64, 65536u64, 4096u64, 256u64]
-    let mut slot = 1u64
+    let mut slot = first_slot
     for band in 0u64 .. 4u64 {
         let width = widths[band]
         let mut room = true
@@ -668,7 +673,7 @@ fn claim_terminal_reserve_is_per_claim(c: Clock) -> Result[(), Error] waits {
     }
     let held = snapshot(db)
     let _ = pin(mut db, "old", held)?
-    claim_reserve_fill(mut db, rows, c)?
+    claim_reserve_fill(mut db, rows, c, 1)?
     let call = KeyedCallRecord(entry: b"charge", args: b"args", revision: None, code: b"0123456789abcdef")
     // Larger than the first claim's whole reserve, smaller than both.
     let pending = match claim_reserve_run(mut db, rows, keyed_completion(take first, clone(call)), hand_resident + 65536) {
@@ -687,6 +692,8 @@ fn claim_terminal_reserve_is_per_claim(c: Clock) -> Result[(), Error] waits {
     if db.keyed_credit.resident != hand_resident || db.keyed_credit.journal != hand_frame {
         fail("the first success released more or less than its own reserve")
     }
+    // Fill again to the limit, so only the second claim's own reserve is left.
+    claim_reserve_fill(mut db, rows, c, 5000)?
     let _ = conclude_claim(mut db, take second, b"done")?
     if db.keyed_credit.resident != 0 || db.keyed_credit.journal != 0 { fail("the control-only reply left a reserve") }
     Ok(())

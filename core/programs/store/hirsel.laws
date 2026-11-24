@@ -48,13 +48,13 @@ store@1/store/bucket_test_soak src=7d059df7524bf16e sig=80c97ea1aad965bc run=f6f
 store@1/store/cell_elision_and_inline_boundary src=fb961d08ce9f0cfc sig=0f4d24922c01a23c run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/cell_log_format_l79_l77_l78 src=efc567eef58780a8 sig=412ef0d5e437f9b7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/claim_expires_from_its_reply src=d584ed41058d54a5 sig=bb30a96f2e682e7e run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/claim_liveness_before_digest src=7ef42608bdd5ac39 sig=c4c30f1ba056d519 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/claim_liveness_before_digest src=c922f49f84e8cb6b sig=15b69a377a2eb6e6 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/claim_quotas_reclaim_their_own_scope src=03d1574423fcc652 sig=ef40a331ec734c32 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/claim_reclaims_expired_front src=a5ca87b222d5bc50 sig=1fece35513f373ff run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/claim_roots_survive_checkpoint src=4c621bf112f0c051 sig=da04462405b9e2a6 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/claim_served_body_and_record_reopen src=bed0377bff593c27 sig=b207a7bf9754c61b run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/claim_terminal_credit_survives_reopen src=7fa8354590ea877f sig=abf78576448cc63c run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/claim_terminal_reserve_is_per_claim src=112ab499a5732e66 sig=8501a756f6c3e6f8 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/claim_terminal_reserve_is_per_claim src=50880cba657b85e7 sig=8501a756f6c3e6f8 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/directory_grant_covers_journal_worker src=7b7a67d7a1078af0 sig=aefc94aee727d903 run=ba799caff9b50348 bug=- oracle=- rows=pending
 store@1/store/disk_pack_bound src=3031abe6e70c903a sig=11e7541f2b72e0c6 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/disk_test_blob_threshold src=1603be365862436f sig=855aafc2855e6e51 run=ea720f3846592392 bug=- oracle=- rows=pending

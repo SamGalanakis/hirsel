@@ -56,8 +56,6 @@ pub opaque type Ended               // as `finish` returns it
 
 ## Logs
 
-*Specified 2026-11-24 (std Group 2), not yet implemented.*
-
 Leveled, structured log lines belong to the same module as spans and follow the same shape.
 State is caller-owned, there is no global logger, and the encoder is pure. Writing a line
 is a thin wrapper over one `stderr.write_bytes` call. A program that does not log passes no
@@ -68,27 +66,30 @@ pub type Level: key = Debug | Info | Warn | Error
 pub opaque type Logger              // Clock anchor, minimum level, reusable line buffer
 pub fn logger(c: Clock, min: Level) -> Logger
 pub fn enabled(l: Logger, level: Level) -> bool
-pub fn encode_line(mut out: Bytes, unix_ns: u64, level: Level, ctx: Option[Context], msg: String, fields: List[Attribute])
-pub fn log(mut l: Logger, c: Clock, err: Stderr, level: Level, ctx: Option[Context], msg: String, fields: List[Attribute]) -> Result[(), WriteError] waits
+pub fn encode_line(mut out: Bytes, unix_ns: u64, level: Level, ctx: Option[Context], msg: String, take fields: List[Attribute])
+pub fn log(mut l: Logger, c: Clock, err: Stderr, level: Level, ctx: Option[Context], msg: String, take fields: List[Attribute]) -> Result[(), WriteError] waits
 ```
 
 ```hirsel
 let mut lg = trace.logger(c, level)
-trace.log(mut lg, c, err, Info, Some(trace.ids(span)), "fetched", [Attribute(key: "bytes", value: Int(n))])?
+let mut fields: List[trace.Attribute] = list.new()
+list.push(mut fields, trace.Attribute(key: "bytes", value: Int(n)))
+trace.log(mut lg, c, err, Info, Some(trace.ids(span)), "fetched", take fields)?
 ```
 
-- **Levels.** `Debug < Info < Warn < Error`, ordered by declaration as `key` types are.
-  `enabled(l, level)` is `level >= min`. `log` below the minimum returns `Ok(())` at once,
-  reading no clock and writing nothing. A caller that builds expensive fields checks
-  `enabled` first. The level usually comes from `config.log_level_or` (config.md, Flags).
+- **Levels.** `Debug < Info < Warn < Error`, in increasing severity.
+  `enabled(l, level)` checks whether the level meets the minimum. Below the minimum,
+  `log` returns `Ok(())` without reading the clock or writing to stderr. Check `enabled`
+  before building expensive fields. The level usually comes from `config.log_level_or`
+  (config.md, Flags).
 - **Time.** `logger(c, min)` anchors to `c` exactly as `recorder(c)` does (Decisions, Time
   above), so a log line and a span read from the same Clock share one time scale. A
   `provide.clock` Clock gives exact, repeatable times.
 - **Line format.** `encode_line` appends one JSON object and a `\n` to `out`, which grows by
   GROWTH. Members come in this order: `time`, `level`, `msg`, then `trace_id` and `span_id`
   (lower-case hex, as in spans) when `ctx` is `Some`, then `attributes` when `fields` is
-  nonempty. `time` is RFC 3339 UTC with nine fraction digits (`time.push_rfc3339(out, t, 0,
-  9)`). `level` is `DEBUG`, `INFO`, `WARN` or `ERROR`. `attributes` is an object whose
+  nonempty. `time` uses the same RFC 3339 UTC format as `time.push_rfc3339` with nine
+  fraction digits. `level` is `DEBUG`, `INFO`, `WARN` or `ERROR`. `attributes` is an object whose
   members are sorted by key bytes, with one value per key, and a later field replaces an
   earlier one, the same rule spans use. The JSON is written with no spacing, and strings
   are escaped as std.json escapes them, so a message holding a newline cannot forge a
@@ -114,9 +115,11 @@ trace.log(mut lg, c, err, Info, Some(trace.ids(span)), "fetched", [Attribute(key
   `c` reads below the anchor.
 - **Charging.** `logger` admits nothing until the first line. The line buffer is admitted
   under the limit current at that `log` call, grows by GROWTH to the longest line, and is
-  refunded when the logger is dropped. `encode_line` admits only `out`'s growth. `enabled` admits nothing and takes one step. Steps:
-  sorting the fields takes O(k log k) for k fields, and escaping takes O(bytes written).
-  Both are bounded by the caller's own arguments.
+  refunded when the logger is dropped. The encoder takes ownership of the fields and
+  sorts the list in place with a stable sort. Its temporary storage is refunded before
+  the write. Encoding otherwise admits only the output buffer's growth. The `enabled`
+  check admits nothing and takes O(1) steps. Sorting takes O(k log k) comparisons for
+  k fields, and escaping takes O(bytes written).
 - **Replay.** `log` reads the Clock and writes the stream, each passing its own replay
   point. The encoding passes none and is recomputed.
 
@@ -135,16 +138,6 @@ trace.log(mut lg, c, err, Info, Some(trace.ids(span)), "fetched", [Attribute(key
   global configuration.
 - Goose (`/tmp/ref-goose`, goose d5ae5bb) has `write_stderr` (`stdlib/os.goose`) and no
   leveled logging. ADOPTED: the plain stderr sink, with no buffering layer of its own.
-
-### Open
-
-- **`Level.Error` shares its name with `Result`'s `Error`.** The expected type picks the
-  constructor (language.md, LANG-11), so it compiles, but `Error` in a match on a log
-  level reads like a result. Renaming it is reversible until the logs land.
-- **Line atomicity between tasks.** Each line is one `stderr.write_bytes` call, and no
-  promise is made that another task's call cannot land inside it. If the host provider
-  writes each call whole, that promise could be added later. Removing it later would not
-  be possible.
 
 ## Left out
 

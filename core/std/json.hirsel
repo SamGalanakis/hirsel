@@ -561,55 +561,54 @@ fn next_quote_escape(b: Bytes, start: u64, end: u64) -> u64 {
 // Goose stdlib/json.goose:35 and serde_json 1.0.154 ser.rs:2079: copy runs
 // between ASCII escapes. Each cut is a UTF-8 boundary, including after an escape.
 fn push_quoted(mut s: String, value: String) {
-    string.push(mut s, "\"")
-    let b = string.as_bytes(value)
-    let end = list.len(b)
-    let first = next_quote_escape(b, 0, end)
-    if first == end {
-        string.push(mut s, value)
-    } else {
-        push_escaped_runs(mut s, value, b, first, end)
-    }
-    string.push(mut s, "\"")
+    emit_quoted(value, scoped fn(piece: String) {
+        string.push(mut s, piece)
+    })
 }
 
-fn push_escaped_runs(mut s: String, value: String, b: Bytes, first: u64, end: u64) {
-    let mut i = first
-    let mut start: u64 = 0
-    while i < end {
-        string.push(mut s, string.slice(value, start, i))
-        let c = b[i]
-        if c == b'"' {
-            string.push(mut s, "\\\"")
-        } else if c == b'\\' {
-            string.push(mut s, "\\\\")
-        } else if c == 8 {
-            string.push(mut s, "\\b")
-        } else if c == 9 {
-            string.push(mut s, "\\t")
-        } else if c == 10 {
-            string.push(mut s, "\\n")
-        } else if c == 12 {
-            string.push(mut s, "\\f")
-        } else if c == 13 {
-            string.push(mut s, "\\r")
-        } else {
-            // Commit the whole six-byte escape in one append.
-            string.reserve(mut s, 6)
-            let mut hex: Inline[u8, 64] =[b'0'; 64]
-            let control: u64 = int.widen(c)
-            let _ = int.radix_digits(control, 16, mut hex)
-            string.push(mut s, "\\u00")
-            for j in 62u64 .. 64 {
-                let code: u32 = int.widen(hex[j])
-                string.push_char(mut s, option.unwrap(char.from_u32(code)))
-            }
-        }
-        start = i + 1
-        i = next_quote_escape(b, start, end)
-    }
-    string.push(mut s, string.slice(value, start, end))
+/// Appends a JSON string, including quotes, to a byte buffer.
+/// Fails: Capacity. Alloc: GROWTH of out only. Cost: O(bytes written).
+pub fn append_quoted(mut out: Bytes, value: String) {
+    emit_quoted(value, scoped fn(piece: String) {
+        list.append(mut out, string.as_bytes(piece))
+    })
 }
+
+fn emit_quoted(value: String, append: scoped fn(String)) {
+    append("\"")
+    let b = string.as_bytes(value)
+    let end = list.len(b)
+    let mut i = next_quote_escape(b, 0, end)
+    if i == end {
+        append(value)
+    } else {
+        let mut start: u64 = 0
+        while i < end {
+            append(string.slice(value, start, i))
+            let c = b[i]
+            match c {
+                b'"' => append("\\\""),
+                b'\\' => append("\\\\"),
+                8 => append("\\b"),
+                9 => append("\\t"),
+                10 => append("\\n"),
+                12 => append("\\f"),
+                13 => append("\\r"),
+                _ => {
+                    let control: u64 = int.widen(c)
+                    let offset = control * 6
+                    append(string.slice(CONTROL_ESCAPES, offset, offset + 6))
+                },
+            }
+            start = i + 1
+            i = next_quote_escape(b, start, end)
+        }
+        append(string.slice(value, start, end))
+    }
+    append("\"")
+}
+
+const CONTROL_ESCAPES: String = "\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f"
 
 /// Finds the last member of ms whose key equals k, as a view of its value.
 /// Returns None when no member matches. Alloc: none. Cost: one pass.

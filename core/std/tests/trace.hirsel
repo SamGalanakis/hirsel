@@ -164,3 +164,81 @@ fn clock_behind_anchor() -> bool {
     trace.end(r, behind, take s)
     true
 }
+
+fn write_log_lines(take err: Stderr) -> bool waits {
+    let (c, hand) = provide.clock(5000, 1700000000123)
+    let (behind, _hand) = provide.clock(0, 0)
+    let mut h = take hand
+    let mut lg = trace.logger(c, Info)
+    if trace.enabled(lg, Debug) || !trace.enabled(lg, Info) || !trace.enabled(lg, Warn) || !trace.enabled(lg, Error) {
+        return false
+    }
+    // A read of behind would overflow, and the provider expects no write here.
+    result.unwrap(trace.log(mut lg, behind, err, Debug, None, "filtered", list.new()))
+    clock.advance_to(mut h, 7345)
+    let mut raw: Bytes = list.new()
+    list.append(mut raw, b"hidden-credential")
+    let token = result.unwrap(secret.seal(take raw, "mac"))
+    let mut fields: List[trace.Attribute] = list.new()
+    for i in 0u64 .. 21u64 {
+        list.push(mut fields, trace.Attribute(key: "attempt", value: Int(int.narrow(i))))
+    }
+    let large: f64 = 1.0e308
+    let infinity = large * 10.0
+    list.push(mut fields, trace.Attribute(key: "z", value: Str("é\u{0001}")))
+    list.push(mut fields, trace.Attribute(key: "token", value: Str(string.from(secret.render(token)))))
+    list.push(mut fields, trace.Attribute(key: "nan", value: Double(infinity - infinity)))
+    list.push(mut fields, trace.Attribute(key: "min", value: Int(-9223372036854775808)))
+    list.push(mut fields, trace.Attribute(key: "msg", value: Bool(true)))
+    list.push(mut fields, trace.Attribute(key: "finite", value: Double(1.0e-6)))
+    list.push(mut fields, trace.Attribute(key: "bytes", value: Blob(b"\xff")))
+    list.push(mut fields, trace.Attribute(key: "b\"ack", value: Double(-infinity)))
+    list.push(mut fields, trace.Attribute(key: "ahead", value: Double(infinity)))
+    let ctx = Some(ok_context(0x1234, 0xabcdef, 0x9))
+    result.unwrap(trace.log(mut lg, c, err, Warn, ctx, "quote \" slash \\ line\nnext", take fields))
+    clock.advance_to(mut h, 7346)
+    match trace.log(mut lg, c, err, Error, None, "shorter", list.new()) {
+        Error(e) => e.written == 8 && match e.error {
+            Other(code) => code == 5,
+            _ => false,
+        },
+        Ok(_) => false,
+    }
+}
+
+fn expect_log_write(mut served: Served[StreamOp], expected: Bytes, answer: StreamReply) -> bool waits {
+    let Some(take call) = provide.next(mut served) else {
+        return false
+    }
+    let Write(len) = provide.stream_op(call)
+    let mut got: Bytes = list.with_capacity(len)
+    provide.payload(call, 0, mut got)
+    result.unwrap(provide.reply(mut served, take call, provide.stream_reply(answer)))
+    len == list.len(expected) && got == expected
+}
+
+// One provider call per accepted line, in call order, with a partial write error passed back.
+// The first timestamp adds 2345 ns to 2023-11-14 at 22:13:20.123Z. The 21 "attempt"
+// values cross the stable sort's scratch threshold and only the last one survives.
+// expect: run leveled_json_log_contract(tasks) = true
+fn leveled_json_log_contract(tasks: Tasks) -> bool waits {
+    let mut encoded: Bytes = list.new()
+    list.append(mut encoded, b"\xff")
+    trace.encode_line(mut encoded, 1, Debug, None, "", list.new())
+    let appended = encoded == b"\xff{\"time\":\"1970-01-01T00:00:00.000000001Z\",\"level\":\"DEBUG\",\"msg\":\"\"}\n"
+    let (err, port) = provide.stderr(bytes 4096, false)
+    let mut served = take port
+    let child = task.spawn(tasks, bytes 65536, err, write_log_lines)
+    let first = expect_log_write(mut served, string.as_bytes("{\"time\":\"2023-11-14T22:13:20.123002345Z\",\"level\":\"WARN\",\"msg\":\"quote \\\" slash \\\\ line\\nnext\",\"trace_id\":\"00000000000012340000000000abcdef\",\"span_id\":\"0000000000000009\",\"attributes\":{\"ahead\":\"Infinity\",\"attempt\":20,\"b\\\"ack\":\"-Infinity\",\"bytes\":\"/w==\",\"finite\":1e-6,\"min\":-9223372036854775808,\"msg\":true,\"nan\":\"NaN\",\"token\":\"[secret]\",\"z\":\"é\\u0001\"}}\n"), Done)
+    let second = expect_log_write(mut served, b"{\"time\":\"2023-11-14T22:13:20.123002346Z\",\"level\":\"ERROR\",\"msg\":\"shorter\"}\n", WriteFailed(WriteError(written: 8, error: Other(5))))
+    let quiet = match provide.next(mut served) {
+        None => true,
+        Some(take call) => {
+            drop(take call)
+            false
+        },
+    }
+    drop(take served)
+    let wrote = result.unwrap(task.join(take child))
+    appended && first && second && wrote && quiet
+}

@@ -296,13 +296,14 @@ impl SecretGrant {
 }
 
 #[derive(Clone, Copy)]
-pub enum HmacSha2 {
+pub enum HmacAlgorithm {
+    Sha1,
     Sha256,
     Sha384,
     Sha512,
 }
 
-impl HmacSha2 {
+impl HmacAlgorithm {
     /// The case of the guest's JwsMacAlg.
     pub fn from_jws_case(case: u64) -> Self {
         match case {
@@ -315,6 +316,7 @@ impl HmacSha2 {
 
     fn algorithm(self) -> ring::hmac::Algorithm {
         match self {
+            Self::Sha1 => ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
             Self::Sha256 => ring::hmac::HMAC_SHA256,
             Self::Sha384 => ring::hmac::HMAC_SHA384,
             Self::Sha512 => ring::hmac::HMAC_SHA512,

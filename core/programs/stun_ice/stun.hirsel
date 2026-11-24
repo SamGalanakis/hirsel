@@ -4,6 +4,58 @@ const CRC_MASK: u32 = 0x5354554e
 
 const HEADER: u64 = 20
 
+const MAX_PACKET: u64 = HEADER + 65532
+
+pub const CHANNEL_NUMBER: u16 = 0x000c
+
+pub const LIFETIME: u16 = 0x000d
+
+pub const XOR_PEER_ADDRESS: u16 = 0x0012
+
+pub const DATA: u16 = 0x0013
+
+pub const REALM: u16 = 0x0014
+
+pub const NONCE: u16 = 0x0015
+
+pub const XOR_RELAYED_ADDRESS: u16 = 0x0016
+
+pub const REQUESTED_ADDRESS_FAMILY: u16 = 0x0017
+
+pub const EVEN_PORT: u16 = 0x0018
+
+pub const REQUESTED_TRANSPORT: u16 = 0x0019
+
+pub const DONT_FRAGMENT: u16 = 0x001a
+
+pub const MESSAGE_INTEGRITY_SHA256: u16 = 0x001c
+
+pub const PASSWORD_ALGORITHM: u16 = 0x001d
+
+pub const USERHASH: u16 = 0x001e
+
+pub const RESERVATION_TOKEN: u16 = 0x0022
+
+pub const ADDITIONAL_ADDRESS_FAMILY: u16 = 0x8000
+
+pub const ADDRESS_ERROR_CODE: u16 = 0x8001
+
+pub const PASSWORD_ALGORITHMS: u16 = 0x8002
+
+pub const ICMP: u16 = 0x8004
+
+pub const ALLOCATE: u16 = 0x0003
+
+pub const REFRESH: u16 = 0x0004
+
+pub const SEND: u16 = 0x0006
+
+pub const DATA_METHOD: u16 = 0x0007
+
+pub const CREATE_PERMISSION: u16 = 0x0008
+
+pub const CHANNEL_BIND: u16 = 0x0009
+
 pub type Transaction: key {
     high: u32,
     low: u64
@@ -26,7 +78,7 @@ pub type Check {
 
 pub type Integrity: key = NoIntegrity | Sha1 | Sha256 | Both
 
-pub type Error = BadHeader | UnsupportedMethod(u16) | BadAttribute(u16) | UnknownRequired(u16) | BadFingerprint | MissingIntegrity | BadIntegrity | BufferTooSmall(u64) | BadUsername | BadErrorCode
+pub type Error = BadHeader | UnsupportedMethod(u16) | BadAttribute(u16) | UnknownRequired(u16) | BadFingerprint | MissingIntegrity | BadIntegrity | BufferTooSmall(u64) | BadUsername | BadErrorCode | Mac(MacError)
 
 pub type Range {
     lo: u64,
@@ -47,10 +99,30 @@ pub type Message {
     integrity: Integrity
 }
 
-type Parsed {
-    message: Message,
-    sha1_at: u64,
-    sha256_at: u64
+pub type Key = Short(Bytes) | Long(Secret)
+
+pub type Attr {
+    kind: u16,
+    value: Range
+}
+
+pub type Header {
+    method: u16,
+    class: Class,
+    transaction: Transaction,
+    length: u16
+}
+
+pub opaque type Builder {
+    transaction: Transaction,
+    at: u64
+}
+
+type Scan {
+    at: u64,
+    tag_at: u64,
+    integrity: Integrity,
+    unknown: Option[u16]
 }
 
 fn mapped_address(packet: Bytes, at: u64, len: u64, tx: Transaction, xored: bool) -> Result[Addr, Error] {
@@ -98,7 +170,8 @@ fn mapped_address(packet: Bytes, at: u64, len: u64, tx: Transaction, xored: bool
     Ok(Addr(ip: ip, port: port ^ port_mask))
 }
 
-fn parse(packet: Bytes) -> Result[Parsed, Error] {
+/// Parse the fixed header of one complete STUN message.
+pub fn header(packet: Bytes) -> Result[Header, Error] {
     let end = list.len(packet)
     if end < HEADER {
         return Error(BadHeader)
@@ -109,147 +182,192 @@ fn parse(packet: Bytes) -> Result[Parsed, Error] {
     if (kind & 0xc000) != 0 || (length & 3) != 0 || end != HEADER + int.widen(length) || cookie != COOKIE {
         return Error(BadHeader)
     }
-    let class = match kind {
-        0x0001 => Request,
-        0x0011 => Indication,
-        0x0101 => Success,
-        0x0111 => Failure,
-        _ => {
-            return Error(UnsupportedMethod(kind))
-        },
+    let class = match kind & 0x0110 {
+        0 => Request,
+        0x0010 => Indication,
+        0x0100 => Success,
+        _ => Failure,
     }
+    let method = (kind & 0x000f) | ((kind & 0x00e0) >> 1) | ((kind & 0x3e00) >> 2)
     let tx = Transaction(high: list.word_be(packet, 8), low: list.word_be(packet, 12))
-    let mut msg = Message(class: class, transaction: tx, username: None, mapped: None, xor_mapped: false, priority: None, role: None, nominate: false, code: None, fingerprint: false, integrity: NoIntegrity)
-    let mut sha1_at = 0u64
-    let mut sha256_at = 0u64
-    let mut at = HEADER
-    while at < end {
-        let attr: u16 = list.word_be(packet, at)
-        let len16: u16 = list.word_be(packet, at + 2)
-        let len: u64 = int.widen(len16)
-        let data = at + 4
-        let next = data + padded(len)
-        if next > end {
-            return Error(BadAttribute(attr))
-        }
-        if attr == 0x8028 {
+    Ok(Header(method: method, class: class, transaction: tx, length: length))
+}
+
+fn scan_start() -> Scan {
+    Scan(at: HEADER, tag_at: 0, integrity: NoIntegrity, unknown: None)
+}
+
+fn required_known(kind: u16) -> bool {
+    kind == 0x0001 || kind == 0x0006 || kind == 0x0009 || kind == 0x000a || kind == CHANNEL_NUMBER || kind == LIFETIME || kind == XOR_PEER_ADDRESS || kind == DATA || kind == REALM || kind == NONCE || kind == XOR_RELAYED_ADDRESS || kind == REQUESTED_ADDRESS_FAMILY || kind == EVEN_PORT || kind == REQUESTED_TRANSPORT || kind == DONT_FRAGMENT || kind == PASSWORD_ALGORITHM || kind == USERHASH || kind == 0x0020 || kind == RESERVATION_TOKEN || kind == 0x0024 || kind == 0x0025
+}
+
+fn next_attr(packet: Bytes, mut scan: Scan) -> Result[Attr, Error] {
+    let at = scan.at
+    let end = list.len(packet)
+    let kind: u16 = list.word_be(packet, at)
+    let len16: u16 = list.word_be(packet, at + 2)
+    let len: u64 = int.widen(len16)
+    let data = at + 4
+    let next = data + padded(len)
+    if next > end {
+        return Error(BadAttribute(kind))
+    }
+    match kind {
+        0x8028 => {
             if len != 4 || next != end {
-                return Error(BadAttribute(attr))
+                return Error(BadAttribute(kind))
             }
             let got: u32 = list.word_be(packet, data)
             if got != (std.crc32.update(0, packet, 0, at) ^ CRC_MASK) {
                 return Error(BadFingerprint)
             }
-            msg.fingerprint = true
-        } else if attr == 0x001c {
-            if len != 32 || sha256_at != 0 {
-                return Error(BadAttribute(attr))
+        },
+        _ if kind == MESSAGE_INTEGRITY_SHA256 => {
+            if len != 32 || scan.integrity == Sha256 || scan.integrity == Both {
+                return Error(BadAttribute(kind))
             }
-            sha256_at = at
-        } else if sha1_at == 0 && sha256_at == 0 {
-            match attr {
-                0x0008 => {
-                    if len != 20 {
-                        return Error(BadAttribute(attr))
-                    }
-                    sha1_at = at
-                },
-                0x0006 => {
-                    if len > 763 || !valid_utf8(packet, data, len) {
-                        return Error(BadAttribute(attr))
-                    }
-                    if let None = msg.username {
-                        msg.username = Some(Range(lo: data, hi: data + len))
-                    }
-                },
-                _ if attr == 0x0001 || attr == 0x0020 => {
-                    if !msg.xor_mapped {
-                        let addr = mapped_address(packet, data, len, tx, attr == 0x0020)?
-                        if attr == 0x0020 {
-                            msg.mapped = Some(addr)
-                            msg.xor_mapped = true
-                        } else if let None = msg.mapped {
-                            msg.mapped = Some(addr)
-                        }
-                    }
-                },
-                0x0009 => {
-                    if len < 4 || len > 767 || !valid_utf8(packet, data + 4, len - 4) {
-                        return Error(BadAttribute(attr))
-                    }
-                    let hundreds: u16 = int.widen(packet[data + 2] & 7)
-                    let number: u16 = int.widen(packet[data + 3])
-                    if hundreds < 3 || hundreds > 6 || number > 99 {
-                        return Error(BadAttribute(attr))
-                    }
-                    if let None = msg.code {
-                        msg.code = Some(100 * hundreds + number)
-                    }
-                },
-                0x0024 => {
-                    if len != 4 {
-                        return Error(BadAttribute(attr))
-                    }
-                    if let None = msg.priority {
-                        msg.priority = Some(list.word_be(packet, data))
-                    }
-                },
-                0x0025 => {
-                    if len != 0 {
-                        return Error(BadAttribute(attr))
-                    }
-                    msg.nominate = true
-                },
-                _ if attr == 0x8029 || attr == 0x802a => {
-                    if len != 8 {
-                        return Error(BadAttribute(attr))
-                    }
-                    let role = if attr == 0x802a {
-                        Controlling
-                    } else {
-                        Controlled
-                    }
-                    if let Some(old) = msg.role {
-                        if old.role != role {
-                            return Error(BadAttribute(attr))
-                        }
-                    } else {
-                        msg.role = Some(IceRole(role: role, tie: list.word_be(packet, data)))
-                    }
-                },
-                // Long-term key derivation and challenges belong to the STUN usage.
-                _ if attr == 0x0014 || attr == 0x0015 => {
-                    if len > 763 || !valid_utf8(packet, data, len) {
-                        return Error(BadAttribute(attr))
-                    }
-                },
-                0x001e => {
-                    if len != 32 {
-                        return Error(BadAttribute(attr))
-                    }
-                },
-                _ if attr == 0x000a || attr == 0x001d => (),
-                _ => {
-                    if attr < 0x8000 {
-                        return Error(UnknownRequired(attr))
-                    }
-                },
+            scan.tag_at = at
+            scan.integrity = if scan.integrity == Sha1 {
+                Both
+            } else {
+                Sha256
             }
-        }
-        at = next
+        },
+        _ => {
+            if scan.integrity != NoIntegrity {
+                return Error(BadAttribute(kind))
+            }
+            if kind == 0x0008 {
+                if len != 20 {
+                    return Error(BadAttribute(kind))
+                }
+                scan.tag_at = at
+                scan.integrity = Sha1
+            } else if kind < 0x8000 && !required_known(kind) {
+                if let None = scan.unknown {
+                    scan.unknown = Some(kind)
+                }
+            }
+        },
     }
-    msg.integrity = if sha256_at != 0 {
-        if sha1_at != 0 {
-            Both
-        } else {
-            Sha256
-        }
-    } else if sha1_at != 0 {
-        Sha1
-    } else {
-        NoIntegrity
+    scan.at = next
+    Ok(Attr(kind: kind, value: Range(lo: data, hi: data + len)))
+}
+
+/// Append the attribute value ranges in wire order. A framing error leaves the preceding ranges appended.
+/// UnknownRequired follows a complete scan. Keep the ranges to derive a key and authenticate with verify_key.
+pub fn attrs(packet: Bytes, mut out: List[Attr]) -> Result[Integrity, Error] {
+    let _ = header(packet)?
+    let mut scan = scan_start()
+    while scan.at < list.len(packet) {
+        list.push(mut out, next_attr(packet, mut scan)?)
     }
-    Ok(Parsed(message: msg, sha1_at: sha1_at, sha256_at: sha256_at))
+    if let Some(kind) = scan.unknown {
+        return Error(UnknownRequired(kind))
+    }
+    Ok(scan.integrity)
+}
+
+fn binding_header(packet: Bytes) -> Result[Header, Error] {
+    let h = header(packet)?
+    if h.method != 1 {
+        return Error(UnsupportedMethod(list.word_be(packet, 0)))
+    }
+    Ok(h)
+}
+
+fn binding_fields(packet: Bytes, h: Header, mut scan: Scan) -> Result[Message, Error] {
+    let mut msg = Message(class: h.class, transaction: h.transaction, username: None, mapped: None, xor_mapped: false, priority: None, role: None, nominate: false, code: None, fingerprint: false, integrity: NoIntegrity)
+    while scan.at < list.len(packet) {
+        let attr = next_attr(packet, mut scan)?
+        if let Some(kind) = scan.unknown {
+            return Error(UnknownRequired(kind))
+        }
+        let kind = attr.kind
+        let data = attr.value.lo
+        let len = attr.value.hi - data
+        match kind {
+            0x0006 => {
+                if len > 763 || !valid_utf8(packet, data, len) {
+                    return Error(BadAttribute(kind))
+                }
+                if let None = msg.username {
+                    msg.username = Some(attr.value)
+                }
+            },
+            _ if kind == 0x0001 || kind == 0x0020 => {
+                if !msg.xor_mapped {
+                    let addr = mapped_address(packet, data, len, h.transaction, kind == 0x0020)?
+                    if kind == 0x0020 {
+                        msg.mapped = Some(addr)
+                        msg.xor_mapped = true
+                    } else if let None = msg.mapped {
+                        msg.mapped = Some(addr)
+                    }
+                }
+            },
+            0x0009 => {
+                if len < 4 || len > 767 || !valid_utf8(packet, data + 4, len - 4) {
+                    return Error(BadAttribute(kind))
+                }
+                let hundreds: u16 = int.widen(packet[data + 2] & 7)
+                let number: u16 = int.widen(packet[data + 3])
+                if hundreds < 3 || hundreds > 6 || number > 99 {
+                    return Error(BadAttribute(kind))
+                }
+                if let None = msg.code {
+                    msg.code = Some(100 * hundreds + number)
+                }
+            },
+            0x0024 => {
+                if len != 4 {
+                    return Error(BadAttribute(kind))
+                }
+                if let None = msg.priority {
+                    msg.priority = Some(list.word_be(packet, data))
+                }
+            },
+            0x0025 => {
+                if len != 0 {
+                    return Error(BadAttribute(kind))
+                }
+                msg.nominate = true
+            },
+            _ if kind == 0x8029 || kind == 0x802a => {
+                if len != 8 {
+                    return Error(BadAttribute(kind))
+                }
+                let role = if kind == 0x802a {
+                    Controlling
+                } else {
+                    Controlled
+                }
+                if let Some(old) = msg.role {
+                    if old.role != role {
+                        return Error(BadAttribute(kind))
+                    }
+                } else {
+                    msg.role = Some(IceRole(role: role, tie: list.word_be(packet, data)))
+                }
+            },
+            _ if kind == REALM || kind == NONCE => {
+                if len > 763 || !valid_utf8(packet, data, len) {
+                    return Error(BadAttribute(kind))
+                }
+            },
+            _ if kind == USERHASH => {
+                if len != 32 {
+                    return Error(BadAttribute(kind))
+                }
+            },
+            0x8028 => {
+                msg.fingerprint = true
+            },
+            _ => (),
+        }
+    }
+    msg.integrity = scan.integrity
+    Ok(msg)
 }
 
 fn valid_utf8(packet: Bytes, at: u64, len: u64) -> bool {
@@ -263,39 +381,32 @@ fn valid_utf8(packet: Bytes, at: u64, len: u64) -> bool {
 /// Parse one Binding datagram and check any FINGERPRINT. Call verify before trusting authenticated fields.
 /// The username range refers to packet; neither function retains the packet.
 pub fn decode(packet: Bytes) -> Result[Message, Error] {
-    Ok(parse(packet)?.message)
+    let mut scan = scan_start()
+    binding_fields(packet, binding_header(packet)?, mut scan)
 }
 
 /// Authenticate with the usage's prepared key. SHA-256 takes precedence when both tags are present.
 /// SHA-1 needs 64 bytes of scratch plus the prefix before its attribute. Scratch is cleared after use.
 pub fn verify(packet: Bytes, key: Bytes, mut scratch: Bytes) -> Result[Message, Error] {
-    let p = parse(packet)?
-    if p.sha256_at != 0 {
-        let tag = sha256_prefix(key, packet, p.sha256_at)
-        let mut diff = 0u8
-        for i in 0u64 .. 32 {
-            diff |= tag[i] ^ packet[p.sha256_at + 4 + i]
-        }
-        if diff != 0 {
-            return Error(BadIntegrity)
-        }
-    } else if p.sha1_at != 0 {
-        let need = 64 + p.sha1_at
-        if list.len(scratch) < need {
-            return Error(BufferTooSmall(need))
-        }
-        let tag = sha1_prefix(key, packet, p.sha1_at, mut scratch)
-        let mut diff = 0u8
-        for i in 0u64 .. 20 {
-            diff |= tag[i] ^ packet[p.sha1_at + 4 + i]
-        }
-        if diff != 0 {
-            return Error(BadIntegrity)
-        }
-    } else {
-        return Error(MissingIntegrity)
+    let mut scan = scan_start()
+    let msg = binding_fields(packet, binding_header(packet)?, mut scan)?
+    verify_tag(packet, scan, ShortView(view key), mut scratch)?
+    Ok(msg)
+}
+
+/// Authenticate the strongest tag present after checking the message's attribute framing.
+/// A well-framed unknown required attribute is covered by the tag like any other attribute.
+pub fn verify_key(packet: Bytes, key: Key, mut scratch: Bytes) -> Result[Integrity, Error] {
+    let _ = header(packet)?
+    let mut scan = scan_start()
+    while scan.at < list.len(packet) {
+        let _ = next_attr(packet, mut scan)?
     }
-    Ok(p.message)
+    match key {
+        Short(raw_key) => verify_tag(packet, scan, ShortView(view raw_key), mut scratch)?,
+        Long(secret_key) => verify_tag(packet, scan, LongView(view secret_key), mut scratch)?,
+    }
+    Ok(scan.integrity)
 }
 
 fn padded(n: u64) -> u64 {
@@ -315,30 +426,35 @@ fn trailer_size(integrity: Integrity, fingerprint: bool) -> u64 {
     })
 }
 
-fn start(mut out: Bytes, scratch: Bytes, class: Class, tx: Transaction, at: u64, integrity: Integrity, fingerprint: bool) -> Result[u64, Error] {
-    let end = at + trailer_size(integrity, fingerprint)
+fn check_output(out: Bytes, end: u64) -> Result[(), Error] {
+    if end > MAX_PACKET {
+        return Error(BadHeader)
+    }
     if list.len(out) < end {
         return Error(BufferTooSmall(end))
     }
-    if integrity == Sha1 || integrity == Both {
-        let need = at + 64
-        if list.len(scratch) < need {
-            return Error(BufferTooSmall(need))
-        }
+    Ok(())
+}
+
+/// Begin a message in a caller buffer. Continue building in that same buffer.
+pub fn start(method: u16, class: Class, tx: Transaction, mut out: Bytes) -> Result[Builder, Error] {
+    if method > 0x0fff {
+        return Error(BadHeader)
     }
-    let kind: u16 = match class {
-        Request => 0x0001,
-        Indication => 0x0011,
-        Success => 0x0101,
-        Failure => 0x0111,
+    check_output(out, HEADER)?
+    let class_bits: u16 = match class {
+        Request => 0,
+        Indication => 0x0010,
+        Success => 0x0100,
+        Failure => 0x0110,
     }
-    let length: u16 = int.narrow(end - HEADER)
+    let kind = (method & 0x000f) | ((method & 0x0070) << 1) | ((method & 0x0f80) << 2) | class_bits
     list.set_word_be(mut out, 0, kind)
-    list.set_word_be(mut out, 2, length)
+    list.set_word_be(mut out, 2, 0u16)
     list.set_word_be(mut out, 4, COOKIE)
     list.set_word_be(mut out, 8, tx.high)
     list.set_word_be(mut out, 12, tx.low)
-    Ok(end)
+    Ok(Builder(transaction: tx, at: HEADER))
 }
 
 fn attribute(mut out: Bytes, at: u64, kind: u16, len: u16) {
@@ -346,10 +462,87 @@ fn attribute(mut out: Bytes, at: u64, kind: u16, len: u16) {
     list.set_word_be(mut out, at + 2, len)
 }
 
-fn finish(mut out: Bytes, key: Bytes, mut scratch: Bytes, at: u64, integrity: Integrity, fingerprint: bool) {
+fn reserve_attr(mut b: Builder, kind: u16, len: u64, mut out: Bytes) -> Result[u64, Error] {
+    if len > 65535 || kind == 0x0008 || kind == MESSAGE_INTEGRITY_SHA256 || kind == 0x8028 {
+        return Error(BadAttribute(kind))
+    }
+    let data = b.at + 4
+    let end = data + padded(len)
+    check_output(out, end)?
+    attribute(mut out, b.at, kind, int.narrow(len))
+    b.at = end
+    Ok(data)
+}
+
+/// Append one attribute with zero padding. Add integrity and fingerprint with finish.
+pub fn add(mut b: Builder, kind: u16, value: Bytes, mut out: Bytes) -> Result[(), Error] {
+    let len = list.len(value)
+    let data = reserve_attr(mut b, kind, len, mut out)?
+    list.copy_from_slice(mut out, data, value)
+    list.fill_slice(mut out, data + len, padded(len) - len, 0)
+    Ok(())
+}
+
+pub fn add_xor_addr(mut b: Builder, kind: u16, a: Addr, mut out: Bytes) -> Result[(), Error] {
+    let len: u64 = match a.ip {
+        V4(_) => 8,
+        V6(_, _) => 20,
+    }
+    let data = reserve_attr(mut b, kind, len, mut out)?
+    out[data] = 0
+    list.set_word_be(mut out, data + 2, a.port ^ 0x2112)
+    match a.ip {
+        V4(ip) => {
+            out[data + 1] = 1
+            list.set_word_be(mut out, data + 4, ip ^ COOKIE)
+        },
+        V6(hi, lo) => {
+            out[data + 1] = 2
+            let cookie: u64 = int.widen(COOKIE)
+            let mask = (cookie << 32) | int.widen(b.transaction.high)
+            list.set_word_be(mut out, data + 4, hi ^ mask)
+            list.set_word_be(mut out, data + 12, lo ^ b.transaction.low)
+        },
+    }
+    Ok(())
+}
+
+pub fn add_error(mut b: Builder, code: u16, mut out: Bytes) -> Result[(), Error] {
+    if code < 300 || code > 699 {
+        return Error(BadErrorCode)
+    }
+    let data = reserve_attr(mut b, 0x0009, 4, mut out)?
+    let encoded: u32 = int.widen(((code / 100) << 8) | (code % 100))
+    list.set_word_be(mut out, data, encoded)
+    Ok(())
+}
+
+fn finish_size(at: u64, integrity: Integrity, fingerprint: bool, long: bool, out: Bytes, scratch: Bytes) -> Result[u64, Error] {
+    let end = at + trailer_size(integrity, fingerprint)
+    check_output(out, end)?
+    let need = if long {
+        match integrity {
+            NoIntegrity => 0u64,
+            Both => at + 24,
+            _ => at,
+        }
+    } else if integrity == Sha1 || integrity == Both {
+        at + 64
+    } else {
+        0
+    }
+    if list.len(scratch) < need {
+        return Error(BufferTooSmall(need))
+    }
+    Ok(end)
+}
+
+fn finish_packet(at: u64, end: u64, integrity: Integrity, key: KeyView, fingerprint: bool, mut out: Bytes, mut scratch: Bytes) -> Result[u64, Error] {
+    let length: u16 = int.narrow(end - HEADER)
+    list.set_word_be(mut out, 2, length)
     let mut next = at
     if integrity == Sha1 || integrity == Both {
-        let tag = sha1_prefix(key, out, next, mut scratch)
+        let tag = sign_sha1(key, out, next, mut scratch)?
         attribute(mut out, next, 0x0008, 20)
         for i in 0u64 .. 20 {
             out[next + 4 + i] = tag[i]
@@ -357,8 +550,8 @@ fn finish(mut out: Bytes, key: Bytes, mut scratch: Bytes, at: u64, integrity: In
         next += 24
     }
     if integrity == Sha256 || integrity == Both {
-        let tag = sha256_prefix(key, out, next)
-        attribute(mut out, next, 0x001c, 32)
+        let tag = sign_sha256(key, out, next, mut scratch)?
+        attribute(mut out, next, MESSAGE_INTEGRITY_SHA256, 32)
         for i in 0u64 .. 32 {
             out[next + 4 + i] = tag[i]
         }
@@ -369,6 +562,36 @@ fn finish(mut out: Bytes, key: Bytes, mut scratch: Bytes, at: u64, integrity: In
         attribute(mut out, next, 0x8028, 4)
         list.set_word_be(mut out, next + 4, crc)
     }
+    Ok(end)
+}
+
+pub fn finish(take b: Builder, integrity: Integrity, key: Key, fingerprint: bool, mut out: Bytes, mut scratch: Bytes) -> Result[u64, Error] {
+    match key {
+        Short(raw_key) => {
+            let end = finish_size(b.at, integrity, fingerprint, false, out, scratch)?
+            finish_packet(b.at, end, integrity, ShortView(view raw_key), fingerprint, mut out, mut scratch)
+        },
+        Long(secret_key) => {
+            let end = finish_size(b.at, integrity, fingerprint, true, out, scratch)?
+            finish_packet(b.at, end, integrity, LongView(view secret_key), fingerprint, mut out, mut scratch)
+        },
+    }
+}
+
+fn add_check(mut b: Builder, check: Check, mut out: Bytes) -> Result[(), Error] {
+    let priority = reserve_attr(mut b, 0x0024, 4, mut out)?
+    list.set_word_be(mut out, priority, check.priority)
+    let kind: u16 = if check.role.role == Controlling {
+        0x802a
+    } else {
+        0x8029
+    }
+    let tie = reserve_attr(mut b, kind, 8, mut out)?
+    list.set_word_be(mut out, tie, check.role.tie)
+    if check.nominate {
+        add(mut b, 0x0025, b"", mut out)?
+    }
+    Ok(())
 }
 
 /// Write a Binding request to a caller buffer. Return the number of bytes written.
@@ -389,59 +612,27 @@ pub fn binding_request(tx: Transaction, username: Bytes, check: Option[Check], i
             20
         }
     }
-    let end = start(mut out, scratch, Request, tx, at, integrity, fingerprint)?
-    at = HEADER
+    let end = finish_size(at, integrity, fingerprint, false, out, scratch)?
+    let mut b = start(1, Request, tx, mut out)?
     if n != 0 {
-        attribute(mut out, at, 0x0006, int.narrow(n))
-        list.copy_from_slice(mut out, at + 4, username)
-        list.fill_slice(mut out, at + 4 + n, padded(n) - n, 0)
-        at += 4 + padded(n)
+        add(mut b, 0x0006, username, mut out)?
     }
     if let Some(c) = check {
-        attribute(mut out, at, 0x0024, 4)
-        list.set_word_be(mut out, at + 4, c.priority)
-        let kind: u16 = if c.role.role == Controlling {
-            0x802a
-        } else {
-            0x8029
-        }
-        attribute(mut out, at + 8, kind, 8)
-        list.set_word_be(mut out, at + 12, c.role.tie)
-        at += 20
-        if c.nominate {
-            attribute(mut out, at, 0x0025, 0)
-            at += 4
-        }
+        add_check(mut b, c, mut out)?
     }
-    finish(mut out, key, mut scratch, at, integrity, fingerprint)
-    Ok(end)
+    finish_packet(b.at, end, integrity, ShortView(view key), fingerprint, mut out, mut scratch)
 }
 
 /// Write a Binding success with the source transport address in XOR-MAPPED-ADDRESS.
 pub fn binding_success(tx: Transaction, mapped: Addr, integrity: Integrity, fingerprint: bool, key: Bytes, mut out: Bytes, mut scratch: Bytes) -> Result[u64, Error] {
-    let len: u16 = match mapped.ip {
-        V4(_) => 8,
-        V6(_, _) => 20,
+    let at = HEADER + match mapped.ip {
+        V4(_) => 12u64,
+        V6(_, _) => 24u64
     }
-    let at = HEADER + 4 + int.widen(len)
-    let end = start(mut out, scratch, Success, tx, at, integrity, fingerprint)?
-    attribute(mut out, HEADER, 0x0020, len)
-    out[24] = 0
-    list.set_word_be(mut out, 26, mapped.port ^ 0x2112)
-    match mapped.ip {
-        V4(ip) => {
-            out[25] = 1
-            list.set_word_be(mut out, 28, ip ^ COOKIE)
-        },
-        V6(hi, lo) => {
-            out[25] = 2
-            let mask: u64 = list.word_be(out, 4)
-            list.set_word_be(mut out, 28, hi ^ mask)
-            list.set_word_be(mut out, 36, lo ^ tx.low)
-        },
-    }
-    finish(mut out, key, mut scratch, at, integrity, fingerprint)
-    Ok(end)
+    let end = finish_size(at, integrity, fingerprint, false, out, scratch)?
+    let mut b = start(1, Success, tx, mut out)?
+    add_xor_addr(mut b, 0x0020, mapped, mut out)?
+    finish_packet(b.at, end, integrity, ShortView(view key), fingerprint, mut out, mut scratch)
 }
 
 /// Write a Binding error with an empty diagnostic phrase.
@@ -449,12 +640,10 @@ pub fn binding_error(tx: Transaction, code: u16, integrity: Integrity, fingerpri
     if code < 300 || code > 699 {
         return Error(BadErrorCode)
     }
-    let end = start(mut out, scratch, Failure, tx, 28, integrity, fingerprint)?
-    attribute(mut out, HEADER, 0x0009, 4)
-    let encoded: u32 = int.widen(((code / 100) << 8) | (code % 100))
-    list.set_word_be(mut out, 24, encoded)
-    finish(mut out, key, mut scratch, 28, integrity, fingerprint)
-    Ok(end)
+    let end = finish_size(28, integrity, fingerprint, false, out, scratch)?
+    let mut b = start(1, Failure, tx, mut out)?
+    add_error(mut b, code, mut out)?
+    finish_packet(b.at, end, integrity, ShortView(view key), fingerprint, mut out, mut scratch)
 }
 
 fn same_address(a: Addr, b: Addr) -> bool {

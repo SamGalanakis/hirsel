@@ -314,6 +314,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
                     | HostOp::SecretHmac
+                    | HostOp::SecretHmacSha1
+                    | HostOp::SecretVerifyHmacSha1
                     | HostOp::SecretDeriveHmac
                     | HostOp::SecretDeriveHkdf
                     | HostOp::SecretDeriveArgon2id
@@ -445,32 +447,7 @@ impl Function<'_, '_, '_> {
                 };
                 // Provider rows return a status byte for failures (e.g. Cancelled, Bounds).
                 self.call_failure(values[4], call.fail)?;
-                let n = if matches!(op, HostOp::Random | HostOp::Stopped) {
-                    0
-                } else if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
-                    1
-                } else {
-                    4
-                };
-                for i in 0..n {
-                    outputs[i] = values[i];
-                }
-                if op.address_outcome() || op == HostOp::TlsConnect {
-                    for i in 4..8 {
-                        outputs[i] = values[i + 1];
-                    }
-                    8
-                } else if op == HostOp::ExecSpawn {
-                    for i in 4..7 {
-                        outputs[i] = values[i + 1];
-                    }
-                    7
-                } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
-                    outputs[4] = values[5];
-                    5
-                } else {
-                    n
-                }
+                Self::host_outputs(op, values, &mut outputs)
             }
             RtOp::Transfer { x, r } => {
                 // The job packed as a task input behind the root's code word.

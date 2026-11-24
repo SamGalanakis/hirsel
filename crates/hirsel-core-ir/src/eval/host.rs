@@ -35,14 +35,7 @@ impl Machine<'_> {
             HostOp::SecretDeriveHmac | HostOp::SecretDeriveHkdf | HostOp::SecretDeriveArgon2id => {
                 return self.secret_derive(t, op, a);
             }
-            HostOp::SecretHmac
-            | HostOp::SecretHmacSha384
-            | HostOp::SecretHmacSha512
-            | HostOp::SecretVerifyHmacSha384
-            | HostOp::SecretVerifyHmacSha512
-            | HostOp::SecretVerifyHmac
-            | HostOp::SecretJwsHmacSign
-            | HostOp::SecretJwsHmacVerify => return self.secret_mac(t, op, a),
+            op if op.is_secret_mac() => return self.secret_mac(t, op, a),
             HostOp::SecretP256Key => return self.secret_p256_key(t, a),
             HostOp::SecretKeyShare => return self.key_share(t, a),
             HostOp::SecretWrap | HostOp::SecretUnwrap | HostOp::SecretSign => {
@@ -107,6 +100,8 @@ impl Machine<'_> {
             | HostOp::SecretDeriveHkdf
             | HostOp::SecretDeriveArgon2id
             | HostOp::SecretHmac
+            | HostOp::SecretHmacSha1
+            | HostOp::SecretVerifyHmacSha1
             | HostOp::SecretVerifyHmac
             | HostOp::SecretHmacSha384
             | HostOp::SecretHmacSha512

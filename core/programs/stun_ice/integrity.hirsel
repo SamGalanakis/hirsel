@@ -19,3 +19,84 @@ fn sha256_prefix(key: Bytes, packet: Bytes, at: u64) -> Inline[u8, 32] {
     std.hmac.add(mut mac, packet, 4, at)
     std.hmac.finish(mac)
 }
+
+scoped type KeyView = ShortView(View[Bytes]) | LongView(View[Secret])
+
+// For the Secret sinks only. The STUN length covers the tag, while the input
+// ends before its attribute header.
+fn copy_prefix(packet: Bytes, at: u64, tag_len: u64, mut scratch: Bytes) {
+    list.copy_from_slice(mut scratch, 0, list.slice(packet, 0, at))
+    let length: u16 = int.narrow(at + 4 + tag_len - HEADER)
+    list.set_word_be(mut scratch, 2, length)
+}
+
+fn sign_sha1(key: KeyView, packet: Bytes, at: u64, mut scratch: Bytes) -> Result[Inline[u8, 20], Error] {
+    match key {
+        ShortView(raw_key) => Ok(sha1_prefix(raw_key, packet, at, mut scratch)),
+        LongView(secret_key) => {
+            copy_prefix(packet, at, 20, mut scratch)
+            Ok(secret.hmac_sha1(secret_key, list.slice(scratch, 0, at)) ?=> Mac)
+        },
+    }
+}
+
+fn sign_sha256(key: KeyView, packet: Bytes, at: u64, mut scratch: Bytes) -> Result[Inline[u8, 32], Error] {
+    match key {
+        ShortView(raw_key) => Ok(sha256_prefix(raw_key, packet, at)),
+        LongView(secret_key) => {
+            copy_prefix(packet, at, 32, mut scratch)
+            Ok(secret.hmac_sha256(secret_key, list.slice(scratch, 0, at)) ?=> Mac)
+        },
+    }
+}
+
+fn verify_tag(packet: Bytes, scan: Scan, key: KeyView, mut scratch: Bytes) -> Result[(), Error] {
+    if scan.integrity == NoIntegrity {
+        return Error(MissingIntegrity)
+    }
+    let at = scan.tag_at
+    let sha1 = scan.integrity == Sha1
+    let tag_len = if sha1 {
+        20u64
+    } else {
+        32u64
+    }
+    let verdict = match key {
+        ShortView(raw_key) => {
+            let mut diff = 0u8
+            if sha1 {
+                let need = 64 + at
+                if list.len(scratch) < need {
+                    return Error(BufferTooSmall(need))
+                }
+                let tag = sha1_prefix(raw_key, packet, at, mut scratch)
+                for i in 0u64 .. 20 {
+                    diff |= tag[i] ^ packet[at + 4 + i]
+                }
+            } else {
+                let tag = sha256_prefix(raw_key, packet, at)
+                for i in 0u64 .. 32 {
+                    diff |= tag[i] ^ packet[at + 4 + i]
+                }
+            }
+            diff == 0
+        },
+        LongView(secret_key) => {
+            if list.len(scratch) < at {
+                return Error(BufferTooSmall(at))
+            }
+            copy_prefix(packet, at, tag_len, mut scratch)
+            let prefix = list.slice(scratch, 0, at)
+            let tag = list.slice(packet, at + 4, at + 4 + tag_len)
+            if sha1 {
+                secret.verify_hmac_sha1(secret_key, prefix, tag) ?=> Mac
+            } else {
+                secret.verify_hmac_sha256(secret_key, prefix, tag) ?=> Mac
+            }
+        },
+    }
+    if !verdict {
+        return Error(BadIntegrity)
+    }
+    Ok(())
+}

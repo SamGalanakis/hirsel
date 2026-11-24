@@ -343,13 +343,14 @@ impl Machine<'_> {
         self.take_steps(t, self.load(a[1] + 8, 8))?;
         let secret = self.secret(a[0]).unwrap();
         let data = self.carrier_bytes(a[1]);
-        use hirsel_core_net::HmacSha2;
+        use hirsel_core_net::HmacAlgorithm;
         let alg = match op {
-            HostOp::SecretHmac | HostOp::SecretVerifyHmac => HmacSha2::Sha256,
-            HostOp::SecretHmacSha384 | HostOp::SecretVerifyHmacSha384 => HmacSha2::Sha384,
-            HostOp::SecretHmacSha512 | HostOp::SecretVerifyHmacSha512 => HmacSha2::Sha512,
+            HostOp::SecretHmacSha1 | HostOp::SecretVerifyHmacSha1 => HmacAlgorithm::Sha1,
+            HostOp::SecretHmac | HostOp::SecretVerifyHmac => HmacAlgorithm::Sha256,
+            HostOp::SecretHmacSha384 | HostOp::SecretVerifyHmacSha384 => HmacAlgorithm::Sha384,
+            HostOp::SecretHmacSha512 | HostOp::SecretVerifyHmacSha512 => HmacAlgorithm::Sha512,
             HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify => {
-                HmacSha2::from_jws_case(a[3])
+                HmacAlgorithm::from_jws_case(a[3])
             }
             _ => unreachable!(),
         };

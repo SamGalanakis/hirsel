@@ -37,6 +37,8 @@ impl HostOp {
             Self::SendSecret => "hirsel_core_host_send_secret",
             Self::SecretSeal => "hirsel_core_secret_seal",
             Self::SecretNarrow => "hirsel_core_secret_narrow",
+            Self::SecretHmacSha1 => "hirsel_core_secret_hmac_sha1",
+            Self::SecretVerifyHmacSha1 => "hirsel_core_secret_verify_hmac_sha1",
             Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
             Self::SecretDeriveHmac => "hirsel_core_secret_derive_hmac_sha256",
             Self::SecretDeriveHkdf => "hirsel_core_secret_derive_hkdf_sha256",

@@ -553,6 +553,8 @@ tags!(HostOp {
     166 => ScheduleSrtp,
     167 => ScheduleSpaceInfo,
     168 => ScheduleSealerPair,
+    169 => SecretHmacSha1,
+    170 => SecretVerifyHmacSha1,
 });
 
 tags!(RaiseCause {

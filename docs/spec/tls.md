@@ -484,11 +484,11 @@ place header values, kind 0 or 1 marks place body segments, and a kind 2 mark wr
 `Content-Length` ([http](http.md#http-17-client-request-bodies)). On a plain-TCP
 connection, such a request fails `Denied` before any byte is sent.
 
-**The MAC sink.** `secret.hmac_sha256`, `secret.hmac_sha384` and `secret.hmac_sha512`
-use a secret as an HMAC key without sending it. The runtime computes from run-owned
-memory and returns a 32-, 48- or 64-byte inline tag. The corresponding
-`secret.verify_hmac_sha256`, `secret.verify_hmac_sha384` and `secret.verify_hmac_sha512`
-verify full-length tags in constant time. They return `Ok(false)` for a tag of any
+**The MAC sink.** `secret.hmac_sha1`, `secret.hmac_sha256`, `secret.hmac_sha384`
+and `secret.hmac_sha512` use a secret as an HMAC key without sending it. The runtime computes from run-owned
+memory and returns a 20-, 32-, 48- or 64-byte inline tag. The corresponding
+`secret.verify_hmac_sha1`, `secret.verify_hmac_sha256`, `secret.verify_hmac_sha384`
+and `secret.verify_hmac_sha512` verify full-length tags in constant time. They return `Ok(false)` for a tag of any
 other length. Signing requires `mac` and verification requires `mac` or `verify`.
 Without the use, the result is `Denied` before issue. A tag over chosen data is a signing
 oracle wherever it is sent, which is why the use must be granted.

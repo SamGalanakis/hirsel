@@ -258,7 +258,7 @@ pub mod secret_kdf;
 pub mod srtp_cipher;
 pub mod tls_kdf;
 pub use secret_grant::{
-    HmacSha2, ImportKind, ImportRefusal, ImportSpend, ImportUse, SecretGrant, SecretPolicy,
+    HmacAlgorithm, ImportKind, ImportRefusal, ImportSpend, ImportUse, SecretGrant, SecretPolicy,
     SecretSource, SecretUse, derive_hmac_sha256,
 };
 

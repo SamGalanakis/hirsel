@@ -70,6 +70,8 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         }
         HostOp::Rename
         | HostOp::SecretHmac
+        | HostOp::SecretHmacSha1
+        | HostOp::SecretVerifyHmacSha1
         | HostOp::SecretHmacSha384
         | HostOp::SecretHmacSha512
         | HostOp::SecretVerifyHmacSha384

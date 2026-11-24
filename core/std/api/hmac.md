@@ -49,9 +49,11 @@ pub fn hmac.sha1(key: Bytes, data: Bytes) -> Inline[u8, 20]
 
 ```
 pub type MacError = Denied()
+pub fn secret.hmac_sha1(s: Secret, data: Bytes) -> Result[Inline[u8, 20], MacError]
 pub fn secret.hmac_sha256(s: Secret, data: Bytes) -> Result[Inline[u8, 32], MacError]
 pub fn secret.hmac_sha384(s: Secret, data: Bytes) -> Result[Inline[u8, 48], MacError]
 pub fn secret.hmac_sha512(s: Secret, data: Bytes) -> Result[Inline[u8, 64], MacError]
+pub fn secret.verify_hmac_sha1(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacError]
 pub fn secret.verify_hmac_sha256(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacError]
 pub fn secret.verify_hmac_sha384(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacError]
 pub fn secret.verify_hmac_sha512(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacError]

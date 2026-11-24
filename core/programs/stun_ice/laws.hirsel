@@ -43,6 +43,59 @@ const IP4: Addr = Addr(ip: V4(0xc0000201), port: 32853)
 
 const IP6: Addr = Addr(ip: V6(0x20010db812345678, 0x0011223344556677), port: 32853)
 
+fn long_key_vector(mut scratch: Bytes) -> Result[(), stun_ice.Error] {
+    let packet = long_sha1()
+    let h = stun_ice.header(packet)?
+    let mut fields: List[stun_ice.Attr] = list.with_capacity(4)
+    let integrity = stun_ice.attrs(packet, mut fields)?
+    if h.method != 1 || h.class != Request || h.length != 96 || integrity != Sha1 || list.len(fields) != 4 {
+        fail("RFC 5769 long-term request framing")
+    }
+    let key_bytes = md5_key()
+    let sealed = result.unwrap(secret.seal(take key_bytes, "mac"))
+    let key: stun_ice.Key = Long(take sealed)
+    if stun_ice.verify_key(packet, key, mut scratch)? != Sha1 {
+        fail("RFC 5769 long-term request rejected")
+    }
+    let mut out: Bytes = list.with_capacity(116)
+    list.fill(mut out, 116, 0xff)
+    let mut builder = stun_ice.start(h.method, h.class, h.transaction, mut out)?
+    for i in 0u64 .. 3 {
+        let attr = fields[i]
+        stun_ice.add(mut builder, attr.kind, list.slice(packet, attr.value.lo, attr.value.hi), mut out)?
+    }
+    let count = stun_ice.finish(take builder, Sha1, key, false, mut out, mut scratch)?
+    if count != 116 || list.compare_bytes(out, packet) != Equal {
+        fail("RFC 5769 long-term request bytes")
+    }
+    // Move the published REALM field after MESSAGE-INTEGRITY without changing their bytes.
+    list.copy_from_slice(mut out, 76, list.slice(packet, 92, 116))
+    list.copy_from_slice(mut out, 100, list.slice(packet, 76, 92))
+    if let Error(BadAttribute(0x0014)) = stun_ice.attrs(out, mut fields) {} else {
+        fail("REALM after MESSAGE-INTEGRITY accepted")
+    }
+    list.copy_from_slice(mut out, 0, packet)
+    list.set_word_be(mut out, 20, 0x7777u16)
+    list.clear(mut fields)
+    if let Error(UnknownRequired(0x7777)) = stun_ice.attrs(out, mut fields) {} else {
+        fail("unknown required attribute was not reported")
+    }
+    if list.len(fields) != 4 || fields[2].kind != stun_ice.REALM || fields[3].kind != 0x0008 {
+        fail("unknown attribute hid the remaining credential and integrity fields")
+    }
+    if let Error(BadIntegrity) = stun_ice.verify_key(out, key, mut scratch) {} else {
+        fail("unknown required attribute stopped integrity verification")
+    }
+    let replacement = std.hmac.sha1(md5_key(), list.slice(out, 0, 92))
+    for i in 0u64 .. 20 {
+        out[96 + i] = replacement[i]
+    }
+    if stun_ice.verify_key(out, key, mut scratch)? != Sha1 {
+        fail("authenticated request with an unknown required attribute rejected")
+    }
+    Ok(())
+}
+
 /// bug: include the whole datagram length in HMAC or omit it from CRC.
 /// oracle: RFC 5769 sections 2.1–2.4, RFC 8489 Appendix B.1 with erratum 6268.
 @test
@@ -80,6 +133,7 @@ fn binding_vectors() -> Result[(), stun_ice.Error] {
         fail("RFC 5769 IPv6 bytes")
     }
     let _ = stun_ice.verify(long_sha1(), md5_key(), mut scratch)?
+    long_key_vector(mut scratch)?
     let sha256 = stun_ice.verify(long_sha256(), sha256_key(), mut scratch)?
     if let Sha256 = sha256.integrity {} else {
         fail("RFC 8489 SHA-256 integrity absent")

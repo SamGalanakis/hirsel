@@ -566,13 +566,13 @@ fn log_boxed_list_append_and_finish_in_evaluator() {
 }
 
 #[test]
-fn secret_mac_authority_is_an_intersection() {
+fn secret_mac_authority_and_vectors() {
     let source = include_str!("../../../core/core/tests/secret_hmac.hirsel");
     let (module, functions) = crate::SourceProgram::lower(source, None);
-    let result = eval::run(&module, functions["secret_mac_authority"], &[], 4096);
+    let result = eval::run(&module, functions["secret_hmac_law"], &[], 4096);
     assert_eq!(
         result.outcome,
         eval::Outcome::Returned(vec![0]),
-        "MAC authority case"
+        "MAC law return code"
     );
 }

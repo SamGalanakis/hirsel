@@ -2784,17 +2784,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ) {
             return self.runtime_secret_derive(op, f, vals, result, n);
         }
-        if matches!(
-            op,
-            HostOp::SecretHmac
-                | HostOp::SecretHmacSha384
-                | HostOp::SecretHmacSha512
-                | HostOp::SecretVerifyHmacSha384
-                | HostOp::SecretVerifyHmacSha512
-                | HostOp::SecretVerifyHmac
-                | HostOp::SecretJwsHmacSign
-                | HostOp::SecretJwsHmacVerify
-        ) {
+        if op.is_secret_mac() {
             return self.runtime_secret_mac(op, f, vals, result, n);
         }
         if op.is_secret_key() {

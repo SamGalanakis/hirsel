@@ -122,6 +122,8 @@ pub enum HostOp {
     SecretVerifyHmacSha512 = 128,
     SecretJwsHmacSign = 129,
     SecretJwsHmacVerify = 130,
+    SecretHmacSha1 = 164,
+    SecretVerifyHmacSha1 = 165,
     SecretP256Key = hirsel_core_ids::host_op::MEDIA_P256_KEY as isize,
     SecretKeyShare = hirsel_core_ids::host_op::MEDIA_KEY_SHARE as isize,
     ScheduleQuicInitial = hirsel_core_ids::host_op::SCHEDULE_QUIC_INITIAL as isize,
@@ -233,6 +235,8 @@ impl HostOp {
         HostOp::SecretSeal,
         HostOp::SecretNarrow,
         HostOp::SecretHmac,
+        HostOp::SecretHmacSha1,
+        HostOp::SecretVerifyHmacSha1,
         HostOp::SecretVerifyHmac,
         HostOp::SecretHmacSha384,
         HostOp::SecretHmacSha512,
@@ -469,6 +473,8 @@ impl HostOp {
                 (vec![V(u64_), V(p), w, w, w, V(u64_), V(p)], outcome)
             }
             HostOp::SecretHmac
+            | HostOp::SecretHmacSha1
+            | HostOp::SecretVerifyHmacSha1
             | HostOp::SecretVerifyHmac
             | HostOp::SecretHmacSha384
             | HostOp::SecretHmacSha512
@@ -709,6 +715,8 @@ impl HostOp {
             HostOp::SendSecret => "send_secret",
             HostOp::SecretSeal => "secret_seal",
             HostOp::SecretNarrow => "secret_narrow",
+            HostOp::SecretHmacSha1 => "secret_hmac_sha1",
+            HostOp::SecretVerifyHmacSha1 => "secret_verify_hmac_sha1",
             HostOp::SecretHmac => "secret_hmac_sha256",
             HostOp::SecretDeriveHmac => "secret_derive_hmac_sha256",
             HostOp::SecretDeriveHkdf => "secret_derive_hkdf_sha256",
@@ -827,11 +835,25 @@ impl HostOp {
         )
     }
 
+    /// The secret MAC signing and verification operations, including JWS.
+    pub const fn is_secret_mac(self) -> bool {
+        self.secret_mac_signs()
+            || matches!(
+                self,
+                Self::SecretVerifyHmac
+                    | Self::SecretVerifyHmacSha1
+                    | Self::SecretVerifyHmacSha384
+                    | Self::SecretVerifyHmacSha512
+                    | Self::SecretJwsHmacVerify
+            )
+    }
+
     /// Whether a Secret MAC operation returns a tag instead of a verdict.
     pub const fn secret_mac_signs(self) -> bool {
         matches!(
             self,
             Self::SecretHmac
+                | Self::SecretHmacSha1
                 | Self::SecretHmacSha384
                 | Self::SecretHmacSha512
                 | Self::SecretJwsHmacSign
@@ -854,6 +876,8 @@ impl HostOp {
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
                     | HostOp::SecretHmac
+                    | HostOp::SecretHmacSha1
+                    | HostOp::SecretVerifyHmacSha1
                     | HostOp::SecretHmacSha384
                     | HostOp::SecretHmacSha512
                     | HostOp::SecretVerifyHmacSha384

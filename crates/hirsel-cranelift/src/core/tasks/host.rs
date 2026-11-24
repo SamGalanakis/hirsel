@@ -28,4 +28,37 @@ impl Function<'_, '_, '_> {
         }
         self.c_call(op.adapter_symbol(), &params, &results, &operands)
     }
+
+    pub(super) fn host_outputs(
+        op: HostOp,
+        values: calls::NativeValues,
+        outputs: &mut [Value],
+    ) -> usize {
+        let n = if matches!(op, HostOp::Random | HostOp::Stopped) {
+            0
+        } else if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
+            1
+        } else {
+            4
+        };
+        for i in 0..n {
+            outputs[i] = values[i];
+        }
+        if op.address_outcome() || op == HostOp::TlsConnect {
+            for i in 4..8 {
+                outputs[i] = values[i + 1];
+            }
+            8
+        } else if op == HostOp::ExecSpawn {
+            for i in 4..7 {
+                outputs[i] = values[i + 1];
+            }
+            7
+        } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
+            outputs[4] = values[5];
+            5
+        } else {
+            n
+        }
+    }
 }

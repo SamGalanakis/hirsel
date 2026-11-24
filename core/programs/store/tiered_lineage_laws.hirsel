@@ -4,11 +4,6 @@ fn l69_pack() -> Result[DiskIndex[u64, PagePack], Error] {
     Ok(take packs)
 }
 
-fn l69_pin(name: String, branch_id: u32, watermark: u64) -> LocatedPin {
-    let zero = std.page.unlocated(0)
-    LocatedPin(name: string.from(name), branch: branch_id, version: 0, roots: LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new()), watermark: watermark)
-}
-
 fn l69_live(packs: DiskIndex[u64, PagePack]) -> u64 {
     let Some(pack) = disk_index_get(packs, 7) else {
         fail("L69: the fixture pack must remain in inventory")
@@ -27,9 +22,9 @@ fn test_l69_lineage_last_holder_ghost_and_adopt() -> Result[(), Error] {
 fn l69_shared_watermark(frame: ReplacedFrame) -> Result[(), Error] {
     let mut lineage = Lineage(forks: map.new(), cells: map.new())
     let mut packs = l69_pack()?
-    let mut pins: List[LocatedPin] = list.new()
-    list.push(mut pins, l69_pin("A", 0, 50))
-    list.push(mut pins, l69_pin("B", 0, 50))
+    let mut pins: List[(u32, u64)] = list.new()
+    list.push(mut pins, (0u32, 50u64))
+    list.push(mut pins, (0u32, 50u64))
     let holders = lineage_holders(lineage.forks, pins, list.new())
     file_lineage_kill(mut lineage, holders, mut packs, 0, frame)?
     let cell = LineageCell(branch: 0, boundary: 50, side: 1, interval: 0, pack: 7)
@@ -53,8 +48,8 @@ fn l69_shared_watermark(frame: ReplacedFrame) -> Result[(), Error] {
 fn l69_ghost_watermark(frame: ReplacedFrame) -> Result[(), Error] {
     let mut lineage = Lineage(forks: map.new(), cells: map.new())
     let mut packs = l69_pack()?
-    let mut pins: List[LocatedPin] = list.new()
-    list.push(mut pins, l69_pin("Q", 1, 70))
+    let mut pins: List[(u32, u64)] = list.new()
+    list.push(mut pins, (1u32, 70u64))
     map.insert(mut lineage.forks, 1u32, LineageFork(child: 1, parent: 0, watermark: 60, adopted: false))
     let holders = lineage_holders(lineage.forks, pins, list.new())
     file_lineage_kill(mut lineage, holders, mut packs, 0, frame)?
@@ -137,4 +132,74 @@ fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Task
         fail("lineage: a deleted branch's row with no dependent is removed")
     }
     close(take deleted)
+}
+
+fn l69_cold_root(db: Db, collection: u32) -> Result[std.page.PagePtr, Error] {
+    match std.page.collection_slot(db.heads[0u64].roots.collections.root, prefix(collection)?) {
+        Some((ColdPage(located), _)) => Ok(located),
+        _ => fail("L69: the cut leaves the Tiered table root Cold"),
+    }
+}
+
+fn l69_pack_live(db: Db, pack: u64) -> u64 {
+    let Some(listed) = disk_index_get(disk_state(db).pages.locations.packs, pack) else {
+        fail("L69: a Tiered pack stays listed until a probe retires it")
+    }
+    listed.live
+}
+
+// L69 (a) through the production cut (§13.6 "Filing a kill", "Dropping";
+// §13.6a T8 steps 2 and 5). A served overwrite replaces the Cold leaf R that
+// a pin at w still reaches: the cut files R's bytes into the holder cell
+// (main, w, 1, 0, pack) and `live` keeps them. The unpin drops the last
+// holder at w, so the cell goes and `live` loses exactly R's length. With no
+// holder, an overwrite's kill is dead at once. Every figure is read back
+// after a reopen.
+@test
+fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    l68_cold_rows(d, c, r, tasks, floor)?
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let leaf = l69_cold_root(db, rows.id)?
+    let width: u64 = int.widen(leaf.len)
+    let before = l69_pack_live(db, leaf.pack)
+    let held = snapshot(db)
+    let w = held.watermark
+    if w <= leaf.stamp {
+        fail("L69: the pin's watermark is above the Cold leaf's stamp")
+    }
+    let _ = pin(mut db, "held", held)?
+    l68_write_rows(mut db, 3u64, 33u32, None)?
+    let _ = checkpoint(mut db)?
+    close(take db)?
+
+    db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let cell = LineageCell(branch: 0, boundary: w, side: 1, interval: 0, pack: leaf.pack)
+    let filed = map.len(disk_state(db).pages.lists.rows.cells) == 1 && map.get_or(disk_state(db).pages.lists.rows.cells, cell, 0u64) == width
+    if !filed || l69_pack_live(db, leaf.pack) != before {
+        fail("L69: the pinned leaf's kill is one holder cell of its length, and live keeps it")
+    }
+    let _ = unpin(mut db, "held")?
+    close(take db)?
+
+    db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if map.len(disk_state(db).pages.lists.rows.cells) != 0 || l69_pack_live(db, leaf.pack) != before - width {
+        fail("L69: the last unpin at w drops the cell and charges exactly the leaf")
+    }
+    let later = l69_cold_root(db, rows.id)?
+    let later_width: u64 = int.widen(later.len)
+    let later_before = l69_pack_live(db, later.pack)
+    l68_write_rows(mut db, 5u64, 55u32, None)?
+    let _ = checkpoint(mut db)?
+    close(take db)?
+
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if map.len(disk_state(reopened).pages.lists.rows.cells) != 0 || l69_pack_live(reopened, later.pack) != later_before - later_width {
+        fail("L69: with no holder the overwrite's kill leaves live at its cut")
+    }
+    if l69_pack_live(reopened, leaf.pack) != before - width {
+        fail("L69: a later cut leaves the earlier charge as it was")
+    }
+    close(take reopened)
 }

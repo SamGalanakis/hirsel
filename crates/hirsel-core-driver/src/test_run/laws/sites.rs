@@ -81,6 +81,10 @@ fn indirect(module: &Module, signature: &Signature) -> Option<u64> {
         return match (dest, signature.params.len()) {
             (Some("std@1/model/Outcome"), 2) => Some(law::MODEL_EXPLORE),
             (_, 2) => Some(law::MODEL_CHECK),
+            (Some(dest), 4) if dest.starts_with("std@1/model/Conformance[") => {
+                Some(law::MODEL_CONFORMS)
+            }
+            (_, 4) => Some(law::MODEL_CONFORMS_CHECK),
             _ => None,
         };
     }

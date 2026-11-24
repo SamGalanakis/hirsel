@@ -8,6 +8,15 @@ pub(super) struct Verdict {
     witnessed: Vec<(String, u64)>,
 }
 
+fn variant_at(read: &impl Fn(u64, u64) -> u64, base: u64, words: &[u64]) -> usize {
+    let tag = tag_from_words(words);
+    case_of(&tag, read(base + tag.offset, tag.width)) as usize
+}
+
+fn model_bound(index: usize, bounds: [u64; 4]) -> (&'static str, u64) {
+    (["depth", "states"][index], bounds[index])
+}
+
 impl Verdict {
     /// `value` and `words` must describe the initialized return of `model.explore`.
     pub(super) unsafe fn read(
@@ -16,10 +25,7 @@ impl Verdict {
         bounds: [u64; 4],
         read: &impl Fn(u64, u64) -> u64,
     ) -> Self {
-        let case = |base: u64, words: &[u64]| {
-            let tag = tag_from_words(words);
-            case_of(&tag, read(base + tag.offset, tag.width)) as usize
-        };
+        let case = |base, words: &[u64]| variant_at(read, base, words);
         let variant = case(0, words);
         let offsets = &words[TAG_WORDS..];
         let base = offsets[variant];
@@ -56,9 +62,38 @@ impl Verdict {
             Self {
                 class: "to depth",
                 numbers: vec![depth],
-                bound: Some((["depth", "states"][index], bounds[index])),
+                bound: Some(model_bound(index, bounds)),
                 witnessed,
             }
+        }
+    }
+
+    pub(super) fn conformance(
+        words: &[u64],
+        bounds: [u64; 4],
+        read: &impl Fn(u64, u64) -> u64,
+    ) -> Self {
+        let variant = variant_at(read, 0, words);
+        let offsets = &words[TAG_WORDS..];
+        let entry = read(offsets[variant], 8);
+        let (limit, divergence) = offsets[3..].split_at(1 + TAG_WORDS);
+        let (class, numbers, bound) = match variant {
+            0 => ("conforms", vec![entry], None),
+            1 => {
+                let reason = variant_at(read, divergence[0], &divergence[1..]);
+                ("diverged", vec![entry, reason as u64], None)
+            }
+            2 => {
+                let index = variant_at(read, limit[0], &limit[1..]);
+                ("incomplete", vec![entry], Some(model_bound(index, bounds)))
+            }
+            _ => unreachable!(),
+        };
+        Self {
+            class,
+            numbers,
+            bound,
+            witnessed: Vec::new(),
         }
     }
 

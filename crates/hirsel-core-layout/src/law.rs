@@ -18,7 +18,9 @@ pub const CHECK_CORPUS: u64 = 4;
 pub const CHECK_TASKS_CORPUS: u64 = 5;
 pub const MODEL_EXPLORE: u64 = 6;
 pub const MODEL_CHECK: u64 = 7;
-pub const CALLEES: [&str; 8] = [
+pub const MODEL_CONFORMS: u64 = 8;
+pub const MODEL_CONFORMS_CHECK: u64 = 9;
+pub const CALLEES: [&str; 10] = [
     "all",
     "search",
     "check",
@@ -27,11 +29,14 @@ pub const CALLEES: [&str; 8] = [
     "check_tasks_corpus",
     "model.explore",
     "model.check",
+    "model.conforms",
+    "model.conforms_check",
 ];
 
 pub fn model_engine(callee: u64) -> Option<u64> {
     match callee {
         MODEL_EXPLORE | MODEL_CHECK => Some(MODEL_EXPLORE),
+        MODEL_CONFORMS | MODEL_CONFORMS_CHECK => Some(MODEL_CONFORMS),
         _ => None,
     }
 }

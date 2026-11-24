@@ -14,6 +14,8 @@ pub fn callee(definition: &DefPath) -> Option<u64> {
         return match definition.0.name.as_str() {
             "explore" => Some(law::MODEL_EXPLORE),
             "check" => Some(law::MODEL_CHECK),
+            "conforms" => Some(law::MODEL_CONFORMS),
+            "conforms_check" => Some(law::MODEL_CONFORMS_CHECK),
             _ => None,
         };
     }
@@ -103,20 +105,23 @@ impl Hooks {
                     .map(|name| field(module, layouts, config, name))
                     .to_vec(),
             };
-            let result =
-                matches!(callee, law::ALL | law::SEARCH | law::MODEL_EXPLORE).then(|| Hook {
-                    operation: law::OUTCOME,
-                    value: params[0],
-                    predicate: None,
-                    words: {
-                        let ty = signature.dest.expect("an engine outcome has a destination");
-                        if model.is_some() {
-                            model_outcome(module, layouts, ty)
-                        } else {
-                            outcome(module, layouts, ty)
-                        }
-                    },
-                });
+            let result = matches!(
+                callee,
+                law::ALL | law::SEARCH | law::MODEL_EXPLORE | law::MODEL_CONFORMS
+            )
+            .then(|| Hook {
+                operation: law::OUTCOME,
+                value: params[0],
+                predicate: None,
+                words: {
+                    let ty = signature.dest.expect("an engine outcome has a destination");
+                    match callee {
+                        law::MODEL_EXPLORE => model_outcome(module, layouts, ty),
+                        law::MODEL_CONFORMS => conformance_outcome(module, layouts, ty),
+                        _ => outcome(module, layouts, ty),
+                    }
+                },
+            });
             return Some(Self {
                 callee: Some(callee),
                 start,
@@ -176,6 +181,7 @@ impl Hooks {
             Some(law::CHECK_CORPUS) => law::CHECK,
             Some(law::CHECK_TASKS_CORPUS) => law::CHECK_TASKS,
             Some(law::MODEL_CHECK) => law::MODEL_EXPLORE,
+            Some(law::MODEL_CONFORMS_CHECK) => law::MODEL_CONFORMS,
             _ => return false,
         };
         callee(&module.instances[instance.index()].definition) == Some(expected)
@@ -282,6 +288,30 @@ fn model_outcome(module: &Module, layouts: &[RecipeRow], ty: TypeId) -> Vec<u64>
     words.extend(["depth", "reason"].map(|name| field(module, layouts, failure, name)));
     words.extend(law::tag_words(
         fixed(layouts, reason).tag.expect("model failure kind tag"),
+    ));
+    words
+}
+
+fn conformance_outcome(module: &Module, layouts: &[RecipeRow], ty: TypeId) -> Vec<u64> {
+    let layout = fixed(layouts, ty);
+    let ShapeBody::Variant(cases) = &module.types[ty.index()].body else {
+        panic!("expected a conformance outcome variant")
+    };
+    let limit = inline(&cases[2].fields[1].ty);
+    let reason = inline(&cases[1].fields[2].ty);
+    let mut words = law::tag_words(layout.tag.expect("conformance outcome tag")).to_vec();
+    words.extend([
+        layout.offsets[0][0],
+        layout.offsets[1][0],
+        layout.offsets[2][0],
+    ]);
+    words.push(layout.offsets[2][1]);
+    words.extend(law::tag_words(
+        fixed(layouts, limit).tag.expect("conformance limit tag"),
+    ));
+    words.push(layout.offsets[1][2]);
+    words.extend(law::tag_words(
+        fixed(layouts, reason).tag.expect("conformance reason tag"),
     ));
     words
 }

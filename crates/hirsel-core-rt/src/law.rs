@@ -243,8 +243,12 @@ pub unsafe extern "C" fn hirsel_core_law_observe(
     };
     if let Some(engine) = model_engine(call.callee) {
         if operation == OUTCOME && callee == engine && call.depth == call.settling_depth {
-            // SAFETY: this is the returned model outcome and the matching layout descriptor.
-            let verdict = unsafe { model::Verdict::read(value, words, call.bounds, &read) };
+            let verdict = if engine == MODEL_EXPLORE {
+                // SAFETY: this is the returned model outcome and its matching layout descriptor.
+                unsafe { model::Verdict::read(value, words, call.bounds, &read) }
+            } else {
+                model::Verdict::conformance(words, call.bounds, &read)
+            };
             observation.rows.push(Row {
                 callee: call.callee,
                 site: call.site,

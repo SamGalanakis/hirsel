@@ -49,6 +49,7 @@ impl LawRow {
             "sampled" | "vacuous" => format!("{first} cases"),
             "unbounded" => format!("at {first}"),
             "closed" => format!("{first}, {second}, {}", rest[1]),
+            "conforms" | "incomplete" | "diverged" => first.to_string(),
             "failed" => {
                 let kind = MODEL_FAILURE_KINDS[self.kind.unwrap() as usize];
                 if self.per_build {
@@ -288,8 +289,9 @@ fn model_row<'a>(mut fields: impl Iterator<Item = &'a str>, places: &Sites) -> O
     let bound = fields.next()?;
     let bound = (!bound.is_empty()).then(|| bound.to_owned());
     let kind = match (class, numbers.as_slice()) {
-        ("closed", [_, _, _]) | ("to depth", [_]) => None,
+        ("closed", [_, _, _]) | ("to depth" | "conforms" | "incomplete", [_]) => None,
         ("failed", [_, kind]) if *kind < MODEL_FAILURE_KINDS.len() as u64 => numbers.pop(),
+        ("diverged", [_, 0 | 1]) => numbers.pop(),
         _ => return None,
     };
     let mut witnessed = BTreeMap::<String, u64>::new();
@@ -304,7 +306,7 @@ fn model_row<'a>(mut fields: impl Iterator<Item = &'a str>, places: &Sites) -> O
         class: class.into(),
         numbers,
         bound,
-        per_build: kind == Some(3),
+        per_build: class == "failed" && kind == Some(3),
         witnessed,
         kind,
     })

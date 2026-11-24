@@ -378,3 +378,37 @@ fn controlled_nomination(mut output: Bytes, mut scratch: Bytes) -> Result[(), st
     }
     Ok(())
 }
+
+/// bug: complete a lite/lite checklist before signaling has reconciled every component.
+/// oracle: RFC 8445 section 8.2's pair matching and completion requirements.
+@test
+fn lite_peer_signaling() -> Result[(), stun_ice.IceError] {
+    let local = stun_ice.credentials(b"lite", b"LocalPassword1234567890")?
+    let second = Addr(ip: V6(0x20010db800000000, 1), port: 40001)
+    let remote = Addr(ip: V6(0x20010db800000000, 2), port: 46001)
+    let mut bases: List[stun_ice.Local] = list.new()
+    list.push(mut bases, stun_ice.Local(component: 1, base: BASE))
+    list.push(mut bases, stun_ice.Local(component: 2, base: second))
+    let mut agent = stun_ice.lite(take local, take bases)?
+    let mut pairs: List[stun_ice.Path] = list.new()
+    list.push(mut pairs, stun_ice.Path(component: 1, base: BASE, peer: PEER_A))
+    list.push(mut pairs, stun_ice.Path(component: 2, base: second, peer: PEER_B))
+    if let Error(BadCandidate) = stun_ice.lite_select_signaled(mut agent, pairs) {} else {
+        fail("lite/lite accepted an address-family mismatch")
+    }
+    if let Some(_) = stun_ice.lite_selected(agent, 1) {
+        fail("a rejected candidate exchange partially selected routes")
+    }
+    pairs[1] = stun_ice.Path(component: 2, base: second, peer: remote)
+    stun_ice.lite_select_signaled(mut agent, pairs)?
+    let Some(first_path) = stun_ice.lite_selected(agent, 1) else {
+        fail("IPv4 component missing")
+    }
+    let Some(second_path) = stun_ice.lite_selected(agent, 2) else {
+        fail("IPv6 component missing")
+    }
+    if first_path.peer.port != 46000 || second_path.peer.port != 46001 {
+        fail("lite/lite used a path outside the reconciled exchange")
+    }
+    Ok(())
+}

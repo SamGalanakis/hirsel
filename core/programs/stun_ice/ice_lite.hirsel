@@ -150,3 +150,38 @@ pub fn lite_selected(agent: Lite, component: u16) -> Option[Path] {
         None
     }
 }
+
+/// Commit the reconciled host pairs from signaling when both agents use ICE-Lite.
+/// The signaling layer supplies one pair per component after address selection
+/// and any updated candidate exchange required by RFC 8445 section 8.2.
+pub fn lite_select_signaled(mut agent: Lite, paths: List[Path]) -> Result[(), IceError] {
+    let n = list.len(paths)
+    if n != list.len(agent.paths) || n == 0 {
+        return Error(BadCandidate)
+    }
+    for i in 0u64 .. n {
+        let path = paths[i]
+        let Some(component) = local_component(agent.bases, path.base) else {
+            return Error(UnknownBase)
+        }
+        if path.component != component || path.peer.port == 0 || !same_family(path.base.ip, path.peer.ip) {
+            return Error(BadCandidate)
+        }
+        for j in 0u64 .. i {
+            if paths[j].component == component {
+                return Error(DuplicateCandidate)
+            }
+        }
+        if let Some(old) = lite_selected(agent, component) {
+            if !same_address(old.base, path.base) || !same_address(old.peer, path.peer) {
+                return Error(BadCheck)
+            }
+        }
+    }
+    for path in paths {
+        if let Some(i) = selection_index(agent.paths, path.component) {
+            agent.paths[i] = Selection(component: path.component, path: Some(path))
+        }
+    }
+    Ok(())
+}

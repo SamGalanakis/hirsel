@@ -177,6 +177,7 @@ fn on_handshake(mut e: Endpoint, now: u64, r: Random, epoch: u16, body: Bytes) -
                 break
             }
             on_message(mut e, now, m)?
+            message_done(mut e.rx, mut e.early)
             advance(mut e, now, r)?
             if let Some(_) = e.closed {
                 return Ok(())

@@ -436,8 +436,13 @@ fn check_pin(mut e: Endpoint) -> Result[(), Failure] {
 }
 
 /// DTLS-3: Connected needs the peer's Finished, its signature and the pin, once.
+/// Connect once Finished verified and the pin matched, but not while a flight is still to
+/// be built: server_final hashes the transcript this clears.
 fn try_connect(mut e: Endpoint) {
     if e.connected || !e.finished || !e.pinned {
+        return
+    }
+    if let Nothing = e.build {} else {
         return
     }
     records_connected(mut e.layer)

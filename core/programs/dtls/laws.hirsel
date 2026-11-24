@@ -114,6 +114,7 @@ fn receive_flight_six(mut r: dtls.Records, mut a: dtls.Ahead, server: schedule.S
                 let Some(message) = dtls.next_message(mut hs, mut a) else {
                     fail("ServerHelloDone missing")
                 }
+                dtls.message_done(mut hs, mut a)
                 if message.kind != 14 || message.sequence != 4 {
                     fail("ServerHelloDone header")
                 }
@@ -322,6 +323,7 @@ fn fragments_reassemble() -> Result[(), ()] {
     let Some(msg) = dtls.next_message(mut rx, mut a) else {
         fail("missing ClientHello")
     }
+    dtls.message_done(mut rx, mut a)
     if msg.kind != 1 || msg.sequence != 0 || msg.body != hello {
         fail("ClientHello reconstruction")
     }
@@ -342,6 +344,7 @@ fn fragments_reassemble() -> Result[(), ()] {
     let Some(cert) = dtls.next_message(mut rx, mut a) else {
         fail("missing Certificate")
     }
+    dtls.message_done(mut rx, mut a)
     if cert.kind != 11 || cert.sequence != 1 || cert.body != body {
         fail("Certificate reconstruction")
     }

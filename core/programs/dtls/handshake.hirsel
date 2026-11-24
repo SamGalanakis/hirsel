@@ -135,7 +135,8 @@ fn merge(mut p: PartialMessage, f: Fragment, input: Bytes, new_bytes: u64, far: 
 }
 
 /// Feed each handshake fragment in the record. A complete message can be read
-/// with next_message. Retransmission does not re-enter the transcript.
+/// with next_message and is acknowledged with message_done. Retransmission does not
+/// re-enter the transcript.
 pub fn receive_fragment(mut r: Reassembly, mut layer: Records, mut a: Ahead, epoch: u16, input: Bytes, mut at: u64) -> Result[FragmentEvent, HandshakeError] {
     let f = fragment_at(input, at, r.max_message)?
     let sequence: u64 = int.widen(f.sequence)
@@ -188,6 +189,9 @@ pub fn receive_fragment(mut r: Reassembly, mut layer: Records, mut a: Ahead, epo
     Ok(Buffered)
 }
 
+/// Take the complete message at `expected` without advancing past it: until message_done,
+/// a retransmitted copy reassembles again, so a message whose processing is refused for
+/// Capacity is not lost (DTLS-8).
 pub fn next_message(mut r: Reassembly, mut a: Ahead) -> Option[HandshakeMessage] {
     if r.expected > 0xffff {
         return None
@@ -204,6 +208,11 @@ pub fn next_message(mut r: Reassembly, mut a: Ahead) -> Option[HandshakeMessage]
         return None
     }
     let PartialMessage(kind, sequence, epoch, body: take body, ..) = take p
+    Some(HandshakeMessage(kind: kind, sequence: sequence, epoch: epoch, body: take body))
+}
+
+/// The message next_message returned was processed: expect the one after it.
+pub fn message_done(mut r: Reassembly, mut a: Ahead) {
     r.expected += 1
     for j in 0 .. list.len(r.pending) {
         let seq: u64 = int.widen(r.pending[j].sequence)
@@ -213,7 +222,6 @@ pub fn next_message(mut r: Reassembly, mut a: Ahead) -> Option[HandshakeMessage]
             break
         }
     }
-    Some(HandshakeMessage(kind: kind, sequence: sequence, epoch: epoch, body: take body))
 }
 
 pub fn transcript(max_message: u32) -> Transcript {

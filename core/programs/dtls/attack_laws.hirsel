@@ -108,3 +108,139 @@ fn atk_epoch0_hello_after_ccs_seals() -> Result[(), ()] {
     ignored_after_ccs(723, spoof)
     Ok(())
 }
+
+/// Whether receiving `datagram` at 0 was refused for Capacity.
+fn refused_capacity(mut e: dtls.Endpoint, r: Random, datagram: Bytes) -> bool {
+    let mut data: Bytes = list.new()
+    match dtls.receive(mut e, 0, r, datagram, mut data) {
+        Error(Capacity(_)) => true,
+        _ => false,
+    }
+}
+
+fn bytes_between(b: Bytes, from: u64, to: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(to - from)
+    for i in from .. to {
+        list.push(mut out, b[i])
+    }
+    out
+}
+
+/// bug: a Capacity refusal while processing a reassembled message had already advanced past
+/// it, so every retransmission was ignored as processed and the handshake ended in Timeout
+/// or 10 (attack 2434 F4). oracle: DTLS-8 by hand: a Capacity refusal leaves the endpoint
+/// usable, so the retransmitted flight 4 still draws flight 5.
+@test
+fn capacity_refusal_keeps_message() -> Result[(), ()] {
+    let rc = provide.random(781)
+    let rs = provide.random(782)
+    let mut server = fresh_server(783)
+    let mut client = fresh_client(784)
+    let _ = deliver(mut server, rs, 0, drain(mut client, rc, 0))
+    let flight4 = drain(mut server, rs, 0)
+    let parts = records_in(flight4)
+    for i in 0u64 .. list.len(parts) {
+        if is_plain_message(parts[i], 11) {
+            let body = bytes_between(parts[i], 25, list.len(parts[i]))
+            let total = list.len(body)
+            let half = total / 2
+            let seq = seq_of(parts[i])
+            let head = plain_record(22, 500, hs_fragment(11, total, seq, 0, bytes_between(body, 0, half)))
+            let tail = plain_record(22, 501, hs_fragment(11, total, seq, half, bytes_between(body, half, total)))
+            let _ = deliver(mut client, rc, 0, single(head))
+            // The last fragment completes Certificate. 768 bytes admit its record and
+            // reassembly and refuse processing it (640 to 896 do).
+            let outcome = bound bytes 768 {
+                refused_capacity(mut client, rc, tail)
+            }
+            match outcome {
+                Ok(true) => (),
+                _ => fail("processing Certificate was not refused for Capacity"),
+            }
+        } else {
+            let _ = deliver(mut client, rc, 0, single(parts[i]))
+        }
+    }
+    match dtls.state(client) {
+        Handshaking => (),
+        _ => fail("a Capacity refusal closed the client"),
+    }
+    let _ = deliver(mut client, rc, 0, flight4)
+    if list.len(drain(mut client, rc, 0)) == 0 {
+        fail("the retransmitted flight 4 drew no flight 5")
+    }
+    Ok(())
+}
+
+/// bug: when building flight 6 was refused for Capacity, the next poll connected first and
+/// cleared the transcript, so flight 6 carried a Finished over nothing and the client closed
+/// with 51 (attack 2434 F5). oracle: RFC 5246 section 7.4.9 by hand: Finished covers every
+/// handshake message, so the retried flight 6 must connect the client.
+@test
+fn capacity_refusal_before_flight_6() -> Result[(), ()] {
+    let a = party(791)
+    let b = party(792)
+    let rc = provide.random(793)
+    let rs = provide.random(794)
+    let Party(id: take client_id, certificate: client_certificate) = take a
+    let Party(id: take server_id, certificate: server_certificate) = take b
+    let mut client = result.unwrap(dtls.client(take client_id, dtls.defaults(), address(1)))
+    let mut server = result.unwrap(dtls.server(take server_id, dtls.defaults(), address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(server_certificate)))
+    result.unwrap(dtls.expect(mut server, pin_list(client_certificate)))
+    let _ = deliver(mut server, rs, 0, drain(mut client, rc, 0))
+    let _ = deliver(mut client, rc, 0, drain(mut server, rs, 0))
+    let parts = records_in(drain(mut client, rc, 0))
+    let n = list.len(parts)
+    for i in 0u64 .. n - 1 {
+        let _ = deliver(mut server, rs, 0, single(parts[i]))
+    }
+    // 512 bytes let Finished open and verify, and refuse building flight 6.
+    let finished = owned(parts[n - 1])
+    let outcome = bound bytes 512 {
+        refused_capacity(mut server, rs, finished)
+    }
+    match outcome {
+        Ok(true) => (),
+        _ => fail("building flight 6 was not refused for Capacity"),
+    }
+    let _ = deliver(mut client, rc, 0, drain(mut server, rs, 0))
+    if !is_connected(client) {
+        fail("flight 6 built after a Capacity refusal did not connect the client")
+    }
+    Ok(())
+}
+
+/// An epoch-1 application record with `length` bytes of payload.
+fn epoch1_record(length: u64) -> Bytes {
+    let mut out = unhex("17fefd0001000000000001")
+    list.push(mut out, int.narrow(length >> 8))
+    list.push(mut out, int.narrow(length & 0xff))
+    for _ in 0u64 .. length {
+        list.push(mut out, 0)
+    }
+    out
+}
+
+/// bug: before the opener existed, epoch-1 records of any length up to 65,535 bytes were
+/// copied and held unauthenticated, about 2 MB of peer-chosen bytes at defaults (attack 2434
+/// F6). oracle: RFC 5246 section 6.2.3 by hand: a sealed record is at most 16,384 + 8
+/// (explicit nonce) + 16 (tag) = 16,408 bytes, so one byte more is never genuine.
+@test
+fn oversized_epoch1_never_held() -> Result[(), ()] {
+    let rc = provide.random(801)
+    let rs = provide.random(802)
+    let mut server = fresh_server(803)
+    let mut client = fresh_client(804)
+    let _ = deliver(mut server, rs, 0, drain(mut client, rc, 0))
+    let _ = drain(mut server, rs, 0)
+    let _ = deliver(mut server, rs, 0, single(epoch1_record(16408)))
+    if dtls.discards(server).tampered != 0 {
+        fail("a sealed-size epoch-1 record was refused")
+    }
+    let _ = deliver(mut server, rs, 0, single(epoch1_record(16409)))
+    if dtls.discards(server).tampered != 1 {
+        fail("an epoch-1 record past the sealed size was held")
+    }
+    Ok(())
+}

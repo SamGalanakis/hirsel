@@ -229,7 +229,9 @@ record in epoch 1 that arrives before the endpoint has epoch-1 keys or before th
 ChangeCipherSpec (a Finished overtaking the ChangeCipherSpec) is held, at most `max_ahead`
 records counted with handshake fragments, and processed once the keys exist and that
 ChangeCipherSpec has arrived; past that it is discarded as `overflow` and
-retransmission recovers it. A record in any other epoch is `stale_epoch`.
+retransmission recovers it. An epoch-1 record longer than a sealed 16,384-byte plaintext
+(16,384 + 8 + 16 = 16,408 bytes) is `tampered` and never held, so held records stay
+bounded by `max_ahead` times that size. A record in any other epoch is `stale_epoch`.
 
 **Replay.** Epoch 1 has a 64-record sliding window (RFC 6347 §4.1.2.6), as in dimpl's
 `ReplayWindow` (`src/window.rs`). A record whose number is in the window and already

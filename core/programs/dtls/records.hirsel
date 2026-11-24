@@ -221,6 +221,9 @@ pub fn next_record(mut r: Records, mut a: Ahead, version: RecordVersion, datagra
         1 => {
             if let Some(mut k) = r.read {
                 receive_protected(mut k, mut a, r.connected, mut r.dropped, mut r.close, datagram, h)?
+            } else if h.end - h.start > MAX_PLAINTEXT + TAG + EXPLICIT_NONCE {
+                // Longer than any sealed 16,384-byte plaintext: never held.
+                tampered(mut r.dropped)
             } else if ahead_full(a) {
                 overflow(mut r.dropped)
             } else {

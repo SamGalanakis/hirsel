@@ -1581,7 +1581,6 @@ impl RtOp {
                         (params, metadata)
                     }
                     HostOp::Close
-                    | HostOp::Entries
                     | HostOp::TryLock
                     | HostOp::Unlock
                     | HostOp::Sync

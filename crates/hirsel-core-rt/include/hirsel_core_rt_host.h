@@ -6,7 +6,9 @@
    Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
    Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
    ReadAt 37, WriteAt 38, Resolve 40, OpenDir 43, Entries 44, NextEntries 45,
-   Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77, RecvReady 78. Positioned requests carry an eight-byte little-endian
+   Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77, RecvReady 78, Mkstemp 119.
+   Entries takes an optional path (path_len 0 means the grant root).
+   Positioned requests carry an eight-byte little-endian
    offset in path and the original open mode in mode.
    Open modes: Read 0, Write 1, Append 2, CreateNew 3, ReadWrite 4. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
@@ -57,8 +59,8 @@ HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProv
    status@24 (failure convention 3c242a8a), kind@25. Stat returns size in value,
    signed modification nanoseconds in written, and the file kind in kind. error 0 succeeds; 1..5 are IoError
    case + 1. Clock rows ignore status and use value; waiting rows can fail with
-   Cancelled. Mkdtemp, positioned I/O and NextEntries can also fail with Bounds.
-   Read, ReadAt, Mkdtemp and NextEntries can update operand.len; data and
+   Cancelled. Mkdtemp, Mkstemp, positioned I/O and NextEntries can also fail with Bounds.
+   Read, ReadAt, Mkdtemp, Mkstemp and NextEntries can update operand.len; data and
    capacity never change. Capacity 0 borrows storage (even if len > 0).
    No row admits or grows/frees carrier storage. Null operand for no operand. */
 HirselCoreHostOutcome hirsel_core_host_op(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);

@@ -1900,6 +1900,34 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
     let store = root.join("store");
     std::fs::create_dir_all(world.join("child")).unwrap();
     std::fs::create_dir_all(&store).unwrap();
+    let child = world.join("child");
+    let child_fd = std::fs::File::open(&child).unwrap();
+    let candidates = [17_u128, 23_u128];
+    let collision = child.join(format!("trial-{:032x}", candidates[0]));
+    std::fs::write(&collision, b"existing file").unwrap();
+    let mut entropy = candidates.into_iter();
+    let (created, suffix) = crate::os::temp::create_temp_file(
+        std::os::fd::AsRawFd::as_raw_fd(&child_fd),
+        b"trial-",
+        || Ok(entropy.next().expect("exactly one retry after collision")),
+    )
+    .unwrap();
+    assert_eq!(suffix, format!("{:032x}", candidates[1]));
+    let created = std::fs::File::from(created);
+    assert_eq!(created.metadata().unwrap().len(), 0);
+    assert_eq!(std::fs::read(&collision).unwrap(), b"existing file");
+    drop(created);
+    drop(child_fd);
+    std::fs::remove_file(&collision).unwrap();
+    std::fs::remove_file(child.join(format!("trial-{suffix}"))).unwrap();
+
+    let child_fds = || {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .flatten()
+            .filter(|fd| std::fs::read_link(fd.path()).is_ok_and(|path| path == child))
+            .count()
+    };
     let file_path = world.join("child/data");
     let data = std::fs::File::create(&file_path).unwrap();
     let before_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(2);
@@ -1913,6 +1941,15 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
     let (wd, sd) = (os.grant(&world).unwrap(), os.grant(&store).unwrap());
     let (store, real) = (os.provider(), os.provider());
 
+    let listed = |dir, path: &[u8]| {
+        let opened = plain(dir, ENTRIES, 0, path);
+        assert_eq!(opened.error, IoError::OK);
+        let listing = (dir.0, handle_like(dir.1, opened.value));
+        let first = spare(listing, NEXT_ENTRIES, &[], 258);
+        let last = spare(listing, NEXT_ENTRIES, &[], 258);
+        assert_eq!(plain(listing, CLOSE_ENTRIES, 0, &[]).error, IoError::OK);
+        [first, last]
+    };
     let taped = |mode: Mode, host: Provider, wd: u64| {
         let mut observations = Vec::new();
         in_task(mode == Mode::Record, &mut |context| {
@@ -1923,18 +1960,23 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
             let (tape, _) =
                 unsafe { Tape::open(REVISION, (store, sd), b"t", mode, &h, &expect()) }.unwrap();
             let root = tape.on_tape(crate::entry::DIR, (host, wd)).unwrap();
+            let before = child_fds();
+            let [first, last] = listed(root, b"child");
+            assert_eq!(
+                child_fds(),
+                before,
+                "listing retained a directory descriptor"
+            );
             let open_dir = plain(root, OPEN_DIR, 0, b"child");
             let dir = (root.0, handle_like(root.1, open_dir.value));
-            let open_entries = plain(dir, ENTRIES, 0, &[]);
-            let listing = (dir.0, handle_like(dir.1, open_entries.value));
+            let [from_narrow, end_narrow] = listed(dir, b"");
+            assert_eq!((&first, &last), (&from_narrow, &end_narrow));
             let open_file = plain(dir, OPEN, 4, b"data");
             let file = (dir.0, handle_like(dir.1, open_file.value));
             observations = vec![
                 open_dir,
-                open_entries,
-                spare(listing, NEXT_ENTRIES, &[], 258),
-                spare(listing, NEXT_ENTRIES, &[], 258),
-                plain(listing, CLOSE_ENTRIES, 0, &[]),
+                first,
+                last,
                 plain(dir, STAT, 0, b"data"),
                 open_file,
                 call(
@@ -1956,6 +1998,11 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
                 plain(file, STAT_FILE, 0, &[]),
                 plain(file, CLOSE, 0, &[]),
             ];
+            let temp = spare(dir, MKSTEMP, b"temp-", 37);
+            let key = (dir.0, handle_like(dir.1, temp.value));
+            observations.push(temp);
+            observations.push(input(key, WRITE, b"new file"));
+            observations.push(plain(key, CLOSE, 0, &[]));
             tape.end(&ending()).unwrap();
             TASK.set(ptr::null_mut());
         });
@@ -1968,21 +2015,41 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
             .iter()
             .all(|o| o.status == 0 && o.error == IoError::OK)
     );
-    assert_eq!(recorded[2].value, 2);
-    assert_eq!(recorded[3].value, 0);
+    assert_eq!(recorded[1].value, 2);
+    assert_eq!(recorded[2].value, 0);
     assert_eq!(
         (
-            recorded[5].kind,
-            recorded[5].value,
-            recorded[5].written as i64
+            recorded[3].kind,
+            recorded[3].value,
+            recorded[3].written as i64
         ),
         (0, 0, -2_000_000_000)
     );
     assert_eq!(
-        (recorded[7].written, recorded[8].bytes.as_slice()),
+        (recorded[5].written, recorded[6].bytes.as_slice()),
         (1, &[0, 0, b'Z'][..])
     );
-    assert_eq!((recorded[9].kind, recorded[9].value), (0, 5));
+    assert_eq!((recorded[7].kind, recorded[7].value), (0, 5));
+    let temp = &recorded[9].bytes;
+    let suffix = temp.strip_prefix(b"temp-").unwrap();
+    assert!((1..=32).contains(&suffix.len()) && suffix.iter().all(u8::is_ascii_alphanumeric));
+    assert_eq!(
+        std::fs::read(child.join(std::str::from_utf8(temp).unwrap())).unwrap(),
+        b"new file"
+    );
+    super::writer::flush();
+    let frames = tape_frames(&std::fs::read(root.join("store/t")).unwrap());
+    assert!(frames.iter().any(|f| matches!(
+        f,
+        Frame::Op { op: ENTRIES, object: 1, args, .. } if *args == Args::Literal(b"child".to_vec())
+    )));
+    assert!(frames.iter().any(|f| matches!(
+        f,
+        Frame::Op { op: MKSTEMP, object: 3, args, out, .. }
+            if args.operands() == &Args::Literal(b"temp-".to_vec())
+                && args.recorded_spare() == Some([32, 0])
+                && out.payload == suffix
+    )));
 
     std::fs::remove_dir_all(&world).unwrap();
     let blocked = Counted::new(None);

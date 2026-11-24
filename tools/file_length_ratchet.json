@@ -249,9 +249,9 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 4694,
-    "raise_revision": 2,
-    "reason": "w3a-b-sized-2009"
+    "lines": 4315,
+    "raise_revision": 3,
+    "reason": "std2-host-2117"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
     "lines": 2866,
@@ -310,9 +310,9 @@
     "lines": 1198
   },
   "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 8486,
-    "raise_revision": 2,
-    "reason": "w3a-b-sized-2009"
+    "lines": 8510,
+    "raise_revision": 3,
+    "reason": "std2-host-2117"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
@@ -401,7 +401,9 @@
     "lines": 1013
   },
   "crates/hirsel-core-rt/src/provide.rs": {
-    "lines": 2336
+    "lines": 2209,
+    "raise_revision": 1,
+    "reason": "std2-host-2117"
   },
   "crates/hirsel-core-rt/src/provider_s0_tests.rs": {
     "lines": 2346
@@ -422,7 +424,9 @@
     "lines": 2258
   },
   "crates/hirsel-core-rt/src/tape/tests.rs": {
-    "lines": 2499
+    "lines": 2553,
+    "raise_revision": 1,
+    "reason": "std2-host-2117"
   },
   "crates/hirsel-core-rt/src/task_heap.rs": {
     "lines": 2650

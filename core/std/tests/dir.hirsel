@@ -95,7 +95,7 @@ fn list_small_batches(d: Dir) -> bool waits {
     result.unwrap(dir.create_dir(scan, b))
     result.unwrap(file.write(scan, a, string.as_bytes("a")))
     result.unwrap(file.write(scan, c, string.as_bytes("C")))
-    let mut handle = result.unwrap(dir.entries(scan))
+    let mut handle = result.unwrap(dir.entries(d, Some("scan")))
     let mut buf: Bytes = list.with_capacity(258)
     let mut seen: u8 = 0
     loop {
@@ -130,7 +130,7 @@ fn list_small_batches(d: Dir) -> bool waits {
     if seen != 7 {
         fail("an entry was lost between batches")
     }
-    let sorted = result.unwrap(dir.list(scan))
+    let sorted = result.unwrap(dir.list(scan, None))
     list.len(sorted) == 3 && sorted[0].name == c && sorted[1].name == a && sorted[2].name == b
 }
 
@@ -174,7 +174,7 @@ fn read_only_dir_denies_writes(d: Dir) -> bool waits {
     let read = result.unwrap(host.read(mut f, mut got))
     result.unwrap(host.close(take f))
     let info = result.unwrap(host.stat(child, "value"))
-    let mut entries = result.unwrap(host.entries(child))
+    let mut entries = result.unwrap(host.entries(child, None))
     let mut encoded: Bytes = list.with_capacity(258)
     let count = result.unwrap(host.next_entries(mut entries, mut encoded))
     result.unwrap(host.sync_dir(child))

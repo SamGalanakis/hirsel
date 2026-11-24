@@ -39,17 +39,17 @@ a caller-narrowed Dir). It matches Rust cap-std's `Dir::open_dir` and WASI's
 
 ```
 pub type Kind = File | Directory | Symlink | Other
-pub fn host.entries(d: Dir) -> Result[HostEntries, IoError] waits
+pub fn host.entries(d: Dir, at: Option[String]) -> Result[HostEntries, IoError] waits
 pub fn host.next_entries(mut h: HostEntries, mut buf: Bytes) -> Result[u64, IoError] waits
 pub type Entry { name: String, kind: Kind }
-pub fn dir.entries(d: Dir) -> Result[HostEntries, IoError] waits
+pub fn dir.entries(d: Dir, at: Option[String]) -> Result[HostEntries, IoError] waits
 pub fn dir.next_entries(mut h: HostEntries, mut buf: Bytes) -> Result[u64, IoError] waits
-pub fn dir.list(d: Dir) -> Result[List[Entry], file.Error] waits
+pub fn dir.list(d: Dir, at: Option[String]) -> Result[List[Entry], file.Error] waits
 ```
 
-A listing reads the directory a Dir is rooted at. To list a subdirectory, narrow to it
-first, so a listing takes no path. (Group 2 replaces this rule: a listing takes
-`at: Option[String]`, see [Listing below a path](#listing-below-a-path).) `HostEntries` is a `send` mechanical resource, like
+A listing reads the selected directory. `None` lists the root of `d` and `Some(p)`
+lists the directory at `p`. See [Listing below a path](#listing-below-a-path).
+`HostEntries` is a `send` mechanical resource, like
 `HostFile` ([MEM-24](../../../docs/spec/budgets.md#mem-24-logical-charges)). Making one
 admits nothing, and its finalizer closes it.
 
@@ -69,8 +69,7 @@ listing may or may not appear, as POSIX `readdir` allows.
 UTF-8 gives `Error(NotUtf8)`, because no `String` path can name it. The listing is not
 silently shortened.
 
-- **Authority.** `d` alone. A listing reveals the names directly in `d`'s root and
-  nothing below them.
+- **Authority.** `d` alone. A listing reveals the names directly in the selected directory.
 - **Failures.** `host.entries`: `Denied` when the root can no longer be read, and
   `Other(errno)`. `host.next_entries`: `Other(errno)`, after which `buf` is unchanged.
   `dir.list` also returns `NotUtf8` for an invalid name. A refused allocation
@@ -78,7 +77,7 @@ silently shortened.
 - **Charging.** The host operations admit nothing. Their bytes land in capacity the caller
   already holds. `dir.list` admits its record buffer (4096 bytes), the list and each name
   under the current limit, and refunds the buffer before it returns.
-- **Replay.** `host.entries` passes the replay point at issue (`d`'s ordinal) and at
+- **Replay.** `host.entries` passes the replay point at issue (`d`'s ordinal and the optional path) and at
   delivery (the handle's ordinal). Each `host.next_entries` passes it at issue (the handle's
   ordinal and the spare capacity) and at delivery (the appended records). A replay
   supplies the recorded records, so it sees the recorded host order, and a replayed
@@ -115,23 +114,14 @@ them, and capability authority replaces permission bits as the access check.
 
 ## Listing below a path
 
-*Specified 2026-11-24 (std Group 2), not yet implemented. It replaces the listing
-signatures above.*
-
-```
-pub fn host.entries(d: Dir, at: Option[String]) -> Result[HostEntries, IoError] waits
-pub fn dir.entries(d: Dir, at: Option[String]) -> Result[HostEntries, IoError] waits
-pub fn dir.list(d: Dir, at: Option[String]) -> Result[List[Entry], file.Error] waits
-```
-
-`None` lists `d`'s root, as today. `Some(p)` lists the existing directory `p` below `d`, with
+`None` lists `d`'s root. `Some(p)` lists the existing directory `p` below `d`, with
 `host.open_dir`'s confinement and refusals: `NotFound` when `p` is absent, and `Denied` when
 `p` is not a valid path, leaves `d`, or names something other than a directory (a final
 symbolic link is not followed). The listing's descriptor belongs to the `HostEntries` and
 closes with it. That is the reason for the change. Narrowing to each directory first
 would leave one run-owned descriptor open per directory (Narrowing, above), and a walk of
 a large tree would exhaust the process's descriptors. Authority, charging and replay are
-the listing's. Replay adds `p` to the issue record, and the provider's `DirOp` becomes
+the listing's. Replay adds `p` to the issue record, and the provider's `DirOp` carries
 `Entries(dir: u64, path: u64)`, where a path length of 0 means `None`, because a valid path
 is never empty.
 

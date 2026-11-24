@@ -476,8 +476,9 @@ operations it names; nothing else about them may be inferred from an implementat
   `host.open_dir(d, p)` returns a `Dir` rooted at the existing directory `p`, with the same
   confinement ([CAP-7](capabilities.md#cap-7-attenuation)). It gives `Denied` when `p` names
   anything other than a directory, without following a final symbolic link.
-  `host.entries(d)` opens a listing of `d`'s root as a `HostEntries`, a mechanical resource
-  whose finalizer closes it. `host.next_entries(mut h, mut buf)` appends whole records
+  `host.entries(d, at: Option[String])` opens a `HostEntries` listing of `d`'s root for `None`, or
+  of the directory at `p` for `Some(p)`, with `host.open_dir`'s confinement and refusals.
+  The listing is a mechanical resource whose finalizer closes its descriptor. `host.next_entries(mut h, mut buf)` appends whole records
   (kind byte, `u16` little-endian name length, name), never `.` or `..`, in host order, and
   `Ok(0)` when exhausted. It fails with `Bounds` before issue when `buf` has less than 258
   bytes spare. `host.stat(d, p)` and `host.stat_file(mut f)` report kind, size and
@@ -495,20 +496,16 @@ operations it names; nothing else about them may be inferred from an implementat
   bytes or names survive a crash is not known, and a later success of the same barrier
   says nothing about them. Each is a cancellation point at its issue only, and the host
   provider completes it at its issue ([CONC-7](tasks.md#conc-7-cancellation-points)), so
-  cancellation never interrupts one. *Std Group 2 (specified 2026-11-24, not yet
-  implemented) changes two directory primitives.* `host.mkstemp(d, mut name) ->
+  cancellation never interrupts one. `host.mkstemp(d, mut name) ->
   Result[HostFile, IoError] waits` is `host.mkdtemp` for a regular file: the same 32-byte
   spare-capacity check (`Bounds` before issue), the same prefix rules and fresh suffix, one
   exclusive create that never opens an existing file, and a result open for writing as
   `CreateNew` opens one. It is a cancellation point at issue only, and a cancellation
-  observed at delivery closes the handle and leaves the file created. `host.entries(d, at:
-  Option[String])` lists `d`'s root for `None`, and for `Some(p)` the existing directory
-  `p` below `d`, with `host.open_dir`'s confinement and refusals. The listing owns its
-  descriptor, so listing a subdirectory leaves nothing open after the `HostEntries` is
-  dropped, where a narrowed `Dir` stays open until the run ends. Provider operations:
-  `DirOp` gains `Mkstemp(dir: u64, prefix: u64, room: u64)`, answered `File(u64)` with the
-  suffix staged by `provide.fill`, and `Entries(dir: u64)` becomes `Entries(dir: u64, path:
-  u64)`, where a path length of 0 means `None`
+  observed at delivery closes the handle and leaves the file created. The issue records
+  `d`'s ordinal, the prefix and spare capacity, and delivery records the file's ordinal
+  and suffix. The provider's `DirOp` carries `Mkstemp(dir: u64, prefix: u64, room: u64)`,
+  answered `File(u64)` with the suffix staged by `provide.fill`, and `Entries(dir: u64, path:
+  u64)`, where path length 0 means `None`.
   ([file](../../core/std/api/file.md#replace), [dir](../../core/std/api/dir.md#listing-below-a-path)).
   `host.wall_ms` is milliseconds since 1970 and
   `host.mono_ns` never decreases in a run. `host.sleep_until(c, deadline_ns)` returns once
@@ -940,7 +937,7 @@ pub opaque resource type ClockHand
 pub opaque resource type StopTrigger
 pub type Withdrawn = Withdrawn()
 pub type Part = Whole | Read | Write
-pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, path: u64) | Mkdtemp(dir: u64, prefix: u64, room: u64) | Stat(dir: u64, path: u64) | Mkdir(dir: u64, path: u64) | Remove(dir: u64, path: u64) | RemoveTree(dir: u64, path: u64) | Rename(dir: u64, from: u64, to: u64) | SyncDir(dir: u64) | Entries(dir: u64) | Read(file: u64, room: u64) | ReadAt(file: u64, at: u64, room: u64) | Write(file: u64, len: u64) | WriteAt(file: u64, at: u64, len: u64) | StatFile(file: u64) | Sync(file: u64) | TryLock(file: u64) | Unlock(file: u64) | Close(file: u64) | NextEntries(entries: u64, room: u64) | Released(id: u64)
+pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, path: u64) | Mkdtemp(dir: u64, prefix: u64, room: u64) | Stat(dir: u64, path: u64) | Mkdir(dir: u64, path: u64) | Remove(dir: u64, path: u64) | RemoveTree(dir: u64, path: u64) | Rename(dir: u64, from: u64, to: u64) | SyncDir(dir: u64) | Entries(dir: u64, path: u64) | Read(file: u64, room: u64) | ReadAt(file: u64, at: u64, room: u64) | Write(file: u64, len: u64) | WriteAt(file: u64, at: u64, len: u64) | StatFile(file: u64) | Sync(file: u64) | TryLock(file: u64) | Unlock(file: u64) | Close(file: u64) | NextEntries(entries: u64, room: u64) | Released(id: u64) | Mkstemp(dir: u64, prefix: u64, room: u64)
 pub type DirReply = Done | Failed(IoError) | WriteFailed(WriteError) | Count(u64) | Locked(bool) | Stat(Stat) | File(u64) | Dir(u64) | Entries(u64)
 pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, wire: u64, secrets: u64, marks: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64) | Ready(socket: u64) | LocalAddr(id: u64) | PeerAddr(socket: u64)
 pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake) | UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool) | Address(Addr)

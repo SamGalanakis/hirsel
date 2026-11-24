@@ -281,10 +281,12 @@ impl Function<'_, '_, '_> {
                     | HostOp::Read
                     | HostOp::Write
                     | HostOp::OpenDir
+                    | HostOp::Entries
                     | HostOp::Stat
                     | HostOp::NextEntries
                     | HostOp::Mkdir
                     | HostOp::Mkdtemp
+                    | HostOp::Mkstemp
                     | HostOp::Remove
                     | HostOp::RemoveTree
                     | HostOp::Stdout
@@ -422,6 +424,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::Unlock
                     | HostOp::Mkdir
                     | HostOp::Mkdtemp
+                    | HostOp::Mkstemp
                     | HostOp::Remove
                     | HostOp::RemoveTree
                     | HostOp::WallMs

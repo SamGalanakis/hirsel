@@ -247,6 +247,7 @@ enum Queued {
 }
 const DIR_CLOSE: u64 = 18;
 const DIR_RELEASED: u64 = 20;
+const DIR_MKSTEMP: u64 = 21;
 const NET_RELEASED: u64 = 8;
 const NET_UNIX_CONNECT: u64 = 9;
 const NET_UNIX_LISTEN: u64 = 10;
@@ -546,6 +547,21 @@ impl World {
             };
         }
         unreachable!("split always supplies a final component")
+    }
+
+    fn find_dir(&self, dir: u64, path: &[u8]) -> Result<u64, (u64, u64)> {
+        let key = self.dir_key(dir, path).map_err(|error| {
+            if error == (OTHER, 20) {
+                (DENIED, 0)
+            } else {
+                error
+            }
+        })?;
+        match self.nodes.get(&key) {
+            Some(Node::Dir(dir)) => Ok(*dir),
+            Some(Node::File(_)) => Err((DENIED, 0)),
+            None => Err((NOT_FOUND, 0)),
+        }
     }
 
     fn new_dir(&mut self, key: DirKey) -> u64 {
@@ -2447,7 +2463,9 @@ impl Machine<'_> {
         };
         // The caller-side checks of every provider's entry (native `drive`).
         match op {
-            HostOp::Mkdtemp if spare(self, a[1]) < 32 => return Err(Stop::Cause("Bounds")),
+            HostOp::Mkdtemp | HostOp::Mkstemp if spare(self, a[1]) < 32 => {
+                return Err(Stop::Cause("Bounds"));
+            }
             HostOp::NextEntries if spare(self, a[1]) < 258 => return Err(Stop::Cause("Bounds")),
             HostOp::WriteAt
                 if a[1]
@@ -2479,12 +2497,17 @@ impl Machine<'_> {
                 let p = path(self, 1);
                 (0, vec![tag, h, p.len() as u64], vec![vec![], p], None)
             }
-            HostOp::Mkdtemp => {
+            HostOp::Mkdtemp | HostOp::Mkstemp => {
                 let (prefix, ..) = self.carrier(a[1]);
                 let room = spare(self, a[1]);
+                let tag = if op == HostOp::Mkstemp {
+                    DIR_MKSTEMP
+                } else {
+                    2
+                };
                 (
                     0,
-                    vec![2, h, prefix.len() as u64, room],
+                    vec![tag, h, prefix.len() as u64, room],
                     vec![vec![], prefix],
                     Some(a[1]),
                 )
@@ -2499,7 +2522,10 @@ impl Machine<'_> {
                 )
             }
             HostOp::SyncDir => (0, vec![8, h], vec![], None),
-            HostOp::Entries => (0, vec![9, h], vec![], None),
+            HostOp::Entries => {
+                let p = if a[1] == 0 { vec![] } else { path(self, 1) };
+                (0, vec![9, h, p.len() as u64], vec![vec![], p], None)
+            }
             HostOp::Read => (1, vec![10, h, spare(self, a[1])], vec![], Some(a[1])),
             HostOp::ReadAt => (1, vec![11, h, a[1], spare(self, a[2])], vec![], Some(a[2])),
             HostOp::Write => {
@@ -2733,7 +2759,7 @@ impl Machine<'_> {
         } else {
             (tag == 1 && op != DIR_RELEASED)
                 || match op {
-                    0 => tag == 6,
+                    0 | DIR_MKSTEMP => tag == 6,
                     1 | 2 => tag == 7,
                     3 | 14 => tag == 5,
                     9 => tag == 8,
@@ -2743,7 +2769,12 @@ impl Machine<'_> {
                     _ => tag == 0,
                 }
         };
-        if !answers {
+        if !answers
+            || (dir
+                && op == DIR_MKSTEMP
+                && tag == 6
+                && !hirsel_core_ids::host_op::valid_temp_suffix(&call.staged))
+        {
             return None;
         }
         let io = |t: u64| (1..=5).contains(&t).then_some(t);
@@ -2999,7 +3030,11 @@ impl Machine<'_> {
         let (calls, ..) = self.world.cells[c].port();
         let call = &calls[&id];
         if let (Some(out), false) = (call.out, call.staged.is_empty())
-            && !((vocab == Vocab::Exec || (vocab, op) == (Vocab::Net, NET_DATAGRAM_RECV))
+            && !((vocab == Vocab::Exec
+                || matches!(
+                    (vocab, op),
+                    (Vocab::Net, NET_DATAGRAM_RECV) | (Vocab::Dir, DIR_MKSTEMP)
+                ))
                 && answer[1] != 0)
         {
             // The commit copies the staged bytes into the caller's capacity.
@@ -3263,7 +3298,7 @@ impl Machine<'_> {
                     (Vocab::Dir, 10 | 19) | (Vocab::Net, 1 | 4 | NET_DATAGRAM_RECV) => {
                         call.words[2]
                     }
-                    (Vocab::Dir, 2 | 11) => call.words[3],
+                    (Vocab::Dir, 2 | 11 | DIR_MKSTEMP) => call.words[3],
                     (Vocab::Exec, exec::RECV) => call.words[2].min(call.words[3]),
                     _ => 0,
                 };
@@ -3363,6 +3398,7 @@ impl Machine<'_> {
             HostOp::Open
             | HostOp::OpenDir
             | HostOp::Mkdtemp
+            | HostOp::Mkstemp
             | HostOp::Stat
             | HostOp::Mkdir
             | HostOp::Remove
@@ -4764,6 +4800,13 @@ impl Machine<'_> {
             self.check_cancel(t)?;
             return Ok(vec![0, DENIED, 0, 0]);
         }
+        if op == HostOp::Entries
+            && a[1] != 0
+            && !hirsel_core_net::valid_relative_path(self.carrier_bytes(a[1]))
+        {
+            self.check_cancel(t)?;
+            return Ok(vec![0, DENIED, 0, 0]);
+        }
         if let Some(reply) = self.provide(t, op, a) {
             return reply;
         }
@@ -5058,22 +5101,22 @@ impl Machine<'_> {
                 }));
                 ok(FILE_BASE + w.files.len() as u64 - 1, 0)
             }
-            HostOp::OpenDir => {
-                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
-                    Ok(key) => key,
-                    Err((OTHER, 20)) => return Ok(error(DENIED)),
-                    Err(e) => return Ok(resolve(e)),
-                };
-                match self.world.nodes.get(&key) {
-                    Some(Node::Dir(dir)) => ok(*dir | (a[0] & DIR_READ_ONLY), 0),
-                    Some(Node::File(_)) => error(DENIED),
-                    None => error(NOT_FOUND),
-                }
-            }
+            HostOp::OpenDir => match self.world.find_dir(a[0], self.carrier_bytes(a[1])) {
+                Ok(dir) => ok(dir | (a[0] & DIR_READ_ONLY), 0),
+                Err(e) => resolve(e),
+            },
             HostOp::Entries => {
+                let dir = if a[1] == 0 {
+                    a[0]
+                } else {
+                    match self.world.find_dir(a[0], self.carrier_bytes(a[1])) {
+                        Ok(dir) => dir,
+                        Err(e) => return Ok(resolve(e)),
+                    }
+                };
                 let records = self
                     .world
-                    .children(a[0])
+                    .children(dir)
                     .map(|((_, name), node)| {
                         let kind = u8::from(matches!(node, Node::Dir(_)));
                         let mut record = vec![kind];
@@ -5274,7 +5317,7 @@ impl Machine<'_> {
                     None => error(NOT_FOUND),
                 }
             }
-            HostOp::Mkdtemp => {
+            HostOp::Mkdtemp | HostOp::Mkstemp => {
                 let (prefix, data, len, cap) = self.carrier(a[1]);
                 if cap.saturating_sub(len) < 32 {
                     return Err(Stop::Cause("Bounds"));
@@ -5294,7 +5337,22 @@ impl Machine<'_> {
                     if !self.world.nodes.contains_key(&key) {
                         self.put(data + len, &suffix);
                         self.store(a[1] + 8, 8, len + suffix.len() as u64);
-                        return Ok(ok(self.world.new_dir(key), 0));
+                        if op == HostOp::Mkdtemp {
+                            return Ok(ok(self.world.new_dir(key), 0));
+                        }
+                        let file = Arc::new(Mutex::new(ModelFile {
+                            modified_ns: self.world.clock.min(i64::MAX as u64),
+                            ..ModelFile::default()
+                        }));
+                        self.world.nodes.insert(key, Node::File(Arc::clone(&file)));
+                        self.world.files.push(Some(OpenFile {
+                            file,
+                            at: 0,
+                            locked: false,
+                            mode: 3,
+                            read_only_dir: false,
+                        }));
+                        return Ok(ok(FILE_BASE + self.world.files.len() as u64 - 1, 0));
                     }
                 }
                 resolve((OTHER, 11)) // EAGAIN

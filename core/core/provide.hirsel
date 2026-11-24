@@ -85,7 +85,7 @@ pub fn dir_op(c: Call[DirOp]) -> DirOp {
     } else if t == 8 {
         SyncDir(dir: a)
     } else if t == 9 {
-        Entries(dir: a)
+        Entries(dir: a, path: b)
     } else if t == 10 {
         Read(file: a, room: b)
     } else if t == 11 {
@@ -106,6 +106,8 @@ pub fn dir_op(c: Call[DirOp]) -> DirOp {
         Close(file: a)
     } else if t == 19 {
         NextEntries(entries: a, room: b)
+    } else if t == 21 {
+        Mkstemp(dir: a, prefix: b, room: d)
     } else {
         Released(id: a)
     }

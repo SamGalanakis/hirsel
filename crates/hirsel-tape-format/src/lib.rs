@@ -344,6 +344,15 @@ impl Out {
                     return Err(Corrupt);
                 }
             }
+            if op == op::MKSTEMP
+                && if status == OK {
+                    !hirsel_core_ids::host_op::valid_temp_suffix(b)
+                } else {
+                    !b.is_empty()
+                }
+            {
+                return Err(Corrupt);
+            }
             if op == op::TLS_CONNECT {
                 if status == OK {
                     tls_connect_payload(b)?;

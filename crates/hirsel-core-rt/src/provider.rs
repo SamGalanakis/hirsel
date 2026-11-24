@@ -279,7 +279,7 @@ unsafe fn admit<const RETURNABLE: bool>(
                 return Some(CANCELLED);
             }
             let request = &*request;
-            if (operation == MKDTEMP
+            if (matches!(operation, MKDTEMP | MKSTEMP)
                 && request.buffer.capacity.saturating_sub(request.buffer.len) < 32)
                 || (operation == NEXT_ENTRIES
                     && request.buffer.capacity.saturating_sub(request.buffer.len) < 258)

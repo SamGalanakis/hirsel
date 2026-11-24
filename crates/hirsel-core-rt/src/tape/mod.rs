@@ -927,6 +927,7 @@ fn creates_object(op: u8) -> bool {
         OPEN | OPEN_DIR
             | ENTRIES
             | MKDTEMP
+            | MKSTEMP
             | LISTEN
             | CONNECT
             | ACCEPT
@@ -1187,8 +1188,8 @@ unsafe fn operands(r: &Request) -> Args {
             }
             READ_AT => path.to_vec(),
             WRITE_AT => return Args::of_parts(&[path, bytes]),
-            WRITE | STDOUT | STDERR | MKDTEMP => bytes.to_vec(),
-            MKDIR | REMOVE | REMOVE_TREE | RENAME | OPEN_DIR | STAT => path.to_vec(),
+            WRITE | STDOUT | STDERR | MKDTEMP | MKSTEMP => bytes.to_vec(),
+            MKDIR | REMOVE | REMOVE_TREE | RENAME | OPEN_DIR | ENTRIES | STAT => path.to_vec(),
             SLEEP_UNTIL | SLEEP_UNTIL_WALL => bytes.to_vec(),
             _ => vec![],
         })
@@ -1205,9 +1206,8 @@ unsafe fn canonical(r: &Request) -> Args {
             arguments.buffered(cred.spares)
         }
         RESOLVE => arguments.buffered([crate::resolve::spare(&r.buffer) as u64, 0]),
-        READ | READ_AT | RANDOM | NEXT_ENTRIES | RECV_BOUNDED | DATAGRAM_RECV | STDIN_READ => {
-            arguments.buffered([r.buffer.capacity.saturating_sub(r.buffer.len) as u64, 0])
-        }
+        READ | READ_AT | RANDOM | NEXT_ENTRIES | RECV_BOUNDED | DATAGRAM_RECV | STDIN_READ
+        | MKSTEMP => arguments.buffered([r.buffer.capacity.saturating_sub(r.buffer.len) as u64, 0]),
         SECRET_MAC if matches!(r.mode, crate::secret::KEY_WRAP | crate::secret::KEY_SIGN) => {
             arguments.buffered([r.buffer.capacity.saturating_sub(r.buffer.len) as u64, 0])
         }
@@ -2069,7 +2069,7 @@ unsafe fn record_out(
                 provider: inner.provider,
                 handle: o.value,
             }),
-            open_resource: matches!(r.operation, OPEN | ENTRIES),
+            open_resource: matches!(r.operation, OPEN | ENTRIES | MKSTEMP),
         });
         out.value = live.objects.len() as u64;
         answer.value = handle(generation, live.objects.len());

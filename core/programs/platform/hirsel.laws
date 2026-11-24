@@ -1,6 +1,6 @@
 hirsel.laws 1
-platform@1/launcher/session_vectors src=0dbb9ad5c26e70b4 sig=7fdc9663ba663626 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_genesis_recovers src=e07f35d703561666 sig=eaf9f3ba93809e32 run=d58926ede9b57167 bug=- oracle=- rows=pending
+platform@1/launcher/session_vectors src=0dbb9ad5c26e70b4 sig=e7db71c96e614327 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_genesis_recovers src=29e74b578bb50373 sig=41f0e751f2961646 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_idle_unload src=89f26225b5586810 sig=1e50e33656803486 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_one_head src=264faecd5fcb6aba sig=0e5b97640969e86a run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_reopen_keeps src=73fdd797317264bf sig=e27ea148c5683b11 run=d58926ede9b57167 bug=- oracle=- rows=pending
@@ -15,7 +15,7 @@ platform@1/platform/cutover_survives_host_loss src=8ddf134b88d7e695 sig=0c9003ac
 platform@1/platform/deploy_admission_policy src=ab4decacea6c1cfb sig=7f67b6e8090055c7 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_drift_retry src=3af4467f2f9d8665 sig=dabbe8652f503388 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/deploy_preview src=e9c594bdead65a3c sig=6e5179d41acfa855 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-platform@1/platform/operator_register src=39ca8e62281107fb sig=d3d983159e602d63 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+platform@1/platform/operator_register src=39ca8e62281107fb sig=7d69c945bff5f768 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/operator_request_identity src=a727bb0b986f5190 sig=7cbd9d6419081071 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/pin_expiry src=e1c4b8062adcb321 sig=05341f62c799a4ed run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/pin_offline_reader src=b3173333018ef8a4 sig=9ffd4d8fd3dbf885 run=ea720f3846592392 bug=- oracle=- rows=pending

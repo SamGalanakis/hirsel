@@ -498,6 +498,7 @@ tags!(HostOp {
     123 => LocalAddr,
     124 => PeerAddr,
     125 => CallPayloadPrefix,
+    126 => Mkstemp,
 });
 
 tags!(RaiseCause {

@@ -6,6 +6,7 @@ pub fn carries_payload(op: u8) -> bool {
         op,
         READ | READ_AT
             | MKDTEMP
+            | MKSTEMP
             | RANDOM
             | LISTEN
             | ACCEPT

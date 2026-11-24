@@ -269,6 +269,7 @@ impl FunctionEmitter<'_> {
             | HostOp::Unlock
             | HostOp::Mkdir
             | HostOp::Mkdtemp
+            | HostOp::Mkstemp
             | HostOp::Remove
             | HostOp::RemoveTree
             | HostOp::WallMs

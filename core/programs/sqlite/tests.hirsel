@@ -336,7 +336,7 @@ fn fl10_random(f: Foreign[sqlite.Sqlite], out: Stdout) -> Result[(), sqlite.Sqli
 }
 
 fn file_count(d: Dir) -> u64 waits {
-    let mut entries = result.unwrap(host.entries(d))
+    let mut entries = result.unwrap(host.entries(d, None))
     let mut rows: Bytes = list.with_capacity(4096)
     result.unwrap(host.next_entries(mut entries, mut rows))
 }

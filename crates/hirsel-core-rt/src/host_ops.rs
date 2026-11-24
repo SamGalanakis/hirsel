@@ -118,25 +118,39 @@ pub unsafe extern "C" fn hirsel_core_host_op(
     // immutable path/write/argv carriers are never mutably borrowed or rewritten.
     unsafe {
         let buffer = carrier(operand);
+        let mode = if op == MKSTEMP { 3 } else { mode }; // CreateNew
         let mut request = request(op, mode, site, buffer);
         let outcome = match op {
             READ | WRITE | CLOSE | TRY_LOCK | UNLOCK | SYNC | NEXT_ENTRIES | STAT_FILE => {
                 hirsel_core_host_file(context, handle, &mut request)
             }
-            OPEN | RENAME | MKDIR | MKDTEMP | REMOVE | REMOVE_TREE | SYNC_DIR | OPEN_DIR
-            | ENTRIES | STAT => {
+            OPEN | RENAME | MKDIR | MKDTEMP | MKSTEMP | REMOVE | REMOVE_TREE | SYNC_DIR
+            | OPEN_DIR | ENTRIES | STAT => {
                 let rights = handle & DIR_READ_ONLY;
                 if rights != 0 && needs_writable_dir(op, mode) {
+                    return denied(context, site);
+                }
+                if op == ENTRIES
+                    && !operand.is_null()
+                    && (buffer.len == 0
+                        || !hirsel_core_net::valid_relative_path(std::slice::from_raw_parts(
+                            buffer.data,
+                            buffer.len,
+                        )))
+                {
                     return denied(context, site);
                 }
                 let handle = handle & !DIR_READ_ONLY;
                 let provider = hirsel_core_capability_provider(context, handle);
                 request.handle = hirsel_core_capability_handle(context, handle);
-                if matches!(op, OPEN | MKDIR | REMOVE | REMOVE_TREE | OPEN_DIR | STAT) {
+                if matches!(
+                    op,
+                    OPEN | MKDIR | REMOVE | REMOVE_TREE | OPEN_DIR | ENTRIES | STAT
+                ) {
                     request.path = buffer.data;
                     request.path_len = buffer.len;
                 }
-                if matches!(op, OPEN | ENTRIES) {
+                if matches!(op, OPEN | ENTRIES | MKSTEMP) {
                     open_file(context, provider, &mut request, rights != 0)
                 } else {
                     let mut result = drive(context, provider, &mut request, None);
@@ -161,6 +175,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             _ => unreachable!(),
         };
         let appended = matches!(op, READ | MKDTEMP)
+            || (op == MKSTEMP && outcome.status == 0 && outcome.error == IoError::OK)
             || (op == NEXT_ENTRIES && outcome.status == 0 && outcome.error == IoError::OK);
         if appended && request.buffer.len != buffer.len {
             // Only these rows write the length; spare-capacity checks guarantee

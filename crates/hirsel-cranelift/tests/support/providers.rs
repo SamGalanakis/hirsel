@@ -303,6 +303,7 @@ fn every_host_row_preserves_c_fields_and_status() {
         HostOp::Unlock,
         HostOp::Mkdir,
         HostOp::Mkdtemp,
+        HostOp::Mkstemp,
         HostOp::Remove,
         HostOp::RemoveTree,
         HostOp::WallMs,

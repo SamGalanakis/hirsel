@@ -220,6 +220,7 @@ core@1/host/close
 core@1/host/entries
 core@1/host/mkdir
 core@1/host/mkdtemp
+core@1/host/mkstemp
 core@1/host/mono_ns
 core@1/host/next_entries
 core@1/host/open

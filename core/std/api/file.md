@@ -59,7 +59,8 @@ Neither moves the file's position.
 
 ## Replace
 
-*Specified 2026-11-24 (std Group 2), not yet implemented.*
+`host.mkstemp` is implemented. The std operations in this section are specified for
+Group 2.
 
 ```
 pub fn host.mkstemp(d: Dir, mut name: String) -> Result[HostFile, IoError] waits

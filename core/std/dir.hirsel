@@ -16,9 +16,9 @@ pub fn narrow(d: Dir, p: String) -> Result[Dir, IoError] waits {
     host.open_dir(d, p)
 }
 
-/// Opens a listing of d's root. Dropping the handle closes it.
-pub fn entries(d: Dir) -> Result[HostEntries, IoError] waits {
-    host.entries(d)
+/// Opens a listing of d's root or the directory at a relative path. Dropping the handle closes it.
+pub fn entries(d: Dir, at: Option[String]) -> Result[HostEntries, IoError] waits {
+    host.entries(d, at)
 }
 
 /// Appends whole records in host order. Fails Bounds with fewer than 258 spare bytes.
@@ -31,9 +31,9 @@ pub fn stat(d: Dir, p: String) -> Result[Stat, IoError] waits {
     host.stat(d, p)
 }
 
-/// Lists d's direct entries in bytewise name order. Names must be valid UTF-8.
-pub fn list(d: Dir) -> Result[List[Entry], file.Error] waits {
-    let mut handle = match entries(d) {
+/// Lists the selected directory's direct entries in bytewise name order. Names must be valid UTF-8.
+pub fn list(d: Dir, at: Option[String]) -> Result[List[Entry], file.Error] waits {
+    let mut handle = match entries(d, at) {
         Ok(take h) => take h,
         Error(e) => return Error(Io(e)),
     }
@@ -45,19 +45,19 @@ pub fn list(d: Dir) -> Result[List[Entry], file.Error] waits {
             Ok(_) => {},
             Error(e) => return Error(Io(e)),
         }
-        let mut at: u64 = 0
-        while at < list.len(buf) {
-            let kind: Kind = match buf[at] {
+        let mut offset: u64 = 0
+        while offset < list.len(buf) {
+            let kind: Kind = match buf[offset] {
                 0 => File,
                 1 => Directory,
                 2 => Symlink,
                 _ => Other,
             }
-            let size: u16 = list.word_le(buf, at + 1)
-            let from = at + 3
-            at = from + int.widen(size)
+            let size: u16 = list.word_le(buf, offset + 1)
+            let from = offset + 3
+            offset = from + int.widen(size)
             let mut name_bytes: Bytes = list.with_capacity(int.widen(size))
-            list.append(mut name_bytes, list.slice(buf, from, at))
+            list.append(mut name_bytes, list.slice(buf, from, offset))
             let name = match string.from_utf8(take name_bytes) {
                 Ok(take name) => take name,
                 Error(_) => return Error(NotUtf8),

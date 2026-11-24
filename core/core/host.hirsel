@@ -10,7 +10,7 @@ pub fn open_dir(d: Dir, p: String) -> Result[Dir, IoError] waits
 
 pub fn read_only(d: Dir) -> Dir
 
-pub fn entries(d: Dir) -> Result[HostEntries, IoError] waits
+pub fn entries(d: Dir, at: Option[String]) -> Result[HostEntries, IoError] waits
 
 pub fn next_entries(mut h: HostEntries, mut buf: Bytes) -> Result[u64, IoError] waits
 
@@ -31,6 +31,8 @@ pub fn unlock(mut f: HostFile) -> Result[(), IoError] waits
 pub fn mkdir(d: Dir, p: String) -> Result[(), IoError] waits
 
 pub fn mkdtemp(d: Dir, mut name: String) -> Result[Dir, IoError] waits
+
+pub fn mkstemp(d: Dir, mut name: String) -> Result[HostFile, IoError] waits
 
 pub fn remove(d: Dir, p: String) -> Result[(), IoError] waits
 

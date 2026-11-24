@@ -76,7 +76,7 @@ type RefusalFile {
 }
 
 fn refusal_directory(d: Dir) -> List[RefusalFile] waits {
-    let listed_entries = result.unwrap(std.dir.list(d))
+    let listed_entries = result.unwrap(std.dir.list(d, None))
     let mut files: List[RefusalFile] = list.with_capacity(list.len(listed_entries))
     for listed in listed_entries {
         if let File = listed.kind {

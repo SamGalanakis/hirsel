@@ -112,6 +112,7 @@ host_ops! {
     LOCAL_ADDR = 116,
     PEER_ADDR = 117,
     CALL_PAYLOAD_PREFIX = 118,
+    MKSTEMP = 119,
 }
 
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.
@@ -119,7 +120,15 @@ pub const DIR_READ_ONLY: u64 = 1 << 62;
 
 /// Directory operations that need write authority and the writing modes of open.
 pub fn needs_writable_dir(op: u8, mode: u8) -> bool {
-    matches!(op, MKDIR | MKDTEMP | REMOVE | REMOVE_TREE | RENAME) || (op == OPEN && mode != 0)
+    matches!(
+        op,
+        MKDIR | MKDTEMP | MKSTEMP | REMOVE | REMOVE_TREE | RENAME
+    ) || (op == OPEN && mode != 0)
+}
+
+/// A temporary name suffix must fit the 32 bytes guaranteed at entry.
+pub fn valid_temp_suffix(suffix: &[u8]) -> bool {
+    (1..=32).contains(&suffix.len()) && suffix.iter().all(u8::is_ascii_alphanumeric)
 }
 
 pub fn unix_operation(op: u8) -> bool {

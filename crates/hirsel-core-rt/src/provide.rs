@@ -145,6 +145,7 @@ const HANDLE_ROOM: u64 = 32;
 /// DirOp variants in declaration order (core.md, Provide).
 const DIR_CLOSE: u64 = 18;
 const DIR_RELEASED: u64 = 20;
+const DIR_MKSTEMP: u64 = 21;
 /// NetOp variants in declaration order.
 const NET_CONNECT: u64 = 0;
 const NET_RESOLVE: u64 = 1;
@@ -436,7 +437,8 @@ impl Port {
                 (Kind::Dir, &[])
             }
             SYNC_DIR => (Kind::Dir, &[8, h]),
-            ENTRIES => (Kind::Dir, &[9, h]),
+            ENTRIES => (Kind::Dir, &[9, h, path]),
+            MKSTEMP => (Kind::Dir, &[DIR_MKSTEMP, h, b.len as u64, spare]),
             READ => (Kind::File, &[10, h, spare]),
             READ_AT => {
                 w[..4].copy_from_slice(&[11, h, request.offset(), spare]);
@@ -502,8 +504,8 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
         };
         match (vocab, call.words[0], field) {
             (Vocab::Stream, 0, 0) => buffer,
-            (Vocab::Dir, 0 | 1 | 3 | 4 | 5 | 6, 1) => path,
-            (Vocab::Dir, 2 | 12, 1) | (Vocab::Dir, 13, 2) => buffer,
+            (Vocab::Dir, 0 | 1 | 3 | 4 | 5 | 6 | 9, 1) => path,
+            (Vocab::Dir, 2 | 12 | DIR_MKSTEMP, 1) | (Vocab::Dir, 13, 2) => buffer,
             (Vocab::Dir, 7, 1) => &path[..call.words[2] as usize],
             (Vocab::Dir, 7, 2) => &path[call.words[2] as usize + 1..],
             (Vocab::Net, NET_RESOLVE, 0) => {
@@ -542,7 +544,7 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
 fn call_room(vocab: Vocab, words: &[u64; 9]) -> u64 {
     match (vocab, words[0]) {
         (Vocab::Dir, 10 | 19) => words[2],
-        (Vocab::Dir, 2 | 11) => words[3],
+        (Vocab::Dir, 2 | 11 | DIR_MKSTEMP) => words[3],
         (Vocab::Exec, exec::RECV) => words[2].min(words[3]),
         (Vocab::Net, NET_RECV | NET_RESOLVE | SERVED_DATAGRAM_RECV) => words[2],
         _ => 0,
@@ -557,7 +559,7 @@ fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
         Vocab::Dir => {
             (reply == R_FAILED && op != DIR_RELEASED)
                 || match op {
-                    0 => reply == R_FILE,
+                    0 | DIR_MKSTEMP => reply == R_FILE,
                     1 | 2 => reply == R_DIR,
                     3 | 14 => reply == R_STAT,
                     9 => reply == R_ENTRIES,
@@ -1798,6 +1800,11 @@ fn answer(p: &Port, call: &PortCall, unix: Option<u64>, tag: u64, w: [u64; 6]) -
     ) {
         return None;
     }
+    if (p.vocab, op, tag) == (Vocab::Dir, DIR_MKSTEMP, R_FILE)
+        && !hirsel_core_ids::host_op::valid_temp_suffix(&call.staged)
+    {
+        return None;
+    }
     let io = |tag, code| net::reply_error(p.vocab, call, tag, code);
     let mut out = Outcome::default();
     match tag {
@@ -2080,7 +2087,10 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
     let c = &p.calls[&id];
     if !c.staged.is_empty()
         && !((p.vocab == Vocab::Exec
-            || (p.vocab, c.words[0]) == (Vocab::Net, SERVED_DATAGRAM_RECV))
+            || matches!(
+                (p.vocab, c.words[0]),
+                (Vocab::Net, SERVED_DATAGRAM_RECV) | (Vocab::Dir, DIR_MKSTEMP)
+            ))
             && outcome.error != IoError::OK)
     {
         // The commit copies the staged bytes into the caller's spare

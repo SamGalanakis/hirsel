@@ -3,6 +3,7 @@
 use crate::provider::*;
 
 mod listing;
+pub(crate) mod temp;
 use listing::Listing;
 use std::{
     collections::BTreeMap,
@@ -12,7 +13,8 @@ use std::{
     path::Path,
     sync::Mutex,
 };
-pub(crate) const TEMP_ATTEMPTS: usize = 128;
+#[cfg(test)]
+pub(crate) use temp::TEMP_ATTEMPTS;
 
 pub(crate) type IssueFile = unsafe extern "C" fn(*mut u8, *mut Request) -> Outcome;
 /// Queue a SYNC or SYNC_DIR on the sync helper; None for a handle this
@@ -188,14 +190,7 @@ impl OsProvider {
             }
             OPEN_DIR => {
                 let root = self.directories[&request.handle].as_raw_fd();
-                let flags = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_RDONLY;
-                let dir = beneath(root, path, flags).map_err(|error| {
-                    if error.raw_os_error() == Some(libc::ENOTDIR) {
-                        io::Error::from_raw_os_error(libc::EACCES)
-                    } else {
-                        error
-                    }
-                })?;
+                let dir = open_directory(root, path)?;
                 let id = self.id();
                 self.directories.insert(id, dir);
                 out.value = id;
@@ -203,7 +198,13 @@ impl OsProvider {
             ENTRIES => {
                 let root = self.directories[&request.handle].as_raw_fd();
                 // Open a fresh description so independently opened listings have distinct cursors.
-                let fd = beneath(root, b".", libc::O_RDONLY | libc::O_DIRECTORY)?;
+                let path = if path.is_empty() {
+                    b".".as_slice()
+                } else {
+                    valid_path(path)?;
+                    path
+                };
+                let fd = open_directory(root, path)?;
                 let listing = Listing::open(fd)?;
                 let id = self.id();
                 self.listings.insert(id, listing);
@@ -341,70 +342,16 @@ impl OsProvider {
                     _ => unreachable!(),
                 }
             }
-            MKDTEMP => {
+            MKDTEMP | MKSTEMP => {
                 let fd = self.directories[&request.handle].as_raw_fd();
-                // Only the completed basename must be valid: dot prefixes are
-                // ordinary names once the nonempty alphanumeric suffix is added.
-                let prefix = if request.buffer.len == 0 {
-                    &[]
+                let opened = temp::create(fd, request, &mut self.temporary)?;
+                let id = self.id();
+                if request.operation == MKSTEMP {
+                    self.files.insert(id, opened);
                 } else {
-                    // SAFETY: issue borrows the carrier's existing initialized bytes.
-                    unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
-                };
-                if prefix.contains(&b'/') || prefix.contains(&0) {
-                    return Err(io::Error::from_raw_os_error(libc::EACCES));
+                    self.directories.insert(id, opened);
                 }
-                for _ in 0..TEMP_ATTEMPTS {
-                    let sequence = self.temporary;
-                    self.temporary = sequence
-                        .checked_add(1)
-                        .unwrap_or_else(|| crate::process::stop(b"HostNames"));
-                    let suffix = format!("h{:x}x{:x}", std::process::id(), sequence);
-                    let mut name = prefix.to_vec();
-                    name.extend_from_slice(suffix.as_bytes());
-                    let name_c = CString::new(name)?;
-                    // SAFETY: new single-component name in the granted directory.
-                    let result = unsafe { libc::mkdirat(fd, name_c.as_ptr(), 0o700) };
-                    if result < 0 {
-                        let error = io::Error::last_os_error();
-                        if error.raw_os_error() == Some(libc::EEXIST) {
-                            continue;
-                        }
-                        return Err(error);
-                    }
-                    let opened = beneath(
-                        fd,
-                        name_c.as_bytes(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-                    );
-                    let directory = match opened {
-                        Ok(directory) => directory,
-                        Err(error) => {
-                            // SAFETY: remove the empty directory just created, no link traversal.
-                            unsafe {
-                                libc::unlinkat(fd, name_c.as_ptr(), libc::AT_REMOVEDIR);
-                            }
-                            return Err(error);
-                        }
-                    };
-                    // SAFETY: entry checked 32 spare bytes before issue; suffix
-                    // is at most 27 ASCII bytes. Prefix bytes are never rewritten.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            suffix.as_ptr(),
-                            request.buffer.data.add(request.buffer.len),
-                            suffix.len(),
-                        );
-                    }
-                    request.buffer.len += suffix.len();
-                    let id = self.id();
-                    self.directories.insert(id, directory);
-                    out.value = id;
-                    return Ok(out);
-                }
-                // Host namespace contention is recoverable. All attempts were
-                // collisions, so no directory or carrier bytes were changed.
-                return Err(io::Error::from_raw_os_error(libc::EAGAIN));
+                out.value = id;
             }
             SYNC => {
                 let fd = self.files[&request.handle].as_raw_fd();
@@ -973,29 +920,30 @@ fn write_request(fd: i32, request: &Request) -> Outcome {
 }
 
 fn random(request: &mut Request) -> io::Result<Outcome> {
-    let mut filled = 0usize;
-    while filled < request.buffer.capacity.saturating_sub(request.buffer.len) {
-        let spare = request.buffer.capacity - request.buffer.len - filled;
-        // SAFETY: the carrier owns writable spare capacity and the
-        // syscall is bounded to that exact extent.
-        let n = unsafe {
-            libc::getrandom(
-                request.buffer.data.add(request.buffer.len + filled).cast(),
-                spare,
-                0,
-            )
-        };
-        let n = syscall(n as isize)? as usize;
+    let spare = request.buffer.capacity.saturating_sub(request.buffer.len);
+    if spare != 0 {
+        // SAFETY: the request pins the writable spare capacity, which may be uninitialized.
+        let data = unsafe { request.buffer.data.add(request.buffer.len) };
+        fill_random_bytes(data, spare)?;
+    }
+    request.buffer.len += spare;
+    Ok(Outcome {
+        written: spare as u64,
+        ..Outcome::default()
+    })
+}
+
+fn fill_random_bytes(mut data: *mut u8, mut remaining: usize) -> io::Result<()> {
+    while remaining != 0 {
+        // SAFETY: both callers provide a live writable range of the given length.
+        let n = syscall(unsafe { libc::getrandom(data.cast(), remaining, 0) } as isize)? as usize;
         if n == 0 {
             return Err(io::Error::from_raw_os_error(libc::EIO));
         }
-        filled += n;
+        data = data.wrapping_add(n);
+        remaining -= n;
     }
-    request.buffer.len += filled;
-    Ok(Outcome {
-        written: filled as u64,
-        ..Outcome::default()
-    })
+    Ok(())
 }
 
 fn syscall(rc: isize) -> io::Result<isize> {
@@ -1068,6 +1016,14 @@ fn valid_path(path: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
+fn open_directory(fd: i32, path: &[u8]) -> io::Result<OwnedFd> {
+    let flags = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_RDONLY;
+    beneath(fd, path, flags).map_err(|error| match error.raw_os_error() {
+        Some(libc::ENOTDIR) => io::Error::from_raw_os_error(libc::EACCES),
+        _ => error,
+    })
+}
+
 fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
     open_beneath(fd, path, flags, libc::RESOLVE_NO_MAGICLINKS)
 }

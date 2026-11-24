@@ -116,6 +116,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("host", "listen_unix", 1),
     ("host", "mkdir", 1),
     ("host", "mkdtemp", 1),
+    ("host", "mkstemp", 1),
     ("host", "mono_ns", 1),
     ("host", "next_entries", 1),
     ("host", "open", 1),

@@ -352,7 +352,7 @@ unsafe fn close(context: *mut Context, file: File) {
 /// Open a mechanical file or listing through the selected provider.
 /// No logical admission; registry storage is provider bookkeeping (MEM-24).
 /// # Safety
-/// Live run context, provider and OPEN or ENTRIES request; callbacks obey CAP-8 and retain
+/// Live run context, provider and OPEN, MKSTEMP or ENTRIES request; callbacks obey CAP-8 and retain
 /// their state until the run closes its grants. Success transfers sole ownership.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_file_open(

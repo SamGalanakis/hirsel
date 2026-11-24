@@ -196,6 +196,7 @@ operations! {
     ("host", "unlock", Lane::Runtime(Kernel::Host(HostOp::Unlock)), "B", "core-ops-914", false),
     ("host", "mkdir", Lane::Runtime(Kernel::Host(HostOp::Mkdir)), "B", "core-ops-914", false),
     ("host", "mkdtemp", Lane::Runtime(Kernel::Host(HostOp::Mkdtemp)), "B", "core-ops-914", false),
+    ("host", "mkstemp", Lane::Runtime(Kernel::Host(HostOp::Mkstemp)), "B", "std2-host-2117", false),
     ("host", "remove", Lane::Runtime(Kernel::Host(HostOp::Remove)), "B", "core-ops-914", false),
     ("host", "remove_tree", Lane::Runtime(Kernel::Host(HostOp::RemoveTree)), "B", "core-ops-914", false),
     ("host", "wall_ms", Lane::Runtime(Kernel::Host(HostOp::WallMs)), "B", "core-ops-914", false),
@@ -2599,6 +2600,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 args[2] = Arg::Value(self.runtime_mode(f, 2, vals[2]?, n)?);
                 3
             }
+            HostOp::Entries => {
+                let option = self.p.fns[f].params[1].ty;
+                let TyKind::Adt(_, types) = self.t.kind(option) else {
+                    return None;
+                };
+                let string = types[0];
+                let (_, at) = self.runtime_place(option, vals[1], n)?;
+                let tag = self.net_case(at, n);
+                let some = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 1, n)?;
+                let yes = self.new_block(&[]);
+                let no = self.new_block(&[]);
+                let join = self.new_block(&[Ty::Ptr]);
+                self.runtime_branch(some, yes, no, n);
+                self.start(yes);
+                let path =
+                    self.runtime_field(at, &[Step::CaseField { case: 1, field: 0 }], string, n)?;
+                let path = self.pointer(path, n);
+                self.jump(join, &[path], n);
+                self.start(no);
+                let null = self.konst(Ty::Ptr, 0, n)?;
+                self.jump(join, &[null], n);
+                self.start(join);
+                args[1] = Arg::Value(self.block_params(join)[0]);
+                2
+            }
             HostOp::Read
             | HostOp::Write
             | HostOp::OpenDir
@@ -2606,6 +2632,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             | HostOp::Stat
             | HostOp::Mkdir
             | HostOp::Mkdtemp
+            | HostOp::Mkstemp
             | HostOp::Remove
             | HostOp::RemoveTree
             | HostOp::Stdout
@@ -2644,7 +2671,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ok,
             n,
             |cx, to, ty| match op {
-                HostOp::Open | HostOp::Entries => {
+                HostOp::Open | HostOp::Entries | HostOp::Mkstemp => {
                     if let Some(to) =
                         cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
                     {

@@ -101,6 +101,7 @@ pub enum HostOp {
     NetNarrowUnix = hirsel_core_ids::host_op::NET_NARROW_UNIX as isize,
     /// Wait until the clock's wall time reaches an absolute millisecond reading.
     SleepUntilWall = hirsel_core_ids::host_op::SLEEP_UNTIL_WALL as isize,
+    Mkstemp = hirsel_core_ids::host_op::MKSTEMP as isize,
     CallPayloadPrefix = hirsel_core_ids::host_op::CALL_PAYLOAD_PREFIX as isize,
 }
 
@@ -132,6 +133,7 @@ impl HostOp {
         HostOp::Unlock,
         HostOp::Mkdir,
         HostOp::Mkdtemp,
+        HostOp::Mkstemp,
         HostOp::Remove,
         HostOp::RemoveTree,
         HostOp::WallMs,
@@ -242,6 +244,7 @@ impl HostOp {
             HostOp::Unlock => "host_unlock",
             HostOp::Mkdir => "host_mkdir",
             HostOp::Mkdtemp => "host_mkdtemp",
+            HostOp::Mkstemp => "host_mkstemp",
             HostOp::Remove => "host_remove",
             HostOp::RemoveTree => "host_remove_tree",
             HostOp::WallMs => "host_wall_ms",

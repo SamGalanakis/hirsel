@@ -21,9 +21,9 @@ static struct world world;
 static uint8_t operand_bytes[300]="abc";
 static int is_file(uint8_t op) { return (op>=1 && op<=5) || op==16 || op==37 || op==38 || op==45 || op==47; }
 static int has_operand(uint8_t op) {
-    return op==0 || op==1 || op==2 || (op>=6 && op<=9) || (op>=12 && op<14) || op==18 || op==37 || op==38 || op==43 || op==45 || op==46;
+    return op==0 || op==1 || op==2 || (op>=6 && op<=9) || (op>=12 && op<14) || op==18 || op==37 || op==38 || op==43 || op==44 || op==45 || op==46 || op==119;
 }
-static int has_path(uint8_t op) { return op==0 || op==6 || op==8 || op==9 || op==43 || op==46; }
+static int has_path(uint8_t op) { return op==0 || op==6 || op==8 || op==9 || op==43 || op==44 || op==46; }
 static void require(int condition) { if(!condition) abort(); }
 static int path_is(HirselCoreHostRequest *r,const char *s) {
     return r->path_len==strlen(s) && !memcmp(r->path,s,r->path_len);
@@ -36,7 +36,7 @@ static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) 
     if(w->matrix) {
         uint8_t op=r->operation;
         require(op==w->operation && r->site==0);
-        require(r->mode==(op==0 ? 3 : op==38 ? 1 : 0));
+        require(r->mode==(op==0 || op==119 ? 3 : op==38 ? 1 : 0));
         require(r->handle==(is_file(op) ? 111 : 7));
         if(op==14) {
             require(r->buffer.data==NULL && r->buffer.len==0 && r->buffer.capacity==0);

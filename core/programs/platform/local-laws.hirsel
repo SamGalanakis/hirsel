@@ -183,7 +183,7 @@ fn copy_tree(d: Dir, from: String, to: String) waits {
     let _ = std.dir.create_dir(d, to)
     let src = result.unwrap(std.dir.narrow(d, from))
     let dst = result.unwrap(std.dir.narrow(d, to))
-    for e in result.unwrap(std.dir.list(src)) {
+    for e in result.unwrap(std.dir.list(src, None)) {
         match e.kind {
             Directory => copy_tree(d, path_in(from, e.name), path_in(to, e.name)),
             _ => result.unwrap(std.file.write(dst, e.name, result.unwrap(std.file.read(src, e.name)))),

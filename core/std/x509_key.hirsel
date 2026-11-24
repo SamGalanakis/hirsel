@@ -1,0 +1,110 @@
+pub type PublicKey = P256(Bytes) | P384(Bytes) | Invalid
+
+type Body {
+    start: u64,
+    end: u64
+}
+
+fn field(data: Bytes, mut at: u64, end: u64, tag: u8) -> Result[Body, ()] {
+    if end - at < 2 || data[at] != tag {
+        return Error(())
+    }
+    let mut len: u64 = int.widen(data[at + 1])
+    at += 2
+    if len >= 128 {
+        let width = len - 128
+        if width == 0 || width > 8 || width > end - at || data[at] == 0 {
+            return Error(())
+        }
+        len = 0
+        for i in at .. at + width {
+            len = (len << 8) | int.widen(data[i])
+        }
+        at += width
+        if len < 128 {
+            return Error(())
+        }
+    }
+    if len > end - at {
+        return Error(())
+    }
+    let start = at
+    at += len
+    Ok(Body(start: start, end: at))
+}
+
+fn optional_field(data: Bytes, mut at: u64, end: u64, tag: u8) -> Result[(), ()] {
+    if at < end && data[at] == tag {
+        let _ = field(data, mut at, end, tag)?
+    }
+    Ok(())
+}
+
+fn subject_public_key_info(data: Bytes) -> Result[Body, ()] {
+    let end = list.len(data)
+    let mut at = 0u64
+    let cert = field(data, mut at, end, 0x30)?
+    if at != end {
+        return Error(())
+    }
+    at = cert.start
+    let tbs = field(data, mut at, cert.end, 0x30)?
+    let _ = field(data, mut at, cert.end, 0x30)? // signatureAlgorithm
+    let _ = field(data, mut at, cert.end, 0x03)? // signatureValue
+    if at != cert.end {
+        return Error(())
+    }
+    at = tbs.start
+    optional_field(data, mut at, tbs.end, 0xa0)? // version
+    let _ = field(data, mut at, tbs.end, 0x02)? // serialNumber
+    let _ = field(data, mut at, tbs.end, 0x30)? // signature
+    let _ = field(data, mut at, tbs.end, 0x30)? // issuer
+    let _ = field(data, mut at, tbs.end, 0x30)? // validity
+    let _ = field(data, mut at, tbs.end, 0x30)? // subject
+    let spki = field(data, mut at, tbs.end, 0x30)?
+    optional_field(data, mut at, tbs.end, 0x81)? // issuerUniqueID
+    optional_field(data, mut at, tbs.end, 0x82)? // subjectUniqueID
+    optional_field(data, mut at, tbs.end, 0xa3)? // extensions
+    if at != tbs.end {
+        return Error(())
+    }
+    Ok(take spki)
+}
+
+fn read_spki(data: Bytes) -> Result[PublicKey, ()] {
+    let spki = subject_public_key_info(data)?
+    let mut at = spki.start
+    let algorithm = field(data, mut at, spki.end, 0x30)?
+    let bits = field(data, mut at, spki.end, 0x03)?
+    if at != spki.end {
+        return Error(())
+    }
+    // DER for id-ecPublicKey followed by a namedCurve OID.
+    let identifiers = list.slice(data, algorithm.start, algorithm.end)
+    let size = if list.compare_bytes(identifiers, b"\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07") == Equal {
+        65u64
+    } else if list.compare_bytes(identifiers, b"\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x05\x2b\x81\x04\x00\x22") == Equal {
+        97u64
+    } else {
+        return Error(())
+    }
+    if bits.end - bits.start != size + 1 || data[bits.start] != 0 || data[bits.start + 1] != 4 {
+        return Error(())
+    }
+    let mut point: Bytes = list.with_capacity(size)
+    list.append(mut point, list.slice(data, bits.start + 1, bits.end))
+    if size == 65 {
+        Ok(P256(take point))
+    } else {
+        Ok(P384(take point))
+    }
+}
+
+/// Extract an uncompressed P-256 or P-384 public point from a DER certificate.
+/// Fields outside subjectPublicKeyInfo are opaque beyond their DER framing.
+pub fn read(der: Bytes) -> PublicKey {
+    match read_spki(der) {
+        Ok(take key) => take key,
+        Error(_) => Invalid,
+    }
+}

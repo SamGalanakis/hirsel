@@ -89,14 +89,14 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     let actor = ObjectJournalTask(ready: take starting, receive: take queued, acks: take journal_acks, notices: channel.sender(written_send), synced: take synced_send, group_bytes: group_room, group_commits: int.widen(options.group_commits), idle: Some(take idle_send), health_signal: Some(ObjectHealthSignal(value: latest.handle(health_state), terminal: channel.sender(health_tx))))
-    let worker_room = 4 * group_room + 524288
+    let worker_room = 4 * group_room + 524288 + RECLAIM_PAGE_BYTES
     let work = match task.try_spawn(tasks, bytes worker_room, take actor, object_journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     let blank = disk_allocation(fn() -> Result[HistoryOpenBase, Error] {
         let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None)
-        Ok(HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, pages: take pages))
+        Ok(HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, sweep: sweep_start(), pages: take pages))
     })?
     let held_options = disk_allocation(scoped fn() -> Result[Options, Error] { Ok(clone(options)) })?
     let (take register, _, take started) = history_open_with(mut read_source, c, r, options, level_name, mut workspace, op_ms, scoped fn(id: StoreId, replay: JournalReplay) -> Result[Db, Error] {
@@ -112,13 +112,13 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     let head = register.head
     let ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
     let (take requests, take workers) = std.object.split(take owned_client)
-    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, reclaim: None)
-    if let Error(_) = channel.send(start, take startup) {
-        return Error(Io(Closed))
-    }
-    let HistoryOpenBase(generation, fence, recorded_after, pages: take pages) = match take base {
+    let HistoryOpenBase(generation, fence, recorded_after, sweep, pages: take pages) = match take base {
         Some(take admitted) => take admitted,
         None => take blank,
+    }
+    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep, reclaim: None)
+    if let Error(_) = channel.send(start, take startup) {
+        return Error(Io(Closed))
     }
     db.checkpointed = generation
     db.fence = fence
@@ -222,7 +222,9 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         let (take pages, _) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
             cut_retirement(layout, participants.holders, None, list.new(), seq, seq)
         })?
-        let (_, take manifest) = disk_read_page_manifest("MANIFEST", buffers.out)?
+        let (_, take parsed) = disk_read_page_manifest("MANIFEST", buffers.out)?
+        let mut manifest = take parsed
+        manifest.sweep = lane.sweep
         let candidate_locator = disk_allocation(scoped fn() -> Result[HistoryLocator, Error] {
             let mut rows: Map[u64, HistoryRef] = map.new()
             capacity(map.try_reserve(mut rows, list.len(refs)))?

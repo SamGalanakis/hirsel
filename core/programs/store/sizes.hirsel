@@ -91,6 +91,7 @@ pub fn sized_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Option
                 add_size(mut parts, "client_lanes", size_or(lanes, 18446744073709551615u64))
                 add_size(mut parts, "entry_buffers", 2 * (112 + order.min(group, 4294967295u64)))
                 add_size(mut parts, "head_buffers", BUCKET_HEAD_BYTES)
+                add_size(mut parts, "reclaim_page", RECLAIM_PAGE_BYTES)
                 add_size(mut parts, "put_buffer", pack)
             }
         },

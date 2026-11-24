@@ -30,30 +30,31 @@ fn derived_budgets() -> Result[(), String] {
     }
     let config = std.object.LaneConfig(requested_lanes: 3, lane_bytes: 1048576)
     let bucket = result.unwrap(store.sized(Bucket(config), 134217728u64))
-    if bucket.resident_limit != 53955561u64 { fail("L60: Bucket fixed reservations") }
+    if bucket.resident_limit != 53014638u64 { fail("L60: Bucket fixed reservations") }
     let default_lanes = std.object.LaneConfig(requested_lanes: 0, lane_bytes: 1048576)
     let default_bucket = result.unwrap(store.sized(Bucket(default_lanes), 134217728u64))
-    if default_bucket.resident_limit != 49519278u64 { fail("L60: Bucket default lanes") }
+    if default_bucket.resident_limit != 48578354u64 { fail("L60: Bucket default lanes") }
 
     let mut opts = store.Overrides(resident_limit: None, journal_limit: None,
         checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(2097152u64), group_commits: None, lock_wait_ms: None)
     let adjusted = result.unwrap(store.sized_with(Bucket(config), 134217728u64, opts))
-    if adjusted.resident_limit != 57504588u64 || adjusted.group_bytes != 2097152u32 {
+    if adjusted.resident_limit != 56563664u64 || adjusted.group_bytes != 2097152u32 {
         fail("L60: Bucket group override changes two entry buffers")
     }
     opts.resident_limit = Some(1048576u64)
     opts.pack_bytes = Some(8388608u64)
     opts.checkpoint_bytes = Some(8388608u64)
     opts.journal_limit = Some(25165904u64)
-    // 50,397,344 directory fixed bytes + 15,860,416 Bucket fixed bytes
+    // 50,397,344 directory fixed bytes + 16,972,416 Bucket fixed bytes
     // + 1,048,576 resident bytes + 190,652 bytes of variable checkpoint work.
-    let _ = result.unwrap(store.sized_with(Bucket(config), 67496988u64, opts))
-    match store.sized_with(Bucket(config), 67496987u64, opts) {
+    let _ = result.unwrap(store.sized_with(Bucket(config), 68608988u64, opts))
+    match store.sized_with(Bucket(config), 68608987u64, opts) {
         Error(short) => {
-            if short.need != 67496988u64 || short.have != 67496987u64 { fail("L60: Bucket floor") }
+            if short.need != 68608988u64 || short.have != 68608987u64 { fail("L60: Bucket floor") }
             expect_size_part(short.parts, "client_lanes", 3145728u64)
             expect_size_part(short.parts, "entry_buffers", 4194528u64)
             expect_size_part(short.parts, "head_buffers", 131552u64)
+            expect_size_part(short.parts, "reclaim_page", 1112000u64)
             expect_size_part(short.parts, "put_buffer", 8388608u64)
         },
         _ => fail("L60: below Bucket floor"),

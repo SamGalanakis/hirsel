@@ -5,6 +5,7 @@ type ObjectJournalStart: send {
     buffers: HistoryBuffers,
     op_ms: u64,
     failed_polls: u32,
+    sweep: SweepCursor,
     reclaim: Option[ObjectReclaimCapture]
 }
 
@@ -52,18 +53,19 @@ type ObjectJournalSession {
     buffers: HistoryBuffers,
     op_ms: u64,
     failed_polls: u32,
+    sweep: SweepCursor,
     reclaim: Option[ObjectReclaimCapture]
 }
 
 fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
-    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, reclaim) = take input
-    ObjectJournalSession(client: std.object.attach(take requests), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, reclaim)
+    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, reclaim) = take input
+    ObjectJournalSession(client: std.object.attach(take requests), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, reclaim)
 }
 
 fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart {
-    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, reclaim) = take active
+    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, reclaim) = take active
     let (take requests, _) = std.object.split(take client)
-    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, reclaim)
+    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, reclaim)
 }
 
 fn object_journal_advance(mut lane: ObjectJournalSession) -> Result[(), Error] waits {

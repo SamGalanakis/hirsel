@@ -21,7 +21,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     }
     let ObjectPackRead(client: take client, ..) = take source
     let (take requests, take lifetime) = std.object.split(take client)
-    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS, failed_polls: 0, reclaim: None)
+    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS, failed_polls: 0, sweep: sweep_start(), reclaim: None)
     result.unwrap(channel.send(init, take opened))
     let ObjectJournaled(2, observed_bytes, 2) = result.unwrap(channel.receive(delivered)) else {
         fail("the worker did not acknowledge both frames as one group")
@@ -203,6 +203,70 @@ fn bucket_test_m2_reclaim_execution(c: Clock, r: Random, tasks: Tasks) -> Result
     let reclaimed = object_reclaim_law(c, r, tasks, sim)
     let _ = bucket_law_finish(take sim)
     reclaimed
+}
+
+fn sweep_fixture_name(epoch: u64, digest: u64) -> String {
+    history_key("e-", HistoryRef(seq: 1, epoch, len: 1, digest))
+}
+
+fn object_sweep_cursor_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    options.retain = 1
+    let first = bucket_law_authority(sim, tasks, "s3.test", 1)?
+    let seed = open_authority(tasks, take first, c, r, options)?
+    close(take seed)?
+    options.create = false
+    let second = bucket_law_authority(sim, tasks, "s3.test", 2)?
+    let mut writer = open_authority(tasks, take second, c, r, options)?
+    let mut witness = bucket_law_client_lanes(sim, tasks, "s3.test", 3, true, 1)?
+    let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
+    let mut workspace = history_buffers(65536)?
+    let mut octets = string.into_bytes(string.from("x"))
+    for digest in 1u64 .. 1002 {
+        let key = sweep_fixture_name(2, digest)
+        history_create(mut witness, key, mut octets, mut workspace.compare, deadline)?
+    }
+    let _ = checkpoint(mut writer)?
+    reclaim_barrier(writer)?
+    let leftover = sweep_fixture_name(2, 1000)
+    let _ = history_fetch(mut witness, leftover, mut workspace.compare, deadline)?
+    let _ = checkpoint(mut writer)?
+    reclaim_barrier(writer)?
+    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
+    let selected = history_decode_head(workspace.witness)?
+    let (take mark, _) = history_checkpoint(mut witness, selected.head, deadline)?
+    let manifest = history_read_manifest(mut witness, selected.head.store, mark, selected.head.checkpoint.seq, deadline)?
+    // The first page contained genesis at epoch 1 and 999 epoch-2 keys.
+    if manifest.sweep.position != 1 || manifest.sweep.epoch != 2 || manifest.sweep.digest != 999 {
+        fail("the cut did not record the last fully examined key of the first page")
+    }
+    if let Error(Remote(NotFound)) = history_fetch(mut witness, leftover, mut workspace.compare, deadline) {} else {
+        fail("the resumed sweep missed the next key at the same position")
+    }
+    close(take writer)?
+    let late = sweep_fixture_name(1, 7)
+    history_create(mut witness, late, mut octets, mut workspace.compare, deadline)?
+    let third = bucket_law_authority(sim, tasks, "s3.test", 4)?
+    let mut successor = open_authority(tasks, take third, c, r, options)?
+    let _ = checkpoint(mut successor)?
+    reclaim_barrier(successor)?
+    let _ = history_fetch(mut witness, late, mut workspace.compare, deadline)?
+    let _ = checkpoint(mut successor)?
+    reclaim_barrier(successor)?
+    if let Error(Remote(NotFound)) = history_fetch(mut witness, late, mut workspace.compare, deadline) {} else {
+        fail("the sweep did not wrap to remove a late key behind the durable cursor")
+    }
+    close(take successor)
+}
+
+@test
+fn bucket_test_m2_sweep_cursor(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 589, None, list.new())
+    let outcome = object_sweep_cursor_law(c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
 }
 
 fn pending_pack_name(seq: u64, epoch: u64) -> String {

@@ -203,6 +203,12 @@ fn history_read_manifest(mut client: std.object.Client, id: StoreId, mark: Histo
         if manifest.first_live != checkpoint_seq || manifest.prev_first != checkpoint_seq || manifest.retirement_root != std.page.unlocated(0) {
             return Error(disk_fault(name, 72, Malformed))
         }
+        let cursor = manifest.sweep
+        if cursor.position >= mark.floor ||
+            (cursor.position == 0 && (cursor.epoch != 0 || cursor.digest != 0)) ||
+            (cursor.position != 0 && cursor.epoch == 0) {
+            return Error(disk_fault(name, 72, Malformed))
+        }
         Ok(take manifest)
     })
 }

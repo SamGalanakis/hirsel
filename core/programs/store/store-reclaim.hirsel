@@ -205,34 +205,77 @@ fn history_abort_reclaimed_uploads(mut lane: ObjectJournalSession, pass: Reclaim
     }
 }
 
-fn history_execute_reclaim(mut lane: ObjectJournalSession, fixed: ObjectReclaimCapture) -> Result[(), Error] waits {
-    let deadline = std.object.deadline_after_ms(lane.client, lane.op_ms)
+const HISTORY_LIST_PAGE: u64 = 1000
+
+// One inline object key (1024 bytes plus length), size and inline ETag.
+const RECLAIM_PAGE_BYTES: u64 = HISTORY_LIST_PAGE * (1024 + 8 + 8 + 64 + 8)
+
+fn sweep_start() -> SweepCursor {
+    SweepCursor(position: 0, epoch: 0, digest: 0)
+}
+
+fn history_entry_cursor(mark: SweepCursor) -> String {
+    history_key("e-", HistoryRef(seq: mark.position, epoch: mark.epoch, len: 0, digest: mark.digest))
+}
+
+fn history_sweep_entries(mut lane: ObjectJournalSession, pass: ReclaimPass, mut members: List[std.object.Entry], deadline: u64) -> Result[(), Error] waits {
+    let after = if lane.sweep.position == 0 { string.new() } else { history_entry_cursor(lane.sweep) }
+    let page = std.object.list(mut lane.client, "e-", after, mut members, deadline) ?=> Remote
     history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
-    let pass = reclaim_capture(mut lane.client, fixed, deadline)?
-    let mut members = disk_allocation(fn() -> Result[List[std.object.Entry], Error] { Ok(list.with_capacity(64)) })?
-    let mut after = string.new()
+    for member in members {
+        let name = std.object.key_text(member.key)
+        let Some(parsed_name) = history_parse_name(name) else {
+            return Error(disk_fault(name, 0, Malformed))
+        }
+        if parsed_name.seq >= pass.floor {
+            lane.sweep = sweep_start()
+            return Ok(())
+        }
+        if history_dead_key(pass, name) {
+            std.object.erase(mut lane.client, name, deadline) ?=> Remote
+        }
+        lane.sweep = SweepCursor(position: parsed_name.seq, epoch: parsed_name.epoch, digest: parsed_name.digest)
+    }
+    if !page.truncated { lane.sweep = sweep_start() }
+    Ok(())
+}
+
+fn history_reclaim_prefix(mut lane: ObjectJournalSession, pass: ReclaimPass, lead: String, take start: String, mut members: List[std.object.Entry], deadline: u64) -> Result[(), Error] waits {
+    let mut after = take start
     loop {
         list.clear(mut members)
-        let page = match std.object.list(mut lane.client, "", after, mut members, deadline) {
-            Ok(value) => value,
-            Error(take cause) => return Error(Remote(take cause)),
-        }
+        let page = std.object.list(mut lane.client, lead, after, mut members, deadline) ?=> Remote
         history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
         for member in members {
             let name = std.object.key_text(member.key)
+            if lead == "e-" {
+                let Some(parsed_name) = history_parse_name(name) else { continue }
+                if parsed_name.seq > pass.position { return Ok(()) }
+                if parsed_name.seq < pass.floor { continue }
+            }
             if history_dead_key(pass, name) {
-                if let Error(take cause) = std.object.erase(mut lane.client, name, deadline) {
-                    return Error(Remote(take cause))
-                }
+                std.object.erase(mut lane.client, name, deadline) ?=> Remote
             }
         }
-        if !page.truncated {
-            return history_abort_reclaimed_uploads(mut lane, pass, deadline)
-        }
+        if !page.truncated { return Ok(()) }
         let following = std.object.key_text(page.after)
         if order.compare(following, after) != Greater {
             return Error(disk_fault("authority", 0, Malformed))
         }
         after = take following
     }
+}
+
+fn history_execute_reclaim(mut lane: ObjectJournalSession, fixed: ObjectReclaimCapture) -> Result[(), Error] waits {
+    let deadline = std.object.deadline_after_ms(lane.client, lane.op_ms)
+    history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
+    let pass = reclaim_capture(mut lane.client, fixed, deadline)?
+    let mut members = disk_allocation(fn() -> Result[List[std.object.Entry], Error] { Ok(list.with_capacity(HISTORY_LIST_PAGE)) })?
+    history_sweep_entries(mut lane, pass, mut members, deadline)?
+    let start_live = history_entry_cursor(SweepCursor(position: pass.floor, epoch: 0, digest: 0))
+    history_reclaim_prefix(mut lane, pass, "e-", take start_live, mut members, deadline)?
+    for lead in ["m-", "l-", "p-"] {
+        history_reclaim_prefix(mut lane, pass, lead, string.new(), mut members, deadline)?
+    }
+    history_abort_reclaimed_uploads(mut lane, pass, deadline)
 }

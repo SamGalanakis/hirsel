@@ -2,6 +2,7 @@ type HistoryOpenBase: send {
     generation: u64,
     fence: u32,
     recorded_after: u64,
+    sweep: SweepCursor,
     pages: PageDisk
 }
 
@@ -12,7 +13,7 @@ fn history_load_admitted(mut read_source: ObjectPackRead, head: HistoryHead, cei
     })?
     let LoadedPageStore(manifest: take manifest, lists: take lists, locations: take locations, ..) = take checkpoint_state
     let pages = PageDisk(next_pack: manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None)
-    read_source.admitted_base = Some(HistoryOpenBase(generation: manifest.generation, fence: manifest.fence, recorded_after: manifest.branches[0].version, pages: take pages))
+    read_source.admitted_base = Some(HistoryOpenBase(generation: manifest.generation, fence: manifest.fence, recorded_after: manifest.branches[0].version, sweep: manifest.sweep, pages: take pages))
     Ok(take replay)
 }
 

@@ -475,3 +475,48 @@ fn fan_out_into() -> Result[(), srtp.SrtpError] {
     assert_bytes(src, control, "fan-out modified shared payload")
     Ok(())
 }
+
+fn rtx_case(p: schedule.SrtpProfile, wire: Bytes, clear_osn: Bytes) -> Result[(), srtp.SrtpError] {
+    let plain = rtx_plain()
+    let mut send = sender(p)
+    let mut out = copy_packet(plain, srtp.tag_room(p))
+    let _ = srtp.protect_rtp(mut send, mut out)?
+    assert_bytes(out, wire, "RTX wire differs")
+    let mut receive = receiver(p, LIMITS)
+    let opened = srtp.unprotect_rtp(mut receive, mut out)?
+    if opened.index != 5 || opened.ssrc != 0xbeef {
+        fail("RTX authenticated metadata")
+    }
+    assert_bytes(out, plain, "RTX OSN or payload differs")
+    // Negative control: the same packet sealed with the OSN in the authenticated header.
+    let mut keys = import_key(p, master(p), "srtp_import(send)")
+    let mut sealer = result.unwrap(schedule.sealer(mut keys, Rtp, 0xbeef, 5))
+    let mut roc: Bytes = list.with_capacity(4)
+    if srtp.tag_room(p) == 10 {
+        list.put_word_be(mut roc, 0u32)
+    }
+    let mut clear = copy_packet(plain, srtp.tag_room(p))
+    let _ = result.unwrap(packet.seal(mut sealer, 5, mut clear, 0, 14, roc))
+    assert_bytes(clear, clear_osn, "clear-OSN control differs")
+    let mut late = receiver(p, LIMITS)
+    let outcome = srtp.unprotect_rtp(mut late, mut clear)
+    if srtp.tag_room(p) == 10 {
+        let _ = outcome?
+        let osn: u16 = list.word_be(clear, 12)
+        if osn == 0x1234 {
+            fail("CM opener recovered a clear OSN")
+        }
+    } else {
+        assert_discard(outcome, Tampered)
+    }
+    Ok(())
+}
+
+/// bug: seal an RTX repair from after its OSN, leaving the OSN in the authenticated header.
+/// oracle: an opener in Python cryptography (RFC 3711 section 4 AES-CM with HMAC-SHA1-80, RFC 7714 AES-GCM with the 12-byte header as AAD).
+@test
+fn rtx_protected() -> Result[(), srtp.SrtpError] {
+    rtx_case(Aes128CmHmacSha1_80, rtx_wire_cm(), rtx_clear_osn_cm())?
+    rtx_case(AeadAes128Gcm, rtx_wire_gcm(), rtx_clear_osn_gcm())?
+    rtx_case(AeadAes256Gcm, rtx_wire_gcm256(), rtx_clear_osn_gcm256())
+}

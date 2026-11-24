@@ -5,6 +5,7 @@ import hmac
 from io import StringIO
 import struct
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -64,6 +65,53 @@ def rtp(profile, master, ssrc, index, body=b"abc", first=0x80, extension=b""):
 def rtcp(profile, master, compound, index, encrypt=True):
     ssrc = int.from_bytes(compound[4:8], "big")
     return protect(profile, master, compound[:8], compound[8:], ssrc, index, rtcp=True, encrypt=encrypt)
+
+
+def open_rtp(profile, master, wire, ssrc, index):
+    """Open an SRTP packet with a 12-byte header, written apart from protect."""
+    width = 32 if profile == "gcm256" else 16
+    salt_width = 14 if profile == "cm" else 12
+    key, master_salt = master[:width], master[width:]
+
+    def derive(label, size):
+        # RFC 7714 §11 pads a 96-bit master salt on the right to RFC 3711's 112 bits.
+        x = int.from_bytes(master_salt.ljust(14, b"\0"), "big") ^ (label << 48)
+        iv = x.to_bytes(14, "big") + b"\0\0"
+        return Cipher(algorithms.AES(key), modes.CTR(iv)).encryptor().update(bytes(size))
+
+    session_key, session_salt = derive(0, width), derive(2, salt_width)
+    if profile == "cm":
+        body, tag = wire[:-10], wire[-10:]
+        auth = hmac.new(derive(1, 20), body + (index >> 16).to_bytes(4, "big"), "sha1")
+        if not hmac.compare_digest(auth.digest()[:10], tag):
+            return None
+        iv = (int.from_bytes(session_salt, "big") << 16) ^ (ssrc << 64) ^ (index << 16)
+        decrypt = Cipher(algorithms.AES(session_key), modes.CTR(iv.to_bytes(16, "big"))).decryptor()
+        return body[:12] + decrypt.update(body[12:])
+    iv = int.from_bytes(session_salt, "big") ^ (ssrc << 48) ^ index
+    try:
+        return wire[:12] + AESGCM(session_key).decrypt(iv.to_bytes(12, "big"), wire[12:], wire[:12])
+    except InvalidTag:
+        return None
+
+
+def rtx_protected():
+    # rtp's rtx_layout packet: PT 97, RTX SSRC 0xBEEF, RTX sequence 5, OSN 0x1234.
+    plain = bytes.fromhex("80e1000500000bb80000beef1234aabbcc")
+    hirsel("rtx_plain", plain)
+    for label, master in [("cm", CM), ("gcm", GCM), ("gcm256", GCM256)]:
+        wire = protect(label, master, plain[:12], plain[12:], 0xBEEF, 5)
+        assert open_rtp(label, master, wire, 0xBEEF, 5) == plain
+        assert all(a != b for a, b in zip(wire[12:17], plain[12:17], strict=True))
+        hirsel(f"rtx_wire_{label}", wire)
+        # Negative control: the OSN left in the authenticated header.
+        clear_osn = protect(label, master, plain[:14], plain[14:], 0xBEEF, 5)
+        opened = open_rtp(label, master, clear_osn, 0xBEEF, 5)
+        if label == "cm":
+            assert opened is not None and opened[12:14] != plain[12:14]
+        else:
+            assert opened is None
+        hirsel(f"rtx_clear_osn_{label}", clear_osn)
 
 
 def hirsel(name, data):
@@ -126,6 +174,8 @@ def main():
         key = bytes(range(i, 16 + i)) + GCM[16:]
         hirsel(f"fan_key_{i}", key)
         hirsel(f"fan_wire_{i}", rtp("gcm", key, 20 + i, 100 + i, payload))
+
+    rtx_protected()
 
 
 if __name__ == "__main__":

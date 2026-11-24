@@ -207,3 +207,31 @@ fn fan_wire_2() -> Bytes {
     list.append(mut out, unhex("69f980d1c303d2990772cb45be59e930a66fb1f718e1edaa0baf4a488b4d5af92848186227bc21bec3a5efa3b8d2556982a25f7846dc9ec7cb9115328d457799e8dc228d"))
     take out
 }
+
+fn rtx_plain() -> Bytes {
+    unhex("80e1000500000bb80000beef1234aabbcc")
+}
+
+fn rtx_wire_cm() -> Bytes {
+    unhex("80e1000500000bb80000beef8bfdb07416f56abd4920df01f6aa7e")
+}
+
+fn rtx_clear_osn_cm() -> Bytes {
+    unhex("80e1000500000bb80000beef12343372d686fbc555e5318b36478b")
+}
+
+fn rtx_wire_gcm() -> Bytes {
+    unhex("80e1000500000bb80000beef9dd9503973001350b12368a61834c976a97c9af259")
+}
+
+fn rtx_clear_osn_gcm() -> Bytes {
+    unhex("80e1000500000bb80000beef1234255636ac5516ff739321a16fe8b1205dc9b6e7")
+}
+
+fn rtx_wire_gcm256() -> Bytes {
+    unhex("80e1000500000bb80000beeff3966e67e8707eff3ea483a508b12a35522c28966e")
+}
+
+fn rtx_clear_osn_gcm256() -> Bytes {
+    unhex("80e1000500000bb80000beef12344b1908ae0dc1bb4f82aaadae815eb11e82fc77")
+}

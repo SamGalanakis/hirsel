@@ -29,14 +29,14 @@ pub(super) fn direct_link(
             "-z",
             "keep-text-section-prefix",
         ]);
-        // The startup data stays at the front of read-only data. Align the
-        // source table separately so ordinary reads do not share its pages.
+        // Put the failure-only site table after the unwind metadata so it can
+        // share a page with that metadata without padding the file.
         let layout = tempfile::NamedTempFile::new_in(parent.unwrap_or(Path::new(".")))?;
         std::fs::write(
             layout.path(),
             "SECTIONS {\n\
-                .rodata.hirsel_sites : ALIGN(CONSTANT(MAXPAGESIZE)) { *(.rodata.hirsel_sites) }\n\
-             } INSERT AFTER .rodata;\n",
+                .rodata.hirsel_sites : { *(.rodata.hirsel_sites) }\n\
+             } INSERT AFTER .eh_frame;\n",
         )?;
         process.arg("-T").arg(std::path::absolute(layout.path())?);
         Some(layout)

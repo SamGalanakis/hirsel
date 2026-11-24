@@ -1647,7 +1647,7 @@ fn link_objects(
     };
     // The executable key includes the mode-specific lld options.
     let link_mode = if options.optimize {
-        "release-link-gc-icf-cold-sites"
+        "release-link-gc-icf-sites-after-unwind"
     } else {
         "development-link-O0"
     };

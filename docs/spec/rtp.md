@@ -97,7 +97,7 @@ pub type WriteError = Capacity(Capacity) | Form
 pub fn parse(pkt: Bytes) -> Result[Header, Error]
 pub fn payload(h: Header, pkt: Bytes) -> Result[(u64, u64), Error]
 pub fn csrc(h: Header, pkt: Bytes, i: u8) -> Result[u32, Error]
-pub fn write(f: Fields, exts: View[ExtWriter], mut out: Bytes) -> Result[u64, WriteError]
+pub fn write(f: Fields, w: View[ExtWriter], mut out: Bytes) -> Result[u64, WriteError]
 ```
 
 `header.parse(pkt)` reads the fixed header of [RFC 3550 §5.1](https://www.rfc-editor.org/rfc/rfc3550#section-5.1)
@@ -134,8 +134,9 @@ the check cannot see. The rule makes a stale view harmless, never out of bounds.
 
 Each offset check is written as `at <= len && size <= len − at`, so no sum can wrap.
 
-`header.write(f, exts, mut out)` appends a fixed header with `V = 2`, `P = 0`, `CC = 0` and
-the extensions that `exts` holds ([RTP-3](#rtp-3-header-extensions)) to the spare of `out`,
+`header.write(f, w, mut out)` appends a fixed header with `V = 2`, `P = 0`, `CC = 0` and
+the extension block of `w`, a view of one `ExtWriter` that holds up to 16 elements
+([RTP-3](#rtp-3-header-extensions)), to the spare of `out`,
 and answers the bytes appended. A forwarder never forwards CSRCs: it is not a mixer, so
 the header it writes has none. Its errors are `Capacity` (the spare is short, with the
 whole header's length as `requested`) and the form error of RTP-3. A refused write appends
@@ -605,8 +606,8 @@ pub fn clear[P](mut h: History[P]) -> u64
 // module rtx
 pub type Rtx = Repair(u16, u64) | Probe
 pub fn unwrap(h: Header, pkt: Bytes) -> Result[Rtx, header.Error]
-pub fn write(f: Fields, exts: View[ExtWriter], osn: u16, pre: Bytes, payload: Bytes, from: u64, len: u64, mut out: Bytes) -> Result[u64, WriteError]
-pub fn write_probe(f: Fields, exts: View[ExtWriter], pad: u8, mut out: Bytes) -> Result[u64, WriteError]
+pub fn write(f: Fields, w: View[ExtWriter], osn: u16, pre: Bytes, payload: Bytes, from: u64, len: u64, mut out: Bytes) -> Result[u64, WriteError]
+pub fn write_probe(f: Fields, w: View[ExtWriter], pad: u8, mut out: Bytes) -> Result[u64, WriteError]
 ```
 
 **History.** A `History[P]` remembers what a stream sent, so a NACK can be answered. `P` is
@@ -628,7 +629,8 @@ a payload into a history.
   sent no more than `max_age_ns` ago, and not resent within `min_resend`. It then records the
   resend. It answers `Throttled` for a resend inside `min_resend`, `BeforeSwitch` for an
   index below the gate, and `Missing` otherwise.
-- `gate(index)` refuses every later lookup below `index`. The rewriter sets it at a source
+- `gate(index)` refuses every later lookup below `index`. A gate only rises: a lower
+  `index` than the current gate changes nothing. The rewriter sets it at a source
   switch ([RTP-11](#rtp-11-stream-rewriting-and-layer-switching)): a packet from before a
   switch belongs to the old source, which the receiver's decoder discards. LiveKit filters
   NACKs the same way (`pkg/sfu/rtpmunger.go:261-274` at `d210b4d`).
@@ -663,10 +665,12 @@ sequence numbers ([RFC 4588 §4](https://www.rfc-editor.org/rfc/rfc4588#section-
 payload is the original sequence number (OSN) in 2 bytes, big-endian, followed by the
 original egress payload without its padding. The timestamp and marker are the original's.
 
-The OSN is **payload**, so SRTP must encrypt it. `rtx.write(f, exts, osn, pre, payload, from,
+The OSN is **payload**, so SRTP must encrypt it. `rtx.write(f, w, osn, pre, payload, from,
 len, mut out)` builds the RTX header, then appends the OSN, `pre` (the leg's rewritten codec
 descriptor, or nothing) and `payload[from..from + len]` (the shared remainder) behind it into
-a packet pre-sized in `out`, and answers the header's length. The caller then
+a packet pre-sized in `out`, and answers the header's length. Like `header.write`, it
+appends the whole packet or nothing: a short spare is `Capacity` with the whole packet's
+length as `requested`. The caller then
 protects the packet in place from the end of the RTP header with TLS-8's
 [`seal`](tls.md#tls-8-packet-ciphers-and-key-agreement): the packet's start as `aad_at` and
 `start + header length` as `at`. So the OSN and any rewritten codec descriptor are encrypted
@@ -685,9 +689,11 @@ reads nothing outside that range:
 - a 1-byte payload is malformed (`header.Error.Padding`);
 - otherwise it is `Repair(osn, at)`, with the original payload from `at`.
 
-**Probes.** `rtx.write_probe(f, exts, pad, mut out)` writes a padding-only RTX packet: the
-header with `P = 1` and `pad` bytes of padding, of which the last is the count. `pad` is 1 to
-255, the most one padding count octet can say ([RFC 3550 §5.1](https://www.rfc-editor.org/rfc/rfc3550#section-5.1)).
+**Probes.** `rtx.write_probe(f, w, pad, mut out)` writes a padding-only RTX packet: the
+header with `P = 1` and `pad` bytes of padding, of which the last is the count, and answers
+the header's length, as `rtx.write` does. `pad` is 1 to 255, the most one padding count
+octet can say ([RFC 3550 §5.1](https://www.rfc-editor.org/rfc/rfc3550#section-5.1)); a `pad`
+of 0 is `Form`, and nothing is appended.
 A probe packet's **size**, as the pacer and the estimator count it, is its RTP bytes before
 protection, header and padding included. A larger probe budget is split into several
 packets, each with its own transport number.
@@ -1263,8 +1269,11 @@ written here and repeated in the law's comment.
   3550 §5.1.
 - **`bounded_views` (RTP-1, RTP-3, RTP-4).** Every accessor on hostile or mismatched input
   answers a bounded error and changes nothing. *Inputs, by hand:* every prefix of `hb1` from
-  0 to 47 bytes through `parse` (`Short` below 12, then `Csrc` or `Extension`, never a read
-  past the prefix); a header with `CC = 2` read at `csrc` 1 (a value) and 2 (`Index`); the
+  0 to 47 bytes through `parse`, never a read past the prefix: `Short` below 12 bytes;
+  `Extension` from 12 to 31 bytes, because `hb1` has `X` set and no CSRCs, so its block runs
+  to byte 32; and from 32 to 47 bytes `Ok` with `end` 32 and `len` the prefix's length,
+  because the whole header is present and `parse` never reads padding (`payload` checks it,
+  as `padding_counts` shows); a header with `CC = 2` read at `csrc` 1 (a value) and 2 (`Index`); the
   `Header` of `hb1` used with a 47-byte buffer (`Buffer`); a two-byte block whose last byte
   is a lone nonzero id (`Overrun`); a one-byte block where the `Mid` element is followed by an
   element that overruns (`find` answers `Overrun`, not the match); an RR with `RC = 1` read at

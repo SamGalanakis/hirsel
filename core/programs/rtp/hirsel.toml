@@ -8,6 +8,8 @@ charge = "charge-v1"
 "seq.hirsel" = "seq"
 "ext.hirsel" = "ext"
 "rtcp.hirsel" = "rtcp"
+"history.hirsel" = "history"
+"rtx.hirsel" = "rtx"
 
 [tests]
 limit = 67108864

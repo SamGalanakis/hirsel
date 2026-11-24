@@ -240,8 +240,8 @@ fn index_estimate() -> Result[(), ()] {
     Ok(())
 }
 
-/// bug: Use the wrong packet's view or read past a truncated header, CSRC list, extension element, RTCP report block or FCI entry.
-/// oracle: RFC 3550 sections 5.1, 6.1 and 6.4, RFC 5761 section 4 and RFC 8285 sections 4.2 and 4.3. Chrome's complete header takes 32 bytes.
+/// bug: Use the wrong packet's view or read past a truncated header, CSRC list, extension element, RTCP report block, FCI entry or RTX payload.
+/// oracle: RFC 3550 sections 5.1, 6.1 and 6.4, RFC 5761 section 4 and RFC 8285 sections 4.2 and 4.3. Chrome's complete header takes 32 bytes; an RTX payload range comes from header.payload, which checks the buffer first.
 @test
 fn bounded_views() -> Result[(), ()] {
     let raw = chrome()
@@ -327,7 +327,202 @@ fn bounded_views() -> Result[(), ()] {
     if at != 4 {
         fail("opaque block did not leave a terminal cursor")
     }
+    let Error(Buffer) = rtx.unwrap(h, short) else {
+        fail("RTX unwrap accepted a mismatched buffer")
+    }
     rtcp_views()
+    Ok(())
+}
+
+fn expect_lookup(mut h: history.History[u64], index: u64, now: u64, expected: history.Lookup) {
+    let got = history.get(mut h, index, now, 50)
+    let same = match (got, expected) {
+        (Found(a), Found(b)) => a == b,
+        (Missing, Missing) => true,
+        (Throttled, Throttled) => true,
+        (BeforeSwitch, BeforeSwitch) => true,
+        _ => false,
+    }
+    if !same {
+        fail("wrong history lookup")
+    }
+}
+
+/// bug: Answer a NACK from an overwritten, aged, gated or just-resent slot, or alias two indices with one low 16 bits.
+/// oracle: RTP-7, by hand. Four slots: index i lives in slot i mod 4, so 5 overwrote 1 and 6 overwrote 2; 65,537 mod 4 = 1 mod 4 and 65,537 mod 2^16 = 1.
+@test
+fn history_lookup() -> Result[(), ()] {
+    let mut h: history.History[u64] = result.unwrap(history.history(4, 1000))
+    let mut i = 1u64
+    while i <= 4 {
+        if let Some(_) = history.put(mut h, i, i * 10, i * 100) {
+            fail("an empty slot answered a replaced value")
+        }
+        i += 1
+    }
+    let Some(100) = history.put(mut h, 5, 50, 500) else {
+        fail("put did not answer the value it replaced")
+    }
+    let Some(200) = history.put(mut h, 6, 60, 600) else {
+        fail("put did not answer the value it replaced")
+    }
+    expect_lookup(mut h, 2, 100, Missing)
+    expect_lookup(mut h, 5, 100, Found(5))
+    expect_lookup(mut h, 5, 120, Throttled)
+    if option.copied(history.entry(h, 5)) != Some(500u64) {
+        fail("entry answered another slot's value")
+    }
+    // Index 5 was sent at 50 ns; at 1051 ns it is 1001 ns old, past max_age 1000.
+    expect_lookup(mut h, 5, 1051, Missing)
+    expect_lookup(mut h, 6, 200, Found(6))
+    history.gate(mut h, 6)
+    expect_lookup(mut h, 5, 300, BeforeSwitch)
+    if history.clear(mut h) != 4 {
+        fail("clear count")
+    }
+    expect_lookup(mut h, 6, 400, Missing)
+    let mut fresh: history.History[u64] = result.unwrap(history.history(4, 1000))
+    history.put(mut fresh, 1, 0, 1)
+    history.put(mut fresh, 65537, 0, 65537)
+    expect_lookup(mut fresh, 1, 10, Missing)
+    if let Some(_) = history.entry(fresh, 1) {
+        fail("entry answered an index the slot no longer holds")
+    }
+    let none: Result[history.History[u64], Capacity] = history.history(0, 1000)
+    let Error(_) = none else {
+        fail("history of 0 slots")
+    }
+    let over: Result[history.History[u64], Capacity] = history.history(32769, 1000)
+    let Error(_) = over else {
+        fail("history of 2^15 + 1 slots")
+    }
+    Ok(())
+}
+
+// One sent packet, as a leg's egress history keeps it: enough to reproduce
+// that leg's exact media payload.
+type Sent {
+    generation: u64,
+    ts: u32,
+    marker: bool,
+    pre: Bytes,
+    from: u64,
+    len: u64
+}
+
+type Leg {
+    map: ext.ExtMap,
+    mid: Bytes,
+    pt: u8,
+    ssrc: u32,
+    rtx_pt: u8,
+    rtx_ssrc: u32,
+    rtx_seq: u16,
+    transport: u16,
+    highest: u64,
+    sent: history.History[Sent]
+}
+
+fn leg(mid_id: u8, take mid: Bytes, transport_id: u8, pt: u8, ssrc: u32, rtx_pt: u8, rtx_ssrc: u32, rtx_seq: u16, transport: u16) -> Leg {
+    let mut m = ext.map(Mixed)
+    result.unwrap(ext.bind(mut m, mid_id, Mid))
+    result.unwrap(ext.bind(mut m, transport_id, TransportSeq))
+    Leg(map: m, mid: mid, pt: pt, ssrc: ssrc, rtx_pt: rtx_pt, rtx_ssrc: rtx_ssrc, rtx_seq: rtx_seq, transport: transport, highest: 0, sent: result.unwrap(history.history(64, 1000000000)))
+}
+
+// The leg's own extensions, with a fresh transport number for this send.
+fn leg_exts(mut l: Leg) -> ext.ExtWriter {
+    let mut w = ext.writer()
+    result.unwrap(ext.put(mut w, l.map, Mid, l.mid, 0, list.len(l.mid)))
+    let mut t: Bytes = list.with_capacity(2)
+    list.put_word_be(mut t, l.transport)
+    l.transport += 1
+    result.unwrap(ext.put(mut w, l.map, TransportSeq, t, 0, 2))
+    w
+}
+
+fn send(mut l: Leg, index: u64, take s: Sent, src: Bytes) -> Bytes {
+    let w = leg_exts(mut l)
+    let mut out: Bytes = list.with_capacity(64)
+    let seq: u16 = int.truncate(index)
+    result.unwrap(header.write(header.Fields(marker: s.marker, pt: l.pt, seq: seq, ts: s.ts, ssrc: l.ssrc), view w, mut out))
+    for b in s.pre {
+        list.push(mut out, b)
+    }
+    for b in list.slice(src, s.from, s.from + s.len) {
+        list.push(mut out, b)
+    }
+    l.highest = index
+    history.put(mut l.sent, index, 1000000, take s)
+    out
+}
+
+fn repair(mut l: Leg, wire: u16, src: Bytes) -> Result[(Bytes, u64), history.Lookup] {
+    let Index(index) = seq.estimate(l.highest, wire) else {
+        fail("NACK outside the index domain")
+    }
+    let i = match history.get(mut l.sent, index, 2000000, 10000000) {
+        Found(i) => i,
+        other => return Error(other),
+    }
+    let w = leg_exts(mut l)
+    let Some(s) = history.entry(l.sent, i) else {
+        fail("found index without an entry")
+    }
+    let mut out: Bytes = list.with_capacity(64)
+    let osn: u16 = int.truncate(i)
+    let head = result.unwrap(rtx.write(header.Fields(marker: s.marker, pt: l.rtx_pt, seq: l.rtx_seq, ts: s.ts, ssrc: l.rtx_ssrc), view w, osn, s.pre, src, s.from, s.len, mut out))
+    l.rtx_seq += 1
+    Ok((out, head))
+}
+
+/// bug: Put the OSN in the header, repair with the publisher's or another leg's identity, descriptor or transport number, or read padding as a repair.
+/// oracle: RFC 4588 section 4 and RFC 8852 section 3, by hand. 0x80 | 97 = 0xE1, 0x80 | 101 = 0xE5; 3000 = 0x0BB8, 9000 = 0x2328, 500 = 0x01F4. One-byte elements: MID "0" at id 1 is 10 30, "v-1" at id 2 is 22 76 2D 31, transport-seq at id 3 is 31 hi lo and at id 5 is 51 hi lo, padded to 8 bytes. VP8 picture IDs 0x1234 and 0x0042 with M set: 90 80 92 34 and 90 80 80 42.
+@test
+fn rtx_layout() -> Result[(), ()] {
+    let mut out: Bytes = list.with_capacity(32)
+    let empty = ext.writer()
+    let f = header.Fields(marker: true, pt: 97, seq: 5, ts: 3000, ssrc: 0xbeef)
+    if result.unwrap(rtx.write(f, view empty, 0x1234, b"", b"\x00\xaa\xbb\xcc\x00", 1, 3, mut out)) != 12 || out != b"\x80\xe1\x00\x05\x00\x00\x0b\xb8\x00\x00\xbe\xef\x12\x34\xaa\xbb\xcc" {
+        fail("RTX plaintext layout")
+    }
+    let Repair(0x1234, 14) = result.unwrap(rtx.unwrap(result.unwrap(header.parse(out)), out)) else {
+        fail("RTX repair read back")
+    }
+    let mut probe: Bytes = list.with_capacity(32)
+    if result.unwrap(rtx.write_probe(header.Fields(marker: false, pt: 97, seq: 6, ts: 3000, ssrc: 0xbeef), view empty, 4, mut probe)) != 12 || probe != b"\xa0\x61\x00\x06\x00\x00\x0b\xb8\x00\x00\xbe\xef\x00\x00\x00\x04" {
+        fail("padding-only probe layout")
+    }
+    let Probe = result.unwrap(rtx.unwrap(result.unwrap(header.parse(probe)), probe)) else {
+        fail("padding-only RTX read as a repair")
+    }
+    let one = b"\x80\x61\x00\x07\x00\x00\x0b\xb8\x00\x00\xbe\xef\x12"
+    let Error(Padding) = rtx.unwrap(result.unwrap(header.parse(one)), one) else {
+        fail("1-byte RTX payload accepted")
+    }
+    // The publisher's packet: its own VP8 descriptor, then the shared remainder.
+    let src = b"\x90\x80\x81\x00\xaa\xbb\xcc"
+    let mut one_leg = leg(1, b"0", 3, 96, 0x1111, 97, 0x2222, 0x10, 7)
+    let mut two_leg = leg(2, b"v-1", 5, 100, 0x3333, 101, 0x4444, 0x200, 40)
+    let media_one = send(mut one_leg, 100, Sent(generation: 1, ts: 3000, marker: true, pre: b"\x90\x80\x92\x34", from: 4, len: 3), src)
+    let media_two = send(mut two_leg, 500, Sent(generation: 1, ts: 9000, marker: true, pre: b"\x90\x80\x80\x42", from: 4, len: 3), src)
+    if media_one != b"\x90\xe0\x00\x64\x00\x00\x0b\xb8\x00\x00\x11\x11\xbe\xde\x00\x02\x10\x30\x31\x00\x07\x00\x00\x00\x90\x80\x92\x34\xaa\xbb\xcc" || media_two != b"\x90\xe4\x01\xf4\x00\x00\x23\x28\x00\x00\x33\x33\xbe\xde\x00\x02\x22\x76\x2d\x31\x51\x00\x28\x00\x90\x80\x80\x42\xaa\xbb\xcc" {
+        fail("per-leg media send")
+    }
+    let (repair_one, head_one) = result.unwrap(repair(mut one_leg, 100, src))
+    if head_one != 24 || repair_one != b"\x90\xe1\x00\x10\x00\x00\x0b\xb8\x00\x00\x22\x22\xbe\xde\x00\x02\x10\x30\x31\x00\x08\x00\x00\x00\x00\x64\x90\x80\x92\x34\xaa\xbb\xcc" {
+        fail("leg 1 repair")
+    }
+    let (repair_two, head_two) = result.unwrap(repair(mut two_leg, 500, src))
+    if head_two != 24 || repair_two != b"\x90\xe5\x02\x00\x00\x00\x23\x28\x00\x00\x44\x44\xbe\xde\x00\x02\x22\x76\x2d\x31\x51\x00\x29\x00\x01\xf4\x90\x80\x80\x42\xaa\xbb\xcc" {
+        fail("leg 2 repair")
+    }
+    // A source switch on leg 1: the next output index comes from generation 2.
+    send(mut one_leg, 101, Sent(generation: 2, ts: 6000, marker: false, pre: b"", from: 4, len: 3), src)
+    history.gate(mut one_leg.sent, 101)
+    let Error(BeforeSwitch) = repair(mut one_leg, 100, src) else {
+        fail("repair from before the switch")
+    }
     Ok(())
 }
 

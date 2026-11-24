@@ -1,0 +1,54 @@
+pub type Rtx = Repair(u16, u64) | Probe
+
+pub fn unwrap(h: header.Header, pkt: Bytes) -> Result[Rtx, header.Error] {
+    let (at, len) = header.payload(h, pkt)?
+    if len == 0 {
+        return Ok(Probe)
+    }
+    if len == 1 {
+        return Error(Padding)
+    }
+    Ok(Repair(list.word_be(pkt, at), at + 2))
+}
+
+// Write the header, then `body` more bytes behind it, or append nothing. A
+// refusal names the whole packet's length.
+fn write_with(f: header.Fields, w: View[ext.ExtWriter], body: u64, mut out: Bytes) -> Result[u64, header.WriteError] {
+    let start = list.len(out)
+    let available = list.capacity(out) - start
+    let head = match header.write(f, w, mut out) {
+        Ok(n) => n,
+        Error(Capacity(c)) => return Error(Capacity(Capacity(requested: c.requested + body, available: available))),
+        Error(e) => return Error(e),
+    }
+    if body > available - head {
+        list.truncate(mut out, start)
+        return Error(Capacity(Capacity(requested: head + body, available: available)))
+    }
+    list.fill(mut out, body, 0u8)
+    Ok(head)
+}
+
+pub fn write(f: header.Fields, w: View[ext.ExtWriter], osn: u16, pre: Bytes, payload: Bytes, from: u64, len: u64, mut out: Bytes) -> Result[u64, header.WriteError] {
+    let rest = list.slice(payload, from, from + len)
+    let start = list.len(out)
+    let head = write_with(f, w, 2 + list.len(pre) + len, mut out)?
+    let at = start + head
+    out[at] = int.truncate(osn >> 8)
+    out[at + 1] = int.truncate(osn)
+    list.copy_from_slice(mut out, at + 2, pre)
+    list.copy_from_slice(mut out, at + 2 + list.len(pre), rest)
+    Ok(head)
+}
+
+pub fn write_probe(f: header.Fields, w: View[ext.ExtWriter], pad: u8, mut out: Bytes) -> Result[u64, header.WriteError] {
+    if pad == 0 {
+        return Error(Form)
+    }
+    let start = list.len(out)
+    let body: u64 = int.widen(pad)
+    let head = write_with(f, w, body, mut out)?
+    out[start] = out[start] | 32
+    out[start + head + body - 1] = pad
+    Ok(head)
+}

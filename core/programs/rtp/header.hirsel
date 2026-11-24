@@ -98,6 +98,6 @@ pub fn csrc(h: Header, pkt: Bytes, i: u8) -> Result[u32, Error] {
     Ok(list.word_be(pkt, at))
 }
 
-pub fn write(f: Fields, exts: View[ext.ExtWriter], mut out: Bytes) -> Result[u64, WriteError] {
-    ext.write_header(f, exts, mut out)
+pub fn write(f: Fields, w: View[ext.ExtWriter], mut out: Bytes) -> Result[u64, WriteError] {
+    ext.write_header(f, w, mut out)
 }

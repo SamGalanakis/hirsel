@@ -189,8 +189,18 @@ fn resize_inner(source: Raster, width: u32, height: u32, filter: Filter, limits:
         return Error(ByteLimit)
     }
     list.fill(mut ring, count, black())
+    // The horizontal windows overlap. Convert each source pixel once per row.
+    let mut linear_row: List[LinearPixel] = list.new()
+    if let Error(_) = list.try_reserve(mut linear_row, sw) {
+        return Error(ByteLimit)
+    }
+    list.fill(mut linear_row, sw, black())
     let mut rgba = alloc_bytes(length)?
     let mut y_coefficients: List[i64] = list.new()
+    let mut y_rows: List[u64] = list.new()
+    if let Error(_) = list.try_reserve(mut y_rows, slots) {
+        return Error(ByteLimit)
+    }
     let mut next = 0u64
     for y in 0u64 .. h {
         list.clear(mut y_coefficients)
@@ -199,37 +209,30 @@ fn resize_inner(source: Raster, width: u32, height: u32, filter: Filter, limits:
         next = order.max(next, window.first)
         while next < end {
             let dest = next % slots * w
+            let source_row = next * sw
+            for x in 0u64 .. sw {
+                linear_row[x] = premultiply(source.rgba, (source_row + x) * 4)
+            }
             for x in 0u64 .. w {
                 let span = wx[x]
                 let mut total = black()
-                let base = (next * sw + span.first) * 4
-                let mut i = span.lo
-                while i + 1 < span.hi {
-                    let at = base + (i - span.lo) * 4
-                    let (first, second) = premultiply_pair(source.rgba, at, at + 4)
-                    weighted_pair(mut total, first, second, x_coefficients[i], x_coefficients[i + 1])
-                    i += 2
-                }
-                if i < span.hi {
-                    let pixel = premultiply(source.rgba, base + (i - span.lo) * 4)
-                    weighted(mut total, pixel, x_coefficients[i])
+                let mut pos = span.first
+                for i in span.lo .. span.hi {
+                    weighted(mut total, linear_row[pos], x_coefficients[i])
+                    pos += 1
                 }
                 ring[dest + x] = normalized(total)
             }
             next += 1
         }
+        list.clear(mut y_rows)
+        for row in window.first .. end {
+            list.push(mut y_rows, row % slots * w)
+        }
         for x in 0u64 .. w {
             let mut total = black()
-            let mut k = 0u64
-            while k + 1 < window.hi {
-                let first = ring[(window.first + k) % slots * w + x]
-                let second = ring[(window.first + k + 1) % slots * w + x]
-                weighted_pair(mut total, first, second, y_coefficients[k], y_coefficients[k + 1])
-                k += 2
-            }
-            if k < window.hi {
-                let pixel = ring[(window.first + k) % slots * w + x]
-                weighted(mut total, pixel, y_coefficients[k])
+            for k in 0u64 .. window.hi {
+                weighted(mut total, ring[y_rows[k] + x], y_coefficients[k])
             }
             list.put_word_be(mut rgba, straight(normalized(total)))
         }

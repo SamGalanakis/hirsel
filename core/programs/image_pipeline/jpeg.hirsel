@@ -214,6 +214,22 @@ fn put_rgb(mut rgba: Bytes, to: u64, rgb: Bytes, from: u64) {
     rgba[to + 2] = rgb[from + 2]
 }
 
+fn expand_rgb(mut rgba: Bytes, out: u64, rgb: Bytes, count: u64) {
+    let pick: Inline[u8, 16] =[0, 1, 2, 128, 3, 4, 5, 128, 6, 7, 8, 128, 9, 10, 11, 128]
+    let alpha: Inline[u8, 16] =[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+    let mut i = 0u64
+    // The load is 16 bytes, of which the shuffle consumes 12.
+    while i + 6 <= count {
+        let packed: Simd[u8, 16] = list.lanes(rgb, i * 3)
+        let pixels = simd.swizzle(packed, simd.from(pick)) | simd.from(alpha)
+        list.set_lanes(mut rgba, (out + i) * 4, pixels)
+        i += 4
+    }
+    for j in i .. count {
+        put_rgb(mut rgba, (out + j) * 4, rgb, j * 3)
+    }
+}
+
 fn jpeg_result[T](take value: Result[T, image_jpeg.Error]) -> Result[T, PipelineError] {
     match take value {
         Ok(take x) => Ok(take x),
@@ -249,12 +265,35 @@ fn jpeg_decode(f: Foreign[image_jpeg.Jpeg], take input: Bytes, target: image_cor
             },
             Rows(rows) => {
                 let count = width * int.widen(rows)
-                for i in 0u64 .. count {
-                    put_rgb(mut rgba, 4 * (out + i), rgb, 3 * i)
-                }
+                expand_rgb(mut rgba, out, rgb, count)
                 out += count
             },
         }
+    }
+}
+
+fn flatten_rgb(mut rgb: Bytes, rgba: Bytes, start: u64, count: u64) {
+    let pick: Inline[u8, 16] =[0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 128, 128, 128, 128]
+    let alpha: Inline[u8, 16] =[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+    let mask = simd.from(alpha)
+    let mut i = 0u64
+    while i < count {
+        if i + 6 <= count {
+            let pixels: Simd[u8, 16] = list.lanes(rgba, (start + i) * 4)
+            if simd.bitmask(simd.eq(pixels & mask, mask)) == 65535 {
+                // The next iteration overwrites the four padding bytes.
+                list.set_lanes(mut rgb, i * 3, simd.swizzle(pixels, simd.from(pick)))
+                i += 4
+                continue
+            }
+        }
+        let at = (start + i) * 4
+        let a: u32 = int.widen(rgba[at + 3])
+        for channel in 0u64 .. 3 {
+            let sample: u32 = int.widen(rgba[at + channel])
+            rgb[i * 3 + channel] = int.narrow((sample * a + 255 * (255 - a) + 127) / 255)
+        }
+        i += 1
     }
 }
 
@@ -270,14 +309,7 @@ fn jpeg_encode(f: Foreign[image_jpeg.Jpeg], raster: image_core.image.Raster, lim
     while row < height {
         let rows = order.min(16u64, height - row)
         let pixels = rows * w
-        for i in 0u64 .. pixels {
-            let at = 4 * (row * w + i)
-            let a: u32 = int.widen(raster.rgba[at + 3])
-            for channel in 0u64 .. 3 {
-                let sample: u32 = int.widen(raster.rgba[at + channel])
-                rgb[i * 3 + channel] = int.narrow((sample * a + 255 * (255 - a) + 127) / 255)
-            }
-        }
+        flatten_rgb(mut rgb, raster.rgba, row * w, pixels)
         let consumed = jpeg_result(image_jpeg.encode_strip(mut encoder, list.slice(rgb, 0, 3 * pixels)))?
         row += int.widen(consumed)
     }

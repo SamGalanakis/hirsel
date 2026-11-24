@@ -32,8 +32,10 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
             if !in_scan {
                 return Error(Malformed)
             }
-            at += 1
-            continue
+            let Some(marker) = list.find_byte(input, at + 1, limit, 0xff) else {
+                return Error(jpeg_cutoff(limit, n))
+            }
+            at = marker
         }
         let start = at
         while at < limit && input[at] == 0xff {

@@ -214,7 +214,18 @@ pub fn render(codecs: Codecs, take input: Bytes, transform: Transform, accept: B
     let decoded = decode(codecs, take input, target, limits, max_native_bytes)?
     let DecodedImage(raster: take pixels, ..) = take decoded
     let raster = geometry(take pixels, transform, limits)?
-    let Some(format) = choose_format(accept, avif_size(raster.width, raster.height) && opaque_pixels(raster), webp_size(raster.width, raster.height)) else {
+    let webp = webp_size(raster.width, raster.height)
+    let preferred = choose_format(accept, avif_size(raster.width, raster.height), webp)
+    let selected = if let Some(OutputAvif) = preferred {
+        if opaque_pixels(raster) {
+            preferred
+        } else {
+            choose_format(accept, false, webp)
+        }
+    } else {
+        preferred
+    }
+    let Some(format) = selected else {
         return Error(PipelineAccept)
     }
     render_raster(codecs, raster, format, limits, max_native_bytes)

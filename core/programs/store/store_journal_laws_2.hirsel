@@ -354,9 +354,9 @@ fn journal_place_idle(d: Dir, tasks: Tasks, mut db: Db, t: Table[u64, u64], out:
     result.unwrap(channel.send(wake, ()))
     result.unwrap(task.join(take turn))
     let boundary = disk_end(d, db.store, db.file_seq)?
-    // HEADER (72) + empty COMMIT with DATA section (42) + the put's
-    // overhead (9), table-prefixed u64 key (12), and schema-tagged row (10).
-    Ok(boundary == Some(145u64))
+    // HEADER (72) + COMMIT with DATA section (42) + the format-5 put:
+    // tag and lengths (9), prior (4), prefixed key (12), tagged row (10).
+    Ok(boundary == Some(149u64))
 }
 
 pub fn journal_law_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {

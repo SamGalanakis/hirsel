@@ -81,7 +81,13 @@ fn fork_frame_start(frames: &[u8]) -> Option<usize> {
         let payload = frames.get(16..16 + len)?;
         if kind == 0x0013 {
             assert_eq!(frames[2..4], [1, 0]);
-            assert_eq!(payload, b"\x01\0\0\0\0\0\0\0\x02\0\0\0\0\0\0\0\x04\0beta");
+            // AP19 and §13.1: id 1, parent 0, version 2, name "beta",
+            // then the LE watermark. The fixture uses 2 schema stamps,
+            // reserves 7 for the pack-list edit and 14 for the first put.
+            assert_eq!(
+                payload,
+                b"\x01\0\0\0\0\0\0\0\x02\0\0\0\0\0\0\0\x04\0beta\x18\0\0\0\0\0\0\0"
+            );
             return Some(offset);
         }
         offset += 16 + len;

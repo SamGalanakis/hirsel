@@ -32,6 +32,7 @@ dirs = ["."]
 "launcher_wire.hirsel" = "launcher"
 "operator_wire.hirsel" = "operator"
 "platform_laws.hirsel" = "platform"
+"platform_arrival_laws.hirsel" = "platform"
 "platform_front_laws.hirsel" = "platform"
 "platform_cutover_laws.hirsel" = "platform"
 "platform_recovery_laws.hirsel" = "platform"

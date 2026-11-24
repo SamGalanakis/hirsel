@@ -1,0 +1,65 @@
+// L46 `wake_arrival_during_drain` (§14.3): a connection that is already waiting in the
+// end's listener sample relaunches the place at gen + 1 instead of writing Clean. One
+// that connects just after that sample follows the end as `Arrived`, which the host applies
+// after the end; after a reconnect before that arrival, the inventory reports the listener
+// readable and wakes the group. In each case the next child accepts the connection and its
+// clean report is the first Clean.
+@test
+fn wake_arrival_during_drain(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    // The connection is in the end's sample. The row never leaves Dirty before gen + 1.
+    let mut r = rig(c, rnd, 1u64)
+    cold_due(mut r, "queued", "t", T0 + 1000u64)
+    add(mut r, "sampled", "t")
+    op_wake(mut r, "sampled")
+    at_wall(mut r, T0 + 1000u64)
+    expect(is_dirty(r, "sampled", 1u64), "L46: the first serving child is not Dirty(1)")
+    let target = last(r, "sampled").group
+    let before_end = launcher.connect(mut r.f, target)
+    expect(list.len(before_end) == 0u64, "L46: a live child did not suppress an Arrived")
+    idle_stop(mut r, "sampled", None)
+    expect(is_dirty(r, "sampled", 2u64), "L46: a readable clean end wrote Clean or did not relaunch")
+    expect(gens(r, "sampled") == two(1u64, 2u64), "L46: the sampled connection did not start the next child")
+    expect(gens(r, "queued") == one(1u64), "L46: a Clean row freed the sampled place's slot")
+    launcher.accept(mut r.f, target)
+    idle_stop(mut r, "sampled", None)
+    expect(is_clean(r, "sampled"), "L46: the next child's clean report did not write Clean")
+    expect(gens(r, "queued") == two(1u64, 2u64), "L46: the final clean report did not free the slot")
+    // The connection is just after the end's sample: its Arrived follows the End and
+    // starts gen + 1 from the Clean row.
+    let mut late = rig(c, rnd, 4u64)
+    add(mut late, "late", "t")
+    op_wake(mut late, "late")
+    let child = last(late, "late")
+    let group: launcher.Group = clone(child.group)
+    let ends = launcher.end(mut late.f, child, Code(0i32), Some(None))
+    let arrivals = launcher.connect(mut late.f, group)
+    // Delivering the late Arrived too early consumes it while the old child is outstanding.
+    feed(mut late, clone(arrivals))
+    expect(is_dirty(late, "late", 1u64), "L46: an arrival before the end replaced the live child")
+    feed(mut late, take ends)
+    expect(is_clean(late, "late") && gens(late, "late") == one(1u64), "L46: without a subsequent arrival the unreadable end must leave the place cold")
+    feed(mut late, take arrivals)
+    expect(is_dirty(late, "late", 2u64) && gens(late, "late") == two(1u64, 2u64), "L46: the arrival after the end did not start the next child")
+    launcher.accept(mut late.f, group)
+    idle_stop(mut late, "late", None)
+    expect(is_clean(late, "late"), "L46: the late connection's next child did not stop Clean")
+    // A reconnect after the End and before that Arrived repeats the readable listener in
+    // the inventory; the inventory alone starts the next child, and the late Arrived is a no-op.
+    let mut lost = rig(c, rnd, 4u64)
+    add(mut lost, "lost", "t")
+    op_wake(mut lost, "lost")
+    let ended_child = last(lost, "lost")
+    let ended_group: launcher.Group = clone(ended_child.group)
+    let ended_events = launcher.end(mut lost.f, ended_child, Code(0i32), Some(None))
+    feed(mut lost, take ended_events)
+    let waiting = launcher.connect(mut lost.f, ended_group)
+    let session = reconnect(lost.h)
+    pump(mut lost, take session)
+    expect(is_dirty(lost, "lost", 2u64) && gens(lost, "lost") == two(1u64, 2u64), "L46: the reconnect inventory did not wake the readable listener")
+    feed(mut lost, take waiting)
+    expect(gens(lost, "lost") == two(1u64, 2u64), "L46: the arrival after the inventory started another child")
+    launcher.accept(mut lost.f, ended_group)
+    idle_stop(mut lost, "lost", None)
+    expect(is_clean(lost, "lost"), "L46: the inventory wake's child did not stop Clean")
+    Ok(())
+}

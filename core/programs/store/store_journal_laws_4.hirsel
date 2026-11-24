@@ -364,8 +364,8 @@ fn test_step_bounds(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-// A body that puts one row `k` times, so it logs `k` issued ids, then burns
-// `burn` steps.
+// A body that puts one row `k` times, so it reserves `k` id intervals, then
+// burns `burn` steps.
 fn latch_body(mut tx: Tx, k: u64, burn: u64) -> Result[Bytes, Bytes] {
     for i in 0u64 .. k {
         if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(i)) {
@@ -376,13 +376,11 @@ fn latch_body(mut tx: Tx, k: u64, burn: u64) -> Result[Bytes, Bytes] {
     Ok(key_word(7))
 }
 
-// L33's latch term: the grant of s_e + 6 + n_e / 8 steps covers a body that
-// spends its whole s_e and logs as many issued ids as n_e bytes hold. Here
-// k = 255 puts and the reply's reservation log 256 ids in the least n_e that
-// admits them, 8 bytes each and the draft's other admissions besides, so
-// n_e / 8 is 256 plus a few latches. Oracle, by hand from MEM-30:
-// reconciling the log takes one loop step per entry, 256 steps, and fits; a
-// reconciliation of two steps per entry would need 512, and does not.
+// L33's grant of s_e + 6 + n_e / 8 steps covers a body that spends its whole
+// s_e after k = 255 puts, at the least n_e that admits them. Since v2.89 the
+// issued ids are one cell, so no step outside the body grows with k; the law
+// keeps the grant honest against the calls outside the body that K_fixed
+// must cover (AM5).
 pub fn law_reserve_latches(c: Clock) -> bool waits {
     let k = 255u64
     let mut db = raw_test_db(c, 1073741824)

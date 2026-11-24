@@ -236,20 +236,20 @@ fn encode_pack_row(pack: PagePack) -> Bytes {
 
 // Apply final data-pack counts to the installed pack-list tree.
 // The list is edited in place only on paths private to this candidate.
-fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: core.Log[u64]) -> Result[u64, Error] {
+fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: core.Cell[u64]) -> Result[u64, Error] {
     let height: u64 = int.widen(std.page.level(std.page.image_of(root)))
     // Per level an edit can copy the path page, replace two siblings during
     // a rotation, and split into three pieces. The final root needs one stamp.
     let Some(end) = int.checked_add(next_stamp, 6 * (height + 1) + 1) else {
         return Error(Limit(Ids))
     }
-    log.append(issued, end)
+    let _ = cell.replace(issued, end)
     let first = next_stamp
     next_stamp = end
     Ok(first)
 }
 
-fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_from: u64, mut next_stamp: u64, issued: core.Log[u64]) -> Result[List[u64], Error] {
+fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_from: u64, mut next_stamp: u64, issued: core.Cell[u64]) -> Result[List[u64], Error] {
     let mut retired: List[u64] = list.new()
     let mut inventory = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
@@ -332,7 +332,7 @@ fn retiring_list_packs(known: PageLocations, emission: CutFrames, mut retiring: 
     }
 }
 
-fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: core.Log[u64], relocated: Option[View[core.Log[bool]]]) -> Result[ListLayout, Error] {
+fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: core.Cell[u64], relocated: Option[View[core.Log[bool]]]) -> Result[ListLayout, Error] {
     let mut pack_root = arc.share(installed.packs)
     let private_from = next_stamp
     let data_retired = edit_pack_list(mut pack_root, known, private_from, mut next_stamp, issued)?
@@ -386,7 +386,7 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Op
         let Some(end) = int.checked_add(next_stamp, span + 1) else {
             return Error(Limit(Ids))
         }
-        log.append(issued, end)
+        let _ = cell.replace(issued, end)
     }
     let retired = build_retirement_list(removals, mut next_stamp)?
     record_fresh_tree(mut known, retired, 2)?
@@ -418,10 +418,10 @@ type PagedCutLayout: send {
 }
 
 fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut next_stamp: u64) -> Result[PagedCutLayout, Error] {
-    let issued = disk_allocation(fn() -> Result[core.Log[u64], Error] {
-        Ok(log.new())
-    })?
     let first_stamp = next_stamp
+    let issued = disk_allocation(fn() -> Result[core.Cell[u64], Error] {
+        Ok(cell.new(first_stamp))
+    })?
     let proposed = disk_allocation(scoped fn() -> Result[PagedCutLayout, Error] {
         let mut emission = empty_cut_frames()
         for held in holders {
@@ -436,10 +436,7 @@ fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedL
         let lists = plan_paged_lists(mut candidate, installed, carried, data_pages.next_pack, cap, mut draw, issued, relocated)?
         Ok(PagedCutLayout(locations: take candidate, blobs: take blobs, data_pages: take data_pages, lists: take lists))
     })
-    let draws = log.finish(take issued)
-    for end in draws {
-        next_stamp = end
-    }
+    next_stamp = cell.into_inner(take issued)
     take proposed
 }
 

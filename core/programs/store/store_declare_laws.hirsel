@@ -291,7 +291,7 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     let items = conflict_setup(mut db)?
     let before = version(snapshot(db))
     let reads: core.Log[Read] = log.new()
-    let issued: core.Log[u64] = log.new()
+    let issued: core.Cell[u64] = cell.new(0)
     let keep: Option[fn(Error) -> bool] = None
     let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes)
     let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()

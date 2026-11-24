@@ -496,7 +496,7 @@ pub opaque scoped type Tx {
     retain_old: bool,
     frame_tail: u64,
     reads: View[core.Log[Read]],
-    issued: View[core.Log[u64]],
+    issued: View[core.Cell[u64]],
     // The attempt record and the pin map it reads (§13.3, v2.81). The call's
     // driver owns both, outside the body's isolation and step bound.
     attempt: View[Option[core.Cell[TieredTouchSet]]],
@@ -944,8 +944,8 @@ pub type CallReserve {
     steps: u64
 }
 
-// MEM-30 calls on the longest path outside the body's scope: draft_call (1),
-// the isolate (2), and log finish twice plus finish_stage (3).
+// MEM-30 calls on the longest path outside the body's scope: draft_call (1), the
+// isolate (2), the issued cell's into_inner, the read log's finish and finish_stage (3).
 const CALL_FIXED_STEPS: u64 = 6
 
 pub fn call_reserves(plan: Plan) -> Option[CallReserve] {
@@ -1300,7 +1300,7 @@ fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Op
 // The caller keeps owning the record so a refused publication can return it.
 fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[Settlement], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let reads: core.Log[Read] = log.new()
-    let issued: core.Log[u64] = log.new()
+    let issued: core.Cell[u64] = cell.new(0)
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, wall, db.heads[i].at)
     let caught = isolate(fn() -> Result[Finished[R, A], OutOfTime] {
         let perform = scoped fn() -> Finished[R, A] {
@@ -1329,18 +1329,13 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     // The latch is read before anything else: a latched attempt's ids and
     // reads are discarded with it, so the watermark never depends on reruns.
     if call_attempt_latched(attempt) {
-        let _ = log.finish(take issued)
+        let _ = cell.into_inner(take issued)
         let _ = log.finish(take reads)
         return Latched
     }
-    let consumed = log.finish(take issued)
-    // An overrun under rollback_writes_on_overrun drops its stamps, so a later
-    // reservation may log a lower end: the watermark is the highest. The
-    // comparison takes no step, so each entry costs its loop step alone.
-    for n in consumed {
-        if n > db.next_node {
-            db.next_node = n
-        }
+    let high = cell.into_inner(take issued)
+    if high > db.next_node {
+        db.next_node = high
     }
     let seen = log.finish(take reads)
     match take caught {
@@ -1354,7 +1349,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     }
 }
 
-fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Log[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Cell[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     let (frame_bytes, initial_tail) = match db.disk {
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
@@ -1911,13 +1906,17 @@ pub fn body_capacity(mut tx: Tx, problem: Capacity) {
     tx.refusal = Some(problem)
 }
 
-// Reserve the stamp interval before a page edit can allocate. The log
-// keeps the high watermark even if the body exits under a capacity failure.
+// Reserve the stamp interval before a page edit can allocate. The cell keeps
+// the high watermark even if the body exits under a capacity failure; after an
+// overrun's rollback a later reservation may end lower and puts the higher back.
 fn reserve_ids(mut tx: Tx, height: u64) -> Result[u64, Error] {
     let Some(end) = int.checked_add(tx.ids, 6 * height + 2) else {
         return Error(Limit(Ids))
     }
-    log.append(tx.issued, end)
+    let high = cell.replace(tx.issued, end)
+    if high > end {
+        let _ = cell.replace(tx.issued, high)
+    }
     let first = tx.ids + 1
     tx.ids = end
     Ok(first)
@@ -6423,7 +6422,7 @@ fn reserve_tx(mut tx: Tx, fault: bool) -> Result[Bytes, Bytes] {
 }
 
 // L33. AM5 and MEM-24 give 4096 + 32 bytes. MEM-30 gives 8192 body
-// steps + 6 fixed calls + at most 4096/8 issued-ID latches.
+// steps + 6 fixed calls + 4096/8 for AM5's K_id term.
 pub fn law_call_reserve(c: Clock) -> bool waits {
     let byte_total = 4128u64
     let step_total = 8710u64
@@ -6512,15 +6511,15 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         return false
     }
     let small = Plan(n_e: 1024, s_e: plan.s_e, reply_max: plan.reply_max)
-    // The two log nodes (48 bytes) and a 944-byte reply fit in 1024. The
-    // reply row's stored copy, 41 + 944 = 985 bytes rounded up to 992, does
-    // not fit in the 32 left.
+    // The read log's node (24 bytes), the issued cell's node (8, MEM-29) and
+    // a 944-byte reply fit in 1024. The reply row's stored copy, 41 + 944 =
+    // 985 bytes rounded up to 992, does not fit in the 48 left.
     let kept_inside = match serve(mut db, take complete, small, None, (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {
         let mut output: Bytes = list.with_capacity(944)
         list.fill(mut output, 944, 7u8)
         Ok(take output)
     }) {
-        Ok(Failed(_, OutOfBytes(problem))) => problem.requested == 992 && problem.available == 32,
+        Ok(Failed(_, OutOfBytes(problem))) => problem.requested == 992 && problem.available == 48,
         _ => false,
     }
     kept_inside && reserve_settles_pin(c, 10, plan) && reserve_settles_pin(c, 100000, plan)

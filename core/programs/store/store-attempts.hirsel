@@ -51,7 +51,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             let keep: Option[fn(ServeReply) -> bool] = None
             let draft = bound bytes plan.n_e {
                 let reads: core.Log[Read] = log.new()
-                let issued: core.Log[u64] = log.new()
+                let issued: core.Cell[u64] = cell.new(0)
                 let staged = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
                     stage_reply(mut tx, complete, rec, plan.reply_max, body)
                 })
@@ -85,11 +85,9 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
         Ok(Ok(Ok(Error(problem)))) => Over(Refused(Allocation(problem))),
         Ok(Ok(Ok(Ok(take draft)))) => {
             let CallDraft(finished: take result, reads: take reads, issued: take issued) = take draft
-            let consumed = log.finish(take issued)
-            for n in consumed {
-                if n > next_id {
-                    next_id = n
-                }
+            let high = cell.into_inner(take issued)
+            if high > next_id {
+                next_id = high
             }
             finish_stage(ci, take result, log.finish(take reads))
         },
@@ -101,7 +99,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
 type CallDraft {
     finished: Finished[Bytes, ServeReply],
     reads: core.Log[Read],
-    issued: core.Log[u64]
+    issued: core.Cell[u64]
 }
 
 type DraftedCall {
@@ -265,7 +263,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
 
 fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]]) -> Looked[R] {
     let reads: core.Log[Read] = log.new()
-    let issued: core.Log[u64] = log.new()
+    let issued: core.Cell[u64] = cell.new(0)
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = empty_index_registry()
@@ -279,7 +277,7 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
             None => Ok(perform()),
         }
     })
-    let _ = log.finish(take issued)
+    let _ = cell.into_inner(take issued)
     let seen = log.finish(take reads)
     match take caught {
         Error(c) => Refused(Allocation(c), take seen),

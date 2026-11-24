@@ -184,7 +184,7 @@ type Rerun[R] = RanTo(R, DataRows) | Halted(Stop) | RoomRefused
 // data writes (F2).
 fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
     let reads: core.Log[Read] = log.new()
-    let issued: core.Log[u64] = log.new()
+    let issued: core.Cell[u64] = cell.new(0)
     // A re-run has no pins: a Cold touch latches, and the verdict is Unknown.
     let attempt = call_attempt(base.collections.root, db.writer_pin_bytes)
     let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
@@ -205,7 +205,7 @@ fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Pl
         }
     })
     let _ = log.finish(take reads)
-    let _ = log.finish(take issued)
+    let _ = cell.into_inner(take issued)
     if let Some(state) = call_attempt_finish(take attempt) {
         if let Some(_) = state.stopped {
             return RoomRefused

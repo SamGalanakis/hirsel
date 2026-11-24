@@ -539,7 +539,9 @@ pub fn law_look_faults(c: Clock) -> bool waits {
         } else {
             19u64
         }
-        let observed = result.unwrap(result.unwrap(bound bytes 80 {
+        // The read log's node (24), the issued cell's node (8) and the
+        // isolate's cause cell (32) are 64 bytes; one fewer refuses the cell.
+        let observed = result.unwrap(result.unwrap(bound bytes 64 {
             look(read, s, None, expected, fn(tx, call_env) -> u64 {
                 call_env
             })
@@ -551,7 +553,7 @@ pub fn law_look_faults(c: Clock) -> bool waits {
             _ => return false
         }
     }
-    let refused_query = result.unwrap(bound bytes 79 {
+    let refused_query = result.unwrap(bound bytes 63 {
         look(read, s, None, (), fn(tx, unused_env) -> u64 {
             7u64
         })

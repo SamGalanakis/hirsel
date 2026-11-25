@@ -32,15 +32,66 @@ def checked(command, env=None, *, engine, case=None):
     return result
 
 
-def run_cuts(executable, engine, env=None, scenarios=SCENARIOS):
+def run_cuts(executable, engine, env=None, scenarios=SCENARIOS, receipts=False):
+    """Every cut 0..N of each scenario recovers. With receipts (CLOUD #3), the
+    cut at k must name the same step k + 1, logical role and completed-prefix
+    hash as the uncut run's trace, k = N must name none, and k = N + 1 fails."""
     rows = []
     for scenario in scenarios:
-        count, _ = count_cuts(executable, scenario, engine, env)
+        count, trace = count_cuts(executable, scenario, engine,
+                                  dict(env or os.environ, HIRSEL_W2_TRACE_CUTS='1') if receipts else env)
+        steps = dict(re.findall(r'^w2-cut ([0-9]+) (.+)$', trace, re.M))
+        if receipts and sorted(map(int, steps)) != list(range(1, count + 1)):
+            raise RuntimeError(f'{scenario}: trace names {len(steps)} of {count} steps')
         for cut in range(count + 1):
-            checked([str(executable), scenario, str(cut)], env, engine=engine)
+            result = checked([str(executable), scenario, str(cut)], env, engine=engine)
+            got = re.findall(r'^w2-receipt ([0-9]+) (.+)$', result.stderr, re.M)
+            want = [(str(cut + 1), steps[str(cut + 1)])] if cut < count else []
+            if receipts and got != want:
+                raise RuntimeError(f'{scenario} cut {cut}: receipt {got}, uncut trace {want}')
+        if receipts:
+            beyond = [str(executable), scenario, str(count + 1)]
+            ran = run_case(' '.join(beyond[1:]), engine, beyond, capture_output=True, text=True, env=env)
+            if ran.returncode != 120 or f'W2 cut {count + 1} was not reached' not in ran.stderr:
+                raise RuntimeError(f'{scenario} cut {count + 1} past the end passed: {ran.returncode}\n{ran.stderr}')
+            rows += eio_cases(executable, scenario, trace, engine, env)
         rows.append(dict(scenario=scenario, mutations=count, cuts=count + 1, passed=True))
         print(f'{engine} crash {scenario}: {count + 1}/{count + 1} cuts passed', flush=True)
     return rows
+
+
+# SQLITE #3: STORE-SPEC §3.4 steps 1-2 open LOCK (Write), then MANIFEST (Read),
+# so the reopen's second eligible call is the zero-mutation open of an
+# existing file. Its failure ends the open with Io(e) (V6), and the read after
+# it recovers the write's durable state.
+EIO_SCENARIOS = ('checkpoint',)
+EIO_OPEN = 'reopen:2:open:MANIFEST'
+
+
+def eio_cases(executable, scenario, trace, engine, env):
+    """An EIO at the reopen's MANIFEST open, at the write's MANIFEST rename and
+    at the first removal after it must each be reached. The write must not
+    acknowledge after its failure (V6 poison), and every read recovers. An
+    ordinal never reached fails."""
+    if scenario not in EIO_SCENARIOS:
+        return []
+    calls = re.findall(r'^w2-call (\S+) ([0-9]+) (\S+) (\S+)$', trace, re.M)
+    if ('read', '2', 'open', 'MANIFEST') not in calls:
+        raise RuntimeError(f'{scenario}: the opener\'s second call is not the MANIFEST open: {calls[:4]}')
+    write = [call for call in calls if call[0] == 'write']
+    renamed = next((i for i, call in enumerate(write) if call[2:] == ('rename', 'MANIFEST.tmp>MANIFEST')), None)
+    removal = next((call for call in write[renamed:] if call[2] == 'remove'), None) if renamed is not None else None
+    if removal is None:
+        raise RuntimeError(f'{scenario}: no MANIFEST rename and removal after it in {write}')
+    cases = [EIO_OPEN, ':'.join(write[renamed]), ':'.join(removal)]
+    for case in cases:
+        checked([str(executable), scenario, 'eio:' + case], env, engine=engine)
+    never = [str(executable), scenario, 'eio:read:100000:open:MANIFEST']
+    ran = run_case(' '.join(never[1:]), engine, never, capture_output=True, text=True, env=env)
+    if ran.returncode != 120 or 'injected EIO read:100000:open:MANIFEST was not reached' not in ran.stderr:
+        raise RuntimeError(f'{scenario}: an unreached EIO passed: {ran.returncode}\n{ran.stderr}')
+    print(f'{engine} crash {scenario}: EIO reached at {cases}', flush=True)
+    return [dict(scenario=scenario, eio=case, passed=True) for case in cases]
 
 
 LATE_SCENARIOS = ('late-group', 'late-group-failed', 'late-follow', 'late-follow-failed', 'late-cut', 'late-genesis')
@@ -149,10 +200,10 @@ def bridge_env(bridge, environment=None):
 
 def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                 entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None, adapter="store_crash.c",
-                count_only=(), sectors=()):
+                count_only=(), sectors=(), receipts=False):
     executable = build_crash(root, compiler, runtime, bridge, cc, manifest, work, engine, entry, environment, adapter)
     env = bridge_env(bridge, environment)
-    rows = run_cuts(executable, engine, env, scenarios)
+    rows = run_cuts(executable, engine, env, scenarios, receipts)
     for scenario in count_only:
         checked([str(executable), scenario, 'count'], env, engine=engine)
         rows.append(dict(scenario=scenario, passed=True))
@@ -190,7 +241,7 @@ def sector_images(executable, scenarios, engine, env):
     seen = {kind: set() for kind in SECTOR_KINDS}
     for scenario in scenarios:
         _, trace = count_cuts(executable, scenario, engine, dict(env, HIRSEL_W2_TRACE_CUTS='1'))
-        cuts = [(int(cut), kind) for cut, kind in re.findall(r'^w2-cut ([0-9]+) ([a-z-]+)$', trace, re.M)
+        cuts = [(int(cut), kind) for cut, kind in re.findall(r'^w2-cut ([0-9]+) ([a-z-]+) ', trace, re.M)
                 if kind in SECTOR_KINDS]
         for seed in SECTOR_SEEDS:
             for cut, kind in cuts:
@@ -255,7 +306,7 @@ def smoke(executable, env):
     scenario = 'journal-rotate'
     count, trace = count_cuts(executable, scenario, 'cranelift', dict(env, HIRSEL_W2_TRACE_CUTS='1'))
     cuts = {}
-    for cut, kind in re.findall(r'^w2-cut ([0-9]+) ([a-z-]+)$', trace, re.M):
+    for cut, kind in re.findall(r'^w2-cut ([0-9]+) ([a-z-]+) ', trace, re.M):
         cuts.setdefault(kind, int(cut))
     selected = [cuts.get(kind) for kind in SMOKE_KINDS]
     if any(cut is None or not 1 <= cut <= count for cut in selected):

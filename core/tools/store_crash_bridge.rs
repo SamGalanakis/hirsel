@@ -16,11 +16,14 @@ const SECOND_SEGMENT_SHORT_WRITE: u8 = 9;
 const POISON_GROUP: u8 = 12;
 #[path = "store_crash_late.rs"]
 mod late;
+#[path = "store_crash_reach.rs"]
+mod reach;
 #[path = "store_crash_sync.rs"]
 mod sync;
 #[path = "store_crash_window.rs"]
 mod window;
 use late::LateWriteSchedule;
+use reach::Eio;
 #[path = "store_crash_staged.rs"]
 mod staged;
 use staged::{ForkObservation, StagedCommit, StagedCut, fork_frame_start};
@@ -96,6 +99,14 @@ struct Bridge {
     staged: Option<StagedCommit>,
     staged_cut: Option<StagedCut>,
     window: Option<WindowObservation>,
+    /// CLOUD #3: the cut's intercepted step, `<k+1> <kind> <role> <prefix>`,
+    /// where prefix hashes the k completed write-phase steps.
+    receipt: Option<String>,
+    prefix: u64,
+    /// SQLITE #3: eligible host calls in this phase, counted before effects,
+    /// beside the mutation ordinal `events`.
+    calls: u64,
+    eio: Option<Eio>,
 }
 
 impl Bridge {
@@ -109,42 +120,10 @@ impl Bridge {
                 || matches!(op, Op::SyncDir),
             "read-only open issued {op:?}"
         );
-        if self.phase == 1 && self.events == self.cut {
-            self.crashed = true;
-        }
-        if self.crashed {
+        if !self.reach(&op) {
             return false;
         }
         if self.phase == 1 && self.trace_cuts {
-            let kind = match &op {
-                Op::Create(_) => "create",
-                Op::Write(name, bytes) => {
-                    // §3.3b's mode-specific images: a Direct extension (the
-                    // creation block or a window step), a Direct overwrite
-                    // of the zeroed window, and a Durable END rewrite whose
-                    // one sector straddles EOF. Each is pending until the
-                    // sync event that follows it.
-                    let old = self.fs.read(name).unwrap_or(&[]);
-                    let differs = old.iter().zip(*bytes).any(|(old, new)| old != new);
-                    if self.fs.is_direct(name) && bytes.len() > old.len() {
-                        "extend"
-                    } else if self.fs.is_direct(name) && differs {
-                        "window"
-                    } else if name.ends_with(".end") && differs && bytes.len() % 512 != 0 {
-                        "straddle"
-                    } else if differs {
-                        "overwrite"
-                    } else {
-                        "write"
-                    }
-                }
-                Op::Append(..) => "append",
-                Op::Sync(_) => "sync",
-                Op::Rename(..) => "rename",
-                Op::Remove(_) => "unlink",
-                Op::SyncDir => "sync-dir",
-            };
-            eprintln!("w2-cut {} {kind}", self.events + 1);
             // BL2: where a Direct write first changes the durable image. A
             // group over a tail block starts past a block boundary (72 for a
             // fresh segment's first group, behind its creation HEADER).
@@ -274,6 +253,9 @@ impl Bridge {
         // the owner's next file operation is the one that fails.
         if self.crashed && !(op == 18 && self.late.is_some()) {
             return Self::error(5);
+        }
+        if let Some(outcome) = self.eligible(op, handle, path) {
+            return outcome;
         }
         if self.phase == 1 && self.armed {
             let slot = match op {
@@ -711,6 +693,10 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         staged: None,
         staged_cut: None,
         window: None,
+        receipt: None,
+        prefix: 0xcbf29ce484222325,
+        calls: 0,
+        eio: None,
     }))
     .cast()
 }
@@ -796,6 +782,7 @@ pub unsafe extern "C" fn store_crash_phase(p: *mut c_void, phase: u64) {
         bridge.crashed = false;
     }
     bridge.phase = phase;
+    bridge.calls = 0;
 }
 
 /// # Safety

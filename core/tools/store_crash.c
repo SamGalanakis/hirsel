@@ -33,6 +33,9 @@ extern uint8_t store_crash_syncs(void *, uint8_t, uint64_t);
 extern void store_crash_late_write(void *, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t store_crash_late_points(const void *);
 extern uint8_t store_crash_late_polls(const void *);
+extern uint8_t store_crash_eio(void *, const char *, size_t);
+extern uint8_t store_crash_eio_reached(const void *);
+extern uint8_t store_crash_intercepted(const void *);
 
 static struct {
     uint64_t phase, issued;
@@ -290,10 +293,16 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     const HirselCoreView *names,const HirselCoreSourceTable *sources,HirselCoreEntry entry) {
     (void)names; (void)sources;
     if(input->args_len<2 || input->args_len>4 || input->parameters_len>16) return 120;
-    char raw_cut[32]={0};
+    char raw_cut[128]={0};
     if(input->args[1].len>=sizeof raw_cut) return 120;
     memcpy(raw_cut,input->args[1].data,input->args[1].len);
-    uint64_t cut=!strcmp(raw_cut,"count")?UINT64_MAX:strtoull(raw_cut,0,10);
+    /* SQLITE #3: eio:<phase>:<ordinal>:<operation>:<role> fails that eligible
+     * host call with Other(5) and runs no power cut. A reopen-phase EIO runs
+     * init, write, reopen (which must refuse with Io), then the read oracle. */
+    int eio=!strncmp(raw_cut,"eio:",4);
+    int eio_reopen=eio && !strncmp(raw_cut,"eio:reopen:",11);
+    int eio_write=eio && !strncmp(raw_cut,"eio:write:",10);
+    uint64_t cut=!strcmp(raw_cut,"count") || eio?UINT64_MAX:strtoull(raw_cut,0,10);
     char scenario[64]={0};
     if(input->args[0].len>=sizeof scenario) return 120;
     memcpy(scenario,input->args[0].data,input->args[0].len);
@@ -306,6 +315,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     if(late && strcmp(raw_cut,"count") &&
         (sscanf(raw_cut,"%llu:%llu:%llu",&readable,&complete,&power_cut)!=3 || !readable || complete<=readable)) return 120;
     if(late) cut=UINT64_MAX;
+    if(eio && (late || input->args_len!=2)) return 120;
     uint64_t seed=0;
     if(input->args_len>=3) {
         char raw_seed[32]={0};
@@ -348,7 +358,10 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         damage_seed=strtoull(raw_damage,0,10);
         if(errno==ERANGE) return 120;
     }
+    /* CLOUD #3: a numeric cut must reach its step, or k = N must complete. */
+    int numeric=cut!=UINT64_MAX;
     void *state=store_crash_new(cut);
+    if(eio && !store_crash_eio(state,raw_cut+4,strlen(raw_cut+4))) {store_crash_free(state);return 120;}
     if(input->args_len==4) store_crash_damage_seed(state,damage_seed);
     store_crash_sync_failure(state,failure);
     if(orphan_end) store_crash_orphan_end(state);
@@ -369,7 +382,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     }
     static const char *phases[]={"init","write","read","reopen"};
     static const uint64_t reopen_order[]={0,1,3,2};
-    int reopen=orphan_end || checkpoint_reopen || late;
+    int reopen=orphan_end || checkpoint_reopen || late || eio_reopen;
     int read_only=!strcmp(scenario,"read-only");
     uint64_t original_manifest=0;
     uint8_t status=0;
@@ -460,9 +473,21 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
                 status=120;break;
             }
         }
+        if(phase==1 && numeric && !store_crash_intercepted(state) &&
+            (store_crash_crashed(state) || store_crash_events(state)!=cut || !store_crash_acked(state))) {
+            fprintf(stderr,"W2 cut %llu was not reached: %llu steps, %s\n",(unsigned long long)cut,
+                (unsigned long long)store_crash_events(state),store_crash_acked(state)?"completed":"not completed");
+            status=120;break;
+        }
+        if(phase==1 && eio_write && store_crash_eio_reached(state)==1 && store_crash_acked(state)) {
+            fprintf(stderr,"the write acknowledged after its injected EIO\n");status=120;break;
+        }
         if(phase==1 && uncut && !reopen && !store_crash_acked(state)) {
             fprintf(stderr,"uncut store run did not acknowledge its checkpoint\n");status=120;break;
         }
+    }
+    if(!status && eio && store_crash_eio_reached(state)!=1) {
+        fprintf(stderr,"injected EIO %s was not reached\n",raw_cut+4);status=120;
     }
     if(!status && late) printf("points %llu\n",(unsigned long long)store_crash_late_points(state));
     else if(!status) printf("cuts %llu\n",(unsigned long long)(cancellation.enabled?cancellation.events:parked.enabled?parked.issued:store_crash_events(state)));

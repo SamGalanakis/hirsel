@@ -98,11 +98,17 @@ pub fn receive(mut e: Endpoint, now: u64, r: Random, datagram: Bytes, mut data: 
 
 fn receive_records(mut e: Endpoint, now: u64, r: Random, datagram: Bytes, mut data: Bytes) -> Result[u64, Failure] {
     check_pin(mut e)?
+    // A step a refused call left to build is retried at the next call (DTLS-8), before this
+    // datagram's records need it. The first ClientHello is the first poll's.
+    if let FirstHello = e.build {} else {
+        advance(mut e, now, r)?
+    }
     let mut n = 0u64
     let mut at = 0u64
     let mut draining = false
     while true {
         let version = reading_version(e)
+        let window = read_window(e.layer)
         let next = if draining {
             next_early_record(mut e.layer, mut e.early)
         } else {
@@ -130,7 +136,14 @@ fn receive_records(mut e: Endpoint, now: u64, r: Random, datagram: Bytes, mut da
                 e.closed = Some(c)
                 return Ok(n)
             },
-            HandshakeRecord(h, take body) => on_handshake(mut e, now, r, h.epoch, body)?,
+            HandshakeRecord(h, take body) => {
+                if let Error(f) = on_handshake(mut e, now, r, h.epoch, body) {
+                    if let Retry(_) = f {
+                        restore_window(mut e.layer, window)
+                    }
+                    return Error(f)
+                }
+            },
             ApplicationData(take b) => {
                 n += list.len(b)
                 list.append(mut data, b)

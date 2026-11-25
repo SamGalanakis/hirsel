@@ -1,6 +1,9 @@
 # TURN, long-term credentials and the TCP fallback
 
-Version note (2026-11-24, net-public-only-amend-2441): review 2431's F1 applied. An
+Version note (2026-11-25, media-refusal-fixes-2557): TURN-5's client rules: a `Capacity`
+refusal while deriving the client's key on a 401 is the client's `Capacity`, not a fatal
+`Secret`, and leaves the client as it was. TURN-3 is unchanged.
+Earlier (2026-11-24, net-public-only-amend-2441): review 2431's F1 applied. An
 IPv4-mapped peer is checked as its IPv4 address against `deny`, `local` and `allow`, and an
 embedded IPv4 address in `deny` or `local` denies its NAT64, 6to4 or Teredo form;
 `peer_policy` gains those cases.
@@ -380,6 +383,9 @@ one source-table counter.
 REALM and NONCE it derives the key once for that realm and algorithm (SHA-256 when the nonce
 cookie has the Password algorithms bit and PASSWORD-ALGORITHMS lists it, else MD5) and
 retries once; a second 401 with the same credentials is `Closed(Credentials)`, never a loop.
+A `Capacity` refusal while deriving that key is the client's `Capacity`, not `Secret`, and
+leaves the client as it was, so the same 401 received again is taken; `Secret` stays fatal
+for every other secret failure.
 On 438 it retries with the new nonce, without re-deriving. Once a response has shown
 PASSWORD-ALGORITHMS, it never falls back to MD5 for that server. A 400 without integrity
 after a request with integrity is discarded and counted (it may be forged). Every response to

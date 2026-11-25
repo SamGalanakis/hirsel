@@ -88,38 +88,51 @@ fn take_challenge(mut c: Client, i: u64, packet: Bytes, fields: List[stun_ice.At
         Some(k) => k,
         None => Cookie(algorithms: false, anonymity: false),
     }
-    let algorithm = if cookie.algorithms {
+    let listed = if cookie.algorithms {
         // RFC 8489 section 9.2.5: the bit without the attribute is a bid-down.
-        let Some(listed) = find(fields, stun_ice.PASSWORD_ALGORITHMS) else {
+        let Some(l) = find(fields, stun_ice.PASSWORD_ALGORITHMS) else {
             return Ok(false)
         }
-        let Some(a) = pick_algorithm(packet, listed) else {
-            return Ok(false)
-        }
-        list.clear(mut c.algorithms)
-        list.append(mut c.algorithms, list.slice(packet, listed.lo, listed.hi))
-        c.seen_algorithms = true
-        a
+        Some(l)
     } else {
         if c.seen_algorithms {
             return Ok(false)
         }
-        list.clear(mut c.algorithms)
+        None
+    }
+    let algorithm = if let Some(l) = listed {
+        let Some(a) = pick_algorithm(packet, l) else {
+            return Ok(false)
+        }
+        a
+    } else {
         Md5
+    }
+    let realm_bytes = list.slice(packet, realm.lo, realm.hi)
+    let same_key = if let Some(_) = c.key {
+        algorithm == c.algorithm && list.compare_bytes(c.key_realm, realm_bytes) == Equal
+    } else {
+        false
+    }
+    // Derive before changing anything, so a refusal leaves the client as it was and the
+    // same 401 can be received again (TURN-3: Capacity is not fatal).
+    let key: Option[Secret] = if same_key {
+        None
+    } else {
+        Some(client_key(c.password, c.username, realm_bytes, algorithm)?)
+    }
+    list.clear(mut c.algorithms)
+    if let Some(l) = listed {
+        list.append(mut c.algorithms, list.slice(packet, l.lo, l.hi))
+        c.seen_algorithms = true
     }
     c.anonymity = cookie.anonymity
     list.clear(mut c.nonce)
     list.append(mut c.nonce, list.slice(packet, n.lo, n.hi))
-    let same_key = if let Some(_) = c.key {
-        algorithm == c.algorithm && list.compare_bytes(c.key_realm, list.slice(packet, realm.lo, realm.hi)) == Equal
-    } else {
-        false
-    }
-    if !same_key {
+    if let Some(take k) = key {
         list.clear(mut c.realm)
-        list.append(mut c.realm, list.slice(packet, realm.lo, realm.hi))
-        let key = client_key(c.password, c.username, c.realm, algorithm)?
-        c.key = Some(take key)
+        list.append(mut c.realm, realm_bytes)
+        c.key = Some(take k)
         c.key_realm = owned(packet, realm)
         c.algorithm = algorithm
         c.derivations += 1

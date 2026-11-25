@@ -296,7 +296,8 @@ fn sweep_state(e: dtls.Endpoint) -> u8 {
 type SweepEnd: key {
     client: u8,
     server: u8,
-    keys: bool
+    keys: bool,
+    waited: bool
 }
 
 fn show_sweep_end(e: SweepEnd, mut out: String) {
@@ -309,6 +310,9 @@ fn show_sweep_end(e: SweepEnd, mut out: String) {
     } else {
         " keys differ"
     })
+    if e.waited {
+        string.push(mut out, " after a wait")
+    }
 }
 
 /// Numbers the calls of a swept run and bounds the one its budget names.
@@ -421,8 +425,9 @@ fn swept_handshake(p: SweepParties, index: u64, budget: Option[std.refuse.Budget
     result.unwrap(dtls.expect(mut client, pin_list(p.server.certificate)))
     result.unwrap(dtls.expect(mut server, pin_list(p.client.certificate)))
     let mut k = SweepCalls(budget: budget, calls: 0, next: None, now: 0)
-    // A round that moves nothing waits one second, as a caller polls at WakeAt: a refusal
-    // that only delays a flight to its retransmission still connects (DTLS-5 timers).
+    // A round that moves nothing waits one second, as a caller polls at WakeAt. With no loss
+    // the never-refused run never waits, so a refusal that delays a flight to its
+    // retransmission timer ends in a different class (DTLS-8: the next poll retries).
     for _ in 0u64 .. 24 {
         let to_server = sweep_drain(mut client, rc, mut k)
         for i in 0u64 .. list.len(to_server) {
@@ -442,16 +447,18 @@ fn swept_handshake(p: SweepParties, index: u64, budget: Option[std.refuse.Budget
     let c = sweep_state(client)
     let s = sweep_state(server)
     let keys = c == 1 && s == 1 && exporter_agrees(mut client, mut server)
-    std.refuse.Refusal(end: SweepEnd(client: c, server: s, keys: keys), calls: k.calls, next: k.next)
+    std.refuse.Refusal(end: SweepEnd(client: c, server: s, keys: keys, waited: k.now != 0), calls: k.calls, next: k.next)
 }
 
 /// bug: a Capacity refusal anywhere in the handshake leaves an endpoint that never connects:
 /// a refused message skipped (attack 2434 F4), a refused flight 6 over a cleared transcript
-/// (F5), or a refused record open faulting the task (2465).
+/// (F5), or a refused record open faulting the task (2465); or one that connects only after
+/// waiting for its retransmission timer, because a refused first poll had built the
+/// ClientHello but never queued it (2557).
 /// oracle: DTLS-8 and MEM-21: a refusal leaves the endpoint usable, so at every budget where
 /// some call first meets a refusal, repeating that call unbounded still connects both sides
-/// with agreeing SRTP keys (RFC 5764 section 4.2), as the never-refused run does, and no
-/// failure but Capacity is raised.
+/// with agreeing SRTP keys (RFC 5764 section 4.2) without the clock moving, as the
+/// never-refused run does, and no failure but Capacity is raised.
 @test
 fn capacity_sweep_handshake() -> Result[(), ()] {
     let parties = SweepParties(client: party(821), server: party(822))

@@ -34,7 +34,10 @@ type Timer {
     at: u64,
     rto: u64,
     resent: u8,
-    triggered: bool
+    triggered: bool,
+    /// The flight is built but a refusal kept it from the queue: the next poll sends it
+    /// (DTLS-8), not the retransmission timer.
+    unsent: bool
 }
 
 /// A fatal failure carries its alert; a retry leaves the endpoint as it was.
@@ -161,7 +164,7 @@ fn config_copy(c: Config) -> Config {
 
 fn endpoint(side: schedule.Side, take id: Identity, c: Config, peer: Addr, a: Admission, build: Build, want: Want) -> Endpoint {
     let start = c.start_rto_ns
-    Endpoint(side: side, id: take id, c: config_copy(c), peer: peer, admission: a, proven: false, closed: None, connected: false, layer: records(0), early: ahead(c.max_ahead), rx: reassembly(0, c.max_message), log: transcript(c.max_message), want: want, build: build, next_seq: 0, verify_seen: false, client_random: list.new(), server_random: list.new(), cookie: list.new(), suite: Aes128GcmSha256, group: X25519, profile: None, share: None, peer_point: list.new(), peer_certificate: None, peer_key: list.new(), peer_p384: false, session_hash: list.new(), keys: None, pins: None, pinned: false, finished: false, flight: list.new(), out: queue(), timer: Timer(armed: false, at: 0, rto: start, resent: 0, triggered: false), deadline: None, last: 0)
+    Endpoint(side: side, id: take id, c: config_copy(c), peer: peer, admission: a, proven: false, closed: None, connected: false, layer: records(0), early: ahead(c.max_ahead), rx: reassembly(0, c.max_message), log: transcript(c.max_message), want: want, build: build, next_seq: 0, verify_seen: false, client_random: list.new(), server_random: list.new(), cookie: list.new(), suite: Aes128GcmSha256, group: X25519, profile: None, share: None, peer_point: list.new(), peer_certificate: None, peer_key: list.new(), peer_p384: false, session_hash: list.new(), keys: None, pins: None, pinned: false, finished: false, flight: list.new(), out: queue(), timer: Timer(armed: false, at: 0, rto: start, resent: 0, triggered: false, unsent: false), deadline: None, last: 0)
 }
 
 pub fn client(take id: Identity, c: Config, peer: Addr) -> Result[Endpoint, DtlsError] {
@@ -345,9 +348,20 @@ fn flush(mut e: Endpoint, mut d: Bytes) -> Result[(), Failure] {
 }
 
 /// Serialize the whole flight with fresh record numbers (RFC 6347 section 4.2.4), packing
-/// whole records into datagrams of at most `mtu`.
+/// whole records into datagrams of at most `mtu`. A refusal queues none of it and leaves the
+/// flight to the next poll (DTLS-8).
 fn send_flight(mut e: Endpoint) -> Result[(), Failure] {
     e.out = queue()
+    e.timer.unsent = true
+    if let Error(f) = queue_flight(mut e) {
+        e.out = queue()
+        return Error(f)
+    }
+    e.timer.unsent = false
+    Ok(())
+}
+
+fn queue_flight(mut e: Endpoint) -> Result[(), Failure] {
     let mtu = e.c.mtu
     let mut d: Bytes = list.with_capacity(int.widen(mtu))
     for i in 0u64 .. list.len(e.flight) {
@@ -492,6 +506,9 @@ fn poll_step(mut e: Endpoint, now: u64, r: Random) -> Result[(), Failure] {
                 return Ok(())
             }
         }
+    }
+    if e.timer.unsent {
+        send_flight(mut e)?
     }
     advance(mut e, now, r)?
     if e.timer.armed && now >= e.timer.at {

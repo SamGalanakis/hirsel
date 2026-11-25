@@ -221,11 +221,21 @@ fn receive_stream(s: Session, ssrc: u32) -> (bool, ReceiveStream) {
     (false, ReceiveStream(rtp: window(kept.rtp), rtcp: window(kept.rtcp)))
 }
 
-fn commit_receive(mut s: Session, ssrc: u32, live: bool, stream: ReceiveStream) -> Result[(), SrtpError] {
-    if live {
-        map.insert(mut s.receivers, ssrc, stream)
-        Ok(())
-    } else {
-        insert_receiver(mut s, ssrc, stream)
+/// Reserve the slot a packet on a new SSRC will take, before `open` changes `buf`, so a
+/// refusal leaves the packet and the session as they were (SRTP-6). A full session reserves
+/// nothing: that packet authenticates first and is then `Streams` (SRTP-4).
+fn reserve_receiver(mut s: Session, live: bool) -> Result[(), SrtpError] {
+    if !live && map.len(s.receivers) < int.widen(s.limits.receive_streams) {
+        map.try_reserve(mut s.receivers, 1) ?=> |c| Capacity(c)
     }
+    Ok(())
+}
+
+/// After `reserve_receiver`: a new stream's insert has its room.
+fn commit_receive(mut s: Session, ssrc: u32, live: bool, stream: ReceiveStream) -> Result[(), SrtpError] {
+    if !live && map.len(s.receivers) >= int.widen(s.limits.receive_streams) {
+        return Error(Streams)
+    }
+    map.insert(mut s.receivers, ssrc, stream)
+    Ok(())
 }

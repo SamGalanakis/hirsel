@@ -213,6 +213,7 @@ pub fn unprotect_rtp(mut s: Session, mut buf: Bytes) -> Result[Opened, SrtpError
         return Error(Discarded(TooOld))
     }
     check_window(stream.rtp, index)?
+    reserve_receiver(mut s, live)?
     if s.cm {
         let roc: u32 = int.narrow(index >> 16)
         list.set_word_be(mut s.extra, 0, roc)
@@ -247,6 +248,7 @@ pub fn unprotect_rtcp(mut s: Session, mut buf: Bytes) -> Result[u64, SrtpError] 
     let (live, previous) = receive_stream(s, ssrc)
     let mut stream = previous
     check_window(stream.rtcp, index)?
+    reserve_receiver(mut s, live)?
     let encrypted = trailer & 0x80000000 != 0
     let clear_gcm = !s.cm && !encrypted
     let at = if encrypted {

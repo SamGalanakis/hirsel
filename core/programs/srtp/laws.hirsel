@@ -561,14 +561,34 @@ fn swept(mut s: srtp.Session, mut buf: Bytes, op: SweepOp, mut k: SweepCalls) ->
     }
 }
 
-/// Six RTP packets on two SSRCs and two SRTCP packets, each protected by the sender and
-/// opened by the receiver, every call under the budget it names. The end class is how many
-/// came back byte for byte.
-fn swept_session(p: schedule.SrtpProfile, index: u64, budget: Option[std.refuse.Budget]) -> std.refuse.Refusal[u64] {
-    let mut send = sender(p)
-    let mut receive = receiver(p, LIMITS)
-    let mut k = SweepCalls(budget: budget, calls: 0, next: None)
-    let _ = index
+/// One sweep: a profile, and whether SRTCP comes first, so that each kind's first packet on
+/// a new SSRC is the one that grows an empty receiver map.
+type SweepCase {
+    profile: schedule.SrtpProfile,
+    rtcp_first: bool
+}
+
+/// Two SRTCP packets on an SSRC no RTP packet opened, so its first packet creates the
+/// stream; the count that came back byte for byte.
+fn swept_rtcp(mut send: srtp.Session, mut receive: srtp.Session, p: schedule.SrtpProfile, mut k: SweepCalls) -> u64 {
+    let mut good = 0u64
+    for _ in 0u64 .. 2 {
+        let mut plain = rtcp_plain()
+        list.set_word_be(mut plain, 4, 0xf00du32)
+        let mut buf = copy_packet(plain, srtp.tag_room(p) + 4)
+        if let Ok(_) = swept(mut send, mut buf, SealRtcp, mut k) {
+            if let Ok(n) = swept(mut receive, mut buf, OpenRtcp, mut k) {
+                if n == list.len(plain) && buf == plain {
+                    good += 1
+                }
+            }
+        }
+    }
+    good
+}
+
+/// Six RTP packets on two SSRCs; the count that came back byte for byte.
+fn swept_rtp(mut send: srtp.Session, mut receive: srtp.Session, p: schedule.SrtpProfile, mut k: SweepCalls) -> u64 {
     let mut good = 0u64
     let mut ssrc = LIB_SSRC
     for _ in 0u64 .. 2 {
@@ -585,16 +605,25 @@ fn swept_session(p: schedule.SrtpProfile, index: u64, budget: Option[std.refuse.
         }
         ssrc = 0xbeef
     }
-    for _ in 0u64 .. 2 {
-        let plain = rtcp_plain()
-        let mut buf = copy_packet(plain, srtp.tag_room(p) + 4)
-        if let Ok(_) = swept(mut send, mut buf, SealRtcp, mut k) {
-            if let Ok(n) = swept(mut receive, mut buf, OpenRtcp, mut k) {
-                if n == list.len(plain) && buf == plain {
-                    good += 1
-                }
-            }
-        }
+    good
+}
+
+/// Six RTP packets on two SSRCs and two SRTCP packets on a third, each protected by the
+/// sender and opened by the receiver, every call under the budget it names. The end class is
+/// how many came back byte for byte.
+fn swept_session(c: SweepCase, index: u64, budget: Option[std.refuse.Budget]) -> std.refuse.Refusal[u64] {
+    let p = c.profile
+    let mut send = sender(p)
+    let mut receive = receiver(p, LIMITS)
+    let mut k = SweepCalls(budget: budget, calls: 0, next: None)
+    let _ = index
+    let mut good = 0u64
+    if c.rtcp_first {
+        good += swept_rtcp(mut send, mut receive, p, mut k)
+    }
+    good += swept_rtp(mut send, mut receive, p, mut k)
+    if !c.rtcp_first {
+        good += swept_rtcp(mut send, mut receive, p, mut k)
     }
     std.refuse.Refusal(end: good, calls: k.calls, next: k.next)
 }
@@ -606,7 +635,8 @@ fn show_count(n: u64, mut out: String) {
 
 /// bug: a Capacity refusal while protecting or opening leaves a session that loses or
 /// corrupts packets: a stream half made, an index or replay bit advanced past a packet that
-/// was never sealed or delivered.
+/// was never sealed or delivered, or a packet on a new SSRC opened in place before its
+/// stream's slot was reserved, so the refusal returned it decrypted (2557).
 /// oracle: SRTP-6 and MEM-21: `Capacity` is returned before
 /// issue with nothing changed, so at every budget where some call first meets a refusal,
 /// repeating that call unbounded brings all 8 packets back byte for byte (RFC 3711 sections
@@ -615,11 +645,12 @@ fn show_count(n: u64, mut out: String) {
 fn capacity_sweep_session() -> Result[(), ()] {
     let cm: schedule.SrtpProfile = Aes128CmHmacSha1_80
     let gcm: schedule.SrtpProfile = AeadAes128Gcm
-    if let Error(take text) = std.refuse.sweep(cm, swept_session, show_count) {
-        fail(take text)
-    }
-    if let Error(take text) = std.refuse.sweep(gcm, swept_session, show_count) {
-        fail(take text)
+    for p in[cm, gcm] {
+        for rtcp_first in[false, true] {
+            if let Error(take text) = std.refuse.sweep(SweepCase(profile: p, rtcp_first: rtcp_first), swept_session, show_count) {
+                fail(take text)
+            }
+        }
     }
     Ok(())
 }

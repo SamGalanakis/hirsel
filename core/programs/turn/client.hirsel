@@ -529,26 +529,26 @@ fn refreshes(mut c: Client, now_ns: u64) -> Result[(), TurnError] {
         return Ok(())
     }
     if !c.refreshing && now_ns >= c.refresh_ns {
-        c.refreshing = true
         list.try_reserve(mut c.txs, 1) ?=> Capacity
         let tx = new_tx(c, RefreshJob(c.c.lifetime_s))
         list.push(mut c.txs, tx)
+        c.refreshing = true
     }
     for i in 0u64 .. list.len(c.perms) {
         if c.perms[i].installed && !c.perms[i].busy && now_ns >= c.perms[i].refresh_ns {
-            c.perms[i].busy = true
             list.try_reserve(mut c.txs, 1) ?=> Capacity
             let tx = new_tx(c, PermitJob(c.perms[i].peer))
             list.push(mut c.txs, tx)
+            c.perms[i].busy = true
         }
     }
     for i in 0u64 .. list.len(c.chans) {
         let ch = c.chans[i]
         if ch.live && ch.confirmed && !ch.busy && now_ns >= ch.refresh_ns {
-            c.chans[i].busy = true
             list.try_reserve(mut c.txs, 1) ?=> Capacity
             let tx = new_tx(c, BindJob(ch.number, ch.peer))
             list.push(mut c.txs, tx)
+            c.chans[i].busy = true
         }
     }
     Ok(())
@@ -593,17 +593,21 @@ fn step(mut c: Client, now: Now, r: Random, mut out: Bytes) -> Result[Poll, Turn
     let mut i = 0u64
     while i < list.len(c.txs) {
         let tx = c.txs[i]
+        // Build before marking the send, so a refused build leaves the transaction to the
+        // next poll rather than to its retransmission.
         if tx.fresh {
             let id = draw_tx(r)
+            let n = build(mut c, tx.job, id, tx.authed, mut out)?
             c.txs[i].id = id
             c.txs[i].fresh = false
             c.txs[i].sends = 1
             c.txs[i].start_ns = now_ns
-            return Ok(Send(build(mut c, tx.job, id, tx.authed, mut out)?))
+            return Ok(Send(n))
         }
         if tx.sends < sends_max(c) && now_ns >= tx.start_ns + send_offset(c, tx.sends) {
+            let n = build(mut c, tx.job, tx.id, tx.authed, mut out)?
             c.txs[i].sends = tx.sends + 1
-            return Ok(Send(build(mut c, tx.job, tx.id, tx.authed, mut out)?))
+            return Ok(Send(n))
         }
         if tx.sends >= sends_max(c) && now_ns >= tx.start_ns + deadline(c) {
             time_out(mut c, i, now_ns)?

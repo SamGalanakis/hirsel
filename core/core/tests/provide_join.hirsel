@@ -14,7 +14,7 @@ fn net_connect(mut s: Served[NetOp], id: u64) -> bool waits {
     match provide.next(mut s) {
         Some(take call) => {
             let op = match provide.net_op(call) {
-                Connect(addr, _) => addr.port == 443 && match addr.ip {
+                Connect(addr, ..) => addr.port == 443 && match addr.ip {
                     V4(x) => x == 2130706433,
                     _ => false
                 },

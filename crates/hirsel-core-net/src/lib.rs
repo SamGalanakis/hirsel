@@ -11,6 +11,7 @@ use std::net::IpAddr;
 pub mod agreement_registry;
 mod env;
 pub mod exec;
+pub mod own_address;
 pub mod udp;
 pub mod unix;
 pub use env::{EnvPatterns, EnvSnapshot};

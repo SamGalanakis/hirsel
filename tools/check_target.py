@@ -26,6 +26,7 @@ CRATES = 'crates/'
 HOST_SEAMS = (
     'crates/hirsel-core-rt/src/host/',
     'crates/hirsel-core-net/src/reactor/',
+    'crates/hirsel-core-net/src/own_address/',
     'crates/hirsel-prof/src/linux/',
 )
 # Host-OS code that predates its seam. Each entry names the slice of the macOS design

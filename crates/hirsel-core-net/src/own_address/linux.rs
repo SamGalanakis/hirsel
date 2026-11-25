@@ -1,12 +1,10 @@
-//! NET-18 part 2: the host's own addresses, kept from a `NETLINK_ROUTE`
-//! socket. The table is filled by one `RTM_GETADDR` dump when the first
-//! public-only connect is issued and kept current from `RTM_NEWADDR` and
-//! `RTM_DELADDR`. Before each answer the socket is read until it would block,
-//! and a reported `ENOBUFS` (lost messages) dumps again.
-use crate::net::Address;
+//! The Linux address-change source: a `NETLINK_ROUTE` socket bound to the
+//! IPv4 and IPv6 address groups, filled by one `RTM_GETADDR` dump and kept
+//! current from `RTM_NEWADDR` and `RTM_DELADDR`. A reported `ENOBUFS` (lost
+//! messages) dumps again.
+use super::{Key, errno};
 use std::collections::BTreeSet;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::Mutex;
 
 const NETLINK_ROUTE: i32 = 0;
 /// `RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR`.
@@ -23,83 +21,37 @@ const IFA_LOCAL: u16 = 2;
 const HEADER: usize = 16;
 const IFADDRMSG: usize = 8;
 
-/// One assigned address: (family as in `Address`, its bits, interface index,
-/// prefix length). An address held on two interfaces, or twice with two
-/// prefix lengths, stays until every assignment is dropped.
-type Key = (u8, u128, u32, u8);
-
-struct Table {
+/// The subscribed netlink socket.
+pub(super) struct Changes {
     events: OwnedFd,
-    held: BTreeSet<Key>,
 }
 
-/// A connect issued while the table is dumped waits on this lock.
-static TABLE: Mutex<Option<Table>> = Mutex::new(None);
-
-/// Whether `address`, or an IPv4 address embedded in it by NET-18's table, is
-/// assigned to the host. An error is the errno that kept the table from
-/// being read, and the caller refuses the connect.
-pub(crate) fn holds(address: Address) -> Result<bool, i32> {
-    let mut table = TABLE.lock().unwrap_or_else(|e| e.into_inner());
-    let table = match &mut *table {
-        Some(table) => {
-            table.settle()?;
-            table
-        }
-        empty => {
-            // Subscribe first, so a change made during the dump is queued.
-            let events = open()?;
-            // SAFETY: an all-zero `sockaddr_nl` is valid; its fields are set below.
-            let mut groups: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
-            groups.nl_family = libc::AF_NETLINK as u16;
-            groups.nl_groups = GROUPS;
-            // SAFETY: `groups` is a valid netlink address for this socket.
-            let rc = unsafe {
-                libc::bind(
-                    events.as_raw_fd(),
-                    (&groups as *const libc::sockaddr_nl).cast(),
-                    size_of::<libc::sockaddr_nl>() as u32,
-                )
-            };
-            if rc < 0 {
-                return Err(errno());
-            }
-            let mut table = Table {
-                events,
-                held: dump()?,
-            };
-            table.settle()?;
-            empty.insert(table)
-        }
+/// Subscribe to the address groups.
+pub(super) fn subscribe() -> Result<Changes, i32> {
+    let events = open()?;
+    // SAFETY: an all-zero `sockaddr_nl` is valid; its fields are set below.
+    let mut groups: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    groups.nl_family = libc::AF_NETLINK as u16;
+    groups.nl_groups = GROUPS;
+    // SAFETY: `groups` is a valid netlink address for this socket.
+    let rc = unsafe {
+        libc::bind(
+            events.as_raw_fd(),
+            (&groups as *const libc::sockaddr_nl).cast(),
+            size_of::<libc::sockaddr_nl>() as u32,
+        )
     };
-    let ip = (u128::from(address.hi) << 64) | u128::from(address.lo);
-    let held = |family: u8, ip: u128| {
-        table
-            .held
-            .range((family, ip, 0, 0)..=(family, ip, u32::MAX, u8::MAX))
-            .next()
-            .is_some()
-    };
-    Ok(if address.family == 0 {
-        held(0, ip)
-    } else {
-        held(1, ip) || hirsel_core_net::class::embedded_v4(ip).any(|v4| held(0, u128::from(v4)))
-    })
-}
-
-impl Table {
-    /// Read every queued change, dumping again until a drain loses nothing.
-    fn settle(&mut self) -> Result<(), i32> {
-        while self.drain()? {
-            self.held = dump()?;
-        }
-        Ok(())
+    if rc < 0 {
+        return Err(errno());
     }
+    Ok(Changes { events })
+}
 
-    /// Apply every queued change. Each change sets its key's state, so
-    /// replaying changes older than the dump leaves the dump's answer. True
+impl Changes {
+    /// Apply every queued change to `held`. Each change sets its key's state,
+    /// so replaying changes older than the dump leaves the dump's answer. True
     /// when the kernel dropped messages and the table must be dumped again.
-    fn drain(&mut self) -> Result<bool, i32> {
+    pub(super) fn drain(&mut self, held: &mut BTreeSet<Key>) -> Result<bool, i32> {
         let mut lost = false;
         let mut buffer = vec![0u8; 1 << 16];
         loop {
@@ -109,10 +61,10 @@ impl Table {
                     for message in messages(&buffer[..len]) {
                         match message {
                             Ok((RTM_NEWADDR, Some(key))) => {
-                                self.held.insert(key);
+                                held.insert(key);
                             }
                             Ok((RTM_DELADDR, Some(key))) => {
-                                self.held.remove(&key);
+                                held.remove(&key);
                             }
                             Ok((RTM_NEWADDR | RTM_DELADDR, None)) | Err(_) => lost = true,
                             Ok(_) => {}
@@ -125,12 +77,6 @@ impl Table {
             }
         }
     }
-}
-
-fn errno() -> i32 {
-    std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(libc::EIO)
 }
 
 fn open() -> Result<OwnedFd, i32> {
@@ -171,7 +117,7 @@ fn receive(fd: &OwnedFd, buffer: &mut [u8], flags: i32) -> Result<usize, i32> {
 }
 
 /// Every address assigned now, from one `RTM_GETADDR` dump on its own socket.
-fn dump() -> Result<BTreeSet<Key>, i32> {
+pub(super) fn snapshot() -> Result<BTreeSet<Key>, i32> {
     let fd = open()?;
     let mut request = [0u8; HEADER + IFADDRMSG];
     request[..4].copy_from_slice(&((HEADER + IFADDRMSG) as u32).to_ne_bytes());

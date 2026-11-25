@@ -255,6 +255,14 @@ Version note (2026-11-25, macos-s0-spec-2495): part 2's provider reads the host'
 address-change source, which is netlink on Linux and `PF_ROUTE` on macOS. Nothing a program
 sees changes.
 
+Version note (2026-11-25, macos-s11-own-address-2587): the address table and its lookup are
+one module behind a compile-time host seam (`crates/hirsel-core-net/src/own_address/`), with
+a netlink source and a `PF_ROUTE` source. On macOS the routing socket is read until it would
+block before each public-only connect, as the netlink socket is, rather than registered in
+the kqueue. Any `RTM_NEWADDR` or `RTM_DELADDR`, an `ENOBUFS` or a message that does not
+parse takes a new `getifaddrs` snapshot, so the table is never patched from an
+`ifa_msghdr`. Nothing a program sees changes.
+
 A `Connect` rule may carry the reach `Public`. That rule then covers only an address that
 the address-class table below calls public, so a program granted
 `Connect 0.0.0.0/0 443-443 public` can reach any web server on the internet. It cannot
@@ -363,10 +371,11 @@ The check has two parts, kept apart because they depend on different things.
    `RTM_NEWADDR` and `RTM_DELADDR` messages. When the socket reports `ENOBUFS` (messages
    lost), the provider dumps again before it answers the next public-only connect. Before
    it answers a public-only connect, the provider reads the netlink socket until it would
-   block. A connect issued while a dump runs waits for the dump. On macOS (not yet built;
-   macOS slice S11) the source is `getifaddrs` for the snapshot and a `PF_ROUTE` socket,
-   registered in the provider's kqueue, for `RTM_NEWADDR` and `RTM_DELADDR`. A lost message
-   (`ENOBUFS`) takes a new snapshot, as a netlink dump does. A `std.sim.net` server answers
+   block. A connect issued while a dump runs waits for the dump. On macOS (macOS slice S11,
+   compile-checked on Linux) the source is `getifaddrs` for the snapshot and a `PF_ROUTE`
+   socket, read until it would block before each public-only connect, whose `RTM_NEWADDR`
+   and `RTM_DELADDR` messages each take a new snapshot. A lost message (`ENOBUFS`) takes a
+   new snapshot too, as a netlink dump does. A `std.sim.net` server answers
    `Denied` to a public-only `Connect` to an address given by
    `sim.net.local_as(mut n, addrs)`.
 

@@ -1,7 +1,6 @@
 //! Linux try-first socket attempts. Go's SO_ERROR + getpeername sequence rejects
 //! spurious writable connect events; combined interests live in core-net.
 mod addr;
-mod own;
 pub(crate) use addr::is_operation;
 use addr::{address, decoded, query_address};
 
@@ -391,7 +390,8 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     // NET-18 part 2: a public-only connect to an address the
                     // host holds, or whose holdings cannot be read, is refused
                     // before any socket call.
-                    if own::holds(n.address) != Ok(false) {
+                    let ip = (u128::from(n.address.hi) << 64) | u128::from(n.address.lo);
+                    if hirsel_core_net::own_address::holds(n.address.family, ip) != Ok(false) {
                         return Some(Outcome {
                             error: IoError {
                                 tag: 1,

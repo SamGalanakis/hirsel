@@ -122,6 +122,7 @@ fn churn_run(net: Net, clock: Clock) waits {
         }
         let PublicationId(id) = pub_for(r, p)
         let refused = list.len(r.refused)
+        let from = list.len(r.offers)
         say_as(mut r, SUBSCRIBER, Subscribe(id, base_layer()))
         if d == Refuses {
             say_as(mut r, p, Subscribe(own, base_layer()))
@@ -130,6 +131,7 @@ fn churn_run(net: Net, clock: Clock) waits {
         if list.len(r.refused) != refused {
             fail_on(d, "a subscription was refused")
         }
+        settle_offers(mut r, from)
         let at = list.len(r.h.seen)
         chatter_all(mut r, 20)
         let (ssrc, _) = down_track(r, SUBSCRIBER, p)

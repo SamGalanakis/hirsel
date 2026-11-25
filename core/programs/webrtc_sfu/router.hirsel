@@ -786,7 +786,7 @@ fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, s
         let first_ts: u32 = list.word_be(b, 2)
         let track = peer.add_track(mut r.members[mi].session, section, first_seq, first_ts) ?=> |take e| Peer(e)
         let opus = r.publications[pi].codec == Opus && peer.set_opus_fmtp(mut r.members[mi].session, track, r.publications[pi].opus_fmtp)
-        if opus || peer.fec_unannounced(r.members[mi].session, track) || peer.ssrc_stale(r.members[mi].session, track) {
+        if opus || peer.unannounced(r.members[mi].session, track) || peer.ssrc_stale(r.members[mi].session, track) {
             reoffer(mut r, room, who)
         }
         track

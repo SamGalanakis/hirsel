@@ -118,8 +118,8 @@ fn restart(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, track: u16
     Ok(())
 }
 
-// RTC-4: the collided down-tracks' fresh SSRCs, or a new down-track's FlexFEC SSRC
-// (RTP-14), go to the participant in one re-offer, which the control unit sends on. A
+// RTC-4: the collided down-tracks' fresh SSRCs, or a new down-track's RTX and FlexFEC
+// pairs (RTP-14), go to the participant in one re-offer, which the control unit sends on. A
 // re-offer asked for while one is in flight is made when its answer is taken. A
 // re-offer the session cannot make is refused.
 fn reoffer(mut r: Router, room: peer.RoomId, who: peer.Gen) {

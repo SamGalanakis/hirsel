@@ -22,13 +22,14 @@ type Sig {
     out: List[runner.room_client.RoomOut[signal.Signal]],
     members: List[Member],
     // Published (peer, publication), Fenced (peer, epoch, capture index when sent),
-    // Refused (peer, code), the peers sent an Answer and the re-offers sent (peer,
-    // origin version).
+    // Refused (peer, code), the peers sent an Answer, the re-offers sent (peer, origin
+    // version) and those `settle_offers` answered.
     pubs: List[(u32, u64)],
     fenced: List[(u32, u64, u64)],
     refused: List[(u32, u32)],
     answered: List[u32],
     offers: List[(u32, u64)],
+    settled: List[(u32, u64)],
     // Published sent to one peer (to, owner, publication), and every Unpublished.
     told: List[(u32, u32, u64)],
     unpublished: List[u64],
@@ -192,6 +193,7 @@ fn opened_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
         enter_room(mut r, Joined(p))
     }
     enter_room(mut r, PartEnd)
+    let from = list.len(r.offers)
     for p in[3u32, 2u32, 1u32] {
         say_as(mut r, p, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
     }
@@ -211,7 +213,64 @@ fn opened_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
     if list.len(r.refused) != 0 {
         fail("a subscription was refused")
     }
+    settle_offers(mut r, from)
     take r
+}
+
+// Peer `p`'s answer to a re-offer, as its browser makes it: its join offer from the
+// active end, with the fingerprint `serve_builds` established its session with.
+fn browser_answer(p: u32) -> Bytes {
+    let mut d = sdp.description()
+    result.unwrap(sdp.parse(unit_offer(2, b"96", b"97", b"1", b"3"), mut d))
+    d.setup = Active
+    let wide: u64 = int.widen(p)
+    let Party(id: _, certificate: certificate) = party(16001 + wide)
+    let h = std.sha256.hash(certificate)
+    for i in 0u64 .. 32 {
+        d.fingerprint[i] = h[i]
+    }
+    let mut text: Bytes = list.new()
+    let _ = result.unwrap(sdp.write(d, mut text))
+    take text
+}
+
+// Every browser answers each re-offer from the `from`th on, as page.ts does, until a
+// round raises none. A subscribe re-offers its leg's RTX pair (RTC-4). No answer may
+// be refused: nothing is fenced or refused while they settle.
+fn settle_offers(mut r: Sig, from: u64) waits {
+    let fenced = list.len(r.fenced)
+    let refused = list.len(r.refused)
+    let mut next = from
+    for _ in 0u64 .. 8 {
+        for _ in 0u64 .. 8 {
+            turn_all(mut r)
+        }
+        let end = list.len(r.offers)
+        if end == next {
+            if list.len(r.fenced) != fenced || list.len(r.refused) != refused {
+                fail("a browser's answer to a re-offer was refused")
+            }
+            return
+        }
+        for k in next .. end {
+            let (p, v) = r.offers[k]
+            list.push(mut r.settled, (p, v))
+            say_as(mut r, p, Answer(v, browser_answer(p)))
+        }
+        next = end
+    }
+    fail("the re-offers did not settle")
+}
+
+// The next origin version a re-offer to `p` takes: one past the last it answered.
+fn next_version(r: Sig, p: u32) -> u64 {
+    let mut v = 1u64
+    for (q, x) in r.settled {
+        if q == p && x > v {
+            v = x
+        }
+    }
+    v + 1
 }
 
 // The service (9) alone in an empty room: the adapter over units 0 and 1, before
@@ -228,7 +287,7 @@ fn adapter_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
     })
     let mut a = signal.adapter(room_id(), revoke_limits(), take embed, 2)
     signal.you(mut a, Some(YOU))
-    Sig(h: take h, a: take a, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), offers: list.new(), told: list.new(), unpublished: list.new(), loss: loss, revoking: list.new())
+    Sig(h: take h, a: take a, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), offers: list.new(), settled: list.new(), told: list.new(), unpublished: list.new(), loss: loss, revoking: list.new())
 }
 
 fn seam_on(mut h: Hall, k: u16, limit: u64) {
@@ -581,9 +640,10 @@ fn reoffer_run(net: Net, clock: Clock) waits {
     let Gen(id: id, epoch: epoch) = two.gen
     let (m, _) = down_track(r, 2, 1)
     let clash = tagged(mut r.h.peers[two.index].c.cs, m, 7, mark_for(2))
+    let before = list.len(r.offers)
     send_from(mut r.h, two.index, clash)
     let mut t = 0u64
-    while list.len(r.offers) == 0 {
+    while list.len(r.offers) == before {
         if t >= 32 {
             fail("the collision sent peer 2 no re-offer")
         }
@@ -591,12 +651,12 @@ fn reoffer_run(net: Net, clock: Clock) waits {
         t += 1
     }
     chatter_all(mut r, 8)
-    if list.len(r.offers) != 1 {
+    if list.len(r.offers) != before + 1 {
         fail("the collision sent more than one re-offer")
     }
-    let (p, version) = r.offers[0]
-    if p != 2 || version != 2 {
-        fail("the re-offer went to another peer or at another version than 2")
+    let (p, version) = r.offers[before]
+    if p != 2 || version != next_version(r, 2) {
+        fail("the re-offer went to another peer or at another version than the next")
     }
     say_as(mut r, 2, Answer(version + 1, b"answer"))
     talk_through(mut r)

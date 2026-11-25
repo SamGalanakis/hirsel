@@ -168,8 +168,18 @@ fn revoke_run(net: Net, clock: Clock, held: Held) waits {
         let _ = result.unwrap(a)
     }
     units.seam(mut h.w.u1, 0, true)
-    let events = units.take_events(mut h.w.u0)
-    if list.len(events) != 1 {
+    // The subscribes' re-offers (RTC-4) ride in the same queue; nothing else may.
+    let mut fenced = 0u64
+    for e in units.take_events(mut h.w.u0) {
+        match e {
+            Fenced(_) => {
+                fenced += 1
+            },
+            Offer(who: _, version: _, text: _) => (),
+            _ => fail("the revoke raised an event other than Fenced"),
+        }
+    }
+    if fenced != 1 {
         fail("the revoke did not raise one Fenced event")
     }
     // 200 ms of further input: X keeps sending from its old 5-tuple (media, then a

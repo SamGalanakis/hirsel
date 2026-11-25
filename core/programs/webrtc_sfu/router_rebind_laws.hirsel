@@ -109,14 +109,14 @@ fn listed(xs: List[u32], v: u32) -> bool {
     false
 }
 
-// The one re-offer the router raised for `who` after a collision (RTC-4).
+// The one re-offer the router raised for `who` (RTC-4).
 fn w7_reoffered(mut r: router.Router, who: peer.Gen) -> (u64, Bytes) {
     let mut found: Option[(u64, Bytes)] = None
     for take n in router.take_notices(mut r) {
         match take n {
             Offer(who: w, version: v, text: take t) if w == who => {
                 if found != None {
-                    fail("the collision raised two re-offers")
+                    fail("one change raised two re-offers")
                 }
                 found = Some((v, take t))
             },
@@ -124,7 +124,7 @@ fn w7_reoffered(mut r: router.Router, who: peer.Gen) -> (u64, Bytes) {
         }
     }
     let Some(take got) = found else {
-        fail("the collision raised no re-offer")
+        fail("the change raised no re-offer")
     }
     take got
 }
@@ -196,6 +196,9 @@ fn rebind_run(cross: bool, seed: u64) {
     let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
     result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 0, mut out))
     let (m, x) = option.unwrap(router.track_ssrcs(r, room, s.who, pa))
+    // RTC-4: the subscribe's re-offer, at version 2, announces the pair; it is answered.
+    let (v2, _) = w7_reoffered(mut r, s.who)
+    result.unwrap(router.answer_reoffer(mut r, room, s.who, v2, w7_answer(seed + 10)))
     peer.clear_outbox(mut out)
     // A, Layer(0) then Layer(2): one frame per millisecond from 10 ms.
     let mut o = 0u16
@@ -306,11 +309,11 @@ fn rebind_run(cross: bool, seed: u64) {
     if m2 == m || m2 == x || x2 == m || x2 == x || m2 == 0 || x2 == 0 || m2 == x2 {
         fail("the collision did not draw fresh SSRCs")
     }
-    // RTC-4 and RTC-2: one re-offer at the admission's origin version 1 plus one, as
+    // RTC-4 and RTC-2: one re-offer at the subscribe's origin version 2 plus one, as
     // the server's actpass offer on the running ICE credentials, whose one section
     // names the fresh pair in `a=ssrc` and `a=ssrc-group:FID` and neither retired SSRC.
     let (version, text) = w7_reoffered(mut r, s.who)
-    if version != 2 {
+    if version != 3 {
         fail("the re-offer is not at the next origin version")
     }
     let mut d = sdp.description()
@@ -354,10 +357,131 @@ fn rebind_run(cross: bool, seed: u64) {
 }
 
 /// bug: change a down-track's SSRC or sealer at a layer switch, Off or a rebind; drop the old publication before the new one's keyframe; let a rebind's switch go back in time or reuse a number; project a switch through SRs of two sender clocks; keep the old SSRC, the old numbering or a delta-frame start after a collision; leave the fresh SSRCs out of the re-offer or let a refused one pass unnoticed.
-/// oracle: W7 by hand from RTC-4, RTC-6 and RTP-11: the outbound index rises by one per forwarded packet (o to o + 12); timestamps keep each source's differences, and each switch anchors as the comments derive (resume t + 9270, B t + 59070 projected or t + 15540 on arrival, C t + 104970 or t + 21720); the collision sends a BYE for both SSRCs (RFC 3550 section 8.2), asks C for a keyframe, and the stream continues on fresh SSRCs from C's next keyframe; one re-offer at origin version 2 names exactly the fresh pair (RFC 4588 section 4 FID), a matching answer keeps the session and one naming version 3 raises `Shut` (RTC-4).
+/// oracle: W7 by hand from RTC-4, RTC-6 and RTP-11: the outbound index rises by one per forwarded packet (o to o + 12); timestamps keep each source's differences, and each switch anchors as the comments derive (resume t + 9270, B t + 59070 projected or t + 15540 on arrival, C t + 104970 or t + 21720); the collision sends a BYE for both SSRCs (RFC 3550 section 8.2), asks C for a keyframe, and the stream continues on fresh SSRCs from C's next keyframe; one re-offer at origin version 3 (the subscribe's was 2) names exactly the fresh pair (RFC 4588 section 4 FID), a matching answer keeps the session and one naming version 3 raises `Shut` (RTC-4).
 @test
 fn ssrc_survives_switches() -> Result[(), router.RouterError] {
     rebind_run(false, 100)
     rebind_run(true, 120)
+    Ok(())
+}
+
+// One re-offer raised for `who` since the last call, or none (RTC-4).
+fn offered_now(mut r: router.Router, who: peer.Gen) -> Option[(u64, sdp.Description)] {
+    let mut found: Option[(u64, sdp.Description)] = None
+    let mut count = 0u64
+    for take n in router.take_notices(mut r) {
+        match take n {
+            Offer(who: w, version: v, text: take t) if w == who => {
+                count += 1
+                if count > 1 {
+                    fail("one subscribe raised two re-offers")
+                }
+                let mut d = sdp.description()
+                result.unwrap(sdp.parse(t, mut d))
+                found = Some((v, take d))
+            },
+            _ => (),
+        }
+    }
+    found
+}
+
+// The SSRCs the subscriber hears its leg on: the publisher sends four keyframes from
+// `seq` at `now` ms, then the subscriber NACKs the second. The media SSRC is the one
+// the frames arrive on, the RTX SSRC the one the repair arrives on.
+fn heard_pair(mut r: router.Router, mut pub_: Client, mut s: Client, seq: u16, now: u64, mut out: peer.Outbox) -> (u32, u32) {
+    peer.clear_outbox(mut out)
+    let mut heard = 0u32
+    let mut second = 0u16
+    for k in 0u16 .. 4u16 {
+        let ts: u32 = int.widen(k)
+        let at: u64 = int.widen(k)
+        let packet = media_carrying(mut pub_.cs, MEDIA_SSRC, seq + k, 3000 * ts, b"a", 96, vp8_key())
+        feed(mut r, (now + at) * MS, pub_.who, pub_.at, packet, mut out)
+        let g = one(received(mut s, out), "each frame reaches the leg once")
+        heard = g.h.ssrc
+        if k == 1 {
+            second = g.h.seq
+        }
+        peer.clear_outbox(mut out)
+    }
+    feed(mut r, (now + 4) * MS, s.who, s.at, nack(mut s.cs, heard, second), mut out)
+    let mut rtx = 0u32
+    for ms in 0u64 .. 4u64 {
+        let _ = router.poll(mut r, (now + 4 + ms) * MS, mut out)
+        for g in received(mut s, out) {
+            if g.h.ssrc != heard {
+                rtx = g.h.ssrc
+            }
+        }
+        peer.clear_outbox(mut out)
+    }
+    if rtx == 0 {
+        fail("the NACK was not repaired on the leg's RTX SSRC")
+    }
+    (heard, rtx)
+}
+
+fn names_pair(d: sdp.Description, m: u32, x: u32) -> bool {
+    let named = d.sections[0].ssrcs
+    list.len(d.sections) == 1 && d.sections[0].dir == SendOnly && list.len(named) == 2 && listed(named, m) && listed(named, x) && list.len(d.sections[0].rtx_pairs) == 1 && d.sections[0].rtx_pairs[0] == (m, x)
+}
+
+/// bug: never tell the subscriber its down-track's SSRCs, so a browser sees the leg's RTX stream unsignalled and cannot tie it to the media (no `a=ssrc-group:FID`): every subscribe without FlexFEC, which is every Firefox subscribe; announce a re-subscribed leg's old pair; or re-offer for a leg with no RTX pair to announce.
+/// oracle: RFC 4588 section 8.1 (FID groups the original and the RTX SSRC), RFC 8829 section 5.2.1 (a sending section names its SSRCs) and RTC-4 by hand, the pair taken from the wire: the SSRC the leg's frames arrive on and the SSRC a NACK's repair arrives on. A subscribe on an RTX section raises one offer at origin version 2 whose one section is sendonly with exactly those two `a=ssrc` lines and `a=ssrc-group:FID` with the media SSRC first. Answered, an unsubscribe raises none (the next offer drops the ended track); a re-subscribe draws a fresh pair, announced at version 3 without the old one. A video section without RTX and an audio section have no pair, and their subscribes raise no offer.
+@test
+fn subscribe_announces_rtx_pair() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(190))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let room = room_id()
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut pub_ = admit(mut r, 191, session_offer(), 1)
+    let pa = result.unwrap(router.publish(mut r, room, pub_.who, 0))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let mut offer = minimal_head(b" d")
+    recv_section(mut offer, b"d", b"96", b"97", b"1", b"3")
+    let mut s = admit(mut r, 193, offer, 2)
+    result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 0, mut out))
+    let Some((v, d)) = offered_now(mut r, s.who) else {
+        fail("the subscribe raised no offer naming the leg's RTX pair")
+    }
+    let (m, x) = heard_pair(mut r, mut pub_, mut s, 300, 10, mut out)
+    if v != 2 || !names_pair(d, m, x) {
+        fail("the subscribe's offer does not name exactly the heard pair as FID")
+    }
+    result.unwrap(router.answer_reoffer(mut r, room, s.who, v, w7_answer(194)))
+    result.unwrap(router.unsubscribe(mut r, room, s.who, pa))
+    if let Some(_) = offered_now(mut r, s.who) {
+        fail("an unsubscribe raised an offer")
+    }
+    result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 30 * MS, mut out))
+    let Some((v2, d2)) = offered_now(mut r, s.who) else {
+        fail("the re-subscribe raised no offer naming its fresh pair")
+    }
+    let (m2, x2) = heard_pair(mut r, mut pub_, mut s, 310, 40, mut out)
+    if m2 == m || m2 == x || x2 == m || x2 == x {
+        fail("the re-subscribe kept an old SSRC")
+    }
+    if v2 != 3 || !names_pair(d2, m2, x2) {
+        fail("the re-subscribe's offer does not name exactly the fresh pair as FID")
+    }
+    // No RTX on the section: nothing to pair, no offer.
+    let mut plain = minimal_head(b" d")
+    recv_section(mut plain, b"d", b"96", b"", b"1", b"3")
+    let p = admit(mut r, 195, plain, 3)
+    result.unwrap(router.subscribe(mut r, room, p.who, pa, 0, base, 60 * MS, mut out))
+    if let Some(_) = offered_now(mut r, p.who) {
+        fail("a subscribe without RTX raised an offer")
+    }
+    // Audio: no RTX, no offer.
+    let speaker = admit(mut r, 197, speaker_offer(b""), 4)
+    let pv = result.unwrap(router.publish(mut r, room, speaker.who, 0))
+    let mut listen = minimal_head(b" a")
+    audio_section(mut listen, b"a", b"recvonly", b"", b"")
+    let l = admit(mut r, 199, listen, 5)
+    result.unwrap(router.subscribe(mut r, room, l.who, pv, 0, base, 70 * MS, mut out))
+    if let Some(_) = offered_now(mut r, l.who) {
+        fail("an audio subscribe raised an offer")
+    }
     Ok(())
 }

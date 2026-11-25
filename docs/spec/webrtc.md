@@ -66,7 +66,9 @@ below 0, so a silent or cheaper stream can neither freeze a leg nor pay for anot
 publication's step. A dropped encoding up to a target stays in the local mask so that the
 publisher can resume it. Within 5 s of a session's first cluster, a cluster that raised
 nothing is retried after 1 s rather than 5 s (the window and spacing of libwebrtc's
-repeated initial probing).
+repeated initial probing). A down-track whose RTX pair the agreement in force lacks re-offers
+the session when it is added, so every subscribe on an RTX section signals its
+`a=ssrc-group:FID`, not only FlexFEC sections and collisions.
 
 This chapter specifies three layers, each sans-IO:
 
@@ -650,7 +652,14 @@ So:
   uses it. SRTCP's 31-bit index rises once per packet on each sender SSRC.
 
 `offer` (RTC-2) signals each down-track's two SSRCs with `a=ssrc` and `a=ssrc-group:FID`.
-A browser also accepts unsignaled SSRCs by MID, but signaling them pins the RTX pairing.
+A browser also accepts unsignaled SSRCs by MID, but signaling them pins the RTX pairing
+([RFC 4588](https://www.rfc-editor.org/rfc/rfc4588) §8.1), as libwebrtc, LiveKit and
+mediasoup do. The answer to the participant's one offer, at join, names no SSRC, since no
+down-track exists yet. A down-track whose RTX or FlexFEC SSRC the agreement in force does
+not pair with its media SSRC (`a=ssrc-group:FID` or `FEC-FR`) therefore re-offers the
+session when it is added, as a subscribe and a re-subscribe do. A down-track with neither,
+audio or video without RTX, raises no re-offer: its media goes by MID. An unsubscribe
+raises none either; the next re-offer names no SSRC for the ended track.
 
 - **FlexFEC SSRC ([RTP-14](rtp.md#rtp-14-flexfec-03)).** A video down-track on a section
   that agreed `Flexfec` draws a third SSRC from the generator, with its own sealer and its
@@ -1578,7 +1587,16 @@ unless named otherwise.
   packet, and at every intended switch the output timestamp equals the hand-projected
   value, which is strictly above the last. The two packets of B's first frame share one output
   timestamp. After the collision, a BYE for the old SSRC goes out, the down-track continues on
-  a fresh SSRC with a new sealer, and the retired SSRC's sealer is never issued again.
+  a fresh SSRC with a new sealer, and the retired SSRC's sealer is never issued again. The
+  subscribe's re-offer is answered at version 2; the collision's is at version 3.
+  Its companion `subscribe_announces_rtx_pair` takes the pair from the wire (the SSRC the
+  leg's frames arrive on and the one a NACK's repair arrives on): a subscribe on an RTX
+  section raises one offer at version 2 whose one sendonly section has exactly those two
+  `a=ssrc` lines and `a=ssrc-group:FID` with the media SSRC first. Once that offer is
+  answered, an unsubscribe raises no offer, and a re-subscribe's offer at version 3 names
+  only the fresh pair. A subscribe on a video section without RTX, and one on an audio
+  section, raise no offer. It is red on main, where a subscribe without FlexFEC raised
+  no offer.
 - **W8 `fanout_across_units`.** One publisher on unit 0, two subscribers on unit 0 and two on
   unit 1, over `sim.udp`. The subscribers' legs use different MIDs, payload types and
   extension IDs from the publisher's and from each other. *Oracle:* hand-derived rewritten

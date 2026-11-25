@@ -23,13 +23,6 @@ fn fec_on(p: PeerSession, t: u64) -> bool {
     false
 }
 
-/// Whether track `track` has a FlexFEC SSRC the participant has not been offered yet,
-/// so the router re-offers (RTC-4).
-pub fn fec_unannounced(p: PeerSession, track: u16) -> bool {
-    let t: u64 = int.widen(track)
-    t < list.len(p.tracks) && p.tracks[t].fec_ssrc != 0 && !fec_on(p, t)
-}
-
 // The group size of a media packet of frame `u` on track `t` (RTP-14 F4): keyframes,
 // then the frames the lowest target needs, then none for the rest. A frame is a
 // keyframe from its first packet on, though only that packet's descriptor says so.

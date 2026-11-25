@@ -114,6 +114,32 @@ pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Resul
     Ok(Some(version))
 }
 
+/// Whether track `track` has an RTX or FlexFEC SSRC that the agreement in force does not
+/// pair with its media SSRC (`a=ssrc-group:FID` or `FEC-FR`), so the router re-offers
+/// (RTC-4). A track with neither, audio or video without RTX, needs no re-offer: the
+/// browser takes its media by MID.
+pub fn unannounced(p: PeerSession, track: u16) -> bool {
+    let t: u64 = int.widen(track)
+    if t >= list.len(p.tracks) {
+        return false
+    }
+    let si: u64 = int.widen(p.tracks[t].section)
+    let local = p.sections[si].agreed.local
+    let ssrc = p.tracks[t].ssrc
+    let rtx = p.tracks[t].rtx_ssrc
+    let fec = p.tracks[t].fec_ssrc
+    (rtx != 0 && !paired(local.rtx_pairs, (ssrc, rtx))) || (fec != 0 && !paired(local.fec_pairs, (ssrc, fec)))
+}
+
+fn paired(pairs: List[(u32, u32)], pair: (u32, u32)) -> bool {
+    for x in pairs {
+        if x == pair {
+            return true
+        }
+    }
+    false
+}
+
 /// Whether a re-offer was asked for while another was in flight (RTC-4).
 pub fn reoffer_due(p: PeerSession) -> bool {
     if let Some(_) = p.offered {

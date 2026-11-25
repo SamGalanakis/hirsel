@@ -641,6 +641,13 @@ fn f()->u8{2u8}"###)), src("b", "b.hirsel", false, lit(r###"pub type B=a.A"###))
         check(vec![
             core(vec![]),
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A=u16"###)), src("b", "b.hirsel", false, lit(r###"fn f(x:a.A)->u8{x}"###))])])]),
+        seq("assertion_value", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub const V:u8=1u8"###)), src("b", "b.hirsel", false, lit(r###"const _:u8=a.V+254u8"###)), src("b", "b#2.hirsel", false, lit(r###"const _:u8=a.V"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub const V:u8=2u8"###)), src("b", "b.hirsel", false, lit(r###"const _:u8=a.V+254u8"###)), src("b", "b#2.hirsel", false, lit(r###"const _:u8=a.V"###))])])]),
         seq("body_parse_refusal", vec![
         check(vec![
             core(vec![]),
@@ -1883,6 +1890,7 @@ const GATES: &[(&str, Gate)] = &[
     ("alias_cycle_added", Gate::Fallback),
     ("alias_cycle_body", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("alias_target", Gate::Fallback),
+    ("assertion_value", Gate::Fallback), // comptime-phase2-2693: b's two assertions read a.V; the second step refuses one
     ("backend_llvm", Gate::Fast),
     ("body_parse_refusal", Gate::Fallback),
     ("body_test_reference", Gate::Fast),

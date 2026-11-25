@@ -207,8 +207,9 @@
     "reason": "coverage-c4-tool-2604"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
-    "lines": 2641,
-    "reason": "stale-codec-1910"
+    "lines": 2649,
+    "raise_revision": 1,
+    "reason": "comptime-phase2-2693"
   },
   "crates/hirsel-core-driver/src/reuse.rs": {
     "lines": 1427,

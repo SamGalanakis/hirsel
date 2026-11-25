@@ -439,7 +439,13 @@ impl Own<'_> {
                         } else {
                             self.drop(now, q, strong, &mut vec![]);
                         }
-                        for &t in self.shadow[q].iter().filter(|t| !own.contains(t)) {
+                        // A join place overlapping one dropped through the join is that drop's:
+                        // `Two(..)` dropping `*v.case1.0` leaves `*v` and `*v.case1.1` undropped.
+                        let held = |t: &usize| {
+                            own.iter()
+                                .any(|&o| overlap(&self.tracked[o], &self.tracked[*t]))
+                        };
+                        for &t in self.shadow[q].iter().filter(|t| !held(t)) {
                             self.drop(now, t, false, &mut vec![]);
                         }
                     }

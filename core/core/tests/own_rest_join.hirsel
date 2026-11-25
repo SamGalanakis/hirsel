@@ -1,0 +1,26 @@
+type RestPair = RestTwo(String, String) | RestOne(String)
+
+// A `..` pattern drops each field it leaves unbound once (OWN-2), here on a value
+// selected from either of two places, so the match reads it through a join: round 0
+// takes RestTwo("ab", "cde") out of `deferred` and drops both strings (5), round 1
+// makes RestOne("xy") (2). A well-formedness check that took dropping the first field
+// through the join for a drop of the whole value refused the second field's drop as a
+// double drop, and the evaluator would not run the function at all.
+// expect: run rest_pattern_through_join() = 7
+fn rest_pattern_through_join() -> u64 {
+    let mut deferred: Option[RestPair] = Some(RestTwo("ab", "cde"))
+    let mut total = 0u64
+    let mut round = 0u64
+    while round < 2 {
+        let selected = match replace(mut deferred, None) {
+            Some(take p) => take p,
+            None => RestOne("xy"),
+        }
+        total += match take selected {
+            RestTwo(..) => 5,
+            RestOne(s) => string.byte_len(s),
+        }
+        round += 1
+    }
+    total
+}

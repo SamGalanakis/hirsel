@@ -31,7 +31,6 @@ pub enum Arrival<'a> {
     SealAnswer(u64),
     Settlement(u64, Settlement<'a>),
     HelperEnd(u64, HelperOutcome<'a>, Vec<Survivor>),
-    Credits(Vec<Credit>),
     /// Making stream, connection ordinal there, retained header, unused room.
     LastRelease(u32, u64, u64, u64),
     /// Home stream and node ordinal there.
@@ -42,7 +41,7 @@ pub enum Arrival<'a> {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Settlement<'a> {
-    Accepted(Vec<Credit>),
+    Accepted,
     Closed(Value<'a>),
     Withdrawn,
 }
@@ -302,10 +301,6 @@ fn credit(c: &mut Cursor<'_>) -> Result<Credit, Corrupt> {
     })
 }
 
-fn credits(c: &mut Cursor<'_>) -> Result<Vec<Credit>, Corrupt> {
-    (0..c.varint()?).map(|_| credit(c)).collect()
-}
-
 fn causes<'a>(c: &mut Cursor<'a>) -> Result<Vec<Cause<'a>>, Corrupt> {
     let count = c.varint()?;
     if count == 0 {
@@ -350,7 +345,7 @@ fn read_arrival<'a>(c: &mut Cursor<'a>) -> Result<Arrival<'a>, Corrupt> {
         3 => Arrival::Settlement(
             c.varint()?,
             match c.u8()? {
-                0 => Settlement::Accepted(credits(c)?),
+                0 => Settlement::Accepted,
                 1 => Settlement::Closed(read_value(c)?),
                 2 => Settlement::Withdrawn,
                 _ => return Err(Corrupt),
@@ -378,7 +373,6 @@ fn read_arrival<'a>(c: &mut Cursor<'a>) -> Result<Arrival<'a>, Corrupt> {
                 .collect::<Result<_, Corrupt>>()?;
             Arrival::HelperEnd(ordinal, outcome, survivors)
         }
-        5 => Arrival::Credits(credits(c)?),
         6 => Arrival::LastRelease(c.u32()?, c.varint()?, c.u64()?, c.u64()?),
         7 => Arrival::SharedRelease(c.u32()?, c.varint()?),
         8 => Arrival::Cancel,

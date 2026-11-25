@@ -551,10 +551,8 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 body.push(3);
                 put_varint(&mut body, position);
                 body.push(outcome);
-                match outcome {
-                    0 => put_varint(&mut body, 0),
-                    1 => body.extend(value),
-                    _ => {}
+                if outcome == 1 {
+                    body.extend(value);
                 }
             }
             Arrival::HelperEnd {

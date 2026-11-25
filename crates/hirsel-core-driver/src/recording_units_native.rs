@@ -648,5 +648,93 @@ fn rl9_shared_survives_its_helper() {
     }
 }
 
+/// One unit's send that waits: the root fills its one-slot connection, a task
+/// it spawns sends again and waits, and the root's receive frees the slot.
+const RL9_ACCEPTED: &str = r#"
+fn sender(take c: Client[u64]) -> u64 waits {
+    result.unwrap(conn.send(c, 7))
+    1
+}
+
+fn at_once(take n: u64) -> u64 { n }
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(c, 5))
+    let w = task.spawn(tasks, bytes 65536, take c, sender)
+    let y = task.spawn(tasks, bytes 65536, 0, at_once)
+    let z = result.unwrap(task.join(take y))
+    let a = result.unwrap(conn.receive(i))
+    let b = result.unwrap(conn.receive(i))
+    let d = result.unwrap(task.join(take w))
+    if z != 0 || a != 5 || b != 7 || d != 1 { return Error(Exit(status: 3)) }
+    result.unwrap(stdout.write(out, "accepted"))
+    Ok(())
+}
+"#;
+
+/// A waiting send's `Accepted` settlement (recording.md, "TAKE", amended by
+/// unit-tapes-u3e-2692), hand-derived before its first run. The root numbers
+/// the connection g+1 and its client g+2 at `conn.new`; `try_send` of 5
+/// fills the one slot, so the task's `conn.send` of 7 on client g+2 waits:
+/// an `ISSUE`, the stream's only `CONN_SEND`. The root's first receive takes
+/// 5 and frees the slot, the send is accepted, and the root takes its
+/// settlement: tag 3, the `ISSUE`'s position (its frame's place in the
+/// stream, counted from 1), outcome 0 and nothing after it. The items taken
+/// are 5 then 7, from inbox g+1.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_waiting_send_is_accepted() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame, op};
+
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record(RL9_ACCEPTED, dir.path(), "accepted", backend, "accepted");
+        let frames = rl8_root_frames(&path);
+        let g = frames
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u64;
+        let issues: Vec<_> = frames
+            .iter()
+            .enumerate()
+            .filter_map(|(at, f)| match f {
+                Frame::Issue { op: o, object, .. } if *o == op::CONN_SEND => {
+                    Some((at as u64 + 1, *object))
+                }
+                _ => None,
+            })
+            .collect();
+        let [(position, client)] = issues[..] else {
+            panic!("{backend:?}: {issues:?}")
+        };
+        assert_eq!(client, g + 2, "{backend:?}: the waiting send's client");
+        assert!(position < 128, "{backend:?}: a one-byte varint");
+        let mut settlements = Vec::new();
+        let mut items = Vec::new();
+        for f in &frames {
+            if let Frame::Take { body, .. } = f {
+                match body.arrival() {
+                    Arrival::Settlement(..) => settlements.push(body.bytes().to_vec()),
+                    Arrival::Item(inbox, v) => items.push((inbox, v.bytes().to_vec())),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(
+            settlements,
+            [vec![3, position as u8, 0]],
+            "{backend:?}: settlement"
+        );
+        let word = |v: u8| [vec![8, v], vec![0; 7], vec![0]].concat();
+        assert_eq!(
+            items,
+            [(g + 1, word(5)), (g + 1, word(7))],
+            "{backend:?}: items"
+        );
+    }
+}
+
 // RL8 natively, the ordering seam (feature `testing`).
 include!("recording_rl8_native.rs");

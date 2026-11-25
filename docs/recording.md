@@ -58,6 +58,13 @@ struct field. The helper-end survivor list names a kept `Shared` node (kind 1) a
 written in ascending (kind, stream, ordinal) order; RL9 gains a node that survives its home
 helper.
 
+Amendment (2026-11-25, unit-tapes-u3e-2692): the `credits` take (tag 5) and the credit list
+after an `Accepted` settlement are removed. Since every unit charge is admitted once in the
+limit table, an accepted send returns no bytes to its sender, and the bytes a unit gets back
+arrive as a `refund`, a `last release`, a `shared release` or a helper end's survivors; no
+language unit is ever sent credits. Tag 5 is now corrupt, and an `Accepted` body ends at its
+outcome byte. Format 14 keeps its number: a tape replays only on the build that wrote it.
+
 A program whose entry reaches a foreign function has no recording build. Recording and
 replay commands refuse it before building, reading a tape or running native code, as
 [FFI-8](spec/foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)
@@ -522,16 +529,15 @@ holds. Its body is one of:
 | item | the inbox's ordinal; the item's plain bytes and content in full; a handle snapshot for each handle it holds |
 | close | the inbox's ordinal (its last client was cleaned in another unit) |
 | seal answer | the ordinal of the connection whose inbox this unit cleaned. When it comes depends on how many sends other units had accepted before the seal, so the replaying unit takes the recorded answer and makes none of its own |
-| settlement of a waiting send | the send's issue position in this stream; `Accepted` with each credit's limit ordinal and amount, `Closed` with the returned item in full, or `Withdrawn` |
+| settlement of a waiting send | the send's issue position in this stream; `Accepted`, `Closed` with the returned item in full, or `Withdrawn` |
 | helper end | the helper handle's ordinal; the result in full with its handle snapshots, or the causes; and each survivor charge the owner keeps ([CONC-15](spec/tasks.md#conc-15-units)): every open connection, `Shared` node, held `Secret` designation, held sealed bytes, live key object or unretired agreement registry entry ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)), and unretired `UdpSocket` pool or group queue the helper paid for, each with its ordinal and amount |
-| credits | each credit's limit ordinal and amount |
 | last release | the connection's making stream and its ordinal there, its retained header and its unused room |
 | shared release | the `Shared` node's home stream and its ordinal there |
 | cancel | nothing: a cancellation request for this unit's root |
 | refund | the limit ordinal and amount of a refund another unit posted to this unit's mailbox (a key object whose charge this unit paid and whose holder ended elsewhere, among others), or of a charge released by a run-wide count (above): a registry entry, a `Secret` designation or the sealed bytes behind one, at the paying unit's own drop or at a drain. A post that carries a UDP retirement is its `RETIRED` frame, not a refund take |
 
 Each `TAKE` body starts with its arrival tag: item 0, close 1, seal answer 2, settlement 3,
-helper end 4, credits 5, last release 6, shared release 7, cancel 8, refund 9. A
+helper end 4, last release 6, shared release 7, cancel 8, refund 9; tag 5 is unused. A
 settlement's outcome tag is `Accepted` 0, `Closed` 1, `Withdrawn` 2; a helper end's is a
 result 0, `Failed` 1, `Cancelled` 2. Any other tag is corrupt.
 
@@ -606,8 +612,8 @@ ordinal and part, not by its position, as **Child processes and Unix sockets** i
 [What a recording holds](#what-a-recording-holds) says for every dropped handle. A refund
 a unit sends to another unit is no frame in the sender's stream: the sender's replay
 recomputes it from the charges and the drops it checks, and drops it at the other unit's
-mailbox as it drops published arrivals. The unit that receives it takes it as a `credits`
-or `refund` take.
+mailbox as it drops published arrivals. The unit that receives it takes it as a `refund`
+take.
 
 `conn.receive`, `conn.try_receive`, `conn.new`, `conn.client`, `shared.new` and
 `shared.share` are not frames. What they observe is the unit's own state after the takes
@@ -801,16 +807,13 @@ task bit is 0, because a take names no task. Then:
 | 0 | item | inbox ordinal `varint`; the item as a value |
 | 1 | close | inbox ordinal `varint` |
 | 2 | seal answer | connection ordinal `varint` |
-| 3 | settlement | the send's `ISSUE` position `varint`; outcome `u8`: 0 `Accepted` and a credit list, 1 `Closed` and the returned item as a value, 2 `Withdrawn` and nothing |
+| 3 | settlement | the send's `ISSUE` position `varint`; outcome `u8`: 0 `Accepted` and nothing, 1 `Closed` and the returned item as a value, 2 `Withdrawn` and nothing |
 | 4 | helper end | helper ordinal `varint`; outcome `u8`: 0 a result and the result as a value, 1 `Failed` and its causes, 2 `Cancelled` and its causes; survivor count `varint`, then the survivors in ascending (kind, stream, ordinal) order |
-| 5 | credits | a credit list |
 | 6 | last release | making stream `u32`; connection ordinal `varint` in that stream; retained header `u64`; unused room `u64` |
 | 7 | shared release | home stream `u32`; node ordinal `varint` |
 | 8 | cancel | nothing |
 | 9 | refund | limit ordinal `varint`; amount `u64` |
 
-- A **credit list** is a count `varint`, then per credit its limit ordinal `varint` and
-  amount `u64`.
 - **Causes** are a count `varint` of at least 1, then each cause of the chain, primary
   first: its kind `u8` in `CauseKind`'s declared order (`Overflow` 0 to `OutOfTime` 7), its
   site `u64`, then for `Fail` its message as `bytes`, for `Capacity` its requested and
@@ -998,7 +1001,7 @@ take order, and `hirsel test --replay` for whole programs.
 
 | law | bug | oracle and setup |
 |---|---|---|
-| **RL6** format 14 bytes | a stream number outside the block check, a `TAKE` that decodes to another arrival, a format 13 tape admitted | Hand-built byte strings: a block of stream 3 whose stream number is changed to 4 fails its check; each `TAKE` body in the table decodes to the arrival its hand-written bytes name; a valid format 13 tape is refused at open. Hand-built tapes with a sequence gap, a duplicate stream header, a repeated block, two swapped blocks of one stream, a block after its stream's `END`, a helper block of sequence 1 before its header, two headers with one (parent, spawn index), a short helper header, a cycle in which streams 3 and 4 each name the other as parent, a flipped byte in a middle block and a byte after the last `END` are each `Damaged` at the hand-counted block; a `TAKE` with point kind 2, arrival tag 10, snapshot tag 13, nonzero direction in a listener snapshot or survivor kind 8 is `Corrupt`. A stream with an absent parent is named `?.<stream number>`. A 2 MiB entry and a helper result in canonical form round-trip through `DATA`, with the receiver ordinal present in its helper-end take. Designations and survivors of kinds 2 and 7 keep their origin kinds. A `PORT_NEXT` payload crosses a block boundary through `DATA`, and a nonempty payload with an empty first chunk is `Corrupt`. |
+| **RL6** format 14 bytes | a stream number outside the block check, a `TAKE` that decodes to another arrival, a format 13 tape admitted | Hand-built byte strings: a block of stream 3 whose stream number is changed to 4 fails its check; each `TAKE` body in the table decodes to the arrival its hand-written bytes name; a valid format 13 tape is refused at open. Hand-built tapes with a sequence gap, a duplicate stream header, a repeated block, two swapped blocks of one stream, a block after its stream's `END`, a helper block of sequence 1 before its header, two headers with one (parent, spawn index), a short helper header, a cycle in which streams 3 and 4 each name the other as parent, a flipped byte in a middle block and a byte after the last `END` are each `Damaged` at the hand-counted block; a `TAKE` with point kind 2, arrival tag 5 or 10, an `Accepted` settlement with a byte after its outcome, snapshot tag 13, nonzero direction in a listener snapshot or survivor kind 8 is `Corrupt`. A stream with an absent parent is named `?.<stream number>`. A 2 MiB entry and a helper result in canonical form round-trip through `DATA`, with the receiver ordinal present in its helper-end take. Designations and survivors of kinds 2 and 7 keep their origin kinds. A `PORT_NEXT` payload crosses a block boundary through `DATA`, and a nonempty payload with an empty first chunk is `Corrupt`. |
 | **RL7** each unit replays alone | a helper's input that is not in its stream (an unrecorded take path, an entry stored as a digest) | A program whose root spawns two helpers that exchange items over connections, with one helper also doing a host `RANDOM`. Record it; replay each unit with `--unit` and every other helper stream's blocks deleted from the file. Each replay is `Sealed`, its scripted provider records zero calls, and each unit's printed values equal the hand-derived ones. Further cases: a helper is handed a virtual sealer that already sealed counter 5; alone it replays `seal(5)` as `Reused` and `seal(6)` to the recorded bytes, and RL5's search of the tape finds no key bytes. A helper draws from a `provide.random` made by the root while the root draws too; each unit alone replays its recorded draws, and the scripted provider records zero calls. The root draws once, hands its `Random` to a helper, and draws twice more with the helper's draw held between them by the hold hook: the root alone replays its three hand-derived draws, the first recomputed and the other two from its stream. The root's server task is parked in `provide.next` when the root sends the port's capability to a helper that then calls it: the root alone replays the call at the recorded position. |
 | **RL8** take positions | a take applied at another point of the unit's order than it was recorded | Using the ledger's hold hook, script when each arrival reaches a unit between its events. The recorded `TAKE` gaps equal the hand-counted event positions, and on replay each `try_receive` gives the hand-tabled `Ok` or `Empty` at each step, including a `release_take` that takes an older item before its retirement notice and two `try_receive` calls with no event between them, the second of which takes. A separate case, with the hook off, has one item published while its receiver is ready, so `take_single_item` takes it: its `TAKE` has the hand-counted gap and point, and replay delivers it at the same `receive`. One receiver is recorded twice, the hold hook releasing the item before the first pump and after an idle wake: both tapes hold the same hand-counted (gap, count), with point kinds 0 and 1, and each replays to the hand-tabled results. A `try_receive` that is `Empty`, a pump with no event between that takes the item, and a second `try_receive` that is `Ok` replay to `Empty` then `Ok`. A receiver task parked in `conn.receive` is woken by the scheduler's idle pump, which takes the item another task of the unit sent while the hook held it: its `TAKE` is kind 1 with the hand-counted gap and count. A `Shared` node crosses its own unit's connection and both holders are dropped at home: the item's `TAKE` holds the node's `Shared` snapshot, naming home stream 0 and the node's ordinal there, the arriving holder taking the next ordinal, and the last drop's `shared release` `TAKE` has the hand-counted gap and count and names the same node. The same node held in a struct field crosses the same way: the item's plain bytes zero only the holder's word, at its field's offset, and its one part is the node's snapshot. The cases run as native programs on Cranelift and LLVM: the hold hook is built only into test builds and the `testing` feature's runtime, never a production runtime, and a C object linked into the program calls its `hirsel_core_test_hold` steps between the program's runtime calls, adding no frame, event or take-point position. |
 | **RL9** streams of one recording agree | a recorder that writes an item one unit sent differently from the item another took, or an entry unlike its spawn | For each RL7 and RL8 recording, a test-only reader pairs every `CONN_SEND` with the `TAKE` it reached, and every `UNIT_SPAWN` with its child's entry. The sent items' canonical arguments equal the canonical arguments of the taken items, in connection order. The oracle is the hand-written list of sends. A `Shared` node whose only holder the root moves into a helper's entry is written there as a `Shared` snapshot naming home stream 0 and the node's root ordinal, the helper numbering it 1, and the spawn's arguments hold the same value in canonical form; the helper drops it, so its stream takes nothing and the root takes the `shared release` naming that node before the helper end, whose survivor list is empty. A helper makes a node and sends its only holder to the root, then ends while the root holds it: the root's helper-end `TAKE` lists it as a kind 1 survivor naming the helper's stream, the node's ordinal there and the node's charge, and the root's later drop of that holder takes the `shared release` naming the same survivor. |

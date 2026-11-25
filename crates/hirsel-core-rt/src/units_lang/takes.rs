@@ -80,9 +80,10 @@ pub(super) unsafe fn take(u: &mut LangUnit, took: &Took, id: usize) {
         // Its end take writes it, with the helper's outcome.
         Took::HelperEnd => return,
         Took::LastRelease => Arrival::LastRelease(id),
-        Took::Credits => {
-            Arrival::Unrecorded("a credits take, whose limit ordinals this build does not write")
-        }
+        // Only a model-ledger unit is sent credits; a language unit's charges
+        // return as refunds, releases and survivors, and the format has no
+        // credits take.
+        Took::Credits => Arrival::Unrecorded("a credits take, which the format has no frame for"),
         Took::SharedRelease => Arrival::SharedRelease(id),
         Took::Cancel => Arrival::Cancel,
     };

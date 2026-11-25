@@ -79,6 +79,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::rl8_take_positions_natively",
         "native::tests::rl9_shared_crosses_into_a_helper",
         "native::tests::rl9_shared_survives_its_helper",
+        "native::tests::rl9_waiting_send_is_accepted",
         "native::tests::test_replay_flag_records_and_replays",
         "native::tests::package_cred_grants_are_per_test_and_replay_uses_the_tape",
         "native::tests::served_scram_replays_with_the_same_send_calls",

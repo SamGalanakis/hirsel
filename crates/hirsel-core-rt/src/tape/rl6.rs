@@ -187,7 +187,6 @@ fn take_cases() {
     for (bytes, expected) in [
         (&[1, 4][..], Arrival::Close(4)),
         (&[2, 5], Arrival::SealAnswer(5)),
-        (&[5, 0], Arrival::Credits(vec![])),
         (
             &[
                 6, 3, 0, 0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0,
@@ -268,13 +267,7 @@ fn take_cases() {
     let returned = [1, 0x42, 0];
     for (settled, expected) in [
         (&[3, 1, 2][..], Settlement::Withdrawn),
-        (
-            &[3, 1, 0, 1, 2, 48, 0, 0, 0, 0, 0, 0, 0],
-            Settlement::Accepted(vec![Credit {
-                limit: 2,
-                amount: 48,
-            }]),
-        ),
+        (&[3, 1, 0][..], Settlement::Accepted),
         (
             &[3, 1, 1, 1, 0x42, 0],
             Settlement::Closed(Value::decode(&returned).unwrap()),
@@ -296,9 +289,16 @@ fn take_cases() {
         Decoder::default().block(&take(1, &[3, 1, 2]), false),
         Err(Corrupt)
     );
+    // An `Accepted` settlement carries nothing after its outcome.
+    assert_eq!(
+        Decoder::default().block(&[issue.as_slice(), &take(1, &[3, 1, 0, 0])].concat(), false),
+        Err(Corrupt)
+    );
 
     for body in [
         &b"\x0a"[..],
+        // Tag 5 (credits) was removed: no unit takes one.
+        b"\x05\0",
         b"\0\x07\0\x01\x01\x0d\0",
         b"\x04\0\0\0\0\x01\x08\0\0\0\0\0\0\0\0\0",
         // Cause kind 8 is past OutOfTime.

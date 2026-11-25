@@ -21,6 +21,9 @@ NATIVE_EXEC_TEST_CASES = [
 
 # These bodies use the real Linux OS Dir provider. Compile on the pool, execute
 # only on the invoking host; each body executes the shared fail-loud precondition.
+# The key is the owning test suite. core-driver-native is the native-integration
+# projection of the driver harness, so its ignored native::tests bodies have no
+# second shards under hirsel-core-driver-unittest.
 OPENAT2_TEST_CASES = {
     "hirsel-core-rt-unittest": [
         "entry_tests::c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv",
@@ -51,6 +54,8 @@ OPENAT2_TEST_CASES = {
     ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("provider_tests::")],
     "hirsel-core-driver-unittest": [
         "terminal_fixture::terminal_bits_follow_each_granted_descriptor",
+    ],
+    "core-driver-native": [
         "native::tests::dir_cranelift_entry",
         "native::tests::dir_llvm_entry",
         "native::tests::host_operations_cranelift",

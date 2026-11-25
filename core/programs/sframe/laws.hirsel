@@ -807,8 +807,8 @@ fn step_frame(step: u64, ctr: u64, l: sframe.Limits) -> Bytes {
     seal_rfc(mut s, b"", b"k2")
 }
 
-/// bug: a candidate committed before the open, a forward step past the bound, the jumped-from step evicted, or advance losing retained steps.
-/// oracle: SFRAME-8's bounds: 1 <= d <= forward, keep steps retained, keep >= forward, keep + 1 + forward <= 2^bits.
+/// bug: a candidate committed before the open, a forward step past the bound, the jumped-from step evicted, advance losing retained steps, or a removal whose oversized generation aliases an installed one.
+/// oracle: SFRAME-8's bounds: 1 <= d <= forward, keep steps retained, keep >= forward, keep + 1 + forward <= 2^bits, and a generation is generation << bits with generation < 2^(64 - bits).
 @test
 fn forward_bounds() -> Result[(), ()] {
     let l = sframe.limits()
@@ -824,6 +824,8 @@ fn forward_bounds() -> Result[(), ()] {
     check(opened(open_rfc(mut r, b"", step_frame(7, 1, l))), "a genuine d = forward frame does not open")
     check(opened(open_rfc(mut r, b"", step_frame(5, 1, l))), "the jumped-from step was evicted")
     check(opened(open_rfc(mut r, b"", step_frame(6, 0, l))), "a step passed over does not open")
+    check(!sframe.remove_generation(mut r, 4, 3 | (1 << 60)), "a removal of an oversized generation answers true")
+    check(opened(open_rfc(mut r, b"", step_frame(5, 3, l))), "a removal of an oversized generation removed generation 3")
     let unsound =[sframe.Follow(generation: 1, bits: 4, step: 0, forward: 2, keep: 1, floor: 0), sframe.Follow(generation: 9, bits: 2, step: 0, forward: 2, keep: 2, floor: 0)]
     for bad in unsound {
         let mut q = result.unwrap(sframe.receiver(suite(), Rfc, l))

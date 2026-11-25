@@ -12,7 +12,8 @@ each recorded publication to its own file without transcoding:
 | H.264 | fragmented MP4, an `avc3` track |
 
 It holds no PeerSession, so it needs no ICE, DTLS or SRTP and sends no RTP.
-It is not part of `//:hirsel-toolchain`.
+The installed toolchain ships it as `media_record@1`, with every package it binds; a
+program outside the repository binds it as `media_record = { major = 1 }`.
 
 ## 1. Use
 

@@ -229,12 +229,15 @@ the last.
 
 - `{ major }` alone binds a **toolchain package**. The installed toolchain supplies `std@1`,
   `store@1`, `runner@1`, `webrtc_sfu@1`, `turn@1`, `dtls@1`, `srtp@1`, `rtp@1`, `stun_ice@1`,
-  `media_bits@1`, `rtp_jitter@1`, `platform@1`, `search@1` and `mcp@1`. Each binds only
-  toolchain packages: `store@1`, `dtls@1`, `srtp@1`, `rtp@1`, `stun_ice@1`, `media_bits@1` and
-  `mcp@1` bind `std@1`; `runner@1` and `search@1` bind `std@1` and `store@1`; `platform@1`
-  binds `std@1`, `store@1` and `runner@1`; `turn@1` binds `std@1` and `stun_ice@1`;
-  `rtp_jitter@1` binds `std@1`, `media_bits@1` and `rtp@1`; `webrtc_sfu@1` binds `std@1`,
-  `store@1`, `runner@1` and the WebRTC packages other than `rtp_jitter@1`.
+  `media_bits@1`, `rtp_jitter@1`, `sframe@1`, `media_container@1`, `media_record@1`,
+  `platform@1`, `search@1` and `mcp@1`. Each binds only toolchain packages: `store@1`, `dtls@1`,
+  `srtp@1`, `rtp@1`, `stun_ice@1`, `media_bits@1` and `mcp@1` bind `std@1`; `runner@1` and
+  `search@1` bind `std@1` and `store@1`; `platform@1` binds `std@1`, `store@1` and `runner@1`;
+  `turn@1` binds `std@1` and `stun_ice@1`; `sframe@1` and `media_container@1` bind `std@1` and
+  `media_bits@1`; `rtp_jitter@1` binds `std@1`, `media_bits@1` and `rtp@1`; `webrtc_sfu@1`
+  binds `std@1`, `store@1`, `runner@1` and the WebRTC packages other than `rtp_jitter@1`;
+  `media_record@1` binds `std@1`, `media_bits@1`, `media_container@1`, `rtp@1`,
+  `rtp_jitter@1` and `webrtc_sfu@1`.
   Binding a package brings in the toolchain packages it binds. A workspace using a toolchain package cannot also bind that
   package as a member or published library. `core` is bound in every package and
   may not be declared.

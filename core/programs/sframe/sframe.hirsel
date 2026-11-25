@@ -701,7 +701,7 @@ pub fn remove(mut r: Receiver, id: u64) -> bool {
 }
 
 pub fn remove_generation(mut r: Receiver, bits: u8, generation: u64) -> bool {
-    if bits < 1 || bits > 16 {
+    if bits < 1 || bits > 16 || generation >> (64 - w8(bits)) != 0 {
         return false
     }
     let first = generation << w8(bits)

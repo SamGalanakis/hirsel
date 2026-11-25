@@ -591,7 +591,7 @@ _toolchain_packages = rule(
 
 # The toolchain packages other than std, in core-packages/: the names
 # package_content::TOOLCHAIN in hirsel-core-driver lists, with their bindings.
-TOOLCHAIN_PACKAGES = ["store", "runner", "media_bits", "rtp", "srtp", "dtls", "stun_ice", "turn", "webrtc_sfu", "rtp_jitter", "platform", "search", "mcp"]
+TOOLCHAIN_PACKAGES = ["store", "runner", "media_bits", "sframe", "media_container", "rtp", "srtp", "dtls", "stun_ice", "turn", "webrtc_sfu", "rtp_jitter", "media_record", "platform", "search", "mcp"]
 
 def hirsel_toolchain_packages(name, hirsel):
     sources = []

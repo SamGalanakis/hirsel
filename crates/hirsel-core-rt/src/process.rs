@@ -126,16 +126,7 @@ pub(crate) fn arm_host_parent() -> std::io::Result<()> {
         // A contained serving child has the container init as parent.
         .filter(|pid| *pid > 0)
         .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-    // SAFETY: these calls take no memory arguments and affect only this child.
-    unsafe {
-        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if libc::getppid() != expected {
-            return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
-        }
-    }
-    Ok(())
+    crate::host::sys::exit_with_parent(expected)
 }
 
 /// Take the place control socket once (field 0) or read the scratch grant (1).
@@ -370,7 +361,7 @@ fn map_hash_key() -> std::io::Result<[u8; 16]> {
     let mut remaining = &mut key[..];
     while !remaining.is_empty() {
         // SAFETY: remaining is a writable slice passed for exactly its length.
-        let n = unsafe { libc::getrandom(remaining.as_mut_ptr().cast(), remaining.len(), 0) };
+        let n = unsafe { crate::host::sys::random(remaining.as_mut_ptr(), remaining.len(), 0) };
         if n < 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::Interrupted {

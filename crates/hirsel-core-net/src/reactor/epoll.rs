@@ -15,6 +15,8 @@ pub(crate) type RawEvent = libc::epoll_event;
 /// A wake is an eventfd: woken by an eight-byte add, reported by its set.
 pub(crate) type WakerId = RawFd;
 pub(crate) type WakeSource = OwnedFd;
+/// The child a selector watches for exit: its pidfd.
+pub type Child<'a> = BorrowedFd<'a>;
 
 pub(crate) fn waker_id(source: &WakeSource) -> WakerId {
     source.as_raw_fd()
@@ -159,7 +161,7 @@ pub(crate) fn wake_source(epoll: RawFd, token: u64) -> io::Result<OwnedFd> {
 }
 
 impl Poller {
-    pub(super) fn new_epoll() -> io::Result<Arc<Self>> {
+    pub(super) fn new_readiness() -> io::Result<Arc<Self>> {
         let poller = Arc::new(Self {
             backend: Backend::Epoll {
                 epoll: selector()?,

@@ -4,7 +4,7 @@ use crate::host::path::{self as host, Refuse};
 use std::{
     ffi::{CStr, CString},
     io,
-    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
+    os::fd::{AsRawFd, IntoRawFd, OwnedFd},
 };
 
 // Validate user paths once, before any operation can touch the host. Internal
@@ -42,34 +42,11 @@ pub(crate) fn open_beneath(
         long = CString::new(path)?;
         &long
     };
-    let how = host::how(flags, refuse);
-    if crate::units::uses_file_ring() {
-        let entry = io_uring::opcode::OpenAt2::new(
-            io_uring::types::Fd(fd),
-            path.as_ptr(),
-            (&raw const how).cast(),
-        )
-        .build();
-        // SAFETY: the provider holds fd, and path and how are live through the CQE.
-        let raw = unsafe { crate::units::file_request(entry) }?;
-        // SAFETY: OPENAT2 succeeded and transfers a fresh descriptor.
-        return Ok(unsafe { OwnedFd::from_raw_fd(raw) });
-    }
-    host::open_beneath(fd, path, &how)
+    host::open_beneath(fd, path, &host::how(flags, refuse))
 }
 
 pub(super) fn close_file(fd: OwnedFd) -> io::Result<()> {
-    let fd = fd.into_raw_fd();
-    if crate::units::uses_file_ring() {
-        let entry = io_uring::opcode::Close::new(io_uring::types::Fd(fd)).build();
-        // SAFETY: the entry consumes the sole owned descriptor.
-        unsafe { crate::units::file_request(entry) }?;
-    } else {
-        // SAFETY: consumes the sole owned fd. Linux closes even on EINTR;
-        // retrying could close a newly reused descriptor.
-        syscall(unsafe { libc::close(fd) } as isize)?;
-    }
-    Ok(())
+    crate::host::file::close(fd.into_raw_fd())
 }
 pub(super) fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
     let split = path.iter().rposition(|&c| c == b'/');

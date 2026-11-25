@@ -1,0 +1,318 @@
+//! Small host calls on Darwin: errno, notices, sockets, peer credentials,
+//! randomness, a retry timer and the parent-exit arm.
+use std::{
+    io,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+};
+
+/// This thread's errno.
+#[inline(always)]
+pub(crate) fn errno() -> *mut libc::c_int {
+    // SAFETY: the location is this thread's own errno.
+    unsafe { libc::__error() }
+}
+
+fn owned(fd: libc::c_int) -> io::Result<OwnedFd> {
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a fresh descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn set_flags(fd: RawFd, descriptor: libc::c_int, status: libc::c_int) -> io::Result<()> {
+    // SAFETY: fcntl on a live descriptor with integer arguments.
+    unsafe {
+        if descriptor != 0 && libc::fcntl(fd, libc::F_SETFD, descriptor) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if status != 0 {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | status) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A one-way wakeup a writer posts and one reader takes: a pipe whose write
+/// end never blocks, so a signal handler can always post.
+pub(crate) struct Notice {
+    read: OwnedFd,
+    write: OwnedFd,
+}
+
+impl Notice {
+    /// `nonblocking` makes [`take`] on an empty notice fail with EAGAIN.
+    pub(crate) fn new(nonblocking: bool) -> io::Result<Self> {
+        let mut ends = [-1; 2];
+        // SAFETY: pipe writes exactly two new descriptors.
+        if unsafe { libc::pipe(ends.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let notice = Self {
+            read: owned(ends[0])?,
+            write: owned(ends[1])?,
+        };
+        let read_status = if nonblocking { libc::O_NONBLOCK } else { 0 };
+        set_flags(notice.read.as_raw_fd(), libc::FD_CLOEXEC, read_status)?;
+        set_flags(notice.write.as_raw_fd(), libc::FD_CLOEXEC, libc::O_NONBLOCK)?;
+        Ok(notice)
+    }
+
+    pub(crate) fn reader(&self) -> RawFd {
+        self.read.as_raw_fd()
+    }
+
+    pub(crate) fn writer(&self) -> RawFd {
+        self.write.as_raw_fd()
+    }
+}
+
+/// Post one wakeup to a notice's writer: one async-signal-safe write. A full
+/// pipe is already readable, so a failed post loses nothing.
+pub(crate) fn post(writer: RawFd) -> isize {
+    // SAFETY: one readable byte for this one write.
+    unsafe { libc::write(writer, [1u8].as_ptr().cast(), 1) }
+}
+
+/// Take posted wakeups from a notice's reader. Wakeups beyond one read's
+/// buffer stay readable and cost the reader one more turn.
+pub(crate) fn take(reader: RawFd) -> isize {
+    let mut drained = [0u8; 64];
+    // SAFETY: the buffer is writable for its length.
+    unsafe { libc::read(reader, drained.as_mut_ptr().cast(), drained.len()) }
+}
+
+/// A close-on-exec, nonblocking socket that never raises SIGPIPE, or -1
+/// with errno.
+pub(crate) fn socket(domain: libc::c_int, kind: libc::c_int) -> isize {
+    // SAFETY: success returns one fresh descriptor.
+    let fd = unsafe { libc::socket(domain, kind, 0) };
+    finish_socket(fd)
+}
+
+fn finish_socket(fd: libc::c_int) -> isize {
+    if fd < 0 {
+        return -1;
+    }
+    // SAFETY: a fresh descriptor this call owns.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    let one: libc::c_int = 1;
+    // SAFETY: an int option on a live socket.
+    let nosigpipe = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&raw const one).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if nosigpipe < 0 || set_flags(fd, libc::FD_CLOEXEC, libc::O_NONBLOCK).is_err() {
+        // Dropping `owned` closes fd; keep the first failure's errno.
+        let saved = io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO);
+        drop(owned);
+        // SAFETY: this thread's errno.
+        unsafe { *errno() = saved };
+        return -1;
+    }
+    use std::os::fd::IntoRawFd;
+    owned.into_raw_fd() as isize
+}
+
+/// Accept one close-on-exec, nonblocking connection, or -1 with errno.
+///
+/// # Safety
+/// `address` and `len` are null or a writable address and its length.
+pub(crate) unsafe fn accept(
+    fd: RawFd,
+    address: *mut libc::sockaddr,
+    len: *mut libc::socklen_t,
+) -> isize {
+    // SAFETY: by the contract.
+    finish_socket(unsafe { libc::accept(fd, address, len) })
+}
+
+/// Darwin has no socket option naming a protocol; a stream socket of an
+/// Internet family is TCP.
+pub(crate) const PROTOCOL: Option<libc::c_int> = None;
+
+/// The address family of the socket `fd`.
+pub(crate) fn socket_domain(fd: RawFd) -> io::Result<libc::c_int> {
+    // SAFETY: integer-only address storage, sized by len.
+    let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: address and len are live and sized for the call.
+    if unsafe { libc::getsockname(fd, (&raw mut address).cast(), &mut len) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(libc::c_int::from(address.ss_family))
+}
+
+/// The UID of the process at the other end of a connected Unix stream.
+pub(crate) fn peer_uid(fd: RawFd) -> Option<u32> {
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: both outputs are live.
+    (unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } == 0).then_some(uid)
+}
+
+/// Darwin reports a peer's shutdown as readable end of stream; there is no
+/// separate poll bit.
+pub(crate) const PEER_CLOSED: libc::c_short = 0;
+
+/// A [`random`] flag. Darwin's pool is seeded before user space runs, so no
+/// draw waits and the flag has no effect.
+pub(crate) const RANDOM_NOWAIT: u32 = 1;
+
+/// Fill a prefix of `len` bytes at `data` from the kernel's pool, returning
+/// its length, or -1 with errno. One `getentropy` call fills at most 256.
+///
+/// # Safety
+/// `data` is writable for `len` bytes.
+pub(crate) unsafe fn random(data: *mut u8, len: usize, _flags: u32) -> isize {
+    let len = len.min(256);
+    // SAFETY: by the contract, for the clamped length.
+    if unsafe { libc::getentropy(data.cast(), len) } < 0 {
+        return -1;
+    }
+    len as isize
+}
+
+/// A descriptor that turns readable every millisecond until [`tick`]: a
+/// kqueue holding one periodic timer.
+pub(crate) fn timer() -> io::Result<OwnedFd> {
+    // SAFETY: success returns one fresh descriptor.
+    let kq = owned(unsafe { libc::kqueue() })?;
+    set_flags(kq.as_raw_fd(), libc::FD_CLOEXEC, 0)?;
+    let change = libc::kevent {
+        ident: 1,
+        filter: libc::EVFILT_TIMER,
+        flags: libc::EV_ADD,
+        fflags: 0,
+        data: 1, // milliseconds
+        udata: std::ptr::null_mut(),
+    };
+    // SAFETY: one change record and no output.
+    let rc = unsafe {
+        libc::kevent(
+            kq.as_raw_fd(),
+            &change,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(kq)
+}
+
+/// Consume a [`timer`]'s expirations.
+pub(crate) fn tick(fd: RawFd) -> isize {
+    // SAFETY: an all-zero kevent is a valid output slot.
+    let mut fired: libc::kevent = unsafe { std::mem::zeroed() };
+    let now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: one writable output record and a zero timeout.
+    unsafe { libc::kevent(fd, std::ptr::null(), 0, &mut fired, 1, &now) as isize }
+}
+
+/// Die with the parent `expected`. Darwin has no parent-death signal, so a
+/// thread waits on the parent's exit and kills this process. Fails with ESRCH
+/// when the parent is already gone.
+pub(crate) fn exit_with_parent(expected: libc::pid_t) -> io::Result<()> {
+    // SAFETY: success returns one fresh descriptor.
+    let kq = owned(unsafe { libc::kqueue() })?;
+    let change = libc::kevent {
+        ident: expected as usize,
+        filter: libc::EVFILT_PROC,
+        flags: libc::EV_ADD | libc::EV_ONESHOT,
+        fflags: libc::NOTE_EXIT,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    // SAFETY: one change record and no output.
+    if unsafe {
+        libc::kevent(
+            kq.as_raw_fd(),
+            &change,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // Armed before the check, so a parent that exits after it is seen.
+    // SAFETY: no arguments.
+    if unsafe { libc::getppid() } != expected {
+        return Err(io::Error::from_raw_os_error(libc::ESRCH));
+    }
+    std::thread::Builder::new()
+        .name("hirsel-parent".into())
+        .spawn(move || {
+            // SAFETY: an all-zero kevent is a valid output slot.
+            let mut fired: libc::kevent = unsafe { std::mem::zeroed() };
+            loop {
+                // SAFETY: one writable output record; wait without a timeout.
+                let n = unsafe {
+                    libc::kevent(
+                        kq.as_raw_fd(),
+                        std::ptr::null(),
+                        0,
+                        &mut fired,
+                        1,
+                        std::ptr::null(),
+                    )
+                };
+                if n > 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    break;
+                }
+            }
+            // SAFETY: ends this process, as the Linux parent-death signal does.
+            unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+        })?;
+    Ok(())
+}
+
+/// This thread's kernel thread id.
+#[cfg(feature = "prof")]
+pub(crate) fn thread_id() -> u64 {
+    let mut id = 0u64;
+    // SAFETY: a null thread names the caller; id is a live output.
+    unsafe { libc::pthread_threadid_np(0, &mut id) };
+    id
+}
+
+#[cfg(feature = "prof")]
+/// This thread's stack as `(lowest address, one past the highest)`. Darwin
+/// reports the stack's top address and its size.
+pub(crate) fn stack_bounds() -> Option<(usize, usize)> {
+    // SAFETY: queries on the calling thread.
+    let (top, size) = unsafe {
+        let this = libc::pthread_self();
+        (
+            libc::pthread_get_stackaddr_np(this).addr(),
+            libc::pthread_get_stacksize_np(this),
+        )
+    };
+    Some((top.checked_sub(size)?, top))
+}
+
+#[cfg(feature = "record")]
+/// Run this thread only on time other threads leave: Darwin's background
+/// band. Best effort; a refusal leaves normal priority.
+pub(crate) fn background_thread() {
+    // SAFETY: affects only the calling thread.
+    unsafe { libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG) };
+}

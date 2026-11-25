@@ -1,58 +1,26 @@
 //! Probe the same descriptor-relative operations required by NET-12 and NET-13.
+use crate::host::unix as host;
 use std::fs::File;
 use std::io;
 use std::os::{
-    fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
-    linux::fs::MetadataExt as _,
-    unix::net::{UnixListener, UnixStream},
+    fd::{BorrowedFd, OwnedFd},
+    unix::net::UnixListener,
 };
 
-/// A Linux pathname address leaves one byte for the terminator.
+/// A pathname address leaves one byte for the terminator.
 pub const MAX_PATH_BYTES: usize =
     size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path) - 1;
-
-#[repr(C)]
-struct OpenHow {
-    flags: u64,
-    mode: u64,
-    resolve: u64,
-}
 
 pub fn open_beneath(
     root: BorrowedFd<'_>,
     path: &std::ffi::CStr,
     flags: i32,
 ) -> io::Result<OwnedFd> {
-    let how = OpenHow {
-        flags: (flags | libc::O_CLOEXEC) as u64,
-        mode: 0,
-        resolve: 0x08 | 0x04, // RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS
-    };
-    // SAFETY: open_how and the C path are pinned for the resolved open.
-    let fd = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            root.as_raw_fd(),
-            path.as_ptr(),
-            &how,
-            std::mem::size_of_val(&how),
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the kernel returned an owned descriptor.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    host::open_beneath(root, path, flags)
 }
 
 pub fn isolate_binding_thread(dir: BorrowedFd<'_>) -> io::Result<()> {
-    // SAFETY: the probe and the bind helper use only this thread's copied fs state.
-    unsafe {
-        if libc::unshare(libc::CLONE_FS) < 0 || libc::fchdir(dir.as_raw_fd()) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
+    host::isolate_binding_thread(dir)
 }
 
 pub fn probe() -> io::Result<()> {
@@ -63,26 +31,21 @@ pub fn probe() -> io::Result<()> {
     }
     let private = PrivateDir::new().map_err(|e| requires("a private probe directory", e))?;
     let root = File::open(&private.0).map_err(|e| requires("opening the probe directory", e))?;
-    let parent = open_beneath(root.as_fd(), c".", libc::O_PATH | libc::O_DIRECTORY)
-        .map_err(|e| requires("openat2", e))?;
+    let parent =
+        open_beneath(root.as_fd(), c".", host::DIRECTORY).map_err(|e| requires("openat2", e))?;
     let binding = std::thread::Builder::new()
         .name("hirsel-unix-probe".into())
         .spawn(move || {
             isolate_binding_thread(parent.as_fd())
-                .map_err(|e| requires("unshare(CLONE_FS) and fchdir", e))?;
+                .map_err(|e| requires("a private working directory", e))?;
             UnixListener::bind("socket").map_err(|e| requires("bind and listen", e))
         })
         .map_err(|e| requires("a bind helper thread", e))?;
     let listener = binding
         .join()
         .map_err(|_| io::Error::other("Unix bind helper stopped"))??;
-    let endpoint = open_beneath(root.as_fd(), c"socket", libc::O_PATH | libc::O_NOFOLLOW)
-        .map_err(|e| requires("openat2 on the socket endpoint", e))?;
-    if File::from(endpoint.try_clone()?).metadata()?.st_mode() & libc::S_IFMT != libc::S_IFSOCK {
-        return Err(io::Error::other("Unix probe did not pin a socket"));
-    }
-    let _client = UnixStream::connect(format!("/proc/self/fd/{}", endpoint.as_raw_fd()))
-        .map_err(|e| requires("connect through /proc/self/fd", e))?;
+    let _client = host::connect_pinned(root.as_fd(), c"socket")
+        .map_err(|e| requires("connecting to the pinned endpoint", e))?;
     drop(listener);
     Ok(())
 }

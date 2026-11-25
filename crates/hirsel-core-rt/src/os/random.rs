@@ -18,7 +18,7 @@ pub(super) fn issue(request: &mut Request) -> Outcome {
     unsafe impl Send for Pinned<'_> {}
 
     // Only an early boot's unseeded pool can wait.
-    let result = match draw(request, libc::GRND_NONBLOCK) {
+    let result = match draw(request, crate::host::sys::RANDOM_NOWAIT) {
         Err(error) if error.raw_os_error() == Some(libc::EAGAIN) => {
             let pinned = Pinned(request);
             crate::units::off_slot(move || {
@@ -65,7 +65,7 @@ fn read(data: *mut u8, len: usize, flags: u32) -> io::Result<usize> {
         return read(data, len, flags);
     }
     // SAFETY: fill's callers provide a live writable range of the given length.
-    super::syscall(unsafe { libc::getrandom(data.cast(), len, flags) } as isize).map(|n| n as usize)
+    super::syscall(unsafe { crate::host::sys::random(data, len, flags) }).map(|n| n as usize)
 }
 
 #[cfg(test)]

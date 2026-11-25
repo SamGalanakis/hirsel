@@ -21,8 +21,9 @@ https://github.com/SamGalanakis/hirsel-lang/releases/tag/toolchain-llvm-23.1.5.
 
 - `build-static-lld DIR`, `static-lld-elf-macho.patch`: build the toolchain image's
   `bin/ld.lld` (the lock's `static_lld` record). See below.
-- `darwin/libSystem.symbols`: every libSystem symbol a program may import on
-  `aarch64-apple-darwin`; the link kit turns it into `libSystem.tbd`. See Link kit.
+- `darwin/<library>.symbols`: every symbol of libSystem, CoreFoundation or Security a
+  program may import on `aarch64-apple-darwin`; the link kit turns each into
+  `<library>.tbd`. See Link kit.
 - `build-libllvm DIR ARTIFACTS`, `engine_llvm.py`: build the compiler's engine libLLVM
   (the lock's `engine_llvm` record) and guard it. See below.
 
@@ -136,12 +137,16 @@ kit's identity and enters every build ID. The runtime archive's own
 `compiler_builtins` provides every compiler builtin, so the kit carries no
 compiler-rt builtins.
 
-For `aarch64-apple-darwin` the kit holds one file, `libSystem.tbd`: a TBD v4 text
-stub with install name `/usr/lib/libSystem.B.dylib` that exports exactly the names
-in `darwin/libSystem.symbols`, so an import off the list fails the link with its
-name. The kit refuses `fsync` and `fdatasync` in the list (Darwin durability is
+For `aarch64-apple-darwin` the kit holds one TBD v4 text stub per library, each
+exporting exactly the names in `darwin/<library>.symbols`, so an import off a list
+fails the link with its name: `libSystem.tbd` (install name
+`/usr/lib/libSystem.B.dylib`), and `CoreFoundation.tbd` and `Security.tbd` (their
+framework install names) for Trust.System's Keychain read (DECISIONS D4). A program
+links every stub with `-dead_strip_dylibs`, so a framework it never reaches leaves
+no load command. The kit refuses `fsync` and `fdatasync` in the list (Darwin durability is
 `fcntl(F_FULLFSYNC)`, STORE-SPEC §3.3c), and every name must be exported for arm64
-macOS by Zig's `lib/libc/darwin/libSystem.tbd` at the abilists commit. Adding a
+macOS by Zig's `lib/libc/darwin/libSystem.tbd` at the abilists commit. Zig ships no
+framework stubs, so the CoreFoundation and Security names are checked on the Mac day. Adding a
 name is a reviewed one-line change. No Apple file is shipped. The manifest row
 records the macOS floor (26.0). `:glibc_floor` unpacks the same `libc6` packages as
 `<triple>/` loader and library directories for running executables at the
@@ -153,8 +158,9 @@ floor through that loader (never a link input).
 
 The proof runs clang's version command, links and runs C with the pinned lld,
 builds a static AArch64 executable and runs it directly with the input qemu
-(no binfmt), links an arm64 Mach-O against the kit's `libSystem.tbd` and checks its
-floor, load commands, signature and imports (and that an `fsync` import fails to link), then checks the C executable with the input Valgrind and
+(no binfmt), links an arm64 Mach-O against the kit's Darwin stubs and checks its
+floor, load commands, signature and imports (that an `fsync` import fails to link,
+and that only a Keychain read loads Security.framework), then checks the C executable with the input Valgrind and
 `VALGRIND_LIB`. It checks the pinned clang/lld versions, requires output markers from both
 executables and an explicit zero-error Valgrind summary, then requires
 Valgrind to refuse a planted 32-byte leak with exit 97. A skipped step fails.

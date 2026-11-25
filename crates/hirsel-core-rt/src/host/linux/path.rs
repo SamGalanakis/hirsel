@@ -37,13 +37,27 @@ pub(crate) fn how(flags: i32, refuse: Refuse) -> How {
     how
 }
 
-/// Open `path` beneath the directory `fd` as `how` describes.
+/// Open `path` beneath the directory `fd` as `how` describes, through the
+/// unit's file ring when its pool owns one.
 pub(crate) fn open_beneath(fd: RawFd, path: &CStr, how: &How) -> io::Result<OwnedFd> {
-    // SAFETY: openat2 reads the pinned path and open_how for the call only.
-    let raw = unsafe { libc::syscall(libc::SYS_openat2, fd, path.as_ptr(), how, size_of::<How>()) };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: a successful openat2 transfers a fresh descriptor.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw as i32) })
+    let raw = if crate::units::uses_file_ring() {
+        let entry = io_uring::opcode::OpenAt2::new(
+            io_uring::types::Fd(fd),
+            path.as_ptr(),
+            (&raw const *how).cast(),
+        )
+        .build();
+        // SAFETY: the provider holds fd, and path and how are live through the CQE.
+        unsafe { crate::units::file_request(entry) }?
+    } else {
+        // SAFETY: openat2 reads the pinned path and open_how for the call only.
+        let raw =
+            unsafe { libc::syscall(libc::SYS_openat2, fd, path.as_ptr(), how, size_of::<How>()) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        raw as i32
+    };
+    // SAFETY: a successful open transfers a fresh descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }

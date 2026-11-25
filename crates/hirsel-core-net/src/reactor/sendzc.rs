@@ -18,7 +18,7 @@
 //! every idle slot: a ring that stopped sending holds no slot bytes, and a
 //! connection that is not sending never holds a slot. A refused registration (a memory-lock limit) leaves the slot
 //! unregistered, and its sends name its bytes directly.
-use super::{Backend, Poller, Uring};
+use super::{Backend, Poller, TxState, Uring};
 use std::{
     collections::HashMap,
     io,
@@ -88,18 +88,6 @@ impl Drop for Table {
             }
         }
     }
-}
-
-/// What a slot's latest send has done.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TxState {
-    /// Nothing submitted since the slot was taken.
-    Filling,
-    /// The kernel has not answered the send yet.
-    Sending,
-    /// The kernel accepted this many bytes, or failed with `-errno`. Its
-    /// bytes stay immutable until the slot is dropped.
-    Sent(i32),
 }
 
 /// A claim on one transmit slot. The bytes are writable only before the

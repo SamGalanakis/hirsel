@@ -4,15 +4,15 @@ use std::{io, net::SocketAddr, num::NonZeroU16};
 
 mod rules;
 pub use rules::UdpRules;
-mod linux;
 pub(crate) mod measure;
 mod members;
 mod receive;
 mod send;
-pub use linux::Socket;
+mod socket;
 pub use members::{MemberProducer, MemberReader, WriterList, member_queue};
 pub use receive::{Captured, ReceivePool};
 pub use send::Window;
+pub use socket::Socket;
 
 pub const HEADER_BYTES: usize = 256;
 pub const FULL_SLOT_BYTES: u32 = 65_792;

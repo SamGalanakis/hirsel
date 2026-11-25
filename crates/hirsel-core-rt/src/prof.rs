@@ -245,8 +245,7 @@ impl Worker {
         let Some(shared) = RUN.lock().unwrap().clone() else {
             return Self(false);
         };
-        // SAFETY: gettid has no operands.
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+        let tid = crate::host::sys::thread_id() as u32;
         let (thread, capacity) = match Thread::new(tid, shared.chunk_bytes) {
             Ok(thread) => (thread, shared.chunk_bytes),
             Err(_) => (Thread::new(tid, 0).unwrap(), 0),

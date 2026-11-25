@@ -26,18 +26,7 @@ fn zero_range(fd: i32, offset: u64, len: u64, direct: bool) -> Outcome {
         let used = count.div_ceil(ZERO_BYTES);
         iov[used - 1].iov_len = count - (used - 1) * ZERO_BYTES;
         let at = at.expect("zero_at is positioned");
-        if ring {
-            let entry =
-                io_uring::opcode::Writev::new(io_uring::types::Fd(fd), iov.as_ptr(), used as u32)
-                    .offset(at as u64)
-                    .build();
-            // SAFETY: the provider holds fd and this frame pins the iovecs and zero region.
-            unsafe { crate::units::file_request(entry) }.map(|n| n as usize)
-        } else {
-            // SAFETY: fd and the initialized vector are live throughout pwritev.
-            super::syscall(unsafe { libc::pwritev(fd, iov.as_ptr(), used as i32, at) })
-                .map(|n| n as usize)
-        }
+        crate::host::file::zero_part(fd, &iov[..used], at, ring)
     })
 }
 
@@ -125,27 +114,5 @@ fn complete(
 }
 
 fn write_part(fd: i32, bytes: &[u8], offset: Option<i64>, ring: bool) -> std::io::Result<usize> {
-    if ring {
-        let entry = io_uring::opcode::Write::new(
-            io_uring::types::Fd(fd),
-            bytes.as_ptr(),
-            bytes
-                .len()
-                .min(i32::MAX as usize & !(DIRECT_ALIGNMENT as usize - 1)) as u32,
-        )
-        .offset(offset.map_or(u64::MAX, |at| at as u64))
-        .build();
-        // SAFETY: the provider keeps fd and bytes live until the call's CQE.
-        let result = unsafe { crate::units::file_request(entry) }?;
-        return Ok(result as usize);
-    }
-    // SAFETY: fd and bytes remain live through the syscall.
-    let result = unsafe {
-        let data = bytes.as_ptr().cast();
-        match offset {
-            Some(at) => libc::pwrite(fd, data, bytes.len(), at),
-            None => libc::write(fd, data, bytes.len()),
-        }
-    };
-    super::syscall(result).map(|result| result as usize)
+    crate::host::file::write_part(fd, bytes, offset, ring, DIRECT_ALIGNMENT)
 }

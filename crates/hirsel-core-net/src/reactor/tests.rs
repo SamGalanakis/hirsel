@@ -112,7 +112,7 @@ fn a_socket_registered_by_an_exited_thread_still_reports_readiness() {
 #[test]
 fn a_writer_parked_beside_a_waiting_reader_is_woken_alone() {
     use std::io::Read;
-    let mut makers: Vec<fn() -> io::Result<Arc<Poller>>> = vec![Poller::new_epoll];
+    let mut makers: Vec<fn() -> io::Result<Arc<Poller>>> = vec![Poller::new_readiness];
     if kernel_offers_io_uring() {
         makers.push(Poller::new_uring);
     }
@@ -332,7 +332,7 @@ fn readiness_beyond_the_completion_queue_is_all_reported() {
             let entries = ring.ring.cq_entries() as u32;
             (Poller::from_uring(ring), entries)
         }
-        Reactor::Epoll => (Poller::new_epoll().unwrap(), CQ_ENTRIES),
+        Reactor::Epoll => (Poller::new_readiness().unwrap(), CQ_ENTRIES),
     };
     // Keep the burst at three times the CQ while fitting within 4,096 fds.
     let socket_count = 3 * completion_entries as usize;

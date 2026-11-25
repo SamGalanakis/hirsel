@@ -20,7 +20,7 @@ pub(super) struct PoolHooks {
     pub(super) off_slot: fn(&mut (dyn FnMut() + Send)) -> bool,
     pub(super) take_slot: fn(),
     pub(super) uses_file_ring: fn() -> bool,
-    pub(super) file_request: unsafe fn(io_uring::squeue::Entry) -> std::io::Result<i32>,
+    pub(super) file_request: unsafe fn(hirsel_core_net::FileEntry) -> std::io::Result<i32>,
 }
 
 static POOL_HOOKS: OnceLock<PoolHooks> = OnceLock::new();

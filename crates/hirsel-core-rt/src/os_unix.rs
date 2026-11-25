@@ -1,7 +1,10 @@
 //! Linux AF_UNIX operations. Bind uses a private cwd. Connect and send-to
 //! retain an O_PATH descriptor to the endpoint until the operation settles.
 use crate::{
-    host::path::{DIRECTORY_HANDLE, LEAF_HANDLE, Refuse},
+    host::{
+        path::{DIRECTORY_HANDLE, LEAF_HANDLE, Refuse},
+        unix::{self, Endpoint},
+    },
     net::DENIED,
     os::{OsProvider, open_beneath},
     os_net::{Due, adopt_socket, deadline, error, retry, signal},
@@ -121,7 +124,7 @@ pub(crate) unsafe fn receive_operator() -> io::Result<Option<(OwnedFd, u32)>> {
             Ok(value)
         }
     };
-    if option(libc::SO_DOMAIN)? != libc::AF_UNIX
+    if crate::host::sys::socket_domain(OPERATOR_FD)? != libc::AF_UNIX
         || option(libc::SO_TYPE)? != libc::SOCK_STREAM
         || option(libc::SO_ACCEPTCONN)? != 1
     {
@@ -160,13 +163,9 @@ fn bound_at(listener: &OwnedFd, root: BorrowedFd<'_>, path: &str) -> bool {
     let Ok(target) = pinned_socket(root, path) else {
         return false;
     };
-    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: a live O_PATH descriptor and its result slot.
-    if unsafe { libc::fstat(target.as_raw_fd(), stat.as_mut_ptr()) } < 0 {
-        return false;
-    }
-    let stat = unsafe { stat.assume_init() };
-    (bound.dev(), bound.ino()) == (stat.st_dev, stat.st_ino)
+    target
+        .identity()
+        .is_ok_and(|identity| identity == (bound.dev(), bound.ino()))
 }
 
 /// Adopt the launcher's operator listener for a UNIX_LISTEN that names its socket.
@@ -212,27 +211,6 @@ pub(crate) fn admitted(os: &OsProvider, key: u64) -> Option<u32> {
     }
 }
 
-/// The UID of the process at the other end of a connected stream.
-fn peer_uid(fd: BorrowedFd<'_>) -> Option<u32> {
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: cred and len are live, sized for SO_PEERCRED.
-    let rc = unsafe {
-        libc::getsockopt(
-            fd.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut cred).cast(),
-            &mut len,
-        )
-    };
-    (rc == 0).then_some(cred.uid)
-}
-
 fn host(code: io::Error) -> i32 {
     code.raw_os_error().unwrap_or(libc::EIO)
 }
@@ -250,13 +228,7 @@ fn address(path: &[u8]) -> (libc::sockaddr_un, libc::socklen_t) {
 
 fn socket(kind: i32) -> Result<OwnedFd> {
     // SAFETY: success returns one fresh descriptor.
-    let fd = retry(|| unsafe {
-        libc::socket(
-            libc::AF_UNIX,
-            kind | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-            0,
-        ) as isize
-    })?;
+    let fd = retry(|| crate::host::sys::socket(libc::AF_UNIX, kind))?;
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
@@ -271,7 +243,7 @@ fn pinned_parent<'p>(root: BorrowedFd<'_>, path: &'p str) -> io::Result<(OwnedFd
     Ok((dir, name))
 }
 
-pub(crate) fn pinned_socket(root: BorrowedFd<'_>, path: &str) -> io::Result<OwnedFd> {
+pub(crate) fn pinned_socket(root: BorrowedFd<'_>, path: &str) -> io::Result<Endpoint> {
     let (parent, name) =
         pinned_parent(root, path).map_err(|_| io::Error::from_raw_os_error(libc::EACCES))?;
     let target = open_beneath(
@@ -287,7 +259,7 @@ pub(crate) fn pinned_socket(root: BorrowedFd<'_>, path: &str) -> io::Result<Owne
     if unsafe { stat.assume_init() }.st_mode & libc::S_IFMT != libc::S_IFSOCK {
         return Err(io::Error::from_raw_os_error(libc::EACCES));
     }
-    Ok(target)
+    Ok(Endpoint::new(parent, name, target))
 }
 
 pub(crate) fn private_bind(fd: BorrowedFd<'_>, parent: OwnedFd, name: &str) -> Result<()> {
@@ -379,7 +351,7 @@ fn done(outcome: Outcome) -> Step {
     }
 }
 
-fn endpoint(os: &OsProvider, n: &UnixRequest) -> io::Result<OwnedFd> {
+fn endpoint(os: &OsProvider, n: &UnixRequest) -> io::Result<Endpoint> {
     let root = os
         .unix_roots
         .get(n.root)
@@ -387,14 +359,14 @@ fn endpoint(os: &OsProvider, n: &UnixRequest) -> io::Result<OwnedFd> {
     pinned_socket(root.as_fd(), n.path)
 }
 
-fn pinned_address(target: &OwnedFd) -> (libc::sockaddr_un, libc::socklen_t) {
-    address(format!("/proc/self/fd/{}", target.as_raw_fd()).as_bytes())
-}
-
-fn connect(fd: i32, target: &OwnedFd) -> Result<isize> {
-    let (addr, len) = pinned_address(target);
-    // SAFETY: fd and its pinned target remain live through the syscall.
-    retry(|| unsafe { libc::connect(fd, (&addr as *const libc::sockaddr_un).cast(), len) as isize })
+fn connect(fd: i32, target: &Endpoint) -> Result<isize> {
+    unix::reach(target, |path| {
+        let (addr, len) = address(path);
+        // SAFETY: fd and its pinned target remain live through the syscall.
+        retry(|| unsafe {
+            libc::connect(fd, (&addr as *const libc::sockaddr_un).cast(), len) as isize
+        })
+    })
 }
 
 /// Accept one connection; on a listener that admits only `uid`, a connection from any
@@ -403,15 +375,10 @@ pub(crate) fn accept(sockets: &mut Sockets, fd: i32, uid: Option<u32>) -> Result
     let accepted = loop {
         // SAFETY: no peer address is requested. Success returns a fresh descriptor.
         let accepted = retry(|| unsafe {
-            libc::accept4(
-                fd,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-            ) as isize
+            crate::host::sys::accept(fd, std::ptr::null_mut(), std::ptr::null_mut())
         })?;
         let accepted = unsafe { OwnedFd::from_raw_fd(accepted as i32) };
-        if uid.is_none_or(|uid| peer_uid(accepted.as_fd()) == Some(uid)) {
+        if uid.is_none_or(|uid| crate::host::sys::peer_uid(accepted.as_raw_fd()) == Some(uid)) {
             break accepted;
         }
     };
@@ -420,21 +387,23 @@ pub(crate) fn accept(sockets: &mut Sockets, fd: i32, uid: Option<u32>) -> Result
         .map_err(host)
 }
 
-fn send(fd: i32, buf: &Buffer, target: Option<&OwnedFd>) -> Result<Outcome> {
+fn send(fd: i32, buf: &Buffer, target: Option<&Endpoint>) -> Result<Outcome> {
     // SAFETY: the caller pins the offered prefix for the send. Linux queues an
     // AF_UNIX datagram atomically, including an empty datagram.
     unsafe {
         if let Some(target) = target {
-            let (addr, len) = pinned_address(target);
-            retry(|| {
-                libc::sendto(
-                    fd,
-                    buf.data.cast(),
-                    buf.len,
-                    libc::MSG_NOSIGNAL,
-                    (&addr as *const libc::sockaddr_un).cast(),
-                    len,
-                )
+            unix::reach(target, |path| {
+                let (addr, len) = address(path);
+                retry(|| {
+                    libc::sendto(
+                        fd,
+                        buf.data.cast(),
+                        buf.len,
+                        libc::MSG_NOSIGNAL,
+                        (&addr as *const libc::sockaddr_un).cast(),
+                        len,
+                    )
+                })
             })?;
         } else {
             retry(|| libc::send(fd, buf.data.cast(), buf.len, libc::MSG_NOSIGNAL))?;
@@ -472,30 +441,12 @@ fn recv(fd: i32, buf: &mut Buffer) -> Result<Outcome> {
 fn poll_retry(sockets: &mut Sockets) -> Result<u64> {
     // Linux gives no writable notification on an unconnected sender when
     // the receiver gains room, including a stream connect with a full backlog.
-    let raw = retry(|| unsafe {
-        libc::timerfd_create(
-            libc::CLOCK_MONOTONIC,
-            libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
-        ) as isize
-    })? as i32;
-    // SAFETY: fresh descriptor uniquely owned by this request until release.
-    let timer = unsafe { OwnedFd::from_raw_fd(raw) };
-    let interval = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 1_000_000,
-    };
-    let spec = libc::itimerspec {
-        it_interval: interval,
-        it_value: interval,
-    };
-    retry(|| unsafe { libc::timerfd_settime(raw, 0, &spec, std::ptr::null_mut()) as isize })?;
+    let timer = crate::host::sys::timer().map_err(host)?;
     unsafe { adopt_socket(sockets, timer) }.map_err(host)
 }
 
 fn tick(fd: i32) {
-    let mut count = 0u64;
-    // SAFETY: a live timerfd and its exact eight-byte result slot.
-    let _ = retry(|| unsafe { libc::read(fd, (&mut count as *mut u64).cast(), size_of::<u64>()) });
+    let _ = retry(|| crate::host::sys::tick(fd));
 }
 
 fn finish(n: &mut UnixRequest, outcome: Outcome) -> Step {

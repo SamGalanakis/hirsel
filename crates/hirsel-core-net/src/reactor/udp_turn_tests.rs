@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn turn_budget_starts_only_what_fits() {
     const LARGE: usize = 65_507;
-    let poller = Poller::new_epoll().unwrap();
+    let poller = Poller::new_readiness().unwrap();
     let options = Options::new(8, 65_792).unwrap();
     let loopback = "127.0.0.1:0".parse().unwrap();
     let sender = std::net::UdpSocket::bind(loopback).unwrap();

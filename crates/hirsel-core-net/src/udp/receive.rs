@@ -1,8 +1,9 @@
 use super::{
     HEADER_BYTES, Options, Socket, TurnBudget, UdpRules,
-    linux::{checked, decode_address},
+    socket::{checked, decode_address},
     socket_error,
 };
+use crate::host::udp as host;
 use std::{
     collections::VecDeque,
     io,
@@ -87,7 +88,7 @@ impl ReceivePool {
         let room = self.options.payload_room();
         let stride = self.options.slot_bytes();
         // SAFETY: zero is valid for all integer and pointer fields in these C headers.
-        let mut messages: [libc::mmsghdr; MAX_MESSAGES] = unsafe { std::mem::zeroed() };
+        let mut messages: [host::Message; MAX_MESSAGES] = unsafe { std::mem::zeroed() };
         let mut iovecs: [libc::iovec; MAX_MESSAGES] = unsafe { std::mem::zeroed() };
         let free = self.free.len();
         for i in 0..count {
@@ -111,15 +112,9 @@ impl ReceivePool {
         }
         // SAFETY: all headers and iovecs stay pinned through the call. Each writable slot
         // in the batch is distinct and has the declared header and payload capacity.
-        let received = checked(unsafe {
-            libc::recvmmsg(
-                socket.as_fd().as_raw_fd(),
-                messages.as_mut_ptr(),
-                count as u32,
-                libc::MSG_DONTWAIT | libc::MSG_TRUNC,
-                std::ptr::null_mut(),
-            )
-        })? as usize;
+        let received =
+            checked(unsafe { host::receive(socket.as_fd().as_raw_fd(), &mut messages[..count]) })?
+                as usize;
         let captured_at = super::measure::clock();
         for (i, message) in messages[..received].iter().enumerate() {
             let slot = self.free[free - 1 - i];
@@ -206,27 +201,27 @@ fn metadata(mut control: &[u8], flags: i32) -> Option<(Option<usize>, u8)> {
     }
     let mut stride = None;
     let mut ecn = 0;
-    let header_size = size_of::<libc::cmsghdr>().next_multiple_of(size_of::<usize>());
+    let header_size = size_of::<libc::cmsghdr>().next_multiple_of(host::CMSG_ALIGN);
     while control.len() >= header_size {
         // SAFETY: the slice contains a complete C header and arbitrary integer bits are valid.
         let header = unsafe { control.as_ptr().cast::<libc::cmsghdr>().read_unaligned() };
         let size = header.cmsg_len as usize;
         let value = control.get(header_size..size)?;
         match (header.cmsg_level, header.cmsg_type) {
-            (libc::SOL_UDP, libc::UDP_GRO) => {
+            kind if Some(kind) == host::COALESCED => {
                 let value = i32::from_ne_bytes(value.try_into().ok()?);
                 if value <= 0 || stride.is_some() {
                     return None;
                 }
                 stride = Some(value as usize);
             }
-            (libc::IPPROTO_IP, libc::IP_TOS) => ecn = *value.first()? & 3,
+            (libc::IPPROTO_IP, host::TOS_RECEIVED) => ecn = *value.first()? & 3,
             (libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => {
                 ecn = (i32::from_ne_bytes(value.try_into().ok()?) & 3) as u8;
             }
             _ => {}
         }
-        let following = size.next_multiple_of(size_of::<usize>());
+        let following = size.next_multiple_of(host::CMSG_ALIGN);
         control = control.get(following..).unwrap_or(&[]);
     }
     Some((stride, ecn))

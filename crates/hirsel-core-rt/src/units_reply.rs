@@ -18,7 +18,7 @@ pub(crate) fn uses_file_ring() -> bool {
 /// # Safety
 /// A ring unit is running. Every operand named by the SQE lives through
 /// completion, and the entry generates exactly one CQE.
-pub(super) unsafe fn file_request_pool(entry: io_uring::squeue::Entry) -> std::io::Result<i32> {
+pub(super) unsafe fn file_request_pool(entry: hirsel_core_net::FileEntry) -> std::io::Result<i32> {
     use std::sync::atomic::AtomicI32;
 
     struct FileReply {
@@ -66,7 +66,7 @@ pub(super) unsafe fn file_request_pool(entry: io_uring::squeue::Entry) -> std::i
 ///
 /// # Safety
 /// Same contract as the pool file request.
-pub(crate) unsafe fn file_request(entry: io_uring::squeue::Entry) -> std::io::Result<i32> {
+pub(crate) unsafe fn file_request(entry: hirsel_core_net::FileEntry) -> std::io::Result<i32> {
     // SAFETY: the caller establishes the pool file-ring contract.
     unsafe { (pool_hooks().file_request)(entry) }
 }

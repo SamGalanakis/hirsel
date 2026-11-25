@@ -1,15 +1,16 @@
 //! Hirsel's readiness vocabulary, shared by the Net reactor, the runtime's
 //! Exec supervisor and the driver's launcher. Callers see a token and the
 //! conditions that fired, never the host's event layout. The host provider
-//! is chosen at compile time: epoll on Linux (`reactor/epoll.rs`); a kqueue
-//! provider maps the same shape (one event per token and filter, user
-//! events for wakes, process filters for child exit).
+//! is chosen at compile time: epoll on Linux (`reactor/epoll.rs`), kqueue on
+//! Darwin (`reactor/kqueue.rs`: one event per token and filter, user events
+//! for wakes, process filters for child exit).
 use crate::reactor::sys;
 use std::{
     io,
-    os::fd::{BorrowedFd, OwnedFd, RawFd},
+    os::fd::{OwnedFd, RawFd},
     time::Duration,
 };
+pub use sys::Child;
 
 /// The conditions a readiness event reports, or a watch asks for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -64,6 +65,10 @@ impl std::ops::BitOr for Ready {
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Event(sys::RawEvent);
+// SAFETY: an event's fields are integers; kqueue's `udata` carries the token,
+// never a pointer this process dereferences.
+unsafe impl Send for Event {}
+unsafe impl Sync for Event {}
 
 impl Event {
     pub const EMPTY: Event = Event::new(0, Ready::EMPTY);
@@ -90,7 +95,7 @@ impl std::fmt::Debug for Event {
     }
 }
 
-/// A readiness set's kernel handle (an epoll descriptor on Linux), for a
+/// A readiness set's kernel handle (an epoll or kqueue descriptor), for a
 /// thread that waits on a set another value owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handle(pub(crate) RawFd);
@@ -147,9 +152,9 @@ impl Selector {
     pub fn remove(&self, fd: RawFd) -> io::Result<()> {
         sys::remove(self.handle().0, fd)
     }
-    /// Report the exit of the child `process` (a pidfd on Linux) once,
-    /// under `token`.
-    pub fn add_exit(&self, process: BorrowedFd<'_>, token: u64) -> io::Result<()> {
+    /// Report the exit of the child `process` (a pidfd on Linux, a process
+    /// id on Darwin) once, under `token`.
+    pub fn add_exit(&self, process: Child<'_>, token: u64) -> io::Result<()> {
         sys::add_exit(self.handle().0, process, token)
     }
     pub fn wait(&self, events: &mut [Event], timeout: Option<Duration>) -> io::Result<usize> {

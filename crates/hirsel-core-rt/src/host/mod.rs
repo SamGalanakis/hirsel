@@ -12,4 +12,4 @@ use darwin as provider;
 use linux as provider;
 
 pub use provider::exec;
-pub(crate) use provider::{clock, path, stat::stat, sync};
+pub(crate) use provider::{clock, file, path, stat::stat, sync, sys, unix};

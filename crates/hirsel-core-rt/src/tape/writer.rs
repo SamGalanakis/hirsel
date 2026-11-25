@@ -244,9 +244,7 @@ fn run() {
     // The writer shares the workers' CPUs; at idle priority it only takes
     // time they leave, so it never preempts a worker. Best effort: if the
     // policy is refused it runs at normal priority.
-    let idle = libc::sched_param { sched_priority: 0 };
-    // SAFETY: plain syscall on the calling thread with a valid parameter.
-    unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &idle) };
+    crate::host::sys::background_thread();
     let mut batch = VecDeque::new();
     loop {
         {

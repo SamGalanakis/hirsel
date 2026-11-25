@@ -251,24 +251,18 @@ impl OsProvider {
                     let spare = b.capacity - b.len;
                     let n = match offset {
                         Some(at) if at > i64::MAX as u64 => 0,
-                        // §3.3b: a ring host issues one buffered ring READ, which
-                        // completes from the page cache or through task_work. An
-                        // offset of -1 reads at, and advances, the file cursor.
-                        _ if crate::units::uses_file_ring() => {
-                            let entry = io_uring::opcode::Read::new(
-                                io_uring::types::Fd(fd),
+                        // SAFETY: spare capacity is writable; the issuing unit stays
+                        // parked, with fd and the buffer pinned, until the read ends.
+                        // An offset of -1 reads at, and advances, the file cursor.
+                        at => unsafe {
+                            crate::host::file::read_part(
+                                fd,
                                 data,
-                                spare.min(i32::MAX as usize) as u32,
+                                spare,
+                                at,
+                                crate::units::uses_file_ring(),
                             )
-                            .offset(offset.unwrap_or(u64::MAX))
-                            .build();
-                            // SAFETY: the issuing unit stays parked, with fd and the
-                            // buffer pinned, until the call's CQE.
-                            unsafe { crate::units::file_request(entry) }? as isize
-                        }
-                        // SAFETY: as above; the syscall completes before return.
-                        Some(at) => unsafe { libc::pread(fd, data.cast(), spare, at as i64) },
-                        None => unsafe { libc::read(fd, data.cast(), spare) },
+                        }?,
                     };
                     let n = syscall(n)? as usize;
                     b.len += n;
@@ -798,29 +792,9 @@ fn request_outcome(result: io::Result<Outcome>) -> Outcome {
 }
 
 /// One sync of `fd`, never retried (§3.3b): a ring host issues one ring FSYNC
-/// from the unit's slot (data-only for a file, as `fdatasync`; full for a
-/// directory, as `fsync`), and a helper host makes the call off the slot.
+/// from the unit's slot, and a helper host makes the call off the slot.
 fn sync(fd: i32, directory: bool) -> io::Result<()> {
-    if crate::units::uses_file_ring() {
-        let flags = if directory {
-            io_uring::types::FsyncFlags::empty()
-        } else {
-            io_uring::types::FsyncFlags::DATASYNC
-        };
-        let entry = io_uring::opcode::Fsync::new(io_uring::types::Fd(fd))
-            .flags(flags)
-            .build();
-        // SAFETY: the issuing unit stays parked, with fd held by this provider,
-        // until the call's CQE.
-        unsafe { crate::units::file_request(entry) }?;
-        return Ok(());
-    }
-    let rc = if directory {
-        crate::host::sync::sync_directory(fd)
-    } else {
-        crate::host::sync::sync_data(fd)
-    };
-    syscall(rc as isize).map(drop)
+    crate::host::file::sync(fd, directory, crate::units::uses_file_ring())
 }
 
 fn syscall(rc: isize) -> io::Result<isize> {

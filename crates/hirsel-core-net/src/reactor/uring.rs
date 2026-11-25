@@ -1,7 +1,9 @@
 //! The io_uring backend of a [`Poller`](super::Poller): one ring per owner,
 //! its mailbox, and the multishot polls of its watched descriptors.
+use super::COMPLETION_READY;
 use super::{
-    Backend, INTEREST, POLL_BATCH, PollEvents, Poller, REGISTER_SEND_MSG_RING, Turn, WAKE, sendzc,
+    Backend, POLL_BATCH, PollEvents, Poller, REGISTER_SEND_MSG_RING, Turn, WAKE, sendzc,
+    sys::INTEREST,
 };
 use crate::ready::{Event, Ready};
 use std::{
@@ -17,7 +19,8 @@ use completion::Completion;
 use ring::Ring;
 use watch::{REMOVE, Watches};
 
-pub(super) const COMPLETION_READY: u64 = u64::MAX - 2;
+/// A one-shot file operation for a slot's completion ring.
+pub type FileEntry = io_uring::squeue::Entry;
 
 /// Post a `WAKE` completion to the ring `fd` without a source ring
 /// (`IORING_REGISTER_SEND_MSG_RING`, 6.13). The kernel posts it into the
@@ -418,7 +421,7 @@ impl Poller {
     pub unsafe fn submit_file(
         &self,
         unit: u16,
-        entry: io_uring::squeue::Entry,
+        entry: FileEntry,
         context: *const (),
         complete: unsafe fn(*const (), i32),
     ) -> bool {

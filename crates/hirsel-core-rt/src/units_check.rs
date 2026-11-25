@@ -1118,7 +1118,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
             .and_then(|v| v.parse().ok())
             .unwrap_or(d)
     };
-    let pollers = hirsel_core_net::slot_epoll_pollers(case.workers, super::here).unwrap();
+    let pollers = hirsel_core_net::slot_readiness_pollers(case.workers, super::here).unwrap();
     // Setup stamps (unit creation) use the real clock; start the model 10 s
     // ahead of it so no setup stamp is later than modelled time.
     T0V.store(

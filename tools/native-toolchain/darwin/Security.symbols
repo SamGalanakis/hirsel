@@ -1,0 +1,10 @@
+# Every Security.framework symbol a Hirsel program may import on aarch64-apple-darwin,
+# one Mach-O name per line, sorted. link_kit.py turns it into the kit's Security.tbd.
+# Only Trust.System reaches it: the system and admin Keychain trust settings
+# (DECISIONS D4). A program that never reaches Trust.System drops the framework at
+# link time (-dead_strip_dylibs).
+
+_SecCertificateCopyData
+_SecCopyErrorMessageString
+_SecTrustSettingsCopyCertificates
+_SecTrustSettingsCopyTrustSettings

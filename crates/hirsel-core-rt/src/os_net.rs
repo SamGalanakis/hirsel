@@ -156,7 +156,10 @@ fn inherited_address(listener: &TcpListener) -> Result<Address, i32> {
     let fd = listener.as_fd();
     if socket_option(fd, libc::SOL_SOCKET, libc::SO_TYPE)? != libc::SOCK_STREAM
         || socket_option(fd, libc::SOL_SOCKET, libc::SO_ACCEPTCONN)? != 1
-        || socket_option(fd, libc::SOL_SOCKET, libc::SO_PROTOCOL)? != libc::IPPROTO_TCP
+        || match crate::host::sys::PROTOCOL {
+            Some(name) => socket_option(fd, libc::SOL_SOCKET, name)? != libc::IPPROTO_TCP,
+            None => false,
+        }
     {
         return Err(libc::EINVAL);
     }
@@ -285,17 +288,12 @@ fn options(fd: i32, family: u8, listener: bool, accepted: bool) -> Result<(), i3
 }
 unsafe fn socket(n: &mut NetworkRequest, listener: bool) -> Result<u64, i32> {
     unsafe {
-        let fd = retry(|| {
-            libc::socket(
-                if n.address.family == 0 {
-                    libc::AF_INET
-                } else {
-                    libc::AF_INET6
-                },
-                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                0,
-            ) as isize
-        })? as i32;
+        let domain = if n.address.family == 0 {
+            libc::AF_INET
+        } else {
+            libc::AF_INET6
+        };
+        let fd = retry(|| crate::host::sys::socket(domain, libc::SOCK_STREAM))? as i32;
         let owned = OwnedFd::from_raw_fd(fd);
         options(fd, n.address.family, listener, false)?;
         register_socket(n, owned)
@@ -326,7 +324,7 @@ unsafe fn send_pair(fd: i32, prefix: &Buffer, tail: &Buffer) -> isize {
         ];
         let mut message: libc::msghdr = zeroed();
         message.msg_iov = parts.as_mut_ptr();
-        message.msg_iovlen = parts.len();
+        message.msg_iovlen = parts.len() as _;
         libc::sendmsg(fd, &message, libc::MSG_NOSIGNAL)
     }
 }
@@ -464,12 +462,11 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 let mut len = size_of::<libc::sockaddr_storage>() as u32;
                 let accepted = loop {
                     let result = retry(|| {
-                        libc::accept4(
+                        crate::host::sys::accept(
                             sockets.fd(key),
                             (&mut peer as *mut libc::sockaddr_storage).cast(),
                             &mut len,
-                            libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                        ) as isize
+                        )
                     });
                     // An aborted peer does not prove the accept queue is drained.
                     if result != Err(libc::ECONNABORTED) {
@@ -552,7 +549,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 // readable; none is consumed, so the receive still reports it.
                 let mut poll = libc::pollfd {
                     fd: sockets.fd(key),
-                    events: libc::POLLIN | libc::POLLRDHUP,
+                    events: libc::POLLIN | crate::host::sys::PEER_CLOSED,
                     revents: 0,
                 };
                 match retry(|| libc::poll(&mut poll, 1, 0) as isize) {

@@ -13,21 +13,8 @@ thread_local! {
 
 /// Called before the first task starts on the serial replay thread.
 pub(crate) fn prepare() {
-    // SAFETY: pthread attributes are initialized by pthread_getattr_np.
-    unsafe {
-        let mut attributes = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
-        if libc::pthread_getattr_np(libc::pthread_self(), attributes.as_mut_ptr()) != 0 {
-            return;
-        }
-        let mut attributes = attributes.assume_init();
-        let mut address = std::ptr::null_mut();
-        let mut size = 0;
-        let result = libc::pthread_attr_getstack(&attributes, &mut address, &mut size);
-        libc::pthread_attr_destroy(&mut attributes);
-        if result == 0 {
-            let base = address.addr();
-            HOST.set((base, base + size));
-        }
+    if let Some(bounds) = crate::host::sys::stack_bounds() {
+        HOST.set(bounds);
     }
 }
 

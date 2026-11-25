@@ -1353,7 +1353,7 @@ pub(crate) fn launch(
         idle: Mutex::new(Vec::with_capacity(w)),
         nsleep: AtomicUsize::new(0),
         handed: (0..w).map(|_| AtomicBool::new(false)).collect(),
-        uring: pollers[0].reactor() == hirsel_core_net::Reactor::IoUring,
+        uring: pollers[0].reactor().completes_files(),
         slots: pollers.into_iter().map(Slot::new).collect(),
         net_used: AtomicBool::new(false),
         stop: AtomicBool::new(false),

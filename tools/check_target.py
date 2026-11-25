@@ -26,6 +26,7 @@ CRATES = 'crates/'
 HOST_SEAMS = (
     'crates/hirsel-core-rt/src/host/',
     'crates/hirsel-core-driver/src/dry_run/host/',
+    'crates/hirsel-core-net/src/host/',
     'crates/hirsel-core-net/src/reactor/',
     'crates/hirsel-core-net/src/own_address/',
     'crates/hirsel-prof/src/linux/',
@@ -35,7 +36,6 @@ HOST_SEAMS = (
 # no longer reads the host. A stale entry fails the check.
 HOST_FILES = {
     # S6/S7: the runtime host seam and its Darwin provider.
-    'crates/hirsel-core-net/src/exec/image.rs': 'S6',
     'crates/hirsel-core-net/src/reactor.rs': 'S6',
     'crates/hirsel-core-rt/src/fiber.rs': 'S6',
     'crates/hirsel-core-rt/src/fiber_stop_tests.rs': 'S6',

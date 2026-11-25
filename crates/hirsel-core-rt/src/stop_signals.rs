@@ -2,13 +2,13 @@
 //! the scheduler's ordinary provider readiness path.
 use crate::{
     entry::ProcessOperations,
+    host::sys::{self, Notice},
     provider::{CANCELLED, Outcome, Provider, Request, STEP_PENDING, Step, Wait, deliver},
 };
 
 use std::{
     collections::BTreeSet,
     io,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{
         Arc, Mutex,
         atomic::{AtomicI32, Ordering},
@@ -25,7 +25,7 @@ const SIGNALS: [i32; 2] = [libc::SIGTERM, libc::SIGINT];
 const DISARMED: i32 = -1;
 const NOTIFYING: i32 = -2;
 const RECEIVED: i32 = -3;
-// A nonnegative value identifies the live relay's eventfd. During NOTIFYING
+// A nonnegative value identifies the live relay notice's writer. During NOTIFYING
 // the handler owns its write, so shutdown waits before closing the descriptor.
 static SIGNAL_FD: AtomicI32 = AtomicI32::new(DISARMED);
 static ACTIVE: Mutex<Option<Relay>> = Mutex::new(None);
@@ -89,7 +89,7 @@ fn release() {
 }
 
 struct Relay {
-    fd: OwnedFd,
+    notice: Notice,
     thread: Option<JoinHandle<()>>,
     state: Arc<Mutex<State>>,
     previous: Vec<(i32, libc::sigaction)>,
@@ -97,18 +97,15 @@ struct Relay {
 }
 impl Relay {
     fn install() -> io::Result<Self> {
-        // SAFETY: eventfd returns a new descriptor. A blocking reader wakes on
-        // the first signal or shutdown. These are the only two possible writes.
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        // A blocking reader wakes on the first signal or shutdown. These are
+        // the only two possible posts.
+        let notice = Notice::new(false)?;
+        let (reader, fd) = (notice.reader(), notice.writer());
         let state = Arc::new(Mutex::new(State::default()));
         let shared = state.clone();
-        let thread = thread::Builder::new().spawn(move || relay(fd, &shared))?;
+        let thread = thread::Builder::new().spawn(move || relay(reader, &shared))?;
         let mut relay = Self {
-            fd: owned,
+            notice,
             thread: Some(thread),
             state,
             previous: Vec::with_capacity(SIGNALS.len()),
@@ -149,7 +146,7 @@ impl Drop for Relay {
                 break;
             }
         }
-        notify(self.fd.as_raw_fd());
+        notify(self.notice.writer());
         self.thread.take().unwrap().join().unwrap();
     }
 }
@@ -195,21 +192,17 @@ fn notify(fd: i32) {
     // SAFETY: write is async-signal-safe. Restore the interrupted thread's
     // errno even if the write was interrupted by another signal.
     unsafe {
-        let errno = libc::__errno_location();
+        let errno = sys::errno();
         let saved = *errno;
-        let one = 1u64;
-        while libc::write(fd, (&one as *const u64).cast(), size_of::<u64>()) < 0
-            && *errno == libc::EINTR
-        {}
+        while sys::post(fd) < 0 && *errno == libc::EINTR {}
         *errno = saved;
     }
 }
 
 fn relay(fd: i32, state: &Mutex<State>) {
-    let mut value = 0u64;
     loop {
-        // SAFETY: installation owns the eventfd until this thread joins.
-        if unsafe { libc::read(fd, (&mut value as *mut u64).cast(), size_of::<u64>()) } > 0 {
+        // Installation owns the notice until this thread joins.
+        if sys::take(fd) > 0 {
             break;
         }
         if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {

@@ -691,8 +691,7 @@ impl Live {
     }
 
     fn worker(&self) -> LiveWorker {
-        // SAFETY: gettid has no operands.
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u64;
+        let tid = crate::host::sys::thread_id();
         super::prof_stack::prepare();
         LiveWorker {
             sampler: Sampler::new(prof::now_ns() ^ tid.wrapping_mul(0xff51_afd7_ed55_8ccd)),
@@ -773,8 +772,13 @@ fn resident_bytes(address: usize, bytes: usize, page: usize) -> Option<u64> {
         let count = (end - start).div_ceil(page).min(pages.len());
         // SAFETY: mincore looks up the virtual page range in the kernel. It
         // does not dereference that range and writes at most count result bytes.
-        if unsafe { libc::mincore(start as *mut libc::c_void, count * page, pages.as_mut_ptr()) }
-            != 0
+        if unsafe {
+            libc::mincore(
+                start as *mut libc::c_void,
+                count * page,
+                pages.as_mut_ptr().cast(),
+            )
+        } != 0
         {
             return None;
         }

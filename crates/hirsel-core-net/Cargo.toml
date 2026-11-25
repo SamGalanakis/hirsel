@@ -9,7 +9,6 @@ rust-version.workspace = true
 [dependencies]
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 libc = { version = "0.2", default-features = false }
-io-uring = { version = "=0.7.16", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ring = "=0.17.14"
 md-5 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
@@ -24,6 +23,9 @@ subtle = "=2.6.1"
 zeroize = "=1.9.2"
 unicode-normalization = "=0.1.25"
 rustls = { version = "=0.23.46", default-features = false, features = ["std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "=0.7.16", default-features = false }
 
 [dev-dependencies]
 hirsel-guard = { path = "../hirsel-guard" }

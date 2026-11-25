@@ -40,7 +40,7 @@ def _link_kit(ctx):
         "--libunwind", source("libunwind"),
         "--compiler-rt", source("compiler-rt"),
         "--zig-libsystem", source("libSystem-tbd"),
-        "--darwin-symbols", ctx.attrs._darwin_symbols,
+        [cmd_args("--darwin-symbols", cmd_args(library, "=", path, delimiter = "")) for library, path in sorted(ctx.attrs._darwin_symbols.items())],
         "--pins", pins,
         "--output", output.as_output(),
     )
@@ -58,7 +58,10 @@ link_kit = rule(impl = _link_kit, attrs = {
     "sources": attrs.dict(attrs.string(), attrs.dep()),
     "pins": attrs.dict(attrs.string(), attrs.dict(attrs.string(), attrs.any())),
     "_script": attrs.source(default = "//tools/buck2/native-toolchain:link_kit.py"),
-    "_darwin_symbols": attrs.source(default = "root//:darwin-libsystem-symbols"),
+    "_darwin_symbols": attrs.dict(attrs.string(), attrs.source(), default = {
+        library: "root//:darwin-{}-symbols".format(library.lower())
+        for library in ["libSystem", "CoreFoundation", "Security"]
+    }),
 })
 
 def _proof(ctx):

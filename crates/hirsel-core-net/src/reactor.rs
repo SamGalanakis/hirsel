@@ -16,36 +16,82 @@ use std::{
 };
 #[cfg(target_os = "linux")]
 pub(crate) mod epoll;
+#[cfg(target_os = "macos")]
+pub(crate) mod kqueue;
+#[cfg(target_os = "linux")]
 mod sendzc;
 #[cfg(target_os = "linux")]
 pub(crate) use epoll as sys;
+#[cfg(target_os = "macos")]
+pub(crate) use kqueue as sys;
 mod udp_group;
+#[cfg(target_os = "linux")]
 mod uring;
 use crate::ready::{Event, Handle, Waker};
-pub use sendzc::{TxSlot, TxState};
-use sys::INTEREST;
+#[cfg(target_os = "linux")]
+pub use sendzc::TxSlot;
+#[cfg(target_os = "macos")]
+pub use sys::{FileEntry, TxSlot};
 pub use udp_group::UdpMember;
+#[cfg(target_os = "linux")]
+pub use uring::FileEntry;
+#[cfg(target_os = "linux")]
 use uring::{Uring, msg_ring_wake};
 
+/// What a transmit slot's latest send has done.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxState {
+    /// Nothing submitted since the slot was taken.
+    Filling,
+    /// The kernel has not answered the send yet.
+    Sending,
+    /// The kernel accepted this many bytes, or failed with `-errno`. Its
+    /// bytes stay immutable until the slot is dropped.
+    Sent(i32),
+}
+
 const POLL_BATCH: i32 = 128;
-/// A wake's tag: the eventfd's on epoll, a MSG_RING completion's on io_uring.
+/// A wake's tag: the eventfd's on epoll, a MSG_RING completion's on io_uring,
+/// the user event's on kqueue.
 const WAKE: u64 = u64::MAX;
 /// io_uring: the completion of a poll removal, which carries no readiness.
+#[cfg(target_os = "linux")]
 const REMOVED: u64 = u64::MAX - 1;
 /// `IORING_REGISTER_SEND_MSG_RING`: a MSG_RING issued without a source ring.
+#[cfg(target_os = "linux")]
 const REGISTER_SEND_MSG_RING: libc::c_long = 31;
 
 /// The kernel interface behind the Net transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reactor {
+    #[cfg(target_os = "linux")]
     Epoll,
+    #[cfg(target_os = "linux")]
     IoUring,
+    #[cfg(target_os = "macos")]
+    Kqueue,
 }
 impl Reactor {
     pub fn name(self) -> &'static str {
         match self {
+            #[cfg(target_os = "linux")]
             Reactor::Epoll => "epoll",
+            #[cfg(target_os = "linux")]
             Reactor::IoUring => "io_uring",
+            #[cfg(target_os = "macos")]
+            Reactor::Kqueue => "kqueue",
+        }
+    }
+    /// Whether its pollers are completion rings, which also complete a
+    /// unit's file operations (`Poller::submit_file`).
+    pub fn completes_files(self) -> bool {
+        match self {
+            #[cfg(target_os = "linux")]
+            Reactor::Epoll => false,
+            #[cfg(target_os = "linux")]
+            Reactor::IoUring => true,
+            #[cfg(target_os = "macos")]
+            Reactor::Kqueue => false,
         }
     }
 }
@@ -63,20 +109,25 @@ static CHOSEN: OnceLock<Result<Reactor, String>> = OnceLock::new();
 /// notification and page pinning: TLS PUT measured 17% slower there.
 pub const SEND_ZC_ENV: &str = "HIRSEL_NET_SEND_ZC";
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendZc {
     Auto,
     Always,
     Never,
 }
+#[cfg(target_os = "linux")]
 static SEND_ZC: OnceLock<SendZc> = OnceLock::new();
 
+#[cfg(target_os = "linux")]
 fn send_zc() -> SendZc {
     *SEND_ZC.get().unwrap_or(&SendZc::Auto)
 }
+#[cfg(target_os = "linux")]
 /// The ring and wake descriptor the probe built, for the first poller.
 static PROBED: Mutex<Option<Uring>> = Mutex::new(None);
 
+#[cfg(target_os = "linux")]
 /// Whether `auto` may take io_uring on a kernel of this release
 /// (`uname -r`). Through 6.12, a request reached from the exit fallback
 /// (`io_fallback_req_func`) puts its task through `io_put_task_remote`, which
@@ -92,6 +143,7 @@ fn release_allows_uring(release: &str) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn kernel_release() -> String {
     // SAFETY: uname fills the zeroed struct; release is NUL-terminated.
     unsafe {
@@ -105,6 +157,7 @@ fn kernel_release() -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// Whether sends to `fd`'s peer go zero-copy under [`SEND_ZC_ENV`]: TCP
 /// only, and under `auto` not to a loopback address.
 fn zero_copy_peer(fd: i32) -> bool {
@@ -137,6 +190,7 @@ fn zero_copy_peer(fd: i32) -> bool {
     mode == SendZc::Always || !is_loopback(&peer)
 }
 
+#[cfg(target_os = "linux")]
 fn is_loopback(peer: &std::net::SocketAddr) -> bool {
     match peer.ip() {
         std::net::IpAddr::V4(ip) => ip.is_loopback(),
@@ -148,8 +202,28 @@ fn is_loopback(peer: &std::net::SocketAddr) -> bool {
 
 /// The process's reactor, chosen at its first use and fixed after.
 pub fn reactor() -> io::Result<Reactor> {
-    CHOSEN
-        .get_or_init(|| {
+    CHOSEN.get_or_init(choose).clone().map_err(|message| {
+        eprintln!("{message}");
+        io::Error::new(io::ErrorKind::InvalidInput, message)
+    })
+}
+
+/// Darwin has one reactor; `auto` and `kqueue` name it.
+#[cfg(target_os = "macos")]
+fn choose() -> Result<Reactor, String> {
+    match std::env::var_os(REACTOR_ENV) {
+        Some(v) if v != "auto" && v != "kqueue" => Err(format!(
+            "{REACTOR_ENV}={} is not a reactor; use auto or kqueue",
+            v.to_string_lossy()
+        )),
+        _ => Ok(Reactor::Kqueue),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn choose() -> Result<Reactor, String> {
+    {
+        {
             let send_zc = match std::env::var_os(SEND_ZC_ENV) {
                 None => SendZc::Auto,
                 Some(v) if v == "auto" => SendZc::Auto,
@@ -185,12 +259,8 @@ pub fn reactor() -> io::Result<Reactor> {
                 Err(e) if forced => Err(format!("{REACTOR_ENV}=io_uring: {e}")),
                 Err(_) => Ok(Reactor::Epoll),
             }
-        })
-        .clone()
-        .map_err(|message| {
-            eprintln!("{message}");
-            io::Error::new(io::ErrorKind::InvalidInput, message)
-        })
+        }
+    }
 }
 
 pub struct Poller {
@@ -209,9 +279,14 @@ pub struct Poller {
 enum Backend {
     /// The epoll fd and its wake eventfd, watched edge-triggered and never
     /// read: each write is a fresh edge.
+    #[cfg(target_os = "linux")]
     Epoll { epoll: OwnedFd, wake: OwnedFd },
     /// Dropped by `PollOperations::release`.
+    #[cfg(target_os = "linux")]
     Uring(ManuallyDrop<Box<Uring>>),
+    /// The kqueue, whose wake is a user event in it.
+    #[cfg(target_os = "macos")]
+    Kqueue { kq: OwnedFd },
 }
 
 /// The backend's operations, installed by its constructor: a program that
@@ -250,14 +325,20 @@ fn timeout_ns(timeout_ms: i32) -> Option<u64> {
 impl Poller {
     fn new() -> io::Result<Arc<Self>> {
         match reactor()? {
-            Reactor::Epoll => Self::new_epoll(),
+            #[cfg(target_os = "linux")]
+            Reactor::Epoll => Self::new_readiness(),
+            #[cfg(target_os = "linux")]
             Reactor::IoUring => Self::new_uring(),
+            #[cfg(target_os = "macos")]
+            Reactor::Kqueue => Self::new_readiness(),
         }
     }
+    #[cfg(target_os = "linux")]
     fn new_uring() -> io::Result<Arc<Self>> {
         let probed = PROBED.lock().unwrap_or_else(|e| e.into_inner()).take();
         Ok(Self::from_uring(probed.map_or_else(Uring::open, Ok)?))
     }
+    #[cfg(target_os = "linux")]
     fn from_uring(ring: Uring) -> Arc<Self> {
         Arc::new(Self {
             backend: Backend::Uring(ManuallyDrop::new(Box::new(ring))),
@@ -283,8 +364,12 @@ impl Poller {
     /// The interface this poller waits on.
     pub fn reactor(&self) -> Reactor {
         match self.backend {
+            #[cfg(target_os = "linux")]
             Backend::Epoll { .. } => Reactor::Epoll,
+            #[cfg(target_os = "linux")]
             Backend::Uring(_) => Reactor::IoUring,
+            #[cfg(target_os = "macos")]
+            Backend::Kqueue { .. } => Reactor::Kqueue,
         }
     }
     /// Watch `fd` for every direction under `tag`. epoll's interest takes
@@ -313,6 +398,7 @@ impl Poller {
     }
     /// io_uring: submit the mailbox now when the caller owns this poller and
     /// its turn is free; otherwise wake the owner to submit it.
+    #[cfg(target_os = "linux")]
     fn submit_or_wake(&self, owner: bool) {
         let Backend::Uring(ring) = &self.backend else {
             return;
@@ -366,18 +452,27 @@ impl Poller {
     /// ring descriptor).
     pub fn handle(&self) -> Handle {
         match &self.backend {
+            #[cfg(target_os = "linux")]
             Backend::Epoll { epoll, .. } => Handle(epoll.as_raw_fd()),
+            #[cfg(target_os = "linux")]
             Backend::Uring(ring) => Handle(ring.ring.as_raw_fd()),
+            #[cfg(target_os = "macos")]
+            Backend::Kqueue { kq } => Handle(kq.as_raw_fd()),
         }
     }
     /// A descriptor-waited poller's wake, reported as a `WAKE` event; None
     /// for an io_uring ring, which [`Poller::wake`] wakes by MSG_RING.
     pub fn waker(&self) -> Option<Waker> {
         match &self.backend {
+            #[cfg(target_os = "linux")]
             Backend::Epoll { .. } => Some(Waker(self.wake_fd())),
+            #[cfg(target_os = "linux")]
             Backend::Uring(_) => None,
+            #[cfg(target_os = "macos")]
+            Backend::Kqueue { .. } => Some(Waker(self.waker_id())),
         }
     }
+    #[cfg(target_os = "linux")]
     fn wake_ring(&self) {
         let _ = msg_ring_wake(self.handle().0);
     }
@@ -405,6 +500,9 @@ struct SlotPollers {
     pollers: Vec<Arc<Poller>>,
     here: fn() -> Option<Here>,
 }
+/// The file ring's completion-descriptor tag; poller-owned tags (UDP groups)
+/// stay below it.
+const COMPLETION_READY: u64 = u64::MAX - 2;
 static SHARED: Mutex<Option<Arc<SlotPollers>>> = Mutex::new(None);
 /// Bits of a shared tag below the unit.
 pub const SHARED_UNIT_SHIFT: u32 = 48;
@@ -419,15 +517,15 @@ pub fn slot_pollers(workers: usize, here: fn() -> Option<Here>) -> io::Result<Ve
         here,
     )
 }
-/// The interleaving checker models epoll calls, so its pool's slots use
-/// epoll pollers whichever reactor the process chose.
-pub fn slot_epoll_pollers(
+/// The interleaving checker models readiness calls, so its pool's slots use
+/// readiness pollers (epoll, kqueue) whichever reactor the process chose.
+pub fn slot_readiness_pollers(
     workers: usize,
     here: fn() -> Option<Here>,
 ) -> io::Result<Vec<Arc<Poller>>> {
     share(
         (0..workers)
-            .map(|_| Poller::new_epoll())
+            .map(|_| Poller::new_readiness())
             .collect::<io::Result<_>>()?,
         here,
     )
@@ -460,6 +558,7 @@ struct Record {
     /// Its last send was abandoned, so it closes with a reset.
     abandoned: bool,
     /// Whether sends to its peer go zero-copy, once a send has asked.
+    #[cfg(target_os = "linux")]
     zero_copy: Option<bool>,
     /// The pool slot whose poller holds its registration (0 when private).
     home: usize,
@@ -578,6 +677,7 @@ impl Sockets {
             read_terminal: false,
             own_listener: false,
             abandoned: false,
+            #[cfg(target_os = "linux")]
             zero_copy: None,
             home: 0,
         })?;
@@ -741,20 +841,23 @@ impl Sockets {
         self.register(key)?;
         let (poller, owner) = self.home(self.record(key).home);
         let poller = poller.clone();
-        let Backend::Uring(ring) = &poller.backend else {
-            return Ok(None);
-        };
-        if !ring.zc || !owner {
-            return Ok(None);
+        #[cfg(target_os = "linux")]
+        if let Backend::Uring(ring) = &poller.backend
+            && ring.zc
+            && owner
+        {
+            let r = self.record_mut(key);
+            let fd = r.fd.as_raw_fd();
+            if !*r.zero_copy.get_or_insert_with(|| zero_copy_peer(fd)) {
+                return Ok(None);
+            }
+            let index = ((key >> 2) as u32) as usize;
+            let tag =
+                Self::registration_tag(self.shared_unit(), index, self.slots[index].generation);
+            return Ok(Some((poller, tag)));
         }
-        let r = self.record_mut(key);
-        let fd = r.fd.as_raw_fd();
-        if !*r.zero_copy.get_or_insert_with(|| zero_copy_peer(fd)) {
-            return Ok(None);
-        }
-        let index = ((key >> 2) as u32) as usize;
-        let tag = Self::registration_tag(self.shared_unit(), index, self.slots[index].generation);
-        Ok(Some((poller, tag)))
+        let _ = (poller, owner);
+        Ok(None)
     }
 
     /// A send on `key` was abandoned (cancelled or past its deadline): until

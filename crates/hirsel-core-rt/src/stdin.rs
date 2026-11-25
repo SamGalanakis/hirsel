@@ -1,10 +1,15 @@
 //! One helper owns the input stream. A pending read borrows no bytes from a
 //! task's stack until the scheduler delivers a fragment to that task.
-use crate::{Context, entry, provider::*, tasks::Outside};
+use crate::{
+    Context, entry,
+    host::sys::{self, Notice},
+    provider::*,
+    tasks::Outside,
+};
 use std::{
     collections::VecDeque,
     io,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, OwnedFd},
     ptr,
     sync::{Arc, Condvar, Mutex},
 };
@@ -19,7 +24,7 @@ pub(crate) struct Stream {
 }
 
 struct Helper {
-    changed: OwnedFd,
+    changed: Notice,
     work: Condvar,
     state: Mutex<State>,
 }
@@ -86,13 +91,8 @@ impl Drop for Stream {
 
 impl Helper {
     fn start(input: Arc<OwnedFd>) -> io::Result<Arc<Self>> {
-        // SAFETY: eventfd either returns an owned fd or signals a host error.
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
         let helper = Arc::new(Self {
-            changed: unsafe { OwnedFd::from_raw_fd(fd) },
+            changed: Notice::new(true)?,
             work: Condvar::new(),
             state: Mutex::default(),
         });
@@ -106,15 +106,8 @@ impl Helper {
 
     fn changed(&self) {
         self.work.notify_one();
-        // SAFETY: the eventfd borrows eight bytes for this one write. A full
-        // counter is already readable, so the helper still sees the change.
-        let _ = crate::os_net::retry(|| unsafe {
-            libc::write(
-                self.changed.as_raw_fd(),
-                1u64.to_ne_bytes().as_ptr().cast(),
-                8,
-            )
-        });
+        // A full notice is already readable, so the helper still sees the change.
+        let _ = crate::os_net::retry(|| sys::post(self.changed.writer()));
     }
 
     fn run(&self, input: &OwnedFd) {
@@ -129,7 +122,7 @@ impl Helper {
             drop(state);
             let mut fds = [
                 libc::pollfd {
-                    fd: self.changed.as_raw_fd(),
+                    fd: self.changed.reader(),
                     events: libc::POLLIN,
                     revents: 0,
                 },
@@ -143,15 +136,8 @@ impl Helper {
             let poll =
                 crate::os_net::retry(|| unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) as isize });
             if fds[0].revents != 0 {
-                let mut count = 0u64;
-                // SAFETY: the helper is the only eventfd reader and count holds eight bytes.
-                let _ = crate::os_net::retry(|| unsafe {
-                    libc::read(
-                        self.changed.as_raw_fd(),
-                        ptr::from_mut(&mut count).cast(),
-                        8,
-                    )
-                });
+                // The helper is the notice's only reader.
+                let _ = crate::os_net::retry(|| sys::take(self.changed.reader()));
             }
             let state = self.state.lock().unwrap();
             if state.closed {

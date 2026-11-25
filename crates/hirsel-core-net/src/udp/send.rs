@@ -1,8 +1,9 @@
 use super::{
     Socket, TxPacket,
-    linux::{address, checked},
+    socket::{address, checked},
     socket_error,
 };
+use crate::host::udp as host;
 use std::{
     io,
     os::fd::{AsFd, AsRawFd},
@@ -24,7 +25,7 @@ struct Control([u8; 64]);
 
 impl Control {
     fn put(&mut self, offset: usize, level: i32, kind: i32, data: &[u8]) -> usize {
-        let word = size_of::<usize>();
+        let word = host::CMSG_ALIGN;
         let header = size_of::<libc::cmsghdr>().next_multiple_of(word);
         let length = header + data.len();
         let padded = length.next_multiple_of(word);
@@ -56,7 +57,7 @@ impl Socket {
         }
         let gso = self.gso.load(Ordering::Relaxed);
         // SAFETY: zero is valid for the C structures' integer and pointer fields.
-        let mut messages: [libc::mmsghdr; MESSAGES] = unsafe { std::mem::zeroed() };
+        let mut messages: [host::Message; MESSAGES] = unsafe { std::mem::zeroed() };
         let mut sockets: [libc::sockaddr_storage; MESSAGES] = unsafe { std::mem::zeroed() };
         let mut vectors: [libc::iovec; VECTORS] = unsafe { std::mem::zeroed() };
         let mut controls = std::array::from_fn::<_, MESSAGES, _>(|_| Control([0; 64]));
@@ -90,19 +91,18 @@ impl Socket {
                 };
             }
             let control = &mut controls[messages_used];
-            let ecn = i32::from(first.ecn).to_ne_bytes();
             let mut control_len = if self.v6 {
-                control.put(0, libc::IPPROTO_IPV6, libc::IPV6_TCLASS, &ecn)
+                let class = i32::from(first.ecn).to_ne_bytes();
+                control.put(0, libc::IPPROTO_IPV6, libc::IPV6_TCLASS, &class)
             } else {
-                control.put(0, libc::IPPROTO_IP, libc::IP_TOS, &ecn)
+                let tos = host::Tos::from(first.ecn).to_ne_bytes();
+                control.put(0, libc::IPPROTO_IP, libc::IP_TOS, &tos)
             };
-            if train > 1 {
-                control_len = control.put(
-                    control_len,
-                    libc::SOL_UDP,
-                    libc::UDP_SEGMENT,
-                    &(first.len as u16).to_ne_bytes(),
-                );
+            if train > 1
+                && let Some((level, kind)) = host::SEGMENT
+            {
+                control_len =
+                    control.put(control_len, level, kind, &(first.len as u16).to_ne_bytes());
             }
             let header = &mut messages[messages_used].msg_hdr;
             header.msg_name = (&mut sockets[messages_used] as *mut libc::sockaddr_storage).cast();
@@ -118,12 +118,7 @@ impl Socket {
         // SAFETY: the address, ancillary data, iovecs and borrowed payload remain live
         // through this syscall. The kernel writes only the supplied message headers.
         let sent = checked(unsafe {
-            libc::sendmmsg(
-                self.as_fd().as_raw_fd(),
-                messages.as_mut_ptr(),
-                messages_used as u32,
-                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
-            )
+            host::send(self.as_fd().as_raw_fd(), &mut messages[..messages_used])
         });
         match sent {
             Ok(0) => Ok(Window::Sent(0)),

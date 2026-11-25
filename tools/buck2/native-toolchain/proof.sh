@@ -59,21 +59,27 @@ status=0
 grep -Fq 'definitely lost: 32 bytes in 1 blocks' "$build/leak.err" || { cat "$build/leak.err" >&2; fail "Valgrind did not find the planted 32-byte leak"; }
 grep -Eq 'ERROR SUMMARY: [1-9][0-9]* errors' "$build/leak.err" || fail "Valgrind did not count the planted leak as an error"
 cat "$build/leak.err"
-# Mach-O: link for aarch64-apple-darwin against the kit's generated libSystem.tbd with
-# the same ld.lld (§4.2 of the macOS design; nothing runs, there is no Mac here).
+# Mach-O: link for aarch64-apple-darwin against every library stub the kit generates
+# with the same ld.lld (§4.2 of the macOS design; nothing runs, there is no Mac here).
+# A framework the program never reaches leaves no load command.
 cat > "$build/darwin.c" <<'C'
 void *malloc(unsigned long); void free(void *); long write(int, const void *, unsigned long); int fsync(int);
+int SecTrustSettingsCopyCertificates(int, void **);
 int main(void) { void *p = malloc(32); free(p); write(1, "darwin\n", 7);
 #ifdef PROOF_FSYNC
   fsync(1);
 #endif
+#ifdef PROOF_KEYCHAIN
+  SecTrustSettingsCopyCertificates(0, &p);
+#endif
   return 0; }
 C
 floor=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["targets"]["aarch64-apple-darwin"]["floor"])' "$kit/manifest.json")
+mapfile -t darwin_libraries < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["targets"]["aarch64-apple-darwin"]["libraries"]))' "$kit/manifest.json")
 link_darwin() {
   "$llvm/bin/clang" --target="arm64-apple-macos$floor" -c "$build/darwin.c" -o "$build/darwin.o" "$@"
   "$kit/ld.lld" -flavor darwin -arch arm64 -platform_version macos "$floor" "$floor" -dead_strip -dead_strip_dylibs \
-    -adhoc_codesign "$build/darwin.o" "$kit/aarch64-apple-darwin/libSystem.tbd" -o "$build/darwin"
+    -adhoc_codesign "$build/darwin.o" "${darwin_libraries[@]/#/$kit/aarch64-apple-darwin/}" -o "$build/darwin"
 }
 link_darwin
 headers=$("$llvm/bin/llvm-objdump" --macho --private-headers "$build/darwin")
@@ -86,4 +92,8 @@ status=0
 link_darwin -DPROOF_FSYNC 2> "$build/fsync.err" || status=$?
 [[ "$status" != 0 ]] && grep -q 'undefined symbol: _fsync' "$build/fsync.err" || { cat "$build/fsync.err" >&2; fail "a Darwin program importing fsync linked"; }
 echo 'aarch64-apple-darwin: a program importing fsync is refused at link time'
+link_darwin -DPROOF_KEYCHAIN
+loads=$("$llvm/bin/llvm-objdump" --macho --private-headers "$build/darwin" | grep -E '^ +name /' | awk '{print $2}' | sort | tr '\n' ' ')
+[[ "$loads" == "/System/Library/Frameworks/Security.framework/Versions/A/Security /usr/lib/dyld /usr/lib/libSystem.B.dylib " ]] || fail "a Keychain read loads $loads, not Security and libSystem"
+echo 'aarch64-apple-darwin: a Keychain read loads Security.framework; a program without one does not'
 echo 'native toolchain proof: clang, lld (ELF and Mach-O), cross gcc, qemu and Valgrind passed; planted leak refused with exit 97'

@@ -6,13 +6,13 @@ pub(super) unsafe fn address(a: Address) -> (libc::sockaddr_storage, libc::sockl
         let mut storage: libc::sockaddr_storage = zeroed();
         let len = if a.family == 0 {
             let v4 = storage_as_mut::<libc::sockaddr_in>(&mut storage);
-            v4.sin_family = libc::AF_INET as u16;
+            v4.sin_family = libc::AF_INET as libc::sa_family_t;
             v4.sin_port = a.port.to_be();
             v4.sin_addr.s_addr = (a.lo as u32).to_be();
             size_of::<libc::sockaddr_in>()
         } else {
             let v6 = storage_as_mut::<libc::sockaddr_in6>(&mut storage);
-            v6.sin6_family = libc::AF_INET6 as u16;
+            v6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
             v6.sin6_port = a.port.to_be();
             v6.sin6_addr.s6_addr = ((u128::from(a.hi) << 64) | u128::from(a.lo)).to_be_bytes();
             size_of::<libc::sockaddr_in6>()

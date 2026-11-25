@@ -35,7 +35,12 @@ compiler's DWARF is decompressed for the rewrite and compressed again for
 the distribution. When
 combined with `--pgo`, BOLT runs after the PGO-use link. The work directory
 (`--work`, default `OUTPUT-work`) keeps `bolt/hirsel` (BOLT's input),
-`bolt/merged.fdata` (its profile) and `bolt/hirsel.bolt` (its output).
+`bolt/merged.fdata` (its profile) and `bolt/hirsel.bolt` (its output). The
+compiler is rewritten with `--bolt-info=0`: BOLT's note records its command
+line, which names temporary directories. Given one input and one profile, the
+rewrite is byte-identical at four threads. BOLT's own training is not: its
+counts differ from run to run like PGO's, so a `--bolt` build is not yet
+reproducible (release-pgo-pinned-profile-2754).
 
 `NOTICES.md` at the repository root is the distribution's notice inventory. It is
 generated, never edited: `tools/toolchain-dist/notices.py --write [--bundle DIR]`

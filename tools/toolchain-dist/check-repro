@@ -125,7 +125,9 @@ def main():
         profile = args.pgo.resolve() if isinstance(args.pgo, Path) else None
         if args.pgo is True:
             print(f'check-repro: training one profile at {revision}', flush=True)
-            build(revision, first, args.num_threads, ['--train-profile', output / 'profile'])
+            build(revision, first, args.num_threads, ['--train-profile', output / 'profile',
+                                                      '--work', Path(scratch) / 'profile-work'])
+            shutil.rmtree(Path(scratch) / 'profile-work')
             (profile,) = (output / 'profile').glob('*.profdata')
         flags = ['--pgo', profile] * bool(profile) + ['--bolt'] * args.bolt
         print(f'check-repro: building {revision} twice {" ".join(map(str, flags)) or "without PGO"}', flush=True)

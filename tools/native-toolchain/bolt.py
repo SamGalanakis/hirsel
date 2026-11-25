@@ -145,7 +145,10 @@ def optimize(kind, compiler, library, runtime, output, keep=None):
             shutil.copyfile(profile, keep / 'merged.fdata')
         with tempfile.TemporaryDirectory(prefix='.bolt-', dir=output.parent) as staging:
             candidate = Path(staging) / output.name
-            run([*tool, source, '-data', profile, *OPTIMIZE, '-o', candidate], work)
+            # BOLT's note records its command line, whose paths are temporary
+            # directories; the shipped compiler must not depend on them.
+            note = ['--bolt-info=0'] if kind == 'compiler' else []
+            run([*tool, source, '-data', profile, *OPTIMIZE, *note, '-o', candidate], work)
             if kind == 'compiler':
                 run([OBJCOPY, '--compress-debug-sections=zlib', candidate], work)
             candidate.replace(output)

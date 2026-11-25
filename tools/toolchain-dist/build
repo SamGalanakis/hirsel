@@ -98,6 +98,8 @@ def build(mode, output, options, work, *, bolt=False):
         # Keep BOLT's input binary, its merged profile and its output, so two
         # builds that differ can be compared stage by stage.
         kept = work / 'bolt'
+        if kept.exists():
+            raise SystemExit(f'{kept} exists: use a fresh work directory')
         kept.mkdir(parents=True)
         shutil.copyfile(compiler, kept / 'hirsel')
         try:

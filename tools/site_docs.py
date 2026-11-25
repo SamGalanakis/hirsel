@@ -132,7 +132,7 @@ def render_inline(text: str, ref: str, href_rewriter=rewrite_human_href) -> str:
         tok = m.group(0)
         if tok.startswith("`"):
             body = tok[1:-1]
-            # Short inline code never wraps mid-token (`--record`, `OWN-7`); long code may wrap at spaces.
+            # Short inline code never wraps mid-token (`--record`, `mut`); long code may wrap at spaces.
             cls = ' class="w"' if len(body) > 28 else ""
             parts.append(f"<code{cls}>{html.escape(body, quote=False)}</code>")
         elif tok.startswith("**"):
@@ -597,8 +597,8 @@ def tooling_part_html(ref: str, parser, query) -> str:
                 "Built-in CLI tools for inspecting rules, sampling CPU and replay memory, recording and replaying runs, and cross-compiling for AArch64 Linux.",
             ),
             heading("h2", "hirsel-explain", "<code>hirsel explain</code>"),
-            "<p>Every checker refusal cites one rule ID (such as <code>OWN-7</code> or <code>CAP-1</code>). "
-            "Run <code>hirsel explain RULE</code> to print the normative rule and refused example from the installed binary, "
+            "<p>When the compiler refuses code, it prints a short rule code (such as <code>OWN-7</code>). "
+            "Run <code>hirsel explain RULE</code> to print the rule and a refused example from the installed binary, "
             "or pass a module keyword or <code>--list</code> (with optional <code>--json</code>). See the "
             '<a href="/docs/spec/diagnostics/">diagnostics specification</a> for the error contract.</p>',
             explain_cmd,
@@ -611,7 +611,7 @@ def tooling_part_html(ref: str, parser, query) -> str:
             prof_cmd,
             heading("h2", "record-and-replay", "Record and replay"),
             "<p>Pass <code>--record FILE.tape</code> to record every host provider input and delivery of a run into a new, owner-only tape file, "
-            "without altering the program (<a href=\"/docs/spec/capabilities/#cap-9-recording-is-outside-the-program\">CAP-9</a>). "
+            "without altering the program (<a href=\"/docs/spec/capabilities/#cap-9-recording-is-outside-the-program\">recording is outside the program</a>). "
             "Replay the tape with <code>hirsel replay</code> using zero host grants; programs reaching <code>Foreign</code> code cannot be recorded or replayed. "
             f'Full format and verdict rules live in <a href="{html.escape(rec_url, quote=True)}">docs/recording.md</a>.</p>',
             replay_cmd,

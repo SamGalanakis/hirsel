@@ -3,9 +3,8 @@
 [API overview](../API.md).
 
 `std.tally.Tally[T: send]` counts and folds across tasks with no shared state; it is
-the library form that takes the place of atomics for counting (atomics-moonshot-1009,
-section 3.1; Java's LongAdder, OTP `counters` and Linux per-CPU counters are its
-prior art). `new(n, start, combine)` opens one channel of max(n, 1) items, admitted
+the library form that takes the place of atomics for counting (Java's LongAdder, OTP
+`counters`, and Linux per-CPU counters are its prior art). `new(n, start, combine)` opens one channel of max(n, 1) items, admitted
 at creation, and reserves n slots; `start: fn() -> T` makes a fresh partial and
 `combine: fn(take T, take T) -> T` folds partials, both cold. `handle(mut t)` issues a
 `send` resource `Handle[T]` with the next index (0, 1, ... in the owner's program
@@ -21,8 +20,8 @@ is no tag test. A counter is `update(mut h, fn(mut n: u64) { n += 1 })`, a float
 `fn(mut s: f64) { s += x }`, a concatenation `fn(mut s: String) { string.push(mut s, piece) }`.
 `update` is the only way to change a partial. It is neither an event nor a
 cancellation point and touches nothing another task can see. A handle's cleanup sends
-`(index, partial)` once, so a handle dropped by a failing or cancelled task delivers
-its partial (FAIL-8), as far as an `update` that failed had changed it.
+`(index, partial)` once, so a handle dropped by a failing or cancelled task still delivers
+its partial during cleanup, as far as an `update` that failed had changed it.
 `finish(take t) -> T waits` drops the owner's sender, receives until every handle is
 cleaned and folds `start()` then the partials in handle order. The partition of
 updates among handles and their order within each are fixed by the programs, so the

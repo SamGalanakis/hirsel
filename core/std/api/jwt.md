@@ -121,7 +121,7 @@ and name the signer's algorithm, otherwise `WrongKey`. `sign_jwt` writes
 `{"alg":…,"typ":"JWT"}` plus the signer's `kid`.
 
 - **Authority.** Verification needs none. Signing and HMAC verification use the secret's
-  policy ([TLS-5](../../../docs/spec/tls.md#tls-5-secrets)).
+  policy ([secrets](../../../docs/spec/tls.md#tls-5-secrets)).
 - **Charging.** Work is linear in the token or set size; both are bounded above.
 - **Replay.** Parsing and public-key verification are pure. The `Secret` operations are
   provider operations and record their tag, verdict or signature, never the key.

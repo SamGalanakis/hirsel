@@ -23,7 +23,8 @@ writing. A nonzero exit status is a successful collection.
 
 The same `Until` applies to the wait and each read. Process, stdout, stderr, and
 worker errors identify where collection failed. When collection fails, scope
-cleanup closes the pipe halves and releases the Proc under EXEC-6. Each piped
+cleanup closes the pipe halves and releases the `Proc`
+([child process cleanup](../../../docs/spec/exec.md#exec-6-drop-and-cleanup)). Each piped
 stream reserves a task with its rounded capture limit plus 4096 bytes.
 The task allocates scratch after filling the capture. The returned prefixes
 keep their storage.

@@ -62,9 +62,8 @@ the operation uses a no-clobber precondition.
 
 ## Opening an object for a relay
 
-Added 2026-11-25 (object-range-stream-2690); the choice is
-[decision 61](../../../docs/spec/http.md#8-decisions) of the HTTP
-specification, whose HTTP-10 states the object route's rules.
+See [HTTP response outcomes](../../../docs/spec/http.md#http-10-outcomes) for the object
+route rules.
 
 `opener(client)` returns an `Opener`, a handle any task can use while the
 client lives; `share_opener` copies it, for instance into each connection's

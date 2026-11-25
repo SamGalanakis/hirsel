@@ -1,38 +1,26 @@
 # Model
 
-[API overview](../API.md). Verification Phases 1.4 and 1.5.
-The build list is
-`hirsel-briefs/verify-phase-spec-2034/BUILD-ITEMS.md`.
-
-Version note (2026-11-24, verify-phase-spec-2034): first text. This document specifies
-`explore`, `check`, `replay`, `Bag` (Phase 1.4), and `conforms` (Phase 1.5) against
-the same `Model` value. It follows the ratified 1.4 plan (BFS over whole states, `always`
-plus required counted `sometimes`, `closed` versus `to depth k`), the 2026-11-24
-shortlist amendments (VP5, VP8, VP9), and R28 and R29.
-
-Version note (verify-model-2038): T2 ends with `(Recv,3)`.
-
-Version note (verify-model-2038): A `show` failure keeps the triggering tape and
-records its source depth separately.
+[API overview](../API.md).
 
 `std.model` checks a pure reducer. It explores every state that a finite transition
-relation can reach and checks the model's laws on every transition. It is ordinary
-Hirsel code: it takes no capability, reads no verdict, and returns ordinary values. As R28
-requires, a test runner may observe a result ([law table](../../../docs/laws.md)), but no
+relation can reach (breadth-first search over whole states, checking `always` invariants
+and required counted `sometimes` reach properties) and checks whether an implementation's
+observed trace conforms to the same `Model`. It is ordinary
+Hirsel code: it takes no capability, reads no verdict, and returns ordinary values. A test
+runner may observe a result ([law table](../../../docs/laws.md)), but no
 program reads a runner's verdict.
 
-**Not in this version.** These parts of the 2026-11-22 plan are deferred to a later
-spec pass, which is required before they are built:
+**Not in this version.** These planned extensions are deferred to a later pass:
 
 - `Env(skew, crash, drop, duplicate, reorder, delay, step_bytes, step_steps)`;
 - per-node clocks and `tick`;
 - `restart(n)`;
 - `std.model.serve`.
 
-The 11-22 text names `skew` and `delay` without defining them. Until that pass, a model
-writes faults as its own actions. The [bag example](#example-a-bag-of-messages) delivers
-from a `Bag` in any order, and drop and duplicate are actions of the same kind. `grounded`
-and every `refines` or `invariant` alias are also out of scope.
+Until then, a model writes faults as its own actions. The
+[bag example](#example-a-bag-of-messages) delivers from a `Bag` in any order, and drop and
+duplicate are actions of the same kind. `grounded` and every `refines` or `invariant` alias
+are also out of scope.
 
 ## The model
 
@@ -74,7 +62,7 @@ model code. Every call to `actions`, `step`, `done`, a `holds` or `show` runs as
 `bound bytes step_bytes { isolate { bound steps step_steps { … } } }`, as a `std.prop` case
 does.
 
-State identity is whole-state structural equality (SEM-7). The checker borrows the
+State identity is whole-state structural equality. The checker borrows the
 initial states and indexes distinct successors in a `Set[S]`. It checks both when
 testing for a visited state. A hash hit is never a match by itself. There is no
 fingerprint-only compaction or symmetry reduction. A model-only ("ghost") field is an ordinary field
@@ -137,7 +125,7 @@ and its bounds always give the same outcome:
   includes `OutOfTime` under `step_steps` and `Capacity` under `step_bytes`. The failure
   carries the path to the state being expanded, and its report names the handler and
   the cause. It is a build's resource outcome when the cause is `OutOfTime` or a bound
-  refusal (MEM-30 Q1).
+  refusal ([step bounds](../../../docs/spec/budgets.md#mem-30-step-bounds)).
 
 The visited set and the predecessor links are charged to the caller's current limit, as
 any `Set` and `List` growth is. A refused admission raises `Capacity` from `explore`. There
@@ -147,9 +135,9 @@ is no partial verdict, and `b.states` is the way to stay inside memory with an a
 and on `ToDepth` it raises `model: to depth K (LIMIT), not closed; states S, edges E`. A
 law that accepts a horizon matches on `explore` itself.
 
-No outcome is a run stop or a new cause (R29). A violated law, a stuck state, an unwitnessed
+No outcome is a run stop or a new cause. A violated law, a stuck state, an unwitnessed
 `sometimes` and a handler failure are values. `check` turns them into one `fail(text)`.
-"Stuck" is not the runtime's `Deadlock` ([FAIL-15](../../../docs/spec/failure.md#fail-15-run-stops)),
+"Stuck" is not the runtime's `Deadlock` ([run stops](../../../docs/spec/failure.md#fail-15-run-stops)),
 which stops real tasks: a stuck model state is a finding about the model.
 
 ## Paths, tokens and replay
@@ -171,7 +159,7 @@ initial state's index in `init`, followed by the index of each action within its
 When `show` fails, the report displays the path through that action's source.
 The token keeps the full tape for the failure that triggered the report. Replay
 reaches that failure, invokes `show` again, and recovers the source depth
-separately from the tape length. For example, if C2's `show` fails while
+separately from the tape length. For example, if the wrapping counter's `show` fails while
 rendering the first `Inc`, the depth is 0 and the tape is still `[0, 0, 0, 0]`.
 Its token is `AQAEAAAAAA==`.
 
@@ -215,7 +203,7 @@ pub fn bag_entries[M: key + ordered](b: Bag[M]) -> View[List[(M, u64)]] in b
 
 A `Bag` is an unordered multiset of messages for a model's network. It is stored as a list of
 `(message, count)` pairs, sorted by message with every count at least 1. So two bags that
-hold the same messages the same number of times are equal and hash alike (SEM-7), whatever
+hold the same messages the same number of times are equal and hash alike, whatever
 order they were filled in, and a `Bag` field keeps the state a `key`.
 
 - `bag_add` adds one copy.
@@ -230,7 +218,7 @@ A bag never collapses copies. Two sends of one message followed by one delivery 
 of 1. A model that needs a FIFO link keeps a `List` instead. That restriction is part of
 the model, and the bag does not imply it.
 
-## Trace conformance (Phase 1.5)
+## Trace conformance
 
 ```hirsel
 pub type Boundary[S: key, A, L: key, O: key] {
@@ -408,38 +396,38 @@ wire is empty, so `(Recv,1)` would diverge.
 
 ## Checker self-test corpus
 
-The corpus lives in `std.model`'s contract tests (`core/std/tests/model.hirsel`). It is also 1.4's law set. Each entry is a tiny model with an outcome derived by
+The corpus lives in `std.model`'s contract tests (`core/std/tests/model.hirsel`). Each entry is a tiny model with an outcome derived by
 hand. Each bad entry names the checker bug that would make it report the wrong outcome.
 No model needs more than ten states, so the corpus runs in seconds. There is no
 expected-failure registry. A negative entry asserts its exact `Failed` kind, depth and
 token in its own body.
 
-| # | Model | Expected | Checker bug it catches |
+| Case | Model | Expected | Checker bug it catches |
 |---|---|---|---|
-| C1 | counter mod 3 (above) | `Closed`, 3 states, 3 edges, depth 2, wrap 1 | a missing edge or state count; `sometimes` evaluated after pruning (wrap 0) |
-| C2 | C1 plus `always never_wrap: !(p == 2 && n == 0)` | `Violated("never_wrap")`, depth 3, token `AQAEAAAAAA==` | `always` skipped on an edge into a visited state (reports `Closed`) |
-| C3 | C1 with `Bounds.depth = 1` | `ToDepth`, `Depth`, states 2, edges 1, depth 1 | a horizon reported as `Closed` |
-| C4 | C1 with `Bounds.states = 2` | `ToDepth`, `States`, states 2, edges 2, depth 1 | a state bound that hides the checked edge, or that reports `Closed` |
-| C5 | bag model (above) | `Closed`, 6 states, 6 edges, depth 4, both 1 | a bag that collapses copies (`Unwitnessed("both")`) |
-| C6 | bag model, `done` false | `Stuck`, depth 4, token `AQAFAAAAAAA=` | a successor-free state folded into `Closed`; a `done` state reported stuck |
-| C7 | two initial states `(0, false)` and `(0, true)`, no actions, `done` true, `sometimes any: true` | `depth 0`: `ToDepth`, `Depth`, states 2, edges 0; `depth 1`: `Unwitnessed("any")` | dedup by hash or by a projection that merges the two states (states 1); `sometimes` counted on initial states (`Closed`) |
-| C8 | `init [5]`, `always small: n < 4` | `Violated("small")` at depth 0, token `AQABAA==` | initial states not checked |
-| C9 | C1 with `step_steps = 0` | `Handler` at depth 0, `OutOfTime` in `actions` | a handler failure reported as a law verdict, or one escaping as a run stop |
+| Counter closure | counter mod 3 (above) | `Closed`, 3 states, 3 edges, depth 2, wrap 1 | a missing edge or state count; `sometimes` evaluated after pruning (wrap 0) |
+| Edge into visited state | counter mod 3 plus `always never_wrap: !(p == 2 && n == 0)` | `Violated("never_wrap")`, depth 3, token `AQAEAAAAAA==` | `always` skipped on an edge into a visited state (reports `Closed`) |
+| Depth horizon | counter mod 3 with `Bounds.depth = 1` | `ToDepth`, `Depth`, states 2, edges 1, depth 1 | a horizon reported as `Closed` |
+| State horizon | counter mod 3 with `Bounds.states = 2` | `ToDepth`, `States`, states 2, edges 2, depth 1 | a state bound that hides the checked edge, or that reports `Closed` |
+| Bag multiset | bag model (above) | `Closed`, 6 states, 6 edges, depth 4, both 1 | a bag that collapses copies (`Unwitnessed("both")`) |
+| Stuck state | bag model, `done` false | `Stuck`, depth 4, token `AQAFAAAAAAA=` | a successor-free state folded into `Closed`; a `done` state reported stuck |
+| Distinct initial states | two initial states `(0, false)` and `(0, true)`, no actions, `done` true, `sometimes any: true` | `depth 0`: `ToDepth`, `Depth`, states 2, edges 0; `depth 1`: `Unwitnessed("any")` | dedup by hash or by a projection that merges the two states (states 1); `sometimes` counted on initial states (`Closed`) |
+| Initial violation | `init [5]`, `always small: n < 4` | `Violated("small")` at depth 0, token `AQABAA==` | initial states not checked |
+| Handler timeout | counter mod 3 with `step_steps = 0` | `Handler` at depth 0, `OutOfTime` in `actions` | a handler failure reported as a law verdict, or one escaping as a run stop |
 
 Notes:
 
-- **C7** runs twice. With `Bounds.depth = 0` the outcome is `ToDepth(Stats(states: 2,
+- **Distinct initial states** runs twice. With `Bounds.depth = 0` the outcome is `ToDepth(Stats(states: 2,
   edges: 0, depth: 0, ..), Depth)`. Both states are discovered at depth 0 and left
   unexpanded. With `depth = 1` it is `Unwitnessed("any")`, because `sometimes` counts
   real edges only and the model has none.
-- **C8.** The pseudo-edge `(5, start, 5)` fails, so the path is init 0 alone. The tape
+- **Initial violation.** The pseudo-edge `(5, start, 5)` fails, so the path is init 0 alone. The tape
   is `[0]`, and the token is base64 of `01 00 01 00`.
 
-Phase 1.5 adds three entries:
+Trace conformance adds four entries:
 
-| # | Trace | Expected | Bug it catches |
+| Case | Trace | Expected | Bug it catches |
 |---|---|---|---|
-| T1 | the conforming pipe trace | `Conforms(4, 3)` | no stuttering closure (diverges at entry 2) |
-| T2 | the impossible `(Recv,3)` | `Diverged(2, 1, NoTransition)` | a final-state-only check, or a label taken as proof |
-| T3 | the mislabeled `(Send,1)` | `Diverged(1, 2, HintMismatch(Recv))` | hints ignored, or hints trusted over observations |
-| T4 | the conforming trace with `Bounds.states = 2` | `Incomplete(1, States)`: closing after `(Send,2)` reaches a third state | a cap reported as `Conforms` or `Diverged` |
+| Conforming pipe trace | the conforming pipe trace | `Conforms(4, 3)` | no stuttering closure (diverges at entry 2) |
+| Impossible transition | the impossible `(Recv,3)` | `Diverged(2, 1, NoTransition)` | a final-state-only check, or a label taken as proof |
+| Mislabeled hint | the mislabeled `(Send,1)` | `Diverged(1, 2, HintMismatch(Recv))` | hints ignored, or hints trusted over observations |
+| State cap | the conforming trace with `Bounds.states = 2` | `Incomplete(1, States)`: closing after `(Send,2)` reaches a third state | a cap reported as `Conforms` or `Diverged` |

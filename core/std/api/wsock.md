@@ -40,9 +40,9 @@ per asset failure. Runner supplies it through `operate_report`.
 
 `read` drives the pure decoder over the ReadHalf. An idle reader holds no
 receive buffer: `refill` returns its input, waits with `host.recv_ready`
-([NET-1](../../../docs/spec/net.md#net-1-socket-operation-declarations)), and
+([socket operations](../../../docs/spec/net.md#net-1-socket-operation-declarations)), and
 only then checks out an 8192-byte loan for one `recv_bounded`. The loan is
-charged to the limit current in the calling task (MEM-19, MEM-20), so a
+charged to the limit current in the calling task, so a
 connection pays for a loan only while it holds one; there is no shared buffer
 pool. A receive that times out before the deadline is stale readiness: the
 loan returns and the reader waits again. A refused loan is `Allocation`.

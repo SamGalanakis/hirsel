@@ -14,7 +14,7 @@ pub fn bounded(b: Option[Budget], call: u64) -> Option[u64]
 `sweep` checks that a refused admission leaves its subject usable. `run(subject, index,
 budget)` builds a fresh subject and drives it to an end class, numbering its calls on the
 subject. When `budget` is `Some(Budget(call: k, limit: b))`, `run` makes call `k` under
-`bound bytes b` ([MEM-25](../../../docs/spec/budgets.md#mem-25-the-bound-scope)). If that
+`bound bytes b` ([byte bounds](../../../docs/spec/budgets.md#mem-25-the-bound-scope)). If that
 call answers `Capacity` as a value, `run` repeats it unbounded and reports
 `next = Some(past(b, c))`. `bounded(budget,
 call)` gives the limit for the call that `budget` names. `index` is distinct for each run,
@@ -25,14 +25,12 @@ call count. Then, for each call `k` below that count, it runs with budgets 0, th
 run's `next` (at least one byte more), until the bounded call is not refused. Each bounded
 run is wrapped in an `isolate`:
 
-- A run that ends in a `Capacity` failure is allowed and counted in `failed`. Under MEM-21
-  an admission that is not one of the four value refusals fails, and takes the subject
-  with it. The next budget steps past the failure's shortfall.
+- A run that ends in a `Capacity` failure is allowed and counted in `failed`: an admission
+  that is not one of the four value-returning refusals raises `Capacity` and unwinds the
+  subject with it. The next budget steps past the failure's shortfall.
 - Any other failure is red.
 - An end class other than the reference run's is red.
 
 `sweep` answers `Error` with up to eight red lines of the form `call K budget B: ...`,
 each naming the end class through `show_fn`. A reference run that reports `next` fails
 the test.
-
-Version note (2026-11-25, verify-refusal-sweep-2510): new module.

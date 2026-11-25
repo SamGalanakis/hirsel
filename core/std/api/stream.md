@@ -46,4 +46,4 @@ connection, closing upstream. It refuses `InvalidStream` unless the
 connection is at a fresh response head and `event_max` is at least 8. On an
 upstream failure before its head, answer `http_client.gateway_status(error)`
 (502, or 504 for `Deadline`) instead
-([HTTP-10](../../../docs/spec/http.md#http-10-outcomes)).
+([HTTP response outcomes](../../../docs/spec/http.md#http-10-outcomes)).

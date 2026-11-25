@@ -21,6 +21,7 @@ struct Fence {
     uses_std: bool,
     entry: bool,
     rules: BTreeSet<String>,
+    refused_any: bool,
     run: Option<Run>,
 }
 
@@ -109,6 +110,7 @@ fn expected_run(lines: &mut Lines<'_>, location: &str) -> Run {
 fn read_fences(
     path: &Path,
     std_by_default: bool,
+    plain_refusals: bool,
     failures: &mut Vec<String>,
     unbuilt: &mut usize,
 ) -> Vec<Fence> {
@@ -144,6 +146,7 @@ fn read_fences(
                 failures.push(format!("{location}: formatting failed to round trip"));
             }
         }
+        let mut refused_any = false;
         let rules = parsed
             .syntax
             .tree
@@ -154,22 +157,25 @@ fn read_fences(
                 source[token.span.start as usize..token.span.end as usize]
                     .strip_prefix("// refused:")
             })
-            .map(|comment| {
+            .filter_map(|comment| {
                 let rule = comment
                     .split_whitespace()
                     .next()
                     .unwrap_or("")
                     .trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
-                assert!(
-                    rule.split_once('-').is_some_and(|(family, number)| {
-                        !family.is_empty()
-                            && family.bytes().all(|c| c.is_ascii_uppercase())
-                            && !number.is_empty()
-                            && number.bytes().all(|c| c.is_ascii_digit())
-                    }),
-                    "{location}: expected a rule ID after // refused:"
-                );
-                rule.to_owned()
+                if rule.split_once('-').is_some_and(|(family, number)| {
+                    !family.is_empty()
+                        && family.bytes().all(|c| c.is_ascii_uppercase())
+                        && !number.is_empty()
+                        && number.bytes().all(|c| c.is_ascii_digit())
+                }) {
+                    Some(rule.to_owned())
+                } else if plain_refusals {
+                    refused_any = true;
+                    None
+                } else {
+                    panic!("{location}: expected a rule ID after // refused:");
+                }
             })
             .collect::<BTreeSet<_>>();
         let entry = !signatures
@@ -187,7 +193,7 @@ fn read_fences(
             });
         if run.is_some() {
             assert!(
-                entry && rules.is_empty(),
+                entry && rules.is_empty() && !refused_any,
                 "{location}: run fence needs a public main and no refusal annotations"
             );
         }
@@ -199,6 +205,7 @@ fn read_fences(
             signatures,
             entry,
             rules,
+            refused_any,
             run,
         });
     }
@@ -268,10 +275,13 @@ fn check_fences(fences: &[&Fence], failures: &mut Vec<String>) {
     let checked = Checked::check(CorpusManifest { core, packages }, files, entry.clone());
     let product = &checked.product;
     let mut seen = BTreeSet::new();
+    let mut seen_any = BTreeSet::new();
     for diagnostic in product.machine_diagnostics().unwrap() {
         let fence = origins.get(&diagnostic.primary.module);
         if fence.is_some_and(|f| f.rules.contains(diagnostic.rule)) {
             seen.insert((diagnostic.primary.module, diagnostic.rule));
+        } else if fence.is_some_and(|f| f.refused_any) {
+            seen_any.insert(diagnostic.primary.module);
         } else {
             failures.push(format!(
                 "{}: unexpected {} ({})",
@@ -287,10 +297,13 @@ fn check_fences(fences: &[&Fence], failures: &mut Vec<String>) {
                 failures.push(format!("{}: missing {rule}", fence.location()));
             }
         }
+        if fence.refused_any && !seen_any.contains(module) {
+            failures.push(format!("{}: expected refusal", fence.location()));
+        }
     }
     for gap in product.machine_incomplete().unwrap() {
         let fence = origins.get(&gap.primary.module);
-        if fence.is_none_or(|f| f.rules.is_empty()) {
+        if fence.is_none_or(|f| f.rules.is_empty() && !f.refused_any) {
             failures.push(format!(
                 "{}: incomplete check ({})",
                 diagnostic_location(fence, &gap.primary),
@@ -448,6 +461,7 @@ fn every_live_spec_fence_checks_its_claim() {
             read_fences(
                 path,
                 path == &primer || path == &unicode,
+                path == &primer,
                 &mut failures,
                 &mut unbuilt,
             )
@@ -455,7 +469,7 @@ fn every_live_spec_fence_checks_its_claim() {
         .collect::<Vec<_>>();
     let refused = fences
         .iter()
-        .filter(|fence| !fence.rules.is_empty())
+        .filter(|fence| !fence.rules.is_empty() || fence.refused_any)
         .count();
     let runs = fences.iter().filter(|fence| fence.run.is_some()).count();
     let positive = fences.len() - refused - runs;

@@ -31,7 +31,7 @@ The toolchain packages are package archives in `core-packages/<name>-<major>.hpk
 and `runner@1`, and the WebRTC stack, `webrtc_sfu@1` with `turn@1`, `dtls@1`, `srtp@1`,
 `rtp@1`, `stun_ice@1`, `media_bits@1` and `rtp_jitter@1`; the media packages `sframe@1`
 (end-to-end media encryption, [SFrame](spec/sframe.md)), `media_container@1` (Ogg, WebM and
-MP4 framing) and `media_record@1` (the room recorder, [WebRTC](spec/webrtc.md) RTC-9); and
+MP4 framing) and `media_record@1` (the [room recorder](spec/webrtc.md#rtc-9-recording)); and
 `platform@1`, `search@1` and `mcp@1`. A program binds one by major alone, for example `webrtc_sfu = { major = 1 }` in its
 `[dependencies]`. The toolchain supplies it with every toolchain package it binds, so a program
 outside the repository builds against the WebRTC SFU, TURN, SFrame, the recorder, the
@@ -66,9 +66,9 @@ default to the current directory. `new` creates a runnable `main`, a test and it
 limit in `hirsel.toml`. With `--lib` it also creates `lib.hirsel`.
 `hirsel check DIR` checks every
 definition and declaration in it; `--json` prints the outcome, its diagnostics, its
-incomplete features and its resource refusals. `hirsel explain RULE` prints a
-specification rule (for example `hirsel explain CAP-4`), and `hirsel explain --list`
-lists them all.
+incomplete features and its resource refusals. When the compiler refuses code it prints a
+short rule code; `hirsel explain RULE` prints the rule and a refused example, and
+`hirsel explain --list` lists them all.
 
 `hirsel fmt FILE` formats one file in place. `hirsel fmt DIR` formats every
 `.hirsel` file in the directory tree. A source refusal prevents writes to the
@@ -93,7 +93,7 @@ hirsel build app --release -o hello
 hirsel run app --dir . --grant Stdout -- input.txt normal
 ```
 
-`main` receives its authority as parameters ([CAP-4](spec/capabilities.md#cap-4-entry-grants)).
+`main` receives its authority as parameters ([entry grants](spec/capabilities.md#cap-4-entry-grants)).
 `--dir PATH` grants a confined directory, one per Dir parameter in order, and
 `--grant KIND` grants `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Process`, or
 `Tasks`, as well as parameterized rules for `Net` (TCP/UDP/TLS/Resolve and Unix-domain
@@ -110,7 +110,7 @@ parameter the build leaves ungranted, in parameter order:
 ``hirsel: warning: grant `NAME` is not in the build's configuration; the executable will not start``.
 `run` exits with the program's status. A `main` that returns `Error(e)` writes
 `e` as Hirsel source after `error: `, with every `Secret` shown as `[secret]`; an
-`Exit` writes nothing ([PROG-3](spec/programs.md#prog-3-entry)). For every nonzero
+`Exit` writes nothing ([program entry](spec/programs.md#prog-3-entry)). For every nonzero
 status `run` then adds one stderr line naming the outcome, so
 `Error(Serve(Configuration))` ends the run with `error: Serve(Configuration)` and
 `hirsel: main returned an error, exit status 1`. A directory grant that cannot be
@@ -146,7 +146,7 @@ and `--backend`. A build without it has no recording machinery; `--recording`,
 Recording and replay, what a recording holds and the replay verdicts are in
 [Recording and replay](recording.md). A recording is for diagnosis and testing.
 Work that must survive a crash goes through the store and its step library
-([CAP-9](spec/capabilities.md#cap-9-recording-is-outside-the-program)).
+([recording is outside the program](spec/capabilities.md#cap-9-recording-is-outside-the-program)).
 
 ## Symbolize a runtime panic
 
@@ -172,9 +172,9 @@ in the executable for self-contained symbolization.
 hirsel test app --limit 1048576 --grant Stdout
 ```
 
-`hirsel test` discovers each `@test` function ([PROG-4](spec/programs.md#prog-4-tests))
+`hirsel test` discovers each `@test` function ([test functions](spec/programs.md#prog-4-tests))
 in the package and runs each execution in its own process. A package whose
-`hirsel.toml` declares its tests' run configuration (PROG-4) runs under it, and
+`hirsel.toml` declares its tests' run configuration runs under it, and
 `--limit`, `--dir` and `--grant` are refused. Use the `limit`, `dirs` and
 `grants` keys in `[tests]`. Otherwise `--limit BYTES` is
 mandatory and is each test run's root limit; `--dir` and `--grant` configure
@@ -212,7 +212,7 @@ and platform hosting (`host`, `launcher`, `register`, `deploy`, `manifest show`;
 
 When a program exceeds an implementation ceiling — parser or resolver nesting depth,
 64-bit native layout range, or the per-build monomorphized instance limit (65,536 by
-default) — `hirsel check` and `hirsel build` report a resource refusal ([PROG-6](spec/programs.md))
+default) — `hirsel check` and `hirsel build` report a resource refusal ([program limits](spec/programs.md))
 and exit **2** (rule refusals exit **1**). In `--json` mode these appear under the
 `resources` array as `{primary, message}`. See
 [internal compiler limits](internal/compiler-limits.md) for parser guard and stack-budget

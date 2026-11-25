@@ -61,7 +61,7 @@ are written. The caller calls it again while `ended` is false.
   window, hash chains and block buffer (level-dependent, at most 512 KiB at level 9). Both
   are under the current limit, and the state is refunded when it is dropped. The step
   operations admit nothing. The whole-buffer operations admit their state and their
-  output, which grows by GROWTH, and on failure they clean and refund it (FAIL-5).
+  output, which grows by GROWTH, and on failure they clean and refund it.
   Steps are O(input + output).
 - **Failures.** A refused allocation raises `Capacity`. A decoder that reports a
   data error returns that error on every later call.

@@ -15,10 +15,10 @@ pub fn dir.narrow(d: Dir, p: String) -> Result[Dir, IoError] waits
 ```
 
 `dir.narrow(d, p)` returns a `Dir` rooted at the existing directory `p` below `d`
-([CAP-7](../../../docs/spec/capabilities.md#cap-7-attenuation)). It is `host.open_dir`, with
+([capability attenuation](../../../docs/spec/capabilities.md#cap-7-attenuation)). It is `host.open_dir`, with
 the same confinement as every Dir: every path through the child resolves beneath it,
 symbolic links included, so the child never permits more than `d`. This is how a caller
-hands a store or another library exactly one subtree (the 2026-11-18 O1 ruling: Disk takes
+hands a store or another library exactly one subtree (disk stores take
 a caller-narrowed Dir). It matches Rust cap-std's `Dir::open_dir` and WASI's
 `path_open` with `O_DIRECTORY`.
 
@@ -50,7 +50,7 @@ pub fn dir.list(d: Dir, at: Option[String]) -> Result[List[Entry], file.Error] w
 A listing reads the selected directory. `None` lists the root of `d` and `Some(p)`
 lists the directory at `p`. See [Listing below a path](#listing-below-a-path).
 `HostEntries` is a `send` mechanical resource, like
-`HostFile` ([MEM-24](../../../docs/spec/budgets.md#mem-24-logical-charges)). Making one
+`HostFile` ([logical charges](../../../docs/spec/budgets.md#mem-24-logical-charges)). Making one
 admits nothing, and its finalizer closes it.
 
 `host.next_entries` appends whole records to `buf`: a kind byte (File 0, Directory 1,
@@ -73,7 +73,7 @@ silently shortened.
 - **Failures.** `host.entries`: `Denied` when the root can no longer be read, and
   `Other(errno)`. `host.next_entries`: `Other(errno)`, after which `buf` is unchanged.
   `dir.list` also returns `NotUtf8` for an invalid name. A refused allocation
-  raises `Capacity`. Cleanup closes the listing and refunds its allocations (FAIL-5).
+  raises `Capacity`. Cleanup closes the listing and refunds its allocations.
 - **Charging.** The host operations admit nothing. Their bytes land in capacity the caller
   already holds. `dir.list` admits its record buffer (4096 bytes), the list and each name
   under the current limit, and refunds the buffer before it returns.
@@ -84,7 +84,7 @@ silently shortened.
   `dir.list` sorts them to the same result.
 
 None of these operations waits after issue
-([CONC-7](../../../docs/spec/tasks.md#conc-7-cancellation-points)).
+([cancellation points](../../../docs/spec/tasks.md#conc-7-cancellation-points)).
 
 ## Metadata
 
@@ -182,7 +182,7 @@ directory itself is not returned.
 
 - **Authority.** `d` alone. A walk reveals names below `at` and nothing outside `d`.
 - **Failures.** As above. A refused allocation raises `Capacity`, and cleanup closes any
-  open listing and refunds the walker's storage (FAIL-5).
+  open listing and refunds the walker's storage.
 - **Charging.** The walker holds the path of the directory it is in and, for each
   directory on that path, the sorted entries not yet returned. Each directory is listed
   whole (as `dir.list` does) and its listing closed before any entry is returned, so at
@@ -191,7 +191,8 @@ directory itself is not returned.
   directories on the current path, of the bytes of their entries. It is refunded as each
   directory is finished. Steps: listing a directory of k entries and b name bytes takes
   O(b + k log k) (the sort), and each `next` takes O(1) more, so a whole walk of n entries
-  takes O(total name bytes + n log n), plus one step per host call (MEM-30).
+  takes O(total name bytes + n log n), plus one step per host call
+  ([step bounds](../../../docs/spec/budgets.md#mem-30-step-bounds)).
 - **Replay.** Each listing's host calls pass their replay points. A replay supplies the
   recorded records, and the sort gives the same order.
 
@@ -249,5 +250,5 @@ symbolic links alike, as Go's `filepath.Glob` does.
 
 - **`host.entries` takes a path.** This changes a core primitive and its four callers,
   plus `dir.list`'s five. The alternative was a closeable narrowed `Dir`. A `Dir` is
-  plain and copyable, so it has no single owner to close it, and the change would reach
-  CAP-7. The change is reversible until a release pins the signature.
+  plain and copyable, so it has no single owner to close it, and the change would affect
+  [capability attenuation](../../../docs/spec/capabilities.md#cap-7-attenuation). The change is reversible until a release pins the signature.

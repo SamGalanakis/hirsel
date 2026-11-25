@@ -13,6 +13,5 @@ in groups of up to 16 and separately account for the final, possibly overlapping
 stripe. Stripe accumulation uses AVX2 or ARM NEON when available, with the same
 values and step rules on the portable path. Set `HIRSEL_XXH3=portable` to exercise it.
 
-The store binds each checksum to its store, file and byte offset as specified in
-STORE-SPEC v2.2. Laws check one-shot and split streams against libxxhash 0.8.2
-and the published xxHash sanity vectors.
+The store binds each checksum to its store, file and byte offset. Contract tests check
+one-shot and split streams against libxxhash 0.8.2 and the published xxHash sanity vectors.

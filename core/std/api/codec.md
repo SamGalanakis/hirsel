@@ -2,9 +2,10 @@
 
 [API overview](../API.md).
 
-`std.codec.Codec[T]` is SEM-10's codec: a plain record of an encoder, a decoder, a schema
+`std.codec.Codec[T]` is Hirsel's binary codec: a plain record of an encoder, a decoder, a schema
 writer (each a described function, `StaticFn`), a lower bound on the encoded length, and whether its encoding set is empty.
-`revision(c)` and `key_revision(k)` return the three parts' code revisions (PROG-9), 96 bytes,
+`revision(c)` and `key_revision(k)` return the three parts'
+[code revisions](../../../docs/spec/programs.md#prog-9-code-descriptors), 96 bytes,
 which change with any default literal or `via` body decoding reads. `of[T]()` is the only way a program
 names one. The checker resolves it per instance:
 
@@ -16,7 +17,7 @@ names one. The checker resolves it per instance:
 | a tuple of codec components | a derived codec that reads and writes each component in order |
 
 In a generic body `of[T]()` resolves when T is substituted, so a codec bound needs no
-dictionary. `of` at a type without the codec bound is LANG-12 at the call.
+dictionary. Calling `of` at a type without the `codec` bound is refused at the call site.
 
 **Whole values.** `encode(c, x, mut out) -> Result[(), EncodeError]` appends x's
 bytes. A refused allocation raises Capacity and leaves the completed prefix in
@@ -31,7 +32,7 @@ and `read` and `read_at` decode under it. Resolution and both reads return
 are the hand-written key codec protocol. `encode_key` returns unit and `decode_key` returns
 `Result[T, DecodeError]`.
 
-**Ordered keys (`key_of`, DX Q1).** `key_of[K]()` is how a program names an
+**Ordered keys (`key_of`).** `key_of[K]()` is how a program names an
 ordered key codec, and the checker resolves it per instance, as it does `of`. Its
 admitted set is its own; it is not the `key` (equality) bound, which `List`, `Option`
 and `Arc` also satisfy:
@@ -46,7 +47,7 @@ and `Arc` also satisfy:
 | a nominal record declared `key` whose fields are admitted | its fields in declaration order, as a tuple |
 | `Desc[T]`, T admitted | T's key bytes with every byte inverted (`b ^ 0xff`) |
 
-Any other K is LANG-12 at the call (`key_of` of a type outside the set). A record with
+Any other K is refused at the call (`key_of` requires a type in the admitted set). A record with
 a defaulted or removed field is refused at the call: a key has no reader, so any edit
 to a key type is a `migrate_table` rewrite. The format is prefix-free (no key's bytes
 are a proper prefix of another's), so bytewise order is value order, a tuple's order is
@@ -69,7 +70,7 @@ Option and Result. A value schema is version 03; a key schema is version 04. Def
 variants, tuple arities, type arguments, definition indices and UTF-8 names use u32
 counts or lengths, all four bytes little-endian. The root type uses opcodes 0-21.
 Opcode 20 is Never, which has no valid encoding. Opcode 21, in key schemas only, is
-`Desc` followed by its component type (v2.57; a key schema without `Desc` has the same
+`Desc` followed by its component type (a key schema without `Desc` has the same
 bytes and fingerprint as before, so the version stays 04). A tag whose payload requires
 a Never fails with Invalid at the start of the tag.
 The full format is in `codec.hirsel`. Counts above u32::MAX return

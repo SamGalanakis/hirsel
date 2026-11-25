@@ -16,7 +16,7 @@ the remaining half. Finishing sends no application protocol frame and does
 not acknowledge application delivery. The protocol writer must flush its Close
 before calling finish.
 
-This is NET-7's specified ownership composition, with no provider ABI change.
+This composes the socket half ownership rules with no provider ABI change.
 It follows TCP half-close/drain practice in Go and Tokio; ordinary drop alone
 cannot prevent unread input from making final close reset the connection.
 Goose's hypothetical socket sketch has no graceful completion operation.
@@ -26,7 +26,8 @@ Goose's hypothetical socket sketch has no graceful completion operation.
 `net.local_addr(socket)` and `net.peer_addr(socket)` return the connection's
 local and remote IP address and port. `net.listener_addr(listener)` returns the
 listener's bound address, including the kernel-selected port after a port-zero
-listen. These operations borrow their handles. [NET-1](../../../docs/spec/net.md#net-1-socket-operation-declarations)
+listen. These operations borrow their handles
+([socket operations](../../../docs/spec/net.md#net-1-socket-operation-declarations)).
 
 `std.net.accept_from(mut listener, peer, until)` accepts a connection from an
 expected IP address and port, closing other accepted connections. It preserves
@@ -36,7 +37,7 @@ the original deadline across accepts.
 
 `std.net.lookup(n: Net, name: String, until: Until) -> Result[List[Ip], LookupError] waits`
 reserves room for 16 addresses under the current limit, calls `host.resolve`
-([NET-11](../../../docs/spec/net.md#net-11-name-resolution)) and returns the addresses in
+([name resolution](../../../docs/spec/net.md#net-11-name-resolution)) and returns the addresses in
 resolver order. `LookupError = Network(NetError) | NoAddress`.
 `NoAddress` is a name with no address, which `host.resolve` reports as `Ok(0)`, so callers
 of `lookup` do not mistake an empty list for success. That is how Go's `LookupIP` reports

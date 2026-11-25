@@ -73,7 +73,7 @@ the tag.
 - **Authority.** A MAC with a secret's key is a signing oracle. Whoever can ask for tags
   over chosen data can forge what the key authenticates, wherever the tag is then sent.
   So a secret can be used as a key only when its policy holds the use
-  ([TLS-5](../../../docs/spec/tls.md#tls-5-secrets)): `mac` permits both operations, and
+  ([secrets](../../../docs/spec/tls.md#tls-5-secrets)): `mac` permits both operations, and
   `verify` permits the verification operations.
 
   ```sh
@@ -87,14 +87,14 @@ the tag.
   either side is dropped. An empty result is `Invalid`. Without the needed use, the
   operation gives `Denied` before issue, with no effect.
 - **Passwords.** A password used for SCRAM goes through `secret.scram_sha256`
-  ([TLS-6](../../../docs/spec/tls.md#tls-6-scram-sha-256)), never through these. Under
+  ([SCRAM-SHA-256](../../../docs/spec/tls.md#tls-6-scram-sha-256)), never through these. Under
   `mac`, a program could rebuild PBKDF2 one HMAC at a time and read `SaltedPassword`.
 - **Charging.** An authorized call spends one call step plus one per message byte
   before issue. These operations admit no bytes and do not wait.
-- **Replay.** Each operation is a provider operation
-  ([CAP-5](../../../docs/spec/capabilities.md#cap-5-provider-operations)) and passes the
-  replay point at issue and at delivery
-  ([CAP-8](../../../docs/spec/capabilities.md#cap-8-the-replay-point)). The issue holds the
+- **Replay.** Each operation is a
+  [provider operation](../../../docs/spec/capabilities.md#cap-5-provider-operations) and passes
+  [the replay point](../../../docs/spec/capabilities.md#cap-8-the-replay-point) at issue and
+  at delivery. The issue holds the
   secret's designation and the canonical bytes of `data` (and of `tag`). The delivery
   holds the complete tag, verdict or JWS key-size refusal. On replay the provider
   delivers the recorded result without reading key bytes
@@ -112,4 +112,4 @@ The parent needs `digest`. The call refuses a child policy containing
 `digest` or `kdf` before issue. It takes one step and admits 48 bytes for MD5 or
 64 bytes for SHA-256. The recording keeps the parent designation, algorithm,
 encoding, affixes and child policy. Replay delivers the child designation
-without its key bytes. [TLS-5](../../../docs/spec/tls.md#tls-5-secrets)
+without its key bytes (see [secrets](../../../docs/spec/tls.md#tls-5-secrets)).

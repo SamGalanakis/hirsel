@@ -9,7 +9,7 @@ input before allocating its result. `Ok(None)` is malformed input; the outer
 error is Capacity. Whitespace, missing or misplaced padding, and nonzero pad
 bits are rejected.
 
-Full blocks use SEM-11 vectors. The encoder writes only ASCII and constructs
+Full blocks use portable SIMD vectors. The encoder writes only ASCII and constructs
 the `String` from the bytes it produced. Tail padding follows Goose's Base64
 codec, with RFC 4648's zero pad bits required for a canonical spelling.
 

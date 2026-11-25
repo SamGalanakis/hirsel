@@ -126,8 +126,9 @@ passes through from the host primitive that failed:
 
 - After a `NotReplaced` return, `name` is unchanged and the temp file is gone, unless its
   removal failed.
-- A cancellation at any wait point from step 2 to step 4 (each is a cancellation point at
-  issue, CONC-7) stops `replace` without its removal step. Cleanup closes the temp file,
+- A cancellation at any wait point from step 2 to step 4 (each is a
+  [cancellation point](../../../docs/spec/tasks.md#conc-7-cancellation-points) at
+  issue) stops `replace` without its removal step. Cleanup closes the temp file,
   and the file stays in `d` under a `.hirsel-tmp-` name. `name` is unchanged.
 - A cancellation observed at the delivery of step 4 or at step 5 leaves `name` holding
   the new contents for readers, with durability unknown, as `Unsynced`.
@@ -142,7 +143,8 @@ passes through from the host primitive that failed:
 - **Charging.** `replace` admits the 45-byte temp-name `String` under the current limit and
   refunds it before it returns. The data is written from the caller's `Bytes`. No copy is
   made. `mkstemp` admits nothing, and its name bytes land in capacity the caller holds.
-  Steps: `replace` makes at most seven host calls, each one step (MEM-30), plus O(1) of its
+  Steps: `replace` makes at most seven host calls, each one step
+  ([step bounds](../../../docs/spec/budgets.md#mem-30-step-bounds)), plus O(1) of its
   own, whatever `data`'s length. The host's write time is a wait, not steps.
 - **Replay.** Every host call passes its own replay point. `mkstemp`'s issue records
   `d`'s ordinal, the prefix and the spare capacity, and its delivery records the new

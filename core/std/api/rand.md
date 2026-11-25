@@ -9,7 +9,7 @@ balancing and jitter. For keys, tokens and unguessable identifiers, use bytes
 straight from `host.random`. A known seed or enough stream outputs can reveal
 future outputs.
 
-`Pcg` is plain ([OWN-3](../../../docs/spec/ownership.md#own-3-kinds)). `let fork = g`
+`Pcg` is plain ([value kinds](../../../docs/spec/ownership.md#own-3-kinds)). `let fork = g`
 copies the state and forks the stream. Draws borrow it `mut`. Each generator
 belongs to the caller and uses no implicit global or thread state.
 
@@ -21,9 +21,9 @@ belongs to the caller and uses no implicit global or thread state.
 - For fresh entropy, use a buffer with 16 bytes of spare capacity and call
   `host.random(r, mut b)` with an explicit `Random` capability. In a new buffer,
   pass the result to `std.rand.new(list.word_le(b, 0), list.word_le(b, 8))`.
-  Recording captures the host bytes at delivery and replay supplies them again.
+  Recording captures the host bytes at delivery and replay supplies them again
+  ([the replay point](../../../docs/spec/capabilities.md#cap-8-the-replay-point)).
   Subsequent draws only use the generator state.
-  [CAP-8](../../../docs/spec/capabilities.md#cap-8-the-replay-point).
 
 A signed range `[lo, lo + size)` is `lo + int.truncate(std.rand.below(mut g, size))`
 when the size and the range fit `i64`. A list choice is

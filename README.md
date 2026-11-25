@@ -91,7 +91,7 @@ building from source.
 Hirsel's CLI is designed as a self-contained feedback loop for agents:
 
 - `hirsel primer` — prints the exact language primer matching your installed compiler.
-- `hirsel explain RULE` (`--list`, `--json`) — prints the normative rule and refused example for any diagnostic ID (e.g., `OWN-7`, `CAP-1`).
+- `hirsel explain RULE` (`--list`, `--json`) — when the compiler refuses code it prints a short rule code (e.g. `OWN-7`); `hirsel explain OWN-7` prints the rule and a refused example.
 - `hirsel inspect --core --interface` / `hirsel inspect --std --interface` — lists every public core and `std` declaration with exact parameter modes (`mut`, `take`).
 - `hirsel check --json` — machine-readable diagnostics with rule IDs, spans, and causal sites.
 - [hirsel.ai/llms.txt](https://hirsel.ai/llms.txt) — concise agent index.

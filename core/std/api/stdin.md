@@ -3,8 +3,8 @@
 [API overview](../API.md). [Io](io.md). [Core provider signatures](../../core/stdin.hirsel).
 [Host contract](../../../docs/spec/core.md#contracts-the-signatures-do-not-state).
 
-Core module `stdin` holds one provider operation
-([CAP-5](../../../docs/spec/capabilities.md#cap-5-provider-operations)):
+Core module `stdin` holds one
+[provider operation](../../../docs/spec/capabilities.md#cap-5-provider-operations):
 
 ```
 pub type StdinError = Aborted | TimedOut | Other(u32)
@@ -28,10 +28,10 @@ read one stream: each byte the host supplies is delivered by exactly one read. B
 reach one task's successive reads in stream order.
 
 **Waiting.** `read` waits after issue until input is ready
-([CONC-7](../../../docs/spec/tasks.md#conc-7-cancellation-points)). It is a
+([cancellation points](../../../docs/spec/tasks.md#conc-7-cancellation-points)). It is a
 cancellation point at issue and while it waits. If cancellation reaches the read
-while it waits, the read gives `Aborted`. `until` is an absolute deadline, as in NET-1.
-When the deadline passes before input arrives, the read gives `TimedOut`. `Never`
+while it waits, the read gives `Aborted`. `until` is an absolute deadline, as for socket
+operations. When the deadline passes before input arrives, the read gives `TimedOut`. `Never`
 waits without a deadline. In both cases the read has appended nothing. Bytes the host
 supplies after an abort or a timeout are not lost: the next read delivers them first.
 The host provider does not change the flags of the inherited descriptor, because the
@@ -44,15 +44,15 @@ closed terminal. A failed read leaves the stream where it was.
 **Writes to `Stdout` and `Stderr`.** A write whose reader has gone, such as `tool | head -1`
 after `head` exits, reports `WriteError(written, error: Closed)`, where `written` counts the
 bytes the reader's end accepted first. `Closed` is also the answer for a stream that was
-absent at launch ([CAP-4](../../../docs/spec/capabilities.md#cap-4-entry-grants)). A
+absent at launch ([entry grants](../../../docs/spec/capabilities.md#cap-4-entry-grants)). A
 command-line program that stops quietly when its output is closed matches `Closed`; it never
 needs the host's `EPIPE` number.
 
 **Charging.** `read` admits nothing and charges no limit. The bytes land in capacity
 the caller already holds ([core](../../../docs/spec/core.md#contracts-the-signatures-do-not-state)).
 
-**Replay.** Every read passes the replay point
-([CAP-8](../../../docs/spec/capabilities.md#cap-8-the-replay-point)). At issue it
+**Replay.** Every read passes
+[the replay point](../../../docs/spec/capabilities.md#cap-8-the-replay-point). At issue it
 passes the spare capacity of `buf` and `until`, and at delivery its bytes or its
 error. When recording is on, the recording holds both, and a replay delivers the
 recorded bytes without reading the host
@@ -83,8 +83,8 @@ answer to choose colour, progress output or an interactive prompt, as Rust's
   read the descriptor, the terminal's size or its modes.
 - **Charging.** The call is an ordinary core call: one step, nothing admitted, no wait,
   no failure.
-- **Replay.** The bit is part of the stream's entry grant, so it passes the replay point
-  once, at entry ([CAP-8](../../../docs/spec/capabilities.md#cap-8-the-replay-point)), and
+- **Replay.** The bit is part of the stream's entry grant, so it passes
+  [the replay point](../../../docs/spec/capabilities.md#cap-8-the-replay-point) once, at entry, and
   the call adds no frame. A recording keeps the bit in the stream's grant, and a replay
   answers from it whatever its own descriptors are
   ([recording](../../../docs/recording.md#what-a-recording-holds)).
@@ -93,9 +93,11 @@ answer to choose colour, progress output or an interactive prompt, as Rust's
   ([core](../../../docs/spec/core.md#provide)). The query is answered by the capability and
   never reaches the port. A model-world stream answers `false`.
 
-| law | bug | oracle and setup |
+### Verification properties
+
+| property | bug caught | verification setup |
 |---|---|---|
-| **TT1** the bit is `isatty`, per stream | testing for a character device in place of a terminal, or reading one descriptor for all three | Run a program that writes the three bits to a file, natively on both backends. Case 1: stdin and stdout on the slave of a pty from `openpty`, stderr on a pipe. Expected `true`, `true`, `false`. Case 2: stdin from `/dev/null`, stdout to a regular file, stderr on the pty. Expected `false`, `false`, `true`. The oracle is POSIX `isatty`: a pty slave is a terminal, and a pipe, a file and `/dev/null` are not. Add these cases to the native launch tests beside the `LISTEN_FDS` cases in `crates/hirsel-core-driver/src/host/child.rs`. |
-| **TT2** replay answers from the grant | a replay that probes its own descriptors | Record case 1 of TT1, then replay it with all three descriptors on pipes. The replay ends `Sealed`. A replay that answered from its own descriptors would issue a different write of the bits, so it would end `Diverged` at that write. |
-| **TT3** virtual bit | a constructor that ignores its argument, or a query that queues on the port | `provide.stdout(64, true)` gives `true` and `provide.stderr(64, false)` gives `false`, including after the `Served` end is dropped. The server's `provide.next` sees no call. Add this case to `core/core/tests/provide.hirsel`. |
+| **Bit matches `isatty` per stream** | testing for a character device in place of a terminal, or reading one descriptor for all three | Run a program that writes the three bits to a file, natively on both backends. Case 1: stdin and stdout on the slave of a pty from `openpty`, stderr on a pipe (`true`, `true`, `false`). Case 2: stdin from `/dev/null`, stdout to a regular file, stderr on the pty (`false`, `false`, `true`). Covered in `crates/hirsel-core-driver/src/host/child.rs`. |
+| **Replay answers from the grant** | a replay that probes its own descriptors | Record case 1 above, then replay it with all three descriptors on pipes. The replay ends `Sealed`. |
+| **Virtual bit** | a constructor that ignores its argument, or a query that queues on the port | `provide.stdout(64, true)` gives `true` and `provide.stderr(64, false)` gives `false`, including after the `Served` end is dropped. The server's `provide.next` sees no call. Covered in `core/core/tests/provide.hirsel`. |
 

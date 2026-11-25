@@ -15,7 +15,7 @@ request. A `Segment` is `Plain(bytes)` or `Sealed(credential, coding)`, whose
 `Secret` the runtime writes `Raw` or `Form`-urlencoded. An OAuth refresh body is
 `Segments([Plain("grant_type=refresh_token&refresh_token="), Sealed(token, Form)])`
 with a `Content-Type: application/x-www-form-urlencoded` field
-([HTTP-17](../../../docs/spec/http.md#http-17-client-request-bodies)). The writer owns the
+([client request bodies](../../../docs/spec/http.md#http-17-client-request-bodies)). The writer owns the
 framing fields and refuses caller-supplied Host, Content-Length,
 Transfer-Encoding, Trailer, Expect and Upgrade. A protected Connection field
 ends reuse because the client cannot tell whether it asks the peer to close.
@@ -120,7 +120,8 @@ failure before its head: 504 for `Deadline`, otherwise 502.
 
 ## Fetch
 
-The normative rules are [HTTP-18](../../../docs/spec/http.md#http-18-client-fetch-redirects-decoding-and-reuse).
+The normative rules are in
+[client fetch, redirects, decoding, and reuse](../../../docs/spec/http.md#http-18-client-fetch-redirects-decoding-and-reuse).
 
 `fetch` sends one request to an `http` or `https` URL. It takes a connection from a pool,
 follows redirects, decodes a gzip, deflate or zstd body, and returns the final response.
@@ -207,7 +208,7 @@ which has no universal value:
 Credentials go in `Protected` headers, never in a URL that a redirect, a render or a log
 could copy. The fragment is not sent. The target is the path (`/` when empty) and the
 query. `body` is the whole body as segments
-([HTTP-17](../../../docs/spec/http.md#http-17-client-request-bodies)), so `fetch` can
+([client request bodies](../../../docs/spec/http.md#http-17-client-request-bodies)), so `fetch` can
 send it again on a 307 or 308 redirect or a retry. An empty body sends no body for GET,
 HEAD, DELETE, OPTIONS and TRACE, and `Content-Length: 0` for any other method
 (RFC 9110 §8.6). The header rules are `start`'s.
@@ -226,13 +227,14 @@ and frees its slot at once, without waiting.
   ([net.md](../../../docs/spec/net.md)). A redirect to a host the grant does not cover is
   `Resolve(Denied)`, or `Http(Connect(Denied))` for an address. `c` reads deadlines and
   idle ages. `trust` verifies every `https` hop. A `Protected` header or `Sealed` segment
-  still passes TLS-5's sink check on each hop's verified name. A `Client` carries the
+  still passes the secret sink check ([secrets](../../../docs/spec/tls.md#tls-5-secrets)) on each hop's verified name. A `Client` carries the
   pool's authority, and an `Endpoint` narrows it to one origin.
 - **Failures.** Each `FetchError` names one cause. `Http(e)` is the connection's own error
   on any hop, including `TooLarge` for either body bound and `Deadline`, which also ends
   a wait for a connection. `NoAddress` means the name resolved to no address. `Location`
   is a redirect whose `Location` field is repeated, is not a URI reference, or resolves
-  to a URL `fetch` refuses. `TooManyRedirects` and `CrossOriginSecret` are HTTP-18's.
+  to a URL `fetch` refuses. `TooManyRedirects` and `CrossOriginSecret` enforce the redirect
+  and secret-origin limits.
   `CrossOrigin` is an endpoint's redirect to another origin. `Busy` means every
   connection is in use and `waiters_max` fetches already wait. `Gone` means the `Pool`
   was dropped. `Coding(e)` is a body that cannot be decoded. A refused allocation raises
@@ -241,7 +243,7 @@ and frees its slot at once, without waiting.
 - **Charging.** `pool` takes ownership of its trust value and admits, under the limit
   current at the call, its coordinator task with a reservation of `conns_max` × (49152 +
   r) + 8192 bytes, where r is the trust value's roots, plus its channels and tables
-  (HTTP-18 gives the exact terms). `Error(c)` makes nothing. That reservation pays for
+  (see the [fetch specification](../../../docs/spec/http.md#http-18-client-fetch-redirects-decoding-and-reuse) for the exact terms). `Error(c)` makes nothing. That reservation pays for
   every connection: its three 8192-byte buffers for wire data, the response head and
   request encoding, its TLS state on the host's side, its lease and its origin key. A
   handler that exits while its connection is idle in the pool leaves no charge behind.
@@ -292,7 +294,7 @@ and frees its slot at once, without waiting.
   pool. A server whose many tasks fetch either gives each task a client or runs a client
   task behind a channel. A shared pool would need a core primitive, and that decision
   belongs to the concurrency spec.
-- **Encoded-bytes allowance.** The fixed 131,072-byte framing allowance (HTTP-18) refuses a
+- **Encoded-bytes allowance.** The fixed 131,072-byte framing allowance refuses a
   gzip response with larger optional header fields, or with many tiny members. No server
   in common use sends one. Raising the allowance is reversible.
 - **`x-gzip` and raw deflate.** `x-gzip` is accepted as `gzip` (RFC 9110 §8.4.1.3), and

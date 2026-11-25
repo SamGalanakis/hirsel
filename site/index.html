@@ -479,9 +479,9 @@ header .menu:active{background:rgba(17,17,15,.06)}
 
       <div class="card-grid">
         <article class="card" id="safe">
-          <div class="card-top"><h3>Safe</h3><span class="card-tag">OWN-1 &middot; FFI-1</span></div>
+          <div class="card-top"><h3>Safe</h3><span class="card-tag">value ownership &middot; zero GC</span></div>
           <p>An accepted Hirsel program has no undefined behaviour, no data races, no use after free, and no leaked resources. Types declare their ownership representation once, and values are freed deterministically without a garbage collector.</p>
-          <p class="note">Native C libraries called behind <code>Foreign</code> are trusted, not checked (<code>FFI-1</code>): safety guarantees hold while foreign code keeps its native contract.</p>
+          <p class="note">Native C libraries called behind <code>Foreign</code> are trusted, not checked: safety guarantees hold while foreign code keeps its native contract.</p>
           <div class="card-foot">
             <a class="card-link" href="/docs/spec/ownership/">Ownership spec</a>
             <button class="walk-btn" type="button" data-walk="safe">Walk this &rarr;</button>
@@ -489,11 +489,11 @@ header .menu:active{background:rgba(17,17,15,.06)}
         </article>
 
         <article class="card" id="deterministic">
-          <div class="card-top"><h3>Deterministic</h3><span class="card-tag">SEM-8 &middot; CAP-9</span></div>
+          <div class="card-top"><h3>Deterministic</h3><span class="card-tag">same run &middot; recorded replay</span></div>
           <p>Given the same outside inputs, replay values, and limits, every run of one build behaves identically — down to its steps and where it runs out of memory. Across engines and builds, values, output, and host effects match.</p>
-          <p class="note">Applies to pure Hirsel and host-provider code; excludes <code>Foreign</code> (FFI) code and runs stopped from outside (<code>SEM-8</code>, <code>FFI-8</code>).</p>
+          <p class="note">Applies to pure Hirsel and host-provider code; excludes <code>Foreign</code> (FFI) code and runs stopped from outside.</p>
           <div class="card-foot">
-            <a class="card-link" href="/docs/spec/semantics/#sem-8-determinism">SEM-8 contract</a>
+            <a class="card-link" href="/docs/spec/semantics/#sem-8-determinism">Determinism contract</a>
             <button class="walk-btn" type="button" data-walk="deterministic">Walk this &rarr;</button>
           </div>
         </article>
@@ -512,14 +512,14 @@ header .menu:active{background:rgba(17,17,15,.06)}
         </article>
 
         <article class="card" id="authority">
-          <div class="card-top"><h3>Capability security</h3><span class="card-tag">CAP-1 &middot; NET-1 &middot; EXEC-1</span></div>
+          <div class="card-top"><h3>Capability security</h3><span class="card-tag">explicit grants &middot; no ambient I/O</span></div>
           <p>Files, network, clocks, randomness, environment variables, secrets, child processes, foreign interfaces, and tasks arrive only as explicit parameters.</p>
           <ul>
             <li><code>Dir</code> resolves every Linux path traversal with <code>openat2(RESOLVE_BENEATH)</code> and no fallback.</li>
             <li><code>--grant 'Net=...'</code> enforces explicit CIDR and port allowlists; <code>Secret</code> bytes remain unreadable to Hirsel code.</li>
             <li>Missing grants fail before <code>main</code> with exit <code>103</code>, naming every ungranted parameter at once.</li>
           </ul>
-          <p class="note">Honest boundaries: TLS uses <code>rustls</code>, child processes started through <code>Exec</code> are not confined (<code>EXEC-1</code>), and Hirsel does not apply seccomp or Landlock.</p>
+          <p class="note">Honest boundaries: TLS uses <code>rustls</code>, child processes started through <code>Exec</code> are not confined, and Hirsel does not apply seccomp or Landlock.</p>
           <div class="card-foot">
             <a class="card-link" href="/docs/spec/capabilities/">Capabilities spec</a>
             <button class="walk-btn" type="button" data-walk="authority">Walk this &rarr;</button>
@@ -527,20 +527,20 @@ header .menu:active{background:rgba(17,17,15,.06)}
         </article>
 
         <article class="card" id="local">
-          <div class="card-top"><h3>Content-addressed builds &amp; deploys</h3><span class="card-tag">LANG-8 &middot; PROG-10</span></div>
+          <div class="card-top"><h3>Content-addressed builds &amp; deploys</h3><span class="card-tag">local checking &middot; hash-addressed</span></div>
           <p>Checking a definition reads only its own body and the signatures it names, backed by a per-definition Merkle cache so edits recheck only changed bodies and callers of changed signatures.</p>
           <ul>
-            <li>Hash-addressed code (<code>PROG-10</code>) with capability-typed purity: functions hold no ambient authority.</li>
+            <li>Hash-addressed code with capability-typed purity: functions hold no ambient authority.</li>
             <li><code>hirsel publish</code> and <code>hirsel deploy</code> transfer only missing code objects by hash; <code>hirsel.lock</code> pins dependencies by <code>sha256:</code> roots.</li>
           </ul>
           <div class="card-foot">
-            <a class="card-link" href="/docs/spec/programs/#prog-10-code-addresses">PROG-10 code addresses</a>
+            <a class="card-link" href="/docs/spec/programs/#prog-10-code-addresses">Code addresses</a>
             <button class="walk-btn" type="button" data-walk="local">Walk this &rarr;</button>
           </div>
         </article>
 
         <article class="card" id="memory">
-          <div class="card-top"><h3>Memory, data layout &amp; tooling</h3><span class="card-tag">MEM-1 &middot; MEM-30</span></div>
+          <div class="card-top"><h3>Memory, data layout &amp; tooling</h3><span class="card-tag">regions &middot; byte &amp; step bounds</span></div>
           <p>Value semantics with declared representation: <code>region</code> arenas freed at once, <code>Columns[T]</code> struct-of-arrays storage, <code>Inline[T, N]</code>, portable <code>Simd[T, N]</code>, and nested <code>bound bytes</code> and <code>bound steps</code> limits that raise catchable <code>Capacity</code> or <code>OutOfTime</code>.</p>
           <ul>
             <li>Built-in <code>hirsel prof</code> for CPU sampling, compiler remarks, and exact replay memory profiles.</li>
@@ -569,7 +569,7 @@ header .menu:active{background:rgba(17,17,15,.06)}
         </article>
 
         <article class="card" id="parallel">
-          <div class="card-top"><h3>Parallel</h3><span class="card-tag">CONC-2 &middot; CONC-15</span></div>
+          <div class="card-top"><h3>Parallel</h3><span class="card-tag">shared-nothing tasks &amp; units</span></div>
           <p>Tasks share nothing. Values move between tasks through <code>task.spawn</code>, bounded channels, or joins, and immutable sharing is explicit via <code>Arc</code>. For strict budget isolation, <code>task.spawn_unit</code> runs work in an independent memory-accounted unit.</p>
           <div class="card-foot">
             <a class="card-link" href="/docs/spec/tasks/">Tasks spec</a>
@@ -612,7 +612,7 @@ header .menu:active{background:rgba(17,17,15,.06)}
             <li><strong>Transport &amp; security:</strong> DTLS 1.2 (<code>dtls</code>), SRTP/SRTCP (<code>srtp</code>), RTP/RTCP with RTX, BWE, and pacing (<code>rtp</code>), jitter buffer (<code>rtp_jitter</code>), STUN/ICE-lite (<code>stun_ice</code>), TURN client &amp; relay (<code>turn</code>), and RFC 9605 SFrame E2EE (<code>sframe</code>).</li>
             <li><strong>WebRTC SFU &amp; containers:</strong> <code>webrtc_sfu</code> (simulcast, VP9/AV1 SVC, dynacast, Opus RED, E2EE clear-range routing), codec bitstream parsers (<code>media_bits</code>), Ogg/MP4/WebM containers (<code>media_container</code>), and room recording (<code>media_record</code>).</li>
           </ul>
-          <p class="note"><strong>Thin C FFI wrappers:</strong> <code>opus</code>, <code>av1</code>, <code>h264</code>, <code>image_jpeg</code>, and <code>image_webp</code> are thin C FFI wrappers behind <code>Foreign</code> (trusted under <code>FFI-1</code>).</p>
+          <p class="note"><strong>Thin C FFI wrappers:</strong> <code>opus</code>, <code>av1</code>, <code>h264</code>, <code>image_jpeg</code>, and <code>image_webp</code> are thin C FFI wrappers behind <code>Foreign</code> (trusted native code).</p>
           <p class="quiet"><strong>Shipped in the toolchain bundle</strong> (17 packages; bind by <code>major = 1</code>, per <code>tools/buck2/defs.bzl</code>):</p>
           <div class="pkg-list">
             <span class="pkg-chip bundle">std</span><span class="pkg-chip bundle">store</span><span class="pkg-chip bundle">runner</span><span class="pkg-chip bundle">platform</span><span class="pkg-chip bundle">search</span><span class="pkg-chip bundle">mcp</span><span class="pkg-chip bundle">webrtc_sfu</span><span class="pkg-chip bundle">dtls</span><span class="pkg-chip bundle">srtp</span><span class="pkg-chip bundle">rtp</span><span class="pkg-chip bundle">rtp_jitter</span><span class="pkg-chip bundle">turn</span><span class="pkg-chip bundle">stun_ice</span><span class="pkg-chip bundle">sframe</span><span class="pkg-chip bundle">media_bits</span><span class="pkg-chip bundle">media_container</span><span class="pkg-chip bundle">media_record</span>
@@ -705,7 +705,7 @@ const viewOf = h => ALIAS[h] || h;
 const COPY = {
   hill: ['The hill', '', ''],
   safe: ['Safe', 'Nothing is left lying on the hill.',
-    'An accepted program has no undefined behaviour, no data races, no use after free and no leaked resources. Native C libraries called behind Foreign are trusted, not checked (FFI-1).'],
+    'An accepted program has no undefined behaviour, no data races, no use after free and no leaked resources. Native C libraries called behind Foreign are trusted, not checked.'],
   parallel: ['Parallel', 'Every task keeps to its own ground.',
     'Tasks share nothing. A value passes from one task to another only by moving through a spawn, a channel or a join. The only memory two tasks can both read is the immutable payload of an Arc, and spawn_unit isolates memory budgets across units.'],
   memory: ['Memory', 'The type decides who frees.',
@@ -713,24 +713,24 @@ const COPY = {
   bounded: ['Bounded', 'A full patch refuses the next mouthful.',
     'Every allocation is made against a byte limit (bound bytes) and loops can be capped by steps (bound steps). Running out raises Capacity or OutOfTime, ordinary failures the program can catch and recover from.'],
   deterministic: ['Deterministic', 'One run, every time.',
-    'Given the same outside inputs, replay values and limits, every run of one build behaves identically — down to its steps and where it runs out of memory. Across engines and builds, values, output and host effects match. Excludes Foreign (FFI) code and runs stopped from outside (SEM-8).'],
+    'Given the same outside inputs, replay values and limits, every run of one build behaves identically — down to its steps and where it runs out of memory. Across engines and builds, values, output and host effects match. Excludes Foreign (FFI) code and runs stopped from outside.'],
   authority: ['Explicit authority', 'Only a sheep handed the key goes through the gate.',
-    'Files, network, clocks, randomness, tasks, secrets and output are values passed as parameters. Linux Dir uses openat2(RESOLVE_BENEATH) with no fallback, Net uses explicit allowlists, Secret is unreadable, and missing grants exit 103 naming every missing grant. TLS uses rustls; Exec children are not confined (EXEC-1).'],
+    'Files, network, clocks, randomness, tasks, secrets and output are values passed as parameters. Linux Dir uses openat2(RESOLVE_BENEATH) with no fallback, Net uses explicit allowlists, Secret is unreadable, and missing grants exit 103 naming every missing grant. TLS uses rustls; Exec children are not confined.'],
   local: ['Local', 'Each sheep needs only its own ground.',
-    'Checking a definition reads only its own body and the signatures it names, backed by a per-definition Merkle cache and hash-addressed code (PROG-10). hirsel publish and deploy transfer only missing objects by hash, and hirsel.lock pins sha256 roots.'],
+    'Checking a definition reads only its own body and the signatures it names, backed by a per-definition Merkle cache and hash-addressed code. hirsel publish and deploy transfer only missing objects by hash, and hirsel.lock pins sha256 roots.'],
   fast: ['Fast', 'A straight line across the hill.',
     ['Native code through Cranelift and LLVM, with no garbage collector. Latest board (48e50bad, Passed: no): 0.78× AWFY instructions (11/14), 0.81× LangArena wall time (32/50), and 0.91× warm edit compile vs Rust, keeping bounds, overflow and step checks on.',
       ['build', 'Per-definition content-addressed caching checks and lowers each definition once, so an edit rechecks only that definition and callers of a changed signature.'],
       ['run', 'Every type declares its representation, regions free at once, and Columns[T] / Simd[T, N] keep hot loops tight. See /benchmarks/ for every suite, losing row and caveat.']]],
 };
 /* In code: each property as real Hirsel, opened on request. Every program here is checked by
-   `hirsel check` as shown (refusals cite the rule the checker prints); the shell lines are
-   transcripts. no: the line numbers (from 0) of the one refusal or failure, set in red. */
+   `hirsel check` as shown (refusals explain why the checker rejects the line); the shell lines
+   are transcripts. no: the line numbers (from 0) of the one refusal or failure, set in red. */
 const CODE = {
   safe: { no: [2], src: [
     'fn keep(take name: String) -> String {',
     '  let kept = name',
-    '  name       // refused: OWN-5, name moved',
+    '  name       // refused: name was moved',
     '}'] },
   parallel: { no: [6, 7], src: [
     'fn count(ts: Tasks, take ws: List[String])',
@@ -740,7 +740,7 @@ const CODE = {
     '      list.len(w) })',
     '}',
     'type Job: send { seen: Rc[String] }',
-    '  // refused: CONC-2, Rc is not send'] },
+    '  // refused: Rc cannot cross tasks'] },
   memory: { no: [], src: [
     'fn width(take s: String) -> u64 {',
     '  let owned = s        // moved: one owner',
@@ -771,7 +771,7 @@ const CODE = {
     '  host.mono_ns(c)',
     '}',
     'fn sneak() -> u64 {',
-    '  host.mono_ns()  // refused: CAP-1, no Clock',
+    '  host.mono_ns()  // refused: missing Clock parameter',
     '}'] },
   local: { no: [5], src: [
     'fn twice(n: u64) -> u64 { n + n }',
@@ -779,7 +779,7 @@ const CODE = {
     '  twice(n)    // reads twice\'s signature only',
     '}',
     '$ hirsel check',
-    'main.hirsel:3:9-10: LANG-11 expected `u64`, found `u32`'] },
+    'main.hirsel:3:9-10: expected `u64`, found `u32`'] },
   fast: { no: [], src: [
     '$ hirsel check          # nothing changed',
     'accepted: 99 files, 0 checked definitions',
@@ -795,7 +795,7 @@ const CODE_HL = {
   safe: [
     [[0,2,'k'],[3,4,'d'],[7,1,'o'],[8,4,'k'],[17,1,'o'],[19,6,'t'],[25,1,'o'],[27,2,'o'],[30,6,'t'],[37,1,'o']],
     [[2,3,'k'],[11,1,'o']],
-    [[13,29,'c']],
+    [[13,26,'c']],
     [[0,1,'o']],
   ],
   parallel: [
@@ -806,7 +806,7 @@ const CODE_HL = {
     [[10,1,'o'],[14,1,'o'],[16,1,'o'],[18,1,'o'],[19,1,'o']],
     [[0,1,'o']],
     [[0,4,'k'],[5,3,'d'],[8,1,'o'],[10,4,'t'],[15,1,'o'],[21,1,'o'],[23,2,'t'],[25,1,'o'],[26,6,'t'],[32,1,'o'],[34,1,'o']],
-    [[2,34,'c']],
+    [[2,33,'c']],
   ],
   memory: [
     [[0,2,'k'],[3,5,'d'],[8,1,'o'],[9,4,'k'],[15,1,'o'],[17,6,'t'],[23,1,'o'],[25,2,'o'],[28,3,'t'],[32,1,'o']],
@@ -833,7 +833,7 @@ const CODE_HL = {
     [[6,1,'o'],[14,1,'o'],[16,1,'o']],
     [[0,1,'o']],
     [[0,2,'k'],[3,5,'d'],[8,1,'o'],[9,1,'o'],[11,2,'o'],[14,3,'t'],[18,1,'o']],
-    [[6,1,'o'],[14,1,'o'],[15,1,'o'],[18,27,'c']],
+    [[6,1,'o'],[14,1,'o'],[15,1,'o'],[18,35,'c']],
     [[0,1,'o']],
   ],
   local: [

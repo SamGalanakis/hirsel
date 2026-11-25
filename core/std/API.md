@@ -3,8 +3,8 @@
 Admit a module to `std` when it meets all three conditions. It is universal across real
 Hirsel services and CLIs. It has one settled, familiar shape with either an RFC or a spec
 behind it or an implementation under about 300 lines. It must get a Hirsel invariant right,
-such as `bound bytes` and `Capacity`, `Secret` redaction, `CAP-1` capabilities, constant-time
-cryptography, or R8a deterministic simulation with `Clock` and `Pcg`. As a tie-breaker, put
+such as `bound bytes` and `Capacity`, `Secret` redaction, explicit capabilities, constant-time
+cryptography, or deterministic simulation with `Clock` and `Pcg`. As a tie-breaker, put
 it in `std` if an agent would otherwise hand-roll 80 lines of subtle, bug-prone boilerplate.
 
 Keep modules in separate libraries when they pick an opinionated or competing style, as web
@@ -30,13 +30,13 @@ A plain `fn` or `const` is private to its module. Contract tests live under
 runs them through the package product on the two native engines; `--filter` selects
 named cases, and `--backend evaluator` runs host-free cases on the test evaluator.
 
-**Naming std from another package.** There are no imports (LANG-7). A module that extends core
+**Naming std from another package.** There are no imports. A module that extends core
 (`arc`, `char`, `check`, `clock`, `cred`, `exec`, `float`, `int`, `list`, `map`, `net`, `order`,
 `result`, `sha1`, `sha256`, `sha512`, `string`, `task` — see the `Extends` column in [API-INDEX.md](API-INDEX.md))
 merges into core's name, so `list.sort` and
 `string.find` are written bare everywhere. Core collections use bare names: `Deque[T]`, `deque.push_back`, `Heap[T]`,
 `heap.pop`, `list.swap` and `list.sort_stable`. The stable sort's scratch is specified
-in [MEM-24](../../docs/spec/budgets.md#mem-24-logical-charges). A comparator failure
+in [logical charges](../../docs/spec/budgets.md#mem-24-logical-charges). A comparator failure
 preserves every element in unspecified order, and Capacity leaves the list unchanged.
 The Deque ring uses uninhabited slots,
 and the Heap uses hole sifts over one List. Their modules are in `core/core`, with no
@@ -55,7 +55,7 @@ requires it.
 
 ## Files
 
-A module with a core module's name **extends** it (LANG-7): `list.push` is core's and `list.sort`
+A module with a core module's name **extends** it: `list.push` is core's and `list.sort`
 the seed's, read through one name. No extension declares a core member's name.
 
 The generated [operation index](API-INDEX.md) lists every module and operation.

@@ -52,7 +52,8 @@ count. A refused measurement or reservation leaves the output bytes intact.
 reference to the prepared plan for the measured wire writer.
 Use [`http.response_typed`](http.md) to send a typed JSON response.
 
-The `typed()` format follows [HTTP B-4 and B-5](../../../docs/spec/http.md#b-4-lexical-forms-json-path-and-query).
+The `typed()` format follows the
+[HTTP JSON lexical rules](../../../docs/spec/http.md#b-4-lexical-forms-json-path-and-query).
 In particular, 64-bit integers are strings, Bytes use padded base64, and maps
 are arrays of pairs in insertion order. Records are written in declaration
 order. The writer uses `\u00XX` for control characters and shortest round-trip

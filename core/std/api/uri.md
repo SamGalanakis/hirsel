@@ -7,8 +7,8 @@ decodes their parts. Parsing copies nothing. A `Uri` is a set of spans into the 
 using the same `Span` type as `std.http1`, and each component stays raw (still
 percent-encoded) until the caller decodes the one it needs. The grammar is RFC 3986's, held
 strictly. A byte the ABNF does not allow is an error at its offset, never a guess, and an
-absent component is distinct from an empty one. Query strings follow HTTP B-4
-([http.md](../../../docs/spec/http.md#b-4-lexical-forms-json-path-and-query), "Query strings"):
+absent component is distinct from an empty one. Query strings follow the
+[HTTP query-string lexical rules](../../../docs/spec/http.md#b-4-lexical-forms-json-path-and-query):
 percent-decoding only, with `+` a literal plus. Operations allocate nothing except the
 appenders, which grow a caller-owned `String` or `Bytes`.
 
@@ -79,7 +79,7 @@ RFC 3986 §3 and §4.1 `URI-reference`, ASCII only:
   eagerly into `Path` and keeps `RawPath` only sometimes, accepts many bytes RFC 3986
   refuses, and accepts RFC 6874 zones. Go's `ResolveReference` (`url.go:1132`) is RFC 5.2
   and its tests are an oracle. Its `ParseQuery` (`url.go:962-1020`) decodes `+` as a space
-  and refuses `;`. Here `+` stays literal (B-4) and `;` is literal, as WHATWG
+  and refuses `;`. Here `+` stays literal and `;` is literal, as WHATWG
   `URLSearchParams` treats it. The rest of Go's field rules are ADOPTED: split on `&`, skip
   empty fields, and treat a missing `=` as an empty value.
 - **WHATWG URL NOT TAKEN** (rust `url` 2.5.8 implements it). It repairs input (backslashes,
@@ -89,17 +89,16 @@ RFC 3986 §3 and §4.1 `URI-reference`, ASCII only:
 - **Encode sets by component, ADOPTED from rust `percent-encoding`** (2.3.2 `src/lib.rs`,
   `AsciiSet`). The sets here are named fixed values, not ones the caller builds.
 - **Goose** has no URI module. The caller-owned-output convention is followed (ADOPTED).
-- **Spans in the public API, extending HTTP-6.** HTTP-6 keeps `http1.Span` offsets inside
-  std for the handler-facing `Request`, which is anchored to one buffer and lives for one
+- **Spans in the public API.** HTTP keeps `http1.Span` offsets internal for the
+  handler-facing `Request`, which is anchored to one buffer and lives for one
   call. A parsed `Uri` is different. `resolve` writes into `out` and returns spans of it
   while `out` is still `mut`, and a caller keeps a `Uri` in records and maps next to its
-  text. Under OWN-19, a view would freeze its anchor and could not be a record field of a
-  stable type or a collection element. So `Uri` holds plain spans, and `decode_text` or
-  `string.slice` turns one into text. This rule does not change HTTP-6: handlers still see
-  views.
-- **Extends HTTP B-4** without changing it. B-4 rules how a route's query decodes, and
-  `next_pair` with `decode_text` is that rule as a library. `http1` keeps its query raw and
-  routing never reads it (http.md HTTP-4).
+  text. A scoped view would freeze its anchor and could not be stored in an owned record
+  field or collection. So `Uri` holds plain spans, and `decode_text` or
+  `string.slice` turns one into text. HTTP handlers still see views.
+- **Matches HTTP query decoding.** `next_pair` with `decode_text` exposes the same
+  query-string decoding rule used by HTTP routes as a standalone library. `http1` keeps
+  its query raw and routing never reads it.
 
 ## Left out
 

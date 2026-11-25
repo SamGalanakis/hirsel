@@ -86,8 +86,7 @@ letters, digits or underscores. An invalid key gives
 
 ### Reading the command line
 
-`new` splits the arguments once, in order. `Args` index 0 is the first program argument
-(PROG-3).
+`new` splits the arguments once, in order. `Args` index 0 is the first program argument.
 
 | Token | Meaning |
 |---|---|
@@ -172,10 +171,10 @@ CLI framework package (API.md, "Keep modules in separate libraries").
 
 ### Authority, failures, charging and replay
 
-- **Authority.** `Args` is not a capability (PROG-3): every `main` may take it. The
+- **Authority.** `Args` is not a capability: every `main` may take it. The
   environment half still needs the `Env` grant, as before.
 - **Failures.** Every problem above is recorded and reported by `finish`. None stops the
-  reader. A refused allocation raises `Capacity`, and cleanup refunds the reader (FAIL-5).
+  reader. A refused allocation raises `Capacity`, and cleanup refunds the reader.
 - **Charging.** `new` admits one claim byte per argument (`args.len(a)` bytes) under the
   current limit. The reader also admits flag names and their getter modes as each key
   is read, along with the error list's growth. `strings` and `positionals` admit their
@@ -186,7 +185,8 @@ CLI framework package (API.md, "Keep modules in separate libraries").
   O(g × A) steps. With both bounded by the program and its command line, no input chooses
   more work than that.
 - **Replay.** No operation passes a replay point. `Args` and the `Env` snapshot enter the
-  run with its entry (CAP-8), so a replay reads the same tokens.
+  run with its entry ([the replay point](../../../docs/spec/capabilities.md#cap-8-the-replay-point)),
+  so a replay reads the same tokens.
 
 ### Prior art
 

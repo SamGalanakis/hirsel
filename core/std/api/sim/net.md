@@ -16,7 +16,8 @@ counts successful opaque secret sends without reading their bytes. Virtual
 TLS supplies no trust authority for entry-granted secrets.
 
 `local_as` names addresses as the simulated host's own: the server answers
-a public-only `Connect` to one of them `Denied` (NET-18).
+a public-only `Connect` to one of them `Denied`
+([public-only connects](../../../../docs/spec/net.md#net-18-public-only-connects)).
 
 `answer_name` answers one served Resolve or Handshake using the same
 scripts as `serve`. It replies Denied to other operations.

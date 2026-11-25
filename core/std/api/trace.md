@@ -17,7 +17,7 @@ pub type SpanKind: key = Internal | Server | Client | Producer | Consumer
 pub type Status: key = Unset | Succeeded | Failed
 pub type Value = Str(String) | Bool(bool) | Int(i64) | Double(f64) | Blob(Bytes)
 pub type Attribute { key: String, value: Value }
-pub opaque type Recorder            // Clock anchor and a Log of ended spans (MEM-29)
+pub opaque type Recorder            // Clock anchor and a bounded log of ended spans
 pub opaque type Span                // started, not yet ended
 pub opaque type Ended               // as `finish` returns it
 ```
@@ -103,9 +103,9 @@ std.trace.log(mut lg, c, err, Info, Some(std.trace.ids(span)), "fetched", take f
   Its `written` bytes, a prefix of the line, stay written. A cancellation at the write may
   likewise leave a prefix. Lines from one logger appear in call order. This module promises
   no order between tasks or between loggers, and no atomicity of a line against another
-  task's writes (CONC-10's order is not extended here).
+  task's writes.
 - **Secrets.** `Value` has no variant that holds a `Secret`, and program code never gets
-  a secret's bytes (TLS-5), so no log line can hold one. A program that wants to record
+  a secret's bytes, so no log line can hold one. A program that wants to record
   that a credential was used logs `Str(secret.render(s))`, which is `[secret]`.
 
 - **Authority.** `logger` and `log` read `c`. `log` writes through `err`. `encode_line`
@@ -130,7 +130,7 @@ std.trace.log(mut lg, c, err, Info, Some(std.trace.ids(span)), "fetched", take f
   (`src/log/slog/handler.go:179-185`). ADOPTED: the four levels, the key names and their
   order, and the JSON-lines handler as the one sink. REPLACED: slog's numeric gaps for
   custom levels. A closed `key` type keeps a filter total. Also REPLACED: slog's default
-  logger, which is ambient global state (CAP-1). NOT TAKEN: the text (logfmt) handler,
+  logger, which is ambient global state. NOT TAKEN: the text (logfmt) handler,
   `With` groups and context propagation. A caller builds fields once and passes them on.
 - Python `logging` (`/tmp/ref-cpython`, cpython 32b51e3, `Lib/logging/__init__.py:95-101`):
   DEBUG 10 to CRITICAL 50. NOT TAKEN: CRITICAL, which no program here can act on

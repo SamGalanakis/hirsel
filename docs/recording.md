@@ -3,7 +3,7 @@
 A recording is a quick way to keep a trace of one execution for debugging and testing,
 without altering the code. The launcher and the test runner make it, and replay is a tool
 run against it. No program operation takes, returns or mentions a recording
-([CAP-9](spec/capabilities.md#cap-9-recording-is-outside-the-program)), so this page is the
+([recording is outside the program](spec/capabilities.md#cap-9-recording-is-outside-the-program)), so this page is the
 tools' contract, not part of the language.
 
 A recording is not a way to make durable work. It is never synced, nothing resumes from it,
@@ -41,50 +41,12 @@ own failure. It is read and
 removed like `HIRSEL_RECORD`, works with recording on or off, and is under the same-observation
 rule below. A build without recording contains none of it.
 
-Version note (2026-11-24, verify-phase-spec-2034): adds planned law observation to the
-recording build, so CAP-9 keeps one build switch.
-
-Version note (2026-11-24, verify-observer-2037): defines the observation point for
-an engine check that raises a failure.
-
-Version note (2026-11-25, unit-tapes-u3d-2656): RL8 runs natively on both backends
-through the `testing` runtime's hold hook, and gains a kind 1 take at the scheduler's pump
-with a real parked receiver. It then gains a `Shared` node's snapshot and home
-`shared release`, and RL9 a `Shared` node moved into a helper and released home from
-there.
-
-Version note (2026-11-25, unit-tapes-u3e-2692): RL8 gains a `Shared` node held in a
-struct field. The helper-end survivor list names a kept `Shared` node (kind 1) and is
-written in ascending (kind, stream, ordinal) order; RL9 gains a node that survives its home
-helper.
-
-Amendment (2026-11-25, unit-tapes-u3e-2692): the `credits` take (tag 5) and the credit list
-after an `Accepted` settlement are removed. Since every unit charge is admitted once in the
-limit table, an accepted send returns no bytes to its sender, and the bytes a unit gets back
-arrive as a `refund`, a `last release`, a `shared release` or a helper end's survivors; no
-language unit is ever sent credits. Tag 5 is now corrupt, and an `Accepted` body ends at its
-outcome byte. Format 14 keeps its number: a tape replays only on the build that wrote it.
-
-Version note (2026-11-25, unit-tapes-u3e-2692): a granted capability (`Dir`, `Clock`,
-`Random`, `Stdout`, `Stderr`, `Stdin`, `Process`, `Exec`) crosses in an item as its tag 5
-snapshot. The receiving unit gives it a new object ordinal at its take and designates its
-word on its own cell, so the word's later operations there are that unit's, on that ordinal.
-When a word arrives again, the latest arrival's ordinal is the one later operations use.
-A narrowed capability, a `Net`, `Env` or `Cred` grant, and a capability of virtual
-construction still truncate the stream at the item.
-
-Version note (2026-11-25, unit-tapes-u3f-2714): a `Net`, granted or narrowed, crosses in an
-item or a helper's entry as its tag 5 snapshot: its rule count and rules as the header
-writes them after the `Net` kind byte, the narrowed rules for a narrowing, whose count may be
-0. An entry's capabilities, nested ones included, are snapshot by the same rules as an
-item's.
-
-A program whose entry reaches a foreign function has no recording build. Recording and
-replay commands refuse it before building, reading a tape or running native code, as
-[FFI-8](spec/foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)
-says: `hirsel replay` exits 2 with `replay: refused: FFI-8: …`, and `hirsel test --replay`
-fails each foreign-reaching test alone. `hirsel test --laws` runs those tests in the
-ordinary build and reports `unobserved (FFI-8)`.
+A program whose entry reaches a foreign function has no recording build
+([foreign code cannot be recorded](spec/foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)).
+Recording and replay commands refuse it before building, reading a tape or running native
+code: `hirsel replay` exits 2 with a refusal message, `hirsel test --replay` fails each
+foreign-reaching test alone, and `hirsel test --laws` runs those tests in the ordinary
+build and reports them as unobserved.
 
 `--release`, `--backend` and `--target` select the engine, optimisation and target of a
 recording build as they do for any other build.
@@ -94,10 +56,10 @@ into PATH. The runtime reads the variable and removes it from the environment be
 starts, so no grant observes it. Started without it, the executable runs with recording off.
 An executable built without recording never reads it.
 
-**Same observations.** Given the same values at the replay point
-([CAP-8](spec/capabilities.md#cap-8-the-replay-point)) in the same order, a build without
+**Same observations.** Given the same values at the
+[replay point](spec/capabilities.md#cap-8-the-replay-point) in the same order, a build without
 recording, a recording build with recording off and the same build with recording on make the same
-observations ([SEM-8](spec/semantics.md#sem-8-determinism)). Recording runs outside the
+observations ([determinism](spec/semantics.md#sem-8-determinism)). Recording runs outside the
 program's accounting. It charges no limit, takes no step, adds no event, poll or provider
 operation, holds no share of a program value, acts on no program handle and changes no
 delivery.
@@ -118,7 +80,7 @@ A recording holds the values the run receives at the replay point, in the run's 
   build's;
 - each provider operation's issue: its operation, its object and its canonical arguments;
 - each delivery: its result, error, bytes or committed count;
-- each scheduler choice ([CONC-10](spec/tasks.md#conc-10-event-order));
+- each scheduler choice ([event order](spec/tasks.md#conc-10-event-order));
 - the run's outcome: the exit status it returned, or the causes it failed or was cancelled
   with.
 
@@ -137,7 +99,7 @@ and longer ones as their xxh3-64 digest.
 capacity, but a replay does not compare the replaying buffer's spare capacity with the
 recorded one. It requires only that the recorded delivery fits: the bytes, records or
 addresses delivered are at most the replaying buffer's spare capacity, and a replay whose
-buffer is too small for the recorded delivery ends `Diverged` at that issue (RL2). So a
+buffer is too small for the recorded delivery ends `Diverged` at that issue. So a
 buffer that grew or shrank between builds, by a capacity rounding or another growth
 policy, replays as long as each delivery still fits. A delivery that contradicts the
 recorded room, such as a datagram whose length and truncation flag disagree with the
@@ -190,10 +152,10 @@ it did in the recording, because when a value is dropped is not an observation t
 program's meaning fixes. Ordinals are allocated in delivery order and never reused, so the
 match is exact. A `CLOSE` contributes no scheduler event. A `CLOSE` the recording does not hold for that ordinal and part, or a
 recorded `CLOSE` whose handle the replay never drops before the run ends, ends the replay
-`Diverged`, the second at the run's end (RL2). It then changes local ownership only: nothing is killed,
+`Diverged`, the second at the run's end. It then changes local ownership only: nothing is killed,
 closed or unlinked on the host. A delivery that its issue could not have produced, such as a
 packet whose length and flag contradict its room, is `Corrupt`
-([EXEC-8](spec/exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
+([child process replay](spec/exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
 
 A recording is a file of the recording user. Every child of a run granted `Exec` runs as that
 user and can rewrite it, or put another valid tape of the same program in its place. Replay
@@ -218,19 +180,19 @@ environment.
 | operation | at issue (checked on replay) | at delivery (supplied on replay) |
 |---|---|---|
 | `TLS_CONNECT` | socket ordinal; canonical args = `name`, trust (`System`, or the SHA-256 of the roots bundle), the ALPN entries in order, `until` | the outcome. On success the new stream ordinal, the negotiated protocol, the 32-byte peer digest and the binding value with its length (0 when absent). |
-| `TLS_HELLO` ([TLS-9](spec/tls.md#tls-9-server-handshake)) | socket ordinal; canonical args = `until` | the outcome. On success the new `Hello` ordinal and the normalised server name. |
-| `TLS_ACCEPT` ([TLS-9](spec/tls.md#tls-9-server-handshake)) | `Hello` ordinal; canonical args = the chain's entries in order, the key's designation and policy, the ALPN entries in order, `until` | the outcome. On success the new stream ordinal and the chosen ALPN index. Never the key's bytes. |
+| `TLS_HELLO` ([server handshake](spec/tls.md#tls-9-server-handshake)) | socket ordinal; canonical args = `until` | the outcome. On success the new `Hello` ordinal and the normalised server name. |
+| `TLS_ACCEPT` ([server handshake](spec/tls.md#tls-9-server-handshake)) | `Hello` ordinal; canonical args = the chain's entries in order, the key's designation and policy, the ALPN entries in order, `until` | the outcome. On success the new stream ordinal and the chosen ALPN index. Never the key's bytes. |
 | `RECV_BOUNDED` on a TLS half | as for a socket | the decrypted plaintext, in its original fragments |
 | `SEND_PAIR` on a TLS half | as for a socket: both offered plaintext buffers and the deadline | the committed count |
 | `SEND_SECRET` | half ordinal; canonical args = `until`, each secret's designation in `secrets` order, `wire`, `marks` | the outcome, and the committed count on failure |
 | `SECRET_MAC` | run-owned sink at object 0; modes 0/1 for SHA-256, 7/8 for SHA-384 and 9/10 for SHA-512 (sign/verify). Modes 11/12, 13/14 and 15/16 enforce the same algorithms' JWS key minimums. Modes 17/18 sign/verify SHA-1. Canonical args = mode, secret designation and policy, `data` and the input tag for verify. | the 20-, 32-, 48- or 64-byte tag, the verification verdict or the JWS `ShortKey` refusal |
-| `SECRET_KDF` ([TLS-5](spec/tls.md#tls-5-secrets)) | run-owned sink at object 0; canonical args = parent designation and policy, child policy, then `key_prefix` and `data` for HMAC, or the mode, `salt`, `len` and `info` (HKDF) or `cost` (Argon2id), or `alg`, `inner`, `prefix` and `suffix` (digest) | the delivery position or Argon2id's delivered `Invalid`, without key bytes |
-| `SECRET_MAC` key operations ([TLS-5](spec/tls.md#tls-5-secrets)) | object 0; mode 2 `wrap`, 3 `unwrap`, 4 `sign`; canonical args = mode, the key's designation and policy, then for `wrap` the wrapped secret's designation and policy, for `unwrap` the `uses` text and the blob, for `sign` the algorithm, `Random` identity and `msg`, and the spare of `out` | the outcome; for `wrap` and `sign` on success the blob or signature. `Capacity`'s available bytes are the recorded spare. |
-| `SECRET_MAC` AEAD ([TLS-5](spec/tls.md#tls-5-secrets)) | object 0; mode 5 `aead_seal`, 6 `aead_open`; canonical args = mode, key designation and policy, algorithm, nonce, associated data, plaintext or sealed bytes, and output spare | the refusal or the appended bytes, including the authenticated plaintext for open |
-| `MEDIA_KEY_SHARE` ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | object 0. Canonical args bind the Random designation, group and public buffer spare. | The delivery position and public key bytes. Replay holds a share ticket with no private key. |
-| `MEDIA_P256_KEY` ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | root-owned key generator at object 0. Canonical args bind the Random designation, signing policy and public buffer spare. | The delivery position and 65-byte public point. The Secret’s document stays with the provider. |
-| `MEDIA_CAPTURE` ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | Root media outcome at object 0. Canonical args bind the operation, public arguments and writable spare. | A child origin, public output bytes, or a refusal. Replay validates the delivery shape before it writes any bytes. |
-| `MEDIA_AGREEMENT` ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | root-owned registry verdict at object 0. Canonical args bind the constructor's public operands and share origin, including for virtual shares. | `Invalid` (0), accepted (1), or `Issued` (2). Replay supplies the verdict without an agreement provider call. |
+| `SECRET_KDF` ([secrets](spec/tls.md#tls-5-secrets)) | run-owned sink at object 0; canonical args = parent designation and policy, child policy, then `key_prefix` and `data` for HMAC, or the mode, `salt`, `len` and `info` (HKDF) or `cost` (Argon2id), or `alg`, `inner`, `prefix` and `suffix` (digest) | the delivery position or Argon2id's delivered `Invalid`, without key bytes |
+| `SECRET_MAC` key operations ([secrets](spec/tls.md#tls-5-secrets)) | object 0; mode 2 `wrap`, 3 `unwrap`, 4 `sign`; canonical args = mode, the key's designation and policy, then for `wrap` the wrapped secret's designation and policy, for `unwrap` the `uses` text and the blob, for `sign` the algorithm, `Random` identity and `msg`, and the spare of `out` | the outcome; for `wrap` and `sign` on success the blob or signature. `Capacity`'s available bytes are the recorded spare. |
+| `SECRET_MAC` AEAD ([secrets](spec/tls.md#tls-5-secrets)) | object 0; mode 5 `aead_seal`, 6 `aead_open`; canonical args = mode, key designation and policy, algorithm, nonce, associated data, plaintext or sealed bytes, and output spare | the refusal or the appended bytes, including the authenticated plaintext for open |
+| `MEDIA_KEY_SHARE` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | object 0. Canonical args bind the Random designation, group and public buffer spare. | The delivery position and public key bytes. Replay holds a share ticket with no private key. |
+| `MEDIA_P256_KEY` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | root-owned key generator at object 0. Canonical args bind the Random designation, signing policy and public buffer spare. | The delivery position and 65-byte public point. The Secret’s document stays with the provider. |
+| `MEDIA_CAPTURE` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | Root media outcome at object 0. Canonical args bind the operation, public arguments and writable spare. | A child origin, public output bytes, or a refusal. Replay validates the delivery shape before it writes any bytes. |
+| `MEDIA_AGREEMENT` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | root-owned registry verdict at object 0. Canonical args bind the constructor's public operands and share origin, including for virtual shares. | `Invalid` (0), accepted (1), or `Issued` (2). Replay supplies the verdict without an agreement provider call. |
 | `SCRAM` | half ordinal; canonical args = secret designation, `client_first`, `server_first`, `before`, `after`, `until` | the outcome, and the committed count on failure. The new `Scram`'s ordinal on success. |
 | `SCRAM_VERIFY` | `Scram` ordinal; canonical args = `server_final` | the verdict |
 
@@ -238,7 +200,7 @@ A recording **never** holds ciphertext, handshake records, keys, client or serve
 the certificate chain, the roots bundle, or the provider's verification time. Nor does it
 hold any SCRAM value computed from a password: the normalized password, `SaltedPassword`,
 `ClientKey`, `StoredKey`, `ServerKey`, the client proof or the expected server signature
-([TLS-6](spec/tls.md#tls-6-scram-sha-256)).
+([SCRAM-SHA-256](spec/tls.md#tls-6-scram-sha-256)).
 
 **Secret designations.** A granted secret is a grant. It takes a `GRANT` frame and an object
 ordinal in the order of the run's grants, like every other grant. The header's grant
@@ -277,14 +239,15 @@ A replayed `Net` grant starts with no live rules, and its narrowed rule lists an
 metadata is the recorded value, never the digest of the replaying executable.
 
 **Admission.** Before any program code runs, a replay refuses a recording whose entry
-identity, entry code revision ([PROG-9](spec/programs.md#prog-9-code-descriptors)),
+identity, [entry code revision](spec/programs.md#prog-9-code-descriptors),
 argument snapshot, root limit or charge policy differs from the replaying build's, and one
 whose header is damaged. The code revision covers the reachable checked code, not the engine
 or the CPU's vector level, so admission accepts a recording on either engine and on any CPU
 the build supports. It exits 2 with `replay: refused: REASON`.
 
-**Another build (2026-11-23, Spec Q1).** Steps and slice ends are a build's own
-([SEM-8](spec/semantics.md#sem-8-determinism), [CAP-9](spec/capabilities.md#cap-9-recording-is-outside-the-program)):
+**Another build.** Steps and slice ends are a build's own
+([determinism](spec/semantics.md#sem-8-determinism),
+[recording is outside the program](spec/capabilities.md#cap-9-recording-is-outside-the-program)):
 the same program may take a different number of steps on another engine or optimisation
 level, so its slices may end at other points and a step bound may stop it elsewhere. A
 recording build is the same build as the build without recording, and replay on that build
@@ -346,10 +309,10 @@ Where cleartext can be in a recording:
 | bytes supplied by a `Secret` grant | never via the grant, send or `TLS_ACCEPT` record | Replay uses the designation. |
 | a sealed secret | only where the bytes were already there, as the received plaintext they were computed from | Replay recomputes the same bytes from those deliveries, so the seal adds nothing. |
 | received plaintext (response bodies, cookies, minted tokens; a child's stdout and stderr; received datagrams) | always, exactly as received | Replay delivers these bytes to the program, so it needs them exactly. |
-| a credential fetch ([TLS-7](spec/tls.md#tls-7-credential-grants)) | the access key id and session token, as received plaintext; never the secret key | The key is sealed by the provider. Replay makes a designation with no bytes, as for a grant. |
+| a credential fetch ([credential grants](spec/tls.md#tls-7-credential-grants)) | the access key id and session token, as received plaintext; never the secret key | The key is sealed by the provider. Replay makes a designation with no bytes, as for a grant. |
 | a wrapped secret | only as `wrap`'s blob, sealed under the KEK | Replay delivers the blob, and opening it needs the KEK's bytes, which a recording never holds. |
 | a SCRAM exchange | the salt, iteration count, nonces and the server's `v=`, as received plaintext; never the proof | The server's messages are deliveries. With the client's first message they let a holder of the tape test password guesses offline, which is one reason every tape is credential-bearing. The proof would give the same, so it is not stored. |
-| an opaque key schedule's secrets, or a sealer's, opener's, header mask's or key share's key ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | never; the issue holds the origins it was made from | Replay delivers each seal, open, mask and Finished value from the recording. A wholly virtual schedule writes no frame at all: replay recomputes it from the seed and the recorded peer messages. |
+| an opaque key schedule's secrets, or a sealer's, opener's, header mask's or key share's key ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | never; the issue holds the origins it was made from | Replay delivers each seal, open, mask and Finished value from the recording. A wholly virtual schedule writes no frame at all: replay recomputes it from the seed and the recorded peer messages. |
 | a key drawn from a host `Random` (a key share, a signing key, an ECDSA nonce) | never; the delivery holds the public key | The draw happens inside the provider and does not pass the replay point. |
 | a packet's plaintext on an opaque path | sealed plaintext as the canonical-arguments rule stores it; every successfully opened plaintext in full, including through `open_into` | Replay checks seals and delivers opens. Opened plaintext is whatever the peer sent (media, or credentials sent inside it), which is one more reason every tape is credential-bearing. |
 | sent plaintext | as the canonical-arguments rule stores it: 16 bytes or fewer literally, otherwise a digest | Replay only checks sends. |
@@ -363,36 +326,35 @@ recorded outcome.
 
 ## Unit recordings
 
-Specified 2026-11-24 (unit-tapes-spec-2339). Slices U1 and U2 are built: the tape is
-format 14, and each helper of a recorded run gets its own stream with its entry, host frames
-and `END`. Takes and unit operations come with U3, and helpers replay by stream from U4. Until U5,
-[CONC-15](spec/tasks.md#conc-15-units)'s Unbuilt list still applies. Everything else in
-this section is the end state those slices build.
+Unit recording is being rolled out incrementally: per-helper streams, entries, host frames,
+`END` frames, takes, and unit operations are implemented, while per-stream helper replay
+remains in progress (see [units](spec/tasks.md#conc-15-units) for the current unbuilt list).
+The rest of this section describes the full unit-recording design.
 
 A program that calls `task.spawn_unit` runs as several units, and each unit has its own
-order of events with no order across units ([CONC-10](spec/tasks.md#conc-10-event-order)).
+order of events with no order across units ([event order](spec/tasks.md#conc-10-event-order)).
 A unit's behaviour is a function of its entry and of its inputs in the order it takes them
-([CONC-15](spec/tasks.md#conc-15-units)). A recording of such a run is therefore one
+([units](spec/tasks.md#conc-15-units)). A recording of such a run is therefore one
 **stream** per unit. Each stream records that unit's inputs in that unit's own order, and
 replays without the other units' streams. No frame orders one unit's events against
-another's, and nothing in a recording promises such an order. The total-order promises of
-CONC-10, SEM-8, CAP-8 and CAP-9 are per unit and are not widened here.
+another's, and nothing in a recording promises such an order. Total-order determinism
+guarantees apply per unit and are not widened across units.
 
 ### What each stream holds
 
-The **root stream** is the stream a format 13 tape holds today: the header, the grants and
-the run's frames, plus the unit frames below. Each **helper stream** holds, in the helper's
-own order:
+The **root stream** holds the header, the grants, the run's frames, and the unit frames
+below. Each **helper stream** holds, in the helper's own order:
 
-- its **entry** ([CONC-15](spec/tasks.md#conc-15-units)): the code descriptor of `f`
-  ([PROG-9](spec/programs.md#prog-9-code-descriptors)), the root limit `n`, the root step
+- its **entry** ([units](spec/tasks.md#conc-15-units)): the
+  [code descriptor](spec/programs.md#prog-9-code-descriptors) of `f`,
+  the root limit `n`, the root step
   bound or its absence as the helper received it, and the whole of `x` (its plain bytes and its content, with each
   handle it holds written as a handle snapshot, below). The entry is an input of the helper,
   so it is stored in full, never as a digest;
 - every frame a root stream would hold for the same operations: each provider operation's
   issue and delivery, each scheduler choice, each `WAKE`, `CANCEL`, `RETIRED` and `CLOSE`,
   with the same per-operation contents as the tables above. A helper's `MEDIA_AGREEMENT`
-  verdict ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) is a frame of the
+  verdict ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) is a frame of the
   helper's stream, exactly as a root's is of the root stream;
 - each **take** (below);
 - each **unit operation** the helper issues (below);
@@ -407,15 +369,15 @@ unit that stops.
 point in every unit, whatever its secret's bytes on replay: its issue holds the designation
 and profile or suite, and its delivery the schedule origin or the refusal. A `Spent` found
 at the run's atomic mark is that delivery, not a refusal before issue. Replay supplies it from the stream and
-never reads the mark ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement) gives
+never reads the mark ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement) gives
 the order).
 
 **Charges released by a run-wide count.** Five charges are released when the last of
 holders that can sit in several units is dropped: an agreement registry entry's 48 bytes
-([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)), the charge that `narrow` or
+([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)), the charge that `narrow` or
 `provide.secret` admitted for a `Secret` designation, and the charge of the sealed bytes
 behind one, which `seal` or the derivation admitted and which is released with the last
-designation of those bytes, a `Shared` node's charges (CONC-15) and a connection's (CONC-17).
+designation of those bytes, a `Shared` node's charges and a connection's charges.
 `share` adds holders, a `Secret` is `cross`, and the counts are
 run-wide, so whether a given drop is the last one follows the order of drops in every unit,
 which replay does not keep. One rule covers all five, every time, whether or not a holder
@@ -423,7 +385,7 @@ ever left the unit:
 
 - the release is an input of the **paying unit**: the unit whose limit admitted the
   charge, or, once that unit has ended with the charge among its survivors, the unit of
-  the owner that kept it ([CONC-15](spec/tasks.md#conc-15-units));
+  the owner that kept it ([units](spec/tasks.md#conc-15-units));
 - for the registry entry, designation and sealed bytes, its refund is a `refund` take
   (below) in the paying unit's stream, wherever the last
   holder ends. When the last holder is dropped in the paying unit itself, the take is at
@@ -447,7 +409,7 @@ drop, according to which was last live; and its replay alone applies them there.
 **Virtual capabilities across units.** A capability of virtual construction
 (`provide.clock`, `random`, `random_tape`, `process`, `dir`, `net`, `stdout`, `stderr`, and
 every capability a served port issues or a narrowing of one makes) is plain and `cross`
-([CONC-2](spec/tasks.md#conc-2-the-send-bound)), so it can reach another unit, and its
+([the `send` bound](spec/tasks.md#conc-2-the-send-bound)), so it can reach another unit, and its
 cell or port is then reached from more than one unit. Its **home** is the unit that ran its
 constructor. Core's rule that a virtual provider's results are recomputed
 ([core](spec/core.md#provide)) holds only while one unit uses the cell:
@@ -478,7 +440,7 @@ constructor. Core's rule that a virtual provider's results are recomputed
   every operation on that cell comes from the stream, and one with no frame ends
   `Diverged(Missing)`. A capability that arrives back at its home is used under this rule,
   not the snapshot row's;
-- for [TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement), a virtual `Random`
+- for [packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement), a virtual `Random`
   whose operation passes the replay point by these rules counts as a host `Random`: a
   `key_share` or `p256_key` from it passes the replay point as a whole and its key has no
   bytes on replay. No drawn key byte is written.
@@ -516,7 +478,7 @@ The native runtime drains the mailbox at these sites, each with its kind:
 |---|---|
 | the commit of every event the unit records (`record_event` in `tasks.rs`), before the event, so a take there is in the gap before that event | 0 |
 | a limit's end and a limit's hand-over (`Funding::end` and `Funding::handover` in `limit.rs`) | 0 |
-| a binding of a task to a worker that drains before the task resumes (`hirsel_core_task_bind` in `abi.rs`, exported, called by no emitted code; the scheduler rebinds a task through `task_resume`, which does not drain, [MEM-20](spec/budgets.md#mem-20-limit-records-and-hand-over)) | 1, a scheduler pump |
+| a binding of a task to a worker that drains before the task resumes (`hirsel_core_task_bind` in `abi.rs`, exported, called by no emitted code; the scheduler rebinds a task through `task_resume`, which does not drain, see [limit records and hand-over](spec/budgets.md#mem-20-limit-records-and-hand-over)) | 1, a scheduler pump |
 | the drop of the unit's last limit handle (`Drop for Funding`) | none: it runs after the unit's `END` is written, no admission follows it, and its folds are not takes |
 
 Any other drain an operation makes, such as `hirsel_core_refunds_drain` (exported, emitted
@@ -535,8 +497,8 @@ at the count's in-operation position and one at the next pump after it have the 
 and count. Replay applies every `TAKE` recorded for a position when it reaches that
 position, in stream order: a kind 0 take at the in-operation position with that count, and
 a kind 1 take at the first scheduler pump after it, which is the idle pump when every task
-of the unit waits. A `TAKE` adds no event, poll or provider operation, so [RL1](#laws) still
-holds. Its body is one of:
+of the unit waits. A `TAKE` adds no event, poll or provider operation, so recording still
+changes no program observation ([Laws](#laws)). Its body is one of:
 
 | arrival | what the `TAKE` holds |
 |---|---|
@@ -544,7 +506,7 @@ holds. Its body is one of:
 | close | the inbox's ordinal (its last client was cleaned in another unit) |
 | seal answer | the ordinal of the connection whose inbox this unit cleaned. When it comes depends on how many sends other units had accepted before the seal, so the replaying unit takes the recorded answer and makes none of its own |
 | settlement of a waiting send | the send's issue position in this stream; `Accepted`, `Closed` with the returned item in full, or `Withdrawn` |
-| helper end | the helper handle's ordinal; the result in full with its handle snapshots, or the causes; and each survivor charge the owner keeps ([CONC-15](spec/tasks.md#conc-15-units)): every open connection, `Shared` node, held `Secret` designation, held sealed bytes, live key object or unretired agreement registry entry ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)), and unretired `UdpSocket` pool or group queue the helper paid for, each with its ordinal and amount |
+| helper end | the helper handle's ordinal; the result in full with its handle snapshots, or the causes; and each survivor charge the owner keeps ([units](spec/tasks.md#conc-15-units)): every open connection, `Shared` node, held `Secret` designation, held sealed bytes, live key object or unretired agreement registry entry ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)), and unretired `UdpSocket` pool or group queue the helper paid for, each with its ordinal and amount |
 | last release | the connection's making stream and its ordinal there, its retained header and its unused room |
 | shared release | the `Shared` node's home stream and its ordinal there |
 | cancel | nothing: a cancellation request for this unit's root |
@@ -590,7 +552,7 @@ and a delivery.
 Later host operations on a handle that arrived are issues in the receiving unit's stream,
 checked and delivered there like any other. A replayed snapshot designates nothing on the
 host, as every replayed handle does. A socket's `RETIRED` frame is in the stream of the
-**refunded unit** that [NET-16](spec/net.md#net-16-udp-sockets-and-batches) names, at the
+**refunded unit** ([UDP sockets and batches](spec/net.md#net-16-udp-sockets-and-batches)), at the
 position where that unit folds it, and it names the socket by the stream number and
 ordinal of the unit that dropped it.
 
@@ -672,7 +634,7 @@ child's entry. Each unit's replay is exact for what that unit observed, which is
 thing a replay promises, and a tape is the recorder's own file
 ([What a recording holds](#what-a-recording-holds)). The block check covers the tape id,
 so a block from another recording is `Damaged` (format, below). That the streams of one
-recording agree is a property of the recorder, held by law RL9 below. The missing-stream
+recording agree is a property of the recorder, verified by the stream-agreement tests below. The missing-stream
 check above is not such a comparison: it checks the tape for an outcome the recorder is
 specified to produce, a stream for every helper that started.
 
@@ -701,17 +663,14 @@ between units moves as its designation, never as bytes.
 
 ### Unit stream format
 
-Format 14 is the clean bump that unit streams need. A reader of format 14 refuses every
-earlier format, and format 13 has no reader once U1 lands (G-1 = B: no store format
-continuity).
+The tape format is versioned and forward-only: a reader refuses every earlier format
+without migration, and a tape replays only on the build that wrote it.
 
-The layouts below use format 13's encodings from `crates/hirsel-tape-format`: `u8`, `u16`,
+The layouts below use the encodings in `crates/hirsel-tape-format`: `u8`, `u16`,
 `u32` and `u64` are little-endian fixed-width integers; `varint` is canonical unsigned LEB128
 (at most 10 bytes, no overlong final `0x00`, a 10th byte of at most 1); `bytes` is a `varint`
 length followed by that many bytes. A field that breaks its layout, a tag outside its table,
-or a byte string with bytes left after its last field is `Corrupt`. Format 13's header,
-frames and `Out` encoding are unchanged except where this section says so. Each layout is
-stated once, here.
+or a byte string with bytes left after its last field is `Corrupt`.
 
 **Blocks.** Every block, in every stream, is:
 
@@ -725,11 +684,11 @@ stated once, here.
 | payload | `len` bytes | |
 | check | `u64` | xxh3-64, seed 0, over the 16-byte tape id, then the 20 head bytes (flags to len), then the payload |
 
-The head is 20 bytes, 4 more than format 13's. The check covers the stream number, so a
+The head is 20 bytes. The check covers the stream number, so a
 block moved between streams fails its check. Each stream's block 0 is its **header block**,
-with flags 0; its later blocks hold frames, as format 13's blocks after block 0 do. The
-root's header block payload is format 13's header with `FORMAT = 14`; the tape id every check
-uses comes from it.
+with flags 0; its later blocks hold frames. The
+root's header block payload holds the current format tag (`0x000e`) and the tape id every check
+uses.
 
 **Helper stream header.** A helper stream's header block payload is:
 
@@ -745,7 +704,7 @@ stream comes before the entry is complete. The joined entry is:
 
 | field | width |
 |---|---|
-| descriptor | `bytes`: `f`'s identity bytes ([PROG-9](spec/programs.md#prog-9-code-descriptors)), version byte `0x01` first |
+| descriptor | `bytes`: `f`'s [code identity bytes](spec/programs.md#prog-9-code-descriptors), version byte `0x01` first |
 | `n` | `u64` |
 | bound | `u8` 0 when the helper received no step bound; `u8` 1 followed by the bound as a `u64` |
 | `x` | a value (below) |
@@ -779,7 +738,7 @@ descriptor that does not resolve.
 A value's **canonical form** is its bytes as above with each snapshot's ordinal field left
 out, at every depth. The sender cannot know the ordinals the receiving stream allocates, so
 the arguments of `UNIT_SPAWN`, `CONN_SEND` and `CONN_TRY_SEND` hash the canonical form, and
-RL9 compares a sent item with the canonical form of the item taken.
+stream-agreement checks compare a sent item with the canonical form of the item taken.
 
 **Snapshots.** A snapshot is its kind tag `u8` (above), its new object ordinal in the
 receiving stream as a `varint`, then:
@@ -852,8 +811,8 @@ task bit is 0, because a take names no task. Then:
 **Unit operations.** `UNIT_SPAWN`, `CONN_SEND`, `CONN_TRY_SEND` and `UNIT_CANCEL` are
 operation codes 164, 165, 166 and 167 of `ISSUE`, `DONE` and `OP`, in
 `hirsel_core_ids::host_op`, whose table refuses a duplicate code (162 and 163 are
-`SCHEDULE_SPACE_INFO` and `SCHEDULE_SEALER_PAIR`). Their frames are format 13's `ISSUE` and
-`OP`, task bit included. Their `Out` holds only the status, which is `OK` (0), and the
+`SCHEDULE_SPACE_INFO` and `SCHEDULE_SEALER_PAIR`). Their frames use the standard `ISSUE` and
+`OP` encoding, task bit included. Their `Out` holds only the status, which is `OK` (0), and the
 `value` `varint`: no error, written count or payload. Any other status or value is
 `Corrupt`.
 
@@ -876,7 +835,7 @@ length `varint`, then the first `bytes` chunk, then `DATA` continuations as for 
 The first chunk is empty only when the total length is 0. A nonzero total length with an
 empty first chunk is `Corrupt` in its stream.
 
-**`END`.** The root stream's `END` is format 13's. A helper stream's `END` (any stream number
+**`END`.** The root stream's `END` uses the root outcome layout. A helper stream's `END` (any stream number
 other than 0) is head `0x0A`, the gap `varint`, the status `u8` 0, the kind `u8`
 (`Returned` 0, `Failed` 1, `Cancelled` 2, `Deadlock` 3), then a carrier holding, for
 `Returned`, the result in canonical form (the owner's helper-end take holds it as a
@@ -934,7 +893,7 @@ own state: its previous task, its outstanding issues and its open carrier.
 `tape show` prints the header, then each stream under its unit name, ordered by
 spawn-index path, compared numerically.
 
-**Example.** A root-only format 14 tape with one `TAKE`: a refund of 48 bytes to limit
+**Example.** A root-only tape with one `TAKE`: a refund of 48 bytes to limit
 ordinal 0 (the root limit), taken at a scheduler pump with gap 0 and count 0, and then an
 `END` returning exit status 0. The tape id is the bytes `00` to `0f`. The header has an
 empty identity, a zero revision, charge policy 0, limit 65536, bound 0, the FIFO chooser,
@@ -949,7 +908,7 @@ Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 00 00 00 00                stream 0
 00 00 00 00 00 00 00 00    seq 0
 4b 00 00 00                len 75
-0e 00                      format 14
+0e 00                      format version
 01                         kind Run
 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f   tape id
 00                         identity: empty bytes
@@ -992,82 +951,54 @@ Block 1 (stream 0, seq 1, flags `END`, 25-byte payload), 53 bytes:
 
 | system | what it does for many actors | taken? |
 |---|---|---|
-| rr (`/tmp/ref-rr` at `b3e8e72`) | One trace per recording with substreams (`src/TraceStream.h:76-87`: events, raw data, mmaps, tasks), and every event frame tagged with its thread id and a single global time (`src/TraceFrame.h:33-40`). That one order exists because rr runs one thread at a time while recording (`src/Scheduler.cc:132`), and replay follows its recorded decisions (`src/Scheduler.h:20-60`) | **ADAPTED.** One file holding several streams is taken, as are tagged frames. The single global order is **NOT TAKEN**: it serializes every thread through one core while recording, which would undo the point of units, and Hirsel has no cross-unit order to record (CONC-10). Weakness avoided: recording cost grows with parallelism. Win taken: one artifact per recording. |
-| TigerBeetle VOPR (`/tmp/ref-tigerbeetle` at `a2a3c70`) | Records nothing. The whole cluster, replicas and network alike, is a deterministic function of one seed (`src/vopr.zig:127-135`), and the network is a simulator drawing loss, replay and partitions from that seed's PRNG (`src/testing/packet_simulator.zig:193`, `:272-304`) | **NOT TAKEN** for recordings: a live Hirsel run's inputs come from the host, so they cannot be regenerated from a seed. It stays the model for `hirsel test --sim`, which already plays that part. Win noted: replaying a single actor needs only its own inputs, which is what per-unit streams give. |
+| rr (`b3e8e72`) | One trace per recording with substreams (`events`, `raw data`, `mmaps`, `tasks`), and every event frame tagged with its thread id and a single global time. That one order exists because rr runs one thread at a time while recording, and replay follows its recorded decisions | **ADAPTED.** One file holding several streams is taken, as are tagged frames. The single global order is **NOT TAKEN**: it serializes every thread through one core while recording, which would undo the point of units, and Hirsel has no cross-unit event order to record. Weakness avoided: recording cost grows with parallelism. Win taken: one artifact per recording. |
+| TigerBeetle VOPR (`a2a3c70`) | Records nothing. The whole cluster, replicas and network alike, is a deterministic function of one seed, and the network is a simulator drawing loss, replay and partitions from that seed's PRNG | **NOT TAKEN** for recordings: a live Hirsel run's inputs come from the host, so they cannot be regenerated from a seed. It stays the model for `hirsel test --sim`, which already plays that part. Win noted: replaying a single actor needs only its own inputs, which is what per-unit streams give. |
 | Antithesis-style deterministic hypervisor (public documentation only, no source) | Runs the whole system on one deterministic machine and replays it from its seed and injected inputs, so every actor shares one order | **NOT TAKEN**, for the same reason as rr's global order: it needs a whole-machine single order, which units do not have and must not acquire. |
-| Goose (`/tmp/ref-goose` at `d5ae5bb`) | Threads share no mutable memory and meet only through typed queues of flat values (`docs/reference.md:3842-3870`); it has no record or replay | **ADOPTED** as confirmation of the input model: when actors meet only through queues, each actor's queue takes are its whole outside input, and that is the `TAKE` frame. |
+| Goose (`d5ae5bb`) | Threads share no mutable memory and meet only through typed queues of flat values; it has no record or replay | **ADOPTED** as confirmation of the input model: when actors meet only through queues, each actor's queue takes are its whole outside input, and that is the `TAKE` frame. |
 
-### Build slices
+### Unit-recording verification properties
 
-| slice | size | depends on | builds | laws |
-|---|---|---|---|---|
-| **U1** format 14 | S | — | `crates/hirsel-tape-format`: stream number in the block head, stream header, `TAKE` (kind 14, point kind, arrival and snapshot tags), unit operation codes 164-167, value and snapshot layouts, carriers (`DATA` continuation of entries, takes and helper results, survivor lists inside the helper-end body); the open-time index with its `Damaged` rules (sequence gap, repeated sequence number, swapped blocks, a block after its stream's `END` or `TRUNCATED`, a helper block before its header, a self-parented or duplicate (parent, spawn index) header, failed check, trailing bytes) and B as the count of complete blocks before the fault; survivor kind 7; `tape show` by spawn-index path; `FORMAT = 14`, format 13 refused; the recorder writes the root stream only | RL6 |
-| **U2** helper streams | M | U1 | the map from a plain `fn` code word to its PROG-9 identity bytes (each item made an entry-shaped `fn(take X) -> R` value defines its row's descriptor, and the recording entry indexes every descriptor of the link); capability and function-word rows in the `cross` descriptor (`hirsel-core-layout` `cross.rs`) for the value's own fields; each helper gets its own recorder at its spawn; its entry, host frames and `END` go to its stream; the writer carries several recorders into one file; per-stream truncation and its report; the root `END` block is written last; no `END` at a run stop other than `Deadlock` | RL7's recording half, RL12 |
-| **U3** takes and unit operations | M | U2 | `TAKE` at every take point and all three take paths, with gap, point kind and count, including each mailbox drain site with its kind (event commit, limit end and hand-over kind 0; task bind kind 1) and each drop of a run-wide-counted holder; takes for posts from other units and for every release of a registry entry, `Secret` designation, sealed bytes, `Shared` node or connection, in the paying unit; the unit operation frames; handle snapshots, with the `cross` descriptor's owner rows inside list elements, plain variants and `Shared` payloads, and key-object and virtual-capability snapshots; limit ordinals; designations by origin kind, stream and ordinal; imports always passing the replay point, `Spent` as a delivery; a virtual cell's home and its crossing frame, the `ISSUE` of each wait pending there, and the replay point for foreign operations and home operations after the crossing frame; `RETIRED` in the refunded unit; key objects and registry entries in the helper-end survivor list | RL8, RL9 |
-| **U4** replay by stream | L | U3 | open every stream; start each unit from its entry; takes and unit outcomes from the stream; drop published arrivals and posted refunds; `UNIT_SPAWN` handles ended by the parent's `TAKE`; the missing-stream check; `Diverged(Take)` with its three cases; registry entries, `Secret` designations, sealed bytes, `Shared` nodes and connections released only at their takes, never by a replaying count (`ShareTicket::replay`); a home cell supplied from the stream from its crossing frame on; per-stream verdicts ordered by spawn-index path; `--unit` | RL7, RL10, RL11 |
-| **U5** retire the Unbuilt text | S | U4 | remove CONC-15's Unbuilt recording bullet, TLS-8's root-only sentence and T14's "when unit recordings are built", and the "Not built" line above; rewrite the `crates/hirsel-core-rt/src/units.rs` header to point here | the T14 helper case |
-
-### Laws
-
-Each law's cases go in an existing harness: the tape laws (`crates/hirsel-core-rt/src/tape/tests.rs`)
-for frames, the unit ledger law trace (`crates/hirsel-core-rt/src/units_ledger_law.rs`) for
+Each verification property runs in an existing harness: the tape tests (`crates/hirsel-core-rt/src/tape/tests.rs`)
+for frames, the unit ledger trace (`crates/hirsel-core-rt/src/units_ledger_law.rs`) for
 take order, and `hirsel test --replay` for whole programs.
 
-| law | bug | oracle and setup |
+| property | bug caught | verification setup |
 |---|---|---|
-| **RL6** format 14 bytes | a stream number outside the block check, a `TAKE` that decodes to another arrival, a format 13 tape admitted | Hand-built byte strings: a block of stream 3 whose stream number is changed to 4 fails its check; each `TAKE` body in the table decodes to the arrival its hand-written bytes name; a valid format 13 tape is refused at open. Hand-built tapes with a sequence gap, a duplicate stream header, a repeated block, two swapped blocks of one stream, a block after its stream's `END`, a helper block of sequence 1 before its header, two headers with one (parent, spawn index), a short helper header, a cycle in which streams 3 and 4 each name the other as parent, a flipped byte in a middle block and a byte after the last `END` are each `Damaged` at the hand-counted block; a `TAKE` with point kind 2, arrival tag 5 or 10, an `Accepted` settlement with a byte after its outcome, snapshot tag 13, nonzero direction in a listener snapshot or survivor kind 8 is `Corrupt`. A stream with an absent parent is named `?.<stream number>`. A 2 MiB entry and a helper result in canonical form round-trip through `DATA`, with the receiver ordinal present in its helper-end take. Designations and survivors of kinds 2 and 7 keep their origin kinds. A `PORT_NEXT` payload crosses a block boundary through `DATA`, and a nonempty payload with an empty first chunk is `Corrupt`. |
-| **RL7** each unit replays alone | a helper's input that is not in its stream (an unrecorded take path, an entry stored as a digest) | A program whose root spawns two helpers that exchange items over connections, with one helper also doing a host `RANDOM`. Record it; replay each unit with `--unit` and every other helper stream's blocks deleted from the file. Each replay is `Sealed`, its scripted provider records zero calls, and each unit's printed values equal the hand-derived ones. Further cases: a helper is handed a virtual sealer that already sealed counter 5; alone it replays `seal(5)` as `Reused` and `seal(6)` to the recorded bytes, and RL5's search of the tape finds no key bytes. A helper draws from a `provide.random` made by the root while the root draws too; each unit alone replays its recorded draws, and the scripted provider records zero calls. The root draws once, hands its `Random` to a helper, and draws twice more with the helper's draw held between them by the hold hook: the root alone replays its three hand-derived draws, the first recomputed and the other two from its stream. The root's server task is parked in `provide.next` when the root sends the port's capability to a helper that then calls it: the root alone replays the call at the recorded position. |
-| **RL8** take positions | a take applied at another point of the unit's order than it was recorded | Using the ledger's hold hook, script when each arrival reaches a unit between its events. The recorded `TAKE` gaps equal the hand-counted event positions, and on replay each `try_receive` gives the hand-tabled `Ok` or `Empty` at each step, including a `release_take` that takes an older item before its retirement notice and two `try_receive` calls with no event between them, the second of which takes. A separate case, with the hook off, has one item published while its receiver is ready, so `take_single_item` takes it: its `TAKE` has the hand-counted gap and point, and replay delivers it at the same `receive`. One receiver is recorded twice, the hold hook releasing the item before the first pump and after an idle wake: both tapes hold the same hand-counted (gap, count), with point kinds 0 and 1, and each replays to the hand-tabled results. A `try_receive` that is `Empty`, a pump with no event between that takes the item, and a second `try_receive` that is `Ok` replay to `Empty` then `Ok`. A receiver task parked in `conn.receive` is woken by the scheduler's idle pump, which takes the item another task of the unit sent while the hook held it: its `TAKE` is kind 1 with the hand-counted gap and count. A `Shared` node crosses its own unit's connection and both holders are dropped at home: the item's `TAKE` holds the node's `Shared` snapshot, naming home stream 0 and the node's ordinal there, the arriving holder taking the next ordinal, and the last drop's `shared release` `TAKE` has the hand-counted gap and count and names the same node. The same node held in a struct field crosses the same way: the item's plain bytes zero only the holder's word, at its field's offset, and its one part is the node's snapshot. The cases run as native programs on Cranelift and LLVM: the hold hook is built only into test builds and the `testing` feature's runtime, never a production runtime, and a C object linked into the program calls its `hirsel_core_test_hold` steps between the program's runtime calls, adding no frame, event or take-point position. |
-| **RL9** streams of one recording agree | a recorder that writes an item one unit sent differently from the item another took, or an entry unlike its spawn | For each RL7 and RL8 recording, a test-only reader pairs every `CONN_SEND` with the `TAKE` it reached, and every `UNIT_SPAWN` with its child's entry. The sent items' canonical arguments equal the canonical arguments of the taken items, in connection order. The oracle is the hand-written list of sends. A `Shared` node whose only holder the root moves into a helper's entry is written there as a `Shared` snapshot naming home stream 0 and the node's root ordinal, the helper numbering it 1, and the spawn's arguments hold the same value in canonical form; the helper drops it, so its stream takes nothing and the root takes the `shared release` naming that node before the helper end, whose survivor list is empty. A helper makes a node and sends its only holder to the root, then ends while the root holds it: the root's helper-end `TAKE` lists it as a kind 1 survivor naming the helper's stream, the node's ordinal there and the node's charge, and the root's later drop of that holder takes the `shared release` naming the same survivor. A waiting `conn.send` that a receive later accepts gives its sender a `settlement` take naming the send's `ISSUE` position, with nothing after `Accepted`. A granted `Random` that crosses in an item, to the sending unit itself or to a helper, is a tag 5 snapshot naming the ordinal the receiving unit gives it at its take, and the draw through it is a `RANDOM` in the receiving unit's stream on that ordinal, not on the grant's. A granted `Net` and a narrowing of it that the root sends to itself are each a tag 5 snapshot of their own rules, a `LISTEN` through the narrowing that arrived names its arrival ordinal, and the narrowing moved into a helper's entry is the same snapshot there. |
-| **RL10** worker count changes no replay | a replay that depends on scheduling across units | Record the RL7 program at `HIRSEL_UNTIED=1` and at `HIRSEL_UNTIED=8`. Replay each recording at both counts. All four replays are `Sealed`, with outputs equal to the hand-derived values. |
-| **RL11** a helper's divergence | a divergence that stops other units, goes unreported, or is reported in a timing-dependent order | Replay RL7's recording with the program edited so that (a) helper `root.1` sends other bytes, (b) helper `root.0` receives on an inbox it never made, and (c) both at once. (a) ends `Diverged(Arg) in root.1` and (b) `Diverged(Take) in root.0`, each at the hand-counted position. (c) writes both lines in name order. Every other stream is `Sealed`, and the exit status is 1. (d) RL7's tape with `root.1`'s blocks removed, replayed without `--unit`: `Truncated at 0 in root.1`, exit 1, other streams `Sealed`. (e) `root.0` edited to receive one extra item ends `Diverged(Take) in root.0` at the hand-counted position, exit 1. |
-| **RL12** recording with helpers changes nothing | unit recording that adds a charge, step, poll or event | RL1's corpus gains the RL7 program. Its outputs, `Capacity` refusals, step counts per unit and provider call logs are equal across the three builds of RL1. |
-
-The T14 case for helpers is
-`helper_virtual_agreement_verdicts_are_recorded_and_replayed` in [TLS](spec/tls.md#laws), built in U5:
-two helpers hold different virtual X25519 shares and construct against each other's public
-key. Each verdict is in its own helper's stream, and each helper replays alone without
-consulting the agreement engine. Two more cases go with it in the tape laws. Two helpers hold aliases of
-one sealed `srtp_import(receive)` secret and both import: each `--unit` replay gives its
-recorded result, exactly one of them `Spent`, whichever stream starts first. The root
-constructs a `tls13` schedule while a helper still holds a counted share, and the helper
-drops it: the root's stream holds a `refund` take of 48 bytes at the hand-counted position,
-and the root replayed alone makes a 48-byte admission that is refused before that take and
-admitted after it, as live. The root seals a `Secret`, shares it to a helper, and the two
-drop their holders in both orders across two recordings, set by the hold hook: when the
-helper drops last, the root's stream holds the designation's and the bytes' `refund` takes
-at a drain; when the root drops last, it holds them at its own drop, kind 0, designation
-first. Each root replayed alone gives the hand-derived `Capacity` before and success after.
+| **Stream framing and corruption** | a stream number outside the block check, a `TAKE` that decodes to another arrival, or an earlier-format tape admitted | Hand-built byte strings verify that changing a block's stream number fails its check, each `TAKE` body decodes to its expected arrival, earlier-format tapes are refused at open, structural errors (sequence gaps, duplicate headers, repeated or swapped blocks, post-`END` blocks, missing helper headers, duplicate `(parent, spawn index)`, parent cycles, flipped bytes, trailing bytes) report `Damaged` at the exact block, and invalid tags or payloads report `Corrupt`. |
+| **Per-unit standalone replay** | a helper's input missing from its stream (an unrecorded take path, or an entry stored only as a digest) | A program whose root spawns two helpers exchanging items over connections (with host randomness and crossed virtual capabilities) is recorded and each unit is replayed alone with `--unit` and every other helper stream removed. Each replay ends `Sealed` with zero host provider calls and matching outputs. |
+| **Exact take positions** | a take applied at another point in the unit's order than recorded | Scripted delivery positions verify that recorded `TAKE` gaps, point kinds (in-operation vs scheduler pump), and counts match hand-counted positions across `try_receive`, parked `receive`, `release_take`, `Shared` snapshots, and `shared release` takes on both Cranelift and LLVM. |
+| **Cross-stream agreement** | a recorder writing a sent item differently from what the receiver took, or a helper entry unlike its spawn | A test reader pairs every `CONN_SEND` with the `TAKE` it reached and every `UNIT_SPAWN` with its child's entry, checking that canonical arguments, `Shared` snapshots, survivor lists, settlements, and crossed capabilities (including granted and narrowed `Net`) agree across streams. |
+| **Worker-count independence** | a replay depending on scheduling across units | Recording at `HIRSEL_UNTIED=1` and `HIRSEL_UNTIED=8` and replaying each tape at both worker counts yields `Sealed` with identical outputs. |
+| **Per-helper divergence reporting** | a divergence stopping other units, going unreported, or printing in timing-dependent order | Replaying with edited helper code verifies that each diverged helper reports `Diverged(Arg)` or `Diverged(Take)` at its exact position in deterministic unit-name order while other streams still finish `Sealed`, and a missing helper stream reports `Truncated at 0 in UNIT`. |
+| **Zero overhead on observations** | unit recording adding a charge, step, poll, or event | Running a multi-unit program across an uninstrumented build, a recording build with recording off, and a recording build with recording on produces identical outputs, `Capacity` refusals, step counts per unit, and provider call logs. |
 
 ## Format
 
-A recording file is a **tape** in format 13, which `crates/hirsel-tape-format` owns. Format 7
-added the run's Map hash key to the header, and format 12 removes it (below). Format 8 adds the terminal byte to stream grants
-and adds the SCRAM frames described in [TLS-6](spec/tls.md#tls-6-scram-sha-256). Format 9
-writes each Secret grant's policy as its canonical set of uses
-([TLS-5](spec/tls.md#tls-5-secrets)). Format 10 gives `SEND_SECRET` the list of
-designations, the `wire` and the `marks` of one message. Format 11 adds the `Cred` grant
-record and the credential fetch frames ([TLS-7](spec/tls.md#tls-7-credential-grants)).
-Format 12 removes the Map hash key from the header. Format 13 ends a Run's launch metadata
-with the recording's 32-byte build digest. A replay refuses a tape of an earlier format. The format is not part of the language and a replay reads only tapes its own build admits,
-and its pinned executable reads that layout. The host uses the checked block-zero prefix
-through the launch arguments to find and verify the pin.
+A recording file is a **tape** owned by `crates/hirsel-tape-format`. The current tape layout
+includes per-stream blocks, terminal flags on stream grants, SCRAM frames
+([SCRAM-SHA-256](spec/tls.md#tls-6-scram-sha-256)), canonical `Secret` grant policies
+([secrets](spec/tls.md#tls-5-secrets)), `SEND_SECRET` designation lists, `Cred` grant and
+fetch frames ([credential grants](spec/tls.md#tls-7-credential-grants)), and the 32-byte
+build digest at the end of launch metadata. A replay refuses tapes written by earlier
+formats. The format is not part of the language and a replay reads only tapes its own build
+admits; its pinned executable reads that layout, and the host uses the checked block-zero
+prefix through the launch arguments to find and verify the pin.
 
 - The header holds no Map hash key. Every run, a replay included, draws its own key from
   host entropy at entry, and no observable depends on it
-  ([SEM-5](spec/semantics.md#sem-5-maps), [CAP-8](spec/capabilities.md#cap-8-the-replay-point)),
+  ([maps](spec/semantics.md#sem-5-maps), [the replay point](spec/capabilities.md#cap-8-the-replay-point)),
   so a replay supplies nothing for it and compares nothing with it.
 - The header has no mode byte. Its grant snapshot stores the run's root Net rules in order
   and with duplicates; each address rule occupies 23 bytes, preceded by the byte 8 when
-  its reach is `Public` ([NET-18](spec/net.md#net-18-public-only-connects)).
+  its reach is `Public` ([public-only connects](spec/net.md#net-18-public-only-connects)).
 - The `Tls` rule record holds the direction byte 2; the trust byte, followed by 32 bytes of
   roots digest when the trust is `Roots`; the port interval; and a `u16` count of patterns,
   each a length byte followed by its bytes.
 - A `Secret` grant record holds the parameter name, the source label and the canonical
-  policy text ([TLS-5](spec/tls.md#tls-5-secrets)), all length-prefixed.
+  policy text ([secrets](spec/tls.md#tls-5-secrets)), all length-prefixed.
 - A `Cred` grant record, after the `Secret` grant records, holds the parameter name, the
   source text and the canonical policy text
-  ([TLS-7](spec/tls.md#tls-7-credential-grants)), all length-prefixed. A fetch's issue holds
+  ([credential grants](spec/tls.md#tls-7-credential-grants)), all length-prefixed. A fetch's issue holds
   the spare capacities of `key_id` and `token` and its deadline. A successful delivery holds its own tape position as `value` (the designation
   the key gets) and, as the payload, the key id and the session token, each
   length-prefixed, then the expiry as a little-endian `u64`. The key is never in a frame.
@@ -1096,14 +1027,14 @@ test pass only when its replay ends with that verdict.
 
 A test that wants a fake clock, a scripted directory or a failing service does not use a
 recording. It runs against a controlled provider that the run's configuration chooses
-([CAP-5](spec/capabilities.md#cap-5-provider-operations)).
+([provider operations](spec/capabilities.md#cap-5-provider-operations)).
 
 ## Laws
 
-| law | bug | oracle and setup |
+| property | bug caught | verification setup |
 |---|---|---|
-| **RL1** recording changes nothing | recording machinery that adds a charge, a step, a poll or a second read, or leaks into a build without recording | For a corpus of small programs with scripted providers and ordered senders, run the build without recording, the recording build with recording off and the same build with recording on, on both engines. Their outputs, outcomes, cause sites and chains, `Capacity` refusals, step counts and provider call logs are equal. The executable built without recording defines no symbol of the recording runtime. |
-| **RL2** a divergence ends the replay at its position | a replay that continues past a mismatch, or reports it to the program | Record a run, then replay it with the program edited to (a) keep to the end a handle the recording dropped (its recorded `CLOSE` never comes: `Diverged` at the run's end), (b) omit its last send and (c) send other bytes, each still returning the recorded result, and (d) read into a buffer too small for a recorded delivery. Each replay ends `Diverged` at the hand-counted frame position, exits 1, and its scripted provider records zero calls. Replays with the program edited to (e) drop a handle at another point and (f) read into a larger buffer, each still delivering the recorded bytes, end `Sealed` (2026-11-23, Spec Q5). |
-| **RL3** replay is offline | replay reaching the host or needing keys | Record an HTTPS GET against the loopback server. Replay it with a refuse-all inner provider, the server stopped, and the roots file removed. The response bytes, the protocol and the peer digest are equal to the recorded run's, and the inner provider records zero calls. |
-| **RL4** replay without the secret | replay reading the secret's source | Replay TL10's recording ([TLS](spec/tls.md#laws)) with the environment variable unset. The run starts. Its outputs equal the recorded run's, byte for byte. The inner provider records zero calls. |
-| **RL5** a secret never reaches a recording | a secret's bytes in a frame or a digest | Record TL10's run and search the recording for the value, its base64 and its raw bytes: there are no hits. |
+| **Recording changes nothing** | recording machinery that adds a charge, a step, a poll or a second read, or leaks into a build without recording | For a corpus of small programs with scripted providers and ordered senders, run the build without recording, the recording build with recording off and the same build with recording on, on both engines. Their outputs, outcomes, cause sites and chains, `Capacity` refusals, step counts and provider call logs are equal. The executable built without recording defines no symbol of the recording runtime. |
+| **Divergence ends replay at its position** | a replay that continues past a mismatch, or reports it to the program | Record a run, then replay it with the program edited to keep a dropped handle open, omit its last send, send different bytes, or read into a buffer too small for a recorded delivery. Each replay ends `Diverged` at the exact frame position, exits 1, and records zero provider calls. Replays that drop a handle at a different point or read into a larger buffer still end `Sealed`. |
+| **Replay is offline** | replay reaching the host or needing keys | Record an HTTPS GET against a loopback server. Replay it with a refuse-all inner provider, the server stopped, and the roots file removed. The response bytes, the protocol and the peer digest equal the recorded run's, and the inner provider records zero calls. |
+| **Replay without the secret** | replay reading the secret's source | Replay a recorded run that sent a `Secret` ([TLS verification](spec/tls.md#laws)) with the environment variable unset. The run starts, its outputs match byte for byte, and the inner provider records zero calls. |
+| **Secrets never reach a recording** | a secret's bytes appearing in a frame or digest | Search a recording of a `Secret`-sending run for the secret value, its base64 encoding, and its raw bytes: there are no hits. |

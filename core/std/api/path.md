@@ -121,32 +121,32 @@ Absolute paths, `..` resolution, normalization (`clean`), Windows separators and
 (`{a,b}`), `is_hidden`, `with_extension` (`stem` and two `string.push`es), and any OS-path
 conversion. A path to a file outside every `Dir` is not a value a program can use.
 
-## Laws
+## Verification laws
 
 [Contract tests](../tests/path.hirsel).
 
-- **P1 Host differential.** For each row in a table of about 30 strings, `is_valid(p)` is
+- **Host differential.** For each row in a table of about 30 strings, `is_valid(p)` is
   true exactly when `file.write(sub, p, ..)` (with parents created) does not return
   `Denied`. `sub` is a fresh subdirectory per row, so no row meets an earlier row's file.
   The table holds the empty string, `/`, `a/`, `/a`, `a//b`, `.`, `..`, `a/./b`, `a/../b`,
   `...`, `.a`, `a.`, a NUL in the middle, `é`, and a 255-byte component. Oracle: the
   provider (the host's own `Denied`), run as an `f(dir)` test. Bug caught: `...` refused as
   if it were `..`, or a trailing `/` accepted.
-- **P2 Fault offsets.** `check` gives `Invalid(0)` for `""` and `/a`, `Invalid(2)` for
+- **Fault offsets.** `check` gives `Invalid(0)` for `""` and `/a`, `Invalid(2)` for
   `a//b` and `a/./b`, `Invalid(2)` for `a/..`, and the NUL's offset for a NUL. Oracle:
   hand-derived from the grammar. Bug caught: the offset points at the `/` before the bad
   component rather than at its start.
-- **P3 Atomic join.** `join` into `out = "x"` with `p` = `a/../b` leaves `out == "x"`. The
+- **Atomic join.** `join` into `out = "x"` with `p` = `a/../b` leaves `out == "x"`. The
   same with a capacity-limited allocator at exactly one byte short also leaves `out == "x"`.
   Oracle: the contract. Bug caught: writing the separator before validating `p`.
-- **P4 Rust dot rules.** The examples in Rust's `Path::extension`, `file_stem` and
+- **Rust dot rules.** The examples in Rust's `Path::extension`, `file_stem` and
   `file_prefix` docs (path.rs:2880-2975) that apply, plus `a.`, `.a.b` and `..a`. Oracle: the
   Rust doc text. Bug caught: `.bashrc` given extension `bashrc` (Go's rule), or a `rsplit`
   at the first dot.
-- **P5 Go split tables.** Go `splittests`, `basetests` and `dirtests` (`path_test.go:100,168,191`),
+- **Go split tables.** Go `splittests`, `basetests` and `dirtests` (`path_test.go:100,168,191`),
   limited to rows that are valid paths. They are mapped to `parent` and `name`, and the
   deviations are listed in the test comment (Go's `Dir("a")` is `.`; here it is `None`).
   Oracle: Go's tables. Bug caught: `parent` returning the trailing `/`.
-- **P6 Component-wise strip.** `strip_base("ab/c", "a")` is `None`, `strip_base("a/b", "a/b")`
+- **Component-wise strip.** `strip_base("ab/c", "a")` is `None`, `strip_base("a/b", "a/b")`
   is `None`, and `strip_base("a/b/c", "a/b")` is `c`. Oracle: hand-derived. Bug caught: a
   byte-prefix implementation.

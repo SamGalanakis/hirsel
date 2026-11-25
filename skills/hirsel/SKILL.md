@@ -1,6 +1,6 @@
 ---
 name: hirsel
-description: Write, check, test and fix Hirsel programs with the installed hirsel binary. Use when writing or editing .hirsel files or a hirsel.toml package, or when a hirsel check refusal cites a rule ID such as OWN-7.
+description: Write, check, test and fix Hirsel programs with the installed hirsel binary. Use when writing or editing .hirsel files or a hirsel.toml package, or when hirsel check refuses code.
 ---
 
 # Hirsel
@@ -18,19 +18,20 @@ and repeat each `mut` and `take` mode at the call site.
 
 1. Write the code. Start a package with `hirsel new app` (`--lib` for a library).
 2. Run `hirsel check` in the package directory. Each refusal starts with one line naming its
-   rule and primary site:
+   rule code and primary site:
 
    ```text
-   ./main.hirsel:2:32-34: OWN-7 a moving place is passed as `take xs`
+   ./main.hirsel:2:32-34: <RULE> a moving place is passed as `take xs`
    ```
 
-3. Read the rule ID and the span first, then the message. For automation,
-   `hirsel check --json` returns structured rule IDs, byte spans, and causal sites (and on
+3. Read the rule code and the span first, then the message. For automation,
+   `hirsel check --json` returns structured rule codes, byte spans, and causal sites (and on
    `main` / newer toolchains, `line`/`column`/`line_text` plus machine-applicable `fixes`;
    when `fixes` are present, apply a fix's edits together at their byte spans, review
    `maybe` fixes, and fill in bodies supplied by `placeholder` fixes).
-4. Run `hirsel explain OWN-7` (or `hirsel explain OWN-7 --json`) for the rule's exact
-   statement and a refused example, or `hirsel explain --list` to list all rules.
+4. When the compiler refuses code it prints a short rule code (e.g. `OWN-7`); run
+   `hirsel explain OWN-7` (or with `--json`) for the rule's exact statement and a refused
+   example, or `hirsel explain --list` to list all rules.
    Fix to the rule, not to the message's wording.
 5. Repeat from step 2 until it prints `accepted`.
 6. Run `hirsel test`. It runs every `@test` in its own process under the `[tests]`

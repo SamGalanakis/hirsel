@@ -9,7 +9,7 @@ before refunding the old block. Removal does not shrink or allocate.
 Returned element views anchor to and freeze the list. Bounds checks and refused
 growth precede mutation as stated in each source contract.
 
-A refused growth raises `Capacity` (MEM-21); the element passed to `list.push`
+A refused growth raises `Capacity`; the element passed to `list.push`
 is cleaned with the unwound frame. `list.try_reserve` returns the refusal as a
 value for inline recovery. Plain elements may be passed as `x` without `take`.
 
@@ -25,20 +25,20 @@ leaves every original element in the list.
 
 `list.map` and `list.try_map` call their callbacks in list order and reserve
 exactly `len(xs)` output slots first. A refused reservation raises `Capacity`
-before the callback runs. `map` cannot collect views (OWN-19). `try_map` stops
+before the callback runs. `map` cannot collect views. `try_map` stops
 at the first `Error` and returns it. A `?` within the callback exits only that
-callback (LANG-18). Scoped callbacks cannot wait. Use a `for` loop for waiting
+callback. Scoped callbacks cannot wait. Use a `for` loop for waiting
 calls.
 
 `list.retain` keeps matching elements in order without allocating. It cleans
 removed elements after the last predicate call. A failing predicate leaves
 every original element in the list exactly once, in unspecified order. The
-predicate cannot capture the list (OWN-11).
+predicate cannot capture the list.
 
 `list.find` and `list.position` stop at the first match, returning a view or
 an index respectively. Both return `None` if no element matches. The view
-freezes the list (OWN-10). Use `position` to find an element for mutation
-because Hirsel has no mutable views (OWN-8).
+freezes the list while it lives. Use `position` to find an element for mutation
+because Hirsel has no mutable views.
 
 Core's `list.prefetch(xs, i)` hints that `xs[i]` will be read soon, as
 `__builtin_prefetch` does in C. An index past the end does nothing; the call never

@@ -1,6 +1,6 @@
 # Prop
 
-[API overview](../API.md). The design record is roadmap item 13a.
+[API overview](../API.md).
 
 `std.prop` checks a law against generated values. `search` samples cases and
 shrinks a failing case. `all` walks a bounded choice tree. A generator draws its
@@ -13,7 +13,7 @@ running the generator and the law again on the edit. No type has a shrink functi
 Shrinking runs in the engine, inside the test's own run, under the test's limits.
 `hirsel test` is not changed. A property test that takes no parameters is still
 fixed by its program and configuration, so its pass may be reused as any other
-test's ([PROG-4](../../../docs/spec/programs.md#prog-4-tests)).
+[test's](../../../docs/spec/programs.md#prog-4-tests).
 
 ## Generators
 
@@ -26,11 +26,11 @@ pub fn draw[T](mut s: Source, g: Gen[T]) -> T
 
 A `Source` belongs to one run of one case. Only the engine makes one.
 
-A `Gen[T]` holds owning closures, so it is an own value ([LANG-13](../../../docs/spec/language.md#lang-13-callables)), not a plain one.
+A `Gen[T]` holds owning closures, so it is an own value ([callables](../../../docs/spec/language.md#lang-13-callables)), not a plain one.
 
 - Every combinator takes its generators with `take`, and a generator is used once.
 - To use the same generator twice, call its constructor twice.
-- An owning closure may capture a `Gen`, because a Gen holds an opaque owner, which [LANG-14](../../../docs/spec/language.md#lang-14-captures) allows.
+- An owning closure may capture a `Gen`, because a Gen holds an opaque owner, which [closure capture rules](../../../docs/spec/language.md#lang-14-captures) allow.
 - `just(x)` needs `T` to be plain and inert, since its closure captures `x` and copies it out.
 
 ### Choice primitives
@@ -204,7 +204,7 @@ User code is bounded per run:
 - **Steps under `check`.** The user code of a property takes at most
   `(cases + max_rejects + max_shrinks + 1) × (gen_steps + case_steps)` steps.
 - **Steps under `check_tasks`.** Each task a case spawns gets its own root bound of
-  what is left of `case_steps` ([MEM-30](../../../docs/spec/budgets.md#mem-30-step-bounds)).
+  what is left of `case_steps` ([step bounds](../../../docs/spec/budgets.md#mem-30-step-bounds)).
   So the bound applies per task, and `case_bytes` limits how many tasks there are.
 - **Bytes.** At the defaults, the engine's own bytes stay under 0.5 MiB besides
   `case_bytes`.
@@ -369,9 +369,6 @@ and `check_tasks_corpus`, and reports a strength row (`held`, `truncated`, `vacu
 `sampled`, `gave up`, `falsified`) beside pass and fail. A law that swallows `Truncated` or
 `Held(0, d)` with a catch-all arm still passes, but its row says so. Nothing here changes
 `AllOutcome`, `Outcome` or any report line.
-
-Version note (2026-11-24, verify-observer-2037): adds `sometimes` witnesses to the
-recording build.
 
 ## Report and replay
 

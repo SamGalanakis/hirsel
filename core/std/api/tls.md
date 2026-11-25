@@ -19,7 +19,7 @@ public `wire` bytes with insertions that `marks` places, in groups of four
 words `[at, kind, a, b]`. Kind 0 inserts `secrets[a]`, kind 1 inserts it
 form-urlencoded, and kinds 2 and 3 insert the decimal or hexadecimal length of
 the message bytes made from `wire[a..b]`, so a `Content-Length` can count a
-secret ([TLS-5](../../../docs/spec/tls.md#tls-5-secrets)). Malformed marks raise
+secret ([secrets](../../../docs/spec/tls.md#tls-5-secrets)). Malformed marks raise
 `Bounds`. Every secret must cover the stream's verified name. A plain TCP half
 or a name outside any secret's patterns gives `Denied` before sending any bytes.
 Failure after a partial commit spends the write half. Later sends on it give
@@ -37,7 +37,7 @@ The key never leaves the provider: it must be a P-256, Ed25519 or 2048 to 4096
 bit RSA PKCS#8 key matching the leaf, else `Tls(Key)`; a chain that is empty,
 longer than 8 entries, malformed, or over a 65,535-byte Certificate message
 gives `Tls(Chain)`. A server half has no verified name, so `send_secret` and
-SCRAM on it give `Denied` ([TLS-9](../../../docs/spec/tls.md#tls-9-server-handshake)).
+SCRAM on it give `Denied` ([server handshake](../../../docs/spec/tls.md#tls-9-server-handshake)).
 
 The launcher can grant a `Secret` from the environment or a file. Use
 `secret.seal` to transfer owned bytes into secret storage. If sealing refuses, its

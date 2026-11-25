@@ -8,7 +8,6 @@ returns with that same stop. The wait observes task cancellation. Pass the
 capability explicitly through `main` to handle a stop.
 
 A second SIGTERM or SIGINT terminates the live process immediately. The stop's
-delivery passes the replay point
-([CAP-8](../../../docs/spec/capabilities.md#cap-8-the-replay-point)).
+delivery passes [the replay point](../../../docs/spec/capabilities.md#cap-8-the-replay-point).
 
 [Capability contract](../../../docs/spec/capabilities.md#cap-5-provider-operations).

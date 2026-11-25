@@ -948,3 +948,53 @@ fn tail_body(mut w: Tx, t: Table[u64, u64]) -> Result[(), Error] {
     put(mut w, t, 3, 30)?
     Error(Missing("typed"))
 }
+
+// §I.3 step one: a raw delete removes row 7's one "bucket" entry (6 % 4 = 2);
+// writing 5 moves the row to bucket 1, so the old entry's remove finds no
+// target. The write commits and attention counts one drift (was: no count).
+@test
+fn test_index_drift_counted(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let mut d = declare(db, Migrate)?
+    let mut items = declare_table(mut d, "items", key, std.codec.of_u64())?
+    let ix = index(mut d, mut items, "bucket", Many, code.describe(bucket_keys), key)?
+    let rows = finish(mut d, take items)?
+    let _ = seal(mut db, take d)?
+    if !typed_put(mut db, rows, 7, 6) {
+        return Error(Foreign)
+    }
+    let index_id = ix.id
+    let cut = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[u64, Error] {
+        let mut found = 0u64
+        let mut target: Bytes = list.new()
+        {
+            let mut cursor = byte_cursor(tx.roots.collections, Included(prefix(index_id)?), prefix(index_id + 1)?)?
+            while let Some((row_key, _)) = next_bytes(mut cursor)? {
+                found += 1
+                target = copied(row_key)?
+            }
+        }
+        let Some(refund) = delete_refund(tx, target)? else {
+            return Error(Missing("bucket entry"))
+        }
+        let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, target, None, tx.frame_bytes)?
+        apply_delete(mut tx, take target, refund)?
+        tx.frame_bytes = frame
+        Ok(found)
+    })?
+    match take cut {
+        Committed(done) => if done.value != 1 {
+            return Error(Foreign)
+        },
+        _ => return Error(Foreign),
+    }
+    if list.len(attention(db)?.drift) != 0 || !typed_put(mut db, rows, 7, 5) {
+        return Error(Foreign)
+    }
+    let seen = attention(db)?.drift
+    if list.len(seen) != 1 || seen[0].index != "bucket" || seen[0].count != 1 || typed_value(snapshot(db), rows, 7) != 5 {
+        return Error(Foreign)
+    }
+    Ok(())
+}

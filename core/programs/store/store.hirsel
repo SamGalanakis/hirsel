@@ -86,6 +86,8 @@ pub opaque type Db {
     streams_per_caller_max: u64,
     streams_max: u64,
     stream_sweep_after: Option[StreamSweepCursor],
+    // Index drift seen since this open (§I.3 step one), one entry per index.
+    drift: List[IndexDrift],
 }
 
 pub type Branch {
@@ -505,6 +507,8 @@ pub opaque scoped type Tx {
     pins: View[Map[TieredCacheKey, Arc[TieredFrame]]],
     refusal: Option[Capacity],
     index_conflict: Option[String],
+    // (table, index) of each staged index remove whose target was absent (§I.3).
+    drift: Option[List[(u32, u32)]],
     frame_bytes: Option[u64],
     wrote: bool,
     ops: DataOps,
@@ -595,24 +599,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
     Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(),
-        stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None)
-}
-
-pub type Accounts {
-    logical: u64,
-    tiered: u64,
-    exact: bool,
-    frames: u64,
-    journal: u64,
-    resident: u64
-}
-
-pub fn accounts(db: Db) -> Accounts {
-    let (frames, journal) = match db.disk {
-        Some(state) => (state.inflight, state.uncovered),
-        None => (0u64, 0u64)
-    }
-    Accounts(logical: int.saturating_add(int.saturating_add(db.resident, db.tiered), db.keyed_credit.padding), tiered: db.tiered, exact: !retaining(db) || db.changes == db.settled, frames: frames, journal: journal, resident: db.page_resident)
+        stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None, drift: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -1191,6 +1178,7 @@ type Prepared[R, A] {
     frame_tail: u64,
     stream_ops: DataRows,
     keyed: Option[KeyedDraft],
+    drift: Option[List[(u32, u32)]],
     first_stamp: u64,
     prepared_roots: bool,
     call: Option[CallSection]
@@ -1251,7 +1239,17 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
             None => Over(Failed(Raised(take cs))),
         },
         Ok(Ok(Error(e))) => Over(Stopped(e)),
-        Ok(Ok(Ok(take f))) => finish_stage(ci, take f, take seen),
+        Ok(Ok(Ok(take f))) => {
+            if let Prepared(staged) = f {
+                if let Some(drifted) = staged.drift {
+                    let catalog = share_page_tree(db.heads[i].roots.catalog)
+                    if let Error(take problem) = count_drift(mut db, catalog, drifted) {
+                        return DraftError(take problem)
+                    }
+                }
+            }
+            finish_stage(ci, take f, take seen)
+        },
     }
 }
 
@@ -1260,7 +1258,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1293,6 +1291,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
             tx.roots.collections = share_page_tree(base.collections)
             tx.roots.catalog = share_page_tree(base.catalog)
             tx.ops = empty_ops()
+            tx.drift = None
             tx.rows = 0
             tx.frame_tail = NO_FRAME_TAIL
             Error(take a)
@@ -1307,7 +1306,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
     if let Some(keyed) = tx.keyed {
         tx.resident = keyed_draft_live(base, keyed.edits, tx.retain_old, tx.resident)
     }
-    let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, ..) = take tx
+    let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, drift: take drift, ..) = take tx
     let DataOps(cells: take cells, ..) = take ops
     seal_cell_edits(mut rows, cells)
     let DataOps(rows: take stream_rows, ..) = take stream_ops
@@ -1315,7 +1314,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => Some(db.tiered),
         None => None,
     }
-    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, call: take call))
+    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, drift: take drift, first_stamp: first_stamp, prepared_roots: false, call: take call))
 }
 
 fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: List[Read]) -> Stage[R, A] {

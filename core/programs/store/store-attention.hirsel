@@ -1,0 +1,65 @@
+// What a working store reports to its operator (§II.3).
+
+pub type Accounts {
+    logical: u64,
+    tiered: u64,
+    exact: bool,
+    frames: u64,
+    journal: u64,
+    resident: u64
+}
+
+pub fn accounts(db: Db) -> Accounts {
+    let (frames, journal) = match db.disk {
+        Some(state) => (state.inflight, state.uncovered),
+        None => (0u64, 0u64)
+    }
+    Accounts(logical: int.saturating_add(int.saturating_add(db.resident, db.tiered), db.keyed_credit.padding), tiered: db.tiered, exact: !retaining(db) || db.changes == db.settled, frames: frames, journal: journal, resident: db.page_resident)
+}
+
+/// An index whose write found an entry missing that the row's old value
+/// implies: the index and its table disagree (§I.3). `count` is the number of
+/// such removes staged since this open. The write proceeds; the count is
+/// taken when its draft is staged, so a draft refused at commit still counts.
+pub type IndexDrift {
+    table: u32,
+    id: u32,
+    index: String,
+    count: u64
+}
+
+/// Conditions a working store reports to its operator (§II.3), unlike
+/// `Health`, which signals once when the store stops working.
+pub type Attention {
+    drift: List[IndexDrift]
+}
+
+pub fn attention(db: Db) -> Result[Attention, Error] {
+    let mut drift: List[IndexDrift] = list.new()
+    capacity(list.try_reserve(mut drift, list.len(db.drift)))?
+    for seen in db.drift {
+        list.push(mut drift, IndexDrift(table: seen.table, id: seen.id, index: named(seen.index)?, count: seen.count))
+    }
+    Ok(Attention(drift: take drift))
+}
+
+// Counts the drift a staged draft saw, by index, under the names its base
+// catalog gives them.
+fn count_drift(mut db: Db, catalog: PageTree, seen: List[(u32, u32)]) -> Result[(), Error] {
+    for (owner, id) in seen {
+        let mut found = false
+        for at in 0u64 .. list.len(db.drift) {
+            if db.drift[at].table == owner && db.drift[at].id == id {
+                db.drift[at].count = int.saturating_add(db.drift[at].count, 1)
+                found = true
+                break
+            }
+        }
+        if !found {
+            let name = find_index_name(catalog, owner, id)?
+            capacity(list.try_reserve(mut db.drift, 1))?
+            list.push(mut db.drift, IndexDrift(table: owner, id: id, index: take name, count: 1))
+        }
+    }
+    Ok(())
+}

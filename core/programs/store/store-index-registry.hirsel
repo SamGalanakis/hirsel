@@ -280,7 +280,7 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
     let mut old = 0u64
     for take key in take keys {
         while old < list.len(old_keys) && old_keys[old] < key {
-            append_index_remove(tx, mut edits, copied(old_keys[old])?, mut frame)?
+            append_index_remove(tx, mut edits, record, copied(old_keys[old])?, mut frame)?
             old += 1
         }
         let unchanged = old < list.len(old_keys) && old_keys[old] == key
@@ -297,7 +297,7 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
         push_index_edit(mut edits, StoreRow(take key, copied(payload)?))
     }
     while old < list.len(old_keys) {
-        append_index_remove(tx, mut edits, copied(old_keys[old])?, mut frame)?
+        append_index_remove(tx, mut edits, record, copied(old_keys[old])?, mut frame)?
         old += 1
     }
     Ok(())
@@ -493,6 +493,7 @@ type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, u64)
 
 type IndexEdits {
     probes: List[(u32, Bytes)],
+    drift: Option[List[(u32, u32)]],
     first: Option[DataEdit],
     rest: List[DataEdit]
 }
@@ -505,12 +506,28 @@ fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
     }
 }
 
-fn append_index_remove(tx: Tx, mut edits: IndexEdits, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
+// Every declared index is complete, so an absent target is drift (§I.3 step
+// one): the write proceeds and the store counts it.
+fn append_index_remove(tx: Tx, mut edits: IndexEdits, record: Catalog, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
     if let Some(refund) = delete_refund(tx, key)? {
         frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame)?
         push_index_edit(mut edits, RemoveRow(take key, refund))
+    } else {
+        let mut seen: List[(u32, u32)] = list.new()
+        list.push(mut seen, (record.owner, record.id))
+        stage_drift(mut edits.drift, take seen)
     }
     Ok(())
+}
+
+fn stage_drift(mut into: Option[List[(u32, u32)]], take seen: List[(u32, u32)]) {
+    if let Some(mut held) = into {
+        for (owner, id) in seen {
+            list.push(mut held, (owner, id))
+        }
+    } else {
+        into = Some(take seen)
+    }
 }
 
 fn apply_edit(mut tx: Tx, take edit: DataEdit) -> Result[(), Error] {
@@ -521,7 +538,10 @@ fn apply_edit(mut tx: Tx, take edit: DataEdit) -> Result[(), Error] {
 }
 
 fn apply_edits(mut tx: Tx, take edits: IndexEdits) -> Result[(), Error] {
-    let IndexEdits(probes: take probes, first: take first, rest: take rest) = take edits
+    let IndexEdits(probes: take probes, drift: take drift, first: take first, rest: take rest) = take edits
+    if let Some(take seen) = take drift {
+        stage_drift(mut tx.drift, take seen)
+    }
     if let Some(take edit) = take first {
         apply_edit(mut tx, take edit)?
     }
@@ -556,7 +576,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
     } else {
         let edits = {
             let previous = transaction_row(tx, p)?
-            let mut pending = IndexEdits(probes: list.new(), first: None, rest: list.new())
+            let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
             let primary = list.slice(p, 4, list.len(p))
             for (_, ix) in indexes {
                 let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
@@ -601,12 +621,12 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], 
         }
         let previous = memory_data_charge(tx, p, old)
         let refund = if tx.retain_old { 0u64 } else { previous }
-        let mut pending = IndexEdits(probes: list.new(), first: None, rest: list.new())
+        let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
         for (_, ix) in indexes {
             let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
             let IndexValue(keys: take keys, ..) = (bound_index.extract)(old, key)?
             for take row in take keys {
-                append_index_remove(tx, mut pending, take row, mut frame)?
+                append_index_remove(tx, mut pending, ix, take row, mut frame)?
             }
         }
         (take pending, refund)

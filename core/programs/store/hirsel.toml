@@ -80,6 +80,7 @@ std = { major = 1 }
 "store-object-writer.hirsel" = "store"
 "store-levels.hirsel" = "store"
 "store-health.hirsel" = "store"
+"store-attention.hirsel" = "store"
 "store-health-types.hirsel" = "status"
 "store-followers.hirsel" = "store"
 "store-follower-service.hirsel" = "store"

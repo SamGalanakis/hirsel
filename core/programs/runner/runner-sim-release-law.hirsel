@@ -95,7 +95,7 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     let mut operations: Registry[(), Qh] = registry()
     result.unwrap(transact(mut operations, operation, 65536, DEFAULT_STEPS))
     let mut hd = Head(db: take db, anonymous: anonymous_streams(), r: take operations, replay_identity: list.new(), h: arc.new(take handles), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None)
-    let request = head_request(law_caller(1), store.StreamId(t: 0u64, n: 1u64), 0, take key, word(7), channel.sender(owner.to))
+    let request = head_request(law_caller(1), store.StreamId(t: store.keyed_time(hd.db), n: 1u64), 0, take key, word(7), channel.sender(owner.to))
     head_arrival(mut hd, take request, false, false)?
     let receipt = option.unwrap(hd.last)
     close_group(mut hd)

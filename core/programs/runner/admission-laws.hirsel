@@ -327,7 +327,9 @@ type W3cRig {
     work: WireWork,
     requests: Receiver[HeadInput],
     releases: Receiver[PubIn],
-    inbox: Receiver[WireEvent]
+    inbox: Receiver[WireEvent],
+    // The keyed time every rig stream is named at (STORE-SPEC stream retention).
+    t: u64
 }
 
 // The real wire owner, head and publisher delivery path, stepped without sockets.
@@ -341,7 +343,8 @@ fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
     let data = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
     let caller = option.unwrap(anonymous_caller(random))
-    let stream = store.StreamKey(caller: clone(caller), id: store.StreamId(t: store.keyed_time(db), n: 77u64))
+    let t = store.keyed_time(db)
+    let stream = store.StreamKey(caller: clone(caller), id: store.StreamId(t: t, n: 77u64))
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(w3c_retired(), list.new())))
     let (to_head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(5u64)
     let (to_pub, releases): (Sender[PubIn], Receiver[PubIn]) = channel.new(5u64)
@@ -361,7 +364,7 @@ fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random
     wire_know(mut owner, entries, w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), big_codec))
     wire_know(mut owner, entries, w3c_retired())
     let head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(W3cHandles(data: data)), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None)
-    W3cRig(head: take head, owner: take owner, work: wire_work(), requests: take requests, releases: take releases, inbox: take inbox)
+    W3cRig(head: take head, owner: take owner, work: wire_work(), requests: take requests, releases: take releases, inbox: take inbox, t: t)
 }
 
 fn w3c_arg(n: u32) -> Bytes {
@@ -372,7 +375,8 @@ fn w3c_arg(n: u32) -> Bytes {
 
 fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, wire_slot: u32, take arg: Bytes) -> Frame waits {
     let at = host.mono_ns(rig.owner.clock)
-    result.unwrap(wire_call_ready(mut rig.owner, rig.head.r, mut rig.work, WirePending(stream: store.StreamId(t: 0u64, n: int.widen(stream)), p: p, wire_slot: wire_slot, deadline: 10000u32, arg: take arg, at: at, grows: true)))
+    let named = w3c_stream(rig, stream)
+    result.unwrap(wire_call_ready(mut rig.owner, rig.head.r, mut rig.work, WirePending(stream: named, p: p, wire_slot: wire_slot, deadline: 10000u32, arg: take arg, at: at, grows: true)))
     if let Some(take out) = transport_receive(mut rig.owner, mut rig.work) {
         return take out
     }
@@ -404,7 +408,11 @@ fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, wire_slot: u32, take arg: Byte
     option.unwrap(transport_receive(mut rig.owner, mut rig.work))
 }
 
-fn w3c_answer(frame: Frame, version: u64, stream: u32, p: u64, expected: Outcome) -> bool {
+fn w3c_stream(rig: W3cRig, n: u32) -> store.StreamId {
+    store.StreamId(t: rig.t, n: int.widen(n))
+}
+
+fn w3c_answer(frame: Frame, version: u64, stream: store.StreamId, p: u64, expected: Outcome) -> bool {
     match frame {
         Batch(v, complete, rows, done) => {
             if v != version || list.len(complete) != 0u64 || list.len(rows) != 0u64 || list.len(done) != 1u64 {
@@ -416,7 +424,7 @@ fn w3c_answer(frame: Frame, version: u64, stream: u32, p: u64, expected: Outcome
             let mut b: Bytes = list.new()
             result.unwrap(std.codec.encode(codec, got.outcome, mut a))
             result.unwrap(std.codec.encode(codec, expected, mut b))
-            got.stream == store.StreamId(t: 0u64, n: int.widen(stream)) && got.p == p && a == b
+            got.stream == stream && got.p == p && a == b
         },
         _ => false,
     }
@@ -430,7 +438,7 @@ fn w3c_ok(version: u64) -> Outcome {
 }
 
 fn w3c_close(take rig: W3cRig) -> () waits {
-    let W3cRig(head: take hd, owner: _, work: _, requests: _, releases: _, inbox: _) = take rig
+    let W3cRig(head: take hd, owner: _, work: _, requests: _, releases: _, inbox: _, t: _) = take rig
     let Head(db: take db, ..) = take hd
     result.unwrap(store.close(take db))
 }
@@ -492,7 +500,7 @@ pub fn law_gone_slot_v5(tasks: Tasks, clock: Clock, random: Random) -> bool wait
     let mut ok = true
     for (p, v) in[(0u64, 3u64), (0u64, 3u64), (1u64, 5u64), (1u64, 5u64)] {
         let out = w3c_send(mut rig, 77u32, p, 3u32, list.new())
-        ok = w3c_answer(out, v, 77u32, p, Failed(Gone)) && ok
+        ok = w3c_answer(out, v, w3c_stream(rig, 77u32), p, Failed(Gone)) && ok
     }
     ok = store.version(store.snapshot(rig.head.db)) == 5u64 && ok
     w3c_close(take rig)
@@ -502,9 +510,9 @@ pub fn law_gone_slot_v5(tasks: Tasks, clock: Clock, random: Random) -> bool wait
 pub fn law_request_mismatch_wire(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
     let mut rig = w3c_rig(tasks, clock, random)
     let first = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(7u32))
-    let mut ok = w3c_answer(first, 4u64, 0u32, 0u64, w3c_ok(4u64))
+    let mut ok = w3c_answer(first, 4u64, w3c_stream(rig, 0u32), 0u64, w3c_ok(4u64))
     let changed = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(8u32))
-    ok = w3c_answer(changed, 4u64, 0u32, 0u64, Refused(RequestMismatch)) && ok
+    ok = w3c_answer(changed, 4u64, w3c_stream(rig, 0u32), 0u64, Refused(RequestMismatch)) && ok
     ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(result.unwrap(store.reader(rig.head.db, 0u64)), store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == Some(7u32) && ok
     w3c_close(take rig)
     ok
@@ -515,10 +523,10 @@ pub fn law_history_below_latest(tasks: Tasks, clock: Clock, random: Random) -> b
     let mut ok = true
     for (p, v) in[(0u64, 4u64), (1u64, 6u64)] {
         let out = w3c_send(mut rig, 0u32, p, 0u32, w3c_arg(7u32))
-        ok = w3c_answer(out, v, 0u32, p, w3c_ok(v)) && ok
+        ok = w3c_answer(out, v, w3c_stream(rig, 0u32), p, w3c_ok(v)) && ok
     }
     let old = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(9u32))
-    ok = w3c_answer(old, 6u64, 0u32, 0u64, Refused(HistoryUnavailable)) && ok
+    ok = w3c_answer(old, 6u64, w3c_stream(rig, 0u32), 0u64, Refused(HistoryUnavailable)) && ok
     ok = store.version(store.snapshot(rig.head.db)) == 6u64 && result.unwrap(store.get(result.unwrap(store.reader(rig.head.db, 0u64)), store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == Some(7u32) && ok
     w3c_close(take rig)
     ok
@@ -527,9 +535,9 @@ pub fn law_history_below_latest(tasks: Tasks, clock: Clock, random: Random) -> b
 pub fn law_reply_over_done_max(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
     let mut rig = w3c_rig(tasks, clock, random)
     let large = w3c_send(mut rig, 1u32, 0u64, 1u32, w3c_arg(8165u32))
-    let mut ok = w3c_answer(large, 4u64, 1u32, 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8160u64))))
+    let mut ok = w3c_answer(large, 4u64, w3c_stream(rig, 1u32), 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8160u64))))
     let big = w3c_send(mut rig, 2u32, 0u64, 2u32, w3c_arg(8169u32))
-    ok = w3c_answer(big, 4u64, 2u32, 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8160u64)))) && ok
+    ok = w3c_answer(big, 4u64, w3c_stream(rig, 2u32), 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8160u64)))) && ok
     ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(result.unwrap(store.reader(rig.head.db, 0u64)), store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == None && ok
     w3c_close(take rig)
     ok

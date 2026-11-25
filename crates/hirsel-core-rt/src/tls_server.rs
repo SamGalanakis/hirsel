@@ -161,19 +161,21 @@ pub unsafe extern "C" fn hirsel_core_host_tls_hello(
     unsafe {
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
-        // Only a socket a host TCP listener accepted, or its rejoined halves.
-        let provider = match (*files).tcp_routes.get(&key) {
-            Some(&TcpRoute {
-                provider,
-                origin: TcpOrigin::Accepted,
-            }) if !crate::provide::owns(&provider) => provider,
-            _ => {
-                net::hirsel_core_socket_drop(context, key);
-                return DENIED;
-            }
+        // Only a socket a TCP listener accepted, a host's or a served Net's,
+        // or its rejoined halves.
+        let Some(&TcpRoute {
+            provider,
+            origin: TcpOrigin::Accepted,
+        }) = (*files).tcp_routes.get(&key)
+        else {
+            net::hirsel_core_socket_drop(context, key);
+            return DENIED;
         };
+        // A served socket's handshake is its port's, never a tape's.
         #[cfg(feature = "record")]
-        let tape = (*files).net_tape;
+        let tape = (*files)
+            .net_tape
+            .filter(|_| !crate::provide::owns(&provider));
         let mut name = [0u8; 253];
         let mut name_out = Buffer {
             data: name.as_mut_ptr(),
@@ -342,7 +344,9 @@ unsafe fn accept(
             return refuse(context, key, tls_failure(2, 0));
         };
         #[cfg(feature = "record")]
-        let tape = (*files).net_tape;
+        let tape = (*files)
+            .net_tape
+            .filter(|_| !crate::provide::owns(&provider));
         let mut state = AcceptState {
             accepted: record.and_then(|record| record.accepted),
             key: key_secret,

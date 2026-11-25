@@ -1055,8 +1055,8 @@ fn hello_client(take n: Net) -> bool waits {
     }
 }
 
-// TL3 (TLS-9 check 1): a provide.net socket is not one a host TCP listener
-// accepted, so hello is Denied before any call and the socket it consumed
+// TL3 (TLS-9 check 1): a served Connect socket is not an accepted one,
+// so hello is Denied before any call and the socket it consumed
 // reaches its server only as Released Whole.
 // expect: run tls_hello_scripted(tasks) = true
 fn tls_hello_scripted(tasks: Tasks) -> bool waits {

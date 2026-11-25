@@ -208,8 +208,12 @@ pub fn net_op(c: Call[NetOp]) -> NetOp {
         UdpRecv(socket: a, room: b, entries: d)
     } else if t == 24 {
         UdpSend(socket: a, data: b, pkts: d)
-    } else {
+    } else if t == 25 {
         UdpLocal(socket: a)
+    } else if t == 26 {
+        Hello(socket: a, room: b)
+    } else {
+        Serve(socket: a, chain: b, alpn: d)
     }
 }
 
@@ -401,6 +405,10 @@ pub fn net_reply(r: NetReply) -> Reply[NetOp] {
             Reply(tag: 17, w0: first, w1: family, w2: hi, w3: lo, w4: int.widen(a.port), w5: int.widen(count))
         },
         UdpPackets(count) => words(18, count, 0, 0),
+        Accepted(protocol: protocol) => match protocol {
+            Some(p) => words(19, 1, p, 0),
+            None => words(19, 0, 0, 0)
+        },
         Secured(h) => {
             let (some, protocol): (u64, u64) = match h.protocol {
                 Some(p) => (1, p),

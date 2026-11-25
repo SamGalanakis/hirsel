@@ -52,9 +52,12 @@ impl Machine<'_> {
         }
         match op {
             HostOp::TlsConnect => return self.tls_connect(t, a),
-            HostOp::TlsHello | HostOp::TlsAccept => return Ok(self.tls_server(a)),
-            // No Hello lives in the evaluator, so its name is always empty.
-            HostOp::TlsServerName => return Ok(vec![self.host_view(&[]), 0, 0, 0]),
+            HostOp::TlsHello => return self.tls_hello(t, a),
+            HostOp::TlsAccept => return self.tls_accept(t, a),
+            HostOp::TlsServerName => {
+                let name = self.host.world.tls_hellos.get(&a[0]).cloned();
+                return Ok(vec![self.host_view(&name.unwrap_or_default()), 0, 0, 0]);
+            }
             HostOp::SendSecret => return self.send_secret(t, a),
             HostOp::ScramSha256 => return self.scram_send(t, a),
             HostOp::ScramFinalLen => return Ok(self.scram_final_len(a)),

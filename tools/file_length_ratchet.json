@@ -240,9 +240,9 @@
     "reason": "macos-s5-macho-2582"
   },
   "crates/hirsel-core-eval/src/lib.rs": {
-    "lines": 6568,
-    "raise_revision": 10,
-    "reason": "comptime-flat-default-2685"
+    "lines": 6594,
+    "raise_revision": 11,
+    "reason": "tls-accept-followups-2762"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2609,
@@ -424,9 +424,9 @@
     "lines": 1013
   },
   "crates/hirsel-core-rt/src/provide.rs": {
-    "lines": 2209,
-    "raise_revision": 1,
-    "reason": "std2-host-2117"
+    "lines": 2075,
+    "raise_revision": 2,
+    "reason": "tls-accept-followups-2762"
   },
   "crates/hirsel-core-rt/src/provider_s0_tests.rs": {
     "lines": 2346

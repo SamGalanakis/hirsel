@@ -495,6 +495,8 @@ impl Machine<'_> {
         if key & 3 == 2 {
             self.host.world.tls_writes.remove(&(key & !3));
         }
+        // A dropped Hello declines: a served socket's server sees it released.
+        self.host.world.tls_hellos.remove(&key);
         if !self.port_socket_part(key, false) {
             self.host.world.network.sockets.release(key);
         }

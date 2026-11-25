@@ -819,6 +819,9 @@ server staged. Any other packet, or a reply of the wrong kind for its call, fail
 with `Fail` before the caller changes. A server models a listener as a named queue and a
 datagram endpoint as a bounded packet queue. It commits a dequeue or a send only after its
 reply returns `Ok(())`. A virtual server never receives a host directory.
+The server handshake's `Hello(socket, room)`, answered `Count`, and `Serve(socket, chain,
+alpn)`, answered `Accepted(protocol)`, also join `NetOp` and `NetReply`; their fields and
+checks are in [TLS-9](tls.md#tls-9-server-handshake).
 
 ## UDP
 

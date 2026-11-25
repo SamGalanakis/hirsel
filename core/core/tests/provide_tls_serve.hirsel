@@ -1,0 +1,471 @@
+// TLS-9 server handshakes on a served Net (tls.md, Scripted provider): a
+// socket a provide.net listener accepted takes tls.hello, whose server
+// stages the ClientHello's name, and tls.accept, whose server receives the
+// chain and the ALPN list but never the key. Each script plays the client
+// side; the program is the child task. Chains are one-entry stand-ins, a DER
+// SEQUENCE 30 03 02 01 <n> whose last byte names the certificate (1 alpha,
+// 2 beta), so the packed field is that entry's u32 length 5 and its 5 bytes.
+fn net_answer(mut s: Served[NetOp], take c: Call[NetOp], r: NetReply) -> bool {
+    match provide.reply(mut s, take c, provide.net_reply(r)) {
+        Ok(_) => true,
+        _ => false
+    }
+}
+
+// Take the next call and expect Released(id, part), which Done acknowledges.
+fn net_released(mut s: Served[NetOp], id: u64, part: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Released(id: h, part: p) => h == id && match p {
+                    Whole => part == 0,
+                    Read => part == 1,
+                    Write => part == 2,
+                },
+                _ => false
+            }
+            op && net_answer(mut s, take call, Done)
+        },
+        None => false
+    }
+}
+
+fn quiet(mut s: Served[NetOp]) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+}
+
+fn same(a: Bytes, b: Bytes) -> bool {
+    let mut equal = list.len(a) == list.len(b)
+    let mut i: u64 = 0
+    while equal && i < list.len(a) {
+        equal = a[i] == b[i]
+        i = i + 1
+    }
+    equal
+}
+
+// Listen on 127.0.0.1:443, answered as Listener(7).
+fn script_listen(mut s: Served[NetOp]) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Listen(addr, ..) => addr.port == 443,
+                _ => false
+            }
+            op && net_answer(mut s, take call, Listener(7, Addr(ip: V4(2130706433), port: 443)))
+        },
+        None => false
+    }
+}
+
+// Accept on listener 7, answered as Socket(id) from 127.0.0.1:5000.
+fn script_accept(mut s: Served[NetOp], id: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Accept(listener) => listener == 7,
+                _ => false
+            }
+            op && net_answer(mut s, take call, Socket(id, Addr(ip: V4(2130706433), port: 5000)))
+        },
+        None => false
+    }
+}
+
+// Hello on socket id with 253 bytes of room: stage `name` and count it.
+fn script_hello(mut s: Served[NetOp], id: u64, name: Bytes) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let mut c = take call
+            let op = match provide.net_op(c) {
+                Hello(socket, room) => socket == id && room == 253,
+                _ => false
+            }
+            let took = provide.fill(mut s, mut c, name)
+            op && took == list.len(name) && net_answer(mut s, take c, Count(took))
+        },
+        None => false
+    }
+}
+
+// Hello on socket id, answered with a failure.
+fn script_hello_fails(mut s: Served[NetOp], id: u64, e: NetError) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Hello(socket, room: _) => socket == id,
+                _ => false
+            }
+            op && net_answer(mut s, take call, Failed(e))
+        },
+        None => false
+    }
+}
+
+// Serve on socket id: field 1 is certificate `cert`'s packed entry and
+// field 2 exactly `wire`; answered with `reply`.
+fn script_serve(mut s: Served[NetOp], id: u64, cert: u8, wire: Bytes, reply: NetReply) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Serve(socket, chain, alpn) => socket == id && chain == 9 && alpn == list.len(wire),
+                _ => false
+            }
+            let mut packed: Bytes = list.with_capacity(16)
+            provide.payload(call, 1, mut packed)
+            let mut expected: Bytes = list.with_capacity(9)
+            list.push(mut expected, 5)
+            list.push(mut expected, 0)
+            list.push(mut expected, 0)
+            list.push(mut expected, 0)
+            list.push(mut expected, 0x30)
+            list.push(mut expected, 3)
+            list.push(mut expected, 2)
+            list.push(mut expected, 1)
+            list.push(mut expected, cert)
+            let mut offered: Bytes = list.with_capacity(32)
+            provide.payload(call, 2, mut offered)
+            op && same(packed, expected) && same(offered, wire) && net_answer(mut s, take call, reply)
+        },
+        None => false
+    }
+}
+
+fn chain_of(cert: u8) -> List[Bytes] {
+    let mut der: Bytes = list.with_capacity(5)
+    list.push(mut der, 0x30)
+    list.push(mut der, 3)
+    list.push(mut der, 2)
+    list.push(mut der, 1)
+    list.push(mut der, cert)
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, take der)
+    chain
+}
+
+fn serving_key() -> Secret {
+    result.unwrap(secret.seal(string.into_bytes(string.from("key")), "tls_serve"))
+}
+
+fn listen(n: Net) -> Listener waits {
+    let (listener, _) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 443), 4))
+    listener
+}
+
+// TL18's choice: alpha's chain for alpha.test or no name, beta's for
+// beta.test, and a dropped Hello otherwise. Answers the certificate it
+// served, 0 for a declined name.
+fn serve_by_name(mut l: Listener, key: Secret) -> u8 waits {
+    let (socket, _) = result.unwrap(host.accept(mut l, Never))
+    let h = result.unwrap(tls.hello(take socket, Never))
+    let name = string.from(tls.server_name(h))
+    let cert: u8 = if name == "alpha.test" || name == "" {
+        1
+    } else if name == "beta.test" {
+        2
+    } else {
+        0
+    }
+    if cert == 0 {
+        let _ = take h
+        return 0
+    }
+    let none: List[String] = list.new()
+    match tls.accept(take h, chain_of(cert), key, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let _ = take r
+            let _ = take w
+            cert
+        },
+        Error(_) => 9
+    }
+}
+
+fn sni_server(take n: Net) -> bool waits {
+    let mut l = listen(n)
+    let key = serving_key()
+    let alpha = serve_by_name(mut l, key)
+    let empty = serve_by_name(mut l, key)
+    let beta = serve_by_name(mut l, key)
+    let gamma = serve_by_name(mut l, key)
+    let _ = take l
+    alpha == 1 && empty == 1 && beta == 2 && gamma == 0
+}
+
+// TL18 (scripted): the name the server staged chooses the chain the server
+// receives. alpha.test and no name get alpha's, beta.test beta's; gamma.test
+// is declined, so its socket comes back Released Whole with no Serve.
+// expect: run tls_sni_scripted(tasks) = true
+fn tls_sni_scripted(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 256)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, sni_server)
+    let none: Bytes = list.new()
+    let listened = script_listen(mut served)
+    let alpha = script_accept(mut served, 9) && script_hello(mut served, 9, string.as_bytes("alpha.test")) && script_serve(mut served, 9, 1, none, Accepted(protocol: None)) && net_released(mut served, 9, 1) && net_released(mut served, 9, 2)
+    let empty = script_accept(mut served, 10) && script_hello(mut served, 10, none) && script_serve(mut served, 10, 1, none, Accepted(protocol: None)) && net_released(mut served, 10, 1) && net_released(mut served, 10, 2)
+    let beta = script_accept(mut served, 11) && script_hello(mut served, 11, string.as_bytes("beta.test")) && script_serve(mut served, 11, 2, none, Accepted(protocol: None)) && net_released(mut served, 11, 1) && net_released(mut served, 11, 2)
+    let gamma = script_accept(mut served, 12) && script_hello(mut served, 12, string.as_bytes("gamma.test")) && net_released(mut served, 12, 0)
+    let closed = net_released(mut served, 7, 0)
+    let client = result.unwrap(task.join(take child))
+    listened && alpha && empty && beta && gamma && closed && client && quiet(mut served)
+}
+
+// TL21's refusals on a server half: two secret sends, SCRAM and its final
+// length are each Denied, and the halves do not join.
+fn refused_half(mut l: Listener, key: Secret, send: Secret) -> bool waits {
+    let (socket, _) = result.unwrap(host.accept(mut l, Never))
+    let h = result.unwrap(tls.hello(take socket, Never))
+    let none: List[String] = list.new()
+    match tls.accept(take h, chain_of(1), key, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let mut wh = take w
+            let mut one: List[Secret] = list.with_capacity(1)
+            list.push(mut one, secret.share(send))
+            let mut marks: List[u64] = list.with_capacity(4)
+            for _ in 0u64 .. 4u64 {
+                list.push(mut marks, 0)
+            }
+            let wire = string.into_bytes(string.from("x"))
+            let nothing: Bytes = list.new()
+            let no_secrets: List[Secret] = list.new()
+            let no_marks: List[u64] = list.new()
+            let first = string.as_bytes("n,,n=user,r=rOprNGfwEbeRWgbNEkqO")
+            let server = string.as_bytes("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
+            let granted = match tls.send_secret(mut wh, wire, one, marks, Never) {
+                Error(Denied) => true,
+                _ => false
+            }
+            let empty = match tls.send_secret(mut wh, nothing, no_secrets, no_marks, Never) {
+                Error(Denied) => true,
+                _ => false
+            }
+            let scram = match secret.scram_sha256(mut wh, send, first, server, nothing, nothing, Never) {
+                Ok(take c) => {
+                    let _ = take c
+                    false
+                },
+                Error(e) => match e {
+                    Denied => true,
+                    _ => false
+                }
+            }
+            let final_len = match secret.scram_final_len(wh, first, server) {
+                Error(Denied) => true,
+                _ => false
+            }
+            let unjoined = match net.join(take r, take wh) {
+                Ok(take s) => {
+                    let _ = take s
+                    false
+                },
+                Error(take u) => {
+                    let Unjoined(take rh, take w2) = take u
+                    let _ = take rh
+                    let _ = take w2
+                    true
+                }
+            }
+            granted && empty && scram && final_len && unjoined
+        },
+        Error(_) => false
+    }
+}
+
+fn half_server(take n: Net) -> bool waits {
+    let mut l = listen(n)
+    let key = serving_key()
+    let send = result.unwrap(secret.seal(string.into_bytes(string.from("pencil")), "tls_send(alpha.test)"))
+    let named = refused_half(mut l, key, send)
+    let unnamed = refused_half(mut l, key, send)
+    let _ = take l
+    named && unnamed
+}
+
+// TL21 (scripted): a server half has no verified name, so with SNI
+// alpha.test, and with none, a secret granted tls_send(alpha.test) reaches
+// no SendSecret call: after Serve the server sees only the halves' release.
+// expect: run tls_half_scripted(tasks) = true
+fn tls_half_scripted(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 256)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, half_server)
+    let none: Bytes = list.new()
+    let listened = script_listen(mut served)
+    let named = script_accept(mut served, 9) && script_hello(mut served, 9, string.as_bytes("alpha.test")) && script_serve(mut served, 9, 1, none, Accepted(protocol: None)) && net_released(mut served, 9, 1) && net_released(mut served, 9, 2)
+    let unnamed = script_accept(mut served, 10) && script_hello(mut served, 10, none) && script_serve(mut served, 10, 1, none, Accepted(protocol: None)) && net_released(mut served, 10, 1) && net_released(mut served, 10, 2)
+    let closed = net_released(mut served, 7, 0)
+    let client = result.unwrap(task.join(take child))
+    listened && named && unnamed && closed && client && quiet(mut served)
+}
+
+// Accepts with `alpn` and answers the protocol index, 99 for none and 100
+// plus the alert for Tls(Protocol(d)).
+fn serve_alpn(mut l: Listener, key: Secret, alpn: List[String]) -> u64 waits {
+    let (socket, _) = result.unwrap(host.accept(mut l, Never))
+    let h = result.unwrap(tls.hello(take socket, Never))
+    match tls.accept(take h, chain_of(1), key, alpn, Never) {
+        Ok(take stream) => {
+            let (take r, take w, chosen) = take stream
+            let _ = take r
+            let _ = take w
+            match chosen {
+                Some(i) => i,
+                None => 99
+            }
+        },
+        Error(Tls(Protocol(d))) => 100u64 + int.widen(d),
+        Error(_) => 1000
+    }
+}
+
+fn alpn_server(take n: Net) -> bool waits {
+    let mut l = listen(n)
+    let key = serving_key()
+    let mut both: List[String] = list.new()
+    list.push(mut both, string.from("http/1.1"))
+    list.push(mut both, string.from("h2"))
+    let preferred = serve_alpn(mut l, key, both)
+    let only_h2 = serve_alpn(mut l, key, both)
+    let mismatch = serve_alpn(mut l, key, both)
+    let none: List[String] = list.new()
+    let empty = serve_alpn(mut l, key, none)
+    let _ = take l
+    preferred == 0 && only_h2 == 1 && mismatch == 220 && empty == 99
+}
+
+// TL22 (scripted): the server receives `accept`'s list as ALPN wire bytes,
+// 08 "http/1.1" 02 "h2" (RFC 7301 §3.1), and its index is into that list.
+// By server preference (§3.2) a client offering h2,http/1.1 gets index 0,
+// one offering h2 alone index 1; a client offering only x gets
+// Tls(Protocol(120)) and its socket back Released Whole; an empty list is
+// field 2 empty and None.
+// expect: run tls_alpn_scripted(tasks) = true
+fn tls_alpn_scripted(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 256)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, alpn_server)
+    let mut wire: Bytes = list.with_capacity(12)
+    list.push(mut wire, 8)
+    list.append(mut wire, string.as_bytes("http/1.1"))
+    list.push(mut wire, 2)
+    list.append(mut wire, string.as_bytes("h2"))
+    let none: Bytes = list.new()
+    let name = string.as_bytes("alpha.test")
+    let listened = script_listen(mut served)
+    let preferred = script_accept(mut served, 9) && script_hello(mut served, 9, name) && script_serve(mut served, 9, 1, wire, Accepted(protocol: Some(0))) && net_released(mut served, 9, 1) && net_released(mut served, 9, 2)
+    let only_h2 = script_accept(mut served, 10) && script_hello(mut served, 10, name) && script_serve(mut served, 10, 1, wire, Accepted(protocol: Some(1))) && net_released(mut served, 10, 1) && net_released(mut served, 10, 2)
+    let mismatch = script_accept(mut served, 11) && script_hello(mut served, 11, name) && script_serve(mut served, 11, 1, wire, Failed(Tls(Protocol(120)))) && net_released(mut served, 11, 0)
+    let empty = script_accept(mut served, 12) && script_hello(mut served, 12, name) && script_serve(mut served, 12, 1, none, Accepted(protocol: None)) && net_released(mut served, 12, 1) && net_released(mut served, 12, 2)
+    let closed = net_released(mut served, 7, 0)
+    let client = result.unwrap(task.join(take child))
+    listened && preferred && only_h2 && mismatch && empty && closed && client && quiet(mut served)
+}
+
+fn decline_server(take n: Net) -> bool waits {
+    let mut l = listen(n)
+    let key = serving_key()
+    // A name it does not serve: the Hello is read, then dropped.
+    let (first, _) = result.unwrap(host.accept(mut l, Never))
+    let declined = match tls.hello(take first, Never) {
+        Ok(take h) => {
+            let name = string.from(tls.server_name(h))
+            let _ = take h
+            name == "gamma.test"
+        },
+        Error(_) => false
+    }
+    // A plaintext request is no ClientHello.
+    let (second, _) = result.unwrap(host.accept(mut l, Never))
+    let plaintext = match tls.hello(take second, Never) {
+        Ok(take h) => {
+            let _ = take h
+            false
+        },
+        Error(Tls(Protocol(d))) => d == 0,
+        Error(_) => false
+    }
+    // A TLS 1.2 client passes hello and fails accept.
+    let (third, _) = result.unwrap(host.accept(mut l, Never))
+    let h = result.unwrap(tls.hello(take third, Never))
+    let none: List[String] = list.new()
+    let version = match tls.accept(take h, chain_of(1), key, none, Never) {
+        Ok(take stream) => {
+            let (take r, take w, _) = take stream
+            let _ = take r
+            let _ = take w
+            false
+        },
+        Error(Tls(Protocol(d))) => d == 0,
+        Error(_) => false
+    }
+    let _ = take l
+    declined && plaintext && version
+}
+
+// TL23 (scripted): a dropped Hello reaches the server as its socket's
+// Released Whole after the name it staged, a Hello answered
+// Tls(Protocol(0)) is hello's error, and a Serve answered Tls(Protocol(0))
+// (the script's TLS 1.2 client) is accept's; each failure releases the
+// socket whole.
+// expect: run tls_decline_scripted(tasks) = true
+fn tls_decline_scripted(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 256)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, decline_server)
+    let none: Bytes = list.new()
+    let listened = script_listen(mut served)
+    let declined = script_accept(mut served, 9) && script_hello(mut served, 9, string.as_bytes("gamma.test")) && net_released(mut served, 9, 0)
+    let plaintext = script_accept(mut served, 10) && script_hello_fails(mut served, 10, Tls(Protocol(0))) && net_released(mut served, 10, 0)
+    let version = script_accept(mut served, 11) && script_hello(mut served, 11, string.as_bytes("alpha.test")) && script_serve(mut served, 11, 1, none, Failed(Tls(Protocol(0)))) && net_released(mut served, 11, 0)
+    let closed = net_released(mut served, 7, 0)
+    let client = result.unwrap(task.join(take child))
+    listened && declined && plaintext && version && closed && client && quiet(mut served)
+}
+
+fn checked_server(take n: Net) -> bool waits {
+    let mut l = listen(n)
+    let none: List[String] = list.new()
+    let (first, _) = result.unwrap(host.accept(mut l, Never))
+    let h = result.unwrap(tls.hello(take first, Never))
+    let mac = result.unwrap(secret.seal(string.into_bytes(string.from("key")), "mac"))
+    let ungranted = match tls.accept(take h, chain_of(1), mac, none, Never) {
+        Error(Denied) => true,
+        _ => false
+    }
+    let (second, _) = result.unwrap(host.accept(mut l, Never))
+    let h2 = result.unwrap(tls.hello(take second, Never))
+    let empty: List[Bytes] = list.new()
+    let chainless = match tls.accept(take h2, empty, serving_key(), none, Never) {
+        Error(Tls(Chain)) => true,
+        _ => false
+    }
+    let _ = take l
+    ungranted && chainless
+}
+
+// TL3 and TLS-9 check 2 (scripted): the key's grant and the chain are
+// checked before issue on a served socket too. A key sealed for mac only
+// gives Denied and an empty chain Tls(Chain), each with no Serve: the
+// server's next call is the socket's Released Whole.
+// expect: run tls_accept_checks_scripted(tasks) = true
+fn tls_accept_checks_scripted(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 256)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, checked_server)
+    let name = string.as_bytes("alpha.test")
+    let listened = script_listen(mut served)
+    let ungranted = script_accept(mut served, 9) && script_hello(mut served, 9, name) && net_released(mut served, 9, 0)
+    let chainless = script_accept(mut served, 10) && script_hello(mut served, 10, name) && net_released(mut served, 10, 0)
+    let closed = net_released(mut served, 7, 0)
+    let client = result.unwrap(task.join(take child))
+    listened && ungranted && chainless && closed && client && quiet(mut served)
+}

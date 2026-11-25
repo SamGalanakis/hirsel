@@ -110,6 +110,23 @@ impl Port {
                     u64::from(tls.trust == 0),
                 ]);
             }
+            TLS_HELLO => {
+                // The ClientHello's server name is staged, at most 253 bytes.
+                let id = self.socket(request.handle, Kind::Socket)?;
+                w[..3].copy_from_slice(&[NET_HELLO, id, 253]);
+            }
+            TLS_ACCEPT => {
+                // SAFETY: TLS_ACCEPT pins its TlsAcceptRequest in `path`.
+                let accept =
+                    unsafe { &*request.path.cast::<crate::tls_server::TlsAcceptRequest>() };
+                let id = self.socket(request.handle, Kind::Socket)?;
+                w[..4].copy_from_slice(&[
+                    NET_SERVE,
+                    id,
+                    accept.chain.len as u64,
+                    accept.alpn.len as u64,
+                ]);
+            }
             _ => return None,
         }
         Some(w)

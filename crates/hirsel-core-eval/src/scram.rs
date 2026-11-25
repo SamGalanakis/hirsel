@@ -4,7 +4,8 @@ impl Machine<'_> {
     pub(super) fn scram_send(&mut self, t: &mut Task, args: &[u64]) -> X<Vec<u64>> {
         use hirsel_core_net::scram::Transcript;
         let key = args[0];
-        let Some((name, spent, binding)) = self.host.world.tls_writes.get(&(key & !3)) else {
+        // A server half has no verified name (TLS-9), with or without a secret.
+        let Some((Some(name), spent, binding)) = self.host.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
         let secret = self.secret(args[1]).unwrap();
@@ -77,7 +78,7 @@ impl Machine<'_> {
 
     pub(super) fn scram_final_len(&self, args: &[u64]) -> Vec<u64> {
         use hirsel_core_net::scram::Transcript;
-        let Some((_, _, binding)) = self.host.world.tls_writes.get(&(args[0] & !3)) else {
+        let Some((Some(_), _, binding)) = self.host.world.tls_writes.get(&(args[0] & !3)) else {
             return vec![0, 1, 0, 0];
         };
         match Transcript::parse(

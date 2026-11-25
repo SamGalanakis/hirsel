@@ -13,6 +13,8 @@ pub(super) fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
                     NET_LISTEN => reply == R_LISTENER,
                     NET_RESOLVE | NET_RECV | NET_SEND => reply == R_COUNT,
                     NET_HANDSHAKE => reply == R_SECURED,
+                    NET_HELLO => reply == R_COUNT,
+                    NET_SERVE => reply == R_ACCEPTED,
                     NET_SEND_SECRET | NET_READY => reply == R_DONE,
                     NET_LOCAL_ADDR | NET_PEER_ADDR => reply == R_ADDRESS,
                     _ => false,
@@ -100,6 +102,12 @@ pub(super) fn answer(
             }
             out.value = w[0];
         }
+        R_COUNT if p.vocab == Vocab::Net && op == NET_HELLO => {
+            // The staged server name, as `tls.hello` would hand it out.
+            if !hirsel_core_net::tls::hello_name(&call.staged) || w[0] != call.staged.len() as u64 {
+                return None;
+            }
+        }
         R_COUNT => {
             // A read's count is the bytes it staged; a listing's, its entries.
             if !(p.vocab == Vocab::Dir && op == DirOp::NextEntries.word())
@@ -126,6 +134,16 @@ pub(super) fn answer(
         }
         R_SECURED => {
             // Some(i) names one of the offered protocols; None is (0, 0).
+            // SAFETY: the call is unsettled, so its caller's request is pinned.
+            let offered = alpn_count(unsafe { field_bytes(p.vocab, call, 2) });
+            if !matches!((w[0], w[1]), (0, 0)) && !(w[0] == 1 && w[1] < offered) {
+                return None;
+            }
+            // SAFETY: as above.
+            out.value = unsafe { (*call.request).handle };
+        }
+        R_ACCEPTED if p.vocab == Vocab::Net => {
+            // Some(i) names one of the server's protocols; None is (0, 0).
             // SAFETY: the call is unsettled, so its caller's request is pinned.
             let offered = alpn_count(unsafe { field_bytes(p.vocab, call, 2) });
             if !matches!((w[0], w[1]), (0, 0)) && !(w[0] == 1 && w[1] < offered) {

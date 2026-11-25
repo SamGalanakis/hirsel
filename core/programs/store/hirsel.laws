@@ -95,7 +95,7 @@ store@1/store/expired_cutover_keeps_old_serving src=bf4e3cd90966f56c sig=be3722d
 store@1/store/export_refuses_a_second_lease src=19344a9d5d817aa4 sig=1dc16f09a4e1c7b3 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/follow_schedules src=52a835df0ea4d419 sig=83286378a5d5b04c run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/follower_cancelled_publication src=500e7cad2250a94b sig=063cea7fd29d45e0 run=c9049a952ba23a49 bug=- oracle=- rows=pending
-store@1/store/follower_cancelled_slot src=6ee0d8e288b2ee5a sig=8a5664d891eb5a09 run=c9049a952ba23a49 bug=- oracle=- rows=pending
+store@1/store/follower_cancelled_slot src=6ee0d8e288b2ee5a sig=9bc8ae7c5b1dfbe3 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/follower_retained_bytes src=9a12a728cc2efdac sig=37181f61e456b287 run=c7b2a52baff70a63 bug=- oracle=- rows=pending
 store@1/store/follower_slot_admission src=7515bc5c3ee4edd2 sig=14c077d48b853c18 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/follower_starter_admission src=64e9b8462e9844df sig=9f03bd04470d412c run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -194,7 +194,7 @@ store@1/store/test_fork_settle src=bfacba733f2069a6 sig=5370ec8b8f982640 run=aff
 store@1/store/test_fork_shared_head src=6ec999ebf833b1e2 sig=9e07ff9e3a3d7d5b run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frame_size src=b88fd42eacf70c23 sig=0595b0ee84e6694c run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frames src=e2a03facf79d4eb1 sig=67a87acd7c807068 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_index_build_law src=8e5a5ca8791ed210 sig=2dc86a359cc73a46 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_index_build_law src=8e5a5ca8791ed210 sig=58303068826b8908 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_catch_up_law src=94df6a891c64299e sig=625507e78b9569dc run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_index_declaration_laws src=b35eb152d2afd356 sig=f3eab4b7ff60cc16 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_drift_counted src=5c32a907f7eb0e39 sig=93a200464e84b955 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

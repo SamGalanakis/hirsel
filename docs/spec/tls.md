@@ -2215,9 +2215,11 @@ client's ClientHello is complete.
 Checks before issue, each with no host effect except closing `s`:
 
 1. `s` was not made by `host.accept` on a host TCP listener, or by `net.join` of the halves of
-   such a socket: `Denied`. A socket from `host.connect` is a client's. A socket of a
-   `provide.net` Net is refused because a served Net has no server handshake. That is
-   reversible: a served form can be added as `NetOp` variants later.
+   such a socket, or by `net.accept` on a listener of a `provide.net` Net (a served
+   `Accept`), or by `net.join` of the halves of such a socket: `Denied`. A socket from
+   `host.connect`, a served `Connect` or a Unix socket is not an accepted TCP socket. A
+   provided socket is a socket: its server handshake is served, as the scripted provider
+   below states.
 
 When the provider is asked to read the ClientHello, these failures are possible:
 
@@ -2426,26 +2428,37 @@ entries are `hirsel_core_host_tls_hello` and `hirsel_core_host_tls_accept`. `IoE
 encodes `Chain` as 7 and `Key` as 8 in the low byte. A provider that does not implement
 TLS answers both with `Tls(Protocol(0))`, which is a delivery.
 
-**Scripted provider.** A peer script for a server handshake states:
+**Scripted provider.** The scripted provider is `provide.net`. On a socket its listener
+accepted, the server handshake is two served calls, and the server script plays the
+client:
 
-- the ClientHello: a server name or none, and the client's ALPN offers in order;
-- the handshake result: a `TlsFailure`, a transport failure or success;
-- then the plaintext, as for a client script (TLS-4).
+- `tls.hello` issues `Hello(socket, room)` with `room` 253. The server stages the
+  ClientHello's server name with `provide.fill` and answers `Count(n)`, or `Failed(e)`.
+  The staged bytes must be empty (no name) or a name `tls.server_name` could return under
+  the OS provider: lower-case, no trailing dot, not an IP address, at most 253 bytes, a
+  DNS name by rustls's rule. Any other bytes, or `n` other than their length, fail the
+  server.
+- `tls.accept` runs the checks before issue first, as the OS provider does: the key's
+  `tls_serve` grant (`Denied`), the chain (`Tls(Chain)`) and the ALPN list. Only then does
+  it issue `Serve(socket, chain, alpn)`, whose field 1 is the chain's run of entries as in
+  `TlsAcceptRequest` and field 2 the ALPN list in wire form. The key is never sent: the
+  server sees neither its bytes nor its designation. The server answers
+  `Accepted(protocol)` with the chosen index into the program's list, or `Failed(e)`; an
+  index past the list fails the server.
 
-The scripted provider does no cryptography. It runs the checks before issue as the OS
-provider does, and computes ALPN by the server-preference rule above from the script's
-offers and `accept`'s `alpn`. It also records the chain and the key's designation each
-`accept` was given, so a law can check which certificate the program chose for which
-name. It does not check that the key matches the leaf: a script that tests `Tls(Key)`
-states it as the result.
+The server therefore decides the name, the handshake result and the ALPN choice, and a law
+can check which certificate the program chose for which name from field 1. The scripted
+provider does no cryptography and does not check that the key matches the leaf: a script
+that tests `Tls(Key)` answers `Failed(Tls(Key))`. A dropped `Hello` releases the socket
+(`Released(socket, Whole)`) and sends no alert, since no bytes were read; a failed
+`accept` releases the socket as on the OS path. A served server half has no verified name,
+so `send_secret` and SCRAM on it give `Denied`, as on the OS path. A `provide.net` socket
+from a served `Connect` is refused by check 1 before any call, as a `host.connect` socket
+is. The plaintext after `accept` is served as for a client half (TLS-4).
 
-*Version note (2026-11-25, tls-accept-build-2679): the scripted server script is not built.
-The scripted provider is `provide.net`, and TLS-9 check 1 and TL3 refuse `hello` on a
-`provide.net` socket, since only a socket from a host TCP listener may be read as a
-ClientHello. The evaluator therefore answers `hello` and `accept` with `Denied` and
-releases the socket, and TL18, TL21, TL22 and TL23 have no scripted cases. Building the
-script needs a `provide.net` accept-side handshake step and a narrower check 1 that admits
-it; both are additive.*
+*Version note (2026-11-25, tls-accept-followups-2762): the served server handshake is
+built. It replaces the earlier note, under which check 1 refused every `provide.net`
+socket and TL18, TL21, TL22 and TL23 had no scripted cases.*
 
 ## Laws
 
@@ -2467,7 +2480,7 @@ ignore the common name.
 |---|---|---|
 | **TL1** wrong name | verification skipped, or SNI matched in place of the certificate | A loopback server presents `alpha.test`. `tls.connect` with name `beta.test` and roots holding the test CA gives `Tls(Certificate(NameMismatch))`. With name `alpha.test` it succeeds, and `Handshake.peer` equals the `openssl` digest of the alpha leaf split into four big-endian words. |
 | **TL2** trust is exact | `Roots` falling back to the host store, or accepting any chain | The same server with `Roots` set to an unrelated CA, and with `System`: both give `Tls(Certificate(UnknownIssuer))`. Malformed or empty PEM gives `Tls(Roots)`, and the provider records no call. The oracle is the fixture's issuer. |
-| **TL3** authority before effect | the handshake reaching the host without a covering rule | Using a counting provider, check that each of these gives `Denied` with zero provider calls past the socket: a name outside the rule's patterns, a peer port outside the range, trust `System` under a `Roots=` rule, a roots bundle whose digest differs from the pin, an accepted socket, and for the server, `tls.hello` on a socket from `host.connect`, on a socket of `provide.net` and on a Unix socket, each with zero provider calls past the socket, and, after a successful `hello`, `tls.accept` with a key granted `sign(p256)` only, with zero provider calls past the `hello` (the alert and close of the dropped `Hello` are not counted). The expected verdicts are worked out by hand for a corpus of names against `*.a.test` and `x.a.test` (`a.test`, `x.a.test`, `y.x.a.test`, `X.A.TEST.`, `xa.test`). |
+| **TL3** authority before effect | the handshake reaching the host without a covering rule | Using a counting provider, check that each of these gives `Denied` with zero provider calls past the socket: a name outside the rule's patterns, a peer port outside the range, trust `System` under a `Roots=` rule, a roots bundle whose digest differs from the pin, an accepted socket, and for the server, `tls.hello` on a socket from `host.connect`, on a socket of a served `Connect` of `provide.net` and on a Unix socket, each with zero provider calls past the socket, and, after a successful `hello`, `tls.accept` with a key granted `sign(p256)` only, with zero provider calls past the `hello` (the alert and close of the dropped `Hello` are not counted). The expected verdicts are worked out by hand for a corpus of names against `*.a.test` and `x.a.test` (`a.test`, `x.a.test`, `y.x.a.test`, `X.A.TEST.`, `xa.test`). |
 | **TL4** narrowing never widens | intersection returning the wider pattern | Over the TL3 name corpus, a pair of rules, and every order of two `narrow` calls: the set of names the result covers equals the intersection of the hand-computed sets. Put the cases in the existing NET-6 rule tests. |
 | **TL5** committed prefix | counting plaintext as committed that the session later drops or sends twice | The peer reads slowly over a small socket buffer. Sends of a 1 MiB pattern with deadlines that expire part way through. The caller continues from `written` each time. The peer's received plaintext equals the pattern byte for byte, so nothing is lost or repeated. |
 | **TL6** truncation | an unauthenticated EOF read as a clean end | The peer closes TCP after half of a body without `close_notify`, and the next receive gives `Tls(Truncated)`. With `close_notify`, the next receive gives `Ok(0)`. The oracle is RFC 8446 §6.1. |
@@ -2524,8 +2537,9 @@ loopback, and AE1 to AE8 and KD1 to KD6 against the OS provider. KD1–KD3 are i
 `core/core/tests/hkdf_vectors.hirsel`, with KD4–KD5 in `core/std/tests/secret_kdf.hirsel`.
 KD6 and the KD4–KD5 no-call checks are in the runtime tape laws. AE5 and AE6
 also have scripted-provider cases. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider
-cases, so that the evaluator is covered. TL18, TL21, TL22 and TL23 have none yet: see the
-version note under the scripted provider above.
+cases, so that the evaluator is covered. TL18, TL21, TL22 and TL23 also have scripted cases,
+in `core/core/tests/provide_tls_serve.hirsel`, served by `provide.net` as the scripted
+provider above states, with TL3's `accept` checks on a served socket.
 TL20 and TL24 are native only. SC9 runs on both engines. CR1 to CR5 run natively against loopback servers. The recording laws of
 TLS sessions and secrets, RL3 to RL5, are with the tools ([recording](../recording.md#laws)).
 

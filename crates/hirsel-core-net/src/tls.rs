@@ -10,6 +10,21 @@ pub fn verification_name(bytes: &[u8]) -> Option<Name> {
     Name::parse(std::str::from_utf8(bytes).ok()?)
 }
 
+/// Whether `bytes` can be a `server_name` that `tls.hello` hands out
+/// (TLS-9): empty, or a name rustls reads as a DNS name (underscores
+/// allowed), already lowercase and without its trailing dot.
+pub fn hello_name(bytes: &[u8]) -> bool {
+    let Ok(name) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    name.is_empty()
+        || (name.len() <= 253
+            && !name.ends_with('.')
+            && !name.bytes().any(|b| b.is_ascii_uppercase())
+            && name.parse::<std::net::IpAddr>().is_err()
+            && rustls::pki_types::DnsName::try_from(name).is_ok())
+}
+
 pub fn valid_protocols(protocols: &[impl AsRef<[u8]>]) -> bool {
     protocols.len() <= 16
         && protocols.iter().enumerate().all(|(i, protocol)| {

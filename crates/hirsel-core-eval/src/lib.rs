@@ -198,7 +198,14 @@ struct World {
     agreement_refunds: Arc<Mutex<Vec<Limit>>>,
     /// Each sealed secret's charge, refunded once no designation holds its token.
     seals: Vec<(std::sync::Weak<()>, Limit, u64)>,
-    tls_writes: BTreeMap<u64, (Name, bool, hirsel_core_net::scram::Binding)>,
+    /// Each TLS write half: its verified name (none on a server half, TLS-9),
+    /// whether a secret send split it, and its channel binding.
+    tls_writes: BTreeMap<u64, (Option<Name>, bool, hirsel_core_net::scram::Binding)>,
+    /// Each live `Hello`'s normalised server name, by its socket's key.
+    tls_hellos: BTreeMap<u64, Vec<u8>>,
+    /// A served `Hello` call's staged name, by its caller task, from the
+    /// commit until the caller reads it.
+    hello_names: BTreeMap<usize, Vec<u8>>,
     next_scram: u64,
     scrams: BTreeMap<u64, ([u8; 32], Limit)>,
     /// `provide` cells: cell `i`'s capability and its hand or trigger are both
@@ -274,6 +281,8 @@ struct PortHandle {
     write: Option<PortState>,
     read_only_file: bool,
     client_socket: bool,
+    /// Made by `Accept`: a socket `tls.hello` may read (TLS-9).
+    accepted_socket: bool,
     file_mode: u8,
     termination: Option<u64>,
 }
@@ -285,6 +294,7 @@ impl PortHandle {
             write: None,
             read_only_file: false,
             client_socket: false,
+            accepted_socket: false,
             file_mode: 0,
             termination: None,
         }
@@ -317,6 +327,9 @@ const NET_DATAGRAM_RECV: u64 = 17;
 const NET_READY: u64 = 18;
 const NET_LOCAL_ADDR: u64 = 19;
 const NET_PEER_ADDR: u64 = 20;
+/// After the UDP variants (21 to 25): TLS-9's server handshake.
+const NET_HELLO: u64 = 26;
+const NET_SERVE: u64 = 27;
 const PORT_SOCKET: u8 = 3;
 const PORT_UNIX_SOCKET: u8 = 5;
 const PORT_UNIX_LISTENER: u8 = 6;
@@ -2685,6 +2698,8 @@ impl Machine<'_> {
                 NET_LOCAL_ADDR | NET_PEER_ADDR => tag == 16,
                 1 | 4 | 5 => tag == 3,
                 6 => tag == 11,
+                NET_HELLO => tag == 3,
+                NET_SERVE => tag == 19,
                 7 | NET_DATAGRAM_CONNECT | NET_DATAGRAM_SEND | NET_DATAGRAM_SEND_TO | NET_READY => {
                     tag == 0
                 }
@@ -2723,6 +2738,10 @@ impl Machine<'_> {
             3 => {
                 let fits = if op == 5 {
                     w[0] <= call.words[2] + call.words[3]
+                } else if op == NET_HELLO {
+                    // The staged name, as `tls.hello` hands it out.
+                    hirsel_core_net::tls::hello_name(&call.staged)
+                        && w[0] == call.staged.len() as u64
                 } else if op == 1 {
                     // Well-formed, distinct address records (NOTES 34).
                     hirsel_core_net::ip_records(&call.staged)
@@ -2732,6 +2751,20 @@ impl Machine<'_> {
                 };
                 fits.then_some(())?;
                 ([w[0], 0, 0, 0, 0], None)
+            }
+            19 => {
+                // Some(i) names one of the server's protocols; None is (0, 0).
+                let mut wire = &call.fields[2][..];
+                let mut offered = 0;
+                while let Some((&len, rest)) = wire.split_first() {
+                    wire = rest.get(usize::from(len)..).unwrap_or_default();
+                    offered += 1;
+                }
+                if !matches!((w[0], w[1]), (0, 0)) && !(w[0] == 1 && w[1] < offered) {
+                    return None;
+                }
+                // `written` is the index plus one, or 0, as natively.
+                ([0, 0, 0, if w[0] == 1 { w[1] + 1 } else { 0 }, 0], None)
             }
             15 => {
                 let room = call.words[2];
@@ -2828,6 +2861,7 @@ impl Machine<'_> {
             *used += HANDLE_ROOM;
             let mut handle = PortHandle::new(kind);
             handle.client_socket = vocab == Vocab::Net && op == 0;
+            handle.accepted_socket = vocab == Vocab::Net && op == 3;
             handles.insert(answer[0], handle);
             if vocab == Vocab::Net {
                 let key = PORT_KEYS | (self.host.world.next_port_key << 2);
@@ -2881,6 +2915,13 @@ impl Machine<'_> {
                     pipes[i - 1] = key | part;
                 }
             }
+        }
+        let (calls, ..) = self.host.world.cells[c].port();
+        let call = &calls[&id];
+        if (vocab, op) == (Vocab::Net, NET_HELLO) && answer[1] == 0 {
+            // The name goes to the Hello, never a carrier.
+            let (caller, name) = (call.caller, call.staged.clone());
+            self.host.world.hello_names.insert(caller, name);
         }
         let (calls, ..) = self.host.world.cells[c].port();
         let call = &calls[&id];
@@ -3152,7 +3193,7 @@ impl Machine<'_> {
                     _ if matches!(dir, Some(DirOp::Mkdtemp | DirOp::ReadAt | DirOp::Mkstemp)) => {
                         call.words[3]
                     }
-                    (Vocab::Net, 1 | 4 | NET_DATAGRAM_RECV) => call.words[2],
+                    (Vocab::Net, 1 | 4 | NET_HELLO | NET_DATAGRAM_RECV) => call.words[2],
                     (Vocab::Exec, exec::RECV) => call.words[2].min(call.words[3]),
                     _ => 0,
                 };
@@ -4165,7 +4206,8 @@ impl Machine<'_> {
         if !hirsel_core_net::marks::well_formed(&marks, wire.len(), handles.len()) {
             return Err(Stop::Cause("Bounds"));
         }
-        let Some((name, spent, _)) = self.host.world.tls_writes.get(&(key & !3)) else {
+        // A server half has no verified name (TLS-9), with or without a secret.
+        let Some((Some(name), spent, _)) = self.host.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
         if *spent {

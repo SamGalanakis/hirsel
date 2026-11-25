@@ -167,6 +167,9 @@ const NET_RELEASED: u64 = 8;
 const NET_READY: u64 = 18;
 const NET_LOCAL_ADDR: u64 = 19;
 const NET_PEER_ADDR: u64 = 20;
+/// After the UDP variants (21 to 25): TLS-9's server handshake.
+const NET_HELLO: u64 = 26;
+const NET_SERVE: u64 = 27;
 /// DirReply and StreamReply variants as `Reply[Op]` tags; NetReply shares
 /// Done, Failed and Count.
 use hirsel_core_ids::dir_port::reply::{
@@ -182,6 +185,8 @@ const R_UNIX_LISTENING: u64 = 13;
 const R_DATAGRAM: u64 = 14;
 const R_PACKET: u64 = 15;
 const R_ADDRESS: u64 = 16;
+/// After UdpSockets (17) and UdpPackets (18).
+const R_ACCEPTED: u64 = 19;
 
 /// A port caller's socket and listener keys: the registry's generation-0
 /// band with bit 33 set, so they never meet a registry key (generation 1 and
@@ -540,6 +545,14 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
             (Vocab::Net, NET_HANDSHAKE, 2) => {
                 crate::tls::view_bytes(&(*r.path.cast::<crate::tls::TlsRequest>()).alpn)
             }
+            // A server handshake's chain run and its ALPN wire bytes; the
+            // key stays with the run (TLS-9).
+            (Vocab::Net, NET_SERVE, 1) => crate::tls::view_bytes(
+                &(*r.path.cast::<crate::tls_server::TlsAcceptRequest>()).chain,
+            ),
+            (Vocab::Net, NET_SERVE, 2) => crate::tls::view_bytes(
+                &(*r.path.cast::<crate::tls_server::TlsAcceptRequest>()).alpn,
+            ),
             _ => &[],
         }
     }
@@ -556,7 +569,9 @@ fn call_room(vocab: Vocab, words: &[u64; 9]) -> u64 {
     }
     match (vocab, words[0]) {
         (Vocab::Exec, exec::RECV) => words[2].min(words[3]),
-        (Vocab::Net, NET_RECV | NET_RESOLVE | SERVED_DATAGRAM_RECV | udp::RECV) => words[2],
+        (Vocab::Net, NET_RECV | NET_RESOLVE | NET_HELLO | SERVED_DATAGRAM_RECV | udp::RECV) => {
+            words[2]
+        }
         _ => 0,
     }
 }
@@ -1917,6 +1932,22 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
             }
         }
     }
+    if (p.vocab, tag) == (Vocab::Net, R_ACCEPTED) {
+        // The chosen protocol's index goes to the caller; the stream's
+        // write half is now live.
+        // SAFETY: the call is unsettled, so its caller's request is pinned.
+        unsafe {
+            let c = &p.calls[&id];
+            let accept = &*(*c.request)
+                .path
+                .cast::<crate::tls_server::TlsAcceptRequest>();
+            *accept.protocol_out = if w[0] == 1 { w[1] } else { u64::MAX };
+            let key = (*c.request).handle;
+            if let Some(&h) = p.keys.get(&(key & !3)) {
+                p.handles.get_mut(&h).expect("live socket").write = Some(State::Live);
+            }
+        }
+    }
     let c = &p.calls[&id];
     if !c.staged.is_empty()
         && !((p.vocab == Vocab::Exec
@@ -1929,7 +1960,13 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         // SAFETY: the call is unsettled, so its caller's request is pinned.
         unsafe {
             let b = &mut (*c.request).buffer;
-            if (p.vocab, c.words[0]) == (Vocab::Net, NET_RESOLVE) {
+            if (p.vocab, c.words[0]) == (Vocab::Net, NET_HELLO) {
+                // The name goes to the Hello's record, never the buffer.
+                let hello = &*(*c.request).path.cast::<crate::tls_server::HelloRequest>();
+                let out = &mut *hello.name_out;
+                ptr::copy_nonoverlapping(c.staged.as_ptr(), out.data, c.staged.len());
+                out.len = c.staged.len();
+            } else if (p.vocab, c.words[0]) == (Vocab::Net, NET_RESOLVE) {
                 // Records become the caller's Ip elements; `answer` checked them.
                 let addresses = hirsel_core_net::ip_records(&c.staged).expect("checked records");
                 crate::resolve::append(b, &addresses);

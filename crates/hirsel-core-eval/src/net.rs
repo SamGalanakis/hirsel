@@ -151,18 +151,117 @@ impl Machine<'_> {
         Ok(vec![0, 1, 0, 0, 0, 0, 0, 0])
     }
 
-    /// `tls.hello` and `tls.accept` (TLS-9): no evaluator socket was made by
-    /// `host.accept` on a host TCP listener, and a served Net has no server
-    /// handshake, so both give `Denied` before issue. The Socket, or the
-    /// Hello's socket, is consumed on every return, as natively.
-    pub(super) fn tls_server(&mut self, a: &[u64]) -> Vec<u64> {
+    /// `tls.hello` (TLS-9) on a socket a served Net's listener accepted, the
+    /// only accepted TCP socket the evaluator has: its server reads the
+    /// ClientHello and stages the server name. The Socket is consumed on
+    /// every return, as natively.
+    pub(super) fn tls_hello(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
-        if self.host.world.port_keys.contains_key(&(key & !3)) {
-            self.port_socket_part(key, false);
-        } else {
-            self.host.world.network.sockets.release(key);
+        let Some((c, id, true)) = self.port_socket(key, PORT_SOCKET).filter(|&(c, id, _)| {
+            let VirtualCell::Port { handles, .. } = &self.host.world.cells[c] else {
+                unreachable!()
+            };
+            handles[&id].accepted_socket
+        }) else {
+            self.socket_drop(key);
+            return Ok(vec![0, 1, 0, 0]);
+        };
+        let mut w = [0; 9];
+        w[..3].copy_from_slice(&[NET_HELLO, id, 253]);
+        let row = match self.check_cancel(t).and_then(|()| {
+            let deadline = self.until(a, 1);
+            self.port_call_with(t, c, w, vec![], None, true, &mut None, deadline)
+        }) {
+            Ok(row) => row,
+            Err(stop) => {
+                self.socket_drop(key);
+                return Err(stop);
+            }
+        };
+        let name = self.host.world.hello_names.remove(&t.k);
+        if row[1] != 0 {
+            self.socket_drop(key);
+            return Ok(row);
         }
-        vec![0, 1, 0, 0]
+        self.host
+            .world
+            .tls_hellos
+            .insert(key, name.unwrap_or_default());
+        Ok(vec![key, 0, 0, 0])
+    }
+
+    /// `tls.accept` (TLS-9) on a served `Hello`: the key's grant, the chain
+    /// and the ALPN list are checked before issue, as natively; the server
+    /// receives the chain and the list, never the key, and answers the
+    /// handshake. The Hello's socket is consumed on every return.
+    pub(super) fn tls_accept(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
+        use hirsel_core_net::{SecretUse, tls};
+        let key = a[0];
+        let failed = |s: &mut Self, tag: u64, code: u64| {
+            s.socket_drop(key);
+            Ok(vec![0, tag, code, 0])
+        };
+        let hello = self.host.world.tls_hellos.remove(&key).is_some();
+        let Some((c, id, true)) = self.port_socket(key, PORT_SOCKET).filter(|_| hello) else {
+            return failed(self, 1, 0);
+        };
+        if !self
+            .secret(a[2])
+            .is_some_and(|key| key.policy.uses.permits(SecretUse::TLS_SERVE))
+        {
+            return failed(self, 1, 0);
+        }
+        let list = |s: &Self, carrier: u64| -> Vec<Vec<u8>> {
+            let (data, len) = (s.load(carrier, 8), s.load(carrier + 8, 8));
+            (0..len)
+                .map(|i| s.carrier_bytes(data + i * 24).to_vec())
+                .collect()
+        };
+        let entries = list(self, a[1]);
+        if !tls::valid_chain(&entries) {
+            return failed(self, 9, 7);
+        }
+        let protocols = list(self, a[3]);
+        if !tls::valid_protocols(&protocols) {
+            return failed(self, 9, 2);
+        }
+        // The chain as natively packed: each entry's u32 length, then its DER.
+        let packed: Vec<u8> = entries
+            .iter()
+            .flat_map(|der| {
+                (der.len() as u32)
+                    .to_le_bytes()
+                    .into_iter()
+                    .chain(der.iter().copied())
+            })
+            .collect();
+        let wire: Vec<u8> = protocols
+            .iter()
+            .flat_map(|p| std::iter::once(p.len() as u8).chain(p.iter().copied()))
+            .collect();
+        let mut w = [0; 9];
+        w[..4].copy_from_slice(&[NET_SERVE, id, packed.len() as u64, wire.len() as u64]);
+        let row = match self.check_cancel(t).and_then(|()| {
+            let deadline = self.until(a, 4);
+            let fields = vec![vec![], packed, wire];
+            self.port_call_with(t, c, w, fields, None, true, &mut None, deadline)
+        }) {
+            Ok(row) => row,
+            Err(stop) => {
+                self.socket_drop(key);
+                return Err(stop);
+            }
+        };
+        if row[1] != 0 {
+            return failed(self, row[1], row[2]);
+        }
+        self.port_socket_part(key, true);
+        // A server half has no verified name: it authorizes no secret.
+        self.host
+            .world
+            .tls_writes
+            .insert(key & !3, (None, false, Default::default()));
+        Ok(vec![key, 0, 0, row[3]])
     }
 
     /// `tls.connect` on a served Net's socket (native `tls::connect` through
@@ -230,7 +329,7 @@ impl Machine<'_> {
         self.host
             .world
             .tls_writes
-            .insert(key & !3, (name, false, Default::default()));
+            .insert(key & !3, (Some(name), false, Default::default()));
         Ok([&[key, 0, 0], &row[3..8]].concat())
     }
 }

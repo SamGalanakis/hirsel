@@ -570,8 +570,25 @@ fn test_l88_refused_probe_publishes_mandatory_steps(d: Dir, c: Clock, r: Random,
 // Its MANIFEST seal is refused after every pack is written, and the bytes the
 // rename would have published are returned, sealed.
 fn compact_refused_retiring_cut(mut db: Db) -> Result[Bytes, Error] waits {
+    let (take sealed, attempts) = refused_cut_seals(mut db, NoHolderChange)?
+    if attempts != 1 {
+        fail("§13.6 crash: the retiring cut seals one MANIFEST")
+    }
+    Ok(take sealed)
+}
+
+// Any cut, with `delta` its holder change, refused at its MANIFEST seal
+// after every pack is written. The bytes the rename would have published
+// are returned, sealed: a crash after the seal of the cut's last attempt.
+fn refused_cut_bytes(mut db: Db, take delta: HolderDelta) -> Result[Bytes, Error] waits {
+    let (take sealed, _) = refused_cut_seals(mut db, take delta)?
+    Ok(take sealed)
+}
+
+// The last attempt's sealed bytes, and how many attempts sealed.
+fn refused_cut_seals(mut db: Db, take delta: HolderDelta) -> Result[(Bytes, u64), Error] waits {
     let sealed: core.Log[Bytes] = log.new()
-    match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+    match disk_cut_state(mut db, take delta, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
         let mut whole: Bytes = clone(raw)
         seal_page_manifest_file(mut whole, context, fence)?
         log.append(sealed, take whole)
@@ -583,10 +600,13 @@ fn compact_refused_retiring_cut(mut db: Db) -> Result[Bytes, Error] waits {
         _ => fail("§13.6 crash: the refused seal fails the retiring cut before its rename"),
     }
     let mut published = log.finish(take sealed)
-    if list.len(published) != 1 {
-        fail("§13.6 crash: the retiring cut seals one MANIFEST")
+    // A refused first attempt that shed relocation marks retries without
+    // them (`prepare_page_cut`), so the files on disk are the last attempt's.
+    let attempts = list.len(published)
+    let Some(final_seal) = list.pop(mut published) else {
+        fail("§13.6 crash: the refused cut seals its MANIFEST")
     }
-    Ok(list.remove(mut published, 0))
+    Ok((take final_seal, attempts))
 }
 
 fn compact_crash_options(floor: u64) -> Result[Options, Error] {

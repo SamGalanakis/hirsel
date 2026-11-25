@@ -44,6 +44,7 @@ std = { major = 1 }
 "store-tiered-emission.hirsel" = "store"
 "store-tiered-publish.hirsel" = "store"
 "store-cut-participants.hirsel" = "store"
+"store-fork.hirsel" = "store"
 "store-tiered-probe.hirsel" = "store"
 "store-tiered-probe-index.hirsel" = "store"
 "store-tiered-promote.hirsel" = "store"
@@ -155,6 +156,7 @@ dirs = ["."]
 "tiered_tx_read_laws.hirsel" = "store"
 "tiered_residency_laws.hirsel" = "store"
 "tiered_crash_arm_laws.hirsel" = "store"
+"tiered_gate_laws.hirsel" = "store"
 "tiered_random_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
@@ -236,6 +238,21 @@ limit = 268435456
 limit = 268435456
 
 [tests.runs."store@1/store/test_l87_each_promoted_holder_materializes_once"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_each_promoted_holder_refused_cut"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_pin_materialization_crash_before_rename"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_pin_materialization_crash_after_rename"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_each_promoted_holder_crash_before_rename"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_each_promoted_holder_crash_after_rename"]
 limit = 268435456
 
 [tests.runs."store@1/store/bucket_test_l4_cuts"]

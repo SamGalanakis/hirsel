@@ -1,0 +1,112 @@
+// A fork shares a live head's roots through the journal, or is published
+// by a cut as a new head (AP17 step 6).
+type ForkPlan = LiveFork(u64) | CutFork(u32, HolderDelta)
+
+pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket), Error] waits {
+    let plan = plan_fork(mut db, name, from)?
+    match take plan {
+        LiveFork(slot) => fork_live(mut db, name, slot),
+        CutFork(id, take delta) => {
+            let commit_ticket = cut_install(mut db, take delta)?
+            Ok((Branch(store: db.store, id: id), commit_ticket))
+        },
+    }
+}
+
+fn plan_fork(mut db: Db, name: String, from: Snapshot) -> Result[ForkPlan, Error] {
+    this_open(db, from)?
+    journal_poll(mut db)?
+    if string.byte_len(name) > 255 {
+        return Error(Limit(Name))
+    }
+    if let Some(_) = branch(db, name) {
+        return Error(Exists(named(name)?))
+    }
+    let id = db.next_branch
+    if id == 4294967295 {
+        return Error(Limit(Ids))
+    }
+    check_manifest_addition(db, branch_root_bytes(name, from.roots))?
+    // A Snapshot carries no wall time; the branch it was taken on, if it is
+    // still live, gives the at its CallInfo continues from (section 1.7).
+    let mut at = db.heads[0].at
+    let mut live_bytes: Option[u64] = None
+    if let Ok(slot) = branch_slot(db, from.branch) {
+        let h = db.heads[slot]
+        at = h.at
+        if capture_matches_head(from, h) {
+            live_bytes = Some(slot)
+        }
+    }
+    if let Some(slot) = live_bytes {
+        return Ok(LiveFork(slot))
+    }
+    db.next_branch += 1
+    if is_disk(db) { note_fork_row(mut db, LineageFork(child: id, parent: from.branch, watermark: from.watermark, adopted: false))? }
+    let (take head, take indexed_name) = disk_allocation(scoped fn() -> Result[(Head, String), Error] {
+        Ok((Head(id: id, name: string.from(name), parent: from.branch, forked_at: from.head, roots: share_roots(from.roots), head: from.head, at: at, following: None), string.from(name)))
+    })?
+    Ok(CutFork(id, AddHead(take head, take indexed_name)))
+}
+
+fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), Error] waits {
+    let size = 42 + string.byte_len(name)
+    let disk = is_disk(db)
+    if disk {
+        if let Some(over) = journal_refusal(disk_state(db).uncovered, size, available_journal(db, db.keyed_credit)) {
+            return Error(Full(Journal(over)))
+        }
+    }
+    let id = db.next_branch
+    let watermark = stamp_after(db.next_node)?
+    let (take head, take indexed_name, take frame) = disk_allocation(scoped fn() -> Result[(Head, String, Option[Bytes]), Error] {
+        let source = db.heads[parent]
+        let head = Head(id: id, name: string.from(name), parent: source.id, forked_at: source.head, roots: share_roots(source.roots), head: source.head, at: source.at, following: None)
+        let frame: Option[Bytes] = if disk {
+            let context = DiskContext(store: db.store, role: 2, seq: db.file_seq)
+            Some(capacity(encode_fork(context, db.file_end, head, watermark))?)
+        } else {
+            None
+        }
+        Ok((take head, string.from(name), take frame))
+    })?
+    capacity(map.try_reserve(mut db.branch_names, 1))?
+    capacity(list.try_reserve(mut db.heads, 1))?
+    let store = db.store
+    let opened = open_number(db)
+    if disk {
+        let preceding = Ticket(store: store, open: opened, mark: Journal(db.frame_seq, 0, 0))
+        durable(mut db, preceding)?
+    }
+    db.next_branch += 1
+    let exact = !retaining(db) || db.changes == db.settled
+    let sequence = if let Some(take raw) = take frame {
+        db.file_end += size
+        db.frame_seq += 1
+        write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
+            state.pending = Some(take frame_bytes)
+        })
+        handoff(mut db)?
+        db.frame_seq
+    } else {
+        db.changes + 1
+    }
+    let fork_ticket = Ticket(store: store, open: opened, mark: Journal(sequence, id, head.head))
+    if disk {
+        durable(mut db, fork_ticket)?
+    }
+    if disk {
+        note_fork_row(mut db, LineageFork(child: id, parent: head.parent, watermark: watermark, adopted: false))?
+    }
+    install_head(mut db, take head, take indexed_name)
+    db.changes += 1
+    if exact {
+        db.settled = db.changes
+    }
+    match maybe_checkpoint(mut db) {
+        Ok(()) => (),
+        Error(Limit(Ids)) => (),
+        Error(take problem) => return Error(take problem),
+    }
+    Ok((Branch(store: store, id: id), fork_ticket))
+}

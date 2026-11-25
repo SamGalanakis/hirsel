@@ -1,0 +1,273 @@
+// Tiered activation gates (STORE-SPEC §13.5, §13.6, L87, L88) through the
+// public path, each with its §13.6 crash arm. A crash arm drives the same
+// holder change the public call would (`pin_delta`, `plan_fork`) through a
+// cut whose MANIFEST seal is refused after its packs are written
+// (`refused_cut_bytes`), then lands the sealed bytes as MANIFEST.tmp (the
+// process died before the rename) or MANIFEST (it died after the rename,
+// before RAM install). The crash table's rows:
+// - the refused cut loses nothing: RAM keeps the previous generation;
+// - before the rename, open removes MANIFEST.tmp and the cut's packs, and
+//   the previous generation recovers without the new holder;
+// - after the rename, the new generation recovers with the holder.
+// In every generation the walker over every published root finds each stamp
+// at exactly one (pack, offset), in a listed pack on disk (L88).
+
+fn gate_walk_roots(d: Dir, db: Db, roots: Roots, collection: u32, mut walk: CompactWalk) -> Result[(), Error] waits {
+    match std.page.collection_slot(roots.collections.root, prefix(collection)?) {
+        Some((ColdPage(root), _)) => compact_walk_frame(d, db, root, mut walk),
+        _ => fail("L88: a cut leaves every published holder's Tiered root Cold"),
+    }
+}
+
+// One walker across every head, every pin and every queued Page or Blob row
+// (§13.6: queue rows are their own roots).
+fn gate_walk_all(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Error] waits {
+    let mut walk = CompactWalk(live: map.new(), places: map.new())
+    for slot in 0u64 .. list.len(db.heads) {
+        gate_walk_roots(d, db, db.heads[slot].roots, collection, mut walk)?
+    }
+    for k in 0u64 .. list.len(db.pins) {
+        gate_walk_roots(d, db, db.pins[k].roots, collection, mut walk)?
+    }
+    let queued = l87_queue(db)?
+    for k in 0u64 .. list.len(queued) {
+        let (_, row) = queued[k]
+        match row.target {
+            TieredPage(ptr) => compact_walk_frame(d, db, ptr, mut walk)?,
+            TieredBlob(body) => compact_walk_blob(d, db, body, mut walk)?,
+        }
+    }
+    for (seq, _) in walk.live {
+        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+            fail("L88: every published root reaches its frames in listed packs on disk")
+        }
+    }
+    Ok(take walk)
+}
+
+fn gate_head(db: Db, name: String) -> Option[Branch] {
+    for slot in 0u64 .. list.len(db.heads) {
+        if db.heads[slot].name == name {
+            return Some(Branch(store: db.store, id: db.heads[slot].id))
+        }
+    }
+    None
+}
+
+// The §13.6 crash table's rows, at the cut that publishes a holder:
+// - SealRefused: the seal is refused and the same open carries on; its next
+//   cut publishes nothing of the refused holder.
+// - BeforeRename: the process dies with MANIFEST.tmp written.
+// - AfterRename: it dies with MANIFEST renamed, before RAM install.
+type GateCrash = SealRefused | BeforeRename | AfterRename
+
+// Ends the refused cut's open as `crash` says, and returns the store that
+// carries on. A crash lands the sealed bytes and reopens, and open removes
+// MANIFEST.tmp, and before the rename the packs the cut wrote from
+// `first_output` on.
+fn gate_crash_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, take db: Db, sealed: Bytes, first_output: u64, crash: GateCrash) -> Result[Db, Error] waits {
+    let renamed = match crash {
+        SealRefused => {
+            let mut carried = take db
+            let _ = checkpoint(mut carried)?
+            return Ok(take carried)
+        },
+        BeforeRename => false,
+        AfterRename => true,
+    }
+    close(take db)?
+    disk_write_synced(d, if renamed {
+        "MANIFEST"
+    } else {
+        "MANIFEST.tmp"
+    }, sealed)?
+    let reopened = open(tasks, d, c, r, options)?
+    if disk_exists(d, "MANIFEST.tmp")? {
+        fail("§13.6 crash: open removes an unpublished MANIFEST.tmp")
+    }
+    if !renamed && disk_exists(d, paged_pack_path(first_output)?)? {
+        fail("§13.6 crash: open removes an unpublished cut's packs")
+    }
+    Ok(take reopened)
+}
+
+fn gate_published(crash: GateCrash) -> bool {
+    match crash {
+        AfterRename => true,
+        _ => false,
+    }
+}
+
+// L87 (pin materialization adds no queue row): one row, seq 0, main's
+// detached first Cold leaf.
+fn gate_one_queued_leaf(db: Db, leaf: std.page.PagePtr) -> Result[(), Error] {
+    let queued = l87_queue(db)?
+    if list.len(queued) != 1 || disk_state(db).pages.lists.deferred_next != 1 {
+        fail("L87: a pin's materialization adds no queue row")
+    }
+    let (seq, row) = queued[0u64]
+    let TieredPage(queued_leaf) = row.target else {
+        fail("L87: a detached leaf is queued as a Page row")
+    }
+    if seq != 0 || row.branch_id != 0 || queued_leaf != leaf {
+        fail("L87: the queue names main's detached Cold leaf once")
+    }
+    Ok(())
+}
+
+// The pinned Snapshot reads the rows at or above the trim, as appended.
+fn gate_pin_reads(db: Db, events: Log[Bytes], trim: u64, appended: u64) -> Result[(), Error] waits {
+    let Some(held) = pinned(db, "history") else {
+        fail("L87: the pin is published")
+    }
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    for at in 0u64 .. appended {
+        let expected: Option[Bytes] = if at < trim { None } else { Some(compact_entry(at)) }
+        if log_get(read_handle, held, events, at)? != expected {
+            fail("L87: the pin reads its Snapshot's overlay")
+        }
+    }
+    drop(take read_handle)
+    drop(take held)
+    Ok(())
+}
+
+// Crash arm of test_l87_pin_materialization_adds_no_queue_row: the cut that
+// publishes pin(S) is the one that crashes. S was captured before the fold
+// cut, so the pin materializes S's overlay into fresh pages (§13.5 step 3)
+// and its queue still holds the one row main's fold queued.
+fn gate_pin_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let appended = 120u64
+    let events = l87_cold_log(d, c, r, tasks, floor, appended, 48)?
+    let mut cold = open(tasks, d, c, r, l87_options(floor, 0)?)?
+    let (leaf, trim) = l87_first_leaf(d, cold, events.binding.id)?
+    let trimmed: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut cold, Some(100000), copy_env((trimmed, trim)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+        trim_before(mut tx, env.0, env.1)
+    })? else {
+        fail("L87: the served trim of a Cold Tiered Log commits")
+    }
+    close(take cold)?
+    let mut db = open(tasks, d, c, r, l87_options(floor, 0)?)?
+    let s = snapshot(db)
+    let _ = checkpoint(mut db)?
+    let delta = pin_delta(mut db, ApplicationPin, "history", s)?
+    drop(take s)
+    let first_output = disk_state(db).pages.next_pack
+    let sealed = refused_cut_bytes(mut db, take delta)?
+    if !disk_exists(d, paged_pack_path(first_output)?)? {
+        fail("§13.6 crash: the pin's cut wrote its materialization before the rename")
+    }
+    if let Some(_) = pinned(db, "history") {
+        fail("§13.6 crash: a refused cut installs no pin")
+    }
+    gate_one_queued_leaf(db, leaf)?
+    let reopened = gate_crash_reopen(d, c, r, tasks, l87_options(floor, 0)?, take db, sealed, first_output, crash)?
+    gate_one_queued_leaf(reopened, leaf)?
+    if gate_published(crash) {
+        gate_pin_reads(reopened, events, trim, appended)?
+    } else if let Some(_) = pinned(reopened, "history") {
+        fail("§13.6 crash: the previous generation recovers without the pin")
+    }
+    let _ = gate_walk_all(d, reopened, events.binding.id)?
+    close(take reopened)
+}
+
+@test
+fn test_l87_pin_materialization_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_pin_crash(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l87_pin_materialization_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_pin_crash(d, c, r, tasks, AfterRename)
+}
+
+// Crash arm of test_l87_each_promoted_holder_materializes_once: the cut-path
+// fork `beta` of S crashes. Before the rename, `beta` is absent and the pin's
+// pack and pack 7 keep their live bytes. After it, `beta` reads its own
+// materialization in a pack of its own, and its later kill of those pages
+// lowers only that pack's live to 0 (§13.6 "Holders").
+fn gate_fork_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let rows = compact_cold_table_of(d, c, r, tasks, floor, 160, 48)?
+    let mut cold = open(tasks, d, c, r, l69_options(floor)?)?
+    let original = l69_cold_root(cold, rows.id)?.pack
+    l87_edit_on(mut cold, rows, 0, 1)?
+    close(take cold)?
+    let mut db = open(tasks, d, c, r, l69_options(floor)?)?
+    let s = snapshot(db)
+    let _ = checkpoint(mut db)?
+    let old_live = l69_pack_live(db, original)
+    let _ = pin(mut db, "history", s)?
+    let Some(held) = pinned(db, "history") else {
+        fail("L87 (e2): the pin is published")
+    }
+    let (pin_pack, pin_bytes) = l87_fresh_frames(d, db, l87_snapshot_root(held, rows.id)?, original)?
+    drop(take held)
+    let CutFork(beta_id, delta) = plan_fork(mut db, "beta", s)? else {
+        fail("L87 (e2): a fork of a Snapshot before the cut is published by a cut")
+    }
+    drop(take s)
+    let first_output = disk_state(db).pages.next_pack
+    let sealed = refused_cut_bytes(mut db, take delta)?
+    if !disk_exists(d, paged_pack_path(first_output)?)? {
+        fail("§13.6 crash: the fork's cut wrote its materialization before the rename")
+    }
+    if let Some(_) = gate_head(db, "beta") {
+        fail("§13.6 crash: a refused cut installs no head")
+    }
+    let mut reopened = gate_crash_reopen(d, c, r, tasks, l69_options(floor)?, take db, sealed, first_output, crash)?
+    if l69_pack_live(reopened, pin_pack) != pin_bytes || l69_pack_live(reopened, original) != old_live {
+        fail("§13.6 crash: the fork's crash leaves the pin's pack and pack 7 unchanged")
+    }
+    let Some(history) = pinned(reopened, "history") else {
+        fail("L87 (e2): the pin survives the crash")
+    }
+    l87_reads_row(reopened, history, rows, 1)?
+    drop(take history)
+    let _ = gate_walk_all(d, reopened, rows.id)?
+    if !gate_published(crash) {
+        if let Some(_) = gate_head(reopened, "beta") {
+            fail("§13.6 crash: the previous generation recovers without the fork")
+        }
+        // The refused fork's lineage row never publishes: no head names it.
+        if map.contains(disk_state(reopened).pages.lists.rows.forks, beta_id) {
+            fail("§13.6 crash: a refused fork publishes no lineage row")
+        }
+        return close(take reopened)
+    }
+    let Some(beta) = gate_head(reopened, "beta") else {
+        fail("§13.6 crash: the new generation recovers with the fork")
+    }
+    let forked = snapshot_of(reopened, beta)?
+    let (beta_pack, beta_bytes) = l87_fresh_frames(d, reopened, l87_snapshot_root(forked, rows.id)?, original)?
+    l87_reads_row(reopened, forked, rows, 1)?
+    drop(take forked)
+    if beta_pack == pin_pack || l69_pack_live(reopened, beta_pack) != beta_bytes {
+        fail("L87 (e2): the fork's materialization is its own pack's live")
+    }
+    l87_edit_on(mut reopened, rows, beta.id, 2)?
+    let _ = checkpoint(mut reopened)?
+    if l69_pack_live(reopened, beta_pack) != 0 || l69_pack_live(reopened, pin_pack) != pin_bytes || l69_pack_live(reopened, original) != old_live {
+        fail("L87 (e2): the fork's kill lowers only its own pack's live")
+    }
+    let _ = gate_walk_all(d, reopened, rows.id)?
+    close(take reopened)
+}
+
+@test
+fn test_l87_each_promoted_holder_refused_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_fork_crash(d, c, r, tasks, SealRefused)
+}
+
+@test
+fn test_l87_each_promoted_holder_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_fork_crash(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l87_each_promoted_holder_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_fork_crash(d, c, r, tasks, AfterRename)
+}

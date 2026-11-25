@@ -507,6 +507,12 @@ fn pin_shares_head(db: Db, held: Pin) -> bool {
 }
 
 fn change_pin(mut db: Db, owner: PinOwner, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
+    let delta = pin_delta(mut db, owner, name, s)?
+    cut_install(mut db, take delta)
+}
+
+// The holder change a pin's cut publishes.
+fn pin_delta(mut db: Db, owner: PinOwner, name: String, s: Snapshot) -> Result[HolderDelta, Error] {
     journal_poll(mut db)?
     healthy(db)?
     this_open(db, s)?
@@ -528,8 +534,8 @@ fn change_pin(mut db: Db, owner: PinOwner, name: String, s: Snapshot) -> Result[
         _ => share_roots(s.roots),
     }
     let kept = Pin(owner: owner, name: take owned, branch: s.branch, version: s.head, serial: serial, roots: take roots, watermark: s.watermark)
-    if replacing { return cut_install(mut db, ReplacePin(slot, take kept)) }
-    cut_install(mut db, AddPin(take kept))
+    if replacing { return Ok(ReplacePin(slot, take kept)) }
+    Ok(AddPin(take kept))
 }
 
 pub fn unpin(mut db: Db, name: String) -> Result[Ticket, Error] waits {

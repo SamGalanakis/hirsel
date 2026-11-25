@@ -73,7 +73,7 @@ fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, slot: Bytes, mut out
     let id = r.publications[pi].id
     let end = m.payload_at + m.payload_len
     let payload = list.slice(slot, m.payload_at, end)
-    let shared = shared_unit(codec, m)
+    let mut shared = shared_unit(codec, m)
     if let None = shared {
         if codec == Vp8 {
             r.counts.unparsed += 1
@@ -89,6 +89,22 @@ fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, slot: Bytes, mut out
     let vp9 = if codec == Vp9 {
         match media_bits.unit.vp9_frame(payload, m.marker) {
             Ok(f) => Some(f),
+            Error(Unmappable) => {
+                // A layer frame whose SID or TID passes 3 is in no target of the map:
+                // every leg keeps its target and closes the frame up, so no leg's
+                // numbering has a hole (RTC-6). It is counted once.
+                let Ok(d) = media_bits.vp9.parse(payload) else {
+                    r.counts.unparsed += 1
+                    return Ok(())
+                }
+                let spatial: u16 = match d.layer {
+                    Some(l) => int.widen(l.spatial),
+                    None => 0,
+                }
+                r.counts.unmapped += 1
+                shared = Some(rtp.rewrite.Unit(start: d.first, end: d.last || m.marker, keyframe: false, needs: 0, switches: 0, frame: spatial))
+                None
+            },
             Error(_) => {
                 r.counts.unparsed += 1
                 return Ok(())

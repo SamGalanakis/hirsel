@@ -349,11 +349,13 @@ fn svc_send(mut r: router.Router, now: u64, mut p: Client, seq: u16, ts: u32, fr
 
 /// bug: map a VP9 `Layer(e, s, t)` by `t` alone or by layers seen, or treat a picture's
 /// layer frames, which share one timestamp, as one frame, so a base-layer leg gets the
-/// upper layer or an upper-layer leg loses it.
+/// upper layer or an upper-layer leg loses it; or drop a layer frame above the map
+/// before the legs see it, so each leg's numbering has a hole no packet fills.
 /// oracle: RTC-6 and RFC 9628 section 4.2 by hand: `i = 4s + t`; frame (s', t') is
 /// needed by target i = 4S + T when s' <= S and t' <= T. Layer(0, 1, 0) is i = 4 and
 /// gets both layer frames of each picture; Layer(0, 0, 0) is i = 0 and gets the base
-/// frames only, numbered without gaps.
+/// frames only, numbered without gaps. A SID 4 frame is in no target: each leg keeps
+/// its target and closes the frame up (RTP-11), and `unmapped` counts it once.
 @test
 fn router_maps_vp9_layers() -> Result[(), router.RouterError] {
     let mut r = router.router(provide.random(110))
@@ -406,5 +408,57 @@ fn router_maps_vp9_layers() -> Result[(), router.RouterError] {
     if !same(payload_of(seen_base[0]), svc_packet(false, 0, 5)) || !same(payload_of(seen_both[1]), svc_packet(false, 1, 5)) {
         fail("a VP9 leg got another layer frame than the one its target needs")
     }
+    // Picture 7 also carries a layer frame with SID 4, above the map: neither leg
+    // forwards it, both close it up, and it is counted once. Picture 8 follows.
+    let before = router.counts(r)
+    let mut late_both: List[Got] = list.new()
+    let mut late_base: List[Got] = list.new()
+    for (picture, ts, spatial) in[(7u8, 9000u32, 0u8), (7u8, 9000u32, 1u8), (7u8, 9000u32, 4u8), (8u8, 12000u32, 0u8), (8u8, 12000u32, 1u8)] {
+        let frame = if spatial == 4 {
+            svc_high(picture)
+        } else {
+            svc_packet(true, spatial, picture)
+        }
+        svc_send(mut r, now, mut p, seq, ts, frame, spatial == 4 || (picture == 8 && spatial == 1), mut out)
+        seq += 1
+        for g in received(mut both, out) {
+            let kept: Got = clone(g)
+            list.push(mut late_both, take kept)
+        }
+        for g in received(mut base, out) {
+            let kept: Got = clone(g)
+            list.push(mut late_base, take kept)
+        }
+        peer.clear_outbox(mut out)
+    }
+    if list.len(late_both) != 4 || list.len(late_base) != 2 {
+        fail("a VP9 leg forwarded a layer above the map, or lost a mapped one")
+    }
+    for k in 0u64 .. 4u64 {
+        let step: u16 = int.narrow(4 + k)
+        let pic: u32 = int.narrow(2 + k / 2)
+        let h = late_both[k].h
+        if h.seq != plus(a0.seq, step) || h.ts != later(a0.ts, 3000 * pic) {
+            fail("the spatial-layer leg left a gap for the layer above the map")
+        }
+    }
+    if late_base[0].h.seq != plus(b0.seq, 2) || late_base[1].h.seq != plus(b0.seq, 3) || late_base[1].h.ts != later(b0.ts, 9000) {
+        fail("the base-layer leg left a gap for the layer above the map")
+    }
+    let after = router.counts(r)
+    if after.unmapped != before.unmapped + 1 || after.unparsed != before.unparsed {
+        fail("the layer above the map is not counted once as unmapped")
+    }
     Ok(())
+}
+
+// A predicted layer frame with SID 4 (TID 0, U 0, D 1), above RTC-6's map.
+fn svc_high(picture: u8) -> Bytes {
+    let mut b: Bytes = list.new()
+    list.push(mut b, 0xec)
+    list.push(mut b, picture)
+    list.push(mut b, 0x09)
+    list.push(mut b, 0x00)
+    list.append(mut b, b"\x86\x00\x40")
+    b
 }

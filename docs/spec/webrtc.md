@@ -701,9 +701,13 @@ renumbers a target that is in use. `Off` is `rewrite.target(Off)`.
   `Y = 1` (a layer sync frame, which depends only on the base layer,
   [RFC 7741](https://www.rfc-editor.org/rfc/rfc7741) §4.2).
 - **VP9** ([RFC 9628](https://www.rfc-editor.org/rfc/rfc9628) §4.2). `i = 4 · s + t`, with
-  `s` and `t` each at most 3, so 16 targets cover every structure the map accepts. A stream
-  whose `SID` or `TID` passes 3 is refused for switching, explicitly. It is forwarded only
-  as its current target, and the refusal is counted. `needs` bit `4 · S + T` is set for a
+  `s` and `t` each at most 3, so 16 targets cover every structure the map accepts. A layer
+  frame whose `SID` or `TID` passes 3 is in no target, so no switch can reach it. Every
+  down-track keeps its current target, and the frame goes to each `Rewrite` with empty
+  `needs` and `switches`, so each leg closes it up and its numbering has no hole. The frame
+  is counted once (`unmapped`). Forwarding it is unsound: it may reference earlier frames
+  above 3, which the map never tracked, so no switch point for it can be computed. A lower
+  layer never references it, so the legs stay decodable. `needs` bit `4 · S + T` is set for a
   layer frame `(s', t')` when `s' ≤ S` and `t' ≤ T`. `switches` follows VP9's own switch
   facts. Every bit is set at a keyframe. A **temporal** up-switch from `T` to `T'` within
   spatial `S` is allowed at the first layer frame with `TID` above `T` that follows a
@@ -1347,8 +1351,8 @@ W19, blocks, because those are soundness reds.
   off-path (W19's path-move case).
 - **Codec frames.** VP8 per-leg counters are keyed by the extended timestamp. A VP9 picture's
   layer frames share one timestamp, so the `Rewrite` frame key is the spatial id. The VP9
-  target map is `i = 4s + t` with `s` and `t` clamped to 3 each. A packet whose layer ids
-  `media_bits` cannot map counts `unmapped`.
+  target map is `i = 4s + t` with `s` and `t` clamped to 3 each. A layer frame whose `SID`
+  or `TID` passes 3 is closed up on every leg and counted `unmapped` once per packet (RTC-6).
 - **Counters.** `Counts` holds `unrequested` (a keyframe ask the publisher did not
   negotiate for), `ring_misses`, `unparsed` (a VP8, VP9 or H.264 payload whose descriptor does
   not parse, which is dropped) and `unmapped`. An ask counts as `unrequested` only once the
@@ -1358,9 +1362,7 @@ W19, blocks, because those are soundness reds.
   forward path).
 - **Not closed in S4.** The pacer: `pacer_packets` bounds nothing yet, and egress goes
   straight to the outbox. AV1 routing needs a dependency-descriptor kind in `rtp.ext` (an rtp
-  amend). A VP9 stream whose `SID` or `TID` passes 3 is dropped from the leg and counted
-  `unmapped`, not yet forwarded as its current target as the VP9 rule above requires. W7
-  needs rebinding a down-track to another publication. W9 waits for captured or reference
+  amend). W7 needs rebinding a down-track to another publication. W9 waits for captured or reference
   simulcast and SVC packets. Each is an open red on S4's ticket.
 
 **Follow-ups this spec names.**

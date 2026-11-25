@@ -143,16 +143,16 @@ const STOP_GRACE_MS: u64 = 5000u64
 
 // runner.operate owns the place from store open to store close; a SIGINT or SIGTERM closes
 // `stop` (runner.main), which drains and closes the store.
-fn config(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, selection: runner.Selection, listen: Addr, take proxies: List[std.wsock.Prefix]) -> runner.PlaceConfig[(), Handles, ()] {
+fn config(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, take selection: runner.Selection, listen: Addr, take proxies: List[std.wsock.Prefix]) -> runner.PlaceConfig[(), Handles, ()] {
     let mut session = runner.wire_defaults(65536u64)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(), selection: selection, place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64, listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
+    runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(), selection: take selection, place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64, listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
 }
 
 fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, errors: Stderr, take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
     let selected = runner.launch_selection(a) ?=> Usage
     let Settings(listen: listen, proxies: take proxies) = settings(a) ?=> Usage
-    let configured = config(n, directory, web, c, random, tasks, selected, listen, take proxies)
+    let configured = config(n, directory, web, c, random, tasks, take selected, listen, take proxies)
     let ended = runner.operate_report(take configured, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start
     Ok(ended)
 }

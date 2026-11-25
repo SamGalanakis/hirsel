@@ -1,6 +1,8 @@
 // W3b's socket fixture supplies a transport-neutral service without admission.
 // W3c owns the production Hello, principal, entry and durable-call service.
-fn ready(context: ()) -> bool { true }
+fn ready(context: ()) -> bool {
+    true
+}
 
 fn step(mut context: (), mut work: runner.WireWork, take input: runner.ServiceInput) -> Result[Option[runner.Frame], u16] {
     match take input {
@@ -10,7 +12,11 @@ fn step(mut context: (), mut work: runner.WireWork, take input: runner.ServiceIn
             Ok(Some(Batch(0u64, list.new(), list.new(), take done)))
         },
         WClient(Hello(Some(token), _), _) => {
-            if token == string.as_bytes("deadline") { Ok(Some(Reset(0u64, list.new()))) } else { Error(1013u16) }
+            if token == string.as_bytes("deadline") {
+                Ok(Some(Reset(0u64, list.new())))
+            } else {
+                Error(1013u16)
+            }
         },
         WClient(Unsubscribe(_), _) => Ok(Some(Reset(0u64, list.new()))),
         WClient(_, _) => Error(1013u16),
@@ -18,12 +24,16 @@ fn step(mut context: (), mut work: runner.WireWork, take input: runner.ServiceIn
     }
 }
 
-fn inspect(context: (), frame: runner.Frame) -> Option[u16] { None }
+fn inspect(context: (), frame: runner.Frame) -> Option[u16] {
+    None
+}
 
-fn finish(mut context: ()) -> Option[runner.PubIn] { None }
+fn finish(mut context: ()) -> Option[runner.PubIn] {
+    None
+}
 
 fn service() -> runner.Service[()] {
-    runner.Service(context: (), step: step, ready: ready, finish: finish, check: inspect)
+    runner.Service(context: (), step: step, ready: ready, finish: finish, check: inspect, retirement: None, flush_subscriptions: fn(mut context: (), mut work: runner.WireWork) -> () {})
 }
 
 fn run(n: Net, tasks: Tasks, clock: Clock, config: runner.WireConfig) -> Result[(), Exit] waits {
@@ -35,10 +45,14 @@ fn run(n: Net, tasks: Tasks, clock: Clock, config: runner.WireConfig) -> Result[
     }
     let mail = result.unwrap(runner.mailbox(64u64))
     let to_publisher = runner.post(mail)
-    let result = runner.serve_wire(take listener, tasks, clock, to_publisher, c, 16u64, list.new(), 0u64, service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) })
-    match result { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
+    let result = runner.serve_wire(take listener, tasks, clock, to_publisher, c, 16u64, list.new(), 0u64, service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] {
+        Error(1013u16)
+    })
+    match result {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 1u8))
+    }
 }
-
 
 pub fn main(n: Net, tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
     run(n, tasks, clock, runner.wire_defaults(65536u64))

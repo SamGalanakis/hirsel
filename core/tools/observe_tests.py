@@ -24,9 +24,17 @@ CLAUSES = ('J1', 'J2', 'J3', 'J4', 'J5', 'J6')
 
 
 def replace(text, old, new):
-    if text.count(old) != 1:
+    """Replace the one occurrence of old's tokens; layout between tokens may differ."""
+    tokens = re.findall(r'\w+|\S', old)
+    pattern = re.escape(tokens[0])
+    for a, b in zip(tokens, tokens[1:]):
+        words = re.match(r'\w', a[-1]) and re.match(r'\w', b[0])
+        pattern += r'\s+' if words else r'\s*'
+        pattern += re.escape(b)
+    found = list(re.finditer(pattern, text))
+    if len(found) != 1:
         raise ValueError(f'observe fixture seam changed: {old!r}')
-    return text.replace(old, new)
+    return text[:found[0].start()] + new + text[found[0].end():]
 
 
 def without_tests(text):
@@ -39,17 +47,19 @@ def without_tests(text):
     return text
 
 
-def traced_calls(root, work):
-    text = without_tests((root / 'core/programs/runner/runner_calls.hirsel').read_text())
+def traced_calls(files, work):
+    """Rewrite the whole runner_calls module, whichever files its manifest lists."""
+    text = without_tests('\n'.join(Path(f).read_text() for f in files))
     text = replace(text, 'type Conn =', 'type Transport =')
     text = replace(text, 'type Drive: send {', 'type Drive: send { out: Stdout, err: Stderr,')
     text = text.replace('let d = Drive(', 'let d = Drive(out: out, err: err, ')
     text = re.sub(r'(pub fn law_\w+\()', r'\1out: Stdout, err: Stderr, ', text)
-    for name in ('served', 'served_in', 'served_on'):
+    for name in ('served', 'served_in', 'served_on', 'served_on_with_place'):
         text = replace(text, f'fn {name}(', f'fn {name}(out: Stdout, err: Stderr, ')
         text = re.sub(rf'(?<!fn )\b{name}\(', f'{name}(out, err, ', text)
     text = replace(text, 'Some(Socket(take cn, take h))',
                    'Some(observed(d, Socket(take cn, take h)))')
+    text = replace(text, 'Socket(take cn, take h)\n}', 'observed(d, Socket(take cn, take h))\n}')
     text = re.sub(r'Held\(runner\.fixture_owner\(d\.post, (\w+\(\w+\))\)\)',
                   r'observed(d, Held(runner.fixture_owner(d.post, \1)))', text)
     text = text.replace('match cn {', 'match cn.link {')
@@ -358,9 +368,10 @@ def observed_manifest(root, work):
         (root / 'core/programs/observe/observe.hirsel', 'observe'),
         (root / 'core/programs/observe/fixture.hirsel', 'observe_fixture')])
     m = json.loads(path.read_text())
-    for source in m['packages'][-1]['sources']:
-        if source['modules'] == ['runner_calls']:
-            source['file'] = str(traced_calls(root, work))
+    sources = m['packages'][-1]['sources']
+    calls = [s for s in sources if s['modules'] == ['runner_calls']]
+    calls[0]['file'] = str(traced_calls([s['file'] for s in calls], work))
+    sources[:] = [s for s in sources if s['modules'] != ['runner_calls'] or s is calls[0]]
     path.write_text(json.dumps(m))
     return path
 

@@ -105,10 +105,11 @@ export async function vectors(c,frame,entries,http) {
   vector({tag:'Set',values:[7,{tag:'Some',value:bytes('aabb')}]},'09000000 07000000 01000000 02000000 aabb');
   vector({tag:'Send',values:[7,{tag:'Some',value:8},bytes('aabb')]},'0a000000 07000000 01000000 08000000 02000000 aabb');
   vector({tag:'Live',value:[{sub:7,complete:true,you:{tag:'Some',value:8},
+    incarnation:[0x0706050403020100n,0x0f0e0d0c0b0a0908n],revision:0x0102030405060708n,snapshot:true,
     joined:[[9,{issuer:2,subject:bytes('000102030405060708090a0b0c0d0e0f')}]],
     states:[[9,{tag:'Some',value:bytes('aabb')}]],msgs:[[9,true,bytes('cafe')]],
     left:[10],gap:11,lost:12,full:true}]},
-    '0b000000 01000000 07000000 01 01000000 08000000 01000000 09000000 02 10000000 000102030405060708090a0b0c0d0e0f 01000000 09000000 01000000 02000000 aabb 01000000 09000000 01 02000000 cafe 01000000 0a000000 0b000000 0c000000 01');
+    '0b000000 01000000 07000000 01 01000000 08000000 000102030405060708090a0b0c0d0e0f 0807060504030201 01 01000000 09000000 02 10000000 000102030405060708090a0b0c0d0e0f 01000000 09000000 01000000 02000000 aabb 01000000 09000000 01 02000000 cafe 01000000 0a000000 0b000000 0c000000 01');
   assert.throws(() => c.Frame.decode(bytes('0c000000')),c.Malformed);
   assert.throws(() => c.Frame.decode(bytes('0500000003000000')),c.Malformed);
   assert.throws(() => c.Frame.decode(bytes('0000000002000000')),c.Malformed);

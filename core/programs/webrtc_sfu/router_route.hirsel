@@ -8,12 +8,34 @@ pub fn receive(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, from: 
         return Error(NoParticipant)
     }
     let input = peer.receive(mut r.members[mi].session, now, from, mut slot, mut out) ?=> |take e| Peer(e)
+    while let Some(track) = peer.collided(mut r.members[mi].session) {
+        restart(mut r, now, room, who, track, mut out)?
+    }
     match input {
         Media(m) => route(mut r, now, mi, m, slot, mut out),
         Repair(m) => route(mut r, now, mi, m, slot, mut out),
         Control(take c) => control(mut r, now, mi, take c, mut out),
         _ => Ok(()),
     }
+}
+
+// A collision restarted the track's stream (RTC-4): it forgets the old source's
+// parameter sets and any rebind in flight, and takes its target again, which asks
+// the publisher for a keyframe.
+fn restart(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, track: u16, mut out: peer.Outbox) -> Result[(), RouterError] {
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].sub == who && r.downs[d].room == room && r.downs[d].track == track {
+            r.downs[d].previous = None
+            media_bits.unit.clear_parameter_sets(mut r.downs[d].sets)
+            media_bits.unit.clear_parameter_sets(mut r.downs[d].next_sets)
+            r.downs[d].after_end = true
+            r.downs[d].next_after_end = true
+            let p = r.downs[d].publication
+            let target = r.downs[d].target
+            return set_target(mut r, room, who, p, target, now, mut out)
+        }
+    }
+    Ok(())
 }
 
 fn owned(r: Router, room: peer.RoomId, owner: peer.Gen, section: u8) -> Option[u64] {
@@ -44,10 +66,8 @@ fn shared_unit(codec: sdp.Codec, m: peer.MediaIn) -> Option[rtp.rewrite.Unit] {
 }
 
 // Keep the plaintext packet up to the payload's end in the publication's ring, for
-// repairs. The handle names the slot and is never reused.
-fn store(mut g: Ring, packet: Bytes) -> u64 {
-    let handle = g.next
-    g.next += 1
+// repairs. The handle names the slot and is never reused in the router.
+fn store(mut g: Ring, handle: u64, packet: Bytes) -> u64 {
     let n = list.len(g.slots)
     if n == 0 || list.len(packet) > RING_SLOT {
         return handle
@@ -121,13 +141,17 @@ fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, slot: Bytes, mut out
     if m.reset {
         keyframe(mut r, now, pi, m.encoding, Loss, mut out)?
     }
-    let handle = store(mut r.publications[pi].ring, list.slice(slot, 0, end))
+    let handle = store(mut r.publications[pi].ring, r.next_handle, list.slice(slot, 0, end))
+    r.next_handle += 1
     let src = source(id, m.encoding)
     let mut waits = false
     for d in 0u64 .. list.len(r.downs) {
-        if r.downs[d].room != owner.room || r.downs[d].publication != id {
+        if r.downs[d].room != owner.room || (r.downs[d].publication != id && r.downs[d].previous != Some(id)) {
             continue
         }
+        // While a rebind waits, the new publication's packets are judged with its own
+        // H.264 state (RTP-11: one set per source the caller presents).
+        let fresh = r.downs[d].publication == id && r.downs[d].previous != None
         let Some(si) = member_at(r, owner.room, r.downs[d].sub) else {
             continue
         }
@@ -154,7 +178,12 @@ fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, slot: Bytes, mut out
                     if codec != H264 {
                         continue
                     }
-                    match media_bits.unit.h264(payload, m.marker, r.downs[d].after_end, r.downs[d].sets) {
+                    let judged = if fresh {
+                        media_bits.unit.h264(payload, m.marker, r.downs[d].next_after_end, r.downs[d].next_sets)
+                    } else {
+                        media_bits.unit.h264(payload, m.marker, r.downs[d].after_end, r.downs[d].sets)
+                    }
+                    match judged {
                         Ok(u) => rewrite_unit(u),
                         Error(_) => {
                             r.counts.unparsed += 1
@@ -168,11 +197,20 @@ fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, slot: Bytes, mut out
         let track = r.downs[d].track
         let sent = peer.forward(mut r.members[si].session, now, track, leg, slot, mut out) ?=> |take x| Peer(x)
         if sent == OnMedia && codec == H264 {
-            let _ = media_bits.unit.h264_sent(mut r.downs[d].sets, payload)
-            r.downs[d].after_end = unit.end
+            if fresh {
+                let _ = media_bits.unit.h264_sent(mut r.downs[d].next_sets, payload)
+                r.downs[d].next_after_end = unit.end
+            } else {
+                let _ = media_bits.unit.h264_sent(mut r.downs[d].sets, payload)
+                r.downs[d].after_end = unit.end
+            }
         }
-        if sent == Held && peer.pending(r.members[si].session, track) == Some(src) {
+        let pending = peer.pending(r.members[si].session, track)
+        if sent == Held && pending == Some(src) {
             waits = true
+        }
+        if pending == None {
+            settle(mut r, d)
         }
     }
     if let Some(f) = vp9 {
@@ -191,15 +229,21 @@ fn control(mut r: Router, now: u64, mi: u64, take c: peer.ControlIn, mut out: pe
         let Some(d) = track_down(r, who, ask.track) else {
             continue
         }
-        let Some(pi) = publication_at(r, who.room, r.downs[d].publication) else {
-            continue
+        let mut held: Option[u64] = None
+        for p in[Some(r.downs[d].publication), r.downs[d].previous] {
+            if let Some(id) = p {
+                if let Some(pi) = publication_at(r, who.room, id) {
+                    if holds(r.publications[pi].ring, ask.handle) {
+                        held = Some(pi)
+                    }
+                }
+            }
         }
-        let n = list.len(r.publications[pi].ring.slots)
-        if n == 0 || r.publications[pi].ring.handles[ask.handle % n] != ask.handle {
+        let Some(pi) = held else {
             r.counts.ring_misses += 1
             continue
         }
-        let k = ask.handle % n
+        let k = ask.handle % list.len(r.publications[pi].ring.slots)
         let _ = peer.resend(mut r.members[mi].session, now, ask, r.publications[pi].ring.slots[k], mut out) ?=> |take x| Peer(x)
     }
     for ka in c.keyframes {
@@ -230,16 +274,43 @@ fn control(mut r: Router, now: u64, mi: u64, take c: peer.ControlIn, mut out: pe
                 let src = source(r.publications[pi].id, int.narrow(e))
                 let id = r.publications[pi].id
                 for d in 0u64 .. list.len(r.downs) {
-                    if r.downs[d].room == who.room && r.downs[d].publication == id {
-                        if let Some(si) = member_at(r, who.room, r.downs[d].sub) {
-                            peer.source_report(mut r.members[si].session, r.downs[d].track, src, info, now)
-                        }
+                    if r.downs[d].room != who.room || !clocked(r, d, id, who.gen) {
+                        continue
+                    }
+                    if let Some(si) = member_at(r, who.room, r.downs[d].sub) {
+                        peer.source_report(mut r.members[si].session, r.downs[d].track, src, info, now)
                     }
                 }
             }
         }
     }
     Ok(())
+}
+
+// Whether down `d` takes the SRs of publication `id`, sent by `owner`. RTP-11 projects
+// a switch through two SRs only when they share one sender clock, which the caller
+// vouches for: so a rebound publication's SRs reach the track before its switch
+// only when one participant publishes both; across publishers the switch takes the
+// arrival rule.
+fn clocked(r: Router, d: u64, id: PublicationId, owner: peer.Gen) -> bool {
+    if r.downs[d].previous == Some(id) {
+        return true
+    }
+    if r.downs[d].publication != id {
+        return false
+    }
+    match r.downs[d].previous {
+        None => true,
+        Some(prev) => match publication_at(r, r.downs[d].room, prev) {
+            Some(pp) => r.publications[pp].owner == owner,
+            None => true,
+        },
+    }
+}
+
+fn holds(g: Ring, handle: u64) -> bool {
+    let n = list.len(g.slots)
+    n != 0 && g.handles[handle % n] == handle
 }
 
 fn track_down(r: Router, who: peer.Participant, track: u16) -> Option[u64] {

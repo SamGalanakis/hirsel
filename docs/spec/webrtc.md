@@ -556,6 +556,7 @@ pub fn join(mut r: Router, who: Participant, publish: bool, offer: Bytes) -> Res
 pub fn signal(mut r: Router, who: Participant, kind: SignalIn) -> Result[(), RouterError] waits
 pub fn subscribe(mut r: Router, who: Participant, p: PublicationId, target: Target) -> Result[(), RouterError] waits
 pub fn set_target(mut r: Router, who: Participant, p: PublicationId, target: Target) -> Result[(), RouterError] waits
+pub fn rebind(mut r: Router, who: Participant, from: PublicationId, to: PublicationId, target: Target) -> Result[(), RouterError] waits
 pub fn unsubscribe(mut r: Router, who: Participant, p: PublicationId) -> Result[(), RouterError] waits
 pub fn leave(mut r: Router, who: Participant) -> Result[(), RouterError] waits
 pub fn revoke(mut r: Router, room: RoomId, participant: u64, epoch: u64) -> Result[(), RouterError] waits
@@ -1160,7 +1161,8 @@ unless named otherwise.
   and is rebound to a second publication, then to a third: A → B → C. A's output offset is
   nonzero, the three sources have unrelated sequence and timestamp bases, one switch crosses
   a sequence wrap, B's first frame is two packets with equal timestamps, and SRs are taken
-  from the publishers' wire. A second run has no SRs and uses the arrival rule. Then an
+  from the publishers' wire. A second run puts A, B and C on three publishers, whose SRs are
+  never presented across publishers, so every switch uses the arrival rule. Then an
   authenticated remote packet arrives on the down-track's media SSRC. *Oracle:* by hand from
   RTC-4 and RTC-6. Until the collision, the media and RTX SSRCs never change, each sealer is
   issued exactly once (no `Issued` from TLS-8), the outbound index rises by one per forwarded
@@ -1357,13 +1359,31 @@ W19, blocks, because those are soundness reds.
   negotiate for), `ring_misses`, `unparsed` (a VP8, VP9 or H.264 payload whose descriptor does
   not parse, which is dropped) and `unmapped`. An ask counts as `unrequested` only once the
   encoding's SSRC is known: before its first packet there is nothing to ask about.
+- **Rebind.** `rebind(who, from, to, target)` moves `who`'s down-track for `from` onto `to`.
+  The track keeps its section, SSRCs, sealers, history and `Rewrite`, so `to` is one more
+  source switch (RTC-6): `to`'s layer is pending, its keyframe is asked for at once, and `from`
+  forwards until that keyframe arrives. It refuses `NoPublication` when `who` has no down-track
+  for `from` or `to` is gone, `Exists` when `who` already has one for `to`, and
+  `Peer(Sdp(AnswerMismatch(section)))` when the section agreed no format for `to`'s codec.
+  Until the switch, the down-track keeps both publications' H.264 parameter-set state, and a
+  repair looks in both rings. Unpublishing either one settles the down-track on the other.
+- **SRs across a rebind.** RTP-11 projects a switch through two SRs only when they come from
+  one sender clock, and the caller vouches for that. Only one publisher's own SRs share a
+  clock, so the router presents a pending publication's SRs to the down-track only when the
+  same participant publishes the current one. Across publishers, the switch uses the arrival
+  rule.
+- **Collision restart.** After a collision (RTC-4), the session queues the down-track
+  (`peer.collided`). The router drains that queue after each `peer.receive`. It clears the
+  down-track's parameter sets and any rebind in flight, then applies its target again, which
+  asks for a keyframe. The fresh `Rewrite` starts at a random sequence number and timestamp,
+  so the new SSRC's stream begins at that keyframe.
 - **Keyframe request buffer.** `peer.request_keyframe` builds a compound RR, SDES CNAME and
   PLI or FIR with the SRTCP trailer in a 320-byte buffer, allocated per request (off the
   forward path).
 - **Not closed in S4.** The pacer: `pacer_packets` bounds nothing yet, and egress goes
   straight to the outbox. AV1 routing needs a dependency-descriptor kind in `rtp.ext` (an rtp
-  amend). W7 needs rebinding a down-track to another publication. W9 waits for captured or reference
-  simulcast and SVC packets. Each is an open red on S4's ticket.
+  amend). W9 waits for captured or reference simulcast and SVC packets. The re-offer after an
+  SSRC collision (RTC-4) waits for the renegotiation path. Each is an open red on S4's ticket.
 
 **Follow-ups this spec names.**
 

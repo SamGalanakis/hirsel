@@ -18,7 +18,10 @@ fn retire(mut p: PeerSession, ssrc: u32, mut out: Outbox) -> Result[(), PeerErro
 
 /// A confirmed collision: an authenticated packet or report from the remote end uses
 /// an SSRC this session sends on.
-fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut collided: List[u16], mut out: Outbox) -> Result[(), PeerError] {
+/// Each colliding down-track restarts as a fresh stream: new SSRCs, a `Rewrite` at
+/// random first numbers with no target, and an empty history (RTC-4). `collided`
+/// hands the track to the router, which re-applies its target and asks for a keyframe.
+fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut out: Outbox) -> Result[(), PeerError] {
     if ssrc == p.control {
         retire(mut p, ssrc, mut out)?
         let fresh = draw(mut p)
@@ -40,7 +43,15 @@ fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut collided: List[u16], mut
             p.tracks[t].highest = EMPTY
             p.tracks[t].sent = rtp.stats.sent(0)
             let _ = rtp.history.clear(mut p.tracks[t].history)
-            list.push(mut collided, int.narrow(t))
+            p.tracks[t].gated = None
+            let mut b: Bytes = list.with_capacity(6)
+            host.random(p.random, mut b)
+            let first_seq: u16 = list.word_be(b, 0)
+            let first_ts: u32 = list.word_be(b, 2)
+            let clock = section_clock(p, p.tracks[t].section)
+            p.tracks[t].rewrite = rtp.rewrite.rewrite(clock, REWRITE_RANGES, REWRITE_FRAMES, int.widen(first_seq), first_ts) ?=> |c| Capacity(c)
+            list.try_reserve(mut p.collided, 1) ?=> |c| Capacity(c)
+            list.push(mut p.collided, int.narrow(t))
         }
     }
     Ok(())
@@ -56,6 +67,19 @@ fn has_rtx(a: sdp.Agreed) -> bool {
     false
 }
 
+fn section_clock(p: PeerSession, section: u8) -> u32 {
+    let si: u64 = int.widen(section)
+    match list.get(p.sections[si].agreed.formats, 0) {
+        Some(f) => f.clock,
+        None => 90000,
+    }
+}
+
+/// A down-track `collide` restarted, for the router to re-target.
+pub fn collided(mut p: PeerSession) -> Option[u16] {
+    list.pop(mut p.collided)
+}
+
 /// Make a down-track on a sending section. It draws its media SSRC and, for video
 /// with RTX agreed, its RTX SSRC; both keep for the track's life while collision-free.
 /// `first_seq` and `first_ts` are the outgoing stream's first number and timestamp
@@ -69,10 +93,7 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
         return Error(Capacity(Capacity(requested: list.len(p.tracks) + 1, available: int.widen(p.limits.down_tracks))))
     }
     let video = p.sections[si].agreed.media == Video
-    let clock = match list.get(p.sections[si].agreed.formats, 0) {
-        Some(f) => f.clock,
-        None => 90000,
-    }
+    let clock = section_clock(p, section)
     let ssrc = draw(mut p)
     let rtx = if video && has_rtx(p.sections[si].agreed) {
         draw(mut p)

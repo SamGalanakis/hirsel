@@ -1,0 +1,278 @@
+// ---- RTC-4 rebind and collision law (W7) ----
+const RA: u32 = 0x31000000
+
+const RB: u32 = 0x32000000
+
+const RC: u32 = 0x33000000
+
+const TA: u32 = 500000
+
+const TB: u32 = 7000000
+
+const TC: u32 = 3000000000
+
+// A 32.32 NTP time, and half a second in that format.
+const NTP0: u64 = 0xe876543200000000
+
+const HALF: u64 = 0x80000000
+
+// Sections a, b and c, each VP8 on 96 with NACK and PLI, MID on extension 1.
+fn three_sections() -> Bytes {
+    let mut b = minimal_head(b" a b c")
+    list.append(mut b, minimal_video(b"96", b"a", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\na=rtcp-fb:96 nack pli\n")
+    list.append(mut b, minimal_video(b"96", b"b", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\na=rtcp-fb:96 nack pli\n")
+    list.append(mut b, minimal_video(b"96", b"c", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\na=rtcp-fb:96 nack pli\n")
+    take b
+}
+
+// RFC 7741 section 4.2: a packet that continues a frame (S = 0).
+fn vp8_rest() -> Bytes {
+    b"\x00\x77\x77\x77"
+}
+
+fn piece(mut cs: srtp.Session, ssrc: u32, seq: u16, ts: u32, mid: Bytes, marker: bool, body: Bytes) -> Bytes {
+    let mut m = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut m, 1, Mid))
+    let mut w = rtp.ext.writer()
+    result.unwrap(rtp.ext.put(mut w, m, Mid, mid, 0, list.len(mid)))
+    let f = rtp.header.Fields(marker: marker, pt: 96, seq: seq, ts: ts, ssrc: ssrc)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, body)
+    let _ = result.unwrap(srtp.protect_rtp(mut cs, mut b))
+    b
+}
+
+fn send(mut r: router.Router, now: u64, mut p: Client, ssrc: u32, mid: Bytes, seq: u16, ts: u32, marker: bool, body: Bytes, mut out: peer.Outbox) {
+    let packet = piece(mut p.cs, ssrc, seq, ts, mid, marker, body)
+    feed(mut r, now, p.who, p.at, packet, mut out)
+}
+
+// The publisher's SR for `ssrc`, with its CNAME (RFC 3550 section 6.4.1).
+fn sender_report(mut r: router.Router, now: u64, mut p: Client, ssrc: u32, ntp: u64, at: u32, mut out: peer.Outbox) {
+    let mut b: Bytes = list.with_capacity(1500)
+    let empty: List[rtp.rtcp.Block] = list.new()
+    let _ = result.unwrap(rtp.rtcp.write_sr(rtp.rtcp.SenderInfo(ssrc: ssrc, ntp: ntp, rtp: at, packets: 1, octets: 1), view empty, mut b))
+    let _ = result.unwrap(rtp.rtcp.write_cname(ssrc, b"browser", mut b))
+    feed(mut r, now, p.who, p.at, sealed_rtcp(mut p.cs, take b), mut out)
+}
+
+// The SSRCs every RTCP BYE to `c` in `out` names (RFC 3550 section 6.6: the
+// SSRC list follows the header).
+fn byes(mut c: Client, out: peer.Outbox) -> List[u32] {
+    let mut named: List[u32] = list.new()
+    for tx in out.pkts {
+        let UdpTx(to, at, len, ecn: _) = tx
+        if to != c.at {
+            continue
+        }
+        let mut b = copy_of(list.slice(out.data, at, at + len))
+        if b[1] < 192 || b[1] > 223 {
+            continue
+        }
+        let Ok(n) = srtp.unprotect_rtcp(mut c.cs, mut b) else {
+            fail("a harness SRTCP receiver could not open a report")
+        }
+        list.truncate(mut b, n)
+        let mut k = 0u64
+        while let Ok(Some(pk)) = rtp.rtcp.next(b, mut k) {
+            if let Bye(_, _) = pk.item {
+                let ssrc: u32 = list.word_be(b, pk.body)
+                list.push(mut named, ssrc)
+            }
+        }
+    }
+    named
+}
+
+fn on_leg(g: Got, ssrc: u32, seq: u16, ts: u32, take what: String) {
+    if g.h.ssrc != ssrc || g.h.seq != seq || g.h.ts != ts {
+        fail(take what)
+    }
+}
+
+fn nothing(mut c: Client, out: peer.Outbox, take what: String) {
+    if list.len(received(mut c, out)) != 0 {
+        fail(take what)
+    }
+}
+
+fn listed(xs: List[u32], v: u32) -> bool {
+    for x in xs {
+        if x == v {
+            return true
+        }
+    }
+    false
+}
+
+// One W7 run. With `cross` false one publisher owns sections a, b and c, so its SRs
+// share a sender clock and every source switch is projected through them (RTP-11);
+// with `cross` true three publishers own one each, the router presents no rebound
+// publication's SR before its switch, and the switches take the arrival rule.
+fn rebind_run(cross: bool, seed: u64) {
+    let mut r = router.router(provide.random(seed))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let room = room_id()
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut pubs: List[Client] = list.new()
+    let owners: u64 = if cross {
+        3
+    } else {
+        1
+    }
+    for i in 0u64 .. owners {
+        list.push(mut pubs, admit(mut r, seed + 1 + 2 * i, three_sections(), 1 + i))
+    }
+    let ob: u64 = if cross {
+        1
+    } else {
+        0
+    }
+    let oc: u64 = if cross {
+        2
+    } else {
+        0
+    }
+    let mut sub_offer = minimal_head(b" d")
+    recv_section(mut sub_offer, b"d", b"96", b"97", b"1", b"3")
+    let mut s = admit(mut r, seed + 9, sub_offer, 8)
+    let pa = result.unwrap(router.publish(mut r, room, pubs[0].who, 0))
+    let pb = result.unwrap(router.publish(mut r, room, pubs[ob].who, 1))
+    let pc = result.unwrap(router.publish(mut r, room, pubs[oc].who, 2))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 0, mut out))
+    let (m, x) = option.unwrap(router.track_ssrcs(r, room, s.who, pa))
+    peer.clear_outbox(mut out)
+    // A, Layer(0) then Layer(2): one frame per millisecond from 10 ms.
+    let mut o = 0u16
+    let mut t = 0u32
+    for k in 0u16 .. 4u16 {
+        let wide: u32 = int.widen(k)
+        let at: u64 = int.widen(k)
+        send(mut r, (10 + at) * MS, mut pubs[0], RA, b"a", 1000 + k, TA + 3000 * wide, true, vp8_key(), mut out)
+        let g = one(received(mut s, out), "each A frame reaches the leg once")
+        if k == 0 {
+            o = g.h.seq
+            t = g.h.ts
+        }
+        on_leg(g, m, plus(o, k), later(t, 3000 * wide), "A's numbering and timing carry over unchanged")
+        peer.clear_outbox(mut out)
+        if k == 1 {
+            result.unwrap(router.set_target(mut r, room, s.who, pa, Layer(encoding: 0, spatial: 0, temporal: 2), 11 * MS, mut out))
+        }
+    }
+    // Off: two frames go nowhere and use no outgoing number.
+    result.unwrap(router.set_target(mut r, room, s.who, pa, Off, 13 * MS, mut out))
+    send(mut r, 14 * MS, mut pubs[0], RA, b"a", 1004, TA + 12000, true, vp8_key(), mut out)
+    send(mut r, 15 * MS, mut pubs[0], RA, b"a", 1005, TA + 15000, true, vp8_key(), mut out)
+    nothing(mut s, out, "a leg at Off sent a frame")
+    result.unwrap(router.set_target(mut r, room, s.who, pa, Layer(encoding: 0, spatial: 0, temporal: 1), 15 * MS, mut out))
+    peer.clear_outbox(mut out)
+    // Layer(1) from Off at 16 ms takes the arrival rule (Off forgets every SR): the last
+    // output t + 9000 at 13 ms plus 3 ms at 90 kHz.
+    send(mut r, 16 * MS, mut pubs[0], RA, b"a", 1006, TA + 18000, true, vp8_key(), mut out)
+    on_leg(one(received(mut s, out), "the resume frame"), m, plus(o, 4), later(t, 9270), "the resume from Off")
+    peer.clear_outbox(mut out)
+    send(mut r, 17 * MS, mut pubs[0], RA, b"a", 1007, TA + 21000, true, vp8_key(), mut out)
+    on_leg(one(received(mut s, out), "A after the resume"), m, plus(o, 5), later(t, 12270), "A keeps its new offset")
+    peer.clear_outbox(mut out)
+    // A's SR: capture 10 ms after its frame at TA + 21000.
+    sender_report(mut r, 18 * MS, mut pubs[0], RA, NTP0, TA + 21900, mut out)
+    // B already streams; rebinding to it keeps A on the leg until B's keyframe.
+    send(mut r, 19 * MS, mut pubs[ob], RB, b"b", 65533, TB - 6000, true, vp8_delta(), mut out)
+    peer.clear_outbox(mut out)
+    result.unwrap(router.rebind(mut r, room, s.who, pa, pb, base, 20 * MS, mut out))
+    if asked(mut pubs[ob], out, RB).plis != 1 {
+        fail("the rebind did not ask B for a keyframe")
+    }
+    peer.clear_outbox(mut out)
+    send(mut r, 21 * MS, mut pubs[0], RA, b"a", 1008, TA + 24000, true, vp8_key(), mut out)
+    on_leg(one(received(mut s, out), "A while B is pending"), m, plus(o, 6), later(t, 15270), "A forwards until B's keyframe")
+    peer.clear_outbox(mut out)
+    // B's SR, half a second of NTP after A's, 10 ms before B's first frame.
+    sender_report(mut r, 22 * MS, mut pubs[ob], RB, NTP0 + HALF, TB - 900, mut out)
+    send(mut r, 23 * MS, mut pubs[ob], RB, b"b", 65534, TB - 3000, true, vp8_delta(), mut out)
+    nothing(mut s, out, "a pending source's delta frame went out")
+    // B's first frame: two packets with one timestamp, across B's sequence wrap.
+    send(mut r, 24 * MS, mut pubs[ob], RB, b"b", 65535, TB, false, vp8_key(), mut out)
+    // One clock: t_A = (TA + 21900) + 900 + 45000 (0.5 s at 90 kHz), minus A's offset
+    // (TA + 18000) - (t + 9270), so t + 59070. Arrival: t + 15270 at 21 ms plus 3 ms.
+    let anchor_b: u32 = if cross {
+        15540
+    } else {
+        59070
+    }
+    on_leg(one(received(mut s, out), "B's first packet"), m, plus(o, 7), later(t, anchor_b), "the switch to B")
+    peer.clear_outbox(mut out)
+    send(mut r, 25 * MS, mut pubs[ob], RB, b"b", 0, TB, true, vp8_rest(), mut out)
+    on_leg(one(received(mut s, out), "B's second packet"), m, plus(o, 8), later(t, anchor_b), "B's first frame keeps one timestamp")
+    peer.clear_outbox(mut out)
+    send(mut r, 26 * MS, mut pubs[0], RA, b"a", 1009, TA + 27000, true, vp8_key(), mut out)
+    nothing(mut s, out, "A reached the leg after the switch to B")
+    send(mut r, 27 * MS, mut pubs[ob], RB, b"b", 1, TB + 3000, true, vp8_key(), mut out)
+    on_leg(one(received(mut s, out), "B after its switch"), m, plus(o, 9), later(t, anchor_b + 3000), "B's numbering")
+    peer.clear_outbox(mut out)
+    // B to C, the same way.
+    send(mut r, 28 * MS, mut pubs[oc], RC, b"c", 39999, TC - 3000, true, vp8_delta(), mut out)
+    peer.clear_outbox(mut out)
+    result.unwrap(router.rebind(mut r, room, s.who, pb, pc, base, 30 * MS, mut out))
+    peer.clear_outbox(mut out)
+    send(mut r, 31 * MS, mut pubs[ob], RB, b"b", 2, TB + 6000, true, vp8_key(), mut out)
+    on_leg(one(received(mut s, out), "B while C is pending"), m, plus(o, 10), later(t, anchor_b + 6000), "B forwards until C's keyframe")
+    peer.clear_outbox(mut out)
+    sender_report(mut r, 32 * MS, mut pubs[oc], RC, NTP0 + 2 * HALF, TC - 1800, mut out)
+    send(mut r, 33 * MS, mut pubs[oc], RC, b"c", 40000, TC, true, vp8_key(), mut out)
+    // One clock: t_B = (TB - 900) + 1800 + 45000, minus B's offset TB - (t + 59070),
+    // so t + 104970. Arrival: t + 21540 at 31 ms plus 2 ms.
+    let anchor_c: u32 = if cross {
+        21720
+    } else {
+        104970
+    }
+    on_leg(one(received(mut s, out), "C's first frame"), m, plus(o, 11), later(t, anchor_c), "the switch to C")
+    peer.clear_outbox(mut out)
+    send(mut r, 34 * MS, mut pubs[oc], RC, b"c", 40001, TC + 3000, true, vp8_key(), mut out)
+    on_leg(one(received(mut s, out), "C after its switch"), m, plus(o, 12), later(t, anchor_c + 3000), "C's numbering")
+    peer.clear_outbox(mut out)
+    if router.track_ssrcs(r, room, s.who, pc) != Some((m, x)) {
+        fail("the down-track's SSRCs changed before any collision")
+    }
+    // The subscriber's own authenticated packet on the leg's media SSRC (RFC 3550
+    // section 8.2): BYE for both SSRCs, fresh ones, and a keyframe ask for C.
+    let clash = piece(mut s.cs, m, 7, 0, b"d", true, vp8_key())
+    feed(mut r, 400 * MS, s.who, s.at, clash, mut out)
+    let gone = byes(mut s, out)
+    if !listed(gone, m) || !listed(gone, x) {
+        fail("the collision did not send a BYE for the old SSRCs")
+    }
+    if asked(mut pubs[oc], out, RC).plis != 1 {
+        fail("the collision did not ask C for a keyframe")
+    }
+    let (m2, x2) = option.unwrap(router.track_ssrcs(r, room, s.who, pc))
+    if m2 == m || m2 == x || x2 == m || x2 == x || m2 == 0 || x2 == 0 || m2 == x2 {
+        fail("the collision did not draw fresh SSRCs")
+    }
+    peer.clear_outbox(mut out)
+    // The fresh stream starts at a keyframe, on the fresh SSRC only.
+    send(mut r, 401 * MS, mut pubs[oc], RC, b"c", 40002, TC + 6000, true, vp8_delta(), mut out)
+    nothing(mut s, out, "a delta frame started the fresh stream")
+    send(mut r, 402 * MS, mut pubs[oc], RC, b"c", 40003, TC + 9000, true, vp8_key(), mut out)
+    let first = one(received(mut s, out), "the fresh stream's keyframe")
+    on_leg(first, m2, first.h.seq, first.h.ts, "the keyframe after the collision is not on the fresh SSRC")
+    peer.clear_outbox(mut out)
+    send(mut r, 403 * MS, mut pubs[oc], RC, b"c", 40004, TC + 12000, true, vp8_key(), mut out)
+    on_leg(one(received(mut s, out), "the fresh stream's next frame"), m2, plus(first.h.seq, 1), later(first.h.ts, 3000), "the fresh stream's numbering")
+}
+
+/// bug: change a down-track's SSRC or sealer at a layer switch, Off or a rebind; drop the old publication before the new one's keyframe; let a rebind's switch go back in time or reuse a number; project a switch through SRs of two sender clocks; or keep the old SSRC, the old numbering or a delta-frame start after a collision.
+/// oracle: W7 by hand from RTC-4, RTC-6 and RTP-11: the outbound index rises by one per forwarded packet (o to o + 12); timestamps keep each source's differences, and each switch anchors as the comments derive (resume t + 9270, B t + 59070 projected or t + 15540 on arrival, C t + 104970 or t + 21720); the collision sends a BYE for both SSRCs (RFC 3550 section 8.2), asks C for a keyframe, and the stream continues on fresh SSRCs from C's next keyframe.
+@test
+fn ssrc_survives_switches() -> Result[(), router.RouterError] {
+    rebind_run(false, 100)
+    rebind_run(true, 120)
+    Ok(())
+}

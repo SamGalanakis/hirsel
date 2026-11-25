@@ -185,12 +185,7 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
         p.drops.malformed += 1
         return Ok(Nothing)
     }
-    let mut collided: List[u16] = list.new()
-    collide(mut p, now, h.ssrc, mut collided, mut out)?
-    // Reported with the next control input, so the caller re-offers.
-    for t in collided {
-        list.push(mut p.collided, t)
-    }
+    collide(mut p, now, h.ssrc, mut out)?
     // MID is bundle-wide, so any receiving section's map reads it; every other kind
     // is read with the bound section's own map below.
     let bundle = scanned(any_map(p), slot, h)
@@ -447,12 +442,12 @@ fn rtcp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Re
         p.drops.malformed += 1
         return Ok(Nothing)
     }
-    let mut c = ControlIn(repairs: list.new(), keyframes: list.new(), collided: replace(mut p.collided, list.new()), senders: list.new(), reports: 0, acked: 0)
+    let mut c = ControlIn(repairs: list.new(), keyframes: list.new(), senders: list.new(), reports: 0, acked: 0)
     let mut at = 0u64
     while let Ok(Some(pkt)) = rtp.rtcp.next(slot, mut at) {
         match pkt.item {
             Sr(info, _) => {
-                collide(mut p, now, info.ssrc, mut c.collided, mut out)?
+                collide(mut p, now, info.ssrc, mut out)?
                 if let Some(i) = find_inbound(p, info.ssrc) {
                     rtp.stats.on_sr(mut p.inbound[i].stats, info, now)
                     list.push(mut c.senders, info)
@@ -460,7 +455,7 @@ fn rtcp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Re
                 c.reports += 1
             },
             Rr(ssrc, count) => {
-                collide(mut p, now, ssrc, mut c.collided, mut out)?
+                collide(mut p, now, ssrc, mut out)?
                 for b in 0u8 .. count {
                     if let Ok(block) = rtp.rtcp.block(slot, pkt, b) {
                         if let Some(_) = track_of(p, block.ssrc) {

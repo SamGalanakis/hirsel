@@ -90,7 +90,6 @@ pub type KeyframeAsk {
 pub type ControlIn {
     repairs: List[RepairAsk],
     keyframes: List[KeyframeAsk],
-    collided: List[u16],
     // Sender reports of inbound streams, for the switch timeline (RTP-11 `on_sr`).
     senders: List[rtp.rtcp.SenderInfo],
     reports: u32,

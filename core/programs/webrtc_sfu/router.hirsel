@@ -32,8 +32,7 @@ pub type Counts: key {
 /// fixed slots: `floor(rtx_bytes / 1500)` of them, fixed when the publication opens.
 type Ring {
     slots: List[Bytes],
-    handles: List[u64],
-    next: u64
+    handles: List[u64]
 }
 
 type Encoding {
@@ -60,11 +59,19 @@ type Down {
     sub: peer.Gen,
     room: peer.RoomId,
     publication: PublicationId,
+    // The subscriber's sending section the track lives on.
+    section: u8,
     track: u16,
     target: Target,
-    // The H.264 parameter sets this leg has sent (media_bits `ParameterSets`).
+    // The H.264 parameter sets this leg has sent of its current source (media_bits
+    // `ParameterSets`), and whether that source's last packet ended an access unit.
     sets: media_bits.unit.ParameterSets,
-    after_end: bool
+    after_end: bool,
+    // A rebind waiting for the new publication's keyframe: the publication that
+    // still forwards until then, and the new source's own sets (RTP-11).
+    previous: Option[PublicationId],
+    next_sets: media_bits.unit.ParameterSets,
+    next_after_end: bool
 }
 
 type Member {
@@ -91,6 +98,9 @@ pub opaque type Router {
     publications: List[Publication],
     downs: List[Down],
     next_publication: u64,
+    // Ring handles are unique across publications, so a repair ask finds its
+    // plaintext in the one ring that holds it, also while a rebind is pending.
+    next_handle: u64,
     counts: Counts
 }
 
@@ -107,7 +117,7 @@ const RING_SLOT: u64 = 1500
 const MIN_INTERVAL_NS: u64 = 100000000
 
 pub fn router(r: Random) -> Router {
-    Router(random: r, rooms: list.new(), members: list.new(), publications: list.new(), downs: list.new(), next_publication: 1, counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0))
+    Router(random: r, rooms: list.new(), members: list.new(), publications: list.new(), downs: list.new(), next_publication: 1, next_handle: 0, counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0))
 }
 
 pub fn counts(r: Router) -> Counts {
@@ -252,7 +262,7 @@ fn ring(rtx_bytes: u64) -> Result[Ring, RouterError] {
         list.push(mut slots, take b)
         list.push(mut handles, 0xffffffffffffffff)
     }
-    Ok(Ring(slots: take slots, handles: take handles, next: 0))
+    Ok(Ring(slots: take slots, handles: take handles))
 }
 
 /// Make the receiving section `section` of `who`'s session a publication.
@@ -358,7 +368,7 @@ pub fn subscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: Publication
     let first_ts: u32 = list.word_be(b, 2)
     let track = peer.add_track(mut r.members[mi].session, section, first_seq, first_ts) ?=> |take e| Peer(e)
     list.try_reserve(mut r.downs, 1) ?=> |c| Capacity(c)
-    list.push(mut r.downs, Down(sub: who, room: room, publication: p, track: track, target: Off, sets: media_bits.unit.parameter_sets(), after_end: true))
+    list.push(mut r.downs, Down(sub: who, room: room, publication: p, section: section, track: track, target: Off, sets: media_bits.unit.parameter_sets(), after_end: true, previous: None, next_sets: media_bits.unit.parameter_sets(), next_after_end: true))
     r.members[mi].downs += 1
     set_target(mut r, room, who, p, target, now, mut out)
 }
@@ -393,6 +403,64 @@ pub fn set_target(mut r: Router, room: peer.RoomId, who: peer.Gen, p: Publicatio
         }
     }
     Ok(())
+}
+
+/// Rebind `who`'s down-track from publication `from` to `to` (RTC-4, RTC-5): the
+/// track keeps its SSRCs, sealers and `Rewrite`, so its numbering stays continuous.
+/// `to`'s layer is pending until its keyframe, which is asked for at once, and
+/// `from` forwards until then. `to`'s codec must have a payload type on the track's
+/// section.
+pub fn rebind(mut r: Router, room: peer.RoomId, who: peer.Gen, from: PublicationId, to: PublicationId, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(di) = down_at(r, room, who, from) else {
+        return Error(NoPublication)
+    }
+    let Some(pi) = publication_at(r, room, to) else {
+        return Error(NoPublication)
+    }
+    let Some(mi) = member_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    if let Some(_) = down_at(r, room, who, to) {
+        return Error(Exists)
+    }
+    let section = r.downs[di].section
+    let Some(a) = peer.agreement(r.members[mi].session, section) else {
+        return Error(Peer(Sdp(AnswerMismatch(section))))
+    }
+    let mut carried = false
+    for f in a.formats {
+        if f.codec == r.publications[pi].codec {
+            carried = true
+        }
+    }
+    if !carried {
+        return Error(Peer(Sdp(AnswerMismatch(section))))
+    }
+    // The publication the track forwards now keeps forwarding until the switch;
+    // a second rebind while one waits replaces only the pending side, and a rebind
+    // back to the forwarding publication cancels the wait.
+    if r.downs[di].previous == Some(to) {
+        r.downs[di].previous = None
+    } else if r.downs[di].previous == None {
+        r.downs[di].previous = Some(from)
+    }
+    r.downs[di].publication = to
+    media_bits.unit.clear_parameter_sets(mut r.downs[di].next_sets)
+    r.downs[di].next_after_end = true
+    set_target(mut r, room, who, to, target, now, mut out)
+}
+
+// The switch to the rebound publication happened, or no longer waits: its sets
+// become the leg's, and the old publication stops reaching the track.
+fn settle(mut r: Router, d: u64) {
+    if r.downs[d].previous == None {
+        return
+    }
+    r.downs[d].previous = None
+    r.downs[d].sets = r.downs[d].next_sets
+    media_bits.unit.clear_parameter_sets(mut r.downs[d].next_sets)
+    r.downs[d].after_end = r.downs[d].next_after_end
+    r.downs[d].next_after_end = true
 }
 
 pub fn unsubscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Result[(), RouterError] {
@@ -468,6 +536,11 @@ fn drop_member(mut r: Router, mi: u64, notify: bool, mut out: peer.Outbox) {
                     let _ = list.remove(mut r.downs, d)
                 } else {
                     d += 1
+                }
+            }
+            for k in 0u64 .. list.len(r.downs) {
+                if r.downs[k].room == who.room && r.downs[k].previous == Some(id) {
+                    settle(mut r, k)
                 }
             }
             let _ = list.remove(mut r.publications, i)

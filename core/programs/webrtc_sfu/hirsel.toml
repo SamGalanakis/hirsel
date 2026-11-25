@@ -31,5 +31,6 @@ limit = 67108864
 "ingress_laws.hirsel" = "laws"
 "router_laws.hirsel" = "laws"
 "router_keyframe_laws.hirsel" = "laws"
+"router_rebind_laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"

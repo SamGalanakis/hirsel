@@ -24,6 +24,7 @@ import arena
 import awfy_measure
 import board_baseline
 import board_host
+import board_markdown
 import board_size
 import build
 import comparison
@@ -35,6 +36,7 @@ from receipt import measurement_slot, write as write_json
 from timing_shield import BOARD as LOCK, REGIMES, hold, measurement_affinity
 from comparison import SPECTRALNORM, SPECTRALNORM_CHECKSUM, spectralnorm_marker
 from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
+from measurement_artifacts import build_outputs
 
 ROOT = build.ROOT
 CAP = ROOT / "tools/capped"
@@ -50,7 +52,6 @@ STARTUP = {
     "pool": ("List", "AWFY pool/index (List)"),
     "arena": ("CLBG::Nbody", "LangArena (CLBG::Nbody)"),
 }
-EXPECTED = {**awfy_measure.EXPECTED, "Startup": tuple(label for _, label in STARTUP.values())}
 INSTRUCTION_LIMIT = Decimal(2)
 SIZE_LIMIT = 2048
 CHECKBOX_METRICS = {
@@ -86,6 +87,10 @@ def load(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+place_density = load("place_density", ROOT / "bench/place-density/run.py")
+EXPECTED = {**awfy_measure.EXPECTED, "Startup": tuple(label for _, label in STARTUP.values()), place_density.GOAL: (place_density.ROW,)}
 
 
 def git(directory, *args):
@@ -174,40 +179,7 @@ class Board:
             all(row["status"] == "ok" for row in expected) and not self.report["failures"]
         )
         write_json(self.out / "board.json", self.report)
-        lines = ["# Hirsel goal board", "",
-                 "Complete" if self.report["complete"] else "Incomplete", "", *NOTES, "", *board_host.markdown(self.report.get("host")),
-                 "| Goal | Row | Metric | H/R | H/G | Commit |",
-                 "| --- | --- | --- | ---: | ---: | --- |"]
-        for row in self.report["rows"]:
-            for metric in row["metrics"]:
-                cells = []
-                for side in ("rust", "goose"):
-                    value = row["ratios"][side].get(metric)
-                    cells.append(f"{value:.4f}×" if value is not None else "n/a")
-                lines.append("| " + " | ".join((row["goal"], row["row"], metric, *cells,
-                                                  row["commit"][:8])) + " |")
-        notes = [f"- {row['goal']}/{row['row']}. {row['notes']}"
-                 for row in self.report["rows"] if row.get("notes")]
-        if notes:
-            lines += ["", "## Runtime notes", "", *notes]
-        if self.report["failures"]:
-            lines += ["", "## Incomplete samples", ""]
-            lines += [f"- {label}: {reason}" for label, reason in self.report["failures"].items()]
-        missing = [f"{row['goal']}/{row['row']}" for row in expected if row["status"] == "missing"]
-        if missing:
-            lines += ["", "## Missing rows", "", *[f"- {label}" for label in missing]]
-        if "exit_status" in self.report:
-            lines += ["", f"Board exit status {self.report['exit_status']}"]
-        comparison = self.report.get("instruction_comparison")
-        if comparison:
-            lines += ["", "## Nightly instruction comparison", "", comparison["status"], "",
-                      *comparison["details"]]
-        for gate in ("size", "checkbox"):
-            if comparison := self.report.get(f"{gate}_comparison"):
-                lines += ["", f"## Nightly {gate} comparison", "", *comparison]
-            if gate == "size" and (census := self.report.get("size_census")):
-                lines += board_size.census_markdown(census)
-        (self.out / "board.md").write_text("\n".join(lines) + "\n")
+        (self.out / "board.md").write_text(board_markdown.render(self.report, expected, place_density.GOAL))
 
     def finish(self, baseline=None):
         self.save()
@@ -230,6 +202,8 @@ class Board:
                 details = [f"REFUSED ({error})"]
                 self.report["instruction_comparison"] = {"status": "Refused", "details": details}
                 print(details[0], file=sys.stderr)
+        if self.report.get("place_density", {}).get("regressed"):
+            status = 3
         self.report["exit_status"] = status
         self.save()
         print(self.out / "board.md", flush=True)
@@ -316,13 +290,16 @@ class Board:
             (row["goal"], row["row"]) == (goal, name) for row in self.report["rows"]
         ):
             raise ValueError(f"unexpected or repeated row {label}")
-        sides = ("hirsel", "rust") if goal in ("Compile", "Checkbox") else awfy_measure.SIDES
+        sides = {place_density.GOAL: ("hirsel",), "Compile": ("hirsel", "rust"),
+                 "Checkbox": ("hirsel", "rust")}.get(goal, awfy_measure.SIDES)
         complete = True
         for side in sides:
             sample = samples.get(side, {})
             status = sample.get("status", "missing")
             if status == "ok" and not all(
-                field in sample and math.isfinite(float(sample[field])) and float(sample[field]) > 0
+                field in sample and math.isfinite(float(sample[field]))
+                and (float(sample[field]) > 0 or
+                     (field == "idle_instructions_per_second" and sample[field] == 0))
                 for field in fields
             ):
                 status = "missing-or-invalid-metric"
@@ -1068,6 +1045,25 @@ def prepare_goose(out, args, env, *, jobs):
     return goose_dir / "goose"
 
 
+def place_density_row(board, args):
+    out = board.out / "place-density.json"
+    bundle = "//:hirsel-toolchain"
+    compiler = build_outputs([bundle], threads=4)[bundle] / "hirsel"
+    cpus = ",".join(map(str, args.measure_cpus))
+    subprocess.run([sys.executable, place_density.__file__, "--hirsel", compiler, "--cpus", cpus,
+                    "--lock", args.lock, out], cwd=ROOT, check=True)
+    result = receipt.read(out)
+    comparison = list(place_density.compare(result, receipt.read(place_density.BASELINE)))
+    board.report["place_density"] = dict(place_density.board_sample(result),
+                                         comparison=[line for _, line in comparison],
+                                         regressed=any(failed for failed, _ in comparison))
+    for failed, line in comparison:
+        if failed:
+            print(f"Place density: {line}", file=sys.stderr)
+    board.row(place_density.GOAL, place_density.ROW,
+              {"hirsel": {"status": "ok", **result["metrics"]}}, tuple(place_density.METRICS))
+
+
 def prepare_awfy(out, args, goose, artifact_file, env, *, matched):
     out.mkdir()
     entries = ("harness", "pools", "pool_index") if matched else ("harness",)
@@ -1097,6 +1093,7 @@ def run_board(board, args):
     compile_ready = board.attempt("Compile preparation", prepare_compile, compile_dir, artifacts, env)
     checkbox_dir = out / "checkbox"
     checkbox_ready = board.attempt("Checkbox build", prepare_checkbox, checkbox_dir, artifacts, env)
+    board.attempt("Place density", place_density_row, board, args)
     with hold(REGIMES, args.lock):
         require_comparison_window()
         os.sched_setaffinity(0, {args.measure_cpus[0]})

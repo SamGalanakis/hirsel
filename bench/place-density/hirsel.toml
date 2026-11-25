@@ -1,0 +1,15 @@
+[package]
+name = "place_density"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+store = { major = 1 }
+runner = { major = 1 }
+
+[sources]
+"main.hirsel" = "main"
+
+[program]
+module = "main"

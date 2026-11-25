@@ -102,8 +102,8 @@ fi
 step=board
 record
 status=0
-taskset -c 8-11,16-17 python3 bench/awfy/board.py "$run/board" \
-  --build-cpus 8-11 --measure-cpus 16-17 --awfy "$base/peers/awfy" \
+taskset -c 8-11,16-19 python3 bench/awfy/board.py "$run/board" \
+  --build-cpus 8-11 --measure-cpus 16-19 --awfy "$base/peers/awfy" \
   --resid "$base/peers/resid" --goose "$base/peers/goose" --langarena "$base/peers/langarena" \
   "${baseline[@]}" >>"$run/run.log" 2>&1 || status=$?
 if (( status == 0 )); then

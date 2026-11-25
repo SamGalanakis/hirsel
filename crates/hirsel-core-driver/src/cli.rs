@@ -60,6 +60,9 @@ commands! {
     "prof diff", "prof diff <BASE.hprof> <HEAD.hprof> [--by self|inclusive] [--group def_path|instance] [--min-delta-pct 1.0] [--json]", "Compare compatible captures and report changed and unmatched functions.";
     "prof sql", "prof sql <FILE.hprof> \"<SQL>\" [--limit 500] [--timeout-ms 5000] [--json]", "Query the profile with one read-only SQL statement.";
     "prof export", "prof export <FILE.hprof> --format pprof --out <PATH>", "Export a pprof profile.";
+    "coverage", "coverage <merge|diff>", "Merge, report and diff saved coverage profiles without running anything.";
+    "coverage merge", "coverage merge FILE... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]", "Merge coverage profiles, and raw files read against their site maps, then report.";
+    "coverage diff", "coverage diff BASE NEW [--json]", "Report the sites one coverage profile reached and the other did not.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.toml contains [tests], set limit, dirs and grants there.";
@@ -85,10 +88,15 @@ macro_rules! option {
 #[path = "cli_options.rs"]
 mod options;
 use options::OPTIONS;
+#[path = "cli_coverage_options.rs"]
+mod cli_coverage_options;
 #[path = "cli_package_options.rs"]
 mod cli_package_options;
 fn options() -> impl Iterator<Item = &'static OptionSpec> {
-    cli_package_options::OPTIONS.iter().chain(OPTIONS)
+    cli_package_options::OPTIONS
+        .iter()
+        .chain(OPTIONS)
+        .chain(cli_coverage_options::OPTIONS)
 }
 #[path = "cli_help.rs"]
 mod help_text;

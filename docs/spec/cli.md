@@ -121,25 +121,27 @@ again. Exit status: 0 done, 1 refused (the refusal is on stderr), 2 usage, 75 he
 
 ## Coverage
 
-*Specified, not built; [coverage](../coverage.md) is the full text.* A coverage build adds
-reached flags at function entries and source control-flow arms. It is the same build
+*[Coverage](../coverage.md) is the full text.* A coverage build adds reached flags at
+function entries and source control-flow arms. It is the same build
 ([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)), and no program reads a
 flag (R28).
 
 | Form | Does |
 |---|---|
-| `hirsel test [package-dir] --coverage [--json]`<!-- doc-ref: planned --> | builds the coverage build, runs the selected tests and reports reached entries and arms; with `--laws`, also each test's law rows |
-| `--coverage-out FILE`<!-- doc-ref: planned --> | also writes the merged profile |
-| `--coverage-base FILE`<!-- doc-ref: planned --> | adds a diff against an earlier profile |
-| `--coverage-targets FILE`<!-- doc-ref: planned --> | restricts the uncovered list to the source ranges in FILE |
-| `--coverage-runs`<!-- doc-ref: planned --> | keeps one row per run in the profile |
-| `--seed-base K`<!-- doc-ref: planned --> | with `--seeds N`, runs seeds K to K+N-1 |
-| `hirsel coverage FILE... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]`<!-- doc-ref: planned --> | merges raw files and profiles, reports and diffs, and runs nothing |
+| `hirsel test [package-dir] --coverage [--json]` | builds the coverage build, runs the selected tests and reports reached entries and arms; with `--laws`, also each test's law rows |
+| `--coverage-out FILE` | also writes the merged profile |
+| `--coverage-base FILE` | adds a diff against an earlier profile |
+| `--coverage-targets FILE` | restricts the uncovered list to the source ranges in FILE |
+| `--coverage-runs` | keeps one row per run in the profile |
+| `--seed-base K` | with `--seeds N`, runs seeds K to K+N-1 |
+| `hirsel coverage merge FILE... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]` | merges profiles, and raw files read against their site maps, and reports; runs nothing |
+| `hirsel coverage diff BASE NEW [--json]` | lists the sites reached in one profile and not the other |
 
-Each coverage option implies `--coverage`<!-- doc-ref: planned -->. A narrowed run is allowed. With `-o DIR`, each
-test's site map is written beside its executable as `HEX.covmap`. Coverage never changes an
-exit code: `hirsel test` exits as it does without it, and `hirsel coverage`<!-- doc-ref: planned --> exits 0 when it
-reports, 1 when it refuses an input and 2 on usage errors.
+Each coverage option implies `--coverage`. A narrowed run is allowed. Each coverage test
+build writes its site map beside its executable as `HEX.covmap`. Coverage never changes an
+exit code: `hirsel test` exits as it does without it, and `hirsel coverage` exits 0 when it
+reports, 1 when it refuses an input (another format version, or inputs from builds of
+different sources) and 2 on usage errors.
 
 `hirsel laws` stays static and about the lock: `check` and `write` run no test, and it has
 no coverage option. Coverage never enters a law row or `hirsel.laws`.

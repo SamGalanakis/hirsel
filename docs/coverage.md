@@ -41,6 +41,18 @@ runs count as unobserved, the seed framing of `selection.digest`, and where `onl
 printed ("Text"). The map fragment's meaning is now named `coverage.v2` in the environment
 tuple, so no fragment built under C1's target rule is joined into a C2 map.
 
+Version note (2026-11-25, coverage-c4-tool-2604): slice C4 published the formats and built
+the offline tool. The profile is format 2. It is one document, written by `--coverage-out`
+and `hirsel coverage merge -o`, the top-level `coverage` of `--json`, and what
+`hirsel coverage merge --json` prints, and it is read back by every one of them. C2's
+`schema: 1` key is gone, and a format 1 file is refused. Format 2 gives each test row a
+`build`, writes a mixed seed set (`null` and ranges) without loss, and gives an arm row its
+`function`. The site map is format 1, written beside every coverage test executable. The
+offline tool is two subcommands, `hirsel coverage merge` and `hirsel coverage diff`, in
+place of one `hirsel coverage` form. The diff text counts sites. Merge also refuses one site
+placed two ways, and "same run" means the same test, seed and build. D3 to D6 are now
+published: changing any of them changes a format version.
+
 These are out of scope:
 
 - hit counts, and any reading of coverage by the program it observes;
@@ -243,7 +255,8 @@ build. A profile counts how many runs reached each site.
 | `--coverage-targets FILE` | restricts the uncovered list to source ranges | C4 |
 | `--coverage-runs` | keeps one row per run in the profile | C4 |
 | `--seed-base K` | with `--seeds N`, runs seeds K to K+N-1 | C4 |
-| `hirsel coverage FILE... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]` | merges, reports and diffs offline | C4 |
+| `hirsel coverage merge FILE... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]` | merges profiles and raw files, and reports | C4 |
+| `hirsel coverage diff BASE NEW [--json]` | lists the sites reached in one profile and not the other | C4 |
 
 **`--coverage`** composes with `--release`, `--backend`, `--target`, `--sim`, `--seed`,
 `--seeds`, `--filter`, `--exact`, `--laws`, `--laws-baseline`, `--replay`,
@@ -271,22 +284,42 @@ Targets narrow the uncovered list and mark the targeted rows. Totals are unchang
 **`--seed-base K`** requires `--seeds` and conflicts with `--seed`. It exists so that a
 fresh seed range can be checked against a fixed one (see the recipe).
 
+**`hirsel coverage merge`** reads each `FILE` as a profile, or as a raw file when it starts
+with the raw magic. It merges them in order ("Merge") and prints the report, as text or with
+`--json` as the profile document. `-o FILE` also writes that document. `--base` adds a diff,
+and `--targets` narrows the uncovered list, as their `hirsel test` forms do. A raw file is
+read against a site map given by `--map`. With one map, every raw file pairs with it.
+With several, a raw file pairs with the one map whose file name, less `.covmap`, begins the
+raw file's name, so `HEX.covmap` pairs with `HEX.0.raw`, `HEX-seed-7.raw` and so on. A raw
+file that pairs with no map or with two is refused. It needs no compiler, store or source.
+
+**`hirsel coverage diff BASE NEW`** prints the diff of `NEW` against `BASE` ("Diff"): its
+text line, then one line per key, `  + KEY` for gained and `  - KEY` for lost, then
+`  changed FUNCTION` for each changed function. With `--json` it prints the `diff` object.
+
 **`hirsel laws`** keeps only `check` and `write`. It runs no test and has no coverage
 option.
 
 **Exit codes.** `hirsel test` exits as it does without coverage. A coverage failure never
 changes the status: an unwritable profile file makes the run `unobserved` and is reported.
-`hirsel coverage` exits 0 when it reports, 1 when an input is refused (unreadable,
-conflicting, or naming an id no map holds), and 2 on usage errors.
+`hirsel coverage` exits 0 when it reports, 1 when an input is refused, and 2 on usage errors.
+An input is refused, with a message naming the file and the conflict, when it is unreadable,
+of another format version, not a profile or site map, a raw file with no `end` mark or with
+no single map, holds an id no map holds or a record whose flag count is not its map's, or
+conflicts with another input under "Merge". Under `hirsel test`, a `--coverage-base` or
+`--coverage-targets` file that cannot be read is reported and changes nothing else.
 
 ## Files
 
 ### The site map (`.covmap`)
 
-With `--coverage` and `-o DIR`, `hirsel test` writes each test's executable to `DIR/HEX`,
-where `HEX` is the content hash of the test's definition path, as it does today. Beside it
-the test writes `DIR/HEX.covmap`, the site map of that executable. A raw file is read
-against the map of the executable that wrote it.
+`hirsel test` writes each test's executable to `DIR/HEX`, where `DIR` is the build output
+directory (`-o DIR`, or the default) and `HEX` is the hex SHA-256 of the test's definition
+path. With `--coverage`, each build writes `DIR/HEX.covmap` beside it, the site map of that
+executable. A raw file is read against the map of the executable that wrote it. A pass
+served from the cache builds nothing and writes no map. The map holds placed rows, so the
+offline tool never reads source. A map that cannot be placed or written is reported, and
+the test goes on.
 
 A map is one JSON document:
 
@@ -301,11 +334,15 @@ A map is one JSON document:
    {"site": "store@1/tiered/compact#e", "kind": "entry", "definition": "store@1/tiered/compact",
     "file": "tiered.hirsel", "line": 210, "col": 1},
    {"site": "store@1/tiered/compact@1180-1213.0:no", "kind": "arm", "arm": "no",
-    "definition": "store@1/tiered/compact", "file": "tiered.hirsel",
+    "definition": "store@1/tiered/compact", "function": "store@1/tiered/compact", "file": "tiered.hirsel",
     "line": 244, "col": 9, "end_line": 244, "end_col": 42, "arm_line": 251, "arm_col": 13}]}],
  "unreferenced": [{"definition": "store@1/tiered/debug_dump", "file": "tiered.hirsel", "line": 12}]}
 ```
 
+- `hirsel_covmap` is the format version. A reader refuses a version it does not read.
+- An arm row's `definition` is the item that holds its decision, and `function` is the
+  function whose body holds it. They differ for an arm inlined from another item. An entry
+  row has no `function`: its function is its `definition`.
 - `records` lists each id once, with its sites in `coverage::sites` order. Flag `i` of a raw
   record is site `i` of its id.
 - `file` is relative to its package root. Lines and columns are 1-based. Columns count
@@ -387,14 +424,15 @@ is an error naming the file, never a silent drop.
 
 **Raw file to run.** A raw file is one run. Its test comes from the map it was read against,
 its seed and outcome from the header, and its build from the map. Under `hirsel test` the
-runner knows all four and records them itself.
+runner knows all four and records them itself. `hirsel coverage merge --map` reads a raw file
+offline the same way, and counts outcome 0 as failed.
 
 ### The profile
 
-`--coverage-out` and `hirsel coverage -o` write a profile, one JSON document:
+`--coverage-out` and `hirsel coverage merge -o` write a profile, one JSON document:
 
 ```json
-{"hirsel_coverage": 1,
+{"hirsel_coverage": 2,
  "builds": [{"engine": "llvm", "optimize": true, "target": "x86_64-unknown-linux-gnu"}],
  "scope": ["store@1"],
  "selection": {"tests": 147, "runs": 4704, "digest": "<16 hex>"},
@@ -405,12 +443,16 @@ runner knows all four and records them itself.
             "definition": "store@1/tiered/compact", "file": "tiered.hirsel", "line": 210,
             "col": 1, "passed_runs": 96, "failed_runs": 1}],
  "unreferenced": [{"definition": "store@1/tiered/debug_dump", "file": "tiered.hirsel", "line": 12}],
- "tests": [{"definition": "store@1/tiered_random_laws/law_tiers", "seeds": [[0, 31]],
+ "tests": [{"definition": "store@1/tiered_random_laws/law_tiers", "build": 0, "seeds": [[0, 31]],
             "runs": 32, "failed_runs": 0, "reached": "<base64>"}],
- "run_rows": [{"definition": "store@1/tiered_random_laws/law_tiers", "seed": 3,
+ "run_rows": [{"definition": "store@1/tiered_random_laws/law_tiers", "seed": 3, "build": 0,
                "passed": true, "reached": "<base64>"}]}
 ```
 
+- **`hirsel_coverage`** is the format version, 2. A reader refuses a version it does not
+  read, and a document without it.
+- **`tests`** has one row for each test and build, sorted by definition and then build.
+  `build` is the row's index in `builds`, which is sorted. `run_rows` index it the same way.
 - **`sites`** is sorted bytewise by key. A site row carries the map's fields for its key,
   plus `passed_runs` and `failed_runs`, the number of observed runs that reached it. Those
   two counts are enough for a quality score or an Ochiai ranking without per-run rows.
@@ -418,9 +460,11 @@ runner knows all four and records them itself.
   stored in byte `i / 8`, at bit `i % 8`, counting from the least significant bit. The bytes
   number `ceil(sites / 8)`, with unused high bits zero, and are written in standard base64
   with padding.
-- **`seeds`** lists the seeds of a test's runs as sorted, merged, inclusive ranges.
-  `null` stands for the one run of a test without `--sim`.
-- **`run_rows`** is present only with `--coverage-runs`. Without it, runs are folded by test.
+- **`seeds`** lists the seeds of a test's runs as sorted, merged, inclusive ranges, after a
+  `null` that stands for the run of a test without `--sim`.
+- **`run_rows`** is present only with `--coverage-runs`, and holds only observed runs.
+  Without it, runs are folded by test. A merge keeps run rows only when every input has
+  them.
 - **`selection.digest`** is the first 8 bytes, in hex, of SHA-256 over the sorted
   `definition`/seed pairs of every run, each framed by its length. A seed is its eight
   little-endian bytes, and the absent seed of a run without `--sim` is empty.
@@ -433,12 +477,21 @@ runner knows all four and records them itself.
 **Merge.** Sites match by key. Counts add, bitsets are OR-ed, and seed ranges join. Inputs
 are refused, naming the conflict, when:
 
-- **Same run twice.** Two inputs hold the same run (test, seed, engine and optimisation
-  level). A run cannot be taken back out of a count.
-- **Different sources.** Two inputs give different `src` for one function.
+- **Same run twice.** Two inputs hold the same run (test, seed, and build: engine,
+  optimisation level and target). A run cannot be taken back out of a count.
+- **Different sources.** Two inputs give different `src` for one function, or place one site
+  key differently (its arm, definition or place). This is checked first, so two builds of
+  different sources are named as such even when they also share a run. They are builds of different sources, and their counts would not mean
+  the same lines.
 
 Profiles from different engines merge, because keys do not depend on the engine. `builds`
-then lists each build.
+then lists each build. A merge of two inputs that share a function with the same `src`, such
+as two profiles of one build, is not refused.
+
+**One document.** A report adds fields derived from the profile: `totals`, `files`,
+`uncovered`, `diff`, and `entered_runs` and `arms` on each function row. A reader ignores
+them, so a report written by `--coverage-out`, the `coverage` object of `--json`, and the
+output of `hirsel coverage merge --json` each read back as the profile they report.
 
 ## Report
 
@@ -475,7 +528,7 @@ never entered (3 of 132; --json lists all)
 entered, arm not reached (most-entered first)
   store@1/tiered/compact   tiered.hirsel:244:9   no    other arm taken        entered by 96 runs
   store@1/tiered/plan      tiered.hirsel:301:5   2     decision not reached   entered by 40 runs
-since base  +119 arms, -0   2 functions changed
+since base  +119 sites, -0   2 functions changed
 ```
 
 The text report lists at most 20 rows in each section, then the count left. Rows sort by
@@ -496,7 +549,7 @@ Each row of `tests` gains a `coverage` object, and the document gains a top-leve
      "coverage": {"functions": 212, "arms": 1490, "only": 7}}
   ],
   "coverage": {
-    "schema": 1,
+    "hirsel_coverage": 2,
     "builds": [{"engine": "llvm", "optimize": true, "target": "x86_64-unknown-linux-gnu"}],
     "scope": ["store@1"],
     "selection": {"tests": 147, "runs": 4704, "digest": "<16 hex>"},
@@ -515,7 +568,8 @@ Each row of `tests` gains a `coverage` object, and the document gains a top-leve
       {"site": "store@1/tiered/rewrite_tail#e", "kind": "entry", "state": "never entered",
        "file": "tiered.hirsel", "line": 412, "col": 1, "arms": 9},
       {"site": "store@1/tiered/compact@1180-1213.0:no", "kind": "arm",
-       "state": "other arm taken", "arm": "no", "entered_runs": 96,
+       "state": "other arm taken", "arm": "no", "definition": "store@1/tiered/compact",
+       "function": "store@1/tiered/compact", "entered_runs": 96,
        "file": "tiered.hirsel", "line": 244, "col": 9, "end_line": 244, "end_col": 42,
        "arm_line": 251, "arm_col": 13, "target": true}
     ],
@@ -532,11 +586,13 @@ the test's runs. A row whose run was unobserved has `"coverage": null`.
 
 `uncovered` lists every uncovered row with no limit. With `--laws`, each test row also
 carries `laws` and `law_strength` as the [law table](laws.md#output) says. `hirsel coverage
---json` prints the `coverage` object alone.
+merge --json` prints the `coverage` object alone. The `tests` rows, `sites` rows and the
+rest of "The profile" are in it too; the example leaves them out.
 
 ### Diff
 
-`--coverage-base FILE` and `hirsel coverage --base FILE` compare by site key.
+`--coverage-base FILE`, `hirsel coverage merge --base FILE` and `hirsel coverage diff`
+compare by site key.
 
 - **`gained`** and **`lost`** list the keys reached in one profile and not the other.
 - **`changed_functions`** lists each function whose `src` differs between the two. Its sites
@@ -640,6 +696,10 @@ named existing harnesses. None adds a new harness.
 | **Engines agree** | a missed block copy on LLVM, or the engines ordering sites differently | the contract corpus run by `core/tools/std_native.py`: for each determined law, the Cranelift and LLVM release profiles are equal | the other engine |
 | **Known arms** | an arm index off by one, or an `if` without `else` reported from its join block | one package in `crates/hirsel-core-driver/src/test_run_native.rs` with an `if` and no `else`, a three-arm `match` with one arm unreachable, and `&&` | keys derived by hand |
 | **Killed run** | a profile lost when the runner kills a test | the timeout case in `crates/hirsel-core-driver/src/test_run_native.rs` | the site before the hang is reached, and the run counts as failed |
+| **Round trip** | a profile field lost or misread between writer and reader | `coverage_profiles_merge_read_back_and_refuse_conflicts` in `crates/hirsel-core-driver/src/test_run_native.rs`: two profiles merged, and the report read back; `coverage_tool_diffs_merges_and_reads_raw_files`: one profile through `hirsel coverage merge` | counts and bitsets worked by hand |
+| **Refusal** | profiles of different sources or of another format merged | the same two laws: a run twice, a function's `src` changed, a site placed differently, format versions 1 and 2, and two sources through the tool | the conflict, by hand |
+| **Diff** | gained and lost swapped, or a changed function's sites counted | `coverage_tool_diffs_merges_and_reads_raw_files`: two sources whose covered arms differ by one arm each way | the arms, by hand |
+| **Raw file offline** | a raw file read against the wrong map, or its header misread | the same law: a raw file written by hand, read against the build's `.covmap` | the run it records |
 | **Off is off** | a coverage object reused by a plain build | `crates/hirsel-core-driver/src/test_run_native.rs`: after a `--coverage` run, the plain executable has no `hirsel_cov` section, and a plain pass is not served as a coverage pass | the section's absence |
 
 Slice C3 runs "Same observations" and "Tape crosses" on Cranelift, LLVM debug and LLVM

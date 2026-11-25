@@ -71,6 +71,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         }
         _ => {}
     }
+    if invocation.command.name.starts_with("coverage") {
+        return conclude(crate::coverage::cli::run(invocation)?);
+    }
     if invocation.command.name.starts_with("lean ") {
         lean::run(invocation)?;
         return conclude(Outcome::Exit(0));
@@ -314,8 +317,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut test_write_laws = false;
     let mut law_baseline = None;
     let mut test_rerun = false;
-    let mut test_coverage = false;
-    let mut coverage_out = None;
+    let mut coverage = crate::test_run::Flags::default();
+    let mut seed_base = None;
     let mut expect_verdict = None;
     let mut diagnose = false;
     let mut grants = crate::package_dir::Grants::default();
@@ -352,8 +355,18 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::WriteLaws => test_write_laws = true,
             Opt::LawsBaseline => law_baseline = Some(PathBuf::from(value)),
             Opt::Rerun => test_rerun = true,
-            Opt::Coverage => test_coverage = true,
-            Opt::CoverageOut => coverage_out = Some(PathBuf::from(value)),
+            Opt::Coverage => coverage.on = true,
+            Opt::CoverageOut => coverage.out = Some(PathBuf::from(value)),
+            Opt::CoverageBase => coverage.base = Some(PathBuf::from(value)),
+            Opt::CoverageTargets => coverage.targets = Some(PathBuf::from(value)),
+            Opt::CoverageRuns => coverage.runs = true,
+            Opt::SeedBase => {
+                seed_base = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| "--seed-base expects a u64")?,
+                );
+            }
             Opt::Sim => test_sim = true,
             Opt::PropertyCorpus => corpus_path = Some(PathBuf::from(value)),
             Opt::SimSeeds => {
@@ -505,7 +518,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::ProfDepth
             | Opt::ProfMinDeltaPct
             | Opt::ProfTimeout
-            | Opt::ProfFormat => unreachable!("CLI early command option"),
+            | Opt::ProfFormat
+            | Opt::CoverageMap => unreachable!("CLI early command option"),
         }
     }
     if test_filter.is_some() && !test_exact.is_empty() {
@@ -533,7 +547,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         .map(crate::law_lock::Baseline::read)
         .transpose()?;
     test_laws |= test_write_laws || law_baseline.is_some();
-    test_coverage |= coverage_out.is_some();
+    let test_coverage = coverage.on();
     if test_write_laws && manifest.is_some() {
         return Err("test: --write-laws requires a package directory".into());
     }
@@ -549,6 +563,13 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     }
     if test_seed.is_some() && test_seeds.is_some() {
         return Err("choose one of --seed and --seeds".into());
+    }
+    if seed_base.is_some() && test_seeds.is_none() {
+        return Err("--seed-base requires --seeds".into());
+    }
+    let seed_base = seed_base.unwrap_or(0);
+    if seed_base.checked_add(test_seeds.unwrap_or(1) - 1).is_none() {
+        return Err("--seed-base and --seeds run past the last u64 seed".into());
     }
     if test_sim && test_replay {
         return Err("choose one of --sim and --replay".into());
@@ -1422,15 +1443,17 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         };
         let mut rows = Vec::new();
         let mut failed = false;
-        let mut coverage =
-            test_coverage.then(|| crate::test_run::Session::new(native_options.as_ref().unwrap()));
+        let coverage_flags = coverage;
+        let mut coverage = test_coverage.then(|| {
+            crate::test_run::Session::new(native_options.as_ref().unwrap(), coverage_flags.runs)
+        });
         let jobs = test_jobs.map_or_else(crate::test_run::affinity_jobs, Ok)?;
         for index in 0..if tests.is_empty() {
             0
         } else {
             test_seeds.unwrap_or(1)
         } {
-            let seed = test_sim.then_some(test_seed.unwrap_or(index));
+            let seed = test_sim.then_some(test_seed.unwrap_or(seed_base + index));
             let batch = crate::test_run::TestBatch {
                 runs: &test_runs,
                 jobs,
@@ -1554,12 +1577,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         let passed = !tests.is_empty() && !failed;
         let coverage = coverage.and_then(|session| {
             let scope = native_options.as_ref().unwrap().coverage.as_ref().unwrap();
-            session.finish(&product, scope, &mut rows, coverage_out.as_deref())
+            session.finish(&product, scope, &mut rows, &coverage_flags)
         });
         if json {
             let mut report = serde_json::json!({"passed":passed,"tests":rows});
             if let Some(coverage) = &coverage {
-                report["coverage"] = coverage.coverage.clone();
+                report["coverage"] = coverage.document.clone();
             }
             if let Some(regressions) = regressions {
                 report["law_regressions"] = serde_json::json!(regressions);

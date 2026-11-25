@@ -380,20 +380,6 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Compare a full observed test run with the law lock at FILE."
     ),
     option!(
-        Coverage,
-        ["--coverage"],
-        None,
-        ["test"],
-        "Report the function entries and source arms the selected tests reached."
-    ),
-    option!(
-        CoverageOut,
-        ["--coverage-out"],
-        Some("FILE"),
-        ["test"],
-        "With --coverage (implied), also write the merged coverage profile to FILE."
-    ),
-    option!(
         IncludeCredentials,
         ["--include-credentials"],
         None,
@@ -617,7 +603,9 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
             "std-product",
             "env",
             "add",
-            "explain"
+            "explain",
+            "coverage merge",
+            "coverage diff"
         ],
         "Print structured JSON."
     ),
@@ -839,7 +827,8 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
             "pack",
             "sdk",
             "lean extract",
-            "lean status"
+            "lean status",
+            "coverage merge"
         ],
         "Write the command output to this path."
     ),

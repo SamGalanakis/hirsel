@@ -40,6 +40,7 @@ mod executable;
 mod flow;
 mod instance_walk;
 mod instances;
+mod coverage;
 mod law_lock;
 mod native;
 pub mod native_debug;

@@ -311,10 +311,10 @@ fn prog4_pass_cache(backend: Backend) {
             .unwrap();
         assert!(outcome.timed_out, "{outcome:?}");
         assert_eq!(coverage_reached(&outcome.coverage).get("app@1/main/spins#e"), Some(&true));
-        let build = crate::test_run::Build::of(&covered);
-        let (run, _) = crate::test_run::Profile::of_run(&build, &spins, None, outcome.passed(), &outcome.coverage);
-        let report = run.report(&spinner, covered.coverage.as_ref().unwrap()).unwrap();
-        let entry = &report.profile["sites"][0];
+        let mut session = crate::test_run::Session::new(&covered, false);
+        session.run(0, &spins, None, outcome.passed(), &outcome.coverage);
+        let profile = session.placed(&spinner, covered.coverage.as_ref().unwrap()).unwrap().0.json();
+        let entry = &profile["sites"][0];
         assert_eq!((&entry["site"], &entry["passed_runs"], &entry["failed_runs"]), (&"app@1/main/spins#e".into(), &0.into(), &1.into()));
     }
 
@@ -483,10 +483,10 @@ fn coverage_off_and_known_arms(backend: Backend, optimize: bool) -> BTreeMap<Str
     // each decision's line, column and end column, and each arm's target
     // line, absent for an empty arm: the `no` of the `if` without `else`. The
     // short-circuit `no` of `n < 5u64` lands on the decision of the whole `&&`.
-    let build = crate::test_run::Build::of(&covered);
-    let (run, _) = crate::test_run::Profile::of_run(&build, &test, None, true, &outcome.coverage);
-    let report = run.report(&product, &scope).unwrap();
-    let rows: BTreeMap<String, serde_json::Value> = report.profile["sites"]
+    let mut session = crate::test_run::Session::new(&covered, false);
+    session.run(0, &test, None, true, &outcome.coverage);
+    let profile = session.placed(&product, &scope).unwrap().0.json();
+    let rows: BTreeMap<String, serde_json::Value> = profile["sites"]
         .as_array()
         .unwrap()
         .iter()
@@ -1016,6 +1016,17 @@ impl PackageLaw {
 
     fn run(&self, args: &[&str]) -> (Option<i32>, String, String) {
         self.with_store(args, "packages")
+    }
+
+    /// A request with no package or build options, such as `hirsel coverage`.
+    fn tool(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let output = process::tape_request_command(&args, self.dir.path()).output().unwrap();
+        let after = |bytes: &[u8]| {
+            let text = String::from_utf8_lossy(bytes);
+            text.split_once(process::CHILD_MARK).unwrap().1.to_owned()
+        };
+        (output.status.code(), after(&output.stdout), after(&output.stderr))
     }
 
     fn pass(output: (Option<i32>, String, String)) -> String {
@@ -3032,7 +3043,7 @@ fn coverage_merges_seeds_and_writes_the_profile() {
     assert_eq!(status, Some(1), "{stdout}\n{stderr}");
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let profile: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
-    assert_eq!(profile["hirsel_coverage"], 1);
+    assert_eq!(profile["hirsel_coverage"], 2);
     assert_eq!((&profile["runs"], &profile["failed_runs"], &profile["unobserved_runs"]), (&3.into(), &1.into(), &0.into()));
     assert_eq!((&profile["selection"]["tests"], &profile["selection"]["runs"]), (&1.into(), &3.into()));
     assert_eq!(report["coverage"]["selection"], profile["selection"]);
@@ -3065,6 +3076,223 @@ fn coverage_merges_seeds_and_writes_the_profile() {
         assert_eq!(place, [4u64, 8, 4, 17].map(serde_json::Value::from).each_ref(), "{arm}");
         assert_eq!(row["arm_line"].as_u64(), arm_line, "{arm}");
     }
+    // `--seed-base 1 --seeds 2` runs seeds 1 and 2: by hand, 1 fails and 2 passes.
+    let (status, stdout, stderr) = law.run(&["test", "app", "--sim", "--seeds", "2", "--seed-base", "1", "--json"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let rows: Vec<_> = report["tests"].as_array().unwrap().iter().map(|r| (r["seed"].clone(), r["passed"].clone())).collect();
+    assert_eq!(rows, [(1.into(), false.into()), (2.into(), true.into())]);
+}
+
+/// Coverage C4 "Merge" and "The profile" (`docs/coverage.md`), on two
+/// profiles worked by hand. One build runs `t1` at seed 0, which passes and
+/// reaches f's entry and `yes`, and `t2` unseeded, which fails and reaches
+/// f's entry and `no` and g's entry, a site t1's map does not hold. Sorted
+/// keys are f#e, f's `no`, f's `yes`, g#e (`#` sorts before `@`), so t1's
+/// reached set is bits 0 and 2, byte 5, "BQ==", and t2's is bits 0, 1 and 3,
+/// byte 11, "Cw==". The report reads back as the merged profile, and the
+/// conflicts a merge refuses are refused.
+#[test]
+fn coverage_profiles_merge_read_back_and_refuse_conflicts() {
+    use crate::coverage::{Build, Function, Place, Profile, SiteMap};
+    let build = Build { engine: "cranelift".into(), optimize: false, target: "x86_64-unknown-linux-gnu".into() };
+    let site = |function: &str, arm: Option<&str>, line: u64| crate::coverage::Site {
+        arm: arm.map(str::to_owned),
+        definition: function.into(),
+        function: function.into(),
+        place: Place { file: Some("main.hirsel".into()), line: Some(line), ..Place::default() },
+        passed_runs: 0,
+        failed_runs: 0,
+    };
+    let (f, g) = ("app@1/main/f", "app@1/main/g");
+    let (entry, no, yes, g_entry) = ("app@1/main/f#e", "app@1/main/f@10-15.0:no", "app@1/main/f@10-15.0:yes", "app@1/main/g#e");
+    let sources = |pairs: &[(&str, &str)]| -> BTreeMap<String, Function> {
+        pairs.iter().map(|(name, src)| ((*name).to_owned(), Function { src: Some((*src).to_owned()), place: Place::default() })).collect()
+    };
+    let run = |build: &Build, test: &str, seed, passed, flags: [bool; 3], extra: bool, f_src: &str, yes_line: u64| {
+        let mut observed = vec![
+            (entry.to_owned(), site(f, None, 3), flags[0]),
+            (no.to_owned(), site(f, Some("no"), 4), flags[1]),
+            (yes.to_owned(), site(f, Some("yes"), yes_line), flags[2]),
+        ];
+        let mut functions = vec![(f, f_src)];
+        if extra {
+            observed.push((g_entry.to_owned(), site(g, None, 8), true));
+            functions.push((g, "src-g"));
+        }
+        let (mut profile, _) = Profile::of_run(build, test, seed, passed, Some(observed), true);
+        profile.functions = sources(&functions);
+        profile
+    };
+    let a = run(&build, "app@1/main/t1", Some(0), true, [true, false, true], false, "src-f", 4);
+    let b = run(&build, "app@1/main/t2", None, false, [true, true, false], true, "src-f", 4);
+    let mut merged = a.clone();
+    merged.merge(b.clone()).expect("two runs of one build that share f merge");
+    let document = merged.report(None, None).document;
+    let counts: Vec<(&str, u64, u64)> = document["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["site"].as_str().unwrap(), r["passed_runs"].as_u64().unwrap(), r["failed_runs"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(counts, [(entry, 1, 1), (no, 0, 1), (yes, 1, 0), (g_entry, 0, 1)]);
+    let tests: Vec<(&str, serde_json::Value, &str)> = document["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["definition"].as_str().unwrap(), r["seeds"].clone(), r["reached"].as_str().unwrap()))
+        .collect();
+    assert_eq!(tests, [("app@1/main/t1", serde_json::json!([[0, 0]]), "BQ=="), ("app@1/main/t2", serde_json::json!([null]), "Cw==")]);
+    assert_eq!((&document["runs"], &document["failed_runs"], &document["hirsel_coverage"]), (&2.into(), &1.into(), &2.into()));
+    assert_eq!(Profile::from_json(&document), Ok(merged.clone()));
+
+    // The same run on another engine is another run: C3's profiles merge.
+    let llvm = Build { engine: "llvm".into(), ..build.clone() };
+    let mut engines = merged.clone();
+    engines.merge(run(&llvm, "app@1/main/t2", None, false, [true, true, false], true, "src-f", 4)).unwrap();
+    assert_eq!((engines.runs, engines.tests.len()), (3, 3));
+
+    let refusal = |other: Profile| merged.clone().merge(other).unwrap_err().0;
+    assert_eq!(refusal(b.clone()), "the run of app@1/main/t2 on cranelift is in both profiles");
+    assert_eq!(
+        refusal(run(&build, "app@1/main/t3", Some(5), true, [true, false, false], false, "src-f2", 4)),
+        "app@1/main/f has source src-f in one input and src-f2 in another: they are builds of different sources"
+    );
+    assert_eq!(
+        refusal(run(&build, "app@1/main/t3", Some(5), true, [true, false, false], false, "src-f", 5)),
+        "site app@1/main/f@10-15.0:yes is placed differently in two inputs: they are builds of different sources"
+    );
+    let mut old = document.clone();
+    old["hirsel_coverage"] = 1.into();
+    assert_eq!(Profile::from_json(&old).unwrap_err().0, "profile format 1; this hirsel reads format 2");
+    let map = serde_json::json!({"hirsel_covmap": 2});
+    assert_eq!(SiteMap::from_json(&map).unwrap_err().0, "site map format 2; this hirsel reads format 1");
+}
+
+const PICKS: &str = r#"
+fn classify(s: u64) -> u64 {
+    let mut out = 0u64
+    if s == 1u64 { out = 1u64 }
+    out
+}
+@test
+fn picks() -> Result[(), ()] { if classify(INPUT) == INPUT { Ok(()) } else { Error(()) } }
+"#;
+
+/// Coverage C4 "The coverage tool" (`docs/coverage.md`). Two sources differ
+/// only in `picks`'s input: by hand, input 0 takes `classify`'s `no` and
+/// input 1 its `yes`, so `new` gains `yes` and loses `no`, and `picks`, whose
+/// source differs, is changed and has its own arms left out. The two
+/// profiles are builds of different sources, so merging them is refused; one
+/// profile through `coverage merge` reads back as itself; a raw file made by
+/// hand, read against the `.covmap` the build wrote, gives the run it
+/// records. Lines are PICKS's, the first being its leading break.
+#[test]
+fn coverage_tool_diffs_merges_and_reads_raw_files() {
+    use crate::coverage::{Profile, SiteMap};
+    let law = PackageLaw::new();
+    law.manifest(
+        "app",
+        "app",
+        1,
+        "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 1048576\n",
+    );
+    let (a, b) = (law.path("a.json"), law.path("b.json"));
+    for (input, out) in [("0u64", &a), ("1u64", &b)] {
+        law.write("app/main.hirsel", PICKS.replace("INPUT", input));
+        let built = law.path("built");
+        let (status, stdout, stderr) =
+            law.run(&["test", "app", "-o", built.to_str().unwrap(), "--coverage-out", out.to_str().unwrap()]);
+        assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    }
+    let item = &PICKS[PICKS.find("fn classify").unwrap()..];
+    let start = item.find("s == 1u64").unwrap();
+    let decision = format!("app@1/main/classify@{start}-{}.0", start + "s == 1u64".len());
+    let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
+
+    let (status, stdout, stderr) = law.tool(&["coverage", "diff", a, b, "--json"]);
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    let diff: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(diff["gained"], serde_json::json!([format!("{decision}:yes")]));
+    assert_eq!(diff["lost"], serde_json::json!([format!("{decision}:no")]));
+    assert_eq!(diff["changed_functions"], serde_json::json!(["app@1/main/picks"]));
+    assert_eq!((&diff["reached"]["before"], &diff["reached"]["after"], &diff["selection_changed"]), (&2.into(), &2.into(), &false.into()));
+    let (status, stdout, _) = law.tool(&["coverage", "diff", a, b]);
+    assert_eq!((status, stdout.lines().next()), (Some(0), Some("since base  +1 sites, -1   1 functions changed")));
+
+    let (status, stdout, stderr) = law.tool(&["coverage", "merge", a, b]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    assert!(stderr.contains("app@1/main/picks has source") && stderr.ends_with("they are builds of different sources\n"), "{stderr}");
+    let read = |path: &str| Profile::from_json(&serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()).unwrap();
+    let merged = law.path("merged.json");
+    let (status, stdout, stderr) = law.tool(&["coverage", "merge", a, "--json", "-o", merged.to_str().unwrap()]);
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    assert_eq!(Profile::from_json(&serde_json::from_str(&stdout).unwrap()), Ok(read(a)));
+    assert_eq!(read(merged.to_str().unwrap()), read(a));
+
+    // The one `.covmap`, input 1's build, places classify's arms by hand.
+    let mut maps = Vec::new();
+    let mut dirs = vec![law.path("built")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "covmap") {
+                maps.push(path);
+            }
+        }
+    }
+    let [map_path] = maps.as_slice() else { panic!("{maps:?}") };
+    let map = SiteMap::from_json(&serde_json::from_slice(&std::fs::read(map_path).unwrap()).unwrap()).unwrap();
+    assert_eq!(map.test, "app@1/main/picks");
+    let (id, sites) = map.records.iter().find(|(_, sites)| sites[0].0 == "app@1/main/classify#e").unwrap();
+    let keys: Vec<&str> = sites.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(keys, ["app@1/main/classify#e".to_owned(), format!("{decision}:no"), format!("{decision}:yes")]);
+    for (key, site) in &sites[1..] {
+        let place = &site.place;
+        assert_eq!((place.file.as_deref(), place.line, place.col, place.end_line, place.end_col), (Some("main.hirsel"), Some(4), Some(8), Some(4), Some(17)), "{key}");
+    }
+    assert_eq!((sites[1].1.place.arm_line, sites[2].1.place.arm_line), (None, Some(4)));
+
+    // A raw file ("The raw file") with classify's record flagged entry and
+    // `yes`, seed 7 and a pass; picks's record is absent, so none of its
+    // sites is reached.
+    let mut raw = Vec::new();
+    raw.extend_from_slice(b"HIRSELCV");
+    raw.extend_from_slice(&1u32.to_le_bytes());
+    raw.extend_from_slice(&[0; 4]);
+    raw.extend_from_slice(&56u64.to_le_bytes());
+    raw.extend_from_slice(&48u64.to_le_bytes());
+    raw.extend_from_slice(&1u32.to_le_bytes());
+    raw.extend_from_slice(&1u32.to_le_bytes());
+    raw.extend_from_slice(&7u64.to_le_bytes());
+    raw.extend_from_slice(&0x4544_4F4Eu32.to_le_bytes());
+    raw.extend_from_slice(&[0; 4]);
+    raw.extend_from_slice(&0x5643_4948u32.to_le_bytes());
+    raw.extend_from_slice(&3u32.to_le_bytes());
+    raw.extend((0..32).map(|i| u8::from_str_radix(&id[2 * i..2 * i + 2], 16).unwrap()));
+    raw.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0, 0]);
+    let raw_path = law.path("run.raw");
+    std::fs::write(&raw_path, &raw).unwrap();
+    let (status, stdout, stderr) =
+        law.tool(&["coverage", "merge", raw_path.to_str().unwrap(), "--map", map_path.to_str().unwrap(), "--json"]);
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    let profile: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let test = &profile["tests"][0];
+    assert_eq!((&test["definition"], &test["seeds"], &test["runs"], &test["failed_runs"]), (&"app@1/main/picks".into(), &serde_json::json!([[7, 7]]), &1.into(), &0.into()));
+    let passed: BTreeMap<&str, u64> = profile["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["site"].as_str().unwrap(), r["passed_runs"].as_u64().unwrap()))
+        .filter(|(key, _)| key.starts_with("app@1/main/classify"))
+        .collect();
+    let yes = format!("{decision}:yes");
+    let no = format!("{decision}:no");
+    assert_eq!(passed, BTreeMap::from([("app@1/main/classify#e", 1), (no.as_str(), 0), (yes.as_str(), 1)]));
+    let (status, _, stderr) = law.tool(&["coverage", "merge", raw_path.to_str().unwrap()]);
+    assert_eq!((status, stderr.ends_with("a raw file needs --map\n")), (Some(1), true), "{stderr}");
 }
 
 #[test]

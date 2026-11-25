@@ -1,23 +1,22 @@
 //! Coverage under `hirsel test --coverage` (`docs/coverage.md`): the raw file
 //! a run writes, read against the site map of the executable that wrote it,
-//! folded by test and seed into a [`Profile`], and the report and profile
-//! document drawn from that.
+//! folded by test and seed into a [`Profile`] and placed in the request's
+//! source once, when the request reports; and the `.covmap` a coverage build
+//! writes beside each test executable.
 use crate::CheckProduct;
+use crate::coverage::{Build, Function, Place, Profile, Report, RunCounts, Site, SiteMap, Targets};
 use crate::request::hex;
 use hirsel_core_ids::{ContentHash, DefPath};
 use hirsel_core_ir::coverage::{Fragment, RECORD_HEADER, RECORD_MAGIC, Record, Scope, SiteRow};
 use hirsel_core_ir::source::SourcePositions;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
-use std::{io, path::PathBuf, process::Command, sync::Arc};
+use std::path::{Path, PathBuf};
+use std::{io, process::Command, sync::Arc};
 
 pub(super) const ENV: &str = "HIRSEL_COVERAGE";
 const END_MARK: u32 = 0x4544_4F4E;
-/// Rows each section of the text report lists.
-const TEXT_ROWS: usize = 20;
 
 /// One run's coverage: each record of its executable's map, with the flags the
 /// run set. Positions stay item-relative, so a cached pass is placed against
@@ -95,7 +94,16 @@ pub(crate) fn read(bytes: &[u8], map: &Fragment) -> RunCoverage {
     }
 }
 
-fn records(bytes: &[u8]) -> Result<BTreeMap<ContentHash, Vec<u8>>, String> {
+/// A finished raw file's seed (none when the run had no `--sim` seed) and
+/// whether it recorded a pass; outcome 0, not recorded, reads as failed.
+pub(crate) fn header(bytes: &[u8]) -> Result<(Option<u64>, bool), String> {
+    records(bytes)?;
+    let seed = (word(bytes, 32) == Some(1)).then(|| long(bytes, 40).unwrap());
+    Ok((seed, word(bytes, 36) == Some(1)))
+}
+
+/// The OR-ed flags of each id a raw file holds.
+pub(crate) fn records(bytes: &[u8]) -> Result<BTreeMap<ContentHash, Vec<u8>>, String> {
     if bytes.get(..8) != Some(b"HIRSELCV") || word(bytes, 8) != Some(1) {
         return Err("not a version 1 raw file".into());
     }
@@ -137,528 +145,143 @@ fn records(bytes: &[u8]) -> Result<BTreeMap<ContentHash, Vec<u8>>, String> {
     Ok(raw)
 }
 
-/// The build a run ran on.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct Build {
-    pub engine: &'static str,
-    pub optimize: bool,
-    pub target: String,
+/// The packages of a scope, as the documents name them.
+fn scope_names(scope: &Scope) -> BTreeSet<String> {
+    scope
+        .iter()
+        .map(|p| format!("{}@{}", p.name, p.version))
+        .collect()
 }
 
-impl Build {
-    pub(crate) fn of(options: &crate::NativeOptions) -> Self {
-        Self {
-            engine: match options.backend {
-                crate::Backend::Cranelift => "cranelift",
-                crate::Backend::Llvm => "llvm",
-            },
-            optimize: options.optimize,
-            target: options.target.clone(),
-        }
+/// A site as a run sees it before it is placed.
+fn bare(row: &SiteRow, function: &DefPath) -> Site {
+    Site {
+        arm: row.arm.clone(),
+        definition: row
+            .decision
+            .as_ref()
+            .map_or(function, |d| &d.definition)
+            .to_string(),
+        function: function.to_string(),
+        place: Place::default(),
+        passed_runs: 0,
+        failed_runs: 0,
     }
 }
 
-#[derive(Clone, Debug)]
-struct Site {
-    row: SiteRow,
-    /// The function whose body holds the site.
-    function: DefPath,
-    passed_runs: u64,
-    failed_runs: u64,
+/// Records placed in the request's source: each record's sites, the
+/// functions that hold them, and the in-scope functions none holds.
+struct Placed {
+    records: Vec<(String, Vec<(String, Site)>)>,
+    functions: BTreeMap<String, Function>,
+    unreferenced: BTreeMap<String, Place>,
 }
 
-impl Site {
-    fn entry(&self) -> bool {
-        self.row.arm.is_none()
+fn place(product: &CheckProduct, scope: &Scope, records: &[&Record]) -> io::Result<Placed> {
+    let functions: BTreeSet<&DefPath> = records.iter().map(|r| &r.function).collect();
+    let unreferenced = unreferenced(product, scope, &functions);
+    let mut items: BTreeSet<DefPath> = functions.iter().map(|&f| f.clone()).collect();
+    items.extend(unreferenced.iter().cloned());
+    for row in records.iter().flat_map(|r| &r.sites) {
+        items.extend(row.decision.iter().map(|p| p.definition.clone()));
+        items.extend(row.target.iter().map(|p| p.definition.clone()));
     }
-
-    fn reached(&self) -> u64 {
-        self.passed_runs + self.failed_runs
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct TestRow {
-    seeds: BTreeSet<Option<u64>>,
-    runs: u64,
-    failed_runs: u64,
-    reached: BTreeSet<String>,
-}
-
-/// What one run reached, for its test row.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RunCounts {
-    pub functions: usize,
-    pub arms: usize,
-}
-
-/// A profile folded by test ("The profile"): site counts over observed runs,
-/// each test's seeds and reached sites, and every selected run.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Profile {
-    builds: BTreeSet<Build>,
-    sites: BTreeMap<String, Site>,
-    tests: BTreeMap<DefPath, TestRow>,
-    /// Every selected run, observed or not: test, seed and build.
-    selection: BTreeSet<(DefPath, Option<u64>, Build)>,
-    runs: u64,
-    failed_runs: u64,
-    unobserved_runs: u64,
-}
-
-impl Profile {
-    /// The profile of one selected run, and what it reached when observed.
-    pub(crate) fn of_run(
-        build: &Build,
-        test: &DefPath,
-        seed: Option<u64>,
-        passed: bool,
-        coverage: &RunCoverage,
-    ) -> (Self, Option<RunCounts>) {
-        let mut profile = Self::default();
-        profile.builds.insert(build.clone());
-        profile
-            .selection
-            .insert((test.clone(), seed, build.clone()));
-        let row = profile.tests.entry(test.clone()).or_default();
-        row.seeds.insert(seed);
-        let RunCoverage::Observed(records) = coverage else {
-            profile.unobserved_runs = 1;
-            return (profile, None);
-        };
-        for (record, flags) in records {
-            for (site, &flag) in record.sites.iter().zip(flags) {
-                profile
+    let items: Vec<_> = items
+        .into_iter()
+        .filter(|path| product.headers.get(path).is_some())
+        .collect();
+    let sources = product.native_sources(&items)?;
+    let places = Places(sources.positions());
+    Ok(Placed {
+        records: records
+            .iter()
+            .map(|record| {
+                let sites = record
                     .sites
-                    .entry(site.key.clone())
-                    .or_insert_with(|| Site {
-                        row: site.clone(),
-                        function: record.function.clone(),
-                        passed_runs: 0,
-                        failed_runs: 0,
-                    });
-                if flag != 0 {
-                    row.reached.insert(site.key.clone());
-                }
-            }
-        }
-        let mut counts = RunCounts {
-            functions: 0,
-            arms: 0,
-        };
-        for key in &row.reached {
-            let site = profile.sites.get_mut(key).unwrap();
-            *if passed {
-                &mut site.passed_runs
-            } else {
-                &mut site.failed_runs
-            } = 1;
-            *if site.entry() {
-                &mut counts.functions
-            } else {
-                &mut counts.arms
-            } += 1;
-        }
-        row.runs = 1;
-        row.failed_runs = u64::from(!passed);
-        profile.runs = 1;
-        profile.failed_runs = u64::from(!passed);
-        (profile, Some(counts))
-    }
-
-    /// Add `other` ("Merge"): sites match by key, counts add, reached sets
-    /// and seeds join. A run in both is refused, since a count cannot be
-    /// taken back.
-    pub(crate) fn merge(&mut self, other: Self) -> Result<(), String> {
-        if let Some((test, seed, build)) = self.selection.intersection(&other.selection).next() {
-            let seed = seed.map_or_else(String::new, |seed| format!(" at seed {seed}"));
-            return Err(format!(
-                "the run of {test}{seed} on {} is in both profiles",
-                build.engine
-            ));
-        }
-        self.builds.extend(other.builds);
-        self.selection.extend(other.selection);
-        for (key, site) in other.sites {
-            match self.sites.entry(key) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(site);
-                }
-                std::collections::btree_map::Entry::Occupied(mut held) => {
-                    held.get_mut().passed_runs += site.passed_runs;
-                    held.get_mut().failed_runs += site.failed_runs;
-                }
-            }
-        }
-        for (test, row) in other.tests {
-            let held = self.tests.entry(test).or_default();
-            held.seeds.extend(row.seeds);
-            held.runs += row.runs;
-            held.failed_runs += row.failed_runs;
-            held.reached.extend(row.reached);
-        }
-        self.runs += other.runs;
-        self.failed_runs += other.failed_runs;
-        self.unobserved_runs += other.unobserved_runs;
-        Ok(())
-    }
-
-    /// The number of sites each test reached and no other test did.
-    pub(crate) fn only(&self) -> BTreeMap<&DefPath, usize> {
-        let mut tests = BTreeMap::<&str, usize>::new();
-        for key in self.tests.values().flat_map(|row| &row.reached) {
-            *tests.entry(key).or_default() += 1;
-        }
-        self.tests
-            .iter()
-            .map(|(test, row)| {
-                (
-                    test,
-                    row.reached
-                        .iter()
-                        .filter(|k| tests[k.as_str()] == 1)
-                        .count(),
-                )
+                    .iter()
+                    .map(|row| (row.key.clone(), places.site(row, &record.function)))
+                    .collect();
+                (hex(record.id), sites)
             })
-            .collect()
-    }
-
-    /// The first 8 bytes, in hex, of SHA-256 over the sorted (definition,
-    /// seed) pair of every selected run, each part framed by its length; a
-    /// seed is its eight little-endian bytes, and no seed is empty.
-    fn digest(&self) -> String {
-        let pairs: BTreeSet<_> = self
-            .selection
-            .iter()
-            .map(|(test, seed, _)| (test.to_string(), *seed))
-            .collect();
-        let mut hash = Sha256::new();
-        for (test, seed) in pairs {
-            crate::law_lock::part(&mut hash, test.as_bytes());
-            crate::law_lock::part(
-                &mut hash,
-                &seed.map_or_else(Vec::new, |s| s.to_le_bytes().to_vec()),
-            );
-        }
-        crate::law_lock::short(hash.finalize().as_ref())
-    }
-
-    fn selection(&self) -> Value {
-        let tests: BTreeSet<_> = self.selection.iter().map(|(test, ..)| test).collect();
-        let runs: BTreeSet<_> = self
-            .selection
-            .iter()
-            .map(|(test, seed, _)| (test, seed))
-            .collect();
-        json!({"tests": tests.len(), "runs": runs.len(), "digest": self.digest()})
-    }
-
-    /// The profile document, the report's `coverage` object and its text.
-    pub(crate) fn report(&self, product: &CheckProduct, scope: &Scope) -> io::Result<Report> {
-        let functions: BTreeSet<&DefPath> = self.sites.values().map(|s| &s.function).collect();
-        let unreferenced = unreferenced(product, scope, &functions);
-        let mut items: BTreeSet<DefPath> = functions.iter().map(|&f| f.clone()).collect();
-        items.extend(unreferenced.iter().cloned());
-        for site in self.sites.values() {
-            items.extend(site.row.decision.iter().map(|p| p.definition.clone()));
-            items.extend(site.row.target.iter().map(|p| p.definition.clone()));
-        }
-        let items: Vec<_> = items
-            .into_iter()
-            .filter(|path| product.headers.get(path).is_some())
-            .collect();
-        let sources = product.native_sources(&items)?;
-        let place = Places(sources.positions());
-        let builds: Vec<_> = self
-            .builds
-            .iter()
-            .map(|b| json!({"engine": b.engine, "optimize": b.optimize, "target": b.target}))
-            .collect();
-        let scope: Vec<_> = scope
-            .iter()
-            .map(|p| format!("{}@{}", p.name, p.version))
-            .collect();
-        let keys: Vec<&String> = self.sites.keys().collect();
-        let function_rows: Vec<Value> = functions
+            .collect(),
+        functions: functions
             .iter()
             .map(|&f| {
-                let mut row = json!({"definition": f.to_string(), "src": crate::law_lock::function_src(product, f)});
-                place.at(&mut row, f, 0, "line", "col", true);
-                row
+                let function = Function {
+                    src: crate::law_lock::function_src(product, f),
+                    place: places.point(f, 0, true),
+                };
+                (f.to_string(), function)
             })
-            .collect();
-        let unreferenced: Vec<Value> = unreferenced
+            .collect(),
+        unreferenced: unreferenced
             .iter()
             .map(|f| {
-                let mut row = json!({"definition": f.to_string()});
-                place.at(&mut row, f, 0, "line", "", true);
-                row
+                let mut place = places.point(f, 0, false);
+                place.col = None;
+                (f.to_string(), place)
             })
-            .collect();
-        let profile = json!({
-            "hirsel_coverage": 1,
-            "builds": builds,
-            "scope": scope,
-            "selection": self.selection(),
-            "runs": self.runs, "failed_runs": self.failed_runs, "unobserved_runs": self.unobserved_runs,
-            "functions": function_rows,
-            "sites": self.sites.iter().map(|(key, site)| {
-                let mut row = place.site(key, site);
-                row["passed_runs"] = site.passed_runs.into();
-                row["failed_runs"] = site.failed_runs.into();
-                row
-            }).collect::<Vec<_>>(),
-            "unreferenced": unreferenced,
-            "tests": self.tests.iter().map(|(test, row)| json!({
-                "definition": test.to_string(),
-                "seeds": seeds(&row.seeds),
-                "runs": row.runs, "failed_runs": row.failed_runs,
-                "reached": crate::call::base64(&bitset(&keys, &row.reached)),
-            })).collect::<Vec<_>>(),
-        });
-        Ok(self.coverage(profile, &place))
-    }
+            .collect(),
+    })
+}
 
-    fn coverage(&self, profile: Value, place: &Places<'_>) -> Report {
-        let entered = |function: &DefPath| {
-            self.sites
-                .get(&format!("{function}#e"))
-                .map_or(0, Site::reached)
-        };
-        let count = |entry: bool, filter: &dyn Fn(&Site) -> bool| {
-            let sites = self
-                .sites
-                .values()
-                .filter(|s| s.entry() == entry && filter(s));
-            let (mut reached, mut total) = (0, 0);
-            for site in sites {
-                total += 1;
-                reached += u64::from(site.reached() > 0);
-            }
-            json!({"reached": reached, "total": total})
-        };
-        // By function, its arms reached and in all.
-        let mut arms = BTreeMap::<String, (u64, u64)>::new();
-        for site in self.sites.values().filter(|s| !s.entry()) {
-            let held = arms.entry(site.function.to_string()).or_default();
-            held.0 += u64::from(site.reached() > 0);
-            held.1 += 1;
-        }
-        let file = |site: &Site| place.file(site);
-        let files: BTreeSet<String> = self.sites.values().filter_map(file).collect();
-        let files: Vec<Value> = files
-            .iter()
-            .map(|name| {
-                let here = |s: &Site| file(s).as_deref() == Some(name);
-                json!({"file": name, "functions": count(true, &here), "arms": count(false, &here)})
-            })
-            .collect();
-        let functions: Vec<Value> = profile["functions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| {
-                let mut row = row.clone();
-                let definition = row["definition"].as_str().unwrap().to_owned();
-                row.as_object_mut().unwrap().remove("col");
-                row["entered_runs"] = self
-                    .sites
-                    .get(&format!("{definition}#e"))
-                    .map_or(0, Site::reached)
-                    .into();
-                let (reached, total) = arms.get(&definition).copied().unwrap_or_default();
-                row["arms"] = json!({"reached": reached, "total": total});
-                row
-            })
-            .collect();
-        let mut uncovered = Vec::new();
-        for (key, site) in self.sites.iter().filter(|(_, s)| s.reached() == 0) {
-            let entered_runs = entered(&site.function);
-            let mut row = place.site(key, site);
-            if site.entry() {
-                row["state"] = "never entered".into();
-                row["arms"] = arms
-                    .get(&site.function.to_string())
-                    .map_or(0, |a| a.1)
-                    .into();
-            } else if entered_runs == 0 {
-                continue;
-            } else {
-                // The arms of one decision are the keys up to their last `:`.
-                let decision = &key[..=key.rfind(':').unwrap()];
-                let taken = self
-                    .sites
-                    .range::<str, _>((
-                        std::ops::Bound::Included(decision),
-                        std::ops::Bound::Unbounded,
-                    ))
-                    .take_while(|(k, _)| k.starts_with(decision))
-                    .any(|(_, s)| s.reached() > 0);
-                row["state"] = if taken {
-                    "other arm taken"
-                } else {
-                    "decision not reached"
-                }
-                .into();
-                row["entered_runs"] = entered_runs.into();
-            }
-            uncovered.push((entered_runs, key, row));
-        }
-        uncovered.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
-        let totals = json!({
-            "functions": count(true, &|_| true),
-            "arms": count(false, &|_| true),
-            "unreferenced": profile["unreferenced"].as_array().unwrap().len(),
+/// Write `map`, the site map of the coverage executable at `output`, to
+/// `output.covmap` ("The site map"). Coverage is never a verdict, so a map
+/// that cannot be placed or written is reported and the test goes on.
+pub(super) fn write_map(
+    product: &CheckProduct,
+    test: &DefPath,
+    options: &crate::NativeOptions,
+    map: &Fragment,
+) {
+    let Some(scope) = &options.coverage else {
+        return;
+    };
+    let mut path = options.output.clone().into_os_string();
+    path.push(".covmap");
+    let path = PathBuf::from(path);
+    let written =
+        place(product, scope, &map.records.iter().collect::<Vec<_>>()).and_then(|placed| {
+            let map = SiteMap {
+                test: test.to_string(),
+                build: Build::of(options),
+                scope: scope_names(scope),
+                functions: placed.functions,
+                records: placed.records,
+                unreferenced: placed.unreferenced,
+            };
+            std::fs::write(&path, format!("{}\n", map.json()))
         });
-        let text = self.text(&profile, &totals, &files, &uncovered);
-        let coverage = json!({
-            "schema": 1,
-            "builds": profile["builds"], "scope": profile["scope"], "selection": profile["selection"],
-            "runs": self.runs, "failed_runs": self.failed_runs, "unobserved_runs": self.unobserved_runs,
-            "totals": totals,
-            "files": files,
-            "functions": functions,
-            "uncovered": uncovered.into_iter().map(|(_, _, row)| row).collect::<Vec<_>>(),
-            "unreferenced": profile["unreferenced"],
-        });
-        Report {
-            profile,
-            coverage,
-            text,
-        }
-    }
-
-    fn text(
-        &self,
-        profile: &Value,
-        totals: &Value,
-        files: &[Value],
-        uncovered: &[(u64, &String, Value)],
-    ) -> String {
-        let fraction = |v: &Value| format!("{}/{}", v["reached"], v["total"]);
-        let mut text = String::new();
-        let builds: Vec<String> = self
-            .builds
-            .iter()
-            .map(|b| {
-                format!(
-                    "{} {}",
-                    b.engine,
-                    if b.optimize { "release" } else { "dev" }
-                )
-            })
-            .collect();
-        let scope: Vec<&str> = profile["scope"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
-        let selection = &profile["selection"];
-        writeln!(
-            text,
-            "coverage  {}  {}  {} tests, {} runs",
-            scope.join(" "),
-            builds.join(", "),
-            selection["tests"],
-            selection["runs"]
-        )
-        .unwrap();
-        writeln!(
-            text,
-            "  functions {}   arms {}   {} unreferenced",
-            fraction(&totals["functions"]),
-            fraction(&totals["arms"]),
-            totals["unreferenced"]
-        )
-        .unwrap();
-        if self.unobserved_runs > 0 {
-            writeln!(text, "  {} runs unobserved", self.unobserved_runs).unwrap();
-        }
-        for file in files {
-            writeln!(
-                text,
-                "  {:<24} functions {}   arms {}",
-                file["file"].as_str().unwrap(),
-                fraction(&file["functions"]),
-                fraction(&file["arms"])
-            )
-            .unwrap();
-        }
-        let (never, arms): (Vec<_>, Vec<_>) = uncovered
-            .iter()
-            .partition(|(_, _, row)| row["kind"] == "entry");
-        let at = |row: &Value, col: bool| {
-            let mut at = format!("{}:{}", row["file"].as_str().unwrap_or("?"), row["line"]);
-            if col {
-                write!(at, ":{}", row["col"]).unwrap();
-            }
-            at
-        };
-        if !never.is_empty() {
-            writeln!(
-                text,
-                "never entered ({} of {}; --json lists all)",
-                never.len(),
-                totals["functions"]["total"]
-            )
-            .unwrap();
-            for (_, _, row) in never.iter().take(TEXT_ROWS) {
-                writeln!(
-                    text,
-                    "  {:<36} {}",
-                    row["definition"].as_str().unwrap(),
-                    at(row, false)
-                )
-                .unwrap();
-            }
-            more(&mut text, never.len());
-        }
-        if !arms.is_empty() {
-            writeln!(text, "entered, arm not reached (most-entered first)").unwrap();
-            for (entered, _, row) in arms.iter().take(TEXT_ROWS) {
-                writeln!(
-                    text,
-                    "  {}   {}   {}   {}   entered by {entered} runs",
-                    row["definition"].as_str().unwrap(),
-                    at(row, true),
-                    row["arm"].as_str().unwrap(),
-                    row["state"].as_str().unwrap()
-                )
-                .unwrap();
-            }
-            more(&mut text, arms.len());
-        }
-        let only = self.only();
-        for (test, row) in &self.tests {
-            let reached = row.reached.iter().map(|k| &self.sites[k]);
-            let (functions, arms) =
-                reached.fold(
-                    (0, 0),
-                    |(f, a), s| if s.entry() { (f + 1, a) } else { (f, a + 1) },
-                );
-            writeln!(
-                text,
-                "  {test}  coverage {functions} fn, {arms} arms, {} only",
-                only[test]
-            )
-            .unwrap();
-        }
-        text
+    if let Err(error) = written {
+        eprintln!("coverage: {} cannot be written: {error}", path.display());
     }
 }
 
-fn more(text: &mut String, rows: usize) {
-    if rows > TEXT_ROWS {
-        writeln!(text, "  ... {} more", rows - TEXT_ROWS).unwrap();
+/// What `hirsel test` was asked to do with coverage.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Flags {
+    pub on: bool,
+    pub out: Option<PathBuf>,
+    pub base: Option<PathBuf>,
+    pub targets: Option<PathBuf>,
+    pub runs: bool,
+}
+
+impl Flags {
+    /// Coverage is on: asked for, or implied by another coverage option.
+    pub(crate) fn on(&self) -> bool {
+        self.on || self.out.is_some() || self.base.is_some() || self.targets.is_some() || self.runs
     }
 }
 
 /// The coverage of one `hirsel test --coverage`: its runs folded as each
-/// reports, and the counts of each JSON row's run.
+/// reports, the map record of each id they hold, and the counts of each
+/// JSON row's run.
 pub(crate) struct Session {
     build: Build,
+    keep_runs: bool,
     profile: Profile,
+    records: BTreeMap<ContentHash, Record>,
     rows: BTreeMap<usize, Option<RunCounts>>,
 }
 
@@ -672,10 +295,12 @@ impl Session {
             .collect()
     }
 
-    pub(crate) fn new(options: &crate::NativeOptions) -> Self {
+    pub(crate) fn new(options: &crate::NativeOptions, keep_runs: bool) -> Self {
         Self {
             build: Build::of(options),
+            keep_runs,
             profile: Profile::default(),
+            records: BTreeMap::new(),
             rows: BTreeMap::new(),
         }
     }
@@ -689,7 +314,30 @@ impl Session {
         passed: bool,
         coverage: &RunCoverage,
     ) -> String {
-        let (run, counts) = Profile::of_run(&self.build, test, seed, passed, coverage);
+        let observed = match coverage {
+            RunCoverage::Observed(records) => Some(
+                records
+                    .iter()
+                    .flat_map(|(record, flags)| {
+                        self.records
+                            .entry(record.id)
+                            .or_insert_with(|| record.clone());
+                        record.sites.iter().zip(flags).map(|(site, &flag)| {
+                            (site.key.clone(), bare(site, &record.function), flag != 0)
+                        })
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+        let (run, counts) = Profile::of_run(
+            &self.build,
+            &test.to_string(),
+            seed,
+            passed,
+            observed,
+            self.keep_runs,
+        );
         self.profile.merge(run).expect("a run is selected once");
         self.rows.insert(row, counts);
         match (counts, coverage) {
@@ -699,51 +347,81 @@ impl Session {
         }
     }
 
+    /// The profile, placed in the request's source.
+    pub(crate) fn placed(
+        self,
+        product: &CheckProduct,
+        scope: &Scope,
+    ) -> io::Result<(Profile, BTreeMap<usize, Option<RunCounts>>)> {
+        let Self {
+            mut profile,
+            records,
+            rows,
+            ..
+        } = self;
+        let placed = place(product, scope, &records.values().collect::<Vec<_>>())?;
+        for (key, site) in placed.records.into_iter().flat_map(|(_, sites)| sites) {
+            if let Some(held) = profile.sites.get_mut(&key) {
+                held.place = site.place;
+            }
+        }
+        profile.functions = placed.functions;
+        profile.unreferenced = placed.unreferenced;
+        profile.scope = scope_names(scope);
+        Ok((profile, rows))
+    }
+
     /// The report, with each JSON row's `coverage` set: the functions and
     /// arms its run reached, and the sites its test alone reached. Coverage
-    /// is never a verdict, so a profile that cannot be placed or written is
-    /// reported and changes no status.
+    /// is never a verdict, so a profile that cannot be placed or written, or
+    /// a base or targets file that cannot be read, is reported and changes
+    /// no status.
     pub(crate) fn finish(
         self,
         product: &CheckProduct,
         scope: &Scope,
         rows: &mut [Value],
-        out: Option<&std::path::Path>,
+        flags: &Flags,
     ) -> Option<Report> {
-        let report = self
-            .profile
-            .report(product, scope)
+        let (profile, counts) = self
+            .placed(product, scope)
             .map_err(|error| eprintln!("coverage: the profile cannot be placed: {error}"))
             .ok()?;
-        if let Some(path) = out
-            && let Err(error) = std::fs::write(path, format!("{}\n", report.profile))
+        let base = flags.base.as_deref().and_then(|path| {
+            read_profile(path)
+                .map_err(|error| eprintln!("coverage: base {}: {error}", path.display()))
+                .ok()
+        });
+        let targets = flags.targets.as_deref().and_then(|path| {
+            std::fs::read_to_string(path)
+                .map_err(|error| error.to_string())
+                .and_then(|text| Targets::read(&text))
+                .map_err(|error| eprintln!("coverage: targets {}: {error}", path.display()))
+                .ok()
+        });
+        let report = profile.report(targets.as_ref(), base.as_ref());
+        if let Some(path) = &flags.out
+            && let Err(error) = std::fs::write(path, format!("{}\n", report.document))
         {
             eprintln!("coverage: {} cannot be written: {error}", path.display());
         }
-        let only: BTreeMap<String, usize> = self
-            .profile
-            .only()
-            .into_iter()
-            .map(|(test, n)| (test.to_string(), n))
-            .collect();
-        for (index, counts) in self.rows {
+        let only = profile.only();
+        for (index, counts) in counts {
             let row = &mut rows[index];
             let only = row["definition"].as_str().and_then(|test| only.get(test));
             row["coverage"] = counts.map_or(Value::Null, |c| {
-                json!({"functions": c.functions, "arms": c.arms, "only": only.copied().unwrap_or(0)})
+                serde_json::json!({"functions": c.functions, "arms": c.arms, "only": only.copied().unwrap_or(0)})
             });
         }
         Some(report)
     }
 }
 
-/// The report of a profile.
-pub(crate) struct Report {
-    /// The document `--coverage-out` writes.
-    pub profile: Value,
-    /// The `--json` document's top-level `coverage`.
-    pub coverage: Value,
-    pub text: String,
+/// The profile a file holds.
+fn read_profile(path: &Path) -> Result<Profile, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let document: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    Profile::from_json(&document).map_err(|e| e.to_string())
 }
 
 /// A source file's path relative to its package's root. A file no manifest
@@ -759,69 +437,34 @@ fn relative(path: &str, item: &DefPath) -> String {
 struct Places<'a>(SourcePositions<'a>);
 
 impl Places<'_> {
-    /// Set `line`/`col` keys (and `file` when `file` is true) on `row`.
-    fn at(&self, row: &mut Value, item: &DefPath, offset: u32, line: &str, col: &str, file: bool) {
-        if let Some((source, l, c)) = self.0.position(item, offset) {
-            if file {
-                row["file"] = relative(&source.path, item).into();
-            }
-            row[line] = l.into();
-            if !col.is_empty() {
-                row[col] = c.into();
-            }
+    /// The line and column of `offset` in `item`, with its file when `file`.
+    fn point(&self, item: &DefPath, offset: u32, file: bool) -> Place {
+        let mut place = Place::default();
+        if let Some((source, line, col)) = self.0.position(item, offset) {
+            place.file = file.then(|| relative(&source.path, item));
+            place.line = Some(line.into());
+            place.col = Some(col.into());
         }
+        place
     }
 
-    fn file(&self, site: &Site) -> Option<String> {
-        let (item, offset) = match &site.row.decision {
-            Some(decision) => (&decision.definition, decision.start),
-            None => (&site.function, 0),
-        };
-        self.0
-            .position(item, offset)
-            .map(|(source, ..)| relative(&source.path, item))
-    }
-
-    /// A site row with the map's fields for its key ("The site map").
-    fn site(&self, key: &str, site: &Site) -> Value {
-        let mut row = json!({"site": key, "kind": if site.entry() { "entry" } else { "arm" }});
-        match &site.row.decision {
-            None => {
-                row["definition"] = site.function.to_string().into();
-                self.at(&mut row, &site.function, 0, "line", "col", true);
-            }
+    /// A map row placed ("The site map").
+    fn site(&self, row: &SiteRow, function: &DefPath) -> Site {
+        let mut site = bare(row, function);
+        site.place = match &row.decision {
+            None => self.point(function, 0, true),
             Some(decision) => {
-                row["arm"] = site.row.arm.clone().into();
-                row["definition"] = decision.definition.to_string().into();
-                self.at(
-                    &mut row,
-                    &decision.definition,
-                    decision.start,
-                    "line",
-                    "col",
-                    true,
-                );
-                self.at(
-                    &mut row,
-                    &decision.definition,
-                    decision.end,
-                    "end_line",
-                    "end_col",
-                    false,
-                );
-                if let Some(target) = &site.row.target {
-                    self.at(
-                        &mut row,
-                        &target.definition,
-                        target.start,
-                        "arm_line",
-                        "arm_col",
-                        false,
-                    );
+                let mut place = self.point(&decision.definition, decision.start, true);
+                let end = self.point(&decision.definition, decision.end, false);
+                (place.end_line, place.end_col) = (end.line, end.col);
+                if let Some(target) = &row.target {
+                    let arm = self.point(&target.definition, target.start, false);
+                    (place.arm_line, place.arm_col) = (arm.line, arm.col);
                 }
+                place
             }
-        }
-        row
+        };
+        site
     }
 }
 
@@ -847,31 +490,4 @@ fn unreferenced(
         .collect();
     paths.sort();
     paths
-}
-
-/// Seeds as sorted, merged, inclusive ranges; null for a test run without one.
-fn seeds(seeds: &BTreeSet<Option<u64>>) -> Value {
-    let mut ranges: Vec<[u64; 2]> = Vec::new();
-    for &seed in seeds.iter().flatten() {
-        match ranges.last_mut() {
-            Some(range) if range[1].checked_add(1) == Some(seed) => range[1] = seed,
-            _ => ranges.push([seed, seed]),
-        }
-    }
-    if ranges.is_empty() {
-        Value::Null
-    } else {
-        json!(ranges)
-    }
-}
-
-/// Bit `i` set when `keys[i]` is reached, least significant bit first.
-fn bitset(keys: &[&String], reached: &BTreeSet<String>) -> Vec<u8> {
-    let mut bytes = vec![0u8; keys.len().div_ceil(8)];
-    for (i, key) in keys.iter().enumerate() {
-        if reached.contains(*key) {
-            bytes[i / 8] |= 1 << (i % 8);
-        }
-    }
-    bytes
 }

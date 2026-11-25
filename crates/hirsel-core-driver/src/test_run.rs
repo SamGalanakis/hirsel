@@ -12,9 +12,7 @@ mod replay;
 pub use cache::TestCache;
 use cache::test_key;
 use coverage::CoverageCapture;
-#[cfg(test)]
-pub(crate) use coverage::{Build, Profile};
-pub(crate) use coverage::{RunCoverage, Session};
+pub(crate) use coverage::{Flags, RunCoverage, Session, header, records};
 use laws::LawCapture;
 pub(crate) use laws::{LawReport, LawRow, class_rank};
 use std::collections::BTreeMap;
@@ -746,6 +744,9 @@ impl CheckProduct {
             }
             built
         };
+        if let Some(map) = &built.coverage {
+            coverage::write_map(self, test, options, map);
+        }
         let executable = std::fs::canonicalize(&built.executable)?;
         let mut command = runner.test_command(&executable);
         for grant in &options.exec_grants {

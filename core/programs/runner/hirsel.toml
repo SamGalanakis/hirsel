@@ -205,3 +205,8 @@ grants = ["Stdout"]
 # HTTP listener, relay and client tasks.
 [tests.runs."runner@1/runner/refused_front_fails_after_recover_max"]
 limit = 805306368
+
+# L17: a store at the Tiered floor (r = 182,375,272 B, the pager's C + K + P
+# among it), the head, the HTTP listener, the relay and the client tasks.
+[tests.runs."runner@1/runner/keyed_http_join_on_cold_read"]
+limit = 536870912

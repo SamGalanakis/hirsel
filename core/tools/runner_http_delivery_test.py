@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Runner L15 with a native body trace and a fresh process at reopen."""
+"""Run Runner L15 and L17 with a native body trace, and L15 again in a fresh process at reopen."""
 
 import argparse
 import json
@@ -80,6 +80,15 @@ def main():
         if not verdict["passed"] or len(verdict["tests"]) != 1 or "L15 body runs: 3\n" not in verdict["tests"][0]["stderr"]:
             raise RuntimeError(f"L15 trace missing from test verdict {verdict}")
         print("L15 | 3 body runs, bounded expiry and retirement")
+        # L17: two equal keyed sends while the first run is parked on a cold
+        # read complete one run, and the next key's increment one more.
+        joined = run([
+            compiler, "test", RUNNER, "--backend", "cranelift", "--source-std",
+            "--libraries", ROOT / "core", "--filter", "/keyed_http_join_on_cold_read", "--cc", cc, "-j", "4", "--json",
+        ], expected=2, json_output=True)
+        if not joined["passed"] or len(joined["tests"]) != 1 or "L15 body runs: 2\n" not in joined["tests"][0]["stderr"]:
+            raise RuntimeError(f"L17 trace missing from test verdict {joined}")
+        print("L17 | 2 body runs, one per claim")
         fixture(work, compiler, cc)
 
 

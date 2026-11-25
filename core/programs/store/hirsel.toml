@@ -428,6 +428,10 @@ limit = 536870912
 [tests.runs."store@1/store/test_l63_parked_rerun_takes_moved_prior"]
 limit = 536870912
 
+# L63's Directory fixture at its 300,000,000 B Tiered share.
+[tests.runs."store@1/store/test_l63_change_pages_between_cold_snapshots"]
+limit = 536870912
+
 [tests.runs."store@1/store/test_l63_seeded_call_schedule"]
 limit = 536870912
 

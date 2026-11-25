@@ -1,4 +1,8 @@
-pub type StepId: codec + key + send { run: triggers.Id, index: u64 }
+pub type StepId: codec + key + send {
+    run: triggers.Id,
+    index: u64
+}
+
 pub type StepError[E: codec]: codec = Callback(E) | InDoubt(StepId) | StaleAttempt | Cancelled | Cap
 
 pub opaque scoped type Ctx[G: send] {
@@ -7,15 +11,36 @@ pub opaque scoped type Ctx[G: send] {
     index: u64,
 }
 
-type Fingerprint: codec + send { contract: Bytes }
+type Fingerprint: codec + send {
+    contract: Bytes
+}
+
 type SubRow: codec + send = Started(u64, Fingerprint) | Finished(Fingerprint, Bytes)
+
 type Mode: codec + send = First | Resend | Lookup
-type Begin: codec + send { index: u64, fingerprint: Fingerprint, mode: Mode }
-type Finish: codec + send { step: Begin, raw: Bytes }
+
+type Begin: codec + send {
+    index: u64,
+    fingerprint: Fingerprint,
+    mode: Mode
+}
+
+type Finish: codec + send {
+    step: Begin,
+    raw: Bytes
+}
+
 type Command: codec + send = Enter(Begin) | Finalize(Finish)
+
 type Reply: codec + send = Ready | Replay(Bytes) | Doubt | Held | Capped
-type TxRequest: codec + send { index: u64, arg: Bytes }
+
+type TxRequest: codec + send {
+    index: u64,
+    arg: Bytes
+}
+
 const OUTSIDE: u8 = 0
+
 const TRANSACTION: u8 = 1
 
 pub opaque type Tables: shareable + send {
@@ -24,8 +49,13 @@ pub opaque type Tables: shareable + send {
     triggers: triggers.Tables,
 }
 
-fn caps_name() -> String { "store.steps.caps" }
-fn rows_name() -> String { "store.steps.rows" }
+fn caps_name() -> String {
+    "store.steps.caps"
+}
+
+fn rows_name() -> String {
+    "store.steps.rows"
+}
 
 pub fn declare_tables(mut d: store.Declare, take pending: triggers.Tables) -> Result[Tables, store.Error] {
     let caps = store.declare_table(mut d, caps_name(), std.codec.key_bytes(), std.codec.of_u64())?
@@ -63,7 +93,9 @@ fn fingerprint[A, R, E](kind: u8, identity: Bytes, ca: std.codec.Codec[A], cr: s
     std.sha256.add(mut hash, raw, 0u64, list.len(raw))
     let digest = std.sha256.finish(hash)
     let mut result: Bytes = list.with_capacity(32u64)
-    for i in 0u64 .. 32u64 { let _ = list.push(mut result, digest[i]) }
+    for i in 0u64 .. 32u64 {
+        let _ = list.push(mut result, digest[i])
+    }
     Ok(Fingerprint(contract: take result))
 }
 
@@ -85,8 +117,12 @@ fn trigger_write(take changed: Result[(), triggers.Error]) -> Result[(), store.E
 
 fn capped(mut tx: store.Tx, t: Tables, a: triggers.Attempt, index: u64) -> Result[bool, store.Error] {
     let key = run_key(a)?
-    let Some(limit) = store.fetch(tx, t.caps, key)? else { return Error(Missing("step cap")) }
-    if index < limit { return Ok(false) }
+    let Some(limit) = store.fetch(tx, t.caps, key)? else {
+        return Error(Missing("step cap"))
+    }
+    if index < limit {
+        return Ok(false)
+    }
     trigger_write(triggers.finish(mut tx, t.triggers, a, Cap))?
     Ok(true)
 }
@@ -97,22 +133,33 @@ fn hold(mut tx: store.Tx, t: Tables, a: triggers.Attempt, index: u64, expected: 
 }
 
 fn start_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take b: Begin) -> Result[Reply, store.Error] {
-    if capped(mut tx, t, a, b.index)? { return Ok(Capped) }
+    if capped(mut tx, t, a, b.index)? {
+        return Ok(Capped)
+    }
     let key = row_key(a, b.index)?
     match store.fetch(tx, t.rows, key)? {
         Some(Finished(take saved, take raw)) => {
-            if saved.contract != b.fingerprint.contract { return hold(mut tx, t, a, b.index, saved, b.fingerprint) }
+            if saved.contract != b.fingerprint.contract {
+                return hold(mut tx, t, a, b.index, saved, b.fingerprint)
+            }
             return Ok(Replay(take raw))
         },
         Some(Started(previous, take saved)) => {
-            if saved.contract != b.fingerprint.contract { return hold(mut tx, t, a, b.index, saved, b.fingerprint) }
+            if saved.contract != b.fingerprint.contract {
+                return hold(mut tx, t, a, b.index, saved, b.fingerprint)
+            }
             match b.mode {
                 First => return Ok(Doubt),
                 Lookup => return Ok(Ready),
-                Resend => if previous >= triggers.number(a) { return Ok(Doubt) },
+                Resend => if previous >= triggers.number(a) {
+                    return Ok(Doubt)
+                },
             }
         },
-        None => match b.mode { First => (), _ => return Ok(Doubt) },
+        None => match b.mode {
+            First => (),
+            _ => return Ok(Doubt)
+        },
     }
     let Begin(index: _, fingerprint: take encoded, mode: _) = take b
     store.put(mut tx, t.rows, key, Started(triggers.number(a), take encoded))?
@@ -121,11 +168,17 @@ fn start_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take b: Begin
 
 fn finish_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take f: Finish) -> Result[Reply, store.Error] {
     let key = row_key(a, f.step.index)?
-    let Some(Started(attempt, take saved)) = store.fetch(tx, t.rows, key)? else { return Error(Missing("started step")) }
-    if saved.contract != f.step.fingerprint.contract { return hold(mut tx, t, a, f.step.index, saved, f.step.fingerprint) }
+    let Some(Started(attempt, take saved)) = store.fetch(tx, t.rows, key)? else {
+        return Error(Missing("started step"))
+    }
+    if saved.contract != f.step.fingerprint.contract {
+        return hold(mut tx, t, a, f.step.index, saved, f.step.fingerprint)
+    }
     match f.step.mode {
         Lookup => (),
-        _ => if attempt != triggers.number(a) { return Ok(Doubt) },
+        _ => if attempt != triggers.number(a) {
+            return Ok(Doubt)
+        },
     }
     let Finish(step: _, raw: take raw) = take f
     let copied: Bytes = clone(raw)
@@ -147,7 +200,10 @@ pub fn register[G: send, H: shareable + inert + send](mut r: runner.Registry[G, 
 }
 
 fn must[A, E](take value: Result[A, E]) -> A {
-    match take value { Ok(take a) => take a, Error(_) => fail("step wrapper: rejected value") }
+    match take value {
+        Ok(take a) => take a,
+        Error(_) => fail("step wrapper: rejected value")
+    }
 }
 
 fn dispatch[F, A: codec, E: codec](route: runner.TriggerContext, f: StaticFn[F], arg: A) -> Result[Reply, StepError[E]] waits {
@@ -166,7 +222,10 @@ fn dispatch[F, A: codec, E: codec](route: runner.TriggerContext, f: StaticFn[F],
         },
         Error(StaleAttempt) => Error(StaleAttempt),
         Error(Cancelled) => Error(Cancelled),
-        Error(Closed) => { task.check_cancel(); Error(StaleAttempt) },
+        Error(Closed) => {
+            task.check_cancel();
+            Error(StaleAttempt)
+        },
         _ => fail("step wrapper: place call failed"),
     }
 }
@@ -180,8 +239,7 @@ pub fn schedule[A](mut tx: store.Tx, t: Tables, entries: triggers.Entries, targe
     }
 }
 
-pub fn run[G: send, A: codec, R: codec, E: codec](route: runner.TriggerContext, take grants: Map[u64, G],
-    take a: A, body: fn(mut Ctx[G], take A) -> Result[R, StepError[E]] waits) -> Result[R, StepError[E]] waits {
+pub fn run[G: send, A: codec, R: codec, E: codec](route: runner.TriggerContext, take grants: Map[u64, G], take a: A, body: fn(mut Ctx[G], take A) -> Result[R, StepError[E]] waits) -> Result[R, StepError[E]] waits {
     let mut ctx = Ctx(route: view route, grants: take grants, index: 0u64)
     body(mut ctx, take a)
 }
@@ -190,7 +248,9 @@ pub fn next_id[G: send](ctx: Ctx[G]) -> StepId {
     StepId(run: triggers.run_id(runner.trigger_attempt(ctx.route)), index: ctx.index)
 }
 
-pub fn outside_key(id: StepId) -> Result[Bytes, store.Error] { encode(id) }
+pub fn outside_key(id: StepId) -> Result[Bytes, store.Error] {
+    encode(id)
+}
 
 fn reply_value[G: send, R: codec, E: codec](mut ctx: Ctx[G], take reply: Reply) -> Result[R, StepError[E]] {
     match take reply {
@@ -246,12 +306,16 @@ fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, ta
 
 fn unkeyed_outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take request: Begin, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     let invoke = code.callable(f)
-    outside(mut ctx, take a, take request, scoped fn(grant: G, _id: StepId, take arg: A) -> Result[R, E] waits { invoke(grant, take arg) })
+    outside(mut ctx, take a, take request, scoped fn(grant: G, _id: StepId, take arg: A) -> Result[R, E] waits {
+        invoke(grant, take arg)
+    })
 }
 
 fn keyed_outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take request: Begin, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     let invoke = code.callable(f)
-    outside(mut ctx, take a, take request, scoped fn(grant: G, id: StepId, take arg: A) -> Result[R, E] waits { invoke(grant, must(outside_key(id)), take arg) })
+    outside(mut ctx, take a, take request, scoped fn(grant: G, id: StepId, take arg: A) -> Result[R, E] waits {
+        invoke(grant, must(outside_key(id)), take arg)
+    })
 }
 
 pub fn step[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
@@ -260,13 +324,17 @@ pub fn step[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f
 }
 
 pub fn resend[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
-    if id != next_id(ctx) { return Error(StaleAttempt) }
+    if id != next_id(ctx) {
+        return Error(StaleAttempt)
+    }
     let request = outside_request(ctx.index, a, f, Resend)
     unkeyed_outside(mut ctx, take a, take request, f)
 }
 
 pub fn resolve[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits], lookup: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
-    if id != next_id(ctx) { return Error(StaleAttempt) }
+    if id != next_id(ctx) {
+        return Error(StaleAttempt)
+    }
     let request = outside_request(ctx.index, a, f, Lookup)
     unkeyed_outside(mut ctx, take a, take request, lookup)
 }
@@ -278,20 +346,26 @@ pub fn keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, 
 }
 
 pub fn resend_keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
-    if id != next_id(ctx) { return Error(StaleAttempt) }
+    if id != next_id(ctx) {
+        return Error(StaleAttempt)
+    }
     let request = keyed_request(ctx.index, a, f, Resend)
     keyed_outside(mut ctx, take a, take request, f)
 }
 
 pub fn resolve_keyed[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits], lookup: StaticFn[fn(G, Bytes, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
-    if id != next_id(ctx) { return Error(StaleAttempt) }
+    if id != next_id(ctx) {
+        return Error(StaleAttempt)
+    }
     let request = keyed_request(ctx.index, a, f, Lookup)
     keyed_outside(mut ctx, take a, take request, lookup)
 }
 
 fn transaction_body[App: inert + send, A: codec, R: codec, E: codec](mut tx: store.Tx, t: Tables, app: App, a: triggers.Attempt, take request: TxRequest, f: StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]]) -> Result[Reply, store.Error] {
     let index = request.index
-    if capped(mut tx, t, a, index)? { return Ok(Capped) }
+    if capped(mut tx, t, a, index)? {
+        return Ok(Capped)
+    }
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let ce: std.codec.Codec[E] = std.codec.of()
@@ -299,7 +373,9 @@ fn transaction_body[App: inert + send, A: codec, R: codec, E: codec](mut tx: sto
     let row = row_key(a, index)?
     match store.fetch(tx, t.rows, row)? {
         Some(Finished(take saved, take raw)) => {
-            if saved.contract != encoded.contract { return hold(mut tx, t, a, index, saved, encoded) }
+            if saved.contract != encoded.contract {
+                return hold(mut tx, t, a, index, saved, encoded)
+            }
             return Ok(Replay(take raw))
         },
         Some(Started(_, take saved)) => return hold(mut tx, t, a, index, saved, encoded),
@@ -307,19 +383,18 @@ fn transaction_body[App: inert + send, A: codec, R: codec, E: codec](mut tx: sto
     }
     let arg: A = decode(request.arg)?
     let body = code.callable(f)
-    let result = store.rollback_writes_on_error(mut tx, scoped fn(mut draft: store.Tx) -> Result[R, E] { body(mut draft, app, arg) })
+    let result = store.rollback_writes_on_error(mut tx, scoped fn(mut draft: store.Tx) -> Result[R, E] {
+        body(mut draft, app, arg)
+    })
     let raw = encode(result)?
     let data: Bytes = clone(raw)
     store.put(mut tx, t.rows, row, Finished(take encoded, take raw))?
     Ok(Replay(take data))
 }
 
-pub fn register_transaction[G: send, H: shareable + inert + send, App: inert + send, A: codec, R: codec, E: codec](
-    mut r: runner.Registry[G, H], f: StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]],
-    select: fn(H) -> Tables, select_app: fn(H) -> App, encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
+pub fn register_transaction[G: send, H: shareable + inert + send, App: inert + send, A: codec, R: codec, E: codec](mut r: runner.Registry[G, H], f: StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]], select: fn(H) -> Tables, select_app: fn(H) -> App, encoded: u64, steps: u64) -> Result[(), runner.RegisterError] {
     let env = (f, select, select_app)
-    runner.register_attempt(mut r, f, env, fn(mut tx: store.Tx, h: H, a: triggers.Attempt, take request: TxRequest,
-        callbacks: (StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]], fn(H) -> Tables, fn(H) -> App)) -> Result[Reply, store.Error] {
+    runner.register_attempt(mut r, f, env, fn(mut tx: store.Tx, h: H, a: triggers.Attempt, take request: TxRequest, callbacks: (StaticFn[fn(mut store.Tx, App, A) -> Result[R, E]], fn(H) -> Tables, fn(H) -> App)) -> Result[Reply, store.Error] {
         transaction_body(mut tx, (callbacks.1)(h), (callbacks.2)(h), a, take request, callbacks.0)
     }, encoded, steps)
 }

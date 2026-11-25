@@ -449,3 +449,143 @@ fn keyed_http_held_reply_across_expiry(d: Dir, random: Random, tasks: Tasks, net
     result.unwrap(std.dir.remove_all(d, name))
     Ok(())
 }
+
+type KeyedJoinPost: send {
+    net: Net,
+    clock: Clock,
+    address: Addr,
+    credential: Bytes,
+    stream: store.StreamId,
+    replayed: bool,
+    body: Bytes,
+    why: String
+}
+
+fn keyed_join_post(take job: KeyedJoinPost) waits {
+    let KeyedJoinPost(net, clock, address, credential: take credential, stream, replayed, body: take body, why: take why) = take job
+    let reply = http_law_post(net, clock, address, "/old", credential, stream, 0u64, b"{}", 1000u32)
+    keyed_http_expect(reply, 201u16, replayed, body, Some(b"10100"), why)
+}
+
+fn keyed_join_spawn(tasks: Tasks, take job: KeyedJoinPost) -> Task[()] {
+    task.spawn(tasks, bytes 1048576u64, take job, keyed_join_post)
+}
+
+// L17's body: the counter increment with L15's 37-send marker after its read,
+// so the native trace counts only executions that got past the cold page (a
+// parked attempt stops at the read and is run again, RUNNER-SPEC H2).
+fn keyed_join_body(mut tx: store.Tx, h: HttpLawHandles, _caller: Caller, take input: HttpOpInput) -> Result[u64, ()] {
+    if input.name != "saved" {
+        return Error(())
+    }
+    let previous = match result.unwrap(store.fetch(tx, h.counter, 0u64)) {
+        Some(n) => n,
+        None => 0u64
+    }
+    let (to, _from): (Sender[()], Receiver[()]) = channel.new(37u64)
+    for _ in 0u64 .. 37u64 {
+        let _ = channel.try_send(to, ())
+    }
+    result.unwrap(store.put(mut tx, h.counter, 0u64, previous + 1u64))
+    Ok(previous + 1u64)
+}
+
+fn keyed_join_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    transact(mut r, code.describe(keyed_join_body), 65536u64, DEFAULT_STEPS)?
+    let mut binding = http_op_binding(r, "increment", "/old", 201u16)
+    binding.mode = Keyed
+    bind_keyed(mut r, take binding, KeyedRule(claim: keyed_http_law_claim(), retention_ms: 10000, keys_max: 4, principal_keys_max: 4))
+}
+
+fn keyed_cold_join_drive(take job: KeyedHorizonDrive) waits {
+    let KeyedHorizonDrive(head: take head, publisher: take pub_to, clock: time, hand: take clock_hand, random, tasks, net) = take job
+    let birth = host.wall_ms(time)
+    let definition: HttpOpPlace = code.describe(keyed_join_place)
+    let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+    let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let (take relay, take relay_task) = result.unwrap(start_relay(reg, intercept, pub_to, time, tasks, RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 2u64, arg_max: 1024u64)))
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let server_job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock: time, random, tasks, place: definition, previous: None, retired: None, stage: 0u8, stop: None)
+    let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
+    // Two sends of one key with equal arguments, both held at the relay. They
+    // reach the head back to back: the first is admitted and its body parks on
+    // the counter's cold page, and the second joins that run (K-5). Seeded at
+    // 41, the one run replies 42 to both, neither as a replay; a second run
+    // would reply 43 to one of them, and a Duplicate would be a replay.
+    let first = keyed_join_spawn(tasks, KeyedJoinPost(net, clock: time, address, credential: b"token", stream: http_law_stream(birth, 0u32), replayed: false, body: b"\"42\"", why: "the first of two equal sends did not get the one run's outcome"))
+    let second = keyed_join_spawn(tasks, KeyedJoinPost(net, clock: time, address, credential: b"token", stream: http_law_stream(birth, 1u32), replayed: false, body: b"\"42\"", why: "an equal send during a parked run did not join it"))
+    let held_first = l15_head_request(waiting)
+    let held_second = l15_head_request(waiting)
+    result.unwrap(channel.send(head, take held_first))
+    result.unwrap(channel.send(head, take held_second))
+    if let Error(_) = task.join(take first) {
+        fail("the parked run's first send failed")
+    }
+    if let Error(_) = task.join(take second) {
+        fail("the joined send failed")
+    }
+    // The store's oracle: a retry of the key replays 42, and the next key's
+    // increment reads 42 back and replies 43, so exactly one run committed.
+    let replay = keyed_join_spawn(tasks, KeyedJoinPost(net, clock: time, address, credential: b"token", stream: http_law_stream(birth, 2u32), replayed: true, body: b"\"42\"", why: "the joined claim's reply was not saved once"))
+    result.unwrap(channel.send(head, l15_head_request(waiting)))
+    if let Error(_) = task.join(take replay) {
+        fail("the joined claim's retry failed")
+    }
+    let next = keyed_join_spawn(tasks, KeyedJoinPost(net, clock: time, address, credential: b"other", stream: http_law_stream(birth, 3u32), replayed: false, body: b"\"43\"", why: "two equal sends committed other than one increment"))
+    result.unwrap(channel.send(head, l15_head_request(waiting)))
+    if let Error(_) = task.join(take next) {
+        fail("the next key's send failed")
+    }
+    let _ = std.task.cancel_join(take server)
+    let _ = std.task.cancel_join(take relay_task)
+    let _ = take head
+    let _ = take clock_hand
+}
+
+// L17 (http.md H9, K-5): two keyed sends with equal digests run one body, and
+// both get its outcome. The counter table is Tiered (STORE-SPEC §13.8,
+// set_residency) and the store is reopened, so the first run parks on a cold
+// read and the second send arrives while it is parked. The oracle is the body's
+// execution count: core/tools/runner_http_delivery_test.py runs this law under
+// the native trace and requires 2 completed runs (this claim and "other").
+@test
+fn keyed_http_join_on_cold_read(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let (clock, take wall) = provide.clock(0u64, 100u64)
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let definition: HttpOpPlace = code.describe(keyed_join_place)
+    // The Tiered plan's floor at a 2 GiB share (STORE-SPEC §1.1, L70).
+    let mut sizes = store.derived_sizes()
+    sizes.resident_limit = Some(182375272u64)
+    let mut options = result.unwrap(store.sized_with(Directory, 2147483648u64, sizes))
+    let mut seeding = result.unwrap(store.open(tasks, dir, clock, random, options))
+    let (_, take seeded, _, _) = result.unwrap(head_prepare(mut seeding, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let put = store.run(mut seeding, None, store.copy_env(seeded.counter), fn(mut tx: store.Tx, counter: store.Table[u64, u64]) -> Result[(), store.Error] {
+        store.put(mut tx, counter, 0u64, 41u64)
+    })
+    match take put {
+        Ok(Committed(_)) => (),
+        _ => fail("the counter's seed did not commit"),
+    }
+    let (_, counter_id) = store.table_identity(seeded.counter)
+    result.unwrap(store.set_residency(mut seeding, counter_id, Tiered))
+    result.unwrap(store.close(take seeding))
+    options.create = false
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Reopen, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let mail = result.unwrap(mailbox(16u64))
+    let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock, hand: take wall, random, tasks, net)
+    let work = task.spawn(tasks, bytes 16777216u64, take seed, keyed_cold_join_drive)
+    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    if let Error(take problem) = started {
+        fail(start_text(Open(take problem)))
+    }
+    match task.join(take work) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+    result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}

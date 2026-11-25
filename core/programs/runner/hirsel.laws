@@ -24,6 +24,7 @@ runner@1/runner/journal_test_trigger_transact src=eb709bcbb457a651 sig=f8f267a54
 runner@1/runner/keyed_http_claim_route_and_alias src=61458284369a4641 sig=d6b923b67ce73c9b run=ab73c978eb9eebf6 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_held_reply_across_expiry src=90fd16bf346a60c4 sig=fa45e65a3ab3d93e run=ab73c978eb9eebf6 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_horizon_at_deciding_admission src=1b73bc765b22e38f sig=15b32568130e44cc run=ab73c978eb9eebf6 bug=- oracle=- rows=pending
+runner@1/runner/keyed_http_join_on_cold_read src=97aeb48313ea5eb9 sig=dfef290f11180d34 run=4d45e6fc0748fdb8 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_quota_refuses_with_503 src=959c7b223171e88f sig=3f8d240e04766315 run=ab73c978eb9eebf6 bug=- oracle=- rows=pending
 runner@1/runner/law_trigger_model src=c3d3d85d8462359f sig=472792d722fe5655 run=4e2c39d888a20f27 bug=- oracle=- rows=pending
 runner@1/runner/leaving_sub_does_not_block_successor src=3244b7ac0dd46caa sig=f9c8d7a1a64a69ec run=dbf6722727633166 bug=- oracle=- rows=pending

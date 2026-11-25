@@ -1,5 +1,4 @@
 // L63 (a), (b): a call's Tiered reads abort and rerun (§13.3 "Abort and rerun").
-
 // Rows 1, 3, 5 in a Cold `rows` collection with the pager running, plus a Hot
 // `marks` table the bodies write to.
 fn l63_call_fixture(d: Dir, c: Clock, tasks: Tasks, call: scoped[view] fn(mut Db, (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits) -> Result[(), Error] waits {
@@ -210,8 +209,7 @@ fn test_l63_served_miss_reruns_and_commits_once(d: Dir, c: Clock, tasks: Tasks) 
 
 // Polls and resumes a served call until it is decided, waiting on the park
 // notices while it is parked (§13.3a "Polling").
-fn l63_settle[E: inert](mut db: Db, take first: Result[Served, ServeError], handles: E,
-    body: fn(mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
+fn l63_settle[E: inert](mut db: Db, take first: Result[Served, ServeError], handles: E, body: fn(mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
     let mut served = take first
     for _ in 0u64 .. 32 {
         let p = match take served {
@@ -460,7 +458,9 @@ fn l63_parked_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
     let k = logical_key(rows.id, key_word(4))?
     let mut prior: Option[u32] = None
     for op in frame.data {
-        if op.key == k { prior = Some(op.prior) }
+        if op.key == k {
+            prior = Some(op.prior)
+        }
     }
     if prior != Some(7) {
         fail("L63 (d): A's put of key 4 carries prior 1 + |40|, the moved head's value")
@@ -479,16 +479,101 @@ fn test_l63_parked_rerun_takes_moved_prior(d: Dir, c: Clock, r: Random, tasks: T
     l63_parked_prior(d, c, r, tasks)
 }
 
+// Every change between `a` and `b` over the whole key space, one page at a
+// time under `limits`, each page resumed where the last one stopped.
+fn l63_paged_changes(read_handle: Reader, a: Snapshot, b: Snapshot, limits: Limits) -> Result[List[Change], Error] waits {
+    let mut low: Bytes = list.new()
+    let mut hi: Bytes = list.new()
+    list.push(mut hi, 255u8)
+    let mut all: List[Change] = list.new()
+    loop {
+        let page = changes_page(read_handle, Some(clone(a)), b, low, hi, limits)?
+        if list.len(page.trimmed) != 0 || list.len(page.bounds) != 0 {
+            fail("L63 (j): a table diff has no trims or bounds")
+        }
+        let ChangePage(changes: take rows, next: take resume, ..) = take page
+        for take change in take rows {
+            list.push(mut all, take change)
+        }
+        let Some(take next_low) = take resume else {
+            break
+        }
+        low = take next_low
+    }
+    Ok(take all)
+}
+
+// `seen` is the hand-derived forward diff: rows {1, 3, 5} (Cold) against
+// {1, 2, 5} puts `added` and deletes `deleted`, and the Memory neighbor's row
+// 7 is put in the target only.
+fn l63_check_diff(seen: List[Change], rows_handle: Table[u64, u32], neighbor: Table[u64, u32], added: (u64, u32), deleted: u64, why: String) -> Result[(), Error] {
+    if list.len(seen) != 3 {
+        fail(clone(why))
+    }
+    let (first, second) = if added.0 < deleted {
+        (0u64, 1u64)
+    } else {
+        (1u64, 0u64)
+    }
+    l62_check_span_row(seen[first], rows_handle, added.0, added.1)?
+    if seen[second].tree_key != log_key(rows_handle.id, deleted)? || seen[second].value != None {
+        fail(clone(why))
+    }
+    l62_check_span_row(seen[2u64], neighbor, 7, 70)
+}
+
+// L63 (j), changes_page between two Snapshots (§1.5): on (d)'s Directory store,
+// reopened so the Tiered collection's rows {1, 3, 5} are Cold, the base is the
+// reopened head, and the target is a commit that puts 2 and deletes 3 through
+// the pager, beside a put of 7 to the Memory `marks` table. Each direction's
+// diff is read whole and one row per page; the backward diff's put of row 3 is
+// read from the base's Cold page.
+@test
+fn test_l63_change_pages_between_cold_snapshots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let (_, _, take opened, take rows, take marks) = l63_directory_fixture(d, c, r, tasks)?
+    let mut db = take opened
+    let base = snapshot(db)
+    l63_cold_snapshot_diffs(mut db, base, rows, marks)?
+    close(take db)
+}
+
+fn l63_cold_snapshot_diffs(mut db: Db, base: Snapshot, rows_handle: Table[u64, u32], neighbor: Table[u64, u32]) -> Result[(), Error] waits {
+    let pair: (Table[u64, u32], Table[u64, u32]) = (clone(rows_handle), clone(neighbor))
+    let Committed(_) = run(mut db, Some(1048576u64), copy_env(pair), fn(mut tx: Tx, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] {
+        put(mut tx, handles.0, 2u64, 20u32)?
+        let _ = delete(mut tx, handles.0, 3u64)?
+        put(mut tx, handles.1, 7u64, 70u32)
+    })? else {
+        fail("L63 (j): the target's commit did not commit")
+    }
+    let target = snapshot(db)
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let whole = Limits(rows: 64, byte_limit: VALUE_LIMIT + 1048576)
+    let single = Limits(rows: 1, byte_limit: 1)
+    l63_check_diff(l63_paged_changes(read_handle, base, target, whole)?, rows_handle, neighbor, (2u64, 20u32), 3u64, "L63 (j): the forward diff of two Cold Snapshots")?
+    l63_check_diff(l63_paged_changes(read_handle, base, target, single)?, rows_handle, neighbor, (2u64, 20u32), 3u64, "L63 (j): the forward diff resumed one row at a time")?
+    let backward = l63_paged_changes(read_handle, target, base, single)?
+    if list.len(backward) != 3 || backward[0u64].tree_key != log_key(rows_handle.id, 2)? || backward[0u64].value != None || backward[2u64].tree_key != log_key(neighbor.id, 7)? || backward[2u64].value != None {
+        fail("L63 (j): the backward diff deletes the target's put and the neighbor's row")
+    }
+    l62_check_span_row(backward[1u64], rows_handle, 3, 30)
+}
+
 // TURSO #2: one seeded call's body. It reads Cold row `env.2` and mark
 // `env.3`, adds the row (absent is 0) plus 1 to the mark, and replies with
 // the mark it read * 1000000 + the row + 1. A missed attempt replies 0.
 fn l63_schedule_body(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32], u64, u64)) -> Result[Bytes, Bytes] {
-    let Ok(seen) = fetch(tx, env.0, env.2) else { return Ok(key_word(0)) }
+    let Ok(seen) = fetch(tx, env.0, env.2) else {
+        return Ok(key_word(0))
+    }
     let old = match fetch(tx, env.1, env.3) {
         Ok(Some(m)) => m,
         _ => 0u32,
     }
-    let add = match seen { Some(v) => v, None => 0u32 }
+    let add = match seen {
+        Some(v) => v,
+        None => 0u32
+    }
     result.unwrap(put(mut tx, env.1, env.3, old + add + 1))
     Ok(schedule_reply(old, add))
 }
@@ -509,8 +594,14 @@ type ScheduleModel {
 // A call committed at the model's head: it read the model there (L62), so its
 // reply is the model's, its one write lands, and the head moves by one (L63).
 fn schedule_commit(db: Db, mut model: ScheduleModel, env: (Table[u64, u32], Table[u64, u32], u64, u64), answer: Bytes) {
-    let old = match option.copied(map.get(model.marks, env.3)) { Some(m) => m, None => 0u32 }
-    let add = match option.copied(map.get(model.rows, env.2)) { Some(v) => v, None => 0u32 }
+    let old = match option.copied(map.get(model.marks, env.3)) {
+        Some(m) => m,
+        None => 0u32
+    }
+    let add = match option.copied(map.get(model.rows, env.2)) {
+        Some(v) => v,
+        None => 0u32
+    }
     if answer != schedule_reply(old, add) {
         fail("L63 schedule: a call's reply is the model's at the head it commits on")
     }
@@ -585,7 +676,11 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             schedule_moved(db, mut model)
         } else if op == 2 {
             let key = 1 + std.rand.below(mut g, 6)
-            let value: Option[u32] = if std.rand.below(mut g, 3) == 0 { None } else { Some(int.truncate(1 + std.rand.below(mut g, 1000))) }
+            let value: Option[u32] = if std.rand.below(mut g, 3) == 0 {
+                None
+            } else {
+                Some(int.truncate(1 + std.rand.below(mut g, 1000)))
+            }
             let Committed(_) = run(mut db, Some(100000), (copy_env(handles.0), key, value), fn(mut tx: Tx, env: (Table[u64, u32], u64, Option[u32])) -> Result[(), Error] {
                 match env.2 {
                     Some(v) => put(mut tx, env.0, env.1, v),
@@ -600,7 +695,9 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             let _ = std.prop.sometimes("held write", true)
             match value {
                 Some(v) => map.insert(mut model.rows, key, v),
-                None => { let _ = map.remove(mut model.rows, key) },
+                None => {
+                    let _ = map.remove(mut model.rows, key)
+                },
             }
             schedule_moved(db, mut model)
         } else if op == 3 && list.len(parked) != 0 {
@@ -610,7 +707,9 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             let was_ready = list.contains(ready, park_id(p))
             match resume_parked(mut db, take p, copy_env(env), l63_schedule_body) {
                 Ok(Parked(take again)) => {
-                    if was_ready { let _ = std.prop.sometimes("resume parks again", true) }
+                    if was_ready {
+                        let _ = std.prop.sometimes("resume parks again", true)
+                    }
                     list.push(mut parked, (take again, take env))
                 },
                 Ok(Committed(receipt)) => {

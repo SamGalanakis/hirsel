@@ -177,27 +177,7 @@ fn definition_inputs(
     let mut src = Sha256::new();
     for (path, item) in source {
         part(&mut src, path.as_bytes());
-        let text = item.source_text();
-        let mut from = 0;
-        let mut content = String::with_capacity(text.len());
-        for token in
-            &item.tree.tokens[item.range.tokens.start as usize..item.range.tokens.end as usize]
-        {
-            if !token.kind.is_trivia()
-                || token.span.start < item.file_offset
-                || token.span.end > item.range.end
-            {
-                continue;
-            }
-            let start = (token.span.start - item.file_offset) as usize;
-            let end = (token.span.end - item.file_offset) as usize;
-            if text[start..end].starts_with("///") {
-                content.push_str(&text[from..start]);
-                from = end;
-            }
-        }
-        content.push_str(&text[from..]);
-        part(&mut src, content.as_bytes());
+        part(&mut src, without_docs(&item).as_bytes());
     }
     let mut sig = Sha256::new();
     for (identity, digest) in signatures.into_values() {
@@ -229,12 +209,49 @@ fn resolved_constructors(
         .collect()
 }
 
-fn part(hash: &mut Sha256, bytes: &[u8]) {
+/// An item's source text with its `///` doc comments removed, so a doc edit
+/// changes no `src`.
+fn without_docs(item: &Item<'_>) -> String {
+    let text = item.source_text();
+    let mut from = 0;
+    let mut content = String::with_capacity(text.len());
+    for token in &item.tree.tokens[item.range.tokens.start as usize..item.range.tokens.end as usize]
+    {
+        if !token.kind.is_trivia()
+            || token.span.start < item.file_offset
+            || token.span.end > item.range.end
+        {
+            continue;
+        }
+        let start = (token.span.start - item.file_offset) as usize;
+        let end = (token.span.end - item.file_offset) as usize;
+        if text[start..end].starts_with("///") {
+            content.push_str(&text[from..start]);
+            from = end;
+        }
+    }
+    content.push_str(&text[from..]);
+    content
+}
+
+/// A source function's `src` (docs/coverage.md, "The site map"): the short
+/// hash of its source without doc comments, framed by its length.
+pub(crate) fn function_src(product: &CheckProduct, path: &DefPath) -> Option<String> {
+    let header = product.headers.row(product.headers.id(path)?)?;
+    let mut src = Sha256::new();
+    part(
+        &mut src,
+        without_docs(&source_item(product, header)?).as_bytes(),
+    );
+    Some(short(src.finalize().as_ref()))
+}
+
+pub(crate) fn part(hash: &mut Sha256, bytes: &[u8]) {
     hash.update((bytes.len() as u64).to_le_bytes());
     hash.update(bytes);
 }
 
-fn short(hash: &[u8]) -> String {
+pub(crate) fn short(hash: &[u8]) -> String {
     let mut text = String::with_capacity(16);
     for byte in &hash[..8] {
         write!(&mut text, "{byte:02x}").unwrap();

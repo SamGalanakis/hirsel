@@ -2219,6 +2219,17 @@ fn writes_and_replays(out: Stdout) -> Result[(), ()] {
         "test --replay --expect-verdict Sealed --rerun: {out}\n{err}"
     );
 
+    // `--replay --coverage`: the profile is the recorded run's, one observed
+    // run that entered the test; the sealed replay adds none.
+    let mut covered = base.clone();
+    covered.extend(["--coverage".into(), "--json".into()]);
+    let (code, out, err) = process::tape_request(&covered, dir.path());
+    assert_eq!(code, Some(0), "test --replay --coverage: {out}\n{err}");
+    let coverage = &serde_json::from_str::<serde_json::Value>(&out).unwrap()["coverage"];
+    assert_eq!((&coverage["runs"], &coverage["unobserved_runs"]), (&1.into(), &0.into()), "{coverage}");
+    let entered = coverage["functions"].as_array().unwrap().iter().find(|f| f["definition"] == "app@1/main/writes_and_replays");
+    assert_eq!(entered.map(|f| &f["entered_runs"]), Some(&1.into()), "{coverage}");
+
     let mut wrong_verdict = base;
     wrong_verdict.extend(["--expect-verdict".into(), "Diverged(Arg)".into()]);
     let (code, _, _) = process::tape_request(&wrong_verdict, dir.path());

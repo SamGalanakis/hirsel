@@ -330,6 +330,10 @@ pub struct BuildProduct {
     pub debug_lines: bool,
     /// The walk's and the link's work counters.
     pub reach: crate::reach::ReachCounters,
+    /// A coverage build's site map: the fragments of its linked objects,
+    /// one record per id (`docs/coverage.md`, "The site map").
+    #[serde(skip)]
+    pub(crate) coverage: Option<Arc<hirsel_core_ir::coverage::Fragment>>,
 }
 /// The libLLVM an LLVM object's key takes (`tool_inputs::llvm_library`):
 /// none for Cranelift, which is part of the compiler executable.
@@ -433,7 +437,7 @@ pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::
     // A coverage build's objects depend on its scope. A build without the
     // switch appends nothing, so its keys are the keys it had before coverage.
     if let Some(scope) = &options.coverage {
-        environment.extend(encode(&("coverage", scope))?);
+        environment.extend(encode(&(hirsel_core_ir::coverage::KEY_TAG, scope))?);
     }
     Ok(environment)
 }
@@ -1553,6 +1557,12 @@ fn link_objects(
         None => key("hirsel.core-executable.v9", &(build, entry_plan))?,
     };
     let store = Store::new(&options.store)?;
+    let coverage = options
+        .coverage
+        .is_some()
+        .then(|| crate::native_object::join_coverage(&store, objects.iter().map(|o| o.identity)))
+        .transpose()?
+        .map(Arc::new);
     use crate::native_debug::NativeImage;
     let (binary, linked) = if let Some(binary) = NativeImage::load(&store, link_key)? {
         (binary, false)
@@ -1841,6 +1851,7 @@ fn link_objects(
         observation_mode: options.logical_charge_report.is_some(),
         debug_lines: options.debug_lines,
         reach: counters,
+        coverage,
     };
     // Copy from integrity-checked bytes even on a hit; a damaged materialized file
     // is never trusted as the executable cache product.

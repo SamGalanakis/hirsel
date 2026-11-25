@@ -18,6 +18,10 @@ pub const RECORD_MAGIC: u32 = 0x5643_4948;
 pub const RECORD_HEADER: usize = 40;
 /// The link section that holds every record.
 pub const SECTION: &str = "hirsel_cov";
+/// The name a coverage build's scope enters the native environment under.
+/// It names the map fragment's meaning too, so a fragment built under an
+/// earlier rule is never joined into a later map.
+pub const KEY_TAG: &str = "coverage.v2";
 
 /// An arm of a source decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -190,7 +194,8 @@ pub struct SiteRow {
     pub arm: Option<String>,
     /// An arm's decision; none for an entry, whose place is its function's.
     pub decision: Option<Position>,
-    /// The first anchored position of an arm's target block, when it has one.
+    /// The first anchored position of an arm's target block; none for an
+    /// entry and for an empty arm.
     pub target: Option<Position>,
 }
 
@@ -234,12 +239,17 @@ impl Fragment {
                     target: None,
                 },
                 Kind::Arm { block, arm } => {
-                    let target = body.edges[edge(body, block, arm).index()].target;
-                    let target = &body.blocks[target.index()];
+                    let index = body.edges[edge(body, block, arm).index()].target.index();
+                    let target = &body.blocks[index];
                     let (start, len) = (target.insts.start as usize, target.insts.len as usize);
                     let first = (start..start + len)
-                        .find_map(|i| body.inst_anchors.get(i).copied().flatten())
-                        .or(target.anchor);
+                        .find_map(|i| body.inst_anchors.get(i).copied().flatten());
+                    // An empty arm, such as the `no` of an `if` without `else`,
+                    // reaches a block with no source code of its own that only
+                    // jumps on: it has no position ("The site map", `arm_line`).
+                    let empty =
+                        first.is_none() && matches!(body.terminators[index], Terminator::Jump(_));
+                    let first = first.or(target.anchor).filter(|_| !empty);
                     SiteRow {
                         key: site.key.clone(),
                         arm: Some(arm.to_string()),

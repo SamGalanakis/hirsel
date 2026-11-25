@@ -314,6 +314,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut test_write_laws = false;
     let mut law_baseline = None;
     let mut test_rerun = false;
+    let mut test_coverage = false;
+    let mut coverage_out = None;
     let mut expect_verdict = None;
     let mut diagnose = false;
     let mut grants = crate::package_dir::Grants::default();
@@ -350,6 +352,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::WriteLaws => test_write_laws = true,
             Opt::LawsBaseline => law_baseline = Some(PathBuf::from(value)),
             Opt::Rerun => test_rerun = true,
+            Opt::Coverage => test_coverage = true,
+            Opt::CoverageOut => coverage_out = Some(PathBuf::from(value)),
             Opt::Sim => test_sim = true,
             Opt::PropertyCorpus => corpus_path = Some(PathBuf::from(value)),
             Opt::SimSeeds => {
@@ -529,6 +533,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         .map(crate::law_lock::Baseline::read)
         .transpose()?;
     test_laws |= test_write_laws || law_baseline.is_some();
+    test_coverage |= coverage_out.is_some();
     if test_write_laws && manifest.is_some() {
         return Err("test: --write-laws requires a package directory".into());
     }
@@ -1362,7 +1367,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         return conclude(Outcome::Exit(0));
     }
     let native_options = if native_command && (test_command || accepted) {
-        let options = prepared.expect("a native command prepares its options")?;
+        let mut options = prepared.expect("a native command prepares its options")?;
+        if test_coverage {
+            options.coverage = Some(crate::test_run::Session::scope(&product));
+        }
         if options.logical_charge_report.is_some() {
             eprintln!(
                 "observation build: root peak reservation includes bound, task and grant reservations (MEM-19); timings are not performance samples"
@@ -1414,6 +1422,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         };
         let mut rows = Vec::new();
         let mut failed = false;
+        let mut coverage =
+            test_coverage.then(|| crate::test_run::Session::new(native_options.as_ref().unwrap()));
         let jobs = test_jobs.map_or_else(crate::test_run::affinity_jobs, Ok)?;
         for index in 0..if tests.is_empty() {
             0
@@ -1454,7 +1464,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                         format!(" [property corpus {state}]")
                     });
                     let strength = test_laws.then(|| outcome.laws.strength());
-                    let laws_note = strength.map_or_else(String::new, |class| format!(" {class}"));
+                    let mut laws_note = strength.map_or_else(String::new, |class| format!(" {class}"));
+                    if let Some(session) = &mut coverage {
+                        laws_note.push_str(&session.run(rows.len(), test, seed, passed, &outcome.coverage));
+                    }
                     if !json {
                         if let Some(wall_ms) = wall_ms {
                             if passed {
@@ -1504,6 +1517,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 }
                 Err(error) => {
                     failed = true;
+                    if let Some(session) = &mut coverage {
+                        session.run(rows.len(), test, seed, false, &crate::test_run::RunCoverage::Unobserved("stopped".into()));
+                    }
                     let mut row = serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null});
                     if test_laws {
                         row["law_strength"] = if matches!(error, crate::NativeStop::ForeignRecording { .. }) { "unobserved (FFI-8)" } else { "unobserved" }.into();
@@ -1536,15 +1552,25 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         let law_red = regressions.as_ref().is_some_and(|rows| !rows.is_empty());
         failed |= law_red;
         let passed = !tests.is_empty() && !failed;
+        let coverage = coverage.and_then(|session| {
+            let scope = native_options.as_ref().unwrap().coverage.as_ref().unwrap();
+            session.finish(&product, scope, &mut rows, coverage_out.as_deref())
+        });
         if json {
             let mut report = serde_json::json!({"passed":passed,"tests":rows});
+            if let Some(coverage) = &coverage {
+                report["coverage"] = coverage.coverage.clone();
+            }
             if let Some(regressions) = regressions {
                 report["law_regressions"] = serde_json::json!(regressions);
             }
             println!("{report}");
-        } else if let Some(regressions) = regressions {
-            for red in regressions {
+        } else {
+            for red in regressions.into_iter().flatten() {
                 println!("{red}");
+            }
+            if let Some(coverage) = &coverage {
+                print!("{}", coverage.text);
             }
         }
         if tests.is_empty() && !json {

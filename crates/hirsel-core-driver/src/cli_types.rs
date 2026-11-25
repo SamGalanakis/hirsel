@@ -21,6 +21,8 @@ pub enum OptionId {
     Laws,
     WriteLaws,
     LawsBaseline,
+    Coverage,
+    CoverageOut,
     ExpectVerdict,
     IncludeCredentials,
     Diagnose,

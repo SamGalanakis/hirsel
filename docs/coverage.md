@@ -33,6 +33,14 @@ Version note (2026-11-25, coverage-gen-anchors-2579): the front marks source dec
 only they are sites. The terminators it generates inside an expression keep their anchors
 but no longer count. "Sites" states the final rule. Site keys keep their format.
 
+Version note (2026-11-25, coverage-c2-runner-2577): slice C2 built the runner side:
+`hirsel test --coverage`, `--coverage-out`, the text report and `--json`, the joined site
+map, cached passes with their profile, and `--replay --coverage`. It amended the empty-arm
+rule ("The site map"), the outcome on the runtime's own exit paths ("The raw file"), which
+runs count as unobserved, the seed framing of `selection.digest`, and where `only` is
+printed ("Text"). The map fragment's meaning is now named `coverage.v2` in the environment
+tuple, so no fragment built under C1's target rule is joined into a C2 map.
+
 These are out of scope:
 
 - hit counts, and any reading of coverage by the program it observes;
@@ -302,7 +310,10 @@ A map is one JSON document:
   Unicode scalar values.
 - `line`/`col` to `end_line`/`end_col` is the decision's source range, from its anchor.
 - `arm_line`/`arm_col` is the first anchored position in the arm's target block. It is
-  absent when the arm is empty, as for the `no` arm of an `if` with no `else`.
+  absent when the arm is empty, as for the `no` arm of an `if` with no `else`. An arm is
+  **empty** when its target block holds no anchored instruction and ends in a plain jump.
+- `end_line`/`end_col` is the position of the decision's end offset, so a one-line
+  decision `n == 9u64` at column 8 ends at column 17.
 - `src` is the first 8 bytes, in hex, of SHA-256 over the function's source bytes without
   doc comments, framed by its length in eight little-endian bytes, as in `hirsel.laws`.
 
@@ -348,8 +359,10 @@ the run reads as `unobserved`.
 
 Reading the seed is not an effect of the program: the runtime reads the variable as given and
 leaves it in place. The outcome is written once, by the entry code, from the exit status the
-entry returns: 1 when it is 0, else 2. A run killed or aborted before that, or one that ends
-by calling `exit` directly, leaves outcome 0. A reader counts outcome 0 as failed, because
+entry returns: 1 when it is 0, else 2. The runtime's own paths that end the process
+themselves (the model checker's verdict, and a replay that sealed a recorded deadlock) write
+it first from the status they exit with. A run killed or aborted before that, or one that
+ends by calling `exit` some other way, leaves outcome 0. A reader counts outcome 0 as failed, because
 PROG-4 fails a test that a stop ends.
 
 **Records.** The section copy is a sequence of records, each starting at an 8-byte-aligned
@@ -407,9 +420,13 @@ runner knows all four and records them itself.
   `null` stands for the one run of a test without `--sim`.
 - **`run_rows`** is present only with `--coverage-runs`. Without it, runs are folded by test.
 - **`selection.digest`** is the first 8 bytes, in hex, of SHA-256 over the sorted
-  `definition`/seed pairs of every run, each framed by its length.
-- **`unobserved_runs`** counts runs whose raw file was missing or unfinished. They are in no
-  other count.
+  `definition`/seed pairs of every run, each framed by its length. A seed is its eight
+  little-endian bytes, and the absent seed of a run without `--sim` is empty.
+- **`unobserved_runs`** counts runs whose raw file was missing or unfinished, and runs the
+  runner stopped before they reported (a build or launch failure). They are in no other
+  count, except that a test's `seeds` and `selection` list every selected run.
+- **Passed or failed** is the runner's verdict on the run (PROG-4), not the header's outcome
+  field. A reader without a runner, such as `sim_campaign.py`, uses the field.
 
 **Merge.** Sites match by key. Counts add, bitsets are OR-ed, and seed ranges join. Inputs
 are refused, naming the conflict, when:
@@ -461,7 +478,9 @@ since base  +119 arms, -0   2 functions changed
 
 The text report lists at most 20 rows in each section, then the count left. Rows sort by
 `entered_runs`, largest first, then by key. A test row of `hirsel test --coverage` gains its
-counts after the outcome: `coverage 212 fn, 1490 arms, 7 only`.
+counts after the outcome: `coverage 212 fn, 1490 arms`, the sites that run reached. `only`
+needs every run, so the report ends with one line per test: `TEST  coverage 212 fn,
+1490 arms, 7 only`, its counts over all its runs.
 
 ### `--json`
 
@@ -505,6 +524,9 @@ Each row of `tests` gains a `coverage` object, and the document gains a top-leve
   }
 }
 ```
+
+A row's `functions` and `arms` are the sites its run reached; `only` is its test's, over all
+the test's runs. A row whose run was unobserved has `"coverage": null`.
 
 `uncovered` lists every uncovered row with no limit. With `--laws`, each test row also
 carries `laws` and `law_strength` as the [law table](laws.md#output) says. `hirsel coverage

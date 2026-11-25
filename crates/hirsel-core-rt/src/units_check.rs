@@ -352,6 +352,7 @@ impl State {
         if std::env::var_os("HIRSEL_CHECK_PRINT").is_some() {
             eprintln!("{text}");
         }
+        crate::coverage::exiting(code);
         std::process::exit(code)
     }
 }

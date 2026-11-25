@@ -10,7 +10,7 @@
 //! Only a coverage executable's entry references these functions, so a plain
 //! link has no caller of them.
 use std::os::unix::ffi::OsStringExt as _;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 const MAGIC: &[u8; 8] = b"HIRSELCV";
 const VERSION: u32 = 1;
@@ -20,6 +20,22 @@ const END_OFFSET: i64 = 48;
 
 /// The open raw file, for the outcome; -1 when this run has none.
 static FILE: AtomicI32 = AtomicI32::new(-1);
+/// [`hirsel_core_coverage_outcome`], installed by an open that succeeded, for
+/// the runtime's paths that end the process themselves with status 0 (a
+/// sealed replay, the model checker's verdict) instead of returning to the
+/// entry. Only [`hirsel_core_coverage_open`] names the outcome function, so a
+/// plain link that drops `open` drops it too.
+static OUTCOME: AtomicUsize = AtomicUsize::new(0);
+
+/// Record `status` as the outcome before the runtime itself ends the process.
+pub(crate) fn exiting(status: i32) {
+    let outcome = OUTCOME.load(Ordering::Relaxed);
+    if outcome != 0 {
+        // SAFETY: only `open` stores, and it stores this function's address.
+        let outcome: extern "C" fn(u32) = unsafe { std::mem::transmute(outcome) };
+        outcome(status as u32);
+    }
+}
 
 /// Open the raw file named by `HIRSEL_COVERAGE` over the flag section
 /// `start..start + length`, and remove the variable from the environment.
@@ -45,6 +61,8 @@ pub unsafe extern "C" fn hirsel_core_coverage_open(start: *mut u8, length: u64) 
     // SAFETY: the caller's bounds are the section's, mapped and writable.
     if let Some(fd) = unsafe { open(&path, start, length as usize, seed) } {
         FILE.store(fd, Ordering::Relaxed);
+        let outcome: extern "C" fn(u32) = hirsel_core_coverage_outcome;
+        OUTCOME.store(outcome as usize, Ordering::Relaxed);
     }
 }
 

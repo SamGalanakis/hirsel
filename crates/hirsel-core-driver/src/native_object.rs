@@ -66,7 +66,6 @@ fn put_parts(
 
 /// The map fragment stored with the coverage object named `identity`
 /// ([`crate::native::ObjectProduct::identity`]), when it checks.
-#[expect(dead_code, reason = "the C2 runner capture joins a link's fragments")]
 pub(crate) fn load_coverage(
     store: &Store,
     identity: ContentHash,
@@ -75,6 +74,31 @@ pub(crate) fn load_coverage(
         .get(coverage_name(identity))?
         .and_then(|bytes| decode::<(u32, hirsel_core_ir::coverage::Fragment)>(&bytes))
         .and_then(|(schema, fragment)| (schema == COVERAGE_SCHEMA).then_some(fragment)))
+}
+
+/// A coverage link's site map: the fragment of each linked object named in
+/// `identities`, in link order, keeping the first record of each id. Records
+/// of one id have the same sites; only the code variants' arm positions can
+/// differ, so the first in link order is the one kept. An object with no
+/// fragment here (one from an image store) adds no record, and a raw record
+/// of its id is refused when the file is read.
+pub(crate) fn join_coverage(
+    store: &Store,
+    identities: impl Iterator<Item = ContentHash>,
+) -> io::Result<hirsel_core_ir::coverage::Fragment> {
+    let mut map = hirsel_core_ir::coverage::Fragment::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for identity in identities {
+        for record in load_coverage(store, identity)?
+            .into_iter()
+            .flat_map(|f| f.records)
+        {
+            if seen.insert(record.id) {
+                map.records.push(record);
+            }
+        }
+    }
+    Ok(map)
 }
 
 /// Publish an emitted object and its debug rows with their record under

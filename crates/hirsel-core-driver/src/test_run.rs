@@ -6,9 +6,15 @@ use crate::{CheckProduct, NativeOptions, NativeStop};
 use hirsel_core_ids::{ContentHash, DefPath};
 
 mod cache;
+mod coverage;
 mod laws;
+mod replay;
 pub use cache::TestCache;
 use cache::test_key;
+use coverage::CoverageCapture;
+#[cfg(test)]
+pub(crate) use coverage::{Build, Profile};
+pub(crate) use coverage::{RunCoverage, Session};
 use laws::LawCapture;
 pub(crate) use laws::{LawReport, LawRow, class_rank};
 use std::collections::BTreeMap;
@@ -103,6 +109,7 @@ impl Runner {
             "HIRSEL_RECORD",
             "HIRSEL_RECORD_ID",
             "HIRSEL_LAWS",
+            coverage::ENV,
             SEED_ENV,
             property_corpus::ENV,
         ] {
@@ -122,6 +129,7 @@ pub struct TestOutcome {
     pub wall_time: Duration,
     pub(crate) corpus: Option<&'static str>,
     pub(crate) laws: LawReport,
+    pub(crate) coverage: RunCoverage,
 }
 
 impl TestOutcome {
@@ -261,6 +269,7 @@ struct TestProcess<'a> {
     /// Removed once the run is collected.
     _directory: tempfile::TempDir,
     laws: Option<LawCapture>,
+    coverage: Option<CoverageCapture>,
     foreign: bool,
 }
 
@@ -280,12 +289,17 @@ impl TestProcess<'_> {
                     .as_ref()
                     .map_or_else(LawReport::default, LawCapture::report)
             },
+            coverage: self
+                .coverage
+                .as_ref()
+                .map_or_else(RunCoverage::default, CoverageCapture::report),
         };
         if outcome.passed()
             && (self.laws.is_none() || matches!(outcome.laws, LawReport::Observed(_)))
+            && (self.coverage.is_none() || matches!(outcome.coverage, RunCoverage::Observed(_)))
             && let Some((cache, key)) = self.pass
         {
-            cache.put(key, &outcome.output, &outcome.laws);
+            cache.put(key, &outcome.output, &outcome.laws, &outcome.coverage);
         }
         Ok((outcome, Source::Executed))
     }
@@ -697,7 +711,8 @@ impl CheckProduct {
             });
         if !rerun
             && let Some((cache, key)) = pass
-            && let Some((output, laws)) = cache.get(key, laws.is_some())
+            && let Some((output, laws, coverage)) =
+                cache.get(key, laws.is_some(), options.coverage.is_some())
         {
             return Ok(TestLaunch::Cached(TestOutcome {
                 definition: test.clone(),
@@ -706,6 +721,7 @@ impl CheckProduct {
                 wall_time: Duration::ZERO,
                 corpus: None,
                 laws,
+                coverage,
             }));
         }
         let built = if options.foreign_grants.is_empty() || options.recording {
@@ -744,12 +760,17 @@ impl CheckProduct {
             .then(|| LawCapture::attach(&mut command, self, test, options.instance_limit))
             .flatten();
         let pass = pass.filter(|_| !observe || laws.is_some());
+        let coverage = options
+            .coverage
+            .is_some()
+            .then(|| CoverageCapture::attach(&mut command, built.coverage.as_ref()));
         Ok(TestLaunch::Run(TestProcess {
             command,
             executable,
             pass,
             _directory: directory,
             laws,
+            coverage,
             foreign,
         }))
     }
@@ -794,127 +815,6 @@ impl CheckProduct {
                 | "core@1/core/Tasks" => false,
                 _ => true,
             })
-    }
-
-    /// Run a checked test in the recording build with recording on, require it to
-    /// pass without truncation, then replay that recording and require `Sealed`
-    /// (or `expect_verdict` when given).
-    pub fn run_test_with_replay(
-        &self,
-        test: &DefPath,
-        options: &NativeOptions,
-        timeout: Option<Duration>,
-        runner: &Runner,
-        expect_verdict: Option<&str>,
-    ) -> Result<TestOutcome, NativeStop> {
-        self.run_test_replay(test, options, timeout, runner, expect_verdict, false)
-    }
-
-    fn run_test_replay(
-        &self,
-        test: &DefPath,
-        options: &NativeOptions,
-        timeout: Option<Duration>,
-        runner: &Runner,
-        expect_verdict: Option<&str>,
-        laws: bool,
-    ) -> Result<TestOutcome, NativeStop> {
-        use std::os::unix::fs::PermissionsExt;
-        if !self.test_entries.contains_key(test) {
-            return Err(NativeStop::Entry(format!(
-                "{test} is not a discovered @test"
-            )));
-        }
-        let tape_dir = tempfile::tempdir()?;
-        std::fs::set_permissions(tape_dir.path(), std::fs::Permissions::from_mode(0o700))?;
-        let tape_path = tape_dir.path().join("test.tape");
-        let mut record_options = self.granted(test, options);
-        record_options.recording = true;
-        record_options.replay = None;
-        let built = self.build(test, &record_options)?;
-        let mut cmd = runner.test_command(&std::fs::canonicalize(&built.executable)?);
-        for grant in &record_options.exec_grants {
-            grant.approve(&mut cmd);
-        }
-        cmd.env("HIRSEL_RECORD", &tape_path);
-        let observation = laws
-            .then(|| LawCapture::attach(&mut cmd, self, test, options.instance_limit))
-            .flatten();
-        let directory = private_directory(&mut cmd)?;
-        let (output, timed_out, wall_time) = execute(&mut cmd, timeout)?;
-        let laws = observation
-            .as_ref()
-            .map_or_else(LawReport::default, LawCapture::report);
-        drop(directory);
-        if timed_out || !output.status.success() {
-            return Ok(TestOutcome {
-                definition: test.clone(),
-                output,
-                timed_out,
-                wall_time,
-                corpus: None,
-                laws,
-            });
-        }
-        let record_stderr = String::from_utf8_lossy(&output.stderr);
-        if record_stderr.contains("record: truncated at ") {
-            return Err(NativeStop::Entry(record_stderr.trim().to_owned()));
-        }
-        let mut replay_options = record_options;
-        crate::package_dir::Grants::default().apply(&mut replay_options);
-        replay_options.output = options.output.with_extension("replay");
-        replay_options.replay = Some(crate::ReplayPlan {
-            path: tape_path
-                .to_str()
-                .ok_or_else(|| NativeStop::Entry("tape path is not UTF-8".into()))?
-                .to_owned(),
-            diagnose: false,
-        });
-        let replay_built = self.build(test, &replay_options)?;
-        let mut replay = runner.test_command(&std::fs::canonicalize(&replay_built.executable)?);
-        let _directory = private_directory(&mut replay)?;
-        let (replay_output, replay_timed_out, replay_wall_time) = execute(&mut replay, timeout)?;
-        let wall_time = wall_time + replay_wall_time;
-        if replay_timed_out {
-            return Ok(TestOutcome {
-                definition: test.clone(),
-                output: replay_output,
-                timed_out: true,
-                wall_time,
-                corpus: None,
-                laws,
-            });
-        }
-        let expected = expect_verdict.unwrap_or("Sealed");
-        if expected == "Sealed" {
-            return Ok(TestOutcome {
-                definition: test.clone(),
-                output: replay_output,
-                timed_out: false,
-                wall_time,
-                corpus: None,
-                laws,
-            });
-        }
-        let replay_stderr = String::from_utf8_lossy(&replay_output.stderr);
-        let prefix = format!("replay: {expected}");
-        if replay_output.status.code() == Some(1)
-            && replay_stderr.lines().any(|line| line.starts_with(&prefix))
-        {
-            return Ok(TestOutcome {
-                definition: test.clone(),
-                output,
-                timed_out: false,
-                wall_time,
-                corpus: None,
-                laws,
-            });
-        }
-        Err(NativeStop::Entry(format!(
-            "expected replay verdict `{expected}`, got status {:?}: {}",
-            replay_output.status.code(),
-            replay_stderr.trim()
-        )))
     }
 }
 

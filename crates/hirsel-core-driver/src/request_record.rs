@@ -146,7 +146,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
     ))?;
     // Appended only when on, so a plain request's key is the key it had.
     if let Some(scope) = coverage {
-        tuple.extend(encode(&("coverage", scope))?);
+        tuple.extend(encode(&(hirsel_core_ir::coverage::KEY_TAG, scope))?);
     }
     Ok((store.clone(), tuple))
 }
@@ -595,6 +595,7 @@ impl Hit {
             observation_mode: n.observation_mode,
             debug_lines: n.debug_lines,
             reach: Default::default(),
+            coverage: None,
         })
     }
 }

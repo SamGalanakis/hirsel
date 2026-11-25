@@ -178,6 +178,26 @@ fn prog4_pass_cache(backend: Backend) {
     let (outcome, source) = run(&product, "good", &covered, false);
     assert_eq!(source, Source::Executed, "{outcome:?}");
     assert!(outcome.passed(), "{outcome:?}");
+    if backend == Backend::Cranelift {
+        // A pass carries its profile (schema 5): the cached pass reports the
+        // sites the executed one reached. By hand, from `good`'s source: both
+        // entries, and the `if`'s `yes` arm only (`private_answer()` is 7).
+        let (cached, source) = run(&product, "good", &covered, false);
+        assert_eq!(source, Source::Cached, "{cached:?}");
+        assert_eq!(cached.coverage, outcome.coverage);
+        let item = &PROG4_SOURCE[PROG4_SOURCE.find("@test\nfn good").unwrap()..];
+        let (start, text) = (item.find("private_answer() == 7u64").unwrap(), "private_answer() == 7u64");
+        let decision = format!("app@1/main/good@{start}-{}.0", start + text.len());
+        let reached = coverage_reached(&cached.coverage);
+        for (key, hit) in [
+            ("app@1/main/good#e".to_owned(), true),
+            ("app@1/main/private_answer#e".to_owned(), true),
+            (format!("{decision}:yes"), true),
+            (format!("{decision}:no"), false),
+        ] {
+            assert_eq!(reached.get(&key), Some(&hit), "{key}: {reached:?}");
+        }
+    }
 
     let (outcome, source) = run(&product, "allocation", &limited, false);
     assert_eq!(source, Source::Executed);
@@ -279,6 +299,23 @@ fn prog4_pass_cache(backend: Backend) {
         assert_eq!(source, Source::Executed);
         assert!(outcome.timed_out);
         assert!(!outcome.passed());
+    }
+    if backend == Backend::Cranelift {
+        // Coverage "Killed run": the runner kills the spinner at its timeout,
+        // and the mapped file still holds the entry flag set before the hang;
+        // the run counts as failed.
+        let covered = NativeOptions { coverage: Some([package("app")].into()), ..base.clone() };
+        let spins = test("spins");
+        let outcome = spinner
+            .run_test_with_timeout(&spins, &covered, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(outcome.timed_out, "{outcome:?}");
+        assert_eq!(coverage_reached(&outcome.coverage).get("app@1/main/spins#e"), Some(&true));
+        let build = crate::test_run::Build::of(&covered);
+        let (run, _) = crate::test_run::Profile::of_run(&build, &spins, None, outcome.passed(), &outcome.coverage);
+        let report = run.report(&spinner, covered.coverage.as_ref().unwrap()).unwrap();
+        let entry = &report.profile["sites"][0];
+        assert_eq!((&entry["site"], &entry["passed_runs"], &entry["failed_runs"]), (&"app@1/main/spins#e".into(), &0.into(), &1.into()));
     }
 
     prog4_cache_damage(&product, &limited, dir.path());
@@ -404,43 +441,20 @@ fn coverage_off_and_known_arms() {
         let found = file.section_by_name(hirsel_core_ir::coverage::SECTION).is_some();
         (built.executable, found)
     };
-    let (executable, found) = section(&covered);
+    let (_, found) = section(&covered);
     assert!(found, "a coverage executable has the flag section");
     assert!(!section(&plain).1, "a plain build after a coverage build has no flag section");
 
-    let raw = dir.path().join("run.hcov");
-    let status = Command::new(&executable).env("HIRSEL_COVERAGE", &raw).status().unwrap();
-    assert_eq!(status.code(), Some(0));
-    let file = std::fs::read(&raw).unwrap();
-    let word = |at: usize| u32::from_le_bytes(file[at..at + 4].try_into().unwrap());
-    let long = |at: usize| u64::from_le_bytes(file[at..at + 8].try_into().unwrap()) as usize;
-    assert_eq!(&file[..8], b"HIRSELCV");
-    assert_eq!((word(36), word(48)), (1, 0x4544_4F4E), "a passed run, observed");
-    let (start, length) = (long(16), long(24));
-    let section = &file[start..start + length];
-    // Each record: magic, site count, id, then one flag byte per site.
-    let mut records = std::collections::BTreeMap::new();
-    let mut at = 0;
-    while at < section.len() {
-        let magic = u32::from_le_bytes(section[at..at + 4].try_into().unwrap());
-        if magic != hirsel_core_ir::coverage::RECORD_MAGIC {
-            at += 8;
-            continue;
-        }
-        let n = u32::from_le_bytes(section[at + 4..at + 8].try_into().unwrap()) as usize;
-        let id: [u8; 32] = section[at + 8..at + 40].try_into().unwrap();
-        records.insert(id, section[at + 40..at + 40 + n].to_vec());
-        at += (40 + n).next_multiple_of(8);
-    }
+    // Through the runner: the raw file read against the link's joined fragments.
+    let outcome = product.run_test(&test, &covered).unwrap();
+    assert!(outcome.passed(), "{outcome:?}");
+    let all = coverage_reached(&outcome.coverage);
     let reached = |name: &str| {
-        let identity = Identity::plain(DefPath::from_full(&format!("app@1/main/{name}")).unwrap());
-        let units = product.units([identity.clone()], 4096).unwrap();
-        let modules = units.modules().unwrap();
-        let (mut module, function) = hirsel_core_materialize::join(&modules, &identity).unwrap();
-        module.coverage = Some(scope.clone());
-        let sites = hirsel_core_ir::coverage::sites(&module, function).unwrap();
-        let flags = &records[&sites.id.0];
-        sites.sites.iter().zip(flags).map(|(s, f)| (s.key.clone(), *f == 1)).collect::<BTreeMap<_, _>>()
+        let item = format!("app@1/main/{name}");
+        all.iter()
+            .filter(|(key, _)| key.strip_prefix(&item).is_some_and(|rest| rest.starts_with(['#', '@'])))
+            .map(|(key, flag)| (key.clone(), *flag))
+            .collect::<BTreeMap<_, _>>()
     };
     // Keys by hand: offsets within the item of each decision's source text.
     let expected = |name: &str, arms: &[(&str, bool, bool)]| {
@@ -463,6 +477,49 @@ fn coverage_off_and_known_arms() {
     ];
     assert_eq!(reached("known"), expected("known", &known));
     assert_eq!(reached("generated"), expected("generated", &[("n > 1u64", true, false)]));
+
+    // Places by hand from KNOWN_ARMS's lines (line 1 is its leading break):
+    // each decision's line, column and end column, and each arm's target
+    // line, absent for an empty arm: the `no` of the `if` without `else`. The
+    // short-circuit `no` of `n < 5u64` lands on the decision of the whole `&&`.
+    let build = crate::test_run::Build::of(&covered);
+    let (run, _) = crate::test_run::Profile::of_run(&build, &test, None, true, &outcome.coverage);
+    let report = run.report(&product, &scope).unwrap();
+    let rows: BTreeMap<String, serde_json::Value> = report.profile["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| (row["site"].as_str().unwrap().to_owned(), row.clone()))
+        .collect();
+    let entry = &rows["app@1/main/known#e"];
+    assert_eq!([&entry["file"], &entry["line"], &entry["col"]], [&serde_json::json!("main.hirsel"), &3.into(), &1.into()]);
+    for (text, line, col, end_col, yes_line, no_line) in [
+        ("n == 9u64", 5, 8, 17, Some(5), None),
+        ("PickA", 7, 9, 14, Some(7), Some(8)),
+        ("PickB", 8, 9, 14, Some(8), Some(9)),
+        ("n < 5u64", 11, 8, 16, Some(11), Some(11)),
+        ("n < 5u64 && n > 0u64", 11, 8, 28, Some(11), Some(11)),
+    ] {
+        for (arm, arm_line) in [("yes", yes_line), ("no", no_line)] {
+            let start = KNOWN_ARMS[KNOWN_ARMS.find("fn known(").unwrap()..].find(text).unwrap();
+            let row = &rows[&format!("app@1/main/known@{start}-{}.0:{arm}", start + text.len())];
+            let place = [&row["line"], &row["col"], &row["end_line"], &row["end_col"]];
+            assert_eq!(place, [line, col, line, end_col].map(|n: u64| serde_json::json!(n)).each_ref(), "{text} {arm}");
+            assert_eq!(row["arm_line"].as_u64(), arm_line, "{text} {arm}: {row}");
+            assert_eq!(row.get("arm_col").is_some(), arm_line.is_some(), "{text} {arm}");
+        }
+    }
+}
+
+/// Each site key of a run's coverage, with whether the run reached it.
+fn coverage_reached(coverage: &crate::test_run::RunCoverage) -> BTreeMap<String, bool> {
+    let crate::test_run::RunCoverage::Observed(records) = coverage else {
+        panic!("coverage unobserved: {coverage:?}");
+    };
+    records
+        .iter()
+        .flat_map(|(record, flags)| record.sites.iter().zip(flags).map(|(site, flag)| (site.key.clone(), *flag == 1)))
+        .collect()
 }
 
 #[test]
@@ -2919,6 +2976,78 @@ fn seeded(e: Env) -> Result[(), ()] {
         "{stdout}"
     );
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
+}
+
+const SEEDED_COVERAGE: &str = r#"
+fn classify(s: u64) -> u64 {
+    let mut out = 0u64
+    if s == 1u64 { out = 1u64 }
+    out
+}
+@test
+fn seeded(e: Env) -> Result[(), ()] {
+    match std.sim.world.test_seed(e) {
+        Some(s) => if classify(s) == 0u64 { Ok(()) } else { Error(()) },
+        None => fail("no simulation seed")
+    }
+}
+"#;
+
+/// Coverage merges by test and seed, and `--coverage-out` writes the profile
+/// (`docs/coverage.md`, "The profile"). Seeds 0 to 2 run `classify`; by hand,
+/// only seed 1 takes its `if`'s `yes` arm, and that run fails. So the entry
+/// is reached by two passed runs and one failed, `yes` by the failed run
+/// alone and `no` by the two passed ones. Lines are SEEDED_COVERAGE's, the
+/// first being its leading break; `no` reaches the join and has no place.
+#[test]
+fn coverage_merges_seeds_and_writes_the_profile() {
+    let law = PackageLaw::new();
+    law.manifest(
+        "app",
+        "app",
+        1,
+        "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 1048576\n",
+    );
+    law.write("app/main.hirsel", SEEDED_COVERAGE);
+    let out = law.path("profile.json");
+    let (status, stdout, stderr) =
+        law.run(&["test", "app", "--sim", "--seeds", "3", "--json", "--coverage-out", out.to_str().unwrap()]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let profile: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(profile["hirsel_coverage"], 1);
+    assert_eq!((&profile["runs"], &profile["failed_runs"], &profile["unobserved_runs"]), (&3.into(), &1.into(), &0.into()));
+    assert_eq!((&profile["selection"]["tests"], &profile["selection"]["runs"]), (&1.into(), &3.into()));
+    assert_eq!(report["coverage"]["selection"], profile["selection"]);
+    let test = &profile["tests"].as_array().unwrap()[0];
+    assert_eq!(test["definition"], "app@1/main/seeded");
+    assert_eq!((&test["seeds"], &test["runs"], &test["failed_runs"]), (&serde_json::json!([[0, 2]]), &3.into(), &1.into()));
+    for row in report["tests"].as_array().unwrap() {
+        assert!(row["coverage"]["functions"].as_u64().unwrap() >= 2, "{row}");
+    }
+    let sites: BTreeMap<String, &serde_json::Value> = profile["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| (row["site"].as_str().unwrap().to_owned(), row))
+        .collect();
+    let item = &SEEDED_COVERAGE[SEEDED_COVERAGE.find("fn classify").unwrap()..];
+    let start = item.find("s == 1u64").unwrap();
+    let decision = format!("app@1/main/classify@{start}-{}.0", start + "s == 1u64".len());
+    let count = |key: &str| {
+        let row = sites[key];
+        (row["passed_runs"].as_u64().unwrap(), row["failed_runs"].as_u64().unwrap())
+    };
+    assert_eq!(count("app@1/main/classify#e"), (2, 1));
+    assert_eq!(count(&format!("{decision}:yes")), (0, 1));
+    assert_eq!(count(&format!("{decision}:no")), (2, 0));
+    for (arm, arm_line) in [("yes", Some(4)), ("no", None)] {
+        let row = sites[&format!("{decision}:{arm}")];
+        let place = [&row["line"], &row["col"], &row["end_line"], &row["end_col"]];
+        assert_eq!(row["file"], "main.hirsel", "{arm}");
+        assert_eq!(place, [4u64, 8, 4, 17].map(serde_json::Value::from).each_ref(), "{arm}");
+        assert_eq!(row["arm_line"].as_u64(), arm_line, "{arm}");
+    }
 }
 
 #[test]

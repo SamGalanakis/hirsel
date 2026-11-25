@@ -7,7 +7,7 @@ use std::{
     process::{ExitStatus, Output},
 };
 
-const TEST_PASS_SCHEMA: u32 = 4;
+const TEST_PASS_SCHEMA: u32 = 5;
 
 /// Reused passes of determined tests (PROG-4).
 pub struct TestCache {
@@ -26,12 +26,21 @@ impl TestCache {
         PackageProduct::default_cache().join("test-results")
     }
 
-    pub(super) fn get(&self, key: ContentHash, observe: bool) -> Option<(Output, LawReport)> {
+    /// A stored pass, when it carries each observation the run asks for: law
+    /// rows under `observe`, a profile under `coverage`.
+    pub(super) fn get(
+        &self,
+        key: ContentHash,
+        observe: bool,
+        coverage: bool,
+    ) -> Option<(Output, LawReport, RunCoverage)> {
         let bytes = self.store.get(key).ok()??;
-        let (TEST_PASS_SCHEMA, stdout, stderr, laws) = crate::decode(&bytes)? else {
+        let (TEST_PASS_SCHEMA, stdout, stderr, laws, profile) = crate::decode(&bytes)? else {
             return None;
         };
-        if observe && !matches!(laws, LawReport::Observed(_)) {
+        if observe && !matches!(laws, LawReport::Observed(_))
+            || coverage && !matches!(profile, RunCoverage::Observed(_))
+        {
             return None;
         }
         Some((
@@ -41,12 +50,24 @@ impl TestCache {
                 stderr,
             },
             laws,
+            profile,
         ))
     }
 
-    pub(super) fn put(&self, key: ContentHash, output: &Output, laws: &LawReport) {
-        if let Ok(bytes) = crate::encode(&(TEST_PASS_SCHEMA, &output.stdout, &output.stderr, laws))
-        {
+    pub(super) fn put(
+        &self,
+        key: ContentHash,
+        output: &Output,
+        laws: &LawReport,
+        coverage: &RunCoverage,
+    ) {
+        if let Ok(bytes) = crate::encode(&(
+            TEST_PASS_SCHEMA,
+            &output.stdout,
+            &output.stderr,
+            laws,
+            coverage,
+        )) {
             let _ = self.store.put_keyed(key, &bytes);
         }
     }
@@ -88,4 +109,4 @@ pub(super) fn test_key(
     )
     .ok()
 }
-use super::LawReport;
+use super::{LawReport, RunCoverage};

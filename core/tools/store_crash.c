@@ -256,7 +256,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     parked.target=cut;
     int uncut=!strcmp(raw_cut,"count");
     enum { ORPHAN_END_SYNC_FAILURE=6, OPEN_MANIFEST_SYNC_FAILURE=8, SECOND_SEGMENT_SHORT_WRITE=9,
-        WINDOW_CHUNK_FAILURE=10, WINDOW_SYNC_FAILURE=11 };
+        WINDOW_CHUNK_FAILURE=10, WINDOW_SYNC_FAILURE=11, POISON_GROUP=12 };
     window.enabled=!strcmp(scenario,"window") || !strcmp(scenario,"window-chunk-failure") || !strcmp(scenario,"window-sync-failure");
     window.issued=0; window.issuing=0;
     int recovery_failure=!strcmp(scenario,"orphan-end-recovery-sync");
@@ -268,6 +268,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         !strcmp(scenario,"journal-place-short")?SECOND_SEGMENT_SHORT_WRITE:
         !strcmp(scenario,"window-chunk-failure")?WINDOW_CHUNK_FAILURE:
         !strcmp(scenario,"window-sync-failure")?WINDOW_SYNC_FAILURE:
+        !strcmp(scenario,"follower-poison")?POISON_GROUP:
         recovery_failure?ORPHAN_END_SYNC_FAILURE:open_sync_failure?OPEN_MANIFEST_SYNC_FAILURE:0;
     int orphan_end=recovery_failure || !strcmp(scenario,"orphan-end");
     if((failure && failure!=5) || cancellation.enabled || parked.enabled || orphan_end) cut=UINT64_MAX;
@@ -317,7 +318,8 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         /* Law 8 opens at midnight, noon and the following midnight. */
         park_wall_ms=!strcmp(scenario,"steps-park")?1000+phase*UINT64_C(43200000):0;
         parked.phase=phase; parked.worker=0;
-        hold.enabled=phase==1 && !strcmp(scenario,"journal-ack");
+        /* follower-poison: each parked Direct write lets the writer refill the queue. */
+        hold.enabled=phase==1 && (!strcmp(scenario,"journal-ack") || !strcmp(scenario,"follower-poison"));
         hold.child_probe=phase==1 && fork_image==5;
         hold.schedule_probe=seed && phase==1 &&
             (!strcmp(scenario,"journal-group") || !strcmp(scenario,"journal-rotate"));

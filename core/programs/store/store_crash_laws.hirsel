@@ -470,7 +470,7 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
         disk_crash_read_only(d, c, published) ?=> |_| Exit(status: 33)
         return Ok(())
     }
-    if scenario == "follower-durable" || scenario == "follower-boundary" || scenario == "read-only-durable" || scenario == "read-only-creation" || scenario == "follower-polls" {
+    if scenario == "follower-durable" || scenario == "follower-boundary" || scenario == "read-only-durable" || scenario == "read-only-creation" || scenario == "follower-polls" || scenario == "follower-poison" {
         return disk_crash_live_read_main(d, c, r, tasks, argv, out, scenario)
     }
     if scenario == "watermark-absent" || scenario == "watermark-torn" {

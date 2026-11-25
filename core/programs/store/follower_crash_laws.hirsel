@@ -9,6 +9,8 @@ fn disk_crash_live_read_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Ar
     if phase == "write" {
         let published = if scenario == "follower-polls" {
             disk_crash_follower_polls(d, c, r, tasks, out) ?=> |_| Exit(status: 32)
+        } else if scenario == "follower-poison" {
+            disk_crash_follower_poison(d, c, r, tasks, out) ?=> |_| Exit(status: 32)
         } else {
             disk_crash_live_read_write(d, c, tasks, out, scenario) ?=> |_| Exit(status: 32)
         }
@@ -130,6 +132,81 @@ fn disk_crash_follower_polls(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Std
     close_follower_service(take service)?
     close(take writer)?
     Ok(head)
+}
+
+// BL5 part 2 and BL6 (2249 M3): a poisoned owner. With one commit per group
+// and each Direct write parked across a scheduler turn, the writer keeps the
+// journal queue non-empty, so no END is written before the 64th group
+// (§3.2: END at the 64th group or at the next empty queue). The bridge fails
+// that 64th group write with ENOSPC: 63 groups are acked past END(72), and
+// the Db stays open, poisoned, holding LOCK. The journal task closed its
+// segment handle as it ended, so the terminal fence is free and a follower
+// reads to the torn tail: catch_up and at_least reach the 63rd ack. If the
+// failed task kept its handle, the capture would be END-bounded at 72.
+// Oracle: the acked tickets; the read phase's reopen keeps the 63rd.
+fn disk_crash_follower_poison(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[u64, Error] waits {
+    let mut options = disk_crash_options("checkpoint")
+    options.group_commits = 1
+    let mut writer = open(tasks, d, c, r, options)?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let mut replica = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(d), c, None)?
+    let trunk = follower_main(replica)
+    let base = version(snapshot(writer))
+    if applied(replica, trunk)?.version != base {
+        fail("BL5: the first capture missed the opened head")
+    }
+    let _ = stdout.write(out, "ARM")
+    let mut tickets: List[Ticket] = list.new()
+    for k in 0u64 .. 64 {
+        match run(mut writer, None, (copy_env(rows), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, 1000 + call_env.1, call_env.1)
+        }) {
+            Ok(Committed(done)) => list.push(mut tickets, done.ticket),
+            Error(Poisoned(_)) => break,
+            _ => fail("BL5: a pipelined commit was refused"),
+        }
+    }
+    if list.len(tickets) != 64 {
+        fail("BL5: the journal failed before the 64th group was queued")
+    }
+    match durable(mut writer, tickets[63u64]) {
+        Error(Poisoned(Other(28))) => (),
+        _ => fail("BL5: the 64th group did not poison the store"),
+    }
+    let mut acked = 0u64
+    for t in tickets {
+        if covered(writer, t.mark) {
+            acked += 1
+        }
+    }
+    let Journal(_, acked_branch, top) = tickets[62u64].mark else {
+        fail("BL5: a journal commit without a journal mark")
+    }
+    if acked != 63 || top != base + 63 {
+        fail("BL5: the poisoned store did not ack exactly 63 groups")
+    }
+    let creation_end = journal_end_bytes(writer.store, writer.file_seq, 72)
+    let ending = capacity(disk_path("j-", writer.file_seq, ".end"))?
+    if disk_read_file(d, ending, list.len(creation_end))? != creation_end {
+        fail("BL5: an END covered the acked groups; the poison case is vacuous")
+    }
+    let forever = 18446744073709551615u64
+    if catch_up(mut replica, forever)?.version != top {
+        fail("BL5: a capture beside the poisoned owner was END-bounded")
+    }
+    let wanted = Position(store: writer.store, branch: acked_branch, version: top)
+    if version(at_least(mut replica, wanted, forever)?) != top {
+        fail("BL5: at_least missed the last acked commit")
+    }
+    close_follower_service(take service)?
+    match close(take writer) {
+        Error(Poisoned(Other(28))) => (),
+        _ => fail("BL5: the poisoned writer closed cleanly"),
+    }
+    Ok(top)
 }
 
 // BL7 part 2 (2284 N1): a cut has created j-(seq + 1) but its creation

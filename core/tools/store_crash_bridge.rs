@@ -12,6 +12,8 @@ const ORPHAN_END_SYNC_FAILURE: u8 = 6;
 const SECOND_SEGMENT_SYNC_FAILURE: u8 = 7;
 const OPEN_MANIFEST_SYNC_FAILURE: u8 = 8;
 const SECOND_SEGMENT_SHORT_WRITE: u8 = 9;
+/// follower-poison (BL5 part 2): fail the 64th armed group write, ENOSPC.
+const POISON_GROUP: u8 = 12;
 #[path = "store_crash_late.rs"]
 mod late;
 #[path = "store_crash_sync.rs"]
@@ -22,7 +24,7 @@ use late::LateWriteSchedule;
 #[path = "store_crash_staged.rs"]
 mod staged;
 use staged::{ForkObservation, StagedCommit, StagedCut, fork_frame_start};
-use window::{WINDOW_SYNC_FAILURE, WindowObservation};
+use window::WindowObservation;
 
 #[repr(C)]
 #[derive(Default)]
@@ -77,6 +79,8 @@ struct Bridge {
     /// After ARM in the write phase: `.end` opens, END syncs, segment syncs
     /// and other syncs (files and directories).
     armed_io: [u64; 4],
+    /// Direct segment group writes after ARM in the write phase.
+    armed_groups: u64,
     reader_syncs: [u64; 2],
     reader_segment_reads: u64,
     late: Option<LateWriteSchedule>,
@@ -381,6 +385,16 @@ impl Bridge {
                 {
                     return Self::error(5);
                 }
+                if self.phase == 1 && self.armed && mode == DIRECT && is_segment(&name) {
+                    self.armed_groups += 1;
+                    if self.sync_failure == POISON_GROUP && self.armed_groups == 64 {
+                        self.failed_syncs += 1;
+                        return Outcome {
+                            error: Error { tag: 5, code: 28 },
+                            ..Outcome::default()
+                        };
+                    }
+                }
                 if self.phase == 1 && is_segment(&name) {
                     let image = self.fs.read_inode(inode).unwrap().to_vec();
                     if let Some(outcome) = self.window_write(&image, cursor, &data[..len]) {
@@ -664,6 +678,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         split_syncs: 0,
         segment_syncs: 0,
         armed_io: [0; 4],
+        armed_groups: 0,
         reader_syncs: [0; 2],
         reader_segment_reads: 0,
         late: None,
@@ -893,10 +908,10 @@ pub unsafe extern "C" fn store_crash_floor(p: *mut c_void) -> u64 {
 /// `p` is live and quiescent. `kind` is 0 (off), 1 (segment), 2 (END),
 /// 3 (pack), 4 (segment write), 5 (byte split), 6 (orphan END recovery), or
 /// 7 (second segment sync), 8 (O1 open barrier), 9 (second segment short write),
-/// 10 (window chunk), or 11 (window sync).
+/// 10 (window chunk), 11 (window sync), or 12 (the 64th group, ENOSPC).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn store_crash_sync_failure(p: *mut c_void, kind: u8) {
-    assert!(kind <= WINDOW_SYNC_FAILURE);
+    assert!(kind <= POISON_GROUP);
     // SAFETY: the C wrapper configures the bridge before starting a run.
     unsafe { (*p.cast::<Bridge>()).sync_failure = kind };
 }

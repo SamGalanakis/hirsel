@@ -1,7 +1,7 @@
-// Unused constants cannot hide an overflow, a cycle, or a function call.
+// Unused constants cannot hide an overflow or a cycle.
 // expect: refuse LANG-20 at 6:17
 // expect: refuse LANG-20 at 7:19
-// expect: refuse LANG-20 at 8:20
+// UNUSED calls a function: it is computed (LANG-20), and its run returns 7.
 fn identity(x: u8) -> u8 { x }
 const BIG: u8 = 200 + 100
 const CYCLE: u8 = CYCLE

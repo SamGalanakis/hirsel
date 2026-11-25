@@ -677,13 +677,13 @@ include!("revision_native_generic.rs");
 // directly: one binding per builtin at its version, beside the local body hash.
 fn builtin_group(body: ContentHash, slots: usize) -> ContentHash {
     assert!(slots < 128);
-    let mut group = b"HIRGROUP\0\x01\x00\x01".to_vec();
+    let mut group = b"HIRGROUP\0\x02\x00\x01".to_vec();
     group.extend_from_slice(&body.0);
     group.push(slots as u8);
     for _ in 0..slots {
         group.extend_from_slice(&[2, 1, 0, 0, 0]);
     }
-    let group = ContentHash::of_parts("hirsel.code-group.v1", [&group[..]]);
+    let group = ContentHash::of_parts(hirsel_core_ir::address::GROUP_HASH_DOMAIN, [&group[..]]);
     let mut member = [0; 36];
     member[..32].copy_from_slice(&group.0);
     ContentHash::of_parts("hirsel.code-address.v1", [&member[..]])
@@ -858,7 +858,7 @@ fn revision_retargeting_is_in_the_body() {
             .map(|unit| (unit.identity.clone(), units.address(unit.identity).unwrap()))
             .collect::<BTreeMap<_, _>>();
         let order = if app.contains("g() - f()") { ["g", "f"] } else { ["f", "g"] };
-        let mut group = b"HIRGROUP\0\x01\x00\x01".to_vec();
+        let mut group = b"HIRGROUP\0\x02\x00\x01".to_vec();
         group.extend_from_slice(&body.0);
         group.push(2);
         for name in order {
@@ -866,7 +866,7 @@ fn revision_retargeting_is_in_the_body() {
             group.push(1);
             group.extend_from_slice(&leaves[&leaf].0);
         }
-        let group = ContentHash::of_parts("hirsel.code-group.v1", [&group[..]]);
+        let group = ContentHash::of_parts(hirsel_core_ir::address::GROUP_HASH_DOMAIN, [&group[..]]);
         let mut member = [0; 36];
         member[..32].copy_from_slice(&group.0);
         let expected = ContentHash::of_parts("hirsel.code-address.v1", [&member[..]]);
@@ -917,14 +917,14 @@ fn revision_warm_slot_order_is_current() {
         assert_eq!(slots, &[z.clone(), leaf_a.clone()], "A9 exact slot order from the warm record");
         let bound = reached.materialized.addresses(reached.require().unwrap(), prior).unwrap();
         // Hand framing for a singleton with External(z) then External(a).
-        let mut bytes = b"HIRGROUP\0\x01\x00\x01".to_vec();
+        let mut bytes = b"HIRGROUP\0\x02\x00\x01".to_vec();
         bytes.extend_from_slice(&body.0);
         bytes.push(2);
         for target in [&z, &leaf_a] {
             bytes.push(1);
             bytes.extend_from_slice(&bound[target].0);
         }
-        let group = ContentHash::of_parts("hirsel.code-group.v1", [&bytes[..]]);
+        let group = ContentHash::of_parts(hirsel_core_ir::address::GROUP_HASH_DOMAIN, [&bytes[..]]);
         let mut member = [0; 36];
         member[..32].copy_from_slice(&group.0);
         let expected = ContentHash::of_parts("hirsel.code-address.v1", [&member[..]]);

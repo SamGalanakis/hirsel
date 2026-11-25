@@ -11,19 +11,26 @@ use hirsel_core_ids::ContentHash;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// The hash and ordered executable slots of a checked instance.
+/// The hash and ordered executable slots of a checked instance, and the value
+/// hash of each of its constant slots in order (PROG-10). A constant slot is
+/// bound to a value, never walked as a callee.
 pub struct CodeRow {
     pub body: ContentHash,
     pub slots: Vec<Identity>,
+    pub values: Vec<ContentHash>,
 }
 
-const GROUP_MAGIC: &[u8] = b"HIRGROUP\0\x01\x00";
+const GROUP_MAGIC: &[u8] = b"HIRGROUP\0\x02\x00";
+/// The group hash domain; version 2 adds the `Value` binding.
+pub const GROUP_HASH_DOMAIN: &str = "hirsel.code-group.v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Binding {
     Internal(u32),
     External(ContentHash),
     Builtin(u32),
+    /// A constant slot, bound to the computed constant's value hash.
+    Value(ContentHash),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +59,10 @@ impl Binding {
                 bytes.push(2);
                 bytes.extend_from_slice(&number.to_le_bytes());
             }
+            Self::Value(hash) => {
+                bytes.push(3);
+                bytes.extend_from_slice(&hash.0);
+            }
         }
     }
 
@@ -60,6 +71,7 @@ impl Binding {
             0 => Ok(Self::Internal(input.index()?)),
             1 => Ok(Self::External(Wire::read(input)?)),
             2 => Ok(Self::Builtin(Wire::read(input)?)),
+            3 => Ok(Self::Value(Wire::read(input)?)),
             _ => Err(invalid("unknown group binding tag")),
         }
     }
@@ -113,7 +125,7 @@ impl Group {
     }
 
     pub fn hash(bytes: &[u8]) -> ContentHash {
-        ContentHash::of_parts("hirsel.code-group.v1", [bytes])
+        ContentHash::of_parts(GROUP_HASH_DOMAIN, [bytes])
     }
 
     pub fn member_address(hash: ContentHash, ordinal: u32) -> ContentHash {
@@ -253,6 +265,7 @@ impl CodeGraph {
                         },
                     })
                     .collect(),
+                values: code.values.clone(),
             })
             .collect();
         externals.extend(builtins.into_iter().map(|(identity, number)| {
@@ -344,16 +357,21 @@ impl GroupPlan {
         })
     }
 
-    /// Update hashes for changed bodies. Identities outside this plan's root
-    /// closure do not contribute to its addresses.
-    pub fn update<'a>(&mut self, bodies: impl IntoIterator<Item = (&'a Identity, ContentHash)>) {
+    /// Update hashes for changed bodies and constant values. Identities
+    /// outside this plan's root closure do not contribute to its addresses.
+    pub fn update<'a>(
+        &mut self,
+        rows: impl IntoIterator<Item = (&'a Identity, ContentHash, &'a [ContentHash])>,
+    ) {
         let mut pending = BTreeSet::new();
-        for (identity, body) in bodies {
-            if let Ok(node) = self.graph.members.binary_search(identity)
-                && self.graph.nodes[node].body != body
-            {
-                self.graph.nodes[node].body = body;
-                pending.insert(self.component[node]);
+        for (identity, body, values) in rows {
+            if let Ok(node) = self.graph.members.binary_search(identity) {
+                let held = &mut self.graph.nodes[node];
+                if held.body != body || held.values != values {
+                    held.body = body;
+                    held.values = values.to_vec();
+                    pending.insert(self.component[node]);
+                }
             }
         }
         while let Some(i) = pending.pop_first() {
@@ -390,6 +408,7 @@ impl GroupPlan {
 struct Node {
     body: ContentHash,
     slots: Vec<Slot>,
+    values: Vec<ContentHash>,
 }
 
 #[derive(Clone, Copy)]
@@ -493,15 +512,20 @@ fn hash_group(
     let mut bytes = Group::header(members.len());
     for &member in members.iter() {
         let node = &nodes[member];
-        let slots = node.slots.iter().map(|slot| match *slot {
-            Slot::Instance(child) => match numbers[child] {
-                Some(k) => Binding::Internal(k),
-                None => Binding::External(addresses[child]),
-            },
-            Slot::Builtin(number) => Binding::Builtin(number),
-            Slot::External(address) => Binding::External(address),
-        });
-        Group::write_member(&mut bytes, node.body, slots);
+        let slots = node
+            .slots
+            .iter()
+            .map(|slot| match *slot {
+                Slot::Instance(child) => match numbers[child] {
+                    Some(k) => Binding::Internal(k),
+                    None => Binding::External(addresses[child]),
+                },
+                Slot::Builtin(number) => Binding::Builtin(number),
+                Slot::External(address) => Binding::External(address),
+            })
+            .chain(node.values.iter().copied().map(Binding::Value))
+            .collect::<Vec<_>>();
+        Group::write_member(&mut bytes, node.body, slots.into_iter());
     }
     let group = Group::hash(&bytes);
     for &member in members.iter() {
@@ -533,21 +557,31 @@ mod tests {
             (b.clone(), vec![a.clone()]),
             (leaf.clone(), vec![]),
         ]);
-        let row = |bodies: &BTreeMap<Identity, ContentHash>, identity: &Identity| {
+        // `a` reads one computed constant.
+        let mut value = vec![ContentHash([6; 32])];
+        let row = |bodies: &BTreeMap<Identity, ContentHash>,
+                   value: &Vec<ContentHash>,
+                   identity: &Identity| {
             Some(CodeRow {
                 body: *bodies.get(identity)?,
                 slots: slots.get(identity)?.clone(),
+                values: if *identity == a {
+                    value.clone()
+                } else {
+                    vec![]
+                },
             })
         };
-        let mut plan = GroupPlan::new([root.clone()], |id| row(&bodies, id), |_| None).unwrap();
+        let mut plan =
+            GroupPlan::new([root.clone()], |id| row(&bodies, &value, id), |_| None).unwrap();
         let before = plan.addresses();
         let hash = ContentHash([5; 32]);
         bodies.insert(b.clone(), hash);
-        plan.update([(&b, hash)]);
+        plan.update([(&b, hash, &[][..])]);
         let mut expected_frames = BTreeMap::new();
         let expected = code_groups(
             [root.clone()],
-            |id| row(&bodies, id),
+            |id| row(&bodies, &value, id),
             |hash, bytes| {
                 expected_frames.insert(hash, bytes);
             },
@@ -562,9 +596,40 @@ mod tests {
             expected_frames,
         );
         assert_eq!(after[&leaf], before[&leaf]);
-        for changed in [root, a, b] {
-            assert_ne!(after[&changed], before[&changed]);
+        for changed in [&root, &a, &b] {
+            assert_ne!(after[changed], before[changed]);
         }
+        // A value edit with an unchanged body rehashes the reader's group and
+        // its callers, and nothing else (G7 row 1).
+        value = vec![ContentHash([7; 32])];
+        plan.update([(&a, bodies[&a], &value[..])]);
+        let expected = code_groups([root.clone()], |id| row(&bodies, &value, id), |_, _| {});
+        let changed = plan.addresses();
+        assert_eq!(*changed, expected.unwrap());
+        assert_eq!(changed[&leaf], after[&leaf]);
+        for reader in [&root, &a, &b] {
+            assert_ne!(changed[reader], after[reader]);
+        }
+    }
+
+    #[test]
+    fn a_constant_slot_binds_its_value_hash() {
+        // One member, body [3; 32], no function slot, one constant slot bound to
+        // value hash [6; 32]: SHA-256 framing computed with Python hashlib.
+        let c = Identity::plain(DefPath::from_full("app@1/main/c").unwrap());
+        let addresses = code_addresses([c.clone()], |_| {
+            Some(CodeRow {
+                body: ContentHash([3; 32]),
+                slots: vec![],
+                values: vec![ContentHash([6; 32])],
+            })
+        })
+        .unwrap();
+        let hex: String = addresses[&c].0.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "1d2b613082f724ec5e16b0b5fc7ce9576c101d86baab23e806755be92bc95384"
+        );
     }
 
     #[test]
@@ -581,11 +646,13 @@ mod tests {
                     Some(CodeRow {
                         body: ContentHash([a_body; 32]),
                         slots: vec![b.clone()],
+                        values: vec![],
                     })
                 } else {
                     Some(CodeRow {
                         body: ContentHash([b_body; 32]),
                         slots: vec![if back { a.clone() } else { b.clone() }],
+                        values: vec![],
                     })
                 }
             })
@@ -604,11 +671,11 @@ mod tests {
         // b's Internal(0). SHA-256 framing was computed with Python hashlib.
         assert_eq!(
             hex(normal[&a]),
-            "5491ad36f94b799078d3d5912302f491df5ac026a97d661cfe92d94a765aaa4d"
+            "4993888bf25276d9c52375686ffbddacd5f551ee919ae6617ae3f3a6f0439de7"
         );
         assert_eq!(
             hex(normal[&b]),
-            "db3dd3efab15c8e6d1212ee69f83f1441d6fb56811388eefe35dc8f678cc9105"
+            "e2772927965c4c1b4098db379fe7de8ede69383979185f1be4aa30c20082d6ec"
         );
         for edited in [
             graph(vec![a.clone()], 8, 9, true),

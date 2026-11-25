@@ -241,6 +241,7 @@ fn cleanup_only_edit_changes_body_and_failure() {
             Some(crate::CodeRow {
                 body: body.hash(),
                 slots: Vec::new(),
+                values: Vec::new(),
             })
         })
         .unwrap()[&root]
@@ -276,10 +277,10 @@ fn f0 = n0 g0 {
 ",
     );
     let encoded = encode(&module, FuncId(0));
-    // Literal v4 wire fields and hashes derived independently from PROG-10.
+    // Literal v5 wire fields and hashes derived independently from PROG-10.
     // SHA-256 frames the domain and payload with u64le lengths.
     let body = hex(concat!(
-        "484952424f4459000400",               // HIRBODY, NUL, u16le version 4
+        "484952424f4459000500",               // HIRBODY, NUL, u16le version 5
         "000100010009000000",                 // types, () -> u64 signature, statics
         "010c61707040312f6d61696e2f66000000", // instance app@1/main/f
         "01000000010100010000",               // one function and block, const v0
@@ -290,7 +291,7 @@ fn f0 = n0 g0 {
     let hash = encoded.hash();
     assert_eq!(
         hash.0.as_slice(),
-        hex("1b611743d13fe9634de92926820f2fbfe3e860143f4d49f19a0e1fb95b3197ae")
+        hex("cc6faed86929dbee021b8be3ecb28a9f352dbdd3a061364216faa0d6f12266c9")
     );
     let identity = module.identity(module.functions[0].instance);
     let addresses = crate::address::code_groups(
@@ -299,12 +300,13 @@ fn f0 = n0 g0 {
             Some(crate::CodeRow {
                 body: hash,
                 slots: vec![],
+                values: vec![],
             })
         },
         |group, _| {
             assert_eq!(
                 group.0.as_slice(),
-                hex("50fd0605180676a94727071b2a598461c35266d03e571a3011322fbf80c3c15f"),
+                hex("b1a0e05ac9a9fa0ff286073cf3bada40f90afd71888557555cc67ca331428f18"),
             )
         },
     )
@@ -312,11 +314,11 @@ fn f0 = n0 g0 {
     let address = addresses[&identity];
     assert_eq!(
         address.0.as_slice(),
-        hex("3bbd4c135cd648b900e70dcad2f32fad13a356a1c2f8004ea78658df6620f609")
+        hex("821099d1df26d39f0668e1564f7ac3fcbf38fb2696fbc61ace88ba4bcc7df807")
     );
     assert_eq!(
         crate::code_revision(address).0.as_slice(),
-        hex("5b9edd11a6a14703adeb34634fd468f1aa349080197f6df45036332bac1e7a4f")
+        hex("86bda38cdc4437c5eb56f0095d7897dc989ffd0781fc6a6d0786e7282845f0d0")
     );
     let widen = Identity::plain(DefPath::core("float.widen"));
     assert_eq!(
@@ -455,7 +457,11 @@ fn retained_layouts_bind_finalizers_but_codec_metadata_does_not() {
                 };
                 (ContentHash([byte; 32]), Vec::new())
             };
-            Some(crate::CodeRow { body, slots })
+            Some(crate::CodeRow {
+                body,
+                slots,
+                values: Vec::new(),
+            })
         })
         .unwrap()[&dispose]
     };

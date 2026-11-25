@@ -618,6 +618,7 @@ tags!(Loan {
 tags!(Static {
     0 => Bytes { align, bytes },
     1 => Aggregate { ty, value },
+    2 => Computed { ty, constant },
 });
 
 tags!(StaticValue {

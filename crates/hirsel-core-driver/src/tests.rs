@@ -896,7 +896,7 @@ fn native_ir_tables_round_trip_without_text_reconstruction() {
     );
 }
 
-fn library_request(source: &str, dir: &Path) -> CheckRequest {
+pub(crate) fn library_request(source: &str, dir: &Path) -> CheckRequest {
     let mut req = request(source, dir);
     req.inputs.packages[0].package = package("core");
     req.inputs.packages[0].sources[0].modules = vec!["lib".into()];

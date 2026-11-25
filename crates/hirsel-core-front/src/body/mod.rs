@@ -46,6 +46,8 @@ use admission::held_size;
 mod anchors;
 mod builtins;
 mod bytes;
+mod order;
+use order::order_instructions;
 mod callable_abi;
 mod calls;
 mod cleanup;
@@ -142,6 +144,9 @@ pub struct CoreCheck {
     /// A contextual constructor resolved by searching its whole candidate set
     /// (no expected type), so every candidate of that name took part.
     pub constructor_candidates: bool,
+    /// The computed constants this body reads (LANG-20): their values enter its
+    /// instances' record keys and its groups' constant slots, never its body.
+    pub computed: std::collections::BTreeSet<DefPath>,
 }
 
 /// Source conventions survive physical sealing. Generated fixed-ABI glue has the
@@ -213,6 +218,8 @@ pub struct Emitter {
     /// `module.statics` rows by their bytes.
     statics: HashMap<Vec<u8>, hirsel_core_ir::StaticId>,
     constant_statics: HashMap<crate::ConstValue, hirsel_core_ir::StaticId>,
+    /// A computed constant's slot (PROG-10), by constant.
+    computed_statics: HashMap<u32, hirsel_core_ir::StaticId>,
     /// Some layout or recipe was refused and its rows taken back.
     refused: bool,
 }
@@ -946,41 +953,6 @@ fn int_of(ty: TyId) -> Option<(bool, u32)> {
 
 fn is_float(ty: TyId) -> bool {
     matches!(scalar_kind(ty), Some(Scalar::F32 | Scalar::F64))
-}
-
-/// Lay out emitted instructions in block order after control-flow construction.
-fn order_instructions(b: &mut Body) {
-    let mut start = 0;
-    if b.blocks.iter().all(|block| {
-        let ordered = block.insts.start as usize == start;
-        start += block.insts.len as usize;
-        ordered
-    }) && start == b.insts.len()
-    {
-        return;
-    }
-    let mut old = std::mem::take(&mut b.insts);
-    let mut insts = Vec::with_capacity(old.len());
-    let mut anchors = Vec::with_capacity(old.len());
-    for block in &mut b.blocks {
-        let (start, len) = (block.insts.start as usize, block.insts.len as usize);
-        let at = insts.len() as u32;
-        // The emitter gives every instruction to one block. Move it once rather
-        // than dispatching Inst::clone for every variant during this permutation.
-        insts.extend(old[start..start + len].iter_mut().map(|inst| {
-            std::mem::replace(
-                inst,
-                Inst::Const {
-                    result: ValueId(0),
-                    bits: 0,
-                },
-            )
-        }));
-        anchors.extend_from_slice(&b.inst_anchors[start..start + len]);
-        block.insts = PoolRange::new(at, len as u32);
-    }
-    b.insts = insts;
-    b.inst_anchors = anchors;
 }
 
 /// The [`hirsel_core_ir::CLOSED`] index of a core function on LANG-20's closed

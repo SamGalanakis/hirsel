@@ -24,28 +24,13 @@
 
 mod allocation;
 mod runtime;
+mod value_text;
 use runtime::rt;
+use value_text::static_value;
 
 use crate::ir::*;
 use hirsel_core_ids::DefPath;
 use hirsel_core_layout::FieldTy;
-
-fn static_value(value: &StaticValue) -> String {
-    match value {
-        StaticValue::Bits(bits) => bits.to_string(),
-        StaticValue::Fields { case, fields } => {
-            let fields = fields
-                .iter()
-                .map(static_value)
-                .collect::<Vec<_>>()
-                .join(", ");
-            match case {
-                Some(case) => format!("case {case} [{fields}]"),
-                None => format!("[{fields}]"),
-            }
-        }
-    }
-}
 
 macro_rules! names {
     ($ty:ident { $($v:ident = $s:literal),* $(,)? }) => {
@@ -320,6 +305,12 @@ impl Printer {
                         "static d{i} = aggregate t{} {}",
                         ty.0,
                         static_value(value)
+                    ));
+                }
+                Static::Computed { ty, constant } => {
+                    self.line(&format!(
+                        "static d{i} = computed {} {constant}",
+                        field_ty(ty)
                     ));
                 }
             }
@@ -2125,6 +2116,15 @@ impl Parser {
                         let value = l.static_value()?;
                         l.end()?;
                         self.module.statics.push(Static::Aggregate { ty, value });
+                        continue;
+                    }
+                    if l.eat("computed") {
+                        let ty = l.field_ty()?;
+                        let t = l.next()?;
+                        let constant = DefPath::from_full(t)
+                            .ok_or_else(|| format!("bad definition path `{t}`"))?;
+                        l.end()?;
+                        self.module.statics.push(Static::Computed { ty, constant });
                         continue;
                     }
                     l.expect("align")?;

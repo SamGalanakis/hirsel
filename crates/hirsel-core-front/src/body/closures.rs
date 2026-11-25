@@ -1125,10 +1125,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.out.refusals.extend(out.refusals);
         self.out.gaps.extend(out.gaps);
         self.out.counts += out.counts;
+        self.out.computed.extend(out.computed);
         if function.is_none() {
             self.halt();
-        }
-        if function.is_none() {
             return (if refused { ERROR } else { ty }, None);
         }
         let raw = function.unwrap();

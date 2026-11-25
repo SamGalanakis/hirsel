@@ -1,0 +1,43 @@
+// LANG-20: a computed constant whose run fails, reaches the closed list, needs its
+// own value or exceeds its budget is refused at the constant, with the cause and
+// the calls from the initialiser innermost first, and the target that failed when its
+// value depends on the target; a String's call is refused as a
+// static string's.
+// expect: refuse LANG-20 at 25:1
+// expect: refuse LANG-20 at 27:1
+// expect: refuse LANG-20 at 29:1
+// expect: refuse LANG-20 at 31:1
+// expect: refuse LANG-20 at 33:1
+// expect: refuse LANG-20 at 35:22
+// expect: refuse LANG-20 at 40:1
+// expect: refuse LANG-20 at 43:1
+// expect: message LANG-20 at 43:1 | it exceeds its budget (Activations, MEM-34), in app@1/main/deep (4095 calls) from app@1/main/DEEP
+// expect: message LANG-20 at 40:1 | it fails with Division, in app@1/main/per_os from app@1/main/PER_OS, for target aarch64-apple-darwin
+// expect: message LANG-20 at 25:1 | constant app@1/main/BIG is refused: it fails with Overflow, in app@1/main/grow from app@1/main/BIG
+// expect: message LANG-20 at 27:1 | it reaches unique.new, on the closed list, in app@1/main/fresh from app@1/main/ID
+// expect: message LANG-20 at 29:1 | it exceeds its budget (OutOfTime, MEM-34), in app@1/main/spin from app@1/main/SLOW
+// expect: message LANG-20 at 31:1 | its value depends on itself: app@1/main/LOOP reads app@1/main/LOOP, in app@1/main/other
+// expect: message LANG-20 at 33:1 | it fails with Fail, in app@1/main/_$0
+fn grow(n: u8) -> u8 { n + 200 }
+fn fresh() -> u64 { let _ = unique.new(); 1 }
+fn spin() -> u64 { let mut i: u64 = 0; while i < 100000000 { i += 1 }; i }
+fn other() -> u64 { LOOP + 1 }
+const BIG: u8 = grow(100)
+
+const ID: u64 = fresh()
+
+const SLOW: u64 = spin()
+
+const LOOP: u64 = other()
+
+const _: () = core.fail("never")
+
+const NAME: String = name()
+fn name() -> String { "a" }
+
+fn zero() -> u8 { 0 }
+fn per_os() -> u8 { if target.os == (Macos : target.Os) { 1u8 / zero() } else { 1u8 } }
+const PER_OS: u8 = per_os()
+
+fn deep(n: u64) -> u64 { if n == 0 { 0 } else { deep(n - 1) + 1 } }
+const DEEP: u64 = deep(100000)

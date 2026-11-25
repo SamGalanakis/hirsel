@@ -8,6 +8,10 @@ use hirsel_core_ir::{
 use hirsel_core_materialize::{Child, Published, Resolver};
 use std::collections::BTreeSet;
 
+mod materialise;
+pub(crate) use materialise::{Bindings, Materialised, bind_values};
+use materialise::{MaterializedModule, materialise};
+
 /// The records-free walk's units, retained until their consumer finishes. Native
 /// compilation and evaluation materialize the same per-definition products.
 pub struct Units {
@@ -15,6 +19,9 @@ pub struct Units {
     instances: InstanceSet,
 }
 impl Units {
+    pub(crate) fn new(reached: Vec<Identity>, instances: InstanceSet) -> Self {
+        Self { reached, instances }
+    }
     pub fn modules(&self) -> io::Result<Vec<hirsel_core_materialize::Unit<'_>>> {
         self.reached
             .iter()
@@ -125,6 +132,9 @@ pub(crate) enum Location {
 pub(crate) struct CodeSignatures {
     pub own: ContentHash,
     pub slots: Vec<(Identity, ContentHash)>,
+    /// The value hash of each constant slot, in slot order (PROG-10): the
+    /// group binds them, and the body names only the constants.
+    pub values: Vec<ContentHash>,
 }
 
 /// A generated adapter may be emitted weak by several owners. Each owner
@@ -221,11 +231,13 @@ pub(crate) struct InstanceBody {
     /// The module's signature-only rows the walk reached, by ascending row, with
     /// the instance each names.
     externals: Vec<(hirsel_core_ir::FuncId, Identity)>,
+    /// The values its constant slots bind, for each decoding of `code`.
+    pub values: Bindings,
 }
 impl InstanceBody {
     pub fn ir(&self) -> io::Result<&Module> {
         match (&self.module, &self.product) {
-            (Some(module), _) => Ok(module.ir(&self.code)),
+            (Some(module), _) => Ok(module.ir(&self.code, &self.values)),
             (None, Some(product)) => product.ir(),
             (None, None) => unreachable!("a glue instance is materialised"),
         }
@@ -235,9 +247,14 @@ impl InstanceBody {
     pub(crate) fn transient_ir(&self) -> io::Result<std::borrow::Cow<'_, Module>> {
         use std::borrow::Cow;
         match self.module.as_deref() {
-            Some(MaterializedModule::Recipe { sites, decoded }) => Ok(decoded
-                .get()
-                .map_or_else(|| Cow::Owned(sites.restore(&self.code)), Cow::Borrowed)),
+            Some(MaterializedModule::Recipe { sites, decoded }) => Ok(decoded.get().map_or_else(
+                || {
+                    let mut module = sites.restore(&self.code);
+                    bind_values(&mut module, &self.values);
+                    Cow::Owned(module)
+                },
+                Cow::Borrowed,
+            )),
             _ => self.ir().map(Cow::Borrowed),
         }
     }
@@ -263,7 +280,9 @@ impl InstanceBody {
         use hirsel_core_ir::normal;
         match self.module.as_deref() {
             Some(MaterializedModule::Recipe { sites, .. }) => {
-                Ok((sites.annex(sources), normal::assembly_module(&self.code)))
+                let mut module = normal::assembly_module(&self.code);
+                bind_values(&mut module, &self.values);
+                Ok((sites.annex(sources), module))
             }
             _ => Ok(normal::prepare_retained_assembly(self.ir()?, sources)),
         }
@@ -272,7 +291,7 @@ impl InstanceBody {
     /// one is hashed here, by the same rule, through the caller's `scratch`.
     pub fn ir_hash(&self, scratch: &mut Vec<u8>) -> io::Result<ContentHash> {
         match (&self.module, &self.product) {
-            (Some(module), _) => crate::body::ir_hash(module.ir(&self.code), scratch),
+            (Some(module), _) => crate::body::ir_hash(module.ir(&self.code, &self.values), scratch),
             (None, Some(product)) => Ok(product.ir_hash()),
             (None, None) => unreachable!("a glue instance is materialised"),
         }
@@ -394,10 +413,11 @@ impl InstanceSet {
         code_groups_with_external(
             roots,
             |identity| {
-                let (body, slots, _) = rows.get(identity)?;
+                let (body, slots, signatures) = rows.get(identity)?;
                 Some(CodeRow {
                     body: *body,
                     slots: (*slots).clone(),
+                    values: signatures.values.clone(),
                 })
             },
             |identity| foreign.get(identity).copied(),
@@ -413,10 +433,11 @@ impl InstanceSet {
         hirsel_core_ir::address::GroupPlan::new(
             [entry.clone()],
             |identity| {
-                let (body, slots, _) = rows.get(identity)?;
+                let (body, slots, signatures) = rows.get(identity)?;
                 Some(CodeRow {
                     body: *body,
                     slots: (*slots).clone(),
+                    values: signatures.values.clone(),
                 })
             },
             |identity| self.foreign_addresses.get(identity).copied(),
@@ -716,7 +737,20 @@ impl CheckProduct {
                 }
                 Some(product)
             };
-            let own = product.as_ref().map(|p| p.record);
+            let target = instances
+                .target
+                .unwrap_or_else(crate::reachability::default_target);
+            // The values of the constants the body reads, on this target: a
+            // changed value changes the instance's record, its memo and its group.
+            let values = match product.as_deref() {
+                Some(p) if !p.check.computed.is_empty() => {
+                    self.constant_values(&key.definition, &p.check.computed, target)?
+                }
+                _ => Vec::new(),
+            };
+            let own = product
+                .as_ref()
+                .map(|p| crate::comptime::own_with_values(p.record, &values));
             if let Some((records, expand)) = records {
                 let location = if glue || self.definitions.contains_key(&key.definition) {
                     Location::Request
@@ -747,9 +781,6 @@ impl CheckProduct {
             })?;
             // A function of the instance's identity and its definition's
             // published record: a resident compiler keeps it across requests.
-            let target = instances
-                .target
-                .unwrap_or_else(crate::reachability::default_target);
             let memo_key =
                 (own != Some(ContentHash::default())).then(|| (key.clone(), own, target));
             let made = crate::resident::MATERIALISED.get_or(memo_key, || {
@@ -760,6 +791,7 @@ impl CheckProduct {
                     observe,
                     instances.compact_recipe,
                     target,
+                    &values,
                 )
             })?;
             let Materialised {
@@ -773,6 +805,7 @@ impl CheckProduct {
                 adapters,
                 described,
                 unsupported,
+                values,
             } = made;
             if let Some(why) = unsupported {
                 let stop = crate::unsupported_reach::Unsupported {
@@ -835,155 +868,10 @@ impl CheckProduct {
                 adapters,
                 described,
                 externals,
+                values,
             });
             observe(key, "dependencies");
             Ok(pending.into_iter().collect())
         }
     }
-}
-
-enum MaterializedModule {
-    Decoded(Module),
-    Recipe {
-        sites: hirsel_core_ir::normal::RetainedSites,
-        decoded: std::sync::OnceLock<Module>,
-    },
-}
-
-impl MaterializedModule {
-    fn ir(&self, code: &[u8]) -> &Module {
-        match self {
-            Self::Decoded(module) => module,
-            Self::Recipe { sites, decoded } => decoded.get_or_init(|| sites.restore(code)),
-        }
-    }
-}
-
-/// An instance as the walk materialises it, before its walk-specific
-/// bookkeeping: a function of its identity, its definition's published
-/// record and its arguments' closures, which its identity names by hash.
-#[derive(Clone)]
-pub(crate) struct Materialised {
-    module: Option<Arc<MaterializedModule>>,
-    function: hirsel_core_ir::FuncId,
-    children: Vec<Child>,
-    body: ContentHash,
-    code: Arc<[u8]>,
-    slots: Vec<Identity>,
-    signatures: CodeSignatures,
-    adapters: Vec<Adapter>,
-    described: Vec<Identity>,
-    /// The reason of a `target.unsupported` call the retained code makes (PROG-6).
-    unsupported: Option<String>,
-}
-fn materialise(
-    key: &Identity,
-    product: Option<&DefinitionProduct>,
-    arguments: &[&hirsel_core_ir::Closure],
-    observe: &mut impl FnMut(&Identity, &'static str),
-    compact_recipe: bool,
-    target: hirsel_core_layout::Target,
-) -> Result<Materialised, InstanceStop> {
-    let input = |message: String| InstanceStop::Input {
-        definition: key.definition.clone(),
-        message,
-    };
-    let built = match product {
-        None => {
-            observe(key, "load");
-            hirsel_core_materialize::materialize_glue(key, arguments, target).map_err(input)?
-        }
-        Some(product) => {
-            let own = Published {
-                module: product.ir().map_err(|e| input(e.to_string()))?,
-                function: product.check.function.unwrap(),
-                template: product.check.template.as_ref(),
-            };
-            observe(key, "load");
-            hirsel_core_materialize::materialize(&own, key, arguments, target).map_err(input)?
-        }
-    };
-    observe(key, "materialize");
-    let (slots, signatures, adapters) = {
-        use hirsel_core_ir::normal::{self, Slot};
-        let module = built.module.as_ref().expect("materialized module");
-        let mut hashes = rustc_hash::FxHashMap::default();
-        let mut signature = |function: FuncId| {
-            let row = module.functions[function.index()].signature;
-            *hashes
-                .entry(row)
-                .or_insert_with(|| normal::signature(module, function))
-        };
-        let signatures = CodeSignatures {
-            own: signature(built.function),
-            slots: built
-                .children
-                .iter()
-                .map(|child| (child.identity.clone(), signature(child.function)))
-                .collect(),
-        };
-        let mut children = built.children.iter();
-        let slots = built
-            .code
-            .slots
-            .iter()
-            .map(|slot| match slot {
-                Slot::External(_) => children
-                    .next()
-                    .expect("a child for each external slot")
-                    .identity
-                    .clone(),
-                Slot::Builtin(definition) => Identity::plain(definition.clone()),
-            })
-            .collect();
-        let adapters = module
-            .functions
-            .iter()
-            .enumerate()
-            .filter_map(|(i, function)| {
-                function.body.as_ref()?;
-                let key = &module.instances[function.instance.index()];
-                key.definition.0.name.contains("$callable[").then(|| {
-                    let code = normal::encode(module, hirsel_core_ir::FuncId(i as u32));
-                    Adapter {
-                        identity: module.identity(function.instance),
-                        body: code.hash(),
-                        slots: code
-                            .slots
-                            .iter()
-                            .map(|slot| slot.identity(module))
-                            .collect(),
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        (slots, signatures, adapters)
-    };
-    let body = built.code.hash();
-    let described = built.code.described;
-    let unsupported = built
-        .module
-        .as_ref()
-        .and_then(|module| hirsel_core_ir::unsupported_reason(module, built.function));
-    Ok(Materialised {
-        module: built.module.map(|module| {
-            Arc::new(if compact_recipe {
-                MaterializedModule::Recipe {
-                    sites: hirsel_core_ir::normal::RetainedSites::take(module),
-                    decoded: std::sync::OnceLock::new(),
-                }
-            } else {
-                MaterializedModule::Decoded(module)
-            })
-        }),
-        function: built.function,
-        children: built.children,
-        body,
-        code: built.code.bytes.into(),
-        slots,
-        signatures,
-        adapters,
-        described,
-        unsupported,
-    })
 }

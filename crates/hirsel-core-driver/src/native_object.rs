@@ -233,7 +233,7 @@ pub(crate) struct Instance {
     /// Every closure a child's arguments name, deduplicated, by hash.
     pub closures: Vec<std::sync::Arc<hirsel_core_ir::Closure>>,
 }
-pub(crate) const INSTANCE_SCHEMA: u32 = 6;
+pub(crate) const INSTANCE_SCHEMA: u32 = 7;
 
 /// Publish an emitted instance's object, debug rows and record under its
 /// key; the object and the debug rows' blobs.

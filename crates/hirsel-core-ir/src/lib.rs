@@ -1124,7 +1124,7 @@ pub mod roles;
 #[cfg(any(test, feature = "snapshot"))]
 pub mod snapshot;
 pub mod source;
-mod static_data;
+pub mod static_data;
 pub mod step_contexts;
 mod target;
 pub mod text;

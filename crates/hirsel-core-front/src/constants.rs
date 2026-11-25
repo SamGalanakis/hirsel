@@ -1,6 +1,7 @@
 //! LANG-20 constants: declaration-only values evaluated in dependency order.
 //! Values share one append-only field arena; no expression owns a child vector.
 mod bytes;
+mod computed;
 mod index;
 mod targets;
 
@@ -20,6 +21,10 @@ pub struct Constant {
     /// A constant that depends on `target`: its value on each `Target::ALL`.
     pub targets: Option<[ConstValue; 3]>,
     pub(crate) expr: NodeId,
+    /// Its initialiser calls a function or names a computed constant: its value is
+    /// the run of the generated function under its path, after checking.
+    #[serde(default)]
+    pub computed: bool,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ConstValue {
@@ -77,6 +82,7 @@ impl Program<'_> {
                     value: None,
                     targets,
                     expr,
+                    computed: false,
                 });
             }
         }
@@ -130,8 +136,14 @@ impl Program<'_> {
             .collect::<VecDeque<_>>();
         let mut done = vec![false; len - base];
         while let Some(i) = ready.pop_front() {
-            if self.constants[i].targets.is_none() {
-                self.evaluate_constant(i, string);
+            let c = &self.constants[i];
+            if c.targets.is_none() && c.ty != ERROR {
+                // A String is a static string, whose rule refuses a call at it.
+                if Some(c.ty) != string && self.calls_in_initialiser(i) {
+                    self.declare_computed(i);
+                } else {
+                    self.evaluate_constant(i, string);
+                }
             }
             done[i - base] = true;
             let mut next = heads[i - base];

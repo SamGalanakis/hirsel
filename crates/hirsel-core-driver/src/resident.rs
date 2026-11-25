@@ -46,8 +46,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 mod memo;
 pub(crate) use memo::{
-    DEBUG_POSITIONS, MATERIALISED, Memo, OBJECT_RECORDS, RECIPE_GROUPS, RECIPE_REACH, REFERENCED,
-    RESOLVED, RUNTIME_SOURCES, WorkingMemo, parse_file, source_hash, symbol_suffix,
+    CONSTANTS, DEBUG_POSITIONS, MATERIALISED, Memo, OBJECT_RECORDS, RECIPE_GROUPS, RECIPE_REACH,
+    REFERENCED, RESOLVED, RUNTIME_SOURCES, WorkingMemo, parse_file, source_hash, symbol_suffix,
 };
 
 const PROTOCOL: u32 = 2;

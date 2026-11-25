@@ -168,14 +168,21 @@ pub(super) fn check(
                 &mut conflict,
                 budget,
             )?;
-            if row.slots.len() != decoded.slots.len() {
+            // PROG-10: the function slots, then one `Value` per constant slot.
+            let constants = decoded.decoded.module.constant_slots().len();
+            if row.slots.len() != decoded.slots.len() + constants {
                 binding.get_or_insert("group binding count differs from the body slots");
             }
 
             for (slot_index, target) in row.slots.iter().enumerate() {
                 budget.check()?;
                 let slot = decoded.slots.get(slot_index);
+                if (slot_index >= decoded.slots.len()) != matches!(target, Binding::Value(_)) {
+                    binding.get_or_insert("a value binds exactly the constant slots");
+                    continue;
+                }
                 let target = match *target {
+                    Binding::Value(_) => continue,
                     Binding::Internal(target) => {
                         let target = target as usize;
                         if target >= rows.len() {

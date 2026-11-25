@@ -1,0 +1,7 @@
+// LANG-20: an initialiser that reaches a refused body, or reads a constant whose
+// initialiser does, is not run: the body's refusal is the only one reported.
+// expect: refuse LANG-11 at 5:21
+// expect: compared LANG-11 at 5:21 | bool | u8
+fn broken() -> u8 { true }
+const FIRST: u8 = broken()
+const SECOND: u8 = FIRST + 1

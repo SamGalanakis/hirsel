@@ -34,7 +34,7 @@ use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-pub(crate) const REACH_SCHEMA: u32 = 13;
+pub(crate) const REACH_SCHEMA: u32 = 14;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image

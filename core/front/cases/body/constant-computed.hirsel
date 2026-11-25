@@ -1,0 +1,124 @@
+// LANG-20: a constant whose initialiser calls a function, or names a computed
+// constant, is computed: its value is its initialiser's run, which every reader
+// reads. Values are worked by hand: 12 * 12 = 144; AREA + 1 = 145; crc32's
+// table entry 1 is 0x77073096 (1996959894) and entry 255 is 0x2d02ef8d
+// (755167117); Pair(3, 4) by fields; ((9, true)) by fields.
+// expect: accept
+// expect: run area() = 144
+// expect: run next() = 145
+// expect: run sides() = 4
+// expect: run entry(1) = 1996959894
+// expect: run entry(255) = 755167117
+// expect: run pair_sum() = 7
+// expect: run tuple_first() = 9
+// expect: run tuple_flag() = true
+// expect: run wide() = 2
+fn square(n: u64) -> u64 {
+    n * n
+}
+
+const AREA: u64 = square(12)
+
+const NEXT: u64 = AREA + 1
+
+const SIDES: u64 = 4
+
+fn crc_table() -> Inline[u32, 256] {
+    let mut t: Inline[u32, 256] =[0; 256]
+    let mut i: u64 = 0
+    let mut n: u32 = 0
+    while i < 256 {
+        let mut c = n
+        let mut bit: u64 = 0
+        while bit < 8 {
+            if c & 1 == 1 {
+                c = 0xedb88320 ^ (c >> 1)
+            } else {
+                c = c >> 1
+            }
+            bit += 1
+        }
+        t[i] = c
+        i += 1
+        n += 1
+    }
+    t
+}
+
+const TABLE: Inline[u32, 256] = crc_table()
+
+type Pair {
+    a: u32,
+    b: u32
+}
+
+fn make_pair() -> Pair {
+    Pair(a: 3, b: 4)
+}
+
+const PAIR: Pair = make_pair()
+
+const TUPLE: (u64, bool) = (square(3), true)
+
+fn fits(size: u64, limit: u64) {
+    if size > limit {
+        core.fail("record is larger than its cache budget")
+    }
+}
+
+type Particle {
+    x: f32,
+    y: f32,
+    z: f32,
+    mass: f32
+}
+
+const _: () = fits(bytes[Particle], 16)
+
+fn width() -> u64 {
+    4
+}
+
+const WIDE: bool = width() > 2
+
+fn pick(n: u64) -> u64 {
+    if WIDE {
+        n
+    } else {
+        0
+    }
+}
+
+fn area() -> u64 {
+    AREA
+}
+
+fn next() -> u64 {
+    NEXT
+}
+
+fn sides() -> u64 {
+    SIDES
+}
+
+fn entry(i: u64) -> u32 {
+    TABLE[i]
+}
+
+fn pair_sum() -> u32 {
+    PAIR.a + PAIR.b
+}
+
+fn tuple_first() -> u64 {
+    let (n, _) = TUPLE;
+    n
+}
+
+fn tuple_flag() -> bool {
+    let (_, flag) = TUPLE;
+    flag
+}
+
+fn wide() -> u64 {
+    pick(2)
+}

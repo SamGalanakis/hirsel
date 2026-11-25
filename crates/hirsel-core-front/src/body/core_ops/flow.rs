@@ -103,6 +103,7 @@ impl Cx<'_, '_, '_> {
         self.out.refusals.extend(out.refusals);
         self.out.gaps.extend(out.gaps);
         self.out.counts += out.counts;
+        self.out.computed.extend(out.computed);
         if out.function.is_none() {
             self.halt();
             return None;

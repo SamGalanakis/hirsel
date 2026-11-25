@@ -84,6 +84,9 @@ pub struct Counters {
     /// Records of a shape's declared tables installed in place of
     /// declaration (OPTION-L v3.2): one per request on the fast path.
     pub declared_installs: u64,
+    /// Computed constants' initialisers run (LANG-20): one per initialiser
+    /// address no product, image or resident table answered.
+    pub constant_runs: u64,
 }
 
 /// One kind of work [`Counters`] counts.
@@ -103,8 +106,9 @@ pub(crate) enum Count {
     ImageFiles,
     ImageBodies,
     DeclaredInstalls,
+    ConstantRuns,
 }
-const COUNTS: usize = Count::DeclaredInstalls as usize + 1;
+const COUNTS: usize = Count::ConstantRuns as usize + 1;
 static COUNTED: [std::sync::atomic::AtomicU64; COUNTS] =
     [const { std::sync::atomic::AtomicU64::new(0) }; COUNTS];
 
@@ -137,6 +141,7 @@ impl Counters {
             image_files: n(Count::ImageFiles),
             image_bodies: n(Count::ImageBodies),
             declared_installs: n(Count::DeclaredInstalls),
+            constant_runs: n(Count::ConstantRuns),
         }
     }
 }

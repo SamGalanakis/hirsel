@@ -341,6 +341,11 @@ pub(crate) static DEBUG_POSITIONS: Memo<
 
 /// Each stored object record's key-determined parts, by its key alone: a
 /// key determines its object whichever store holds it.
+/// Each computed constant's value or refusal cause, by its initialiser's code
+/// address (PROG-10): an unchanged initialiser is not run again. The run reads
+/// nothing but the code the address names, so targets whose code agrees share it.
+pub(crate) static CONSTANTS: Memo<ContentHash, Result<Arc<crate::comptime::Value>, Arc<str>>> =
+    Memo::new();
 pub(crate) static OBJECT_RECORDS: Memo<ContentHash, crate::native_object::Shared> = Memo::new();
 
 #[derive(Clone)]

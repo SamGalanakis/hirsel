@@ -486,12 +486,12 @@ constant numbered at its first reference, in number order.
 
 Every enumeration is written with a tag from a fixed, append-only table, and every count and
 index as unsigned LEB128. The body starts with the seven ASCII bytes `HIRBODY`, a zero byte
-and its normal-form version as a 16-bit little-endian number. The current version is 4, whose bodies hold
-retained code ([PROG-6](#prog-6-one-meaning)); a reader accepts version 4 only.
+and its normal-form version as a 16-bit little-endian number. The current version is 5, whose bodies hold
+retained code ([PROG-6](#prog-6-one-meaning)) and constant slots; a reader accepts version 5 only.
 Each value has exactly one encoding: a reader refuses a LEB128 number with a redundant byte,
 an unknown tag, a list out of its required order or with a repeat, or bytes left over at the
 end. Decoding and re-encoding a body gives the same bytes. Its
-**body hash** is `H("hirsel.code-body.v4", body)`. Positions and hints go to the body's
+**body hash** is `H("hirsel.code-body.v5", body)`. Positions and hints go to the body's
 **annex** instead, in the body's order: each entry names a position of that body, and an annex
 whose entries do not match its body's instructions, terminators and calls in number and kind is
 malformed. Each terminator's entry also says whether it is a source decision (a coverage site,
@@ -512,7 +512,7 @@ Groups are hashed dependency-first: a group's hash is computed after the hash of
 binds. A group lists its members in ascending identity order, which never ties, so the order
 does not depend on how they were found. For each member it gives the body hash and, for each of
 the member's slots in order, a **binding**: `Internal(k)`, the group's member k;
-`External(address)`; `Builtin(n)`; or, for a constant slot, `Value(h)` (below). The **group hash** is `H("hirsel.code-group.v1", group)`,
+`External(address)`; `Builtin(n)`; or, for a constant slot, `Value(h)` (below). The **group hash** is `H("hirsel.code-group.v2", group)`,
 and member k's address is `H("hirsel.code-address.v1", group hash ‖ k)`, with `k` a 32-bit
 little-endian number. An edit to a callee therefore changes its callers' addresses, through
 their groups, but not their bodies.
@@ -536,14 +536,16 @@ each builtin at the numbers it lists and refuses a program that binds any other;
 a builtin under a number other than the one bound. Engine operations inside a body are written
 as tags, and a change in the meaning of one gets a new tag, under the same rule.
 
-**Computed constants**<!-- doc-ref: planned --> ([LANG-20](language.md#lang-20-constants)).
+**Computed constants** ([LANG-20](language.md#lang-20-constants)).
 
 - **The initialiser is an instance.** A computed constant's initialiser is a function
   generated beside the constant, named as above: its owner is the constant, its kind is
   initialiser, and its signature is `() -> T`. The initialisers of a module's assertions
   (`const _`) are told apart by their ordinal among that module's assertions, in source
-  order. An initialiser has a body, slots and an address like any instance. It is a root of
-  the reach walk, whether or not the program's entry reaches the constant. For a constant
+  order: the module's files in the order the package index lists them, and each file's
+  items in order, so the k-th assertion's initialiser is named `_$k`, from 0. An initialiser
+  has a body, slots and an address like any instance. Its own reach walk starts at it and
+  gives its address, whether or not the program's entry reaches the constant. For a constant
   that depends on `target`, its address is computed once for each target, from that target's
   retained code.
 - **Value bytes and value hash.** A computed constant's **value bytes** are its value written
@@ -552,7 +554,9 @@ as tags, and a change in the meaning of one gets a new tag, under the same rule.
   field, in declaration order; an `Inline` array element by element; and a value of a type
   with cases as its case index, a 32-bit little-endian number, followed by that case's
   fields. Its **value hash** is `H("hirsel.code-value.v1", c ‖ v)`, where `c` is the
-  constant type's closure hash and `v` the value bytes.
+  constant type's closure hash and `v` the value bytes. A scalar type and `()` reach no row,
+  so for them `c` is `H("hirsel.core-closure.v1", n)`, with `n` the type's name in ASCII
+  (`u8`, `bool`, `()`).
 - **A reader's address holds the value hash.** Retained code that reads a computed constant
   never holds its value. It names the constant in a **constant slot**, bound in its group as
   `Value(h)`, where `h` is the value hash, the way a call is bound to its callee's address. So
@@ -563,6 +567,9 @@ as tags, and a change in the meaning of one gets a new tag, under the same rule.
   when the value does. An initialiser that reads another computed constant holds that
   constant in a constant slot too, so its own address includes the other constant's value
   hash.
+- **The values table.** A library image stores the value of each computed constant it
+  evaluated, by its initialiser's address, and a program that imports the library reads it
+  there and runs nothing.
 - **What an evaluation is a function of.** A computed constant's outcome, its value or its
   refusal, is a function of its initialiser's address, and for a constant that depends on
   `target`, of the target. An implementation may reuse an outcome under that key, and under
@@ -589,7 +596,9 @@ this section, and `hirsel.code-body.v3` by the 2026-11-22 version, which retires
 `hirsel.code-body.v3`. A change to the normal form or to a group's encoding takes a new version
 and a new domain. It never reuses an old one. `hirsel.code-annex.v2` by the 2026-11-25
 version (coverage-gen-anchors-2579) retires `hirsel.code-annex.v1`, and `hirsel.code-annex.v3`
-(cli-s1a-launch-2709, the entry's error description) retires `hirsel.code-annex.v2`.
+(cli-s1a-launch-2709, the entry's error description) retires `hirsel.code-annex.v2`. The 2026-11-26
+version (comptime-phase2b-2715) adds `hirsel.code-value.v1`, and `hirsel.code-body.v5` and
+`hirsel.code-group.v2`, which retire `hirsel.code-body.v4` and `hirsel.code-group.v1`.
 
 Version note (2026-11-21, code-address attacks): the traversal now follows every instruction's
 failure target; slots are the functions retained code can run, and type hooks are metadata;
@@ -631,6 +640,13 @@ records which bodies a run read, so the 2026-11-12 hybrid ruling is met by its r
 clause. An address names every body an initialiser can run, so the key is complete, and the
 value hash stops an over-approximated re-evaluation from spreading to readers. Reversible
 before 1.0: the spec only. No address carrying a constant slot has been published.
+
+Version note (2026-11-25, comptime-phase2b-2715): built. An initialiser's address now comes from
+its own reach walk, evaluated at check, rather than from the program's reach walk, so a check
+gives every computed constant's address and value without a build; the address is the same. A
+scalar or unit constant type's closure hash is the hash of its name, since it reaches no row. An
+assertion's source order is made exact: files in index order, then items. A library image now
+holds a values table by initialiser address. Reversible before 1.0: the spec and the driver.
 
 ### PROG-11: Map index
 

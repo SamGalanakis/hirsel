@@ -62,7 +62,12 @@ impl Groups {
         for (i, (identity, row)) in instances.iter().zip(&self.rows).enumerate() {
             let body = materialized.get(identity);
             let live = record(body);
-            if live == row.record && live != Some(ContentHash::default()) {
+            // A constant's value can change under an unchanged record; the
+            // signatures carry the value hashes the group binds.
+            if live == row.record
+                && live != Some(ContentHash::default())
+                && body.signatures.values == row.signatures.values
+            {
                 continue;
             }
             if body.slots != row.slots
@@ -71,14 +76,14 @@ impl Groups {
             {
                 return false;
             }
-            changed.push((i, identity, body.body, live));
+            changed.push((i, identity, body.body, &body.signatures.values, live));
         }
         self.plan.update(
             changed
                 .iter()
-                .map(|(_, identity, body, _)| (*identity, *body)),
+                .map(|(_, identity, body, values, _)| (*identity, *body, &values[..])),
         );
-        for (i, _, _, live) in changed {
+        for (i, _, _, _, live) in changed {
             self.rows[i].record = live;
         }
         true

@@ -1,6 +1,6 @@
 //! Publish the checked program and assemble its recipe with a local toolchain.
 
-use super::recipe_grants::{GRANT_NAMES, grant_name, kind};
+use super::recipe_grants::{GRANT_NAMES, grant_name, kind, net_rule};
 use super::std_release::{StdSide, std_side};
 use super::*;
 use crate::code_admission::{
@@ -51,6 +51,8 @@ impl AssemblyRecord {
 pub(super) struct Unit {
     code: BodyRef,
     module: UnitModule,
+    /// The values the constant slots of `code` bind (PROG-10).
+    values: crate::instances::Bindings,
     annex: Annex,
     builtins: Vec<u32>,
     /// The unit's key in its store's unit index, when its publication keeps
@@ -65,16 +67,18 @@ pub(super) struct Unit {
 #[derive(Clone)]
 enum UnitModule {
     Decoded(Box<Module>),
-    /// Shares the normal body already held by the materialized instance.
-    Encoded(Arc<[u8]>),
+    /// Shares the normal body already held by the materialized instance, with
+    /// the values its constant slots bind.
+    Encoded(Arc<[u8]>, crate::instances::Bindings),
 }
 
 impl UnitModule {
     fn into_bound(self, annex: &Annex, identity: &Identity) -> Module {
         match self {
             Self::Decoded(module) => *module,
-            Self::Encoded(bytes) => {
+            Self::Encoded(bytes, values) => {
                 let mut module = normal::assembly_module(&bytes);
+                crate::instances::bind_values(&mut module, &values);
                 let symbol = hirsel_core_ir::symbol(identity.digest());
                 bind_module(&mut module, annex, Some(&symbol));
                 module
@@ -92,6 +96,8 @@ impl UnitModule {
 /// recipe that the unit's preparation would not give.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct Memo {
+    /// The values the stored body's constant slots bind.
+    values: Vec<(DefPath, hirsel_core_ir::StaticValue)>,
     body: (ContentHash, u64),
     annex: (ContentHash, u64),
     builtins: Vec<u32>,
@@ -123,7 +129,7 @@ struct UnitIndex {
     schema: u32,
     units: BTreeMap<ContentHash, Arc<Memo>>,
 }
-const UNIT_INDEX_SCHEMA: u32 = 1;
+const UNIT_INDEX_SCHEMA: u32 = 2;
 
 /// Where a publication's unit memos come from and go: its index's key, the
 /// index as read, and the code store its bodies are in.
@@ -190,6 +196,7 @@ fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Modu
     Unit {
         code,
         module: UnitModule::Decoded(Box::new(module)),
+        values: Arc::default(),
         annex,
         builtins,
         memo: None,
@@ -391,7 +398,7 @@ impl CheckProduct {
             let (mut annex, module) = if defer_modules && identity != entry {
                 (
                     instance.annex(&sources)?,
-                    UnitModule::Encoded(Arc::clone(&instance.code)),
+                    UnitModule::Encoded(Arc::clone(&instance.code), Arc::clone(&instance.values)),
                 )
             } else {
                 let (annex, module) = instance.prepare_assembly(&sources)?;
@@ -417,6 +424,7 @@ impl CheckProduct {
                 Unit {
                     code,
                     module,
+                    values: Arc::clone(&instance.values),
                     annex,
                     builtins,
                     memo,
@@ -527,6 +535,7 @@ fn memo_key(
             identity,
             instance.product.as_ref().map(|product| product.record),
             instance.body,
+            &instance.signatures.values,
             instance.function.0,
             positions,
         ),
@@ -566,6 +575,7 @@ impl Memos {
             &Debit::unlimited(),
         )
         .map_err(refused)?;
+        crate::instances::bind_values(&mut module, &memo.values);
         let symbol = hirsel_core_ir::symbol(identity.digest());
         bind_module(&mut module, &annex, Some(&symbol));
         Ok(module)
@@ -867,47 +877,6 @@ fn select_archive<'a>(
         ))
         .into()
     })
-}
-
-fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
-    use hirsel_core_net::{AddressDirection, GrantRule, TlsTrust};
-    match rule {
-        GrantRule::Address(rule) => {
-            let direction = AddressDirection::from_tag(rule.dir).unwrap().word();
-            let ip = if rule.family == 0 {
-                std::net::IpAddr::V4(std::net::Ipv4Addr::from(rule.lo as u32))
-            } else {
-                std::net::IpAddr::V6(std::net::Ipv6Addr::from(
-                    (u128::from(rule.hi) << 64) | u128::from(rule.lo),
-                ))
-            };
-            let reach = if rule.reach == hirsel_core_net::PUBLIC {
-                " public"
-            } else {
-                ""
-            };
-            format!(
-                "{direction} {ip}/{} {}-{}{reach}",
-                rule.bits, rule.first, rule.last
-            )
-        }
-        GrantRule::Tls(rule) => {
-            let (first, last) = rule.ports();
-            let trust = match rule.trust() {
-                TlsTrust::System => "System".to_owned(),
-                TlsTrust::Roots(hash) => format!("Roots=sha256:{}", selection(ContentHash(hash))),
-                TlsTrust::Any => "Any".to_owned(),
-            };
-            format!("Tls {} {first}-{last} {trust}", rule.pattern_text())
-        }
-        GrantRule::Resolve(rule) => format!("Resolve {}", rule.pattern_text()),
-        GrantRule::Unix(rule) => {
-            let (root, path) = rule
-                .endpoint()
-                .expect("launch rule has a concrete endpoint");
-            format!("{} {root} {path}", rule.direction.word())
-        }
-    }
 }
 
 fn bindings(
@@ -1316,6 +1285,7 @@ impl Publication {
                     Unit {
                         code,
                         module: UnitModule::Decoded(Box::new(body.module)),
+                        values: Arc::default(),
                         annex,
                         builtins,
                         memo: None,
@@ -1507,8 +1477,10 @@ impl Publication {
             return Ok(None);
         }
         for unit in self.units.values_mut() {
-            if let UnitModule::Encoded(bytes) = &unit.module {
-                unit.module = UnitModule::Decoded(Box::new(normal::assembly_module(bytes)));
+            if let UnitModule::Encoded(bytes, values) = &unit.module {
+                let mut module = normal::assembly_module(bytes);
+                crate::instances::bind_values(&mut module, values);
+                unit.module = UnitModule::Decoded(Box::new(module));
             }
         }
         std_side(&self.units, &self.recipe.entry, library, &options).map(Some)
@@ -1662,6 +1634,7 @@ impl Publication {
                 match unit {
                     Ok(Unit {
                         module,
+                        values,
                         annex,
                         code,
                         builtins,
@@ -1687,6 +1660,7 @@ impl Publication {
                             kept.insert(
                                 memo,
                                 Arc::new(Memo {
+                                    values: values.to_vec(),
                                     body: object(code.body),
                                     annex: object(code.annex),
                                     builtins,

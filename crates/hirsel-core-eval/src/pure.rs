@@ -20,6 +20,9 @@ pub struct PureRun {
     /// The closed-list function ([`hirsel_core_ir::CLOSED`]) whose reach stopped
     /// the run (`Outcome::Stopped("Closed")`).
     pub reached: Option<&'static str>,
+    /// The bodiless (foreign) function whose call stopped the run
+    /// (`Outcome::Stopped("Foreign")`).
+    pub foreign: Option<FuncId>,
     /// The calls from the entry to where the run stopped, or to the site of its
     /// failure's primary cause, innermost first; empty when it returned.
     pub calls: Vec<FuncId>,
@@ -148,6 +151,7 @@ fn pure_root(
     let host = Pure {
         budget: input.steps.is_some(),
         reached: None,
+        foreign: None,
         calls: Vec::new(),
     };
     let mut mach = Machine::with_host(m, recipes, input.limit, core, host);
@@ -213,6 +217,7 @@ fn pure_root(
             .host
             .reached
             .map(|i| hirsel_core_ir::CLOSED[usize::from(i)]),
+        foreign: mach.host.foreign,
         calls,
     }
 }
@@ -236,6 +241,8 @@ pub(super) struct Pure {
     budget: bool,
     /// The closed-list function that stopped the run.
     reached: Option<u8>,
+    /// The foreign function that stopped the run.
+    foreign: Option<FuncId>,
     /// The activations, innermost first, when the primary cause was recorded.
     calls: Vec<FuncId>,
 }
@@ -268,6 +275,10 @@ impl<'m> Host<'m> for Pure {
     fn closed(m: &mut Machine<'m, Self>, i: u8) {
         m.host.reached = Some(i);
         std::panic::resume_unwind(Box::new(RunStop("Closed")));
+    }
+    fn bodiless(m: &mut Machine<'m, Self>, _: &Task, f: FuncId) {
+        m.host.foreign = Some(f);
+        std::panic::resume_unwind(Box::new(RunStop("Foreign")));
     }
     fn failing(m: &mut Machine<'m, Self>, t: &Task) {
         if t.chain.is_empty() {

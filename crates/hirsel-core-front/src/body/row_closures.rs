@@ -63,7 +63,7 @@ struct Mark {
     /// The sizes of the instance, definition-row, program-type-row and signature
     /// maps.
     maps: [usize; 4],
-    body_state: [usize; 12],
+    body_state: [usize; 13],
 }
 
 /// What a fresh emitter holds after building one type's row, numbered from 0. Function
@@ -197,7 +197,7 @@ impl Emitter {
     }
 
     /// The sizes of the state `Closure::build` refuses a closure for reaching.
-    fn body_state(&self) -> [usize; 12] {
+    fn body_state(&self) -> [usize; 13] {
         [
             self.generic_rows.len(),
             self.generic_names.len(),
@@ -206,6 +206,7 @@ impl Emitter {
             self.items.len(),
             self.statics.len(),
             self.constant_statics.len(),
+            self.computed_statics.len(),
             self.callable_adapters.len(),
             self.module.items.len(),
             self.module.statics.len(),
@@ -658,6 +659,7 @@ impl Closure {
             || !e.items.is_empty()
             || !e.statics.is_empty()
             || !e.constant_statics.is_empty()
+            || !e.computed_statics.is_empty()
             || !e.callable_adapters.is_empty()
             || !e.module.items.is_empty()
             || !e.module.statics.is_empty()

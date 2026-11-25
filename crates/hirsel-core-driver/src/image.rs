@@ -32,6 +32,9 @@ pub(crate) struct ImageDirectory {
     pub offsets: Map<ItemAt, u32>,
     pub declarations: ContentHash,
     pub definitions: Map<DefPath, ContentHash>,
+    /// Each computed constant's value, by its initialiser's code address
+    /// (PROG-10): an importer reads it there and runs nothing.
+    pub values: Map<ContentHash, crate::comptime::Value>,
     pub diagnostics: Table<Refusal>,
     pub incomplete: Table<Incomplete>,
     pub resources: Table<ResourceRefusal>,
@@ -359,6 +362,13 @@ impl CoreImage {
             Ok(self.directory()?.definitions.contains_key(path))
         })
     }
+    /// The value of the computed constant whose initialiser has `address`.
+    pub(crate) fn constant_value(
+        &self,
+        address: &ContentHash,
+    ) -> io::Result<Option<crate::comptime::Value>> {
+        hirsel_core_ids::published::catch_io(|| Ok(self.directory()?.values.get(address).cloned()))
+    }
     pub fn decoded_index_rows(&self) -> usize {
         self.indexed.decoded_rows()
     }
@@ -567,6 +577,7 @@ impl Driver {
         for (path, body) in &product.definitions {
             definitions.insert(path.clone(), body.record);
         }
+        let values = product.constant_values.published();
         let mut anchors = Map::default();
         for (id, header) in product.headers.rows.iter().enumerate() {
             if let Some(header) = header {
@@ -609,6 +620,7 @@ impl Driver {
             offsets: writer.map(&offsets)?,
             declarations: store.put(&encode(&library.publish(&mut writer, &outward)?)?)?,
             definitions: writer.map(&definitions)?,
+            values: writer.map(&values)?,
             diagnostics: writer.table(&product.diagnostics.clone().into())?,
             incomplete: writer.table(&product.incomplete.clone().into())?,
             resources: writer.table(&product.resources.clone().into())?,

@@ -183,3 +183,48 @@ fn refuse_ungranted_foreign(
         Err(lines.join("\n"))
     }
 }
+
+/// A launch grant rule as `hirsel` prints it.
+pub(super) fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
+    use hirsel_core_net::{AddressDirection, GrantRule, TlsTrust};
+    match rule {
+        GrantRule::Address(rule) => {
+            let direction = AddressDirection::from_tag(rule.dir).unwrap().word();
+            let ip = if rule.family == 0 {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::from(rule.lo as u32))
+            } else {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+                    (u128::from(rule.hi) << 64) | u128::from(rule.lo),
+                ))
+            };
+            let reach = if rule.reach == hirsel_core_net::PUBLIC {
+                " public"
+            } else {
+                ""
+            };
+            format!(
+                "{direction} {ip}/{} {}-{}{reach}",
+                rule.bits, rule.first, rule.last
+            )
+        }
+        GrantRule::Tls(rule) => {
+            let (first, last) = rule.ports();
+            let trust = match rule.trust() {
+                TlsTrust::System => "System".to_owned(),
+                TlsTrust::Roots(hash) => format!(
+                    "Roots=sha256:{}",
+                    selection(hirsel_core_ids::ContentHash(hash))
+                ),
+                TlsTrust::Any => "Any".to_owned(),
+            };
+            format!("Tls {} {first}-{last} {trust}", rule.pattern_text())
+        }
+        GrantRule::Resolve(rule) => format!("Resolve {}", rule.pattern_text()),
+        GrantRule::Unix(rule) => {
+            let (root, path) = rule
+                .endpoint()
+                .expect("launch rule has a concrete endpoint");
+            format!("{} {root} {path}", rule.direction.word())
+        }
+    }
+}

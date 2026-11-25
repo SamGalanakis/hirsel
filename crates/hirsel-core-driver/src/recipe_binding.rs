@@ -76,7 +76,7 @@ pub(in crate::native) fn bind_annexes(
                     bound.insert(identity.clone(), Bound::of(&unit.annex, Some(added)));
                 }
             }
-            UnitModule::Encoded(_) => {
+            UnitModule::Encoded(..) => {
                 debug_assert!(relocate);
                 bound.insert(identity.clone(), Bound::of(&unit.annex, None));
             }

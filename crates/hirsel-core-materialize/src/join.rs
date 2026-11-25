@@ -153,6 +153,7 @@ pub fn join_units(
     let mut functions = HashMap::default();
     let mut statics = HashMap::default();
     let mut aggregates = HashMap::default();
+    let mut computed = HashMap::default();
     let mut items = HashMap::default();
     let mut remaps = Vec::with_capacity(units.len());
     let mut root = None;
@@ -243,6 +244,17 @@ pub fn join_units(
                         append(Static::Aggregate {
                             ty,
                             value: value.clone(),
+                        })
+                    })
+                }
+                // One slot per constant: every reader binds the same value.
+                Static::Computed { ty, constant } => {
+                    let mut ty = ty.clone();
+                    ty.map_refs(&mut |r| TypeRef(map.types[r.index()].0));
+                    *computed.entry(constant.clone()).or_insert_with(|| {
+                        append(Static::Computed {
+                            ty,
+                            constant: constant.clone(),
                         })
                     })
                 }

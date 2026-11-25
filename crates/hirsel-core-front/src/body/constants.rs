@@ -52,6 +52,133 @@ impl Cx<'_, '_, '_> {
             }
         }
     }
+    /// A read of computed constant `constant` through its projections: its slot
+    /// (PROG-10) is a read-only block the driver binds to the value, which the body
+    /// reads at run time. The body names the constant, never its value.
+    fn computed_path(
+        &mut self,
+        n: NodeId,
+        constant: u32,
+        u: &hirsel_core_resolve::ResolvedUse,
+    ) -> (TyId, Option<ValueId>) {
+        let p = self.p;
+        let c = &p.constants[constant as usize];
+        let mut ty = c.ty;
+        if ty == ERROR {
+            self.halt();
+            return (ERROR, None);
+        }
+        let mut value = self.computed_slot(constant, n);
+        for token_id in u.projections.start..u.projections.end {
+            let token_id = hirsel_core_syntax::TokenId(token_id);
+            let token = &self.item.tree.tokens[token_id.0 as usize];
+            if token.kind != TokenKind::Ident {
+                continue;
+            }
+            let name = p.index.symbols.text(token.symbol);
+            let found = match self.t.kind(ty).clone() {
+                TyKind::Tuple(xs) => name
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| Some((i, *xs.get(i)?))),
+                TyKind::Adt(d, args) => {
+                    if self.require_visible_fields(d, n).is_err() {
+                        return (ERROR, None);
+                    }
+                    match &p.decls[d.index()].body {
+                        crate::DeclBody::Record(fs) => fs
+                            .iter()
+                            .position(|f| f.name == name)
+                            .map(|i| (i, crate::types::subst(&mut self.t, fs[i].ty, &args))),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let Some((i, field)) = found else {
+                self.refuse("LANG-11", n, "constant field is absent");
+                return (ERROR, None);
+            };
+            value = (|| {
+                let v = value?;
+                if !self.live() {
+                    return None;
+                }
+                let Rep::Place(id) = self.rep_at(ty, n)? else {
+                    return None;
+                };
+                let place = self.place_ty(field, n)?;
+                let at = self.fields_of(AddressBase::Value(v), id, n);
+                let address =
+                    self.address(AddressBase::Address(at), &[Step::Field(i as u32)], place, n);
+                match self.rep_at(field, n)? {
+                    r @ Rep::Scalar(_) => Some(self.read_bits(address, r.ty()?, n)),
+                    Rep::Place(_) => Some(self.pointer(address, n)),
+                    Rep::None => None,
+                }
+            })();
+            ty = field;
+        }
+        (ty, value)
+    }
+    /// The value of computed constant `constant`, read from its slot: a scalar is
+    /// loaded, an aggregate is the slot's read-only block.
+    fn computed_slot(&mut self, constant: u32, n: NodeId) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let ty = self.p.constants[constant as usize].ty;
+        self.out
+            .computed
+            .insert(self.p.constants[constant as usize].path.clone());
+        let rep = self.rep_at(ty, n)?;
+        if matches!(rep, Rep::None) {
+            return None;
+        }
+        let data = if let Some(&id) = self.e.computed_statics.get(&constant) {
+            id
+        } else {
+            // The slot holds the value as the reader's representation does: a
+            // declared row by value, or a scalar.
+            let field = match rep {
+                Rep::Place(id) => {
+                    hirsel_core_layout::FieldTy::Inline(hirsel_core_layout::TypeRef(id.0))
+                }
+                Rep::Scalar(hirsel_core_layout::Ty::Scalar(s)) => {
+                    hirsel_core_layout::FieldTy::Scalar(s)
+                }
+                _ => {
+                    self.gap(n, "a computed constant held as a vector is not built");
+                    return None;
+                }
+            };
+            let data = hirsel_core_ir::StaticId(self.e.module.statics.len() as u32);
+            self.e
+                .module
+                .statics
+                .push(hirsel_core_ir::Static::Computed {
+                    ty: field,
+                    constant: self.p.constants[constant as usize].path.clone(),
+                });
+            self.e.computed_statics.insert(constant, data);
+            data
+        };
+        let pointer = self.value(Ty::Ptr);
+        self.inst(
+            Inst::ReadStatic {
+                result: pointer,
+                data,
+            },
+            n,
+        );
+        match rep {
+            Rep::Scalar(s) => {
+                let address = self.address(AddressBase::Value(pointer), &[], PlaceTy::Value(s), n);
+                Some(self.read_bits(address, s, n))
+            }
+            _ => Some(pointer),
+        }
+    }
     fn static_value(&self, value: crate::ConstValue) -> hirsel_core_ir::StaticValue {
         use hirsel_core_ir::StaticValue;
         match value.data {
@@ -85,6 +212,9 @@ impl Cx<'_, '_, '_> {
     ) -> (TyId, Option<ValueId>) {
         let p = self.p;
         let c = &p.constants[constant as usize];
+        if c.computed {
+            return self.computed_path(n, constant, u);
+        }
         let mut values = match (c.targets, c.value) {
             (Some(values), _) => values,
             (None, Some(value)) => [value; 3],

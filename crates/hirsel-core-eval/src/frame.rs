@@ -10,10 +10,20 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     /// activation does, by return or by failure, so a later use of an address into
     /// them is a stop (crate docs, "Values, slots and addresses").
     pub(super) fn activation(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<()> {
-        let b = self.m.functions[f.index()]
-            .body
-            .as_ref()
-            .expect("external functions do not run here");
+        let Some(b) = self.m.functions[f.index()].body.as_ref() else {
+            // A bodiless function reached through a value: a closed-list function
+            // (LANG-20) or a foreign one, which runs only natively.
+            let m = self.m;
+            let definition = &m.instances[m.functions[f.index()].instance.index()].definition;
+            match hirsel_core_ir::CLOSED
+                .iter()
+                .position(|entry| definition.is_core(entry))
+            {
+                Some(i) => H::closed(self, i as u8),
+                None => H::bodiless(self, t, f),
+            }
+            unreachable!("external functions do not run here");
+        };
         let l = self.lowered(f, b);
         let mut slots = self.take_words();
         match &l {

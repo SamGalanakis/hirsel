@@ -748,7 +748,7 @@ without running anything.
 - **Manifest constants** are evaluated once, before any body is checked, in dependency
   order, by the rules of [semantics](semantics.md). They belong to the declarations: types,
   retention ([PROG-6](programs.md#prog-6-one-meaning)) and checking may read their values.
-- **Computed constants**<!-- doc-ref: planned --> are evaluated after their initialiser and
+- **Computed constants** are evaluated after their initialiser and
   every function it can reach are checked. The initialiser's retained code
   ([PROG-10](programs.md#prog-10-code-addresses)) runs as a call with no argument, with the
   meaning the reference evaluator gives it, under the budget of
@@ -795,20 +795,23 @@ except these:
 no `fn` type and no `StaticFn`. Any other type is refused here, at the type. The initialiser
 may build `List`, `Map` and `String` values while it runs. None of them survives, because a
 plain value holds no owned storage, so no check at run time is needed. A computed `String`
-or `Bytes` constant is not in v1 ([reserved](reserved.md#not-in-v1)).
+or `Bytes` constant is not in v1 ([reserved](reserved.md#not-in-v1)): a `String` constant is
+a static string, below, so a call in its initialiser is refused there, at the initialiser.
 
 **Refusal.** A computed constant is refused when its run fails
 ([FAIL-2](failure.md#fail-2-causes)), reaches a function on the closed list or a foreign
 function, or exceeds its budget (MEM-34). The refusal names the constant, the cause (a
 failure's primary cause with its message, the closed-list or foreign function, or the budget
-that ran out), and the chain of calls from the initialiser to the site, innermost first.
+that ran out), and the chain of calls from the initialiser to the site, innermost first. An
+initialiser that reaches a body refused already, or reads a constant whose initialiser does,
+is not run: that body's refusal stands for the constant's.
 
 **Cycles.** A constant that needs its own value is refused. For a manifest constant, that
 means its constants reach itself. For a computed constant, it means its initialiser can
 reach a read of the constant, through any function it can reach and any constant those
 read. Reach is PROG-10's slot reach, so this refusal is decided before anything runs.
 
-**Assertions.** A constant named `_`, `const _: T = e`<!-- doc-ref: planned -->, is an
+**Assertions.** A constant named `_`, `const _: T = e`, is an
 **assertion**. Its initialiser is evaluated like any other constant's, manifest or computed,
 and its value is kept nowhere. `_` names nothing, so a module may declare any number of
 assertions, none of them can be read, and a `pub` assertion is refused. An assertion whose
@@ -849,12 +852,12 @@ fn title() -> String { TITLE }
 ```hirsel
 const PAIR: (String, u64) = ("a", 1)                      // refused: LANG-20, String in a tuple
 ```
-```hirsel unbuilt
+```hirsel
 fn square(n: u64) -> u64 { n * n }
 const AREA: u64 = square(12)                              // computed: 144
 const SIDES: u64 = 4                                      // manifest
 ```
-```text
+```hirsel
 fn fits(size: u64, limit: u64) {
     if size > limit { core.fail("record is larger than its cache budget") }
 }
@@ -869,7 +872,7 @@ const BIG: u8 = grow(100)                                 // refused: LANG-20, O
 fn fresh() -> u64 { let _ = unique.new(); 1 }
 const ID: u64 = fresh()                                   // refused: LANG-20, unique.new is on the closed list
 ```
-```hirsel unbuilt
+```hirsel
 fn width() -> u64 { 4 }
 fn pick(n: u64) -> u64 { if WIDE { n } else { 0 } }       // both arms retained: WIDE is computed
 const WIDE: bool = width() > 2
@@ -887,6 +890,13 @@ alone does not keep a provider out of an initialiser. It also adds the key-mater
 the task-object makers. `charge.latest` is not on the list: it is a MEM-33 recipe, a pure
 function. Reversible before 1.0: the spec only. Shrinking the closed list or raising MEM-34's
 numbers later turns refusals into acceptances and changes no accepted value.
+
+Version note (2026-11-25, comptime-phase2b-2715): computed constants and assertions are
+built. Their examples above are checked. An initialiser that reaches a refused body is not
+run, so a constant reports no second refusal for a body refused already; this adds no
+refusal and removes none of the program's. A `String` constant whose initialiser calls a
+function is refused as a static string, at the initialiser, as before this change; the text
+had also said "at the type". Reversible: the spec and the driver.
 
 ### LANG-21: Operators
 

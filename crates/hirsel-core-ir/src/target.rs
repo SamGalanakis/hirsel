@@ -92,7 +92,7 @@ pub fn unsupported(module: &crate::Module, function: crate::FuncId) -> Option<St
                     Static::Bytes { bytes, .. } => {
                         Some(String::from_utf8_lossy(bytes).into_owned())
                     }
-                    Static::Aggregate { .. } => None,
+                    Static::Aggregate { .. } | Static::Computed { .. } => None,
                 });
             return Some(why.unwrap_or_default());
         }

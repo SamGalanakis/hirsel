@@ -261,7 +261,7 @@ fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Pl
     let mut pins = empty_tiered_pins(root, db.writer_pin_bytes)
     let mut pending: Option[(TieredTarget, Error)] = None
     loop {
-        let attempt = call_attempt(base.collections.root, db.writer_pin_bytes)
+        let attempt = call_attempt(base.collections.root, db.writer_pin_bytes, tiered_window(pins))
         let reran = rerun_attempt(db, registry, base, ci, plan, call, attempt, pins.frames, body)
         let Some(state) = call_attempt_finish(take attempt) else {
             return Ok(take reran)

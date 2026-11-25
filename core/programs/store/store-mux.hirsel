@@ -318,7 +318,7 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
         let ci = call_info(db.store, 0, db.heads[0].head + 1, at, db.heads[0].at)
         refresh_call_pins(mut call.pins, mut call.pending, call_pin_root(db, 0))
         call.attempts += 1
-        let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes)
+        let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes, tiered_window(call.pins))
         let metered = metered_draft(db, complete, ci, plan, grant, rec, attempt, call.pins.frames, body)
         let Some(state) = call_attempt_finish(take attempt) else {
             return decide_served(mut db, take complete, take rec, ci, take metered)

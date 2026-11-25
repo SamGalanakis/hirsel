@@ -140,6 +140,7 @@ fn next_tiered_in(tx: Tx, mut t: TxTieredRows, reverse: bool) -> Result[Option[(
         let cold = if start < stop {
             let hint = if reverse { view stop } else { view start }
             tiered_seek(attempt, SeekKey(copied(list.slice(hint, 4, list.len(hint)))?))
+            tiered_reading(attempt, if reverse { ValuesNone } else { ValuesFrom })
             let found = tiered_scan_row(attempt, tx.pins, edge, t.collection, overlay, start, stop, reverse)?
             tiered_seek(attempt, SeekOperation)
             take found

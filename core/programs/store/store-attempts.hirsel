@@ -10,7 +10,7 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
     let mut pending: Option[(TieredTarget, Error)] = None
     loop {
         refresh_call_pins(mut pins, mut pending, call_pin_root(db, i))
-        let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes)
+        let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes, tiered_window(pins))
         let staged = stage(mut db, i, wall, steps, keep_reply, attempt, pins.frames, body)
         let Some(state) = call_attempt_finish(take attempt) else {
             return Ok(take staged)
@@ -202,6 +202,7 @@ fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
     }
     let inner = list.slice(key, 4, list.len(key))
     tiered_seek(attempt, SeekKey(copied(inner)?))
+    tiered_reading(attempt, ValuesAt)
     let backing = TieredBorrowedRoot(edge: edge, pins: tx.pins)
     let found = tiered_point_bytes(attempt, backing, inner)?
     tiered_seek(attempt, SeekOperation)
@@ -226,7 +227,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
     let mut pins = empty_tiered_pins(root, partition)
     let mut pending: Option[(TieredTarget, Error)] = None
     loop {
-        let attempt = call_attempt(s.roots.collections.root, partition)
+        let attempt = call_attempt(s.roots.collections.root, partition, tiered_window(pins))
         let looked = look_attempt(s, steps, env, body, attempt, pins.frames)
         let Some(state) = call_attempt_finish(take attempt) else {
             return Ok(take looked)

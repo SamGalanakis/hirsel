@@ -36,6 +36,7 @@ fn read_tiered_point[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
     }
     let key = list.slice(logical, 4, list.len(logical))
     retry_tiered_read(source, root_grant, root, key, None, TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error] {
+        tiered_reading(attempt, ValuesAt)
         let backing = TieredBorrowedRoot(edge: view edge, pins: view visible)
         let stored = tiered_point_bytes(attempt, backing, key)?
         decode_row(stored)
@@ -46,10 +47,10 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
     read: scoped[view] fn(core.Cell[TieredTouchSet], Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
     let mut pins = empty_tiered_pins(root, root_grant.pin_bytes)
     let mut pending: Option[(TieredTarget, Error)] = None
-    let mut window = if direction == TieredPoint { 0u64 } else { 8u64 }
     loop {
         // The attempt lives outside the body's isolation, so a stop that
         // escapes the body still leaves its touches and latch readable.
+        let window = if direction == TieredPoint { 0u64 } else { tiered_window(pins) }
         let attempt = tiered_attempt(root_grant.pin_bytes, window)
         let isolated = disk_allocation(scoped fn() -> Result[Result[R, Error], Error] {
             Ok(read(attempt, pins.frames))
@@ -65,7 +66,6 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
                     SeekOperation => view key,
                 }
                 serve_tiered_miss(source, root, state, sought, direction, Some(arc.share(root_grant)), mut pins, mut pending)?
-                window = int.saturating_mul(window, 2)
             },
             Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
@@ -104,15 +104,16 @@ fn tiered_miss_demand(source: TieredPageSource, state: TieredTouchSet, sought: B
         let (_, take problem) = option.unwrap(replace(mut pending, None))
         return Error(take problem)
     }
-    Ok(TieredPointDemand(target: clone(target), key: copied(sought)?, direction: direction, paths: clone(state.gather.paths),
+    Ok(TieredPointDemand(target: clone(target), key: copied(sought)?, values: clone(state.values),
+        room: int.saturating_sub(state.partition, state.touched_bytes), direction: direction, paths: clone(state.gather.paths),
         siblings: clone(state.siblings), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: take grant))
 }
 
 // Installs a delivered batch in its order and records its failure. The
-// path frames of a multi-path batch are protected like touched ones once
-// installed, so a later frame of the same batch never evicts one and the
-// next attempt finds every path it was demanded for. It is false when a frame
-// did not fit the map's partition (§13.3a "crowded").
+// held path frames are protected like touched ones once installed, so a
+// later frame of the same batch never evicts one and the next attempt finds
+// every path it was demanded for. It is false when a path frame did not fit
+// the map's partition (§13.3a "crowded").
 fn tiered_install_delivery(take delivered: TieredPointDelivery, root: TieredPinRoot, touched: Map[u64, ()], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[bool, Error] {
     let TieredPointDelivery(frames: take frames, held: held, failure: take failure, ..) = take delivered
     let mut kept: Map[u64, ()] = map.new()
@@ -130,11 +131,13 @@ fn tiered_install_delivery(take delivered: TieredPointDelivery, root: TieredPinR
         } else {
             tiered_install_pin(mut pins, root, kept, frame)?
         }
+        // A sibling or a later value that does not fit is a prefetch left
+        // out; only a path frame that does not fit leaves the call crowded.
         if installed {
             if at < held {
                 map.insert(mut kept, frame.identity.stamp, ())
             }
-        } else {
+        } else if held == 0 || at < held {
             fit = false
         }
         at += 1
@@ -142,6 +145,7 @@ fn tiered_install_delivery(take delivered: TieredPointDelivery, root: TieredPinR
     if let Some(take refused) = take failure {
         pending = Some(take refused)
     }
+    pins.demands += 1
     Ok(fit)
 }
 

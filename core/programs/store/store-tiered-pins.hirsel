@@ -10,11 +10,26 @@ type TieredPins: send {
     frames: Map[TieredCacheKey, Arc[TieredFrame]],
     ordered: List[TieredCacheKey],
     retained: u64,
-    partition: u64
+    partition: u64,
+    // Deliveries installed since the pins were last emptied: the call's
+    // demands so far, which set its next attempt's sibling window.
+    demands: u64
+}
+
+// The sibling window of a forward or backward scan's first demand (§13.3).
+const TIERED_SCAN_WINDOW: u64 = 8
+
+// An attempt's sibling window: 8 pages, doubled per demand already served.
+fn tiered_window(pins: TieredPins) -> u64 {
+    let mut window = TIERED_SCAN_WINDOW
+    for _ in 0u64 .. pins.demands {
+        window = int.saturating_mul(window, 2)
+    }
+    window
 }
 
 fn empty_tiered_pins(root: TieredPinRoot, partition: u64) -> TieredPins {
-    TieredPins(root: root, frames: map.new(), ordered: list.new(), retained: 0, partition: partition)
+    TieredPins(root: root, frames: map.new(), ordered: list.new(), retained: 0, partition: partition, demands: 0)
 }
 
 fn tiered_reset_pins(mut pins: TieredPins, root: TieredPinRoot) {

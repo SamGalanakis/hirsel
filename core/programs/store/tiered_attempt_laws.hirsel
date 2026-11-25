@@ -97,11 +97,45 @@ fn fetch_many_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> 
     })? else {
         fail("fetch_many: the fixture puts commit")
     }
-    let id = prefix(rows.id)?
+    cold_table(take db, rows.id)
+}
+
+// A BLOB-valued table: BLOB_ROWS rows whose value is BLOB_BYTES copies of
+// the byte key % 251, past the 1,024-byte inline limit.
+const BLOB_ROWS: u64 = 512
+const BLOB_BYTES: u64 = 1500
+
+fn blob_row_value(key: u64) -> Bytes {
+    let mut v: Bytes = list.with_capacity(BLOB_BYTES)
+    list.fill(mut v, BLOB_BYTES, int.truncate(key % 251))
+    take v
+}
+
+fn blob_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = create_table(mut db, spec("blobs", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "blobs", std.codec.key_u64(), std.codec.of_bytes())?
+    for first in 0u64 .. BLOB_ROWS / 64 {
+        let Committed(_) = run(mut db, None, (copy_env(rows), first), fn(mut tx: Tx, env: (Table[u64, Bytes], u64)) -> Result[(), Error] {
+            for key in env.1 * 64 .. env.1 * 64 + 64 {
+                put(mut tx, env.0, key, blob_row_value(key))?
+            }
+            Ok(())
+        })? else {
+            fail("blob fixture: the puts commit")
+        }
+    }
+    cold_table(take db, rows.id)
+}
+
+// Makes the table Tiered and cuts, so every row is Cold after a reopen.
+fn cold_table(take opened: Db, table_id: u32) -> Result[(), Error] waits {
+    let mut db = take opened
+    let id = prefix(table_id)?
     let mut tree = share_page_tree(db.heads[0u64].roots.collections)
     let (take root, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
-            fail("fetch_many: the fixture has its table")
+            fail("cold table: the fixture has its table")
         }
         (arc.share(here), rooted_collection_record(here, before[52u64], 1)?)
     }
@@ -146,10 +180,12 @@ fn fetch_many_body(tx: Tx, env: (Table[u64, u64], bool)) -> Result[List[Option[u
     Ok(rows)
 }
 
-// look's attempts, one serve between each: the attempts the body takes and
-// the rows it returns.
-fn fetch_many_look(r: Reader, s: Snapshot, rows: Table[u64, u64], batched: bool) -> Result[(u64, List[Option[u64]]), Error] waits {
-    let Some(pool) = view r.pool else { fail("fetch_many: the reader has a pool") }
+// look's attempts, one serve between each: the attempts the body takes, the
+// frames its deciding attempt touched and what it returned. With `prefetch`
+// the attempts and demands are look's own; without it every attempt has
+// window 0 and every demand reads no value, which is the oracle's read.
+fn cold_look[E: inert, R](r: Reader, s: Snapshot, env: E, body: fn(Tx, E) -> R, prefetch: bool) -> Result[(u64, u64, R), Error] waits {
+    let Some(pool) = view r.pool else { fail("cold look: the reader has a pool") }
     let partition = pool.grant.pin_bytes
     let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
         Some(inventory) => inventory.generation,
@@ -160,26 +196,35 @@ fn fetch_many_look(r: Reader, s: Snapshot, rows: Table[u64, u64], batched: bool)
     let mut attempts = 0u64
     loop {
         attempts += 1
-        let attempt = call_attempt(s.roots.collections.root, partition)
-        let looked = look_attempt(s, Some(100000000), (copy_env(rows), batched), fetch_many_body, attempt, pins.frames)
+        let attempt = if prefetch {
+            call_attempt(s.roots.collections.root, partition, tiered_window(pins))
+        } else {
+            Some(tiered_attempt(partition, 0))
+        }
+        let looked = look_attempt(s, Some(100000000), env, body, attempt, pins.frames)
         let Some(state) = call_attempt_finish(take attempt) else {
-            fail("fetch_many: the table is Tiered")
+            fail("cold look: the snapshot is Tiered")
         }
         match state.stopped {
             None => {
-                let Seen(seen) = looked else { fail("fetch_many: the look runs") }
-                let Ok(found) = view seen.value else { fail("fetch_many: the body reads its rows") }
-                return Ok((attempts, clone(found)))
+                let Seen(take seen) = take looked else { fail("cold look: the look runs") }
+                let Seen(value: take value, ..) = take seen
+                return Ok((attempts, map.len(state.stamps), take value))
             },
             Some(AttemptMiss(_)) => {
-                let SeekKey(sought) = view state.seek else { fail("fetch_many: a point miss seeks its key") }
+                let SeekKey(sought) = view state.seek else { fail("cold look: a miss seeks its key") }
                 let pager: Option[View[Sender[TieredPagerMessage]]] = Some(view pool.requests)
                 let source = tx_page_source(pager, s.roots.collections)?
                 serve_tiered_miss(source, root, state, sought, TieredPoint, Some(arc.share(pool.grant)), mut pins, mut pending)?
             },
-            _ => fail("fetch_many: only point misses stop the body"),
+            _ => fail("cold look: only misses stop the body"),
         }
     }
+}
+
+fn fetch_many_look(r: Reader, s: Snapshot, rows: Table[u64, u64], batched: bool) -> Result[(u64, List[Option[u64]]), Error] waits {
+    let (attempts, _, take found) = cold_look(r, s, (copy_env(rows), batched), fetch_many_body, true)?
+    Ok((attempts, found?))
 }
 
 @test
@@ -225,4 +270,93 @@ fn test_fetch_many_cold_keys_rerun_once(d: Dir, c: Clock, r: Random, tasks: Task
         fail("fetch_many: staged rows answer fetch_many as they answer fetch")
     }
     close(take db)
+}
+
+// A forward scan of every row of the 4,096-row table: the count, the sum of
+// the values and the sum of the keys.
+fn scan_rows_body(tx: Tx, t: Table[u64, u64]) -> Result[(u64, u64, u64), Error] {
+    let mut seen = (0u64, 0u64, 0u64)
+    let mut rows = range(tx, t, Included(0u64), Excluded(FETCH_MANY_ROWS))?
+    while let Some((k, v)) = next_in(tx, mut rows)? {
+        seen = (seen.0 + 1, seen.1 + v, seen.2 + k)
+    }
+    Ok(seen)
+}
+
+/// bug: a scan in a Tx body (look, run, serve) is given window 0 and pays one rerun per Cold page.
+/// oracle: hand-derived sums (values 3k over k < 4,096) and the same scan with window 0 and no value prefetch; the bound ceil(n/8) is the brief's.
+@test
+fn test_tx_scan_sibling_window(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    fetch_many_fixture(d, c, r, tasks, floor)?
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let (plain, pages, take oracle) = cold_look(read_handle, s, copy_env(rows), scan_rows_body, false)?
+    let (windowed, _, take scanned) = cold_look(read_handle, s, copy_env(rows), scan_rows_body, true)?
+    drop(take s)
+    drop(take read_handle)
+    close(take db)?
+    let n = FETCH_MANY_ROWS
+    let expected = (n, 3 * (n * (n - 1) / 2), n * (n - 1) / 2)
+    if oracle? != expected || scanned? != expected {
+        fail("scan window: the scan returns every row")
+    }
+    // Without the window every Cold page is its own rerun.
+    if plain < pages {
+        fail("scan window: the oracle scan paid one attempt per page")
+    }
+    if windowed > (pages + 7) / 8 {
+        fail("scan window: a cold forward scan of n pages takes at most ceil(n/8) attempts")
+    }
+    Ok(())
+}
+
+fn blob_keys() -> List[u64] {
+    let mut keys: List[u64] = list.new()
+    for i in 0u64 .. 16 {
+        list.push(mut keys, i * (BLOB_ROWS / 16) + 5)
+    }
+    list.push(mut keys, BLOB_ROWS + 1)
+    keys
+}
+
+fn blob_body(tx: Tx, env: (Table[u64, Bytes], bool)) -> Result[List[Option[Bytes]], Error] {
+    if env.1 {
+        return fetch_many(tx, env.0, blob_keys())
+    }
+    let mut found: List[Option[Bytes]] = list.new()
+    for key in blob_keys() {
+        list.push(mut found, fetch(tx, env.0, key)?)
+    }
+    Ok(found)
+}
+
+/// bug: a BLOB-valued row's leaf is demanded without its BLOB, so fetch_many over BLOB rows reruns twice.
+/// oracle: hand-derived values (BLOB_BYTES copies of key % 251, None past the table) and per-key fetch without value prefetch.
+@test
+fn test_fetch_many_blob_values_rerun_once(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    blob_fixture(d, c, r, tasks, floor)?
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows = table(mut db, "blobs", std.codec.key_u64(), std.codec.of_bytes())?
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let (_, _, take oracle) = cold_look(read_handle, s, (copy_env(rows), false), blob_body, false)?
+    let (batched, _, take together) = cold_look(read_handle, s, (copy_env(rows), true), blob_body, true)?
+    drop(take s)
+    drop(take read_handle)
+    close(take db)?
+    let mut expected: List[Option[Bytes]] = list.new()
+    for key in blob_keys() {
+        list.push(mut expected, if key < BLOB_ROWS { Some(blob_row_value(key)) } else { None })
+    }
+    if oracle? != expected || together? != expected {
+        fail("fetch_many blobs: the rows are the BLOB values")
+    }
+    if batched != 2 {
+        fail("fetch_many blobs: BLOB-valued rows cost one rerun")
+    }
+    Ok(())
 }

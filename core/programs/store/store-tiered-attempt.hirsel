@@ -4,6 +4,11 @@ type TieredAttemptStop: send = AttemptMiss(TieredTarget) | AttemptFold(u32) | At
 // its first access, so no stale context outlives the operation that set it.
 type TieredSeek: send = SeekOperation | SeekKey(Bytes) | SeekUpper
 
+// The BLOB values a read at its seek key goes on to read (§13.3 "Values"):
+// none, the value of the row at the key, or the values of the rows from the
+// key on in scan order. The pager reads them with the leaf that holds them.
+type TieredValues: send = ValuesNone | ValuesAt | ValuesFrom
+
 // One first touch, committed by a single assignment (§13.3 "The intent").
 type TieredIntent: send {
     stamp: u64,
@@ -17,11 +22,12 @@ type TieredTouch {
     miss: Option[TieredTarget]
 }
 
-// One more key path a batch demands: the Cold target a key missed at and the
-// key the pager descends by from it.
+// One more key path a batch demands: the Cold target a key missed at, the
+// key the pager descends by from it and the values the read goes on to read.
 type TieredPath: send {
     target: TieredTarget,
-    key: Bytes
+    key: Bytes,
+    values: TieredValues
 }
 
 // `fetch_many`'s batch (§13.3 "Batched point misses"). While `on`, a point
@@ -32,6 +38,7 @@ type TieredGather: send {
     on: bool,
     full: bool,
     seek: Bytes,
+    values: TieredValues,
     paths: List[TieredPath]
 }
 
@@ -42,6 +49,7 @@ type TieredTouchSet: send {
     touched_bytes: u64,
     partition: u64,
     seek: TieredSeek,
+    values: TieredValues,
     sibling_window: u64,
     siblings: List[TieredTarget],
     gather: TieredGather,
@@ -50,8 +58,9 @@ type TieredTouchSet: send {
 }
 
 fn tiered_touch_set(partition: u64) -> TieredTouchSet {
-    TieredTouchSet(stamps: map.new(), touched_bytes: 0, partition: partition, seek: SeekOperation, sibling_window: 0,
-        siblings: list.new(), gather: TieredGather(on: false, full: false, seek: list.new(), paths: list.new()), stopped: None, intent: None)
+    TieredTouchSet(stamps: map.new(), touched_bytes: 0, partition: partition, seek: SeekOperation, values: ValuesNone,
+        sibling_window: 0, siblings: list.new(), gather: TieredGather(on: false, full: false, seek: list.new(), values: ValuesNone, paths: list.new()),
+        stopped: None, intent: None)
 }
 
 fn tiered_attempt(partition: u64, window: u64) -> core.Cell[TieredTouchSet] {
@@ -84,10 +93,11 @@ fn tiered_finish(take attempt: core.Cell[TieredTouchSet]) -> TieredTouchSet {
 }
 
 // A call reads Tiered rows only from a head with Tiered collections, so only
-// such a call carries an attempt record and a Hot call allocates none.
-fn call_attempt(root: Arc[std.page.Page], partition: u64) -> Option[core.Cell[TieredTouchSet]] {
+// such a call carries an attempt record and a Hot call allocates none. Its
+// scans read ahead by the call's window, as a Reader's do.
+fn call_attempt(root: Arc[std.page.Page], partition: u64, window: u64) -> Option[core.Cell[TieredTouchSet]] {
     if tiered_collections(root) {
-        Some(tiered_attempt(partition, 0))
+        Some(tiered_attempt(partition, window))
     } else {
         None
     }
@@ -175,7 +185,7 @@ fn tiered_gather_touch(mut a: TieredTouchSet, stamp: u64, payload: u64, take mis
         a.gather.full = true
         return false
     }
-    list.push(mut a.gather.paths, TieredPath(target: take target, key: clone(a.gather.seek)))
+    list.push(mut a.gather.paths, TieredPath(target: take target, key: clone(a.gather.seek), values: clone(a.gather.values)))
     if first {
         a.touched_bytes = total
         map.insert(mut a.stamps, stamp, ())
@@ -242,17 +252,35 @@ fn tiered_seek_entry(mut a: TieredTouchSet, take seek: TieredSeek) {
     tiered_settle(mut a)
     // A latched miss keeps the seek it was latched under. A batch tracks
     // the key of each later read for the path it may add.
+    // A new seek reads no values until its read says it does.
     if let None = a.stopped {
         a.seek = take seek
+        a.values = ValuesNone
     } else if a.gather.on {
         if let SeekKey(take key) = take seek {
             a.gather.seek = take key
         }
+        a.gather.values = ValuesNone
     }
 }
 
 fn tiered_seek(attempt: core.Cell[TieredTouchSet], take seek: TieredSeek) {
     cell.with(attempt, take seek, tiered_seek_entry)
+}
+
+fn tiered_values_entry(mut a: TieredTouchSet, take values: TieredValues) {
+    tiered_settle(mut a)
+    if let None = a.stopped {
+        a.values = take values
+    } else if a.gather.on {
+        a.gather.values = take values
+    }
+}
+
+// Names the values the read at the current seek key goes on to read, as
+// the seek is named: a latched miss keeps the values it was latched under.
+fn tiered_reading(attempt: core.Cell[TieredTouchSet], take values: TieredValues) {
+    cell.with(attempt, take values, tiered_values_entry)
 }
 
 fn tiered_missed_page_entry(mut a: TieredTouchSet, take nothing: ()) -> Option[(std.page.PagePtr, u64)] {

@@ -141,6 +141,7 @@ fn tiered_snapshot_primary(attempt: core.Cell[TieredTouchSet], visible: Map[Tier
     }
     let key = list.slice(primary, 4, list.len(primary))
     tiered_seek(attempt, SeekKey(copied(key)?))
+    tiered_reading(attempt, ValuesAt)
     let selected = tiered_point_path(attempt, visible, edge, None, key)?
     tiered_seek(attempt, SeekOperation)
     let Some(take value) = take selected else {
@@ -197,6 +198,7 @@ fn read_tiered_scan[K, V](source: TieredPageSource, grant: Arc[TieredReaderGrant
     let direction = if reverse { TieredBackward } else { TieredForward }
     retry_tiered_read(source, grant, root, list.slice(hint, 4, list.len(hint)), None, direction,
         scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Option[(Bytes, (K, V))], Error] {
+            tiered_reading(attempt, if reverse { ValuesNone } else { ValuesFrom })
             let Some((take key, take raw)) = tiered_scan_row(attempt, visible, edge, collection, overlay, start, stop, reverse)? else {
                 return Ok(None)
             }

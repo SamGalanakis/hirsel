@@ -31,11 +31,15 @@ type TieredPageSource {
     deadline: u64
 }
 
-// A latched miss's batch: the target and its key, `paths` more key paths
-// gathered by `fetch_many`, and a scan's sibling window.
+// A latched miss's batch: the target and its key, the values the read at the
+// key goes on to read, `paths` more key paths gathered by `fetch_many`, and a
+// scan's sibling window. `room` bounds the bytes of the scan's later values
+// the pager adds: the attempt's partition less what it touched.
 type TieredPointDemand: send {
     target: TieredTarget,
     key: Bytes,
+    values: TieredValues,
+    room: u64,
     direction: TieredDirection,
     paths: List[TieredPath],
     siblings: List[TieredTarget],
@@ -47,8 +51,9 @@ type TieredPointDemand: send {
 
 type TieredPointDelivery: send {
     frames: List[Arc[TieredFrame]],
-    // A batch's path frames lead `frames`; installing a later frame of the
-    // delivery never evicts one of these. 0 for a single-path demand.
+    // The path frames that lead `frames`, values read at their keys
+    // included; installing a later frame of the delivery never evicts one of
+    // these. 0 for a lone path's frames with nothing after them.
     held: u64,
     failure: Option[(TieredTarget, Error)],
     grant: Option[Arc[TieredReaderGrant]]
@@ -226,6 +231,50 @@ fn tiered_demand_key(demand: TieredPointDemand, path: u64) -> View[Bytes] in dem
     if path == 0 { view demand.key } else { view demand.paths[path - 1].key }
 }
 
+fn tiered_demand_values(demand: TieredPointDemand, path: u64) -> View[TieredValues] in demand {
+    if path == 0 { view demand.values } else { view demand.paths[path - 1].values }
+}
+
+// The Cold BLOB holding a leaf row's value, if the value is a Cold BLOB.
+fn tiered_cold_value(page: Arc[std.page.Page], slot: u64) -> Option[TieredTarget] {
+    let Some(BlobEdge(reference)) = std.page.owning_edge(std.page.image_of(page), slot) else {
+        return None
+    }
+    match std.page.blob_slot(page, reference.body) {
+        Some(ColdBlob(ptr)) => Some(TieredBlob(clone(ptr))),
+        _ => None,
+    }
+}
+
+// A delivered leaf: its page when the frame is a level-0 PAGE.
+fn tiered_delivered_leaf(frame: TieredFrame) -> Option[View[Arc[std.page.Page]] in frame] {
+    let TieredImage(page) = view frame.payload else {
+        return None
+    }
+    if std.page.level(std.page.image_of(page)) != 0 {
+        return None
+    }
+    Some(view page)
+}
+
+// Adds a forward scan's later values, rows `from` on of a delivered leaf, to
+// `later` while their charges fit in `room`; false once one does not.
+fn tiered_later_values(page: Arc[std.page.Page], from: u64, mut room: u64, mut later: List[TieredTarget]) -> Result[bool, Error] {
+    for slot in from .. std.page.count(std.page.image_of(page)) {
+        let Some(take value) = tiered_cold_value(page, slot) else {
+            continue
+        }
+        let charge = 16 + tiered_frame_id(value).len
+        if charge > room {
+            return Ok(false)
+        }
+        room -= charge
+        capacity(list.try_reserve(mut later, 1))?
+        list.push(mut later, take value)
+    }
+    Ok(true)
+}
+
 // Descends every key path of the demand together, one frame of each path per
 // round, so the frames a round needs are read as one batch (one GET window
 // per pack on a Bucket) and a frame several paths share is read once. The
@@ -319,6 +368,101 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
         walking = take deeper
         round += 1
     }
+    // The values round (§13.3 "Values"). The BLOB a path's read goes on to
+    // read joins that path's frames. A forward scan's later values, from its
+    // key on in its leaf and then in the sibling leaves, follow the siblings
+    // in scan order while they fit in the demand's room. One batch reads both.
+    let mut wanted: List[TieredTarget] = list.new()
+    let mut wanted_path: List[u64] = list.new()
+    let mut later: List[TieredTarget] = list.new()
+    let mut room = demand.room
+    let mut fitting = true
+    for path in 0u64 .. width {
+        if let Some(_) = failed[path] {
+            continue
+        }
+        let values = tiered_demand_values(demand, path)
+        if let ValuesNone = values {
+            continue
+        }
+        let depth = list.len(found[path])
+        if depth == 0 {
+            continue
+        }
+        let Some(page) = tiered_delivered_leaf(found[path][depth - 1]) else {
+            continue
+        }
+        let (slot, hit) = std.page.search(std.page.image_of(page), tiered_demand_key(demand, path))
+        let read_now = match values {
+            ValuesAt => hit,
+            _ => slot < std.page.count(std.page.image_of(page)),
+        }
+        if read_now {
+            if let Some(take value) = tiered_cold_value(page, slot) {
+                capacity(list.try_reserve(mut wanted, 1))?
+                capacity(list.try_reserve(mut wanted_path, 1))?
+                list.push(mut wanted, take value)
+                list.push(mut wanted_path, path)
+            }
+        }
+        if let ValuesFrom = values {
+            if fitting {
+                fitting = tiered_later_values(page, slot + 1, mut room, mut later)?
+            }
+            for sibling in siblings {
+                if !fitting {
+                    break
+                }
+                let Ok(frame) = view sibling else {
+                    break
+                }
+                let Some(leaf) = tiered_delivered_leaf(frame) else {
+                    break
+                }
+                fitting = tiered_later_values(leaf, 0, mut room, mut later)?
+            }
+        }
+    }
+    let mut later_read: List[Result[Arc[TieredFrame], Error]] = list.new()
+    if list.len(wanted) != 0 || list.len(later) != 0 {
+        let lead = list.len(wanted)
+        let mut edges: List[TieredTarget] = clone(wanted)
+        capacity(list.try_reserve(mut edges, list.len(later)))?
+        for value in later {
+            list.push(mut edges, clone(value))
+        }
+        // The later values are a prefetch: a batch they make fail is read
+        // again without them.
+        let read = match tiered_pager_read_edges(mut input, mut private_cache, owner, demand, edges) {
+            Ok(take read) => take read,
+            Error(take problem) => {
+                if list.len(later) == 0 {
+                    return Error(take problem)
+                }
+                later = list.new()
+                tiered_pager_read_edges(mut input, mut private_cache, owner, demand, wanted)?
+            },
+        }
+        let mut at = 0u64
+        for take item in take read {
+            if at < lead {
+                let path = wanted_path[at]
+                match take item {
+                    Ok(take frame) => {
+                        capacity(list.try_reserve(mut found[path], 1))?
+                        list.push(mut found[path], take frame)
+                    },
+                    Error(take problem) => {
+                        failed[path] = Some((clone(wanted[at]), take problem))
+                    },
+                }
+            } else {
+                capacity(list.try_reserve(mut later_read, 1))?
+                list.push(mut later_read, take item)
+            }
+            at += 1
+        }
+    }
     let mut frames: List[Arc[TieredFrame]] = list.new()
     let mut failure: Option[(TieredTarget, Error)] = None
     for path in 0u64 .. width {
@@ -330,7 +474,7 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
             failure = replace(mut failed[path], None)
         }
     }
-    let held = if list.len(demand.paths) == 0 { 0u64 } else { list.len(frames) }
+    let lead = list.len(frames)
     if let None = failure {
         let mut slot = 0u64
         for take sibling in take siblings {
@@ -347,6 +491,25 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
             slot += 1
         }
     }
+    if let None = failure {
+        let mut slot = 0u64
+        for take value in take later_read {
+            match take value {
+                Ok(take frame) => {
+                    capacity(list.try_reserve(mut frames, 1))?
+                    list.push(mut frames, take frame)
+                },
+                Error(take problem) => {
+                    failure = Some((clone(later[slot]), take problem))
+                    break
+                },
+            }
+            slot += 1
+        }
+    }
+    // A delivery with more than one path's frames leads with its path frames
+    // (`held`); a lone path's frames are installed in order, as they always were.
+    let held = if list.len(demand.paths) != 0 || list.len(frames) > lead { lead } else { 0u64 }
     Ok(TieredPointDelivery(frames: take frames, held: held, failure: take failure, grant: clone(demand.grant)))
 }
 

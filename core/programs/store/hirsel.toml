@@ -433,3 +433,9 @@ limit = 268435456
 
 [tests.runs."store@1/store/test_fetch_many_cold_keys_rerun_once"]
 limit = 536870912
+
+[tests.runs."store@1/store/test_tx_scan_sibling_window"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_fetch_many_blob_values_rerun_once"]
+limit = 536870912

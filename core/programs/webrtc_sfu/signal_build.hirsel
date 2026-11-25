@@ -1,0 +1,104 @@
+// ---- The home unit's build (RTC-8, S7 service) ----
+// A `Build` becomes a session on the unit the adapter named: the server's answer to the
+// offer, on fresh ICE credentials and this unit's address and certificate, and the
+// session parked there for its `Admit`.
+
+/// What one unit builds sessions with: its DTLS identity, shared into each session; the
+/// address its socket is bound to, which is each session's host candidate; and the SDP
+/// policy and per-session limits.
+pub type Home {
+    id: dtls.Identity,
+    at: Addr,
+    policy: sdp.Policy,
+    limits: peer.PeerLimits
+}
+
+const UFRAG_BYTES: u64 = 4
+
+const PWD_BYTES: u64 = 12
+
+fn drawn(r: Random, n: u64) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(n)
+    list.fill(mut raw, n, 0)
+    host.random(r, mut raw)
+    raw
+}
+
+fn hex_of(r: Random, n: u64) -> Bytes {
+    let raw = drawn(r, n)
+    let mut out: Bytes = list.with_capacity(2 * n)
+    for b in raw {
+        let (hi, lo) = std.hex.encode_byte(b, false)
+        list.push(mut out, hi)
+        list.push(mut out, lo)
+    }
+    out
+}
+
+// RFC 8839 section 5.1: the host candidate of the unit's IPv4 address.
+fn host_candidate(at: Addr) -> Result[Bytes, router.RouterError] {
+    let V4(ip) = at.ip else {
+        return Error(Unrepresentable)
+    }
+    let mut c: Bytes = list.new()
+    list.append(mut c, b"1 1 udp 2130706431 ")
+    for k in 0u64 .. 4 {
+        if k > 0 {
+            list.push(mut c, b'.')
+        }
+        let shift: u32 = int.narrow(24 - 8 * k)
+        put_decimal(mut c, int.widen((ip >> shift) & 0xff))
+    }
+    list.push(mut c, b' ')
+    put_decimal(mut c, int.widen(at.port))
+    list.append(mut c, b" typ host")
+    Ok(c)
+}
+
+/// Answer `b`'s offer as this unit and open its session, unparked: the answer's SDP
+/// names this unit's certificate fingerprint and address and fresh ICE credentials. A
+/// peer the application does not let publish has each section it sends on answered
+/// `inactive`, or `sendonly` where the server sends too (RTC-2, receive-only
+/// participants).
+pub fn build(h: Home, r: Random, b: Build) -> Result[(peer.PeerSession, Built), router.RouterError] {
+    let print = dtls.fingerprint(h.id, Sha256)
+    let mut fingerprint: Inline[u8, 32] =[0u8; 32]
+    for i in 0u64 .. 32 {
+        fingerprint[i] = print.digest[i]
+    }
+    // RFC 8866 section 5.2: a random origin session id, below 2^62.
+    let mut origin = 0u64
+    for x in drawn(r, 8) {
+        origin = (origin << 8) | int.widen(x)
+    }
+    let local = sdp.LocalEnd(origin_session: origin >> 2, origin_version: 1, port: h.at.port, ice_ufrag: hex_of(r, UFRAG_BYTES), ice_pwd: hex_of(r, PWD_BYTES), fingerprint: fingerprint, tls_id: hex_of(r, 8), candidate: host_candidate(h.at)?)
+    let mut offer = sdp.description()
+    sdp.parse(b.offer, mut offer) ?=> |take e| Peer(Sdp(e))
+    let mut reply = sdp.description()
+    let mut agreed = sdp.negotiated(local)
+    sdp.answer(h.policy, None, offer, local, mut reply, mut agreed) ?=> |take e| Peer(Sdp(e))
+    let mut recvs: List[u8] = list.new()
+    let mut sends: List[(u8, sdp.Media)] = list.new()
+    for i in 0u64 .. list.len(agreed.sections) {
+        let k = agreed.sections[i].index
+        if agreed.sections[i].recv && !b.publish {
+            agreed.sections[i].recv = false
+            let at: u64 = int.widen(k)
+            reply.sections[at].dir = if agreed.sections[i].send {
+                SendOnly
+            } else {
+                Inactive
+            }
+        }
+        if agreed.sections[i].recv {
+            list.push(mut recvs, k)
+        }
+        if agreed.sections[i].send {
+            list.push(mut sends, (k, agreed.sections[i].media))
+        }
+    }
+    let mut answer: Bytes = list.new()
+    sdp.write(reply, mut answer) ?=> |take e| Peer(Sdp(e))
+    let session = peer.open(take local, dtls.share_identity(h.id), r, h.at, h.limits, agreed, b.who) ?=> |take e| Peer(e)
+    Ok((take session, Built(answer: take answer, recvs: take recvs, sends: take sends)))
+}

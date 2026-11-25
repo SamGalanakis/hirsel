@@ -92,10 +92,14 @@ fn say_as(mut r: Sig, p: u32, take s: signal.Signal) {
     enter_room(mut r, take e)
 }
 
-// Build each session the adapter asked for on its home unit, as the unit-side driver
-// does: the browser end, the server session parked there, and the outcome.
+// Build each session the adapter asked for on its home unit: `signal.build` answers
+// the offer as that unit and its outcome goes to the adapter, while the session parked
+// there is the fixture's, established with the browser end out of band.
 fn serve_builds(mut r: Sig) waits {
     for take b in signal.take_builds(mut r.a) {
+        let Party(id: take unit_id, certificate: _) = party(16100)
+        let built = signal.build(signal.Home(id: take unit_id, at: r.h.addrs[b.home], policy: sdp.default_policy(), limits: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64)), provide.random(16200), b)
+        let (_, take outcome) = result.unwrap(take built)
         let signal.Build(who: who, home: home, peer: p, version: _, offer: take offer, publish: _) = take b
         let mut ufrag: Bytes = list.new()
         list.append(mut ufrag, b"ufrags")
@@ -116,12 +120,7 @@ fn serve_builds(mut r: Sig) waits {
         let small: u16 = int.narrow(p)
         list.push(mut r.h.peers, Peer(c: Client(who: who.gen, at: local_at, cs: take cs), sock: take sock, home: r.h.addrs[home], ssrc: 0x51000000 + p, seq: 1000 * small, mark: mark_for(p)))
         list.push(mut r.members, Member(peer: p, index: index, home: home, gen: who.gen))
-        let mut recvs: List[u8] = list.new()
-        list.push(mut recvs, 0)
-        let mut sends: List[(u8, sdp.Media)] = list.new()
-        list.push(mut sends, (1u8, Video))
-        list.push(mut sends, (2u8, Video))
-        signal.built(mut r.a, who, Ok(signal.Built(answer: b"answer", recvs: take recvs, sends: take sends)), mut r.out)
+        signal.built(mut r.a, who, Ok(take outcome), mut r.out)
     }
     read_room_out(mut r)
 }
@@ -420,11 +419,18 @@ fn loss_run(net: Net, clock: Clock, loss: Loss) waits {
             enter_room(mut r, PartEnd)
         },
         Image => {
+            // The service rejoined as peer 10, and the image still lists its old 9.
+            signal.you(mut r.a, None)
+            signal.you(mut r.a, Some(10))
             enter_room(mut r, Part(inc_of(1), 6, true, true))
             enter_room(mut r, Joined(YOU))
             enter_room(mut r, Joined(2))
             enter_room(mut r, Joined(3))
+            enter_room(mut r, Joined(10))
             enter_room(mut r, PartEnd)
+            if signal.participant(r.a, YOU) != None || signal.participant(r.a, 10) != None {
+                fail_in(loss, "the service's old or new number was admitted after its rejoin")
+            }
         },
         LeftInSnapshot => {
             enter_room(mut r, Part(inc_of(1), 6, false, true))
@@ -634,8 +640,8 @@ fn reoffer_run(net: Net, clock: Clock) waits {
 /// snapshot, a scratch roster seeded from the pre-gap one under a new membership, a
 /// comparison made at the Part head before the Part's own entries, entries with no
 /// head, or a different incarnation's wrap_signal-numbered peer), resumes before a gone
-/// peer's revoke returns, or applies an entry of an unheralded `complete` Part
-/// before suspending.
+/// peer's revoke returns, applies an entry of an unheralded `complete` Part before
+/// suspending, or admits the service's own number from before its rejoin.
 /// oracle: RTC-8 by hand, from captures at each unit's writer read by the browsers'
 /// own SRTP ends and from each unit's router after every turn. From `Lost` no RTP is
 /// captured until the snapshot's `PartEnd`; the held repair's RTX SSRC and the held
@@ -645,7 +651,8 @@ fn reoffer_run(net: Net, clock: Clock) waits {
 /// `Fenced` at their pre-gap epoch before the first forwarded packet; and their mark
 /// never appears after the loss. Every other peer keeps its id and epoch and its
 /// media reaches its continued subscribers on the same down-track SSRC. In (d) the
-/// room is still suspended 200 ms after the stale snapshot; in (g) a message in the
+/// room is still suspended 200 ms after the stale snapshot; in (b) the service, now
+/// peer 10, holds no seat for 9 or 10; in (g) a message in the
 /// Part is `Refused(Suspended)`. Seeded: (b) is red on a scratch roster seeded from
 /// the pre-gap one, (c) on a comparison made at the Part head.
 /// bug (re-offer): the adapter drops a re-offer raised on another unit, keeps a

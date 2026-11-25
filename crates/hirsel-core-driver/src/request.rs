@@ -862,7 +862,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         match (cc, &installed) {
             (Some(cc), _) => Ok(Link::Driver(crate::link_driver(&cc)?)),
             (None, Some(installed)) => Ok(Link::Installed(installed.link(&target).ok_or_else(
-                || format!("this installation links its host target only, not {target}; pass --cc"),
+                || format!("this installation has no {target} runtime; install one with std-product --install --runtime --target {target} --link-kit, or pass --cc"),
             )?)),
             (None, None) => Ok(Link::Driver(crate::link_driver(&pinned().ok_or(
                 "no link driver: this compiler is not installed and LLVM_SYS_231_PREFIX is unset; pass --cc",

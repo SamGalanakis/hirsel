@@ -288,14 +288,24 @@ def main():
                 self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
                 self.assertIn('pinned LLVM engine missing', refused.stdout + refused.stderr)
                 original.rename(bundled)
-                # Another target links through the cross C driver it names, with
-                # the prefix's own ld.lld: never one that driver finds on PATH.
+                # Every target links with the prefix's own kit and ld.lld, whatever
+                # the host (OPTIMAL-MACOS-ARM64 §4.1): no --cc, no tool on PATH. The
+                # aarch64 program runs under qemu over the Arm sysroot's real glibc.
                 arm = Path(os.environ['HIRSEL_TOOLCHAIN_ARM']).resolve()
+                qemu = Path(os.environ['HIRSEL_TOOLCHAIN_QEMU']).resolve() / 'qemu-aarch64'
                 cross = Path(os.environ['HIRSEL_CORE_RT_ARCHIVES']).resolve() / 'aarch64-unknown-linux-gnu/libhirsel_core_rt.a'
-                invoke('std-product', '--install', str(root), '--runtime', str(cross), '--target', 'aarch64-unknown-linux-gnu')
-                self.assertTrue(json.loads(invoke('build', str(app), '--release', '--target', 'aarch64-unknown-linux-gnu',
-                                                  '--cc', str(arm / 'bin/aarch64-none-linux-gnu-gcc'),
-                                                  '-o', str(work / 'program-aarch64'), '--json').stdout)['native']['linked'])
+                invoke('std-product', '--install', str(root), '--runtime', str(cross), '--target', 'aarch64-unknown-linux-gnu',
+                       '--link-kit', str(kit))
+                for engine in ['cranelift', 'llvm']:
+                    aarch64 = ['--backend', engine, '--release', '--target', 'aarch64-unknown-linux-gnu']
+                    program = work / ('program-aarch64-' + engine)
+                    self.assertTrue(json.loads(invoke('build', str(app), *aarch64, '-o', str(program), '--json').stdout)['native']['linked'])
+                    elf = program.read_bytes()
+                    self.assertEqual(elf[18:20], (183).to_bytes(2, 'little'))  # EM_AARCH64
+                    self.assertIn(b'/lib/ld-linux-aarch64.so.1\0', elf)
+                    emulated = [*aarch64, '--emulator', str(qemu), '--sysroot', str(arm / 'aarch64-none-linux-gnu/libc')]
+                    invoke('run', str(app), *emulated, '--dir', str(work / 'data'))
+                    invoke('run', str(app), *emulated, '--dir', str(work / 'empty'), expected=3)
                 self.assertFalse(found.exists(), found.read_text() if found.exists() else '')
                 linker = root / 'bin' / 'ld.lld'
                 linker.unlink()

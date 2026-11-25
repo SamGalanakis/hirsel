@@ -31,13 +31,6 @@ const FILE: &str = "hirsel-core-toolchain.json";
 const VERSION: u32 = 4;
 /// The installed compiler's name in its prefix.
 const EXECUTABLE: &str = "hirsel";
-/// The host this compiler runs on: the one target an installation links
-/// itself. Another target's runtime is installed; its link takes `--cc`.
-const HOST: &str = if cfg!(target_arch = "aarch64") {
-    "aarch64-unknown-linux-gnu"
-} else {
-    "x86_64-unknown-linux-gnu"
-};
 #[derive(Default, Serialize, Deserialize)]
 struct Registration {
     version: u32,
@@ -152,8 +145,8 @@ impl Installed {
         };
         runtimes.get(target).map(|path| self.root.join(path))
     }
-    /// The link recipe this installation provides for `target`. A target
-    /// without one links only through an explicit `--cc`.
+    /// The link recipe this installation provides for `target`. Every
+    /// installed runtime's target has one, whatever host the compiler runs on.
     pub fn link(&self, target: &str) -> Option<PathBuf> {
         self.registration
             .links
@@ -475,8 +468,9 @@ impl<T> RuntimeVariants<T> {
 /// outside input is read and checked before anything is written; the
 /// selection is written last, so a failed install keeps the previous one.
 ///
-/// Installing the host's runtime installs the native toolchain with it: the
-/// LLVM engine the compiler loads and the pinned kit that links its programs.
+/// Installing a target's runtime installs the native toolchain with it: the
+/// LLVM engine the compiler loads and the pinned kit that links that target's
+/// programs. The target, never the host, selects the kit.
 pub fn publish(
     root: &Path,
     std: bool,
@@ -533,10 +527,7 @@ pub fn publish(
         observed: read_runtime(additional.observed, false, false, true)?,
         observed_recording: read_runtime(additional.observed_recording, true, false, true)?,
     };
-    let linked = runtime
-        .as_ref()
-        .map(|(_, target)| *target)
-        .filter(|target| *target == HOST);
+    let linked = runtime.as_ref().map(|(_, target)| *target);
     let kit = match (linked, link_kit) {
         (Some(target), Some(kit)) => Some((target, kit)),
         (Some(target), None) => {
@@ -544,7 +535,7 @@ pub fn publish(
                 "installing the {target} runtime requires --link-kit"
             )));
         }
-        (None, Some(_)) => return Err(io::Error::other("--link-kit requires a host runtime")),
+        (None, Some(_)) => return Err(io::Error::other("--link-kit requires --runtime")),
         (None, None) => None,
     };
     std::fs::create_dir_all(&root)?;
@@ -645,7 +636,7 @@ pub(crate) fn prebuild_release(
 }
 
 /// Prebuild the installed std image's plain instances for a development
-/// request on the linked host, through the check and emission that request
+/// request on `target`, through the check and emission that request
 /// runs, into the image's store.
 fn prebuild(
     installed: &Installed,

@@ -68,7 +68,12 @@ type Encoding {
     structure: media_bits.dependency.Structure,
     // The frame number of the keyframe that brought `structure`. A retransmitted or
     // late keyframe older than it must not bring back its older structure.
-    structure_frame: Option[u16]
+    structure_frame: Option[u16],
+    // H.264's `after_end` facts of this source (rtp RTP-11): the newest packet index
+    // seen, its extended timestamp, and its marker.
+    last: Option[u64],
+    last_ts: i64,
+    last_marker: bool
 }
 
 // RTC-6's speaker score of an audio publication, in Q16, and its open window, in
@@ -117,15 +122,14 @@ type Down {
     // whether `audio_forward` holds this audio down-track at `Off`.
     effective: Target,
     held: bool,
-    // The H.264 parameter sets this leg has sent of its current source (media_bits
-    // `ParameterSets`), and whether that source's last packet ended an access unit.
+    // The H.264 parameter sets this leg has sent (media_bits `ParameterSets`) and the
+    // source they came from. Only that source's packets are judged against them; any
+    // other source has sent nothing since the last switch away from it (RTP-11).
     sets: media_bits.unit.ParameterSets,
-    after_end: bool,
+    sets_source: Option[u32],
     // A rebind waiting for the new publication's keyframe: the publication that
-    // still forwards until then, and the new source's own sets (RTP-11).
+    // still forwards until then.
     previous: Option[PublicationId],
-    next_sets: media_bits.unit.ParameterSets,
-    next_after_end: bool,
     // AV1: the frame numbers this leg last forwarded per chain (AV1 RTP section A.5),
     // of its current source and of a rebind's new source.
     chains: media_bits.unit.Av1Chains,
@@ -639,7 +643,7 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     for _ in 0u8 .. shape.encodings {
         // Every encoding starts published: the publisher sends all of them until a
         // mask says otherwise (RTC-6).
-        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, wanting: 0, on: true, since: None, structure: media_bits.dependency.empty(), structure_frame: None))
+        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, wanting: 0, on: true, since: None, structure: media_bits.dependency.empty(), structure_frame: None, last: None, last_ts: 0, last_marker: false))
     }
     list.try_reserve(mut r.publications, 1) ?=> |c| Capacity(c)
     list.push(mut r.publications, Publication(id: id, owner: who, home: home, room: room, section: section, codec: shape.codec, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held, local: 0, clock: clock, window: None, voice: quiet()))
@@ -768,7 +772,7 @@ fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, s
         0u16
     }
     list.try_reserve(mut r.downs, 1) ?=> |c| Capacity(c)
-    list.push(mut r.downs, Down(sub: who, home: home, room: room, publication: p, section: section, track: track, target: Off, effective: Off, held: false, sets: media_bits.unit.parameter_sets(), after_end: true, previous: None, next_sets: media_bits.unit.parameter_sets(), next_after_end: true, chains: media_bits.unit.av1_chains(), next_chains: media_bits.unit.av1_chains()))
+    list.push(mut r.downs, Down(sub: who, home: home, room: room, publication: p, section: section, track: track, target: Off, effective: Off, held: false, sets: media_bits.unit.parameter_sets(), sets_source: None, previous: None, chains: media_bits.unit.av1_chains(), next_chains: media_bits.unit.av1_chains()))
     r.roster[si].downs += 1
     retarget(mut r, room, who, p, target, now, mut out)
 }
@@ -885,23 +889,17 @@ fn move_down(mut r: Router, room: peer.RoomId, who: peer.Gen, from: PublicationI
         r.downs[di].previous = Some(from)
     }
     r.downs[di].publication = to
-    media_bits.unit.clear_parameter_sets(mut r.downs[di].next_sets)
-    r.downs[di].next_after_end = true
     r.downs[di].next_chains = media_bits.unit.av1_chains()
     retarget(mut r, room, who, to, target, now, mut out)
 }
 
-// The switch to the rebound publication happened, or no longer waits: its sets
-// become the leg's, and the old publication stops reaching the track.
+// The switch to the rebound publication happened, or no longer waits: its AV1
+// chains become the leg's, and the old publication stops reaching the track.
 fn settle(mut r: Router, d: u64) {
     if r.downs[d].previous == None {
         return
     }
     r.downs[d].previous = None
-    r.downs[d].sets = r.downs[d].next_sets
-    media_bits.unit.clear_parameter_sets(mut r.downs[d].next_sets)
-    r.downs[d].after_end = r.downs[d].next_after_end
-    r.downs[d].next_after_end = true
     r.downs[d].chains = r.downs[d].next_chains
     r.downs[d].next_chains = media_bits.unit.av1_chains()
 }

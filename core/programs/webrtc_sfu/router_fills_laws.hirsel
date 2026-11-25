@@ -1,0 +1,349 @@
+// ---- RTC-6 W9 router_fills_units over the Chromium captures ----
+/// One subscriber: its browser, and the capture index, header and (VP8) output
+/// picture ID of each packet it got.
+type Watched {
+    c: Client,
+    vp8: bool,
+    got: List[u64],
+    heads: List[rtp.header.Header],
+    pictures: List[u64]
+}
+
+fn leg_of(mut r: router.Router, seed: u64, offer: Bytes, id: u64, vp8: bool) -> Watched {
+    Watched(c: admit(mut r, seed, offer, id), vp8: vp8, got: list.new(), heads: list.new(), pictures: list.new())
+}
+
+// The payloads match, except that a VP8 leg writes its own picture ID and TL0PICIDX
+// (bytes 2 to 4 of every descriptor here: X, I with M = 1, and L set, RTC-5).
+fn same_body(vp8: bool, got: Bytes, sent: Bytes) -> bool {
+    if list.len(got) != list.len(sent) {
+        return false
+    }
+    for i in 0u64 .. list.len(got) {
+        if got[i] != sent[i] && !(vp8 && i >= 2 && i <= 4) {
+            return false
+        }
+    }
+    true
+}
+
+fn body_of(plain: Bytes) -> Bytes {
+    let h = result.unwrap(rtp.header.parse(plain))
+    copy_of(list.slice(plain, h.end, list.len(plain)))
+}
+
+// Seal a captured plaintext packet as its publisher and give it to the router.
+fn give(mut r: router.Router, now: u64, mut p: Client, plain: Bytes, mut out: peer.Outbox) {
+    let mut b: Bytes = list.with_capacity(1500)
+    list.append(mut b, plain)
+    let _ = result.unwrap(srtp.protect_rtp(mut p.cs, mut b))
+    feed(mut r, now, p.who, p.at, b, mut out)
+}
+
+// What the leg got of `out`: capture index k when the payload is packet k's, 999 if not.
+fn gather(mut l: Watched, out: peer.Outbox, k: u64, body: Bytes) {
+    for g in received(mut l.c, out) {
+        let got = payload_of(g)
+        list.push(mut l.got, if same_body(l.vp8, got, body) {
+            k
+        } else {
+            999
+        })
+        list.push(mut l.heads, g.h)
+        if l.vp8 {
+            let high: u64 = int.widen(got[2] & 0x7f)
+            let low: u64 = int.widen(got[3])
+            list.push(mut l.pictures, (high << 8) | low)
+        }
+    }
+}
+
+// The leg got exactly the packets `want`, in order. Its sequence numbers step by one
+// (by two at position `gap_at`, after an upstream loss), two packets of one source
+// keep the source's timestamp difference, and, with `markers`, each keeps its marker.
+// A VP8 leg's picture IDs step by one at each new frame, with no gap at a switch or
+// for a frame the leg drops (RTP-11's Compact counters).
+fn expect_leg(l: Watched, want: Bytes, packets: List[Bytes], markers: bool, gap_at: u64, what: String) {
+    let mut ok = list.len(l.got) == list.len(want)
+    if ok {
+        for j in 0u64 .. list.len(want) {
+            let k: u64 = int.widen(want[j])
+            if l.got[j] != k {
+                ok = false
+            }
+        }
+    }
+    if !ok {
+        let mut msg = string.from(what)
+        string.push(mut msg, ": got")
+        for k in l.got {
+            string.push(mut msg, " ")
+            string.push_u64(mut msg, k)
+        }
+        fail(take msg)
+    }
+    for j in 0u64 .. list.len(want) {
+        let k: u64 = int.widen(want[j])
+        let b = result.unwrap(rtp.header.parse(packets[k]))
+        let h = l.heads[j]
+        if markers && h.marker != b.marker {
+            fail(string.from(what))
+        }
+        if j == 0 {
+            continue
+        }
+        let before: u64 = int.widen(want[j - 1])
+        let a = result.unwrap(rtp.header.parse(packets[before]))
+        let prev = l.heads[j - 1]
+        let step: u16 = if j == gap_at {
+            2
+        } else {
+            1
+        }
+        if h.seq != plus(prev.seq, step) || (a.ssrc == b.ssrc && h.ts != later(prev.ts, int.wrapping_sub(b.ts, a.ts))) {
+            fail(string.from(what))
+        }
+        if l.vp8 {
+            let next = if h.ts == prev.ts {
+                l.pictures[j - 1]
+            } else {
+                (l.pictures[j - 1] + 1) & 0x7fff
+            }
+            if l.pictures[j] != next {
+                fail(string.from(what))
+            }
+        }
+    }
+}
+
+fn mid_d() -> List[Bytes] {
+    let mut mids: List[Bytes] = list.new()
+    list.push(mut mids, b"d")
+    mids
+}
+
+// A hand-built packet on rid h (SSRC 3525936532) of the VP8 capture, carrying a
+// Dependency Descriptor (extension 13, which Chromium's offer binds and the router
+// answers) besides the VP8 descriptor `body` with its TID.
+fn vp8_hand(seq: u16, ts: u32, marker: bool, body: Bytes) -> Bytes {
+    let mut m = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut m, 13, DependencyDescriptor))
+    let mut w = rtp.ext.writer()
+    let dd = b"\xc0\x00\x01"
+    result.unwrap(rtp.ext.put(mut w, m, DependencyDescriptor, dd, 0, 3))
+    let f = rtp.header.Fields(marker: marker, pt: 96, seq: seq, ts: ts, ssrc: 3525936532)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, body)
+    b
+}
+
+fn vp8_legs() {
+    let mut r = router.router(provide.random(140))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let room = room_id()
+    let mut p = admit(mut r, 141, vectors.vp8_simulcast_offer(), 1)
+    let mut s = leg_of(mut r, 143, receiving(mid_d()), 2, true)
+    let mut t = leg_of(mut r, 145, receiving(mid_d()), 3, true)
+    let mut u = leg_of(mut r, 147, receiving(mid_d()), 4, true)
+    let pa = result.unwrap(router.publish(mut r, room, p.who, 0))
+    let mut now = 10 * MS
+    result.unwrap(router.subscribe(mut r, room, s.c.who, pa, 0, Layer(encoding: 0, spatial: 0, temporal: 255), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, t.c.who, pa, 0, Layer(encoding: 2, spatial: 0, temporal: 0), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, u.c.who, pa, 0, Layer(encoding: 1, spatial: 0, temporal: 0), now, mut out))
+    peer.clear_outbox(mut out)
+    let mut packets = vectors.vp8_simulcast()
+    // 39: S = 1 with partition index 1 (RFC 7741 section 4.2) of picture 27492, TID 1,
+    // Y = 1, whose first packet (sequence 3248) was lost. 40 and 41: picture 27493,
+    // TID 1, Y = 1, an interframe (tag P = 1) in two packets.
+    list.push(mut packets, vp8_hand(3249, 3004469738, true, b"\x91\xe0\xeb\x64\x97\x60\x9b\x01\x00\x00"))
+    list.push(mut packets, vp8_hand(3250, 3004474238, false, b"\x90\xe0\xeb\x65\x97\x60\x31\x01\x00\x00"))
+    list.push(mut packets, vp8_hand(3251, 3004474238, true, b"\x80\xe0\xeb\x65\x97\x60\x9b\x01\x00\x00"))
+    // Arrival order across the three SSRCs is the law's; each SSRC keeps its own order.
+    let order = b"\x04\x03\x06\x0b\x00\x01\x02\x05\x07\x08\x09\x0a\x13\x0c\x0d\x0e\x0f\x10\x11\x12\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29"
+    for j in 0u64 .. list.len(order) {
+        if j == 3 {
+            result.unwrap(router.set_target(mut r, room, s.c.who, pa, Layer(encoding: 2, spatial: 0, temporal: 255), now, mut out))
+        }
+        if j == 20 {
+            result.unwrap(router.set_target(mut r, room, t.c.who, pa, Layer(encoding: 2, spatial: 0, temporal: 1), now, mut out))
+        }
+        if j == 39 {
+            result.unwrap(router.set_target(mut r, room, u.c.who, pa, Layer(encoding: 1, spatial: 0, temporal: 1), now, mut out))
+        }
+        peer.clear_outbox(mut out)
+        let k: u64 = int.widen(order[j])
+        give(mut r, now, mut p, packets[k], mut out)
+        now += MS
+        let body = body_of(packets[k])
+        gather(mut s, out, k, body)
+        gather(mut t, out, k, body)
+        gather(mut u, out, k, body)
+        peer.clear_outbox(mut out)
+    }
+    expect_leg(s, b"\x04\x0b\x00\x01\x02\x05\x07\x08\x09\x0c\x0d\x0e\x0f\x10\x14\x15\x18\x19\x1a\x1b\x1f\x20\x21\x22\x23", packets, true, 0, "VP8 q to f: the old source until f's five-packet keyframe, then all of f")
+    expect_leg(t, b"\x00\x01\x02\x05\x07\x0c\x0d\x0e\x0f\x10\x18\x19\x1a\x1b\x1f\x20\x21\x22\x23", packets, true, 0, "VP8 f T0 to T1: the raise waits for the Y = 1 frame at 31")
+    expect_leg(u, b"\x03\x06\x11\x12\x1c\x1d\x28\x29", packets, true, 6, "VP8 h T0 to T1: S = 1 with a nonzero partition index starts no frame")
+}
+
+fn h264_receiving() -> Bytes {
+    let mut b = minimal_head(b" d")
+    list.append(mut b, b"m=video 9 UDP/TLS/RTP/SAVPF 102\na=mid:d\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\na=rtcp-mux\na=recvonly\na=rtpmap:102 H264/90000\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\na=rtcp-fb:102 nack\na=rtcp-fb:102 nack pli\n")
+    take b
+}
+
+fn h264_legs() {
+    let mut r = router.router(provide.random(150))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let room = room_id()
+    let mut p = admit(mut r, 151, vectors.h264_simulcast_offer(), 1)
+    let mut up = leg_of(mut r, 153, h264_receiving(), 2, false)
+    let mut down = leg_of(mut r, 155, h264_receiving(), 3, false)
+    let pa = result.unwrap(router.publish(mut r, room, p.who, 0))
+    let mut now = 10 * MS
+    result.unwrap(router.subscribe(mut r, room, up.c.who, pa, 0, Layer(encoding: 0, spatial: 0, temporal: 0), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, down.c.who, pa, 0, Layer(encoding: 2, spatial: 0, temporal: 0), now, mut out))
+    peer.clear_outbox(mut out)
+    let packets = vectors.h264_simulcast()
+    let order = b"\x0a\x00\x01\x02\x07\x03\x04\x05\x06\x08\x09\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e"
+    for j in 0u64 .. list.len(order) {
+        if j == 1 {
+            result.unwrap(router.set_target(mut r, room, up.c.who, pa, Layer(encoding: 2, spatial: 0, temporal: 0), now, mut out))
+        }
+        if j == 4 {
+            result.unwrap(router.set_target(mut r, room, down.c.who, pa, Layer(encoding: 1, spatial: 0, temporal: 0), now, mut out))
+        }
+        peer.clear_outbox(mut out)
+        let k: u64 = int.widen(order[j])
+        give(mut r, now, mut p, packets[k], mut out)
+        now += MS
+        let body = body_of(packets[k])
+        gather(mut up, out, k, body)
+        gather(mut down, out, k, body)
+        peer.clear_outbox(mut out)
+    }
+    expect_leg(up, b"\x0a\x00\x01\x02\x03\x04\x05\x06\x0b\x0c\x0d\x10\x11\x12\x15\x16\x17\x1a\x1b\x1c", packets, true, 0, "H.264 q to f: f's STAP-A and its six-packet IDR, then all of f")
+    expect_leg(down, b"\x00\x01\x02\x07\x08\x09\x0e\x13\x18\x1d", packets, true, 0, "H.264 f to h mid-IDR: h's STAP-A (its SPS ends in a zero byte) switches at once")
+}
+
+fn vp9_legs() {
+    let mut r = router.router(provide.random(160))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let room = room_id()
+    let mut p = admit(mut r, 161, vectors.vp9_l3t3_offer(), 1)
+    let mut wide = leg_of(mut r, 163, vp9_offer(b"y", b"a=recvonly"), 2, false)
+    let mut fast = leg_of(mut r, 165, vp9_offer(b"y", b"a=recvonly"), 3, false)
+    let mut two = leg_of(mut r, 167, vp9_offer(b"y", b"a=recvonly"), 4, false)
+    let pv = result.unwrap(router.publish(mut r, room, p.who, 0))
+    let mut now = 10 * MS
+    result.unwrap(router.subscribe(mut r, room, wide.c.who, pv, 0, Layer(encoding: 0, spatial: 0, temporal: 0), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, fast.c.who, pv, 0, Layer(encoding: 0, spatial: 0, temporal: 0), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, two.c.who, pv, 0, Layer(encoding: 0, spatial: 1, temporal: 0), now, mut out))
+    peer.clear_outbox(mut out)
+    let packets = vectors.vp9_l3t3()
+    for k in 0u64 .. list.len(packets) {
+        if k == 11 {
+            result.unwrap(router.set_target(mut r, room, wide.c.who, pv, Layer(encoding: 0, spatial: 2, temporal: 2), now, mut out))
+            result.unwrap(router.set_target(mut r, room, fast.c.who, pv, Layer(encoding: 0, spatial: 0, temporal: 2), now, mut out))
+        }
+        peer.clear_outbox(mut out)
+        give(mut r, now, mut p, packets[k], mut out)
+        now += MS
+        let body = body_of(packets[k])
+        gather(mut wide, out, k, body)
+        gather(mut fast, out, k, body)
+        gather(mut two, out, k, body)
+        peer.clear_outbox(mut out)
+    }
+    expect_leg(wide, b"\x00\x13\x26", packets, false, 0, "VP9 S0T0 to S2T2: the U pictures' S2 frames are inter-picture, so no spatial switch")
+    // RTC-6 allows a temporal up-switch from T only at the first layer frame above T
+    // after a U = 1 picture at or below T. After picture 2440 that is packet 7 (TID 2),
+    // which passes before the target changes, so picture 2442 (TID 1) does not switch,
+    // though RFC 9628 would allow it. The next is packet 26, after picture 2444.
+    expect_leg(fast, b"\x00\x13\x1a\x1e\x22\x26\x2c", packets, false, 0, "VP9 S0T0 to S0T2: the switch waits for the first TID above 0 after the next U = 1 TID 0 picture")
+    expect_leg(two, b"\x00\x01\x02\x13\x14\x15\x26\x27\x28", packets, false, 0, "VP9 S1T0: both lower spatial layer frames of each TID 0 picture")
+}
+
+// AV1 RTP section A.8 by hand over this capture's structure (15 templates, 9 decode
+// targets in (S, T) order, 3 chains), re-encoded field by field with the targets
+// reversed (d' = 8 - d), as packet 0's 95-byte two-byte-form element at offset 33.
+fn av1_reversed(plain: Bytes) -> Bytes {
+    let dd = b"\xc1\x00\x01\x80\x08\x14\x85\x21\x4f\xff\xea\xaa\xaa\xbc\xf2\x4c\x30\x43\x0c\x10\xfe\xa0\x2a\xa8\x0f\x24\x03\x04\x00\xc1\x00\x2a\x00\x0a\x80\x02\x40\x00\x40\x00\x10\x00\x0d\x95\x49\x26\xe0\x82\xb0\x4a\x09\x41\xb8\x20\xac\x12\x82\x50\x3f\xea\x19\x74\x00\x0c\xa8\x64\x33\x0e\x22\x22\x22\xec\xa8\x65\x53\x04\x22\x42\x30\xec\xa8\x77\x53\x01\x3f\x00\xb3\x02\x7f\x01\x67\x04\xff\x02\xcf"
+    let mut b = copy_of(plain)
+    if b[31] != 13 || b[32] != 95 {
+        fail("the captured AV1 keyframe's descriptor element moved")
+    }
+    for i in 0u64 .. 95 {
+        b[33 + i] = dd[i]
+    }
+    b
+}
+
+fn av1_legs(reversed: bool) {
+    let mut r = router.router(provide.random(170))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let room = room_id()
+    let mut p = admit(mut r, 171, vectors.av1_l3t3_offer(), 1)
+    let mut a = leg_of(mut r, 173, av1_offer(b"y", b"a=recvonly"), 2, false)
+    let mut b = leg_of(mut r, 175, av1_offer(b"y", b"a=recvonly"), 3, false)
+    let mut c = leg_of(mut r, 177, av1_offer(b"y", b"a=recvonly"), 4, false)
+    let mut d = leg_of(mut r, 179, av1_offer(b"y", b"a=recvonly"), 5, false)
+    let pv = result.unwrap(router.publish(mut r, room, p.who, 0))
+    let now0 = 10 * MS
+    let mut now = now0
+    result.unwrap(router.subscribe(mut r, room, a.c.who, pv, 0, Layer(encoding: 0, spatial: 0, temporal: 0), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, b.c.who, pv, 0, Layer(encoding: 0, spatial: 1, temporal: 1), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, c.c.who, pv, 0, Layer(encoding: 0, spatial: 2, temporal: 2), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, d.c.who, pv, 0, Layer(encoding: 0, spatial: 1, temporal: 255), now, mut out))
+    peer.clear_outbox(mut out)
+    let mut packets = vectors.av1_l3t3()
+    if reversed {
+        packets[0] = av1_reversed(packets[0])
+    }
+    for k in 0u64 .. list.len(packets) {
+        peer.clear_outbox(mut out)
+        give(mut r, now, mut p, packets[k], mut out)
+        now += MS
+        let body = body_of(packets[k])
+        gather(mut a, out, k, body)
+        gather(mut b, out, k, body)
+        gather(mut c, out, k, body)
+        gather(mut d, out, k, body)
+        peer.clear_outbox(mut out)
+    }
+    let mut all: Bytes = list.new()
+    for k in 0u8 .. 57u8 {
+        list.push(mut all, k)
+    }
+    expect_leg(a, b"\x00\x11\x29", packets, false, 0, "AV1 S0T0: the S0 T0 frames 1, 13 and 25")
+    expect_leg(b, b"\x00\x01\x09\x0a\x11\x12\x13\x14\x21\x22\x29\x2a\x2b\x2c", packets, false, 0, "AV1 S1T1: the frames decode target (1, 1) needs")
+    expect_leg(c, all, packets, false, 0, "AV1 S2T2: every frame")
+    expect_leg(d, b"\x00\x01\x05\x06\x09\x0a\x0d\x0e\x11\x12\x13\x14\x1c\x1d\x21\x22\x25\x26\x29\x2a\x2b\x2c\x35\x36", packets, false, 0, "AV1 S1T255: decode target (1, 2), the greatest at or below")
+}
+
+/// bug: build the H.264 `after_end` or parameter sets of a pending source from the
+/// current one, so a switch waits past the new source's first access unit; refuse
+/// Chromium's SPS with a trailing zero byte; treat a VP8 packet with `S = 1` and a
+/// nonzero partition index as a frame start, or raise a VP8 temporal target at a
+/// frame without `Y`; read VP8 layers from a Dependency Descriptor instead of TID;
+/// switch VP9 spatially at an inter-picture frame, or temporally anywhere but after a
+/// `U` picture; map an AV1 layer by decode-target index instead of by the structure's
+/// (S_d, T_d), so the reversed table sends other frames.
+/// oracle: Chromium 156 captures (vectors/chromium_rtp.hirsel), decoded by hand from
+/// RFC 7741 section 4.2, RFC 6184 sections 5.6 to 5.8, RFC 9628 section 4.2 and AV1 RTP
+/// section A.8 by independent decoders, with RTC-6 and RTP-11's switch rules. Arrival
+/// order across SSRCs is the law's. Three VP8 packets and the reversed AV1 structure
+/// (re-encoded from the captured one, checked by decoding it back) are built by hand.
+@test
+fn router_fills_units() -> Result[(), router.RouterError] {
+    vp8_legs()
+    h264_legs()
+    vp9_legs()
+    av1_legs(false)
+    av1_legs(true)
+    Ok(())
+}

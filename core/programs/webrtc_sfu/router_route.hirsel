@@ -107,9 +107,7 @@ fn restart(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, track: u16
         if r.downs[d].sub == who && r.downs[d].room == room && r.downs[d].track == track {
             r.downs[d].previous = None
             media_bits.unit.clear_parameter_sets(mut r.downs[d].sets)
-            media_bits.unit.clear_parameter_sets(mut r.downs[d].next_sets)
-            r.downs[d].after_end = true
-            r.downs[d].next_after_end = true
+            r.downs[d].sets_source = None
             r.downs[d].chains = media_bits.unit.av1_chains()
             r.downs[d].next_chains = media_bits.unit.av1_chains()
             let p = r.downs[d].publication
@@ -257,6 +255,31 @@ fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, fresh: bool, slot: B
     spread(mut r, now, pi, m, handle, talking, slot, mut out)
 }
 
+// RTP-11's `after_end` for an H.264 packet of this encoding: the packet at index - 1
+// was seen and ended an access unit (its marker, or another timestamp). Before any
+// packet of the source is seen, or after its stream restarted, a packet may start a
+// unit. Only a newer index moves the record, so a retransmission of an old packet
+// cannot rewind it.
+fn ended(mut enc: Encoding, m: peer.MediaIn) -> bool {
+    if m.reset {
+        enc.last = None
+    }
+    let after = match enc.last {
+        None => true,
+        Some(i) => i + 1 == m.index && (enc.last_marker || enc.last_ts != m.wide),
+    }
+    let newer = match enc.last {
+        None => true,
+        Some(i) => m.index > i,
+    }
+    if newer {
+        enc.last = Some(m.index)
+        enc.last_ts = m.wide
+        enc.last_marker = m.marker
+    }
+    after
+}
+
 // RTC-5 fan-out steps 2 and 3 for one packet of publication `pi`: each local
 // down-track takes it through its `Rewrite`, and on the home unit each other unit
 // with a down-track of it gets one `Media` message.
@@ -268,6 +291,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
     let id = r.publications[pi].id
     let end = m.payload_at + m.payload_len
     let payload = list.slice(packet, m.payload_at, end)
+    let after_end = ended(mut r.publications[pi].encodings[e], m)
     let mut joint = shared_unit(codec, m)
     if let None = joint {
         if codec == Vp8 {
@@ -375,8 +399,8 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
             remote = remote | (1u64 << int.widen(r.downs[d].home))
             continue
         }
-        // While a rebind waits, the new publication's packets are judged with its own
-        // H.264 state (RTP-11: one set per source the caller presents).
+        // While a rebind waits, the new publication's AV1 packets are judged with its
+        // own chains.
         let fresh = r.downs[d].publication == id && r.downs[d].previous != None
         let Some(si) = member_at(r, room, r.downs[d].sub) else {
             continue
@@ -425,10 +449,12 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
                         if codec != H264 {
                             continue
                         }
-                        let judged = if fresh {
-                            media_bits.unit.h264(payload, m.marker, r.downs[d].next_after_end, r.downs[d].next_sets)
+                        // RTP-11: a source other than the one the leg last sent has
+                        // no parameter sets on this leg.
+                        let judged = if r.downs[d].sets_source == Some(src) {
+                            media_bits.unit.h264(payload, m.marker, after_end, r.downs[d].sets)
                         } else {
-                            media_bits.unit.h264(payload, m.marker, r.downs[d].after_end, r.downs[d].sets)
+                            media_bits.unit.h264(payload, m.marker, after_end, media_bits.unit.parameter_sets())
                         }
                         match judged {
                             Ok(u) => rewrite_unit(u),
@@ -451,13 +477,12 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
             Error(take x) => return Error(Peer(x)),
         }
         if sent == OnMedia && codec == H264 {
-            if fresh {
-                let _ = media_bits.unit.h264_sent(mut r.downs[d].next_sets, payload)
-                r.downs[d].next_after_end = unit.end
-            } else {
-                let _ = media_bits.unit.h264_sent(mut r.downs[d].sets, payload)
-                r.downs[d].after_end = unit.end
+            // A switch: the old source's sets no longer describe what the receiver holds.
+            if r.downs[d].sets_source != Some(src) {
+                media_bits.unit.clear_parameter_sets(mut r.downs[d].sets)
+                r.downs[d].sets_source = Some(src)
             }
+            let _ = media_bits.unit.h264_sent(mut r.downs[d].sets, payload)
         }
         if sent == OnMedia {
             if let Some(f) = av1 {

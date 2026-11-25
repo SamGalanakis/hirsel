@@ -1428,8 +1428,23 @@ W19, blocks, because those are soundness reds.
   and counted `capacity`, and the drain goes on. `unpace` takes a down-track's entries out when the router ends
   the track and at a collision. An entry whose SSRC a collision has retired is dropped
   when it is let out. S4 does not probe and sends no padding.
-- **Not closed in S4.** W9's law over the Chromium captures in `vectors/chromium_rtp.hirsel`
-  is not written yet. The AV1 decode-target map itself is built (2595): `rtp.ext` binds `DependencyDescriptor`,
+- **H.264 state per source.** RTP-11's `after_end` is a fact about a source, so the
+  router keeps it per encoding: the newest index seen, its timestamp and its marker,
+  moved only by a newer index and cleared when the stream restarts. Before any packet of
+  the source is seen, a packet may start a unit. A down-track keeps one set of parameter
+  sets and the source it sent them from; a packet of any other source is judged with
+  only the sets it carries, since nothing of that source reached the subscriber since
+  the last switch away from it. The first packet sent from another source clears the
+  sets. W9 found the earlier per-leg state switching to a pending H.264 encoding one
+  access unit late (2595).
+- **Not closed in S4.** W9 `router_fills_units` runs over the Chromium captures in
+  `vectors/chromium_rtp.hirsel` (2595), with the three cases Chromium cannot emit built by
+  hand: VP8 `S = 1` with a nonzero partition index, VP8 TID with a descriptor negotiated,
+  and a permuted AV1 decode-target table. `default_policy` answers the Dependency
+  Descriptor on every video section, and Chromium, offered it on VP8, then sends VP8
+  without TID, so a VP8 leg cannot switch temporal layers. The fix is to answer the
+  descriptor on AV1 sections only. A VP9 leg whose last forwarded layer frame is not the
+  picture's last gets no marker bit. The AV1 decode-target map itself is built (2595): `rtp.ext` binds `DependencyDescriptor`,
   every unit parses it with its encoding's structure, `Layer(e, s, t)` maps through RTC-6's
   `(S_d, T_d)` and is rebuilt at a structure-carrying keyframe, and the decision unit is the
   descriptor's frame number. `router_maps_av1_targets` checks it over LiveKit's captured

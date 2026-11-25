@@ -6,6 +6,10 @@ use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 pub(crate) mod trace;
+// The comptime G1 measurement, on the same instruction counter.
+#[cfg(all(test, feature = "comptime-g1"))]
+#[path = "comptime_g1.rs"]
+mod comptime_g1;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Stage {

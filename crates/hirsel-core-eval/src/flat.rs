@@ -7,8 +7,9 @@
 //! hands the instruction to the tree walker's `inst` over the same registers,
 //! places and frame state. Block entry, edges, failure edges, raises, the
 //! executed-instruction count, steps, charges, the activation bound and failure
-//! sites are the tree walker's; the tree walker stays as this engine's
-//! differential oracle (`samples_behave_as_derived_by_hand` and the corpus).
+//! sites are the tree walker's. It is what a pure run, and so a constant's
+//! initializer, runs on by default; the tree walker stays as its differential
+//! oracle (`samples_behave_as_derived_by_hand` and the corpus).
 //!
 //! What lowering resolves:
 //! - An address's steps. What a step's place holds ([`At`]) follows from its
@@ -31,9 +32,17 @@
 //! the next. A run is what the tree walker charges unless an operation in it
 //! stops, and then the rest of the run is given back (`Lowered::rest`). A run stop
 //! unwinding out of a call or a generic instruction ends its run, so the count
-//! it leaves is the tree walker's too. One difference: an exhausted budget
-//! panics at the start of the run it falls in, the tree walker at the
-//! instruction; no pure run sets a budget.
+//! it leaves is the tree walker's too.
+//!
+//! An exhausted budget stops where the tree walker's does. The tree walker
+//! charges a block's terminator on entry and each instruction before it runs,
+//! so the first instruction past the budget is the one that does not run. A
+//! run longer than what is left takes all of it and owes the rest
+//! (`Machine::owed`). Register arithmetic past that instruction cannot be
+//! seen, so it runs on; the first memory access, call, generic instruction or
+//! terminator at or past it (its `rest` below what is owed) panics before it
+//! runs, and so does a stop past it. A stop before it gives back the rest of
+//! its run less what is owed.
 //!
 //! The activation's site is written before the operations that read it (a call,
 //! a generic instruction, a step under a bound) and when an operation stops.
@@ -295,6 +304,16 @@ enum Op {
 
 const NO_FLAG: u32 = u32::MAX;
 
+/// `Machine::settled`'s check, off the dispatch loop.
+#[cold]
+#[inline(never)]
+fn owing(l: &Lowered, pc: usize, owed: u64) {
+    assert!(
+        u64::from(l.rest[pc]) >= owed,
+        "evaluator instruction budget exhausted"
+    );
+}
+
 // The dispatch loop reads one operation per instruction: a wider one costs every
 // instruction (round 2's `Option<u32>` flag made it 32 bytes, crc +5%).
 const _: () = assert!(std::mem::size_of::<Op>() <= 24);
@@ -370,11 +389,32 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     #[inline(always)]
     fn charge(&mut self, n: u32) {
         let n = u64::from(n);
-        assert!(
-            self.instructions >= n,
-            "evaluator instruction budget exhausted"
-        );
-        self.instructions -= n;
+        if self.instructions >= n {
+            self.instructions -= n;
+        } else {
+            self.overdraw(n);
+        }
+    }
+
+    /// A run of `n` instructions, more than are left: it takes them all and
+    /// owes the rest. Nothing is owed when a run starts, since every operation
+    /// that ends one settles what its run owes first.
+    #[cold]
+    #[inline(never)]
+    fn overdraw(&mut self, n: u64) {
+        assert!(self.owed == 0, "evaluator instruction budget exhausted");
+        self.owed = n - self.instructions;
+        self.instructions = 0;
+    }
+
+    /// Panic when the operation at `pc` is at or past the instruction the tree
+    /// walker's exhausted budget stops at: its run owes more than the
+    /// instructions after it.
+    #[inline(always)]
+    fn settled(&self, l: &Lowered, pc: usize) {
+        if self.owed != 0 {
+            owing(l, pc, self.owed);
+        }
     }
 
     /// `Op::Store` of `x`.
@@ -530,7 +570,10 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         stop: Stop,
     ) -> Option<usize> {
         let at = l.ops[pc].at();
-        self.instructions += u64::from(l.rest[pc]);
+        let rest = u64::from(l.rest[pc]);
+        assert!(rest >= self.owed, "evaluator instruction budget exhausted");
+        self.instructions += rest - self.owed;
+        self.owed = 0;
         t.at.last_mut().unwrap().at = Pos::Inst(at);
         self.stopped(t, stop);
         let fb = b.insts[at as usize].fail(b)?;
@@ -732,15 +775,19 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 }
                 Op::Address {
                     address, resolved, ..
-                } => match self.place_of(l, resolved, slots, &vals, &places) {
-                    Ok(p) => {
-                        set(&mut places, address, (p, l.ats[address as usize]));
-                        pc += 1;
-                        continue;
+                } => {
+                    self.settled(l, pc);
+                    match self.place_of(l, resolved, slots, &vals, &places) {
+                        Ok(p) => {
+                            set(&mut places, address, (p, l.ats[address as usize]));
+                            pc += 1;
+                            continue;
+                        }
+                        Err(stop) => Flow::Stop(stop),
                     }
-                    Err(stop) => Flow::Stop(stop),
-                },
+                }
                 Op::Unresolved { address, .. } => {
+                    self.settled(l, pc);
                     match self.address(b, slots, &vals, &places, AddressId(address)) {
                         Ok(place) => {
                             set(&mut places, address, place);
@@ -751,6 +798,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     }
                 }
                 Op::Read { result, address, n } => {
+                    self.settled(l, pc);
                     let (p, held) = get(&places, address);
                     self.touch(AddressId(address), p, n as usize, false);
                     set(&mut vals, result, self.read_scalar(p, n as usize));
@@ -782,6 +830,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     continue;
                 }
                 Op::Store { address, value, ty } => {
+                    self.settled(l, pc);
                     self.flat_store(&places, address, get(&vals, value), ty);
                     pc += 1;
                     continue;
@@ -812,6 +861,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     }
                 }
                 Op::Call { at, call, then } => {
+                    self.settled(l, pc);
                     site(t, at);
                     match self.flat_call(t, l, &l.calls[call as usize], &mut vals, &places) {
                         Ok(()) => {
@@ -823,6 +873,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     }
                 }
                 Op::Generic { at, then } => {
+                    self.settled(l, pc);
                     site(t, at);
                     match self.inst(
                         t,
@@ -867,6 +918,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     continue;
                 }
                 Op::Return { results } => {
+                    self.settled(l, pc);
                     assert_eq!(t.limits.len(), depth, "a return left a bound scope open");
                     assert_eq!(t.reserved.len(), reserved, "a return left an isolate open");
                     self.results.clear();
@@ -875,6 +927,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     Flow::Done(Ok(()))
                 }
                 Op::Exit { block } => {
+                    self.settled(l, pc);
                     match self.flat_exit(t, l, b, block, slots, &mut vals, &places) {
                         Ok(next) => {
                             pc = next;

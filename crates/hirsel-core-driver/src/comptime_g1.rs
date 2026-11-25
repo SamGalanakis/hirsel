@@ -14,7 +14,7 @@
 //! module's preparation into the measured window, and `COMPTIME_G1=<file>`
 //! writes the rows as JSON. Native regex is 453,268 host instructions, so G1's
 //! 150x is 68.0M; crc's limit is 120 host instructions per executed IR.
-use super::*;
+use crate::*;
 
 const APP: &str = r#"
 pub fn table() -> Inline[u32, 2048] {

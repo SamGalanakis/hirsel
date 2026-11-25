@@ -1,6 +1,7 @@
 //! Lowering a body for the flat engine: its addresses resolved, its integer
 //! operations' widths, its calls' registers, its terminators and its runs'
-//! instruction charges; and the verifier its register access rests on.
+//! instruction charges; and the verifier its register access and its frames'
+//! constant template rest on.
 use super::*;
 
 /// `int_binary` of integers of `width` bits, on u64 or i64, with its results
@@ -97,9 +98,14 @@ impl Lowered {
 }
 
 /// Prove every register, place and slot index `l` names below its body's
-/// counts, which `flat`'s unchecked register access rests on. A body that fails
-/// is a lowering bug.
-pub(super) fn verify(l: &Lowered) {
+/// counts, which `flat`'s unchecked register access rests on, and that no
+/// register has two definitions among `consts` (the constants' registers), the
+/// operations' results and flags, the calls' results and `b`'s block
+/// parameters, which the frame's constant template rests on: a constant's
+/// register holds its constant from the frame's start, so nothing else may
+/// write it. A generic instruction's results are not named here; wf's single
+/// definition covers them. A body that fails is a lowering bug.
+pub(super) fn verify(l: &Lowered, b: &Body, consts: &[u32]) {
     let Counts {
         values,
         addresses,
@@ -198,6 +204,42 @@ pub(super) fn verify(l: &Lowered) {
         }
     }
     l.results.iter().chain(&l.params).copied().for_each(value);
+    let mut defined = vec![false; values];
+    let mut define = |i: u32| {
+        value(i);
+        assert!(
+            !std::mem::replace(&mut defined[i as usize], true),
+            "flat: v{i} defined twice"
+        );
+    };
+    consts.iter().copied().for_each(&mut define);
+    for op in &l.ops {
+        match *op {
+            Op::Int { result, .. }
+            | Op::Wide { result, .. }
+            | Op::Compare { result, .. }
+            | Op::CompareBranch { result, .. }
+            | Op::Read { result, .. }
+            | Op::Pointer { result, .. } => define(result),
+            Op::Convert { result, flag, .. } => {
+                define(result);
+                if flag != NO_FLAG {
+                    define(flag);
+                }
+            }
+            _ => {}
+        }
+    }
+    for c in &l.calls {
+        l.results[c.results.0 as usize..c.results.1 as usize]
+            .iter()
+            .copied()
+            .for_each(&mut define);
+    }
+    for blk in &b.blocks {
+        let params = blk.params.get(&b.pools.values).unwrap();
+        params.iter().for_each(|v| define(v.0));
+    }
 }
 
 fn add_offset(pieces: &mut Vec<Piece>, off: u64) {
@@ -240,6 +282,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 slots: b.slots.len(),
             },
         };
+        let mut consts = Vec::new();
         let mut resolved = vec![None; b.addresses.len()];
         for a in 0..b.addresses.len() {
             self.resolve(b, a, &mut resolved, &mut l);
@@ -288,6 +331,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     // registers start with it.
                     Inst::Const { result, bits } => {
                         l.init[result.index()] = bits;
+                        consts.push(result.0);
                         pending += 1;
                         continue;
                     }
@@ -416,7 +460,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 overlap,
             });
         }
-        verify(&l);
+        verify(&l, b, &consts);
         Some(l)
     }
 

@@ -234,9 +234,9 @@
     "reason": "coverage-c3-followups-2623"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
-    "lines": 3939,
-    "raise_revision": 3,
-    "reason": "comptime-e3c-dispatch-2663"
+    "lines": 3936,
+    "raise_revision": 2,
+    "reason": "comptime-eval-split-2612"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
     "lines": 2587,
@@ -244,9 +244,9 @@
     "reason": "macos-s5-macho-2582"
   },
   "crates/hirsel-core-eval/src/lib.rs": {
-    "lines": 7145,
-    "raise_revision": 9,
-    "reason": "ds-prefetch-2519"
+    "lines": 6568,
+    "raise_revision": 10,
+    "reason": "comptime-flat-default-2685"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2602,

@@ -25,12 +25,11 @@ pub struct PureRun {
 /// What a pure run executes on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Engine {
-    /// The flat engine (E3). It replaces the tree walker for a constant's
-    /// initializer once it meets G1 (COMPTIME-DIRECTION 3.2); until then it
-    /// runs where a caller asks for it.
+    /// The flat engine (E3, COMPTIME-DIRECTION 3.2): what a pure run, and so a
+    /// constant's initializer, runs on by default. A body with a vector value
+    /// still runs on the tree walker.
     Flat,
-    /// The tree walker, what a pure run runs on by default, and the flat
-    /// engine's differential oracle.
+    /// The tree walker: the flat engine's differential oracle, for tests.
     Tree,
 }
 
@@ -43,6 +42,8 @@ pub struct PureInput {
     pub activations: usize,
     /// The test-mode loan and role checks.
     pub checks: bool,
+    /// The run's executed-instruction budget; running past it panics.
+    pub instructions: u64,
     pub engine: Engine,
     /// The run's map hash key; a fresh one when `None`.
     pub map_hash_key: Option<[u8; 16]>,
@@ -54,7 +55,8 @@ impl Default for PureInput {
             limit: u64::MAX,
             activations: usize::MAX,
             checks: false,
-            engine: Engine::Tree,
+            instructions: u64::MAX,
+            engine: Engine::Flat,
             map_hash_key: None,
         }
     }
@@ -87,6 +89,7 @@ impl<'a> PureModule<'a> {
 pub fn run_pure(m: &PureModule<'_>, f: FuncId, args: &[u64], input: PureInput) -> PureRun {
     let core = Core {
         checks: input.checks,
+        instructions: input.instructions,
         activations: input.activations,
         flat: input.engine == Engine::Flat,
         map_hash_key: input.map_hash_key,

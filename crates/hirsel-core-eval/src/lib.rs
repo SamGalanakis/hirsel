@@ -2,8 +2,9 @@
 //! a pure core (values, blocks, calls, steps, charges and the activation count)
 //! generic over a [`Host`], and the provider world, scheduler, threads and network
 //! as one host ([`WorldHost`]) for the test runs. [`run_pure`] runs the core on
-//! [`Pure`], with no world; a world operation stops it. The loan and role checks
-//! are a test-mode option ([`Core::checks`]).
+//! [`Pure`], with no world, on the flat engine by default ([`Engine`]); a world
+//! operation stops it. The loan and role checks are a test-mode option
+//! ([`Core::checks`]).
 //!
 //! The evaluator is written from the op documentation (SEM-1, SEM-2, LIR's op
 //! docs; for the FORM v1 draft FAIL-8..14, MEM-19..29 and CONC-3..9) so the
@@ -873,6 +874,8 @@ struct Machine<'m, H = WorldHost<'m>> {
     dests: u64,
     admissions: usize,
     instructions: u64,
+    /// What a flat run that outran `instructions` still owes ([`flat`]).
+    owed: u64,
     steps: u64,
     injection: Option<(usize, bool)>,
     /// The `view` places of the calls running now, as (block, offset, size).
@@ -1887,6 +1890,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             dests: 0,
             admissions: 0,
             instructions: input.instructions,
+            owed: 0,
             steps: 0,
             injection: input.injection,
             frozen: Vec::new(),
@@ -2087,6 +2091,7 @@ impl<'m> Machine<'m> {
             dests: 0,
             admissions: 0,
             instructions: 0,
+            owed: 0,
             steps: 0,
             injection: None,
             frozen: Vec::new(),

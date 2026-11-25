@@ -3,6 +3,7 @@
 //! derived in the test, not output of this crate.
 
 mod aliasing;
+mod flat;
 
 use crate as eval;
 use hirsel_core_ir::text::{parse, print};
@@ -236,7 +237,9 @@ fn samples_behave_as_derived_by_hand() {
             // | out text | err text`, or `-> fail Cause, ...`; each check after the
             // results is made when written (`\n` in a text is a newline). `refuse K`
             // refuses the run's K-th admission, `K+` that one and every later one, as
-            // the native agreement harnesses' injection (K, later) does.
+            // the native agreement harnesses' injection (K, later) does. `budget N`
+            // runs the pure core with an executed-instruction budget of N on every
+            // engine (`flat::budget`), whose `-> exhausted` is a panic.
             let Some(run) = line.strip_prefix("; run") else {
                 continue;
             };
@@ -245,6 +248,7 @@ fn samples_behave_as_derived_by_hand() {
                 Some((h, a)) => (h, a.split_whitespace().collect()),
                 None => (head, Vec::new()),
             };
+            let budget = head.trim().strip_prefix("budget").map(|n| n.trim());
             let (head, injection) = match head.split_once("refuse") {
                 Some((h, k)) => {
                     let k = k.trim();
@@ -276,6 +280,11 @@ fn samples_behave_as_derived_by_hand() {
                     Param::Address { .. } => panic!("by-address arguments are FORM v1"),
                 })
                 .collect();
+            if let Some(budget) = budget {
+                flat::budget(name, run, &m, f, &args, budget.parse().unwrap(), expected);
+                runs += 1;
+                continue;
+            }
             let got = match injection {
                 Some(_) => {
                     assert!(argv.is_empty(), "{name}: refuse with args");
@@ -283,21 +292,7 @@ fn samples_behave_as_derived_by_hand() {
                 }
                 None => eval::run_args(&m, f, &args, limit, &argv),
             };
-            let want = match expected.trim() {
-                e if e.starts_with("fail") => eval::Outcome::Failed(
-                    e["fail".len()..]
-                        .split(',')
-                        .map(|c| c.trim().to_owned())
-                        .filter(|c| !c.is_empty())
-                        .collect(),
-                ),
-                e => eval::Outcome::Returned(
-                    e.split(',')
-                        .zip(&sig.results)
-                        .map(|(v, t)| eval::scalar(*t, v.trim()))
-                        .collect(),
-                ),
-            };
+            let want = outcome(&sig.results, expected);
             assert_eq!(got.outcome, want, "{name}: {run}");
             // The pure core alone gives a world-free run the same outcome and use,
             // and the flat engine runs it exactly as the tree walker does, with
@@ -377,6 +372,25 @@ fn samples_behave_as_derived_by_hand() {
             runs += 1;
         }
         assert!(runs > 0, "{name} has no run lines");
+    }
+}
+
+/// A run line's expected outcome: `fail Cause, ...` or results of `types`.
+fn outcome(types: &[Ty], expected: &str) -> eval::Outcome {
+    match expected.trim() {
+        e if e.starts_with("fail") => eval::Outcome::Failed(
+            e["fail".len()..]
+                .split(',')
+                .map(|c| c.trim().to_owned())
+                .filter(|c| !c.is_empty())
+                .collect(),
+        ),
+        e => eval::Outcome::Returned(
+            e.split(',')
+                .zip(types)
+                .map(|(v, t)| eval::scalar(*t, v.trim()))
+                .collect(),
+        ),
     }
 }
 

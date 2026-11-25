@@ -36,11 +36,11 @@ mod callable_variants;
 #[cfg(test)]
 mod carried_law;
 mod check_index;
+mod coverage;
 mod executable;
 mod flow;
 mod instance_walk;
 mod instances;
-mod coverage;
 mod law_lock;
 mod native;
 pub mod native_debug;

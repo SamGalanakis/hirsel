@@ -214,6 +214,8 @@ typedef struct {
     const HirselCoreView (*cred_grants)[3];
     size_t cred_grants_len;
     const uint8_t (*revision)[32];
+    /* Nonzero when the program reaches the runner package (place-only launch words). */
+    uint64_t place;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;

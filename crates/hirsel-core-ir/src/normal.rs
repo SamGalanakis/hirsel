@@ -55,8 +55,8 @@ pub(crate) fn decoded_closure_hash(
 pub const VERSION: u16 = 4;
 const BODY_MAGIC: &[u8] = b"HIRBODY\0\x04\x00";
 pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v4";
-pub const ANNEX_HASH_DOMAIN: &str = "hirsel.code-annex.v2";
-const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x02\x00";
+pub const ANNEX_HASH_DOMAIN: &str = "hirsel.code-annex.v3";
+const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x03\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
 mod results;
@@ -517,6 +517,8 @@ pub struct Annex(
     pub Vec<Option<FunctionAnnex>>,
     /// The entry's parameter names, used in startup diagnostics.
     pub Option<Vec<String>>,
+    /// A program entry's error description (PROG-3), opaque to the IR.
+    pub Option<Vec<u8>>,
 );
 
 impl Annex {
@@ -543,6 +545,11 @@ impl Annex {
             }
         }
         self.1.write(&mut out);
+        self.2.is_some().write(&mut out);
+        if let Some(error) = &self.2 {
+            out.count(error.len());
+            out.raw(error);
+        }
         out.bytes
     }
 
@@ -575,12 +582,20 @@ impl Annex {
             function.callable_parameters = input.read_vec(len, Read::index)?;
         }
         let names: Option<Vec<String>> = Wire::read(&mut input)?;
-        input.end()?;
-        let names_match = names.as_ref().is_none_or(|names| {
-            body.functions.first().is_some_and(|entry| {
-                names.len() == body.signatures[entry.signature.index()].params.len()
+        let error = bool::read(&mut input)?
+            .then(|| {
+                let n = input.count()?;
+                input.budget.charge_bytes(n)?;
+                Ok(input.take(n)?.to_vec())
             })
-        });
+            .transpose()?;
+        input.end()?;
+        let names_match = (error.is_none() || names.is_some())
+            && names.as_ref().is_none_or(|names| {
+                body.functions.first().is_some_and(|entry| {
+                    names.len() == body.signatures[entry.signature.index()].params.len()
+                })
+            });
         let matches = names_match
             && functions.len() == body.functions.len()
             && functions
@@ -625,7 +640,7 @@ impl Annex {
         if !matches {
             return Err(DecodeError::Malformed("annex does not match body"));
         }
-        Ok(Self(functions, names))
+        Ok(Self(functions, names, error))
     }
 
     pub fn hash(&self) -> ContentHash {
@@ -648,7 +663,7 @@ pub fn encode_with_annex(
     let body = encode_with_orders(module, root, |order| {
         annex.push(order.map(|order| function_annex(module, &order, sources)));
     });
-    (body, Annex(annex, None))
+    (body, Annex(annex, None, None))
 }
 
 /// Prepare the canonical module and its diagnostic data for assembly.

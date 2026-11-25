@@ -151,13 +151,27 @@ fn startup_refusals(backend: Backend) {
     options.output = dir.path().join("no-dir");
     let built = product.build(&entry, &options).unwrap();
     let output = Command::new(&launcher)
-        .arg(built.executable)
+        .arg(&built.executable)
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(output.stdout, b"entered\n");
     assert!(output.stderr.is_empty());
     assert_eq!(std::fs::read_dir(&effects).unwrap().count(), 0);
+    // Bug: an argument that is not UTF-8 was reported as "host grants could
+    // not be configured". PROG-3: its own line, numbered by its index in the
+    // process argv (the program name is 0).
+    use std::os::unix::ffi::OsStrExt;
+    assert_not_started(
+        &Command::new(&built.executable)
+            .args([
+                std::ffi::OsStr::new("ok"),
+                std::ffi::OsStr::from_bytes(b"\xff"),
+            ])
+            .output()
+            .unwrap(),
+        "not started: argument 2 is not valid UTF-8\n",
+    );
 
     // A recording opens its tape beneath the tape's directory, so the same
     // host refuses it by name before main, and writes no tape.
@@ -185,6 +199,151 @@ fn prog3_startup_refusals_cranelift() {
 #[ignore = "explicit native integration target"]
 fn prog3_startup_refusals_llvm() {
     startup_refusals(Backend::Llvm);
+}
+
+/// Bug: `hirsel build` assembles from the release recipe, whose entry never
+/// carried `E`'s description, so `main`'s `Error(e)` exited 1 with no line.
+/// PROG-3 (`docs/spec/programs.md`): `error: ` and `e` as source, status 1; an
+/// `Exit` error writes nothing and exits with its status.
+#[test]
+#[ignore = "explicit native integration target"]
+fn prog3_recipe_build_writes_the_error_line() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = native_options(Backend::Llvm, dir.path());
+    options.optimize = true;
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for (name, source, status, stderr) in [
+        (
+            "text",
+            "pub fn main() -> Result[(), String] { Error(\"boom\") }",
+            1,
+            "error: \"boom\"\n",
+        ),
+        (
+            "exit",
+            "pub fn main() -> Result[(), Exit] { Error(Exit(status: 2u8)) }",
+            2,
+            "",
+        ),
+    ] {
+        let mut request = source_request(source, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        assert!(product.accepted());
+        options.output = dir.path().join(name);
+        let built = product.build(&entry, &options).unwrap();
+        let output = Command::new(built.executable).output().unwrap();
+        assert_eq!(output.status.code(), Some(status), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), stderr);
+    }
+}
+
+/// Bug: the store and prepare words were read from any executable's first
+/// program arguments, so `./tool --hirsel-dry-run /abs/B x.txt` rebound every
+/// `Dir` to B, dropped two arguments and sent stdout to stderr, and a program
+/// with no `Dir` refused to start. `docs/spec/launch.md`: the first argument
+/// that is not a private option ends the prefix and everything after it is
+/// `Args`; the store and prepare words are a place's (Laws A, B, C of 1.2).
+#[test]
+#[ignore = "explicit native integration target"]
+fn place_words_are_plain_arguments_to_a_program() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("A"), dir.path().join("B"));
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    std::fs::write(a.join("x.txt"), "a").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let echo = r#"
+        for i in 0u64 .. args.len(a) {
+            match args.get(a, i) {
+                Some(v) => {
+                    result.unwrap(stdout.write(output, v))
+                    result.unwrap(stdout.write(output, "\n"))
+                },
+                None => {},
+            }
+        }"#;
+    let with_dir = format!(
+        "pub fn main(files: Dir, a: Args, output: Stdout) -> Result[(), Exit] waits {{{echo}
+        match host.open(files, \"x.txt\", Read) {{
+            Ok(f) => {{
+                result.unwrap(host.close(take f))
+                result.unwrap(stdout.write(output, \"opened\\n\"))
+            }},
+            Error(_) => result.unwrap(stdout.write(output, \"absent\\n\")),
+        }}
+        Ok(())
+    }}"
+    );
+    let without = format!(
+        "pub fn main(a: Args, output: Stdout) -> Result[(), Exit] waits {{{echo}
+        Ok(())
+    }}"
+    );
+    let b = b.display().to_string();
+    for (name, source, directories, grants, words) in [
+        (
+            "dir",
+            &with_dir,
+            vec![a.display().to_string()],
+            1 << 4,
+            [
+                vec!["--hirsel-dry-run", &b, "x.txt"],
+                vec!["--hirsel-store-verify", &b, "x.txt"],
+                vec!["--hirsel-store-repair", &b, "x.txt"],
+                vec!["--hirsel-prepare", &b, "a", "b", "c"],
+            ],
+        ),
+        (
+            "none",
+            &without,
+            vec![],
+            1 << 4,
+            [
+                vec!["--hirsel-dry-run", "x"],
+                vec!["--hirsel-store-verify", "x"],
+                vec!["--hirsel-store-repair", "x"],
+                vec!["--hirsel-prepare", "x"],
+            ],
+        ),
+    ] {
+        let mut request = source_request(source, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        assert!(product.accepted());
+        options.directories = directories;
+        options.grant_mask = grants;
+        options.output = dir.path().join(name);
+        let built = product.build(&entry, &options).unwrap();
+        for words in words {
+            let output = Command::new(&built.executable)
+                .args(&words)
+                .output()
+                .unwrap();
+            let mut expected = words.join("\n") + "\n";
+            if name == "dir" {
+                expected.push_str("opened\n");
+            }
+            assert_eq!(output.status.code(), Some(0), "{words:?}: {output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                expected,
+                "{words:?}"
+            );
+            assert!(output.stderr.is_empty(), "{words:?}: {output:?}");
+        }
+    }
+    assert_eq!(std::fs::read_dir(&b).unwrap().count(), 0);
 }
 
 #[test]

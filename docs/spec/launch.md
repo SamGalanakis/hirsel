@@ -131,13 +131,24 @@ and reports `PlaceTimedOut`; no generated output is written. The deadline
 covers entry through `main`, registration, encoding and child exit. Capacity,
 duplicate registration and timeout errors leave the output destination alone.
 
-The native launcher consumes the private prefix `--hirsel-describe`<!-- doc-ref: external --> and
-`--hirsel-n-place=<bytes>`<!-- doc-ref: external --> before constructing user `Args`. The prefix is
+The native launcher consumes the private prefix before constructing user `Args`. Every native
+executable recognises the same private options, place or not: `--hirsel-describe`<!-- doc-ref: external -->,
+`--hirsel-preview`<!-- doc-ref: external -->, `--hirsel-n-place=<bytes>`<!-- doc-ref: external -->, `--hirsel-wake`<!-- doc-ref: external -->,
+`--hirsel-idle=<ms>`<!-- doc-ref: external -->, `--hirsel-witness=<version>`<!-- doc-ref: external -->, `--hirsel-store-id=<hex>`<!-- doc-ref: external -->,
+`--hirsel-install-predecessor=<hex>`<!-- doc-ref: external -->, `--hirsel-install-child=<activation>`<!-- doc-ref: external --> and
+`--hirsel-dev-store`<!-- doc-ref: external --> (each of the last two ends the prefix), and `--hirsel-exec=<approval>`<!-- doc-ref: external -->
+in an executable with Exec bindings only. The prefix is
 the leading run of arguments that are recognised private launch options: the first argument
 that is not one ends it, and that argument and every one after it become `Args` verbatim, so a
 private option written after a place argument is never read as one. `--hirsel-install`<!-- doc-ref: external -->
 and `--hirsel-activation=<version>`<!-- doc-ref: external --> are place arguments, read from `Args`
-by `runner.launch_selection`, so they come after every private option. A malformed private
+by `runner.launch_selection`, so they come after every private option. Four words are read
+from the first argument after the prefix, and only in a place: `--hirsel-dry-run <dir>`<!-- doc-ref: external -->,
+`--hirsel-store-verify <dir>`<!-- doc-ref: external -->, `--hirsel-store-repair <dir>`<!-- doc-ref: external --> (launch word 20, below) and
+`--hirsel-prepare`<!-- doc-ref: external --> (below). The linker bakes a `place` bit into the executable's launch
+configuration when the program reaches the `runner` package, which holds every reader of these
+words. In an executable without it they are ordinary `Args`: the program keeps its own
+directories and its standard output, and receives the words as written. A malformed private
 option in the prefix is refused before user code: the process writes `not started: ` and the
 reason to standard error and exits 103. A launch that gives `--hirsel-n-place`<!-- doc-ref: external -->
 runs at that allowance in every mode; one that does not runs at its own `PlaceConfig.n_place`

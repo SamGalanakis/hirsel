@@ -110,6 +110,7 @@ pub(in crate::tape) fn check_launch_replay() {
             cred_grants: std::ptr::null(),
             cred_grants_len: 0,
             revision: &[7; 32],
+            place: 0,
             target: View {
                 data: target.as_ptr(),
                 len: target.len(),

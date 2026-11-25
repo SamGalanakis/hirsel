@@ -262,6 +262,10 @@ impl CheckProduct {
         let foreign = self.release_foreign(entry, reached, options, decl, store)?;
         let entry = Identity::plain(entry.clone());
         let names = decl.parameters.iter().map(|p| p.name.clone()).collect();
+        let error = decl
+            .error
+            .as_ref()
+            .map(crate::entry_show::ErrorShown::encode);
         let index = Memos::open(options, &entry, store)?;
         // Keep the canonical bytes through publication. Release std selection
         // needs the decoded program, so assemble that view after publication.
@@ -275,7 +279,7 @@ impl CheckProduct {
             &entry,
             reached,
             store,
-            Some(names),
+            Some((names, error)),
             index.as_ref(),
             defer_modules,
             options.coverage.as_ref(),
@@ -330,8 +334,8 @@ impl CheckProduct {
     }
 
     /// The units of `entry`'s reached closure, each body and annex put in
-    /// `store`, with its groups and each unit's address; `names` are the
-    /// entry's startup parameter names when it is a program entry. A unit
+    /// `store`, with its groups and each unit's address; `launch` is a program
+    /// entry's startup parameter names and error description. A unit
     /// other than the entry whose memo `index` holds, with its body and annex
     /// still in `store`, is taken from it and not prepared.
     pub(super) fn release_units(
@@ -339,7 +343,7 @@ impl CheckProduct {
         entry: &Identity,
         reached: &Reachable<'_>,
         store: &CodeStore,
-        names: Option<Vec<String>>,
+        launch: Option<(Vec<String>, Option<Vec<u8>>)>,
         index: Option<&Memos>,
         defer_modules: bool,
         coverage: Option<&hirsel_core_ir::coverage::Scope>,
@@ -393,8 +397,11 @@ impl CheckProduct {
                 let (annex, module) = instance.prepare_assembly(&sources)?;
                 (annex, UnitModule::Decoded(Box::new(module)))
             };
-            if identity == entry {
-                annex.1.clone_from(&names);
+            if identity == entry
+                && let Some((names, error)) = &launch
+            {
+                annex.1 = Some(names.clone());
+                annex.2.clone_from(error);
             }
             let builtins = instance
                 .slots
@@ -1082,6 +1089,7 @@ pub(crate) fn recording_refusal<'a>(
 fn launch_options(
     recipe: &Recipe,
     names: &[String],
+    error: Option<crate::entry_show::ErrorShown>,
     options: &NativeOptions,
 ) -> Result<(NativeOptions, EntryDecl), NativeStop> {
     if options.recording
@@ -1212,7 +1220,7 @@ fn launch_options(
         EntryDecl {
             exit: recipe.launch.exit_status,
             parameters: params,
-            error: None,
+            error,
         },
     ))
 }
@@ -1509,14 +1517,17 @@ impl Publication {
     /// The options the recipe's launch fixes over `options`, and its entry's
     /// declaration.
     fn launch(&self, options: &NativeOptions) -> Result<(NativeOptions, EntryDecl), NativeStop> {
-        let names = self.units[&self.recipe.entry]
-            .annex
-            .1
+        let annex = &self.units[&self.recipe.entry].annex;
+        let names = annex.1.as_deref().ok_or_else(|| {
+            NativeStop::Entry("recipe entry has no startup parameter names".into())
+        })?;
+        let error = annex
+            .2
             .as_deref()
-            .ok_or_else(|| {
-                NativeStop::Entry("recipe entry has no startup parameter names".into())
-            })?;
-        launch_options(&self.recipe, names, options)
+            .map(crate::entry_show::ErrorShown::decode)
+            .transpose()
+            .map_err(|e| NativeStop::Entry(e.into()))?;
+        launch_options(&self.recipe, names, error, options)
     }
 
     /// Assemble the program; an optimised LLVM build over `std`, the
@@ -1745,6 +1756,9 @@ impl Publication {
             launch_digest_unused,
             &options,
         )?
+        .with_place(crate::native_entry::reaches_place(
+            self.addresses.keys().map(|i| &i.definition),
+        ))
         .with_release_sites(&release_sites, &release_debug_sites, &remarks)
         .with_foreign(&self.recipe.foreign_modules);
         let result = link_objects(

@@ -198,6 +198,7 @@ pub(super) fn emit(
         ),
         (abi::OS_CONFIG_EXEC_OPS, exec_ops),
         (abi::OS_CONFIG_REVISION, revision),
+        (abi::OS_CONFIG_PLACE, f.constant(u64::from(plan.place))),
     ] {
         f.store(value, config, offset);
     }

@@ -139,12 +139,18 @@ impl LaunchOptions<'_> {
 
     /// `--hirsel-dry-run DIR` (1), `--hirsel-store-verify DIR` (2) or
     /// `--hirsel-store-repair DIR` (3): the launch word 20 value and the store
-    /// directory the run uses instead of its granted one.
+    /// directory the run uses instead of its granted one. Only a `place`
+    /// program (one reaching the runner) reads them; any other takes them in
+    /// `Args` as written.
     pub(super) fn store_op_path<'b>(
         &self,
         args: &'b [Vec<u8>],
         directories: usize,
+        place: bool,
     ) -> Result<Option<(u8, &'b Path)>, StartupError> {
+        if !place {
+            return Ok(None);
+        }
         let op = match args.first().map(Vec::as_slice) {
             Some(b"--hirsel-dry-run") => 1,
             Some(b"--hirsel-store-verify") => 2,
@@ -167,12 +173,15 @@ impl LaunchOptions<'_> {
         }
     }
 
+    /// `--hirsel-prepare DIR ...` for a `place` program; any other takes the
+    /// words in `Args`. Checks the private options' combinations either way.
     pub(super) fn prepare_path<'b>(
         &self,
         args: &'b [Vec<u8>],
         directories: usize,
+        place: bool,
     ) -> Result<Option<&'b Path>, StartupError> {
-        let prepare_path = if args.first().is_some_and(|arg| arg == b"--hirsel-prepare") {
+        let prepare_path = if place && args.first().is_some_and(|arg| arg == b"--hirsel-prepare") {
             if self.describe_mode || args.len() != 5 || directories == 0 {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }

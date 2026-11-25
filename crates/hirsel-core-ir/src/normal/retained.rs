@@ -59,7 +59,7 @@ pub fn retained_annex(retained: &Module, sources: &SourcePositions<'_>) -> Annex
             ))
         })
         .collect();
-    Annex(functions, None)
+    Annex(functions, None, None)
 }
 
 /// Source anchors and optimization hints left out of a canonical body.
@@ -135,7 +135,7 @@ impl RetainedSites {
                 }))
             })
             .collect();
-        Annex(functions, None)
+        Annex(functions, None, None)
     }
 
     /// Recover the retained module for consumers that need more than its sites.

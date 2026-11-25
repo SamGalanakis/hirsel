@@ -317,3 +317,207 @@ impl Place<'_> {
         })
     }
 }
+
+/// Nesting past this depth is written as an unknown value (`<value>`); the
+/// decoder refuses deeper input, so an annex cannot exhaust the stack.
+const WIRE_DEPTH: usize = 128;
+
+impl ErrorShown {
+    /// The description a recipe's entry annex carries (PROG-3 on a recipe build).
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        count(&mut out, self.defs.len());
+        for def in &self.defs {
+            match def {
+                ShownDef::Record(name, fields) => {
+                    out.push(0);
+                    text(&mut out, name);
+                    put_fields(&mut out, fields);
+                }
+                ShownDef::Variant(cases) => {
+                    out.push(1);
+                    count(&mut out, cases.len());
+                    for case in cases {
+                        text(&mut out, &case.name);
+                        out.push(u8::from(case.labelled));
+                        put_fields(&mut out, &case.fields);
+                    }
+                }
+            }
+        }
+        put(&mut out, &self.root, 0);
+        out
+    }
+
+    /// Reads [`Self::encode`]'s bytes; refuses a `Def` naming no definition.
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, &'static str> {
+        let mut input = Input(bytes);
+        let defs = input.list(|input| {
+            Ok(match input.byte()? {
+                0 => ShownDef::Record(input.text()?, input.fields()?),
+                1 => ShownDef::Variant(input.list(|input| {
+                    Ok(ShownCase {
+                        name: input.text()?,
+                        labelled: input.flag()?,
+                        fields: input.fields()?,
+                    })
+                })?),
+                _ => return Err(MALFORMED),
+            })
+        })?;
+        let root = input.shown(0)?;
+        let shown = Self { defs, root };
+        let mut named = true;
+        let mut check = |s: &Shown| {
+            named &= !matches!(s, Shown::Def(d) if *d as usize >= shown.defs.len());
+        };
+        shown.root.visit(&mut check);
+        for def in &shown.defs {
+            match def {
+                ShownDef::Record(_, fields) => fields.iter().for_each(|(_, s)| s.visit(&mut check)),
+                ShownDef::Variant(cases) => cases
+                    .iter()
+                    .flat_map(|c| &c.fields)
+                    .for_each(|(_, s)| s.visit(&mut check)),
+            }
+        }
+        (input.0.is_empty() && named)
+            .then_some(shown)
+            .ok_or(MALFORMED)
+    }
+}
+
+const MALFORMED: &str = "malformed entry error description";
+
+impl Shown {
+    fn visit(&self, f: &mut impl FnMut(&Shown)) {
+        f(self);
+        match self {
+            Shown::List(e) | Shown::Array(e, _) | Shown::Boxed(e) => e.visit(f),
+            Shown::Tuple(xs) => xs.iter().for_each(|x| x.visit(f)),
+            Shown::Text(_) | Shown::Scalar(_) | Shown::Str | Shown::Def(_) => {}
+        }
+    }
+}
+
+fn count(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+}
+
+fn text(out: &mut Vec<u8>, s: &str) {
+    count(out, s.len());
+    out.extend_from_slice(s.as_bytes());
+}
+
+fn put_fields(out: &mut Vec<u8>, fields: &[(String, Shown)]) {
+    count(out, fields.len());
+    for (label, shown) in fields {
+        text(out, label);
+        put(out, shown, 0);
+    }
+}
+
+fn put(out: &mut Vec<u8>, shown: &Shown, depth: usize) {
+    if depth == WIRE_DEPTH {
+        return put(out, &Shown::Text("<value>".into()), 0);
+    }
+    match shown {
+        Shown::Text(s) => {
+            out.push(0);
+            text(out, s);
+        }
+        Shown::Scalar(s) => {
+            let code = Scalar::ALL.iter().position(|a| a == s).expect("a scalar");
+            out.extend_from_slice(&[1, code as u8]);
+        }
+        Shown::Str => out.push(2),
+        Shown::List(e) => {
+            out.push(3);
+            put(out, e, depth + 1);
+        }
+        Shown::Array(e, n) => {
+            out.push(4);
+            out.extend_from_slice(&n.to_le_bytes());
+            put(out, e, depth + 1);
+        }
+        Shown::Boxed(e) => {
+            out.push(5);
+            put(out, e, depth + 1);
+        }
+        Shown::Tuple(xs) => {
+            out.push(6);
+            count(out, xs.len());
+            xs.iter().for_each(|x| put(out, x, depth + 1));
+        }
+        Shown::Def(d) => {
+            out.push(7);
+            count(out, *d as usize);
+        }
+    }
+}
+
+struct Input<'a>(&'a [u8]);
+
+impl Input<'_> {
+    fn take(&mut self, n: usize) -> Result<&[u8], &'static str> {
+        if self.0.len() < n {
+            return Err(MALFORMED);
+        }
+        let (head, rest) = self.0.split_at(n);
+        self.0 = rest;
+        Ok(head)
+    }
+    fn byte(&mut self) -> Result<u8, &'static str> {
+        Ok(self.take(1)?[0])
+    }
+    fn flag(&mut self) -> Result<bool, &'static str> {
+        match self.byte()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(MALFORMED),
+        }
+    }
+    fn word(&mut self) -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("four bytes"),
+        ))
+    }
+    fn count(&mut self) -> Result<usize, &'static str> {
+        let n = self.word()? as usize;
+        // Each element takes at least one byte, so a count past the rest is malformed.
+        (n <= self.0.len()).then_some(n).ok_or(MALFORMED)
+    }
+    fn text(&mut self) -> Result<String, &'static str> {
+        let n = self.count()?;
+        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| MALFORMED)
+    }
+    fn list<T>(
+        &mut self,
+        mut item: impl FnMut(&mut Self) -> Result<T, &'static str>,
+    ) -> Result<Vec<T>, &'static str> {
+        let n = self.count()?;
+        (0..n).map(|_| item(self)).collect()
+    }
+    fn fields(&mut self) -> Result<Vec<(String, Shown)>, &'static str> {
+        self.list(|input| Ok((input.text()?, input.shown(0)?)))
+    }
+    fn shown(&mut self, depth: usize) -> Result<Shown, &'static str> {
+        if depth > WIRE_DEPTH {
+            return Err(MALFORMED);
+        }
+        Ok(match self.byte()? {
+            0 => Shown::Text(self.text()?),
+            1 => Shown::Scalar(*Scalar::ALL.get(self.byte()? as usize).ok_or(MALFORMED)?),
+            2 => Shown::Str,
+            3 => Shown::List(Box::new(self.shown(depth + 1)?)),
+            4 => {
+                let n = u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes"));
+                Shown::Array(Box::new(self.shown(depth + 1)?), n)
+            }
+            5 => Shown::Boxed(Box::new(self.shown(depth + 1)?)),
+            6 => Shown::Tuple(self.list(|input| input.shown(depth + 1))?),
+            7 => Shown::Def(self.word()?),
+            _ => return Err(MALFORMED),
+        })
+    }
+}

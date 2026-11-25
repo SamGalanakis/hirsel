@@ -18,6 +18,9 @@ pub(crate) enum StartupError {
     EnvSecretOverlap(String),
     UnsupportedHostOpenat2(io::Error),
     Exec(String),
+    /// A process argument that is not UTF-8, by its index in the process
+    /// argv: the program name is 0 and private options are counted.
+    NonUtf8Arg(usize),
 }
 /// One parameter of main that the run cannot grant, by its index.
 #[derive(Clone, Copy)]
@@ -40,6 +43,7 @@ impl StartupError {
             | Self::UnsupportedHostOpenat2(error)
             | Self::UnixProbe(error) => error,
             Self::Exec(reason) => io::Error::other(reason),
+            Self::NonUtf8Arg(_) => io::Error::from_raw_os_error(libc::EILSEQ),
             Self::Missing(_) | Self::NetRules | Self::EnvPatterns | Self::EnvSecretOverlap(_) => {
                 io::Error::from_raw_os_error(libc::EACCES)
             }
@@ -91,6 +95,9 @@ pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *co
         StartupError::Exec(reason) => {
             line.extend_from_slice(reason.as_bytes());
             line.push(b'\n');
+        }
+        StartupError::NonUtf8Arg(n) => {
+            line.extend_from_slice(format!("argument {n} is not valid UTF-8\n").as_bytes());
         }
         StartupError::Io(error) => {
             line.extend_from_slice(

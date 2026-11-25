@@ -42,6 +42,17 @@ struct Requirement<'a> {
     name: &'a str,
 }
 
+/// Whether a program reaching these definitions reads the place-only launch
+/// words: only the `runner` package's launch reads them (launch.md, "Private
+/// prefix"), so any other program receives them in `Args`.
+pub(crate) fn reaches_place<'d>(
+    definitions: impl IntoIterator<Item = &'d hirsel_core_ids::DefPath>,
+) -> bool {
+    definitions
+        .into_iter()
+        .any(|d| d.0.package.name_is("runner"))
+}
+
 /// A cheap link-key input. Machine code is emitted only after a link-cache miss.
 #[derive(Serialize)]
 pub(crate) struct Plan<'a> {
@@ -72,6 +83,11 @@ pub(crate) struct Plan<'a> {
     /// encoding, which is the encoding it had before coverage.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     coverage: bool,
+    /// The program reaches the `runner` package, so the entry reads the
+    /// place-only launch words (launch.md, "Private prefix"). Absent from a
+    /// plain plan's encoding, which keeps every other program's link key.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    place: bool,
     replay: Option<&'a crate::native::ReplayPlan>,
     foreign: Vec<foreign::Function<'a>>,
     exec: Vec<(String, Vec<u8>, [u8; 32])>,
@@ -252,6 +268,7 @@ impl<'a> Plan<'a> {
             directories: &options.directories,
             recording: options.recording,
             coverage: options.coverage.is_some(),
+            place: false,
             replay: options.replay.as_ref(),
             foreign: vec![],
             exec,
@@ -267,6 +284,12 @@ impl<'a> Plan<'a> {
         leaves: impl IntoIterator<Item = &'a hirsel_core_ir::release_recipe::ForeignLeaf>,
     ) -> Self {
         self.foreign = foreign::Function::collect(leaves);
+        self
+    }
+
+    /// Marks a program that reaches the `runner` package.
+    pub(crate) fn with_place(mut self, place: bool) -> Self {
+        self.place = place;
         self
     }
 

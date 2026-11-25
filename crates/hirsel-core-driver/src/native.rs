@@ -1000,6 +1000,9 @@ impl CheckProduct {
             false,
             options,
         )?
+        .with_place(crate::native_entry::reaches_place(
+            instances.iter().map(|i| &i.definition),
+        ))
         .with_foreign(foreign_modules.values());
         link_objects(
             &entry_plan,

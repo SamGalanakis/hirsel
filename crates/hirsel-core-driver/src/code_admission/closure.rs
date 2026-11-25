@@ -423,6 +423,11 @@ fn check_launch(
                 "startup parameter names belong to the entry annex",
             ));
         }
+        if body.annex.2.is_some() && i != entry {
+            return Err(AdmissionError::Binding(
+                "an error description belongs to the entry annex",
+            ));
+        }
     }
     let body = &bodies[entry];
     let module = &body.decoded.module;
@@ -456,6 +461,17 @@ fn check_launch(
     if recipe.launch.exit_status != exit {
         return Err(AdmissionError::Binding(
             "entry exit status differs from its result shape",
+        ));
+    }
+    // PROG-3: an error other than `Exit` is written from this description.
+    let described = body
+        .annex
+        .2
+        .as_deref()
+        .map(crate::entry_show::ErrorShown::decode);
+    if described.is_some() == exit || described.is_some_and(|d| d.is_err()) {
+        return Err(AdmissionError::Binding(
+            "entry error description differs from its result shape",
         ));
     }
     Ok(())

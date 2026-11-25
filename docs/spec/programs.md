@@ -57,6 +57,10 @@ process early.
 | run stop ([FAIL-15](failure.md#fail-15-run-stops)), other than termination by the host | 102 | `run stop: ` and the stop's name |
 | not started ([CAP-4](capabilities.md#cap-4-entry-grants), [MEM-19](budgets.md#mem-19-limits)) | 103 | one line naming what could not be given; for grants, one line per parameter not granted, in parameter order |
 
+An argument that is not valid UTF-8 is a not-started line of its own,
+`not started: argument N is not valid UTF-8`, where `N` counts the process's
+arguments from the program name as 0, private launch options included.
+
 So 101 to 103 never come from an `Exit`. The stderr writes are the run's, not the
 program's, and come after cleanup; a failure in that cleanup is the run's outcome instead
 (101) and the error's line is not written. An `Exit` carries only a status, so it writes
@@ -491,9 +495,12 @@ end. Decoding and re-encoding a body gives the same bytes. Its
 **annex** instead, in the body's order: each entry names a position of that body, and an annex
 whose entries do not match its body's instructions, terminators and calls in number and kind is
 malformed. Each terminator's entry also says whether it is a source decision (a coverage site,
-[docs/coverage.md](../coverage.md)); only an anchored branch or switch can be one. The annex
-starts with `HIRANNEX`, a zero byte and its version 2 as a 16-bit little-endian number, is
-hashed under `hirsel.code-annex.v2` and never enters an address.
+[docs/coverage.md](../coverage.md)); only an anchored branch or switch can be one. A program
+entry's annex in a recipe also carries the entry's parameter names, for startup diagnostics, and,
+when its error type is not `Exit`, the description of that type its PROG-3 line is written from;
+no other annex carries either. The annex
+starts with `HIRANNEX`, a zero byte and its version 3 as a 16-bit little-endian number, is
+hashed under `hirsel.code-annex.v3` and never enters an address.
 
 **Groups.** Addresses are computed for each build from the whole reach of its program, after
 the reach walk, from each instance's body hash and the ordered identities of its slots. They are
@@ -581,7 +588,8 @@ this section, and `hirsel.code-body.v3` by the 2026-11-22 version, which retires
 `hirsel.code-body.v2`; `hirsel.code-body.v4` by the 2026-11-25 version retires
 `hirsel.code-body.v3`. A change to the normal form or to a group's encoding takes a new version
 and a new domain. It never reuses an old one. `hirsel.code-annex.v2` by the 2026-11-25
-version (coverage-gen-anchors-2579) retires `hirsel.code-annex.v1`.
+version (coverage-gen-anchors-2579) retires `hirsel.code-annex.v1`, and `hirsel.code-annex.v3`
+(cli-s1a-launch-2709, the entry's error description) retires `hirsel.code-annex.v2`.
 
 Version note (2026-11-21, code-address attacks): the traversal now follows every instruction's
 failure target; slots are the functions retained code can run, and type hooks are metadata;

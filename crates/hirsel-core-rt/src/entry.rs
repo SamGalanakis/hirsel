@@ -224,6 +224,9 @@ pub struct OsConfig {
     pub cred_grants_len: usize,
     /// The entry revision, or null for an embedder without one.
     pub revision: *const [u8; 32],
+    /// Nonzero when the linked program reaches the `runner` package, the one
+    /// place reading the place-only launch words (launch.md, private prefix).
+    pub place: u64,
 }
 impl OsConfig {
     pub(crate) fn with_default_operations(&self) -> Self {
@@ -385,14 +388,15 @@ impl OsProcess {
         unsafe {
             crate::process::arm_host_parent()?;
             let argv = (0..input.args_len).map(|index| bytes(*input.args.add(index)));
-            for value in argv.clone() {
-                std::str::from_utf8(value)
-                    .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
+            // `input.args` starts after the program name, process argv's 0.
+            for (index, value) in argv.clone().enumerate() {
+                std::str::from_utf8(value).map_err(|_| StartupError::NonUtf8Arg(index + 1))?;
             }
             let options = launch_options::parse(argv.clone(), input.exec_bindings_len != 0)?;
             let args: Vec<_> = argv.skip(options.prefix).map(<[u8]>::to_vec).collect();
-            let prepare_path = options.prepare_path(&args, input.directories_len)?;
-            let store_op = options.store_op_path(&args, input.directories_len)?;
+            let place = input.place != 0;
+            let prepare_path = options.prepare_path(&args, input.directories_len, place)?;
+            let store_op = options.store_op_path(&args, input.directories_len, place)?;
             let isolated_store = prepare_path.or(store_op.map(|(_, dir)| dir));
             let dry_run = store_op.is_some();
             let program_args = if dry_run { &args[2..] } else { &args[..] };

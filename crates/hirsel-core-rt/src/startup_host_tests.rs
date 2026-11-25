@@ -92,6 +92,7 @@ impl Fixture {
             exec_bindings_len: 0,
             exec_ops: std::ptr::null(),
             revision: std::ptr::null(),
+            place: 0,
             cred_grants: std::ptr::null(),
             cred_grants_len: 0,
             target: crate::process::View {

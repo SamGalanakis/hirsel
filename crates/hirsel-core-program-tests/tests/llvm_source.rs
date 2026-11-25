@@ -14,6 +14,7 @@ include!("support/flow.rs");
 include!("support/front_cases.rs");
 include!("support/copy_within.rs");
 include!("support/prefetch.rs");
+include!("support/release_passes.rs");
 #[path = "support/llvm_codegen.rs"]
 mod llvm_codegen;
 
@@ -2075,29 +2076,7 @@ fn every_front_run_case_matches_the_evaluator() {
                         .is_some_and(|e| e.split(',').any(|e| e == "llvm"))
                 })
             };
-            let case = |run: &&str| {
-                let (call, _) = run.split_once(" = ").unwrap();
-                let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
-                let function = names[name];
-                let sig = &module.signatures[module.functions[function.index()].signature.index()];
-                let args = args
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .zip(&sig.params)
-                    .map(|(a, t)| {
-                        let Param::Value(t) = t else {
-                            panic!("front argument")
-                        };
-                        eval::scalar(*t, a)
-                    })
-                    .collect();
-                Case {
-                    function,
-                    args,
-                    limit: u64::MAX,
-                    injection: None,
-                }
-            };
+            let case = |run: &&str| front_case(&module, &names, run);
             let cases = runs
                 .iter()
                 .filter(|r| !pending(r))

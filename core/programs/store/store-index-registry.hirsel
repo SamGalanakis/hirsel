@@ -12,7 +12,10 @@ type RegisteredIndex: send {
     ordinal: u64,
     by: Bytes,
     key: Bytes,
-    extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error]
+    extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error],
+    // Where a Many entry's primary key starts in the entry key: after the
+    // four-byte id and the index key. The verify walker reads it (§1.2a).
+    key_end: own[send] fn(Bytes) -> Result[u64, Error]
 }
 
 type IndexRegistration: send {
@@ -35,6 +38,15 @@ fn declared_index_registry(take bindings: List[IndexRegistration]) -> IndexRegis
         register_index(mut registry, take schema_binding)
     }
     take registry
+}
+
+fn entry_key_end[J](key: std.codec.Key[J]) -> own[send] fn(Bytes) -> Result[u64, Error] {
+    let end: own[send] fn(Bytes) -> Result[u64, Error] = fn(raw: Bytes) -> Result[u64, Error] {
+        let mut at = 4u64
+        let _ = decoded(std.codec.take_key_with(raw, mut at, key))?
+        Ok(at)
+    }
+    take end
 }
 
 type IndexProjection[K, V, P]: send {
@@ -106,11 +118,11 @@ fn declare_binding[J, K, V, P](t: Table[K, V], record: Catalog, kind: IndexKind,
     let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
         extract_declared(extractor, raw, primary)
     }
-    index_registration(t, record, take extract)
+    index_registration(t, record, take extract, entry_key_end(key))
 }
 
-fn index_registration[K, V](t: Table[K, V], record: Catalog, take extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error]) -> IndexRegistration {
-    IndexRegistration(table: t.id, index: RegisteredIndex(id: record.id, schema: t.readers.current, ordinal: 0, by: clone(record.by), key: clone(record.key), extract: take extract))
+fn index_registration[K, V](t: Table[K, V], record: Catalog, take extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error], take key_end: own[send] fn(Bytes) -> Result[u64, Error]) -> IndexRegistration {
+    IndexRegistration(table: t.id, index: RegisteredIndex(id: record.id, schema: t.readers.current, ordinal: 0, by: clone(record.by), key: clone(record.key), extract: take extract, key_end: take key_end))
 }
 
 fn register_index(mut registry: IndexRegistry, take schema_binding: IndexRegistration) {

@@ -147,7 +147,7 @@ fn aggregate_binding[G, K, V](t: Table[K, V], record: Catalog, by: StaticFn[fn(K
     let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
         extract_aggregate(extractor, raw, primary)
     }
-    index_registration(t, record, take extract)
+    index_registration(t, record, take extract, entry_key_end(key))
 }
 
 // A row's groups as sorted, distinct keys, with each group's summed value

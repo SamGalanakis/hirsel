@@ -1676,7 +1676,8 @@ type Head[G: send, H: shareable + inert + send] {
     // Admitted served calls whose attempt latched a Cold miss, oldest first
     // (STORE-SPEC §13.3a). Their streams count as running.
     parked: List[ParkedCall],
-    recovery: Option[Box[RecoverClaims]]
+    recovery: Option[Box[RecoverClaims]],
+    upkeep: Upkeep
 }
 
 type Publish[G: send, H: shareable + inert + send]: send {
@@ -1758,7 +1759,7 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
             return Ok(None)
         }
     }
-    let mut hd = Head(db: take owned, anonymous: anonymous_streams(), r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new(), recovery: take recovery)
+    let mut hd = Head(db: take owned, anonymous: anonymous_streams(), r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new(), recovery: take recovery, upkeep: upkeep())
     let mut tables: Option[triggers.Tables] = None
     let (take woken, take helpers, take health_setup) = head_wakes(mut hd, take inbox, drain, tasks)
     let served = match take health_setup {
@@ -2449,22 +2450,6 @@ fn pause_progress[G: send, H: shareable + inert + send](mut head: Head[G, H], mu
             Ok(false)
         },
     }
-}
-
-fn head_is_idle[G: send, H: shareable + inert + send](head: Head[G, H], idle: u64) -> Result[bool, store.Error] waits {
-    if map.len(head.busy) != 0u64 || list.len(head.waiting) != 0u64 || list.len(head.parked) != 0u64 || keyed_work_pending(head) || store.export_leased(head.db) {
-        return Ok(false)
-    }
-    if let Some(drive) = head.trigger_drive {
-        if map.len(drive.active) != 0u64 {
-            return Ok(false)
-        }
-        if let Some(due) = next_trigger_due(head.db, drive.tables)? {
-            let at = store.next_call_info(head.db).at
-            return Ok(due >= at && due - at >= idle)
-        }
-    }
-    Ok(true)
 }
 
 fn head_arrival[G: send, H: shareable + inert + send](mut hd: Head[G, H], take message: Req, closed: bool, hold: bool) -> Result[(), store.Error] waits {
@@ -3321,7 +3306,7 @@ fn trigger_effect[G: send, H: shareable + inert + send](mut hd: Head[G, H], trig
 // database and reads the volatile head separately from the answer.
 pub fn journal_attempt_gate[H: shareable + inert + send](take db: store.Db, take registered: Registry[(), H], take handles: H, t: triggers.Tables, a: triggers.Attempt, key: Bytes, arg: Bytes) -> (store.Db, u64, Result[Result[Outcome, TriggerCallError], store.Error]) waits {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(2u64)
-    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take registered, replay_identity: list.new(), h: arc.new(take handles), out: take to, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None)
+    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take registered, replay_identity: list.new(), h: arc.new(take handles), out: take to, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     let response = trigger_effect(mut head, t, store.Caller(issuer: 0u8, subject: list.new()), a, key, arg)
     let at = store.version(store.snapshot(head.db))
     let Head(db: take kept, ..) = take head

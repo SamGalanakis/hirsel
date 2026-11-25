@@ -1,0 +1,205 @@
+// The index walker (STORE-SPEC §1.2). A walk checks every Public index
+// this release binds against its table, both ways. In the rows phase each
+// row's entries must be in the index with the row's payload. In the entries
+// phase each entry must come from a row that still produces it with that
+// payload. One slice reads both sides from main's head as it stands, so a
+// write between slices never makes a false finding. A finding is proof that
+// the index is wrong: the slice counts it as drift and demotes the index
+// (§I.3), so the builder rebuilds it.
+
+/// Missing: a row's entry is absent. Extra: no row produces the entry.
+/// Payload: the entry is present, and its payload is not the row's.
+pub type WalkFault: send = Missing | Extra | Payload
+
+pub type WalkFinding: send {
+    index: String,
+    entry: Bytes,
+    fault: WalkFault
+}
+
+/// `checked` counts rows and entries read since `begin_verify`. `done` says
+/// the walk has checked every index; `findings` holds this slice's.
+pub type WalkReport: send {
+    checked: u64,
+    done: bool,
+    findings: List[WalkFinding]
+}
+
+pub opaque type IndexWalk: send {
+    // The catalog key and id of the index being walked.
+    at: Option[(Bytes, u32)],
+    entries: bool,
+    // The last primary key (rows) or entry key after the id (entries) checked.
+    cursor: Option[Bytes],
+    checked: u64
+}
+
+pub fn begin_verify() -> IndexWalk {
+    IndexWalk(at: None, entries: false, cursor: None, checked: 0)
+}
+
+// The index the walk is on: its current one while that record is still the
+// same Public index, else the next Public index after it that this release
+// binds, from its first row.
+fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, Catalog)], Error] {
+    let mut low: Bytes = list.new()
+    list.push(mut low, 2u8)
+    if let Some((key, _)) = view walk.at {
+        low = copied(key)?
+    }
+    let mut end_key: Bytes = list.new()
+    list.push(mut end_key, 3u8)
+    let mut records = byte_cursor(db.heads[0].roots.catalog, Included(take low), end_key)?
+    while let Some((take key, raw)) = next_bytes(mut records)? {
+        if !record_public(raw) { continue }
+        let record = decode_catalog(raw)?
+        // An aggregate's rows are per-group totals, not per-row entries.
+        if let Sums = record.shape { continue }
+        if let None = bound_extractor(db.indexes, record) { continue }
+        let same_index = match view walk.at {
+            Some((at_key, id)) => at_key == key && id == record.id,
+            None => false,
+        }
+        if !same_index {
+            walk.at = Some((copied(key)?, record.id))
+            walk.entries = false
+            walk.cursor = None
+        }
+        return Ok(Some((take key, take record)))
+    }
+    Ok(None)
+}
+
+// One slice of at most `limit` rows or entries of the index the walk is on.
+// A slice that finds the index wrong demotes it in one schema commit, except
+// while an export lease is held: catch-up refuses a catalog change on OLD
+// as Drift (§3.5a), so the next walk finds it again.
+pub fn verify_step(mut db: Db, mut walk: IndexWalk, limit: u64) -> Result[WalkReport, Error] waits {
+    healthy(db)?
+    if limit == 0 { return Error(Limit(Transaction)) }
+    let Some((take key, take record)) = walk_index(db, mut walk)? else {
+        walk.at = None
+        walk.entries = false
+        walk.cursor = None
+        return Ok(WalkReport(checked: walk.checked, done: true, findings: list.new()))
+    }
+    let name = declaration_index_name(key)?
+    let mut findings: List[WalkFinding] = list.new()
+    if walk.entries {
+        walk_entries(db, mut walk, record, name, limit, mut findings)?
+    } else {
+        walk_rows(db, mut walk, record, name, limit, mut findings)?
+    }
+    if list.len(findings) != 0 {
+        if !export_leased(db) {
+            let mut seen: List[(u32, u32)] = list.new()
+            list.push(mut seen, (record.owner, record.id))
+            trip_drift(mut db, 0, seen)?
+        }
+        // The index is no longer Public; the walk moves past it.
+        walk_past(mut walk)?
+    }
+    Ok(WalkReport(checked: walk.checked, done: false, findings: take findings))
+}
+
+// Moves the walk to the first index after the one it is on.
+fn walk_past(mut walk: IndexWalk) -> Result[(), Error] {
+    let past = match walk.at {
+        Some((at_key, _)) => {
+            let mut k = copied(at_key)?
+            list.push(mut k, 0u8)
+            Some((take k, 0u32))
+        },
+        None => None,
+    }
+    walk.at = take past
+    walk.entries = false
+    walk.cursor = None
+    Ok(())
+}
+
+fn walk_finding(mut findings: List[WalkFinding], name: String, entry_key: Bytes, fault: WalkFault) -> Result[(), Error] {
+    capacity(list.try_reserve(mut findings, 1))?
+    list.push(mut findings, WalkFinding(index: clone(name), entry: copied(entry_key)?, fault: fault))
+    Ok(())
+}
+
+// Rows phase: up to `limit` rows after the cursor, each extracted with the
+// bound extractor and looked up in the index collection, which is resident.
+fn walk_rows(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding]) -> Result[(), Error] waits {
+    let cursor = match walk.cursor {
+        Some(final_key) => Some(copied(final_key)?),
+        None => None,
+    }
+    let (take rows, done) = tiered_rows_after(db, record.owner, cursor, limit)?
+    let collections = view db.heads[0].roots.collections
+    let Some(extractor) = bound_extractor(db.indexes, record) else { return Error(Stale(record.id)) }
+    for (logical, raw) in rows {
+        let primary = list.slice(logical, 4, list.len(logical))
+        let values = (extractor.extract)(raw, primary)?
+        for entry_key in values.keys {
+            match get_page_row(collections, entry_key) {
+                None => walk_finding(mut findings, name, entry_key, Missing)?,
+                Some(stored) => if stored != values.payload {
+                    walk_finding(mut findings, name, entry_key, Payload)?
+                },
+            }
+        }
+        walk.cursor = Some(copied(primary)?)
+    }
+    walk.checked = int.saturating_add(walk.checked, list.len(rows))
+    if done {
+        walk.entries = true
+        walk.cursor = None
+    }
+    Ok(())
+}
+
+// Entries phase: up to `limit` entries after the cursor. A Unique entry names
+// its row in its payload; a Many entry ends with it. The row is read as a
+// point read, through the pager when the table is Tiered.
+fn walk_entries(db: Db, mut walk: IndexWalk, record: Catalog, name: String, limit: u64, mut findings: List[WalkFinding]) -> Result[(), Error] waits {
+    let low = match walk.cursor {
+        Some(final_key) => {
+            let mut k = prefix(record.id)?
+            list.append(mut k, final_key)
+            Excluded(take k)
+        },
+        None => Included(prefix(record.id)?),
+    }
+    let s = snapshot(db)
+    let r = reader(db, db.writer_pin_bytes)?
+    let mut indexed = byte_cursor(s.roots.collections, take low, prefix(record.id + 1)?)?
+    let Some(extractor) = bound_extractor(db.indexes, record) else { return Error(Stale(record.id)) }
+    let mut read = 0u64
+    while read < limit {
+        let Some((take entry_key, raw)) = next_bytes(mut indexed)? else {
+            walk_past(mut walk)?
+            break
+        }
+        let primary = if let Entries(Unique) = record.shape {
+            list.slice(raw, 4, unique_owner_end(raw)?)
+        } else {
+            list.slice(entry_key, (extractor.key_end)(entry_key)?, list.len(entry_key))
+        }
+        let mut logical = prefix(record.owner)?
+        list.append(mut logical, primary)
+        let fault = snapshot_point(r, s, logical, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[WalkFault], Error] {
+            let Some(row) = stored else { return Ok(Some(Extra)) }
+            let values = (extractor.extract)(row, primary)?
+            for produced in values.keys {
+                if produced == entry_key {
+                    return Ok(if same_bytes(values.payload, raw) { None } else { Some(Payload) })
+                }
+            }
+            Ok(Some(Extra))
+        })?
+        if let Some(found) = fault {
+            walk_finding(mut findings, name, entry_key, found)?
+        }
+        walk.cursor = Some(copied(list.slice(entry_key, 4, list.len(entry_key)))?)
+        read += 1
+    }
+    walk.checked = int.saturating_add(walk.checked, read)
+    Ok(())
+}

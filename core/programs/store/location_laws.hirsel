@@ -114,6 +114,44 @@ fn law_read_location_list_row(mut graph: LawLocationGraph, tree: LawLocationTree
 }
 
 fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr, class: u8, tree: LawLocationTree, source: LawLocationSource) -> Result[(), Error] waits {
+    law_follow_bounded(d, mut graph, ptr, class, tree, source, None, None)
+}
+
+// AP3's bounds: every key under a branch entry is at or above its logical
+// separator and below the next entry's, inherited down the tree. Unsigned
+// byte order, as the pager compares keys.
+fn law_bytes_below(a: Bytes, b: Bytes) -> bool { list.compare_bytes(a, b) == Less }
+
+fn law_within(key: Bytes, lo: Option[Bytes], hi: Option[Bytes]) -> bool {
+    let above = match lo {
+        Some(low) => !law_bytes_below(key, low),
+        None => true,
+    }
+    let under = match hi {
+        Some(high) => law_bytes_below(key, high),
+        None => true,
+    }
+    above && under
+}
+
+// An entry's logical key or separator: the page prefix, then its suffix.
+// A branch's entry 0 is empty and takes no prefix.
+fn law_entry_key(page: Bytes, row: u64, cell: u64, first_branch: bool) -> Bytes {
+    let mut key: Bytes = list.new()
+    if first_branch { return take key }
+    list.append(mut key, list.slice(page, 24, 24 + read_le(page, 4, 2)))
+    list.append(mut key, list.slice(page, row + 2, cell))
+    take key
+}
+
+fn law_bound(b: Option[Bytes]) -> Result[Option[Bytes], Error] {
+    match b {
+        Some(at) => Ok(Some(copied(at)?)),
+        None => Ok(None),
+    }
+}
+
+fn law_follow_bounded(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr, class: u8, tree: LawLocationTree, source: LawLocationSource, lo: Option[Bytes], hi: Option[Bytes]) -> Result[(), Error] waits {
     if ptr.stamp == 0 {
         if ptr != std.page.PagePtr(pack: 0, offset: 0, len: 0, checksum: 0, stamp: 0) {
             fail("location law: empty pointer")
@@ -129,7 +167,7 @@ fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePt
         }
         return Ok(())
     }
-    let raw = disk_read_paged_file(d, paged_pack_path(ptr.pack)?, 16384)?
+    let raw = disk_read_paged_file(d, paged_pack_path(ptr.pack)?, 67108864)?
     law_scan_location_pack(mut graph, ptr.pack, class, raw)
     if let Some(physical) = map.get(graph.physical, (ptr.pack, ptr.offset)) {
         if physical != ptr {
@@ -146,11 +184,31 @@ fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePt
     if class != 1 {
         let page = list.slice(raw, ptr.offset + 16, ptr.offset + 16 + width)
         let slots = read_le(page, 2, 2)
+        let on_branch = page[0u64] != 0
         let mut slot = list.len(page) - 2 * slots
+        let mut previous: Option[Bytes] = None
         while slot < list.len(page) {
             let row = read_le(page, slot, 2)
             let cell = row + 2 + read_le(page, row, 2)
+            let first = slot == list.len(page) - 2 * slots
             slot += 2
+            let key = law_entry_key(page, row, cell, on_branch && first)
+            if on_branch && first {
+                if read_le(page, row, 2) != 0 { fail("location law: a branch's entry 0 has a separator") }
+            } else {
+                if !law_within(key, lo, hi) { fail("location law: a key or separator outside its parent's bounds") }
+                if let Some(before) = previous {
+                    if !law_bytes_below(before, key) { fail("location law: keys out of order in a page") }
+                }
+            }
+            // A branch child's bounds: this separator (entry 0 inherits the
+            // page's low bound) up to the next entry's separator.
+            let child_lo = if on_branch && first { law_bound(lo)? } else { Some(copied(key)?) }
+            let child_hi = if on_branch && slot < list.len(page) {
+                let next_row = read_le(page, slot, 2)
+                Some(law_entry_key(page, next_row, next_row + 2 + read_le(page, next_row, 2), false))
+            } else { law_bound(hi)? }
+            if !(on_branch && first) { previous = Some(copied(key)?) }
             let mut child_class = class
             let mut child_tree = tree
             let child = if page[0u64] != 0 {
@@ -181,7 +239,12 @@ fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePt
                 }
                 list.push(mut frame.outgoing, child.stamp)
             }
-            law_follow_location(d, mut graph, child, child_class, child_tree, LawPage(ptr.stamp))?
+            // A collection root starts a new key space; a blob has no keys.
+            if on_branch {
+                law_follow_bounded(d, mut graph, child, child_class, child_tree, LawPage(ptr.stamp), child_lo, child_hi)?
+            } else {
+                law_follow_location(d, mut graph, child, child_class, child_tree, LawPage(ptr.stamp))?
+            }
         }
     }
     map.insert(mut graph.frames, ptr.stamp, take frame)
@@ -253,7 +316,7 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     let listed: Map[u64, PagePack] = clone(graph.listed)
     for (seq, row) in listed {
         if !map.contains(graph.packs, seq) {
-            let pack = disk_read_paged_file(d, paged_pack_path(seq)?, 16384)?
+            let pack = disk_read_paged_file(d, paged_pack_path(seq)?, 67108864)?
             law_scan_location_pack(mut graph, seq, row.class, pack)
         }
     }
@@ -456,4 +519,253 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
 @test
 fn disk_test_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     check_location_relocations(disk_test_directory(d), c, r, tasks)
+}
+
+// STORE-SPEC §1.2 walker, the index walker. Rows k = 1..12 hold walk_value(k):
+// row 1 produces no entry, rows 10 and 11 two bucket entries each, and every
+// value is distinct, so `uniq` is a valid Unique index. Each case corrupts one
+// entry with a raw write and names the one finding a walk must report; the
+// corrupted index alone must be demoted, counted as drift once, and walk
+// clean once the builder has rebuilt it.
+fn walk_value(k: u64) -> u64 {
+    if k == 1 { 0 } else if k == 10 || k == 11 { 1000 + k * 20 } else if k == 12 { 55 } else { k * 13 }
+}
+
+fn walk_bucket_keys(_k: u64, v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    if v == 0 { return Ok(take keys) }
+    list.push(mut keys, v / 10)
+    if v >= 1000 { list.push(mut keys, v / 10 + 1) }
+    Ok(take keys)
+}
+
+fn walk_unique_keys(_k: u64, v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    if v != 0 { list.push(mut keys, v) }
+    Ok(take keys)
+}
+
+fn walk_cover_keys(_k: u64, v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v % 5)
+    Ok(take keys)
+}
+
+fn walk_cover_payload(_k: u64, v: u64) -> Result[u64, Capacity] { Ok(v) }
+
+// An aggregate on the same table: its rows are group totals, which the
+// walker must leave alone (a walk that read them as entries finds them all
+// Extra and demotes a correct index).
+fn walk_total_parts(_k: u64, v: u64) -> Result[List[(u64, u64)], Capacity] {
+    let mut parts: List[(u64, u64)] = list.new()
+    list.push(mut parts, (v % 3, v))
+    Ok(take parts)
+}
+
+type WalkFixture {
+    db: Db,
+    rows: Table[u64, u64],
+    bucket: Index[u64, u64, u64, ()],
+    uniq: Index[u64, u64, u64, ()],
+    cover: Index[u64, u64, u64, u64]
+}
+
+fn walk_fixture(c: Clock) -> Result[WalkFixture, Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let mut d = declare(db, Migrate)?
+    let mut items = declare_table(mut d, "items", key, std.codec.of_u64())?
+    let bucket_ix = index(mut d, mut items, "bucket", Many, code.describe(walk_bucket_keys), key)?
+    let uniq_ix = index(mut d, mut items, "uniq", Unique, code.describe(walk_unique_keys), key)?
+    let cover_ix = covering(mut d, mut items, "cover", Many, code.describe(walk_cover_keys), key, code.describe(walk_cover_payload), std.codec.of_u64())?
+    let _ = aggregate(mut d, mut items, "totals", code.describe(walk_total_parts), key)?
+    let rows = finish(mut d, take items)?
+    let _ = seal(mut db, take d)?
+    for k in 1u64 .. 13 {
+        if !typed_put(mut db, rows, k, walk_value(k)) { return Error(Foreign) }
+    }
+    Ok(WalkFixture(db: take db, rows: rows, bucket: bucket_ix, uniq: uniq_ix, cover: cover_ix))
+}
+
+// An index entry's key after its collection prefix: the index key, then the
+// row's primary for a Many index.
+fn walk_entry(j: u64, primary: Option[u64]) -> Bytes {
+    let mut out: Bytes = list.new()
+    std.codec.encode_key(std.codec.key_u64(), j, mut out)
+    if let Some(p) = primary { std.codec.encode_key(std.codec.key_u64(), p, mut out) }
+    take out
+}
+
+fn walk_stored(db: Db, id: u32, edited: Bytes) -> Result[Bytes, Error] {
+    let p = logical_key(id, edited)?
+    match get_page_row(db.heads[0].roots.collections, p) {
+        Some(v) => copied(v),
+        None => Error(Missing("walk fixture entry")),
+    }
+}
+
+fn walk_edit(mut db: Db, id: u32, edited: Bytes, val: Option[Bytes]) -> Result[(), Error] {
+    let cut = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
+        match val {
+            Some(v) => put_bytes(mut tx, id, edited, v),
+            None => if delete_bytes(mut tx, id, edited)? { Ok(()) } else { Error(Missing("walk fixture entry")) },
+        }
+    })?
+    match take cut {
+        Committed(_) => Ok(()),
+        _ => Error(Foreign),
+    }
+}
+
+// Walks every index to the end, `limit` rows or entries a slice, calling
+// `between` before each slice.
+fn walk_all(mut db: Db, rows: Table[u64, u64], limit: u64, between: scoped fn(mut Db, Table[u64, u64], u64) -> Result[(), Error] waits) -> Result[(List[WalkFinding], u64), Error] waits {
+    let mut walk = begin_verify()
+    let mut found: List[WalkFinding] = list.new()
+    let mut slices = 0u64
+    loop {
+        if slices > 1000 { fail("§1.2 walker: the walk never ended") }
+        between(mut db, rows, slices)?
+        let report = verify_step(mut db, mut walk, limit)?
+        slices += 1
+        for f in report.findings {
+            list.push(mut found, WalkFinding(index: clone(f.index), entry: copied(f.entry)?, fault: f.fault))
+        }
+        if report.done { return Ok((take found, report.checked)) }
+    }
+}
+
+fn walk_still(mut _db: Db, _rows: Table[u64, u64], _slice: u64) -> Result[(), Error] { Ok(()) }
+
+fn walk_serves[P](db: Db, ix: Index[u64, u64, u64, P]) -> Result[bool, Error] waits {
+    match find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Unbounded, Unbounded) {
+        Ok(_) => Ok(true),
+        Error(NotReady(_)) => Ok(false),
+        Error(take e) => Error(take e),
+    }
+}
+
+fn walk_fault_is(a: WalkFault, b: WalkFault) -> bool {
+    match (a, b) {
+        (Missing, Missing) => true,
+        (Extra, Extra) => true,
+        (Payload, Payload) => true,
+        _ => false,
+    }
+}
+
+// One corruption: `which` names the index (0 bucket, 1 uniq, 2 cover), and
+// `edited`/`val` the raw edit of its collection.
+fn walk_corrupt_case(c: Clock, which: u64, edited: Bytes, val: Option[Bytes], fault: WalkFault) -> Result[(), Error] waits {
+    let mut fx = walk_fixture(c)?
+    let (id, name) = if which == 0 { (fx.bucket.id, "bucket") } else if which == 1 { (fx.uniq.id, "uniq") } else { (fx.cover.id, "cover") }
+    walk_edit(mut fx.db, id, edited, val)?
+    let (found, _) = walk_all(mut fx.db, fx.rows, 3, walk_still)?
+    if list.len(found) != 1 { fail("§1.2 walker: a corrupted index must give exactly one finding") }
+    if found[0].index != name || found[0].entry != logical_key(id, edited)? || !walk_fault_is(found[0].fault, fault) {
+        fail("§1.2 walker: the finding names the wrong index, entry or fault")
+    }
+    let serving = [walk_serves(fx.db, fx.bucket)?, walk_serves(fx.db, fx.uniq)?, walk_serves(fx.db, fx.cover)?]
+    for i in 0u64 .. 3 {
+        if serving[i] != (i != which) { fail("§1.2 walker: the walk must demote the corrupted index and only it") }
+    }
+    let drift = attention(fx.db)?.drift
+    if list.len(drift) != 1 || drift[0].index != name || drift[0].count != 1 {
+        fail("§1.2 walker: a finding counts as drift once")
+    }
+    while let Some(_) = index_build_step(mut fx.db, 16)? {}
+    let (again, _) = walk_all(mut fx.db, fx.rows, 3, walk_still)?
+    if list.len(again) != 0 { fail("§1.2 walker: a rebuilt index still has findings") }
+    Ok(())
+}
+
+// Between slices: overwrite, delete and put back rows under the walk. Values
+// 2000 + 7s stay distinct from every fixture value and from each other.
+fn walk_churn(mut db: Db, rows: Table[u64, u64], slice: u64) -> Result[(), Error] waits {
+    let k = slice % 12 + 1
+    if slice % 3 == 1 {
+        let ran = run(mut db, None, (copy_env(rows), k), fn(mut tx, input) -> Result[(), Error] {
+            let _ = delete(mut tx, input.0, input.1)?
+            Ok(())
+        })?
+        if let Committed(_) = ran {} else { return Error(Foreign) }
+    } else if !typed_put(mut db, rows, k, 2000 + 7 * slice) {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+@test
+fn test_index_walker_clean(c: Clock) -> Result[(), Error] waits {
+    // Unchanged rows: bucket has 12 rows and 13 entries (rows 2..9 and 12 one
+    // each, rows 10 and 11 two), uniq 12 rows and 11 entries, cover 12 and 12.
+    let mut fx = walk_fixture(c)?
+    let (found, checked) = walk_all(mut fx.db, fx.rows, 1000, walk_still)?
+    if list.len(found) != 0 { fail("§1.2 walker: a clean store has findings") }
+    if checked != 12 + 13 + 12 + 11 + 12 + 12 { fail("§1.2 walker: the walk skipped rows or entries") }
+    // Two at a time, with the rows changing under the walk.
+    let (churned, _) = walk_all(mut fx.db, fx.rows, 2, walk_churn)?
+    if list.len(churned) != 0 { fail("§1.2 walker: writes between slices made a finding") }
+    if list.len(attention(fx.db)?.drift) != 0 { fail("§1.2 walker: a clean walk counted drift") }
+    if !walk_serves(fx.db, fx.bucket)? || !walk_serves(fx.db, fx.uniq)? || !walk_serves(fx.db, fx.cover)? {
+        fail("§1.2 walker: a clean walk demoted an index")
+    }
+    Ok(())
+}
+
+@test
+fn test_index_walker_corruptions(c: Clock) -> Result[(), Error] waits {
+    let fx = walk_fixture(c)?
+    // Row 2 (26): bucket 2, uniq 26, cover 1. Row 3 (39): uniq 39. Row 4 (52): cover 2.
+    let any_bucket = walk_stored(fx.db, fx.bucket.id, walk_entry(2, Some(2)))?
+    let owner_3 = walk_stored(fx.db, fx.uniq.id, walk_entry(39, None))?
+    let payload_2 = walk_stored(fx.db, fx.cover.id, walk_entry(1, Some(2)))?
+    // Missing: row 3's only bucket entry, and row 10's second (1200 -> 120, 121).
+    walk_corrupt_case(c, 0, walk_entry(3, Some(3)), None, Missing)?
+    walk_corrupt_case(c, 0, walk_entry(121, Some(10)), None, Missing)?
+    // Extra: an entry for row 99, which does not exist.
+    walk_corrupt_case(c, 0, walk_entry(5, Some(99)), Some(copied(any_bucket)?), Extra)?
+    // Extra: row 12 (55) exists but produces bucket 5, not 2.
+    walk_corrupt_case(c, 0, walk_entry(2, Some(12)), Some(copied(any_bucket)?), Extra)?
+    // Payload: uniq 26 names row 3 as its owner. The rows phase reads row 2
+    // first, which produces 26, and a Unique entry's owner is in its payload.
+    walk_corrupt_case(c, 1, walk_entry(26, None), Some(copied(owner_3)?), Payload)?
+    // Extra: uniq 999, which no row produces, names row 3, which produces 39.
+    walk_corrupt_case(c, 1, walk_entry(999, None), Some(copied(owner_3)?), Extra)?
+    // Payload: row 4's cover entry carries row 2's projection, 26 for 52.
+    walk_corrupt_case(c, 2, walk_entry(2, Some(4)), Some(copied(payload_2)?), Payload)?
+    Ok(())
+}
+
+// L41 (viii), separator bounds across nodes. The relocation fixture's trees
+// are one leaf each, so this one is deep: 8,000 rows of 200 bytes, half at
+// sequential keys (long shared prefixes, so short separators) and half at
+// scattered ones, with every third row deleted again, give two branch levels.
+// The oracle is AP3's order itself, checked by the independent parse.
+@test
+fn disk_test_location_separator_bounds(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, disk_test_directory(d), c, r, result.unwrap(sized(Directory, 2147483648u64)))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let mut value: Bytes = list.with_capacity(200)
+    list.fill(mut value, 200, 7u8)
+    for batch in 0u64 .. 8 {
+        law_location_commit(run(mut db, None, (copy_env(rows), copy_env(value), batch), fn(mut tx, call_env) -> Result[(), Error] {
+            for i in 0u64 .. 500 {
+                let n = call_env.2 * 500 + i
+                put(mut tx, call_env.0, n, call_env.1)?
+                put(mut tx, call_env.0, int.wrapping_mul(n + 1, 0x9E3779B97F4A7C15u64), call_env.1)?
+            }
+            Ok(())
+        })?)?
+    }
+    law_location_commit(run(mut db, None, rows, fn(mut tx, t) -> Result[(), Error] {
+        for n in 0u64 .. 4000 {
+            if n % 3 == 0 { let _ = delete(mut tx, t, n)? }
+        }
+        Ok(())
+    })?)?
+    let _ = checkpoint(mut db)?
+    let _ = law_compare_locations(db)?
+    close(take db)
 }

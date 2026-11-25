@@ -1,0 +1,71 @@
+// RUNNER-SPEC §12.5: the head builds a demoted index on its own. Nothing
+// here calls the build step; the head's idle turns do, and the release they
+// publish serves the index. Oracle: rows k in 0..3000 hold k % 7, so the
+// rows under value 3 are 3, 10, ..., 2997: (2997 - 3) / 7 + 1 = 429.
+
+fn upkeep_law_keys(_k: u64, v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v)
+    Ok(take keys)
+}
+
+// Lets the head run until every task waits with no timer due, then finishes it.
+fn upkeep_law_finish(take job: (ClockHand, Sender[HeadInput])) waits {
+    let (take handed, take stop_to) = take job
+    let mut ticks = take handed
+    while let Some(due) = clock.idle(mut ticks) { clock.advance_to(mut ticks, due) }
+    let _ = channel.send(stop_to, HeadFinish)
+}
+
+fn upkeep_law_count(db: store.Db, s: store.Snapshot, ix: store.Index[u64, u64, u64, ()]) -> Result[Option[u64], store.Error] waits {
+    let r = store.reader(db, 0u64)?
+    let mut rows = match store.find(r, s, ix, Included(3u64), Included(3u64)) {
+        Ok(take rows) => take rows,
+        Error(NotReady(_)) => return Ok(None),
+        Error(take why) => return Error(take why),
+    }
+    let mut n = 0u64
+    while let Some(_) = store.next(r, mut rows)? { n += 1u64 }
+    Ok(Some(n))
+}
+
+@test
+fn test_head_builds_demoted_index(random: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let (time, take clock_handle) = provide.clock(0, 100)
+    let mut db = store.memory(time, random, result.unwrap(store.sized(Memory, 1073741824u64)))
+    let mut declarations = store.declare(db, Migrate)?
+    let mut rows_def = store.declare_table(mut declarations, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let ix = store.index(mut declarations, mut rows_def, "by_v", Many, code.describe(upkeep_law_keys), std.codec.key_u64())?
+    let t = store.finish(mut declarations, take rows_def)?
+    let _ = store.seal(mut db, take declarations)?
+    let filled = store.run(mut db, None, t, fn(mut tx, rows) -> Result[(), store.Error] {
+        for k in 0u64 .. 3000u64 { store.put(mut tx, rows, k, k % 7u64)? }
+        Ok(())
+    })?
+    if let Committed(_) = filled {} else { fail("fixture rows did not commit") }
+    store.rebuild_index(mut db, ix)?
+    if upkeep_law_count(db, store.snapshot(db), ix)? != None { fail("a demoted index served a read") }
+
+    let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let Mailbox(to: take out, from: take published, ..) = result.unwrap(mailbox(8u64))
+    let entries: Registry[(), ()] = registry()
+    let mut hd = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()),
+        out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false,
+        minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let driving = task.spawn(tasks, bytes 65536u64, (take clock_handle, take to_head), upkeep_law_finish)
+    let mut no_triggers: Option[triggers.Tables] = None
+    let _ = serve_head(mut hd, take from_head, None, mut no_triggers)?
+    let _ = task.join(take driving)
+    let Head(db: take kept, ..) = take hd
+    let mut built = take kept
+    // The head released the built index; a reader of that release is served.
+    let mut served: Option[u64] = None
+    while let Ok(PubIn(e: take event)) = channel.try_receive(published) {
+        if let Released(Release(snapshot: Some(take at), ..)) = take event {
+            served = upkeep_law_count(built, at, ix)?
+        }
+    }
+    if served != Some(429u64) { fail("the head's last release does not serve the rebuilt index") }
+    if upkeep_law_count(built, store.snapshot(built), ix)? != Some(429u64) { fail("the head did not rebuild the index") }
+    store.close(take built)
+}

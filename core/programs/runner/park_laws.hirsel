@@ -118,7 +118,7 @@ fn promise_resumes_once(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     let drive = result.unwrap(make_trigger_drive(clone(h.triggers), c, tasks, take notify, clone(b"v2"), take config, grant_attempts_of(running)))
     let reg = result.unwrap(placed(code.describe(park_law_places), 1048576u64))
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(16u64)
-    let mut head = Head(db: take reopened, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take to, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None)
+    let mut head = Head(db: take reopened, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take to, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None, upkeep: upkeep())
     for _ in 0u64 .. 4u64 {
         if !result.unwrap(advance_triggers(mut head)) {
             return Error(())

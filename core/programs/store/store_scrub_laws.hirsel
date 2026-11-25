@@ -234,3 +234,39 @@ fn disk_test_scrub_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     }
     close(take db)
 }
+
+// The head's driver (RUNNER-SPEC §12.5) runs a tour one slice at a time
+// between commits and cuts. Nothing here damages a byte, so the oracle is no
+// fault at all: frames appended to a listed pack after the tour began, and
+// packs a cut retires under the lease, read clean to the tour's end.
+@test
+fn disk_test_scrub_interleaved(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let path = disk_test_directory(d)
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.pack_bytes = 512
+    let mut db = open(tasks, path, c, r, options)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    scrub_fill(mut db, t, 500, 0)?
+    let _ = checkpoint(mut db)?
+    let mut tour = begin_scrub(mut db)?
+    let mut steps = 0u64
+    loop {
+        let report = scrub_step(mut tour, 256)?
+        if list.len(report.faults) != 0 { fail("§11.17: a tour between commits and cuts found a fault") }
+        if let None = report.next { break }
+        steps += 1
+        if steps > 100000 { fail("§11.17: the tour never ended") }
+        scrub_fill(mut db, t, 50 + steps % 450, steps)?
+        if steps % 4 == 0 { let _ = checkpoint(mut db)? }
+    }
+    if steps == 0 { fail("the fixture's tour fit one slice") }
+    drop(take tour)
+    let _ = checkpoint(mut db)?
+    let mut again = begin_scrub(mut db)?
+    let mut faults: List[Fault] = list.new()
+    let _ = scrub_to_end(mut again, 4096, mut faults)?
+    if list.len(faults) != 0 { fail("§11.17: the store after the tour has a fault") }
+    drop(take again)
+    close(take db)
+}

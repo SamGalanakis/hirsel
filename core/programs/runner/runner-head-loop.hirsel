@@ -195,6 +195,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             continue
         }
         if none(pause) && advance_stream_retirement(mut head)? { continue }
+        if none(pause) && !closed && !ended && advance_maintenance(mut head)? { continue }
         if ended && list.len(head.parked) == 0u64 { return Ok(false) }
         match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(false) }
     }
@@ -226,4 +227,20 @@ fn publish_store(status: Latest[Status], mut current: Status, take seen: store.A
 
 fn copy_status(value: Status) -> Status {
     clone(value)
+}
+
+fn head_is_idle[G: send, H: shareable + inert + send](head: Head[G, H], idle: u64) -> Result[bool, store.Error] waits {
+    if map.len(head.busy) != 0u64 || list.len(head.waiting) != 0u64 || list.len(head.parked) != 0u64 || keyed_work_pending(head) || store.export_leased(head.db) {
+        return Ok(false)
+    }
+    if let Some(drive) = head.trigger_drive {
+        if map.len(drive.active) != 0u64 {
+            return Ok(false)
+        }
+        if let Some(due) = next_trigger_due(head.db, drive.tables)? {
+            let at = store.next_call_info(head.db).at
+            return Ok(due >= at && due - at >= idle)
+        }
+    }
+    Ok(true)
 }

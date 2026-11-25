@@ -267,7 +267,7 @@ fn activation_settles_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
     let running = trigger_law_grant_task(tasks, h2)
     let drive = result.unwrap(make_trigger_drive(clone(t), c, tasks, take to, r2, take config, trigger_law_attempts(running)))
     let (out, published): (Sender[PubIn], Receiver[PubIn]) = channel.new(32u64)
-    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take reg2, replay_identity: list.new(), h: arc.new(take h2), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None)
+    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take reg2, replay_identity: list.new(), h: arc.new(take h2), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None, upkeep: upkeep())
     let selected = option.unwrap(replace(mut head.trigger_drive, None))
     let late = trigger_effect(mut head, selected.tables, selected.author, a1, result.unwrap(trigger_law_entry_key()), result.unwrap(trigger_law_argument(9u64)))
     head.trigger_drive = Some(take selected)

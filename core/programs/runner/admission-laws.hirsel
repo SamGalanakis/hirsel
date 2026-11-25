@@ -365,7 +365,7 @@ fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random
     wire_know(mut owner, entries, w3c_key(code.identity(code.describe(w3c_large)), std.codec.of_u32(), large_codec))
     wire_know(mut owner, entries, w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), big_codec))
     wire_know(mut owner, entries, w3c_retired())
-    let head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(W3cHandles(data: data)), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None)
+    let head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(W3cHandles(data: data)), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
     W3cRig(head: take head, owner: take owner, work: wire_work(), requests: take requests, releases: take releases, inbox: take inbox, t: t)
 }
 

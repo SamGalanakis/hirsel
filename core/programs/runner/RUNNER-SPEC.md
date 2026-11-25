@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.75: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.76: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,10 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.76 (the head drives the store's upkeep; lane store-head-driver-1-3-2618, Store 1.3)
+
+Built: §12.5. The head owns the Db, so it runs the store's upkeep in bounded slices when it has nothing else to do: index build chunks, scrub slices and index-walker slices (STORE-SPEC v2.123), on idle turns only. Jobs that commit stay off while an export lease is held, because catch-up refuses a catalog change on OLD. No wire, API or format change. Reversible: code and text only.
 
 ## CHANGES-v2.75 (the store section of Status; lane store-status-1-8-2619, with STORE-SPEC v2.120)
 
@@ -2402,6 +2406,22 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 - **Readiness through the route** is decided here, for the reasons above. Reversible: the route is one raw handler over `status`.
 - **`Overloaded` for drain refusals** is decided here. A `Draining` refusal would append tag 8 and change frame-vectors.json, and it would ask the client for the same action. Reversible until a client needs to tell the two apart.
 - **The manifest from the build** is decided here, and extends D1. Reversible: the manifest is one file that one command writes.
+
+### 12.5 The head's upkeep (v2.76, Store 1.3)
+
+The head task owns the Db, so it drives the store's upkeep itself, one bounded slice per turn. No caller of `index_build_step`, `scrub_step` or `verify_step` is needed in a program.
+
+- **When.** An idle turn: the inbox is empty, no group is open, no release is held, no write pause is active, the head is not closed, and its inbox has not ended. Each turn runs one slice of the first job that has work, then reads the inbox again, so a request waits for at most one slice.
+- **Jobs, in priority order.**
+  1. **Build.** One `index_build_step(mut db, 1024)` while an index is `Backfilling`. When the step reports nothing left and a chunk committed since the head last released, the head releases its current snapshot, so readers serve the rebuilt index.
+  2. **Scrub.** One `scrub_step` of 1 MiB of the current tour (STORE-SPEC §11.17). A tour starts at the first idle turn at or after its start time, and its end sets the next start time one hour after it on the store clock (`keyed_time`). A store without a directory has nothing to scrub.
+  3. **Walk.** One `verify_step(mut db, mut walk, 1024)` (STORE-SPEC §1.2, the index walker), with the same rest of one hour after each finished walk. A slice that demotes an index releases the head's snapshot, so readers stop serving that index.
+- **Idle turns only (the kill rule, measured once).** Under steady load an idle turn may never come, and then no slice runs: a build stays `Backfilling` and its index answers `NotReady` until the load drops. A build chunk after every 16th group was measured and refused. On a Directory store, 4,000 one-row commits had a p99 of 31 µs alone, and 19.5 ms when a 1,024-row chunk ran after every 16th (each chunk is a checkpoint: p50 14 ms, p99 24 ms). That is far past the 10% the plan allows. The operator's request (Store 1.4's `hirsel store verify`, and a build command) is the other way to run a job.
+- **Export leases.** A build chunk and a walker's demotion each commit. While an export lease is held (§12.1 deploys), neither commits: each is a catalog change, and Store 1.2's catch-up refuses a catalog change on OLD as `Drift` (STORE-SPEC §3.5a "Catch-up"). Scrub never writes and runs regardless.
+- **Refusals.** `Poisoned` ends the head as any store fault does. Any other refusal of a job turns that job off until the place reopens, so a failing job never spins the head.
+- **Upkeep keeps no place awake.** `head_is_idle` (§14.4) does not look at it, so a cold place stops as before. A build resumes from its committed cursor at the next open, and a scrub tour or walk starts over.
+- **Counts.** The head keeps the tours and walks finished, scrub faults and walk findings since it opened; status will surface them (Store 1.8).
+- **Law.** `test_head_builds_demoted_index` (runner-upkeep-law.hirsel): an index demoted before the head serves is `Public` again after the head runs, with no call of the build step in the law, and the head's last release serves it (429 rows under value 3 of 3,000 rows k ↦ k mod 7, by hand). The walker's laws are STORE-SPEC L41 (viii) and `test_index_walker_*` (location_laws.hirsel); the interleaved tour is `disk_test_scrub_interleaved`.
 
 ## 14. Cold places under the platform host (new in v2.26)
 

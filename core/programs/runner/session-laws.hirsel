@@ -179,7 +179,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let (release_to, releases): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
     let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(),
         h: arc.new(take table), out: take release_to, busy: map.new(), waiting: list.new(),
-        group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None)
+        group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
 
     // The retained writer block costs 32 bytes. The Call's 44-byte payload
     // can arrive in fragments; the decoder doubles its message storage and

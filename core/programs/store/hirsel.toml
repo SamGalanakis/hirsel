@@ -95,6 +95,7 @@ std = { major = 1 }
 "store-index-registry.hirsel" = "store"
 "store-index-build.hirsel" = "store"
 "store-aggregate.hirsel" = "store"
+"store-verify.hirsel" = "store"
 "store-handle-check.hirsel" = "store"
 "store-declare.hirsel" = "store"
 "store-migration.hirsel" = "store"

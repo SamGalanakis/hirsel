@@ -31,7 +31,38 @@ type RoomEntry: send {
     state_schema: Bytes,
     message_schema: Bytes,
     codecs: own[send] fn() -> RoomCodecs,
+    hooks: fn() -> RoomHooks,
     index: u32,
+}
+
+// Everything a place does for rooms goes through this table. Only `room`
+// names `room_hooks`, and code is retained only through the calls and
+// function values it makes (PROG-6), so a place that declares no room links
+// none of the room plan, relay, owner or grant code. The wire session, the
+// publisher and the serving place reach the table through the room values
+// they hold (RoomPlan, RoomLink, RoomOwner, RoomGrants, RoomGrantPublisher),
+// which exist only once a room was declared.
+type RoomHooks {
+    fold: fn(mut RoomPlan, RoomEntry),
+    close: fn(mut RoomPlan, WireConfig),
+    schema: fn(Bytes, List[SlotSchema], RoomEntry) -> Result[Bytes, RegisterError],
+    start: fn(RoomPlan, WireConfig, u64, Sender[PubIn], Tasks, Random) -> Result[Option[(RoomLink, Task[()])], StartError] waits,
+    open: fn(take RoomLink, RoomSession, Sender[WireEvent]) -> Result[RoomOwner, Capacity],
+    join: fn(mut RoomOwner, u32, u64, take RoomRequest, take Caller) -> Result[(), Refusal],
+    sync: fn(mut RoomOwner, Option[u32], List[(u32, u64)]),
+    set: fn(mut RoomOwner, u32, Option[Bytes]) -> Result[(), u16],
+    send: fn(mut RoomOwner, u32, Option[u32], Bytes) -> Result[(), u16],
+    drain: fn(mut RoomOwner),
+    ring: fn(RoomOwner, RoomBell),
+    live: fn(mut RoomOwner) -> Option[Box[RoomLiveBuffer]],
+    finish: fn(take RoomOwner) waits,
+    reserve: fn(take RoomGrants) -> Result[RoomGrantPublisher, Capacity],
+    stage: fn(Subscriptions, mut Joiner, u64),
+    revoke: fn(mut Joiner),
+}
+
+fn room_hooks() -> RoomHooks {
+    RoomHooks(fold: fold_room_plan, close: close_room_plan, schema: encode_room_schema, start: spawn_room_relay, open: room_owner, join: room_owner_join, sync: room_owner_sync, set: room_owner_set_input, send: room_owner_send_input, drain: room_owner_pass, ring: room_owner_ring, live: room_owner_frame, finish: room_owner_finish, reserve: reserve_room_grants, stage: stage_joiner_room_grants, revoke: revoke_joiner_room_grants)
 }
 
 pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](mut r: Registry[G, H], admit: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[Grant], Capacity]], take declarations: Slots[H], state: std.codec.Codec[S], message: std.codec.Codec[M], bounds: RoomBounds, n: u64, arg_limit: u64, steps: u64) -> Result[(), RegisterError] {
@@ -50,7 +81,7 @@ pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](
         }
         RoomCodecs(state: take check_s, message: take check_m)
     }
-    let definition = RoomEntry(bounds, arg_limit, state_schema: take state_schema, message_schema: take message_schema, codecs: take make, index)
+    let definition = RoomEntry(bounds, arg_limit, state_schema: take state_schema, message_schema: take message_schema, codecs: take make, hooks: room_hooks, index)
     register_query(mut r, As(admit), take declarations, store.copy_env, n, steps, Some(take definition))
 }
 
@@ -110,34 +141,49 @@ type RoomPlan: send {
     min_frame: u64,
     message: u64,
     roster: u64,
+    per_sub: u64,
+    decode: u64,
+    hooks: Option[fn() -> RoomHooks],
 }
 
 fn no_rooms() -> RoomPlan {
-    RoomPlan(owner_bytes: 0u64, relay_bytes: 0u64, live_limit: 0u64, min_frame: 0u64, message: 0u64, roster: 0u64)
+    RoomPlan(owner_bytes: 0u64, relay_bytes: 0u64, live_limit: 0u64, min_frame: 0u64, message: 0u64, roster: 0u64, per_sub: 0u64, decode: 0u64, hooks: None)
 }
 
 fn plan_rooms[G: send, H: shareable + inert + send](r: Registry[G, H], c: WireConfig) -> RoomPlan {
     let mut plan = no_rooms()
-    let mut per_sub = 0u64
-    let mut decode = 0u64
     for (_, entry) in r.slots {
         if let Query(_, _, query_entry) = entry {
             if let Some(registered) = query_entry.ephemeral {
-                let bounds = registered.bounds
-                per_sub = order.max(per_sub, room_membership_charge(bounds, registered.arg_limit))
-                decode = order.max(decode, int.widen(order.max(bounds.state, bounds.message)))
-                plan.message = order.max(plan.message, int.widen(bounds.message))
-                plan.min_frame = order.max(plan.min_frame, room_live_minimum(bounds.state, bounds.message))
-                plan.roster = order.max(plan.roster, room_roster_bytes(registered.arg_limit, int.widen(bounds.peers)))
+                let hooks = (registered.hooks)()
+                (hooks.fold)(mut plan, registered)
+                plan.hooks = Some(registered.hooks)
             }
         }
     }
+    let hooks = match plan.hooks {
+        Some(make) => make(),
+        None => return plan
+    }
+    (hooks.close)(mut plan, c)
+    plan
+}
+
+fn fold_room_plan(mut plan: RoomPlan, registered: RoomEntry) {
+    let bounds = registered.bounds
+    plan.per_sub = order.max(plan.per_sub, room_membership_charge(bounds, registered.arg_limit))
+    plan.decode = order.max(plan.decode, int.widen(order.max(bounds.state, bounds.message)))
+    plan.message = order.max(plan.message, int.widen(bounds.message))
+    plan.min_frame = order.max(plan.min_frame, room_live_minimum(bounds.state, bounds.message))
+    plan.roster = order.max(plan.roster, room_roster_bytes(registered.arg_limit, int.widen(bounds.peers)))
+}
+
+fn close_room_plan(mut plan: RoomPlan, c: WireConfig) {
     if plan.roster != 0u64 {
         plan.live_limit = order.min(int.widen(LIVE_MAX), c.socket.max_frame)
-        plan.owner_bytes = room_session_charge(per_sub, plan.message, decode, plan.live_limit)
+        plan.owner_bytes = room_session_charge(plan.per_sub, plan.message, plan.decode, plan.live_limit)
         plan.relay_bytes = c.n_relay
     }
-    plan
 }
 
 fn room_relay_charge(limit: u64) -> u64 {
@@ -169,6 +215,14 @@ fn room_membership_charge(bounds: RoomBounds, arg_limit: u64) -> u64 {
 }
 
 fn start_room_relay(plan: RoomPlan, c: WireConfig, limit: u64, pub_to: Sender[PubIn], tasks: Tasks, random: Random) -> Result[Option[(RoomLink, Task[()])], StartError] waits {
+    let hooks = match plan.hooks {
+        Some(make) => make(),
+        None => return Ok(None)
+    }
+    (hooks.start)(plan, c, limit, pub_to, tasks, random)
+}
+
+fn spawn_room_relay(plan: RoomPlan, c: WireConfig, limit: u64, pub_to: Sender[PubIn], tasks: Tasks, random: Random) -> Result[Option[(RoomLink, Task[()])], StartError] waits {
     if plan.roster == 0u64 {
         return Ok(None)
     }
@@ -193,7 +247,7 @@ fn start_room_relay(plan: RoomPlan, c: WireConfig, limit: u64, pub_to: Sender[Pu
         return Error(Open(PublisherStopped))
     }
     let (to, inbox): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(ROOM_RELAY_TOKENS * limit)
-    let link = RoomLink(relay: take to, round_read: latest.handle(rounds), max_message: plan.message, live_limit: plan.live_limit)
+    let link = RoomLink(relay: take to, round_read: latest.handle(rounds), max_message: plan.message, live_limit: plan.live_limit, hooks: room_hooks)
     let seed = RoomRelaySeed(inbox: take inbox, rounds: take rounds, random, room_bytes: plan.relay_bytes - relay_fixed, max_sessions: limit)
     let task_bytes = plan.relay_bytes - channel_bytes
     let spawned = task.try_spawn(tasks, bytes task_bytes, take seed, room_relay_run) ?=> |(cap, _)| Full(cap)

@@ -95,20 +95,29 @@ fn room_grant_pair(rounds: Latest[RoundAt], sender: Latest[RoomGrantSet], from_s
     }
 }
 
+// A room subscription's grant register and the room hooks that publish it. Only a
+// room owner builds one, so the publisher reaches room grant code through it alone.
+type RoomGrants: send {
+    root: Latest[RoomGrantSet],
+    hooks: fn() -> RoomHooks,
+}
+
 type RoomGrantPublisher: send {
     root: Latest[RoomGrantSet],
     current: Arc[RoomGrantSet],
     spares: List[Arc[RoomGrantSet]],
     wake: bool,
+    hooks: fn() -> RoomHooks,
 }
 
-fn reserve_room_grants(take root: Latest[RoomGrantSet]) -> Result[RoomGrantPublisher, Capacity] {
+fn reserve_room_grants(take grants: RoomGrants) -> Result[RoomGrantPublisher, Capacity] {
+    let RoomGrants(root: take root, hooks: hooks) = take grants
     let mut spares: List[Arc[RoomGrantSet]] = list.with_capacity(4u64)
     for _ in 0u64 .. 4u64 {
         list.push(mut spares, arc.new(empty_room_grants()))
     }
     let current = latest.read(root)
-    Ok(RoomGrantPublisher(root: take root, current: take current, spares: take spares, wake: false))
+    Ok(RoomGrantPublisher(root: take root, current: take current, spares: take spares, wake: false, hooks: hooks))
 }
 
 fn publish_room_grants(mut grants: RoomGrantPublisher, next: Inline[Option[RoomGrant], 8], at: u64) -> bool {
@@ -153,10 +162,11 @@ fn reserve_sub_room_grants(mut owner: Joiner, input: SubscriptionInput) -> bool 
     if let Some(_) = owner.grants {
         return true
     }
-    let Some(root) = view input.grants else {
+    let Some(wanted) = view input.grants else {
         return true
     }
-    match reserve_room_grants(latest.handle(root)) {
+    let hooks = (wanted.hooks)()
+    match (hooks.reserve)(RoomGrants(root: latest.handle(wanted.root), hooks: wanted.hooks)) {
         Ok(take grants) => {
             owner.grants = Some(take grants);
             true
@@ -184,31 +194,40 @@ fn current_room_grant(subs: Subscriptions, who: u64, sub: u32) -> Option[(u64, G
 
 fn stage_room_grants(subs: Subscriptions, mut joined: List[Joiner], at: u64) {
     for i in 0u64 .. list.len(joined) {
-        let Some(take value) = replace(mut joined[i].grants, None) else {
-            continue
+        let make = match joined[i].grants {
+            Some(grants) => grants.hooks,
+            None => continue
         }
-        let mut grants = take value
-        let who = joined[i].who
-        let mut next = empty_room_grants().latest
-        if let Some(group) = map.get(subs.by_session, who) {
-            let mut count = 0u64
-            for (sub, _) in group {
-                let Some((instance, grant)) = current_room_grant(subs, who, sub) else {
-                    continue
-                }
-                let previous = selected_room_grant(grants.current, at, sub)
-                if count == ROOMS_PER_SESSION {
-                    fail("room grants: owner exceeded reserved subscriptions")
-                }
-                next[count] = room_grant_epoch(previous, sub, instance, grant)
-                count += 1u64
-            }
-        }
-        if publish_room_grants(mut grants, next, at) {
-            grants.wake = true
-        }
-        joined[i].grants = Some(take grants)
+        let hooks = make()
+        (hooks.stage)(subs, mut joined[i], at)
     }
+}
+
+fn stage_joiner_room_grants(subs: Subscriptions, mut owner: Joiner, at: u64) {
+    let Some(take value) = replace(mut owner.grants, None) else {
+        return
+    }
+    let mut grants = take value
+    let who = owner.who
+    let mut next = empty_room_grants().latest
+    if let Some(group) = map.get(subs.by_session, who) {
+        let mut count = 0u64
+        for (sub, _) in group {
+            let Some((instance, grant)) = current_room_grant(subs, who, sub) else {
+                continue
+            }
+            let previous = selected_room_grant(grants.current, at, sub)
+            if count == ROOMS_PER_SESSION {
+                fail("room grants: owner exceeded reserved subscriptions")
+            }
+            next[count] = room_grant_epoch(previous, sub, instance, grant)
+            count += 1u64
+        }
+    }
+    if publish_room_grants(mut grants, next, at) {
+        grants.wake = true
+    }
+    owner.grants = Some(take grants)
 }
 
 fn wake_room_grants(mut joined: List[Joiner]) {
@@ -226,6 +245,15 @@ fn wake_room_grants(mut joined: List[Joiner]) {
 }
 
 fn revoke_room_grants(mut owner: Joiner) {
+    let make = match owner.grants {
+        Some(grants) => grants.hooks,
+        None => return
+    }
+    let hooks = make()
+    (hooks.revoke)(mut owner)
+}
+
+fn revoke_joiner_room_grants(mut owner: Joiner) {
     let Some(take value) = replace(mut owner.grants, None) else {
         return
     }

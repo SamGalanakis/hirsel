@@ -8,6 +8,7 @@ type RoomLink: send {
     round_read: Latest[RoundAt],
     max_message: u64,
     live_limit: u64,
+    hooks: fn() -> RoomHooks,
 }
 
 resource type RoomLease: send {
@@ -421,8 +422,14 @@ fn room_owner_live(mut owner: RoomOwner) -> Option[Box[RoomLiveBuffer]] {
     None
 }
 
+fn room_owner_frame(mut owner: RoomOwner) -> Option[Box[RoomLiveBuffer]] {
+    let mut framed = room_owner_live(mut owner)?
+    room_live_frame(mut framed)
+    Some(take framed)
+}
+
 fn copy_room_link(link: RoomLink) -> RoomLink {
-    RoomLink(relay: channel.sender(link.relay), round_read: latest.handle(link.round_read), max_message: link.max_message, live_limit: link.live_limit)
+    RoomLink(relay: channel.sender(link.relay), round_read: latest.handle(link.round_read), max_message: link.max_message, live_limit: link.live_limit, hooks: link.hooks)
 }
 
 fn wire_room_subscribe[G: send](mut s: WireSession[G], mut work: WireWork, sub: u32, take request: RoomRequest, take prepared: SubscriptionInput) -> Result[(), u16] {
@@ -433,7 +440,8 @@ fn wire_room_subscribe[G: send](mut s: WireSession[G], mut work: WireWork, sub: 
         }
         let owner = wire_me(s)
         let id = RoomSession(low: list.word_le(s.anonymous.subject, 0u64), high: list.word_le(s.anonymous.subject, 8u64))
-        match room_owner(take link, id, owner) {
+        let hooks = (link.hooks)()
+        match (hooks.open)(take link, id, owner) {
             Ok(take room_owner_state) => {
                 work.rooms = Some(take room_owner_state)
             },
@@ -445,8 +453,9 @@ fn wire_room_subscribe[G: send](mut s: WireSession[G], mut work: WireWork, sub: 
     }
     let mut owned = option.unwrap(replace(mut work.rooms, None))
     let caller: Caller = clone(prepared.caller)
-    let installed = room_owner_join(mut owned, sub, s.sub_generation + 1u64, take request, take caller)
-    let grants = latest.handle(owned.grants)
+    let hooks = (owned.link.hooks)()
+    let installed = (hooks.join)(mut owned, sub, s.sub_generation + 1u64, take request, take caller)
+    let grants = RoomGrants(root: latest.handle(owned.grants), hooks: owned.link.hooks)
     work.rooms = Some(take owned)
     if let Error(take refusal) = take installed {
         wire_end(mut s, mut work.output, sub, Refused(take refusal))
@@ -464,21 +473,28 @@ fn wire_room_sync[G: send](s: WireSession[G], mut work: WireWork) {
         return
     }
     let mut rooms = take state
+    let pending = match s.subscription {
+        Some((sub, _)) => Some(sub),
+        None => None
+    }
+    let hooks = (rooms.link.hooks)()
+    (hooks.sync)(mut rooms, pending, s.subs)
+    work.rooms = Some(take rooms)
+}
+
+fn room_owner_sync(mut rooms: RoomOwner, pending: Option[u32], subs: List[(u32, u64)]) {
     for i in 0u64 .. ROOMS_PER_SESSION {
         let sub = match rooms.pens[i] {
             Some(pen) => pen.sub,
             None => continue
         }
-        if let Some((pending, _)) = s.subscription {
-            if pending == sub {
-                continue
-            }
+        if pending == Some(sub) {
+            continue
         }
-        if let None = sub_generation(s.subs, sub) {
+        if let None = sub_generation(subs, sub) {
             room_owner_leave(mut rooms, sub)
         }
     }
-    work.rooms = Some(take rooms)
 }
 
 fn wire_room_state[G: send](s: WireSession[G], mut work: WireWork, sub: u32, value: Option[Bytes]) -> Result[(), u16] {
@@ -489,13 +505,17 @@ fn wire_room_state[G: send](s: WireSession[G], mut work: WireWork, sub: u32, val
         return Error(1002u16)
     }
     let mut rooms = take previous
-    let handled = if let Some(_) = room_owner_slot(rooms, sub) {
-        room_owner_set(mut rooms, sub, value)
-    } else {
-        Error(1002u16)
-    }
+    let hooks = (rooms.link.hooks)()
+    let handled = (hooks.set)(mut rooms, sub, value)
     work.rooms = Some(take rooms)
     handled
+}
+
+fn room_owner_set_input(mut rooms: RoomOwner, sub: u32, value: Option[Bytes]) -> Result[(), u16] {
+    if let None = room_owner_slot(rooms, sub) {
+        return Error(1002u16)
+    }
+    room_owner_set(mut rooms, sub, value)
 }
 
 fn wire_room_message[G: send](s: WireSession[G], mut work: WireWork, sub: u32, to: Option[u32], value: Bytes) -> Result[(), u16] {
@@ -506,13 +526,17 @@ fn wire_room_message[G: send](s: WireSession[G], mut work: WireWork, sub: u32, t
         return Error(1002u16)
     }
     let mut rooms = take previous
-    let handled = if let Some(_) = room_owner_slot(rooms, sub) {
-        room_owner_send(mut rooms, sub, to, value)
-    } else {
-        Error(1002u16)
-    }
+    let hooks = (rooms.link.hooks)()
+    let handled = (hooks.send)(mut rooms, sub, to, value)
     work.rooms = Some(take rooms)
     handled
+}
+
+fn room_owner_send_input(mut rooms: RoomOwner, sub: u32, to: Option[u32], value: Bytes) -> Result[(), u16] {
+    if let None = room_owner_slot(rooms, sub) {
+        return Error(1002u16)
+    }
+    room_owner_send(mut rooms, sub, to, value)
 }
 
 fn copy_configured_room_link(link: Option[RoomLink]) -> Option[RoomLink] {
@@ -525,22 +549,29 @@ fn copy_configured_room_link(link: Option[RoomLink]) -> Option[RoomLink] {
 fn wire_room_drain(mut work: WireWork) {
     if let Some(take previous) = replace(mut work.rooms, None) {
         let mut rooms = take previous
-        room_owner_drain(mut rooms)
-        room_owner_regrant(mut rooms)
+        let hooks = (rooms.link.hooks)()
+        (hooks.drain)(mut rooms)
         work.rooms = Some(take rooms)
     }
 }
 
+fn room_owner_pass(mut rooms: RoomOwner) {
+    room_owner_drain(mut rooms)
+    room_owner_regrant(mut rooms)
+}
+
 fn wire_room_bell(work: WireWork, token: RoomBell) {
     if let Some(rooms) = work.rooms {
-        room_owner_ring(rooms, token)
+        let hooks = (rooms.link.hooks)()
+        (hooks.ring)(rooms, token)
     }
 }
 
 fn wire_room_done(take work: WireWork) -> () waits {
     let WireWork(rooms: take owned, ..) = take work
     if let Some(take rooms) = take owned {
-        room_owner_finish(take rooms)
+        let hooks = (rooms.link.hooks)()
+        (hooks.finish)(take rooms)
     }
 }
 
@@ -593,14 +624,13 @@ fn wire_room_offer[C: send](mut st: WireLoop[C]) -> bool waits {
         return false
     }
     let mut owner = option.unwrap(replace(mut st.work.rooms, None))
-    let selected = room_owner_live(mut owner)
+    let hooks = (owner.link.hooks)()
+    let selected = (hooks.live)(mut owner)
     st.work.rooms = Some(take owner)
-    let Some(take live) = take selected else {
+    let Some(take framed) = take selected else {
         st.room_pass = None;
         return false
     }
-    let mut framed = take live
-    room_live_frame(mut framed)
     let writer = option.unwrap(replace(mut st.writer, None))
     st.busy = true
     let end = int.saturating_add(host.mono_ns(st.clock), std.wsock.MESSAGE_NS)

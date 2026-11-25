@@ -1,9 +1,13 @@
 // An attempted query cannot publish a value or a cover before Store accepts its read set.
-type Viewed: shareable + send { covers: List[Cover], value: Bytes, reads: List[store.Read] }
+type Viewed: shareable + send {
+    covers: List[Cover],
+    value: Bytes,
+    reads: List[store.Read]
+}
+
 type Queried = Covered(Viewed) | Stopped(Outcome) | Faulted(Outcome, List[store.Read]) | Lost(store.Error, List[store.Read])
 
-type QueryBody[H, A, R] = Plain(StaticFn[fn(store.Tx, H, take A) -> Result[Answer[R], Capacity]]) |
-    As(StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]])
+type QueryBody[H, A, R] = Plain(StaticFn[fn(store.Tx, H, take A) -> Result[Answer[R], Capacity]]) | As(StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]])
 
 type QueryAttempt[H, A, R] {
     body: QueryBody[H, A, R],
@@ -25,8 +29,7 @@ fn query_body[H, A, R](body: QueryBody[H, A, R], tx: store.Tx, h: H, caller: Cal
 fn query_attempt[H: inert, A, R](tx: store.Tx, attempt: QueryAttempt[H, A, R]) -> Result[Answer[Bytes], Outcome] {
     let ran = isolate(fn() -> Result[Answer[Bytes], Outcome] {
         let input = std.codec.decode(attempt.args, attempt.arguments) ?=> |e| Refused(Malformed(bad(e)))
-        let Answer(value: take value, covers: take selected) =
-            query_body(attempt.body, tx, attempt.handles, attempt.caller, take input) ?=> |f| Failed(OutOfBytes(capacity_room(f)))
+        let Answer(value: take value, covers: take selected) = query_body(attempt.body, tx, attempt.handles, attempt.caller, take input) ?=> |f| Failed(OutOfBytes(capacity_room(f)))
         let encoded_answer = encode_query_value(attempt.value, value, attempt.steps)?
         Ok(Answer(value: take encoded_answer, covers: take selected))
     })
@@ -34,7 +37,9 @@ fn query_attempt[H: inert, A, R](tx: store.Tx, attempt: QueryAttempt[H, A, R]) -
         Ok(Ok(take output)) => take output,
         Ok(Error(cs)) => {
             for cause in cs {
-                if let OutOfTime = cause.kind { return Error(Failed(OutOfTime(attempt.steps))) }
+                if let OutOfTime = cause.kind {
+                    return Error(Failed(OutOfTime(attempt.steps)))
+                }
             }
             Error(projection_cause(cs))
         },
@@ -53,7 +58,9 @@ fn encode_query_value[R](codec: std.codec.Codec[R], value: R, steps: u64) -> Res
         Ok(Ok(Error(_))) => Error(Failed(Raised(5u32))),
         Ok(Error(cs)) => {
             for cause in cs {
-                if let OutOfTime = cause.kind { return Error(Failed(OutOfTime(steps))) }
+                if let OutOfTime = cause.kind {
+                    return Error(Failed(OutOfTime(steps)))
+                }
             }
             Error(projection_cause(cs))
         },
@@ -61,8 +68,7 @@ fn encode_query_value[R](codec: std.codec.Codec[R], value: R, steps: u64) -> Res
     }
 }
 
-fn query_projection[H: inert + send, Outer: send, A, R](access: PublisherReads, read_handle: store.Reader, attempt: QueryAttempt[H, A, R],
-    declared: Slots[Outer], bindings: List[BoundSlot], newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
+fn query_projection[H: inert + send, Outer: send, A, R](access: PublisherReads, read_handle: store.Reader, attempt: QueryAttempt[H, A, R], declared: Slots[Outer], bindings: List[BoundSlot], newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
     let steps = attempt.steps
     match store.look(read_handle, newest, Some(steps), attempt, query_attempt) {
         Ok(Seen(take answer)) => {
@@ -88,8 +94,7 @@ fn query_projection[H: inert + send, Outer: send, A, R](access: PublisherReads, 
     }
 }
 
-fn project_query_covers[H: send](access: PublisherReads, read_handle: store.Reader, declared: Slots[H], bindings: List[BoundSlot],
-    newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]], take selections: CoverSet) -> Result[List[Cover], ProjectionIssue] waits {
+fn project_query_covers[H: send](access: PublisherReads, read_handle: store.Reader, declared: Slots[H], bindings: List[BoundSlot], newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]], take selections: CoverSet) -> Result[List[Cover], ProjectionIssue] waits {
     let matched = isolate(scoped fn() -> Result[List[Cover], Outcome] {
         matched_covers(selections, declared, bindings)
     })
@@ -106,9 +111,7 @@ fn project_query_covers[H: send](access: PublisherReads, read_handle: store.Read
     Ok(take spans)
 }
 
-fn adapt_query[H: inert + send, Outer: send, A, R](body: QueryBody[H, A, R], ca: std.codec.Codec[A], cr: std.codec.Codec[R],
-    declared: Slots[Outer], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: Outer, select: fn(Outer) -> H, caller: Caller, arg: Bytes,
-    n: u64, steps: u64, newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
+fn adapt_query[H: inert + send, Outer: send, A, R](body: QueryBody[H, A, R], ca: std.codec.Codec[A], cr: std.codec.Codec[R], declared: Slots[Outer], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: Outer, select: fn(Outer) -> H, caller: Caller, arg: Bytes, n: u64, steps: u64, newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
     let result = bound bytes n {
         let prepared = isolate(scoped fn() -> QueryAttempt[H, A, R] {
             QueryAttempt(body: body, args: ca, value: cr, handles: select(h), caller: store.copy_env(caller), arguments: store.copy_env(arg), steps: steps)
@@ -132,31 +135,26 @@ type QueryEntry[H: send]: send {
     run: own[send] fn(Slots[H], List[BoundSlot], PublisherReads, store.Reader, H, Caller, Bytes, store.Snapshot, store.Snapshot, Log[Row], Option[View[List[Cover]]]) -> Queried waits
 }
 
-pub fn query[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H],
-    f: StaticFn[fn(store.Tx, H, take A) -> Result[Answer[R], Capacity]], take declarations: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
+pub fn query[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, take A) -> Result[Answer[R], Capacity]], take declarations: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
     register_query(mut r, Plain(f), take declarations, store.copy_env, n, s, None)
 }
 
-pub fn query_as[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H],
-    f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]], take declarations: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
+pub fn query_as[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]], take declarations: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
     register_query(mut r, As(f), take declarations, store.copy_env, n, s, None)
 }
 
-pub fn query_as_with[G: send, Outer: shareable + inert + send, H: shareable + inert + send, A: codec, R: codec](
-    mut r: Registry[G, Outer], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]],
-    take declarations: Slots[H], select: fn(Outer) -> H, n: u64, s: u64) -> Result[(), RegisterError] {
+pub fn query_as_with[G: send, Outer: shareable + inert + send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, Outer], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]], take declarations: Slots[H], select: fn(Outer) -> H, n: u64, s: u64) -> Result[(), RegisterError] {
     let projected = map_slots(take declarations, select)
     register_query(mut r, As(f), take projected, select, n, s, None)
 }
 
-fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, Outer],
-    body: QueryBody[H, A, R], take registered_slots: Slots[Outer], select: fn(Outer) -> H, n: u64, s: u64, take ephemeral: Option[RoomEntry]) -> Result[(), RegisterError] {
+fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, Outer], body: QueryBody[H, A, R], take registered_slots: Slots[Outer], select: fn(Outer) -> H, n: u64, s: u64, take ephemeral: Option[RoomEntry]) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let value = std.codec.schema(cr) ?=> |_| Bounds
     let schemas = slot_descriptions(registered_slots)
     let (kind, take result): (Kind, Bytes) = match ephemeral {
-        Some(definition) => (Room, encode_room_schema(value, schemas, definition)?),
+        Some(definition) => (Room, ((definition.hooks)().schema)(value, schemas, definition)?),
         None => (Query, encode_query_schema(clone(value), clone(schemas)) ?=> |_| Bounds),
     }
     let described_query = match body {
@@ -168,11 +166,13 @@ fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert
     d.slots = take schemas
     d.value = take value
     register_check(mut r, key, ca, n, s)?
-    let go = fn(declared: Slots[Outer], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: Outer, caller: Caller, arg: Bytes,
-        newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
+    let go = fn(declared: Slots[Outer], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: Outer, caller: Caller, arg: Bytes, newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
         adapt_query(body, ca, cr, declared, bindings, access, read_handle, h, select, caller, arg, n, s, newest, prior, rows, old)
     }
-    let by_caller = match body { As(_) => true, Plain(_) => false }
+    let by_caller = match body {
+        As(_) => true,
+        Plain(_) => false
+    }
     insert(mut r, take key, take d, Query(n, s, QueryEntry(by_caller: by_caller, ephemeral: take ephemeral, slots: take registered_slots, run: take go)))
 }
 

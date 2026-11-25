@@ -479,7 +479,7 @@ fn direct_destination_survives_full_block(c: Clock, random: Random, tasks: Tasks
 
 fn room_law_seed_desk(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSession, relay_to: Sender[RoomRelayIn], relay_in: Receiver[RoomRelayIn], to_owner: Sender[WireEvent], settings: (u32, u64, Grant)) -> RoomOwner {
     let (peers, live_limit, grant) = settings
-    let link = RoomLink(relay: channel.sender(relay_to), round_read: latest.handle(rounds), max_message: 32768u64, live_limit)
+    let link = RoomLink(relay: channel.sender(relay_to), round_read: latest.handle(rounds), max_message: 32768u64, live_limit, hooks: room_hooks)
     let mut owner = result.unwrap(room_owner(take link, id, to_owner))
     let check = fn(raw: Bytes) -> RoomCodecCheck {
         ValidRoomValue
@@ -869,7 +869,7 @@ fn room_session_charge_covers_maximum_session() -> Result[(), u64] {
     let input = room_law_bytes(message_max - 4u64, 0x43u8)
     let held = bound bytes (reserve + 32u64) {
         isolate(scoped fn() -> (RoomOwner, RoomCodecCheck) {
-            let link = RoomLink(relay: channel.sender(relay_to), round_read: latest.handle(rounds), max_message: message_max, live_limit: int.widen(LIVE_MAX))
+            let link = RoomLink(relay: channel.sender(relay_to), round_read: latest.handle(rounds), max_message: message_max, live_limit: int.widen(LIVE_MAX), hooks: room_hooks)
             let mut owner = result.unwrap(room_owner(take link, RoomSession(low: 0u64, high: 0u64), to_owner))
             for sub in 0u32 .. 8u32 {
                 let mut arg: Bytes = list.with_capacity(ROOM_ARGS_MAX)

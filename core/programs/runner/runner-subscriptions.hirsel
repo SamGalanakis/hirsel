@@ -3,21 +3,46 @@
 // Fields drop in reverse order: return the room after freeing the Caller, argument and key.
 // `caller` is the subscribing session's, the one a caller-dependent query runs with at
 // subscribe, at every rerun and at repair (rule 2).
-pub opaque type SubscriptionInput: send { grants: Option[Latest[RoomGrantSet]], room: Option[SubscriptionLease], key: Bytes, arg: Bytes, caller: Caller }
+pub opaque type SubscriptionInput: send {
+    grants: Option[RoomGrants],
+    room: Option[SubscriptionLease],
+    key: Bytes,
+    arg: Bytes,
+    caller: Caller
+}
 
-resource type SubscriptionLease: send { refund: Sender[u64], charge: u64, ledger: u64, frame_limit: u64, http: bool } drop(lease) {
+resource type SubscriptionLease: send {
+    refund: Sender[u64],
+    charge: u64,
+    ledger: u64,
+    frame_limit: u64,
+    http: bool
+} drop(lease) {
     let _ = channel.try_send(lease.refund, lease.charge)
 }
 
 type SubscriptionRoom: send {
-    to: Sender[u64], from: Receiver[u64], slots: u64, limit: u64, held: u64, used: u64, ledger: u64, frame_limit: u64,
+    to: Sender[u64],
+    from: Receiver[u64],
+    slots: u64,
+    limit: u64,
+    held: u64,
+    used: u64,
+    ledger: u64,
+    frame_limit: u64,
 }
 
 fn subscription_room(limit: u64, max_subs: u64, ledger: u64, frame_limit: u64) -> Result[SubscriptionRoom, Capacity] {
     let possible = int.saturating_sub(limit, 64u64) / 8u64
     let wanted = int.saturating_add(max_subs, 1u64)
-    let slot_capacity = if wanted < possible { wanted } else { possible }
-    if slot_capacity == 0u64 { return Error(Capacity(requested: 72u64, available: limit)) }
+    let slot_capacity = if wanted < possible {
+        wanted
+    } else {
+        possible
+    }
+    if slot_capacity == 0u64 {
+        return Error(Capacity(requested: 72u64, available: limit))
+    }
     let (to, from): (Sender[u64], Receiver[u64]) = channel.new(slot_capacity)
     Ok(SubscriptionRoom(to: take to, from: take from, slots: slot_capacity, limit: limit - (64u64 + slot_capacity * 8u64), held: 0u64, used: 0u64, ledger: ledger, frame_limit: frame_limit))
 }
@@ -34,8 +59,13 @@ fn subscription_hold_for(mut quota: SubscriptionRoom, take caller: Caller, take 
     // Include the lease record. One refund fits for every issued lease.
     let charge = wire_round(list.capacity(key)) + wire_round(list.capacity(arg)) + wire_round(list.capacity(caller.subject)) + 64u64
     let available = quota.limit - quota.held
-    if quota.used == quota.slots || charge > available { return Error(Capacity(requested: charge, available: available)) }
-    let lease = match SubscriptionLease(refund: channel.sender(quota.to), charge: charge, ledger: quota.ledger, frame_limit: quota.frame_limit, http: http) { Ok(take l) => take l, Error((c, _)) => return Error(c) }
+    if quota.used == quota.slots || charge > available {
+        return Error(Capacity(requested: charge, available: available))
+    }
+    let lease = match SubscriptionLease(refund: channel.sender(quota.to), charge: charge, ledger: quota.ledger, frame_limit: quota.frame_limit, http: http) {
+        Ok(take l) => take l,
+        Error((c, _)) => return Error(c)
+    }
     quota.held += charge
     quota.used += 1u64
     Ok(SubscriptionInput(grants: None, room: Some(take lease), key: take key, arg: take arg, caller: take caller))
@@ -55,13 +85,26 @@ type Sub {
     due: bool
 }
 
-type SubId { who: u64, sub: u32, serial: u64 }
+type SubId {
+    who: u64,
+    sub: u32,
+    serial: u64
+}
 
 // The publisher holds one balanced interval tree for the data-tree keys of its open.
 // Points have an inclusive upper endpoint and Covers and Spans have an exclusive one.
 // Each node also holds the greatest upper endpoint in its subtree.
-type RouteEnd { at: Arc[Bytes], included: bool }
-type RouteKey { low: Arc[Bytes], serial: u64, route_position: u64 }
+type RouteEnd {
+    at: Arc[Bytes],
+    included: bool
+}
+
+type RouteKey {
+    low: Arc[Bytes],
+    serial: u64,
+    route_position: u64
+}
+
 type Route {
     key: RouteKey,
     end: RouteEnd,
@@ -86,8 +129,12 @@ fn subscriptions() -> Subscriptions {
 fn route_before(a: RouteKey, b: RouteKey) -> bool {
     let low_a: View[Bytes] = a.low
     let low_b: View[Bytes] = b.low
-    if low_a != low_b { return low_a < low_b }
-    if a.serial != b.serial { return a.serial < b.serial }
+    if low_a != low_b {
+        return low_a < low_b
+    }
+    if a.serial != b.serial {
+        return a.serial < b.serial
+    }
     a.route_position < b.route_position
 }
 
@@ -105,16 +152,27 @@ fn raise_end(mut end: RouteEnd, candidate: RouteEnd) {
 }
 
 fn route_height(root: Option[Box[Route]]) -> u64 {
-    match root { Some(node) => node.height, None => 0u64 }
+    match root {
+        Some(node) => node.height,
+        None => 0u64
+    }
 }
 
 fn measure_route(mut node: Box[Route]) {
     let left = route_height(node.left)
     let right = route_height(node.right)
-    node.height = 1u64 + if left > right { left } else { right }
+    node.height = 1u64 + if left > right {
+        left
+    } else {
+        right
+    }
     let mut far = RouteEnd(at: arc.share(node.end.at), included: node.end.included)
-    if let Some(child) = node.left { raise_end(mut far, child.max) }
-    if let Some(child) = node.right { raise_end(mut far, child.max) }
+    if let Some(child) = node.left {
+        raise_end(mut far, child.max)
+    }
+    if let Some(child) = node.right {
+        raise_end(mut far, child.max)
+    }
     node.max = take far
 }
 
@@ -146,14 +204,18 @@ fn balance_route(take node: Box[Route]) -> Box[Route] {
         let child = option.unwrap(replace(mut root.left, None))
         root.left = Some(if route_height(child.right) > route_height(child.left) {
             rotate_route_left(take child)
-        } else { take child })
+        } else {
+            take child
+        })
         return rotate_route_right(take root)
     }
     if right > left + 1u64 {
         let child = option.unwrap(replace(mut root.right, None))
         root.right = Some(if route_height(child.left) > route_height(child.right) {
             rotate_route_right(take child)
-        } else { take child })
+        } else {
+            take child
+        })
         return rotate_route_left(take root)
     }
     measure_route(mut root)
@@ -161,7 +223,9 @@ fn balance_route(take node: Box[Route]) -> Box[Route] {
 }
 
 fn put_route(take top: Option[Box[Route]], take node: Box[Route]) -> Box[Route] {
-    let Some(take old) = take top else { return take node }
+    let Some(take old) = take top else {
+        return take node
+    }
     let mut root = take old
     if route_before(node.key, root.key) {
         let child = replace(mut root.left, None)
@@ -195,7 +259,9 @@ fn drop_route(take top: Option[Box[Route]], key: RouteKey) -> Option[Box[Route]]
         root.right = drop_route(take child, key)
     } else {
         let right = replace(mut root.right, None)
-        let Some(take child) = take right else { return replace(mut root.left, None) }
+        let Some(take child) = take right else {
+            return replace(mut root.left, None)
+        }
         let mut rest: Option[Box[Route]] = None
         let mut next = take_first_route(take child, mut rest)
         next.left = replace(mut root.left, None)
@@ -213,20 +279,24 @@ fn stage_route(mut nodes: List[Box[Route]], serial: u64, route_position: u64, ta
             (arc.share(endpoint), RouteEnd(at: take endpoint, included: true))
         },
         Span(take lo, take hi) => {
-            if hi <= lo { return Ok(()) }
+            if hi <= lo {
+                return Ok(())
+            }
             let upper = arc.new(take hi)
             (arc.new(take lo), RouteEnd(at: take upper, included: false))
         },
     }
     let max = RouteEnd(at: arc.share(end.at), included: end.included)
-    let node = Route(key: RouteKey(low: take low, serial: serial, route_position: route_position),
-        end: take end, max: take max, height: 1u64, left: None, right: None)
+    let node = Route(key: RouteKey(low: take low, serial: serial, route_position: route_position), end: take end, max: take max, height: 1u64, left: None, right: None)
     Ok(list.push(mut nodes, box.new(take node)))
 }
 
 // Cover route numbers come first so ending a sub can remove them without allocating.
 fn stage_routes(serial: u64, c: Option[View[List[Cover]]], take reads: List[store.Read]) -> Result[(List[Box[Route]], List[RouteKey]), Capacity] {
-    let count = match c { Some(spans) => list.len(spans), None => 0u64 }
+    let count = match c {
+        Some(spans) => list.len(spans),
+        None => 0u64
+    }
     let mut nodes: List[Box[Route]] = list.with_capacity(list.len(reads) + count)
     if let Some(spans) = c {
         for i in 0u64 .. count {
@@ -261,12 +331,21 @@ fn unregister_routes(mut root: Option[Box[Route]], keys: List[RouteKey]) {
 }
 
 fn route_hit(root: Option[Box[Route]], low: Bytes, high: Option[View[Bytes]], read_only: bool, mut hits: Map[u64, bool]) -> Result[(), Capacity] {
-    let Some(node) = view root else { return Ok(()) }
-    if !end_reaches(node.max, low) { return Ok(()) }
+    let Some(node) = view root else {
+        return Ok(())
+    }
+    if !end_reaches(node.max, low) {
+        return Ok(())
+    }
     route_hit(node.left, low, high, read_only, mut hits)?
     let route_low: View[Bytes] = node.key.low
-    let past = match high { Some(end) => route_low >= end, None => route_low > low }
-    if past { return Ok(()) }
+    let past = match high {
+        Some(end) => route_low >= end,
+        None => route_low > low
+    }
+    if past {
+        return Ok(())
+    }
     let read = node.key.route_position > COVER_MAX
     if (read || !read_only) && end_reaches(node.end, low) {
         if read || !map.contains(hits, node.key.serial) {
@@ -304,8 +383,12 @@ fn remove_sub(mut subs: Subscriptions, who: u64, sub: u32) -> Option[Sub] {
     let Some((take removed, empty)) = map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> (Option[Sub], bool) {
         let removed = map.remove(mut group, sub)
         (take removed, map.len(group) == 0u64)
-    }) else { return None }
-    if empty { let _ = map.remove(mut subs.by_session, who) }
+    }) else {
+        return None
+    }
+    if empty {
+        let _ = map.remove(mut subs.by_session, who)
+    }
     if let Some(previous) = view removed {
         leave_view(mut subs, previous.routes, previous.serial, previous.live)
     }
@@ -316,7 +399,9 @@ fn remove_sub(mut subs: Subscriptions, who: u64, sub: u32) -> Option[Sub] {
 fn end_entry(mut subs: Subscriptions, who: u64, sub: u32) {
     let changed = map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> Option[u64] {
         match map.update(mut group, sub, scoped fn(mut entry: Sub) -> Option[u64] {
-            if !entry.live { return None }
+            if !entry.live {
+                return None
+            }
             entry.live = false
             entry.due = false
             Some(entry.routes)
@@ -325,7 +410,9 @@ fn end_entry(mut subs: Subscriptions, who: u64, sub: u32) {
             None => None,
         }
     })
-    if let Some(Some(routes)) = changed { remove_live(mut subs, routes) }
+    if let Some(Some(routes)) = changed {
+        remove_live(mut subs, routes)
+    }
 }
 
 // A publisher-made Reset ends every live sub of the session; each stays as an ended entry.
@@ -333,10 +420,14 @@ fn end_session(mut subs: Subscriptions, who: u64) {
     let mut live: List[u32] = list.new()
     if let Some(group) = map.get(subs.by_session, who) {
         for (sub, entry) in group {
-            if entry.live { list.push(mut live, sub) }
+            if entry.live {
+                list.push(mut live, sub)
+            }
         }
     }
-    for sub in live { end_entry(mut subs, who, sub) }
+    for sub in live {
+        end_entry(mut subs, who, sub)
+    }
 }
 
 fn ended_entry(subs: Subscriptions, id: SubId) -> bool {
@@ -350,7 +441,9 @@ fn ended_entry(subs: Subscriptions, id: SubId) -> bool {
 fn mark_due(mut subs: Subscriptions, who: u64, sub: u32) -> bool {
     match map.update(mut subs.by_session, who, scoped fn(mut group: Map[u32, Sub]) -> bool {
         match map.update(mut group, sub, scoped fn(mut entry: Sub) -> bool {
-            if !entry.live { return false }
+            if !entry.live {
+                return false
+            }
             entry.due = true
             true
         }) {
@@ -367,7 +460,9 @@ fn due_subs(subs: Subscriptions, who: u64) -> List[u32] {
     let mut due: List[u32] = list.new()
     if let Some(group) = map.get(subs.by_session, who) {
         for (sub, entry) in group {
-            if entry.due { list.push(mut due, sub) }
+            if entry.due {
+                list.push(mut due, sub)
+            }
         }
     }
     take due
@@ -375,9 +470,26 @@ fn due_subs(subs: Subscriptions, who: u64) -> List[u32] {
 
 // What one step owes one session: at `version`, the subs whose whole initial result it
 // carries, its rows and its Ended subs; or, with `reset`, a Reset and nothing else.
-type TerminalUpdate: send { sub: u32, generation: u64, version: u64, outcome: Outcome }
+type TerminalUpdate: send {
+    sub: u32,
+    generation: u64,
+    version: u64,
+    outcome: Outcome
+}
 
-type Owe: send { session: u64, version: u64, generations: List[(u32, u64)], complete: List[u32], rows: List[SubRow], groups: List[OwedGroup], ended: List[TerminalUpdate], group_bytes: u64, frame_limit: u64, reset: bool, read_failed: bool }
+type Owe: send {
+    session: u64,
+    version: u64,
+    generations: List[(u32, u64)],
+    complete: List[u32],
+    rows: List[SubRow],
+    groups: List[OwedGroup],
+    ended: List[TerminalUpdate],
+    group_bytes: u64,
+    frame_limit: u64,
+    reset: bool,
+    read_failed: bool
+}
 
 type PublisherReads: send {
     changes: own[send] fn(store.Reader, Option[store.Snapshot], store.Snapshot, Bytes, Bytes, store.Limits) -> Result[store.ChangePage, store.Error] waits,
@@ -385,22 +497,35 @@ type PublisherReads: send {
 }
 
 fn publisher_reads() -> PublisherReads {
-    let step_span: own[send] fn(store.Reader, mut store.SpanRows, bool) -> Result[Option[store.Change], store.Error] waits =
-        fn(read_handle: store.Reader, mut rows: store.SpanRows, first: bool) -> Result[Option[store.Change], store.Error] waits {
-            store.next_span_change(read_handle, mut rows)
-        }
+    let step_span: own[send] fn(store.Reader, mut store.SpanRows, bool) -> Result[Option[store.Change], store.Error] waits = fn(read_handle: store.Reader, mut rows: store.SpanRows, first: bool) -> Result[Option[store.Change], store.Error] waits {
+        store.next_span_change(read_handle, mut rows)
+    }
     PublisherReads(changes: store.changes_page, span: take step_span)
 }
 
-type Board[G: send, H: shareable + inert + send] { r: Registry[G, H], h: Arc[H], read_handle: store.Reader, reads: PublisherReads, base: store.Snapshot, newest: Option[store.Snapshot], subs: Subscriptions }
+type Board[G: send, H: shareable + inert + send] {
+    r: Registry[G, H],
+    h: Arc[H],
+    read_handle: store.Reader,
+    reads: PublisherReads,
+    base: store.Snapshot,
+    newest: Option[store.Snapshot],
+    subs: Subscriptions
+}
 
 fn sub_generation(generations: List[(u32, u64)], sub: u32) -> Option[u64] {
-    for (id, generation) in generations { if id == sub { return Some(generation) } }
+    for (id, generation) in generations {
+        if id == sub {
+            return Some(generation)
+        }
+    }
     None
 }
 
 fn stamp_rows(mut generations: List[(u32, u64)], sub: u32, generation: u64) {
-    if generation != 0u64 { list.push(mut generations, (sub, generation)) }
+    if generation != 0u64 {
+        list.push(mut generations, (sub, generation))
+    }
 }
 
 fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
@@ -415,10 +540,10 @@ fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
     i
 }
 
-fn run_query[G: send, H: shareable + inert + send](r: Registry[G, H], h: H, access: PublisherReads,
-    read_handle: store.Reader, at: store.Snapshot, input: SubscriptionInput, prior: store.Snapshot,
-    old: Option[View[List[Cover]]], rows: Log[Row]) -> Queried waits {
-    let Some(Query(_, _, registered)) = map.get(r.slots, input.key) else { return Stopped(Refused(NoEntry)) }
+fn run_query[G: send, H: shareable + inert + send](r: Registry[G, H], h: H, access: PublisherReads, read_handle: store.Reader, at: store.Snapshot, input: SubscriptionInput, prior: store.Snapshot, old: Option[View[List[Cover]]], rows: Log[Row]) -> Queried waits {
+    let Some(Query(_, _, registered)) = map.get(r.slots, input.key) else {
+        return Stopped(Refused(NoEntry))
+    }
     let bindings = option.unwrap(map.get(r.bound_slots, input.key))
     (registered.run)(registered.slots, bindings, access, read_handle, h, input.caller, input.arg, at, prior, rows, old)
 }
@@ -427,7 +552,9 @@ fn projection_error(take e: store.Error, take dependencies: List[store.Read]) ->
     match take e {
         Full(c) => {
             let why: Outcome = Failed(OutOfBytes(capacity_room(store_capacity(c))))
-            if list.len(dependencies) == 0u64 { return Stopped(take why) }
+            if list.len(dependencies) == 0u64 {
+                return Stopped(take why)
+            }
             Faulted(take why, take dependencies)
         },
         take other => Lost(take other, take dependencies),
@@ -473,18 +600,17 @@ fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], 
                             stamp_rows(mut o.generations, sub, generation)
                             list.push(mut o.complete, sub)
                         },
-                        Error(_) => { o.reset = true },
+                        Error(_) => {
+                            o.reset = true
+                        },
                     }
                 },
-                (Error(problem), _) => retain_initial_failure(mut b.subs, mut o, sub, generation,
-                    take input, Refused(Budget(capacity_room(problem))), clone(image.reads)),
-                (_, Error(problem)) => retain_initial_failure(mut b.subs, mut o, sub, generation,
-                    take input, Refused(Budget(capacity_room(problem))), clone(image.reads)),
+                (Error(problem), _) => retain_initial_failure(mut b.subs, mut o, sub, generation, take input, Refused(Budget(capacity_room(problem))), clone(image.reads)),
+                (_, Error(problem)) => retain_initial_failure(mut b.subs, mut o, sub, generation, take input, Refused(Budget(capacity_room(problem))), clone(image.reads)),
             }
         },
         Error(Stopped(take why)) => append_terminal(mut o, sub, generation, take why),
-        Error(Faulted(take why, take reads)) =>
-            retain_initial_failure(mut b.subs, mut o, sub, generation, take input, take why, take reads),
+        Error(Faulted(take why, take reads)) => retain_initial_failure(mut b.subs, mut o, sub, generation, take input, take why, take reads),
         Error(Lost(problem, take dependencies)) => {
             let charge = subscription_charge(b.subs, who, sub, input, read_charge(dependencies))
             if let Ok(assigned) = charge {
@@ -499,8 +625,7 @@ fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], 
 }
 
 // A publisher-made Ended can only be sent with its read dependencies indexed.
-fn retain_initial_failure(mut subs: Subscriptions, mut out: Owe, sub: u32, generation: u64,
-    take input: SubscriptionInput, take why: Outcome, take reads: List[store.Read]) {
+fn retain_initial_failure(mut subs: Subscriptions, mut out: Owe, sub: u32, generation: u64, take input: SubscriptionInput, take why: Outcome, take reads: List[store.Read]) {
     let who = out.session
     let charge = subscription_charge(subs, who, sub, input, read_charge(reads))
     if let Ok(assigned) = charge {
@@ -520,7 +645,9 @@ fn append_terminal(mut out: Owe, sub: u32, generation: u64, take why: Outcome) {
 fn initial_view[G: send, H: shareable + inert + send](b: Board[G, H], key: ViewKey, input: SubscriptionInput, rows: Log[Row]) -> Result[Arc[Viewed], Queried] waits {
     if let Some(serial) = map.get(b.subs.views, key) {
         let existing = option.unwrap(map.get(b.subs.indexed, serial))
-        let Some(image) = existing.image else { fail("runner: missing live view image") }
+        let Some(image) = existing.image else {
+            fail("runner: missing live view image")
+        }
         view_image_rows(b, input.key, image, rows)?
         return Ok(arc.share(image))
     }
@@ -530,11 +657,13 @@ fn initial_view[G: send, H: shareable + inert + send](b: Board[G, H], key: ViewK
     }
 }
 
-fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64, take input: SubscriptionInput,
-    take sharing: Option[(ViewKey, Arc[Viewed])], charge: u64, take failed_reads: List[store.Read]) -> Result[(), Capacity] {
+fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64, take input: SubscriptionInput, take sharing: Option[(ViewKey, Arc[Viewed])], charge: u64, take failed_reads: List[store.Read]) -> Result[(), Capacity] {
     subs.serial += 1u64
     let id = SubId(who: who, sub: sub, serial: subs.serial)
-    let live = match sharing { Some(_) => true, None => false }
+    let live = match sharing {
+        Some(_) => true,
+        None => false
+    }
     let routes = match take sharing {
         Some((take key, take image)) => match shared_view_serial(subs.views, key) {
             Some(existing) => existing,
@@ -546,8 +675,7 @@ fn add_subscription(mut subs: Subscriptions, who: u64, sub: u32, generation: u64
         },
         None => index_view(mut subs, None, take failed_reads)?,
     }
-    let inserted = put_sub(mut subs, id, Sub(serial: id.serial, generation: generation, input: take input,
-        routes: routes, charge: charge, live: live, due: false))
+    let inserted = put_sub(mut subs, id, Sub(serial: id.serial, generation: generation, input: take input, routes: routes, charge: charge, live: live, due: false))
     if let Error(problem) = inserted {
         drop_empty_view(mut subs, routes)
         return Error(problem)
@@ -561,7 +689,9 @@ fn project_changes[G: send, H: shareable + inert + send](b: Board[G, H], key: By
         Some(Query(allowance, steps, _)) => {
             let bindings = option.unwrap(map.get(b.r.bound_slots, key))
             let projected = bound bytes allowance {
-                bound steps steps { covered_all_pages(b.reads, b.read_handle, b.base, newest, c, bindings, rows) }
+                bound steps steps {
+                    covered_all_pages(b.reads, b.read_handle, b.base, newest, c, bindings, rows)
+                }
             }
             match take projected {
                 Ok(Ok(take value)) => take value,
@@ -583,8 +713,12 @@ fn reset_session(mut subs: Subscriptions, mut owes: List[Owe], who: u64, version
 
 fn reset_subscriptions(mut subs: Subscriptions, mut owes: List[Owe], version: u64) {
     let mut indexed: List[u64] = list.with_capacity(map.len(subs.by_session))
-    for (who, _) in subs.by_session { list.push(mut indexed, who) }
-    for who in indexed { reset_session(mut subs, mut owes, who, version) }
+    for (who, _) in subs.by_session {
+        list.push(mut indexed, who)
+    }
+    for who in indexed {
+        reset_session(mut subs, mut owes, who, version)
+    }
 }
 
 fn read_failed(problem: store.Error) -> bool {
@@ -619,15 +753,25 @@ fn affected_routes[G: send, H: shareable + inert + send](b: Board[G, H], newest:
         }
         let store.ChangePage(next: take resume, ..) = take page
         match take resume {
-            Some(take continuation) => { low = take continuation },
+            Some(take continuation) => {
+                low = take continuation
+            },
             None => break,
         }
     }
     let mut ordered: List[(u64, bool)] = list.with_capacity(map.len(hits))
-    for (serial, read) in hits { list.push(mut ordered, (serial, read)) }
+    for (serial, read) in hits {
+        list.push(mut ordered, (serial, read))
+    }
     // Both projection and reruns observe the same subscription order as G3.
     list.sort(mut ordered, scoped fn(a: (u64, bool), right: (u64, bool)) -> Order {
-        if a.0 < right.0 { Less } else if a.0 > right.0 { Greater } else { Equal }
+        if a.0 < right.0 {
+            Less
+        } else if a.0 > right.0 {
+            Greater
+        } else {
+            Equal
+        }
     })
     Ok(take ordered)
 }
@@ -639,10 +783,16 @@ fn end_round_sub(mut subs: Subscriptions, mut out: Owe, id: SubId, generation: u
 }
 
 fn append_round_group(mut out: Owe, id: SubId, generation: u64, projected: List[Row], packed: Arc[Bytes], limit: u64) -> bool {
-    if out.reset { return true }
+    if out.reset {
+        return true
+    }
     out.group_bytes = int.saturating_add(out.group_bytes, 4u64 + list.len(packed))
-    if limit < out.frame_limit { out.frame_limit = limit }
-    if !owe_frame_fits(out) { return false }
+    if limit < out.frame_limit {
+        out.frame_limit = limit
+    }
+    if !owe_frame_fits(out) {
+        return false
+    }
     for row in projected {
         list.push(mut out.rows, SubRow(sub: id.sub, key: clone(row.key), value: clone(row.value)))
     }
@@ -656,14 +806,23 @@ fn owe_frame_fits(out: Owe) -> bool {
     int.saturating_add(envelope, out.group_bytes) <= out.frame_limit
 }
 
-type GroupProjection { rows: List[Row], packed: Result[Arc[Bytes], Capacity] }
-type SubUpdate = Rows(Option[GroupProjection]) | Refreshed(Viewed, Option[GroupProjection]) |
-    EndSub(Outcome) | EndRead(Outcome, List[store.Read]) | ResetSubs(bool)
+type GroupProjection {
+    rows: List[Row],
+    packed: Result[Arc[Bytes], Capacity]
+}
+
+type SubUpdate = Rows(Option[GroupProjection]) | Refreshed(Viewed, Option[GroupProjection]) | EndSub(Outcome) | EndRead(Outcome, List[store.Read]) | ResetSubs(bool)
 
 fn project_group(take output: Log[Row], value: Bytes, changed: bool) -> Option[GroupProjection] {
     let rows = slot_rows(take output)
-    if !changed && list.len(rows) == 0u64 { return None }
-    let packed = if changed { pack_group(value, rows) } else { pack_group(list.new(), rows) }
+    if !changed && list.len(rows) == 0u64 {
+        return None
+    }
+    let packed = if changed {
+        pack_group(value, rows)
+    } else {
+        pack_group(list.new(), rows)
+    }
     Some(GroupProjection(rows: take rows, packed: take packed))
 }
 
@@ -698,7 +857,9 @@ fn advance_view[G: send, H: shareable + inert + send](b: Board[G, H], newest: st
 // a lost diff fences them all.
 fn round[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: Fenced) -> List[Owe] waits {
     let mut owes: List[Owe] = list.new()
-    let Some(take newest) = replace(mut b.newest, None) else { return take owes }
+    let Some(take newest) = replace(mut b.newest, None) else {
+        return take owes
+    }
     let version = store.version(newest)
     let hits = match affected_routes(b, newest) {
         Ok(take x) => take x,
@@ -733,14 +894,17 @@ fn live_instance(subs: Subscriptions, id: SubId) -> Option[(u64, bool, u64)] {
     }
 }
 
-fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fenced, take key: ViewKey,
-    members: List[SubId], version: u64, take progress: SubUpdate) {
+fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fenced, take key: ViewKey, members: List[SubId], version: u64, take progress: SubUpdate) {
     match take progress {
         Rows(None) => (),
         Rows(Some(take group)) => {
             for id in members {
-                let Some((generation, due, limit)) = live_instance(subs, id) else { continue }
-                if due { continue }
+                let Some((generation, due, limit)) = live_instance(subs, id) else {
+                    continue
+                }
+                if due {
+                    continue
+                }
                 deliver_round_group(mut subs, mut owes, id, version, generation, limit, group.rows, group.packed)
             }
         },
@@ -749,7 +913,9 @@ fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fe
             let size = view_charge(image)
             let new_routes = index_view(mut subs, Some(arc.share(image)), list.new())
             for id in members {
-                let Some((generation, due, limit)) = live_instance(subs, id) else { continue }
+                let Some((generation, due, limit)) = live_instance(subs, id) else {
+                    continue
+                }
                 match view_admit(subs, id, size, new_routes) {
                     Ok(ViewAdmission(serial: next, charge: charge)) => {
                         move_subscription(mut subs, id, next, charge, true)
@@ -771,13 +937,17 @@ fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fe
                         let target = option.unwrap(map.get(subs.indexed, next))
                         target.live != 0u64
                     }
-                    if has_live { publish_view(mut subs, next, take key) }
+                    if has_live {
+                        publish_view(mut subs, next, take key)
+                    }
                 }
             }
         },
         EndSub(why) => {
             for id in members {
-                let Some((generation, _, _)) = live_instance(subs, id) else { continue }
+                let Some((generation, _, _)) = live_instance(subs, id) else {
+                    continue
+                }
                 let k = owe(mut owes, id.who, version)
                 end_round_sub(mut subs, mut owes[k], id, generation, clone(why))
             }
@@ -786,7 +956,9 @@ fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fe
             let size = read_charge(reads)
             let new_routes = index_view(mut subs, None, take reads)
             for id in members {
-                let Some((generation, _, _)) = live_instance(subs, id) else { continue }
+                let Some((generation, _, _)) = live_instance(subs, id) else {
+                    continue
+                }
                 let k = owe(mut owes, id.who, version)
                 match view_admit(subs, id, size, new_routes) {
                     Ok(ViewAdmission(serial: next, charge: charge)) => {
@@ -796,11 +968,15 @@ fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fe
                     Error(problem) => end_round_sub(mut subs, mut owes[k], id, generation, Refused(Budget(capacity_room(problem)))),
                 }
             }
-            if let Ok(next) = new_routes { let _ = drop_empty_view(mut subs, next) }
+            if let Ok(next) = new_routes {
+                let _ = drop_empty_view(mut subs, next)
+            }
         },
         ResetSubs(failed) => {
             for id in members {
-                if failed { map.insert(mut fenced.sessions, id.who, ()) }
+                if failed {
+                    map.insert(mut fenced.sessions, id.who, ())
+                }
                 let k = owe(mut owes, id.who, version)
                 reset_session(mut subs, mut owes, id.who, version)
                 owes[k].read_failed = failed

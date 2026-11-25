@@ -297,7 +297,8 @@ type SweepEnd: key {
     client: u8,
     server: u8,
     keys: bool,
-    waited: bool
+    waited: bool,
+    data: bool
 }
 
 fn show_sweep_end(e: SweepEnd, mut out: String) {
@@ -313,6 +314,9 @@ fn show_sweep_end(e: SweepEnd, mut out: String) {
     if e.waited {
         string.push(mut out, " after a wait")
     }
+    if !e.data {
+        string.push(mut out, " application data lost")
+    }
 }
 
 /// Numbers the calls of a swept run and bounds the one its budget names.
@@ -320,7 +324,9 @@ type SweepCalls {
     budget: Option[std.refuse.Budget],
     calls: u64,
     next: Option[u64],
-    now: u64
+    now: u64,
+    /// The application data every receive delivered, a refused call's included.
+    got: Bytes
 }
 
 /// The bound for the next call, counting it.
@@ -336,6 +342,7 @@ fn sweep_receive(mut e: dtls.Endpoint, r: Random, datagram: Bytes, mut k: SweepC
     let mut data: Bytes = list.with_capacity(2048)
     let Some(b) = sweep_call(mut k) else {
         let _ = dtls.receive(mut e, k.now, r, datagram, mut data)
+        list.append(mut k.got, data)
         return
     }
     let outcome = bound bytes b {
@@ -349,6 +356,7 @@ fn sweep_receive(mut e: dtls.Endpoint, r: Random, datagram: Bytes, mut k: SweepC
         Ok(_) => (),
         Error(_) => fail("sweep: the bound was refused on entry"),
     }
+    list.append(mut k.got, data)
 }
 
 /// Every datagram `e` has queued, each poll bounded when the budget names it; a refused
@@ -412,7 +420,28 @@ fn exporter_agrees(mut client: dtls.Endpoint, mut server: dtls.Endpoint) -> bool
 
 type SweepParties {
     client: Party,
-    server: Party
+    server: Party,
+    /// Deliver each flight a record per datagram, epoch-1 records first, so the receiver
+    /// holds them until the ChangeCipherSpec and then drains them (DTLS-6 early records).
+    early: bool
+}
+
+/// `flight` as the receiver gets it: as sent, or with its sealed records ahead.
+fn sweep_order(take flight: List[Bytes], early: bool) -> List[Bytes] {
+    if !early {
+        return take flight
+    }
+    let records = records_in(flight)
+    let mut out: List[Bytes] = list.new()
+    for sealed in[true, false] {
+        for i in 0u64 .. list.len(records) {
+            // The epoch's low byte is header byte 4.
+            if (records[i][4] == 1) == sealed {
+                list.push(mut out, owned(records[i]))
+            }
+        }
+    }
+    out
 }
 
 /// A pinned client and server handshaking with no loss, every call on either endpoint under
@@ -424,16 +453,25 @@ fn swept_handshake(p: SweepParties, index: u64, budget: Option[std.refuse.Budget
     let mut server = result.unwrap(dtls.server(dtls.share_identity(p.server.id), dtls.defaults(), address(2), Verified))
     result.unwrap(dtls.expect(mut client, pin_list(p.server.certificate)))
     result.unwrap(dtls.expect(mut server, pin_list(p.client.certificate)))
-    let mut k = SweepCalls(budget: budget, calls: 0, next: None, now: 0)
+    let mut k = SweepCalls(budget: budget, calls: 0, next: None, now: 0, got: list.new())
+    let mut sent = false
     // A round that moves nothing waits one second, as a caller polls at WakeAt. With no loss
     // the never-refused run never waits, so a refusal that delays a flight to its
     // retransmission timer ends in a different class (DTLS-8: the next poll retries).
     for _ in 0u64 .. 24 {
-        let to_server = sweep_drain(mut client, rc, mut k)
+        let to_server = sweep_order(sweep_drain(mut client, rc, mut k), p.early)
         for i in 0u64 .. list.len(to_server) {
             sweep_receive(mut server, rs, to_server[i], mut k)
         }
-        let to_client = sweep_drain(mut server, rs, mut k)
+        let mut flight = sweep_drain(mut server, rs, mut k)
+        // The connected server's first application record rides behind its final flight.
+        if is_connected(server) && !sent {
+            let mut d: Bytes = list.with_capacity(2048)
+            let _ = result.unwrap(dtls.send(mut server, b"held until the client has keys", mut d))
+            list.push(mut flight, take d)
+            sent = true
+        }
+        let to_client = sweep_order(take flight, p.early)
         for i in 0u64 .. list.len(to_client) {
             sweep_receive(mut client, rc, to_client[i], mut k)
         }
@@ -447,24 +485,28 @@ fn swept_handshake(p: SweepParties, index: u64, budget: Option[std.refuse.Budget
     let c = sweep_state(client)
     let s = sweep_state(server)
     let keys = c == 1 && s == 1 && exporter_agrees(mut client, mut server)
-    std.refuse.Refusal(end: SweepEnd(client: c, server: s, keys: keys, waited: k.now != 0), calls: k.calls, next: k.next)
+    std.refuse.Refusal(end: SweepEnd(client: c, server: s, keys: keys, waited: k.now != 0, data: k.got == b"held until the client has keys"), calls: k.calls, next: k.next)
 }
 
 /// bug: a Capacity refusal anywhere in the handshake leaves an endpoint that never connects:
 /// a refused message skipped (attack 2434 F4), a refused flight 6 over a cleared transcript
 /// (F5), or a refused record open faulting the task (2465); or one that connects only after
 /// waiting for its retransmission timer, because a refused first poll had built the
-/// ClientHello but never queued it (2557).
+/// ClientHello but never queued it (2557); or a held early record lost when a refusal hits
+/// while it is drained after the ChangeCipherSpec (2573).
 /// oracle: DTLS-8 and MEM-21: a refusal leaves the endpoint usable, so at every budget where
 /// some call first meets a refusal, repeating that call unbounded still connects both sides
-/// with agreeing SRTP keys (RFC 5764 section 4.2) without the clock moving, as the
-/// never-refused run does, and no failure but Capacity is raised.
+/// with agreeing SRTP keys (RFC 5764 section 4.2) without the clock moving, and delivers the
+/// server's one application record, as the never-refused run does, and no failure but
+/// Capacity is raised. Each flight goes in order, then again with its sealed records first.
 @test
 fn capacity_sweep_handshake() -> Result[(), ()] {
-    let parties = SweepParties(client: party(821), server: party(822))
-    let swept = std.refuse.sweep(parties, swept_handshake, show_sweep_end)
-    match take swept {
-        Ok(_) => Ok(()),
-        Error(take text) => fail(take text),
+    for early in[false, true] {
+        let parties = SweepParties(client: party(821), server: party(822), early: early)
+        let swept = std.refuse.sweep(parties, swept_handshake, show_sweep_end)
+        if let Error(take text) = take swept {
+            fail(take text)
+        }
     }
+    Ok(())
 }

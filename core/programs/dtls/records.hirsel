@@ -21,7 +21,10 @@ pub opaque type Ahead {
     limit: u64,
     fragments: u64,
     encrypted: RecordQueue,
-    application: RecordQueue
+    application: RecordQueue,
+    /// The record `next_early_record` last took, until the next drain call: a refused step
+    /// on it puts it back (DTLS-8). It holds no slot.
+    drained: Option[Bytes]
 }
 
 type ReceiveKeys {
@@ -78,8 +81,18 @@ fn dequeue(mut q: RecordQueue) -> Bytes {
     b
 }
 
+/// Put `b` back at the head of `q`, where `dequeue` took it from.
+fn requeue(mut q: RecordQueue, take b: Bytes) {
+    if q.head == 0 {
+        list.push(mut q.entries, take b)
+    } else {
+        q.head -= 1
+        q.entries[q.head] = b
+    }
+}
+
 pub fn ahead(max_ahead: u16) -> Ahead {
-    Ahead(limit: int.widen(max_ahead), fragments: 0, encrypted: queue(), application: queue())
+    Ahead(limit: int.widen(max_ahead), fragments: 0, encrypted: queue(), application: queue(), drained: None)
 }
 
 pub fn records(first_plain_sequence: u64) -> Records {
@@ -360,6 +373,7 @@ fn receive_protected(mut k: ReceiveKeys, mut a: Ahead, connected: bool, mut drop
 /// Drain after accepting ChangeCipherSpec, one record at a time. Free its shared slot
 /// while processing it, including if authenticated application data has to wait.
 pub fn next_early_record(mut r: Records, mut a: Ahead) -> Result[RecordEvent, RecordError] {
+    a.drained = None
     if let Some(c) = r.close {
         return Error(Closed(c))
     }
@@ -372,17 +386,23 @@ pub fn next_early_record(mut r: Records, mut a: Ahead) -> Result[RecordEvent, Re
     let raw = dequeue(mut a.encrypted)
     let mut at = 0u64
     match next_record(mut r, mut a, Fixed, raw, mut at) {
-        Ok(take event) => Ok(take event),
+        Ok(take event) => {
+            a.drained = Some(take raw)
+            Ok(take event)
+        },
         Error(e) => {
             // Restore the record at the head on a retryable resource refusal.
-            if a.encrypted.head == 0 {
-                list.push(mut a.encrypted.entries, take raw)
-            } else {
-                a.encrypted.head -= 1
-                a.encrypted.entries[a.encrypted.head] = raw
-            }
+            requeue(mut a.encrypted, take raw)
             Error(e)
         },
+    }
+}
+
+/// Processing the record `next_early_record` just returned was refused: hold it again at
+/// the head, so the next receive drains it first (DTLS-8).
+fn undo_early_record(mut a: Ahead) {
+    if let Some(take raw) = replace(mut a.drained, None) {
+        requeue(mut a.encrypted, take raw)
     }
 }
 

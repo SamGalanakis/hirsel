@@ -105,7 +105,9 @@ fn receive_records(mut e: Endpoint, now: u64, r: Random, datagram: Bytes, mut da
     }
     let mut n = 0u64
     let mut at = 0u64
-    let mut draining = false
+    // Records a refused call left held after the ChangeCipherSpec go first; before it, and
+    // once drained, this ends at once.
+    let mut draining = true
     while true {
         let version = reading_version(e)
         let window = read_window(e.layer)
@@ -140,6 +142,9 @@ fn receive_records(mut e: Endpoint, now: u64, r: Random, datagram: Bytes, mut da
                 if let Error(f) = on_handshake(mut e, now, r, h.epoch, body) {
                     if let Retry(_) = f {
                         restore_window(mut e.layer, window)
+                        if draining {
+                            undo_early_record(mut e.early)
+                        }
                     }
                     return Error(f)
                 }

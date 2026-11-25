@@ -480,6 +480,12 @@ pub opaque scoped type IndexEntries[J, K, P] {
     payload_codec: std.codec.Codec[P]
 }
 
+/// The key codec of the index's table. Rows rank in the order of the bytes
+/// it writes, which is the order a package breaks ties in.
+pub fn primary_key[J, K, V, P](ix: Index[J, K, V, P]) -> std.codec.Key[K] {
+    ix.primary
+}
+
 fn check_index_read[J, K, V, P](tx: Tx, ix: Index[J, K, V, P]) -> Result[(), Error] {
     if !same(tx.store, ix.store) {
         return Error(Foreign)

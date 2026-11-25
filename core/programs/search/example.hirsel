@@ -1,24 +1,37 @@
+type Recipe: codec + send {
+    text: String,
+    published: bool
+}
+
+fn recipe_terms(_id: u64, r: Recipe) -> Result[search.Terms, Capacity] {
+    Ok(search.analyze(search.tokenizer(list.new()), r.text))
+}
+
 @test
 fn find_document(clock: Clock, random: Random) -> Result[(), store.Error] waits {
     let options = result.unwrap(store.sized(Memory, 1074790400u64))
     let mut db = store.memory(clock, random, options)
     let mut declaration = store.declare(db, Migrate)?
-    let layout: search.Spec[bool] = search.spec("recipes")
-    let index = search.declare(mut declaration, layout, search.tokenizer(list.new()))?
+    let recipe_codec: std.codec.Codec[Recipe] = std.codec.of()
+    let mut table = store.declare_table(mut declaration, "recipes", std.codec.key_u64(), recipe_codec)?
+    let text = search.declare(mut declaration, mut table, "text", list.new(), code.describe(recipe_terms))?
+    let recipes = store.finish(mut declaration, take table)?
     let _ = store.seal(mut db, take declaration)?
-    let saved = store.run(mut db, None, index, fn(mut tx, recipes) -> Result[(), store.Error] {
-        search.upsert(mut tx, recipes, 1, "lemon cake", true)?
-        search.upsert(mut tx, recipes, 2, "lemon ice cream", false)
+    let saved = store.run(mut db, None, (recipes, text), fn(mut tx, env) -> Result[List[search.Hit[u64]], store.Error] {
+        store.put(mut tx, env.0, 1, Recipe(text: "lemon cake", published: true))?
+        store.put(mut tx, env.0, 2, Recipe(text: "lemon ice cream", published: false))?
+        search.query(tx, env.1, "lemon", 10, search.defaults(), scoped fn(id: u64) -> bool {
+            match store.fetch(tx, env.0, id) {
+                Ok(Some(r)) => r.published,
+                _ => false,
+            }
+        })
     })?
-    let Committed(_) = saved else {
+    let Committed(done) = saved else {
         fail("expected recipes to commit")
     }
-    let reader = store.reader(db, 0u64)?
-    let published = scoped fn(_id: u64, visible: bool) -> bool {
-        visible
-    }
-    let hits = search.query(reader, store.snapshot(db), index, "lemon", 10, search.defaults(), published)?
-    if list.len(hits) != 1 || hits[0].id != 1 {
+    let hits = view done.value
+    if list.len(hits) != 1 || hits[0].key != 1 {
         fail("only the lemon cake recipe is published")
     }
     store.close(take db)

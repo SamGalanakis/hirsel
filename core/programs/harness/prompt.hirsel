@@ -64,7 +64,7 @@ fn tool_search[App: inert + send](mut tx: store.Tx, h: Handles, app: App, inv: I
         let _ = std.set.insert(mut admitted, clone(name))
     }
     for hit in search.rank(texts, query) {
-        let name = view names[hit.id]
+        let name = view names[hit.key]
         if std.set.insert(mut admitted, clone(name)) {
             list.push(mut s.admitted, clone(name))
         }

@@ -1,4 +1,6 @@
-# STORE-SPEC v2.120: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.121: the M4 store library (lane store-spec-1001)
+
+v2.121 (store-search-a-2-2-2640; Store 2.2, D14 = A): built. (1) **Search form A** (§1.2 "Search form A"). `search@1` declares BM25 search on a store table as one `Many` postings index and one aggregate of corpus and term statistics, both written in the row's own transaction, backfilled by the builder and revisioned through one extractor. `search.query(tx, …)` is a plain function of a `Tx`, so entry and query bodies call it, and equal scores rank in primary key order. The five-table `upsert` API (`spec`, `Spec`, `Index`, `upsert`, `delete`, the `Reader` and `Snapshot` form of `query`) is deleted with no compatibility path. (2) **`primary_key(ix)`** returns an index's table key codec, so a package that merges several index ranges orders rows by their key bytes. (3) **Aggregate overflow during a build stays a stall** (§1.2 "Aggregates"): no terminal state is added. Search's term groups cannot overflow, and its corpus sum needs more than 2^64 − 1 tokens. No format change. Reversible: library code and spec text.
 
 v2.120 (store-status-1-8-2619; Store 1.8): built. **What an operator can see (§II.3).** `store.attention(db)` reports, besides drift and reclaim failures: `indexes`, every index on main's head with its build state (`IndexState` is public: `Backfilling(cursor)`, `Public`, `Failed(first, second)`), in catalog order; `IndexDrift.demoted`, the demotions the writer committed for that index since this open (one per demoting schema commit; none when the index is already `Backfilling(None)` or the drift was on a branch); and `reclaim_pending`, true from a failed Bucket reclaim pass until a pass succeeds. `attention_mark(db)` changes whenever `attention` may answer differently, so a caller reads it cheaply and calls `attention` only on a change. The runner's `Status.store` carries the answer (RUNNER-SPEC v2.75). The cursor is reported as the raw primary key, not as a fraction of the table: no row count exists to divide by. Reversible: code only, no format change.
 
@@ -1740,7 +1742,25 @@ type IndexState = Backfilling(Option[Bytes]) | Public | Failed(Bytes, Bytes)
 - **Builder.** `index_build_step` and a `Migrate` declaration build an aggregate in the same chunks as an entry index: a chunk adds each of its rows' parts to the group rows and sets the cursor to its last row, in one schema commit. `rebuild_aggregate(mut db, a)` demotes it to `Backfilling(None)` over an empty collection.
 - **Contention.** Each group is one row, so every write to a hot group touches the same key. The store's one writer serializes them; a hot group costs no aborts, but it is a single point every such write rewrites.
 - **Overflow while building.** A write past the cursor is not counted, so a sum it would overflow is found by the chunk that reaches it: the step refuses `Limit(Value)`, commits nothing, and the aggregate stays `Backfilling` at its cursor until the rows change or it is redeclared. While it stays, `index_build_step` keeps refusing, and indexes after it in the step's order wait.
-- **Not here.** A `Reader` form of `totals`, range reads over groups, and a terminal state for an aggregate whose sum overflows during a build (Store 2.2).
+- **No terminal overflow state (v2.121, Store 2.2).** An overflow during a build keeps the stall above. Search form A, the aggregate's first user, cannot reach it from its term groups, whose sum equals their count. Its corpus sum needs more than 2^64 − 1 tokens in total. A terminal state would be a catalog format change for that case only. If an aggregate does stall, its reads stay `NotReady(name)`, and the remedy is the one above: change the rows or redeclare the aggregate.
+- **Not built.** There is no `Reader` form of `totals` and no range read over groups. A reader calls `totals` inside `look`, and search form A reads its groups by key.
+
+**Search form A (v2.121, Store 2.2, D14 = A).** The `search@1` package ranks a table's rows by BM25. It uses only public store calls (D10).
+- **Declaration.** `search.declare(mut d, mut t, name, stop_words, terms)` takes one extractor, `terms: StaticFn[fn(K, V) -> Result[List[(Term, u64)], Capacity]]`. Normally it is `search.analyze(analyzer, text)`: one `(Corpus, length)` part, then one `(Posting(term, tf, length), 1)` part for each distinct term. The same `StaticFn` declares two records:
+  - `name`, a `Many` index whose key codec writes `0` for `Corpus` and `1 ‖ term ‖ tf ‖ length` for a posting;
+  - `name.stats`, an aggregate whose group key codec writes `0` for `Corpus` and `1 ‖ term` for a posting.
+  - The corpus group's totals are the row count N and the token sum. A term group's count is its document frequency. A row with no terms is counted in N.
+  - One extractor means one recorded revision for both records, so a changed analyzer rebuilds both.
+- **Writes.** There is no search write call. Both records change in the row's own transaction under the index and aggregate rules above.
+- **Query.** `search.query(tx, s, text, k, params, allows)` reads the corpus group, one group per distinct query term, and that term's posting range in `tx`. It takes no `waits`. A query in a transaction sees that transaction's own writes. Scores are f64 BM25 with whole-corpus statistics. `allows(key)` is asked once per candidate. Equal scores rank in increasing order of the primary key's encoded bytes, which the package reads from `primary_key(ix)`.
+- **Readiness.** If either record is not `Public`, the query is `NotReady` with that record's name. `search.rebuild(mut db, s)` demotes both.
+- **Overflow.** A term group's sum equals its count, which is at most the row count, so it cannot overflow. A corpus sum past `u64` on a put to a `Public` aggregate is `Limit(Value)`, and the write stages nothing. During a build it is the stall described under "Aggregates".
+- **Law.** `core/programs/search/tests.hirsel`:
+  - Hand-computed Python BM25 scores for a six-row corpus that includes a row with no terms, with filters, ties, an abort and a retained snapshot.
+  - `bm25_histories`: seeded put, overwrite, delete, rebuild and build-step histories, each checked against a brute-force BM25 ranking over the model rows.
+  - Red on three seeded bugs: ties in descending key order, a corpus that leaves out rows with no terms, and a term frequency dropped to 1.
+
+**Index key codec (v2.121).** `primary_key[J, K, V, P](ix: Index[J, K, V, P]) -> Key[K]` returns the key codec of the index's table.
 
 **The builder.** An index is built in chunks of `INDEX_CHUNK` = 4,096 rows, in primary-key order after the cursor.
 - **Each chunk reads the current head.** The chunk's rows come from main's roots at the moment it runs, never from the roots the build started at, so a row written between chunks is extracted as it now is.

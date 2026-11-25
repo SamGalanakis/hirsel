@@ -1,34 +1,22 @@
-type PostingKey {
-    term: String,
-    id: u64
-}
+// Search form A (OPTIMAL-STORE-ENDSTATE §III.3, Store 2.2): BM25 over a
+// store table. The postings are a Many entry index on the table and the
+// corpus and term statistics are one aggregate on it, both written in the
+// row's own transaction and built by the store's builder. A query is a
+// plain function of a store.Tx, so entry and query bodies can call it.
+/// One part of a row's analysis. `Corpus` puts the row in the corpus with
+/// its token count; `Posting` is one distinct term with its frequency in
+/// the row and the row's token count.
+pub type Term: shareable + send = Corpus | Posting(String, u64, u64)
 
-type Document[M: codec]: codec {
-    length: u64,
-    metadata: M
-}
+/// A row's analysis: one `(Corpus, length)` part, then one
+/// `(Posting(term, tf, length), 1)` part per distinct term.
+pub type Terms = List[(Term, u64)]
 
-type Stats: codec {
-    documents: u64,
-    tokens: u64
-}
-
-pub opaque type Spec[M: codec] {
-    name: String,
-    documents: std.codec.Codec[Document[M]]
-}
-
-pub fn spec[M: codec](name: String) -> Spec[M] {
-    Spec(name: string.from(name), documents: std.codec.of())
-}
-
-pub opaque type Index[M: codec] {
-    tokenizer: Tokenizer,
-    documents: store.Table[u64, Document[M]],
-    forward: store.Table[u64, List[String]],
-    postings: store.Table[PostingKey, u64],
-    frequencies: store.Table[String, u64],
-    stats: store.Table[u8, Stats]
+pub opaque type Text[K, V]: shareable + send {
+    postings: store.Index[(Term, u64), K, V, ()],
+    stats: store.Aggregate[Term],
+    primary: std.codec.Key[K],
+    stop_words: List[String]
 }
 
 pub opaque type Bm25 {
@@ -36,137 +24,149 @@ pub opaque type Bm25 {
     b: f64
 }
 
-pub type Hit {
-    id: u64,
+pub type Hit[K] {
+    key: K,
     score: f64
 }
 
-fn encode_posting(k: PostingKey, mut out: Bytes) {
-    std.codec.put_key_string(k.term, mut out)
-    std.codec.put_key_u64(k.id, mut out)
-}
+const CORPUS_TAG: u8 = 0u8
 
-fn decode_posting(raw: Bytes, mut at: u64) -> Result[PostingKey, std.codec.DecodeError] {
-    let term = std.codec.take_key_string(raw, mut at)?
-    let id = std.codec.take_key_u64(raw, mut at)?
-    Ok(PostingKey(term: take term, id: id))
-}
+const POSTING_TAG: u8 = 1u8
 
-fn posting_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
-    std.codec.schema_tuple(mut s, 2)?
-    std.codec.schema_string(mut s)
-    std.codec.schema_u64(mut s)
-    Ok(())
-}
+const MAX: u64 = 18446744073709551615u64
 
-fn posting_key() -> std.codec.Key[PostingKey] {
-    std.codec.key_make(code.describe(encode_posting), code.describe(decode_posting), code.describe(posting_schema))
-}
-
-fn table_name(name: String, suffix: String) -> String {
-    let mut full = string.from(name)
-    string.push(mut full, suffix)
-    take full
-}
-
-pub fn declare[M: codec](mut d: store.Declare, layout: Spec[M], take analyzer: Tokenizer) -> Result[Index[M], store.Error] {
-    let forward_codec: std.codec.Codec[List[String]] = std.codec.of_list()
-    let stats_codec: std.codec.Codec[Stats] = std.codec.of()
-    let doc_decl = store.declare_table(mut d, table_name(layout.name, ".documents"), std.codec.key_u64(), layout.documents)?
-    let forward_decl = store.declare_table(mut d, table_name(layout.name, ".forward"), std.codec.key_u64(), forward_codec)?
-    let posting_decl = store.declare_table(mut d, table_name(layout.name, ".postings"), posting_key(), std.codec.of_u64())?
-    let frequency_decl = store.declare_table(mut d, table_name(layout.name, ".frequencies"), std.codec.key_string(), std.codec.of_u64())?
-    let stats_decl = store.declare_table(mut d, table_name(layout.name, ".stats"), std.codec.key_u8(), stats_codec)?
-    Ok(Index(tokenizer: take analyzer,
-        documents: store.finish(mut d, take doc_decl)?,
-        forward: store.finish(mut d, take forward_decl)?,
-        postings: store.finish(mut d, take posting_decl)?,
-        frequencies: store.finish(mut d, take frequency_decl)?,
-        stats: store.finish(mut d, take stats_decl)?))
-}
-
-fn corpus_stats(take row: Option[Stats]) -> Stats {
-    match take row {
-        Some(take stats) => take stats,
-        None => Stats(documents: 0, tokens: 0)
-    }
-}
-
-fn remove_posting[M: codec](mut tx: store.Tx, index: Index[M], id: u64, term: String) -> Result[(), store.Error] {
-    let key = PostingKey(term: clone(term), id: id)
-    let _ = store.delete(mut tx, index.postings, key)?
-    let df = option.unwrap(store.fetch(tx, index.frequencies, term)?)
-    if df == 1 {
-        let _ = store.delete(mut tx, index.frequencies, term)?
-    } else {
-        store.put(mut tx, index.frequencies, term, df - 1)?
-    }
-    Ok(())
-}
-
-pub fn upsert[M: codec](mut tx: store.Tx, index: Index[M], id: u64, text: String, take metadata: M) -> Result[(), store.Error] {
-    let tokens = tokenize(index.tokenizer, text)
+/// The analysis of `text` under `analyzer`, in the form `declare`'s
+/// extractor returns. Terms are in first-appearance order.
+pub fn analyze(analyzer: Tokenizer, text: String) -> Terms {
+    let tokens = tokenize(analyzer, text)
     let length = list.len(tokens)
+    let mut order: List[String] = list.new()
     let mut counts: Map[String, u64] = map.new()
     for take token in take tokens {
+        if !map.contains(counts, token) {
+            list.push(mut order, clone(token))
+        }
         map.update_or_insert(mut counts, take token, 0u64, scoped fn(mut tf: u64) {
             tf += 1
         })
     }
-    let mut stats = corpus_stats(store.fetch(tx, index.stats, 0u8)?)
-    let previous = store.fetch(tx, index.documents, id)?
-    if let Some(doc) = previous {
-        stats.tokens -= doc.length
-        let old_terms = option.unwrap(store.fetch(tx, index.forward, id)?)
-        for term in old_terms {
-            if !map.contains(counts, term) {
-                remove_posting(mut tx, index, id, term)?
-            }
-        }
-    } else {
-        stats.documents += 1
+    let mut parts: Terms = list.with_capacity(list.len(order) + 1)
+    list.push(mut parts, (Corpus, length))
+    for take term in take order {
+        let tf = option.unwrap(map.get(counts, term))
+        list.push(mut parts, (Posting(take term, tf, length), 1u64))
     }
-    let postings = view index.postings
-    let frequencies = view index.frequencies
-    let mut unique: List[String] = list.with_capacity(map.len(counts))
-    for take (take term, tf) in take counts {
-        let key = PostingKey(term: clone(term), id: id)
-        let old = store.fetch(tx, postings, key)?
-        if old == None {
-            let df = match store.fetch(tx, frequencies, term)? {
-                Some(df) => df,
-                None => 0u64
-            }
-            store.put(mut tx, index.frequencies, term, df + 1)?
-        }
-        if old != Some(tf) {
-            store.put(mut tx, index.postings, key, tf)?
-        }
-        list.push(mut unique, take term)
-    }
-    stats.tokens += length
-    let doc = Document(length: length, metadata: take metadata)
-    store.put(mut tx, index.documents, id, doc)?
-    store.put(mut tx, index.forward, id, unique)?
-    store.put(mut tx, index.stats, 0u8, stats)
+    take parts
 }
 
-pub fn delete[M: codec](mut tx: store.Tx, index: Index[M], id: u64) -> Result[bool, store.Error] {
-    let doc = match store.fetch(tx, index.documents, id)? {
-        Some(take doc) => take doc,
-        None => return Ok(false)
+// A posting entry's key: tag 1, the term, its frequency and the row's
+// length, so one term's entries are one contiguous range. A corpus part
+// is the one-byte key 0, which no term range reaches. The part's count is
+// not encoded: a posting's is always 1.
+fn encode_posting(part: (Term, u64), mut out: Bytes) {
+    match part.0 {
+        Corpus => std.codec.put_key_u8(CORPUS_TAG, mut out),
+        Posting(term, tf, length) => {
+            std.codec.put_key_u8(POSTING_TAG, mut out)
+            std.codec.put_key_string(term, mut out)
+            std.codec.put_key_u64(tf, mut out)
+            std.codec.put_key_u64(length, mut out)
+        },
     }
-    let terms = option.unwrap(store.fetch(tx, index.forward, id)?)
-    for term in terms {
-        remove_posting(mut tx, index, id, term)?
+}
+
+fn decode_posting(raw: Bytes, mut at: u64) -> Result[(Term, u64), std.codec.DecodeError] {
+    let start = at
+    match std.codec.take_key_u8(raw, mut at)? {
+        0u8 => Ok((Corpus, 1u64)),
+        1u8 => {
+            let term = std.codec.take_key_string(raw, mut at)?
+            let tf = std.codec.take_key_u64(raw, mut at)?
+            let length = std.codec.take_key_u64(raw, mut at)?
+            Ok((Posting(take term, tf, length), 1u64))
+        },
+        _ => Error(Invalid(start)),
     }
-    let mut stats = option.unwrap(store.fetch(tx, index.stats, 0u8)?)
-    stats.documents -= 1
-    stats.tokens -= doc.length
-    let _ = store.delete(mut tx, index.documents, id)?
-    let _ = store.delete(mut tx, index.forward, id)?
-    store.put(mut tx, index.stats, 0u8, stats)?
-    Ok(true)
+}
+
+fn posting_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
+    std.codec.schema_tuple(mut s, 4)?
+    std.codec.schema_u8(mut s)
+    std.codec.schema_string(mut s)
+    std.codec.schema_u64(mut s)
+    std.codec.schema_u64(mut s)
+    Ok(())
+}
+
+fn posting_key() -> std.codec.Key[(Term, u64)] {
+    std.codec.key_make(code.describe(encode_posting), code.describe(decode_posting), code.describe(posting_schema))
+}
+
+// A statistics group's key: tag 0 for the corpus, tag 1 and the term for
+// a term. The corpus group's totals are the row count and the token sum;
+// a term group's count is its document frequency.
+fn encode_group(t: Term, mut out: Bytes) {
+    match t {
+        Corpus => std.codec.put_key_u8(CORPUS_TAG, mut out),
+        Posting(term, _, _) => {
+            std.codec.put_key_u8(POSTING_TAG, mut out)
+            std.codec.put_key_string(term, mut out)
+        },
+    }
+}
+
+fn decode_group(raw: Bytes, mut at: u64) -> Result[Term, std.codec.DecodeError] {
+    let start = at
+    match std.codec.take_key_u8(raw, mut at)? {
+        0u8 => Ok(Corpus),
+        1u8 => Ok(Posting(std.codec.take_key_string(raw, mut at)?, 0, 0)),
+        _ => Error(Invalid(start)),
+    }
+}
+
+fn group_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
+    std.codec.schema_tuple(mut s, 2)?
+    std.codec.schema_u8(mut s)
+    std.codec.schema_string(mut s)
+    Ok(())
+}
+
+fn group_key() -> std.codec.Key[Term] {
+    std.codec.key_make(code.describe(encode_group), code.describe(decode_group), code.describe(group_schema))
+}
+
+fn stats_name(name: String) -> String {
+    let mut full = string.from(name)
+    string.push(mut full, ".stats")
+    take full
+}
+
+/// Declares search on `t`: a Many index `name` of its postings and an
+/// aggregate `name.stats` of its corpus and term statistics. `terms` gives
+/// a row's analysis, normally `Ok(search.analyze(analyzer, text))`. Its
+/// analyzer must use `stop_words`, which `query` applies to query text.
+pub fn declare[K, V](mut d: store.Declare, mut t: store.TableDecl[K, V], name: String, take stop_words: List[String], terms: StaticFn[fn(K, V) -> Result[Terms, Capacity]]) -> Result[Text[K, V], store.Error] {
+    let postings = store.index(mut d, mut t, name, Many, terms, posting_key())?
+    let stats = store.aggregate(mut d, mut t, stats_name(name), terms, group_key())?
+    let primary = store.primary_key(postings)
+    Ok(Text(postings: take postings, stats: take stats, primary: primary, stop_words: take stop_words))
+}
+
+/// The store's handle on the postings index.
+pub fn posting_index[K, V](s: Text[K, V]) -> store.Index[(Term, u64), K, V, ()] {
+    clone(s.postings)
+}
+
+/// The store's handle on the statistics aggregate.
+pub fn statistics[K, V](s: Text[K, V]) -> store.Aggregate[Term] {
+    clone(s.stats)
+}
+
+/// Rebuilds both records from the table's first row; queries answer
+/// NotReady until `store.index_build_step` finishes them.
+pub fn rebuild[K, V](mut db: store.Db, s: Text[K, V]) -> Result[(), store.Error] waits {
+    store.rebuild_index(mut db, s.postings)?
+    store.rebuild_aggregate(mut db, s.stats)
 }
 
 pub fn defaults() -> Bm25 {
@@ -204,49 +204,6 @@ fn log_one_plus(x: f64) -> f64 {
     e * 0.6931471805599453 + 2.0 * sum
 }
 
-fn hit_order(left: Hit, right: Hit) -> Order {
-    if float.gt(left.score, right.score) || (float.eq(left.score, right.score) && left.id < right.id) {
-        Less
-    } else if float.lt(left.score, right.score) || left.id > right.id {
-        Greater
-    } else {
-        Equal
-    }
-}
-
-// The root of this heap is the worst retained hit.
-fn keep_hit(mut hits: List[Hit], k: u64, hit: Hit) {
-    let n = list.len(hits)
-    if n < k {
-        list.push(mut hits, hit)
-        let mut child = n
-        while child != 0 {
-            let parent = (child - 1) / 2
-            if hit_order(hits[child], hits[parent]) != Greater {
-                break
-            }
-            list.swap(mut hits, child, parent)
-            child = parent
-        }
-    } else if hit_order(hit, hits[0]) == Less {
-        let _ = list.set(mut hits, 0, hit)
-        let mut parent: u64 = 0
-        while parent < n / 2 {
-            let mut child = 2 * parent + 1
-            if child + 1 < n && hit_order(hits[child + 1], hits[child]) == Greater {
-                child += 1
-            }
-            if hit_order(hits[child], hits[parent]) != Greater {
-                break
-            }
-            list.swap(mut hits, parent, child)
-            parent = child
-        }
-    }
-}
-
-type Candidate = Rejected | Eligible(f64, f64)
-
 fn inverse_frequency(documents: u64, df: u64) -> f64 {
     let found: f64 = float.from_int(df)
     let absent: f64 = float.from_int(documents - df)
@@ -259,8 +216,8 @@ fn contribution(params: Bm25, norm: f64, weight: f64, tf: u64) -> f64 {
     weight * (frequency / (frequency / scale + (params.k1 / scale) * norm))
 }
 
-// Rank a small corpus without materializing an index. A hit's id is its input position.
-pub fn rank(texts: List[String], text: String) -> List[Hit] {
+// Rank a small corpus without materializing an index. A hit's key is its input position.
+pub fn rank(texts: List[String], text: String) -> List[Hit[u64]] {
     let analyzer = tokenizer(list.new())
     let mut slots: Map[String, u64] = map.new()
     for take term in tokenize(analyzer, text) {
@@ -270,7 +227,7 @@ pub fn rank(texts: List[String], text: String) -> List[Hit] {
         }
     }
     let terms = map.len(slots)
-    let mut hits: List[Hit] = list.new()
+    let mut hits: List[Hit[u64]] = list.new()
     if terms == 0u64 || list.len(texts) == 0u64 {
         return take hits
     }
@@ -316,66 +273,129 @@ pub fn rank(texts: List[String], text: String) -> List[Hit] {
             }
         }
         if float.gt(score, 0.0f64) {
-            list.push(mut hits, Hit(id: id, score: score))
+            list.push(mut hits, Hit(key: id, score: score))
         }
     }
-    std.list.sort(mut hits, hit_order)
+    std.list.sort(mut hits, position_order)
     take hits
 }
 
-pub fn query[M: codec](read_handle: store.Reader, snapshot: store.Snapshot, index: Index[M], text: String, k: u64, params: Bm25, allows: scoped fn(u64, M) -> bool) -> Result[List[Hit], store.Error] waits {
-    let mut hits: List[Hit] = list.new()
-    if k == 0 {
+type Candidate = Rejected | Eligible(f64, f64)
+
+// Ranked first is the greater score, then the smaller key bytes.
+fn ranked[K](left: (Bytes, Hit[K]), right: (Bytes, Hit[K])) -> Order {
+    if float.gt(left.1 .score, right.1 .score) {
+        Less
+    } else if float.lt(left.1 .score, right.1 .score) {
+        Greater
+    } else {
+        list.compare_bytes(left.0, right.0)
+    }
+}
+
+fn position_order(left: Hit[u64], right: Hit[u64]) -> Order {
+    if float.gt(left.score, right.score) || (float.eq(left.score, right.score) && left.key < right.key) {
+        Less
+    } else if float.lt(left.score, right.score) || left.key > right.key {
+        Greater
+    } else {
+        Equal
+    }
+}
+
+// The root of this heap is the worst retained hit.
+fn keep_hit[K](mut hits: List[(Bytes, Hit[K])], k: u64, take hit: (Bytes, Hit[K])) {
+    let n = list.len(hits)
+    if n < k {
+        list.push(mut hits, take hit)
+        let mut child = n
+        while child != 0 {
+            let parent = (child - 1) / 2
+            if ranked(hits[child], hits[parent]) != Greater {
+                break
+            }
+            list.swap(mut hits, child, parent)
+            child = parent
+        }
+    } else if ranked(hit, hits[0]) == Less {
+        let _ = list.set(mut hits, 0, take hit)
+        let mut parent: u64 = 0
+        while parent < n / 2 {
+            let mut child = 2 * parent + 1
+            if child + 1 < n && ranked(hits[child + 1], hits[child]) == Greater {
+                child += 1
+            }
+            if ranked(hits[child], hits[parent]) != Greater {
+                break
+            }
+            list.swap(mut hits, parent, child)
+            parent = child
+        }
+    }
+}
+
+/// The `k` best rows for `text` among the rows `tx` sees, best first, by
+/// BM25 with whole-corpus statistics. `allows` is asked once per candidate
+/// row and only allowed rows rank. Equal scores rank in increasing primary
+/// key order, the table's key codec order. A build in progress answers
+/// `NotReady` with the name of the record still building.
+pub fn query[K, V](tx: store.Tx, s: Text[K, V], text: String, k: u64, params: Bm25, allows: scoped fn(K) -> bool) -> Result[List[Hit[K]], store.Error] {
+    let corpus = store.totals(tx, s.stats, Corpus)?
+    let mut hits: List[Hit[K]] = list.new()
+    if k == 0 || corpus.sum == 0 {
         return Ok(take hits)
     }
-    let stats = corpus_stats(store.get(read_handle, snapshot, index.stats, 0u8)?)
-    if stats.tokens == 0 {
-        return Ok(take hits)
-    }
-    let n: f64 = float.from_int(stats.documents)
-    let tokens: f64 = float.from_int(stats.tokens)
+    let n: f64 = float.from_int(corpus.count)
+    let tokens: f64 = float.from_int(corpus.sum)
     let mean = tokens / n
-    let docs = view index.documents
-    let frequencies = view index.frequencies
-    let postings = view index.postings
-    let mut terms: std.set.Set[String] = std.set.new()
-    let mut candidates: Map[u64, Candidate] = map.new()
-    for take term in tokenize(index.tokenizer, text) {
-        if !std.set.insert(mut terms, clone(term)) {
+    let mut seen: std.set.Set[String] = std.set.new()
+    let mut candidates: Map[Bytes, Candidate] = map.new()
+    let mut keys: Map[Bytes, K] = map.new()
+    for take term in tokenize(tokenizer(clone(s.stop_words)), text) {
+        if !std.set.insert(mut seen, clone(term)) {
             continue
         }
-        let df = match store.get(read_handle, snapshot, frequencies, term)? {
-            Some(df) => df,
-            None => continue
+        let df = store.totals(tx, s.stats, Posting(clone(term), 0, 0))?.count
+        if df == 0 {
+            continue
         }
-        let weight = inverse_frequency(stats.documents, df)
-        let low = PostingKey(term: clone(term), id: 0)
-        let high = PostingKey(term: take term, id: 18446744073709551615)
-        let mut rows = store.scan(read_handle, snapshot, postings, Included(take low), Included(take high))?
-        while let Some((key, tf)) = store.next(read_handle, mut rows)? {
-            let id = key.id
-            if !map.contains(candidates, id) {
-                let doc = option.unwrap(store.get(read_handle, snapshot, docs, id)?)
-                let candidate = if allows(id, doc.metadata) {
-                    let length: f64 = float.from_int(doc.length)
-                    Eligible(1.0 - params.b + params.b * (length / mean), 0.0)
+        let weight = inverse_frequency(corpus.count, df)
+        let low = (Posting(clone(term), 0, 0), 1u64)
+        let high = (Posting(take term, MAX, MAX), 1u64)
+        let mut rows = store.entries(tx, s.postings, Included(take low), Included(take high))?
+        while let Some((part, take key, _)) = store.next_entry(mut rows)? {
+            let (tf, length) = match part.0 {
+                Posting(_, tf, length) => (tf, length),
+                Corpus => continue,
+            }
+            let mut encoded: Bytes = list.new()
+            std.codec.encode_key(s.primary, key, mut encoded)
+            if !map.contains(candidates, encoded) {
+                let candidate = if allows(key) {
+                    let size: f64 = float.from_int(length)
+                    map.insert(mut keys, clone(encoded), take key)
+                    Eligible(1.0 - params.b + params.b * (size / mean), 0.0)
                 } else {
                     Rejected
                 }
-                map.insert(mut candidates, id, candidate)
+                map.insert(mut candidates, clone(encoded), take candidate)
             }
-            let _ = map.update(mut candidates, id, scoped fn(mut candidate: Candidate) {
+            let _ = map.update(mut candidates, encoded, scoped fn(mut candidate: Candidate) {
                 if let Eligible(norm, score) = candidate {
                     candidate = Eligible(norm, score + contribution(params, norm, weight, tf))
                 }
             })
         }
     }
-    for (id, candidate) in candidates {
-        if let Eligible(_, score) = candidate {
-            keep_hit(mut hits, k, Hit(id: id, score: score))
+    let mut best: List[(Bytes, Hit[K])] = list.new()
+    for take (take encoded, take key) in take keys {
+        if let Some(Eligible(_, score)) = map.get(candidates, encoded) {
+            keep_hit(mut best, k, (take encoded, Hit(key: take key, score: score)))
         }
     }
-    std.list.sort(mut hits, hit_order)
+    std.list.sort(mut best, ranked)
+    for take (_, take hit) in take best {
+        list.push(mut hits, take hit)
+    }
     Ok(take hits)
 }

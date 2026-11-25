@@ -3,32 +3,101 @@ const LAST_ID: u64 = 18446744073709551615u64
 // Ranked by the independent Python oracle, with whole-corpus statistics.
 const INITIAL: Inline[(u64, f64), 5] =[(1u64, 1.007225464450901), (3u64, 0.8406763719039017), (LAST_ID, 0.8406763719039017), (2u64, 0.6881642867354947), (4u64, 0.4203381859519508)]
 
-fn expect_hit(hits: List[search.Hit], rank: u64, id: u64, score: f64) {
+type Doc: codec + send {
+    body: String,
+    published: bool
+}
+
+type Docs = store.Table[u64, Doc]
+
+type Found = Result[List[search.Hit[u64]], store.Error]
+
+fn stop_the() -> List[String] {
+    let mut stop_words: List[String] = list.new()
+    list.push(mut stop_words, string.from("the"))
+    take stop_words
+}
+
+fn doc_terms(_id: u64, row: Doc) -> Result[search.Terms, Capacity] {
+    Ok(search.analyze(search.tokenizer(stop_the()), row.body))
+}
+
+fn open_docs(clock: Clock, random: Random, take stop_words: List[String]) -> (store.Db, Docs, search.Text[u64, Doc]) waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut d = result.unwrap(store.declare(db, Migrate))
+    let doc_codec: std.codec.Codec[Doc] = std.codec.of()
+    let mut decl = result.unwrap(store.declare_table(mut d, "docs", std.codec.key_u64(), doc_codec))
+    let text = result.unwrap(search.declare(mut d, mut decl, "body", take stop_words, code.describe(doc_terms)))
+    let docs = result.unwrap(store.finish(mut d, take decl))
+    let _ = result.unwrap(store.seal(mut db, take d))
+    (take db, docs, take text)
+}
+
+fn doc(body: String, published: bool) -> Doc {
+    Doc(body: string.from(body), published: published)
+}
+
+fn expect_hit(hits: List[search.Hit[u64]], rank: u64, id: u64, score: f64) {
     let hit = hits[rank]
-    if hit.id != id || !float.le(float.abs(hit.score - score), 0.000000001) {
+    if hit.key != id || !float.le(float.abs(hit.score - score), 0.000000001) {
         fail("BM25 hit differs from the Python reference")
     }
 }
 
-fn load_fixture(mut db: store.Db, index: search.Index[bool]) -> () waits {
-    let loaded = result.unwrap(store.run(mut db, None, index, fn(mut tx, call_env) -> Result[(), store.Error] {
-        search.upsert(mut tx, call_env, 1, "red red blue", false)?
-        search.upsert(mut tx, call_env, 2, "red red red red", true)?
-        search.upsert(mut tx, call_env, 3, "red blue green", false)?
-        search.upsert(mut tx, call_env, 4, "blue green green", true)?
-        search.upsert(mut tx, call_env, 5, "the", true)?
-        search.upsert(mut tx, call_env, LAST_ID, "red blue green", false)
+fn load_fixture(mut db: store.Db, docs: Docs) -> () waits {
+    let loaded = result.unwrap(store.run(mut db, None, docs, fn(mut tx, t) -> Result[(), store.Error] {
+        store.put(mut tx, t, 1, doc("red red blue", false))?
+        store.put(mut tx, t, 2, doc("red red red red", true))?
+        store.put(mut tx, t, 3, doc("red blue green", false))?
+        store.put(mut tx, t, 4, doc("blue green green", true))?
+        store.put(mut tx, t, 5, doc("the", true))?
+        store.put(mut tx, t, LAST_ID, doc("red blue green", false))
     }))
     if let Committed(_) = loaded {} else {
         fail("initial indexing")
     }
 }
 
+type Filter = Anyone | Published | Among(u64, u64)
+
+// Queries `snapshot` through a look. Published reads each candidate's row
+// in the look's own transaction.
+fn look_query(db: store.Db, snapshot: store.Snapshot, docs: Docs, text: search.Text[u64, Doc], q: String, k: u64, params: search.Bm25, filter: Filter) -> Found waits {
+    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let env = (store.copy_env(docs), store.copy_env(text), store.copy_env(q), k, store.copy_env(params), store.copy_env(filter))
+    let looked = result.unwrap(store.look(read_handle, snapshot, None, env, fn(tx, input) -> Found {
+        search.query(tx, input.1, input.2, input.3, input.4, scoped fn(id: u64) -> bool {
+            match input.5 {
+                Anyone => true,
+                Published => match store.fetch(tx, input.0, id) {
+                    Ok(Some(row)) => row.published,
+                    _ => false,
+                },
+                Among(a, b) => id == a || id == b,
+            }
+        })
+    }))
+    match take looked {
+        Seen(take seen) => clone(seen.value),
+        _ => fail("search law: the look did not run"),
+    }
+}
+
+fn expect_found(take found: Found, count: u64, what: String) -> List[search.Hit[u64]] {
+    let Ok(hits) = take found else {
+        fail("search query failed")
+    }
+    if list.len(hits) != count {
+        fail(string.from(what))
+    }
+    take hits
+}
+
 @test
 fn snapshot_bm25(clock: Clock, random: Random) -> Result[(), ()] waits {
     let mut stop_words: List[String] = list.new()
     list.push(mut stop_words, string.from("THE"))
-    let analyzer = search.tokenizer(stop_words)
+    let analyzer = search.tokenizer(clone(stop_words))
     let tokens = search.tokenize(analyzer, "THE Straße ΟΣ İ can't 3.14 中日 カタカナ foo_bar ___")
     let expected: Inline[String, 9] =[string.from("strasse"), string.from("οσ"), string.from("i\u{307}"), string.from("can't"), string.from("3.14"), string.from("中"), string.from("日"), string.from("カタカナ"), string.from("foo_bar")]
     if list.len(tokens) != 9 {
@@ -39,83 +108,48 @@ fn snapshot_bm25(clock: Clock, random: Random) -> Result[(), ()] waits {
             fail("Unicode tokenizer vector")
         }
     }
-    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let layout: search.Spec[bool] = search.spec("test")
-    let mut declaration = result.unwrap(store.declare(db, Migrate))
-    let index = result.unwrap(search.declare(mut declaration, layout, take analyzer))
-    let _ = result.unwrap(store.seal(mut db, take declaration))
-    load_fixture(mut db, index)
-    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let (take opened, docs, text) = open_docs(clock, random, take stop_words)
+    let mut db = take opened
+    load_fixture(mut db, docs)
     let before = store.snapshot(db)
     let params = search.defaults()
     let query = "red blue red"
-    let anyone = scoped fn(_id: u64, _eligible: bool) -> bool {
-        true
-    }
-    let permitted = scoped fn(_id: u64, eligible: bool) -> bool {
-        eligible
-    }
-    let initial = result.unwrap(search.query(read_handle, before, index, query, 10, params, anyone))
-    if list.len(initial) != 5 {
-        fail("initial scores, deduplication or tie break")
-    }
+    let initial = expect_found(look_query(db, before, docs, text, query, 10, params, Anyone), 5, "initial scores, deduplication or tie break")
     for rank in 0u64 .. 5 {
         let (id, score) = INITIAL[rank]
         expect_hit(initial, rank, id, score)
     }
-    let filtered = result.unwrap(search.query(read_handle, before, index, query, 2, params, permitted))
-    if list.len(filtered) != 2 {
-        fail("filter precedes top k")
-    }
+    let filtered = expect_found(look_query(db, before, docs, text, query, 2, params, Published), 2, "filter precedes top k")
     expect_hit(filtered, 0, 2, 0.6881642867354947)
     expect_hit(filtered, 1, 4, 0.4203381859519508)
     let custom = option.unwrap(search.bm25(0.0, 1.0))
-    let saturated = result.unwrap(search.query(read_handle, before, index, query, 2, custom, anyone))
-    if list.len(saturated) != 2 {
-        fail("custom parameters and tie at the cutoff")
-    }
+    let saturated = expect_found(look_query(db, before, docs, text, query, 2, custom, Anyone), 2, "custom parameters and tie at the cutoff")
     expect_hit(saturated, 0, 1, 0.8836655045580785)
     expect_hit(saturated, 1, 3, 0.8836655045580785)
-    let edited = result.unwrap(store.run(mut db, None, index, fn(mut tx, call_env) -> Result[(), store.Error] {
-        if !search.delete(mut tx, call_env, 1)? || search.delete(mut tx, call_env, 1)? {
-            fail("delete must report prior membership")
-        }
-        search.upsert(mut tx, call_env, 3, "blue blue green", true)
+    let edited = result.unwrap(store.run(mut db, None, docs, fn(mut tx, t) -> Result[(), store.Error] {
+        let _ = store.delete(mut tx, t, 1)?
+        store.put(mut tx, t, 3, doc("blue blue green", true))
     }))
     if let Committed(_) = edited {} else {
         fail("document edits")
     }
-    let rolled_back = result.unwrap(store.run(mut db, None, index, fn(mut tx, call_env) -> Result[(), ()] {
-        result.unwrap(search.upsert(mut tx, call_env, 4, "red red red green", false))
+    let rolled_back = result.unwrap(store.run(mut db, None, docs, fn(mut tx, t) -> Result[(), ()] {
+        result.unwrap(store.put(mut tx, t, 4, doc("red red red green", false)))
         Error(())
     }))
     if let Aborted(_) = rolled_back {} else {
         fail("transaction abort")
     }
     let current = store.snapshot(db)
-    let after = result.unwrap(search.query(read_handle, current, index, query, 10, params, anyone))
-    if list.len(after) != 4 {
-        fail("updated scores and rejected transaction")
-    }
+    let after = expect_found(look_query(db, current, docs, text, query, 10, params, Anyone), 4, "updated scores and rejected transaction")
     expect_hit(after, 0, 2, 1.3552587760931822)
     expect_hit(after, 1, LAST_ID, 1.330714006884092)
     expect_hit(after, 2, 3, 0.7103824848366291)
     expect_hit(after, 3, 4, 0.507082234241936)
-    let mut subset: std.set.Set[u64] = std.set.new()
-    let _ = std.set.insert(mut subset, 3u64)
-    let _ = std.set.insert(mut subset, 4u64)
-    let after_allowed = result.unwrap(search.query(read_handle, current, index, query, 2, params, scoped fn(id: u64, _eligible: bool) -> bool {
-        std.set.contains(subset, id)
-    }))
-    if list.len(after_allowed) != 2 {
-        fail("precomputed allowed set")
-    }
+    let after_allowed = expect_found(look_query(db, current, docs, text, query, 2, params, Among(3, 4)), 2, "precomputed allowed set")
     expect_hit(after_allowed, 0, 3, 0.7103824848366291)
     expect_hit(after_allowed, 1, 4, 0.507082234241936)
-    let prior = result.unwrap(search.query(read_handle, before, index, query, 2, params, permitted))
-    if list.len(prior) != 2 {
-        fail("old snapshot")
-    }
+    let prior = expect_found(look_query(db, before, docs, text, query, 2, params, Published), 2, "old snapshot")
     expect_hit(prior, 0, 2, 0.6881642867354947)
     expect_hit(prior, 1, 4, 0.4203381859519508)
     result.unwrap(store.close(take db))
@@ -133,21 +167,24 @@ fn mask_contains(mask: u64, id: u64) -> bool {
 
 @test
 fn filtered_top_k(clock: Clock, random: Random) -> Result[(), ()] waits {
-    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let layout: search.Spec[bool] = search.spec("test")
-    let mut stop_words: List[String] = list.new()
-    list.push(mut stop_words, string.from("the"))
-    let mut declaration = result.unwrap(store.declare(db, Migrate))
-    let index = result.unwrap(search.declare(mut declaration, layout, search.tokenizer(stop_words)))
-    let _ = result.unwrap(store.seal(mut db, take declaration))
-    load_fixture(mut db, index)
+    let (take opened, docs, text) = open_docs(clock, random, stop_the())
+    let mut db = take opened
+    load_fixture(mut db, docs)
     let snapshot = store.snapshot(db)
     let read_handle = result.unwrap(store.reader(db, 0u64))
     for mask in 0u64 .. 64u64 {
         for k in 0u64 .. 8u64 {
-            let hits = result.unwrap(search.query(read_handle, snapshot, index, "red blue red", k, search.defaults(), scoped fn(id: u64, _metadata: bool) -> bool {
-                mask_contains(mask, id)
+            let looked = result.unwrap(store.look(read_handle, snapshot, None, (store.copy_env(text), mask, k), fn(tx, input) -> Found {
+                search.query(tx, input.0, "red blue red", input.2, search.defaults(), scoped fn(id: u64) -> bool {
+                    mask_contains(input.1, id)
+                })
             }))
+            let Seen(seen) = looked else {
+                fail("filtered look")
+            }
+            let Ok(hits): Found = clone(seen.value) else {
+                fail("filtered query")
+            }
             let mut rank: u64 = 0
             for (id, score) in INITIAL {
                 if rank == k {
@@ -167,5 +204,289 @@ fn filtered_top_k(clock: Clock, random: Random) -> Result[(), ()] waits {
         }
     }
     result.unwrap(store.close(take db))
+    Ok(())
+}
+
+const ROWS: u64 = 12
+
+const ROUNDS: u64 = 120
+
+type Step = Put(u64, String) | Delete(u64)
+
+// Runs the steps and then the query in one transaction, so the query sees
+// the transaction's own writes.
+fn run_query(mut db: store.Db, docs: Docs, text: search.Text[u64, Doc], take steps: List[Step], q: String, k: u64) -> Found waits {
+    let ran = result.unwrap(store.run(mut db, None, (store.copy_env(docs), store.copy_env(text), take steps, store.copy_env(q), k), fn(mut tx, input) -> Result[Found, store.Error] {
+        for step in input.2 {
+            match step {
+                Put(key, body) => store.put(mut tx, input.0, key, doc(body, true))?,
+                Delete(key) => {
+                    let _ = store.delete(mut tx, input.0, key)?
+                },
+            }
+        }
+        Ok(search.query(tx, input.1, input.3, input.4, search.defaults(), scoped fn(_id: u64) -> bool {
+            true
+        }))
+    }))
+    match take ran {
+        Committed(take done) => clone(done.value),
+        _ => fail("search law: the transaction did not commit"),
+    }
+}
+
+// ln(1 + x), written for the model: the same reduction the Python oracle's
+// constants were checked against, so the model and the index score a row
+// with the same floating-point operations.
+fn model_log_one_plus(x: f64) -> f64 {
+    let (exponent, z) = if float.le(x, 1.0) {
+        (0u64, x / (2.0 + x))
+    } else {
+        let bits = float.to_bits64(1.0 + x)
+        let exponent = (bits >> 52) - 1023
+        let mantissa = float.from_bits64((bits & 0x000fffffffffffff) | 0x3ff0000000000000)
+        (exponent, (mantissa - 1.0) / (mantissa + 1.0))
+    }
+    let ratio = z * z
+    let mut sum = z
+    let mut power = z
+    for i in 1u64 .. 18 {
+        power *= ratio
+        let denominator: f64 = float.from_int(2 * i + 1)
+        sum += power / denominator
+    }
+    let e: f64 = float.from_int(exponent)
+    e * 0.6931471805599453 + 2.0 * sum
+}
+
+// The model's brute force: tokenize every present row, count N, the token
+// sum and each query term's document frequency over the rows, score each
+// row that holds a query term (terms in first-appearance order, k1 = 1.2,
+// b = 0.75), and sort by score descending, then key.
+fn model_ranking(model: List[Option[String]], q: String) -> List[(u64, f64)] {
+    let analyzer = search.tokenizer(stop_the())
+    let mut terms: List[String] = list.new()
+    for take term in search.tokenize(analyzer, q) {
+        let mut repeated = false
+        for held in terms {
+            if held == term {
+                repeated = true
+            }
+        }
+        if !repeated {
+            list.push(mut terms, take term)
+        }
+    }
+    let mut rows: List[(u64, List[String])] = list.new()
+    let mut total = 0u64
+    for key in 0u64 .. list.len(model) {
+        if let Some(body) = view model[key] {
+            let tokens = search.tokenize(analyzer, body)
+            total += list.len(tokens)
+            list.push(mut rows, (key, take tokens))
+        }
+    }
+    let mut ranking: List[(u64, f64)] = list.new()
+    if total == 0 {
+        return take ranking
+    }
+    let n: f64 = float.from_int(list.len(rows))
+    let sum: f64 = float.from_int(total)
+    let mean = sum / n
+    let mut weights: List[f64] = list.new()
+    for term in terms {
+        let mut df = 0u64
+        for (_, tokens) in rows {
+            let mut holds = false
+            for token in tokens {
+                if token == term {
+                    holds = true
+                }
+            }
+            if holds {
+                df += 1
+            }
+        }
+        let found: f64 = float.from_int(df)
+        let absent: f64 = float.from_int(list.len(rows) - df)
+        list.push(mut weights, model_log_one_plus((absent + 0.5) / (found + 0.5)))
+    }
+    for (key, tokens) in rows {
+        let size: f64 = float.from_int(list.len(tokens))
+        let norm = 1.0 - 0.75 + 0.75 * (size / mean)
+        let mut score: f64 = 0.0
+        let mut matched = false
+        for i in 0u64 .. list.len(terms) {
+            let mut tf = 0u64
+            for token in tokens {
+                if token == terms[i] {
+                    tf += 1
+                }
+            }
+            if tf > 0 {
+                matched = true
+                let frequency: f64 = float.from_int(tf)
+                score += weights[i] * (frequency / (frequency / 2.2 + (1.2 / 2.2) * norm))
+            }
+        }
+        if matched {
+            list.push(mut ranking, (key, score))
+        }
+    }
+    std.list.sort(mut ranking, scoped fn(a: (u64, f64), b: (u64, f64)) -> Order {
+        if float.gt(a.1, b.1) || (float.eq(a.1, b.1) && a.0 < b.0) {
+            Less
+        } else if float.eq(a.1, b.1) && a.0 == b.0 {
+            Equal
+        } else {
+            Greater
+        }
+    })
+    take ranking
+}
+
+fn exact(hits: List[search.Hit[u64]], ranking: List[(u64, f64)], k: u64) -> bool {
+    let want = if k < list.len(ranking) {
+        k
+    } else {
+        list.len(ranking)
+    }
+    if list.len(hits) != want {
+        return false
+    }
+    for i in 0u64 .. want {
+        if hits[i].key != ranking[i].0 || !float.eq(hits[i].score, ranking[i].1) {
+            return false
+        }
+    }
+    true
+}
+
+fn draw(mut state: u64) -> u64 {
+    state = store.splitmix64(state)
+    state
+}
+
+// A body of zero to four words over a small vocabulary with a stop word,
+// so scores tie often and some rows have no terms.
+fn draw_body(mut state: u64) -> String {
+    let words: Inline[String, 4] =[string.from("red"), string.from("blue"), string.from("green"), string.from("the")]
+    let mut body = string.from("")
+    for i in 0u64 .. draw(mut state) % 5 {
+        if i > 0 {
+            string.push(mut body, " ")
+        }
+        string.push(mut body, words[draw(mut state) % 4])
+    }
+    take body
+}
+
+type Tally {
+    straddles: u64,
+    not_ready: u64,
+    empty_rows: u64,
+    queries: u64
+}
+
+fn has_terms(body: String) -> bool {
+    list.len(search.tokenize(search.tokenizer(stop_the()), body)) > 0
+}
+
+// One seeded history. Each round writes up to three steps (a put of a
+// drawn body, a put of a row's own body again, or a delete that may find no
+// row) and queries, inside that transaction or through a look after it
+// commits. Some rounds rebuild both records or step their build: until the
+// build ends a query may answer NotReady, and any answer it gives is exact.
+fn history(clock: Clock, random: Random, seed: u64, mut tally: Tally) waits {
+    let (take opened, docs, text) = open_docs(clock, random, stop_the())
+    let mut db = take opened
+    let mut model: List[Option[String]] = list.new()
+    for _ in 0u64 .. ROWS {
+        list.push(mut model, None)
+    }
+    let mut state = seed
+    let mut building = false
+    for _ in 0u64 .. ROUNDS {
+        let pick = draw(mut state) % 16
+        if pick == 0 && !building {
+            result.unwrap(search.rebuild(mut db, text))
+            building = true
+        } else if pick < 5 && building {
+            let limit = 1 + draw(mut state) % 5
+            if let None = result.unwrap(store.index_build_step(mut db, limit)) {
+                building = false
+            }
+        }
+        let mut steps: List[Step] = list.new()
+        for _ in 0u64 .. draw(mut state) % 4 {
+            let key = draw(mut state) % ROWS
+            let kind = draw(mut state) % 4
+            if kind == 0 {
+                list.push(mut steps, Delete(key))
+                model[key] = None
+            } else if kind == 1 && model[key] != None {
+                if let Some(same) = view model[key] {
+                    list.push(mut steps, Put(key, clone(same)))
+                }
+            } else {
+                let body = draw_body(mut state)
+                if !has_terms(body) {
+                    tally.empty_rows += 1
+                }
+                list.push(mut steps, Put(key, clone(body)))
+                model[key] = Some(take body)
+            }
+        }
+        let q = draw_body(mut state)
+        let k = draw(mut state) % (ROWS + 2)
+        let found = if draw(mut state) % 2 == 0 {
+            run_query(mut db, docs, text, take steps, q, k)
+        } else {
+            let _ = run_query(mut db, docs, text, take steps, q, 0)
+            look_query(db, store.snapshot(db), docs, text, q, k, search.defaults(), Anyone)
+        }
+        let ranking = model_ranking(model, q)
+        if k > 0 && list.len(ranking) > k && float.eq(ranking[k - 1].1, ranking[k].1) {
+            tally.straddles += 1
+        }
+        tally.queries += 1
+        match take found {
+            Error(NotReady(name)) if building && (name == "body" || name == "body.stats") => {
+                tally.not_ready += 1
+            },
+            Ok(take hits) => {
+                if !exact(hits, ranking, k) {
+                    fail("search law: the top k differs from the model's brute-force BM25 ranking")
+                }
+            },
+            _ => fail("search law: the query failed outside a build"),
+        }
+    }
+    while let Some(_) = result.unwrap(store.index_build_step(mut db, 7)) {}
+    for k in 0u64 .. ROWS + 2 {
+        let q = draw_body(mut state)
+        let Ok(hits) = look_query(db, store.snapshot(db), docs, text, q, k, search.defaults(), Anyone) else {
+            fail("search law: a built index refused a query")
+        }
+        if !exact(hits, model_ranking(model, q), k) {
+            fail("search law: the top k differs from the model's brute-force BM25 ranking")
+        }
+    }
+    result.unwrap(store.close(take db))
+}
+
+/// bug: postings or statistics that keep an overwritten or deleted row's
+/// old terms, a corpus that leaves out rows with no terms, a build that
+/// counts a row twice, or equal scores ranked out of key order, rank
+/// differently from the model's brute-force BM25 over its rows.
+@test
+fn bm25_histories(clock: Clock, random: Random) -> Result[(), ()] waits {
+    let mut tally = Tally(straddles: 0, not_ready: 0, empty_rows: 0, queries: 0)
+    for seed in 0u64 .. 6 {
+        history(clock, random, seed * 7919 + 1, mut tally)
+    }
+    if tally.straddles == 0 || tally.not_ready == 0 || tally.empty_rows == 0 {
+        fail("search law: no query had a tie across the k boundary, none met a build, or no row was empty")
+    }
     Ok(())
 }

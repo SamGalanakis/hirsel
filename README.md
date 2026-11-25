@@ -120,7 +120,7 @@ First-party packages in this repository (bind locally with `path = "..."` in `[d
 - [postgres](core/programs/postgres/) — PostgreSQL client with TLS and streaming query results.
 - [sqlite](core/programs/sqlite/) — SQLite bindings with explicit capabilities.
 - [mcp](core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
-- [search](core/programs/search/) — BM25 full-text search over `store` snapshots.
+- [search](core/programs/search/) — BM25 full-text search over a `store` table, callable from a transaction.
 - [vector](core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
 - [harness](core/programs/harness/) — durable agent sessions, tools, approvals, and model calls.
 - [notes](core/programs/notes/) — offline notes agent with tools and an approval step.
@@ -147,7 +147,7 @@ Repository examples (run from a checkout of this repo):
 - [PostgreSQL](core/programs/postgres/example.hirsel) reads a typed column and drains the cursor before reusing the connection.
 - [SQLite](core/programs/sqlite/example.hirsel) binds a customer ID and reads the total from an in-memory database.
 - [MCP](core/programs/mcp/example.hirsel) decodes a tool-list reply and reads the tool name.
-- [Search](core/programs/search/example.hirsel) indexes two recipes in `store` and queries a snapshot for the published match.
+- [Search](core/programs/search/example.hirsel) declares search on a `store` table of recipes and queries it in the writing transaction for the published match.
 - [JPEG](core/programs/image_jpeg/vectors/example.hirsel), [WebP](core/programs/image_webp/vectors/example.hirsel), [HLS](core/programs/video_packager/example.hirsel), and [Opus](core/programs/opus/vectors/example.hirsel) media codec and packaging examples.
 
 Run the package examples from the repository root with the `hirsel` binary:

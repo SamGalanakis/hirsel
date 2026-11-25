@@ -802,7 +802,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        let to = self.new_slot(PlaceTy::Declared(rid), n);
+        // The target is lent as the glue's `mut` parameter is (#88): a value place
+        // at a scalar-carried row, such as a field-less enum's tag.
+        let to = self.new_slot(scalar_abi::mut_place(&self.e.module.types, rid), n);
         let from = self.address(AddressBase::Value(at), &[], PlaceTy::Declared(id), n);
         let signature = self.e.source_signature(function);
         let fail = self.fail_to(n);

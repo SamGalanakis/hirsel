@@ -1,0 +1,16 @@
+type CloneTri: send = TriLow | TriMid | TriHigh
+
+type CloneHolder { tri: CloneTri, n: u64 }
+
+// A field-less enum that is not plain is carried as its u8 tag, so the `mut`
+// target of its clone glue is a u8 value place (#88). Cloning TriMid out of a
+// record gives TriMid again, rank 2, so the result is 10 + 2 = 12. A clone that
+// lent its target as the enum's row did not match the glue's signature, and the
+// evaluator would not run the function at all.
+// expect: run clone_unit_enum() = 12
+fn clone_unit_enum() -> u64 {
+    let h = CloneHolder(tri: TriMid, n: 10)
+    let copied: CloneTri = clone(h.tri)
+    let rank = match copied { TriLow => 1u64, TriMid => 2, TriHigh => 3 }
+    h.n + rank
+}

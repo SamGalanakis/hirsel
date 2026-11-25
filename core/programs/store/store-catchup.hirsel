@@ -1,10 +1,9 @@
 // Catch-up in the prepare child (STORE-SPEC §3.5a "Catch-up"). OLD advances the export
 // lease to its new head and appends the journal tail to the export directory
 // (`advance_export`, `copy_export_tail`). The child replays that tail from
-// where its last round ended, on the load it already holds, and brings each
+// where its last round ended, on the load it already holds, brings each
 // index range the preparation ships to the new head from the rows the tail
-// changed. The preparation then writes PREPARED against the new head.
-
+// changed, and writes the entries that changed as ROUND (store-rounds).
 // One shipped entry-index range: its catalog name, record and kind, and
 // the position of the extractor its declaration bound in the plan's bindings.
 type CatchUpIndex {
@@ -14,8 +13,9 @@ type CatchUpIndex {
     binding: u64
 }
 
-// Replays the tail copied into `d` and brings `staged` to the new head.
-// Returns the number of rows the tail changed. Drift means this round cannot
+// Replays the tail copied into `d`, brings `staged` to the new head, and writes
+// ROUND: the entries the shipped ranges changed, for OLD's kept import
+// (`apply_round`). Returns the number of rows the tail changed. Drift means this round cannot
 // catch up and the deploy needs a fresh full preparation: OLD's catalog moved,
 // the preparation carries activation rewrites computed at its base, or it
 // ships a populated table (a `migrate_table` copy, whose converter would have
@@ -32,6 +32,11 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     if stamp.next_table != base.next_table || map.len(staged.rewrites) != 0 {
         return Error(Drift)
     }
+    // Rounds follow the PREPARED file OLD keeps.
+    let Some(take kept) = replace(mut source.shipped, None) else {
+        return Error(ExportMismatch)
+    }
+    let ShippedImport(ranges: take round_ranges, round: last_round) = take kept
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     let before = share_roots(source.db.heads[0].roots)
     let state = deploy_result(capacity(current_state(source.db)))?
@@ -50,13 +55,19 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
     let tail = deploy_result(compare_page_collections(before.collections, replayed.state.tips[0].roots.collections))?
     let next_node = order.max(staged.plan.next_node, replayed.next_node)
     staged.plan.next_node = next_node
-    deploy_result(patch_index_ranges(mut staged.plan, before.collections, shipped, tail.rows))?
+    let mut touched: List[Touch] = list.new()
+    deploy_result(patch_index_ranges(mut staged.plan, before.collections, shipped, tail.rows, mut touched))?
+    let ops = deploy_result(round_ops(staged.plan.roots.collections, mut touched))?
+    let round_totals = deploy_result(range_totals(staged.plan.roots.collections, round_ranges))?
+    let round = last_round + 1
+    write_round(d, id, RoundMeta(round: round, from: clone(source.stamp), to: clone(stamp), ops: list.len(ops), totals: take round_totals), ops)?
     let live_bytes = deploy_result(journal_account(replayed))?
     let JournalReplay(state: take advanced, ..) = take replayed
     deploy_result(open_heads(mut source.db, take advanced))?
     source.db.resident = live_bytes
     source.db.next_node = staged.plan.next_node
     source.stamp = take stamp
+    source.shipped = Some(ShippedImport(ranges: take round_ranges, round: round))
     staged.base = declaration_base(source.db)
     staged.base_rows = share_page_tree(source.db.heads[0].roots.collections)
     Ok(list.len(tail.rows))
@@ -68,7 +79,9 @@ pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigrat
 fn catch_up_indexes(plan: SchemaPlan, delta: List[CatalogChange], ranges: List[RangeChange]) -> Result[List[CatchUpIndex], DeployError] {
     let mut found: List[CatchUpIndex] = list.new()
     for shipped_range in ranges {
-        let Some(raw) = shipped_range.catalog else { continue }
+        let Some(raw) = shipped_range.catalog else {
+            continue
+        }
         let record = deploy_result(decode_catalog(raw))?
         if record.kind != 2u8 {
             let id_key = deploy_result(prefix(shipped_range.id))?
@@ -82,7 +95,9 @@ fn catch_up_indexes(plan: SchemaPlan, delta: List[CatalogChange], ranges: List[R
         }
         // An aggregate's group totals are not entries a row owns; a full
         // preparation rebuilds them.
-        let Entries(kind) = record.shape else { return Error(Drift) }
+        let Entries(kind) = record.shape else {
+            return Error(Drift)
+        }
         let mut name: Option[String] = None
         for change in delta {
             if let Some(after) = change.after {
@@ -91,7 +106,9 @@ fn catch_up_indexes(plan: SchemaPlan, delta: List[CatalogChange], ranges: List[R
                 }
             }
         }
-        let Some(take index_name) = take name else { return Error(Drift) }
+        let Some(take index_name) = take name else {
+            return Error(Drift)
+        }
         let mut found_at: Option[u64] = None
         for i in 0u64 .. list.len(plan.bindings) {
             let registration = view plan.bindings[i]
@@ -99,7 +116,9 @@ fn catch_up_indexes(plan: SchemaPlan, delta: List[CatalogChange], ranges: List[R
                 found_at = Some(i)
             }
         }
-        let Some(slot) = found_at else { return Error(Drift) }
+        let Some(slot) = found_at else {
+            return Error(Drift)
+        }
         list.push(mut found, CatchUpIndex(name: take index_name, record: take record, kind: kind, binding: slot))
     }
     Ok(take found)
@@ -110,12 +129,12 @@ fn catch_up_indexes(plan: SchemaPlan, delta: List[CatalogChange], ranges: List[R
 // written, so two rows that trade a Unique key do not collide on the way.
 // A Unique key two rows claim at the new head fails the round with Conflict,
 // as a full build of the same rows does.
-fn patch_index_ranges(mut plan: SchemaPlan, before: PageTree, shipped: List[CatchUpIndex], rows: List[Change]) -> Result[(), Error] {
+fn patch_index_ranges(mut plan: SchemaPlan, before: PageTree, shipped: List[CatchUpIndex], rows: List[Change], mut touched: List[Touch]) -> Result[(), Error] {
     if list.len(shipped) == 0 || list.len(rows) == 0 {
         return Ok(())
     }
     let bindings = replace(mut plan.bindings, list.new())
-    let patched = patch_entries(plan, bindings, before, shipped, rows)
+    let patched = patch_entries(plan, bindings, before, shipped, rows, mut touched)
     plan.bindings = take bindings
     let (take roots, live_bytes, next_node) = patched?
     plan.next_node = next_node
@@ -123,7 +142,7 @@ fn patch_index_ranges(mut plan: SchemaPlan, before: PageTree, shipped: List[Catc
     keep_schema(mut plan, take roots, live_bytes, next_table)
 }
 
-fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: PageTree, shipped: List[CatchUpIndex], rows: List[Change]) -> Result[(Roots, u64, u64), Error] {
+fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: PageTree, shipped: List[CatchUpIndex], rows: List[Change], mut touched: List[Touch]) -> Result[(Roots, u64, u64), Error] {
     let mut roots = share_roots(plan.roots)
     let mut live_bytes = plan.live
     let first = stamp_after(plan.next_node)?
@@ -157,11 +176,16 @@ fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: Pa
                     Some(value) => contains_bytes(value.keys, key),
                     None => false,
                 }
-                if kept { continue }
-                let Some(charge) = owned_entry(roots.collections, key, target.kind, primary)? else { continue }
+                if kept {
+                    continue
+                }
+                let Some(charge) = owned_entry(roots.collections, key, target.kind, primary)? else {
+                    continue
+                }
                 if !plan.retained {
                     live_bytes = int.saturating_sub(live_bytes, charge)
                 }
+                note_touch(mut touched, roots.collections, key)?
                 let _ = remove_page_row(mut roots.collections, key, first, mut next_stamp)?
             }
             if let Some(take value) = take current {
@@ -186,6 +210,7 @@ fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: Pa
         }
         live_bytes = int.saturating_add(live_bytes, entry(key, payload))
         over_ceiling(live_bytes, plan.ceiling)?
+        note_touch(mut touched, roots.collections, key)?
         put_page_row(mut roots.collections, key, payload, first, mut next_stamp)?
     }
     canonical_tree(mut roots.collections)?
@@ -195,7 +220,9 @@ fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: Pa
 // The charge of `key`'s entry when it belongs to `primary`. A Unique entry
 // another row holds is that row's, and stays.
 fn owned_entry(tree: PageTree, key: Bytes, kind: IndexKind, primary: Bytes) -> Result[Option[u64], Error] {
-    let Some(prior) = get_page_row(tree, key) else { return Ok(None) }
+    let Some(prior) = get_page_row(tree, key) else {
+        return Ok(None)
+    }
     if let Unique = kind {
         if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
             return Ok(None)

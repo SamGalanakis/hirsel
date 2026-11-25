@@ -680,9 +680,9 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let attempt = trigger_scan_law_bytes(16u64, 4u8)
     let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), 1u64))
     let exported_store = result.unwrap(store.export_copy(take copying))
-    let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
+    let mut source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
     let mut setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(new_digest), clock: c, tasks: tasks, n_place: new_n_place, place: new_place, on_migrate: None, schema: code.describe(trigger_law_schema), triggers: clone(new_entries), fates: fate.none())
-    let rows = trigger_scan_fates(mut setup, source, same_image)
+    let rows = trigger_scan_fates(mut setup, mut source, same_image)
     if list.len(rows) != (if same_image {
         8u64
     } else {

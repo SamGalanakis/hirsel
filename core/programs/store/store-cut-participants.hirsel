@@ -1,5 +1,4 @@
 // The holders a cut publishes: every head and pin with the holder delta applied.
-
 fn note_held_roots(mut holders: List[HeldPage], kind: u8, owner: u64, roots: Roots) {
     list.push(mut holders, HeldPage(source: HolderSource(kind, owner, 0), root: arc.share(roots.collections.root)))
     list.push(mut holders, HeldPage(source: HolderSource(kind, owner, 1), root: arc.share(roots.streams.root)))
@@ -35,10 +34,7 @@ fn visit_cut_heads[T](db: Db, delta: HolderDelta, mut output: T, visit: scoped f
 }
 
 fn visit_cut_pins[T](db: Db, delta: HolderDelta, mut output: T, visit: scoped fn(mut T, Pin) -> Result[(), Error]) -> Result[(), Error] {
-    let removed: Option[u64] = match delta {
-        RemovePin(slot) => Some(slot),
-        _ => None
-    }
+    let removed = removed_pin(delta)
     let mut inserted = false
     for slot in 0u64 .. list.len(db.pins) {
         if removed == Some(slot) {
@@ -145,8 +141,11 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
     let pins = list.len(db.pins)
     let pin_count = match delta {
         AddPin(_) => pins + 1,
-        RemovePin(_) => pins - 1,
-        _ => pins
+        _ => if let Some(_) = removed_pin(delta) {
+            pins - 1
+        } else {
+            pins
+        }
     }
     capacity(le(mut raw, pin_count, 4))?
     visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: Pin) -> Result[(), Error] {
@@ -157,7 +156,9 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
         let keyed = view published[order_slot].keyed
         if list.len(keyed) != 0 {
             capacity(le(mut raw, order_slot, 4))?
-            for tree in keyed { put_page_ptr(mut raw, published_page_pointer(layout.locations, tree)) }
+            for tree in keyed {
+                put_page_ptr(mut raw, published_page_pointer(layout.locations, tree))
+            }
         }
     }
     write_seal(mut raw, context, db.fence)?

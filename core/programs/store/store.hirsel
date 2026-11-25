@@ -114,8 +114,11 @@ fn main_head(take roots: Roots, head: u64, at: u64) -> Head {
 
 // I4: while a pin or another branch exists, an old row may stay reachable, so
 // commits charge conservatively until the next cut settles the account.
+// An import pin's pages are its own (§3.5a "The kept import"), so it retains nothing.
 fn retaining(db: Db) -> bool {
-    list.len(db.heads) > 1 || list.len(db.pins) != 0
+    list.len(db.heads) > 1 || std.list.any(db.pins, fn(held: Pin) -> bool {
+        held.owner != ImportPin
+    })
 }
 
 // A branch as a cut, open and replay carry it: a Head without the readers'
@@ -143,7 +146,10 @@ type ProposedMain {
     head: u64,
     at: u64,
     tables: u32,
-    activation: Option[HistoryActivation]
+    activation: Option[HistoryActivation],
+    // The import pin slot an installing cut removes with the replacement
+    // (§3.5a "The kept import").
+    drop_pin: Option[u64]
 }
 
 type HolderDelta = NoHolderChange | AddHead(Head, String) | RemoveHead(u64) | AddPin(Pin) | RemovePin(u64) | ReplacePin(u64, Pin) | ReplaceMain(ProposedMain, Option[u64])
@@ -188,11 +194,10 @@ fn state_with_delta(db: Db, delta: HolderDelta) -> Result[State, Capacity] {
     if let AddHead(added, _) = delta {
         list.push(mut tips, tip_of(added))
     }
+    let dropped = removed_pin(delta)
     for slot in 0u64 .. list.len(db.pins) {
-        if let RemovePin(gone) = delta {
-            if slot == gone {
-                continue
-            }
+        if dropped == Some(slot) {
+            continue
         }
         let held = if let ReplacePin(at, replacement) = delta {
             if at == slot {
@@ -264,7 +269,11 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
             let _ = list.set(mut db.pins, slot, take replacement)
         },
         ReplaceMain(take proposed, gone) => {
-            let ProposedMain(roots: take roots, head: head, at: at, tables: tables, ..) = take proposed
+            let ProposedMain(roots: take roots, head: head, at: at, tables: tables, drop_pin: drop_pin, ..) = take proposed
+            if let Some(pin_slot) = drop_pin {
+                let removed = list.remove(mut db.pins, pin_slot)
+                db.record_bytes -= pin_root_bytes(removed.name, removed.roots)
+            }
             db.record_bytes -= keyed_root_record_bytes(db.heads[0u64].roots.keyed)
             db.record_bytes += keyed_root_record_bytes(roots.keyed)
             db.heads[0u64].roots = take roots
@@ -752,7 +761,7 @@ pub fn adopt(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
     if i == 0 || db.heads[i].parent != 0 || db.heads[0].head != db.heads[i].forked_at {
         return Error(Diverged(b.id))
     }
-    let merged = ProposedMain(roots: share_roots(db.heads[i].roots), head: db.heads[i].head, at: db.heads[i].at, tables: db.next_table, activation: None)
+    let merged = ProposedMain(roots: share_roots(db.heads[i].roots), head: db.heads[i].head, at: db.heads[i].at, tables: db.next_table, activation: None, drop_pin: None)
     let publication = capacity(prepare_publication(db, 0, merged.head, merged.roots, db.next_node))?
     let commit_ticket = cut_install(mut db, ReplaceMain(take merged, Some(i)))?
     publish(take publication)
@@ -2785,6 +2794,8 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0083 => Some(20),
         0x0084 => Some(16715784),
         0x0085 => Some(16715784),
+        0x0086 => Some(1048832),
+        0x0087 => Some(16715784),
         _ => None
     }
 }
@@ -3245,29 +3256,14 @@ fn range_inventory(data: PageTree, ranges: List[RangeChange]) -> Result[List[Inv
     Ok(take inventory)
 }
 
-fn write_prepared_frame[T](mut file: HostFile, ctx: DiskContext, mut offset: u64, kind: u16, codec: std.codec.Codec[T], value: T) -> Result[(), Error] waits {
-    let mut encoded: Bytes = list.new()
-    std.codec.encode(codec, value, mut encoded) ?=> |_| Limit(Value)
-    write_prepared_payload(mut file, ctx, mut offset, kind, encoded)
-}
-
-fn write_prepared_payload(mut file: HostFile, ctx: DiskContext, mut offset: u64, kind: u16, encoded: Bytes) -> Result[(), Error] waits {
-    let raw = capacity(disk_seal(ctx, offset, kind, 1, encoded))?
-    match host.write(mut file, raw) {
-        Ok(()) => (),
-        Error(e) => return Error(Io(e.error)),
-    }
-    offset += list.len(raw)
-    Ok(())
-}
-
 pub fn validate_preparation(source: Preparation, staged: StagedMigration) -> Result[(), Error] {
     let mut state = capacity(current_state(source.db))?
     state.tips[0].roots = share_roots(staged.plan.roots)
     over_ceiling(capacity(state_account(state))?, available_resident(source.db))
 }
 
-pub fn write_prepared(source: Preparation, staged: StagedMigration, d: Dir, take target: PreparedTarget) -> Result[(), DeployError] waits {
+// Ships the whole preparation; later catch-up rounds ship ROUND deltas onto it.
+pub fn write_prepared(mut source: Preparation, staged: StagedMigration, d: Dir, take target: PreparedTarget) -> Result[(), DeployError] waits {
     let delta = deploy_result(catalog_changes(source.db.heads[0].roots, staged.plan.roots))?
     let ranges = deploy_result(changed_ranges(delta, source.stamp.next_table, staged.plan.next_table))?
     let inventory = deploy_result(range_inventory(staged.plan.roots.collections, ranges))?
@@ -3281,34 +3277,30 @@ pub fn write_prepared(source: Preparation, staged: StagedMigration, d: Dir, take
         return Error(Scratch(Limit(Value)))
     }
     let rewrites = encode_rewrite_frame(staged)?
-    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Write)))?
-    let header = scratch_result(capacity(disk_header_bytes(ctx, 0u64, 0)))?
-    if let Error(e) = host.write(mut file, header) {
-        return Error(Scratch(Io(e.error)))
-    }
-    let mut offset = 72u64
+    let mut file = scratch_result(open_frames(d, "PREPARED", ctx))?
     let delta_codec: std.codec.Codec[CatalogChange] = std.codec.of()
     let inventory_codec: std.codec.Codec[Inventory] = std.codec.of()
     let row_codec: std.codec.Codec[PreparedRow] = std.codec.of()
-    scratch_result(write_prepared_payload(mut file, ctx, mut offset, 0x0081, encoded_meta))?
+    scratch_result(write_prepared_payload(mut file, 0x0081, encoded_meta))?
     for change in delta {
-        scratch_result(write_prepared_frame(mut file, ctx, mut offset, 0x0082, delta_codec, change))?
+        scratch_result(write_prepared_frame(mut file, 0x0082, delta_codec, change))?
     }
     for desc in inventory {
-        scratch_result(write_prepared_frame(mut file, ctx, mut offset, 0x0083, inventory_codec, desc))?
+        scratch_result(write_prepared_frame(mut file, 0x0083, inventory_codec, desc))?
     }
     for desc in inventory {
         let mut rows = deploy_result(entries_of(staged.plan.roots.collections, desc.id))?
         while let Some((take key, value)) = deploy_result(next_bytes(mut rows))? {
             let row = PreparedRow(key: take key, value: deploy_result(copied(value))?)
-            scratch_result(write_prepared_frame(mut file, ctx, mut offset, 0x0084, row_codec, row))?
+            scratch_result(write_prepared_frame(mut file, 0x0084, row_codec, row))?
         }
     }
     if let Some(raw) = rewrites {
-        scratch_result(write_prepared_payload(mut file, ctx, mut offset, 0x0085, raw))?
+        scratch_result(write_prepared_payload(mut file, 0x0085, raw))?
     }
-    scratch_result(disk_io(host.sync(mut file)))?
-    scratch_result(disk_io(host.close(take file)))
+    scratch_result(finish_frames(take file))?
+    source.shipped = Some(ShippedImport(ranges: deploy_result(shipped_ranges(ranges))?, round: 0))
+    Ok(())
 }
 
 type ValidatedRange: send {
@@ -3449,8 +3441,7 @@ pub opaque type Imported: send {
     delta: List[CatalogChange],
     ranges: List[ImportedRange],
     rewrites: List[ActivationRewrite],
-    digest: Inline[u8, 32],
-    charge: u64
+    digest: Inline[u8, 32]
 }
 
 pub opaque type ImportWork: send {
@@ -3468,8 +3459,8 @@ pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[Imp
     }
     validate_rewrite_base(db, validated)?
     let current = disk_state(db).options.resident_limit
-    let s = deploy_result(capacity(current_state(db)))?
-    let exact = deploy_result(capacity(state_account(s)))?
+    // An import pin still held is stale: this import's keep replaces it.
+    let exact = install_account(db, share_roots(db.heads[0u64].roots))?
     let requested = int.saturating_add(exact, validated.charge)
     if requested > current {
         return Error(Store(Full(Resident(Capacity(requested: requested, available: current)))))
@@ -3520,7 +3511,7 @@ fn matches_export(db: Db, base: ExportStamp) -> bool {
 
 pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
     let ImportWork(payload: take payload, low: low, high: high, inline: inline) = take work
-    let ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: take rewrites, digest: digest, charge: charge, ..) = take payload
+    let ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, rewrites: take rewrites, digest: digest, ..) = take payload
     let mut ids = low + 1
     let mut imported: List[ImportedRange] = list.with_capacity(list.len(ranges))
     for checked_range in ranges {
@@ -3534,7 +3525,7 @@ pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
         }
         list.push(mut imported, ImportedRange(id: checked_range.id, kind: checked_range.kind, tree: take built))
     }
-    Ok(Imported(meta: take meta, delta: take delta, ranges: take imported, rewrites: take rewrites, digest: digest, charge: charge))
+    Ok(Imported(meta: take meta, delta: take delta, ranges: take imported, rewrites: take rewrites, digest: digest))
 }
 
 pub fn imported_digest(value: Imported) -> Inline[u8, 32] {
@@ -3608,23 +3599,6 @@ fn planned_ranges(mut plan: SchemaPlan, imported: List[ImportedRange]) -> Result
     }
     deploy_result(canonical_tree(mut plan.roots.collections))?
     plan.next_node = next_stamp - 1
-    Ok(())
-}
-
-fn install_account(db: Db, roots: Roots) -> Result[u64, DeployError] {
-    let mut s = deploy_result(capacity(current_state(db)))?
-    s.tips[0].roots = share_roots(roots)
-    deploy_result(capacity(state_account(s)))
-}
-
-// M3 associates the trees with the most recent reservation on this attempt.
-pub fn keep_import(mut db: Db, take completed: Imported) -> Result[(), DeployError] {
-    if !is_disk(db) || !matches_export(db, completed.meta.base) || disk_state(db).reserving != Some(completed.digest) {
-        return Error(ExportMismatch)
-    }
-    write_disk(mut db.disk, take completed, scoped fn(mut state: DiskState, take ready: Imported) {
-        state.imported = Some(take ready)
-    })
     Ok(())
 }
 
@@ -3961,7 +3935,7 @@ type DiskState {
     options: Options,
     lease: Option[Arc[ExportLease]],
     scrubs: List[Arc[ScrubLease]],
-    imported: Option[Imported],
+    imported: Option[KeptImport],
     reserving: Option[Inline[u8, 32]],
     target: Option[TargetLimits],
     record_cut: u64,
@@ -4270,6 +4244,11 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut
 
 fn disk_cut_with_limit(mut db: Db, take requested: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     let mut delta = take requested
+    if let NoHolderChange = delta {
+        if let Some(slot) = orphan_import_pin(db) {
+            delta = RemovePin(slot)
+        }
+    }
     healthy(db)?
     if object_writer_open(db) {
         return object_cut_state(mut db, take delta, write_seal, target, pack_bytes, limit)

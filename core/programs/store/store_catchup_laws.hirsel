@@ -1,14 +1,19 @@
-// L-IX, catch-up (STORE-SPEC §3.5a "Catch-up"). A preparation declares its indexes at
-// an export, then follows OLD round by round: each round OLD writes, maybe
-// cuts, advances the lease, and the child replays the copied tail and brings
-// its new index ranges to the new head. After the install, OLD holds exactly
-// the entries a next_value extraction of its final rows gives: lix_expected for
-// by_v, and one (value, row) entry per row for the Unique by_id. The model is
-// the law's own copy of OLD's rows. Round codes: 's' a few single-row writes,
-// 'c' the same with two cuts between them (the tail crosses two rotations,
-// and the second cut used to delete it), 'w' one commit that swaps two rows'
-// values (a Unique key changes owner within the tail), 'b' a rewrite of every
-// row, a tail far over a hundredth of the store, which renews the export.
+// L-IX, catch-up (STORE-SPEC §3.5a "Catch-up", "The kept import"). A
+// preparation declares its indexes at an export and ships PREPARED once; OLD
+// validates it and keeps it under the import pin while it still serves. Then
+// the child follows OLD round by round: each round OLD writes, maybe cuts,
+// advances the lease, and the child replays the copied tail, brings its new
+// index ranges to the new head and ships only the entries that changed
+// (ROUND), which OLD applies to the kept import. After the install, and again
+// after reopening from disk, OLD holds exactly the entries a next_value
+// extraction of its final rows gives: lix_expected for by_v, and one
+// (value, row) entry per row for the Unique by_id, and no import pin. The
+// model is the law's own copy of OLD's rows. Round codes: 's' a few
+// single-row writes, 'c' the same with two cuts between them (the tail crosses
+// two rotations, and the second cut used to delete it), 'w' one commit that
+// swaps two rows' values (a Unique key changes owner within the tail), 'b' a
+// rewrite of every row, a tail far over a hundredth of the store, which renews
+// the export, and the child ships a fresh PREPARED that replaces the kept one.
 const LCU_ROWS: u64 = 4000
 
 fn lcu_unique_expected(id: u32, model: List[Option[u64]]) -> Result[List[(Bytes, u64)], Error] {
@@ -72,12 +77,16 @@ fn lcu_stage(source: Preparation, tasks: Tasks, unique: bool) -> Result[(StagedM
 }
 
 fn lcu_swap(mut db: Db, t: Table[u64, u64], a: u64, b: u64, mut model: List[Option[u64]]) -> Result[(), Error] waits {
-    let (Some(va), Some(vb)) = (model[a], model[b]) else { return Ok(()) }
+    let (Some(va), Some(vb)) = (model[a], model[b]) else {
+        return Ok(())
+    }
     let ran = run(mut db, None, (copy_env(t), a, b, va, vb), fn(mut tx: Tx, input: (Table[u64, u64], u64, u64, u64, u64)) -> Result[(), Error] {
         put(mut tx, input.0, input.1, input.4)?
         put(mut tx, input.0, input.2, input.3)
     })?
-    let Committed(_) = take ran else { return Error(MigrationFault) }
+    let Committed(_) = take ran else {
+        return Error(MigrationFault)
+    }
     model[a] = Some(vb)
     model[b] = Some(va)
     Ok(())
@@ -94,7 +103,9 @@ fn lcu_round(mut db: Db, t: Table[u64, u64], code_byte: u8, seed: u64, mut next_
             }
             Ok(())
         })?
-        let Committed(_) = take ran else { return Error(MigrationFault) }
+        let Committed(_) = take ran else {
+            return Error(MigrationFault)
+        }
         for k in 0u64 .. LCU_ROWS {
             model[k] = Some(next_value + k)
         }
@@ -108,14 +119,27 @@ fn lcu_round(mut db: Db, t: Table[u64, u64], code_byte: u8, seed: u64, mut next_
         let b = (a + 1 + state % (LCU_ROWS - 1)) % LCU_ROWS
         return lcu_swap(mut db, t, a, b, mut model)
     }
-    state = lix_next(state)
-    let writes = 3 + state % 4
-    for i in 0u64 .. writes {
+    let round_writes = lcu_writes(state, mut next_value, list.len(model))
+    for i in 0u64 .. list.len(round_writes) {
         if code_byte == 99u8 && i > 0 {
             let _ = checkpoint(mut db)?
         }
+        let (k, v) = round_writes[i]
+        lix_write(mut db, t, k, v)?
+        model[k] = v
+    }
+    Ok(())
+}
+
+// The single writes of an 's' or 'c' round: 3 to 6 rows below `rows`, a
+// quarter of them deletes, the rest fresh values.
+fn lcu_writes(seed: u64, mut next_value: u64, rows: u64) -> List[(u64, Option[u64])] {
+    let mut state = lix_next(seed)
+    let writes = 3 + state % 4
+    let mut round_writes: List[(u64, Option[u64])] = list.new()
+    for _ in 0u64 .. writes {
         state = lix_next(state)
-        let k = state % list.len(model)
+        let k = state % rows
         state = lix_next(state)
         let v: Option[u64] = if state % 4 == 0 {
             None
@@ -123,8 +147,55 @@ fn lcu_round(mut db: Db, t: Table[u64, u64], code_byte: u8, seed: u64, mut next_
             next_value += 1
             Some(next_value)
         }
-        lix_write(mut db, t, k, v)?
-        model[k] = v
+        list.push(mut round_writes, (k, v))
+    }
+    take round_writes
+}
+
+fn lcu_target() -> PreparedTarget {
+    PreparedTarget(describe: install_fixture_bytes(32u64, 66u8), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: 16781392u64)
+}
+
+// The child ships PREPARED once; OLD validates it and keeps it.
+fn lcu_ship(mut db: Db, mut source: Preparation, staged: StagedMigration, d: Dir) -> Result[Inline[u8, 32], DeployError] waits {
+    write_prepared(mut source, staged, d, lcu_target())?
+    let checked = validate_prepared(d)?
+    let work = reserve_import(mut db, take checked)?
+    let assembled = import_trees(take work)?
+    let digest = imported_digest(assembled)
+    keep_import(mut db, take assembled)?
+    Ok(digest)
+}
+
+// One delta round: OLD's tail to the child, the child's ROUND back to OLD.
+fn lcu_follow(mut db: Db, scratch: Dir, d: Dir, attempt: Bytes, mut source: Preparation, mut staged: StagedMigration) -> Result[bool, DeployError] waits {
+    match advance_export(mut db, scratch, attempt)? {
+        Tail(take tail) => {
+            let _ = copy_export_tail(take tail, d)?
+            let _ = catch_up_export(d, mut source, mut staged)?
+            let checked = validate_round(d)?
+            let _ = apply_round(mut db, take checked)?
+            Ok(true)
+        },
+        Full(_) => Ok(false),
+    }
+}
+
+fn lcu_no_import_pin(db: Db) -> bool {
+    !std.list.any(db.pins, fn(held: Pin) -> bool {
+        held.owner == ImportPin
+    })
+}
+
+fn lcu_check(db: Db, model: List[Option[u64]], by_v: u32, by_id: u32, unique: bool) -> Result[(), DeployError] {
+    if !deploy_result(lcu_public(db, by_v))? || deploy_result(lix_entries(db, by_v))? != deploy_result(lix_expected(by_v, model))? {
+        fail("L-IX catch-up: by_v differs from a next_value extraction of OLD's rows")
+    }
+    if unique && (!deploy_result(lcu_public(db, by_id))? || deploy_result(lcu_unique_entries(db, by_id))? != deploy_result(lcu_unique_expected(by_id, model))?) {
+        fail("L-IX catch-up: by_id differs from a next_value extraction of OLD's rows")
+    }
+    if !lcu_no_import_pin(db) {
+        fail("L-IX catch-up: the install left the import pin")
     }
     Ok(())
 }
@@ -147,9 +218,15 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
         }
         Ok(())
     }))?
-    let Committed(_) = take filled else { return Error(Store(MigrationFault)) }
+    let Committed(_) = take filled else {
+        return Error(Store(MigrationFault))
+    }
     for k in 0u64 .. LCU_ROWS + 16 {
-        list.push(mut model, if k < LCU_ROWS { Some(3 * k) } else { None })
+        list.push(mut model, if k < LCU_ROWS {
+            Some(3 * k)
+        } else {
+            None
+        })
     }
     if backfilling {
         // OLD's own by_v, left Backfilling part way: the child resumes it
@@ -171,6 +248,7 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
     let mut source = open_export(exported.dir, c, attempt, options)?
     let (take initial_staged, by_v, by_id) = deploy_result(lcu_stage(source, tasks, unique))?
     let mut staged = take initial_staged
+    let mut digest = lcu_ship(mut db, mut source, staged, exported.dir)?
     let mut state = seed
     let mut next_value = 1000000u64
     for code_byte in string.as_bytes(rounds) {
@@ -189,6 +267,10 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
                 if code_byte == 99u8 && source.stamp.terminal <= from_segment {
                     fail("L-IX catch-up: a checkpointed round crosses a rotation")
                 }
+                let checked = validate_round(exported.dir)?
+                let _ = apply_round(mut db, take checked)?
+                // apply_round's cut packed the kept trees; this one packs main.
+                let _ = deploy_result(checkpoint(mut db))?
             },
             Full(take job) => {
                 if code_byte != 98u8 {
@@ -198,12 +280,15 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
                 source = open_export(exported.dir, c, attempt, options)?
                 let (take renewed, _, _) = deploy_result(lcu_stage(source, tasks, unique))?
                 staged = take renewed
+                digest = lcu_ship(mut db, mut source, staged, exported.dir)?
             },
         }
     }
     if duplicate {
         // Row 1 takes row 2's value: by_id has two owners for one key.
-        let Some(taken) = model[2] else { fail("L-IX catch-up: row 2 is present") }
+        let Some(taken) = model[2] else {
+            fail("L-IX catch-up: row 2 is present")
+        }
         deploy_result(lix_write(mut db, t, 1, Some(taken)))?
         let Tail(take tail) = advance_export(mut db, scratch, attempt)? else {
             fail("L-IX catch-up: one write catches up")
@@ -215,24 +300,26 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
             },
             _ => fail("L-IX catch-up: a tail that repeats a Unique key fails as a full build does"),
         }
+        // The aborted deploy's kept import goes with its lease; the next cut
+        // drops its pin, and a reopen finds none.
         release_export(mut db, attempt)
-        return deploy_result(close(take db))
+        let _ = deploy_result(checkpoint(mut db))?
+        if !lcu_no_import_pin(db) {
+            fail("L-IX catch-up: a cut after the abort kept the import pin")
+        }
+        deploy_result(close(take db))?
+        let reopened = deploy_result(open(tasks, directory, c, r, options))?
+        if !lcu_no_import_pin(reopened) {
+            fail("L-IX catch-up: a reopen after the abort found the import pin")
+        }
+        return deploy_result(close(take reopened))
     }
-    let header = PreparedTarget(describe: install_fixture_bytes(32u64, 66u8), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: 16781392u64)
-    write_prepared(source, staged, exported.dir, take header)?
-    let checked = validate_prepared(exported.dir)?
-    let work = reserve_import(mut db, take checked)?
-    let assembled = import_trees(take work)?
-    let digest = imported_digest(assembled)
-    keep_import(mut db, take assembled)?
     let _ = crash_apply(mut db, attempt, digest)?
-    if !deploy_result(lcu_public(db, by_v))? || deploy_result(lix_entries(db, by_v))? != deploy_result(lix_expected(by_v, model))? {
-        fail("L-IX catch-up: by_v differs from a next_value extraction of OLD's rows")
-    }
-    if unique && (!deploy_result(lcu_public(db, by_id))? || deploy_result(lcu_unique_entries(db, by_id))? != deploy_result(lcu_unique_expected(by_id, model))?) {
-        fail("L-IX catch-up: by_id differs from a next_value extraction of OLD's rows")
-    }
-    deploy_result(close(take db))
+    lcu_check(db, model, by_v, by_id, unique)?
+    deploy_result(close(take db))?
+    let reopened = deploy_result(open(tasks, directory, c, r, options))?
+    lcu_check(reopened, model, by_v, by_id, unique)?
+    deploy_result(close(take reopened))
 }
 
 @test
@@ -244,4 +331,183 @@ fn test_index_catch_up_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
         lcu_case(d, c, r, tasks, seed * 7919 + 4, "cs", false, true, false)?
     }
     lcu_case(d, c, r, tasks, 5, "s", true, false, true)
+}
+
+// The "catch-up" crash scenario (store_crash_tests.py). The write phase keeps
+// a preparation's import, follows OLD through delta rounds (one with cuts)
+// and installs; the crash harness cuts power at every durable mutation on
+// the way. Whatever the cut, the reopened store is OLD (no by_v, no "other")
+// or NEW, never a mix: NEW's by_v holds exactly a next_value extraction of
+// the rows the store itself reads back, and once a cut has run, no import pin
+// is left in either.
+// As many rows as the law's cases, so a round's tail stays under
+// resident/100 and catches up rather than renewing.
+const LCU_CRASH_ROWS: u64 = LCU_ROWS
+
+const LCU_CRASH_SEED: u64 = 11
+
+const LCU_CRASH_FIRST: u64 = 1000000
+
+const LCU_CRASH_ROUNDS: String = "scs"
+
+// The install scenario's options with packs large enough that 4000 rows make
+// hundreds of cuts, not thousands.
+fn lcu_crash_options() -> Options {
+    let mut options = disk_crash_options("install")
+    options.pack_bytes = 65536
+    options
+}
+
+// The rows after every round of the write phase, from the rounds' plan alone.
+fn lcu_crash_model() -> List[Option[u64]] {
+    let mut model: List[Option[u64]] = list.new()
+    for k in 0u64 .. LCU_CRASH_ROWS + 8 {
+        list.push(mut model, if k < LCU_CRASH_ROWS {
+            Some(3 * k)
+        } else {
+            None
+        })
+    }
+    let mut next_value = LCU_CRASH_FIRST
+    let mut state = LCU_CRASH_SEED
+    for _ in string.as_bytes(LCU_CRASH_ROUNDS) {
+        state = lix_next(state)
+        for (k, v) in lcu_writes(state, mut next_value, list.len(model)) {
+            model[k] = v
+        }
+    }
+    take model
+}
+
+fn lcu_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, lcu_crash_options())?
+    let mut staging = install_old(db)?
+    let description = install_fixture_bytes(32u64, 65u8)
+    stage_activation(mut staging, 1u64, None, description, std.codec.of_bytes(), description)?
+    install_activation(mut db, take staging)?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let filled = run(mut db, None, copy_env(t), fn(mut tx: Tx, rows_table: Table[u64, u64]) -> Result[(), Error] {
+        for k in 0u64 .. LCU_CRASH_ROWS {
+            put(mut tx, rows_table, k, 3 * k)?
+        }
+        Ok(())
+    })?
+    let Committed(_) = take filled else {
+        return Error(MigrationFault)
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)
+}
+
+fn lcu_crash_run(mut db: Db, d: Dir, c: Clock, tasks: Tasks) -> Result[(), DeployError] waits {
+    let t = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let mut model: List[Option[u64]] = list.new()
+    for k in 0u64 .. LCU_CRASH_ROWS + 8 {
+        list.push(mut model, if k < LCU_CRASH_ROWS {
+            Some(3 * k)
+        } else {
+            None
+        })
+    }
+    let attempt = install_fixture_bytes(16u64, 7u8)
+    let (scratch, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let mut source = open_export(scratch, c, attempt, lcu_crash_options())?
+    let (take initial_staged, _, _) = deploy_result(lcu_stage(source, tasks, false))?
+    let mut staged = take initial_staged
+    let digest = lcu_ship(mut db, mut source, staged, scratch)?
+    let mut next_value = LCU_CRASH_FIRST
+    let mut state = LCU_CRASH_SEED
+    for code_byte in string.as_bytes(LCU_CRASH_ROUNDS) {
+        state = lix_next(state)
+        deploy_result(lcu_round(mut db, t, code_byte, state, mut next_value, mut model))?
+        if !lcu_follow(mut db, d, scratch, attempt, mut source, mut staged)? {
+            fail("catch-up crash: a small tail catches up")
+        }
+    }
+    let _ = crash_apply(mut db, attempt, digest)?
+    Ok(())
+}
+
+fn lcu_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, lcu_crash_options())?
+    match lcu_crash_run(mut db, d, c, tasks) {
+        Ok(()) => (),
+        Error(Store(take problem)) => return Error(take problem),
+        Error(Scratch(take problem)) => return Error(take problem),
+        Error(_) => fail("catch-up crash fixture refused"),
+    }
+    close(take db)
+}
+
+// The "catch-up" crash scenario's phases (disk_crash_main).
+fn lcu_crash_phase(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, phase: String) -> Result[(), Exit] waits {
+    if phase == "init" {
+        lcu_crash_init(d, c, r, tasks) ?=> |_| Exit(status: 81u8)
+        return Ok(())
+    }
+    if phase == "write" {
+        return match lcu_crash_write(d, c, r, tasks) {
+            Ok(()) => {
+                let _ = stdout.write(out, "DONE");
+                Ok(())
+            },
+            Error(Io(_)) => Ok(()),
+            Error(Poisoned(_)) => Ok(()),
+            Error(_) => Error(Exit(status: 82u8)),
+        }
+    }
+    let required_new = option.unwrap(args.get(argv, 2u64)) == "new"
+    match lcu_crash_read(d, c, r, tasks, required_new) {
+        Ok(true) => Ok(()),
+        _ => Error(Exit(status: 83u8)),
+    }
+}
+
+// None for OLD, by_v's id for NEW; a mix fails.
+fn lcu_crash_state(db: Db) -> Result[Option[u32], Error] waits {
+    let t = system_table(db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let indexes = index_catalog(db, t.id)?
+    let other = match system_table(db, "other", std.codec.key_u64(), std.codec.of_u64()) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+    // OLD and NEW both hold "other"; only NEW holds by_v.
+    if !other || list.len(indexes) > 1 {
+        fail("catch-up crash: neither OLD's catalog nor NEW's")
+    }
+    if list.len(indexes) == 0 {
+        return Ok(None)
+    }
+    // NEW is installed only after every round, so its rows are the model's.
+    let model = lcu_crash_model()
+    let snap = snapshot(db)
+    for k in 0u64 .. list.len(model) {
+        if get(result.unwrap(reader(db, 0u64)), snap, t, k)? != model[k] {
+            fail("catch-up crash: NEW's rows differ from the rounds' model")
+        }
+    }
+    let by_v = indexes[0].id
+    if !lcu_public(db, by_v)? || lix_entries(db, by_v)? != lix_expected(by_v, model)? {
+        fail("catch-up crash: by_v differs from a next_value extraction of the model")
+    }
+    Ok(Some(by_v))
+}
+
+fn lcu_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
+    let mut db = open(tasks, d, c, r, lcu_crash_options())?
+    let installed = lcu_crash_state(db)?
+    if required_new && installed == None {
+        return Ok(false)
+    }
+    let _ = checkpoint(mut db)?
+    if !lcu_no_import_pin(db) {
+        return Ok(false)
+    }
+    close(take db)?
+    let reopened = open(tasks, d, c, r, lcu_crash_options())?
+    if lcu_crash_state(reopened)? != installed || !lcu_no_import_pin(reopened) {
+        return Ok(false)
+    }
+    close(take reopened)?
+    Ok(true)
 }

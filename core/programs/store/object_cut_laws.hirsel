@@ -36,7 +36,9 @@ fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] 
         Error(take problem) => return Error(Remote(take problem)),
     }
     let recovered = history_paged_capture(mut source, capture.head, 1048576)?
-    if recovered.state.tips[0].head != 1 { fail("cold recovery lost the checkpoint's main tip") }
+    if recovered.state.tips[0].head != 1 {
+        fail("cold recovery lost the checkpoint's main tip")
+    }
     object_locator_boundary(mut source, held.head, manifest, mut workspace)
 }
 
@@ -62,8 +64,7 @@ fn object_locator_boundary(mut source: ObjectPackRead, head: HistoryHead, manife
     let mut observed = head
     observed.checkpoint = mark_entry
     let loaded = history_locator(mut source.client, observed, mark, workspace.packet, source.deadline)?
-    if map.len(loaded.rows) != 32769 || option.unwrap(map.get(loaded.rows, 32768)).digest != 65536 ||
-        option.unwrap(map.get(loaded.rows, 32769)).digest != 65538 {
+    if map.len(loaded.rows) != 32769 || option.unwrap(map.get(loaded.rows, 32768)).digest != 65536 || option.unwrap(map.get(loaded.rows, 32769)).digest != 65538 {
         fail("the split locator changed the leaf rows at the boundary")
     }
     Ok(())
@@ -102,8 +103,7 @@ fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let mut located = empty_history_locator()
     let changed: List[HistoryRef] = clone(list.slice(input, 1, 32770))
     let updated = history_make_locator_reusing(mut client, id, 24, 1, 1, take changed, inherited, mut located, mut workspace, deadline)?
-    if updated.depth != 1 || list.len(updated.rows) != 2 || updated.rows[0].seq != 24 ||
-        !history_ref_matches(updated.rows[1], unchanged) {
+    if updated.depth != 1 || list.len(updated.rows) != 2 || updated.rows[0].seq != 24 || !history_ref_matches(updated.rows[1], unchanged) {
         fail("deleting an earlier row rewrote an unchanged chunk or misplaced it")
     }
     let current_ctx = DiskContext(store: id, role: 2, seq: 24)
@@ -119,7 +119,9 @@ fn locator_reuse_law(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
         fail("the reused locator lost or invented pack rows")
     }
     for pack in 2u64 .. 32771 {
-        let Some(row) = map.get(recovered.rows, pack) else { fail("missing pack row") }
+        let Some(row) = map.get(recovered.rows, pack) else {
+            fail("missing pack row")
+        }
         if row.epoch != 1 || row.len != 96 || row.digest != pack * 2 {
             fail("the reused locator changed a pack reference")
         }
@@ -133,7 +135,9 @@ fn bucket_test_m2_locator_reuse(c: Clock, tasks: Tasks) -> Result[(), Error] wai
     let outcome = locator_reuse_law(tasks, sim)
     let report = bucket_law_finish(take sim)
     outcome?
-    if report.writes != 3 { fail("the unchanged locator chunk was written again") }
+    if report.writes != 3 {
+        fail("the unchanged locator chunk was written again")
+    }
     Ok(())
 }
 
@@ -163,7 +167,9 @@ fn bucket_test_m2_multipart_restart(c: Clock, tasks: Tasks) -> Result[(), Error]
     let sent = upload_pack_with_expired_completion(tasks, sim, name, raw)
     let observed = bucket_law_finish(take sim)
     sent?
-    let Some(saved) = map.get(observed.objects, name) else { fail("completed pack is missing") }
+    let Some(saved) = map.get(observed.objects, name) else {
+        fail("completed pack is missing")
+    }
     if saved.data != raw || observed.writes != 1 || observed.multipart_uploads != 2 || list.len(observed.pending) != 0 {
         fail("multipart restart did not publish only the original bytes under a fresh upload")
     }
@@ -198,8 +204,7 @@ fn object_cut_upload_budget_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSi
     bucket_law_commit(mut writer, 2)?
     let _ = history_fetch(mut witness, "head", mut workspace.body, deadline)?
     let observed = history_decode_head(workspace.body)?
-    if observed.head.entry.seq != baseline.head.entry.seq + 1 ||
-        !history_ref_matches(observed.head.checkpoint, baseline.head.checkpoint) {
+    if observed.head.entry.seq != baseline.head.entry.seq + 1 || !history_ref_matches(observed.head.checkpoint, baseline.head.checkpoint) {
         fail("the holder could not publish a group after its cut was refused")
     }
     close(take writer)
@@ -218,11 +223,17 @@ fn bucket_test_m2_multipart_refused_cut(c: Clock, r: Random, tasks: Tasks) -> Re
 
 fn object_import_seed(mut writer: Db, rows: Table[u64, u64], other: Table[u64, u64]) -> Result[(), Error] waits {
     let outcome = run(mut writer, None, (copy_env(rows), copy_env(other)), fn(mut tx, tables) -> Result[(), Error] {
-        for k in 0u64 .. 96 { put(mut tx, tables.0, k, k + 1)? }
-        for k in 10u64 .. 16 { put(mut tx, tables.1, k, k * 10)? }
+        for k in 0u64 .. 96 {
+            put(mut tx, tables.0, k, k + 1)?
+        }
+        for k in 10u64 .. 16 {
+            put(mut tx, tables.1, k, k * 10)?
+        }
         Ok(())
     })?
-    let Committed(take receipt) = take outcome else { fail("could not seed both import tables") }
+    let Committed(take receipt) = take outcome else {
+        fail("could not seed both import tables")
+    }
     durable(mut writer, receipt.ticket)?
     bucket_law_checkpoint(mut writer)
 }
@@ -241,7 +252,9 @@ fn object_import_edit(mut writer: Db, rows: Table[u64, u64], other: Table[u64, u
         }
         Ok(())
     })?
-    let Committed(take receipt) = take outcome else { fail("could not commit the import fixture edits") }
+    let Committed(take receipt) = take outcome else {
+        fail("could not commit the import fixture edits")
+    }
     durable(mut writer, receipt.ticket)
 }
 
@@ -255,25 +268,34 @@ fn object_import_rows(read_handle: Reader, visible: Snapshot, table_handle: Tabl
             let Some(expected_value) = map.get(expected, key) else {
                 fail("the restored table has a row outside its frozen map")
             }
-            if (if let Some(prior_key) = previous { key <= prior_key } else { false }) ||
-                value != expected_value {
+            if (if let Some(prior_key) = previous {
+                key <= prior_key
+            } else {
+                false
+            }) || value != expected_value {
                 fail("the restored table differs from its frozen map")
             }
             previous = Some(key)
             seen += 1
         }
         let Page(next: take more, ..) = take batch
-        let Some(take resume) = take more else { break }
+        let Some(take resume) = take more else {
+            break
+        }
         if seen >= map.len(expected) {
             fail("the restored table has a resume after its last expected row")
         }
         let Paged(take following) = scan_next(read_handle, visible, table_handle, take resume, limit)? else {
             fail("the restored table's resume must stay on the same snapshot")
         }
-        if list.len(following.rows) == 0 { fail("the restored table's resume made no progress") }
+        if list.len(following.rows) == 0 {
+            fail("the restored table's resume made no progress")
+        }
         batch = take following
     }
-    if seen != map.len(expected) { fail("the restored table ended before its frozen map") }
+    if seen != map.len(expected) {
+        fail("the restored table ended before its frozen map")
+    }
     Ok(())
 }
 
@@ -286,21 +308,34 @@ fn object_import_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     let source_other = deploy_result(table(mut writer, "other", std.codec.key_u64(), std.codec.of_u64()))?
     deploy_result(object_import_seed(mut writer, source_rows, source_other))?
     deploy_result(object_import_edit(mut writer, source_rows, source_other, false))?
-
     let mut expected_rows: Map[u64, u64] = map.new()
     for k in 0u64 .. 96 {
-        if k != 8 { map.insert(mut expected_rows, k, if k == 7 { 700 } else { k + 1 }) }
+        if k != 8 {
+            map.insert(mut expected_rows, k, if k == 7 {
+                700
+            } else {
+                k + 1
+            })
+        }
     }
     let mut expected_other: Map[u64, u64] = map.new()
     for k in 10u64 .. 16 {
-        if k != 13 { map.insert(mut expected_other, k, if k == 12 { 1200 } else { k * 10 }) }
+        if k != 13 {
+            map.insert(mut expected_other, k, if k == 12 {
+                1200
+            } else {
+                k * 10
+            })
+        }
     }
     let frozen_head = version(snapshot(writer))
     let original_id = writer.store
     let attempt = install_fixture_bytes(16, 7)
     let copying = begin_export_copy(mut writer, d, clone(attempt), 1)?
     deploy_result(object_import_edit(mut writer, source_rows, source_other, true))?
-    if version(snapshot(writer)) <= frozen_head { fail("the source did not advance after capture") }
+    if version(snapshot(writer)) <= frozen_head {
+        fail("the source did not advance after capture")
+    }
     let exported = export_copy(take copying)?
     release_export(mut writer, attempt)
     deploy_result(close(take writer))?
@@ -325,8 +360,7 @@ fn object_import_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     let id = deploy_result(import_authority(take clean, take admitted, r, options))?
     let _ = deploy_result(history_fetch(mut witness, "head", mut workspace.witness, deadline))?
     let initial = deploy_result(history_decode_head(workspace.witness))?
-    if same(id, original_id) || !same(id, initial.head.store) || initial.head.entry.seq != 1 ||
-        initial.head.checkpoint.seq != 1 || initial.head.pair.epoch != 1 {
+    if same(id, original_id) || !same(id, initial.head.store) || initial.head.entry.seq != 1 || initial.head.checkpoint.seq != 1 || initial.head.pair.epoch != 1 {
         fail("import did not publish the new identity at the first checkpoint")
     }
     let repeated = deploy_result(bucket_law_authority(sim, tasks, "spare.test", 4))?
@@ -354,7 +388,9 @@ fn object_import_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     let declared_other = deploy_result(declare_table(mut schema, "other", std.codec.key_u64(), std.codec.of_u64()))?
     let other = deploy_result(finish(mut schema, take declared_other))?
     deploy_result(seal_follower(follower_view, take schema))?
-    if version(visible) != frozen_head { fail("the imported base lost the writer's captured version") }
+    if version(visible) != frozen_head {
+        fail("the imported base lost the writer's captured version")
+    }
     deploy_result(object_import_rows(view_reader, visible, rows, expected_rows))?
     deploy_result(object_import_rows(view_reader, visible, other, expected_other))
 }
@@ -397,16 +433,21 @@ fn object_export_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     let empty = begin_export_copy(mut writer, d, clone(attempt_one), 1)?
     let zero_suffix = check_object_export(take empty, c, None)?
     release_export(mut writer, attempt_one)
-    if zero_suffix != (1u64, 72u64) { fail("the empty suffix wrote journal data") }
+    if zero_suffix != (1u64, 72u64) {
+        fail("the empty suffix wrote journal data")
+    }
     let rows = deploy_result(table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64()))?
-    if !typed_put(mut writer, rows, 7, 14) { fail("could not write the export fixture group") }
+    if !typed_put(mut writer, rows, 7, 14) {
+        fail("could not write the export fixture group")
+    }
     let attempt_two = install_fixture_bytes(16, 2)
     let grouped = begin_export_copy(mut writer, d, clone(attempt_two), 1)?
     let group_suffix = check_object_export(take grouped, c, Some(14u64))?
     release_export(mut writer, attempt_two)
-    if group_suffix.0 != 2 || group_suffix.1 <= 72 { fail("the GROUP was absent from the export") }
+    if group_suffix.0 != 2 || group_suffix.1 <= 72 {
+        fail("the GROUP was absent from the export")
+    }
     deploy_result(close(take writer))?
-
     let second = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 2))?
     options.create = false
     let mut successor = open_authority(tasks, take second, c, r, options) ?=> |Refusal(error: take problem, ..)| Store(take problem)
@@ -417,7 +458,9 @@ fn object_export_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     deploy_result(reclaim_barrier(successor))?
     let claim_suffix = check_object_export(take with_claim, c, Some(14u64))?
     release_export(mut successor, attempt_three)
-    if claim_suffix != group_suffix { fail("CLAIM changed the replayed version or journal extent") }
+    if claim_suffix != group_suffix {
+        fail("CLAIM changed the replayed version or journal extent")
+    }
     deploy_result(close(take successor))
 }
 
@@ -431,7 +474,9 @@ fn bucket_test_m2_export_replay(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
 
 fn release_witness(digest: Inline[u8, 32]) -> Bytes {
     let mut octets: Bytes = list.with_capacity(32)
-    for i in 0u64 .. 32 { list.push(mut octets, digest[i]) }
+    for i in 0u64 .. 32 {
+        list.push(mut octets, digest[i])
+    }
     take octets
 }
 
@@ -442,10 +487,10 @@ fn prepared_release_witness(_target: PreparedTarget, digest: Inline[u8, 32]) -> 
 fn stage_object_preparation(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes, resident: u64) -> Result[Inline[u8, 32], DeployError] waits {
     let pending = begin_export_copy(mut db, scratch, clone(attempt), 1)?
     let image = export_copy(take pending)?
-    let source = open_export(image.dir, c, attempt, disk_crash_options("install"))?
+    let mut source = open_export(image.dir, c, attempt, disk_crash_options("install"))?
     let staged = deploy_result(stage_next(source, tasks))?
     let target = PreparedTarget(describe: install_fixture_bytes(32, 66), release: install_fixture_bytes(32, 67), digest: install_fixture_bytes(32, 68), resident_limit: resident, pack_bytes: 1048576, checkpoint_bytes: 4096, journal_limit: 16781392)
-    write_prepared(source, staged, image.dir, take target)?
+    write_prepared(mut source, staged, image.dir, take target)?
     let checked = validate_prepared(image.dir)?
     let work = reserve_import(mut db, take checked)?
     let assembled = import_trees(take work)?
@@ -465,7 +510,9 @@ fn object_prepared_install_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: B
     deploy_result(stage_activation(mut staged, 1, None, description, std.codec.of_bytes(), description))?
     deploy_result(install_bound_activation(mut writer, take staged, 1, description))?
     let rows = deploy_result(table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64()))?
-    if !typed_put(mut writer, rows, 7, 14) || !typed_put(mut writer, rows, 8, 15) { fail("could not write rows at versions 2 and 3") }
+    if !typed_put(mut writer, rows, 7, 14) || !typed_put(mut writer, rows, 8, 15) {
+        fail("could not write rows at versions 2 and 3")
+    }
     let mut witness = deploy_result(bucket_law_client_with(sim, tasks, "s3.test", 2, true))?
     let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
     let mut workspace = deploy_result(history_buffers(65536))?
@@ -473,20 +520,26 @@ fn object_prepared_install_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: B
     let refused_digest = stage_object_preparation(mut writer, d, c, tasks, too_small, 1)?
     let _ = deploy_result(history_fetch(mut witness, "head", mut workspace.witness, deadline))?
     let refused = Cutover(attempt: take too_small, digest: refused_digest, deadline: 0xffffffffffffffffu64)
-    if let Error(FullNew(Resident(_))) = perform_bound_cutover(mut writer, refused, 1, description, std.codec.of_bytes(), prepared_release_witness, [66; 32], fn() -> bool { true }) {} else {
+    if let Error(FullNew(Resident(_))) = perform_bound_cutover(mut writer, refused, 1, description, std.codec.of_bytes(), prepared_release_witness,[66; 32], fn() -> bool {
+        true
+    }) {} else {
         fail("the new resident ceiling did not refuse the installation")
     }
     let _ = deploy_result(history_fetch(mut witness, "head", mut workspace.body, deadline))?
-    if workspace.body != workspace.witness { fail("a pre-publication refusal changed HEAD") }
+    if workspace.body != workspace.witness {
+        fail("a pre-publication refusal changed HEAD")
+    }
     deploy_result(healthy(writer))?
-
     let attempt = install_fixture_bytes(16, 2)
     let digest = stage_object_preparation(mut writer, d, c, tasks, attempt, 2097152)?
     let request = Cutover(attempt: take attempt, digest, deadline: 0xffffffffffffffffu64)
-    let installed = perform_bound_cutover(mut writer, request, 1, description, std.codec.of_bytes(), prepared_release_witness, [66; 32], fn() -> bool { true })?
-    if installed != 4 { fail("activation did not use the exported main version plus one") }
+    let installed = perform_bound_cutover(mut writer, request, 1, description, std.codec.of_bytes(), prepared_release_witness,[66; 32], fn() -> bool {
+        true
+    })?
+    if installed != 4 {
+        fail("activation did not use the exported main version plus one")
+    }
     deploy_result(close(take writer))?
-
     let read_grant = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 3))?
     let mut process = followers()
     let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), options)
@@ -508,9 +561,7 @@ fn object_prepared_install_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: B
     let added = deploy_result(declare_table(mut schema, "added", std.codec.key_u64(), std.codec.of_u64()))?
     let _ = deploy_result(finish(mut schema, take added))?
     deploy_result(seal_follower(observer, take schema))?
-    if capture.activation != 4 || capture.binding != install_fixture_bytes(32, 66) || version(visible) != 4 ||
-        deploy_result(get(view_reader, visible, releases, 4))? != Some(release_witness(digest)) ||
-        deploy_result(get(view_reader, visible, migrated, 7))? != Some(1014u64) {
+    if capture.activation != 4 || capture.binding != install_fixture_bytes(32, 66) || version(visible) != 4 || deploy_result(get(view_reader, visible, releases, 4))? != Some(release_witness(digest)) || deploy_result(get(view_reader, visible, migrated, 7))? != Some(1014u64) {
         fail("the cold capture lost the atomic activation, binding, or PREPARED witness")
     }
     Ok(())
@@ -538,7 +589,9 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let wrote = run(mut draft, None, (copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env.0, 7, call_env.1)
     })?
-    if let Committed(_) = wrote {} else { fail("fixture did not write a blob") }
+    if let Committed(_) = wrote {} else {
+        fail("fixture did not write a blob")
+    }
     let participants = cut_participants(draft, NoHolderChange)?
     let base = page_retry_base(new_page_locations(), map.new(), participants.holders, participants.roots)?
     let mut next_stamp = stamp_after(draft.next_node)?
@@ -591,7 +644,9 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
         let committed = run(mut writer, None, (copy_env(rows), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
             put(mut tx, call_env.0, call_env.1, call_env.1)
         })?
-        if let Committed(_) = committed {} else { fail("the fixture write was refused") }
+        if let Committed(_) = committed {} else {
+            fail("the fixture write was refused")
+        }
     }
     let description = string.into_bytes(string.from("release 12"))
     let mut schema_binding: Bytes = list.with_capacity(32)
@@ -601,9 +656,15 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let committed = run(mut writer, None, copy_env(rows), fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 9, 9)
     })?
-    let Committed(take done) = take committed else { fail("the intervening write was refused") }
-    let Journal(_, 0, acknowledged) = done.ticket.mark else { fail("the write has no main journal acknowledgment") }
-    if acknowledged != 11 { fail("the fixture has the wrong install base") }
+    let Committed(take done) = take committed else {
+        fail("the intervening write was refused")
+    }
+    let Journal(_, 0, acknowledged) = done.ticket.mark else {
+        fail("the write has no main journal acknowledgment")
+    }
+    if acknowledged != 11 {
+        fail("the fixture has the wrong install base")
+    }
     durable(mut writer, done.ticket)?
     let fence = writer.fence
     let refused = install_bound_activation(mut writer, take stale, 12, schema_binding)
@@ -611,12 +672,16 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     if get(result.unwrap(reader(writer, 0u64)), after, rows, 9)? != Some(9u64) {
         fail("the stale activation lost the acknowledged write")
     }
-    if let Error(Foreign) = refused {} else { fail("the stale activation was admitted") }
+    if let Error(Foreign) = refused {} else {
+        fail("the stale activation was admitted")
+    }
     if version(after) != acknowledged || writer.fence != fence {
         fail("the refused activation changed the writer")
     }
     let unpublished = system_table(writer, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_u64())
-    if let Error(Missing(_)) = unpublished {} else { fail("the refused activation published its release table") }
+    if let Error(Missing(_)) = unpublished {} else {
+        fail("the refused activation published its release table")
+    }
     let mut staged = stage_migration(writer, tasks, code.describe(bucket_activation_noop))?
     stage_activation(mut staged, 12, None, description, std.codec.of_u64(), 73u64)?
     install_bound_activation(mut writer, take staged, 12, schema_binding)?
@@ -637,10 +702,14 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     options.activation = Some(12)
     options.binding = Some(list.new())
     let wrong = open_authority(tasks, object_authority(take bad_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)
-    if let Error(Refusal(error: NotCurrent(12), ..)) = wrong {} else { fail("a wrong binding was admitted") }
+    if let Error(Refusal(error: NotCurrent(12), ..)) = wrong {} else {
+        fail("a wrong binding was admitted")
+    }
     let deadline = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
     let clean = fresh_snapshot(mut writer, deadline)?
-    if version(clean) != 12 || claim_of(writer)?.epoch != 1 { fail("a refused binding fenced the incumbent") }
+    if version(clean) != 12 || claim_of(writer)?.epoch != 1 {
+        fail("a refused binding fenced the incumbent")
+    }
     close(take writer)
 }
 
@@ -651,6 +720,7 @@ fn bucket_test_m2_binding(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error
     let _ = bucket_law_finish(take sim)
     outcome
 }
+
 fn object_conflict_sim(tasks: Tasks, c: Clock, seed: u64, tape: Inline[std.sim.s3.Fault, 18]) -> BucketSim {
     let mut faults: List[std.sim.s3.Fault] = list.with_capacity(18)
     let mut words: List[u64] = list.with_capacity(36)
@@ -684,7 +754,6 @@ fn object_conflict_race(tasks: Tasks, sim: BucketSim) -> Result[Bytes, Error] wa
     let mut b = HistoryRegister(head: captured.head, tag: seen.etag, terminal: None)
     bucket_m2_law_commit_packet(mut a_buf.packet, a.head, 1)?
     bucket_m2_law_commit_packet(mut b_buf.packet, b.head, 2)?
-
     // Both candidates use generation 2's tag. A sees 409, then loses the
     // reply to the applied resend. B sees 409, then 412 on its stale resend.
     let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buf, due)? else {
@@ -745,7 +814,7 @@ fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Resu
     let conflict: std.sim.s3.Fault = Conflict
     let lost: std.sim.s3.Fault = ResetAfterBody
     let slow: std.sim.s3.Fault = SlowDown
-    let race_tape = [clean, clean, clean, clean, clean, clean, clean, clean, clean, conflict, lost, clean, clean, clean, conflict, clean, clean, clean]
+    let race_tape =[clean, clean, clean, clean, clean, clean, clean, clean, clean, conflict, lost, clean, clean, clean, conflict, clean, clean, clean]
     let race = object_conflict_sim(tasks, c, seed, race_tape)
     let winner = object_conflict_race(tasks, race)
     let raced = bucket_law_finish(take race)
@@ -760,10 +829,9 @@ fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Resu
     if object_conflict_single_advance(3, 9) || !object_conflict_single_advance(captured.head.entry.seq, raced.writes) || stored.data != expected || raced.attempts != 17 {
         fail("L54: the bucket did not record exactly one generation-3 advance")
     }
-
     // Genesis, five conflicts, then another five attempts with a 503 mixed
     // in. A clean sixth attempt in the mixed run would publish the candidate.
-    let budget_tape = [clean, clean, clean, clean, clean, conflict, conflict, conflict, conflict, conflict, conflict, slow, conflict, conflict, conflict, clean, clean, clean]
+    let budget_tape =[clean, clean, clean, clean, clean, conflict, conflict, conflict, conflict, conflict, conflict, slow, conflict, conflict, conflict, clean, clean, clean]
     let budget = object_conflict_sim(tasks, c, seed, budget_tape)
     let unchanged = object_conflict_budget(tasks, budget)
     let exhausted = bucket_law_finish(take budget)

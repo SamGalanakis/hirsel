@@ -24,9 +24,9 @@ fn trigger_scan_fate(chosen: Option[fate.HeldFate], take entry: Option[(Bytes, f
 // of (a)'s or (b)'s export under several fates. An unsettled report writes no
 // PREPARED; a settled one writes one rewrite per held row and none for any
 // other row. Returns the rows of the report with no fates, for (a) and (b).
-fn trigger_scan_fates[G: send, H: shareable + inert + send](mut setup: PrepareConfig[G, H], source: store.Preparation, same_image: bool) -> List[TriggerScanRow] waits {
+fn trigger_scan_fates[G: send, H: shareable + inert + send](mut setup: PrepareConfig[G, H], mut source: store.Preparation, same_image: bool) -> List[TriggerScanRow] waits {
     let d = setup.scratch
-    result.unwrap(prepare_export(setup, source))
+    result.unwrap(prepare_export(setup, mut source))
     let bare = trigger_scan_report(d)
     if list.len(bare.unmatched) != 0u64 || trigger_scan_prepared(d) != None {
         fail("L40 (d): a report with unfated held rows wrote PREPARED")
@@ -37,7 +37,7 @@ fn trigger_scan_fates[G: send, H: shareable + inert + send](mut setup: PrepareCo
             fail("L40 (d): the Request-parked run is not held Request(same_code: true)")
         }
         setup.fates = trigger_scan_fate(Some(Cancel), None)
-        result.unwrap(prepare_export(setup, source))
+        result.unwrap(prepare_export(setup, mut source))
         let cancelled = trigger_scan_report(d)
         if !trigger_scan_held(cancelled, "trigger_law_granted_body", Request(true), Some(Cancel)) || list.len(cancelled.unmatched) != 0u64 || trigger_scan_prepared(d) != Some(1u64) {
             fail("L40 (d): Cancel for all did not settle the one held row")
@@ -49,7 +49,7 @@ fn trigger_scan_fates[G: send, H: shareable + inert + send](mut setup: PrepareCo
         fail("L40 (d): the started runs are not held Cut with no fate")
     }
     setup.fates = trigger_scan_fate(Some(Release), Some((clone(string.as_bytes("no.such")), Cancel)))
-    result.unwrap(prepare_export(setup, source))
+    result.unwrap(prepare_export(setup, mut source))
     let typo = trigger_scan_report(d)
     let mut typo_paths: List[Bytes] = list.new()
     list.push(mut typo_paths, clone(string.as_bytes("no.such")))
@@ -58,13 +58,13 @@ fn trigger_scan_fates[G: send, H: shareable + inert + send](mut setup: PrepareCo
     }
     // (v2.66) A Cancel for an entry with only unheld rows is matched and changes no row.
     setup.fates = trigger_scan_fate(Some(Release), Some((trigger_scan_path("trigger_scan_law_unchanged"), Cancel)))
-    result.unwrap(prepare_export(setup, source))
+    result.unwrap(prepare_export(setup, mut source))
     let unheld = trigger_scan_report(d)
     if list.len(unheld.unmatched) != 0u64 || trigger_scan_prepared(d) != Some(2u64) {
         fail("L40 (d): a fate for unheld rows rewrote one or was unmatched")
     }
     setup.fates = trigger_scan_fate(Some(Release), Some((trigger_scan_path("trigger_scan_law_removed_run"), Cancel)))
-    result.unwrap(prepare_export(setup, source))
+    result.unwrap(prepare_export(setup, mut source))
     let settled = trigger_scan_report(d)
     if !trigger_scan_held(settled, "trigger_law_granted_body", Cut, Some(Release)) || !trigger_scan_held(settled, "trigger_scan_law_removed_run", Cut, Some(Cancel)) || list.len(settled.unmatched) != 0u64 || trigger_scan_prepared(d) != Some(2u64) {
         fail("L40 (d): the settled report or its PREPARED rewrites are wrong")
@@ -118,9 +118,9 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let digest = trigger_scan_law_bytes(32u64, 2u8)
     let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), 1u64))
     let exported_store = result.unwrap(store.export_copy(take copying))
-    let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
+    let mut source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
     let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(digest), clock: c, tasks: tasks, n_place: n_place, place: code.describe(trigger_scan_law_empty), on_migrate: None, schema: code.describe(trigger_law_schema), triggers: triggers.empty_entries(), fates: fate.none())
-    result.unwrap(prepare_export(setup, source))
+    result.unwrap(prepare_export(setup, mut source))
     let report = trigger_scan_report(exported_store.dir)
     let rows = view report.rows
     if list.len(rows) != 1u64 || rows[0u64].class != Gone || rows[0u64].count != 1u64 || rows[0u64].earliest_due != due {

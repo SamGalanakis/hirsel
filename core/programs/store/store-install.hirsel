@@ -1,11 +1,11 @@
-fn accept_cutover(mut db: Db, request: Cutover) -> Result[Imported, DeployError] waits {
+fn accept_cutover(mut db: Db, request: Cutover) -> Result[KeptImport, DeployError] waits {
     deploy_result(healthy(db))?
     if !is_disk(db) {
         return Error(ExportMismatch)
     }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, final_item))?
-    let finished = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[Imported] {
+    let finished = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[KeptImport] {
         replace(mut state.imported, None)
     })
     let Some(take staged) = take finished else {
@@ -46,7 +46,8 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     let mut schema_change = schema_plan(db)
     schema_change.ceiling = disk_limit
     planned_catalog(mut schema_change, staged.delta)?
-    planned_ranges(mut schema_change, staged.ranges)?
+    let ranges = kept_ranges(staged)?
+    planned_ranges(mut schema_change, ranges)?
     apply_import_rewrites(mut schema_change, staged.rewrites)?
     // STORE-SPEC §1.2: a release activates only over Public indexes.
     if let Some(take name) = deploy_result(unready_index(schema_change.roots.catalog))? {
@@ -56,9 +57,13 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     schema_change.live = install_account(db, schema_change.roots)?
     deploy_result(over_ceiling(schema_change.live, disk_limit))?
     let mut installation = staged_migration(db, take schema_change, false)
-    let Some(release_at) = int.checked_add(base.head, 1u64) else { return Error(Store(Limit(Ids))) }
+    let Some(release_at) = int.checked_add(base.head, 1u64) else {
+        return Error(Store(Limit(Ids)))
+    }
     let activation_update = if object_writer_open(db) {
-        let Some(schema_binding) = target_binding else { return Error(Store(Missing("binding"))) }
+        let Some(schema_binding) = target_binding else {
+            return Error(Store(Missing("binding")))
+        }
         Some(HistoryActivation(number: release_at, binding: schema_binding))
     } else {
         None
@@ -77,7 +82,9 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
         state.target = Some(limits)
     })
     let StagedMigration(plan: take ready, ..) = take installation
-    let installed = publish_schema_plan_binding(mut db, take ready, activation_update)
+    // The same cut drops the import pin: the installed main now holds its pages.
+    let import_slot = import_pin_slot(db)
+    let installed = publish_schema_plan_binding(mut db, take ready, activation_update, import_slot)
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.target = None
     })

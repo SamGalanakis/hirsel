@@ -208,10 +208,10 @@ fn crash_install_prepared(mut db: Db, d: Dir, c: Clock, tasks: Tasks, attempt: B
 }
 
 fn crash_import(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes, image: u8, journal_cap: u64) -> Result[Inline[u8, 32], DeployError] waits {
-    let source = open_export(scratch, c, attempt, disk_crash_options("install"))?
+    let mut source = open_export(scratch, c, attempt, disk_crash_options("install"))?
     let staged = deploy_result(stage_next(source, tasks))?
     let header = PreparedTarget(describe: install_fixture_bytes(32u64, image), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: journal_cap)
-    write_prepared(source, staged, scratch, take header)?
+    write_prepared(mut source, staged, scratch, take header)?
     let checked = validate_prepared(scratch)?
     let work = reserve_import(mut db, take checked)?
     let assembled = import_trees(take work)?
@@ -516,6 +516,9 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
             Ok(true) => Ok(()),
             _ => Error(Exit(status: 63u8))
         }
+    }
+    if scenario == "catch-up" {
+        return lcu_crash_phase(d, c, r, tasks, argv, out, phase)
     }
     if scenario == "index-build" {
         if phase == "init" {

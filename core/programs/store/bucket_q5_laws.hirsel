@@ -1,5 +1,5 @@
-
 type Q5Operation: send = GenesisWrite | ClaimWrite | ActivationWrite
+
 type Q5Fault: send = AfterBody | BeforeBody | OvertakeDrop | OvertakeApply | Retry500 | ExhaustBeforeBody
 
 type Q5Actor: send {
@@ -20,7 +20,10 @@ fn q5_actor(take trial: Q5Actor) -> Q5Observation waits {
     if let ActivationWrite = trial.operation {
         return q5_install(trial)
     }
-    let create = match trial.operation { GenesisWrite => true, _ => false }
+    let create = match trial.operation {
+        GenesisWrite => true,
+        _ => false
+    }
     let observed = q5_open(trial, create)
     Q5Observation(outcome: take observed, digest: None)
 }
@@ -65,11 +68,17 @@ fn q5_prepared_activation(trial: Q5Actor) -> (Result[u64, DeployError], Option[I
         Error(take problem) => return (Error(take problem), None),
     }
     let request = Cutover(attempt: take attempt, digest, deadline: 0xffffffffffffffffu64)
-    let installed = perform_bound_cutover(mut db, request, 1, prior, std.codec.of_bytes(), prepared_release_witness, [66; 32], fn() -> bool { true })
+    let installed = perform_bound_cutover(mut db, request, 1, prior, std.codec.of_bytes(), prepared_release_witness,[66; 32], fn() -> bool {
+        true
+    })
     (take installed, Some(digest))
 }
 
-type Q5Site { connection: u64, nth: u64, reads: u64 }
+type Q5Site {
+    connection: u64,
+    nth: u64,
+    reads: u64
+}
 
 fn q5_selects(operation: Q5Operation, head_bytes: Bytes) -> bool {
     let epoch = read_le(head_bytes, 88, 8)
@@ -77,7 +86,7 @@ fn q5_selects(operation: Q5Operation, head_bytes: Bytes) -> bool {
     match operation {
         GenesisWrite => epoch == 1 && sequence == 1,
         ClaimWrite => epoch == 2 && sequence == 2,
-        ActivationWrite => epoch == 1 && sequence == 6 && read_le(head_bytes, 112, 8) == 4,
+        ActivationWrite => epoch == 1 && sequence == 7 && read_le(head_bytes, 112, 8) == 4,
     }
 }
 
@@ -87,10 +96,18 @@ fn q5_locate_site(operation: Q5Operation, report: std.sim.s3.Report) -> Q5Site {
             let mut sends = 0u64
             let mut reads = 0u64
             for req in report.requests {
-                if req.key != "head" { continue }
-                if req.method == "GET" { reads += 1 }
-                if req.method == "PUT" { sends += 1 }
-                if req.request == event.request { return Q5Site(connection: event.request, nth: sends, reads) }
+                if req.key != "head" {
+                    continue
+                }
+                if req.method == "GET" {
+                    reads += 1
+                }
+                if req.method == "PUT" {
+                    sends += 1
+                }
+                if req.request == event.request {
+                    return Q5Site(connection: event.request, nth: sends, reads)
+                }
             }
         }
     }
@@ -129,7 +146,11 @@ fn q5_fixture(c: Clock, tasks: Tasks, seed: u64, site: Q5Site, fault: Q5Fault) -
     let mut words: List[u64] = list.with_capacity(2 * (site.connection + 64))
     for i in 1u64 .. site.connection + 65 {
         let inject = i == site.connection || (i >= site.connection && i - site.connection < 5 && q5_exhausts(fault))
-        list.push(mut words, if inject { 1u64 << 63 } else { 0u64 })
+        list.push(mut words, if inject {
+            1u64 << 63
+        } else {
+            0u64
+        })
         list.push(mut words, seed)
     }
     let mut streams: List[List[u64]] = list.with_capacity(1)
@@ -137,17 +158,18 @@ fn q5_fixture(c: Clock, tasks: Tasks, seed: u64, site: Q5Site, fault: Q5Fault) -
     let plan = std.sim.world.plan_from(std.sim.world.Script(tail_seed: seed, streams: take streams), 0)
     let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
     match fault {
-        OvertakeDrop => list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "head", from: site.nth, count: 1,
-            until: Applied("PUT", "head", site.nth + 1), then: Drop)),
-        OvertakeApply => list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "head", from: site.nth, count: 1,
-            until: Requested("GET", "head", site.reads + 1), then: ApplyLoseReply)),
+        OvertakeDrop => list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "head", from: site.nth, count: 1, until: Applied("PUT", "head", site.nth + 1), then: Drop)),
+        OvertakeApply => list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "head", from: site.nth, count: 1, until: Requested("GET", "head", site.reads + 1), then: ApplyLoseReply)),
         _ => (),
     }
     bucket_law_sim_holds(tasks, c, seed, None, take faults, take holds, take plan)
 }
 
 fn q5_exhausts(fault: Q5Fault) -> bool {
-    match fault { ExhaustBeforeBody => true, _ => false }
+    match fault {
+        ExhaustBeforeBody => true,
+        _ => false
+    }
 }
 
 fn q5_races(fault: Q5Fault) -> bool {
@@ -186,8 +208,16 @@ fn q5_reconcile(tasks: Tasks, sim: BucketSim, digest: Option[Inline[u8, 32]], ap
     }
     deploy_result(seal_follower(mirror, take schema))?
     let witness = deploy_result(get(read, image, rows, 4))?
-    let wanted: Option[Bytes] = if applied_during_claim { Some(release_witness(option.unwrap(digest))) } else { None }
-    let expected_activation = if applied_during_claim { 4u64 } else { 1u64 }
+    let wanted: Option[Bytes] = if applied_during_claim {
+        Some(release_witness(option.unwrap(digest)))
+    } else {
+        None
+    }
+    let expected_activation = if applied_during_claim {
+        4u64
+    } else {
+        1u64
+    }
     if witness != wanted || captured.activation != expected_activation {
         fail("L54-M: the cold activation witness disagreed with the register")
     }
@@ -195,20 +225,28 @@ fn q5_reconcile(tasks: Tasks, sim: BucketSim, digest: Option[Inline[u8, 32]], ap
 }
 
 fn q5_fault_check(report: std.sim.s3.Report, site: Q5Site, fault: Q5Fault) {
-    if q5_races(fault) { return }
+    if q5_races(fault) {
+        return
+    }
     let expected: u16 = match fault {
         AfterBody => 200,
         Retry500 => 500,
         _ => 0,
     }
     let mut injected = 0u64
-    let last_connection = if q5_exhausts(fault) { site.connection + 4 } else { site.connection }
+    let last_connection = if q5_exhausts(fault) {
+        site.connection + 4
+    } else {
+        site.connection
+    }
     for req in report.requests {
         if req.request >= site.connection && req.request <= last_connection && req.key == "head" && req.method == "PUT" && req.status == expected {
             injected += 1
         }
     }
-    if injected != last_connection - site.connection + 1 { fail("L54-M: the fault tape missed its selected head write") }
+    if injected != last_connection - site.connection + 1 {
+        fail("L54-M: the fault tape missed its selected head write")
+    }
 }
 
 fn q5_verify(operation: Q5Operation, fault: Q5Fault, observed: Q5Observation, report: std.sim.s3.Report) -> Result[(), DeployError] {
@@ -223,7 +261,9 @@ fn q5_verify(operation: Q5Operation, fault: Q5Fault, observed: Q5Observation, re
     }
     let mut recorded_target = false
     for event in report.head_writes {
-        if q5_selects(operation, event.data) { recorded_target = true }
+        if q5_selects(operation, event.data) {
+            recorded_target = true
+        }
     }
     if q5_exhausts(fault) {
         match observed.outcome {
@@ -249,7 +289,10 @@ fn q5_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, operation: Q5Op
     let running = task.spawn(tasks, bytes 50331648, take trial, q5_actor)
     let recovered: Option[Db] = if q5_races(fault) {
         result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", "head", site.nth))
-        let create = match operation { GenesisWrite => true, _ => false }
+        let create = match operation {
+            GenesisWrite => true,
+            _ => false
+        }
         Some(deploy_result(bucket_order_open(tasks, r, sim.time, sim.endpoint, 22, create))?)
     } else {
         None
@@ -267,7 +310,10 @@ fn q5_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, operation: Q5Op
 }
 
 fn q5_applies(fault: Q5Fault) -> bool {
-    match fault { OvertakeApply => true, _ => false }
+    match fault {
+        OvertakeApply => true,
+        _ => false
+    }
 }
 
 type GenesisPhase: send = AfterManifest | AfterCheckpoint | ConcurrentList
@@ -309,11 +355,16 @@ fn genesis_debris_case(d: Dir, real: Clock, tasks: Tasks, seed: u64, phase: Gene
         },
         _ => {
             let mut running = task.spawn(tasks, bytes 33554432, take first, q5_actor)
-            let parked_key: String = match phase { AfterManifest => string.from(entry_name), _ => string.from("head") }
+            let parked_key: String = match phase {
+                AfterManifest => string.from(entry_name),
+                _ => string.from("head")
+            }
             result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", parked_key, 1))
             task.cancel(mut running)
             let _ = task.join(take running)
-            if q5_open(second, true)? != 1 { fail("L54-G: the completing open did not create epoch 1") }
+            if q5_open(second, true)? != 1 {
+                fail("L54-G: the completing open did not create epoch 1")
+            }
         },
     }
     let report = bucket_law_finish(take sim)
@@ -324,11 +375,19 @@ fn genesis_debris_case(d: Dir, real: Clock, tasks: Tasks, seed: u64, phase: Gene
     let mut left_checkpoint = false
     let mut debris_listed = false
     for req in report.requests {
-        if req.method == "PUT" && req.applied && req.key == manifest_name { left_manifest = true }
-        if req.method == "PUT" && req.applied && req.key == entry_name { left_checkpoint = true }
-        if req.method == "LIST" && req.status == 200 && left_manifest && left_checkpoint { debris_listed = true }
+        if req.method == "PUT" && req.applied && req.key == manifest_name {
+            left_manifest = true
+        }
+        if req.method == "PUT" && req.applied && req.key == entry_name {
+            left_checkpoint = true
+        }
+        if req.method == "LIST" && req.status == 200 && left_manifest && left_checkpoint {
+            debris_listed = true
+        }
     }
-    if !left_manifest { fail("L54-G: the first creator never applied its manifest") }
+    if !left_manifest {
+        fail("L54-G: the first creator never applied its manifest")
+    }
     match phase {
         AfterManifest if left_checkpoint => fail("L54-G: the first creator's checkpoint survived the cut"),
         AfterCheckpoint if !left_checkpoint => fail("L54-G: the test cut preceded the checkpoint"),

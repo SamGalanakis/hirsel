@@ -193,6 +193,11 @@ fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation
     if object_writer_open(db) {
         return begin_object_export_copy(mut db, take into, take attempt, activation)
     }
+    // An import pin here is an orphan (a kept import needs a lease): cut it
+    // away so the copied MANIFEST never carries it (§3.5a "The kept import").
+    if let Some(_) = orphan_import_pin(db) {
+        let _ = deploy_result(checkpoint(mut db))?
+    }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, final_item))?
     let from = deploy_result(log_directory(db))?
@@ -375,7 +380,9 @@ fn append_export_range(from: Dir, to: Dir, name: String, low: u64, high: u64) ->
 // for the recovered export; callers can stage schema operations on it.
 pub opaque type Preparation {
     db: Db,
-    stamp: ExportStamp
+    stamp: ExportStamp,
+    // Set once PREPARED is written: every later round ships a ROUND delta.
+    shipped: Option[ShippedImport]
 }
 
 pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result[Preparation, DeployError] waits {
@@ -413,7 +420,7 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     db.resident = live_bytes
     db.next_node = ids
     db.next_table = stamp.next_table
-    Ok(Preparation(db: take db, stamp: take stamp))
+    Ok(Preparation(db: take db, stamp: take stamp, shipped: None))
 }
 
 fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {

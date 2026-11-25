@@ -10,7 +10,11 @@ type LocatedRoots: shareable + send {
 const KEYED_ROOT_RECORD_BYTES: u64 = 4 + 36 * KEYED_TREE_COUNT
 
 fn keyed_root_record_bytes[T](trees: List[T]) -> u64 {
-    if list.len(trees) == 0 { 0u64 } else { KEYED_ROOT_RECORD_BYTES }
+    if list.len(trees) == 0 {
+        0u64
+    } else {
+        KEYED_ROOT_RECORD_BYTES
+    }
 }
 
 type LocatedBranch: shareable + send {
@@ -156,7 +160,9 @@ fn append_page_manifest_pin(mut raw: Bytes, owner: PinOwner, name: String, branc
 fn append_keyed_roots(mut raw: Bytes, holder: u64, roots: LocatedRoots) -> Result[(), Error] {
     if list.len(roots.keyed) != 0 {
         capacity(le(mut raw, holder, 4))?
-        for ptr in roots.keyed { put_page_ptr(mut raw, ptr) }
+        for ptr in roots.keyed {
+            put_page_ptr(mut raw, ptr)
+        }
     }
     Ok(())
 }
@@ -202,7 +208,9 @@ fn read_keyed_roots(file: String, raw: Bytes, mut at: u64, mut branches: List[Lo
     let mut next_holder = 0u64
     while at < list.len(raw) {
         let holder = disk_number(file, raw, mut at, 4)?
-        if holder < next_holder || holder >= holders { return Error(disk_fault(file, at - 4, Order)) }
+        if holder < next_holder || holder >= holders {
+            return Error(disk_fault(file, at - 4, Order))
+        }
         next_holder = holder + 1
         let mut keyed: List[std.page.PagePtr] = list.with_capacity(KEYED_TREE_COUNT)
         let mut any = false
@@ -211,7 +219,9 @@ fn read_keyed_roots(file: String, raw: Bytes, mut at: u64, mut branches: List[Lo
             any = any || ptr.stamp != 0
             list.push(mut keyed, ptr)
         }
-        if !any { return Error(disk_fault(file, at, Malformed)) }
+        if !any {
+            return Error(disk_fault(file, at, Malformed))
+        }
         if holder < branch_count {
             branches[holder].roots.keyed = take keyed
         } else {
@@ -295,6 +305,7 @@ fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageMan
         let owner = match disk_number(file, raw, mut at, 1)? {
             1 => ApplicationPin,
             2 => ProjectorPin,
+            3 => ImportPin,
             _ => return Error(disk_fault(file, at - 1, Malformed)),
         }
         let size = disk_number(file, raw, mut at, 1)?
@@ -376,7 +387,11 @@ fn cut_manifest_size(db: Db, delta: HolderDelta) -> u64 {
                 Some(slot) => branch_root_bytes(db.heads[slot].name, db.heads[slot].roots),
                 None => 0u64,
             }
-            db.record_bytes - removed - keyed_root_record_bytes(db.heads[0u64].roots.keyed) + keyed_root_record_bytes(proposed.roots.keyed)
+            let unpinned = match proposed.drop_pin {
+                Some(pin_slot) => pin_root_bytes(db.pins[pin_slot].name, db.pins[pin_slot].roots),
+                None => 0u64,
+            }
+            db.record_bytes - removed - unpinned - keyed_root_record_bytes(db.heads[0u64].roots.keyed) + keyed_root_record_bytes(proposed.roots.keyed)
         },
         AddPin(held) => db.record_bytes + pin_root_bytes(held.name, held.roots),
         RemovePin(slot) => db.record_bytes - pin_root_bytes(db.pins[slot].name, db.pins[slot].roots),

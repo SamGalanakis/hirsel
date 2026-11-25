@@ -24,9 +24,9 @@ fn activation_fate_hot_deploy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), at))
     let exported = result.unwrap(store.export_copy(take copying))
     let exported_version = store.version(store.snapshot(db))
-    let source = result.unwrap(store.open_export(exported.dir, c, clone(attempt), clone(options)))
+    let mut source = result.unwrap(store.open_export(exported.dir, c, clone(attempt), clone(options)))
     let setup = PrepareConfig(scratch: exported.dir, options: clone(options), attempt: clone(attempt), image_digest: trigger_scan_law_bytes(32u64, 2u8), clock: c, tasks: tasks, n_place: n_place, place: code.describe(fate_law_r2), on_migrate: None, schema: code.describe(trigger_law_schema), triggers: fate_law_entries(false), fates: fate_crash_flags())
-    result.unwrap(prepare_export(setup, source))
+    result.unwrap(prepare_export(setup, mut source))
     let report = trigger_scan_report(exported.dir)
     if trigger_report_unsettled(report) {
         fail("L70 (e): the prepare report of (a)'s fates is unsettled")

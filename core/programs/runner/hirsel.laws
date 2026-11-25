@@ -3,7 +3,7 @@ runner@1/grant_mint_model/grant_mints_v267_shared_fails src=c8e7b29d40f21f1f sig
 runner@1/grant_mint_model/grant_mints_v269_closed src=f48a1605bdb3f478 sig=0b430c83bda6d810 run=c2c0c6612d4cbb79 bug=1ba03595acb46c9e oracle=a372c6d9816fff1b rows=pending
 runner@1/grant_mint_model/grant_trace_refused_as_gone_diverges src=9a70d458782d601e sig=d492be64f6e93763 run=c2c0c6612d4cbb79 bug=931dfda67c30b699 oracle=dd8fcd4cef496e24 rows=pending
 runner@1/grant_mint_model/grant_trace_v267_diverges src=83efb850c705863c sig=d492be64f6e93763 run=c2c0c6612d4cbb79 bug=850f6824d3d820fa oracle=5b62966587b19fca rows=pending
-runner@1/runner/activation_fate_hot_deploy src=b367b7382946efe6 sig=c846822118c77ab7 run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/activation_fate_hot_deploy src=80b4d76c27e65a20 sig=3972d4f6ca863875 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/activation_fate_survives_crash src=1552e6dbbbed05e5 sig=bd02c5c75d06c496 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/activation_settles_held src=5ecf111dd70cadf6 sig=b71c4d5f46840f9a run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/dev_identity_vectors src=59bbe7300fe06ff8 sig=f08a82083c9dc605 run=45ef62becccc2336 bug=- oracle=- rows=pending
@@ -91,7 +91,7 @@ runner@1/runner/test_wire_admission src=31199a2c765feb3e sig=a326a0413487a245 ru
 runner@1/runner/test_wire_replacement_generation src=d47e49480fed2a41 sig=3f138a2f7a5a8ccd run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_session src=1235f49aa5079d5f sig=13ed8a28b1f5cb82 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_write src=d0d09a0076820947 sig=0912c9827d227605 run=4c3ef853c7dc0c9d bug=- oracle=- rows=pending
-runner@1/runner/trigger_scan_classes src=6e8489d2607cad6f sig=d209f81d3efc7eee run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/trigger_scan_classes src=67ee952fdba4b20f sig=45c6852dc57e8126 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/waiter_set_not_installed_after_promotion src=3d08f2f82fca3afa sig=dae5db796cb275e7 run=607dcf6bff52df2b bug=- oracle=- rows=pending
 runner@1/runner_calls/test_anonymous_fresh src=a85d786634202535 sig=6eb21a8a059cce6a run=4c3ef853c7dc0c9d bug=- oracle=- rows=pending
 runner@1/runner_calls/test_atomic_migration src=4c7c7c9a1adc59e6 sig=524358157e76fc0b run=ea720f3846592392 bug=- oracle=- rows=pending

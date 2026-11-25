@@ -272,14 +272,11 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
         _ => return false,
     }
     let ctx = DiskContext(store: StoreId(hi: 1, lo: 2), role: 6, seq: 3)
-    let mut prepared_file = result.unwrap(host.open(d, "PREPARED", Write))
-    let header = result.unwrap(disk_header_bytes(ctx, 0, 0))
-    result.unwrap(host.write(mut prepared_file, header))
+    let mut prepared_file = result.unwrap(open_frames(d, "PREPARED", ctx))
     let meta = PreparedMeta(base: ExportStamp(attempt: install_fixture_bytes(16, 7), store_hi: 1, store_lo: 2, opened: 3, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 3, end: 72), target: PreparedTarget(describe: install_fixture_bytes(32, 21), release: install_fixture_bytes(32, 22), digest: install_fixture_bytes(32, 23), resident_limit: 1048576, pack_bytes: 1048576, checkpoint_bytes: 67108864, journal_limit: 268435456), next_table: 1, changes: 0, ranges: 0)
-    let mut at = 72u64
     let codec: std.codec.Codec[PreparedMeta] = std.codec.of()
-    result.unwrap(write_prepared_frame(mut prepared_file, ctx, mut at, 0x0081, codec, meta))
-    result.unwrap(host.close(take prepared_file))
+    result.unwrap(write_prepared_frame(mut prepared_file, 0x0081, codec, meta))
+    result.unwrap(finish_frames(take prepared_file))
     // AP1b: a 32-byte description makes a 244-byte payload. The four
     // option words start at payload offset 192 (file offset 280).
     let bytes_on_disk = result.unwrap(disk_read_paged_file(d, "PREPARED", 332))
@@ -461,7 +458,7 @@ fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows
     let prior = snapshot(db)
     let attempt = install_fixture_bytes(16, 9)
     let (scratch, base) = crash_install_prepared(mut db, d, c, tasks, attempt)?
-    let source = open_export(scratch, c, attempt, disk_crash_options("install"))?
+    let mut source = open_export(scratch, c, attempt, disk_crash_options("install"))?
     let mut staged = deploy_result(rewrite_law_replace_indexed(source, tasks))?
     let rows = deploy_result(catalog_handle(source.db.store, staged.plan.roots.catalog, "rewrite", std.codec.key_u64(), codec))?
     if rows.id == old_rows.id {
@@ -469,7 +466,7 @@ fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows
     }
     rewrite_law_refusals(mut staged, rows)
     deploy_result(stage_rewrite(mut staged, rows, 1, RewriteLawRow(due: 10, body: 6)))?
-    write_prepared(source, staged, scratch, rewrite_law_target())?
+    write_prepared(mut source, staged, scratch, rewrite_law_target())?
     let file = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
     let mut at = 72u64
     let mut final_kind = 0u64
@@ -535,16 +532,16 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let prior = snapshot(db)
     let attempt = install_fixture_bytes(16, 7)
     let (scratch, base) = crash_install_prepared(mut db, d, c, tasks, attempt)?
-    let source = open_export(scratch, c, attempt, disk_crash_options("install"))?
+    let mut source = open_export(scratch, c, attempt, disk_crash_options("install"))?
     let exported_rows = deploy_result(catalog_handle(source.db.store, source.db.heads[0].roots.catalog, "rewrite", std.codec.key_u64(), codec))?
     let replaced = deploy_result(stage_export_migration(source, tasks, code.describe(rewrite_law_replace)))?
-    write_prepared(source, replaced, scratch, rewrite_law_target())?
+    write_prepared(mut source, replaced, scratch, rewrite_law_target())?
     let replacement = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
     rewrite_law_append(scratch, replacement, exported_rows.id, (1u64, None), false)?
     rewrite_law_import_refused(mut db, scratch, base)
     let mut staged = deploy_result(rewrite_law_stage_export(source, tasks))?
     rewrite_law_refusals(mut staged, exported_rows)
-    write_prepared(source, staged, scratch, rewrite_law_target())?
+    write_prepared(mut source, staged, scratch, rewrite_law_target())?
     let empty = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
     if list.len(empty) != 332 {
         fail("L51(e″): preparation without rewrites has a suffix")
@@ -562,7 +559,7 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     deploy_result(stage_rewrite(mut staged, exported_rows, 1, RewriteLawRow(due: 10, body: 5)))?
     rewrite_law_append(scratch, empty, exported_rows.id, (1u64, None), false)?
     let expected = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
-    write_prepared(source, staged, scratch, rewrite_law_target())?
+    write_prepared(mut source, staged, scratch, rewrite_law_target())?
     let coded = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
     if coded != expected {
         fail("L51(e″): wrong rewrite frame bytes")

@@ -163,7 +163,7 @@ fn prepare_open_result[T](take outcome: Result[T, store.Error]) -> Result[T, Pre
 // The process receives its export directory as a scratch capability. It
 // creates no listener or live-store lock.
 pub fn prepare_deploy[G: send, H: shareable + inert + send](p: PrepareConfig[G, H]) -> Result[(), PrepareError] waits {
-    let source = prepare_result(store.open_export(p.scratch, p.clock, p.attempt, p.options))?
+    let mut source = prepare_result(store.open_export(p.scratch, p.clock, p.attempt, p.options))?
     let digest = match launch_digest() {
         Ok(take hash) => take hash,
         Error(c) => return Error(Open(Store(Full(Allocation(c))))),
@@ -171,10 +171,10 @@ pub fn prepare_deploy[G: send, H: shareable + inert + send](p: PrepareConfig[G, 
     if list.len(digest) != 32 || digest != p.image_digest || launch_env().revision.size == 0u64 {
         return Error(Identity)
     }
-    prepare_export(p, source)
+    prepare_export(p, mut source)
 }
 
-fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], source: store.Preparation) -> Result[(), PrepareError] waits {
+fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], mut source: store.Preparation) -> Result[(), PrepareError] waits {
     let registered = match placed(p.place, p.n_place) {
         Ok(take reg) => take reg,
         Error(take error) => return Error(Open(Place(take error))),
@@ -205,7 +205,7 @@ fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], 
     if unsettled {
         return Ok(())
     }
-    prepare_result(store.write_prepared(source, staged, p.scratch, take target))
+    prepare_result(store.write_prepared(mut source, staged, p.scratch, take target))
 }
 
 // OLD's registered entries, from the activation the export carries.

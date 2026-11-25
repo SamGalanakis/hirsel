@@ -367,10 +367,7 @@ fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_s
     if let AddHead(mut added, _) = delta {
         added.roots.collections = take_sealed(mut sealed_roots, mut at)
     }
-    let dropped: Option[u64] = match delta {
-        RemovePin(slot) => Some(slot),
-        _ => None
-    }
+    let dropped = removed_pin(delta)
     let mut inserted = false
     for slot in 0u64 .. list.len(db.pins) {
         if dropped == Some(slot) {

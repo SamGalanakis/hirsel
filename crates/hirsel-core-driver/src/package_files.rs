@@ -173,16 +173,13 @@ pub(crate) fn walk(_root: &File, _path: &Path) -> Result<Walked, WalkError> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn walk(root: &File, path: &Path) -> Result<Walked, WalkError> {
-    use std::collections::BTreeSet;
-
-    #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-    struct Link(FileId, FileId);
+    /// Section 1's bound: at most 40 links are followed on one path.
+    const LINKS: usize = 40;
 
     enum Step {
         Name(OsString),
         Parent,
         Directory,
-        End(Link),
     }
 
     fn steps(path: &Path, pending: &mut Vec<Step>) -> Result<(), WalkError> {
@@ -206,12 +203,8 @@ pub(crate) fn walk(root: &File, path: &Path) -> Result<Walked, WalkError> {
     steps(path, &mut pending)?;
     let mut open = vec![(root.try_clone()?, root.metadata()?)];
     let mut names = PathBuf::new();
-    let mut links = BTreeSet::new();
+    let mut links = 0;
     while let Some(step) = pending.pop() {
-        if let Step::End(link) = step {
-            links.remove(&link);
-            continue;
-        }
         let (current, metadata) = open.last().unwrap();
         if !metadata.is_dir() {
             return Err(WalkError::WrongType);
@@ -229,18 +222,16 @@ pub(crate) fn walk(root: &File, path: &Path) -> Result<Walked, WalkError> {
                 let file = child(current, &name)?;
                 let candidate = file.metadata()?;
                 if candidate.is_symlink() {
-                    let link = Link(FileId::of(metadata), FileId::of(&candidate));
-                    if !links.insert(link.clone()) {
+                    links += 1;
+                    if links > LINKS {
                         return Err(WalkError::LinkLoop);
                     }
-                    pending.push(Step::End(link));
                     steps(&link_target(&file)?, &mut pending)?;
                 } else {
                     names.push(&name);
                     open.push((file, candidate));
                 }
             }
-            Step::End(_) => unreachable!(),
         }
     }
     let (file, metadata) = open.pop().unwrap();

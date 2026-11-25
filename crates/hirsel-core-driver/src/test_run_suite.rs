@@ -4,5 +4,10 @@ include!("test_run_coverage_native.rs");
 mod package_add_laws {
     include!("package_add/laws.rs");
     include!("package_add/laws_workspace.rs");
+    include!("package_add/laws_git.rs");
+    include!("package_add/laws_git_fetch.rs");
+    include!("package_add/laws_git_bounds.rs");
+    include!("package_add/laws_git_add.rs");
+    include!("package_add/laws_git_locked.rs");
 }
 include!("test_run_laws_native.rs");

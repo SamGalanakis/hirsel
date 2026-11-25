@@ -52,6 +52,7 @@ mod package_add;
 mod package_content;
 mod package_dir;
 mod package_files;
+mod package_git;
 mod package_lock;
 mod package_manifest;
 mod package_resolve;

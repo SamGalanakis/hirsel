@@ -805,7 +805,8 @@ request (`symrefs`, `peel`, and a `ref-prefix` for each candidate name) on the b
 2. `refs/heads/<b>` or `refs/tags/<t>` names that reference exactly;
 3. any other `REF` is looked up as `refs/tags/REF` and `refs/heads/REF`; when both exist it is
    refused as ambiguous, so no spelling means two things;
-4. no `REF` names the branch `HEAD` points at, which must be a `refs/heads/` reference.
+4. no `REF` names the branch `HEAD` points at, which must be a `refs/heads/` reference, and
+   `hirsel add` prints `HEAD of <git> is <ref> at <rev>` so the choice is seen.
 
 Every match is on the whole name: `ref-prefix` only filters the listing, and a listed
 `refs/tags/v10` never answers `v1`.
@@ -2038,14 +2039,18 @@ pointer packed as if it were the archive.
 `hirsel check` of L31's binding with root W exit 2 with `sent a bad pack: over the limit of
 <limit>` and leaves the store empty: a pack header declaring 4 194 305 objects (`4194304
 objects`), refused before any object arrives, which the server's still-open response shows;
-a response that streams past 512 MiB (`512 MiB`); objects whose inflated bytes pass 4 GiB
-together (`4 GiB inflated`); a chain of 4096 deltas (`4095 delta links`); and a delta bomb, a
-16 MiB blob of zeros and one `OFS_DELTA` of 4096 copy instructions of 16 MiB each, whose
-instructions are 32 KiB and whose result would be 64 GiB (`512 MiB object`), refused before
-anything is built for it. An object whose inflated length is not its header's is refused as
-`object at <offset> inflates to <n> bytes, not <m>`. A pack near the bounds, 500 MiB of
-objects whose sizes add to just under 4 GiB through deltas, is checked by a child process
-whose peak RSS stays under L21's 2 GiB cap. A chain of 257 repositories, each commit's package
+objects whose inflated bytes pass 4 GiB together (`4 GiB inflated`); a chain of 4096 deltas
+(`4095 delta links`); and a delta bomb, a 16 MiB blob of zeros and one `OFS_DELTA` of 4096
+copy instructions of 16 777 215 bytes each (the most one copy instruction names), whose
+instructions are 16 KiB and whose result would be nearly 64 GiB (`512 MiB object`), refused
+before anything is built for it. A response that streams past 512 MiB is the git protocol row
+of section 9 instead: `fetching <source> failed: the response is over the limit of 512 MiB;
+hirsel fetches the whole commit, so a repository whose commit is larger cannot be a git
+source`. An object whose inflated length is not its header's is refused as `object at
+<offset> inflates to <n> bytes, not <m>`. A pack near the bounds, C1's objects with a 500 MiB
+blob of zeros and seven deltas that each copy it and insert one byte (500 MiB on the wire,
+4 194 304 007 bytes inflated), is checked by a child process whose peak RSS stays under L21's
+2 GiB cap. A chain of 257 repositories, each commit's package
 binding the next by `git` and `rev`, makes `hirsel add` of the first refuse with
 `hirsel: <id>: git:https://alpha.test/n0#<rev> causes more than 256 fetches` and leaves the
 store empty. The law catches a client that reads a hostile pack to its end before applying a

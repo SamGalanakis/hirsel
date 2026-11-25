@@ -49,6 +49,11 @@ struct DependencyTable {
     root: Option<String>,
     url: Option<String>,
     archive: Option<String>,
+    git: Option<String>,
+    rev: Option<String>,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+    dir: Option<String>,
     workspace: Option<bool>,
 }
 
@@ -82,6 +87,24 @@ struct WorkspacePackage {
 pub(crate) enum SourceLocation {
     Archive(String),
     Url(String),
+    Git(GitSource),
+}
+
+/// A commit and the package's directory in it (GIT-1). `reference` is the full ref name
+/// `hirsel add` resolved; nothing but `add` reads it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GitSource {
+    pub(crate) url: String,
+    pub(crate) rev: String,
+    pub(crate) dir: Option<String>,
+    pub(crate) reference: Option<String>,
+}
+
+impl GitSource {
+    /// The snapshot path prefix: the source spelling without `/<dir>` (GIT-1).
+    pub(crate) fn commit(&self) -> String {
+        format!("git:{}#{}", self.url, self.rev)
+    }
 }
 
 impl std::fmt::Display for SourceLocation {
@@ -89,8 +112,69 @@ impl std::fmt::Display for SourceLocation {
         match self {
             Self::Archive(path) => write!(f, "archive:{path}"),
             Self::Url(url) => write!(f, "url:{url}"),
+            Self::Git(git) => {
+                write!(f, "{}", git.commit())?;
+                match &git.dir {
+                    Some(dir) => write!(f, "/{dir}"),
+                    None => Ok(()),
+                }
+            }
         }
     }
+}
+
+/// GIT-1's `git` rule: an `https://` URL with a lower-case host, no user information, query
+/// or fragment, kept as written.
+pub(crate) fn git_url_rule(url: &str) -> Result<(), String> {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return Err(format!("{url:?} is not an https:// URL"));
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.contains('@') {
+        return Err("has user information".into());
+    }
+    if url.contains('?') {
+        return Err("has a query".into());
+    }
+    if url.contains('#') {
+        return Err("has a fragment".into());
+    }
+    let host = authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, _)| host);
+    if host.is_empty() || rest.len() == authority.len() {
+        return Err(format!("{url:?} is not an https:// URL"));
+    }
+    if host.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err("has a host that is not lower case".into());
+    }
+    Ok(())
+}
+
+/// GIT-1's `rev` rule: a full commit id in lower-case hex.
+pub(crate) fn git_rev_rule(rev: &str) -> bool {
+    matches!(rev.len(), 40 | 64)
+        && rev
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// GIT-1's `dir` rule: section 1's path components, without the `.hirsel` ending.
+pub(crate) fn git_dir_rule(dir: &str) -> Result<(), String> {
+    path_rule(dir, "")?;
+    if dir.ends_with(".hirsel") {
+        return Err("ends in .hirsel".into());
+    }
+    Ok(())
+}
+
+/// GIT-1's `ref` rule: `refs/heads/<name>` or `refs/tags/<name>`.
+pub(crate) fn git_ref_rule(reference: &str) -> bool {
+    ["refs/heads/", "refs/tags/"].iter().any(|prefix| {
+        reference
+            .strip_prefix(prefix)
+            .is_some_and(|name| !name.is_empty())
+    })
 }
 
 #[derive(Clone)]
@@ -398,18 +482,25 @@ fn dependencies(
             let bad_form = || {
                 format!("{field}: give exactly one of path, root, workspace or a toolchain major")
             };
+            let located = [
+                &binding.url,
+                &binding.archive,
+                &binding.git,
+                &binding.rev,
+                &binding.reference,
+                &binding.dir,
+            ]
+            .iter()
+            .any(|field| field.is_some());
             let edge = match (
                 binding.major,
                 binding.path,
                 binding.root,
-                binding.url,
-                binding.archive,
                 binding.workspace,
+                located,
             ) {
-                (None, None, None, None, None, Some(true)) if allow_inherited => {
-                    Dependency::Inherited
-                }
-                (Some(major), None, None, None, None, None) => {
+                (None, None, None, Some(true), false) if allow_inherited => Dependency::Inherited,
+                (Some(major), None, None, None, false) => {
                     let supplied =
                         crate::package_content::toolchain_major(&name).ok_or_else(bad_form)?;
                     if major != supplied {
@@ -422,7 +513,7 @@ fn dependencies(
                         major,
                     })
                 }
-                (Some(major), Some(path), None, None, None, None) if name != "std" => {
+                (Some(major), Some(path), None, None, false) if name != "std" => {
                     Dependency::Member(
                         Id {
                             name: name.clone(),
@@ -431,19 +522,57 @@ fn dependencies(
                         path,
                     )
                 }
-                (Some(major), None, Some(root), url, archive, None)
-                    if name != "std" && (url.is_none() || archive.is_none()) =>
-                {
+                (Some(major), None, Some(root), None, _) if name != "std" => {
                     let root = Root::parse(&root).ok_or_else(|| {
                         format!("{field}.root: expected sha256: and 64 lower-case hex digits")
                     })?;
-                    let source = match (url, archive) {
-                        (Some(url), _) if !url.starts_with("https://") => {
+                    let sources = [&binding.url, &binding.archive, &binding.git];
+                    if sources.iter().filter(|source| source.is_some()).count() > 1 {
+                        return Err(format!("{field}: give at most one of url, archive or git"));
+                    }
+                    if binding.git.is_none() {
+                        for (key, value) in [
+                            ("rev", &binding.rev),
+                            ("ref", &binding.reference),
+                            ("dir", &binding.dir),
+                        ] {
+                            if value.is_some() {
+                                return Err(format!("{field}: {key} needs git"));
+                            }
+                        }
+                    }
+                    let source = match (binding.url, binding.archive, binding.git) {
+                        (Some(url), _, _) if !url.starts_with("https://") => {
                             return Err(format!("{field}.url: expected an HTTPS URL"));
                         }
-                        (Some(url), _) => Some(SourceLocation::Url(url)),
-                        (None, Some(path)) => Some(SourceLocation::Archive(path)),
-                        (None, None) => None,
+                        (Some(url), _, _) => Some(SourceLocation::Url(url)),
+                        (None, Some(path), _) => Some(SourceLocation::Archive(path)),
+                        (None, None, Some(url)) => {
+                            git_url_rule(&url).map_err(|rule| format!("{field}.git: {rule}"))?;
+                            let rev = binding
+                                .rev
+                                .ok_or_else(|| format!("{field}: git needs rev"))?;
+                            if !git_rev_rule(&rev) {
+                                return Err(format!("{field}.rev: {rev:?} is not a full commit id of 40 or 64 lower-case hex digits"));
+                            }
+                            if let Some(reference) = &binding.reference
+                                && !git_ref_rule(reference)
+                            {
+                                return Err(format!("{field}.ref: {reference:?} is not refs/heads/<name> or refs/tags/<name>"));
+                            }
+                            if let Some(dir) = &binding.dir {
+                                git_dir_rule(dir).map_err(|rule| {
+                                    format!("{field}.dir: {dir:?} breaks the path rules: {rule}")
+                                })?;
+                            }
+                            Some(SourceLocation::Git(GitSource {
+                                url,
+                                rev,
+                                dir: binding.dir,
+                                reference: binding.reference,
+                            }))
+                        }
+                        (None, None, None) => None,
                     };
                     Dependency::Published(
                         Id {
@@ -504,7 +633,11 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
             (Manifest, "sources" | "tool")
             | (Package, "name" | "major")
             | (Charge, "workspace")
-            | (Dependency, "major" | "path" | "root" | "url" | "archive" | "workspace")
+            | (
+                Dependency,
+                "major" | "path" | "root" | "url" | "archive" | "git" | "rev" | "ref" | "dir"
+                | "workspace",
+            )
             | (Program, "module" | "function")
             | (Tests, "sources" | "limit" | "grants" | "dirs")
             | (Run, "limit" | "grants" | "dirs")

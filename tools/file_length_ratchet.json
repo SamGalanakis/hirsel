@@ -171,9 +171,9 @@
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/lib.rs": {
-    "lines": 1620,
-    "raise_revision": 4,
-    "reason": "coverage-c4-tool-2604"
+    "lines": 1621,
+    "raise_revision": 5,
+    "reason": "git-deps-build-2704"
   },
   "crates/hirsel-core-driver/src/native.rs": {
     "lines": 2756,
@@ -225,9 +225,9 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 3603,
-    "raise_revision": 21,
-    "reason": "coverage-release-reorder-2667"
+    "lines": 3612,
+    "raise_revision": 22,
+    "reason": "git-deps-build-2704"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 3936,

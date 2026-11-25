@@ -578,13 +578,22 @@ impl Member {
             for (target, row) in &foreign.archives {
                 let digest = archive_digest(&row.bytes);
                 if digest != row.pin {
+                    // GIT-5: the cause is plain when the bytes are a Git LFS pointer.
+                    let pointer = row
+                        .bytes
+                        .starts_with(b"version https://git-lfs.github.com/spec/v1\n");
                     return Err(format!(
-                        "{}: foreign.{}: archive {:?} for {target} does not match its pin: expected sha256 {}, found sha256 {}",
+                        "{}: foreign.{}: archive {:?} for {target} does not match its pin: expected sha256 {}, found sha256 {}{}",
                         self.manifest_path.display(),
                         module.join("."),
                         row.path,
                         hex(&row.pin),
-                        hex(&digest)
+                        hex(&digest),
+                        if pointer {
+                            "; it is a Git LFS pointer, and hirsel does not fetch LFS content"
+                        } else {
+                            ""
+                        }
                     ));
                 }
             }
@@ -610,7 +619,7 @@ pub(crate) fn archive_path(from: &Path, path: &str) -> Option<String> {
     (!components.is_empty()).then(|| components.join("/"))
 }
 
-fn cycles(edges: &BTreeMap<Id, BTreeMap<Id, Edge>>) -> Result<(), String> {
+pub(crate) fn cycles(edges: &BTreeMap<Id, BTreeMap<Id, Edge>>) -> Result<(), String> {
     let mut finished = BTreeSet::new();
     for start in edges.keys() {
         if finished.contains(start) {

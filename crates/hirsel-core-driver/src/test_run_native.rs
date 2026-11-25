@@ -1042,6 +1042,11 @@ impl PackageLaw {
     }
 
     fn with_store(&self, arguments: &[&str], store: &str) -> (Option<i32>, String, String) {
+        Self::output(self.command(arguments, store))
+    }
+
+    /// The request child for `arguments` over package store `store`, not yet run.
+    fn command(&self, arguments: &[&str], store: &str) -> std::process::Command {
         let mut args = arguments.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         args.extend(["--package-store".into(), self.path(store).to_str().unwrap().into()]);
         if matches!(arguments[0], "check" | "test" | "run" | "build" | "publish" | "inspect" | "laws") {
@@ -1060,9 +1065,13 @@ impl PackageLaw {
             args.extend(["--runtime".into(), runtime.canonicalize().unwrap().to_str().unwrap().into()]);
             args.extend(["--cc".into(), cc.canonicalize().unwrap().to_str().unwrap().into()]);
         }
-        let output = process::tape_request_command(&args, self.dir.path())
-            .env("XDG_CACHE_HOME", self.path("cache"))
-            .output().unwrap();
+        let mut command = process::tape_request_command(&args, self.dir.path());
+        command.env("XDG_CACHE_HOME", self.path("cache"));
+        command
+    }
+
+    fn output(mut command: std::process::Command) -> (Option<i32>, String, String) {
+        let output = command.output().unwrap();
         let after = |bytes: &[u8]| {
             let text = String::from_utf8_lossy(bytes);
             let (_, text) = text.split_once(process::CHILD_MARK).unwrap();

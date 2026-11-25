@@ -2,7 +2,7 @@ use crate::package_content::{Id, Root};
 use crate::package_manifest::SourceLocation;
 use toml_edit::{DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
-type Fields = [(&'static str, Option<Value>); 6];
+type Fields = [(&'static str, Option<Value>); 10];
 
 /// What a binding names beside its major.
 pub(super) enum Form<'a> {
@@ -16,6 +16,10 @@ fn published(id: &Id, form: &Form<'_>) -> Fields {
         Form::Published(root, source) => (Some(*root), *source, None),
         Form::Toolchain => (None, None, None),
         Form::Member(path) => (None, None, Some(*path)),
+    };
+    let git = match source {
+        Some(SourceLocation::Git(git)) => Some(git),
+        _ => None,
     };
     [
         ("major", Some(Value::from(i64::from(id.major)))),
@@ -34,6 +38,17 @@ fn published(id: &Id, form: &Form<'_>) -> Fields {
                 _ => None,
             },
         ),
+        ("git", git.map(|git| Value::from(git.url.as_str()))),
+        ("rev", git.map(|git| Value::from(git.rev.as_str()))),
+        (
+            "ref",
+            git.and_then(|git| git.reference.as_deref())
+                .map(Value::from),
+        ),
+        (
+            "dir",
+            git.and_then(|git| git.dir.as_deref()).map(Value::from),
+        ),
         ("path", path.map(Value::from)),
         ("workspace", None),
     ]
@@ -45,6 +60,10 @@ fn inherited() -> Fields {
         ("root", None),
         ("url", None),
         ("archive", None),
+        ("git", None),
+        ("rev", None),
+        ("ref", None),
+        ("dir", None),
         ("path", None),
         ("workspace", Some(Value::from(true))),
     ]

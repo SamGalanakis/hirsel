@@ -3,6 +3,7 @@ use crate::package_content::{
 };
 use crate::package_files::{FileId, WalkError, open_directory, walk};
 use crate::package_manifest::SourceLocation;
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone)]
 pub(crate) struct PackageStore {
     path: PathBuf,
+    /// The commits this command has fetched (GIT-6).
+    pub(crate) session: crate::package_git::Session,
 }
 
 pub(crate) enum Entry {
@@ -24,6 +27,7 @@ impl PackageStore {
             path: path.unwrap_or_else(|| {
                 crate::PackageProduct::default_cache().with_file_name("packages")
             }),
+            session: crate::package_git::Session::default(),
         }
     }
 
@@ -109,14 +113,18 @@ impl PackageStore {
         Ok(false)
     }
 
+    /// Fetches `source`'s bundle for `id` pinned to `pin`, verifies it and admits every entry.
+    /// Each source contacted, nested ones a git snapshot declares included, joins `fetched`.
     pub(crate) fn fetch(
         &self,
         directory: &File,
         id: &Id,
         pin: Root,
         source: &SourceLocation,
+        fetched: &mut BTreeSet<String>,
     ) -> Result<(PackageArchive, Option<FileId>), Box<dyn std::error::Error>> {
-        let (bytes, identity) = match source {
+        let spelling = source.to_string();
+        let (archive, identity) = match source {
             SourceLocation::Archive(path) => {
                 let file = walk(directory, Path::new(path))
                     .and_then(|file| file.read_vec(ARCHIVE_LIMIT))
@@ -126,26 +134,50 @@ impl PackageStore {
                             error.explain("workspace", "a regular file")
                         )
                     })?;
-                (file.0, Some(file.1))
+                (decode(id, pin, &spelling, file.0)?, Some(file.1))
             }
-            SourceLocation::Url(url) => (
-                fetch_https(url)
-                    .map_err(|error| format!("{id}: fetching {url} failed: {error}"))?,
-                None,
-            ),
+            SourceLocation::Url(url) => {
+                let bytes = fetch_https(url, &mut |_| Ok(()))
+                    .map_err(|error| format!("{id}: fetching {url} failed: {error}"))?;
+                (decode(id, pin, &spelling, bytes)?, None)
+            }
+            SourceLocation::Git(git) => {
+                let mut budget = crate::package_git::Budget::new(format!("{id}: {spelling}"));
+                let acquired = crate::package_git::pack_commit(
+                    self,
+                    &self.session,
+                    &mut budget,
+                    id,
+                    pin,
+                    git,
+                )?;
+                fetched.extend(acquired.fetched);
+                (acquired.archive, None)
+            }
         };
-        let archive = PackageArchive::decode(bytes.into())
-            .map_err(|error| format!("{id}: {source} is not a package archive: {error}"))?;
-        archive.verify(id, pin, &source.to_string())?;
         self.install(&archive)
             .map_err(|error| format!("{id}: admitting {source}: {error}\n  cache: partial"))?;
+        fetched.insert(spelling);
         Ok((archive, identity))
     }
 }
 
-/// The HTTPS-only agent every package fetch uses. `follow` false returns a redirect to the
-/// caller instead of following it.
-pub(crate) fn https_agent(follow: bool) -> ureq::Agent {
+/// Decodes and verifies a fetched archive's bytes (section 7 steps 1 to 3).
+pub(crate) fn decode(
+    id: &Id,
+    pin: Root,
+    source: &str,
+    bytes: Vec<u8>,
+) -> Result<PackageArchive, String> {
+    let archive = PackageArchive::decode(bytes.into())
+        .map_err(|error| format!("{id}: {source} is not a package archive: {error}"))?;
+    archive.verify(id, pin, source)?;
+    Ok(archive)
+}
+
+/// The HTTPS client every package fetch uses: the host's roots, the proxy from the
+/// environment, `https` only, and no byte for 60 s refused (GIT-7's limits).
+pub(crate) fn https_config() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
     use ureq::tls::{Certificate, RootCerts, TlsConfig};
     let system_roots = rustls_native_certs::load_native_certs();
     let roots = RootCerts::from(
@@ -158,28 +190,49 @@ pub(crate) fn https_agent(follow: bool) -> ureq::Agent {
         .root_certs(roots)
         .unversioned_rustls_crypto_provider(rustls::crypto::ring::default_provider().into())
         .build();
-    let config = ureq::Agent::config_builder()
+    ureq::Agent::config_builder()
         .https_only(true)
-        .tls_config(tls);
-    if follow {
-        config
-    } else {
-        config.max_redirects(0)
-    }
-    .build()
-    .new_agent()
+        .tls_config(tls)
+        .timeout_per_read(Some(std::time::Duration::from_secs(60)))
 }
 
-pub(crate) fn fetch_https(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut response = https_agent(true).get(url).call()?;
+/// One GET of a `url` source, following `https` redirects, capped at the archive limit.
+/// `receive` counts each chunk as it arrives and may refuse it.
+pub(crate) fn fetch_https(
+    url: &str,
+    receive: &mut dyn FnMut(usize) -> Result<(), String>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let stalled = |error: &dyn std::error::Error| {
+        let text = error.to_string();
+        text.contains("timeout") || text.contains("timed out")
+    };
+    let mut response = https_config().build().new_agent().get(url).call().map_err(
+        |error| -> Box<dyn std::error::Error> {
+            if matches!(error, ureq::Error::Timeout(_)) {
+                "the server sent nothing for 60 s".into()
+            } else {
+                error.into()
+            }
+        },
+    )?;
+    let mut reader = response.body_mut().as_reader();
     let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(ARCHIVE_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > ARCHIVE_LIMIT {
-        return Err(format!("over the limit of {ARCHIVE_LIMIT} bytes").into());
+    let mut chunk = vec![0u8; 1 << 16];
+    loop {
+        let n = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut || stalled(&error) => {
+                return Err("the server sent nothing for 60 s".into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        receive(n)?;
+        if bytes.len() + n > ARCHIVE_LIMIT {
+            return Err(format!("over the limit of {ARCHIVE_LIMIT} bytes").into());
+        }
+        bytes.extend_from_slice(&chunk[..n]);
     }
     Ok(bytes)
 }

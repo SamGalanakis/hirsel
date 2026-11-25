@@ -1,7 +1,8 @@
-use crate::cli::{Invocation, OptionId};
-use crate::package_content::{ARCHIVE_LIMIT, Id, Library, PackageArchive, Root, toolchain_major};
+use crate::cli::Invocation;
+use crate::package_content::{ARCHIVE_LIMIT, Library, PackageArchive, Root, toolchain_major};
 use crate::package_dir::MANIFEST;
 use crate::package_files::{Captured, open_directory, walk};
+use crate::package_git::{Budget, pack_listed};
 use crate::package_lock::{Lock, Mode, NAME as LOCK};
 use crate::package_manifest::{Dependency, Manifest, SourceLocation};
 use crate::package_resolve::Resolution;
@@ -16,121 +17,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 mod edit;
-mod github;
+mod git;
+mod options;
 mod paths;
 
+use options::{Options, Source};
 use paths::{find_member, relative_to, root_relative};
 
 type Failure = Box<dyn std::error::Error>;
-
-enum Source {
-    Archive(String),
-    Url(String),
-    GitHub(github::Reference),
-    Store(Root),
-    Toolchain(Id),
-    Member(String),
-}
-
-impl Source {
-    fn parse(text: String) -> Result<Self, Failure> {
-        if text.starts_with("https://") {
-            Ok(Self::Url(text))
-        } else if let Some(reference) = text.strip_prefix("github:") {
-            Ok(Self::GitHub(github::Reference::parse(reference)?))
-        } else if text.starts_with("sha256:") {
-            Ok(Self::Store(Root::parse(&text).ok_or(
-                "expected sha256: followed by 64 lowercase hex digits",
-            )?))
-        } else if text.contains("://") {
-            Err("add SOURCE requires an https:// URL, a github: reference, a .hpkg path, a sha256: root, NAME@MAJOR, or a member directory".into())
-        } else if text.ends_with(".hpkg") {
-            Ok(Self::Archive(text))
-        } else if let Some((name, major)) = text.split_once('@')
-            && name.starts_with(|c: char| c.is_ascii_lowercase())
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-            && !major.is_empty()
-            && major.bytes().all(|b| b.is_ascii_digit())
-        {
-            let major = major
-                .parse()
-                .map_err(|_| format!("{text}: the major does not fit in 32 bits"))?;
-            Ok(Self::Toolchain(Id {
-                name: name.to_owned(),
-                major,
-            }))
-        } else {
-            Ok(Self::Member(text))
-        }
-    }
-}
-
-struct Options {
-    source: Source,
-    expected: Option<Root>,
-    store: PackageStore,
-    update: bool,
-    workspace: bool,
-    dry_run: bool,
-    json: bool,
-}
-
-impl Options {
-    fn read(invocation: Invocation) -> Result<Self, Failure> {
-        let mut expected = None;
-        let mut store = None;
-        let mut update = false;
-        let mut workspace = false;
-        let mut dry_run = false;
-        let mut json = false;
-        for (id, value) in invocation.options {
-            match id {
-                OptionId::Locked | OptionId::Frozen => {
-                    let flag = if id == OptionId::Locked {
-                        "--locked"
-                    } else {
-                        "--frozen"
-                    };
-                    return Err(
-                        format!("hirsel.toml needs to be updated but {flag} was passed").into(),
-                    );
-                }
-                OptionId::AddRoot => {
-                    expected =
-                        Some(value.as_deref().and_then(Root::parse).ok_or(
-                            "--root requires sha256: followed by 64 lowercase hex digits",
-                        )?);
-                }
-                OptionId::AddUpdate => update = true,
-                OptionId::AddWorkspace => workspace = true,
-                OptionId::AddDryRun => dry_run = true,
-                OptionId::Json => json = true,
-                OptionId::PackageStore => store = value.map(PathBuf::from),
-                _ => unreachable!(),
-            }
-        }
-        let source = Source::parse(invocation.positional.ok_or("add requires SOURCE")?)?;
-        if expected.is_some()
-            && matches!(
-                source,
-                Source::Store(_) | Source::Toolchain(_) | Source::Member(_)
-            )
-        {
-            return Err("--root applies to a fetched archive".into());
-        }
-        Ok(Self {
-            source,
-            expected,
-            store: PackageStore::new(store),
-            update,
-            workspace,
-            dry_run,
-            json,
-        })
-    }
-}
 
 #[derive(Serialize)]
 struct ClosureRow {
@@ -152,6 +46,9 @@ struct Report {
     cache: &'static str,
     fetched: BTreeSet<String>,
     closure: Vec<ClosureRow>,
+    /// The branch and commit taken for a git source given without a reference.
+    #[serde(skip)]
+    chose: Option<String>,
 }
 
 impl Report {
@@ -190,6 +87,9 @@ impl Report {
             _ => bound,
         };
         println!("hirsel: {verb} {} {root} in {}", self.id, target.display());
+        if let Some(chose) = &self.chose {
+            println!("hirsel: {chose}");
+        }
         if archive_len != 0 {
             let source = self
                 .source
@@ -238,11 +138,51 @@ fn lock_scope(cwd: &Path) -> Result<File, Failure> {
     }
 }
 
-fn acquire(
+/// A captured bundle: the archive, its source, its size, the sources a git commit's snapshot
+/// made the tool contact, and the branch taken for a git source with no reference.
+struct Capture {
+    archive: PackageArchive,
+    locator: Option<SourceLocation>,
+    len: usize,
+    fetched: Vec<String>,
+    chose: Option<String>,
+}
+
+fn acquire(options: &Options, workspace: &Workspace, cwd: &Path) -> Result<Capture, Failure> {
+    let (archive, locator, len, fetched, chose) = acquire_any(options, workspace, cwd)?;
+    if let (Some(expected), Some(locator)) = (options.expected, &locator)
+        && expected != archive.head
+    {
+        let spelling = locator.to_string();
+        return Err(format!(
+            "fetched root differs from --root\n  fetched: {}\n  expected: {expected}\n  source: {}",
+            archive.head,
+            spelling.split_once(':').unwrap().1
+        )
+        .into());
+    }
+    Ok(Capture {
+        archive,
+        locator,
+        len,
+        fetched,
+        chose,
+    })
+}
+
+type Acquisition = (
+    PackageArchive,
+    Option<SourceLocation>,
+    usize,
+    Vec<String>,
+    Option<String>,
+);
+
+fn acquire_any(
     options: &Options,
     workspace: &Workspace,
     cwd: &Path,
-) -> Result<(PackageArchive, Option<SourceLocation>, usize), Failure> {
+) -> Result<Acquisition, Failure> {
     let (bytes, locator) = match &options.source {
         Source::Store(root) => {
             let library = match options.store.read(*root)? {
@@ -261,15 +201,40 @@ fn acquire(
                 },
                 None,
                 0,
+                Vec::new(),
+                None,
             ));
         }
         Source::Url(url) => (
-            fetch_https(url).map_err(|error| format!("fetching {url} failed: {error}"))?,
+            fetch_https(url, &mut |_| Ok(()))
+                .map_err(|error| format!("fetching {url} failed: {error}"))?,
             SourceLocation::Url(url.clone()),
         ),
-        Source::GitHub(reference) => {
-            let url = reference.locator()?;
-            (reference.fetch(&url)?, SourceLocation::Url(url))
+        Source::Git(request) => {
+            let mut budget = Budget::new(String::new());
+            let (git, remote, chose) = request.resolve(&mut budget)?;
+            let (_, acquired) = pack_listed(
+                &options.store,
+                &options.store.session,
+                &mut budget,
+                None,
+                None,
+                &git,
+                remote.as_ref(),
+            )?;
+            let len = acquired
+                .archive
+                .entries
+                .values()
+                .map(|library| library.encoded.len())
+                .sum();
+            return Ok((
+                acquired.archive,
+                Some(SourceLocation::Git(git)),
+                len,
+                acquired.fetched,
+                chose,
+            ));
         }
         Source::Archive(path) => {
             let (from, relative) = if Path::new(path).is_absolute() {
@@ -303,18 +268,7 @@ fn acquire(
         .map_err(|error| format!("{locator} is not a package archive: {error}"))?;
     let head = &archive.entries[&archive.head].content.id;
     archive.verify(head, archive.head, &locator.to_string())?;
-    if let Some(expected) = options.expected
-        && expected != archive.head
-    {
-        let spelling = locator.to_string();
-        return Err(format!(
-            "fetched root differs from --root\n  fetched: {}\n  expected: {expected}\n  source: {}",
-            archive.head,
-            spelling.split_once(':').unwrap().1
-        )
-        .into());
-    }
-    Ok((archive, Some(locator), len))
+    Ok((archive, Some(locator), len, Vec::new(), None))
 }
 
 fn check_source(
@@ -322,13 +276,17 @@ fn check_source(
     source: &SourceLocation,
     fetched: Root,
 ) -> Result<(), Failure> {
-    let check = |root: Root, locator: &SourceLocation| {
+    let check = |root: Root, locator: &SourceLocation| -> Result<(), Failure> {
+        if let (SourceLocation::Git(bound), SourceLocation::Git(new)) = (locator, source) {
+            return git::check_moved(bound, root, new, fetched);
+        }
         if root != fetched && locator == source {
             let spelling = source.to_string();
             Err(format!(
                 "{} is already bound to another root\n  bound: {root}\n  fetched: {fetched}\n  pass --update to accept the fetched root",
                 spelling.split_once(':').unwrap().1
-            ))
+            )
+            .into())
         } else {
             Ok(())
         }
@@ -608,6 +566,7 @@ pub(crate) fn run_at(
         .transpose()?;
     let old_lock = Lock::capture(&workspace)?;
 
+    let (mut fetched_early, mut chose) = (Vec::new(), None);
     let (archive, locator, len, local) = match &options.source {
         Source::Toolchain(id) => {
             if toolchain_major(&id.name) != Some(id.major) {
@@ -625,8 +584,10 @@ pub(crate) fn run_at(
             )
         }
         _ => {
-            let (archive, locator, len) = acquire(&options, &workspace, cwd)?;
-            (Some(archive), locator, len, None)
+            let capture = acquire(&options, &workspace, cwd)?;
+            fetched_early = capture.fetched;
+            chose = capture.chose;
+            (Some(capture.archive), capture.locator, capture.len, None)
         }
     };
     checkpoint(Checkpoint::ArchiveCaptured);
@@ -850,8 +811,9 @@ pub(crate) fn run_at(
         previous_root: previous_root.map(|root| root.to_string()),
         dry_run: options.dry_run,
         cache: "complete",
-        fetched: BTreeSet::new(),
+        fetched: fetched_early.into_iter().collect(),
         closure: Vec::new(),
+        chose,
     };
     let mut entries = BTreeMap::<Root, Library>::new();
     for (entry_root, library) in archive.into_iter().flat_map(|archive| archive.entries) {

@@ -257,6 +257,18 @@ limit = 268435456
 [tests.runs."store@1/store/test_l87_each_promoted_holder_crash_after_rename"]
 limit = 268435456
 
+[tests.runs."store@1/store/test_l87_merge_across_a_fork"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_merge_across_a_fork_refused_cut"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_merge_across_a_fork_crash_before_rename"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l87_merge_across_a_fork_crash_after_rename"]
+limit = 268435456
+
 [tests.runs."store@1/store/bucket_test_l4_cuts"]
 limit = 536870912
 

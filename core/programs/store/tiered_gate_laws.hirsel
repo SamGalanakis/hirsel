@@ -55,11 +55,12 @@ fn gate_head(db: Db, name: String) -> Option[Branch] {
 }
 
 // The §13.6 crash table's rows, at the cut that publishes a holder:
+// - NoCrash: the cut publishes.
 // - SealRefused: the seal is refused and the same open carries on; its next
 //   cut publishes nothing of the refused holder.
 // - BeforeRename: the process dies with MANIFEST.tmp written.
 // - AfterRename: it dies with MANIFEST renamed, before RAM install.
-type GateCrash = SealRefused | BeforeRename | AfterRename
+type GateCrash = NoCrash | SealRefused | BeforeRename | AfterRename
 
 // Ends the refused cut's open as `crash` says, and returns the store that
 // carries on. A crash lands the sealed bytes and reopens, and open removes
@@ -67,13 +68,13 @@ type GateCrash = SealRefused | BeforeRename | AfterRename
 // `first_output` on.
 fn gate_crash_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, take db: Db, sealed: Bytes, first_output: u64, crash: GateCrash) -> Result[Db, Error] waits {
     let renamed = match crash {
-        SealRefused => {
+        BeforeRename => false,
+        AfterRename => true,
+        _ => {
             let mut carried = take db
             let _ = checkpoint(mut carried)?
             return Ok(take carried)
         },
-        BeforeRename => false,
-        AfterRename => true,
     }
     close(take db)?
     disk_write_synced(d, if renamed {
@@ -270,4 +271,208 @@ fn test_l87_each_promoted_holder_crash_before_rename(d: Dir, c: Clock, r: Random
 @test
 fn test_l87_each_promoted_holder_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     gate_fork_crash(d, c, r, tasks, AfterRename)
+}
+
+// A Cold page's frame, read from its pack.
+fn gate_page(d: Dir, db: Db, ptr: std.page.PagePtr) -> Result[Arc[std.page.Page], Error] waits {
+    let path = paged_pack_path(ptr.pack)?
+    let wire = disk_read_file(d, path, 4194304)?
+    let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(db.next_node)?)?
+    Ok(arc.share(fold_page(frame)))
+}
+
+// A Cold leaf of a two-level table tree: its location, its row count and
+// its first key.
+type GateLeaf {
+    at: std.page.PagePtr,
+    rows: u64,
+    first: u64
+}
+
+fn gate_leaves(d: Dir, db: Db, slot: u64, collection: u32) -> Result[(std.page.PagePtr, List[GateLeaf]), Error] waits {
+    let root = compact_branch_root(db, slot, collection)?
+    let page = gate_page(d, db, root)?
+    if std.page.level(std.page.image_of(page)) != 1 {
+        fail("L87 (d): the fixture table is a root over leaves")
+    }
+    let mut leaves: List[GateLeaf] = list.new()
+    for k in 0u64 .. std.page.count(std.page.image_of(page)) {
+        let Some(ColdPage(child)) = std.page.child_slot(page, k) else {
+            fail("L87 (d): every leaf of the fixture is Cold")
+        }
+        let leaf = gate_page(d, db, child)?
+        let image = std.page.image_of(leaf)
+        let Some(key) = std.page.key_at(image, 0) else {
+            fail("L87 (d): a leaf holds rows")
+        }
+        let first: u64 = list.word_be(key, 0)
+        list.push(mut leaves, GateLeaf(at: child, rows: std.page.count(image), first: first))
+    }
+    Ok((root, take leaves))
+}
+
+fn gate_delete_rows(mut db: Db, rows: Table[u64, Bytes], from: u64, to: u64) -> Result[(), Error] waits {
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let Committed(_) = run(mut db, Some(100000000), copy_env((fixture, from, to)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, u64)) -> Result[(), Error] {
+        for key in env.1 .. env.2 {
+            let _ = delete(mut tx, env.0, key)?
+        }
+        Ok(())
+    })? else {
+        fail("L87 (d): the deletes commit")
+    }
+    Ok(())
+}
+
+// Rows [0, count) minus `gone`, each as written.
+fn gate_reads_rows(db: Db, b: Branch, rows: Table[u64, Bytes], row_total: u64, gone: Map[u64, ()]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot_of(db, b)?
+    for key in 0u64 .. row_total {
+        let wanted: Option[Bytes] = if map.contains(gone, key) { None } else { Some(compact_value_of(key, 0, 300)) }
+        if get(read_handle, s, rows, key)? != wanted {
+            fail("L87 (d): each branch reads its rows after the merge")
+        }
+    }
+    drop(take s)
+    drop(take read_handle)
+    Ok(())
+}
+
+// L87 (d), merge across a fork (§13.7 "Ownership", astra 2207 medium).
+// Main's Cold table has leaves L (4 rows) and R (5 rows) of 300-byte values
+// under root T, all in pack P. Main deletes L's first row, so L falls under
+// a quarter page and AP3 merges L and R; a live-head FORK `beta` follows,
+// and the writer crashes. The fold cut replaces T, L and R on main and
+// files them into main's holder cell for `beta`'s origin w₀, because `beta`
+// inherited them: cell (main, w₀, 1, 0, P) = |T| + |L| + |R|, and `live[P]`
+// is unchanged. `beta`'s own fold records nothing. `adopt(beta)` then
+// retires main's chain, so `live[P]` falls by exactly that cell. Red when
+// main's kill skips the holder watermark (`live[P]` falls at the fold).
+// T is in the cell because the merge rewrites the parent, which sits in P.
+// `beta` folds to its own root, distinct from main's, yet its fold files no
+// kill and queues no row: with `fold_owners` forced to own every head, the
+// cells and the queue are unchanged. So `child_records_inherited` is not
+// reachable through this fixture.
+
+// Opens the store and runs its next cut, crashed at `crash`'s row of the
+// §13.6 table; a crash before the rename is followed by the retried cut.
+fn gate_fold_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, pack: u64, before_live: u64, crash: GateCrash) -> Result[Db, Error] waits {
+    let mut db = open(tasks, d, c, r, l69_options(floor)?)?
+    if let NoCrash = crash {
+        let _ = checkpoint(mut db)?
+        return Ok(db)
+    }
+    let first_output = disk_state(db).pages.next_pack
+    let sealed = refused_cut_bytes(mut db, NoHolderChange)?
+    if l69_pack_live(db, pack) != before_live {
+        fail("§13.6 crash: a refused fold cut files nothing")
+    }
+    let mut reopened = gate_crash_reopen(d, c, r, tasks, l69_options(floor)?, take db, sealed, first_output, crash)?
+    if let BeforeRename = crash {
+        let _ = checkpoint(mut reopened)?
+    }
+    Ok(reopened)
+}
+
+fn gate_merge_fork(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 60u64
+    let rows = compact_cold_table_of(d, c, r, tasks, floor, row_count, 300)?
+    let mut shaper = open(tasks, d, c, r, l69_options(floor)?)?
+    // Shape the first two leaves to 4 and 5 rows; each stays at or above a
+    // quarter page, so no merge happens yet.
+    let (_, shaped) = gate_leaves(d, shaper, 0, rows.id)?
+    if list.len(shaped) < 3 {
+        fail("L87 (d): the fixture table spans at least three leaves")
+    }
+    let mut gone: Map[u64, ()] = map.new()
+    for key in shaped[0u64].first + 4 .. shaped[1u64].first {
+        map.insert(mut gone, key, ())
+    }
+    for key in shaped[1u64].first + 5 .. shaped[2u64].first {
+        map.insert(mut gone, key, ())
+    }
+    gate_delete_rows(mut shaper, rows, shaped[0u64].first + 4, shaped[1u64].first)?
+    gate_delete_rows(mut shaper, rows, shaped[1u64].first + 5, shaped[2u64].first)?
+    let _ = checkpoint(mut shaper)?
+    let (top, leaves) = gate_leaves(d, shaper, 0, rows.id)?
+    let left = leaves[0u64]
+    let right = leaves[1u64]
+    if left.rows != 4 || right.rows != 5 || left.at.pack != top.pack || right.at.pack != top.pack {
+        fail("L87 (d): the cut writes T over L (4 rows) and R (5 rows) in one pack")
+    }
+    let pack = top.pack
+    let before_live = l69_pack_live(shaper, pack)
+    close(take shaper)?
+
+    // The suffix: main deletes L's first row, then FORK `beta`; crash.
+    let mut writer = open(tasks, d, c, r, l69_options(floor)?)?
+    gate_delete_rows(mut writer, rows, left.first, left.first + 1)?
+    map.insert(mut gone, left.first, ())
+    let at_fork = snapshot(writer)
+    let (beta, _) = fork(mut writer, "beta", at_fork)?
+    drop(take at_fork)
+    close(take writer)?
+
+    // The fold cut, crashed at the crash table's row, or not at all.
+    let mut db = gate_fold_cut(d, c, r, tasks, floor, pack, before_live, crash)?
+    let w0 = match map.get(disk_state(db).pages.lists.rows.forks, beta.id) {
+        Some(fork_row) => fork_row.watermark,
+        None => fail("L87 (d): the fold cut publishes beta's fork row"),
+    }
+    let top_len: u64 = int.widen(top.len)
+    let left_len: u64 = int.widen(left.at.len)
+    let right_len: u64 = int.widen(right.at.len)
+    let replaced = top_len + left_len + right_len
+    for slot in 0u64 .. list.len(db.heads) {
+        let walk = compact_walk_from(d, db, compact_branch_root(db, slot, rows.id)?)?
+        if map.contains(walk.places, top.stamp) || map.contains(walk.places, left.at.stamp) || map.contains(walk.places, right.at.stamp) {
+            fail("L87 (d): every branch's fold merges L and R and replaces T")
+        }
+    }
+    let cell = LineageCell(branch: 0, boundary: w0, side: 1, interval: 0, pack: pack)
+    if map.len(disk_state(db).pages.lists.rows.cells) != 1 || map.get_or(disk_state(db).pages.lists.rows.cells, cell, 0u64) != replaced || l69_pack_live(db, pack) != before_live {
+        fail("L87 (d): main's merge files T, L and R into its holder cell for beta, live[P] keeps them, and beta's own fold records nothing")
+    }
+    let _ = gate_walk_all(d, db, rows.id)?
+    gate_reads_rows(db, main_branch(db), rows, row_count, gone)?
+    let forked = match branch(db, "beta") {
+        Some(b) => b,
+        None => fail("L87 (d): beta survives the fold"),
+    }
+    gate_reads_rows(db, forked, rows, row_count, gone)?
+    let _ = adopt(mut db, forked)?
+    for round in 0u64 .. 2 {
+        if l69_pack_live(db, pack) != before_live - replaced {
+            fail("L87 (d): adopt(beta) retires main's cell from live[P] exactly once")
+        }
+        gate_reads_rows(db, main_branch(db), rows, row_count, gone)?
+        let _ = gate_walk_all(d, db, rows.id)?
+        if round == 0 {
+            close(take db)?
+            db = open(tasks, d, c, r, l69_options(floor)?)?
+        }
+    }
+    close(take db)
+}
+
+@test
+fn test_l87_merge_across_a_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_merge_fork(d, c, r, tasks, NoCrash)
+}
+
+@test
+fn test_l87_merge_across_a_fork_refused_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_merge_fork(d, c, r, tasks, SealRefused)
+}
+
+@test
+fn test_l87_merge_across_a_fork_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_merge_fork(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l87_merge_across_a_fork_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_merge_fork(d, c, r, tasks, AfterRename)
 }

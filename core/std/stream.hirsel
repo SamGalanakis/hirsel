@@ -78,14 +78,14 @@ pub fn spec_owned(req: http.Request, response_status: u16, room: Bounds, directo
     held_spec(req, response_status, room, list.new(), Owned(take driver, directory))
 }
 
-/// Relays an upstream response body whose head the handler has read: the
-/// handler's status, the upstream's end-to-end fields, then its bytes as they
-/// arrive, with no heartbeat, each read under its own idle_ms deadline.
-pub fn spec_relay(req: http.Request, response_status: u16, room: Bounds, take upstream: http_client.Connection, idle_ms: u64) -> Result[Spec, http.HandlerError] {
+/// Relays an upstream body whose head the handler has read: status, `fields` (often
+/// `http_client.relay_fields`), then its bytes as they arrive, each read under idle_ms.
+pub fn spec_relay(req: http.Request, response_status: u16, room: Bounds, take head_fields: List[(Bytes, Bytes)], take upstream: http_client.Connection, idle_ms: u64) -> Result[Spec, http.HandlerError] {
     if room.event_max < 8 || !http_client.fresh_response(upstream) {
         return Error(InvalidStream)
     }
-    held_spec(req, response_status, room, http_client.relay_fields(upstream), Relayed(box.new(take upstream), idle_ms))
+    http.check_response_fields(head_fields)?
+    held_spec(req, response_status, room, take head_fields, Relayed(box.new(take upstream), idle_ms))
 }
 
 fn held_spec(req: http.Request, response_status: u16, room: Bounds, take head_fields: List[(Bytes, Bytes)], take source: Source) -> Result[Spec, http.HandlerError] {

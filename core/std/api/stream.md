@@ -30,11 +30,13 @@ the same credit, byte and step bounds as `produce`, and a disconnected peer
 cancels the producer. The callback may capture plain functions selected by
 the route configuration.
 
-`spec_relay(request, status, bounds, take upstream, idle_ms)` relays an
-upstream response whose head the handler has read with
+`spec_relay(request, status, bounds, take fields, take upstream, idle_ms)`
+relays an upstream response whose head the handler has read with
 [`http_client`](http_client.md): it moves the live `Connection` into the
-stream, takes the upstream's end-to-end fields (`http_client.relay_fields`)
-and writes the handler's status. The producer reads at most `event_max`
+stream and writes the handler's status and `fields`, each checked as
+`header` checks one. Pass `http_client.relay_fields(upstream)` to forward the
+upstream's end-to-end fields; [`http_object`](http_object.md) passes the few
+it chose. The producer reads at most `event_max`
 rounded down to 8 bytes per credit, each read under a deadline `idle_ms`
 from its start, and writes each read as one chunk: the client's decoded body
 equals the upstream's, with no heartbeat. Only upstream's clean end sends the

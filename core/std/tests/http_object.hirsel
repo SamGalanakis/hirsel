@@ -1,0 +1,497 @@
+// HTTP-10's object route (http.md, "Stream serving a stored object"; decision 61):
+// std.http_object serves one stored object through std.object and
+// stream.spec_relay. Every expected status, field and byte below is derived by
+// hand from RFC 9110 §14 and the object each law stores; the client decodes
+// the chunked body with its own RFC 9112 §7.1 decoder.
+const ACCESS_KEY: String = "AKIAIOSFODNN7EXAMPLE"
+
+const SECRET_KEY: String = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+const SIZE: u64 = 10000
+
+fn after_ms(at: u64, ms: u64) -> u64 {
+    at + ms * 1000000
+}
+
+fn root() -> Secret {
+    result.unwrap(secret.seal(string.into_bytes(string.from(SECRET_KEY)), "kdf"))
+}
+
+// Byte i of the stored object is (7i + 3) mod 251, so no two nearby slices
+// are equal and a shifted slice never matches.
+fn object_bytes() -> Bytes {
+    let mut out: Bytes = list.with_capacity(SIZE)
+    for i in 0u64 .. SIZE {
+        list.push(mut out, int.narrow((i * 7 + 3) % 251))
+    }
+    take out
+}
+
+fn span(text: String, first: u64, end: u64) -> bool {
+    match http_object.parse_range(string.as_bytes(text)) {
+        Some(want) => object.range_span(want, SIZE) == Some((first, end)),
+        None => false,
+    }
+}
+
+fn unsatisfiable(text: String) -> bool {
+    match http_object.parse_range(string.as_bytes(text)) {
+        Some(want) => object.range_span(want, SIZE) == None,
+        None => false,
+    }
+}
+
+fn ignored(text: String) -> bool {
+    http_object.parse_range(string.as_bytes(text)) == None
+}
+
+// RFC 9110 §14.1.2's examples on a 10000-byte representation: the first and
+// second 500 bytes, the final 500 bytes both ways, and its three multi-range
+// examples, which this helper ignores (a whole 200). Then the edges §14.1.1
+// fixes: a last-pos past the end means the end, a suffix longer than the
+// object is all of it, the unit is case-insensitive, last < first is invalid,
+// a first-pos at the size and a zero suffix are unsatisfiable.
+// expect: run http_object_ranges() = true
+fn http_object_ranges() -> bool {
+    span("bytes=0-499", 0, 500) && span("bytes=500-999", 500, 1000) && span("bytes=-500", 9500, 10000) && span("bytes=9500-", 9500, 10000) && ignored("bytes=0-0,-1") && ignored("bytes= 0-999, 4500-5499, -1000") && ignored("bytes=500-600,601-999") && span("bytes=0-0", 0, 1) && span("Bytes=9999-99999999999999999999999", 9999, 10000) && span("bytes=-20000", 0, 10000) && span("bytes= 1-1 ", 1, 2) && unsatisfiable("bytes=10000-") && unsatisfiable("bytes=10000-10001") && unsatisfiable("bytes=-0") && ignored("bytes=5-4") && ignored("items=0-1") && ignored("bytes=") && ignored("bytes=-") && ignored("bytes=1-2x") && ignored("bytes=--1")
+}
+
+fn blob_config() -> http.Config {
+    http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 5, inbox_cap: 2, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 1024, body_max: 1024, out_cap: 512, handler_bytes: 262144, first_head_ms: 1000, idle_ms: 1000, head_ms: 1000, body_ms: 1000, handler_ms: 2000, write_ms: 4000, drain_ms: 10, linger_ms: 5, drain_max: 16, streams_max: 1, state_max: 0, reads_max: 0, heartbeat_ms: 10, lease_ms: 8000)
+}
+
+type Blobs: send {
+    opener: object.Opener
+}
+
+// The caller's access rule, decided before the helper: one bearer token reads
+// any key under /blob/.
+fn blob_route(req: http.Request, scratch: Region, mut out: http.Responder, s: Blobs) -> Result[http.Outcome, http.HandlerError] waits {
+    let access: http_object.Access = match (http.field(req, b"authorization"), http.capture(req, "key")) {
+        (Some(token), Some(key)) if token == b"Bearer reader" => Granted(string.from(key)),
+        _ => Denied,
+    }
+    let limits = http_object.Limits(room: stream.Bounds(event_max: 64, producer_bytes: 4096, producer_steps: 1000000), open_ms: 1000, idle_ms: 1000)
+    http_object.serve(req, s.opener, take access, limits)
+}
+
+type BlobJob: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks,
+    opener: object.Opener
+}
+
+fn serve_blobs(take job: BlobJob) waits {
+    let BlobJob(listener: take l, clock: c, tasks, opener: take base) = take job
+    let mut listeners: List[Listener] = list.with_capacity(1)
+    list.push(mut listeners, take l)
+    let mut routes: router.Builder[Blobs] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/blob/{key}", router.Route(handler: blob_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(65536), steps: None)))
+    let make: scoped[view] fn() -> Blobs = fn() -> Blobs {
+        Blobs(opener: object.share_opener(base))
+    }
+    result.unwrap(http.serve_with_factory(take listeners, c, tasks, blob_config(), result.unwrap(router.build(take routes)), 65536, make, None))
+}
+
+fn loopback_server(take input: (Listener, sim.s3.Loopback, Clock)) waits {
+    let (take listener, take bucket, clock) = take input
+    let mut serving = take listener
+    let _ = sim.s3.serve_loopback(mut serving, take bucket, clock)
+}
+
+// A path-style client of the bucket at a loopback address: every answer
+// must carry the simulator's proof for the request (STORE §12.2).
+fn object_client(n: Net, c: Clock, tasks: Tasks, at: Addr) -> object.Client waits {
+    let mut endpoint = string.from("http://127.0.0.1:")
+    string.push_u64(mut endpoint, int.widen(at.port))
+    let bucket = object.Bucket(endpoint: take endpoint, aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Path)
+    let credentials_set = cred.from_secret(ACCESS_KEY, root(), "")
+    result.unwrap(object.start(n, tasks, take bucket, take credentials_set, None, System, c, provide.random(7), object.LaneConfig(requested_lanes: 2, lane_bytes: 1048576), after_ms(host.mono_ns(c), 1000)))
+}
+
+type Harness {
+    front: Addr,
+    client: object.Client,
+    tasks_held: List[Task[()]]
+}
+
+fn front(n: Net, c: Clock, tasks: Tasks, client: object.Client, mut held: List[Task[()]]) -> Addr waits {
+    let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 4))
+    let job = BlobJob(listener: take listener, clock: c, tasks, opener: object.opener(client))
+    list.push(mut held, task.spawn(tasks, bytes 4194304, take job, serve_blobs))
+    address
+}
+
+// The simulated bucket holding object_bytes() at "blob", and the route in
+// front of it.
+fn harness(n: Net, c: Clock, tasks: Tasks) -> Harness waits {
+    let (listener, store_at) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let bucket = sim.s3.Loopback(bucket: string.from("bucket"), access_key: string.from(ACCESS_KEY), aws_region: string.from("us-east-1"), root: root(), exists_status: 412, max_body: 65536)
+    let mut held: List[Task[()]] = list.with_capacity(2)
+    list.push(mut held, task.spawn(tasks, bytes 4194304, (take listener, take bucket, c), loopback_server))
+    let mut client = object_client(n, c, tasks, store_at)
+    let (stored, _) = object.store(mut client, "blob", object_bytes(), after_ms(host.mono_ns(c), 1000))
+    if let Error(_) = stored {
+        fail("the bucket refused the object")
+    }
+    let address = front(n, c, tasks, client, mut held)
+    Harness(front: address, client: take client, tasks_held: take held)
+}
+
+fn finish(take h: Harness) waits {
+    let Harness(front: _, client: _, tasks_held: take held) = take h
+    let mut tasks_left = take held
+    while let Some(take t) = list.pop(mut tasks_left) {
+        let mut running = take t
+        task.cancel(mut running)
+        let _ = task.join(take running)
+    }
+}
+
+// The sim network moves a few bytes per send; send until all are taken.
+fn send_all(mut w: WriteHalf, data: Bytes, until: Until) waits {
+    let mut at = 0u64
+    while at < list.len(data) {
+        match host.send_pair(mut w, list.slice(data, at, list.len(data)), b"", until) {
+            Ok(0) => return,
+            Ok(n) => {
+                at += n
+            },
+            Error(_) => return,
+        }
+    }
+}
+
+fn request(path: String, extra: String) -> Bytes {
+    let mut text = string.from("GET ")
+    string.push(mut text, path)
+    string.push(mut text, " HTTP/1.1\r\nHost: a\r\nConnection: close\r\n")
+    string.push(mut text, extra)
+    string.push(mut text, "\r\n")
+    string.into_bytes(take text)
+}
+
+// The client's view of one exchange: the whole wire until EOF or 3 s.
+fn exchange(n: Net, c: Clock, addr: Addr, ask: Bytes) -> Bytes waits {
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut input = take r
+    let mut output = take w
+    let until = At(c, after_ms(host.mono_ns(c), 3000))
+    send_all(mut output, ask, until)
+    let mut wire: Bytes = list.with_capacity(32768)
+    loop {
+        let room = list.capacity(wire) - list.len(wire)
+        match host.recv_bounded(mut input, mut wire, room, until) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Error(_) => break,
+        }
+    }
+    take wire
+}
+
+// RFC 9112 §7.1: appends each chunk's data to body; true when the
+// zero-size last chunk and its final CRLF arrived.
+fn dechunk(wire: Bytes, from: u64, mut body: Bytes) -> bool {
+    let mut at = from
+    loop {
+        let mut line_end = at
+        while line_end + 1 < list.len(wire) && !(wire[line_end] == b'\r' && wire[line_end + 1] == b'\n') {
+            line_end += 1
+        }
+        if line_end + 1 >= list.len(wire) || line_end == at {
+            return false
+        }
+        let mut size = 0u64
+        for i in at .. line_end {
+            let d = wire[i]
+            let v: u8 = if d >= b'0' && d <= b'9' {
+                d - b'0'
+            } else if d >= b'a' && d <= b'f' {
+                d - b'a' + 10
+            } else if d >= b'A' && d <= b'F' {
+                d - b'A' + 10
+            } else {
+                return false
+            }
+            let wide: u64 = int.widen(v)
+            size = size * 16 + wide
+        }
+        at = line_end + 2
+        if size == 0 {
+            return list.slice(wire, at, list.len(wire)) == b"\r\n"
+        }
+        if at + size + 2 > list.len(wire) || list.slice(wire, at + size, at + size + 2) != b"\r\n" {
+            return false
+        }
+        let _ = list.append(mut body, list.slice(wire, at, at + size))
+        at += size + 2
+    }
+}
+
+fn field_values(wire: Bytes, h: http1.Head, name: Bytes) -> List[Bytes] {
+    let mut values: List[Bytes] = list.new()
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        if http1.equal_ascii(list.slice(wire, f.name.start, f.name.end), name) {
+            list.push(mut values, http.copy_bytes(list.slice(wire, f.value.start, f.value.end)))
+        }
+    }
+    take values
+}
+
+fn one_value(wire: Bytes, h: http1.Head, name: Bytes, value: Bytes) -> bool {
+    let values = field_values(wire, h, name)
+    list.len(values) == 1 && values[0] == value
+}
+
+fn absent(wire: Bytes, h: http1.Head, name: Bytes) -> bool {
+    list.len(field_values(wire, h, name)) == 0
+}
+
+// One GET through the route: its status, its wire and its decoded body (empty
+// unless the body is chunked and complete).
+type Answer {
+    status: u16,
+    wire: Bytes,
+    head: http1.Head,
+    body: Bytes,
+    whole: bool
+}
+
+fn get(n: Net, c: Clock, h: Harness, path: String, extra: String) -> Answer waits {
+    let wire = exchange(n, c, h.front, request(path, extra))
+    let mut head = http1.head()
+    if http1.response(wire, mut head) != Complete {
+        return Answer(status: 0, wire: take wire, head, body: list.new(), whole: false)
+    }
+    let mut body: Bytes = list.new()
+    list.reserve(mut body, SIZE)
+    let whole = absent(wire, head, b"Transfer-Encoding") || dechunk(wire, head.end, mut body)
+    Answer(status: head.status, wire: take wire, head, body: take body, whole)
+}
+
+fn has(a: Answer, name: Bytes, value: Bytes) -> bool {
+    one_value(a.wire, a.head, name, value)
+}
+
+fn slice_of(first: u64, end: u64) -> Bytes {
+    http.copy_bytes(list.slice(object_bytes(), first, end))
+}
+
+// A ranged 206 carries exactly the object's bytes [first, last] and the
+// Content-Range §14.4 spells for them; no Range, or a multi-range Range,
+// is the whole object as a 200; every success names the ranges unit and the
+// stored ETag; a missing key is 404.
+// expect: run http_object_partial(network) = true
+fn http_object_partial(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let h = harness(n, c, tasks)
+    let auth = "Authorization: Bearer reader\r\n"
+    let whole = get(n, c, h, "/blob/blob", auth)
+    let mut ranged = string.from(auth)
+    string.push(mut ranged, "Range: bytes=500-999\r\n")
+    let first = get(n, c, h, "/blob/blob", ranged)
+    let mut tail_ask = string.from(auth)
+    string.push(mut tail_ask, "Range: bytes=-500\r\n")
+    let tail = get(n, c, h, "/blob/blob", tail_ask)
+    let mut multi_ask = string.from(auth)
+    string.push(mut multi_ask, "Range: bytes=0-0,-1\r\n")
+    let multi = get(n, c, h, "/blob/blob", multi_ask)
+    let missing = get(n, c, h, "/blob/other", auth)
+    finish(take h)
+    let tags = field_values(whole.wire, whole.head, b"ETag")
+    if list.len(tags) != 1 || list.len(tags[0]) < 2 || tags[0][0] != b'"' {
+        return false
+    }
+    let whole_ok = whole.status == 200 && whole.whole && whole.body == object_bytes() && has(whole, b"Accept-Ranges", b"bytes") && absent(whole.wire, whole.head, b"Content-Range")
+    let first_ok = first.status == 206 && first.whole && first.body == slice_of(500, 1000) && has(first, b"Content-Range", b"bytes 500-999/10000") && has(first, b"ETag", tags[0])
+    let tail_ok = tail.status == 206 && tail.whole && tail.body == slice_of(9500, 10000) && has(tail, b"Content-Range", b"bytes 9500-9999/10000")
+    let multi_ok = multi.status == 200 && multi.whole && multi.body == object_bytes() && absent(multi.wire, multi.head, b"Content-Range")
+    whole_ok && first_ok && tail_ok && multi_ok && missing.status == 404
+}
+
+// bytes=10000- names no byte of a 10000-byte object: 416 with
+// `Content-Range: bytes */10000` (§15.5.17). If-Range with the object's own
+// strong tag keeps the range (206); with another tag, or a weak one, the
+// condition is false and the whole object is a 200 (§13.1.5), and so is an
+// unsatisfiable range under a stale tag.
+// expect: run http_object_conditions(network) = true
+fn http_object_conditions(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let h = harness(n, c, tasks)
+    let auth = "Authorization: Bearer reader\r\n"
+    let whole = get(n, c, h, "/blob/blob", auth)
+    let tags = field_values(whole.wire, whole.head, b"ETag")
+    if list.len(tags) != 1 {
+        finish(take h)
+        return false
+    }
+    let tag = result.unwrap(string.from_utf8(http.copy_bytes(tags[0])))
+    let mut past = string.from(auth)
+    string.push(mut past, "Range: bytes=10000-\r\n")
+    let beyond = get(n, c, h, "/blob/blob", past)
+    let mut same = string.from(auth)
+    string.push(mut same, "Range: bytes=0-9\r\nIf-Range: ")
+    string.push(mut same, tag)
+    string.push(mut same, "\r\n")
+    let kept = get(n, c, h, "/blob/blob", same)
+    let mut other = string.from(auth)
+    string.push(mut other, "Range: bytes=0-9\r\nIf-Range: \"stale\"\r\n")
+    let changed = get(n, c, h, "/blob/blob", other)
+    let mut weak = string.from(auth)
+    string.push(mut weak, "Range: bytes=0-9\r\nIf-Range: W/")
+    string.push(mut weak, tag)
+    string.push(mut weak, "\r\n")
+    let weak_tag = get(n, c, h, "/blob/blob", weak)
+    let mut stale_past = string.from(auth)
+    string.push(mut stale_past, "Range: bytes=10000-\r\nIf-Range: \"stale\"\r\n")
+    let stale_beyond = get(n, c, h, "/blob/blob", stale_past)
+    finish(take h)
+    let beyond_ok = beyond.status == 416 && has(beyond, b"Content-Range", b"bytes */10000")
+    let kept_ok = kept.status == 206 && kept.whole && kept.body == slice_of(0, 10) && has(kept, b"Content-Range", b"bytes 0-9/10000")
+    let changed_ok = changed.status == 200 && changed.whole && changed.body == object_bytes()
+    let weak_ok = weak_tag.status == 200 && weak_tag.whole && weak_tag.body == object_bytes()
+    let stale_ok = stale_beyond.status == 200 && stale_beyond.whole && stale_beyond.body == object_bytes()
+    beyond_ok && kept_ok && changed_ok && weak_ok && stale_ok
+}
+
+// A caller the route denies gets 403 and the store gets nothing: the store's
+// listener is never even connected to. The same route with the token reaches
+// the store, so the listener is watched.
+// expect: run http_object_denied(network) = true
+fn http_object_denied(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (listener, store_at) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let mut idle = take listener
+    let client = object_client(n, c, tasks, store_at)
+    let mut held: List[Task[()]] = list.with_capacity(1)
+    let address = front(n, c, tasks, client, mut held)
+    let h = Harness(front: address, client: take client, tasks_held: take held)
+    let refused = get(n, c, h, "/blob/blob", "Authorization: Bearer other\r\n")
+    let quiet = match host.accept(mut idle, At(c, after_ms(host.mono_ns(c), 300))) {
+        Ok(_) => false,
+        Error(_) => true,
+    }
+    finish(take h)
+    refused.status == 403 && quiet
+}
+
+type FloodJob: send {
+    listener: Listener,
+    clock: Clock,
+    report: Sender[u64]
+}
+
+// A store that answers the GET with a 4096-byte 200 and the simulator's proof
+// for its Authorization, then sends 'x' bytes as fast as its socket takes
+// them, and reports how many it has had accepted 200 ms in.
+fn flood_store(take job: FloodJob) waits {
+    let FloodJob(listener: take held, clock: c, report: take report) = take job
+    let mut listener = take held
+    let Ok((socket, _)) = host.accept(mut listener, Never) else {
+        return
+    }
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let mut output = take w
+    let mut ask: Bytes = list.with_capacity(4096)
+    loop {
+        let n = list.len(ask)
+        if n >= 4 && list.slice(ask, n - 4, n) == b"\r\n\r\n" {
+            break
+        }
+        match host.recv_bounded(mut input, mut ask, 4096 - n, At(c, after_ms(host.mono_ns(c), 1000))) {
+            Ok(0) => return,
+            Ok(_) => {},
+            Error(_) => return,
+        }
+    }
+    let mut head = http1.head()
+    if http1.request(ask, mut head) != Complete {
+        return
+    }
+    let values = field_values(ask, head, b"Authorization")
+    if list.len(values) != 1 {
+        return
+    }
+    let prover = result.unwrap(sim.s3.proof_key(root()))
+    let proof = sim.s3_wire.hex(result.unwrap(secret.hmac_sha256(prover, sim.s3.proof_message(values[0]))))
+    let mut answer = string.from("HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nETag: \"f\"\r\nx-hirsel-sim-proof: ")
+    string.push(mut answer, proof)
+    string.push(mut answer, "\r\n\r\n")
+    send_all(mut output, string.as_bytes(answer), At(c, after_ms(host.mono_ns(c), 1000)))
+    host.sleep_until(c, after_ms(host.mono_ns(c), 20))
+    let report_at = after_ms(host.mono_ns(c), 200)
+    let mut block: Bytes = list.with_capacity(64)
+    list.fill(mut block, 64, b'x')
+    let mut accepted = 0u64
+    let mut reported = false
+    while accepted < 4096 {
+        let until = if reported {
+            after_ms(host.mono_ns(c), 1000)
+        } else {
+            report_at
+        }
+        match host.send_pair(mut output, list.slice(block, 0, order.min(64, 4096 - accepted)), b"", At(c, until)) {
+            Ok(0) => return,
+            Ok(n) => {
+                accepted += n
+            },
+            Error(TimedOut) => {
+                if reported {
+                    return
+                }
+                reported = true
+                let _ = channel.send(report, accepted)
+            },
+            Error(_) => return,
+        }
+    }
+    if !reported {
+        let _ = channel.send(report, accepted)
+    }
+}
+
+// A client that reads nothing bounds what the route takes from the store. The
+// relay reads only against a credit, at most 64 bytes a read, and a credit
+// comes back only when its chunk is on the client's socket; two credits
+// exist, and each sim direction queues at most 8 bytes. So while the client
+// stalls, the store has had at most 8 + 2 * 64 + 8 = 144 body bytes accepted,
+// whatever the object's size. When the client reads, all 4096 arrive.
+// expect: run http_object_backpressure(network) = true
+fn http_object_backpressure(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (listener, store_at) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let mut held: List[Task[()]] = list.with_capacity(2)
+    list.push(mut held, task.spawn(tasks, bytes 262144, FloodJob(listener: take listener, clock: c, report: take tx), flood_store))
+    let client = object_client(n, c, tasks, store_at)
+    let address = front(n, c, tasks, client, mut held)
+    let h = Harness(front: address, client: take client, tasks_held: take held)
+    let (r, w) = net.split(result.unwrap(host.connect(n, h.front, Never)))
+    let mut input = take r
+    let mut output = take w
+    send_all(mut output, request("/blob/big", "Authorization: Bearer reader\r\n"), At(c, after_ms(host.mono_ns(c), 100)))
+    let accepted = match channel.receive(rx) {
+        Ok(value) => value,
+        Error(_) => 18446744073709551615,
+    }
+    let until = At(c, after_ms(host.mono_ns(c), 4000))
+    let mut wire: Bytes = list.with_capacity(65536)
+    loop {
+        let room = list.capacity(wire) - list.len(wire)
+        match host.recv_bounded(mut input, mut wire, room, until) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Error(_) => break,
+        }
+    }
+    finish(take h)
+    let mut head = http1.head()
+    if accepted > 144 || http1.response(wire, mut head) != Complete || head.status != 200 {
+        return false
+    }
+    let mut body: Bytes = list.new()
+    list.reserve(mut body, 4096)
+    let mut expected: Bytes = list.with_capacity(4096)
+    list.fill(mut expected, 4096, b'x')
+    dechunk(wire, head.end, mut body) && body == expected
+}

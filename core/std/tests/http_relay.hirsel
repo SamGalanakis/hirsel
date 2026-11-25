@@ -36,7 +36,8 @@ fn relay_route(req: http.Request, scratch: Region, mut out: http.Responder, s: R
     }
     let status = http_client.status(http_client.head(up))
     let room = stream.Bounds(event_max: 64, producer_bytes: 4096, producer_steps: 1000000)
-    Ok(Stream(stream.spec_relay(req, status, room, take up, 1000)?))
+    let fields = http_client.relay_fields(up)
+    Ok(Stream(stream.spec_relay(req, status, room, take fields, take up, 1000)?))
 }
 
 type ProxyJob: send {

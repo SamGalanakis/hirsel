@@ -40,6 +40,26 @@ pub type Error: shareable + send = Fatal(Reason) | Retriable(Reason) | Uncertain
 
 pub type Mode: key = Overwrite | NoClobber
 
+/// A byte range of RFC 9110 §14.1.2. `Whole` asks for no range, `From(first)`
+/// is `first-`, `Span(first, last)` is `first-last` with `last` inclusive, and
+/// `Last(n)` is the suffix `-n`.
+pub type Want: key + send = Whole | From(u64) | Span(u64, u64) | Last(u64)
+
+/// The head of an opened object body. A 200 is the whole object; a 206 is
+/// the bytes [first, end) of an object of `size` bytes. `size` is the whole
+/// object's, from `Content-Range` on a 206 and `Content-Length` on a 200.
+pub type Part: send {
+    status: u16,
+    first: u64,
+    end: u64,
+    size: u64,
+    etag: ETag
+}
+
+/// An opened object: its head and the live connection with the body unread,
+/// or the store's 416 when no byte of the object is in the range.
+pub type Opened: send = Ready(Part, Box[http_client.Connection]) | Unsatisfiable
+
 pub opaque type Key: key {
     octets: Inline[u8, 1024],
     len: u64
@@ -62,7 +82,7 @@ pub fn key_text(key: Key) -> String {
     result.unwrap(string.from_utf8(take out))
 }
 
-type Operation: key = Fetch | FetchRange | FetchChanged | Put | PutConditional | PutIf | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads | GetBucketLocation
+type Operation: key = Open | Fetch | FetchRange | FetchChanged | Put | PutConditional | PutIf | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads | GetBucketLocation
 
 type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
 
@@ -214,6 +234,20 @@ fn content_length(head: http_client.ResponseHead) -> Option[u64] {
     match int.parse_decimal_span(value, 0, list.len(value), MAX_U64) {
         Ok(n) => Some(n),
         Error(_) => None,
+    }
+}
+
+/// The half-open span [first, end) that `want` selects from an object of
+/// `size` bytes (RFC 9110 §14.1.2), or None when it is unsatisfiable: no byte
+/// of the object lies in it, as for any range of an empty object, or
+/// `Span(first, last)` has last < first.
+pub fn range_span(want: Want, size: u64) -> Option[(u64, u64)] {
+    match want {
+        Whole => Some((0, size)),
+        From(first) if first < size => Some((first, size)),
+        Span(first, last) if first <= last && first < size => Some((first, order.min(last, size - 1) + 1)),
+        Last(n) if n != 0 && size != 0 => Some((size - order.min(n, size), size)),
+        _ => None,
     }
 }
 
@@ -461,13 +495,14 @@ type Job: send {
     id: Option[Inline[u8, 16]],
     lo: u64,
     hi: u64,
+    want: Want,
     deadline: u64,
     retry_uncertain: bool,
     resolve_complete: bool,
     entries: List[Entry]
 }
 
-type Value: send = Object(Meta) | Existing | NotModified | BucketSetting(String) | Listed(Page) | Initiated(String) | Pending(List[String], List[String], bool, Option[UploadCursor])
+type Value: send = Headed(Part) | Handed(Part, Box[http_client.Connection]) | Object(Meta) | Existing | NotModified | BucketSetting(String) | Listed(Page) | Initiated(String) | Pending(List[String], List[String], bool, Option[UploadCursor])
 
 type Reply: send {
     lane: u64,
@@ -480,6 +515,7 @@ type Reply: send {
 
 fn method(op: Operation) -> String {
     match op {
+        Open => "GET",
         Fetch => "GET",
         FetchRange => "GET",
         FetchChanged => "GET",
@@ -647,6 +683,26 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
         string.push_char(mut w.range_text, '-')
         if to != MAX_U64 {
             string.push_u64(mut w.range_text, to - 1)
+        }
+        copy_header(mut headers, mut w.values, RANGE_FIELD, string.as_bytes(w.range_text))
+    } else if op == Open && job.want != Whole {
+        string.clear(mut w.range_text)
+        string.push(mut w.range_text, "bytes=")
+        match job.want {
+            From(first) => {
+                string.push_u64(mut w.range_text, first)
+                string.push_char(mut w.range_text, '-')
+            },
+            Span(first, last) => {
+                string.push_u64(mut w.range_text, first)
+                string.push_char(mut w.range_text, '-')
+                string.push_u64(mut w.range_text, last)
+            },
+            Last(n) => {
+                string.push_char(mut w.range_text, '-')
+                string.push_u64(mut w.range_text, n)
+            },
+            Whole => {},
         }
         copy_header(mut headers, mut w.values, RANGE_FIELD, string.as_bytes(w.range_text))
     }
@@ -1183,6 +1239,43 @@ fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: 
     Received(Object(take received))
 }
 
+// An opened 2xx head (std.http_object): a 206 must carry the Content-Range
+// that `range_span(want, size)` gives at the object size it names, and a Content-Length,
+// if any, of that span; a 200 is the whole object and needs its length.
+fn open_part(head: http_client.ResponseHead, want: Want, status: u16) -> Exchange {
+    let tag = match header(head, "etag") {
+        Some(value) => match etag(value) {
+            Ok(found) => found,
+            Error(take e) => return Invalid(take e),
+        },
+        None => empty_tag(),
+    }
+    let length = content_length(head)
+    if status == 200 {
+        let Some(size) = length else {
+            return Invalid(Fatal(Malformed))
+        }
+        return Received(Headed(Part(status, first: 0, end: size, size, etag: tag)))
+    }
+    if status != 206 || want == Whole {
+        return Invalid(Fatal(Malformed))
+    }
+    let Some(field) = header(head, "content-range") else {
+        return Invalid(Fatal(Malformed))
+    }
+    let range = match content_range(field) {
+        Ok(value) => value,
+        Error(take e) => return Invalid(take e),
+    }
+    let Some((first, end)) = range_span(want, range.size) else {
+        return Invalid(Fatal(Malformed))
+    }
+    if range.lo != first || range.hi != end || (length != None && length != Some(end - first)) {
+        return Invalid(Fatal(Malformed))
+    }
+    Received(Headed(Part(status, first, end, size: range.size, etag: tag)))
+}
+
 fn location_setting(text: String) -> Result[String, Error] {
     let Some(at) = string.find(text, 0, "<LocationConstraint") else {
         return Error(Fatal(Malformed))
@@ -1555,7 +1648,7 @@ fn pool_loop(take setup: Pool) waits {
     let _ = task.cancel_join(take resolver)
 }
 
-type LaneMessage: send = Work(Job) | Reap
+type LaneMessage: send = Work(Job) | Ask(Job, Sender[Result[Value, Error]]) | Reap
 
 type LaneEvent: send = Finished(Reply) | LaneFailed
 
@@ -1874,6 +1967,12 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
             take response
         },
     }
+    if let Received(Headed(part)) = result {
+        // The body stays unread on the connection, which leaves the lane.
+        let Held(connection: take opened, address, ..) = take h
+        let _ = channel.send(lane.pool, Release(address, false))
+        return Received(Handed(part, box.new(take opened)))
+    }
     let elapsed = host.mono_ns(lane.clock) - at
     let throughput: u64 = match result {
         Received(_) if elapsed != 0 => {
@@ -1962,6 +2061,9 @@ fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Opt
         }
     }
     let status = http_client.status(http_client.head(c))
+    if op == Open && status >= 200 && status < 300 {
+        return open_part(http_client.head(c), job.want, status)
+    }
     if payload_read(op) && status >= 200 && status < 300 {
         return receive_object(mut c, mut job.data, mut progress, status, from, to, mut probe)
     }
@@ -2180,6 +2282,15 @@ fn on_idle(lane: Lane) -> Option[u64] {
     }
 }
 
+fn arm_idle(lane: Lane, arm: Sender[u64], mut armed: bool) waits {
+    if !armed {
+        if let Some(at) = on_idle(lane) {
+            let _ = channel.send(arm, at)
+            armed = true
+        }
+    }
+}
+
 fn lane_loop(take setup: Lane) waits {
     let mut lane = take setup
     let (arm, inbound): (Sender[u64], Receiver[u64]) = channel.new(1)
@@ -2187,15 +2298,18 @@ fn lane_loop(take setup: Lane) waits {
     let mut armed = false
     while let Ok(take next) = channel.receive(lane.input) {
         match take next {
+            Ask(take pending, take reply) => {
+                let mut job = take pending
+                let result = retry(mut lane, mut job)
+                arm_idle(lane, arm, mut armed)
+                // A caller that stopped waiting drops the answer, and with it
+                // any connection the answer holds; the lane goes on.
+                let _ = channel.send(reply, take result)
+            },
             Work(take pending) => {
                 let mut job = take pending
                 let result = retry(mut lane, mut job)
-                if !armed {
-                    if let Some(at) = on_idle(lane) {
-                        let _ = channel.send(arm, at)
-                        armed = true
-                    }
-                }
+                arm_idle(lane, arm, mut armed)
                 let Job(ticket, path: take path, data: take data, entries: take entries, ..) = take job
                 if let Error(_) = channel.send(lane.output.tx, Finished(Reply(lane: lane.index, ticket, path: take path, result: take result, data: take data, entries: take entries))) {
                     break
@@ -2241,6 +2355,78 @@ pub opaque type Workers {
 pub opaque type Client {
     requests: Requests,
     workers: Option[Workers]
+}
+
+/// Opens objects from any task through the client's lanes (std.http_object).
+/// Each call is answered on its own channel; dropping the client cancels
+/// the calls still waiting.
+pub opaque type Opener: send {
+    bucket: Bucket,
+    lanes: List[Sender[LaneMessage]],
+    clock: Clock
+}
+
+pub fn opener(c: Client) -> Opener {
+    share_lanes(c.requests.bucket, c.requests.lanes, c.requests.clock)
+}
+
+pub fn share_opener(o: Opener) -> Opener {
+    share_lanes(o.bucket, o.lanes, o.clock)
+}
+
+fn share_lanes(bucket: Bucket, lanes: List[Sender[LaneMessage]], clock: Clock) -> Opener {
+    let mut copies: List[Sender[LaneMessage]] = list.with_capacity(list.len(lanes))
+    for lane in lanes {
+        list.push(mut copies, channel.sender(lane))
+    }
+    Opener(bucket: clone(bucket), lanes: take copies, clock)
+}
+
+/// The deadline `ms` milliseconds from now on the opener's clock.
+pub fn opener_deadline_ms(o: Opener, ms: u64) -> u64 {
+    clock.deadline_after_ms(host.mono_ns(o.clock), ms)
+}
+
+// One key always takes one lane: the byte sum of its path picks it.
+fn ask(o: Opener, take job: Job) -> Result[Value, Error] waits {
+    let mut index = 0u64
+    for b in string.as_bytes(job.path) {
+        index = (index + int.widen(b)) % list.len(o.lanes)
+    }
+    let (reply, answer): (Sender[Result[Value, Error]], Receiver[Result[Value, Error]]) = channel.new(1)
+    if let Error(_) = channel.send(o.lanes[index], Ask(take job, take reply)) {
+        return Error(Retriable(Cancelled))
+    }
+    match channel.receive(answer) {
+        Ok(take result) => take result,
+        Error(_) => Error(Retriable(Cancelled)),
+    }
+}
+
+/// Sends a signed GET for `want` and returns once the store's head arrives,
+/// with the body unread on the returned connection (std.http_object). The
+/// Range field is signed with the request. A 416 is `Unsatisfiable`; a 404
+/// is `NotFound`; a ranged 206 whose Content-Range is not the span `want`
+/// resolves to at the size it names is `Fatal(Malformed)`.
+pub fn open(o: Opener, key: String, want: Want, deadline_ns: u64) -> Result[Opened, Error] waits {
+    if let Span(first, last) = want {
+        if last < first {
+            return Error(Fatal(Malformed))
+        }
+    }
+    let mut job = new_job(Open, request_path(o.bucket, key, false), list.new(), deadline_ns)
+    job.want = want
+    match ask(o, take job) {
+        Ok(Handed(part, take upstream)) => Ok(Ready(part, take upstream)),
+        Error(Fatal(Status(416, _))) => Ok(Unsatisfiable),
+        Ok(_) => Error(Fatal(Malformed)),
+        Error(take e) => Error(take e),
+    }
+}
+
+/// The object's metadata from a HEAD, through the opener's lanes.
+pub fn stat(o: Opener, key: String, deadline_ns: u64) -> Result[Meta, Error] waits {
+    as_meta(ask(o, new_job(Head, request_path(o.bucket, key, false), list.new(), deadline_ns)))
 }
 
 pub fn split(take c: Client) -> (Requests, Option[Workers]) {
@@ -2389,7 +2575,7 @@ pub fn endpoint_secure(c: Client) -> bool {
 }
 
 fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) -> Job {
-    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, deadline, retry_uncertain: false, resolve_complete: true, entries: list.new())
+    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, want: Whole, deadline, retry_uncertain: false, resolve_complete: true, entries: list.new())
 }
 
 fn submit(input: Sender[LaneMessage], index: u64, take request: Job) -> Option[Reply] waits {
@@ -2459,6 +2645,24 @@ pub fn fetch(mut c: Client, key: String, take into: Bytes, deadline_ns: u64) -> 
 }
 
 /// A conditional GET. None means the service returned 304 without a body.
+/// The entity tag's field value as the store sent it, quotes included.
+pub fn tag_value(tag: ETag) -> Bytes {
+    let mut out: Bytes = list.with_capacity(tag.len)
+    for i in 0u64 .. tag.len {
+        list.push(mut out, tag.octets[i])
+    }
+    take out
+}
+
+/// RFC 9110 §8.8.3.2 strong comparison: both tags are strong and their
+/// octets are equal. A weak tag (`W/"x"`) or a malformed one never matches.
+pub fn strong_match(tag: ETag, value: Bytes) -> bool {
+    match etag(value) {
+        Ok(other) => strong_tag(tag) && strong_tag(other) && tag == other,
+        Error(_) => false,
+    }
+}
+
 pub fn fetch_if_changed(mut c: Client, key: String, unchanged: ETag, take into: Bytes, deadline_ns: u64) -> (Result[Option[Meta], Error], Bytes) waits {
     if !strong_tag(unchanged) {
         return (Error(Precondition), take into)

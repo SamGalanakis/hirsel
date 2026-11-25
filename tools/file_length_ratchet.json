@@ -52,9 +52,9 @@
     "reason": "profilesmash-json-outliers-2389"
   },
   "core/std/http.hirsel": {
-    "lines": 3306,
-    "raise_revision": 5,
-    "reason": "hirsel4-cutover-2276"
+    "lines": 3295,
+    "raise_revision": 6,
+    "reason": "object-range-stream-2690"
   },
   "core/std/json.hirsel": {
     "lines": 3604,
@@ -65,9 +65,9 @@
     "lines": 2819
   },
   "core/std/object.hirsel": {
-    "lines": 2950,
-    "raise_revision": 12,
-    "reason": "object-peer-fallback-2170"
+    "lines": 3154,
+    "raise_revision": 13,
+    "reason": "object-range-stream-2690"
   },
   "core/std/omap.hirsel": {
     "lines": 1374
@@ -88,9 +88,9 @@
     "reason": "std-micro-prims-2019"
   },
   "core/std/sim/s3.hirsel": {
-    "lines": 1405,
-    "raise_revision": 7,
-    "reason": "object-peer-fallback-2170"
+    "lines": 1416,
+    "raise_revision": 8,
+    "reason": "object-range-stream-2690"
   },
   "core/std/string.hirsel": {
     "lines": 1044

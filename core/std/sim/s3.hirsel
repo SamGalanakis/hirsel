@@ -574,14 +574,25 @@ fn ranged(object: Object, value: String) -> Response {
     let Some((raw_lo, raw_hi)) = string.split_once(range, "-") else {
         return error(416, "InvalidRange")
     }
-    let Some(lo) = sim.s3_wire.u64_field(raw_lo) else {
-        return error(416, "InvalidRange")
-    }
     let size = list.len(object.data)
+    // A suffix, bytes=-n, is the last n bytes (RFC 9110 §14.1.2).
+    let suffix = if raw_lo == "" {
+        sim.s3_wire.u64_field(raw_hi)
+    } else {
+        None
+    }
+    let lo = match suffix {
+        Some(n) if n != 0 && size != 0 => size - order.min(n, size),
+        Some(_) => return error(416, "InvalidRange"),
+        None => match sim.s3_wire.u64_field(raw_lo) {
+            Some(first) => first,
+            None => return error(416, "InvalidRange"),
+        },
+    }
     if lo >= size {
         return error(416, "InvalidRange")
     }
-    let last = if raw_hi == "" {
+    let last = if raw_hi == "" || suffix != None {
         size - 1
     } else {
         let Some(parsed) = sim.s3_wire.u64_field(raw_hi) else {

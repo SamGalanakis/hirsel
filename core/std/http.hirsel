@@ -149,6 +149,14 @@ pub fn check_response_field(name: Bytes, value: Bytes) -> Result[(), HandlerErro
     Ok(())
 }
 
+/// Checks each field as `check_response_field` does, in order.
+pub fn check_response_fields(fields: List[(Bytes, Bytes)]) -> Result[(), HandlerError] {
+    for (name, value) in fields {
+        check_response_field(name, value)?
+    }
+    Ok(())
+}
+
 /// Appends a handler-owned field. Framing fields belong to the connection.
 pub fn header(mut r: Response, take name: Bytes, take value: Bytes) -> Result[(), ResponseError] {
     if let Error(e) = check_response_field(name, value) {

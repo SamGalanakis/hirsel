@@ -109,7 +109,7 @@ For an event-stream response, feed the decoded body bytes to the
 [server-sent events decoder](sse.md).
 
 To relay a response from a server handler, read its head, then pass the
-connection to [`stream.spec_relay`](stream.md). `fresh_response(connection)`
+connection and the fields to send to [`stream.spec_relay`](stream.md). `fresh_response(connection)`
 is true while the head has been read and no body byte has.
 `relay_fields(connection)` copies the head's end-to-end fields in order,
 dropping RFC 9110 §7.6.1's hop-by-hop fields, every field `Connection` names,

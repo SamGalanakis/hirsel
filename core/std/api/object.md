@@ -60,6 +60,34 @@ the operation uses a no-clobber precondition.
 | `pending_uploads(prefix, mut into, deadline_ns)` | Appends handles for up to 16 multipart uploads still pending under the prefix and returns true when more remain. Abort them and list again. |
 | `pending_uploads_page(prefix, after, mut into, deadline_ns)` | Lists pending upload handles with their relative object keys. Pass the returned cursor to continue. `None` marks the final page. |
 
+## Opening an object for a relay
+
+Added 2026-11-25 (object-range-stream-2690); the choice is
+[decision 61](../../../docs/spec/http.md#8-decisions) of the HTTP
+specification, whose HTTP-10 states the object route's rules.
+
+`opener(client)` returns an `Opener`, a handle any task can use while the
+client lives; `share_opener` copies it, for instance into each connection's
+state of an HTTP server. Each call is answered on its own channel, and a
+caller that stops waiting leaves the lane serving others.
+`opener_deadline_ms(opener, ms)` is the deadline `ms` from now.
+
+`open(opener, key, want, deadline_ns)` sends a signed GET and returns at the
+store's head, with the body unread on the connection it hands back:
+`Ready(part, connection)` or `Unsatisfiable` for the store's 416. `Want` is
+RFC 9110 §14.1.2's byte range: `Whole`, `From(first)`, `Span(first, last)`
+with `last` inclusive, or the suffix `Last(n)`; its Range field is signed
+with the request. `Part` holds the status, the half-open span
+[first, end), the whole object's size and its ETag. A 206 whose
+Content-Range is not the span `range_span(want, size)` gives, or a 200 without
+Content-Length, is `Fatal(Malformed)`. `stat(opener, key, deadline_ns)`
+returns the object's `Meta` from a HEAD. `range_span(want, size)` is the span a
+range selects, or `None` when it is unsatisfiable.
+[`http_object`](http_object.md) serves an object by range with these.
+
+`tag_value(etag)` is an ETag's field value, quotes included.
+`strong_match(etag, value)` is RFC 9110 §8.8.3.2's strong comparison.
+
 A retried multipart initiation can leave a pending upload if the first
 reply was lost. It publishes no object. The owner of the prefix can
 abort those pending uploads during recovery: `pending_uploads` lists them and

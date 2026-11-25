@@ -1,0 +1,211 @@
+// Serves one stored object over HTTP with RFC 9110 range semantics (http.md
+// HTTP-10, "Stream serving a stored object"; decision 61): the caller decides
+// access, the store is opened through std.object with the Range signed into
+// the request, and the body is relayed from the store's connection through
+// stream.spec_relay, so at most two reads are in flight whatever its size.
+/// The caller's access decision, made before the store is reached. `Granted`
+/// names the object key the caller may read. `Denied` is answered 403 and
+/// sends nothing to the store.
+pub type Access: send = Granted(String) | Denied
+
+/// `room` bounds the relayed stream; `open_ms` bounds dialling the store and
+/// reading its head, and should end before the route's handler deadline so a
+/// slow store is answered 504; `idle_ms` bounds each body read.
+pub type Limits: send {
+    room: stream.Bounds,
+    open_ms: u64,
+    idle_ms: u64
+}
+
+fn blank(b: u8) -> bool {
+    b == b' ' || b == b'\t'
+}
+
+// Decimal digits in b[start .. end], at least one, saturating at MAX_U64: a
+// position past any object is still a position (RFC 9110 §14.1.1).
+fn position(b: Bytes, start: u64, end: u64) -> Option[u64] {
+    if start == end {
+        return None
+    }
+    let mut v = 0u64
+    for i in start .. end {
+        let Some(d) = int.ascii_digit(b[i], 10) else {
+            return None
+        }
+        v = int.saturating_add(int.saturating_mul(v, 10), int.widen(d))
+    }
+    Some(v)
+}
+
+/// Reads a Range field value holding one byte range (RFC 9110 §14.1.2):
+/// `bytes=first-last`, `bytes=first-` or `bytes=-suffix`, the unit in any
+/// case, with optional blanks around the range. Anything else is None and the
+/// field is ignored: another unit, more than one range, last < first, or a
+/// malformed spec.
+pub fn parse_range(value: Bytes) -> Option[object.Want] {
+    let n = list.len(value)
+    if n < 6 || !http1.equal_ascii(list.slice(value, 0, 6), b"bytes=") {
+        return None
+    }
+    let mut start = 6u64
+    let mut end = n
+    while start < end && blank(value[start]) {
+        start += 1
+    }
+    while end > start && blank(value[end - 1]) {
+        end -= 1
+    }
+    let mut dash = start
+    while dash < end && value[dash] != b'-' {
+        dash += 1
+    }
+    if dash == end {
+        return None
+    }
+    if dash == start {
+        return match position(value, dash + 1, end) {
+            Some(suffix) => Some(Last(suffix)),
+            None => None,
+        }
+    }
+    let Some(first) = position(value, start, dash) else {
+        return None
+    }
+    if dash + 1 == end {
+        return Some(From(first))
+    }
+    match position(value, dash + 1, end) {
+        Some(last) if last >= first => Some(Span(first, last)),
+        _ => None,
+    }
+}
+
+// The range a GET asks for: one Range field that parses, unless If-Range
+// (RFC 9110 §13.1.5) holds anything but a strong entity tag, which this
+// helper treats as a false condition, serving the whole object. A strong tag
+// is compared once the object's tag is known.
+fn wanted(req: http.Request) -> object.Want {
+    if http.method(req) != b"GET" || http.field_at(req, b"range", 1) != None {
+        return Whole
+    }
+    let Some(value) = http.field(req, b"range") else {
+        return Whole
+    }
+    let Some(want) = parse_range(value) else {
+        return Whole
+    }
+    match http.field(req, b"if-range") {
+        Some(tag) if list.len(tag) == 0 || tag[0] != b'"' => Whole,
+        _ => want,
+    }
+}
+
+// False when If-Range names a tag other than the object's.
+fn current(req: http.Request, tag: object.ETag) -> bool {
+    match http.field(req, b"if-range") {
+        Some(value) => object.strong_match(tag, value),
+        None => true,
+    }
+}
+
+fn failure(e: object.Error) -> u16 {
+    let reason = match e {
+        NotFound => return 404,
+        Fatal(r) => r,
+        Retriable(r) => r,
+        Uncertain(r) => r,
+        _ => return 502,
+    }
+    match reason {
+        Deadline => 504,
+        Http(h) => http_client.gateway_status(h),
+        _ => 502,
+    }
+}
+
+fn refuse(status: u16) -> Result[http.Outcome, http.HandlerError] {
+    Ok(Reply(http.response(status, list.new(), false)?))
+}
+
+fn decimal(mut out: Bytes, v: u64) {
+    let mut text = string.from("")
+    string.push_u64(mut text, v)
+    list.extend(mut out, string.as_bytes(text))
+}
+
+fn copy_field(mut fields: List[(Bytes, Bytes)], upstream: http_client.Connection, name: Bytes) {
+    let head = http_client.head(upstream)
+    for i in 0u64 .. http_client.field_count(head) {
+        let (field, value) = option.unwrap(http_client.field_at(head, i))
+        if http1.equal_ascii(field, name) {
+            list.push(mut fields, (http.copy_bytes(name), http.copy_bytes(value)))
+            return
+        }
+    }
+}
+
+fn relay(req: http.Request, part: object.Part, take upstream: Box[http_client.Connection], limits: Limits) -> Result[http.Outcome, http.HandlerError] {
+    let mut fields: List[(Bytes, Bytes)] = list.with_capacity(5)
+    copy_field(mut fields, upstream, b"content-type")
+    copy_field(mut fields, upstream, b"last-modified")
+    if part.etag.len != 0 {
+        list.push(mut fields, (http.copy_bytes(b"etag"), object.tag_value(part.etag)))
+    }
+    list.push(mut fields, (http.copy_bytes(b"accept-ranges"), http.copy_bytes(b"bytes")))
+    if part.status == 206 {
+        let mut range: Bytes = list.with_capacity(64)
+        list.extend(mut range, b"bytes ")
+        decimal(mut range, part.first)
+        list.push(mut range, b'-')
+        decimal(mut range, part.end - 1)
+        list.push(mut range, b'/')
+        decimal(mut range, part.size)
+        list.push(mut fields, (http.copy_bytes(b"content-range"), take range))
+    }
+    Ok(Stream(stream.spec_relay(req, part.status, limits.room, take fields, box.unbox(take upstream), limits.idle_ms)?))
+}
+
+/// Answers a GET for one object. `Denied` is 403 before any store request. A
+/// single satisfiable Range is 206 with its Content-Range, an unsatisfiable
+/// one 416 with `Content-Range: bytes */size`; no Range, an ignored one, or an
+/// If-Range that does not match the object's strong tag is 200 with the whole
+/// object. A missing object is 404; a store that fails before its head is 504
+/// past `open_ms`, else 502. The body is relayed from the store's connection
+/// (`stream.spec_relay`); the route needs a `stream_bytes` allowance.
+pub fn serve(req: http.Request, objects: object.Opener, take access: Access, limits: Limits) -> Result[http.Outcome, http.HandlerError] waits {
+    let Granted(take key) = take access else {
+        return refuse(403)
+    }
+    let deadline = order.min(http.handler_deadline(req), object.opener_deadline_ms(objects, limits.open_ms))
+    let mut want = wanted(req)
+    loop {
+        match object.open(objects, key, want, deadline) {
+            Ok(Ready(part, take upstream)) => {
+                if want == Whole || current(req, part.etag) {
+                    return relay(req, part, take upstream, limits)
+                }
+            },
+            Ok(Unsatisfiable) => {
+                if want == Whole {
+                    return refuse(502)
+                }
+                let meta = match object.stat(objects, key, deadline) {
+                    Ok(meta) => meta,
+                    Error(e) => return refuse(failure(e)),
+                }
+                if current(req, meta.etag) {
+                    let mut reply = http.response(416, list.new(), false)?
+                    let mut range: Bytes = list.with_capacity(32)
+                    list.extend(mut range, b"bytes */")
+                    decimal(mut range, meta.size)
+                    http.header(mut reply, http.copy_bytes(b"content-range"), take range)?
+                    return Ok(Reply(take reply))
+                }
+            },
+            Error(e) => return refuse(failure(e)),
+        }
+        // If-Range named another version: the condition is false and the
+        // whole object is served (RFC 9110 §13.1.5).
+        want = Whole
+    }
+}

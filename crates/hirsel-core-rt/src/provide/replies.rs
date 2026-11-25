@@ -14,7 +14,7 @@ pub(super) fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
                     9 => reply == R_ENTRIES,
                     10 | 11 | 19 => reply == R_COUNT,
                     12 | 13 => matches!(reply, R_DONE | R_WRITE_FAILED),
-                    16 => reply == R_LOCKED,
+                    16 | 23 => reply == R_LOCKED,
                     DIR_ZERO_EXTENSION => reply == R_ZERO_EXTENSION,
                     _ => reply == R_DONE,
                 }

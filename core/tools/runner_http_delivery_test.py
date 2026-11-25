@@ -32,12 +32,16 @@ def run(command, *, expected=None, json_output=False):
 def fixture(work, compiler, cc):
     (work / "hirsel.toml").write_text('[workspace]\nmembers = ["runner", "store"]\n')
     source = work / "runner"
-    shutil.copytree(RUNNER, source, ignore=shutil.ignore_patterns("models", "tests"))
+    manifest = (RUNNER / "hirsel.toml").read_text()
+    declared = tomllib.loads(manifest)
+    tests = declared["tests"]["sources"]
+    existing = declared["sources"]
+    # The package is exactly the files its manifest declares.
+    for path in ["hirsel.toml", *existing, *tests]:
+        (source / path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(RUNNER / path, source / path)
     shutil.copytree(RUNNER.parent / "store", work / "store")
     manifest_file = source / "hirsel.toml"
-    manifest = manifest_file.read_text()
-    tests = tomllib.loads(manifest)["tests"]["sources"]
-    existing = tomllib.loads(manifest)["sources"]
     fixtures = [f'{json.dumps(path)} = {json.dumps(module)}' for path, module in tests.items() if path not in existing]
     manifest_file.write_text(manifest.split("[tests]\n", 1)[0] + "\n".join(fixtures) + "\n")
     directory = work / "disk"

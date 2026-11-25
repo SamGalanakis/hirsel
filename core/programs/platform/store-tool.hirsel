@@ -1,0 +1,119 @@
+// Module store_tool: `libexec/hirsel/store_tool`, the installed body of `hirsel store backup`
+// and `hirsel store restore` (STORE-SPEC §15.4). The driver opens both directories, makes
+// the target if it is absent, and passes them as fds 3 and 4; the grants name them as
+// /proc/self/fd/3 and /proc/self/fd/4.
+//
+// argv: `backup` (fd 3 the store, fd 4 the empty target) or `restore` (fd 3 the backup,
+// fd 4 the empty new store directory). It prints `backup <store id> head <H>` or
+// `restored <store id> head <H>`. Exit 0 done, 1 refused (its name on stderr), 2 usage,
+// 75 the store is held by a writer.
+
+fn id_hex(hi: u64, lo: u64) -> String {
+    let mut raw: Bytes = list.with_capacity(16)
+    for word in [hi, lo] {
+        for i in 0u64 .. 8 {
+            list.push(mut raw, int.truncate(word >> (56u64 - i * 8u64)))
+        }
+    }
+    std.hex.encode(raw)
+}
+
+fn store_refusal(e: store.Error) -> String {
+    match e {
+        Held => "Held",
+        NotFound => "NotFound",
+        Corrupt(_) => "Corrupt",
+        Unsupported(_) => "Unsupported",
+        Io(_) => "Io",
+        Full(_) => "Full",
+        Exists(_) => "Exists",
+        ExportDirectory => "ExportDirectory",
+        Tiered(_) => "Tiered",
+        _ => "Refused",
+    }
+}
+
+fn deploy_refusal(e: store.DeployError) -> String {
+    match e {
+        Store(inner) => store_refusal(inner),
+        Scratch(inner) => store_refusal(inner),
+        ExportMismatch => "ExportMismatch",
+        AttemptBusy => "AttemptBusy",
+        _ => "Refused",
+    }
+}
+
+fn refused(err: Stderr, name: String) -> Result[(), Exit] waits {
+    let mut line = string.from("hirsel store: refused: ")
+    string.push(mut line, name)
+    string.push(mut line, "\n")
+    let _ = stderr.write(err, line)
+    Error(Exit(status: 1u8))
+}
+
+fn finished(out: Stdout, verb: String, stamp: store.ExportStamp) -> Result[(), Exit] waits {
+    let mut line = string.from(verb)
+    string.push(mut line, " ")
+    string.push(mut line, id_hex(stamp.store_hi, stamp.store_lo))
+    string.push(mut line, " head ")
+    string.push_u64(mut line, stamp.head)
+    string.push(mut line, "\n")
+    match stdout.write(out, line) {
+        Ok(_) => Ok(()),
+        Error(_) => Error(Exit(status: 1u8)),
+    }
+}
+
+fn backup(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, take options: store.Options, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    // §15.4: a backup never creates the store it names.
+    options.create = false
+    let mut db = match store.open(tasks, from, c, r, options) {
+        Ok(take opened) => take opened,
+        Error(Held) => {
+            let _ = stderr.write(err, "hirsel store: the store is held by a writer\n")
+            return Error(Exit(status: 75u8))
+        },
+        Error(e) => return refused(err, store_refusal(e)),
+    }
+    let mut attempt: Bytes = list.with_capacity(16)
+    host.random(r, mut attempt)
+    let mut kept: Bytes = list.with_capacity(16)
+    list.append(mut kept, attempt)
+    let copied = match store.begin_backup(mut db, to, take attempt) {
+        Ok(take job) => store.export_copy(take job),
+        Error(e) => {
+            let _ = store.close(take db)
+            return refused(err, deploy_refusal(e))
+        },
+    }
+    store.release_export(mut db, kept)
+    let closed = store.close(take db)
+    let exported = match copied {
+        Ok(take done) => take done,
+        Error(e) => return refused(err, deploy_refusal(e)),
+    }
+    if let Error(e) = closed {
+        return refused(err, store_refusal(e))
+    }
+    finished(out, "backup", exported.stamp)
+}
+
+pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, err: Stderr, argv: Args) -> Result[(), Exit] waits {
+    let options = match store.sized(Directory, 2147483648u64) {
+        Ok(take sized) => take sized,
+        Error(_) => return refused(err, "Full"),
+    }
+    let Some(verb) = args.get(argv, 0u64) else {
+        return Error(Exit(status: 2u8))
+    }
+    if verb == "backup" {
+        return backup(from, to, c, r, tasks, take options, out, err)
+    }
+    if verb != "restore" {
+        return Error(Exit(status: 2u8))
+    }
+    match store.restore(from, to, c, options) {
+        Ok(take stamp) => finished(out, "restored", stamp),
+        Error(e) => refused(err, deploy_refusal(e)),
+    }
+}

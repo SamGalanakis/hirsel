@@ -590,7 +590,8 @@ def _toolchain_bundle_impl(ctx):
     # itself in; a request from the bundle loads nothing outside it. The bundled compiler then
     # builds the platform host as libexec/hirsel/platform_main (docs/spec/launch.md "Starting
     # the host") and its offline pin reader as libexec/hirsel/pin_reader: their grants name the state directory as /proc/self/cwd, the directory the
-    # launcher starts the host in, and the driver the reader.
+    # launcher starts the host in, and the driver the reader. libexec/hirsel/store_tool runs `hirsel store
+    # backup|restore` (STORE-SPEC §15.4) on the two directories the driver passes as fds 3 and 4.
     bundle = ctx.actions.declare_output("hirsel-toolchain", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
     runtimes = ctx.attrs.runtimes[DefaultInfo].sub_targets
@@ -618,6 +619,8 @@ def _toolchain_bundle_impl(ctx):
         + ' --dir /proc/self/cwd/catalog --limit {} -o "$root/libexec/hirsel/platform_main" > /dev/null'.format(PLATFORM_HOST_LIMIT),
         '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/platform_main/read_pin --grant Clock --grant Stdout'
         + ' --dir /proc/self/cwd/catalog --limit {} -o "$root/libexec/hirsel/pin_reader" > /dev/null'.format(PLATFORM_HOST_LIMIT),
+        '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/store_tool/main --grant Clock --grant Random --grant Tasks --grant Stdout --grant Stderr'
+        + ' --dir /proc/self/fd/3 --dir /proc/self/fd/4 --limit {} -o "$root/libexec/hirsel/store_tool" > /dev/null'.format(PLATFORM_HOST_LIMIT),
     ])
     platform_sources = _program_sources(ctx, "platform-sources", ctx.attrs.platform_sources)
     ctx.actions.run(

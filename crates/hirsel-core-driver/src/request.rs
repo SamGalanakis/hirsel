@@ -98,7 +98,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             )?));
         }
         "dev" => return conclude(Outcome::Exit(launch::dev::run(invocation)?)),
-        "dry-run" => return conclude(Outcome::Exit(launch::dry_run::run(invocation)?)),
+        "dry-run" | "store backup" | "store restore" => return launch::store_tool(invocation),
         _ => {}
     }
     if command == "replay"

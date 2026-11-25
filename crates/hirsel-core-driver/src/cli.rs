@@ -40,6 +40,9 @@ commands! {
     "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
     "dev", "dev SERVER [--listen ADDR] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
     "dry-run", "dry-run --exe NEW --store DIR [-- arguments...]", "Preview a candidate’s migration against a store.";
+    "store", "store <backup|restore>", "Back up a store or restore one from a backup.";
+    "store backup", "store backup DIR TARGET", "Copy the store at DIR, at a durable head, into the empty or new directory TARGET.";
+    "store restore", "store restore BACKUP DIR", "Restore a backup into the empty or new directory DIR, keeping the store's identity.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build, run and test requests from a resident compiler.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";

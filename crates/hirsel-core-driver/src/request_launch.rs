@@ -32,6 +32,8 @@ impl Launch {
 pub(super) mod dev;
 #[path = "dry_run.rs"]
 pub(super) mod dry_run;
+#[path = "store_cli.rs"]
+pub(super) mod store_cli;
 
 pub(super) fn report_request_error(error: &(dyn std::error::Error + 'static)) -> i32 {
     if let Some(damage) = error
@@ -51,6 +53,18 @@ pub(super) fn report_request_error(error: &(dyn std::error::Error + 'static)) ->
 /// program first for a launch: the in-memory graphs are the OS's to reclaim,
 /// with no teardown. A resident compiler answers its client here, before the
 /// request's frames unwind, and the request returns its outcome to the server.
+/// `hirsel dry-run` and `hirsel store backup|restore`: the commands that run a tool on a
+/// store directory and exit with its status.
+pub(super) fn store_tool(
+    invocation: crate::cli::Invocation,
+) -> Result<Outcome, Box<dyn std::error::Error>> {
+    conclude(Outcome::Exit(if invocation.command.name == "dry-run" {
+        dry_run::run(invocation)?
+    } else {
+        store_cli::run(invocation)?
+    }))
+}
+
 pub(super) fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::Error>> {
     if crate::resident::serving() {
         crate::resident::answer(&outcome);

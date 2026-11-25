@@ -53,7 +53,7 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn installed(name: &str) -> Result<PathBuf, Error> {
+pub(crate) fn installed(name: &str) -> Result<PathBuf, Error> {
     let executable = std::env::current_exe()?;
     let installation = crate::installation::Installed::discover(&executable)?
         .ok_or("hirsel is not running from an installation")?;

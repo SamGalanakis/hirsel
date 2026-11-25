@@ -16,6 +16,7 @@ Code Hirsel adapts into its own sources is listed in [third-party/NOTICES.md](th
 | `core-packages/*` | the core and std package images and the Store source archive | Hirsel |
 | `libexec/hirsel/platform_main` | the Hirsel platform host, linked with the shipped runtime archive | Hirsel |
 | `libexec/hirsel/pin_reader` | the Hirsel offline pin reader, linked with the shipped runtime archive | Hirsel |
+| `libexec/hirsel/store_tool` | the Hirsel store backup and restore tool, linked with the shipped runtime archive | Hirsel |
 | `libexec/hirsel/.hirsel-debug/*.debug` | detached debug information for the platform executables | Hirsel |
 | `lib/libLLVM.so.23.1` | the compiler's LLVM library (tools/native-toolchain/build-libllvm) | native component `engine_llvm`, below |
 | `bin/ld.lld` | the linker, a static PIE (tools/native-toolchain/build-static-lld) | native component `static_lld`, below |
@@ -1659,6 +1660,10 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
   {
    "contents": "the Hirsel offline pin reader, linked with the shipped runtime archive",
    "path": "libexec/hirsel/pin_reader"
+  },
+  {
+   "contents": "the Hirsel store backup and restore tool, linked with the shipped runtime archive",
+   "path": "libexec/hirsel/store_tool"
   },
   {
    "contents": "detached debug information for the platform executables",

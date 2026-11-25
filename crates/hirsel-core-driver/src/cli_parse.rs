@@ -90,7 +90,13 @@ pub(super) fn invocation(
         } else if invocation.arguments.is_empty()
             && matches!(
                 name,
-                "prof annotate" | "prof callers" | "prof callees" | "prof diff" | "prof sql"
+                "prof annotate"
+                    | "prof callers"
+                    | "prof callees"
+                    | "prof diff"
+                    | "prof sql"
+                    | "store backup"
+                    | "store restore"
             )
         {
             invocation.arguments.push(argument);
@@ -116,7 +122,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             Err("--version takes no arguments".into())
         };
     }
-    if matches!(name.as_str(), "prof" | "laws" | "lean" | "sdk") {
+    if matches!(name.as_str(), "prof" | "laws" | "lean" | "sdk" | "store") {
         match arguments.next() {
             None => return Ok(Action::Help(help(Some(named(&name)?)))),
             Some(subcommand) if is_help(&subcommand) => {
@@ -133,7 +139,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
                 if is_help(&name) {
                     Ok(command)
                 } else {
-                    if matches!(name.as_str(), "prof" | "laws" | "lean" | "sdk")
+                    if matches!(name.as_str(), "prof" | "laws" | "lean" | "sdk" | "store")
                         && let Some(subcommand) = arguments.next()
                     {
                         name.push_str(&format!(" {subcommand}"));

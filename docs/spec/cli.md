@@ -104,14 +104,14 @@ fixed for the session.
 
 ## Store backup and restore
 
-`hirsel store`<!-- doc-ref: planned --> commands operate on the directory of a log@1 store. They run in the
+`hirsel store` commands operate on the directory of a log@1 store. They run in the
 installation's `libexec/hirsel/store_tool`, which is granted only the two directories the driver
 passes it. [STORE-SPEC §15](../../core/programs/store/STORE-SPEC.md) has the full contract.
 
 | Form | Does |
 |---|---|
-| `hirsel store backup DIR TARGET`<!-- doc-ref: planned --> | copies the store at `DIR` into the empty directory `TARGET`, which it creates if absent, at the head it leases; prints `backup <store id> head <H>` |
-| `hirsel store restore BACKUP DIR`<!-- doc-ref: planned --> | makes a store at the empty directory `DIR` from a backup; prints `restored <store id> head <H>` |
+| `hirsel store backup DIR TARGET` | copies the store at `DIR` into the empty directory `TARGET`, which it creates if absent, at the head it leases; prints `backup <store id> head <H>` |
+| `hirsel store restore BACKUP DIR` | makes a store at the empty directory `DIR` from a backup; prints `restored <store id> head <H>` |
 
 A backup opens the store as its writer, so a store another process holds exits 75 and is not
 changed. A store a place serves is backed up through its host, which is not built yet. A

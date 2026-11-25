@@ -6,7 +6,7 @@ pub(super) fn install(mach: &mut Machine<'_>, f: FuncId, revisions: Option<&Revi
             RevisionRoot::Item(identity) => revisions.get(&identity.digest()).copied(),
             RevisionRoot::Intrinsic(identity) => Some(intrinsic_revision(&identity)),
         };
-        let launch = mach.world.launch.as_mut().unwrap();
+        let launch = mach.host.world.launch.as_mut().unwrap();
         if launch.revision().is_none() {
             *launch = launch
                 .clone()
@@ -14,6 +14,7 @@ pub(super) fn install(mach: &mut Machine<'_>, f: FuncId, revisions: Option<&Revi
         }
     }
     let target = mach
+        .host
         .world
         .launch
         .as_ref()
@@ -25,6 +26,6 @@ pub(super) fn install(mach: &mut Machine<'_>, f: FuncId, revisions: Option<&Revi
         let target_data = mach.block(target.len() as u64, None, 0, None);
         mach.mem[split(target_data).0].bytes.clone_from(&target);
         mach.mem[split(target_data).0].fixed = true;
-        mach.world.launch_target = (target_data, target.len() as u64);
+        mach.host.world.launch_target = (target_data, target.len() as u64);
     }
 }

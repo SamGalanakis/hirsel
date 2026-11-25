@@ -4,7 +4,7 @@ impl Machine<'_> {
     pub(super) fn network_host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
         match op {
             HostOp::Connect | HostOp::Listen => {
-                if let Some(rules) = self.world.network.grants.get(&a[0]) {
+                if let Some(rules) = self.host.world.network.grants.get(&a[0]) {
                     let denial = hirsel_core_net::address_denial(
                         rules.iter().filter_map(|rule| match rule {
                             hirsel_core_net::GrantRule::Address(rule) => Some(*rule),
@@ -31,8 +31,8 @@ impl Machine<'_> {
                                 a[4] as u16,
                             )
                         {
-                            let provider = self.world.net_ports.get(&a[0]).copied();
-                            *self.world.not_public.entry(provider).or_default() += 1;
+                            let provider = self.host.world.net_ports.get(&a[0]).copied();
+                            *self.host.world.not_public.entry(provider).or_default() += 1;
                         }
                         let mut row = vec![0, u64::from(tag), 0, 0];
                         if op == HostOp::Listen {
@@ -40,7 +40,7 @@ impl Machine<'_> {
                         }
                         return Ok(row);
                     }
-                    if let Some(&c) = self.world.net_ports.get(&a[0]) {
+                    if let Some(&c) = self.host.world.net_ports.get(&a[0]) {
                         return self.net_call(t, op, c, 0, true, a);
                     }
                 }
@@ -69,7 +69,7 @@ impl Machine<'_> {
                 if let Some((c, id, mut live)) = socket {
                     if stream
                         && matches!(
-                            self.world.cells[c],
+                            self.host.world.cells[c],
                             VirtualCell::Port {
                                 vocab: Vocab::Exec,
                                 ..
@@ -124,11 +124,17 @@ impl Machine<'_> {
             &[]
         };
         let (trust, _) = tls::trust(a[3] as u8, pem).ok_or((9, 3))?;
-        let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rules| {
-            rules.iter().any(
-                |rule| matches!(rule, GrantRule::Tls(rule) if rule.permits(&name, port, trust)),
-            )
-        });
+        let allowed = self
+            .host
+            .world
+            .network
+            .grants
+            .get(&a[0])
+            .is_some_and(|rules| {
+                rules.iter().any(
+                    |rule| matches!(rule, GrantRule::Tls(rule) if rule.permits(&name, port, trust)),
+                )
+            });
         if !allowed {
             return Err((1, 0));
         }
@@ -137,11 +143,11 @@ impl Machine<'_> {
 
     pub(super) fn tls_connect(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[1];
-        let served = self.world.net_ports.get(&a[0]).copied();
-        if let Some(&(c, _, peer)) = self.world.port_keys.get(&(key & !3)) {
+        let served = self.host.world.net_ports.get(&a[0]).copied();
+        if let Some(&(c, _, peer)) = self.host.world.port_keys.get(&(key & !3)) {
             return self.port_tls(t, a, c, peer, served);
         }
-        self.world.network.sockets.release(key);
+        self.host.world.network.sockets.release(key);
         Ok(vec![0, 1, 0, 0, 0, 0, 0, 0])
     }
 
@@ -165,7 +171,7 @@ impl Machine<'_> {
         let Some((_, id, true)) = self.port_socket(key, PORT_SOCKET) else {
             return failed(self, 1, 0);
         };
-        let VirtualCell::Port { handles, .. } = &self.world.cells[c] else {
+        let VirtualCell::Port { handles, .. } = &self.host.world.cells[c] else {
             unreachable!()
         };
         if served != Some(c) || !handles[&id].client_socket {
@@ -207,7 +213,8 @@ impl Machine<'_> {
             return failed(self, row[1], row[2]);
         }
         self.port_socket_part(key, true);
-        self.world
+        self.host
+            .world
             .tls_writes
             .insert(key & !3, (name, false, Default::default()));
         Ok([&[key, 0, 0], &row[3..8]].concat())

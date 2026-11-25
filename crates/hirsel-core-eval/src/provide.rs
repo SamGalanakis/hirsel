@@ -9,7 +9,7 @@ impl Machine<'_> {
         out: u64,
     ) -> X<Vec<u64>> {
         let (port, id) = Self::call_of(key);
-        let VirtualCell::Port { calls, .. } = &self.world.cells[port] else {
+        let VirtualCell::Port { calls, .. } = &self.host.world.cells[port] else {
             unreachable!("a port");
         };
         let call = &calls[&id];
@@ -53,7 +53,7 @@ impl Machine<'_> {
             }
         })?;
         if matches!(op, HostOp::Write | HostOp::WriteAt)
-            && let VirtualCell::Port { handles, .. } = &self.world.cells[c]
+            && let VirtualCell::Port { handles, .. } = &self.host.world.cells[c]
             && handles
                 .get(&h)
                 .is_some_and(|file| file.read_only_file && file.state == PortState::Live)
@@ -153,7 +153,7 @@ impl Machine<'_> {
             HostOp::NextEntries => (2, vec![19, h, spare(self, a[1])], vec![], Some(a[1])),
             _ => unreachable!("a Dir, file or listing operation"),
         };
-        let VirtualCell::Port { handles, .. } = &self.world.cells[c] else {
+        let VirtualCell::Port { handles, .. } = &self.host.world.cells[c] else {
             unreachable!()
         };
         let live = handles.get(&h).is_some_and(|handle| {
@@ -167,7 +167,7 @@ impl Machine<'_> {
                 answer[0] |= DIR_READ_ONLY;
             } else if op == HostOp::Open {
                 let (_, file) = self.port_handle(answer[0]).expect("a registered file");
-                let (_, handles, ..) = self.world.cells[c].port();
+                let (_, handles, ..) = self.host.world.cells[c].port();
                 handles.get_mut(&file).unwrap().read_only_file = true;
             }
         }
@@ -183,9 +183,9 @@ impl Machine<'_> {
             return vec![charge, 1, 0, available];
         }
         let tape = RandomStream::tape(self.carrier_bytes(source).to_vec());
-        let handle = CELL_BASE + self.world.cells.len() as u64;
-        self.world.cells.push(VirtualCell::Random(tape));
-        self.world.grant_charges.push((payer.clone(), charge));
+        let handle = CELL_BASE + self.host.world.cells.len() as u64;
+        self.host.world.cells.push(VirtualCell::Random(tape));
+        self.host.world.grant_charges.push((payer.clone(), charge));
         vec![handle, 0, 0, 0]
     }
 
@@ -196,7 +196,7 @@ impl Machine<'_> {
             return Ok(vec![]);
         }
         let (block, offset) = self.check_write(data + len, spare);
-        let VirtualCell::Random(stream) = &mut self.world.cells[cell] else {
+        let VirtualCell::Random(stream) = &mut self.host.world.cells[cell] else {
             unreachable!()
         };
         let bytes = &mut self.mem[block].bytes[offset..offset + spare];

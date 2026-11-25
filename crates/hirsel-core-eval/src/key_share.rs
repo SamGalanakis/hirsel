@@ -25,7 +25,7 @@ impl Machine<'_> {
         let mut point = [0; 65];
         let point = &mut point[..size as usize];
         let key = if let Some(cell) = self.cell(a[0]) {
-            let VirtualCell::Random(stream) = &mut self.world.cells[cell] else {
+            let VirtualCell::Random(stream) = &mut self.host.world.cells[cell] else {
                 unreachable!("a Random cell");
             };
             match KeyShare::from_draws(
@@ -49,6 +49,7 @@ impl Machine<'_> {
         self.put(dst + len, point);
         self.store(a[2] + 8, 8, len + size);
         let ticket = self
+            .host
             .world
             .agreements
             .new_share()

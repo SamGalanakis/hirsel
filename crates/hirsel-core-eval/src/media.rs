@@ -65,13 +65,13 @@ fn sender(tag: u64) -> Side {
 
 impl Machine<'_> {
     pub(super) fn media_hold(&mut self, owner: Limit, payload: Payload) -> Vec<u64> {
-        let id = self.world.media.len() as u64;
-        self.world.media.push(Some(Media { owner, payload }));
+        let id = self.host.world.media.len() as u64;
+        self.host.world.media.push(Some(Media { owner, payload }));
         vec![id, 0, 0, 0]
     }
 
     pub(super) fn drop_media(&mut self, id: u64) {
-        let Media { owner, payload } = self.world.media[id as usize].take().unwrap();
+        let Media { owner, payload } = self.host.world.media[id as usize].take().unwrap();
         let bytes = match payload {
             Payload::Share(share) => {
                 drop(share);
@@ -118,8 +118,10 @@ impl Machine<'_> {
             }
             HostOp::ScheduleSrtp => Ok(self.srtp_child(payer, a)),
             HostOp::ScheduleSpaceInfo => {
-                let Payload::Schedule(schedule) =
-                    &self.world.media[a[0] as usize].as_ref().unwrap().payload
+                let Payload::Schedule(schedule) = &self.host.world.media[a[0] as usize]
+                    .as_ref()
+                    .unwrap()
+                    .payload
                 else {
                     unreachable!()
                 };
@@ -141,14 +143,14 @@ impl Machine<'_> {
             }
             HostOp::ScheduleSealer | HostOp::ScheduleOpener | HostOp::ScheduleHeaderMask => {
                 let slot = a[0] as usize;
-                let mut held = self.world.media[slot].take().unwrap();
+                let mut held = self.host.world.media[slot].take().unwrap();
                 let Payload::Schedule(schedule) = &mut held.payload else {
                     unreachable!()
                 };
                 let epoch = match schedule.epoch(a[1]) {
                     Ok(epoch) => epoch,
                     Err(error) => {
-                        self.world.media[slot] = Some(held);
+                        self.host.world.media[slot] = Some(held);
                         return Ok(issue_error(error));
                     }
                 };
@@ -178,15 +180,17 @@ impl Machine<'_> {
                         .header_mask(a[2] != 0, |n| self.admit(&payer, n).map(|()| payer.clone()))
                         .map(|(key, _)| Payload::Mask(key.unwrap())),
                 };
-                self.world.media[slot] = Some(held);
+                self.host.world.media[slot] = Some(held);
                 Ok(match child {
                     Ok(payload) => self.media_hold(payer, payload),
                     Err(error) => issue_error(error),
                 })
             }
             HostOp::PacketMask => {
-                let Payload::Mask(mask) =
-                    &self.world.media[a[0] as usize].as_ref().unwrap().payload
+                let Payload::Mask(mask) = &self.host.world.media[a[0] as usize]
+                    .as_ref()
+                    .unwrap()
+                    .payload
                 else {
                     unreachable!()
                 };
@@ -198,9 +202,9 @@ impl Machine<'_> {
             }
             _ => {
                 let slot = a[0] as usize;
-                let mut held = self.world.media[slot].take().unwrap();
+                let mut held = self.host.world.media[slot].take().unwrap();
                 let outcome = self.packet_call(&payer, op, a, &mut held.payload);
-                self.world.media[slot] = Some(held);
+                self.host.world.media[slot] = Some(held);
                 let (value, error, written) = packet_aead::outcome(outcome?);
                 Ok(vec![value, error as u64, 0, written])
             }
@@ -209,7 +213,7 @@ impl Machine<'_> {
 
     fn sealer_pair(&mut self, payer: Limit, a: &[u64]) -> Vec<u64> {
         let slot = a[0] as usize;
-        let mut held = self.world.media[slot].take().unwrap();
+        let mut held = self.host.world.media[slot].take().unwrap();
         let Payload::Schedule(schedule) = &mut held.payload else {
             unreachable!()
         };
@@ -235,7 +239,7 @@ impl Machine<'_> {
                         )
                     }))
             });
-        self.world.media[slot] = Some(held);
+        self.host.world.media[slot] = Some(held);
         match result {
             Ok([first, second]) => {
                 let a = self.media_hold(payer.clone(), first)[0];
@@ -247,7 +251,7 @@ impl Machine<'_> {
     }
 
     fn refund_registry(&mut self) {
-        let refunds = std::mem::take(&mut *self.world.agreement_refunds.lock().unwrap());
+        let refunds = std::mem::take(&mut *self.host.world.agreement_refunds.lock().unwrap());
         for payer in refunds {
             self.refund(payer, REGISTRY_CHARGE);
         }
@@ -312,14 +316,14 @@ impl Machine<'_> {
                 available,
             }));
         }
-        let Media { owner, payload } = self.world.media[share as usize].take().unwrap();
+        let Media { owner, payload } = self.host.world.media[share as usize].take().unwrap();
         let Payload::Share(key_share::Share { key, ticket }) = payload else {
             unreachable!("checked KeyShare");
         };
         self.refund(owner, 64);
         let charge = RegistryCharge {
             payer: payer.clone(),
-            queue: self.world.agreement_refunds.clone(),
+            queue: self.host.world.agreement_refunds.clone(),
         };
         let result = match key.agree(self.carrier_bytes(peer)) {
             Some(shared) => match ticket.resolve(side, &shared, charge) {
@@ -340,7 +344,7 @@ impl Machine<'_> {
 
     fn schedule_transition(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
         let slot = a[0] as usize;
-        let mut held = self.world.media[slot].take().unwrap();
+        let mut held = self.host.world.media[slot].take().unwrap();
         let Payload::Schedule(schedule) = &mut held.payload else {
             unreachable!()
         };
@@ -366,13 +370,15 @@ impl Machine<'_> {
             }),
             _ => unreachable!(),
         };
-        self.world.media[slot] = Some(held);
+        self.host.world.media[slot] = Some(held);
         result.map_or_else(issue_error, |()| vec![0; 4])
     }
 
     fn schedule_finished(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
-        let Payload::Schedule(schedule) =
-            &self.world.media[a[0] as usize].as_ref().unwrap().payload
+        let Payload::Schedule(schedule) = &self.host.world.media[a[0] as usize]
+            .as_ref()
+            .unwrap()
+            .payload
         else {
             unreachable!()
         };
@@ -462,7 +468,7 @@ impl Machine<'_> {
             return issue_error(IssueError::Invalid);
         };
         let slot = args[0] as usize;
-        let mut held = self.world.media[slot].take().unwrap();
+        let mut held = self.host.world.media[slot].take().unwrap();
         let Payload::Schedule(parent) = &mut held.payload else {
             unreachable!("checked schedule");
         };
@@ -475,7 +481,7 @@ impl Machine<'_> {
                 })?;
             Ok(parent.srtp(profile))
         });
-        self.world.media[slot] = Some(held);
+        self.host.world.media[slot] = Some(held);
         match child {
             Ok(child) => self.media_hold(payer, Payload::Schedule(child)),
             Err(error) => issue_error(error),

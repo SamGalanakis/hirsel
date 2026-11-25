@@ -1,6 +1,7 @@
+use super::Host;
 use super::{Machine, RtOp};
 
-impl Machine<'_> {
+impl<'m, H: Host<'m>> Machine<'m, H> {
     pub(super) fn verify_signature(&self, op: RtOp, a: &[u64]) -> bool {
         use hirsel_core_net as net;
         let range = |index: usize| {

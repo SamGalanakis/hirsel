@@ -1,4 +1,11 @@
-//! A test-only evaluator, written from the op documentation (SEM-1, SEM-2, LIR's op
+//! The reference evaluator of core IR, split as COMPTIME-DIRECTION 3.2 puts it:
+//! a pure core (values, blocks, calls, steps, charges and the activation count)
+//! generic over a [`Host`], and the provider world, scheduler, threads and network
+//! as one host ([`WorldHost`]) for the test runs. [`run_pure`] runs the core on
+//! [`Pure`], with no world; a world operation stops it. The loan and role checks
+//! are a test-mode option ([`Core::checks`]).
+//!
+//! The evaluator is written from the op documentation (SEM-1, SEM-2, LIR's op
 //! docs; for the FORM v1 draft FAIL-8..14, MEM-19..29 and CONC-3..9) so the
 //! samples' hand-derived run lines can be checked. Memory is blocks of bytes laid
 //! out by the layout recipes. Limits keep exact `used` totals and hand over by
@@ -24,6 +31,7 @@ mod launch;
 mod map;
 mod media;
 mod provide;
+mod pure;
 mod scram;
 mod secret_kdf;
 mod secret_key;
@@ -35,6 +43,7 @@ use sha256::sha256_blocks;
 mod sha512;
 mod signature;
 mod simd;
+mod world_ops;
 
 pub use map::run_map_hash;
 #[cfg(feature = "map-observation")]
@@ -45,6 +54,7 @@ mod net;
 mod net_tests;
 #[cfg(test)]
 mod tests;
+pub use pure::{PureRun, run_pure};
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -154,11 +164,6 @@ pub struct MapObservation {
 /// - Nothing is ever cancelled.
 #[derive(Default)]
 struct World {
-    map_hash_key: [u8; 16],
-    map_fast_salt: [u64; 2],
-    map_strong_key: [u8; 16],
-    #[cfg(feature = "map-observation")]
-    maps: Option<MapObservation>,
     launch_target: (u64, u64),
     launch: Option<hirsel_core_ids::launch::Metadata>,
     args: Vec<u64>,
@@ -956,8 +961,8 @@ struct Child {
 }
 impl Machine<'_> {
     fn next_id(&mut self) -> u64 {
-        let id = self.sched.next;
-        self.sched.next += 1;
+        let id = self.host.sched.next;
+        self.host.sched.next += 1;
         id
     }
 }
@@ -986,7 +991,7 @@ enum At {
     Other,
 }
 
-struct Machine<'m> {
+struct Machine<'m, H = WorldHost<'m>> {
     m: &'m Module,
     recipes: Vec<RecipeRow>,
     mem: Blocks,
@@ -994,10 +999,6 @@ struct Machine<'m> {
     next_step_bound: u64,
     peak_reserved: u64,
     regions: Vec<Vec<usize>>,
-    children: Vec<Child>,
-    chans: Vec<Chan>,
-    conns: Vec<Conn>,
-    latests: Vec<Latest>,
     /// Each live delivered `Causes`, by its head cell: the charged cells it owns.
     causes: HashMap<u64, Vec<(Limit, u64)>>,
     /// Every inline array field type of the module: element and length.
@@ -1009,21 +1010,18 @@ struct Machine<'m> {
     instructions: u64,
     steps: u64,
     injection: Option<(usize, bool)>,
-    world: World,
     /// The `view` places of the calls running now, as (block, offset, size).
     frozen: Vec<(usize, usize, usize)>,
     loans: u64,
     /// The module's derived parameter facts, and each function's roles, filled on
     /// its first call.
-    facts: Arc<roles::Facts>,
+    facts: Option<Arc<roles::Facts>>,
     roles: Vec<Option<Arc<[Option<roles::Role>]>>>,
     /// Per running activation, the bytes each role touched ([`Footprint`]).
     footprints: Vec<Footprint>,
     role_checks: u64,
     copy_size: Option<u64>,
     copies: u64,
-    task_stack_peak: usize,
-    task_call_depth: usize,
     /// Whether each function inherits its caller's site (`source::inherits_site`).
     inherits: Vec<bool>,
     /// By item, its first site word (`SourceMap::item_sites`), by default the
@@ -1032,12 +1030,104 @@ struct Machine<'m> {
     /// [`Nans::Scrambled`]: the count of NaNs stored so far, which picks the next one's
     /// pattern; None in the canonical placement.
     scrambled: Option<u64>,
-    sched: Sched,
-    /// Each task's thread link, held here only while that task runs.
-    links: Vec<Option<Link<'m>>>,
     /// By function, the address of its static descriptor (`Inst::DescriptorRef`),
     /// 0 for a function no body describes. Functions of one code identity share one.
     descriptors: Vec<u64>,
+    /// The run's map hashing keys, and what the map-observation harness records.
+    maps: MapKeys,
+    /// [`Core::checks`] and [`Core::activations`].
+    checks: bool,
+    activations: usize,
+    /// What the run sits on: the provider world and its scheduler, or [`Pure`].
+    host: H,
+}
+
+/// The map hashing keys of a run (derived from one 16-byte key).
+struct MapKeys {
+    hash_key: [u8; 16],
+    fast_salt: [u64; 2],
+    strong_key: [u8; 16],
+    #[cfg(feature = "map-observation")]
+    observed: Option<MapObservation>,
+}
+
+impl MapKeys {
+    fn new(hash_key: [u8; 16]) -> Self {
+        let (s0, s1, strong_key) = hirsel_core_layout::map_index::derive(&hash_key);
+        Self {
+            hash_key,
+            fast_salt: [s0, s1],
+            strong_key,
+            #[cfg(feature = "map-observation")]
+            observed: None,
+        }
+    }
+}
+
+/// The provider world under a run: the modelled providers, the tasks and their
+/// scheduler, and the task objects (children, channels, connections, latests).
+struct WorldHost<'m> {
+    world: World,
+    sched: Sched,
+    /// Each task's thread link, held here only while that task runs.
+    links: Vec<Option<Link<'m>>>,
+    children: Vec<Child>,
+    chans: Vec<Chan>,
+    conns: Vec<Conn>,
+    latests: Vec<Latest>,
+    task_stack_peak: usize,
+    task_call_depth: usize,
+}
+
+/// What the pure core asks of the run it sits on. The provider world answers
+/// with its scheduler, tasks and resources ([`WorldHost`]); a pure run has one
+/// task and no world ([`Pure`]).
+trait Host<'m>: Sized {
+    /// The running task's index, which a new limit records as its owner.
+    fn current(&self) -> usize;
+    /// Record an event of the running task (`hirsel_core_layout::event`).
+    fn event(m: &mut Machine<'m, Self>, kind: u8, object: u64, value: u64);
+    /// Apply the running task's pending refunds.
+    fn drain_refunds(m: &mut Machine<'m, Self>);
+    /// MEM-20: hold a refund for the task that owns `l`; false when it applies now.
+    fn defer_refund(m: &mut Machine<'m, Self>, l: &Limit, n: u64) -> bool;
+    /// MEM-20: fold an ended limit's unused reservation into `parent`, which
+    /// another task owns or another task created the limit for.
+    fn hand_over(m: &mut Machine<'m, Self>, l: &Limit, parent: &Limit);
+    /// The running task used up its step slice.
+    fn slice_end(m: &mut Machine<'m, Self>);
+    /// A call enters with its host frame at `frame`.
+    fn enter_call(m: &mut Machine<'m, Self>, t: &Task, frame: usize);
+    /// An engine operation the core does not define.
+    fn rt(m: &mut Machine<'m, Self>, t: &mut Task, op: RtOp, a: &[u64]) -> X<Vec<u64>>;
+    /// Clean up a handle the core does not define.
+    fn drop_handle(m: &mut Machine<'m, Self>, t: &mut Task, at: u64, h: Handle) -> bool;
+}
+
+/// The host of a pure run: one task, no scheduler, threads, network or
+/// provider. A world operation or handle stops the run.
+struct Pure;
+
+impl<'m> Host<'m> for Pure {
+    fn current(&self) -> usize {
+        0
+    }
+    fn event(_: &mut Machine<'m, Self>, _: u8, _: u64, _: u64) {}
+    fn drain_refunds(_: &mut Machine<'m, Self>) {}
+    fn defer_refund(_: &mut Machine<'m, Self>, _: &Limit, _: u64) -> bool {
+        false
+    }
+    fn hand_over(_: &mut Machine<'m, Self>, _: &Limit, _: &Limit) {
+        unreachable!("a pure run has one task")
+    }
+    fn slice_end(_: &mut Machine<'m, Self>) {}
+    fn enter_call(_: &mut Machine<'m, Self>, _: &Task, _: usize) {}
+    fn rt(_: &mut Machine<'m, Self>, _: &mut Task, _: RtOp, _: &[u64]) -> X<Vec<u64>> {
+        std::panic::resume_unwind(Box::new(RunStop("WorldOperation")))
+    }
+    fn drop_handle(_: &mut Machine<'m, Self>, _: &mut Task, _: u64, _: Handle) -> bool {
+        std::panic::resume_unwind(Box::new(RunStop("WorldHandle")))
+    }
 }
 
 // ---- tasks (CONC-3..10)
@@ -1236,7 +1326,10 @@ pub fn run_nans(m: &Module, f: FuncId, args: &[u64], limit: u64, nans: Nans) -> 
         args,
         limit,
         WorldInput {
-            nans,
+            core: Core {
+                nans,
+                ..Core::default()
+            },
             ..WorldInput::default()
         },
     )
@@ -1256,8 +1349,11 @@ pub fn run_counting_copies(
         args,
         limit,
         WorldInput {
-            nans,
-            copy_size: Some(bytes),
+            core: Core {
+                nans,
+                copy_size: Some(bytes),
+                ..Core::default()
+            },
             ..WorldInput::default()
         },
     )
@@ -1306,9 +1402,12 @@ pub fn run_nans_into(
         args,
         limit,
         WorldInput {
-            nans,
+            core: Core {
+                nans,
+                instructions,
+                ..Core::default()
+            },
             destination,
-            instructions,
             revisions: Some(revisions),
             ..WorldInput::default()
         },
@@ -1341,13 +1440,16 @@ pub fn run_entry(
         args,
         limit,
         WorldInput {
-            nans,
+            core: Core {
+                nans,
+                instructions,
+                sites,
+                ..Core::default()
+            },
             destination,
-            instructions,
             revisions: Some(revisions),
             events,
             process_entry: true,
-            sites,
             launch,
             error_text,
             ..WorldInput::default()
@@ -1404,7 +1506,10 @@ pub fn run_injected(
         args,
         limit,
         WorldInput {
-            injection,
+            core: Core {
+                injection,
+                ..Core::default()
+            },
             ..WorldInput::default()
         },
     )
@@ -1493,58 +1598,59 @@ pub fn run_host_stdio(
     .0
 }
 
+#[derive(Default)]
 struct WorldInput<'a> {
-    map_hash_key: Option<[u8; 16]>,
-    #[cfg(feature = "map-observation")]
-    observe_maps: bool,
+    core: Core<'a>,
     network: Option<Network>,
     network_out: Option<&'a mut Network>,
     launch: Option<&'a hirsel_core_ids::launch::Metadata>,
     revisions: Option<&'a Revisions>,
-    injection: Option<(usize, bool)>,
     argv: &'a [&'a str],
     env: Option<hirsel_core_net::EnvSnapshot>,
     stdin: &'a [u8],
     terminals: [bool; 3],
-    nans: Nans,
     destination: Option<&'a mut [u8]>,
-    instructions: u64,
-    copy_size: Option<u64>,
     events: bool,
     process_entry: bool,
-    sites: &'a [u64],
     /// PROG-3: render `main`'s `Error(e)` with this program, before the run's
     /// memory is released, into the slot.
     error_text: Option<ErrorText<'a>>,
 }
-/// The entry's text program for `Error(e)` and where its text goes (PROG-3).
-pub type ErrorText<'a> = (&'a hirsel_core_layout::show::Show, &'a mut Option<String>);
-impl Default for WorldInput<'_> {
+/// What a run of the pure core is set up with, whatever host it sits on.
+struct Core<'a> {
+    map_hash_key: Option<[u8; 16]>,
+    #[cfg(feature = "map-observation")]
+    observe_maps: bool,
+    injection: Option<(usize, bool)>,
+    nans: Nans,
+    /// The executed-instruction budget.
+    instructions: u64,
+    copy_size: Option<u64>,
+    sites: &'a [u64],
+    /// Test mode: check each call's loans and each activation's role footprints
+    /// (crate docs, "Loans" and "Roles"). A pure run for a constant leaves it off.
+    checks: bool,
+    /// The deepest the activation stack may go; one more call stops the run.
+    activations: usize,
+}
+impl Default for Core<'_> {
     fn default() -> Self {
         Self {
-            network: None,
             map_hash_key: None,
             #[cfg(feature = "map-observation")]
             observe_maps: false,
-            network_out: None,
-            launch: None,
-            revisions: None,
             injection: None,
-            argv: &[],
-            env: None,
-            stdin: &[],
-            terminals: [false; 3],
             nans: Nans::Canonical,
-            destination: None,
             instructions: u64::MAX,
             copy_size: None,
-            events: false,
-            process_entry: false,
             sites: &[],
-            error_text: None,
+            checks: true,
+            activations: usize::MAX,
         }
     }
 }
+/// The entry's text program for `Error(e)` and where its text goes (PROG-3).
+pub type ErrorText<'a> = (&'a hirsel_core_layout::show::Show, &'a mut Option<String>);
 fn run_world(
     m: &Module,
     f: FuncId,
@@ -1556,96 +1662,28 @@ fn run_world(
     let native = hirsel_core_ir::native_layout::resolve(m, &recipes);
     let m = native.as_ref();
     let mut mach = Machine::new(m, recipes, limit, &input);
-    for s in &m.statics {
-        let (_, bytes) = s.native(&m.types, &mach.recipes);
-        let p = mach.block(bytes.len() as u64, None, 0, None);
-        mach.mem[split(p).0].bytes.copy_from_slice(&bytes);
-        mach.mem[split(p).0].fixed = true;
-    }
+    mach.install_statics();
     launch::install(&mut mach, f, input.revisions);
     for a in input.argv {
         let carrier = mach.host_view(a.as_bytes());
-        mach.world.args.push(carrier);
+        mach.host.world.args.push(carrier);
     }
-    mach.world.stdin.extend(input.stdin);
-    mach.world.terminals = input.terminals;
+    mach.host.world.stdin.extend(input.stdin);
+    mach.host.world.terminals = input.terminals;
     if let Some(env) = input.env.take() {
-        mach.world.env_patterns.push(env.patterns);
+        mach.host.world.env_patterns.push(env.patterns);
         for (name, value) in env.entries {
             let name_view = mach.host_view(name.as_bytes());
             let value_view = std::str::from_utf8(&value)
                 .ok()
                 .map(|s| mach.host_view(s.as_bytes()));
-            mach.world.env_entries.push((name, name_view, value_view));
+            mach.host
+                .world
+                .env_entries
+                .push((name, name_view, value_view));
         }
     }
-    // One descriptor per described instance, as the linker keeps one per program:
-    // `{code, length, revision}` then the identity bytes, where `code` is a
-    // function token and `revision` addresses its revision root's carrier
-    // (`Module::revision_root`), `{bytes, 32, 0}` from `revisions` or an
-    // intrinsic's revision, else `{0, 0, 0}`.
-    let mut by_code = HashMap::new();
-    let mut carriers = HashMap::new();
-    for body in m.functions.iter().filter_map(|f| f.body.as_ref()) {
-        for inst in &body.insts {
-            let Inst::DescriptorRef {
-                function, identity, ..
-            } = *inst
-            else {
-                continue;
-            };
-            if mach.descriptors[function.index()] != 0 {
-                continue;
-            }
-            let code = m.descriptor_identity(function);
-            let at = if let Some(&at) = by_code.get(&code) {
-                at
-            } else {
-                let root = m.revision_root(function);
-                let carrier = *carriers.entry(root.identity().digest()).or_insert_with(|| {
-                    let at = mach.block(24, None, 0, None);
-                    let revision = match &root {
-                        RevisionRoot::Item(identity) => input
-                            .revisions
-                            .and_then(|r| r.get(&identity.digest()))
-                            .copied(),
-                        RevisionRoot::Intrinsic(identity) => Some(intrinsic_revision(identity)),
-                    };
-                    if let Some(revision) = revision {
-                        let bytes = mach.block(32, None, 0, None);
-                        mach.mem[split(bytes).0].bytes = revision.0.to_vec();
-                        mach.mem[split(bytes).0].fixed = true;
-                        mach.store(at, 8, bytes);
-                        mach.store(at + 8, 8, 32);
-                    }
-                    mach.mem[split(at).0].fixed = true;
-                    at
-                });
-                let bytes = m.statics[identity.index()].literal_bytes().unwrap();
-                let mut block = Vec::with_capacity(24 + bytes.len());
-                block.extend_from_slice(&(FN_BASE + u64::from(function.0)).to_le_bytes());
-                block.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-                block.extend_from_slice(&[0; 8]);
-                block.extend_from_slice(bytes);
-                let at = mach.block(block.len() as u64, None, 0, None);
-                mach.mem[split(at).0].bytes = block;
-                mach.store(at + 16, 8, carrier);
-                mach.mem[split(at).0].fixed = true;
-                by_code.insert(code, at);
-                at
-            };
-            mach.descriptors[function.index()] = at;
-        }
-    }
-    for shape in &m.types {
-        let fields: Vec<&hirsel_core_layout::Field> = match &shape.body {
-            Shaped::Record(f) => f.iter().collect(),
-            Shaped::Variant(c) => c.iter().flat_map(|c| &c.fields).collect(),
-        };
-        for f in fields {
-            collect_arrays(&f.ty, &mut mach.arrays);
-        }
-    }
+    mach.install_descriptors(input.revisions);
     let root = mach.root().clone();
     let primary_charge = if input.process_entry {
         mach.admit(&root, charge::TASK_RECORD + charge::CAUSE_CELL)
@@ -1655,44 +1693,19 @@ fn run_world(
         // A host call borrows a task with a primary cell outside its allowance.
         0
     };
-    let task = Task {
-        step_bounds: Vec::new(),
-        slice_steps: 0,
-        limits: vec![root.clone()],
-        chain: Vec::new(),
-        cells: Vec::new(),
-        obligations: vec![Some(Cell {
-            limit: root,
-            amount: primary_charge,
-            resource: false,
-        })],
-        reserved: Vec::new(),
-        at: Vec::new(),
-        k: 0,
-        shield: 0,
-    };
+    let task = mach.root_task(primary_charge);
     if let Some(network) = input.network.take() {
-        mach.world.network = network;
+        mach.host.world.network = network;
     }
     // A host caller still receives an aggregate when it only inspects the
     // status. Forwarding a return may lend this place before writing to it.
     let signature = &m.signatures[m.functions[f.index()].signature.index()];
-    let destination = signature.dest.map(|ty| {
-        let size = input
-            .destination
-            .as_ref()
-            .map_or_else(|| mach.held(TypeRef(ty.0)), |bytes| bytes.len() as u64);
-        let p = mach.block(size, None, 0, None);
-        if let Some(bytes) = input.destination.as_ref() {
-            mach.mem[split(p).0].bytes.copy_from_slice(bytes);
-        }
-        p
-    });
+    let destination = mach.destination(f, input.destination.as_deref());
     let arguments = destination
         .into_iter()
         .chain(args.iter().copied())
         .collect();
-    mach.sched.tasks.push(Rec {
+    mach.host.sched.tasks.push(Rec {
         id: 0,
         state: State::Ready,
         cancel: false,
@@ -1704,7 +1717,7 @@ fn run_world(
         unit: 0,
         notices: VecDeque::new(),
     });
-    mach.sched.ready.push_back(0);
+    mach.host.sched.ready.push_back(0);
     let (mut mach, outcome, chain) = drive(mach, input.process_entry);
     if let (Some((show, text)), Some(at), Outcome::Returned(_)) =
         (input.error_text.take(), destination, &outcome)
@@ -1724,43 +1737,43 @@ fn run_world(
     if let Some(bytes) = input.destination.as_mut() {
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
     }
-    for (l, n) in std::mem::take(&mut mach.world.grant_charges) {
+    for (l, n) in std::mem::take(&mut mach.host.world.grant_charges) {
         l.find().subtract(n);
     }
-    for slot in std::mem::take(&mut mach.world.secrets)
+    for slot in std::mem::take(&mut mach.host.world.secrets)
         .into_iter()
         .flatten()
     {
         slot.charge.0.find().subtract(slot.charge.1);
     }
-    for (_, l, n) in std::mem::take(&mut mach.world.seals) {
+    for (_, l, n) in std::mem::take(&mut mach.host.world.seals) {
         l.find().subtract(n);
     }
     // Refunds still pending when the run ends count toward its final use.
-    for k in 0..mach.sched.tasks.len() {
-        for (l, n) in std::mem::take(&mut mach.sched.tasks[k].refunds) {
+    for k in 0..mach.host.sched.tasks.len() {
+        for (l, n) in std::mem::take(&mut mach.host.sched.tasks[k].refunds) {
             l.find().subtract(n);
         }
-        for notice in std::mem::take(&mut mach.sched.tasks[k].notices) {
+        for notice in std::mem::take(&mut mach.host.sched.tasks[k].notices) {
             if let conn::UnitNotice::Refund(l, n) = notice {
                 l.find().subtract(n);
             }
         }
     }
     if let Some(remaining) = input.network_out {
-        *remaining = std::mem::take(&mut mach.world.network);
+        *remaining = std::mem::take(&mut mach.host.world.network);
     }
     let sites = chain.iter().map(|c| c.site).collect();
     let checked = Checked {
         steps: mach.steps,
-        instructions: input.instructions - mach.instructions,
+        instructions: input.core.instructions - mach.instructions,
         loans: mach.loans,
         roles: mach.role_checks,
         copies: mach.copies,
-        task_stack_peak: mach.task_stack_peak,
-        task_call_depth: mach.task_call_depth,
+        task_stack_peak: mach.host.task_stack_peak,
+        task_call_depth: mach.host.task_call_depth,
         #[cfg(feature = "map-observation")]
-        maps: mach.world.maps.take(),
+        maps: mach.maps.observed.take(),
     };
     let report = Report {
         outcome,
@@ -1768,10 +1781,10 @@ fn run_world(
         peak_reserved: mach.peak_reserved,
         trace: mach.trace,
         admissions: mach.admissions,
-        stdout: mach.world.stdout,
-        stderr: mach.world.stderr,
+        stdout: mach.host.world.stdout,
+        stderr: mach.host.world.stderr,
         sites,
-        events: mach.sched.events.take().unwrap_or_default(),
+        events: mach.host.sched.events.take().unwrap_or_default(),
     };
     (report, checked)
 }
@@ -1788,30 +1801,31 @@ fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, 
                         baton: &Machine<'_>| {
             for (k, r) in resumes.iter_mut().enumerate() {
                 if let Some(r) = r.take()
-                    && baton.sched.tasks[k].state != State::Ended
+                    && baton.host.sched.tasks[k].state != State::Ended
                 {
                     let _ = r.send(Resume::Teardown);
                 }
             }
         };
         loop {
-            let s = &mut baton.sched;
-            s.take_wakes(baton.world.clock);
+            let s = &mut baton.host.sched;
+            s.take_wakes(baton.host.world.clock);
             if s.ready.is_empty() {
                 std::mem::swap(&mut s.ready, &mut s.deferred);
             }
             if s.ready.is_empty()
                 && let Some(&(at, _)) = s.timers.first()
             {
-                baton.world.clock = at;
+                baton.host.world.clock = at;
                 s.take_wakes(at);
             }
             if s.ready.is_empty() && baton.quiesce() {
                 continue;
             }
-            let s = &mut baton.sched;
+            let s = &mut baton.host.sched;
             let Some(k) = s.ready.pop_front() else {
                 baton
+                    .host
                     .world
                     .stderr
                     .extend_from_slice(b"run stop: Deadlock\n");
@@ -1864,6 +1878,7 @@ fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, 
                 }
                 Reply::Stopped(mut machine, reason) => {
                     machine
+                        .host
                         .world
                         .stderr
                         .extend_from_slice(format!("run stop: {reason}\n").as_bytes());
@@ -1910,7 +1925,7 @@ fn task_thread<'m>(
         return;
     };
     let (k, reply) = (t.k, link.reply.clone());
-    mach.links[k] = Some(link);
+    mach.host.links[k] = Some(link);
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let root = if k == 0 {
             let r = mach.call(&mut t, f, &args);
@@ -1924,7 +1939,7 @@ fn task_thread<'m>(
             mach.child_main(&mut t, f, &args);
             None
         };
-        mach.links[k] = None;
+        mach.host.links[k] = None;
         root
     }));
     match run {
@@ -1934,7 +1949,7 @@ fn task_thread<'m>(
         Err(payload) if payload.is::<Teardown>() => {}
         Err(payload) if payload.is::<RunStop>() => {
             let reason = payload.downcast::<RunStop>().unwrap().0;
-            mach.links[k] = None;
+            mach.host.links[k] = None;
             let _ = reply.send(Reply::Stopped(mach, reason));
         }
         Err(payload) => {
@@ -1962,10 +1977,19 @@ fn cause(r: RaiseCause) -> &'static str {
     }
 }
 
-impl<'m> Machine<'m> {
-    fn new(m: &'m Module, recipes: Vec<RecipeRow>, limit: u64, input: &WorldInput<'_>) -> Self {
-        let map_hash_key = input.map_hash_key.unwrap_or_else(map::fresh_key);
-        let (s0, s1, map_strong_key) = hirsel_core_layout::map_index::derive(&map_hash_key);
+impl<'m, H: Host<'m>> Machine<'m, H> {
+    fn with_host(
+        m: &'m Module,
+        recipes: Vec<RecipeRow>,
+        limit: u64,
+        input: &Core<'_>,
+        host: H,
+    ) -> Self {
+        let maps = MapKeys {
+            #[cfg(feature = "map-observation")]
+            observed: input.observe_maps.then(MapObservation::default),
+            ..MapKeys::new(input.map_hash_key.unwrap_or_else(map::fresh_key))
+        };
         Self {
             next_step_bound: 1,
             m,
@@ -1974,10 +1998,6 @@ impl<'m> Machine<'m> {
             peak_reserved: 0,
             root: Some(Limit::new(limit, None, 0)),
             regions: Vec::new(),
-            children: Vec::new(),
-            chans: Vec::new(),
-            conns: Vec::new(),
-            latests: Vec::new(),
             causes: HashMap::new(),
             arrays: Vec::new(),
             trace: Vec::new(),
@@ -1986,31 +2006,14 @@ impl<'m> Machine<'m> {
             instructions: input.instructions,
             steps: 0,
             injection: input.injection,
-            world: World {
-                map_hash_key,
-                map_fast_salt: [s0, s1],
-                map_strong_key,
-                #[cfg(feature = "map-observation")]
-                maps: input.observe_maps.then(MapObservation::default),
-                launch: Some(input.launch.cloned().unwrap_or_else(|| {
-                    hirsel_core_ids::launch::Metadata::source(
-                        "",
-                        hirsel_core_ids::launch::DEFAULT_N_PLACE,
-                        false,
-                    )
-                })),
-                ..World::default()
-            },
             frozen: Vec::new(),
             loans: 0,
-            facts: Arc::new(roles::Facts::new(m)),
+            facts: input.checks.then(|| Arc::new(roles::Facts::new(m))),
             roles: vec![None; m.functions.len()],
             footprints: Vec::new(),
             role_checks: 0,
             copy_size: input.copy_size,
             copies: 0,
-            task_stack_peak: 0,
-            task_call_depth: 0,
             inherits: m
                 .functions
                 .iter()
@@ -2022,14 +2025,157 @@ impl<'m> Machine<'m> {
                 input.sites.into()
             },
             scrambled: (input.nans == Nans::Scrambled).then_some(0),
+            descriptors: vec![0; m.functions.len()],
+            maps,
+            checks: input.checks,
+            activations: input.activations,
+            host,
+        }
+    }
+
+    /// Place the module's statics, each a fixed block.
+    fn install_statics(&mut self) {
+        for s in &self.m.statics {
+            let (_, bytes) = s.native(&self.m.types, &self.recipes);
+            let p = self.block(bytes.len() as u64, None, 0, None);
+            self.mem[split(p).0].bytes.copy_from_slice(&bytes);
+            self.mem[split(p).0].fixed = true;
+        }
+    }
+
+    /// One descriptor per described instance, as the linker keeps one per program:
+    /// `{code, length, revision}` then the identity bytes, where `code` is a
+    /// function token and `revision` addresses its revision root's carrier
+    /// (`Module::revision_root`), `{bytes, 32, 0}` from `revisions` or an
+    /// intrinsic's revision, else `{0, 0, 0}`.
+    /// Then note every inline array field type.
+    fn install_descriptors(&mut self, revisions: Option<&Revisions>) {
+        let mut by_code = HashMap::new();
+        let mut carriers = HashMap::new();
+        for body in self.m.functions.iter().filter_map(|f| f.body.as_ref()) {
+            for inst in &body.insts {
+                let Inst::DescriptorRef {
+                    function, identity, ..
+                } = *inst
+                else {
+                    continue;
+                };
+                if self.descriptors[function.index()] != 0 {
+                    continue;
+                }
+                let code = self.m.descriptor_identity(function);
+                let at = if let Some(&at) = by_code.get(&code) {
+                    at
+                } else {
+                    let root = self.m.revision_root(function);
+                    let carrier = *carriers.entry(root.identity().digest()).or_insert_with(|| {
+                        let at = self.block(24, None, 0, None);
+                        let revision = match &root {
+                            RevisionRoot::Item(identity) => {
+                                revisions.and_then(|r| r.get(&identity.digest())).copied()
+                            }
+                            RevisionRoot::Intrinsic(identity) => Some(intrinsic_revision(identity)),
+                        };
+                        if let Some(revision) = revision {
+                            let bytes = self.block(32, None, 0, None);
+                            self.mem[split(bytes).0].bytes = revision.0.to_vec();
+                            self.mem[split(bytes).0].fixed = true;
+                            self.store(at, 8, bytes);
+                            self.store(at + 8, 8, 32);
+                        }
+                        self.mem[split(at).0].fixed = true;
+                        at
+                    });
+                    let bytes = self.m.statics[identity.index()].literal_bytes().unwrap();
+                    let mut block = Vec::with_capacity(24 + bytes.len());
+                    block.extend_from_slice(&(FN_BASE + u64::from(function.0)).to_le_bytes());
+                    block.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                    block.extend_from_slice(&[0; 8]);
+                    block.extend_from_slice(bytes);
+                    let at = self.block(block.len() as u64, None, 0, None);
+                    self.mem[split(at).0].bytes = block;
+                    self.store(at + 16, 8, carrier);
+                    self.mem[split(at).0].fixed = true;
+                    by_code.insert(code, at);
+                    at
+                };
+                self.descriptors[function.index()] = at;
+            }
+        }
+        for shape in &self.m.types {
+            let fields: Vec<&hirsel_core_layout::Field> = match &shape.body {
+                Shaped::Record(f) => f.iter().collect(),
+                Shaped::Variant(c) => c.iter().flat_map(|c| &c.fields).collect(),
+            };
+            for f in fields {
+                collect_arrays(&f.ty, &mut self.arrays);
+            }
+        }
+    }
+
+    /// The root task, its primary obligation cell prepaid by `primary_charge`.
+    fn root_task(&self, primary_charge: u64) -> Task {
+        let root = self.root().clone();
+        Task {
+            step_bounds: Vec::new(),
+            slice_steps: 0,
+            limits: vec![root.clone()],
+            chain: Vec::new(),
+            cells: Vec::new(),
+            obligations: vec![Some(Cell {
+                limit: root,
+                amount: primary_charge,
+                resource: false,
+            })],
+            reserved: Vec::new(),
+            at: Vec::new(),
+            k: 0,
+            shield: 0,
+        }
+    }
+
+    /// The root call's destination for `f`, if its result is an aggregate: a
+    /// block of the result's size, or of `given`'s with its bytes.
+    fn destination(&mut self, f: FuncId, given: Option<&[u8]>) -> Option<u64> {
+        let signature = &self.m.signatures[self.m.functions[f.index()].signature.index()];
+        signature.dest.map(|ty| {
+            let size = given.map_or_else(|| self.held(TypeRef(ty.0)), |bytes| bytes.len() as u64);
+            let p = self.block(size, None, 0, None);
+            if let Some(bytes) = given {
+                self.mem[split(p).0].bytes.copy_from_slice(bytes);
+            }
+            p
+        })
+    }
+}
+
+impl<'m> Machine<'m> {
+    fn new(m: &'m Module, recipes: Vec<RecipeRow>, limit: u64, input: &WorldInput<'_>) -> Self {
+        let host = WorldHost {
+            world: World {
+                launch: Some(input.launch.cloned().unwrap_or_else(|| {
+                    hirsel_core_ids::launch::Metadata::source(
+                        "",
+                        hirsel_core_ids::launch::DEFAULT_N_PLACE,
+                        false,
+                    )
+                })),
+                ..World::default()
+            },
             sched: Sched {
                 next: 1,
                 events: input.events.then(Vec::new),
                 ..Sched::default()
             },
             links: vec![None],
-            descriptors: vec![0; m.functions.len()],
-        }
+            children: Vec::new(),
+            chans: Vec::new(),
+            conns: Vec::new(),
+            latests: Vec::new(),
+            task_stack_peak: 0,
+            task_call_depth: 0,
+        };
+        Machine::with_host(m, recipes, limit, &input.core, host)
     }
 
     /// What a parked task's slot holds while its baton runs elsewhere.
@@ -2042,10 +2188,6 @@ impl<'m> Machine<'m> {
             root: None,
             peak_reserved: 0,
             regions: Vec::new(),
-            children: Vec::new(),
-            chans: Vec::new(),
-            conns: Vec::new(),
-            latests: Vec::new(),
             causes: HashMap::new(),
             arrays: Vec::new(),
             trace: Vec::new(),
@@ -2054,7 +2196,6 @@ impl<'m> Machine<'m> {
             instructions: 0,
             steps: 0,
             injection: None,
-            world: World::default(),
             frozen: Vec::new(),
             loans: 0,
             facts: self.facts.clone(),
@@ -2063,14 +2204,24 @@ impl<'m> Machine<'m> {
             role_checks: 0,
             copy_size: None,
             copies: 0,
-            task_stack_peak: 0,
-            task_call_depth: 0,
             inherits: Vec::new(),
             sites: self.sites.clone(),
             scrambled: None,
-            sched: Sched::default(),
-            links: Vec::new(),
             descriptors: Vec::new(),
+            maps: MapKeys::new([0; 16]),
+            checks: self.checks,
+            activations: 0,
+            host: WorldHost {
+                world: World::default(),
+                sched: Sched::default(),
+                links: Vec::new(),
+                children: Vec::new(),
+                chans: Vec::new(),
+                conns: Vec::new(),
+                latests: Vec::new(),
+                task_stack_peak: 0,
+                task_call_depth: 0,
+            },
         }
     }
 
@@ -2082,33 +2233,36 @@ impl<'m> Machine<'m> {
         self.park_turn(wait, true);
     }
     fn park_turn(&mut self, wait: Option<Wait>, poll: bool) {
-        let k = self.sched.current;
+        let k = self.host.sched.current;
         match wait {
             Some(Wait::Sleep(deadline)) | Some(Wait::Network(Some(deadline))) => {
-                self.sched.tasks[k].state = State::Provider;
-                let s = &mut self.sched;
+                self.host.sched.tasks[k].state = State::Provider;
+                let s = &mut self.host.sched;
                 let at = s.timers.partition_point(|&(d, _)| d <= deadline);
                 s.timers.insert(at, (deadline, k));
             }
-            Some(Wait::Network(None) | Wait::Stop) => self.sched.tasks[k].state = State::Provider,
+            Some(Wait::Network(None) | Wait::Stop) => {
+                self.host.sched.tasks[k].state = State::Provider
+            }
             Some(Wait::Task(condition)) => {
-                self.sched.tasks[k].state = State::Waiting(condition);
-                self.sched
+                self.host.sched.tasks[k].state = State::Waiting(condition);
+                self.host
+                    .sched
                     .waiting
                     .entry(condition)
                     .or_default()
                     .push_back(k);
             }
             None => {
-                self.sched.tasks[k].state = State::Ready;
+                self.host.sched.tasks[k].state = State::Ready;
                 if poll {
-                    self.sched.deferred.push_back(k);
+                    self.host.sched.deferred.push_back(k);
                 } else {
-                    self.sched.ready.push_back(k);
+                    self.host.sched.ready.push_back(k);
                 }
             }
         }
-        let link = self.links[k].take().expect("the running task's link");
+        let link = self.host.links[k].take().expect("the running task's link");
         let frozen = std::mem::take(&mut self.frozen);
         let footprints = std::mem::take(&mut self.footprints);
         let shell = self.shell();
@@ -2122,7 +2276,7 @@ impl<'m> Machine<'m> {
         }
         self.frozen = frozen;
         self.footprints = footprints;
-        self.links[k] = Some(link);
+        self.host.links[k] = Some(link);
     }
 }
 
@@ -2131,7 +2285,7 @@ impl Machine<'_> {
         handle
             .checked_sub(CELL_BASE)
             .map(|i| i as usize)
-            .filter(|&i| i < self.world.cells.len())
+            .filter(|&i| i < self.host.world.cells.len())
     }
     /// An operation's optional `Until` triple at `a[i..i + 3]`: present, clock, at.
     fn until(&self, a: &[u64], i: usize) -> Option<Due> {
@@ -2142,29 +2296,29 @@ impl Machine<'_> {
     }
     fn passed(&self, due: Due) -> bool {
         match due {
-            Due::Host(at) => at <= self.world.clock,
-            Due::Cell(c, at) => match self.world.cells[c] {
+            Due::Host(at) => at <= self.host.world.clock,
+            Due::Cell(c, at) => match self.host.world.cells[c] {
                 VirtualCell::Clock { mono, .. } => at <= mono,
                 _ => unreachable!("an Until names a Clock"),
             },
         }
     }
     fn cell_timer(&mut self, c: usize, at: u64, k: usize) {
-        if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c]
+        if let VirtualCell::Clock { timers, .. } = &mut self.host.world.cells[c]
             && !timers.iter().any(|&(_, j)| j == k)
         {
             timers.push((at, k));
         }
     }
     fn remove_cell_timer(&mut self, c: usize, k: usize) {
-        if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c] {
+        if let VirtualCell::Clock { timers, .. } = &mut self.host.world.cells[c] {
             timers.retain(|&(_, task)| task != k);
         }
     }
     fn ready_provider(&mut self, k: usize) {
-        if self.sched.tasks[k].state == State::Provider {
-            self.sched.tasks[k].state = State::Ready;
-            self.sched.ready.push_back(k);
+        if self.host.sched.tasks[k].state == State::Provider {
+            self.host.sched.tasks[k].state = State::Ready;
+            self.host.sched.ready.push_back(k);
         }
     }
     /// Park the running task on a cell until `done` holds; a cancellation that
@@ -2176,11 +2330,11 @@ impl Machine<'_> {
         register: fn(&mut VirtualCell, usize),
         done: fn(&VirtualCell, usize) -> bool,
     ) -> X<()> {
-        while !done(&self.world.cells[c], t.k) {
-            register(&mut self.world.cells[c], t.k);
-            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+        while !done(&self.host.world.cells[c], t.k) {
+            register(&mut self.host.world.cells[c], t.k);
+            self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
             self.park(Some(Wait::Network(None)));
-            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+            if std::mem::take(&mut self.host.sched.tasks[t.k].cancelled) {
                 self.check_cancel(t)?;
             }
         }
@@ -2189,11 +2343,11 @@ impl Machine<'_> {
     /// The run is quiescent: wake its `clock.idle` waits after pruning deadlines
     /// no parked task waits on (native `provide::quiesce`).
     fn quiesce(&mut self) -> bool {
-        let tasks = &self.sched.tasks;
+        let tasks = &self.host.sched.tasks;
         let parked = |k: usize| tasks[k].state == State::Provider;
         let mut woken = Vec::new();
         let mut advances = false; // if no woken idle advances time, empty `next`s answer None
-        for cell in &mut self.world.cells {
+        for cell in &mut self.host.world.cells {
             if let VirtualCell::Clock {
                 timers,
                 wall_timers,
@@ -2212,7 +2366,7 @@ impl Machine<'_> {
                 }
             }
         }
-        for cell in &mut self.world.cells {
+        for cell in &mut self.host.world.cells {
             if let VirtualCell::Port { .. } = cell
                 && !advances
                 && cell.queued().is_none()
@@ -2270,7 +2424,7 @@ impl Machine<'_> {
         secret: &mut Option<Vec<EvalSecret>>,
         deadline: Option<Due>,
     ) -> X<Vec<u64>> {
-        let VirtualCell::Port { vocab, sealed, .. } = &self.world.cells[c] else {
+        let VirtualCell::Port { vocab, sealed, .. } = &self.host.world.cells[c] else {
             unreachable!()
         };
         let vocab = *vocab;
@@ -2298,7 +2452,7 @@ impl Machine<'_> {
             servers,
             handles,
             ..
-        } = &mut self.world.cells[c]
+        } = &mut self.host.world.cells[c]
         else {
             unreachable!()
         };
@@ -2329,15 +2483,15 @@ impl Machine<'_> {
             self.ready_provider(k);
         }
         loop {
-            let (calls, ..) = self.world.cells[c].port();
+            let (calls, ..) = self.host.world.cells[c].port();
             let call = calls.get_mut(&id).unwrap();
             if let Some(answer) = call.answer.clone() {
                 call.finished = true;
-                self.world.cells[c].prune(id);
+                self.host.world.cells[c].prune(id);
                 return Ok(answer);
             }
             if deadline.is_some_and(|due| self.passed(due)) {
-                let cell = &mut self.world.cells[c];
+                let cell = &mut self.host.world.cells[c];
                 let call = cell.port().0.get_mut(&id).unwrap();
                 call.finished = true;
                 cell.free_staged(id);
@@ -2345,7 +2499,7 @@ impl Machine<'_> {
                 cell.prune(id);
                 return Ok(port_outcome(vocab, words[0], [0, deadline_error, 0, 0, 0]));
             }
-            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
             let host = match deadline {
                 Some(Due::Host(at)) => Some(at),
                 Some(Due::Cell(clock, at)) => {
@@ -2358,8 +2512,8 @@ impl Machine<'_> {
             if let Some(Due::Cell(clock, _)) = deadline {
                 self.remove_cell_timer(clock, t.k);
             }
-            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
-                let cell = &mut self.world.cells[c];
+            if std::mem::take(&mut self.host.sched.tasks[t.k].cancelled) {
+                let cell = &mut self.host.world.cells[c];
                 let call = cell.port().0.get_mut(&id).unwrap();
                 if call.answer.is_none() {
                     call.finished = true;
@@ -2380,11 +2534,11 @@ impl Machine<'_> {
     /// handle: the root is the cell's own capability.
     fn port_handle(&self, h: u64) -> Option<(usize, u64)> {
         if (PORT_HANDLE..CALL_BASE).contains(&h) {
-            return Some(self.world.port_handles[(h - PORT_HANDLE) as usize]);
+            return Some(self.host.world.port_handles[(h - PORT_HANDLE) as usize]);
         }
         let c = self.cell(h)?;
         matches!(
-            self.world.cells[c],
+            self.host.world.cells[c],
             VirtualCell::Port {
                 vocab: Vocab::Dir,
                 ..
@@ -2406,7 +2560,7 @@ impl Machine<'_> {
             handles,
             servers,
             ..
-        } = &mut self.world.cells[c]
+        } = &mut self.host.world.cells[c]
         else {
             unreachable!()
         };
@@ -2425,7 +2579,7 @@ impl Machine<'_> {
     fn port_next(&mut self, t: &Task, c: usize) -> X<Vec<u64>> {
         self.check_cancel(t)?;
         loop {
-            let queued = self.world.cells[c].queued();
+            let queued = self.host.world.cells[c].queued();
             let VirtualCell::Port {
                 vocab,
                 calls,
@@ -2434,7 +2588,7 @@ impl Machine<'_> {
                 used,
                 next,
                 ..
-            } = &mut self.world.cells[c]
+            } = &mut self.host.world.cells[c]
             else {
                 unreachable!()
             };
@@ -2498,10 +2652,10 @@ impl Machine<'_> {
             if !servers.iter().any(|&(k, _)| k == t.k) {
                 servers.push((t.k, false));
             }
-            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
             self.park(Some(Wait::Network(None)));
-            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
-                if let VirtualCell::Port { servers, .. } = &mut self.world.cells[c] {
+            if std::mem::take(&mut self.host.sched.tasks[t.k].cancelled) {
+                if let VirtualCell::Port { servers, .. } = &mut self.host.world.cells[c] {
                     servers.retain(|&(k, _)| k != t.k);
                 }
                 self.check_cancel(t)?;
@@ -2515,7 +2669,7 @@ impl Machine<'_> {
         let mut callers = Vec::new();
         if h >= CALL_BASE {
             let (c, id) = Self::call_of(h);
-            let cell = &mut self.world.cells[c];
+            let cell = &mut self.host.world.cells[c];
             if let Some(call) = cell.port().0.get_mut(&id) {
                 call.held = false;
             }
@@ -2525,7 +2679,7 @@ impl Machine<'_> {
             cell.prune(id);
         } else {
             let c = (h - SERVED_BASE) as usize;
-            let cell = &mut self.world.cells[c];
+            let cell = &mut self.host.world.cells[c];
             let VirtualCell::Port {
                 sealed,
                 calls,
@@ -2562,7 +2716,7 @@ impl Machine<'_> {
             calls,
             handles,
             ..
-        } = &self.world.cells[c]
+        } = &self.host.world.cells[c]
         else {
             unreachable!()
         };
@@ -2753,7 +2907,7 @@ impl Machine<'_> {
             self.port_drop(a[1]);
             return Ok(ok(1));
         }
-        let cell = &mut self.world.cells[c];
+        let cell = &mut self.host.world.cells[c];
         let (calls, _, _, _, vocab) = cell.port();
         let call = calls.get_mut(&id).unwrap();
         call.held = false;
@@ -2768,7 +2922,7 @@ impl Machine<'_> {
             };
         }
         let live = !call.finished && call.answer.is_none();
-        let task = &self.sched.tasks[caller];
+        let task = &self.host.sched.tasks[caller];
         let pending = task.state == State::Provider && task.cancel && task.cancellable;
         if !live || pending {
             cell.free_staged(id);
@@ -2776,7 +2930,7 @@ impl Machine<'_> {
             return Ok(ok(1));
         }
         let Some((answer, kind)) = self.port_answer(c, id, a[2], &a[3..9]) else {
-            let cell = &mut self.world.cells[c];
+            let cell = &mut self.host.world.cells[c];
             let k = cell.settle(id, port_outcome(vocab, op, port_closed(vocab, op)));
             k.into_iter().for_each(|k| self.ready_provider(k));
             return Err(Stop::Cause("Fail"));
@@ -2788,13 +2942,13 @@ impl Machine<'_> {
                 used,
                 handles,
                 ..
-            } = &mut self.world.cells[c]
+            } = &mut self.host.world.cells[c]
             else {
                 unreachable!()
             };
             let available = *room - *used;
             if available < HANDLE_ROOM {
-                let cell = &mut self.world.cells[c];
+                let cell = &mut self.host.world.cells[c];
                 let k = cell.settle(id, port_outcome(vocab, op, port_closed(vocab, op)));
                 k.into_iter().for_each(|k| self.ready_provider(k));
                 return Ok(vec![HANDLE_ROOM, 1, 0, available]);
@@ -2804,18 +2958,19 @@ impl Machine<'_> {
             handle.client_socket = vocab == Vocab::Net && op == 0;
             handles.insert(answer[0], handle);
             if vocab == Vocab::Net {
-                let key = PORT_KEYS | (self.world.next_port_key << 2);
-                self.world.next_port_key += 1;
+                let key = PORT_KEYS | (self.host.world.next_port_key << 2);
+                self.host.world.next_port_key += 1;
                 // A connected socket's peer is the dialed address; an
                 // accepted one's, the reply's.
                 let peer = if op == 0 { dialed } else { a[7] };
-                self.world
+                self.host
+                    .world
                     .port_keys
                     .insert(key, (c, answer[0], peer as u16));
                 answer[0] = key;
             } else {
-                self.world.port_handles.push((c, answer[0]));
-                answer[0] = PORT_HANDLE + self.world.port_handles.len() as u64 - 1;
+                self.host.world.port_handles.push((c, answer[0]));
+                answer[0] = PORT_HANDLE + self.host.world.port_handles.len() as u64 - 1;
             }
         }
         let mut pipes = [0; 3];
@@ -2826,14 +2981,14 @@ impl Machine<'_> {
                 used,
                 handles,
                 ..
-            } = &mut self.world.cells[c]
+            } = &mut self.host.world.cells[c]
             else {
                 unreachable!()
             };
             let available = *room - *used;
             if available < needed {
-                let k =
-                    self.world.cells[c].settle(id, port_outcome(vocab, op, port_closed(vocab, op)));
+                let k = self.host.world.cells[c]
+                    .settle(id, port_outcome(vocab, op, port_closed(vocab, op)));
                 k.into_iter().for_each(|k| self.ready_provider(k));
                 return Ok(vec![needed, 1, 0, available]);
             }
@@ -2845,9 +3000,9 @@ impl Machine<'_> {
                     _ => (PORT_PIPE_READ, 1),
                 };
                 handles.insert(id, PortHandle::new(kind));
-                let key = PORT_KEYS | (self.world.next_port_key << 2);
-                self.world.next_port_key += 1;
-                self.world.port_keys.insert(key, (c, id, 0));
+                let key = PORT_KEYS | (self.host.world.next_port_key << 2);
+                self.host.world.next_port_key += 1;
+                self.host.world.port_keys.insert(key, (c, id, 0));
                 if i == 0 {
                     answer[0] = key;
                 } else {
@@ -2855,7 +3010,7 @@ impl Machine<'_> {
                 }
             }
         }
-        let (calls, ..) = self.world.cells[c].port();
+        let (calls, ..) = self.host.world.cells[c].port();
         let call = &calls[&id];
         if let (Some(out), false) = (call.out, call.staged.is_empty())
             && !((vocab == Vocab::Exec
@@ -2899,7 +3054,7 @@ impl Machine<'_> {
             // The peer digest's words.
             row[4..8].copy_from_slice(&a[5..9]);
         }
-        let k = self.world.cells[c].settle(id, row);
+        let k = self.host.world.cells[c].settle(id, row);
         k.into_iter().for_each(|k| self.ready_provider(k));
         Ok(ok(0))
     }
@@ -2918,7 +3073,7 @@ impl Machine<'_> {
             if let Err(available) = self.admit(payer, charge) {
                 return Some(Ok(ok(0, available)));
             }
-            self.world.grant_charges.push((payer.clone(), charge));
+            self.host.world.grant_charges.push((payer.clone(), charge));
         }
         if matches!(
             op,
@@ -2934,7 +3089,7 @@ impl Machine<'_> {
             if let Err(available) = self.admit(payer, charge) {
                 return Some(Ok(ok(0, available)));
             }
-            self.world.grant_charges.push((payer.clone(), charge));
+            self.host.world.grant_charges.push((payer.clone(), charge));
         }
         let new = |w: &mut World, cell| {
             w.cells.push(cell);
@@ -2943,7 +3098,7 @@ impl Machine<'_> {
         let reply = match op {
             HostOp::ProvideClock => {
                 let h = new(
-                    &mut self.world,
+                    &mut self.host.world,
                     VirtualCell::Clock {
                         mono: a[0],
                         wall: a[1],
@@ -2956,7 +3111,7 @@ impl Machine<'_> {
             }
             HostOp::ProvideRandom => ok(
                 new(
-                    &mut self.world,
+                    &mut self.host.world,
                     VirtualCell::Random(RandomStream::Seeded(a[0])),
                 ),
                 0,
@@ -2967,12 +3122,12 @@ impl Machine<'_> {
                     stopped: false,
                     waiters: Vec::new(),
                 };
-                let h = new(&mut self.world, process);
+                let h = new(&mut self.host.world, process);
                 ok(h, h)
             }
             HostOp::ClockAdvance => {
                 let c = self.cell(a[0]).unwrap();
-                let VirtualCell::Clock { mono, timers, .. } = &mut self.world.cells[c] else {
+                let VirtualCell::Clock { mono, timers, .. } = &mut self.host.world.cells[c] else {
                     unreachable!()
                 };
                 *mono = (*mono).max(a[1]);
@@ -3015,11 +3170,11 @@ impl Machine<'_> {
                     room: a[0],
                     used: 0,
                 };
-                let h = new(&mut self.world, port);
+                let h = new(&mut self.host.world, port);
                 let served = h - CELL_BASE + SERVED_BASE;
                 if vocab == Vocab::Exec {
-                    let key = EXEC_GRANT + self.world.exec_grants.len() as u64;
-                    self.world.exec_grants.push((
+                    let key = EXEC_GRANT + self.host.world.exec_grants.len() as u64;
+                    self.host.world.exec_grants.push((
                         (h - CELL_BASE) as usize,
                         hirsel_core_net::exec::ExecRules::universal(),
                     ));
@@ -3040,23 +3195,26 @@ impl Machine<'_> {
                         hirsel_core_net::GrantRule::Unix(hirsel_core_net::UnixRule::served(dir))
                     }))
                     .collect();
-                let grants = &mut self.world.network.grants;
+                let grants = &mut self.host.world.network.grants;
                 let key = grants
                     .last_key_value()
                     .map_or(0, |(&key, _)| key)
                     .checked_add(1)
                     .expect("run-local handle counter");
                 grants.insert(key, rules);
-                self.world.net_ports.insert(key, (h - CELL_BASE) as usize);
+                self.host
+                    .world
+                    .net_ports
+                    .insert(key, (h - CELL_BASE) as usize);
                 ok(key, served)
             }
             HostOp::StreamTerminal => {
                 let terminal = match self.cell(a[0]) {
-                    Some(c) => match self.world.cells[c] {
+                    Some(c) => match self.host.world.cells[c] {
                         VirtualCell::Port { terminal, .. } => terminal,
                         _ => unreachable!(),
                     },
-                    None => self.world.terminals[a[1] as usize],
+                    None => self.host.world.terminals[a[1] as usize],
                 };
                 ok(u64::from(terminal), 0)
             }
@@ -3066,14 +3224,14 @@ impl Machine<'_> {
             }
             HostOp::CallWord => {
                 let (c, id) = Self::call_of(a[0]);
-                let (calls, ..) = self.world.cells[c].port();
+                let (calls, ..) = self.host.world.cells[c].port();
                 ok(calls[&id].words.get(a[1] as usize).copied().unwrap_or(0), 0)
             }
             HostOp::CallSecret => {
                 // A new designation charged as `secret.narrow`; any call but
                 // a SendSecret fails the server (native `call_secret`).
                 let (c, id) = Self::call_of(a[0]);
-                let (calls, ..) = self.world.cells[c].port();
+                let (calls, ..) = self.host.world.cells[c].port();
                 let Some(secret) = calls[&id]
                     .secret
                     .as_ref()
@@ -3108,7 +3266,7 @@ impl Machine<'_> {
                     room,
                     used,
                     ..
-                } = &mut self.world.cells[c]
+                } = &mut self.host.world.cells[c]
                 else {
                     unreachable!()
                 };
@@ -3142,7 +3300,7 @@ impl Machine<'_> {
                 let c = self.cell(a[0]).unwrap();
                 let VirtualCell::Clock {
                     wall, wall_timers, ..
-                } = &mut self.world.cells[c]
+                } = &mut self.host.world.cells[c]
                 else {
                     unreachable!()
                 };
@@ -3162,7 +3320,8 @@ impl Machine<'_> {
             }
             HostOp::ProcessTrigger => {
                 let c = self.cell(a[0]).unwrap();
-                let VirtualCell::Process { stopped, waiters } = &mut self.world.cells[c] else {
+                let VirtualCell::Process { stopped, waiters } = &mut self.host.world.cells[c]
+                else {
                     unreachable!()
                 };
                 *stopped = true;
@@ -3193,13 +3352,13 @@ impl Machine<'_> {
                         _ => unreachable!(),
                     },
                 );
-                if let VirtualCell::Clock { idle, .. } = &mut self.world.cells[c] {
+                if let VirtualCell::Clock { idle, .. } = &mut self.host.world.cells[c] {
                     idle.retain(|&(j, _)| j != t.k);
                 }
                 if let Err(cancelled) = waited {
                     return Some(Err(cancelled));
                 }
-                let VirtualCell::Clock { timers, .. } = &self.world.cells[c] else {
+                let VirtualCell::Clock { timers, .. } = &self.host.world.cells[c] else {
                     unreachable!()
                 };
                 match timers.iter().map(|&(at, _)| at).min() {
@@ -3256,7 +3415,7 @@ impl Machine<'_> {
                 }
                 match op {
                     HostOp::WallMs | HostOp::MonoNs => {
-                        let VirtualCell::Clock { mono, wall, .. } = self.world.cells[c] else {
+                        let VirtualCell::Clock { mono, wall, .. } = self.host.world.cells[c] else {
                             unreachable!()
                         };
                         vec![if op == HostOp::MonoNs { mono } else { wall }]
@@ -3264,18 +3423,19 @@ impl Machine<'_> {
                     HostOp::SleepUntil => {
                         let at = a[1];
                         loop {
-                            let VirtualCell::Clock { mono, .. } = self.world.cells[c] else {
+                            let VirtualCell::Clock { mono, .. } = self.host.world.cells[c] else {
                                 unreachable!()
                             };
                             if at <= mono {
                                 break;
                             }
                             self.cell_timer(c, at, t.k);
-                            self.sched.tasks[t.k].cancellable =
+                            self.host.sched.tasks[t.k].cancellable =
                                 t.shield == 0 && t.obligations.len() == 1;
                             self.park(Some(Wait::Network(None)));
-                            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
-                                if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c]
+                            if std::mem::take(&mut self.host.sched.tasks[t.k].cancelled) {
+                                if let VirtualCell::Clock { timers, .. } =
+                                    &mut self.host.world.cells[c]
                                 {
                                     timers.retain(|&(_, k)| k != t.k);
                                 }
@@ -3289,23 +3449,24 @@ impl Machine<'_> {
                     HostOp::SleepUntilWall => {
                         let at = a[1];
                         loop {
-                            let VirtualCell::Clock { wall, .. } = self.world.cells[c] else {
+                            let VirtualCell::Clock { wall, .. } = self.host.world.cells[c] else {
                                 unreachable!()
                             };
                             if at <= wall {
                                 break;
                             }
-                            if let VirtualCell::Clock { wall_timers, .. } = &mut self.world.cells[c]
+                            if let VirtualCell::Clock { wall_timers, .. } =
+                                &mut self.host.world.cells[c]
                                 && !wall_timers.iter().any(|&(_, j)| j == t.k)
                             {
                                 wall_timers.push((at, t.k));
                             }
-                            self.sched.tasks[t.k].cancellable =
+                            self.host.sched.tasks[t.k].cancellable =
                                 t.shield == 0 && t.obligations.len() == 1;
                             self.park(Some(Wait::Network(None)));
-                            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                            if std::mem::take(&mut self.host.sched.tasks[t.k].cancelled) {
                                 if let VirtualCell::Clock { wall_timers, .. } =
-                                    &mut self.world.cells[c]
+                                    &mut self.host.world.cells[c]
                                 {
                                     wall_timers.retain(|&(_, k)| k != t.k);
                                 }
@@ -3330,7 +3491,8 @@ impl Machine<'_> {
                             },
                             |cell, _| matches!(cell, VirtualCell::Process { stopped: true, .. }),
                         );
-                        if let VirtualCell::Process { waiters, .. } = &mut self.world.cells[c] {
+                        if let VirtualCell::Process { waiters, .. } = &mut self.host.world.cells[c]
+                        {
                             waiters.retain(|&k| k != t.k);
                         }
                         if let Err(cancelled) = waited {
@@ -3346,29 +3508,29 @@ impl Machine<'_> {
     }
 
     fn park_task(&mut self, t: &Task, condition: Condition) {
-        self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+        self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
         self.park(Some(Wait::Task(condition)));
     }
 
     fn wake(&mut self, condition: Condition) {
-        if let Some(waiters) = self.sched.waiting.remove(&condition) {
+        if let Some(waiters) = self.host.sched.waiting.remove(&condition) {
             for k in waiters {
-                self.sched.tasks[k].state = State::Ready;
-                self.sched.ready.push_back(k);
+                self.host.sched.tasks[k].state = State::Ready;
+                self.host.sched.ready.push_back(k);
             }
         }
     }
 
     /// Record an event of the running task (CONC-10). A poll uses one of the
     /// task's polls; the last one gives a ready peer the turn (native `poll_event`).
-    fn event(&mut self, kind: u8, object: u64, value: u64) {
-        let k = self.sched.current;
-        if k >= self.sched.tasks.len() {
+    fn world_event(&mut self, kind: u8, object: u64, value: u64) {
+        let k = self.host.sched.current;
+        if k >= self.host.sched.tasks.len() {
             return;
         }
         self.drain_refunds();
-        let task = self.sched.tasks[k].id;
-        if let Some(events) = &mut self.sched.events {
+        let task = self.host.sched.tasks[k].id;
+        if let Some(events) = &mut self.host.sched.events {
             events.push(Event {
                 kind,
                 task,
@@ -3378,11 +3540,11 @@ impl Machine<'_> {
             });
         }
         if is_poll(kind, value) {
-            let r = &mut self.sched.tasks[k];
+            let r = &mut self.host.sched.tasks[k];
             r.polls -= 1;
             if r.polls == 0 {
                 r.polls = POLLS_PER_TURN;
-                if !self.sched.ready.is_empty() || !self.sched.deferred.is_empty() {
+                if !self.host.sched.ready.is_empty() || !self.host.sched.deferred.is_empty() {
                     self.park(None);
                 }
             }
@@ -3392,7 +3554,7 @@ impl Machine<'_> {
     /// task is in a finalizer or a shielded cleanup, and observing it fails the
     /// operation with `Cancelled` (native `cancel_takes_effect`).
     fn check_cancel(&mut self, t: &Task) -> X<()> {
-        let r = &mut self.sched.tasks[t.k];
+        let r = &mut self.host.sched.tasks[t.k];
         if r.cancel && t.shield == 0 && t.obligations.len() == 1 {
             r.cancel = false;
             self.event(CANCELLED, 0, 0);
@@ -3402,19 +3564,19 @@ impl Machine<'_> {
     }
     /// Request a child's cancellation (CONC-7). A shielded child stays parked.
     fn cancel(&mut self, i: usize) {
-        let r = &mut self.sched.tasks[i + 1];
+        let r = &mut self.host.sched.tasks[i + 1];
         r.cancel = true;
         let id = r.id;
         match r.state {
-            State::Provider => self.sched.cancels.push(i + 1),
+            State::Provider => self.host.sched.cancels.push(i + 1),
             State::Waiting(condition) if r.cancellable => {
-                let waiters = self.sched.waiting.get_mut(&condition).unwrap();
+                let waiters = self.host.sched.waiting.get_mut(&condition).unwrap();
                 waiters.retain(|&k| k != i + 1);
                 if waiters.is_empty() {
-                    self.sched.waiting.remove(&condition);
+                    self.host.sched.waiting.remove(&condition);
                 }
                 r.state = State::Ready;
-                self.sched.ready.push_back(i + 1);
+                self.host.sched.ready.push_back(i + 1);
             }
             _ => {}
         }
@@ -3425,19 +3587,19 @@ impl Machine<'_> {
     fn child_main(&mut self, t: &mut Task, f: FuncId, args: &[u64]) {
         let i = t.k - 1;
         let returned = self.call(t, f, args);
-        let (rb, r) = (self.children[i].result, self.children[i].r);
+        let (rb, r) = (self.host.children[i].result, self.host.children[i].r);
         if let (Ok(values), Carried::Value(ty)) = (&returned, self.m.types[r.index()].carried) {
             self.store(rb, bytes_of(ty), values[0]);
         }
         let limit = t.limits.pop().unwrap();
-        let unit_owner = self.children[i].unit_owner;
+        let unit_owner = self.host.children[i].unit_owner;
         if unit_owner.is_some() {
             if returned.is_ok() {
                 let owners = self.cross_owners(r);
                 self.check_cross_sockets(rb, &owners);
-                self.children[i].crossed_result = Some(self.cross_take(rb, r, &owners));
+                self.host.children[i].crossed_result = Some(self.cross_take(rb, r, &owners));
             }
-            self.children[i].unit_limit = Some(limit);
+            self.host.children[i].unit_limit = Some(limit);
         } else {
             self.end_limit(limit, None);
         }
@@ -3446,14 +3608,14 @@ impl Machine<'_> {
             Some("Cancelled") => 2,
             _ => 1,
         };
-        let c = &mut self.children[i];
+        let c = &mut self.host.children[i];
         c.status = status;
         c.cells = std::mem::take(&mut t.cells);
         c.chain = std::mem::take(&mut t.chain);
         c.primary = t.obligations[0].take();
-        let id = self.sched.tasks[t.k].id;
+        let id = self.host.sched.tasks[t.k].id;
         self.event(END, id, u64::from(status != 0));
-        self.sched.tasks[t.k].state = State::Ended;
+        self.host.sched.tasks[t.k].state = State::Ended;
         if let Some(owner) = unit_owner {
             self.notify(owner, conn::UnitNotice::HelperEnd(i));
         }
@@ -3485,7 +3647,7 @@ impl Machine<'_> {
         }) as usize
     }
     fn chan_id(&self, i: usize) -> u64 {
-        self.chans[i].id
+        self.host.chans[i].id
     }
 }
 
@@ -3516,9 +3678,14 @@ impl Machine<'_> {
 
     fn env(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
         use hirsel_core_net::EnvPatterns;
-        let patterns = self.world.env_patterns.get(a[0] as usize);
+        let patterns = self.host.world.env_patterns.get(a[0] as usize);
         let covered = |name: &str| patterns.is_some_and(|p| p.covers(name));
-        let mut rows = self.world.env_entries.iter().filter(|row| covered(&row.0));
+        let mut rows = self
+            .host
+            .world
+            .env_entries
+            .iter()
+            .filter(|row| covered(&row.0));
         let ok = |value| vec![value, 0, 0, 0];
         let error = |tag| vec![0, tag, 0, 0];
         match op {
@@ -3530,11 +3697,14 @@ impl Machine<'_> {
                     return error(1);
                 }
                 match self
+                    .host
                     .world
                     .env_entries
                     .binary_search_by(|row| row.0.as_str().cmp(name))
                 {
-                    Ok(i) => self.world.env_entries[i].2.map_or_else(|| error(2), ok),
+                    Ok(i) => self.host.world.env_entries[i]
+                        .2
+                        .map_or_else(|| error(2), ok),
                     Err(_) => ok(0),
                 }
             }
@@ -3550,9 +3720,12 @@ impl Machine<'_> {
                 if let Err(available) = self.admit_charge(payer, requested, charge.is_none()) {
                     return vec![requested, 2, 0, available];
                 }
-                let key = self.world.env_patterns.len() as u64;
-                self.world.env_patterns.push(result);
-                self.world.grant_charges.push((payer.clone(), requested));
+                let key = self.host.world.env_patterns.len() as u64;
+                self.host.world.env_patterns.push(result);
+                self.host
+                    .world
+                    .grant_charges
+                    .push((payer.clone(), requested));
                 ok(key)
             }
             _ => unreachable!(),
@@ -3569,6 +3742,7 @@ impl Machine<'_> {
     }
     fn deny_describe_capability(&self) {
         if self
+            .host
             .world
             .launch
             .as_ref()
@@ -3581,8 +3755,8 @@ impl Machine<'_> {
     /// port, server id and whether the key's part (whole, read or write half)
     /// is live and of kind `kind`.
     fn port_socket(&self, key: u64, kind: u8) -> Option<(usize, u64, bool)> {
-        let &(c, id, _) = self.world.port_keys.get(&(key & !3))?;
-        let VirtualCell::Port { handles, .. } = &self.world.cells[c] else {
+        let &(c, id, _) = self.host.world.port_keys.get(&(key & !3))?;
+        let VirtualCell::Port { handles, .. } = &self.host.world.cells[c] else {
             unreachable!()
         };
         let live = handles.get(&id).is_some_and(|h| {
@@ -3611,7 +3785,7 @@ impl Machine<'_> {
     ) -> X<Vec<u64>> {
         self.check_cancel(t)?;
         let served_exec = matches!(
-            self.world.cells[c],
+            self.host.world.cells[c],
             VirtualCell::Port {
                 vocab: Vocab::Exec,
                 ..
@@ -3677,10 +3851,10 @@ impl Machine<'_> {
     /// `net.join` on a served Net socket's live halves (native
     /// `provide::join_socket`): whole again, the server asked nothing.
     fn port_join(&mut self, key: u64) -> bool {
-        let Some(&(c, id, _)) = self.world.port_keys.get(&(key & !3)) else {
+        let Some(&(c, id, _)) = self.host.world.port_keys.get(&(key & !3)) else {
             return false;
         };
-        let VirtualCell::Port { handles, .. } = &mut self.world.cells[c] else {
+        let VirtualCell::Port { handles, .. } = &mut self.host.world.cells[c] else {
             unreachable!()
         };
         match handles.get_mut(&id) {
@@ -3699,7 +3873,7 @@ impl Machine<'_> {
     /// `net.split` or a dropped socket, half or listener of a served Net
     /// (native `split_socket`, `release_socket`); false when `key` is not one.
     fn port_socket_part(&mut self, key: u64, split: bool) -> bool {
-        let Some(&(c, id, _)) = self.world.port_keys.get(&(key & !3)) else {
+        let Some(&(c, id, _)) = self.host.world.port_keys.get(&(key & !3)) else {
             return false;
         };
         let VirtualCell::Port {
@@ -3707,13 +3881,13 @@ impl Machine<'_> {
             handles,
             servers,
             ..
-        } = &mut self.world.cells[c]
+        } = &mut self.host.world.cells[c]
         else {
             unreachable!()
         };
         let Some(h) = handles.get_mut(&id) else {
-            self.world.port_keys.remove(&(key & !3));
-            self.world.datagrams.remove(&key);
+            self.host.world.port_keys.remove(&(key & !3));
+            self.host.world.datagrams.remove(&key);
             return true;
         };
         if split {
@@ -3733,8 +3907,8 @@ impl Machine<'_> {
             _ => false,
         };
         if h.state != PortState::Live && h.write.is_none_or(|w| w != PortState::Live) {
-            self.world.port_keys.remove(&(key & !3));
-            self.world.datagrams.remove(&key);
+            self.host.world.port_keys.remove(&(key & !3));
+            self.host.world.datagrams.remove(&key);
         }
         if marked {
             *next += 1;
@@ -3752,7 +3926,7 @@ impl Machine<'_> {
         if op == HostOp::ExecSpawn {
             let Some((c, rules)) = a[0]
                 .checked_sub(EXEC_GRANT)
-                .and_then(|i| self.world.exec_grants.get(i as usize))
+                .and_then(|i| self.host.world.exec_grants.get(i as usize))
             else {
                 std::panic::resume_unwind(Box::new(RunStop("NativeExec")));
             };
@@ -3805,7 +3979,7 @@ impl Machine<'_> {
                     .into_iter()
                     .filter(|&key| key != 0)
                 {
-                    self.world.exec_handles.insert(key, payer.clone());
+                    self.host.world.exec_handles.insert(key, payer.clone());
                 }
             } else {
                 self.refund(payer.clone(), charge);
@@ -3817,7 +3991,7 @@ impl Machine<'_> {
             std::panic::resume_unwind(Box::new(RunStop("NativeExec")));
         };
         let wait = op == HostOp::ExecWait;
-        let cached = self.world.cells[c].port().1[&id].termination;
+        let cached = self.host.world.cells[c].port().1[&id].termination;
         if let Some(value) = cached {
             return Ok(vec![if wait { value } else { 0 }, 0, 0, 0]);
         }
@@ -3832,7 +4006,7 @@ impl Machine<'_> {
         let answer =
             self.port_call_with(t, c, words, Vec::new(), None, live, &mut None, deadline)?;
         if wait && answer[1] == 0 {
-            self.world.cells[c]
+            self.host.world.cells[c]
                 .port()
                 .1
                 .get_mut(&id)
@@ -3846,7 +4020,7 @@ impl Machine<'_> {
         use hirsel_core_net::exec::{ArgToken, ExecRule, Form, Names};
         let Some((c, parent)) = a[0]
             .checked_sub(EXEC_GRANT)
-            .and_then(|i| self.world.exec_grants.get(i as usize))
+            .and_then(|i| self.host.world.exec_grants.get(i as usize))
         else {
             std::panic::resume_unwind(Box::new(RunStop("NativeExec")));
         };
@@ -3884,9 +4058,9 @@ impl Machine<'_> {
         if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
             return vec![charge, 2, 0, available];
         }
-        let key = EXEC_GRANT + self.world.exec_grants.len() as u64;
-        self.world.exec_grants.push((c, rules));
-        self.world.grant_charges.push((payer.clone(), charge));
+        let key = EXEC_GRANT + self.host.world.exec_grants.len() as u64;
+        self.host.world.exec_grants.push((c, rules));
+        self.host.world.grant_charges.push((payer.clone(), charge));
         vec![key, 0, 0, 0]
     }
 
@@ -3901,7 +4075,7 @@ impl Machine<'_> {
             | HostOp::UnixListen
             | HostOp::DatagramOpen
             | HostOp::DatagramBind => {
-                let Some(&c) = self.world.net_ports.get(&key) else {
+                let Some(&c) = self.host.world.net_ports.get(&key) else {
                     return denied();
                 };
                 (key, c, 0, true)
@@ -3913,7 +4087,7 @@ impl Machine<'_> {
                 (0, c, id, live)
             }
             _ => {
-                let Some(state) = self.world.datagrams.get(&key) else {
+                let Some(state) = self.host.world.datagrams.get(&key) else {
                     return denied();
                 };
                 if (op == HostOp::DatagramRecv && !state.bound)
@@ -3939,7 +4113,7 @@ impl Machine<'_> {
             let root = self.carrier_bytes(a[1]);
             let path = self.carrier_bytes(a[2]);
             if root.is_empty() || path.len() > hirsel_core_net::unix::MAX_PATH_BYTES || !valid_relative_path(path)
-                || !self.world.network.grants[&grant].iter().any(|rule| {
+                || !self.host.world.network.grants[&grant].iter().any(|rule| {
                     matches!(rule, GrantRule::Unix(rule) if rule.permits(
                         dir, std::str::from_utf8(root).unwrap(), std::str::from_utf8(path).unwrap()))
                 })
@@ -4005,7 +4179,7 @@ impl Machine<'_> {
         let result = self.port_call_with(t, c, w, fields, out, live, &mut None, deadline)?;
         if result[1] == 0 {
             if creates_datagram {
-                self.world.datagrams.insert(
+                self.host.world.datagrams.insert(
                     result[0],
                     DatagramState {
                         grant,
@@ -4014,7 +4188,7 @@ impl Machine<'_> {
                     },
                 );
             } else if op == HostOp::DatagramConnect {
-                self.world.datagrams.get_mut(&key).unwrap().connected = true;
+                self.host.world.datagrams.get_mut(&key).unwrap().connected = true;
             }
         }
         Ok(result)
@@ -4028,12 +4202,18 @@ impl Machine<'_> {
         else {
             return Ok(vec![0, 1, 0, 0]);
         };
-        let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rules| {
-            rules
-                .iter()
-                .any(|r| matches!(r, GrantRule::Resolve(rule) if rule.permits(&name)))
-        });
-        if allowed && let Some(&c) = self.world.net_ports.get(&a[0]) {
+        let allowed = self
+            .host
+            .world
+            .network
+            .grants
+            .get(&a[0])
+            .is_some_and(|rules| {
+                rules
+                    .iter()
+                    .any(|r| matches!(r, GrantRule::Resolve(rule) if rule.permits(&name)))
+            });
+        if allowed && let Some(&c) = self.host.world.net_ports.get(&a[0]) {
             return self.net_call(t, HostOp::Resolve, c, 0, true, a);
         }
         Ok(vec![0, 1, 0, 0])
@@ -4043,6 +4223,7 @@ impl Machine<'_> {
     /// narrow `Invalid` at its end.
     fn narrow_add(&mut self, builder: u64, rule: Option<hirsel_core_net::GrantRule>) -> Vec<u64> {
         let (_, rules, invalid) = self
+            .host
             .world
             .narrowing
             .get_mut(&builder)
@@ -4061,7 +4242,7 @@ impl Machine<'_> {
         parent: u64,
         rules: &[hirsel_core_net::GrantRule],
     ) -> Vec<u64> {
-        let grants = &self.world.network.grants;
+        let grants = &self.host.world.network.grants;
         let intersections: Vec<_> = grants
             .get(&parent)
             .into_iter()
@@ -4078,18 +4259,18 @@ impl Machine<'_> {
         if let Err(available) = self.admit(payer, charge) {
             return vec![charge, 2, 0, available];
         }
-        let grants = &mut self.world.network.grants;
+        let grants = &mut self.host.world.network.grants;
         let key = grants
             .last_key_value()
             .map_or(0, |(&key, _)| key)
             .checked_add(1)
             .expect("run-local handle counter");
         grants.insert(key, intersections);
-        self.world.grant_charges.push((payer.clone(), charge));
-        if let Some(&c) = self.world.net_ports.get(&parent) {
+        self.host.world.grant_charges.push((payer.clone(), charge));
+        if let Some(&c) = self.host.world.net_ports.get(&parent) {
             // A narrowed served Net keeps its port (native `narrow` keeps
             // the provider).
-            self.world.net_ports.insert(key, c);
+            self.host.world.net_ports.insert(key, c);
         }
         vec![key, 0, 0, 0]
     }
@@ -4106,7 +4287,7 @@ impl Machine<'_> {
         if !hirsel_core_net::marks::well_formed(&marks, wire.len(), handles.len()) {
             return Err(Stop::Cause("Bounds"));
         }
-        let Some((name, spent, _)) = self.world.tls_writes.get(&(key & !3)) else {
+        let Some((name, spent, _)) = self.host.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
         if *spent {
@@ -4155,13 +4336,16 @@ impl Machine<'_> {
             let mut secret = Some(narrowed);
             let row = self.port_call_with(t, c, w, fields, None, live, &mut secret, deadline);
             if secret.is_none() && !matches!(&row, Ok(row) if row[1] == 0) {
-                self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+                self.host.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
             }
             return row;
         }
         Ok(vec![0, 1, 0, 0])
     }
+}
 
+// ---- the pure core: memory, charges, values, calls and steps
+impl<'m, H: Host<'m>> Machine<'m, H> {
     fn kind(&self, p: u64, kind: Counted) {
         let made = self.mem[split(p).0].counted;
         assert_eq!(
@@ -4369,7 +4553,7 @@ impl Machine<'_> {
         if let Some(r) = &blk.res {
             if !r.settled {
                 let payer = blk.limit.as_ref().expect("a resource payer");
-                let grant = Limit::new(r.grant, Some(payer.clone()), self.sched.current);
+                let grant = Limit::new(r.grant, Some(payer.clone()), self.host.current());
                 self.end_limit(grant, None);
             }
             n -= r.grant;
@@ -4421,53 +4605,33 @@ impl Machine<'_> {
     /// exactly the refunds the event order puts before their task's latest event.
     fn refund(&mut self, l: Limit, n: u64) {
         let l = l.find();
-        let owner = l.0.owner;
-        if owner == self.sched.current || owner >= self.sched.tasks.len() {
+        if !H::defer_refund(self, &l, n) {
             l.subtract(n);
-        } else {
-            if n != 0 {
-                self.event(REFUND, self.sched.tasks[owner].id, n);
-            }
-            self.sched.tasks[owner].refunds.push((l, n));
         }
     }
-    /// Apply the running task's pending refunds, each to the live limit its record
-    /// now leads to (native `drain_refunds`).
+    /// Apply the running task's pending refunds (native `drain_refunds`).
     fn drain_refunds(&mut self) {
-        let k = self.sched.current;
-        if k < self.sched.tasks.len() && !self.sched.tasks[k].refunds.is_empty() {
-            for (l, n) in std::mem::take(&mut self.sched.tasks[k].refunds) {
-                self.refund(l, n);
-            }
-        }
+        H::drain_refunds(self);
+    }
+    fn event(&mut self, kind: u8, object: u64, value: u64) {
+        H::event(self, kind, object, value);
     }
     /// MEM-20: the old owner folds before handing the limit to its parent.
     /// The recipient sees the unused reservation only upon its next event.
     fn end_limit(&mut self, l: Limit, creator: Option<usize>) {
-        let current = self.sched.current;
-        let (parent, unused) = {
-            let state = l.0.state.lock().unwrap();
-            (
-                state.parent.as_ref().expect("not the root").find(),
-                l.0.cap - state.used,
-            )
-        };
-        let owner = parent.0.owner;
-        if owner != current || creator.is_some_and(|creator| creator != current) {
-            self.drain_refunds();
-            let unused = l.0.cap - l.used();
-            if owner < self.sched.tasks.len() {
-                self.event(REFUND, self.sched.tasks[owner].id, unused);
-            }
-            if owner == current || owner >= self.sched.tasks.len() {
-                parent.subtract(unused);
-            } else {
-                self.sched.tasks[owner]
-                    .refunds
-                    .push((parent.clone(), unused));
-            }
+        let current = self.host.current();
+        let parent =
+            l.0.state
+                .lock()
+                .unwrap()
+                .parent
+                .as_ref()
+                .expect("not the root")
+                .find();
+        if parent.0.owner != current || creator.is_some_and(|creator| creator != current) {
+            H::hand_over(self, &l, &parent);
         } else {
-            parent.subtract(unused);
+            parent.subtract(l.0.cap - l.used());
         }
         let mut state = l.0.state.lock().unwrap();
         state.parent = Some(parent);
@@ -4600,27 +4764,6 @@ impl Machine<'_> {
         }
         failed
     }
-    fn socket_drop(&mut self, key: u64) {
-        if let Some(payer) = self.world.exec_handles.remove(&key) {
-            self.refund(payer, charge::EXEC_HANDLE);
-        }
-        if key & 3 == 2 {
-            self.world.tls_writes.remove(&(key & !3));
-        }
-        if !self.port_socket_part(key, false) {
-            self.world.network.sockets.release(key);
-        }
-    }
-
-    fn child_end_taken(&mut self, child: usize) -> bool {
-        if self.children[child].unit_owner.is_none() {
-            return self.sched.tasks[child + 1].state == State::Ended;
-        }
-        if !self.children[child].end_taken {
-            self.take_unit_notices();
-        }
-        self.children[child].end_taken
-    }
 
     fn drop_field(&mut self, t: &mut Task, at: u64, ty: &FieldTy) -> bool {
         match ty {
@@ -4641,97 +4784,12 @@ impl Machine<'_> {
                 }
                 failed
             }
-            FieldTy::Handle(Handle::Flow) => panic!("flow execution uses the native reference"),
-            FieldTy::Handle(Handle::Socket) => {
-                self.socket_drop(self.load(at, 8));
-                false
-            }
-            FieldTy::Handle(Handle::Media) => {
-                self.drop_media(self.load(at, 8));
-                false
-            }
-            FieldTy::Handle(Handle::Secret) => {
-                self.secret_drop(self.load(at, 8));
-                false
-            }
-            // The provider closes the file and ignores the outcome (core.md,
-            // MEM-24); the trace records the close by its handle.
-            FieldTy::Handle(Handle::HostFile) => {
-                let h = self.load(at, 8);
-                if h & LISTING_HANDLE != 0 {
-                    self.world.listings[(h & !LISTING_HANDLE) as usize] = None;
-                    return false;
-                }
-                if (SCRAM_BASE..PORT_HANDLE).contains(&h) {
-                    let (_, payer) = self.world.scrams.remove(&h).unwrap();
-                    self.refund(payer, 32);
-                    return false;
-                }
-                self.trace.push(h);
-                if (PORT_HANDLE..CALL_BASE).contains(&h) {
-                    // A served Dir's file or listing: the server learns by
-                    // Released (FAIL-13).
-                    self.port_release(h);
-                    return false;
-                }
-                if h >= CALL_BASE || (SERVED_BASE..SERVED_BASE + 0x10_0000).contains(&h) {
-                    // A dropped Call settles its caller as sealed; a cleaned
-                    // Served end seals its port.
-                    self.port_drop(h);
-                    return false;
-                }
-                if (CELL_BASE..LISTING_HANDLE).contains(&h) {
-                    // A dropped ClockHand freezes its clock; a dropped
-                    // StopTrigger never stops its process.
-                    return false;
-                }
-                if let Some(file) = h
-                    .checked_sub(FILE_BASE)
-                    .and_then(|i| self.world.files.get_mut(i as usize))
-                {
-                    *file = None;
-                }
-                false
-            }
             FieldTy::Box(x) => {
                 let p = self.load(at, 8);
                 self.edge(p, ty, "a box");
                 let failed = self.drop_value(t, p, *x);
                 let size = (!self.is_resource(*x)).then(|| self.held(*x));
                 self.free_as(p, charge::boxed(self.logical(*x)), size, "a box");
-                failed
-            }
-            FieldTy::Handle(Handle::Task) => {
-                // CONC-8: cancel the child and wait for its end with cancellation
-                // shielded, then clean its result or chain (native `abandon`).
-                let i = self.child(self.load(at, 8));
-                let id = self.sched.tasks[i + 1].id;
-                t.shield += 1;
-                self.cancel(i);
-                while !self.child_end_taken(i) {
-                    self.park_task(t, Condition::Join(i));
-                }
-                self.event(JOIN, id, 2);
-                let (status, result, r) = {
-                    let c = &self.children[i];
-                    (c.status, c.result, c.r)
-                };
-                // CONC-8: an abandoned handle cleans the result or the chain.
-                let failed = if let Some(item) = self.children[i].crossed_result.take() {
-                    self.cross_discard(&item, &self.cross_owners(r));
-                    false
-                } else {
-                    status == 0 && self.drop_value(t, result, r)
-                };
-                for c in std::mem::take(&mut self.children[i].chain) {
-                    if c.message[2] != 0 {
-                        self.free(c.message[0]);
-                    }
-                }
-                for (l, n) in self.settle_child(i, 0) {
-                    self.refund(l, n);
-                }
-                t.shield -= 1;
                 failed
             }
             FieldTy::FrozenBytes => {
@@ -4831,60 +4889,7 @@ impl Machine<'_> {
                 }
                 false
             }
-            FieldTy::Handle(Handle::Sender) => {
-                let i = ((self.load(at, 8) - CHAN_BASE) / 2) as usize;
-                self.chans[i].senders -= 1;
-                let (id, senders) = (self.chans[i].id, self.chans[i].senders);
-                self.event(SENDERS, id, senders);
-                if senders == 0 {
-                    self.event(CLOSE, id, 0);
-                    self.wake(Condition::Receive(i));
-                }
-                self.chan_freed(i);
-                false
-            }
-            FieldTy::Handle(Handle::Client) => {
-                self.client_drop(self.load(at, 8));
-                false
-            }
-            FieldTy::Handle(Handle::Inbox) => {
-                t.shield += 1;
-                self.inbox_drop(self.load(at, 8));
-                t.shield -= 1;
-                false
-            }
-            FieldTy::Handle(Handle::Latest) => {
-                let i = (self.load(at, 8) - LATEST_BASE) as usize;
-                self.latests[i].handles -= 1;
-                let (id, handles) = (self.latests[i].id, self.latests[i].handles);
-                self.event(SENDERS, id, handles);
-                if self.latests[i].handles != 0 {
-                    return false;
-                }
-                let latest = &mut self.latests[i];
-                let (item, root, limit) = (latest.item, latest.root, latest.limit.take().unwrap());
-                self.release_latest_holder(t, root, item);
-                self.refund(limit, charge::LATEST_ROOT);
-                false
-            }
-            FieldTy::Handle(Handle::Receiver) => {
-                let i = ((self.load(at, 8) - CHAN_BASE) / 2) as usize;
-                self.chans[i].receiver = End::Cleaning;
-                t.shield += 1;
-                self.event(CLOSE, self.chans[i].id, 1);
-                self.wake(Condition::Send(i));
-                let mut failed = false;
-                // CONC-9: last published first; a failure appends and the rest go on.
-                while let Some(bytes) = self.chans[i].queue.pop_back() {
-                    let tmp = self.block(bytes.len() as u64, None, 0, None);
-                    self.put(tmp, &bytes);
-                    failed |= self.drop_value(t, tmp, self.chans[i].item);
-                }
-                self.chans[i].receiver = End::Gone;
-                self.chan_freed(i);
-                t.shield -= 1;
-                failed
-            }
+            FieldTy::Handle(h) => H::drop_handle(self, t, at, *h),
             other => panic!("cleanup of {other:?} is not modelled"),
         }
     }
@@ -4904,7 +4909,7 @@ impl Machine<'_> {
             let resource = self.mem[b].res.as_ref().expect("a resource block");
             let (grant, creator) = (resource.grant, resource.creator);
             let payer = self.mem[b].limit.clone().expect("charged");
-            let g = Limit::new(grant, Some(payer.clone()), self.sched.current);
+            let g = Limit::new(grant, Some(payer.clone()), self.host.current());
             t.limits.push(g);
             t.obligations.push(Some(Cell {
                 limit: payer,
@@ -4934,31 +4939,6 @@ impl Machine<'_> {
         let charge = charge::resource(storage, self.shape(ty).grant);
         self.free_as(blk, charge, None, "a resource");
         failed
-    }
-    /// Refund a joined or abandoned task's record, result slot and unused primary
-    /// cell; the reserved `n` came back when the child's limit ended. The spawn's
-    /// charge holds the child's first primary cell, which may have left with a
-    /// chain: a used cell is among the cells returned to go with its `Causes`, or
-    /// went with one the child caught. A helper's end take returned all but
-    /// `size(R)`, the result's content and what it left behind; the join
-    /// returns the first two less the content `moved` into the result.
-    fn settle_child(&mut self, i: usize, moved: u64) -> Vec<(Limit, u64)> {
-        let c = &mut self.children[i];
-        assert!(!c.joined, "task handle used twice");
-        c.joined = true;
-        let n = if c.unit_owner.is_some() {
-            c.end_kept - moved
-        } else {
-            c.charge - c.n - charge::CAUSE_CELL
-        };
-        let l = c.limit.take().unwrap();
-        let cells = std::mem::take(&mut c.cells);
-        let primary = c.primary.take();
-        self.refund(l, n);
-        if let Some(p) = primary {
-            self.refund(p.limit, p.amount);
-        }
-        cells
     }
     /// A cause's `Site` word (SITES.md), as a linked native unit's: the anchor
     /// item's first site word plus the anchor's start, 0 for none.
@@ -5008,14 +4988,6 @@ impl Machine<'_> {
             .expect("a failure whose obligation's cell is already used");
         t.cells.push((cell.limit, cell.amount));
         t.chain.push(cause);
-    }
-    fn release_latest_holder(&mut self, t: &mut Task, node: u64, item: TypeRef) {
-        let place = self.block(8, None, 0, None);
-        self.put(place, &node.to_le_bytes());
-        assert!(
-            !self.drop_value(t, place, item),
-            "a shareable root's release failed"
-        );
     }
 
     fn share_counted(&mut self, node: u64, kind: Counted) {
@@ -5109,8 +5081,7 @@ impl Machine<'_> {
             self.steps = self.steps.saturating_add(amount);
             if t.slice_steps == 65_536 {
                 t.slice_steps = 0;
-                self.event(hirsel_core_layout::event::STEP_SLICE, 0, 65_536);
-                self.park_turn(None, false);
+                H::slice_end(self);
             }
         }
         Ok(())
@@ -5173,170 +5144,8 @@ impl Machine<'_> {
                 }
                 vec![u64::from(caught)]
             }
-            RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r } => {
-                self.deny_describe_capability();
-                let unit = matches!(op, RtOp::SpawnUnit { .. });
-                let x = TypeRef(x.0);
-                let r = TypeRef(r.0);
-                let n = a[0];
-                let charge = charge::task(self.logical(r), n).unwrap_or(u64::MAX);
-                if let Err(room) = self.admit(cur, charge) {
-                    // x stays the caller's
-                    return Ok(if unit {
-                        vec![0, charge, room]
-                    } else {
-                        vec![0, room]
-                    });
-                }
-                // CONC-15: then x's movable charge against n.
-                let owners = if unit {
-                    self.cross_owners(x)
-                } else {
-                    Vec::new()
-                };
-                let moved = self.cross_charge(a[1], &owners);
-                if unit && moved > n {
-                    self.refund(cur.clone(), charge);
-                    return Ok(vec![0, moved, n]);
-                }
-                // The child's limit serves the child, the next scheduler record.
-                let lim = Limit::new(n, (!unit).then(|| cur.clone()), self.sched.tasks.len());
-                let xb = self.block(self.held(x), None, 0, None);
-                if unit {
-                    self.check_cross_sockets(a[1], &owners);
-                    let item = self.cross_take(a[1], x, &owners);
-                    lim.add(moved);
-                    self.cross_put(xb, &item, &owners, &lim);
-                } else {
-                    let bytes = self.get(a[1], self.held(x) as usize).to_vec();
-                    self.put(xb, &bytes);
-                }
-                let rb = self.block(self.held(r), None, 0, None);
-                // The child's primary cell is part of the spawn's charge to `cur`.
-                let inherited = t
-                    .step_bounds
-                    .last()
-                    .map(|bound| self.step_bound(bound.left));
-                let mut child = Task {
-                    step_bounds: inherited.into_iter().collect(),
-                    slice_steps: 0,
-                    limits: vec![lim],
-                    chain: Vec::new(),
-                    cells: Vec::new(),
-                    obligations: vec![Some(Cell {
-                        limit: cur.clone(),
-                        amount: charge::CAUSE_CELL,
-                        resource: false,
-                    })],
-                    reserved: Vec::new(),
-                    at: Vec::new(),
-                    k: 0,
-                    shield: 0,
-                };
-                let f = FuncId((a[2] - FN_BASE) as u32);
-                let xc = self.m.types[x.index()].carried;
-                let rc = self.m.types[r.index()].carried;
-                let mut args = Vec::with_capacity(3);
-                if matches!(rc, Carried::Address) {
-                    args.push(rb)
-                }
-                args.push(0); // A plain callable's environment.
-                match xc {
-                    Carried::Address => args.push(xb),
-                    Carried::Value(t) => args.push(self.load(xb, bytes_of(t))),
-                    Carried::Nothing => {}
-                }
-                let i = self.children.len();
-                self.children.push(Child {
-                    status: 0,
-                    result: rb,
-                    r,
-                    charge,
-                    n,
-                    limit: Some(cur.clone()),
-                    joined: false,
-                    unit_owner: unit.then(|| self.sched.tasks[t.k].unit),
-                    end_taken: false,
-                    crossed_result: None,
-                    unit_limit: None,
-                    end_kept: 0,
-                    cells: Vec::new(),
-                    chain: Vec::new(),
-                    primary: None,
-                });
-                // CONC-3: the child is readied at the tail and the parent goes on.
-                child.k = i + 1;
-                let id = self.next_id();
-                self.sched.tasks.push(Rec {
-                    id,
-                    state: State::Ready,
-                    cancel: false,
-                    polls: POLLS_PER_TURN,
-                    cancellable: false,
-                    cancelled: false,
-                    start: Some((child, f, args)),
-                    refunds: Vec::new(),
-                    unit: if unit {
-                        i + 1
-                    } else {
-                        self.sched.tasks[t.k].unit
-                    },
-                    notices: VecDeque::new(),
-                });
-                self.links.push(None);
-                self.sched.ready.push_back(i + 1);
-                self.event(SPAWN, id, n);
-                if unit {
-                    vec![TASK_BASE + i as u64, 0, 0]
-                } else {
-                    vec![TASK_BASE + i as u64, 0]
-                }
-            }
-            RtOp::Join { r } => {
-                let i = self.child(a[0]);
-                let id = self.sched.tasks[i + 1].id;
-                // CONC-6: a cancellation point at entry and at each wait.
-                loop {
-                    self.check_cancel(t)?;
-                    if self.child_end_taken(i) {
-                        break;
-                    }
-                    self.park_task(t, Condition::Join(i));
-                }
-                let status = self.children[i].status;
-                let mut moved = 0;
-                if status == 0 {
-                    if let Some(item) = self.children[i].crossed_result.take() {
-                        let payer = self.children[i].limit.as_ref().unwrap().clone();
-                        self.cross_put(a[1], &item, &self.cross_owners(TypeRef(r.0)), &payer);
-                        moved = item.charge;
-                    } else {
-                        let n = self.held(TypeRef(r.0)) as usize;
-                        let bytes = self.get(self.children[i].result, n).to_vec();
-                        self.put(a[1], &bytes);
-                    }
-                }
-                self.event(JOIN, id, u64::from(status != 0));
-                let cells = self.settle_child(i, moved);
-                if status == 0 {
-                    vec![0, 0]
-                } else {
-                    let chain = std::mem::take(&mut self.children[i].chain);
-                    vec![u64::from(status), self.deliver(chain, cells)]
-                }
-            }
             RtOp::CauseNext => vec![self.load(a[0] + CELL_NEXT, 8)],
             RtOp::CauseValue => vec![a[0]],
-            RtOp::Cancel => {
-                let i = self.child(a[0]);
-                self.cancel(i);
-                vec![]
-            }
-            RtOp::CheckCancel => {
-                self.check_cancel(t)?;
-                self.event(CHECK_CANCEL, 0, 0);
-                vec![]
-            }
             // Isolation (crate docs): a reservation on entry, set aside with the
             // active chain; refunded when the body returns; on a caught failure the
             // chain becomes a `Causes`, and the reserved cell takes the place of the
@@ -5402,30 +5211,7 @@ impl Machine<'_> {
                 self.dests += 1;
                 vec![self.dests]
             }
-            RtOp::ArgsLen => vec![self.world.args.len() as u64],
-            RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
             RtOp::RootLimit => vec![t.limits[0].0.cap],
-            RtOp::LaunchWord => vec![self.world.launch.as_ref().unwrap().word(a[0], a[1])],
-            RtOp::LaunchHandle => vec![0],
-            RtOp::SecretShare => vec![self.secret_share(a[0])],
-            RtOp::DescribeEmit => {
-                if self.world.launch.as_ref().unwrap().is_describe() {
-                    let (bytes, _, _, _) = self.carrier(a[0]);
-                    self.world.stdout.extend_from_slice(&bytes);
-                    vec![1]
-                } else {
-                    vec![0]
-                }
-            }
-            RtOp::LaunchTarget { .. } => {
-                let (data, len) = self.world.launch_target;
-                self.store(a[0], 8, data);
-                self.store(a[0] + 8, 8, len);
-                self.store(a[0] + 16, 8, 0);
-                vec![]
-            }
-            RtOp::Host(op) => self.host(t, op, a)?,
-            RtOp::Flow(_) => panic!("flow execution uses the native reference"),
             RtOp::CompareBytes => {
                 let range = |p: u64, n: u64| match n {
                     0 => Vec::new(),
@@ -5441,27 +5227,27 @@ impl Machine<'_> {
                     self.get(a[0], a[1] as usize)
                 };
                 vec![hirsel_core_layout::map_hash::bytes(
-                    &self.world.map_hash_key,
+                    &self.maps.hash_key,
                     bytes,
                 )]
             }
             RtOp::MapHashWord => vec![hirsel_core_layout::map_hash::word(
-                &self.world.map_hash_key,
+                &self.maps.hash_key,
                 a[0],
             )],
             RtOp::MapHashStart => {
-                let state = hirsel_core_layout::map_hash::State::new(&self.world.map_hash_key);
+                let state = hirsel_core_layout::map_hash::State::new(&self.maps.hash_key);
                 self.store_map_hash(a[0], state);
                 vec![]
             }
             RtOp::MapPlaceWord => {
                 #[cfg(feature = "map-observation")]
-                if let Some(stats) = &mut self.world.maps {
+                if let Some(stats) = &mut self.maps.observed {
                     stats.last_word_strong = false;
                 }
                 vec![hirsel_core_layout::map_index::fast_word(
                     a[0],
-                    self.world.map_fast_salt[0],
+                    self.maps.fast_salt[0],
                 )]
             }
             RtOp::MapPlaceBytes | RtOp::MapStrongBytes => {
@@ -5470,25 +5256,25 @@ impl Machine<'_> {
                 } else {
                     self.get(a[0], a[1] as usize)
                 };
-                let [s0, s1] = self.world.map_fast_salt;
+                let [s0, s1] = self.maps.fast_salt;
                 vec![if op == RtOp::MapPlaceBytes {
                     hirsel_core_layout::map_index::fast_bytes(bytes, s0, s1)
                 } else {
-                    hirsel_core_layout::map_hash::bytes(&self.world.map_strong_key, bytes)
+                    hirsel_core_layout::map_hash::bytes(&self.maps.strong_key, bytes)
                 }]
             }
             RtOp::MapStrongWord => {
                 #[cfg(feature = "map-observation")]
-                if let Some(stats) = &mut self.world.maps {
+                if let Some(stats) = &mut self.maps.observed {
                     stats.last_word_strong = true;
                 }
                 vec![hirsel_core_layout::map_hash::word(
-                    &self.world.map_strong_key,
+                    &self.maps.strong_key,
                     a[0],
                 )]
             }
             RtOp::MapStrongStart => {
-                let state = hirsel_core_layout::map_hash::State::new(&self.world.map_strong_key);
+                let state = hirsel_core_layout::map_hash::State::new(&self.maps.strong_key);
                 self.store_map_hash(a[0], state);
                 vec![]
             }
@@ -5632,128 +5418,6 @@ impl Machine<'_> {
             | RtOp::P384VerifyDer
             | RtOp::RsaVerifyPkcs1Sha256
             | RtOp::RsaVerifyPssSha256 => vec![u64::from(self.verify_signature(op, a))],
-            RtOp::ChannelNew { item } => {
-                let item = TypeRef(item.0);
-                if a[0] == 0 {
-                    return Err(Stop::Cause("Bounds"));
-                }
-                let charge = charge::channel(a[0], self.logical(item)).unwrap_or(u64::MAX);
-                match self.admit(cur, charge) {
-                    Err(room) => vec![0, 0, room],
-                    Ok(()) => {
-                        let id = self.next_id();
-                        self.event(SENDERS, id, 1);
-                        self.chans.push(Chan {
-                            id,
-                            item,
-                            cap: a[0],
-                            queue: VecDeque::new(),
-                            senders: 1,
-                            receiver: End::Open,
-                            charge,
-                            limit: Some(cur.clone()),
-                        });
-                        let s = CHAN_BASE + 2 * (self.chans.len() as u64 - 1);
-                        vec![s, s + 1, 0]
-                    }
-                }
-            }
-            RtOp::ConnNew { item } => self.conn_new(&cur.clone(), item, a[0], a[1])?,
-            RtOp::ConnClient => self.conn_client(a[0]),
-            RtOp::ConnSend { .. } | RtOp::ConnTrySend { .. } => {
-                let wait = matches!(op, RtOp::ConnSend { .. });
-                self.conn_send(t, wait, a[0], a[1])?
-            }
-            RtOp::ConnReceive { .. } | RtOp::ConnTryReceive { .. } => {
-                let wait = matches!(op, RtOp::ConnReceive { .. });
-                let cur = cur.clone();
-                self.conn_receive(t, &cur, wait, a[0], a[1])?
-            }
-            RtOp::ChannelSender => {
-                let c = &mut self.chans[((a[0] - CHAN_BASE) / 2) as usize];
-                c.senders += 1;
-                let (id, senders) = (c.id, c.senders);
-                self.event(SENDERS, id, senders);
-                vec![a[0]]
-            }
-            RtOp::Send { item } => {
-                let i = ((a[0] - CHAN_BASE) / 2) as usize;
-                // CONC-5: a cancellation point at entry and at each wait.
-                loop {
-                    self.check_cancel(t)?;
-                    match self.publish(i, a[1], item) {
-                        0 => break vec![1],
-                        2 => {
-                            self.event(
-                                PUBLISH,
-                                self.chan_id(i),
-                                hirsel_core_layout::event::CHANNEL_CLOSED,
-                            );
-                            break vec![0];
-                        }
-                        _ => self.park_task(t, Condition::Send(i)),
-                    }
-                }
-            }
-            RtOp::TrySend { item } => {
-                let i = ((a[0] - CHAN_BASE) / 2) as usize;
-                let status = self.publish(i, a[1], item);
-                let source = self.site(t);
-                // The send's own event: the turn it may give up can record more after it.
-                let event = self.sched.events.as_ref().map(Vec::len);
-                self.event(TRY_SEND, self.chan_id(i), status);
-                if let (Some(event), Some(events)) = (event, &mut self.sched.events) {
-                    events[event].source = source;
-                }
-                vec![status]
-            }
-            RtOp::Receive { .. } => {
-                let i = ((a[0] - CHAN_BASE) / 2) as usize;
-                loop {
-                    self.check_cancel(t)?;
-                    if self.take(i, a[1]) {
-                        break vec![1];
-                    }
-                    if self.chans[i].senders == 0 {
-                        self.event(
-                            RECEIVE,
-                            self.chan_id(i),
-                            hirsel_core_layout::event::CHANNEL_CLOSED,
-                        );
-                        break vec![0];
-                    }
-                    self.park_task(t, Condition::Receive(i));
-                }
-            }
-            RtOp::LatestNew { item } => match self.admit(cur, charge::LATEST_ROOT) {
-                Err(room) => vec![0, room],
-                Ok(()) => {
-                    let id = self.next_id();
-                    self.event(SENDERS, id, 1);
-                    self.latests.push(Latest {
-                        id,
-                        item: TypeRef(item.0),
-                        root: a[0],
-                        handles: 1,
-                        limit: Some(cur.clone()),
-                    });
-                    vec![LATEST_BASE + self.latests.len() as u64 - 1, 0]
-                }
-            },
-            RtOp::LatestHandle => {
-                let l = &mut self.latests[(a[0] - LATEST_BASE) as usize];
-                l.handles += 1;
-                let (id, handles) = (l.id, l.handles);
-                self.event(SENDERS, id, handles);
-                vec![a[0]]
-            }
-            RtOp::LatestPublish => {
-                let l = &mut self.latests[(a[0] - LATEST_BASE) as usize];
-                let (id, item, old) = (l.id, l.item, std::mem::replace(&mut l.root, a[1]));
-                self.event(LATEST_PUBLISH, id, 0);
-                self.release_latest_holder(t, old, item);
-                vec![]
-            }
             RtOp::SharedNew { item } => match self.admit(cur, a[1]) {
                 Err(room) => vec![0, room],
                 Ok(()) => {
@@ -5777,25 +5441,6 @@ impl Machine<'_> {
                 self.store(a[0], 8, count);
                 vec![a[0]]
             }
-            RtOp::LatestRead => {
-                let l = &self.latests[(a[0] - LATEST_BASE) as usize];
-                let (id, root) = (l.id, l.root);
-                self.event(LATEST_READ, id, 0);
-                self.share_counted(root, Counted::Arc);
-                vec![root]
-            }
-            RtOp::TryReceive { .. } => {
-                let i = ((a[0] - CHAN_BASE) / 2) as usize;
-                let status = if self.take(i, a[1]) {
-                    0
-                } else if self.chans[i].senders == 0 {
-                    2
-                } else {
-                    1
-                };
-                self.event(TRY_RECEIVE, self.chan_id(i), status);
-                vec![status]
-            }
             // Only the release lowering of a native program forms these
             // (returnable.rs); the evaluator runs the module before it.
             RtOp::FrameRecord
@@ -5804,6 +5449,7 @@ impl Machine<'_> {
             | RtOp::Transfer { .. } => {
                 unreachable!("returnable waits are native-only")
             }
+            _ => return H::rt(self, t, op, a),
         })
     }
 
@@ -5867,42 +5513,42 @@ impl Machine<'_> {
             // FAIL-15 bypasses every program cleanup and ends the entire run.
             std::panic::resume_unwind(Box::new(RunStop("Stack")));
         }
-        if self.sched.current != 0 {
-            let used =
-                TASK_STACK_ROOM.with(|room| room.get().0.abs_diff(&frame as *const u8 as usize));
-            self.task_stack_peak = self.task_stack_peak.max(used);
-            self.task_call_depth = self.task_call_depth.max(t.at.len() + 1);
+        if t.at.len() >= self.activations {
+            std::panic::resume_unwind(Box::new(RunStop("Activations")));
         }
+        H::enter_call(self, t, &frame as *const u8 as usize);
         let m = self.m;
-        let facts = &self.facts;
-        let roles = self.roles[f.index()]
-            .get_or_insert_with(|| facts.roles(m, f).into())
-            .clone();
-        self.footprints.push(Footprint::new(roles));
+        if let Some(facts) = &self.facts {
+            let roles = self.roles[f.index()]
+                .get_or_insert_with(|| facts.roles(m, f).into())
+                .clone();
+            self.footprints.push(Footprint::new(roles));
+        }
         #[cfg(feature = "map-observation")]
-        let (probe, rebuild, promotes_rebuild, strong) = if let Some(stats) = &mut self.world.maps {
-            let definition = &m.instances[m.functions[f.index()].instance.index()].definition;
-            let probe = definition.is_core("map.probe");
-            let rebuild = definition.is_core("map.rebuild");
-            if probe {
-                stats.groups = 0;
-            }
-            if rebuild {
-                stats.rebuilding = true;
-                stats.rebuilds += 1;
-            }
-            (
-                probe,
-                rebuild,
-                stats.rebuilding && definition.is_core("map.promote"),
-                stats.last_word_strong,
-            )
-        } else {
-            (false, false, false, false)
-        };
+        let (probe, rebuild, promotes_rebuild, strong) =
+            if let Some(stats) = &mut self.maps.observed {
+                let definition = &m.instances[m.functions[f.index()].instance.index()].definition;
+                let probe = definition.is_core("map.probe");
+                let rebuild = definition.is_core("map.rebuild");
+                if probe {
+                    stats.groups = 0;
+                }
+                if rebuild {
+                    stats.rebuilding = true;
+                    stats.rebuilds += 1;
+                }
+                (
+                    probe,
+                    rebuild,
+                    stats.rebuilding && definition.is_core("map.promote"),
+                    stats.last_word_strong,
+                )
+            } else {
+                (false, false, false, false)
+            };
         let r = self.activation(t, f, args);
         #[cfg(feature = "map-observation")]
-        if let Some(stats) = &mut self.world.maps {
+        if let Some(stats) = &mut self.maps.observed {
             if probe {
                 if strong {
                     stats.strong_searches += 1;
@@ -5920,7 +5566,9 @@ impl Machine<'_> {
                 stats.promoted_in_rebuild = true;
             }
         }
-        self.footprints.pop();
+        if self.checks {
+            self.footprints.pop();
+        }
         r
     }
 
@@ -5997,7 +5645,7 @@ impl Machine<'_> {
                 if matches!(inst, Inst::BuiltinUse { .. }) {
                     #[cfg(feature = "map-observation")]
                     if let Inst::BuiltinUse { definition } = inst
-                        && let Some(stats) = &mut self.world.maps
+                        && let Some(stats) = &mut self.maps.observed
                     {
                         if definition.is_core("map.group_match") {
                             stats.groups += 1;
@@ -6243,7 +5891,9 @@ impl Machine<'_> {
         }
         let args = words;
         let held = self.frozen.len();
-        self.lend(&self.m.signatures[site.signature.index()], &args);
+        if self.checks {
+            self.lend(&self.m.signatures[site.signature.index()], &args);
+        }
         let r = match site.callee {
             Callee::Direct(f) => self.call(t, f, &args),
             Callee::Indirect(v) => self.call(t, FuncId((vals[v.index()] - FN_BASE) as u32), &args),
@@ -6641,7 +6291,7 @@ impl Machine<'_> {
                         let res = match kind {
                             AllocKind::Resource { grant } => Some(Res {
                                 grant: *grant,
-                                creator: self.sched.current,
+                                creator: self.host.current(),
                                 settled: false,
                                 cell_used: false,
                             }),
@@ -6757,7 +6407,7 @@ impl Machine<'_> {
                     Err(room) => (0, room),
                 };
                 if ok == 1 {
-                    let l = Limit::new(n, Some(cur.clone()), self.sched.current);
+                    let l = Limit::new(n, Some(cur.clone()), self.host.current());
                     t.limits.push(l);
                 }
                 (vals[admitted.index()], vals[available.index()]) = (ok, room);

@@ -1,4 +1,4 @@
-use super::{Report, WorldInput, run_world};
+use super::{Core, Report, WorldInput, run_world};
 use hirsel_core_ir::{FuncId, Module};
 use std::{collections::hash_map::RandomState, hash::BuildHasher};
 
@@ -27,7 +27,10 @@ pub fn run_map_hash(
         args,
         limit,
         WorldInput {
-            map_hash_key: Some(key),
+            core: Core {
+                map_hash_key: Some(key),
+                ..Core::default()
+            },
             ..WorldInput::default()
         },
     );
@@ -49,8 +52,11 @@ pub fn run_map_observed(
         args,
         limit,
         WorldInput {
-            map_hash_key: Some(key),
-            observe_maps: true,
+            core: Core {
+                map_hash_key: Some(key),
+                observe_maps: true,
+                ..Core::default()
+            },
             events: true,
             ..WorldInput::default()
         },

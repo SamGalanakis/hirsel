@@ -1,6 +1,6 @@
 use super::*;
 
-impl Machine<'_> {
+impl<'m, H: Host<'m>> Machine<'m, H> {
     /// SEM-4, MEM-24: the rows of a List or Columns carrier at `at`. A Columns block
     /// holds column k at the sum of the columns before it, each `capacity × stride`
     /// rounded up to 8; a List is its one column. Rows are cleaned in order, each

@@ -291,6 +291,17 @@ fn samples_behave_as_derived_by_hand() {
                 ),
             };
             assert_eq!(got.outcome, want, "{name}: {run}");
+            // The pure core alone gives a world-free run the same outcome and use.
+            if injection.is_none() && argv.is_empty() {
+                let pure = eval::run_pure(&m, f, &args, limit, usize::MAX, false);
+                if !matches!(
+                    pure.outcome,
+                    eval::Outcome::Stopped("WorldOperation" | "WorldHandle")
+                ) {
+                    assert_eq!(pure.outcome, got.outcome, "{name}: {run}: pure");
+                    assert_eq!(pure.used, got.used, "{name}: {run}: pure used");
+                }
+            }
             for part in parts {
                 let (key, value) = part.trim().split_once(' ').unwrap();
                 match key {

@@ -1,6 +1,6 @@
 use super::*;
 
-impl Machine<'_> {
+impl<'m, H: Host<'m>> Machine<'m, H> {
     /// Run one activation of `f`. Its slots are frame memory: they end when the
     /// activation does, by return or by failure, so a later use of an address into
     /// them is a stop (crate docs, "Values, slots and addresses").

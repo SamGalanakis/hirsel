@@ -1,6 +1,6 @@
 use super::*;
 
-impl Machine<'_> {
+impl<'m, H: Host<'m>> Machine<'m, H> {
     pub(super) fn argon2id(&mut self, t: &mut Task, a: &[u64]) -> X<Vec<u64>> {
         use hirsel_core_net::argon2id::{self, Error, Plan};
 

@@ -59,18 +59,18 @@ impl Machine<'_> {
     }
 
     pub(super) fn secret(&self, key: u64) -> Option<&EvalSecret> {
-        let slot = self.world.secrets.get(key as usize)?.as_ref()?;
+        let slot = self.host.world.secrets.get(key as usize)?.as_ref()?;
         Some(&slot.secret)
     }
 
     /// A new designation with one holder (native `Secrets::push`).
     pub(super) fn designate(&mut self, secret: EvalSecret, charge: (Limit, u64)) -> u64 {
-        self.world.secrets.push(Some(EvalSlot {
+        self.host.world.secrets.push(Some(EvalSlot {
             secret,
             holders: 1,
             charge,
         }));
-        self.world.secrets.len() as u64 - 1
+        self.host.world.secrets.len() as u64 - 1
     }
 
     pub(super) fn store_sealed(
@@ -82,7 +82,8 @@ impl Machine<'_> {
         opaque: bool,
     ) -> u64 {
         let seal = Arc::new(());
-        self.world
+        self.host
+            .world
             .seals
             .push((Arc::downgrade(&seal), payer.clone(), charge));
         self.designate(
@@ -119,7 +120,7 @@ impl Machine<'_> {
         let mut point = [0; PUBLIC_LEN];
         let cell = self.cell(a[0]);
         let document = if let Some(cell) = cell {
-            let VirtualCell::Random(stream) = &mut self.world.cells[cell] else {
+            let VirtualCell::Random(stream) = &mut self.host.world.cells[cell] else {
                 unreachable!("a Random cell");
             };
             match p256_key::generate_virtual(
@@ -230,7 +231,8 @@ impl Machine<'_> {
                     return fail(f);
                 }
                 let seal = Arc::new(());
-                self.world
+                self.host
+                    .world
                     .seals
                     .push((Arc::downgrade(&seal), payer.clone(), charge));
                 let key = self.designate(
@@ -379,26 +381,29 @@ impl Machine<'_> {
     }
 
     pub(super) fn secret_share(&mut self, key: u64) -> u64 {
-        self.world.secrets[key as usize].as_mut().unwrap().holders += 1;
+        self.host.world.secrets[key as usize]
+            .as_mut()
+            .unwrap()
+            .holders += 1;
         key
     }
 
     /// Release one holder; the last refunds the designation's charge, and the
     /// last designation of sealed bytes refunds the seal (TLS-5).
     pub(super) fn secret_drop(&mut self, key: u64) {
-        let slot = self.world.secrets[key as usize].as_mut().unwrap();
+        let slot = self.host.world.secrets[key as usize].as_mut().unwrap();
         slot.holders -= 1;
         if slot.holders != 0 {
             return;
         }
-        let slot = self.world.secrets[key as usize].take().unwrap();
+        let slot = self.host.world.secrets[key as usize].take().unwrap();
         let (l, n) = slot.charge;
         self.refund(l, n);
         drop(slot.secret);
-        let (released, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.world.seals)
+        let (released, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.host.world.seals)
             .into_iter()
             .partition(|(token, ..)| token.strong_count() == 0);
-        self.world.seals = held;
+        self.host.world.seals = held;
         for (_, l, n) in released {
             self.refund(l, n);
         }

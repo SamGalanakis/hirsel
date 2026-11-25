@@ -24,7 +24,7 @@ impl Machine<'_> {
     /// Take channel `i`'s front item into `dest`, or return false when its queue is
     /// empty. The slot it frees wakes this channel's senders in park order.
     pub(super) fn take(&mut self, i: usize, dest: u64) -> bool {
-        let Some(bytes) = self.chans[i].queue.pop_front() else {
+        let Some(bytes) = self.host.chans[i].queue.pop_front() else {
             return false;
         };
         self.put(dest, &bytes);
@@ -35,21 +35,21 @@ impl Machine<'_> {
     /// Put an item on channel `i` unless it is closed (2) or full (1): native
     /// `publish`, which wakes a receiver parked on this channel.
     pub(super) fn publish(&mut self, i: usize, value: u64, item: TypeId) -> u64 {
-        if self.chans[i].receiver != End::Open {
+        if self.host.chans[i].receiver != End::Open {
             return 2;
         }
-        if self.chans[i].queue.len() as u64 == self.chans[i].cap {
+        if self.host.chans[i].queue.len() as u64 == self.host.chans[i].cap {
             return 1;
         }
         let n = self.held(TypeRef(item.0)) as usize;
         let bytes = self.get(value, n).to_vec();
-        self.chans[i].queue.push_back(bytes);
+        self.host.chans[i].queue.push_back(bytes);
         self.event(PUBLISH, self.chan_id(i), 0);
         self.wake(Condition::Receive(i));
         0
     }
     pub(super) fn chan_freed(&mut self, i: usize) {
-        let c = &mut self.chans[i];
+        let c = &mut self.host.chans[i];
         if c.senders == 0 && c.receiver == End::Gone {
             let (l, n) = (c.limit.take().unwrap(), c.charge);
             self.refund(l, n);

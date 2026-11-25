@@ -4,7 +4,7 @@ impl Machine<'_> {
     pub(super) fn scram_send(&mut self, t: &mut Task, args: &[u64]) -> X<Vec<u64>> {
         use hirsel_core_net::scram::Transcript;
         let key = args[0];
-        let Some((name, spent, binding)) = self.world.tls_writes.get(&(key & !3)) else {
+        let Some((name, spent, binding)) = self.host.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
         let secret = self.secret(args[1]).unwrap();
@@ -55,20 +55,20 @@ impl Machine<'_> {
                         Ok(row) => row,
                         Err(stop) => {
                             self.refund(payer, CHARGE);
-                            self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+                            self.host.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
                             return Err(stop);
                         }
                     };
                 if row[1] != 0 {
                     self.refund(payer, CHARGE);
-                    self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+                    self.host.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
                     return Ok(vec![0, 5, row[2], row[1]]);
                 }
                 at += (row[0] as usize).min(joined.len() - at);
             }
-            let id = SCRAM_BASE + self.world.next_scram;
-            self.world.next_scram += 1;
-            self.world.scrams.insert(id, (signature, payer));
+            let id = SCRAM_BASE + self.host.world.next_scram;
+            self.host.world.next_scram += 1;
+            self.host.world.scrams.insert(id, (signature, payer));
             return Ok(vec![id, 0, 0, 0]);
         }
         self.refund(payer, CHARGE);
@@ -77,7 +77,7 @@ impl Machine<'_> {
 
     pub(super) fn scram_final_len(&self, args: &[u64]) -> Vec<u64> {
         use hirsel_core_net::scram::Transcript;
-        let Some((_, _, binding)) = self.world.tls_writes.get(&(args[0] & !3)) else {
+        let Some((_, _, binding)) = self.host.world.tls_writes.get(&(args[0] & !3)) else {
             return vec![0, 1, 0, 0];
         };
         match Transcript::parse(
@@ -91,7 +91,7 @@ impl Machine<'_> {
     }
 
     pub(super) fn scram_verify(&mut self, args: &[u64]) -> Vec<u64> {
-        let (signature, payer) = self.world.scrams.remove(&args[0]).unwrap();
+        let (signature, payer) = self.host.world.scrams.remove(&args[0]).unwrap();
         let result = hirsel_core_net::scram::verify(&signature, self.carrier_bytes(args[1]));
         self.refund(payer, 32);
         vec![u64::from(result), 0, 0, 0]

@@ -46,11 +46,11 @@ fn conn(handle: u64) -> usize {
 
 impl Machine<'_> {
     pub(super) fn take_unit_notices(&mut self) {
-        let unit = self.sched.tasks[self.sched.current].unit;
-        while let Some(notice) = self.sched.tasks[unit].notices.pop_front() {
+        let unit = self.host.sched.tasks[self.host.sched.current].unit;
+        while let Some(notice) = self.host.sched.tasks[unit].notices.pop_front() {
             match notice {
-                UnitNotice::Item(i) => self.conns[i].taken += 1,
-                UnitNotice::Close(i) => self.conns[i].closed = true,
+                UnitNotice::Item(i) => self.host.conns[i].taken += 1,
+                UnitNotice::Close(i) => self.host.conns[i].closed = true,
                 UnitNotice::Refund(limit, amount) => limit.find().subtract(amount),
                 UnitNotice::HelperEnd(i) => self.end_take(unit, i),
             }
@@ -60,7 +60,7 @@ impl Machine<'_> {
     /// The unit a notice for `unit` reaches: an ended helper's notices go to
     /// its owner once the owner has taken its end (native `Port::fwd`).
     pub(super) fn unit_dest(&self, mut unit: usize) -> usize {
-        while let Some(c) = unit.checked_sub(1).and_then(|i| self.children.get(i))
+        while let Some(c) = unit.checked_sub(1).and_then(|i| self.host.children.get(i))
             && c.end_taken
             && let Some(owner) = c.unit_owner
         {
@@ -71,7 +71,7 @@ impl Machine<'_> {
 
     pub(super) fn notify(&mut self, unit: usize, notice: UnitNotice) {
         let to = self.unit_dest(unit);
-        self.sched.tasks[to].notices.push_back(notice);
+        self.host.sched.tasks[to].notices.push_back(notice);
     }
 
     /// A helper's end take: the owner gets back the task record, the unused
@@ -81,7 +81,7 @@ impl Machine<'_> {
     /// so each refunds there at its own retirement. The notices still queued
     /// at the helper follow, in order (native `end_take`).
     fn end_take(&mut self, unit: usize, i: usize) {
-        let c = &mut self.children[i];
+        let c = &mut self.host.children[i];
         c.end_taken = true;
         let lim = c.unit_limit.take().expect("a helper's limit");
         let survivors = lim.used();
@@ -100,8 +100,8 @@ impl Machine<'_> {
         if let Some(p) = primary {
             self.refund(p.limit, p.amount);
         }
-        let rest = std::mem::take(&mut self.sched.tasks[i + 1].notices);
-        self.sched.tasks[unit].notices.extend(rest);
+        let rest = std::mem::take(&mut self.host.sched.tasks[i + 1].notices);
+        self.host.sched.tasks[unit].notices.extend(rest);
     }
 
     pub(super) fn cross_owners(&self, ty: TypeRef) -> Vec<[u64; 4]> {
@@ -121,8 +121,8 @@ impl Machine<'_> {
         for owner in owners.iter().filter(|owner| owner[1] == SOCKET) {
             let key = self.load(at + owner[0], 8);
             if key & 3 != 0
-                || self.world.port_keys.contains_key(&key)
-                || self.world.tls_writes.contains_key(&key)
+                || self.host.world.port_keys.contains_key(&key)
+                || self.host.world.tls_writes.contains_key(&key)
             {
                 std::panic::resume_unwind(Box::new(RunStop("UnitSocket")));
             }
@@ -217,9 +217,9 @@ impl Machine<'_> {
         if let Err(available) = self.admit(cur, charge) {
             return Ok(vec![0, 0, available]);
         }
-        self.conns.push(Conn {
+        self.host.conns.push(Conn {
             item,
-            owner: self.sched.tasks[self.sched.current].unit,
+            owner: self.host.sched.tasks[self.host.sched.current].unit,
             cap,
             room,
             used: 0,
@@ -233,19 +233,19 @@ impl Machine<'_> {
             charge,
             limit: Some(cur.clone()),
         });
-        let c = CONN_BASE + 2 * (self.conns.len() as u64 - 1);
+        let c = CONN_BASE + 2 * (self.host.conns.len() as u64 - 1);
         Ok(vec![c, c + 1, 0])
     }
 
     pub(super) fn conn_client(&mut self, client: u64) -> Vec<u64> {
-        self.conns[conn(client)].clients += 1;
+        self.host.conns[conn(client)].clients += 1;
         vec![client]
     }
 
     /// Whether connection `i` takes an item of `charge` now; a waiting send
     /// passes only from the front of the waiting sends.
     fn conn_fits(&self, i: usize, charge: u64, ticket: Option<u64>) -> bool {
-        let c = &self.conns[i];
+        let c = &self.host.conns[i];
         let first = match ticket {
             Some(t) => c.waiting.front() == Some(&t),
             None => c.waiting.is_empty(),
@@ -254,8 +254,8 @@ impl Machine<'_> {
     }
 
     fn conn_accept(&mut self, i: usize, at: u64, owners: &[[u64; 4]]) {
-        let item = self.cross_take(at, self.conns[i].item, owners);
-        let c = &mut self.conns[i];
+        let item = self.cross_take(at, self.host.conns[i].item, owners);
+        let c = &mut self.host.conns[i];
         c.used += item.charge;
         c.queue.push_back(item);
         let owner = c.owner;
@@ -269,13 +269,13 @@ impl Machine<'_> {
         if wait {
             self.check_cancel(t)?;
         }
-        let owners = self.cross_owners(self.conns[i].item);
+        let owners = self.cross_owners(self.host.conns[i].item);
         self.check_cross_sockets(at, &owners);
         let charge = self.cross_charge(at, &owners);
-        if charge > self.conns[i].room {
+        if charge > self.host.conns[i].room {
             return Err(Stop::Cause("Bounds"));
         }
-        if !self.conns[i].inbox {
+        if !self.host.conns[i].inbox {
             return Ok(vec![1]);
         }
         if self.conn_fits(i, charge, None) {
@@ -286,23 +286,23 @@ impl Machine<'_> {
             self.event(TRY_SEND, client, 1);
             return Ok(vec![2]);
         }
-        let ticket = self.conns[i].tickets;
-        self.conns[i].tickets += 1;
-        self.conns[i].waiting.push_back(ticket);
+        let ticket = self.host.conns[i].tickets;
+        self.host.conns[i].tickets += 1;
+        self.host.conns[i].waiting.push_back(ticket);
         loop {
             self.take_unit_notices();
             // A withdrawal that wins fails the task with `Cancelled`.
             if let Err(stop) = self.check_cancel(t) {
-                self.conns[i].waiting.retain(|&w| w != ticket);
+                self.host.conns[i].waiting.retain(|&w| w != ticket);
                 self.wake(Condition::ConnSend(i));
                 return Err(stop);
             }
-            if !self.conns[i].inbox {
-                self.conns[i].waiting.retain(|&w| w != ticket);
+            if !self.host.conns[i].inbox {
+                self.host.conns[i].waiting.retain(|&w| w != ticket);
                 return Ok(vec![1]);
             }
             if self.conn_fits(i, charge, Some(ticket)) {
-                self.conns[i].waiting.pop_front();
+                self.host.conns[i].waiting.pop_front();
                 self.conn_accept(i, at, &owners);
                 // The next oldest may fit too.
                 self.wake(Condition::ConnSend(i));
@@ -327,23 +327,26 @@ impl Machine<'_> {
             if wait {
                 self.check_cancel(t)?;
             }
-            if self.conns[i].taken == 0 {
+            if self.host.conns[i].taken == 0 {
                 self.take_unit_notices();
             }
-            if self.conns[i].taken != 0 {
-                let charge = self.conns[i].queue.front().unwrap().charge;
+            if self.host.conns[i].taken != 0 {
+                let charge = self.host.conns[i].queue.front().unwrap().charge;
                 if let Err(available) = self.admit(cur, charge) {
                     return Ok(vec![2, charge, available]);
                 }
-                let item = self.conns[i].queue.pop_front().expect("the front item");
-                let owners = self.cross_owners(self.conns[i].item);
+                let item = self.host.conns[i]
+                    .queue
+                    .pop_front()
+                    .expect("the front item");
+                let owners = self.cross_owners(self.host.conns[i].item);
                 self.cross_put(dest, &item, &owners, cur);
-                self.conns[i].used -= charge;
-                self.conns[i].taken -= 1;
+                self.host.conns[i].used -= charge;
+                self.host.conns[i].taken -= 1;
                 self.wake(Condition::ConnSend(i));
                 return Ok(vec![0, 0, 0]);
             }
-            if self.conns[i].closed {
+            if self.host.conns[i].closed {
                 return Ok(vec![1, 0, 0]);
             }
             if !wait {
@@ -356,8 +359,8 @@ impl Machine<'_> {
 
     pub(super) fn client_drop(&mut self, client: u64) {
         let i = conn(client);
-        self.conns[i].clients -= 1;
-        let c = &self.conns[i];
+        self.host.conns[i].clients -= 1;
+        let c = &self.host.conns[i];
         if c.clients == 0 && c.inbox {
             let owner = c.owner;
             self.notify(owner, UnitNotice::Close(i));
@@ -370,15 +373,15 @@ impl Machine<'_> {
     /// `Closed`, and drops what was not received, last accepted first.
     pub(super) fn inbox_drop(&mut self, inbox: u64) {
         let i = conn(inbox);
-        self.conns[i].inbox = false;
+        self.host.conns[i].inbox = false;
         self.take_unit_notices();
         self.wake(Condition::ConnSend(i));
-        let owners = self.cross_owners(self.conns[i].item);
-        while let Some(item) = self.conns[i].queue.pop_back() {
-            self.conns[i].used -= item.charge;
+        let owners = self.cross_owners(self.host.conns[i].item);
+        while let Some(item) = self.host.conns[i].queue.pop_back() {
+            self.host.conns[i].used -= item.charge;
             self.cross_discard(&item, &owners);
         }
-        self.conns[i].taken = 0;
+        self.host.conns[i].taken = 0;
         self.conn_freed(i);
         self.take_unit_notices();
     }
@@ -387,14 +390,14 @@ impl Machine<'_> {
     /// becomes spendable at the owner's next take; the owner's own release is
     /// a take for its own retirement, through its notice in order.
     fn conn_freed(&mut self, i: usize) {
-        let c = &mut self.conns[i];
+        let c = &mut self.host.conns[i];
         if c.clients == 0
             && !c.inbox
             && let Some(limit) = c.limit.take()
         {
             let (owner, charge) = (c.owner, c.charge);
             self.notify(owner, UnitNotice::Refund(limit, charge));
-            if self.unit_dest(owner) == self.sched.tasks[self.sched.current].unit {
+            if self.unit_dest(owner) == self.host.sched.tasks[self.host.sched.current].unit {
                 self.take_unit_notices();
             }
         }

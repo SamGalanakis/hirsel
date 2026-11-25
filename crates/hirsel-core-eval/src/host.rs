@@ -4,19 +4,24 @@ impl Machine<'_> {
     /// NET-18 part 2: a served Net connect only `Public` rules cover, which
     /// its server is told.
     pub(super) fn public_only(&self, a: &[u64]) -> bool {
-        self.world.network.grants.get(&a[0]).is_some_and(|rules| {
-            let rules = rules.iter().filter_map(|rule| match rule {
-                hirsel_core_net::GrantRule::Address(rule) => Some(*rule),
-                _ => None,
-            });
-            hirsel_core_net::public_only(rules, a[1] as u8, a[2], a[3], a[4] as u16)
-        })
+        self.host
+            .world
+            .network
+            .grants
+            .get(&a[0])
+            .is_some_and(|rules| {
+                let rules = rules.iter().filter_map(|rule| match rule {
+                    hirsel_core_net::GrantRule::Address(rule) => Some(*rule),
+                    _ => None,
+                });
+                hirsel_core_net::public_only(rules, a[1] as u8, a[2], a[3], a[4] as u16)
+            })
     }
 
     /// A public-only connect its server answered `Denied` counts as `own_address`.
     pub(super) fn own_address(&mut self, public: bool, port: usize, row: Vec<u64>) -> Vec<u64> {
         if public && row[1] == 1 {
-            *self.world.own_address.entry(Some(port)).or_default() += 1;
+            *self.host.world.own_address.entry(Some(port)).or_default() += 1;
         }
         row
     }
@@ -70,6 +75,7 @@ impl Machine<'_> {
             }
             HostOp::SendPair
                 if self
+                    .host
                     .world
                     .tls_writes
                     .get(&(a[0] & !3))
@@ -247,12 +253,12 @@ impl Machine<'_> {
                 vec![a[0] | 1, 0, 0, a[0] | 2]
             }
             HostOp::NetSplit => {
-                let (read, write) = self.world.network.sockets.split(a[0]);
+                let (read, write) = self.host.world.network.sockets.split(a[0]);
                 vec![read, 0, 0, write]
             }
             HostOp::NetJoin
                 if (a[0] & !3) == (a[1] & !3)
-                    && !self.world.tls_writes.contains_key(&(a[0] & !3))
+                    && !self.host.world.tls_writes.contains_key(&(a[0] & !3))
                     && self.port_join(a[0]) =>
             {
                 ok(a[0] & !3, 0)
@@ -269,10 +275,20 @@ impl Machine<'_> {
                 0,
             ),
             HostOp::NetDenials => {
-                let provider = self.world.net_ports.get(&a[0]).copied();
+                let provider = self.host.world.net_ports.get(&a[0]).copied();
                 ok(
-                    self.world.not_public.get(&provider).copied().unwrap_or(0),
-                    self.world.own_address.get(&provider).copied().unwrap_or(0),
+                    self.host
+                        .world
+                        .not_public
+                        .get(&provider)
+                        .copied()
+                        .unwrap_or(0),
+                    self.host
+                        .world
+                        .own_address
+                        .get(&provider)
+                        .copied()
+                        .unwrap_or(0),
                 )
             }
             HostOp::NetNarrow => {
@@ -291,13 +307,14 @@ impl Machine<'_> {
                 self.narrow_add(a[0], rule.map(hirsel_core_net::GrantRule::Address))
             }
             HostOp::NetNarrowBegin => {
-                let narrowing = &mut self.world.narrowing;
+                let narrowing = &mut self.host.world.narrowing;
                 let key = narrowing.last_key_value().map_or(1, |(&key, _)| key + 1);
                 narrowing.insert(key, (a[0], Vec::new(), false));
                 ok(key, 0)
             }
             HostOp::NetNarrowEnd => {
                 let (parent, rules, invalid) = self
+                    .host
                     .world
                     .narrowing
                     .remove(&a[0])
@@ -315,10 +332,10 @@ impl Machine<'_> {
                     self.load(a[1] + 16, 8),
                 );
                 let n = (cap.saturating_sub(len) as usize)
-                    .min(self.world.stdin.len())
+                    .min(self.host.world.stdin.len())
                     .min(64 * 1024);
                 if n != 0 {
-                    let bytes: Vec<_> = self.world.stdin.drain(..n).collect();
+                    let bytes: Vec<_> = self.host.world.stdin.drain(..n).collect();
                     self.put(data + len, &bytes);
                     self.store(a[1] + 8, 8, len + n as u64);
                 }
@@ -326,7 +343,7 @@ impl Machine<'_> {
             }
             HostOp::Stopped => {
                 // The model has no OS signal source. Cancellation still wakes this wait.
-                self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+                self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
                 self.park(Some(Wait::Stop));
                 self.check_cancel(t)?;
                 vec![]
@@ -338,10 +355,11 @@ impl Machine<'_> {
                 // monotonic readings are one counter, so a wall wait is this
                 // same wait.
                 let deadline = a[1];
-                if deadline > self.world.clock {
-                    self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+                if deadline > self.host.world.clock {
+                    self.host.sched.tasks[t.k].cancellable =
+                        t.shield == 0 && t.obligations.len() == 1;
                     self.park(Some(Wait::Sleep(deadline)));
-                    if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                    if std::mem::take(&mut self.host.sched.tasks[t.k].cancelled) {
                         self.check_cancel(t)?;
                     }
                 }
@@ -351,15 +369,15 @@ impl Machine<'_> {
                 // The host clock is monotonic (native reads CLOCK_MONOTONIC,
                 // hirsel-core-rt os::monotonic_ns): a read after a sleep to the
                 // maximum deadline stays there instead of wrapping (CONC-7).
-                self.world.clock = self.world.clock.saturating_add(1);
-                vec![self.world.clock]
+                self.host.world.clock = self.host.world.clock.saturating_add(1);
+                vec![self.host.world.clock]
             }
             HostOp::Stdout | HostOp::Stderr => {
                 let (bytes, ..) = self.carrier(a[1]);
                 let n = bytes.len() as u64;
                 match op {
-                    HostOp::Stdout => self.world.stdout.extend(bytes),
-                    _ => self.world.stderr.extend(bytes),
+                    HostOp::Stdout => self.host.world.stdout.extend(bytes),
+                    _ => self.host.world.stderr.extend(bytes),
                 }
                 ok(0, n)
             }
@@ -367,19 +385,19 @@ impl Machine<'_> {
                 let (_, data, len, cap) = self.carrier(a[1]);
                 let spare = cap.saturating_sub(len) as usize;
                 let bytes = (0..spare)
-                    .map(|i| self.world.random.wrapping_add(i as u8))
+                    .map(|i| self.host.world.random.wrapping_add(i as u8))
                     .collect::<Vec<_>>();
-                self.world.random = self.world.random.wrapping_add(spare as u8);
+                self.host.world.random = self.host.world.random.wrapping_add(spare as u8);
                 self.put(data + len, &bytes);
                 self.store(a[1] + 8, 8, len + spare as u64);
                 ok(0, spare as u64)
             }
             HostOp::Open => {
-                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                let key = match self.host.world.dir_key(a[0], self.carrier_bytes(a[1])) {
                     Ok(key) => key,
                     Err(e) => return Ok(resolve(e)),
                 };
-                let w = &mut self.world;
+                let w = &mut self.host.world;
                 let mode = a[2] as u8;
                 let file = match (w.nodes.get(&key), mode) {
                     (Some(Node::Dir(_)), _) => return Ok(error(DENIED)),
@@ -410,7 +428,7 @@ impl Machine<'_> {
                 }));
                 ok(FILE_BASE + w.files.len() as u64 - 1, 0)
             }
-            HostOp::OpenDir => match self.world.find_dir(a[0], self.carrier_bytes(a[1])) {
+            HostOp::OpenDir => match self.host.world.find_dir(a[0], self.carrier_bytes(a[1])) {
                 Ok(dir) => ok(dir | (a[0] & DIR_READ_ONLY), 0),
                 Err(e) => resolve(e),
             },
@@ -418,12 +436,13 @@ impl Machine<'_> {
                 let dir = if a[1] == 0 {
                     a[0]
                 } else {
-                    match self.world.find_dir(a[0], self.carrier_bytes(a[1])) {
+                    match self.host.world.find_dir(a[0], self.carrier_bytes(a[1])) {
                         Ok(dir) => dir,
                         Err(e) => return Ok(resolve(e)),
                     }
                 };
                 let records = self
+                    .host
                     .world
                     .children(dir)
                     .map(|((_, name), node)| {
@@ -434,8 +453,8 @@ impl Machine<'_> {
                         record
                     })
                     .collect();
-                let h = LISTING_HANDLE | self.world.listings.len() as u64;
-                self.world.listings.push(Some(records));
+                let h = LISTING_HANDLE | self.host.world.listings.len() as u64;
+                self.host.world.listings.push(Some(records));
                 ok(h, 0)
             }
             HostOp::NextEntries => {
@@ -444,7 +463,8 @@ impl Machine<'_> {
                 if spare < 258 {
                     return Err(Stop::Cause("Bounds"));
                 }
-                let Some(records) = self.world.listings[(a[0] & !LISTING_HANDLE) as usize].as_mut()
+                let Some(records) =
+                    self.host.world.listings[(a[0] & !LISTING_HANDLE) as usize].as_mut()
                 else {
                     return Ok(error(CLOSED));
                 };
@@ -464,11 +484,11 @@ impl Machine<'_> {
                 ok(count, 0)
             }
             HostOp::Stat => {
-                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                let key = match self.host.world.dir_key(a[0], self.carrier_bytes(a[1])) {
                     Ok(key) => key,
                     Err(e) => return Ok(stat_error(e)),
                 };
-                match self.world.nodes.get(&key) {
+                match self.host.world.nodes.get(&key) {
                     Some(Node::Dir(_)) => stat(1, 0, 0),
                     Some(Node::File(f)) => {
                         let f = f.lock().unwrap();
@@ -478,7 +498,7 @@ impl Machine<'_> {
                 }
             }
             HostOp::StatFile => {
-                if let Some(f) = &self.world.files[file(a[0])] {
+                if let Some(f) = &self.host.world.files[file(a[0])] {
                     let f = f.file.lock().unwrap();
                     stat(0, f.len, f.modified_ns)
                 } else {
@@ -490,7 +510,7 @@ impl Machine<'_> {
                 let buffer = a[if positioned { 2 } else { 1 }];
                 let (_, data, len, cap) = self.carrier(buffer);
                 let i = file(a[0]);
-                let Some(f) = self.world.files[i].as_ref() else {
+                let Some(f) = self.host.world.files[i].as_ref() else {
                     return Ok(error(CLOSED));
                 };
                 if positioned && !matches!(f.mode, 0 | 4) {
@@ -507,7 +527,7 @@ impl Machine<'_> {
                     self.store(buffer + 8, 8, len + n as u64);
                 }
                 if !positioned {
-                    self.world.files[i].as_mut().unwrap().at += n as u64;
+                    self.host.world.files[i].as_mut().unwrap().at += n as u64;
                 }
                 ok(n as u64, 0)
             }
@@ -516,7 +536,7 @@ impl Machine<'_> {
                 let (bytes, data, ..) = self.carrier(a[if positioned { 2 } else { 1 }]);
                 let i = file(a[0]);
                 if positioned
-                    && self.world.files[i]
+                    && self.host.world.files[i]
                         .as_ref()
                         .is_some_and(|f| f.mode == MODE_DIRECT)
                 {
@@ -530,7 +550,7 @@ impl Machine<'_> {
                         return Ok(vec![0, 5, 22, 0]); // Other(EINVAL)
                     }
                 }
-                if self.world.files[i]
+                if self.host.world.files[i]
                     .as_ref()
                     .is_some_and(|f| f.read_only_dir)
                 {
@@ -539,7 +559,7 @@ impl Machine<'_> {
                 if positioned && a[1].checked_add(bytes.len() as u64).is_none() {
                     return Err(Stop::Cause("Bounds"));
                 }
-                let Some(f) = self.world.files[i].as_mut() else {
+                let Some(f) = self.host.world.files[i].as_mut() else {
                     return Ok(error(CLOSED));
                 };
                 if positioned && !matches!(f.mode, 1 | 3 | 4 | MODE_DURABLE | MODE_DIRECT) {
@@ -561,7 +581,7 @@ impl Machine<'_> {
                     return Ok(vec![0, 5, 27, 0]); // Other(EFBIG)
                 }
                 c.write(at, &bytes);
-                c.modified_ns = self.world.clock.min(i64::MAX as u64);
+                c.modified_ns = self.host.world.clock.min(i64::MAX as u64);
                 if !positioned {
                     f.at = end;
                 }
@@ -569,13 +589,13 @@ impl Machine<'_> {
             }
             HostOp::Close => {
                 let i = file(a[0]);
-                self.world.files[i] = None;
+                self.host.world.files[i] = None;
                 ok(0, 0)
             }
             HostOp::TryLock | HostOp::Unlock => {
                 let i = file(a[0]);
-                let open = self.world.files[i].as_ref().expect("an open file");
-                let held = self.world.files.iter().enumerate().any(|(j, f)| {
+                let open = self.host.world.files[i].as_ref().expect("an open file");
+                let held = self.host.world.files.iter().enumerate().any(|(j, f)| {
                     j != i
                         && f.as_ref()
                             .is_some_and(|f| f.locked && Arc::ptr_eq(&f.file, &open.file))
@@ -584,59 +604,59 @@ impl Machine<'_> {
                 if take && held {
                     return Ok(ok(0, 0));
                 }
-                self.world.files[i].as_mut().unwrap().locked = take;
+                self.host.world.files[i].as_mut().unwrap().locked = take;
                 ok(u64::from(take), 0)
             }
             HostOp::Mkdir => {
-                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                let key = match self.host.world.dir_key(a[0], self.carrier_bytes(a[1])) {
                     Ok(key) => key,
                     Err(e) => return Ok(resolve(e)),
                 };
-                if self.world.nodes.contains_key(&key) {
+                if self.host.world.nodes.contains_key(&key) {
                     return Ok(error(EXISTS));
                 }
-                self.world.new_dir(key);
+                self.host.world.new_dir(key);
                 ok(0, 0)
             }
             HostOp::Rename => {
-                let from = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                let from = match self.host.world.dir_key(a[0], self.carrier_bytes(a[1])) {
                     Ok(key) => key,
                     Err(e) => return Ok(resolve(e)),
                 };
-                let to = match self.world.dir_key(a[0], self.carrier_bytes(a[2])) {
+                let to = match self.host.world.dir_key(a[0], self.carrier_bytes(a[2])) {
                     Ok(key) => key,
                     Err(e) => return Ok(resolve(e)),
                 };
                 // core.md: a regular file `from` takes the name `to` in the one `Dir`,
                 // replacing a regular file there; anything else at either name is
                 // `Denied` and renames nothing.
-                match self.world.nodes.get(&from) {
+                match self.host.world.nodes.get(&from) {
                     None => return Ok(error(NOT_FOUND)),
                     Some(Node::Dir(_)) => return Ok(error(DENIED)),
                     Some(Node::File(_)) => {}
                 }
-                if let Some(Node::Dir(_)) = self.world.nodes.get(&to) {
+                if let Some(Node::Dir(_)) = self.host.world.nodes.get(&to) {
                     return Ok(error(DENIED));
                 }
                 // The same name: removed and put back, unchanged.
-                let node = self.world.nodes.remove(&from).unwrap();
-                self.world.nodes.insert(to, node);
+                let node = self.host.world.nodes.remove(&from).unwrap();
+                self.host.world.nodes.insert(to, node);
                 ok(0, 0)
             }
             HostOp::Remove | HostOp::RemoveTree => {
-                let key = match self.world.dir_key(a[0], self.carrier_bytes(a[1])) {
+                let key = match self.host.world.dir_key(a[0], self.carrier_bytes(a[1])) {
                     Ok(key) => key,
                     Err(e) => return Ok(resolve(e)),
                 };
-                if let Some(Node::Dir(dir)) = self.world.nodes.get(&key) {
+                if let Some(Node::Dir(dir)) = self.host.world.nodes.get(&key) {
                     let dir = *dir;
                     if op == HostOp::RemoveTree {
-                        self.world.remove_children(dir);
-                    } else if self.world.children(dir).next().is_some() {
+                        self.host.world.remove_children(dir);
+                    } else if self.host.world.children(dir).next().is_some() {
                         return Ok(resolve((OTHER, 39))); // ENOTEMPTY
                     }
                 }
-                match self.world.nodes.remove(&key) {
+                match self.host.world.nodes.remove(&key) {
                     Some(_) => ok(0, 0),
                     None => error(NOT_FOUND),
                 }
@@ -650,33 +670,36 @@ impl Machine<'_> {
                     return Ok(error(DENIED));
                 }
                 for _ in 0..128 {
-                    let k = self.world.temporaries;
-                    self.world.temporaries += 1;
+                    let k = self.host.world.temporaries;
+                    self.host.world.temporaries += 1;
                     let suffix = format!("t{k}").into_bytes();
                     let full = [prefix.as_slice(), &suffix].concat();
                     if full.len() > 255 {
                         return Ok(resolve((OTHER, 36))); // ENAMETOOLONG
                     }
                     let key = (a[0], full);
-                    if !self.world.nodes.contains_key(&key) {
+                    if !self.host.world.nodes.contains_key(&key) {
                         self.put(data + len, &suffix);
                         self.store(a[1] + 8, 8, len + suffix.len() as u64);
                         if op == HostOp::Mkdtemp {
-                            return Ok(ok(self.world.new_dir(key), 0));
+                            return Ok(ok(self.host.world.new_dir(key), 0));
                         }
                         let file = Arc::new(Mutex::new(ModelFile {
-                            modified_ns: self.world.clock.min(i64::MAX as u64),
+                            modified_ns: self.host.world.clock.min(i64::MAX as u64),
                             ..ModelFile::default()
                         }));
-                        self.world.nodes.insert(key, Node::File(Arc::clone(&file)));
-                        self.world.files.push(Some(OpenFile {
+                        self.host
+                            .world
+                            .nodes
+                            .insert(key, Node::File(Arc::clone(&file)));
+                        self.host.world.files.push(Some(OpenFile {
                             file,
                             at: 0,
                             locked: false,
                             mode: 3,
                             read_only_dir: false,
                         }));
-                        return Ok(ok(FILE_BASE + self.world.files.len() as u64 - 1, 0));
+                        return Ok(ok(FILE_BASE + self.host.world.files.len() as u64 - 1, 0));
                     }
                 }
                 resolve((OTHER, 11)) // EAGAIN

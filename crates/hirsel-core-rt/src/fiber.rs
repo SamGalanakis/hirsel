@@ -166,6 +166,7 @@ impl Stack {
         struct Frame<T, F> {
             call: Option<F>,
             previous: *mut u8,
+            bounds: (usize, usize),
             result: std::mem::MaybeUninit<T>,
         }
         unsafe extern "C" fn invoke<T, F: FnOnce() -> T>(first: *mut u8, _: *mut u8) -> ! {
@@ -173,6 +174,9 @@ impl Stack {
             // own it. The single invocation initializes the result.
             unsafe {
                 let frame = first.cast::<Frame<T, F>>();
+                // This stack is current from its first frame on, and stays
+                // current while the switch back saves registers on it.
+                GUARD.set((*frame).bounds);
                 let call = (*frame).call.take().unwrap();
                 (*frame).result.write(call());
                 let mut discard = std::ptr::null_mut();
@@ -183,6 +187,7 @@ impl Stack {
         let mut frame = Frame {
             call: Some(call),
             previous: std::ptr::null_mut(),
+            bounds: self.bounds(),
             result: std::mem::MaybeUninit::uninit(),
         };
         // SAFETY: the borrowed stack is idle. Only invoke can switch back,
@@ -193,7 +198,10 @@ impl Stack {
                 (&raw mut frame).cast(),
                 std::ptr::null_mut(),
             );
-            let previous = GUARD.replace(self.bounds());
+            // The switch saves registers on this stack, which may cross its
+            // commit edge: the fault handler grows only the stack the guard
+            // names, so the guard names this one until `invoke` runs.
+            let previous = GUARD.get();
             hirsel_stack::switch(&raw mut frame.previous, start);
             GUARD.set(previous);
             frame.result.assume_init()

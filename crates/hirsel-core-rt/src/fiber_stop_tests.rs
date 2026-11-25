@@ -267,3 +267,70 @@ fn discarding_below_a_parked_stack_keeps_its_live_frames() {
     }
     assert_eq!(state.result, 23);
 }
+
+/// Law: a call onto another stack from anywhere in a task's stack returns,
+/// even when the switch's register save is the first touch below the caller's
+/// writable part. That save must grow the caller's stack like any other touch,
+/// so the guard still names the caller while the switch writes there.
+///
+/// The child starts a body at each 16-byte offset over 16 KiB above a fresh
+/// stack's commit edge and calls onto a second stack from it, so one offset
+/// puts the switch's save just below the edge. A guard that named the callee
+/// first sends that fault to the default handler: the child dies of SIGSEGV
+/// (a native law whose task called a foreign function 64 KiB deep did).
+#[test]
+fn a_call_from_a_task_at_its_commit_edge_grows_the_caller() {
+    let output = crate::test_process::command()
+        .args([
+            "--ignored",
+            "--exact",
+            "fiber::stop_tests::commit_edge_call_child",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+#[ignore = "isolated commit-edge calls, invoked by the named parent"]
+fn commit_edge_call_child() {
+    struct Edge {
+        callee: *const super::Stack,
+        caller: *mut u8,
+        result: u64,
+    }
+    unsafe extern "C" fn body(first: *mut u8, _: *mut u8) -> ! {
+        let edge = first.cast::<Edge>();
+        // SAFETY: the parent pins the state and both stacks until it resumes;
+        // the callee stack is idle and the call does not switch.
+        unsafe {
+            (*edge).result = (*(*edge).callee).call(|| std::hint::black_box(7_u64));
+            let mut discard = std::ptr::null_mut();
+            hirsel_stack::switch(&mut discard, (*edge).caller);
+        }
+        unreachable!()
+    }
+    super::arm();
+    for offset in (0..16 << 10).step_by(16) {
+        let caller = super::Stack::new();
+        let callee = super::Stack::new();
+        let mut edge = Edge {
+            callee: &callee,
+            caller: std::ptr::null_mut(),
+            result: 0,
+        };
+        let words = hirsel_stack::initial_frame(body, (&raw mut edge).cast(), std::ptr::null_mut());
+        let edge_address = caller.top() - super::COMMIT;
+        // SAFETY: the frame lies in the caller's writable part, 16-aligned.
+        // Only one stack runs at a time, and the body switches back once.
+        unsafe {
+            let start = std::ptr::with_exposed_provenance_mut::<u8>(edge_address + offset);
+            std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), start, size_of_val(&words));
+            super::guard(caller.bounds());
+            hirsel_stack::switch(&raw mut edge.caller, start);
+        }
+        super::guard((0, 0));
+        assert_eq!(edge.result, 7, "offset {offset}");
+    }
+}

@@ -22,11 +22,13 @@ type Sig {
     out: List[runner.room_client.RoomOut[signal.Signal]],
     members: List[Member],
     // Published (peer, publication), Fenced (peer, epoch, capture index when sent),
-    // Refused (peer, code) and the peers sent an Answer.
+    // Refused (peer, code), the peers sent an Answer and the re-offers sent (peer,
+    // origin version).
     pubs: List[(u32, u64)],
     fenced: List[(u32, u64, u64)],
     refused: List[(u32, u32)],
     answered: List[u32],
+    offers: List[(u32, u64)],
     // The case run, and the admissions its oracle revokes: no unit may route the room
     // while one of them is not fenced there.
     loss: Loss,
@@ -73,6 +75,7 @@ fn read_room_out(mut r: Sig) {
             ToPeer(p, take s) => match take s {
                 Refused(c) => list.push(mut r.refused, (p, c)),
                 Answer(_, _) => list.push(mut r.answered, p),
+                Offer(v, _) => list.push(mut r.offers, (p, v)),
                 _ => (),
             },
         }
@@ -189,7 +192,7 @@ fn opened_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
     })
     let mut a = signal.adapter(room_id(), revoke_limits(), take embed, 2)
     signal.you(mut a, Some(YOU))
-    let mut r = Sig(h: take h, a: take a, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), loss: loss, revoking: list.new())
+    let mut r = Sig(h: take h, a: take a, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), offers: list.new(), loss: loss, revoking: list.new())
     enter_room(mut r, Part(inc_of(1), 5, true, true))
     enter_room(mut r, Joined(YOU))
     for p in 1u32 .. 4u32 {
@@ -546,6 +549,87 @@ fn loss_run(net: Net, clock: Clock, loss: Loss) waits {
     close_hall(take h)
 }
 
+// RTC-4 through the adapter: peer 2, on unit 1, sends on the down-track SSRC it
+// receives peer 1 on. Unit 1 raises the re-offer, which reaches unit 0 as a carry and
+// peer 2 as one `Offer`; peer 2 answers it at the wrong version, so the answer crosses
+// back to unit 1 and the refusal's `Shut` returns to unit 0. The adapter revokes the
+// admission and peer 2 rejoins on its id at the next epoch.
+fn reoffer_run(net: Net, clock: Clock) waits {
+    let mut r = opened_room(net, clock, 16000, Continued)
+    chatter_all(mut r, 20)
+    let two = seat_of_peer(r, 2)
+    if two.home != 1 {
+        fail("peer 2 is not on unit 1")
+    }
+    let Gen(id: id, epoch: epoch) = two.gen
+    let (m, _) = down_track(r, 2, 1)
+    let clash = tagged(mut r.h.peers[two.index].c.cs, m, 7, mark_for(2))
+    send_from(mut r.h, two.index, clash)
+    let mut t = 0u64
+    while list.len(r.offers) == 0 {
+        if t >= 32 {
+            fail("the collision sent peer 2 no re-offer")
+        }
+        turn_all(mut r)
+        t += 1
+    }
+    chatter_all(mut r, 8)
+    if list.len(r.offers) != 1 {
+        fail("the collision sent more than one re-offer")
+    }
+    let (p, version) = r.offers[0]
+    if p != 2 || version != 2 {
+        fail("the re-offer went to another peer or at another version than 2")
+    }
+    let refused_at = list.len(r.h.seen)
+    say_as(mut r, 2, Answer(version + 1, b"answer"))
+    talk_through(mut r)
+    let mut fenced_at = list.len(r.h.seen)
+    let mut n = 0u64
+    for (q, e, at) in r.fenced {
+        if q == 2 {
+            if e != epoch {
+                fail("Fenced named another epoch than the refused admission's")
+            }
+            fenced_at = at
+            n += 1
+        } else {
+            fail("a peer other than 2 was fenced")
+        }
+    }
+    if n != 1 {
+        fail("the refused re-offer did not fence peer 2 exactly once")
+    }
+    for k in 0u16 .. 3u16 {
+        if !router.fenced(router_on(r.h, k), room_id(), two.gen) {
+            fail("the refused admission was not fenced on every unit")
+        }
+    }
+    for i in fenced_at .. list.len(r.h.seen) {
+        let s = r.h.seen[i]
+        if s.kind == KIND_RTP && (s.to == addr_of(2) || s.mark == mark_for(2)) {
+            fail("media reached or left peer 2 after its fence")
+        }
+    }
+    for (a, b) in[(1u32, 3u32), (3u32, 1u32)] {
+        let (ssrc, _) = down_track(r, a, b)
+        if !reaches_from(r.h, refused_at, a, ssrc, b) {
+            fail("media between peers 1 and 3 stopped at the refusal")
+        }
+    }
+    say_as(mut r, 2, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    let builds = signal.take_builds(mut r.a)
+    if list.len(builds) != 1 {
+        fail("peer 2's fresh offer asked no single build")
+    }
+    let Gen(id: again, epoch: next) = builds[0].who.gen
+    if again != id || next <= epoch {
+        fail("peer 2 did not rejoin on its id at a later epoch")
+    }
+    let Sig(h: take h, ..) = take r
+    close_hall(take h)
+}
+
 /// bug: the adapter forwards anything between `Lost` and resume, lets media or a
 /// repair queued at the loss leave, resumes from a roster it has not proven (a stale
 /// snapshot, a scratch roster seeded from the pre-gap one under a new membership, a
@@ -565,6 +649,13 @@ fn loss_run(net: Net, clock: Clock, loss: Loss) waits {
 /// room is still suspended 200 ms after the stale snapshot; in (g) a message in the
 /// Part is `Refused(Suspended)`. Seeded: (b) is red on a scratch roster seeded from
 /// the pre-gap one, (c) on a comparison made at the Part head.
+/// bug (re-offer): the adapter drops a re-offer raised on another unit, keeps a
+/// participant whose re-offer was refused, or rejoins it on another id.
+/// oracle: RTC-4 by hand: peer 2's packet on its down-track SSRC from peer 1 yields
+/// one `Offer` at origin version 2 to peer 2 only; an answer at version 3 yields one
+/// `Fenced(2, e)` at peer 2's admitted epoch, fenced on all three units, after which
+/// no RTP goes to or comes from peer 2 while peers 1 and 3 keep reaching each other;
+/// peer 2's next offer builds at its id and an epoch above e.
 @test
 fn signaling_loss_fails_closed(tasks: Tasks) -> Result[(), router.RouterError] waits {
     for loss in[Continued, Image, LeftInSnapshot, Stale, Incarnation, Headless, Unheralded] {
@@ -572,5 +663,8 @@ fn signaling_loss_fails_closed(tasks: Tasks) -> Result[(), router.RouterError] w
         loss_run(net, clock, loss)
         result.unwrap(task.join(take served))
     }
+    let (net, clock, take served) = sim_net(tasks, 16000)
+    reoffer_run(net, clock)
+    result.unwrap(task.join(take served))
     Ok(())
 }

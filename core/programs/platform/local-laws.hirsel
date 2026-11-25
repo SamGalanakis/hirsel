@@ -619,6 +619,10 @@ fn serve_fits(take config: runner.PlaceConfig[(), (), ()], tasks: Tasks) -> Resu
     }
 }
 
+fn serve_share(take config: runner.PlaceConfig[(), (), ()]) -> u64 {
+    runtime.root_limit() - result.unwrap(runner.operate_bytes(config)) - 1048576u64
+}
+
 fn serve_shortfall(take config: runner.PlaceConfig[(), (), ()]) -> Result[runner.Ended, runner.StartError] waits {
     let (stopping, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
     let _ = take stopping
@@ -632,10 +636,17 @@ fn test_platform_serve_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net
     }
     serve_fits(serve_budget_config(Memory, c, r, tasks, n), tasks)?
     serve_fits(serve_budget_config(Temp(d), c, r, tasks, n), tasks)?
+    // RUNNER-SPEC "Store sizes": the share is the root limit − operate_bytes − the
+    // 1 MiB main keeps, and Store's Shortage at that share is the refusal.
     let limited = serve_budget_config(Memory, c, r, tasks, n)
+    let sizing = task.spawn(tasks, bytes 12582912u64, serve_budget_config(Memory, c, r, tasks, n), serve_share)
+    let share = result.unwrap(task.join(take sizing))
+    let Error(short) = store.planned(Memory, share, store.derived_sizes()) else {
+        return Error("L60: the law's share must be short for a Memory store")
+    }
     let child = task.spawn(tasks, bytes 12582912u64, take limited, serve_shortfall)
     match task.join(take child) {
-        Ok(Error(Full(cap))) if cap.requested == 2097152u64 && cap.available == 1238473u64 => Ok(()),
+        Ok(Error(Full(cap))) if short.have == share && cap.requested == short.need && cap.available == share => Ok(()),
         _ => Error("L60: platform.serve must report the exact Store shortage"),
     }
 }

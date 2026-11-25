@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.82: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.83: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,21 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.83 (in-process places on every core, reached without sockets; lane platform-local-scale-2815)
+
+Text first; the build follows in slices in the same lane, and each slice's state is named in §14.11 "Slices". The evidence is Atropia's lash_swarm per-agent ladder (hirsel-briefs/atropia-perf-1126): 500 in-process places in one process peaked at 92.7% CPU, and each place held a loopback listener, an accept task, a clock provider and about 6 FDs (62,058 FDs at 10,000 places).
+
+| # | Item | Change | Where |
+|---|---|---|---|
+| 1 | The in-process transport | **NEW** | §14.11 "Transport". An in-process place takes its sessions through a dial handle, over typed connections that carry the same frames a WebSocket binary message carries. The checks run in the same owner and in the same order as over TCP: session limit, drain admission, Hello deadline and binding, message bound, credits and close codes. |
+| 2 | No listener per in-process place | **CHANGED** | §14.9, §14.11 "External access". `PlaceConfig.listen` is `Listen = Tcp(Addr) \| InProcess(Dials)`. `local` sets `InProcess`, so its places bind nothing, and `Status.addr` is `None`. A host program reaches the outside through its own front, which is one listener per host (the harness gateway's HTTP front is one), and that front reaches places by dialing. |
+| 3 | Shards | **NEW** | §14.11 "Shards". `local` runs places on `Config.units` helper units. Each place starts on the unit with the most room. A place stays on that unit until it ends, and it is placed again at every start. A unit receives a fixed share of `place_bytes`. |
+| 4 | Factory and seed | **CHANGED** | §14.11 "What crosses". `make` runs in the place's unit. The seed is `T: cross`, and the factory's `copy` makes one seed per unit. |
+| 5 | Attack surface | **NEW** | §14.11 "Co-located places". |
+| 6 | Laws | **NEW: `local_dial_parity`, `local_stale_dial`, `local_units_run_together`** | §14.11 "Laws". |
+
+**Decisions, each reversible with no stored format.** The pool size is a Config field, not derived from cores. Placement is not sticky. A unit's share is `place_bytes / units`. External access belongs to the host's front, not to a per-place lazy listener. The `/wholehog` end state of each decision is argued in §14.11.
 
 ## CHANGES-v2.82 (self-editing amended after the soundness review; lane self-edit-build-1c-2808)
 
@@ -2749,9 +2764,9 @@ these groups runs on their first serving start at activation 0.
 
 **Ends.** When the place reaches `Ready`, the actor checks its `Status.store_id` against the store the host recorded and reports `PlaceOpened`. A mismatch is reported `PlaceStoreMismatch` and the place is stopped. A start that fails `NotCurrent(Active)` is reported `PlaceCurrent`, with the probe's read when §14.3 asks for one. These places run on `Disk`, so that read is log@1's, under `LOCK`, and an in-process place starts no `FollowerService` (v2.54). When `operate` returns, the actor reports the end with the child's `gen`: `Stopped(next_due)` is exit 0 with the report, `Unstarted` is exit 0 with none, and anything else is exit 1. (v2.32) The routes waiting on a group whose start failed are refused only after the host has applied the end, and only if the host did not start the group again at once (§14.5 "Genesis", "Failing and backoff", and v2.39's adoption relaunch, §14.3 "Leaving no record"). So §14.4's clean-report rule applies unchanged. (v2.73) A serving start the launcher refused before a place task ran (above) follows the same rule: once the host has applied the refusal, and unless it started the group again at once, the routes waiting on the group are refused. A start refused for size, or one that ends `StartError::Full`, is answered `Full` (§14.2); any other refusal is `Failed` with its cause. A route that arrives while the group waits on backoff is answered by the next retry. The listener's readable bit is "a route waits for this group", so a route that arrives during a drain relaunches the place.
 
-**Operations.** `add(name)` adds a trusted group with no listener and no limits; `remove(name)` retires it with `Delete` and answers after `Close`. `route(name)` wakes the group and answers with a lease on the place's `Status` once the host has applied its `PlaceOpened` and the place still serves; `peek` answers only a place that is already up and otherwise `Busy`. A lease does not hold the place up: the place's own §14.4 idle check, which counts sessions, decides. `unload(name)` is `platform.unload` and answers with the end. `stop` drains every place and closes the host.
+**Operations.** `add(name)` adds a trusted group with no listener and no limits; `remove(name)` retires it with `Delete` and answers after `Close`. `route(name)` wakes the group and answers with a lease once the host has applied its `PlaceOpened` and the place still serves. (v2.83) The lease holds the place's `Status` and its dial handle (§14.11); `peek` answers only a place that is already up and otherwise `Busy`. A lease does not hold the place up: the place's own §14.4 idle check, which counts sessions, decides. `unload(name)` is `platform.unload` and answers with the end. `stop` drains every place and closes the host.
 
-**Fate-sharing.** In-process places share the host's process, so a fault in one ends all. This is allowed only for first-party code: every group `local` adds is trusted, and a tenant group runs only through a process launcher (§14.8 row 9).
+**Fate-sharing.** In-process places share the host's process, so a fault in one ends all. This is allowed only for first-party code: every group `local` adds is trusted, and a tenant group runs only through a process launcher (§14.8 row 9). (v2.83) What a co-located place can and cannot reach of another is in §14.11 "Co-located places".
 
 **Laws (ported from PD1 to PD4).**
 
@@ -2772,6 +2787,63 @@ these groups runs on their first serving start at activation 0.
 - **The activation fate (v2.62), Goose** (d5ae5bb). Goose has no durable runs and no deploys, so there is nothing to settle. **NOT TAKEN.**
 - **The activation fate, Restate** (7f97e97). Each invocation is pinned to the deployment that started it (`pinned_deployment`, crates/storage-query-datafusion/src/invocation_status/row.rs:153). An operator moves one paused invocation to another deployment through a per-invocation resume request, `ResumeInvocationRequest.update_pinned_deployment_id` (crates/types/src/invocation/mod.rs:1160-1178), which `restart_as_new` applies (crates/worker/src/partition/state_machine/lifecycle/restart_as_new.rs:237-242). **ADAPTED:** the pin is the revision stamp, and moving it is `Release`. **REPLACED:** the per-run operator request (option C in platform-audit REPORT "Decision for the lead"). Restate keeps old deployments registered, so a pinned invocation can wait for one. A Hirsel place serves one revision, so nothing could ever run a run left pinned to OLD. Its fate is decided where OLD stops being runnable, in the activation commit. The weakness taken into account: Restate's per-invocation move leaves the operator to find every pinned invocation. The trigger report finds them here.
 - **The activation fate, Golem** (81cb597). A worker update is `Automatic` (replay the oplog on the new component) or snapshot-based (`PendingUpdateKind`, golem-common/src/model/agent/status.rs:1530). A replay that diverges fails the update (golem-worker-executor/src/durable_host/recovery.rs:295-325). **ADAPTED:** `Release` is the automatic update. A divergence is steps law 4's re-hold (residual R-2393-1). **NOT TAKEN:** reverting to the old version after a divergence, because OLD's code is not kept running; and snapshot updates, because a run's steps are its history and there is no user snapshot hook.
+
+### 14.11 Places on every core, reached without sockets (v2.83)
+
+§14.9 runs every place as a task in the actor's own unit, and each place binds a loopback listener. This section moves places onto helper units and replaces the listener with a dial handle. What §14.9 says about the host, its catalog, starts, ends, operations and laws still holds. The changes are described here.
+
+**Shards.** `Config.units: u64` names how many helper units (CONC-15) `local` starts. `local` refuses a value of 0 with `Configuration`. The actor makes all of them at `local.local` and runs no place itself, so one unit and eight units behave the same way. A shard is the root task of one helper. It receives start jobs over a connection (CONC-17), spawns each place as a task in its own unit, and reports each end over a second connection.
+- *Pool size.* The pool size is a Config field. It is not derived from cores. Hirsel has no core-count primitive, and CONC-15 keeps the worker count unobservable: a program that sized itself from cores would run differently on each machine. The host program chooses `units`. The harness gateway passes its operator's setting.
+- *Placement.* Each start goes to the shard with the most room (its share less the charges of its live places). A tie goes to the lowest index. A start is refused `Full` exactly when its charge exceeds the most room any one shard has. This is §14.9's `Full` rule applied to each shard: the charge is unchanged, and the bound is the share.
+- *Not sticky.* A place stays on its shard until it ends, and every start places it again. A woken place reopens its store from disk (§14.4). No memory survives a sleep, so returning to the same shard keeps nothing. A sticky rule would only send a busy place back to a full shard.
+- *Charging.* Each shard is spawned with `bytes place_bytes / units`. Every place's charge (§14.9 "Shape") is admitted against its own shard's limit, so a place can never use more of a shard's share than the shard has. The remainder of the division is not given to any shard, and the actor keeps its own memory as before.
+- `/wholehog`: the end state is all places on helper units, with one rule for every unit count. A "units = 1 means the actor's own unit" path would be a second runtime shape for the same config. A derived pool size would make the program depend on the machine it runs on. Both are NOT TAKEN.
+
+**What crosses.** A unit boundary carries only `cross` values (CONC-2).
+- A start job carries the group's name, `gen`, the workdir's `Dir` capability (narrowed to the workdir), plain overrides, the activation selection, the idle time and the session count.
+- The shard's reply carries the place's dial client (below). A status update carries a `runner.Status`, which is plain and declared `cross`. The actor keeps one `Latest[runner.Status]` per lease in its own unit and feeds it from the updates, so a `Lease` reads the same as before.
+- A stop is the cleaning of the job's stop client: the place's stop watcher sees `Closed` and drains.
+- The store, its database, grants, `Sender`s, `Latest`s and closures never cross. Each place opens its own store inside its shard. The actor's catalog store stays in the actor's unit.
+- `Factory[T]` holds `make: fn(take Launch[T], T) -> Result[Started, Refused]`, a plain function (CONC-3), plus `copy: fn(T) -> T`, and `T` is `cross`. At `local.local` the actor calls `copy` once per shard and sends each shard its own seed. A seed that holds a connection client, a `Shared` value or a capability crosses as a handle (CONC-15). A program that held a `Sender` in its seed now holds a client.
+
+**Transport.** `PlaceConfig.listen` is `Listen = Tcp(Addr) | InProcess(Dials)`. `Tcp` binds as before. `InProcess` binds nothing and does not report `Listening`. It hands `operate` an inbox of dials, and its dial client goes into the lease.
+- A dial is `Dial { back: Client[Wire], accept: Client[Accepted] }`, where `Wire: cross { kind: u8, data: Bytes }`. A `Wire` carries the bytes of one WebSocket binary message (`kind` 2) or one close (`kind` 8, its code in `data`). The frame codec is not changed. The client makes its own receive connection and sends its client as `back`.
+- `serve_sockets` takes a dial where it takes an accepted socket. The dial passes through the same steps as a socket: the session count against `max_sessions`, admission while draining (`closing_at`), and the owner. A refused dial is answered with the same close code that refuses a socket (1013 when full, 1001 while draining). An admitted dial gets a wire owner. The owner makes its own receive connection and sends that client back through `accept`.
+- The wire owner is the same code. The transport sits below it and only moves messages. The 1+q credits, the Hello deadline and its binding, `c.socket.max_frame` (1009), auth expiry, the caller checks, backpressure and the close codes all run unchanged on both transports. An in-process session's source address is `127.0.0.1`, so no binding gives it more trust than a local TCP client.
+- `/hirsel/status` stays HTTP-only. An in-process reader reads the lease's `Status`.
+- A dial sent after the place has stopped answers `Closed`, because the place's dial inbox has been cleaned. The caller routes again, just as a TCP caller does after connect is refused.
+- Decision: a host-level transport, not a lazy per-place listener. A lazy listener would still cost one listener, one accept task and its FDs for every place that is reached, which is the cost this section removes. It would also keep two ways for first-party code to reach a place. `/wholehog`: one transport inside the process and one front at its edge.
+
+**External access.** A host program reaches the outside through its own front, one listener per host. The harness gateway's HTTP front, `gateway_http`, is that front. It reaches places by routing and dialing. `local`'s places have no listener of their own. A hosted child of a process launcher keeps the listener it inherits (§14.1), because it is a separate process.
+
+**Co-located places.** A unit is a boundary for scheduling and accounting. It is not a trust boundary. Capabilities are the boundary, and every place `local` runs is first-party (§14.9 "Fate-sharing").
+
+| Surface | What stops it | What does not |
+|---|---|---|
+| Another place's store | Each place holds only its own workdir's `Dir`, narrowed at the start job, and opens its own store. No path from one place's capabilities reaches another's workdir. | Code with the host's root `Dir` (the host program itself) |
+| Another place's sessions | A dial client comes only from `route`, through the host. A place given the route `Door` (the gateway's subagents) still faces the target's Hello binding and its caller checks, exactly as over TCP. | — |
+| A stale handle | A lease and its dial belong to one `gen`. After an unload the dial answers `Closed`, so it never reaches the next child (`local_stale_dial`). | — |
+| Memory | Each shard's share and each place's admitted charge bound it. One place cannot use more than its shard's share. | A place can fill its own shard's share and refuse starts on that shard. |
+| CPU | Places on different shards run in parallel. | A place that loops without waiting starves the places on its shard (a first-party denial of service, as in §14.9). |
+| The seed | Each shard receives its own copy. | A `Shared` value or client in the seed is visible to every place. That is the seed's purpose. |
+| Timing | — | Places on one shard share a scheduler and caches. Timing side channels exist, as between any first-party tasks. |
+| A fault | — | A fault in any place ends the process (§14.9 "Fate-sharing"). |
+
+*Self-check.* Run as an attacker with one place's code, it can reach another place only through a capability it was given (the route `Door`), and through that capability only by authenticating as any external client must. It can exhaust only its own shard's share and its own shard's CPU. It learns nothing from a `Status` it cannot route to. The residual risks are timing and denial of service within a shard. Both are first-party only, and a tenant runs through a process launcher (§14.8 row 9).
+
+**Laws.**
+
+| Law | Wrong implementation it catches | Oracle |
+|---|---|---|
+| `local_dial_parity`: one differential, with a TCP arm (`wire_client.pair_config`) and an in-process arm (`local` with a dial). Each arm sends the same three cases: a valid credential gets the same `Caller`; a rejected credential gets the same close code; one session past `max_sessions` gets the same refusal code | The dial path skips or reorders a check that the socket path makes (it admits past the limit, authenticates before the Hello deadline arms, or maps a refusal to another code) | The TCP arm, which is the existing transport (§5) |
+| `local_stale_dial`: a lease from `gen` g is unloaded, and the group is routed again (`gen` g+1, possibly on another shard). A dial through the old lease answers `Closed` and never reaches the new place | Dial clients are kept per group rather than per child, so an old lease reaches the next child or another place on the same shard | §14.3's generation fence |
+| `local_units_run_together`: the host has two places, A and B. A spins up to K times on `conn.try_receive` for a token that B sends. With `units` 2, A sees the token; with `units` 1 it does not | Places still share one unit (for example, a shard that runs its places in the actor's unit), so one place's loop blocks the other | CONC-15: helper units run concurrently, and one unit runs one task at a time between waits. This is a progress oracle, not a timing one |
+
+**Slices.** (1) The transport, `Listen` and `local_dial_parity`. (2) Shards, `Factory` and seed changes, `local_stale_dial` and `local_units_run_together`. (3) Deleting the per-place listener path from `local`. Each slice lands as it qualifies. The report for lane platform-local-scale-2815 records which slices have landed.
+
+**Prior art.**
+- **Rivet** (de28d20, rivetkit-rust/packages/rivetkit-core). One process hosts many actors and takes all of their traffic through one engine connection. The registry dispatches each request to its actor in process as a `DispatchCommand` carrying encoded bytes (actor/task.rs:178-203, registry/dispatch.rs:16). **ADOPTED:** one front per process, and in-process dispatch of encoded payloads. **ADAPTED:** Rivet's actors share one Tokio runtime. Hirsel places run on helper units that share no memory, so a place reaches another only through a capability. **NOT TAKEN:** Rivet's per-actor HTTP surface; `/hirsel/status` stays on the front.
+- **Goose** (d5ae5bb). It has no places and no host. **NOT TAKEN:** nothing to take.
 
 ## 15. JWT bindings (new in v2.60; Runner D4)
 

@@ -6,7 +6,7 @@ use super::*;
 /// step or a `bound steps` reservation past the root bound, or an admission the
 /// root limit refuses, fails instead of stopping the run, or a bound the run made
 /// itself stops it. Or the engines disagree on where it stopped. `run constant
-/// [steps N] [limit N]` lines are derived by hand beside their source; every
+/// [steps N] [limit N] [activations N]` lines are derived by hand beside their source; every
 /// engine, with the test-mode checks off and on, must give each one.
 pub(super) fn run(
     at: &str,
@@ -24,6 +24,7 @@ pub(super) fn run(
         match word {
             "steps" => input.steps = Some(n),
             "limit" => input.limit = n,
+            "activations" => input.activations = n as usize,
             other => panic!("{at}: `{other}` in a constant run"),
         }
     }

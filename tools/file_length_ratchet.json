@@ -380,8 +380,8 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-resolve/src/index.rs": {
-    "lines": 1044,
-    "raise_revision": 1,
+    "lines": 1060,
+    "raise_revision": 2,
     "reason": "comptime-phase2-2693"
   },
   "crates/hirsel-core-resolve/src/resolve.rs": {

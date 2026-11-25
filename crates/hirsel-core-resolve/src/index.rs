@@ -278,8 +278,9 @@ pub struct NameIndex {
     pub packages: Table<Package>,
     pub definitions: Table<Definition>,
     members: Map<(ModuleId, Symbol), DefinitionId>,
-    /// Clone bodies by source-file occurrence and item ordinal; no name finds one.
-    clone_items: Map<(SourceId, u32), DefinitionId>,
+    /// Clone bodies and assertions by source-file occurrence and item ordinal;
+    /// no name finds one.
+    occurrences: Map<(SourceId, u32), DefinitionId>,
     sources: u32,
     children: Map<(ModuleId, Symbol), ModuleId>,
     package_ids: Map<(Symbol, Symbol), PackageKey>,
@@ -309,7 +310,7 @@ impl NameIndex {
         result.members = writer.outward_map(&self.members, &|d: &DefinitionId| {
             outward.get(d.0 as usize).copied().unwrap_or(false)
         })?;
-        result.clone_items = writer.map(&self.clone_items)?;
+        result.occurrences = writer.map(&self.occurrences)?;
         result.children = writer.map(&self.children)?;
         result.package_ids = writer.map(&self.package_ids)?;
         result.dependencies = writer.table(&self.dependencies)?;
@@ -335,7 +336,7 @@ impl NameIndex {
             packages: Table::default(),
             definitions: Table::default(),
             members: Map::default(),
-            clone_items: Map::default(),
+            occurrences: Map::default(),
             sources: 0,
             children: Map::default(),
             package_ids: Map::default(),
@@ -691,6 +692,7 @@ impl NameIndex {
             .slice(&self.extensions);
         self.definitions.iter().filter_map(move |d| {
             (d.kind != DefinitionKind::Clone
+                && !is_assertion(d.kind, d.name)
                 && (d.site.module == module || merged.contains(&d.site.module)))
             .then_some(d.name)
         })
@@ -825,11 +827,9 @@ impl NameIndex {
             _ => return,
         };
         let Some(t) = root.token else { return };
-        // An assertion (`const _`, LANG-20) names nothing.
-        if kind == DefinitionKind::Constant && item.symbol(t) == hirsel_core_syntax::sym::UNDERSCORE
-        {
-            return;
-        }
+        // An assertion (`const _`, LANG-20) names nothing: like a clone body it is
+        // found by its occurrence, and no name conflicts with it.
+        let occurrence = kind == DefinitionKind::Clone || is_assertion(kind, item.symbol(t));
         let name = if kind == DefinitionKind::Clone {
             // The type the body copies: the last name of its parameter's type path. A
             // body without one still gets an identity, so the checker refuses it.
@@ -843,7 +843,7 @@ impl NameIndex {
             item: ordinal,
             span: item.token_span(t),
         };
-        if kind != DefinitionKind::Clone
+        if !occurrence
             && let Some(package) = self.path_package(module)
             && module != package.root
             && let Some(conflict) = self
@@ -861,10 +861,12 @@ impl NameIndex {
             return;
         }
         let old = if kind == DefinitionKind::Clone {
-            self.clone_items
-                .iter()
-                .map(|(_, &d)| d)
-                .find(|&d| self.get(d).site.module == module && self.get(d).name == name)
+            self.occurrences.iter().map(|(_, &d)| d).find(|&d| {
+                let d = self.get(d);
+                d.kind == DefinitionKind::Clone && d.site.module == module && d.name == name
+            })
+        } else if occurrence {
+            None
         } else {
             self.definition(module, name)
         };
@@ -923,8 +925,8 @@ impl NameIndex {
                 _ => {}
             }
         }
-        if kind == DefinitionKind::Clone {
-            self.clone_items.insert((source, ordinal), id);
+        if occurrence {
+            self.occurrences.insert((source, ordinal), id);
         } else {
             self.members.insert((module, name), id);
         }
@@ -940,10 +942,13 @@ impl NameIndex {
         item: Item<'_>,
     ) -> Option<DefinitionId> {
         let root = item.tree.node(item.root);
-        if root.kind == NodeKind::CloneHook {
-            return self.clone_items.get(&(source, ordinal)).copied();
+        let name = item.symbol(root.token?);
+        if root.kind == NodeKind::CloneHook
+            || (root.kind == NodeKind::Constant && name == hirsel_core_syntax::sym::UNDERSCORE)
+        {
+            return self.occurrences.get(&(source, ordinal)).copied();
         }
-        self.definition(module, item.symbol(root.token?))
+        self.definition(module, name)
     }
     /// Materialize neutral paths only at driver/checker/output boundaries.
     pub fn module_path(&self, module: ModuleId) -> ModulePath {
@@ -974,11 +979,7 @@ impl NameIndex {
         DefPath(ItemPath {
             package: m.package,
             modules: m.modules,
-            name: if d.kind == DefinitionKind::Clone {
-                format!("{name}.$clone")
-            } else {
-                name.into()
-            },
+            name: self.path_name(id, name).into_owned(),
         })
     }
     /// `definition_path` borrowed from the index, for encoding it without
@@ -1000,11 +1001,23 @@ impl NameIndex {
                 version: self.symbols.text(p.version),
             },
             modules,
-            name: if d.kind == DefinitionKind::Clone {
-                format!("{name}.$clone").into()
-            } else {
-                name.into()
-            },
+            name: self.path_name(id, name),
+        }
+    }
+    /// A definition's last path segment: its name, `<Type>.$clone` for a clone
+    /// body, and `_$<k>` for its module's assertion `k` in index order.
+    fn path_name<'a>(&self, id: DefinitionId, name: &'a str) -> std::borrow::Cow<'a, str> {
+        let d = self.get(id);
+        if d.kind == DefinitionKind::Clone {
+            format!("{name}.$clone").into()
+        } else if is_assertion(d.kind, d.name) {
+            let k = (0..id.0)
+                .map(|i| self.get(DefinitionId(i)))
+                .filter(|e| e.site.module == d.site.module && is_assertion(e.kind, e.name))
+                .count();
+            format!("_${k}").into()
+        } else {
+            name.into()
         }
     }
     pub fn definition(&self, module: ModuleId, name: Symbol) -> Option<DefinitionId> {
@@ -1015,6 +1028,9 @@ impl NameIndex {
             self.members.own_get(&key).copied()
         }
     }
+}
+fn is_assertion(kind: DefinitionKind, name: Symbol) -> bool {
+    kind == DefinitionKind::Constant && name == hirsel_core_syntax::sym::UNDERSCORE
 }
 /// The last name of a clone body's parameter type (`Map` in `x: core.Map[K, V]`).
 fn clone_type_name(item: Item<'_>) -> Option<Symbol> {

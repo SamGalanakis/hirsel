@@ -80,7 +80,7 @@ the query from the original pattern and the two supported properties. It returns
 It parses the supplied pattern with the usual parser scratch admission.
 The kinds are the crate's syntax and translation error kinds, less three this build cannot raise (`UnicodePerlClassNotFound`, `UnicodeCaseUnavailable` and `InvalidLineTerminator`):
 
-```hirsel unbuilt
+```hirsel
 pub type SyntaxKind: key = CaptureLimitExceeded | ClassEscapeInvalid | ClassRangeInvalid
   | ClassRangeLiteral | ClassUnclosed | DecimalEmpty | DecimalInvalid | EscapeHexEmpty
   | EscapeHexInvalid | EscapeHexInvalidDigit | EscapeUnexpectedEof | EscapeUnrecognized

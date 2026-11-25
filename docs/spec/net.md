@@ -869,7 +869,7 @@ explicitly truncated, never a coalesced train.
 
 ### NET-15: UDP rules
 
-```hirsel unbuilt
+```hirsel
 pub type NetDirection = Connect | Listen | UdpBind | UdpSend
 ```
 

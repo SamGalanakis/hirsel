@@ -580,7 +580,7 @@ same values, failures and sites, and one build's versions take the same steps an
 run on a CPU with other levels behaves the same. Nothing a program can observe names a version, and every version has
 the function's revision ([PROG-9](programs.md#prog-9-code-descriptors)).
 
-```hirsel unbuilt
+```hirsel
 const LO: Inline[u8, 16] = [0x15, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x13, 0x1A, 0x1B, 0x1B, 0x1B, 0x1A]
 const HI: Inline[u8, 16] = [0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, 0x08, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10]
 // true when some byte of v is outside the Base64 alphabet
@@ -590,15 +590,15 @@ fn invalid(v: Simd[u8, 32]) -> bool {
 // versioned, though it writes no vector type: list.lanes(b, at) is a Simd[u8, 32]
 fn invalid_at(b: Bytes, at: u64) -> bool { invalid(list.lanes(b, at)) }
 ```
-```hirsel unbuilt
+```hirsel
 fn sum(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16] { a + b }     // refused: LANG-21, use simd.wrapping_add
 ```
-```hirsel unbuilt
+```hirsel
 type Block { lanes: Simd[u8, 16] }                                       // refused: SEM-11, a vector in a field
 ```
-```hirsel unbuilt
+```hirsel
 fn wide(v: Simd[u64, 8]) -> Simd[u64, 8] { v }                          // refused: SEM-11, 64 bytes
 ```
-```hirsel unbuilt
+```hirsel
 fn pick(t: Simd[u16, 16], i: Simd[u8, 16]) -> Simd[u16, 16] { simd.swizzle(t, i) }   // refused: SEM-11, a swizzle table of u16
 ```

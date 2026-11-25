@@ -1,5 +1,5 @@
 //! Check the source and output in the spec without maintaining a second fixture corpus.
-use crate::{Checked, package, repo, std_manifest};
+use crate::{Checked, library_manifest, package, repo, std_manifest};
 use hirsel_core_driver::{SourceSite, line_column};
 use hirsel_core_eval as eval;
 use hirsel_core_ids::DefPath;
@@ -18,7 +18,10 @@ struct Fence {
     line: usize,
     source: String,
     signatures: bool,
+    /// A `hirsel unbuilt` fence claims what the built checker does not do yet.
+    unbuilt: bool,
     uses_std: bool,
+    uses_store: bool,
     entry: bool,
     rules: BTreeSet<String>,
     refused_any: bool,
@@ -107,12 +110,23 @@ fn expected_run(lines: &mut Lines<'_>, location: &str) -> Run {
     Run { stdout, outcome }
 }
 
+/// Whether `source` names a member of the library `name` (`name.` not preceded by a
+/// word character).
+fn names_library(source: &str, name: &str) -> bool {
+    let needle = format!("{name}.");
+    source.match_indices(&needle).any(|(at, _)| {
+        !source[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
 fn read_fences(
     path: &Path,
     std_by_default: bool,
     plain_refusals: bool,
     failures: &mut Vec<String>,
-    unbuilt: &mut usize,
 ) -> Vec<Fence> {
     let markdown = fs::read_to_string(path).unwrap();
     let mut lines = markdown.split_inclusive('\n').enumerate();
@@ -124,26 +138,26 @@ fn read_fences(
         let location = format!("{}:{}", path.display(), at + 1);
         let source = body(&mut lines, &location);
         let mode = match info {
-            "hirsel" | "hirsel run" => ParseMode::Source,
+            "hirsel" | "hirsel run" | "hirsel unbuilt" => ParseMode::Source,
             "hirsel core" => ParseMode::Signatures,
-            "hirsel unbuilt" => {
-                *unbuilt += 1;
-                continue;
-            }
             "" | "ebnf" | "json" | "sh" | "text" => continue,
             _ => panic!("{location}: unknown fence info string {info:?}"),
         };
         let signatures = mode == ParseMode::Signatures;
+        let unbuilt = info == "hirsel unbuilt";
         let run = (info == "hirsel run").then(|| expected_run(&mut lines, &location));
         let mut symbols = Symbols::default();
         let parsed = parse(&source, mode, &mut symbols);
-        if parsed.syntax.text() != source {
-            failures.push(format!("{location}: parser lost source bytes"));
-        }
-        if let Some(canonical) = format(&parsed) {
-            let reparsed = parse(&canonical, mode, &mut Symbols::default());
-            if format(&reparsed).as_deref() != Some(canonical.as_str()) {
-                failures.push(format!("{location}: formatting failed to round trip"));
+        // An unbuilt fence may use syntax the parser does not take yet.
+        if !unbuilt {
+            if parsed.syntax.text() != source {
+                failures.push(format!("{location}: parser lost source bytes"));
+            }
+            if let Some(canonical) = format(&parsed) {
+                let reparsed = parse(&canonical, mode, &mut Symbols::default());
+                if format(&reparsed).as_deref() != Some(canonical.as_str()) {
+                    failures.push(format!("{location}: formatting failed to round trip"));
+                }
             }
         }
         let mut refused_any = false;
@@ -200,9 +214,11 @@ fn read_fences(
         fences.push(Fence {
             path: path.to_owned(),
             line: at + 2,
-            uses_std: std_by_default || source.contains("std."),
+            uses_std: std_by_default || names_library(&source, "std"),
+            uses_store: names_library(&source, "store"),
             source,
             signatures,
+            unbuilt,
             entry,
             rules,
             refused_any,
@@ -212,7 +228,7 @@ fn read_fences(
     fences
 }
 
-fn diagnostic_location(fence: Option<&&Fence>, site: &SourceSite) -> String {
+fn diagnostic_location(fence: Option<&Fence>, site: &SourceSite) -> String {
     if let Some(fence) = fence {
         let (line, col) = line_column(fence.source.as_bytes(), site.span.start as usize);
         format!("{}:{}:{col}", fence.path.display(), fence.line + line - 1)
@@ -221,7 +237,9 @@ fn diagnostic_location(fence: Option<&&Fence>, site: &SourceSite) -> String {
     }
 }
 
-fn check_fences(fences: &[&Fence], failures: &mut Vec<String>) {
+/// Checks `fences` as one corpus. Each failure names the fence it belongs to, if any.
+fn check_fences<'a>(fences: &[&'a Fence]) -> Vec<(Option<&'a Fence>, String)> {
+    let mut failures = Vec::new();
     let files = tempfile::tempdir().unwrap();
     let core = package("core");
     let mut library =
@@ -246,8 +264,11 @@ fn check_fences(fences: &[&Fence], failures: &mut Vec<String>) {
         } else {
             let name = package(&sample);
             let mut dependencies = vec![core.clone()];
-            if fence.uses_std {
+            if fence.uses_std || fence.uses_store {
                 dependencies.push(package("std"));
+            }
+            if fence.uses_store {
+                dependencies.push(package("store"));
             }
             packages.push(PackageManifest {
                 namespace: None,
@@ -271,61 +292,84 @@ fn check_fences(fences: &[&Fence], failures: &mut Vec<String>) {
     {
         packages.push(std_manifest());
     }
+    if packages
+        .iter()
+        .any(|p| p.dependencies.contains(&package("store")))
+    {
+        packages.push(library_manifest("store"));
+    }
     packages.push(library);
     let checked = Checked::check(CorpusManifest { core, packages }, files, entry.clone());
     let product = &checked.product;
     let mut seen = BTreeSet::new();
     let mut seen_any = BTreeSet::new();
     for diagnostic in product.machine_diagnostics().unwrap() {
-        let fence = origins.get(&diagnostic.primary.module);
+        let fence = origins.get(&diagnostic.primary.module).copied();
         if fence.is_some_and(|f| f.rules.contains(diagnostic.rule)) {
             seen.insert((diagnostic.primary.module, diagnostic.rule));
         } else if fence.is_some_and(|f| f.refused_any) {
             seen_any.insert(diagnostic.primary.module);
         } else {
-            failures.push(format!(
-                "{}: unexpected {} ({})",
-                diagnostic_location(fence, &diagnostic.primary),
-                diagnostic.rule,
-                diagnostic.message
+            failures.push((
+                fence,
+                format!(
+                    "{}: unexpected {} ({})",
+                    diagnostic_location(fence, &diagnostic.primary),
+                    diagnostic.rule,
+                    diagnostic.message
+                ),
             ));
         }
     }
     for (module, fence) in &origins {
         for rule in &fence.rules {
             if !seen.contains(&(module.clone(), rule.as_str())) {
-                failures.push(format!("{}: missing {rule}", fence.location()));
+                failures.push((Some(fence), format!("{}: missing {rule}", fence.location())));
             }
         }
         if fence.refused_any && !seen_any.contains(module) {
-            failures.push(format!("{}: expected refusal", fence.location()));
+            failures.push((
+                Some(fence),
+                format!("{}: expected refusal", fence.location()),
+            ));
         }
     }
     for gap in product.machine_incomplete().unwrap() {
-        let fence = origins.get(&gap.primary.module);
+        let fence = origins.get(&gap.primary.module).copied();
         if fence.is_none_or(|f| f.rules.is_empty() && !f.refused_any) {
-            failures.push(format!(
-                "{}: incomplete check ({})",
-                diagnostic_location(fence, &gap.primary),
-                gap.message
+            failures.push((
+                fence,
+                format!(
+                    "{}: incomplete check ({})",
+                    diagnostic_location(fence, &gap.primary),
+                    gap.message
+                ),
             ));
         }
     }
     for resource in product.machine_resources().unwrap() {
-        failures.push(format!(
-            "{}: resource refusal ({})",
-            diagnostic_location(origins.get(&resource.primary.module), &resource.primary),
-            resource.message
+        let fence = origins.get(&resource.primary.module).copied();
+        failures.push((
+            fence,
+            format!(
+                "{}: resource refusal ({})",
+                diagnostic_location(fence, &resource.primary),
+                resource.message
+            ),
         ));
     }
     if let Some(run) = fences.first().and_then(|fence| fence.run.as_ref()) {
         let location = fences[0].location();
         if !product.accepted() {
-            failures.push(format!("{location}: run skipped after check failure"));
+            failures.push((
+                Some(fences[0]),
+                format!("{location}: run skipped after check failure"),
+            ));
         } else if let Err(error) = evaluate(product, entry.unwrap(), run) {
-            failures.push(format!("{location}: {error}"));
+            failures.push((Some(fences[0]), format!("{location}: {error}")));
         }
     }
+    failures
 }
 
 fn evaluate(
@@ -440,6 +484,16 @@ fn evaluate(
     }
 }
 
+/// Checks fragments together and each entry alone, as one request selects one entry.
+fn check_all<'a>(fences: &[&'a Fence]) -> Vec<(Option<&'a Fence>, String)> {
+    let (entries, fragments): (Vec<_>, Vec<_>) = fences.iter().partition(|fence| fence.entry);
+    let mut failures = check_fences(&fragments);
+    for entry in entries {
+        failures.extend(check_fences(&[entry]));
+    }
+    failures
+}
+
 #[test]
 fn every_live_spec_fence_checks_its_claim() {
     let spec = repo().join("docs/spec");
@@ -450,38 +504,69 @@ fn every_live_spec_fence_checks_its_claim() {
         .collect::<Vec<_>>();
     paths.sort();
     let primer = repo().join("docs/PRIMER.md");
+    let cookbook = repo().join("docs/COOKBOOK.md");
     let unicode = spec.join("unicode.md");
-    paths.push(primer.clone());
-    let (mut failures, mut unbuilt) = (Vec::new(), 0);
+    paths.extend([primer.clone(), cookbook.clone(), repo().join("README.md")]);
+    let mut failures = Vec::new();
     let fences = paths
         .iter()
-        // The primer starts with `hirsel new` (which declares std), and Unicode
-        // documents std extensions under the core names `char` and `string`.
+        // The primer and the cookbook start from `hirsel new` (which declares std),
+        // and Unicode documents std extensions under the core names `char` and `string`.
         .flat_map(|path| {
             read_fences(
                 path,
-                path == &primer || path == &unicode,
+                path == &primer || path == &cookbook || path == &unicode,
                 path == &primer,
                 &mut failures,
-                &mut unbuilt,
             )
         })
         .collect::<Vec<_>>();
-    let refused = fences
+    let (unbuilt, live): (Vec<_>, Vec<_>) = fences.iter().partition(|fence| fence.unbuilt);
+    let refused = live
         .iter()
         .filter(|fence| !fence.rules.is_empty() || fence.refused_any)
         .count();
-    let runs = fences.iter().filter(|fence| fence.run.is_some()).count();
-    let positive = fences.len() - refused - runs;
-    println!("spec fences: {refused} refused, {positive} positive, {runs} run, {unbuilt} unbuilt");
+    let runs = live.iter().filter(|fence| fence.run.is_some()).count();
+    let positive = live.len() - refused - runs;
+    println!(
+        "spec fences: {refused} refused, {positive} positive, {runs} run, {} unbuilt",
+        unbuilt.len()
+    );
     assert!(
         refused > 0 && positive > 0 && runs > 0,
         "spec corpus is incomplete"
     );
-    let (entries, fragments): (Vec<_>, Vec<_>) = fences.iter().partition(|fence| fence.entry);
-    check_fences(&fragments, &mut failures);
-    for entry in entries {
-        check_fences(&[entry], &mut failures);
+    failures.extend(check_all(&live).into_iter().map(|(_, failure)| failure));
+    // A `hirsel unbuilt` fence that already checks as its comments say (refused for
+    // each rule it cites, or accepted) shows a built feature: its mark is stale.
+    let unbuilt_failures = check_all(&unbuilt);
+    if unbuilt_failures.iter().all(|(fence, _)| fence.is_some()) {
+        for fence in &unbuilt {
+            if !unbuilt_failures
+                .iter()
+                .any(|(failed, _)| failed.is_some_and(|f| std::ptr::eq(f, *fence)))
+            {
+                let claim = match (fence.rules.is_empty(), fence.refused_any) {
+                    (true, false) => "accepted".to_owned(),
+                    (true, true) => "refused".to_owned(),
+                    (false, _) => format!(
+                        "refused for {}",
+                        Vec::from_iter(fence.rules.iter().cloned()).join(", ")
+                    ),
+                };
+                failures.push(format!(
+                    "{}: the `hirsel unbuilt` fence is {claim} as it says; remove the mark",
+                    fence.location()
+                ));
+            }
+        }
+    } else {
+        failures.extend(
+            unbuilt_failures
+                .into_iter()
+                .filter(|(fence, _)| fence.is_none())
+                .map(|(_, failure)| format!("unbuilt fences: {failure}")),
+        );
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -83,7 +83,12 @@ def check(root):
     commands, flags = cli_names(root)
     docs = sorted([*(root / name for name in DOCS), *(root / 'docs/spec').glob('*.md')])
     for doc in docs:
-        for line, ref in references(doc.read_text(encoding='utf-8')):
+        refs = list(references(doc.read_text(encoding='utf-8')))
+        # Positive control: every checked doc quotes code, so a doc with no
+        # references means extraction (CODE_SPAN, FENCE) stopped matching.
+        if not refs:
+            yield f'{doc.relative_to(root)}: no code spans or shell commands extracted'
+        for line, ref in refs:
             location = f'{doc.relative_to(root)}:{line}'
             if REPO_PATH.fullmatch(ref):
                 path = re.split(r'[:#]', ref, maxsplit=1)[0]

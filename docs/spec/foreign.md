@@ -344,7 +344,7 @@ pub fn main(out: Stdout, db: Foreign[sqlite.Sqlite]) -> Result[(), sqlite.Sqlite
   sqlite.close(take c)
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Mine {}
 fn f(x: Foreign[Mine]) -> u64 { 0 }                              // refused: FFI-4, Mine is not an interface
 ```

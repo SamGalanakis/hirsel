@@ -236,11 +236,11 @@ type Bad = A(x: u64, u64)                                 // refused: LANG-9, mi
 ```hirsel
 pub type OutOfScope = OutOfScope                          // refused: LANG-9, an alias of itself
 ```
-```hirsel unbuilt
+```hirsel
 type Point { x: i64, y: i64 }
 fn up(x: i64, y: i64) -> Point { Point(x, y: y + 1) }
 ```
-```hirsel unbuilt
+```hirsel
 type Point { x: i64, y: i64 }
 fn up(x: i64, y: i64) -> Point { Point(x, y + 1) }      // refused: LANG-9, y + 1 is not a pun
 ```
@@ -376,16 +376,16 @@ fn empty() -> u64 { list.len((list.new() : List[u64])) }
 ```hirsel
 fn widen(x: u8) -> u64 { (x : u64) }                      // refused: LANG-11, at x: u8 is not u64
 ```
-```hirsel unbuilt
+```hirsel
 fn apply(f: fn(u64, take String) -> u64, x: u64, take s: String) -> u64 { f(x, take s) }
 fn g(take s: String) -> u64 { apply(fn(n, take t) { n + string.byte_len(t) }, 1, take s) }
 fn h() -> u64 { let inc: fn(u64) -> u64 = fn(x) { x + 1 }; inc(2) }
 ```
-```hirsel unbuilt
+```hirsel
 fn apply(f: fn(u64, u64) -> u64, x: u64) -> u64 { f(x, x) }
 fn g() -> u64 { apply(fn(a, b: u64) { a + b }, 1) }      // refused: LANG-11, at a: all or none
 ```
-```hirsel unbuilt
+```hirsel
 fn fold[A, T](xs: List[T], f: fn(A, T) -> A, take init: A) -> A { init }
 fn total(xs: List[u64]) -> u64 { let sum = fold(xs, fn(acc, x) { acc + x }, 0); sum }   // refused: LANG-11, at acc: A is open
 ```
@@ -634,7 +634,7 @@ binding.
 type Shape = Circle(f64) | Rect(w: f64, h: f64)
 fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r, Rect(w: w, h: h) => w * h } }
 ```
-```hirsel unbuilt
+```hirsel
 type Shape = Circle(f64) | Rect(w: f64, h: f64)
 fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r, Rect(w, h) => w * h } }
 ```
@@ -841,12 +841,12 @@ const BYTES: u64 = WORDS * 8
 ```hirsel
 const BIG: u8 = 200 + 100                                 // refused: LANG-20, Overflow
 ```
-```hirsel unbuilt
+```hirsel
 const NAME: String = "hirsel"
 const TITLE: String = NAME
 fn title() -> String { TITLE }
 ```
-```hirsel unbuilt
+```hirsel
 const PAIR: (String, u64) = ("a", 1)                      // refused: LANG-20, String in a tuple
 ```
 ```hirsel unbuilt

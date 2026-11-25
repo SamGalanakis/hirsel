@@ -86,7 +86,7 @@ result type, and nothing else does.
 ```hirsel
 fn grow(mut xs: List[u64]) { list.push(mut xs, 1) }        // a refusal fails here; xs unchanged
 ```
-```hirsel unbuilt
+```hirsel
 fn room(mut xs: List[u64], n: u64) -> bool {
   match list.try_reserve(mut xs, n) { Ok(()) => true, Error(_) => false }
 }

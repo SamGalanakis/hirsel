@@ -237,7 +237,7 @@ resource type Lease: codec { n: u64 }                 // refused: OWN-4, a resou
 ```hirsel
 fn pick[T: integer](a: T) -> T { a }                      // refused: OWN-4, integer outside core
 ```
-```hirsel unbuilt
+```hirsel
 fn equals[T: inert + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
 fn same[T: codec + key](take x: T) -> own fn(T) -> bool { fn(y: T) -> bool { y == x } }
 ```

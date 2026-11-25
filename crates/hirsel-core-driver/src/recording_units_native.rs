@@ -514,6 +514,18 @@ fn rl9_shared_crosses_into_a_helper() {
 /// Build `source` with the recording runtime on `backend`, run it recorded,
 /// and check it printed `printed` with no stream truncated: the tape's path.
 fn rl9_record(source: &str, dir: &Path, name: &str, backend: Backend, printed: &str) -> PathBuf {
+    rl9_record_with(source, dir, name, backend, printed, &["Tasks", "Stdout"])
+}
+
+/// `rl9_record` with the run granted `grants`.
+fn rl9_record_with(
+    source: &str,
+    dir: &Path,
+    name: &str,
+    backend: Backend,
+    printed: &str,
+    grants: &[&str],
+) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut request = source_request(source, dir);
     request.inputs.packages[1] =
@@ -526,7 +538,7 @@ fn rl9_record(source: &str, dir: &Path, name: &str, backend: Backend, printed: &
     let mut options = native_options(backend, dir);
     options.runtime = env_record_runtime();
     options.recording = true;
-    options.grant_mask = ["Tasks", "Stdout"]
+    options.grant_mask = grants
         .iter()
         .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
     options.output = dir.join(format!("{name}-{backend:?}"));
@@ -730,6 +742,141 @@ fn rl9_waiting_send_is_accepted() {
             items,
             [(g + 1, word(5)), (g + 1, word(7))],
             "{backend:?}: items"
+        );
+    }
+}
+
+/// The root sends its `Random` over its own connection and draws through
+/// what it takes.
+const RL9_CAPABILITY_HOME: &str = r#"
+pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let (c, i): (Client[Random], Inbox[Random]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(c, r))
+    let s = result.unwrap(conn.try_receive(i))
+    let mut b: Bytes = list.with_capacity(8)
+    host.random(s, mut b)
+    if list.len(b) != 8 { return Error(Exit(status: 3)) }
+    result.unwrap(stdout.write(out, "capability"))
+    Ok(())
+}
+"#;
+
+/// The root sends its `Random` to a helper over the helper's connection, and
+/// the helper draws through it.
+const RL9_CAPABILITY_HELPER: &str = r#"
+fn drawer(take hello: Client[Client[Random]]) -> u64 waits {
+    let (back, back_in): (Client[Random], Inbox[Random]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(hello, take back))
+    let r = result.unwrap(conn.receive(back_in))
+    let mut b: Bytes = list.with_capacity(8)
+    host.random(r, mut b)
+    list.len(b)
+}
+
+pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let (hello, hello_in): (Client[Client[Random]], Inbox[Client[Random]]) = result.unwrap(conn.new(1, bytes 0))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, take hello, drawer))
+    let back = result.unwrap(conn.receive(hello_in))
+    result.unwrap(conn.send(back, r))
+    if result.unwrap(task.join(take h)) != 8 { return Error(Exit(status: 3)) }
+    result.unwrap(stdout.write(out, "capability"))
+    Ok(())
+}
+"#;
+
+/// A granted capability that crosses in an item (recording.md, "Handle
+/// snapshots"; U3), hand-derived before the first run. An item holding a
+/// `Random` is 8 plain bytes (the zeroed capability word), one part, a handle
+/// (1) whose tag 5 snapshot names its new ordinal where it arrives, kind 3
+/// and no stored bytes. Its draw is then an operation of the unit that took
+/// it, on that ordinal:
+/// - at home, the root numbers its connection g+1 and client g+2, and the
+///   `Random` that arrives g+3: the take is `[0, g+1]` and that value, and
+///   the root's `RANDOM` names g+3, not the grant's own ordinal;
+/// - in a helper (stream 1, no grants), `hello` is 1 from its entry, `back` 2
+///   and its client 3, and the arriving `Random` 4: the helper's take is
+///   `[0, 2]` and the value, its `RANDOM` names 4, and the root draws
+///   nothing.
+///
+/// RL9 pairs the sent item, canonical (no ordinal), with each take.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_capability_crosses_in_an_item() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Args, Arrival, Frame, Value, op};
+
+    let grants = ["Tasks", "Random", "Stdout"];
+    let item = |ordinal: u8| [vec![8], vec![0; 8], vec![1, 1, 5, ordinal, 3, 0]].concat();
+    let canonical = Value::decode(&item(1)).unwrap().canonical();
+    let takes = |frames: &[Frame]| -> Vec<Vec<u8>> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)) => {
+                    Some(body.bytes().to_vec())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let draws = |frames: &[Frame]| -> Vec<u64> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op { op: o, object, .. } if *o == op::RANDOM => Some(*object),
+                _ => None,
+            })
+            .collect()
+    };
+    let sent = |frames: &[Frame], o: u8| -> Vec<Args> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op { op: x, args, .. } | Frame::Issue { op: x, args, .. } if *x == o => {
+                    Some(args.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_with(RL9_CAPABILITY_HOME, dir.path(), "cap-home", backend, "capability", &grants);
+        let frames = rl8_root_frames(&path);
+        let g = frames
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        assert_eq!(
+            takes(&frames),
+            [[vec![0, g + 1], item(g + 3)].concat()],
+            "{backend:?}: home take"
+        );
+        assert_eq!(draws(&frames), [u64::from(g + 3)], "{backend:?}: home draw");
+        assert_eq!(
+            sent(&frames, op::CONN_TRY_SEND),
+            [Args::of_parts(&[&canonical])],
+            "{backend:?}: home send"
+        );
+
+        let path = rl9_record_with(
+            RL9_CAPABILITY_HELPER,
+            dir.path(),
+            "cap-helper",
+            backend,
+            "capability",
+            &grants,
+        );
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
+        let helper = &streams[1].1;
+        assert_eq!(takes(helper), [[vec![0, 2], item(4)].concat()], "{backend:?}: helper take");
+        assert_eq!(draws(helper), [4], "{backend:?}: helper draw");
+        assert_eq!(draws(&streams[0].1), [] as [u64; 0], "{backend:?}: root draws");
+        let root_sends = sent(&streams[0].1, op::CONN_SEND);
+        assert_eq!(
+            root_sends.last(),
+            Some(&Args::of_parts(&[&canonical])),
+            "{backend:?}: root send"
         );
     }
 }

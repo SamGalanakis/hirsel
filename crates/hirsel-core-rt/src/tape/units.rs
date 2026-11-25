@@ -5,8 +5,11 @@ use super::schedule::Group;
 use super::*;
 use crate::units_lang::Cross;
 use format::{TakeBody, TakePoint};
-use hirsel_core_layout::cross::{CLIENT, SHARED};
+use hirsel_core_layout::cross::{CAPABILITY, CLIENT, SHARED};
+use item_grants::Granted;
 use std::collections::HashMap;
+
+pub(crate) mod item_grants;
 
 /// One unit's take-point count and the ordinals of its unit objects.
 #[derive(Default)]
@@ -317,8 +320,33 @@ pub(crate) fn retained(conn: usize, (header, retained): (u64, u64)) {
     });
 }
 
+/// The capability words of an item, in the order its value holds them: what
+/// `item_grants::resolve` reads before any cell is locked.
+/// # Safety
+/// `item` holds the connection's flat item; `content` its packed sequences.
+pub(crate) unsafe fn item_words(
+    conn: usize,
+    item: *const u8,
+    content: Option<*const u8>,
+) -> Vec<u64> {
+    let mut words = Vec::new();
+    if let Some(layout) = layout(conn) {
+        let mut handle = |kind, word| {
+            if kind == CAPABILITY {
+                words.push(word);
+            }
+            Ok(Vec::new())
+        };
+        // SAFETY: by the contract. A value that cannot be written is cut
+        // where it is written, so its error here is not this walk's.
+        let _ = unsafe { item_value(&layout, item, content, &mut handle) };
+    }
+    words
+}
+
 /// A send's item as a value, from the sender's live item; with the client's
-/// ordinal, or why the send is not recorded.
+/// ordinal, or why the send is not recorded. `grants` are its capability
+/// words' grants.
 /// # Safety
 /// `item` is the client's connection's initialized item.
 pub(crate) unsafe fn send_item(
@@ -326,6 +354,7 @@ pub(crate) unsafe fn send_item(
     client: usize,
     conn: usize,
     item: *const u8,
+    grants: &[Granted],
 ) -> Option<Result<(u64, Vec<u8>), &'static str>> {
     recording(group, |live| {
         let Some(&ordinal) = live.takes.clients.get(&client) else {
@@ -347,6 +376,7 @@ pub(crate) unsafe fn send_item(
                 word,
                 live.takes.nodes.get(&(word as usize)).copied().unwrap_or(0),
             ),
+            CAPABILITY => item_grants::sent(grants, word),
             _ => Err(CAPABILITY_ITEM),
         };
         // SAFETY: by the contract.
@@ -396,8 +426,7 @@ unsafe fn item_value(
     unsafe { helper::value(item, &x, content, handle) }
 }
 
-const CAPABILITY_ITEM: &str =
-    "an item holds a capability, whose snapshot this build does not write";
+const CAPABILITY_ITEM: &str = "an item holds a handle whose snapshot this build does not write";
 
 /// A send, or why it is not recorded: `CONN_SEND` or `CONN_TRY_SEND` as an
 /// `OP` with its outcome, or a waiting `CONN_SEND`'s `ISSUE` (`waiting` its id).
@@ -467,6 +496,10 @@ pub(crate) enum Arrival<'a> {
         conn: usize,
         flat: *const u8,
         content: *const u8,
+        /// Its capability words' grants, and the receiving unit's registry,
+        /// which designates each on this unit's cell.
+        grants: &'a [Granted],
+        registry: *mut crate::host_file::Registry,
     },
     Close(usize),
     SealAnswer(usize),
@@ -490,7 +523,8 @@ pub(crate) enum Arrival<'a> {
 
 /// One `TAKE`, at a scheduler pump or the in-operation point last reached.
 /// # Safety
-/// An item's `flat` and `content` are its connection's live packed item.
+/// An item's `flat` and `content` are its connection's live packed item, and
+/// its `registry` the receiving unit's, reached only from that unit's thread.
 pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>) {
     recording(group, |live| {
         let own = stream(live);
@@ -502,7 +536,11 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 conn,
                 flat,
                 content,
+                grants,
+                registry,
             } => {
+                let generation = group.map_or(0, |g| g.generation);
+                let mut designations = Vec::new();
                 let value = ordinal(conn).zip(layout(conn)).map(|(ordinal, layout)| {
                     // A client that arrives takes its ordinal at its take.
                     let mut handle = |kind, word: u64| match kind {
@@ -516,6 +554,9 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                             live.takes.nodes.insert(word as usize, o);
                             shared_snapshot(word, o)
                         }
+                        CAPABILITY => {
+                            item_grants::arrived(live, generation, grants, word, &mut designations)
+                        }
                         _ => Err(CAPABILITY_ITEM),
                     };
                     // SAFETY: by the contract.
@@ -528,6 +569,11 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                         body.push(0);
                         put_varint(&mut body, ordinal);
                         body.extend(value);
+                        if let Some(group) = group.filter(|_| !designations.is_empty()) {
+                            // SAFETY: the receiving unit's own registry, which
+                            // only its thread reaches (the arrival's contract).
+                            item_grants::designate(group, unsafe { &mut *registry }, &designations);
+                        }
                     }
                     Some((_, Err(why))) => return live.cut(why),
                     None => return live.cut(UNNAMED_INBOX),

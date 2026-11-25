@@ -640,7 +640,7 @@ unsafe fn conn_send<const REC: bool>(
                 detach_sockets(context, value, offsets())
             };
             // The item as a value, read before the send moves it.
-            let mut send = takes::SendNote::new(handle, value, wait);
+            let mut send = takes::SendNote::new(context, handle, value, wait);
             let mut source = CrossSend::new(value);
             source.sockets = sockets.clone();
             let id = match UnitCtx::send_cross(client, source, charge, wait, || {

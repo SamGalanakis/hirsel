@@ -56,6 +56,7 @@ pub(super) unsafe fn take(u: &mut LangUnit, took: &Took, id: usize) {
     let Some(group) = u.tape() else {
         return;
     };
+    let grants;
     let arrival = match took {
         Took::Item => {
             let Some(&h) = u.inboxes.get(&id) else {
@@ -66,10 +67,28 @@ pub(super) unsafe fn take(u: &mut LangUnit, took: &Took, id: usize) {
             let Some(t) = inbox.0.side().taken.back() else {
                 return;
             };
+            let (flat, content) = (inbox.flat_ptr(t), t.value().cross_parts().1);
+            // SAFETY: the inbox belongs to this unit, whose thread this is;
+            // the item is its newest, still in its connection.
+            let files = unsafe { (*h).files };
+            let words = unsafe { tape::item_words(id, flat, Some(content)) };
+            // As at the send: a unit without host files resolves none.
+            let registry = if files.is_null() {
+                std::ptr::null_mut()
+            } else {
+                unsafe { &raw mut (*files).registry }
+            };
+            grants = if words.is_empty() || registry.is_null() {
+                Vec::new()
+            } else {
+                unsafe { crate::tape::units::item_grants::resolve(&*registry, &words) }
+            };
             Arrival::Item {
                 conn: id,
-                flat: inbox.flat_ptr(t),
-                content: t.value().cross_parts().1,
+                flat,
+                content,
+                grants: &grants,
+                registry,
             }
         }
         Took::Close => Arrival::Close(id),
@@ -148,12 +167,28 @@ pub(super) struct SendNote {
 impl SendNote {
     /// # Safety
     /// `value` is the item, laid out as its connection's items are.
-    pub(super) unsafe fn new(client: *mut ClientH, value: *const u8, wait: bool) -> Self {
+    /// `context` is the sending unit's own.
+    pub(super) unsafe fn new(
+        context: *const crate::Context,
+        client: *mut ClientH,
+        value: *const u8,
+        wait: bool,
+    ) -> Self {
         let group = tasks::current_group();
-        // SAFETY: by the contract; the sender's handle pins the client.
+        // SAFETY: by the contract; the sender's handle pins the client, and
+        // its context's registry resolves its own capability words.
         let item = unsafe {
             let conn = Arc::as_ptr(&(*client).client.0) as usize;
-            tape::send_item(group, client as usize, conn, value)
+            let words = tape::item_words(conn, value, None);
+            // A context without host files (a model unit) resolves none, and
+            // a capability word left unresolved cuts the send.
+            let files = (*context).host_files;
+            let grants = if words.is_empty() || files.is_null() {
+                Vec::new()
+            } else {
+                crate::tape::units::item_grants::resolve(&(*files).registry, &words)
+            };
+            tape::send_item(group, client as usize, conn, value, &grants)
         };
         let op = if wait {
             hirsel_tape_format::op::CONN_SEND
@@ -177,7 +212,12 @@ pub(super) struct SendNote;
 #[cfg(not(feature = "record"))]
 impl SendNote {
     #[inline(always)]
-    pub(super) unsafe fn new(_: *mut super::ClientH, _: *const u8, _: bool) -> Self {
+    pub(super) unsafe fn new(
+        _: *const crate::Context,
+        _: *mut super::ClientH,
+        _: *const u8,
+        _: bool,
+    ) -> Self {
         Self
     }
     #[inline(always)]

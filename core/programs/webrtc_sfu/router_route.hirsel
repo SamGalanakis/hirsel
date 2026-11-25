@@ -119,8 +119,7 @@ fn restart(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, track: u16
 }
 
 // RTC-4: the collided down-tracks' fresh SSRCs go to the participant in one re-offer,
-// which the control unit sends on. A re-offer the session cannot make closes it, as a
-// refused one does.
+// which the control unit sends on. A re-offer the session cannot make is refused.
 fn reoffer(mut r: Router, room: peer.RoomId, who: peer.Gen) {
     let Some(mi) = member_at(r, room, who) else {
         return
@@ -138,12 +137,9 @@ fn reoffer(mut r: Router, room: peer.RoomId, who: peer.Gen) {
     }
 }
 
-/// Close `who`'s session in place after a refused re-offer (RTC-4) and tell the control
-/// unit, whose adapter revokes the participant so it rejoins.
-pub fn shut(mut r: Router, room: peer.RoomId, who: peer.Gen) {
-    if let Some(mi) = member_at(r, room, who) {
-        peer.shut(mut r.members[mi].session)
-    }
+// Tell the control unit that `who`'s re-offer was refused (RTC-4). Its adapter revokes
+// the participant, which closes the session, and the participant rejoins.
+fn shut(mut r: Router, room: peer.RoomId, who: peer.Gen) {
     if r.unit == 0 {
         list.push(mut r.notices, Shut(who: who))
     } else {
@@ -152,9 +148,8 @@ pub fn shut(mut r: Router, room: peer.RoomId, who: peer.Gen) {
 }
 
 /// Take the participant's answer to its re-offer (RTC-4) on the control unit and hand it
-/// to the session's home unit, which installs it or, refused, closes the session and
-/// raises `Shut`. A fenced or unknown participant's answer is `Fenced` or
-/// `NoParticipant` and goes nowhere.
+/// to the session's home unit, which installs it or, refused, raises `Shut`. A fenced or
+/// unknown participant's answer is `Fenced` or `NoParticipant` and goes nowhere.
 pub fn answer_reoffer(mut r: Router, room: peer.RoomId, who: peer.Gen, version: u64, take text: Bytes) -> Result[(), RouterError] {
     if fenced(r, room, who) {
         return Error(Fenced)
@@ -469,13 +464,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
         }
         let leg = peer.Leg(src: owner, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: voice, from: m.payload_at, len: m.payload_len)
         let track = r.downs[d].track
-        // A session a refused re-offer closed waits for its revoke and takes nothing; it
-        // does not fail the publisher's packet (RTC-4).
-        let sent = match peer.forward(mut r.members[si].session, now, track, leg, packet, mut out) {
-            Ok(x) => x,
-            Error(Closed) => continue,
-            Error(take x) => return Error(Peer(x)),
-        }
+        let sent = peer.forward(mut r.members[si].session, now, track, leg, packet, mut out) ?=> |take x| Peer(x)
         if sent == OnMedia && codec == H264 {
             // A switch: the old source's sets no longer describe what the receiver holds.
             if r.downs[d].sets_source != Some(src) {
@@ -621,11 +610,8 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
                 r.counts.stale += 1
                 return Ok(())
             }
-            match peer.resend(mut r.members[mi].session, now, ask, packet, mut out) {
-                Ok(_) => Ok(()),
-                Error(Closed) => Ok(()),
-                Error(take e) => Error(Peer(e)),
-            }
+            let _ = peer.resend(mut r.members[mi].session, now, ask, packet, mut out) ?=> |take e| Peer(e)
+            Ok(())
         },
         Key(room: room, publication: publication, encoding: encoding, why: why) => {
             let Some(pi) = publication_at(r, room, publication) else {

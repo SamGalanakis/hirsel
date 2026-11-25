@@ -344,19 +344,17 @@ fn rebind_run(cross: bool, seed: u64) {
     on_leg(one(received(mut s, out), "the fresh stream's next frame"), m2, plus(first.h.seq, 1), later(first.h.ts, 3000), "the fresh stream's numbering")
     peer.clear_outbox(mut out)
     if cross {
-        // An answer naming another version is refused: the session closes, nothing more
-        // goes out on it, and the control unit hears `Shut` so the participant rejoins.
+        // An answer naming another version is refused: the control unit hears `Shut`,
+        // on which the adapter revokes the participant so it rejoins.
         result.unwrap(router.answer_reoffer(mut r, room, s.who, version + 1, w7_answer(seed + 10)))
         if !w7_shut(mut r, s.who) {
-            fail("a refused re-offer did not close the session")
+            fail("a refused re-offer raised no Shut")
         }
-        send(mut r, 404 * MS, mut pubs[oc], RC, b"c", 40005, TC + 15000, true, vp8_key(), mut out)
-        nothing(mut s, out, "a session whose re-offer was refused still sent")
     }
 }
 
-/// bug: change a down-track's SSRC or sealer at a layer switch, Off or a rebind; drop the old publication before the new one's keyframe; let a rebind's switch go back in time or reuse a number; project a switch through SRs of two sender clocks; keep the old SSRC, the old numbering or a delta-frame start after a collision; leave the fresh SSRCs out of the re-offer or keep sending after it is refused.
-/// oracle: W7 by hand from RTC-4, RTC-6 and RTP-11: the outbound index rises by one per forwarded packet (o to o + 12); timestamps keep each source's differences, and each switch anchors as the comments derive (resume t + 9270, B t + 59070 projected or t + 15540 on arrival, C t + 104970 or t + 21720); the collision sends a BYE for both SSRCs (RFC 3550 section 8.2), asks C for a keyframe, and the stream continues on fresh SSRCs from C's next keyframe; one re-offer at origin version 2 names exactly the fresh pair (RFC 4588 section 4 FID), a matching answer keeps the session and one naming version 3 closes it with `Shut` (RTC-4).
+/// bug: change a down-track's SSRC or sealer at a layer switch, Off or a rebind; drop the old publication before the new one's keyframe; let a rebind's switch go back in time or reuse a number; project a switch through SRs of two sender clocks; keep the old SSRC, the old numbering or a delta-frame start after a collision; leave the fresh SSRCs out of the re-offer or let a refused one pass unnoticed.
+/// oracle: W7 by hand from RTC-4, RTC-6 and RTP-11: the outbound index rises by one per forwarded packet (o to o + 12); timestamps keep each source's differences, and each switch anchors as the comments derive (resume t + 9270, B t + 59070 projected or t + 15540 on arrival, C t + 104970 or t + 21720); the collision sends a BYE for both SSRCs (RFC 3550 section 8.2), asks C for a keyframe, and the stream continues on fresh SSRCs from C's next keyframe; one re-offer at origin version 2 names exactly the fresh pair (RFC 4588 section 4 FID), a matching answer keeps the session and one naming version 3 raises `Shut` (RTC-4).
 @test
 fn ssrc_survives_switches() -> Result[(), router.RouterError] {
     rebind_run(false, 100)

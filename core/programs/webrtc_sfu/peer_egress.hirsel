@@ -701,40 +701,24 @@ pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Resul
 }
 
 /// Take the answer to the re-offer in flight. One that answers no offer in flight, names
-/// another version, does not parse or does not match the offer is refused (RTC-4): the
-/// session closes in place, so nothing more goes in or out on it, and the participant
-/// renegotiates by rejoining. A matching answer installs the agreement.
+/// another version, does not parse or does not match the offer is refused (RTC-4) and
+/// changes nothing here: the caller revokes the participant, which closes the session,
+/// and the participant renegotiates by rejoining. A matching answer installs the agreement.
 pub fn answer_reoffer(mut p: PeerSession, version: u64, text: Bytes) -> Result[(), PeerError] {
     if p.closed {
         return Error(Closed)
     }
-    let refused = Sdp(AnswerMismatch(0))
     let Some((v, take sent)) = replace(mut p.offered, None) else {
-        p.closed = true
-        return Error(refused)
+        return Error(Sdp(AnswerMismatch(0)))
     }
     if v != version {
-        p.closed = true
-        return Error(refused)
+        return Error(Sdp(AnswerMismatch(0)))
     }
     let mut remote = sdp.description()
-    if let Error(take e) = sdp.parse(text, mut remote) {
-        p.closed = true
-        return Error(Sdp(e))
-    }
+    sdp.parse(text, mut remote) ?=> |take e| Sdp(e)
     let mut agreed = sdp.negotiated(p.agreed.local)
-    if let Error(take e) = sdp.accept_answer(p.agreed, sent, remote, mut agreed) {
-        p.closed = true
-        return Error(Sdp(e))
-    }
+    sdp.accept_answer(p.agreed, sent, remote, mut agreed) ?=> |take e| Sdp(e)
     renegotiated(mut p, agreed)
-}
-
-/// Close the session in place: nothing more goes in or out on it (RTC-4's refused
-/// re-offer). The router's member stays until its revoke.
-pub fn shut(mut p: PeerSession) {
-    p.closed = true
-    p.offered = None
 }
 
 /// Install a renegotiated agreement. Bindings of sections no longer receiving go.

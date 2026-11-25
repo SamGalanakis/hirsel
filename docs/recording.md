@@ -186,6 +186,8 @@ environment.
 | operation | at issue (checked on replay) | at delivery (supplied on replay) |
 |---|---|---|
 | `TLS_CONNECT` | socket ordinal; canonical args = `name`, trust (`System`, or the SHA-256 of the roots bundle), the ALPN entries in order, `until` | the outcome. On success the new stream ordinal, the negotiated protocol, the 32-byte peer digest and the binding value with its length (0 when absent). |
+| `TLS_HELLO` ([TLS-9](spec/tls.md#tls-9-server-handshake)) | socket ordinal; canonical args = `until` | the outcome. On success the new `Hello` ordinal and the normalised server name. |
+| `TLS_ACCEPT` ([TLS-9](spec/tls.md#tls-9-server-handshake)) | `Hello` ordinal; canonical args = the chain's entries in order, the key's designation and policy, the ALPN entries in order, `until` | the outcome. On success the new stream ordinal and the chosen ALPN index. Never the key's bytes. |
 | `RECV_BOUNDED` on a TLS half | as for a socket | the decrypted plaintext, in its original fragments |
 | `SEND_PAIR` on a TLS half | as for a socket: both offered plaintext buffers and the deadline | the committed count |
 | `SEND_SECRET` | half ordinal; canonical args = `until`, each secret's designation in `secrets` order, `wire`, `marks` | the outcome, and the committed count on failure |
@@ -309,7 +311,7 @@ Where cleartext can be in a recording:
 
 | bytes | in the recording? | why |
 |---|---|---|
-| bytes supplied by a `Secret` grant | never via the grant or send record | Replay uses the designation. |
+| bytes supplied by a `Secret` grant | never via the grant, send or `TLS_ACCEPT` record | Replay uses the designation. |
 | a sealed secret | only where the bytes were already there, as the received plaintext they were computed from | Replay recomputes the same bytes from those deliveries, so the seal adds nothing. |
 | received plaintext (response bodies, cookies, minted tokens; a child's stdout and stderr; received datagrams) | always, exactly as received | Replay delivers these bytes to the program, so it needs them exactly. |
 | a credential fetch ([TLS-7](spec/tls.md#tls-7-credential-grants)) | the access key id and session token, as received plaintext; never the secret key | The key is sealed by the provider. Replay makes a designation with no bytes, as for a grant. |

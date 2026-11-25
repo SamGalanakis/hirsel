@@ -110,9 +110,11 @@ and no TURN credentials. Neither survives here:
 - **TURN is generic; ICE-TCP is SFU-only.** A TURN client also serves a Hirsel program that
   is itself behind a strict firewall. ICE-TCP on the SFU helps only browsers reaching the SFU.
 
-**Where TLS terminates.** Server-side TLS is not a provider operation: a place's ingress
-belongs to its host, which terminates inbound TLS in front of the program
-([TLS-4](tls.md#tls-4-provider-calls)). So the relay never sees TLS. It sees a plaintext
+**Where TLS terminates.** A hosted relay shares port 443, and the host's front terminates
+inbound TLS in front of the program (dependency H1, below). A relay could terminate TLS
+itself on a dedicated address ([TLS-9](tls.md#tls-9-server-handshake)), but it does not:
+one code path for both is simpler, and a front already holds the certificate. So the relay
+never sees TLS. It sees a plaintext
 stream from an accepted socket ([NET-1](net.md#net-1-socket-operation-declarations)), and
 TURN over TCP and TURN over TLS are one code path in the program. The difference is only the
 host's ingress: plain TCP on 3478 or a dedicated 443 address, or TLS on 443 terminated by the

@@ -1624,13 +1624,15 @@ The place reads and checks the header before any byte reaches the program's prot
 
 Why this is the end-state, and an in-process terminator is not:
 
-- **The host terminates nothing today.** HTTP ingress already sits behind a front. The front
+- **The host terminates nothing.** HTTP ingress already sits behind a front. The front
   owns TLS, and the listener reads `X-Forwarded-For` only from trusted prefixes
-  (`deploy/wire/README.md`, RUNNER-SPEC R2-g). The runtime has a client handshake only
-  ([TLS-1](tls.md#tls-1-client-handshake)): server-side TLS is not a provider operation
-  ([TLS-4](tls.md#tls-4-provider-calls)). An in-process terminator would add server
-  certificates, private keys and renewal to every group's process. It would also add a second
-  TLS stack beside the front that HTTPS keeps. One front for both is like things treated alike.
+  (`deploy/wire/README.md`, RUNNER-SPEC R2-g). A program can terminate TLS itself on a
+  listener it owns ([TLS-9](tls.md#tls-9-server-handshake)), and a standalone run, a local
+  mock or a proxy does. A hosted place on the shared 443 does not. The address is shared by
+  many groups, so something must read SNI before any group sees the connection. Terminating
+  in each group would also put server certificates, private keys and renewal in every
+  group's process, beside the front that HTTPS keeps. One front for both is like things
+  treated alike.
 - **The platform host never proxies bytes** ("Routing" above). A terminator in the launcher
   or host would make it a byte relay for every stream. A separate front keeps the launcher
   holding listeners, not traffic.
@@ -1677,8 +1679,8 @@ the front's configuration from the table is slice H1-c.
 ### Certificates
 
 The front selects the certificate by the same SNI name and holds every certificate and
-private key, including ACME issuance and renewal. A place holds no server key and sees no
-handshake. The TURN URL's host name (`turns:turn.example.org:443`) is the certificate's name.
+private key, including ACME issuance and renewal. A place behind the front holds no server
+key and sees no handshake. The TURN URL's host name (`turns:turn.example.org:443`) is the certificate's name.
 *Reversible.*
 
 ### What the program sees

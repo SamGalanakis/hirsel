@@ -215,14 +215,17 @@ def run_preparation(command, scratch, report, expected):
 
 
 def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_runtime):
+    """Build each law twice: the normal build gives a seed's verdict, and the
+    recording build records it for the SEM-8 replay differential."""
     scratch = work / kind
     scratch.mkdir()
-    output = scratch / 'bin'
-    command = [str(compiler), 'test', '--release', '--backend', 'llvm', '-j', str(jobs), '--seed', '0',
-               '--store', str(scratch / 'objects'), '-o', str(output), '--json']
+    base = [str(compiler), 'test', '--release', '--backend', 'llvm', '-j', str(jobs), '--seed', '0',
+            '--store', str(scratch / 'objects'), '--json']
     normal = ['--runtime', str(runtime)] if runtime else []
     libraries = ['--libraries', str(ROOT / 'core')] if runtime else []
-    recording = ['--runtime', str(recording_runtime)] if recording_runtime else []
+    recording = ['--laws', *(['--runtime', str(recording_runtime)] if recording_runtime else [])]
+    legs = {'bin': lambda definition: recording if definition in REACH_WITNESSES else normal,
+            'recording': lambda definition: recording}
     reports = {}
     rows = {}
     if kind in PACKAGE_LAWS:
@@ -234,49 +237,54 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
                             ignore=shutil.ignore_patterns('hirsel.lock', 'node_modules'))
         entries = group
         print(f'Preparing {len(entries)} {kind} laws', flush=True)
-        for index, definition in enumerate(entries.values()):
-            report = scratch / f'prepare-{index}.json'
-            reports[definition] = report
-            if recording_runtime:
-                launch = ['--laws', *recording]
-            else:
-                launch = ['--laws', *recording] if definition in REACH_WITNESSES else normal
-            rows.update(run_preparation(command + launch + libraries + [str(programs / kind)],
-                                        scratch, report, [definition]))
-    elif kind == 'postgres':
-        package = scratch / 'postgres'
-        shutil.copytree(ROOT / 'core/programs/postgres', package, ignore=shutil.ignore_patterns('hirsel.lock'))
-        entries = {law: law for law in group}
-        command.extend(libraries + [str(package)])
+        for leg, launch in legs.items():
+            for index, definition in enumerate(entries.values()):
+                report = scratch / f'prepare-{leg}-{index}.json'
+                reports[leg, definition] = report
+                rows[leg, definition] = run_preparation(
+                    base + ['-o', str(scratch / leg)] + launch(definition) + libraries + [str(programs / kind)],
+                    scratch, report, [definition])[definition]
     else:
-        inputs, entries = (contract_inputs if kind == 'contracts' else runner_inputs)(group, scratch)
-        manifest = scratch / 'inputs.json'
-        manifest.write_text(json.dumps(inputs))
-        limits = {case.root_limit for case in group.values()} if kind == 'contracts' else {64 << 20}
-        limit, = limits
-        command.extend(['--inputs', str(manifest), '--source-core', '--source-std',
-                        '--limit', str(limit),
-                        '--grant', 'Tasks', '--grant', f'Env={SEED}'])
-    if kind not in PACKAGE_LAWS:
+        command = list(base)
+        if kind == 'postgres':
+            package = scratch / 'postgres'
+            shutil.copytree(ROOT / 'core/programs/postgres', package, ignore=shutil.ignore_patterns('hirsel.lock'))
+            entries = {law: law for law in group}
+            command.extend(libraries + [str(package)])
+        else:
+            inputs, entries = (contract_inputs if kind == 'contracts' else runner_inputs)(group, scratch)
+            manifest = scratch / 'inputs.json'
+            manifest.write_text(json.dumps(inputs))
+            limits = {case.root_limit for case in group.values()} if kind == 'contracts' else {64 << 20}
+            limit, = limits
+            command.extend(['--inputs', str(manifest), '--source-core', '--source-std',
+                            '--limit', str(limit),
+                            '--grant', 'Tasks', '--grant', f'Env={SEED}'])
         print(f'Preparing {len(entries)} {kind} laws', flush=True)
-        report = scratch / 'prepare.json'
-        reports = dict.fromkeys(entries.values(), report)
-        launch = ['--laws', *recording] if recording_runtime else normal
-        rows = run_preparation(command + launch, scratch, report, entries.values())
+        for leg in legs:
+            report = scratch / f'prepare-{leg}.json'
+            launch = recording if leg == 'recording' else normal
+            prepared = run_preparation(command + ['-o', str(scratch / leg)] + launch,
+                                       scratch, report, entries.values())
+            for definition in entries.values():
+                reports[leg, definition] = report
+                rows[leg, definition] = prepared[definition]
     laws = []
     for law, definition in entries.items():
-        report = reports[definition]
-        binary = output / output_name(definition)
-        if rows[definition].get('source') != 'executed' or not binary.is_file():
-            raise ValueError(f'{law} produced no executable; see {report}')
-        row = rows[definition]
+        binaries = {}
+        for leg in legs:
+            binary = scratch / leg / output_name(definition)
+            if rows[leg, definition].get('source') != 'executed' or not binary.is_file():
+                raise ValueError(f'{law} produced no {leg} executable; see {reports[leg, definition]}')
+            binaries[leg] = str(binary)
+        row = rows['bin', definition]
         seed_zero = {'status': 0 if row['passed'] else (row.get('status') or 1),
                      'stdout': row.get('stdout', ''), 'stderr': row.get('stderr', row.get('stopped', ''))}
         count = seeds if seeds is not None else FLOOD_SEEDS.get(law, DEFAULT_SEEDS)
-        laws.append({'build': build, 'law': law, 'executable': str(binary), 'seeds': count,
+        laws.append({'build': build, 'law': law, 'executable': binaries['bin'],
+                     'recording': binaries['recording'], 'seeds': count,
                      'seed_zero': seed_zero, 'min_traces': min(count, TRACE_FLOORS.get(law, 0)),
-                     'required_witnesses': REACH_WITNESSES.get(law, []),
-                     'record_replay': recording_runtime is not None})
+                     'required_witnesses': REACH_WITNESSES.get(law, [])})
     shutil.rmtree(scratch / 'objects')
     return laws
 

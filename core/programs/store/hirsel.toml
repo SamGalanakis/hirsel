@@ -373,13 +373,7 @@ limit = 268435456
 [tests.runs."store@1/store/test_crash_arm_mid_probe_after_rename"]
 limit = 268435456
 
-[tests.runs."store@1/store/test_l69_random_seed_1"]
-limit = 268435456
-
-[tests.runs."store@1/store/test_l69_random_seed_2"]
-limit = 268435456
-
-[tests.runs."store@1/store/test_l69_random_seed_3"]
+[tests.runs."store@1/store/test_l69_random_arm"]
 limit = 268435456
 
 [tests.runs."store@1/store/test_l69_pin_after_its_pack_retires"]

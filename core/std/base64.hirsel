@@ -260,7 +260,7 @@ const VALUES: Inline[u8, 256] =[
 ]
 
 fn value(x: u8) -> u8 {
-    VALUES[int.widen(x)]
+    VALUES[x]
 }
 
 /// Appends RFC 4648's standard alphabet with '=' padding. O(n).

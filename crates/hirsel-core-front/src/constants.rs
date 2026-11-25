@@ -1,6 +1,7 @@
 //! LANG-20 constants: declaration-only values evaluated in dependency order.
 //! Values share one append-only field arena; no expression owns a child vector.
 mod bytes;
+mod index;
 
 use crate::*;
 use hirsel_core_ir::Ty;
@@ -397,7 +398,7 @@ impl ConstCx<'_, '_> {
             }
             NodeKind::Index => {
                 let value = self.expr(kids[0], None, active)?;
-                let index = self.expr(kids[1], Some(scalar(Scalar::U64)), active)?;
+                let index = self.index(kids[1], active)?;
                 let (
                     TyKind::Array(elem, count),
                     ConstData::Fields { start, .. },

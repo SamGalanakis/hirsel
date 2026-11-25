@@ -681,7 +681,7 @@ pub opaque type Encoder {
 /// Start a deterministic DEFLATE stream at level 0 through 9. Allocates the
 /// block and staging buffers and, for levels above zero, the hash chains.
 pub fn encoder(format: Format, level: u8) -> Encoder {
-    let depth = SEARCH[int.widen(level)]
+    let depth = SEARCH[level]
     let mut heads: List[u16] = list.new()
     let mut links: List[u16] = list.new()
     if depth != 0 {
@@ -891,7 +891,7 @@ fn encode_block(mut e: Encoder, last: bool) {
         },
     }
     e.size = int.wrapping_add(e.size, int.truncate(n))
-    let depth = SEARCH[int.widen(e.level)]
+    let depth = SEARCH[e.level]
     if depth == 0 {
         stored_block(mut e, last)
     } else {

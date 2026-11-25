@@ -1,0 +1,21 @@
+// LANG-21: only an index converts; a signed index, a char index and a narrower
+// unsigned value anywhere else stay refused by LANG-11.
+// expect: refuse LANG-11 at 16:46
+// expect: refuse LANG-11 at 17:43
+// expect: refuse LANG-11 at 19:33
+// expect: refuse LANG-11 at 20:39
+// expect: refuse LANG-11 at 21:62
+// expect: refuse LANG-11 at 21:73
+// expect: compared LANG-11 at 16:46 | i32 | u64
+// expect: compared LANG-11 at 17:43 | char | u64
+// expect: compared LANG-11 at 19:33 | u32 | u64
+// expect: compared LANG-11 at 20:39 | u32 | u64
+// expect: compared LANG-11 at 21:62 | u32 | u64
+// expect: compared LANG-11 at 21:73 | u32 | u64
+// Lines 16-21: signed index, char index, a u32 argument, let and branch.
+fn signed(xs: List[u64], i: i32) -> u64 { xs[i] }
+fn ch(xs: List[u64], i: char) -> u64 { xs[i] }
+fn id(x: u64) -> u64 { x }
+fn argument(i: u32) -> u64 { id(i) }
+fn lets(i: u32) -> u64 { let y: u64 = i; y }
+fn branch(xs: List[u64], c: bool, i: u32) -> u64 { xs[if c { i } else { i }] }

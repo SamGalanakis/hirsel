@@ -270,7 +270,8 @@ arm or exit gives an expression its type.
   ([LANG-18](#lang-18-errors));
 - the expected type of a tuple or an `Inline` array ([SEM-9](semantics.md#sem-9-inline-arrays)):
   each component or element;
-- `bool` for a condition, a guard and each operand of `!`, `&&` and `||`; `u64` for an index.
+- `bool` for a condition, a guard and each operand of `!`, `&&` and `||`; `u64` for an index, which a narrower unsigned index
+  converts to ([LANG-21](#lang-21-operators)).
 
 An ascription has the type it writes, and it is checked as `let t: T = e` checks its
 initializer: the type is complete, a conversion below applies against it, and an `e` that
@@ -325,7 +326,8 @@ view ([OWN-25](ownership.md#own-25-region-values-are-read-as-views)); `T in a` t
 when `a` outlives `r` ([MEM-6](memory.md#mem-6-roots)); an `IndexedSpan[T]` to a
 `SeqSpan[T]`, for reading only, keeping its region, `W` and locator
 ([MEM-12](memory.md#mem-12-region-sequences)), never a `Writer`, a `Child` or a field's
-declared encoding; and a callable to a callable type it fits ([LANG-13](#lang-13-callables)).
+declared encoding; a `u8`, `u16` or `u32` index to `u64`, zero-extended
+([LANG-21](#lang-21-operators)); and a callable to a callable type it fits ([LANG-13](#lang-13-callables)).
 A conversion applies to an expression whose type is already synthesised, against its
 expected type; it never settles a type parameter, which the steps above fix as written. So
 a holder nested in a generic call whose result type was fixed from outside is refused, at
@@ -771,14 +773,31 @@ shift takes a scalar count of its lane type. A compound assignment `a op= b` typ
 | unary `!`, `&&`, `\|\|` | `bool` | `bool` |
 | `== !=` | one `key` type ([SEM-7](semantics.md#sem-7-equality-and-order)) | `bool` |
 | `< <= > >=` | one `ordered` type (SEM-7) | `bool` |
-| index `a[i]` | `a` a `List[T]`, an `Inline[T, n]` or a `FixedSpan[T]`, or a view of one; `i` a `u64` | a place of type `T` |
+| index `a[i]` | `a` a `List[T]`, an `Inline[T, n]` or a `FixedSpan[T]`, or a view of one; `i` a `u8`, `u16`, `u32` or `u64` | a place of type `T` |
 
 Indexing reads and assigns as [SEM-4](semantics.md#sem-4-lists),
 [SEM-9](semantics.md#sem-9-inline-arrays) and [MEM-12](memory.md#mem-12-region-sequences)
-say. No other type is indexable: an index or index assignment on `String`, `Text`, `Map`,
+say. An index of type `u8`, `u16` or `u32` is zero-extended to `u64` and indexes exactly as
+that `u64` does, through parentheses; its type is the index expression's own, synthesised
+with `u64` expected, so a branch, arm or call inside it is still checked against `u64`. A
+signed, `char` or any other index is refused by LANG-11, and this is the only position that
+converts an integer: an argument, a field, an operand or a shift count of a narrower type is
+refused. No other type is indexable: an index or index assignment on `String`, `Text`, `Map`,
 `SeqSpan`, `IndexedSpan` or any user type is refused here, at the index expression. A
 string is read through `string.as_bytes` or `string.next_scalar`, and a map through
 `map.get` and `map.insert`, whose results say what a missing key does.
+
+```hirsel
+type Node { next: u32 }
+fn follow(nodes: List[Node], at: u32) -> u32 { nodes[nodes[at].next].next }
+fn byte(b: Bytes, i: u8) -> u8 { b[(i)] }
+```
+```hirsel
+fn at(xs: List[u64], i: i32) -> u64 { xs[i] }              // refused: LANG-11, at i: i32 is not u64
+```
+```hirsel
+fn get(xs: List[u64], i: u32) -> Option[u64] { list.get(xs, i) }   // refused: LANG-11, at i: u32 is not u64
+```
 
 A **literal operand** is an unsuffixed number, or a unary `-` or `~`, a binary operator or
 parentheses applied only to literal operands; it synthesises no type. It is evaluated when

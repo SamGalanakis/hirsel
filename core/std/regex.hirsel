@@ -2542,7 +2542,7 @@ fn emit(mut a: Assembler, tag: u32, x: u64, y: u64, z: u64) -> u64 {
 }
 
 fn edge_bounds(mut a: Assembler, lower: u32, upper: u32) {
-    a.boundaries[int.widen(lower)] = true
+    a.boundaries[lower] = true
     a.boundaries[int.widen(upper + 1)] = true
 }
 
@@ -3139,7 +3139,7 @@ fn common_literal_prefix(needles: Needles) -> u64 {
 }
 
 fn byte_rank(ch: u8) -> u8 {
-    PREFILTER_RANK[int.widen(ch)]
+    PREFILTER_RANK[ch]
 }
 
 fn rare_pair(needle: Needle) -> (u64, u64) {
@@ -4617,7 +4617,7 @@ fn dfa_search(re: Regex, program: List[NfaState], mut work: List[u32], d: DfaLay
                 if ch >= 128 {
                     break
                 }
-                let col: u32 = int.widen(re.class_map[int.widen(ch)])
+                let col: u32 = int.widen(re.class_map[ch])
                 // Live ids are at least `columns` and below DFA_TARGET_LIMIT.
                 let offset: u64 = int.widen(int.wrapping_add(int.wrapping_sub(state, columns), col))
                 let transition = work[d.transitions + offset]

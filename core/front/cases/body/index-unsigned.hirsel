@@ -1,0 +1,99 @@
+// LANG-21: a u8, u16 or u32 index is zero-extended and indexes as the u64 form does.
+// Hand-derived: made(n)[k] = 3k + 1. Length 201 puts u8's last index at 200 (high bit
+// set) and one past at 201; length 40000 puts u16's last index at 39999 (high bit set).
+// expect: run at8(201,0) = 1
+// expect: run at8(201,200) = 601
+// expect: run at8(201,201) = fail Bounds
+// expect: run at16(201,0) = 1
+// expect: run at16(40000,39999) = 119998
+// expect: run at16(40000,40000) = fail Bounds
+// expect: run at32(201,0) = 1
+// expect: run at32(40000,39999) = 119998
+// expect: run at32(40000,40000) = fail Bounds
+// expect: run at32(201,4294967295) = fail Bounds
+// expect: run at64(201,0) = 1
+// expect: run at64(201,200) = 601
+// expect: run at64(201,201) = fail Bounds
+// expect: run at64(40000,39999) = 119998
+// expect: run at64(40000,40000) = fail Bounds
+// expect: run linked(0) = 13
+// expect: run linked(2) = fail Bounds
+// expect: run inline(2) = 13
+// expect: run inline(3) = fail Bounds
+// expect: run byte(1) = 98
+// expect: run byte(255) = fail Bounds
+// expect: run written(1) = 40
+// expect: run temporary(1) = 11
+fn made(n: u64) -> List[u64] {
+    let mut xs: List[u64] = list.new()
+    let mut k: u64 = 0
+    while k < n {
+        let _ = list.push(mut xs, 3 * k + 1)
+        k += 1
+    }
+    xs
+}
+
+fn at8(n: u64, i: u8) -> u64 {
+    let xs = made(n);
+    xs[i]
+}
+
+fn at16(n: u64, i: u16) -> u64 {
+    let xs = made(n);
+    xs[(i)]
+}
+
+fn at32(n: u64, i: u32) -> u64 {
+    let xs = made(n);
+    xs[i]
+}
+
+fn at64(n: u64, i: u64) -> u64 {
+    let xs = made(n);
+    xs[i]
+}
+
+type Link { next: u32, value: u64 }
+
+fn links() -> List[Link] {
+    let mut xs: List[Link] = list.new()
+    let _ = list.push(mut xs, Link(next: 1, value: 7))
+    let _ = list.push(mut xs, Link(next: 2, value: 13))
+    xs
+}
+
+fn follow(xs: List[Link], at: u32) -> u64 {
+    xs[xs[at].next].value
+}
+
+fn linked(at: u32) -> u64 {
+    let xs = links();
+    follow(xs, at)
+}
+
+fn inline(i: u16) -> u64 {
+    let xs: Inline[u64, 3] =[7, 11, 13];
+    xs[i]
+}
+
+fn byte(i: u8) -> u8 {
+    let s: View[String] = "abc"
+    string.as_bytes(s)[i]
+}
+
+fn bump(mut x: u64) {
+    x += 1
+}
+
+fn written(i: u8) -> u64 {
+    let mut xs: List[u64] = made(3)
+    xs[i] = 38
+    bump(mut xs[i])
+    bump(mut xs[i])
+    xs[i]
+}
+
+fn temporary(i: u32) -> u64 {
+    [7u64, 11u64, 13u64][i]
+}

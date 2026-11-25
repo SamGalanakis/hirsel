@@ -1,5 +1,7 @@
 use super::*;
 
+mod indexes;
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
     // ---- ownership state (OWN-5, OWN-9 to OWN-18)
     pub(super) fn var(&self, s: u32) -> Var {
@@ -550,7 +552,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let (collection, viewed) = self.indexed_type(at.ty);
                 let elem = self.index_element(collection, n)?;
                 // Index operands are evaluated once, before places are compared (OWN-9).
-                let (_, value) = self.expr(c[1], expect(scalar(Scalar::U64)));
+                let value = self.index_operand(c[1]);
                 let (s, l) = (at.place.start as usize, at.place.len as usize);
                 if s + l != self.steps.len() {
                     self.steps.extend_from_within(s..s + l);
@@ -943,7 +945,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let Ok(elem) = self.index_element(collection, n) else {
             return (ERROR, None);
         };
-        let (_, index) = self.expr(c[1], expect(scalar(Scalar::U64)));
+        let index = self.index_operand(c[1]);
         let viewed = !self.copies(elem);
         let ty = if viewed {
             self.t.mk(TyKind::View(elem))
@@ -968,33 +970,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         })();
         (ty, result)
-    }
-    /// LANG-21's closed index row, shared by named and temporary bases.
-    pub(super) fn index_element(&mut self, collection: TyId, n: NodeId) -> Result<TyId, ()> {
-        match self.t.kind(collection) {
-            TyKind::Array(elem, _) => Ok(*elem),
-            TyKind::Adt(d, args)
-                if matches!(
-                    self.p.decls[d.index()].role,
-                    Some(Role::List | Role::FixedSpan)
-                ) =>
-            {
-                Ok(args[0])
-            }
-            TyKind::Error => Err(()),
-            _ => {
-                let a = self.shown(collection);
-                let required = "an array, list or fixed span";
-                self.refuse_compared(
-                    "LANG-21",
-                    n,
-                    a,
-                    required,
-                    "this type has no index operation",
-                );
-                Err(())
-            }
-        }
     }
     pub(super) fn indexed_type(&self, mut ty: TyId) -> (TyId, bool) {
         let mut viewed = false;

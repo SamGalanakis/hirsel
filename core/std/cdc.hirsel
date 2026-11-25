@@ -325,7 +325,7 @@ pub fn chunker(min: u64, avg: u64, max: u64) -> Result[Chunker, Error] {
 pub fn feed(mut c: Chunker, block: Bytes, on_chunk: scoped fn(u64)) {
     for byte in block {
         if c.length >= c.minimum {
-            c.hash = int.wrapping_add(c.hash << 1, GEAR[int.widen(byte)])
+            c.hash = int.wrapping_add(c.hash << 1, GEAR[byte])
             let mask = if c.length < c.average {
                 c.strict_mask
             } else {

@@ -350,7 +350,9 @@ operations it names; nothing else about them may be inferred from an implementat
   FIPS 180-4 §5.3.4 SHA-384 initial words, and its `finish` and `hash` return the first
   48 bytes.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
-  where `xs[i]` and `list.set` fail with `Bounds`. An element is mutated in place through
+  where `xs[i]` and `list.set` fail with `Bounds`. The `i` of `xs[i]` may be any unsigned
+  integer, zero-extended (LANG-21); `list.get`, `list.set` and every other `u64` parameter
+  still take a `u64`. An element is mutated in place through
   its index place (`xs[i] = x`, or `mut xs[i]` as an argument), including nested places
   such as `rows[i][j] = x` and `list.push(mut rows[i], x)`; `list.get` gives a view.
   Maps have no index place; use `map.update(mut m, k, f)` to mutate a value in place.

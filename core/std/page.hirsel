@@ -354,8 +354,7 @@ pub fn value_at(page: Arc[Page], slot: u64) -> Option[View[Bytes]] in page {
         return Some(list.slice(page.image.raw, value + 3, value + 3 + n))
     }
     let edge = ref_at(page.image.raw, value + 1)
-    let index: u64 = int.widen(edge.body)
-    Some(hot_bytes(page.blobs[index]))
+    Some(hot_bytes(page.blobs[edge.body]))
 }
 
 pub fn lookup(root: Arc[Page], key: Bytes) -> Option[View[Bytes]] in root {
@@ -1292,7 +1291,7 @@ fn canonical_page(mut page: Page) -> Result[(), Error] {
     if list.len(bodies) != 0 {
         let mut blobs: List[BlobSlot] = list.with_capacity(list.len(bodies))
         for held in bodies {
-            let slot = numbered_blob_slot(page.blobs[int.widen(held)], int.truncate(list.len(blobs)))
+            let slot = numbered_blob_slot(page.blobs[held], int.truncate(list.len(blobs)))
             list.push(mut blobs, take slot)
         }
         page.blobs = take blobs
@@ -1333,7 +1332,7 @@ pub fn seal_located(mut raw: Bytes, page: Arc[Page], locate: scoped[view] fn(u64
         } else if out[value] == 1 {
             let field = value + 1
             let edge = ref_at(out, field)
-            let mut reference = match page.blobs[int.widen(edge.body)] {
+            let mut reference = match page.blobs[edge.body] {
                 ColdBlob(located) => located,
                 HotBlob(_) => {
                     let loc = locate(edge.stamp)
@@ -1964,7 +1963,7 @@ fn owned_slots(page: Page) -> List[PageSlot] {
     for i in 0u64 .. n {
         let row = option.unwrap(entry(page.image, i))
         let blob: Option[BlobSlot] = match row.cell {
-            BlobValue(edge) => Some(clone(page.blobs[int.widen(edge.body)])),
+            BlobValue(edge) => Some(clone(page.blobs[edge.body])),
             _ => None,
         }
         let kid: Option[Slot] = if list.len(page.kids) == 0 {
@@ -3243,7 +3242,7 @@ fn cursor_row(page: Arc[Page], slot: u64) -> CursorRow {
         arc.new(take inline)
     } else {
         let edge = ref_at(page.image.raw, cell_offset + 1)
-        arc.share(hot_body(page.blobs[int.widen(edge.body)]))
+        arc.share(hot_body(page.blobs[edge.body]))
     }
     let collection: Option[Arc[Page]] = if page.image.domain == CollectionMap {
         Some(arc.share(hot_child(page.kids[slot])))

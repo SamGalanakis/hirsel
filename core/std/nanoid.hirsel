@@ -33,11 +33,10 @@ pub fn custom(alphabet: Bytes, size: u64, rand: Bytes) -> Result[Bytes, Error] {
     }
     let mut seen: Inline[bool, 256] =[false; 256]
     for symbol in alphabet {
-        let i: u64 = int.widen(symbol)
-        if seen[i] {
+        if seen[symbol] {
             return Error(DuplicateSymbol(symbol))
         }
-        seen[i] = true
+        seen[symbol] = true
     }
     if random_bytes < size {
         return Error(RandomExhausted)

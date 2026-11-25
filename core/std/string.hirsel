@@ -419,7 +419,7 @@ fn upper_case(c: char) -> CaseMapping {
     if action == 0 {
         return CaseIdentity
     }
-    let entry = UPPER_DATA[int.widen(action)]
+    let entry = UPPER_DATA[action]
     if action >= UPPER_EXPANSION_BASE {
         let span: u32 = int.truncate(entry)
         return CaseExpansion(int.widen(span >> 4), int.widen(span & 15))
@@ -445,7 +445,7 @@ fn lower_case(c: char) -> CaseMapping {
     if action == 0 {
         return CaseIdentity
     }
-    let delta = LOWER_DELTA[int.widen(action)]
+    let delta = LOWER_DELTA[action]
     CaseScalar(option.unwrap(char.from_u32(int.wrapping_add(code, int.truncate(delta)))))
 }
 

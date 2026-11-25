@@ -18,7 +18,9 @@ credit after sending the complete event.
 HTTP/1.1 uses one chunk per event and a terminating chunk. HTTP/1.0
 delimits with a close. HEAD sends just the head. A committed
 `text/event-stream` gets heartbeat comments while the writer and queue
-are idle. The lease begins at the first response byte and covers the whole
+are idle, and `Cache-Control: no-store` and `X-Accel-Buffering: no` unless
+its fields set them. A producer that fails, or returns an empty or oversized
+event, ends the stream without the terminating chunk. The lease begins at the first response byte and covers the whole
 stream. The group cancels and joins its children on exit.
 
 `spec_owned` moves a sendable owning callback into the admitted producer.
@@ -27,3 +29,19 @@ grant. It can call `produce_owned` with already-owned state. Each item follows
 the same credit, byte and step bounds as `produce`, and a disconnected peer
 cancels the producer. The callback may capture plain functions selected by
 the route configuration.
+
+`spec_relay(request, status, bounds, take upstream, idle_ms)` relays an
+upstream response whose head the handler has read with
+[`http_client`](http_client.md): it moves the live `Connection` into the
+stream, takes the upstream's end-to-end fields (`http_client.relay_fields`)
+and writes the handler's status. The producer reads at most `event_max`
+rounded down to 8 bytes per credit, each read under a deadline `idle_ms`
+from its start, and writes each read as one chunk: the client's decoded body
+equals the upstream's, with no heartbeat. Only upstream's clean end sends the
+terminating chunk; a read error, a cut body, the idle deadline, a client
+close, the lease or a stop close without it, and every end drops the
+connection, closing upstream. It refuses `InvalidStream` unless the
+connection is at a fresh response head and `event_max` is at least 8. On an
+upstream failure before its head, answer `http_client.gateway_status(error)`
+(502, or 504 for `Deadline`) instead
+([HTTP-10](../../../docs/spec/http.md#http-10-outcomes)).

@@ -14,7 +14,7 @@ pub opaque type Spec: send {
     expires_at_ms: Option[u64],
 }
 
-type Source: send = Encoded(fn(take Seed) waits) | Owned(own[send] fn(take Seed, Clock, Option[Dir]) waits, Option[Dir]) | Managed
+type Source: send = Encoded(fn(take Seed) waits) | Owned(own[send] fn(take Seed, Clock, Option[Dir]) waits, Option[Dir]) | Relayed(Box[http_client.Connection], u64) | Managed
 
 pub fn spec[P: codec + send](req: http.Request, response_status: u16, room: Bounds, state: P, driver: fn(take Seed) waits) -> Result[Spec, http.HandlerError] {
     if response_status < 200 || response_status > 599 || response_status == 204 || response_status == 304 || room.event_max == 0 {
@@ -58,6 +58,13 @@ fn encode_spec[P: codec + send](spec_status: u16, room: Bounds, state: P, out_ca
     }
 }
 
+fn relayed(source: Source) -> bool {
+    match source {
+        Relayed(..) => true,
+        _ => false,
+    }
+}
+
 pub fn managed(offer: Offer) -> bool {
     if let Managed = offer.source {
         true
@@ -68,6 +75,20 @@ pub fn managed(offer: Offer) -> bool {
 
 /// Hands an owning producer to the admitted stream task without serialization.
 pub fn spec_owned(req: http.Request, response_status: u16, room: Bounds, directory: Option[Dir], take driver: own[send] fn(take Seed, Clock, Option[Dir]) waits) -> Result[Spec, http.HandlerError] {
+    held_spec(req, response_status, room, list.new(), Owned(take driver, directory))
+}
+
+/// Relays an upstream response body whose head the handler has read: the
+/// handler's status, the upstream's end-to-end fields, then its bytes as they
+/// arrive, with no heartbeat, each read under its own idle_ms deadline.
+pub fn spec_relay(req: http.Request, response_status: u16, room: Bounds, take upstream: http_client.Connection, idle_ms: u64) -> Result[Spec, http.HandlerError] {
+    if room.event_max < 8 || !http_client.fresh_response(upstream) {
+        return Error(InvalidStream)
+    }
+    held_spec(req, response_status, room, http_client.relay_fields(upstream), Relayed(box.new(take upstream), idle_ms))
+}
+
+fn held_spec(req: http.Request, response_status: u16, room: Bounds, take head_fields: List[(Bytes, Bytes)], take source: Source) -> Result[Spec, http.HandlerError] {
     if response_status < 200 || response_status > 599 || response_status == 204 || response_status == 304 || room.event_max == 0 {
         return Error(InvalidStream)
     }
@@ -81,7 +102,7 @@ pub fn spec_owned(req: http.Request, response_status: u16, room: Bounds, directo
         take block
     }
     match take made {
-        Ok(take block) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room, source: Owned(take driver, directory), expires_at_ms: None)),
+        Ok(take block) => Ok(Spec(status: response_status, fields: take head_fields, block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None)),
         Error(e) => Error(Allocation(e)),
     }
 }
@@ -122,41 +143,6 @@ pub fn fields(s: Spec) -> View[List[(Bytes, Bytes)]] in s {
     view s.fields
 }
 
-pub type SseHeaders {
-    event_stream: bool,
-    cache_control_default: bool,
-    accel_buffering_default: bool,
-}
-
-pub fn sse_headers(s: Spec) -> SseHeaders {
-    let mut sse = false
-    let mut cache_control = false
-    let mut accel_buffering = false
-    for (name, value) in s.fields {
-        if http1.equal_ascii(name, b"content-type") {
-            sse = sse || event_stream(value)
-        } else if http1.equal_ascii(name, b"cache-control") {
-            cache_control = true
-        } else if http1.equal_ascii(name, b"x-accel-buffering") {
-            accel_buffering = true
-        }
-    }
-    SseHeaders(event_stream: sse, cache_control_default: sse && !cache_control, accel_buffering_default: sse && !accel_buffering)
-}
-
-fn event_stream(value: Bytes) -> bool {
-    let media = b"text/event-stream"
-    let n = list.len(media)
-    if list.len(value) < n || !http1.equal_ascii(list.slice(value, 0, n), media) {
-        return false
-    }
-    let mut at = n
-    while at < list.len(value) && (value[at] == b' ' || value[at] == b'\t') {
-        at += 1
-    }
-    at == list.len(value) || value[at] == b';'
-}
-
 pub type Offer: send {
     block: Bytes,
     head_len: u64,
@@ -177,10 +163,11 @@ pub fn prepare(take s: Spec, head: Bytes, chunked: bool, heartbeat: bool, suppre
     for i in 0u64 .. list.len(head) {
         block[i] = head[i]
     }
-    Offer(block: take block, head_len: list.len(head), state_at, room, source: take source, chunked, heartbeat, suppress, at, pre_head, expires_at_ms)
+    let beat = heartbeat && !relayed(source)
+    Offer(block: take block, head_len: list.len(head), state_at, room, source: take source, chunked, heartbeat: beat, suppress, at, pre_head, expires_at_ms)
 }
 
-pub type Delivery: send = Item(Bytes) | Staged(Bytes, u64) | Committed(u64) | Sent(SentUnit) | WriteFailed | UnitDropped | Expiry | UnitExpired | ReadEnd | Tick | SourceEnded | Stop
+pub type Delivery: send = Item(Bytes) | Staged(Bytes, u64) | Committed(u64) | Sent(SentUnit) | WriteFailed | UnitDropped | Expiry | UnitExpired | ReadEnd | Tick | SourceEnded | SourceFailed | Stop
 
 pub opaque type StopHandle: send {
     inbox: Sender[Delivery]
@@ -241,21 +228,31 @@ pub fn produce_owned[P: send, E](take seed: Seed, take state: P, next: fn(mut P)
 
 fn produce_items[P: send, E](take initial: P, take inbox: Sender[Delivery], take credits: Receiver[()], room: Bounds, next: fn(mut P) -> Result[Option[Bytes], E] waits) waits {
     let mut state = take initial
+    let mut failed = false
     while let Ok(()) = channel.receive(credits) {
         match next_event(take state, room, next) {
             Ok((take current, Ok(Ok(Some(take event))))) => {
                 state = take current
                 if list.len(event) == 0 || list.capacity(event) > room.event_max {
+                    failed = true
                     break
                 }
                 if let Error(_) = channel.send(inbox, Item(take event)) {
                     return
                 }
             },
-            _ => break,
+            Ok((_, Ok(Ok(None)))) => break,
+            _ => {
+                failed = true
+                break
+            },
         }
     }
-    let _ = channel.send(inbox, SourceEnded)
+    let _ = channel.send(inbox, if failed {
+        SourceFailed
+    } else {
+        SourceEnded
+    })
 }
 
 type OwnedJob: send {
@@ -793,6 +790,8 @@ pub fn drive(take job: Work) waits {
         return
     }
     let Offer(block: take block, head_len, state_at, room, source: take offered_source, chunked, heartbeat, suppress, at, pre_head, expires_at_ms) = take offer
+    // A relayed body is whole only when upstream ends it (§2 Ending).
+    let relay = relayed(offered_source)
     let mut source = Some(take offered_source)
     let (tx, rx): (Sender[Delivery], Receiver[Delivery]) = channel.new(6)
     if let Some(owner) = control {
@@ -821,6 +820,7 @@ pub fn drive(take job: Work) waits {
     let mut end: Option[u64] = None
     let mut draining = false
     let mut expired = false
+    let mut whole = !relay
     while let Ok(take message) = channel.receive(rx) {
         let now = host.mono_ns(c)
         let mut heartbeat_ready = false
@@ -881,6 +881,10 @@ pub fn drive(take job: Work) waits {
                                     let owned = OwnedJob(seed: take seed, clock: c, directory, driver: take driver)
                                     Some(task.spawn(tasks, bytes room.producer_bytes, take owned, run_owned))
                                 },
+                                Relayed(take upstream, idle_ms) => {
+                                    let body = http_client.BodyRelay(seed: take seed, upstream: box.unbox(take upstream), idle_ms, size: room.event_max / 8 * 8)
+                                    Some(task.spawn(tasks, bytes room.producer_bytes, take body, http_client.relay_body))
+                                },
                                 Managed => fail("managed offer uses the subscription owner"),
                             }
                         }
@@ -928,8 +932,15 @@ pub fn drive(take job: Work) waits {
             },
             SourceEnded => {
                 if end == None {
+                    whole = true
                     end = Some(clock.deadline_after_ms(now, ms))
                     stop_producer(mut producer)
+                }
+            },
+            SourceFailed => {
+                if end == None {
+                    whole = false
+                    end = Some(clock.deadline_after_ms(now, ms))
                 }
             },
             Tick => {
@@ -959,6 +970,9 @@ pub fn drive(take job: Work) waits {
             let _ = channel.try_send(units, Data(take item, cap))
             busy = true
         } else if let Some(deadline) = end {
+            if !whole {
+                break
+            }
             let _ = channel.try_send(units, Terminal(deadline))
             busy = true
         } else if heartbeat_ready {

@@ -12,6 +12,10 @@ validates and measures the whole item before writing its first byte.
 An error leaves the buffer byte-identical. `into_bytes` moves the
 encoded buffer to a stream producer's output without copying.
 
+`head_defaults(fields)` tells a streamed response's head writer whether the
+fields declare `text/event-stream`, and whether to add `Cache-Control:
+no-store` and `X-Accel-Buffering: no`, each only when the fields lack it.
+
 ## Decoding
 
 `decoder(max_bytes)` creates a bounded EventSource parser whose buffers grow

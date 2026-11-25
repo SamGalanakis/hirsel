@@ -1,0 +1,447 @@
+// HTTP-10 and §2's relayed stream (http.md, 2026-11-25 amendment): a handler
+// reads an upstream head with std.http_client, then hands the connection to
+// stream.spec_relay. Every expected status, field and body below is derived
+// by hand from the upstream script and the amendment's rules; the client
+// decodes the chunked body with its own RFC 9112 §7.1 decoder.
+fn after_ms(at: u64, ms: u64) -> u64 {
+    at + ms * 1000000
+}
+
+fn relay_config() -> http.Config {
+    http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 5, inbox_cap: 2, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 1024, body_max: 1024, out_cap: 512, handler_bytes: 65536, first_head_ms: 200, idle_ms: 200, head_ms: 200, body_ms: 200, handler_ms: 100, write_ms: 1000, drain_ms: 10, linger_ms: 5, drain_max: 16, streams_max: 1, state_max: 0, reads_max: 0, heartbeat_ms: 10, lease_ms: 5000)
+}
+
+type Relay: shareable + send {
+    net: Net,
+    clock: Clock,
+    upstream: Addr,
+    head_ms: u64
+}
+
+fn gateway(e: http_client.Error) -> Result[http.Outcome, http.HandlerError] {
+    Ok(Reply(http.response(http_client.gateway_status(e), list.new(), true)?))
+}
+
+// The proxy under test: dial, read the upstream head, then relay its status,
+// its end-to-end fields and its body.
+fn relay_route(req: http.Request, scratch: Region, mut out: http.Responder, s: Relay) -> Result[http.Outcome, http.HandlerError] waits {
+    let until = order.min(http.handler_deadline(req), after_ms(host.mono_ns(s.clock), s.head_ms))
+    let ask = http_client.Request(method: "GET", target: "/up", headers: list.new(), body: Fixed(0))
+    let mut up = match http_client.dial(s.net, s.upstream, "upstream.test", s.clock, ask, until) {
+        Ok(take c) => take c,
+        Error(e) => return gateway(e),
+    }
+    if let Error(e) = http_client.finish_request(mut up, 18446744073709551615) {
+        return gateway(e)
+    }
+    let status = http_client.status(http_client.head(up))
+    let room = stream.Bounds(event_max: 64, producer_bytes: 4096, producer_steps: 1000000)
+    Ok(Stream(stream.spec_relay(req, status, room, take up, 1000)?))
+}
+
+type ProxyJob: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks,
+    cfg: http.Config,
+    state: Relay
+}
+
+fn serve_proxy(take job: ProxyJob) waits {
+    let ProxyJob(listener: take l, clock: c, tasks, cfg: take cfg, state: take s) = take job
+    let mut listeners: List[Listener] = list.with_capacity(1)
+    list.push(mut listeners, take l)
+    let mut routes: router.Builder[Relay] = router.builder()
+    result.unwrap(router.add(mut routes, "GET", "/relay", router.Route(handler: relay_route, body_max: None, upgrade_bytes: None, stream_bytes: Some(65536), steps: None)))
+    result.unwrap(http.serve(take listeners, c, tasks, take cfg, result.unwrap(router.build(take routes)), take s))
+}
+
+// One scripted upstream exchange: read the request head, then run the steps.
+type Step: send = Send(Bytes) | Pause(u64) | AwaitClose(u64) | Flood(u64, u64)
+
+type UpstreamJob: send {
+    listener: Listener,
+    clock: Clock,
+    steps: List[Step],
+    report: Sender[u64]
+}
+
+fn upstream(take job: UpstreamJob) waits {
+    let UpstreamJob(listener: take held, clock: c, steps: take steps, report: take report) = take job
+    let mut listener = take held
+    let (socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let mut output = take w
+    let mut request: Bytes = list.with_capacity(1024)
+    loop {
+        let n = list.len(request)
+        if n >= 4 && list.slice(request, n - 4, n) == b"\r\n\r\n" {
+            break
+        }
+        match host.recv_bounded(mut input, mut request, 1024 - n, At(c, after_ms(host.mono_ns(c), 1000))) {
+            Ok(0) => return,
+            Ok(_) => {},
+            Error(_) => return,
+        }
+    }
+    for step in steps {
+        match step {
+            Send(data) => send_all(mut output, data, At(c, after_ms(host.mono_ns(c), 1000))),
+            Pause(ms) => host.sleep_until(c, after_ms(host.mono_ns(c), ms)),
+            AwaitClose(ms) => {
+                let until = after_ms(host.mono_ns(c), ms)
+                let mut sink: Bytes = list.with_capacity(64)
+                let closed = loop {
+                    list.clear(mut sink)
+                    match host.recv_bounded(mut input, mut sink, 64, At(c, until)) {
+                        Ok(0) => break true,
+                        Ok(_) => {},
+                        Error(TimedOut) => break false,
+                        Error(_) => break true,
+                    }
+                }
+                let _ = channel.send(report, if closed {
+                    1
+                } else {
+                    0
+                })
+            },
+            Flood(total, report_ms) => {
+                let report_at = after_ms(host.mono_ns(c), report_ms)
+                let mut block: Bytes = list.with_capacity(64)
+                list.fill(mut block, 64, b'x')
+                let mut accepted = 0u64
+                let mut reported = false
+                while accepted < total {
+                    let until = if reported {
+                        after_ms(host.mono_ns(c), 1000)
+                    } else {
+                        report_at
+                    }
+                    let piece = order.min(64, total - accepted)
+                    match host.send_pair(mut output, list.slice(block, 0, piece), b"", At(c, until)) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            accepted += n
+                        },
+                        Error(TimedOut) => {
+                            if reported {
+                                return
+                            }
+                            reported = true
+                            let _ = channel.send(report, accepted)
+                        },
+                        Error(_) => return,
+                    }
+                }
+                if !reported {
+                    let _ = channel.send(report, accepted)
+                }
+            },
+        }
+    }
+}
+
+type Harness {
+    proxy: Addr,
+    server: Task[()],
+    upstream: Task[()],
+    report: Receiver[u64]
+}
+
+fn harness(n: Net, c: Clock, tasks: Tasks, take steps: List[Step], head_ms: u64) -> Harness waits {
+    let local = Addr(ip: V4(2130706433), port: 0)
+    let (up_listener, up_addr) = result.unwrap(host.listen(n, local, 4))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let up_job = UpstreamJob(listener: take up_listener, clock: c, steps: take steps, report: take tx)
+    let up_task = task.spawn(tasks, bytes 65536, take up_job, upstream)
+    let (proxy_listener, proxy_addr) = result.unwrap(host.listen(n, local, 4))
+    let state = Relay(net: n, clock: c, upstream: up_addr, head_ms)
+    let job = ProxyJob(listener: take proxy_listener, clock: c, tasks, cfg: relay_config(), state)
+    Harness(proxy: proxy_addr, server: task.spawn(tasks, bytes 1048576, take job, serve_proxy), upstream: take up_task, report: take rx)
+}
+
+fn finish(take h: Harness) waits {
+    let Harness(proxy: _, server: take server, upstream: take up, report: _) = take h
+    let mut serving = take server
+    let mut scripted = take up
+    task.cancel(mut serving)
+    task.cancel(mut scripted)
+    let _ = task.join(take serving)
+    let _ = task.join(take scripted)
+}
+
+// The sim network moves a few bytes per send; send until all are taken.
+fn send_all(mut w: WriteHalf, data: Bytes, until: Until) waits {
+    let mut at = 0u64
+    while at < list.len(data) {
+        match host.send_pair(mut w, list.slice(data, at, list.len(data)), b"", until) {
+            Ok(0) => return,
+            Ok(n) => {
+                at += n
+            },
+            Error(_) => return,
+        }
+    }
+}
+
+// The client's view of one exchange: the whole wire until EOF or the deadline.
+fn exchange(n: Net, c: Clock, addr: Addr, ms: u64) -> Bytes waits {
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut input = take r
+    let mut output = take w
+    let until = At(c, after_ms(host.mono_ns(c), ms))
+    send_all(mut output, b"GET /relay HTTP/1.1\r\nHost: a\r\n\r\n", until)
+    let mut wire: Bytes = list.with_capacity(16384)
+    loop {
+        let room = list.capacity(wire) - list.len(wire)
+        match host.recv_bounded(mut input, mut wire, room, until) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Error(_) => break,
+        }
+    }
+    take wire
+}
+
+// RFC 9112 §7.1: appends each chunk's data to body; true when the
+// zero-size last chunk and its final CRLF arrived.
+fn dechunk(wire: Bytes, from: u64, mut body: Bytes) -> bool {
+    let mut at = from
+    loop {
+        let mut line_end = at
+        while line_end + 1 < list.len(wire) && !(wire[line_end] == b'\r' && wire[line_end + 1] == b'\n') {
+            line_end += 1
+        }
+        if line_end + 1 >= list.len(wire) || line_end == at {
+            return false
+        }
+        let mut size = 0u64
+        for i in at .. line_end {
+            let d = wire[i]
+            let v: u8 = if d >= b'0' && d <= b'9' {
+                d - b'0'
+            } else if d >= b'a' && d <= b'f' {
+                d - b'a' + 10
+            } else if d >= b'A' && d <= b'F' {
+                d - b'A' + 10
+            } else {
+                return false
+            }
+            let wide: u64 = int.widen(v)
+            size = size * 16 + wide
+        }
+        at = line_end + 2
+        if size == 0 {
+            return list.slice(wire, at, list.len(wire)) == b"\r\n"
+        }
+        if at + size + 2 > list.len(wire) || list.slice(wire, at + size, at + size + 2) != b"\r\n" {
+            return false
+        }
+        let _ = list.append(mut body, list.slice(wire, at, at + size))
+        at += size + 2
+    }
+}
+
+fn field_values(wire: Bytes, h: http1.Head, name: Bytes) -> List[Bytes] {
+    let mut values: List[Bytes] = list.new()
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        if http1.equal_ascii(list.slice(wire, f.name.start, f.name.end), name) {
+            list.push(mut values, http.copy_bytes(list.slice(wire, f.value.start, f.value.end)))
+        }
+    }
+    take values
+}
+
+fn one_value(wire: Bytes, h: http1.Head, name: Bytes, value: Bytes) -> bool {
+    let values = field_values(wire, h, name)
+    list.len(values) == 1 && values[0] == value
+}
+
+fn absent(wire: Bytes, h: http1.Head, name: Bytes) -> bool {
+    list.len(field_values(wire, h, name)) == 0
+}
+
+fn send_steps(data: Bytes) -> List[Step] {
+    let mut steps: List[Step] = list.with_capacity(1)
+    list.push(mut steps, Send(http.copy_bytes(data)))
+    take steps
+}
+
+// The upstream's 429 and its fields are the client's, before any 200 could be
+// committed. Hop-by-hop fields, a field Connection names, Content-Length and
+// the upstream Date are dropped; the writer adds chunked framing and one Date
+// of its own. A body that upstream cuts short (Content-Length 10, 4 bytes,
+// then close) reaches the client without the zero-size last chunk.
+// expect: run http_relay_head(network) = true
+fn http_relay_head(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let upstream_429 = b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 7\r\nConnection: keep-alive, X-Hop\r\nX-Hop: drop\r\nKeep-Alive: timeout=5\r\nDate: Tue, 01 Jan 2030 00:00:00 GMT\r\nContent-Length: 13\r\n\r\n{\"error\":\"x\"}"
+    let h = harness(n, c, tasks, send_steps(upstream_429), 1000)
+    let wire = exchange(n, c, h.proxy, 500)
+    finish(take h)
+    let mut head = http1.head()
+    if http1.response(wire, mut head) != Complete || head.status != 429 {
+        return false
+    }
+    let fields_ok = one_value(wire, head, b"Content-Type", b"application/json") && one_value(wire, head, b"Retry-After", b"7") && one_value(wire, head, b"Transfer-Encoding", b"chunked") && one_value(wire, head, b"Connection", b"close") && absent(wire, head, b"X-Hop") && absent(wire, head, b"Keep-Alive") && absent(wire, head, b"Content-Length")
+    let dates = field_values(wire, head, b"Date")
+    if !fields_ok || list.len(dates) != 1 || dates[0] == b"Tue, 01 Jan 2030 00:00:00 GMT" {
+        return false
+    }
+    let mut body: Bytes = list.new()
+    list.reserve(mut body, 64)
+    if !dechunk(wire, head.end, mut body) || body != b"{\"error\":\"x\"}" {
+        return false
+    }
+    let cut = harness(n, c, tasks, send_steps(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcd"), 1000)
+    let cut_wire = exchange(n, c, cut.proxy, 500)
+    finish(take cut)
+    let mut cut_head = http1.head()
+    if http1.response(cut_wire, mut cut_head) != Complete || cut_head.status != 200 {
+        return false
+    }
+    let mut partial: Bytes = list.new()
+    list.reserve(mut partial, 64)
+    !dechunk(cut_wire, cut_head.end, mut partial) && partial == b"abcd"
+}
+
+// An upstream event stream that pauses 40 ms between pieces, 160 ms in all,
+// past the 100 ms handler deadline and across sixteen 10 ms heartbeat
+// periods. The client's decoded body equals the upstream's decoded body byte
+// for byte: its own comment and an event split across two upstream chunks
+// pass through, and no `:\n\n` is added.
+// expect: run http_relay_event_stream(network) = true
+fn http_relay_event_stream(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut steps: List[Step] = list.with_capacity(9)
+    list.push(mut steps, Send(http.copy_bytes(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n9\r\ndata: a\n\n\r\n")))
+    list.push(mut steps, Pause(40))
+    list.push(mut steps, Send(http.copy_bytes(b"12\r\n: up\n\nevent: x\ndat\r\n")))
+    list.push(mut steps, Pause(40))
+    list.push(mut steps, Send(http.copy_bytes(b"6\r\na: b\n\n\r\n")))
+    list.push(mut steps, Pause(40))
+    list.push(mut steps, Send(http.copy_bytes(b"9\r\ndata: c\n\n\r\n")))
+    list.push(mut steps, Pause(40))
+    list.push(mut steps, Send(http.copy_bytes(b"0\r\n\r\n")))
+    let h = harness(n, c, tasks, take steps, 1000)
+    let wire = exchange(n, c, h.proxy, 800)
+    finish(take h)
+    let mut head = http1.head()
+    if http1.response(wire, mut head) != Complete || head.status != 200 || !one_value(wire, head, b"Content-Type", b"text/event-stream") {
+        return false
+    }
+    let mut body: Bytes = list.new()
+    list.reserve(mut body, 256)
+    dechunk(wire, head.end, mut body) && body == b"data: a\n\n: up\n\nevent: x\ndata: b\n\ndata: c\n\n"
+}
+
+// Before the head the handler owns the upstream connection, and its failure
+// is the handler's answer: an upstream that closes without a head is 502; one
+// silent past the handler's own 30 ms head deadline, inside the 100 ms
+// handler deadline, is 504. Both are complete responses with no body.
+// expect: run http_relay_upstream_failure(network) = true
+fn http_relay_upstream_failure(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let closed = harness(n, c, tasks, list.new(), 1000)
+    let closed_wire = exchange(n, c, closed.proxy, 500)
+    finish(take closed)
+    let mut steps: List[Step] = list.with_capacity(1)
+    list.push(mut steps, Pause(300))
+    let silent = harness(n, c, tasks, take steps, 30)
+    let silent_wire = exchange(n, c, silent.proxy, 500)
+    finish(take silent)
+    let mut first = http1.head()
+    let mut second = http1.head()
+    http1.response(closed_wire, mut first) == Complete && first.status == 502 && one_value(closed_wire, first, b"Content-Length", b"0") && http1.response(silent_wire, mut second) == Complete && second.status == 504 && one_value(silent_wire, second, b"Content-Length", b"0")
+}
+
+// Reads until the first event arrives; returning drops, so closes, the socket.
+fn first_event(n: Net, c: Clock, addr: Addr) -> bool waits {
+    let (r, w) = net.split(result.unwrap(host.connect(n, addr, Never)))
+    let mut input = take r
+    let mut output = take w
+    let until = At(c, after_ms(host.mono_ns(c), 500))
+    send_all(mut output, b"GET /relay HTTP/1.1\r\nHost: a\r\n\r\n", until)
+    let mut wire: Bytes = list.with_capacity(4096)
+    loop {
+        let room = list.capacity(wire) - list.len(wire)
+        match host.recv_bounded(mut input, mut wire, room, until) {
+            Ok(0) => return false,
+            Ok(_) => {},
+            Error(_) => return false,
+        }
+        let mut head = http1.head()
+        if http1.response(wire, mut head) == Complete {
+            let mut body: Bytes = list.new()
+            list.reserve(mut body, 64)
+            let _ = dechunk(wire, head.end, mut body)
+            if body == b"data: a\n\n" {
+                return true
+            }
+        }
+    }
+}
+
+// After the head the stream group owns the upstream connection. A client that
+// reads the first event and closes ends the group, whose producer is
+// cancelled, so upstream sees its connection close within 300 ms. Nothing
+// else would close it that soon: the idle read deadline is 1000 ms, the
+// write deadline 1000 ms and the lease 5000 ms.
+// expect: run http_relay_client_disconnect(network) = true
+fn http_relay_client_disconnect(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut steps: List[Step] = list.with_capacity(2)
+    list.push(mut steps, Send(http.copy_bytes(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n9\r\ndata: a\n\n\r\n")))
+    list.push(mut steps, AwaitClose(300))
+    let h = harness(n, c, tasks, take steps, 1000)
+    let seen = first_event(n, c, h.proxy)
+    let closed = match channel.receive(h.report) {
+        Ok(value) => value == 1,
+        Error(_) => false,
+    }
+    finish(take h)
+    seen && closed
+}
+
+// A client that reads nothing bounds what the relay takes from upstream. The
+// upstream sends its head, then 4096 body bytes as fast as its socket takes
+// them. The producer reads only against a credit, at most 64 bytes a read,
+// and a credit comes back only when its chunk is on the client's socket; two
+// credits exist. Each sim direction queues at most 8 bytes. So while the
+// client stalls, upstream has had accepted at most 8 + 2 * 64 + 8 = 144 body
+// bytes. When the client reads, the whole body arrives with the last chunk.
+// expect: run http_relay_backpressure(network) = true
+fn http_relay_backpressure(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut steps: List[Step] = list.with_capacity(3)
+    list.push(mut steps, Send(http.copy_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n")))
+    list.push(mut steps, Pause(20))
+    list.push(mut steps, Flood(4096, 200))
+    let h = harness(n, c, tasks, take steps, 1000)
+    let (r, w) = net.split(result.unwrap(host.connect(n, h.proxy, Never)))
+    let mut input = take r
+    let mut output = take w
+    send_all(mut output, b"GET /relay HTTP/1.1\r\nHost: a\r\n\r\n", At(c, after_ms(host.mono_ns(c), 100)))
+    let accepted = match channel.receive(h.report) {
+        Ok(value) => value,
+        Error(_) => 18446744073709551615,
+    }
+    let until = At(c, after_ms(host.mono_ns(c), 4000))
+    let mut wire: Bytes = list.with_capacity(65536)
+    loop {
+        let room = list.capacity(wire) - list.len(wire)
+        match host.recv_bounded(mut input, mut wire, room, until) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Error(_) => break,
+        }
+    }
+    finish(take h)
+    let mut head = http1.head()
+    if accepted > 144 || http1.response(wire, mut head) != Complete || head.status != 200 {
+        return false
+    }
+    let mut body: Bytes = list.new()
+    list.reserve(mut body, 4096)
+    let mut expected: Bytes = list.with_capacity(4096)
+    list.fill(mut expected, 4096, b'x')
+    dechunk(wire, head.end, mut body) && body == expected
+}

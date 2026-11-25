@@ -789,6 +789,106 @@ pub fn close_response(take c: Connection) -> ResponseHead {
     replace(mut owned.wire.head, ResponseHead(raw: list.new(), parsed: http1.head(), persistent: false))
 }
 
+/// Whether the connection holds a final response head and none of its body
+/// has been read: what `stream.spec_relay` takes.
+pub fn fresh_response(c: Connection) -> bool {
+    c.phase == Download && c.response_fresh
+}
+
+/// The status a gateway answers when upstream fails before its head (HTTP-10):
+/// 504 for the deadline, otherwise 502 (RFC 9110 §15.6.3, §15.6.5).
+pub fn gateway_status(e: Error) -> u16 {
+    match e {
+        Deadline => 504,
+        _ => 502,
+    }
+}
+
+/// Copies the response head's end-to-end fields, in order, for a relayed
+/// response. It drops hop-by-hop fields (RFC 9110 §7.6.1) and those that
+/// Connection names, the framing and Date fields the server's writer owns,
+/// and any field the writer would refuse (HTTP-4 rule 11).
+pub fn relay_fields(c: Connection) -> List[(Bytes, Bytes)] {
+    let h = response_head(c.wire)
+    let mut fields: List[(Bytes, Bytes)] = list.with_capacity(field_count(h))
+    for i in 0u64 .. field_count(h) {
+        let (name, value) = option.unwrap(field_at(h, i))
+        if hop_by_hop(name) || connection_names(h, name) {
+            continue
+        }
+        if let Ok(()) = http.check_response_field(name, value) {
+            list.push(mut fields, (http.copy_bytes(name), http.copy_bytes(value)))
+        }
+    }
+    take fields
+}
+
+fn hop_by_hop(name: Bytes) -> bool {
+    let hop = http1.equal_ascii(name, b"connection") || http1.equal_ascii(name, b"keep-alive") || http1.equal_ascii(name, b"proxy-connection") || http1.equal_ascii(name, b"te") || http1.equal_ascii(name, b"trailer") || http1.equal_ascii(name, b"transfer-encoding") || http1.equal_ascii(name, b"upgrade")
+    hop || http1.equal_ascii(name, b"content-length") || http1.equal_ascii(name, b"date")
+}
+
+fn connection_names(h: ResponseHead, name: Bytes) -> bool {
+    for i in 0u64 .. field_count(h) {
+        let (field, value) = option.unwrap(field_at(h, i))
+        if !http1.equal_ascii(field, b"connection") {
+            continue
+        }
+        let mut lo = 0u64
+        while lo <= list.len(value) {
+            let mut hi = lo
+            while hi < list.len(value) && value[hi] != b',' {
+                hi += 1
+            }
+            let mut from = lo
+            let mut to = hi
+            while from < to && (value[from] == b' ' || value[from] == b'\t') {
+                from += 1
+            }
+            while to > from && (value[to - 1] == b' ' || value[to - 1] == b'\t') {
+                to -= 1
+            }
+            if to > from && http1.equal_ascii(list.slice(value, from, to), name) {
+                return true
+            }
+            lo = hi + 1
+        }
+    }
+    false
+}
+
+/// A relayed body's producer (§2): the stream's seed, the upstream connection
+/// it now owns, the idle deadline of each read and the read size.
+pub type BodyRelay: send {
+    seed: stream.Seed,
+    upstream: Connection,
+    idle_ms: u64,
+    size: u64
+}
+
+type Relaying: send {
+    upstream: Connection,
+    idle_ms: u64,
+    size: u64
+}
+
+/// Runs in the stream's producer task. Each credit buys one read of at most
+/// `size` decoded bytes, under a deadline set idle_ms after a fresh clock read.
+/// Upstream EOF ends the stream; any error, the deadline included, fails it.
+pub fn relay_body(take job: BodyRelay) waits {
+    let BodyRelay(seed: take seed, upstream: take upstream, idle_ms, size) = take job
+    stream.produce_owned(take seed, Relaying(upstream: take upstream, idle_ms, size), relay_next)
+}
+
+fn relay_next(mut r: Relaying) -> Result[Option[Bytes], Error] waits {
+    r.upstream.deadline = clock.deadline_after_ms(host.mono_ns(r.upstream.clock), r.idle_ms)
+    let mut chunk: Bytes = list.with_capacity(r.size)
+    if read(mut r.upstream, mut chunk)? == 0 {
+        return Ok(None)
+    }
+    Ok(Some(take chunk))
+}
+
 pub type Redirects: key + send = Follow(u8) | Return
 
 pub type Limits: send {

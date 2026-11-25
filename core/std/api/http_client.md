@@ -108,6 +108,16 @@ of credential bytes.
 For an event-stream response, feed the decoded body bytes to the
 [server-sent events decoder](sse.md).
 
+To relay a response from a server handler, read its head, then pass the
+connection to [`stream.spec_relay`](stream.md). `fresh_response(connection)`
+is true while the head has been read and no body byte has.
+`relay_fields(connection)` copies the head's end-to-end fields in order,
+dropping RFC 9110 §7.6.1's hop-by-hop fields, every field `Connection` names,
+`Content-Length`, `Date`, and any field the server writer would refuse.
+`gateway_status(error)` is the status a gateway answers for an upstream
+failure before its head: 504 for `Deadline`, otherwise 502.
+`relay_body` is the producer `spec_relay` runs.
+
 ## Fetch
 
 The normative rules are [HTTP-18](../../../docs/spec/http.md#http-18-client-fetch-redirects-decoding-and-reuse).

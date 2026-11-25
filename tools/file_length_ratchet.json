@@ -229,8 +229,8 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 3136,
-    "raise_revision": 12,
+    "lines": 3140,
+    "raise_revision": 13,
     "reason": "macos-s9-target-consts-2508"
   },
   "crates/hirsel-core-driver/src/tests.rs": {

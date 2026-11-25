@@ -432,7 +432,9 @@ checked IR with the arms that a constant expression rules out removed
 ([PROG-6](#prog-6-one-meaning)); a body the checker keeps is one that retained code holds.
 Only retained code makes slots, calls and reach. Because the rule covers every constant, not
 only `target`'s, it took normal form 4: a body whose function branches on any constant
-changes. Retained code is computed for one target at a time, before the body is encoded.
+changes. Retained code is computed for one target at a time, before the body is encoded:
+the build's `--target`, and for a build without one and for an in-process run (`hirsel run`
+on the evaluator, the checker corpus) `x86_64-unknown-linux-gnu`, the toolchain's default.
 
 **Body.** An instance's **body** is the normal form of its retained code: its own function, the
 functions generated beside it, the shapes, signatures, statics and instance rows they use, and

@@ -2741,10 +2741,6 @@ fn granted(f: Foreign[laws.Laws]) -> Result[(), ()] {
         fail_build(engine, TARGET, &format!("{PREFIX} is not an indexed ar archive"));
         repin(&pinned, &fixture_pin);
         fail_build(engine, ARM, "FFI-3: ffi_laws@1/native has no archive for target aarch64-unknown-linux-gnu; its archives are for x86_64-unknown-linux-gnu");
-        let (_, _, pure_error) = invoke("build", engine, &["--target", ARM, "--entry", "ffi_laws@1/main/pure"]);
-        assert!(!pure_error.contains("FFI-3"), "{pure_error}");
-        assert!(called.exists(), "the non-foreign control reached the linker");
-        fs::remove_file(&called).unwrap();
     }
 
     law.write("ffi_laws/laws.c", r#"
@@ -2805,6 +2801,14 @@ __attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
         assert!(rows["tests"].as_array().unwrap().iter().any(|row| {
             row["definition"] == "ffi_laws@1/tests/ungranted" && row["passed"] == true
         }));
+        fs::remove_file(&called).unwrap();
+    }
+    // The non-foreign control runs last, so the refusal rows above run even when it fails.
+    for engine in ["cranelift", "llvm"] {
+        let _ = (fs::remove_file(law.path("image")), fs::remove_dir_all(law.path("image")));
+        let (_, _, pure_error) = invoke("build", engine, &["--target", ARM, "--entry", "ffi_laws@1/main/pure"]);
+        assert!(!pure_error.contains("FFI-3"), "{pure_error}");
+        assert!(called.exists(), "the non-foreign control reached the linker");
         fs::remove_file(&called).unwrap();
     }
 }

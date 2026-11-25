@@ -80,10 +80,11 @@ fn bucket_budget_at_limit(take config: PlaceConfig[(), (), ()]) -> Result[(u64, 
     Ok((share, total))
 }
 
-// Head: 256 KiB Registry + 1 MiB publisher + 2 MiB own grant.
+// Head: 256 KiB Registry + the publisher's own 256 KiB Registry beside its
+// 1 MiB staging + 2 MiB own grant.
 // Serving: 2 MiB supervisor + one owner at 6,711 + 64 KiB + 256 KiB
 // for the Registry + 4 MiB pool. Operate holds 256 KiB and keeps 1 MiB.
-const BUDGET_RUNNER_BYTES: u64 = (262144 + 1048576 + 2097152) + (2097152 + 6711 + 65536 + 262144 + 4194304) + 262144 + 1048576
+const BUDGET_RUNNER_BYTES: u64 = (262144 + (262144 + 1048576) + 2097152) + (2097152 + 6711 + 65536 + 262144 + 4194304) + 262144 + 1048576
 
 fn keyed_budget_runner_bytes() -> u64 {
     // With no configured keys, the startup allowance adds the periodic task

@@ -150,7 +150,8 @@ async function tone(level: number): Promise<MediaStreamTrack> {
 function preferVp8(t: RTCRtpTransceiver) {
   const caps = RTCRtpReceiver.getCapabilities('video');
   if (!caps || !t.setCodecPreferences) return;
-  const vp8 = caps.codecs.filter(c => /VP8|rtx/i.test(c.mimeType));
+  // RTP-14: flexfec-03 stays, so a receiving section offers it and the service protects it.
+  const vp8 = caps.codecs.filter(c => /VP8|rtx|flexfec-03/i.test(c.mimeType));
   t.setCodecPreferences(vp8);
 }
 
@@ -265,7 +266,8 @@ async function stats() {
     if (s.type === 'inbound-rtp') {
       inbound.push({mid: s.mid ?? null, kind: s.kind, ssrc: s.ssrc, bytes: s.bytesReceived, packets: s.packetsReceived,
         frames: s.framesDecoded ?? null, width: s.frameWidth ?? null, height: s.frameHeight ?? null,
-        lost: s.packetsLost ?? null, nacks: s.nackCount ?? null, plis: s.pliCount ?? null, firs: s.firCount ?? null, dropped: s.framesDropped ?? null, keyframes: s.keyFramesDecoded ?? null});
+        lost: s.packetsLost ?? null, nacks: s.nackCount ?? null, plis: s.pliCount ?? null, firs: s.firCount ?? null, dropped: s.framesDropped ?? null, keyframes: s.keyFramesDecoded ?? null,
+        fec: s.fecPacketsReceived ?? null, fecDiscarded: s.fecPacketsDiscarded ?? null});
     } else if (s.type === 'outbound-rtp') {
       outbound.push({mid: s.mid ?? null, kind: s.kind, rid: s.rid ?? null, bytes: s.bytesSent, frames: s.framesEncoded ?? null,
         width: s.frameWidth ?? null, height: s.frameHeight ?? null, limit: s.qualityLimitationReason ?? null,

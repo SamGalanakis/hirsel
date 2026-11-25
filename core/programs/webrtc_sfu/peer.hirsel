@@ -209,6 +209,8 @@ type Paced {
     slot: u32,
     track: u16,
     media: bool,
+    // RTP-14: the FlexFEC group size of the packet's frame, 0 for none.
+    guard: u8,
     fields: rtp.header.Fields,
     level: Option[u8],
     voice: bool,
@@ -267,7 +269,15 @@ type Track {
     last_ts: u32,
     last_pt: u8,
     // The subscription's static playout delay, written on every media packet (RTC-5).
-    playout: Option[Delay]
+    playout: Option[Delay],
+    // RTP-14: the FlexFEC-03 SSRC (0 for none) and its next sequence number, whether
+    // the frame being sent is a keyframe, the group being filled and the protection
+    // level from the last report.
+    fec_ssrc: u32,
+    fec_seq: u16,
+    fec_key: bool,
+    fec: rtp.fec.Group,
+    fec_policy: rtp.fec.Policy
 }
 
 type Section {
@@ -317,8 +327,10 @@ pub opaque type PeerSession {
     pkt: Bytes,
     word: Bytes,
     dd: Bytes,
-    // An RTP-13 RED payload a down-track sends, rebuilt for each packet.
+    // An RTP-13 RED payload a down-track sends, rebuilt for each packet, and an RTP-14
+    // FlexFEC repair payload.
     red: Bytes,
+    repair: Bytes,
     ext: rtp.ext.ExtWriter,
     // The pacer, its `pacer_packets` payload slots reserved at `open`, the free ones,
     // and the entries `unpace` takes out.
@@ -331,7 +343,9 @@ pub opaque type PeerSession {
     barred: List[Gen],
     // The re-offer in flight after a collision (RTC-4): its version and the description
     // sent, which the answer is checked against.
-    offered: Option[(u64, sdp.Description)]
+    offered: Option[(u64, sdp.Description)],
+    // A re-offer was asked for while `offered` was in flight (RTC-4).
+    reoffer_due: bool
 }
 
 const EMPTY: u64 = 0xffffffffffffffff
@@ -513,9 +527,10 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
         list.push(mut slab, take b)
         list.push(mut free, int.narrow(n - 1 - i))
     }
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: limits.start_bps, min_bps: 30000, max_bps: 20000000)), rtt: None, numbered: 0, probe_from: 0, probe_next: 0, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: limits.start_bps, min_bps: 30000, max_bps: 20000000)), rtt: None, numbered: 0, probe_from: 0, probe_next: 0, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), repair: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None, reoffer_due: false)
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.red, SLOT) ?=> |c| Capacity(c)
+    list.try_reserve(mut p.repair, SLOT) ?=> |c| Capacity(c)
     list.try_reserve(mut p.word, 2) ?=> |c| Capacity(c)
     list.try_reserve(mut p.dd, DD_LIMIT) ?=> |c| Capacity(c)
     let fresh = draw(mut p)

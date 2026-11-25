@@ -50,6 +50,12 @@ value, writes a static per-subscription playout delay (`set_playout`) and passes
 abs-capture-time through; RTC-6 reads the publisher's layers allocation, so planned rates
 replace measured ones and a stream the publisher stops moves its down-tracks at the next
 switch point. Laws W11b and W26.
+Amended 2026-11-25 (webrtc-rtp-fec-2771) for FlexFEC-03 per leg ([RTP-14](rtp.md#rtp-14-flexfec-03)):
+RTC-1 reads `flexfec-03/90000` and `ssrc-group:FEC-FR`; RTC-2 keeps `Flexfec` only on a
+video section the browser offered `recvonly`, so Firefox, which offers none, stays NACK-only;
+RTC-4 draws a FlexFEC SSRC per video down-track and re-offers its `FEC-FR` pair; RTC-5
+protects keyframes and base-layer frames per leg, paced behind the group. Law W30, N1
+`flexfec_per_leg`.
 
 This chapter specifies three layers, each sans-IO:
 
@@ -143,7 +149,7 @@ not own its session.
 pub type Media = Audio | Video | Application
 pub type Direction = SendRecv | SendOnly | RecvOnly | Inactive
 pub type Setup = Active | Passive | ActPass
-pub type Codec = Opus | Vp8 | Vp9 | H264 | Av1 | Rtx | Red | Ulpfec
+pub type Codec = Opus | Vp8 | Vp9 | H264 | Av1 | Rtx | Red | Ulpfec | Flexfec
 pub type Ext = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportCc | DependencyDescriptor
 pub type Format = Format(pt: u8, codec: Codec, clock: u32, channels: u8, fmtp: Bytes, apt: Option[u8], nack: bool, pli: bool, fir: bool, twcc: bool)
 pub type Vad = VadOn | VadOff
@@ -153,7 +159,7 @@ pub type Rid = Rid(id: Inline[u8, 16], len: u8, dir: RidDir, pts: List[u8], depe
 pub type Stream = Stream(alternatives: List[u8], paused: List[bool])
 pub type Simulcast = Simulcast(send: List[Stream], recv: List[Stream])
 pub type Port = Rejected | BundleOnly | Port(u16)
-pub type Section = Section(media: Media, port: Port, mid: Inline[u8, 16], mid_len: u8, dir: Direction, formats: List[Format], extmaps: List[Extmap], rids: List[Rid], simulcast: Simulcast, ssrcs: List[u32], rtx_pairs: List[(u32, u32)], msid: Bytes, rtcp_mux: bool)
+pub type Section = Section(media: Media, port: Port, mid: Inline[u8, 16], mid_len: u8, dir: Direction, formats: List[Format], extmaps: List[Extmap], rids: List[Rid], simulcast: Simulcast, ssrcs: List[u32], rtx_pairs: List[(u32, u32)], fec_pairs: List[(u32, u32)], msid: Bytes, rtcp_mux: bool)
 pub type Description = Description(origin_session: u64, origin_version: u64, bundle: List[u8], ice_ufrag: Bytes, ice_pwd: Bytes, ice_lite: bool, fingerprint: Inline[u8, 32], setup: Setup, tls_id: Bytes, sections: List[Section], candidates: List[Bytes])
 pub type SdpError = TooLarge | Malformed(u64) | NoBundle | NotBundled(u8) | NoRtcpMux(u8) | NoMid(u8) | NoFingerprint | WrongFingerprint | NoIceCredentials | ExtmapConflict(u8) | PayloadConflict(u8) | TooManySections | TooManyFormats(u8) | TooManyRids(u8) | BadRid(u8) | AnswerMismatch(u8) | AssociationChanged | Capacity(Capacity)
 
@@ -180,7 +186,8 @@ and refused one past it:
 `bundle-only`, `ice-ufrag`, `ice-pwd`, `ice-lite`, `ice-options`, `fingerprint`, `setup`,
 `tls-id`, `mid`, `rtcp-mux`, `rtcp-rsize`, `extmap-allow-mixed`, `extmap` (with its optional
 direction and its extension attributes), `sendrecv`, `sendonly`, `recvonly`, `inactive`,
-`msid`, `ssrc` (only the `cname` and `msid` forms), `ssrc-group:FID`, `rtpmap`, `fmtp`,
+`msid`, `ssrc` (only the `cname` and `msid` forms), `ssrc-group:FID` (into `rtx_pairs`),
+`ssrc-group:FEC-FR` (media then FlexFEC SSRC, into `fec_pairs`), `rtpmap`, `fmtp`,
 `rtcp-fb`, `rid`, `simulcast`, `candidate` and `end-of-candidates`. Session-level `ice-ufrag`, `ice-pwd`,
 `fingerprint`, `setup` and `tls-id` apply to every section that lacks its own. `ice-lite` is
 read and written only at session level. Any other attribute is skipped, as RFC 8866 §5.13
@@ -189,7 +196,7 @@ skipped with its payload type or ID. The answer never accepts it, so skipping it
 negotiated behaviour.
 
 **Codec names.** `opus/48000/2`, `VP8/90000`, `VP9/90000`, `H264/90000`, `AV1/90000`,
-`rtx/90000`, `red/48000/2` and `ulpfec/90000`, compared ASCII case-insensitively
+`rtx/90000`, `red/48000/2`, `ulpfec/90000` and `flexfec-03/90000`, compared ASCII case-insensitively
 (RFC 8866 §6.6). The extension URIs are those of RFC 8843 (`mid`), RFC 8852 (`rtp-stream-id`,
 `repaired-rtp-stream-id`), RFC 6464 (`ssrc-audio-level`), `abs-send-time`,
 `transport-wide-cc-extensions-01`, the AV1 RTP specification's `dependency-descriptor`, and
@@ -295,7 +302,12 @@ server adds (RTC-5).
    format is kept when its `apt` format is kept. A `Red` format is kept on an audio section when
    the policy lists `Red` and its `fmtp` names one payload type for every block
    (`111/111`), that of a format kept here; the answer keeps the offerer's mapping as
-   offered. `default_policy` lists `Opus` and `Red` for audio. A section left with no media format is
+   offered. `default_policy` lists `Opus` and `Red` for audio. A `Flexfec` format is kept
+   only on a video section offered `recvonly` (the server sends there and never receives
+   FEC) when the policy lists `Flexfec` and the section keeps a media format;
+   `default_policy` lists it for video. Chromium offers `flexfec-03` on every video
+   section; Firefox offers none, so its legs carry no FEC and are repaired by NACK and RTX
+   alone. `Flexfec` is never a section's media format. A section left with no media format is
    answered `Rejected`.
 4. Extmaps are the offer's for extensions the policy lists, with the offer's IDs (RFC 8285
    §7). An extmap with a direction is answered with the complementary direction, and one
@@ -356,6 +368,10 @@ must keep the running sections' count prefix, order, MIDs and media kinds (RFC 9
 session's counter (`"s0"`, `"s1"`, ...), the first matching format from the publication's
 agreed formats (with the publication's agreed `Red` format whose blocks name it, when the
 policy lists `Red`), `rtcp-rsize` as libwebrtc offers it, and one SSRC and one RTX SSRC (RTC-4).
+A re-offer writes, per down-track that has a FlexFEC SSRC on a section that agreed `Flexfec`,
+an `a=ssrc-group:FEC-FR <media> <fec>` line and the FEC SSRC's `a=ssrc` lines; libwebrtc
+creates its FlexFEC receive stream only from that line. One server offer is in flight at a
+time: an offer asked for while one is outstanding is made when its answer is taken.
 `accept_answer` keeps `rtcp-rsize` on a section only when the answer repeats it. It marks a removed down-track's section
 `inactive` and reuses it for a later down-track of the same media kind, keeping its MID.
 A server offer carries `a=setup:actpass` as RFC 8842 §5.5 requires of every offer. Its ICE
@@ -612,6 +628,14 @@ So:
 `offer` (RTC-2) signals each down-track's two SSRCs with `a=ssrc` and `a=ssrc-group:FID`.
 A browser also accepts unsignaled SSRCs by MID, but signaling them pins the RTX pairing.
 
+- **FlexFEC SSRC ([RTP-14](rtp.md#rtp-14-flexfec-03)).** A video down-track on a section
+  that agreed `Flexfec` draws a third SSRC from the generator, with its own sealer and its
+  own sequence numbers from a random start. The browser learns it only from a server offer,
+  so adding such a down-track re-offers the session with its `FEC-FR` pair, and the leg
+  sends FEC only once an answer in force carries that pair. A collision on the FEC SSRC
+  retires and redraws it like the RTX SSRC, clears its group and re-offers. Repair packets
+  are never kept in the history: a NACK or report block naming the FEC SSRC answers nothing.
+
 ## RTC-5: Router, rooms and fan-out
 
 ```hirsel unbuilt
@@ -754,6 +778,18 @@ down-track, never forwarded as the publisher sent it.
   place. A write refused for room sends the primary alone. A leg that did not agree `Red`,
   or whose policy is `Off`, gets the primary alone on its Opus payload type, so a publisher's
   RED never reaches a leg that did not agree it.
+
+**FlexFEC per leg (RTP-14).** Each video down-track whose FEC pair is in force keeps one
+`fec.Group` and one `fec.Policy`, set by each RR block for its media SSRC and the session's
+round trip. Each media packet, as rewritten and before it is sealed, is put in the group with
+the size its frame's class gives: every packet of a keyframe (the class is taken at the
+frame's first packet, whose descriptor says so) is `Key`, a frame in the lowest target's mask
+is `Base`, and the rest are `Upper` and go unprotected. When the group is full its repair is
+staged in the pacer as video right behind the packet that filled it, on the leg's `Flexfec`
+payload type and FEC SSRC, with its own next sequence number, the last protected packet's
+timestamp, the section's MID and a transport-wide number, so the repair is charged to the
+leg's estimate and reaches the browser before it NACKs the gap. A browser that rebuilds a
+packet from FEC does not NACK it; only a group with two losses leaves NACKs for RTX.
 
 **RTCP is terminated.** The session walks feedback with `rtcp.next(pkt, mut at)` after
 `rtcp.check(pkt, mode)` accepts the datagram (RTC-3). The router never forwards a subscriber's
@@ -1709,6 +1745,18 @@ unless named otherwise.
   publishes, then peer 2 joins. *Oracle:* RTC-8 by hand: peer 2 alone is sent exactly one
   `Published(1, id, ..)`, and its subscription to `id` is granted and carries peer 1's mark.
   Red on main, where peer 2 is told nothing.
+- **W30 `flexfec_recovers_drops_without_nack`.** *Harness:* `fec_laws.hirsel`. A subscriber
+  offers a Chromium video section with `flexfec-03`; its subscription raises one re-offer
+  whose `FEC-FR` pair names the media SSRC and a fresh FEC SSRC. After the answer and an RR
+  at loss 20/256 (level 3), the publisher sends frames of 4 (key), 4 and 6 packets. The
+  receiver, in wire order, drops offsets 0, 3, 6, 9, 10 and 13, rebuilds packets with its own
+  FlexFEC-03 decoder and NACKs a gap only when a later frame starts or the stream ends.
+  *Oracle:* draft-03 §4.2 and libwebrtc's reader, `ZeroMutableExtensions` and
+  `FinishPacketRecovery`, re-derived in the law; RTP-14 F3 and F4 by hand: groups {0,1}
+  {2,3} {4..7} {8..11} {12,13}, five repairs on PT 49 with MID `d`; 0, 3, 6 and 13 are
+  rebuilt bit-exactly with the transport number zeroed; only 9 and 10 are NACKed, and each
+  comes back as exactly one RTX. Red on main, where no FEC SSRC is drawn and no re-offer is
+  raised.
 
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.
@@ -1719,7 +1767,11 @@ a land.
   `audio_forward` gate, a revoke whose subscriber stops receiving at once, and a relayed
   session over TURN with UDP blocked (turn.md U8). The service joins the room through `room_client` (F1).
   It runs from `core/programs/webrtc_sfu/service` (`run.py` builds the deployment, `n1.mjs`
-  drives the browsers); the N1 decisions below say how.
+  drives the browsers); the N1 decisions below say how. Its check `flexfec_per_leg`: the
+  page keeps `flexfec-03` in `setCodecPreferences`; a Chromium subscriber's remote
+  description carries `flexfec-03/90000` and an `a=ssrc-group:FEC-FR` line on the video
+  section and its inbound stats count `fecPacketsReceived` above 0; a Firefox subscriber's
+  carries neither.
 - **N2 `room_vopr`:** 100 participants over `sim.udp`, with Gilbert-Elliott loss, reordering,
   NAT rebinding, joins, leaves, revokes and target changes from a seed. The invariants are
   RTC-7's, the TLS-8 nonce rules (no `Reused`, `Issued` or `Range` from any sealer), RTC-4's
@@ -1761,6 +1813,7 @@ W19, blocks, because those are soundness reds.
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7 | the cost targets |
 | **C1** Opus RED | RTP-13 and its use here: RTC-2's `Red` answer, RTC-5's ring, policy and RED legs | S6 | W21, W22, W23 |
 | **C4** Header-extension pack | RTP-3's VLA, playout-delay, CVO and abs-capture-time; RTC-1's answers, RTC-5's egress extensions and `set_playout`, RTC-6's planned rates and dropped streams | S6 | W11b, W26 |
+| **C14** FlexFEC-03 | RTP-14 and its use here: RTC-1's `FEC-FR`, RTC-2's `Flexfec` answer and re-offer lines, RTC-4's FEC SSRC, RTC-5's groups and paced repairs | S6, C1 | W30; N1 `flexfec_per_leg` |
 | **C9b** E2EE routing | RTC-6's clear ranges; VP9's keyframe from the descriptor alone | S6, C1 | W25 |
 | **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 

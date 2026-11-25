@@ -196,7 +196,7 @@ fn supported_codec(value: Bytes) -> Option[(Codec, u32, u8)] {
     } else {
         1
     }
-    for codec in[Opus, Vp8, Vp9, H264, Av1, Rtx, Red, Ulpfec] {
+    for codec in[Opus, Vp8, Vp9, H264, Av1, Rtx, Red, Ulpfec, Flexfec] {
         let expected_clock: u64 = if codec == Opus || codec == Red {
             48000
         } else {
@@ -470,7 +470,7 @@ fn finish_section(mut draft: Draft, index: u8) -> Result[(), SdpError] {
 fn ssrc_attr(k: Bytes, b: Bytes, at: u64, mut s: Section) -> Result[(), SdpError] {
     let fields = words(b)
     if same(k, b"ssrc-group") {
-        if list.len(fields) == 0 || !same(fields[0], b"FID") {
+        if list.len(fields) == 0 || (!same(fields[0], b"FID") && !same(fields[0], b"FEC-FR")) {
             return Ok(())
         }
         if list.len(fields) != 3 {
@@ -481,6 +481,9 @@ fn ssrc_attr(k: Bytes, b: Bytes, at: u64, mut s: Section) -> Result[(), SdpError
         }
         let Some(repair) = decimal(fields[2], 0xffffffff) else {
             return Error(Malformed(at))
+        }
+        if same(fields[0], b"FEC-FR") {
+            return add(mut s.fec_pairs, (int.narrow(a), int.narrow(repair)))
         }
         return add(mut s.rtx_pairs, (int.narrow(a), int.narrow(repair)))
     }

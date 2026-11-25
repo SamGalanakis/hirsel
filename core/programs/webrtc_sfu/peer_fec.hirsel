@@ -1,0 +1,111 @@
+// ---- RTP-14 egress: FlexFEC-03 repair per down-track ----
+// A video down-track whose section agreed `flexfec-03` and whose answer took its
+// `FEC-FR` pair protects its media packets as they are sealed: each packet goes into
+// the track's group, and a full group's repair packet goes into the pacer behind it,
+// on the track's FlexFEC SSRC with its own numbers, MID and transport number.
+// Whether track `t` sends FlexFEC: the section keeps `flexfec-03` and the agreement in
+// force pairs the track's media SSRC with its FlexFEC SSRC (RTC-4).
+fn fec_on(p: PeerSession, t: u64) -> bool {
+    let fec = p.tracks[t].fec_ssrc
+    if fec == 0 {
+        return false
+    }
+    let si: u64 = int.widen(p.tracks[t].section)
+    if send_pt(p.sections[si].agreed, Flexfec) == None {
+        return false
+    }
+    let ssrc = p.tracks[t].ssrc
+    for pair in p.sections[si].agreed.local.fec_pairs {
+        if pair == (ssrc, fec) {
+            return true
+        }
+    }
+    false
+}
+
+/// Whether track `track` has a FlexFEC SSRC the participant has not been offered yet,
+/// so the router re-offers (RTC-4).
+pub fn fec_unannounced(p: PeerSession, track: u16) -> bool {
+    let t: u64 = int.widen(track)
+    t < list.len(p.tracks) && p.tracks[t].fec_ssrc != 0 && !fec_on(p, t)
+}
+
+// The group size of a media packet of frame `u` on track `t` (RTP-14 F4): keyframes,
+// then the frames the lowest target needs, then none for the rest. A frame is a
+// keyframe from its first packet on, though only that packet's descriptor says so.
+fn guard(mut p: PeerSession, t: u64, u: rtp.rewrite.Unit) -> u8 {
+    if u.start {
+        p.tracks[t].fec_key = u.keyframe
+    }
+    if !p.tracks[t].video || !fec_on(p, t) {
+        return 0
+    }
+    let class: rtp.fec.Class = if u.keyframe || p.tracks[t].fec_key {
+        Key
+    } else if (u.needs & 1) != 0 {
+        Base
+    } else {
+        Upper
+    }
+    rtp.fec.size(p.tracks[t].fec_policy, class)
+}
+
+// Put the media packet in `p.pkt`, before it is sealed, into track `t`'s group. A
+// packet the group refuses starts a new group, and the packets before it go without
+// repair. The answer is whether the group is full.
+fn fec_protect(mut p: PeerSession, t: u64, si: u64, limit: u8) -> bool {
+    if limit == 0 {
+        return false
+    }
+    let map = p.sections[si].map
+    match rtp.fec.protect(mut p.tracks[t].fec, map, p.pkt, limit) {
+        Ok(full) => full,
+        Error(Packet) => false,
+        Error(Long) => false,
+        Error(_) => {
+            rtp.fec.clear(mut p.tracks[t].fec)
+            match rtp.fec.protect(mut p.tracks[t].fec, map, p.pkt, limit) {
+                Ok(full) => full,
+                Error(_) => false,
+            }
+        },
+    }
+}
+
+// Stage track `t`'s repair packet for its full group, paced as video behind the
+// packets it protects. A repair the pacer refuses is counted as a paced drop.
+fn fec_send(mut p: PeerSession, now: u64, t: u64, src: Gen, mut out: Outbox) -> Result[(), PeerError] {
+    let si: u64 = int.widen(p.tracks[t].section)
+    let Some(pt) = send_pt(p.sections[si].agreed, Flexfec) else {
+        rtp.fec.clear(mut p.tracks[t].fec)
+        return Ok(())
+    }
+    let ts = rtp.fec.timestamp(p.tracks[t].fec)
+    let mut buf = replace(mut p.repair, list.new())
+    list.clear(mut buf)
+    let wrote = rtp.fec.write(mut p.tracks[t].fec, mut buf)
+    let staged = match wrote {
+        Ok(n) if n > 0 => {
+            let f = rtp.header.Fields(marker: false, pt: pt, seq: p.tracks[t].fec_seq, ts: ts, ssrc: p.tracks[t].fec_ssrc)
+            let q = Paced(slot: 0, track: int.narrow(t), media: false, guard: 0, fields: f, level: None, voice: false, src: src, dd: 0, cvo: None, capture: None)
+            stage(mut p, now, mut out, q, Video, None, buf, 0, n, None, None, None)
+        },
+        _ => {
+            rtp.fec.clear(mut p.tracks[t].fec)
+            Ok(false)
+        },
+    }
+    p.repair = take buf
+    if staged? {
+        p.tracks[t].fec_seq = int.wrapping_add(p.tracks[t].fec_seq, 1u16)
+    }
+    Ok(())
+}
+
+// RTP-14: a video track's protection level follows its report blocks' loss fraction
+// and the session's round trip.
+fn fec_report(mut p: PeerSession, t: u64, fraction: u8) {
+    if p.tracks[t].video {
+        rtp.fec.on_report(mut p.tracks[t].fec_policy, fraction, p.rtt)
+    }
+}

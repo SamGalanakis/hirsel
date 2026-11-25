@@ -1,0 +1,101 @@
+// RTC-4 re-offers and renegotiation: the SSRCs a session announces, the answer it takes
+// and the agreement it installs.
+/// RTC-4's re-offer, after a collision or for a new FlexFEC SSRC: every section a
+/// down-track sends on carries the track's current SSRC, for video its RTX SSRC as
+/// `a=ssrc` and `a=ssrc-group:FID` lines, and its FlexFEC SSRC as `a=ssrc` and
+/// `a=ssrc-group:FEC-FR` lines (RTC-2). Every other line keeps the running agreement,
+/// at the next origin version, which is also the returned version. The offer stays in
+/// flight until `answer_reoffer` takes its answer. While one is in flight no other is
+/// made: the answer is `None`, and `reoffer_due` holds until that answer is taken.
+pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Result[Option[u64], PeerError] {
+    if p.closed {
+        return Error(Closed)
+    }
+    if let Some(_) = p.offered {
+        p.reoffer_due = true
+        return Ok(None)
+    }
+    p.reoffer_due = false
+    let mut current: sdp.Negotiated = clone(p.agreed)
+    // A section whose down-track ended announces no SSRC; a live one announces its own.
+    for t in p.tracks {
+        let si: u64 = int.widen(t.section)
+        if si < list.len(current.sections) {
+            list.clear(mut current.sections[si].local.ssrcs)
+            list.clear(mut current.sections[si].local.rtx_pairs)
+            list.clear(mut current.sections[si].local.fec_pairs)
+        }
+    }
+    for t in p.tracks {
+        let si: u64 = int.widen(t.section)
+        if t.ended || si >= list.len(current.sections) {
+            continue
+        }
+        list.push(mut current.sections[si].local.ssrcs, t.ssrc)
+        if t.rtx_ssrc != 0 {
+            list.push(mut current.sections[si].local.rtx_pairs, (t.ssrc, t.rtx_ssrc))
+            list.push(mut current.sections[si].local.ssrcs, t.rtx_ssrc)
+        }
+        if t.fec_ssrc != 0 {
+            list.push(mut current.sections[si].local.fec_pairs, (t.ssrc, t.fec_ssrc))
+            list.push(mut current.sections[si].local.ssrcs, t.fec_ssrc)
+        }
+    }
+    current.local.origin_version += 1
+    let mut d = sdp.description()
+    sdp.offer(policy, current, current.local, list.new(), mut d) ?=> |take e| Sdp(e)
+    list.clear(mut text)
+    let _ = sdp.write(d, mut text) ?=> |take e| Sdp(e)
+    let version = d.origin_version
+    p.offered = Some((version, take d))
+    Ok(Some(version))
+}
+
+/// Whether a re-offer was asked for while another was in flight (RTC-4).
+pub fn reoffer_due(p: PeerSession) -> bool {
+    if let Some(_) = p.offered {
+        return false
+    }
+    p.reoffer_due
+}
+
+/// Take the answer to the re-offer in flight. One that answers no offer in flight, names
+/// another version, does not parse or does not match the offer is refused (RTC-4) and
+/// changes nothing here: the caller revokes the participant, which closes the session,
+/// and the participant renegotiates by rejoining. A matching answer installs the agreement.
+pub fn answer_reoffer(mut p: PeerSession, version: u64, text: Bytes) -> Result[(), PeerError] {
+    if p.closed {
+        return Error(Closed)
+    }
+    let Some((v, take sent)) = replace(mut p.offered, None) else {
+        return Error(Sdp(AnswerMismatch(0)))
+    }
+    if v != version {
+        return Error(Sdp(AnswerMismatch(0)))
+    }
+    let mut remote = sdp.description()
+    sdp.parse(text, mut remote) ?=> |take e| Sdp(e)
+    let mut agreed = sdp.negotiated(p.agreed.local)
+    sdp.accept_answer(p.agreed, sent, remote, mut agreed) ?=> |take e| Sdp(e)
+    renegotiated(mut p, agreed)
+}
+
+/// Install a renegotiated agreement. Bindings of sections no longer receiving go.
+pub fn renegotiated(mut p: PeerSession, agreed: sdp.Negotiated) -> Result[(), PeerError] {
+    if p.closed {
+        return Error(Closed)
+    }
+    let sections = build_sections(agreed, p.limits)?
+    p.sections = take sections
+    p.agreed = clone(agreed)
+    let mut kept: List[Inbound] = list.new()
+    let old = replace(mut p.inbound, list.new())
+    for take i in take old {
+        let si: u64 = int.widen(i.section)
+        if si < list.len(p.sections) && p.sections[si].agreed.recv {
+            list.push(mut kept, take i)
+        }
+    }
+    p.inbound = take kept
+    Ok(())
+}

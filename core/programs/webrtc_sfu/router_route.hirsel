@@ -118,15 +118,18 @@ fn restart(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, track: u16
     Ok(())
 }
 
-// RTC-4: the collided down-tracks' fresh SSRCs go to the participant in one re-offer,
-// which the control unit sends on. A re-offer the session cannot make is refused.
+// RTC-4: the collided down-tracks' fresh SSRCs, or a new down-track's FlexFEC SSRC
+// (RTP-14), go to the participant in one re-offer, which the control unit sends on. A
+// re-offer asked for while one is in flight is made when its answer is taken. A
+// re-offer the session cannot make is refused.
 fn reoffer(mut r: Router, room: peer.RoomId, who: peer.Gen) {
     let Some(mi) = member_at(r, room, who) else {
         return
     }
     let mut text: Bytes = list.new()
     match peer.reoffer(mut r.members[mi].session, sdp.default_policy(), mut text) {
-        Ok(version) => {
+        Ok(None) => (),
+        Ok(Some(version)) => {
             if r.unit == 0 {
                 list.push(mut r.notices, Offer(who: who, version: version, text: take text))
             } else {
@@ -172,6 +175,10 @@ fn settle_answer(mut r: Router, room: peer.RoomId, who: peer.Gen, version: u64, 
     }
     if let Error(_) = peer.answer_reoffer(mut r.members[mi].session, version, text) {
         shut(mut r, room, who)
+        return
+    }
+    if peer.reoffer_due(r.members[mi].session) {
+        reoffer(mut r, room, who)
     }
 }
 

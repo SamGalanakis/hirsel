@@ -265,6 +265,14 @@ fn put_section(mut b: Bytes, s: Section, d: Description, tagged: bool) {
         number(mut b, int.widen(rtx))
         append(mut b, b"\r\n")
     }
+    for pair in s.fec_pairs {
+        let (main, fec) = pair
+        append(mut b, b"a=ssrc-group:FEC-FR ")
+        number(mut b, int.widen(main))
+        list.push(mut b, b' ')
+        number(mut b, int.widen(fec))
+        append(mut b, b"\r\n")
+    }
     for ssrc in s.ssrcs {
         append(mut b, b"a=ssrc:")
         number(mut b, int.widen(ssrc))

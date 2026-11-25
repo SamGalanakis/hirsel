@@ -548,6 +548,7 @@ fn rtcp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Re
                                 p.rtt = Some(rtt)
                             }
                             red_report(mut p, t, block.fraction, now)
+                            fec_report(mut p, t, block.fraction)
                         }
                     }
                 }

@@ -593,7 +593,7 @@ fn admit(mut r: Router, who: peer.Participant, home: u16) -> Result[(), RouterEr
 
 fn first_format(a: sdp.Agreed) -> Option[sdp.Format] {
     for f in a.formats {
-        if f.codec != Rtx && f.codec != Red && f.codec != Ulpfec {
+        if f.codec != Rtx && f.codec != Red && f.codec != Ulpfec && f.codec != Flexfec {
             return Some(clone(f))
         }
     }
@@ -797,7 +797,12 @@ fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, s
         host.random(r.random, mut b)
         let first_seq: u16 = list.word_be(b, 0)
         let first_ts: u32 = list.word_be(b, 2)
-        peer.add_track(mut r.members[mi].session, section, first_seq, first_ts) ?=> |take e| Peer(e)
+        let track = peer.add_track(mut r.members[mi].session, section, first_seq, first_ts) ?=> |take e| Peer(e)
+        // RTP-14: the participant learns the track's FlexFEC SSRC from a re-offer.
+        if peer.fec_unannounced(r.members[mi].session, track) {
+            reoffer(mut r, room, who)
+        }
+        track
     } else {
         0u16
     }

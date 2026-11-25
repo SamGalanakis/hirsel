@@ -1,0 +1,345 @@
+// ---- RTP-14 router law (W30): FlexFEC-03 per down-track ----
+// A Chromium receiving video section: VP8 on 96, RTX on 97, FlexFEC-03 on 49 as
+// Chromium offers it, MID on 1, TWCC on 3 and rtcp-rsize. `dir` is its direction.
+fn fec_section(mut b: Bytes, dir: Bytes) {
+    list.append(mut b, b"m=video 9 UDP/TLS/RTP/SAVPF 96 97 49\na=mid:d\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\na=rtcp-mux\na=rtcp-rsize\na=")
+    list.append(mut b, dir)
+    list.append(mut b, b"\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\na=rtcp-fb:96 transport-cc\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtpmap:49 flexfec-03/90000\na=rtcp-fb:49 transport-cc\na=fmtp:49 repair-window=10000000\n")
+}
+
+// The browser's answer to the router's re-offer, from the client whose certificate is
+// `party(client_seed)`.
+fn fec_answer(client_seed: u64) -> Bytes {
+    let mut b: Bytes = b"v=0\no=- 5 10 IN IP4 0.0.0.0\ns=-\nt=0 0\na=group:BUNDLE d\na=ice-ufrag:remote\na=ice-pwd:remote-pass-0123456789abcd\na=fingerprint:sha-256 1F:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\na=setup:active\na=tls-id:remote-association\n"
+    fec_section(mut b, b"recvonly")
+    let mut d = sdp.description()
+    result.unwrap(sdp.parse(b, mut d))
+    let Party(id: _, certificate: certificate) = party(client_seed)
+    let h = std.sha256.hash(certificate)
+    for i in 0u64 .. 32 {
+        d.fingerprint[i] = h[i]
+    }
+    let mut text: Bytes = list.new()
+    let _ = result.unwrap(sdp.write(d, mut text))
+    take text
+}
+
+// A publisher packet on section a with the marker as given.
+fn frame_packet(mut cs: srtp.Session, seq: u16, ts: u32, marker: bool, body: Bytes) -> Bytes {
+    let mut m = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut m, 1, Mid))
+    let mut w = rtp.ext.writer()
+    result.unwrap(rtp.ext.put(mut w, m, Mid, b"a", 0, 1))
+    let f = rtp.header.Fields(marker: marker, pt: 96, seq: seq, ts: ts, ssrc: MEDIA_SSRC)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, body)
+    let _ = result.unwrap(srtp.protect_rtp(mut cs, mut b))
+    b
+}
+
+// Packet `k` of a VP8 frame (RFC 7741 section 4.2, RFC 6386 section 9.1): the first
+// starts partition 0 (S=1) with a keyframe tag (P=0) or an interframe tag (P=1), the
+// rest continue it (S=0). Each is a different length, filled with a byte of `k`.
+fn frame_body(key: bool, k: u64, offset: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(1500)
+    if k == 0 {
+        if key {
+            list.append(mut b, b"\x10\x10\x02\x00\x9d\x01\x2a\x40\x01\xf0\x00")
+        } else {
+            list.append(mut b, b"\x10\x11\x02\x00")
+        }
+    } else {
+        list.push(mut b, 0x00u8)
+    }
+    let fill: u8 = int.truncate(0x31 + offset * 7)
+    while list.len(b) < 90 + 13 * offset {
+        list.push(mut b, fill)
+    }
+    b
+}
+
+// A copy of `g` with its transport-wide sequence number (extension 3) zeroed, as
+// libwebrtc's receiver zeroes mutable extensions before it XORs (RtpPacket::
+// ZeroMutableExtensions).
+fn zeroed(g: Got) -> Bytes {
+    let mut b = copy_of(g.pkt)
+    let mut m = rtp.ext.map(Mixed)
+    result.unwrap(rtp.ext.bind(mut m, 3, TransportSeq))
+    if let Ok(Some(e)) = rtp.ext.find(m, g.pkt, g.h, TransportSeq) {
+        for i in e.at .. e.at + e.len {
+            b[i] = 0u8
+        }
+    }
+    b
+}
+
+// The media offsets (sequence number minus `n0`) a FlexFEC-03 repair protects, from
+// its 20-byte header (draft-ietf-payload-flexible-fec-scheme-03 section 4.2, as
+// libwebrtc's Flexfec03HeaderReader reads it): R = F = 0, one SSRC, the protected
+// SSRC at 12, SN base at 16 and a 15-bit mask at 18 with K = 1.
+fn fec_offsets(fec: Bytes, ssrc_m: u32, n0: u16) -> List[u64] {
+    if list.len(fec) <= 20 || (fec[0] & 0xc0) != 0 || fec[8] != 1 {
+        fail("a FlexFEC repair has no valid single-SSRC header")
+    }
+    let ssrc: u32 = list.word_be(fec, 12)
+    let base: u16 = list.word_be(fec, 16)
+    let mask: u16 = list.word_be(fec, 18)
+    if ssrc != ssrc_m || (mask & 0x8000) == 0 || (mask & 0x7fff) == 0 {
+        fail("a FlexFEC repair names another SSRC or a mask past 15 bits")
+    }
+    let mut out: List[u64] = list.new()
+    for d in 0u16 .. 15u16 {
+        if (mask & (0x4000u16 >> d)) != 0 {
+            let off: u16 = int.wrapping_sub(int.wrapping_add(base, d), n0)
+            list.push(mut out, int.widen(off))
+        }
+    }
+    out
+}
+
+// Recover the one missing packet `lost` of a repair from the others it protects
+// (libwebrtc ForwardErrorCorrection: XOR bytes 0-1, the lengths less 12, the
+// timestamps and bytes 12 on into the repair's fields, then FinishPacketRecovery sets
+// V = 2, the length, the sequence number and the protected SSRC).
+fn recover(fec: Bytes, offsets: List[u64], kept: List[Bytes], lost: u64, ssrc_m: u32, n0: u16) -> Bytes {
+    let mut b0 = fec[0]
+    let mut b1 = fec[1]
+    let mut length: u16 = list.word_be(fec, 2)
+    let mut ts: u32 = list.word_be(fec, 4)
+    let mut body = copy_of(list.slice(fec, 20, list.len(fec)))
+    for o in offsets {
+        if o == lost {
+            continue
+        }
+        let p = kept[o]
+        b0 = b0 ^ p[0]
+        b1 = b1 ^ p[1]
+        let n: u16 = int.narrow(list.len(p) - 12)
+        length = length ^ n
+        let pts: u32 = list.word_be(p, 4)
+        ts = ts ^ pts
+        for i in 12u64 .. list.len(p) {
+            body[i - 12] = body[i - 12] ^ p[i]
+        }
+    }
+    let mut out: Bytes = list.with_capacity(1500)
+    list.push(mut out, (b0 | 0x80) & 0xbf)
+    list.push(mut out, b1)
+    let off: u16 = int.narrow(lost)
+    list.put_word_be(mut out, int.wrapping_add(n0, off))
+    list.put_word_be(mut out, ts)
+    list.put_word_be(mut out, ssrc_m)
+    let len: u64 = int.widen(length)
+    list.append(mut out, list.slice(body, 0, len))
+    out
+}
+
+fn fec_report(mut cs: srtp.Session, ssrc_m: u32, fraction: u8) -> Bytes {
+    let mut b: Bytes = list.with_capacity(1500)
+    let mut blocks: List[rtp.rtcp.Block] = list.new()
+    list.push(mut blocks, rtp.rtcp.Block(ssrc: ssrc_m, fraction: fraction, lost: 0, highest: 0, jitter: 0, lsr: 0, dlsr: 0))
+    let _ = result.unwrap(rtp.rtcp.write_rr(CLIENT_SSRC, view blocks, mut b))
+    sealed_rtcp(mut cs, take b)
+}
+
+// Everything the subscriber receives from `from` up to `to`, polled each millisecond.
+fn fec_drain(mut r: router.Router, from: u64, to: u64, mut s: Client, mut out: peer.Outbox, mut wire: List[Got]) {
+    let mut now = from
+    while now <= to {
+        peer.clear_outbox(mut out)
+        let _ = router.poll(mut r, now, mut out)
+        for g in received(mut s, out) {
+            list.push(mut wire, clone(g))
+        }
+        now += MS
+    }
+    peer.clear_outbox(mut out)
+}
+
+fn has_offset(xs: List[u64], x: u64) -> bool {
+    for v in xs {
+        if v == x {
+            return true
+        }
+    }
+    false
+}
+
+/// bug: send no FlexFEC on a leg whose browser offered flexfec-03, announce no FEC-FR pair, XOR the transport-wide number the receiver zeroes, write a wrong length, timestamp or mask, group across frames or past the RTP-14 sizes, send a group's repair after the next frame starts, or NACK a packet FEC recovers.
+/// oracle: draft-ietf-payload-flexible-fec-scheme-03 section 4.2 and libwebrtc's FlexFEC-03 reader, ZeroMutableExtensions and FinishPacketRecovery, re-derived here as the law's own decoder; RTP-14 F3 and F4 by hand: at loss fraction 20/256 a keyframe goes in groups of 2 and a base-layer frame in groups of 4, closed at the frame's marker, so frames of 4 (key), 4 and 6 packets make groups {0,1} {2,3} {4..7} {8..11} {12,13} and five repairs. The seeded schedule drops 0 and 3 (first and marker of key groups), 6 (middle), 13 (marker of a short group) and 9 and 10 (two in one group): FEC recovers 0, 3, 6 and 13 bit-exactly with the transport number zeroed, the receiver NACKs only 9 and 10 when the next frame starts or the stream ends, and each NACKed packet comes back as exactly one RTX.
+@test
+fn flexfec_recovers_drops_without_nack() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(170))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut pub_ = admit(mut r, 171, session_offer(), 1)
+    let mut offer = minimal_head(b" d")
+    fec_section(mut offer, b"recvonly")
+    let mut s = admit(mut r, 173, offer, 2)
+    let room = room_id()
+    let pa = result.unwrap(router.publish(mut r, room, pub_.who, 0))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 0, mut out))
+    // RTC-4: the new down-track's FlexFEC SSRC comes in one re-offer.
+    let mut reoffer: Option[(u64, Bytes)] = None
+    for take n in router.take_notices(mut r) {
+        if let Offer(who: w, version: v, text: take t) = take n {
+            if w == s.who {
+                reoffer = Some((v, take t))
+            }
+        }
+    }
+    let Some((version, text)) = reoffer else {
+        fail("a subscription on a flexfec-03 section raised no re-offer")
+    }
+    let mut d = sdp.description()
+    result.unwrap(sdp.parse(text, mut d))
+    if list.len(d.sections[0].fec_pairs) != 1 || list.len(d.sections[0].rtx_pairs) != 1 {
+        fail("the re-offer does not pair the track with one FlexFEC and one RTX SSRC")
+    }
+    let (m, f) = d.sections[0].fec_pairs[0]
+    let (m_rtx, x) = d.sections[0].rtx_pairs[0]
+    if m_rtx != m || f == 0 || f == m || f == x {
+        fail("the FEC-FR pair names another media SSRC or reuses one")
+    }
+    result.unwrap(router.answer_reoffer(mut r, room, s.who, version, fec_answer(174)))
+    peer.clear_outbox(mut out)
+    let mut now = 10 * MS
+    feed(mut r, now, s.who, s.at, fec_report(mut s.cs, m, 20), mut out)
+    let mut wire: List[Got] = list.new()
+    // Frames of 4 (key), 4 and 6 packets, one packet each 5 ms.
+    let mut offset = 0u64
+    for (frame, size) in[(0u32, 4u64), (1u32, 4u64), (2u32, 6u64)] {
+        for k in 0u64 .. size {
+            let seq: u16 = int.truncate(500 + offset)
+            let packet = frame_packet(mut pub_.cs, seq, 3000 * frame, k + 1 == size, frame_body(frame == 0, k, offset))
+            peer.clear_outbox(mut out)
+            feed(mut r, now, pub_.who, pub_.at, packet, mut out)
+            for g in received(mut s, out) {
+                list.push(mut wire, clone(g))
+            }
+            fec_drain(mut r, now + MS, now + 4 * MS, mut s, mut out, mut wire)
+            now += 5 * MS
+            offset += 1
+        }
+    }
+    fec_drain(mut r, now, now + 20 * MS, mut s, mut out, mut wire)
+    now += 21 * MS
+    // The receiver, in wire order.
+    let mut drops: List[u64] = list.new()
+    for o in[0u64, 3u64, 6u64, 9u64, 10u64, 13u64] {
+        list.push(mut drops, o)
+    }
+    let mut n0 = 0u16
+    let mut started = false
+    let mut kept: List[Bytes] = list.new()
+    let mut lost_pkts: List[Bytes] = list.new()
+    let mut have: List[u64] = list.new()
+    for _ in 0u64 .. 14 {
+        list.push(mut kept, list.new())
+        list.push(mut lost_pkts, list.new())
+    }
+    let mut recovered: List[u64] = list.new()
+    let mut nacked: List[u64] = list.new()
+    let mut repairs = 0u64
+    let mut frame_ts: Option[u32] = None
+    let mut highest = 0u64
+    for g in wire {
+        if g.h.ssrc == m {
+            if !started {
+                n0 = g.h.seq
+                started = true
+            }
+            let o: u64 = int.widen(int.wrapping_sub(g.h.seq, n0))
+            if o >= 14 {
+                fail("the leg sent more media packets than the publisher")
+            }
+            if has_offset(drops, o) {
+                lost_pkts[o] = zeroed(g)
+                continue
+            }
+            // A packet of a later frame: every gap still open is NACKed.
+            if let Some(t) = frame_ts {
+                if t != g.h.ts {
+                    for gap in 0u64 .. o {
+                        if !has_offset(have, gap) && !has_offset(nacked, gap) {
+                            list.push(mut nacked, gap)
+                        }
+                    }
+                }
+            }
+            frame_ts = Some(g.h.ts)
+            kept[o] = zeroed(g)
+            list.push(mut have, o)
+            highest = order.max(highest, o)
+        } else if g.h.ssrc == f {
+            repairs += 1
+            if g.h.pt != 49 || option.unwrap(ext_value(g, 1, Mid)) != b"d" || ext_value(g, 3, TransportSeq) == None {
+                fail("a repair lacks the FlexFEC type, the leg's MID or a transport number")
+            }
+            let fec = payload_of(g)
+            let offsets = fec_offsets(fec, m, n0)
+            let mut missing: List[u64] = list.new()
+            for o in offsets {
+                if !has_offset(have, o) {
+                    list.push(mut missing, o)
+                }
+            }
+            if list.len(missing) == 1 {
+                let lost = missing[0]
+                let got = recover(fec, offsets, kept, lost, m, n0)
+                if !same(got, lost_pkts[lost]) {
+                    fail("a recovered packet differs from the one lost_pkts with its transport number zeroed")
+                }
+                list.push(mut recovered, lost)
+                list.push(mut have, lost)
+            }
+        }
+    }
+    for gap in 0u64 .. 14 {
+        if !has_offset(have, gap) && !has_offset(nacked, gap) {
+            list.push(mut nacked, gap)
+        }
+    }
+    if repairs != 5 {
+        fail("the leg did not send one repair for each of the five RTP-14 groups")
+    }
+    for o in[0u64, 3u64, 6u64, 13u64] {
+        if !has_offset(recovered, o) {
+            fail("a single loss in a group was not recovered from its repair")
+        }
+    }
+    if list.len(nacked) != 2 || !has_offset(nacked, 9) || !has_offset(nacked, 10) {
+        fail("the receiver NACKed a recovered packet, or missed one FEC could not recover")
+    }
+    // The two NACKed packets come back once each as RTX; nothing FEC recovered does.
+    let mut pairs: List[(u16, u16)] = list.new()
+    list.push(mut pairs, (plus(n0, 9), 1))
+    let request = rsize_nack(mut s.cs, m, plus(n0, 13), pairs)
+    peer.clear_outbox(mut out)
+    feed(mut r, now, s.who, s.at, request, mut out)
+    let mut answers = received(mut s, out)
+    fec_drain(mut r, now + MS, now + 10 * MS, mut s, mut out, mut answers)
+    for o in 0u64 .. 14 {
+        let mut count = 0u64
+        for g in answers {
+            if g.h.ssrc == x {
+                let body = payload_of(g)
+                let osn: u16 = list.word_be(body, 0)
+                if osn == plus(n0, int.narrow(o)) {
+                    count += 1
+                }
+            }
+        }
+        let want = if o == 9 || o == 10 {
+            1u64
+        } else {
+            0u64
+        }
+        if count != want {
+            fail("RTX answered other than exactly the NACKed packets, once each")
+        }
+    }
+    Ok(())
+}

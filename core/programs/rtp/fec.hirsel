@@ -1,0 +1,206 @@
+// RTP-14: FlexFEC-03 repair packets as libwebrtc's FlexfecReceiver reads them, pure
+// and sans-IO. A group XORs up to 15 packets of one media SSRC; its repair packet
+// carries the XOR of their first two bytes, lengths, timestamps and bytes 12 on,
+// with every mutable header extension value counted as zero.
+/// The FlexFEC-03 header of a single-SSRC repair with a 15-bit mask (K0 = 1).
+pub const HEADER: u64 = 20
+
+/// A group's packets lie within this many sequence numbers of its first: offset 0
+/// to 14, the 15 bits of the first mask word.
+pub const SPAN: u16 = 15
+
+/// The longest packet a group protects, header included.
+pub const LONGEST: u64 = 1400
+
+pub type Refusal: key = Packet | Stream | Span | Long
+
+/// The XOR of the packets protected so far, from `base` on one media SSRC.
+pub opaque type Group {
+    ssrc: u32,
+    base: u16,
+    mask: u16,
+    count: u8,
+    size: u8,
+    head: u16,
+    length: u16,
+    ts: u32,
+    last: u32,
+    body: Bytes
+}
+
+pub fn group() -> Result[Group, Capacity] {
+    let mut body: Bytes = list.new()
+    list.try_reserve(mut body, LONGEST)?
+    Ok(Group(ssrc: 0, base: 0, mask: 0, count: 0, size: 0, head: 0, length: 0, ts: 0, last: 0, body: take body))
+}
+
+/// How many packets the group holds.
+pub fn count(g: Group) -> u8 {
+    g.count
+}
+
+/// Forget the packets the group holds.
+pub fn clear(mut g: Group) {
+    g.count = 0
+    g.mask = 0
+    g.head = 0
+    g.length = 0
+    g.ts = 0
+    list.clear(mut g.body)
+}
+
+// The value bytes of the mutable extension `k` in `pkt`, or (0, 0).
+fn mutable(f: ext.Found, k: ext.Kind) -> (u64, u64) {
+    match ext.found(f, k) {
+        Some(e) => (e.at, e.at + e.len),
+        None => (0, 0),
+    }
+}
+
+/// Add the RTP packet `pkt` to the group. The first packet of an empty group sets
+/// its SSRC, its base and its `limit` (1 to 15); a packet on another SSRC, outside
+/// offsets 0 to 14 of the base, or longer than `LONGEST` is refused and the group is
+/// left as it was. The TransportSeq and AbsSendTime values of `pkt`, as `m` binds
+/// them, are counted as zero. The answer is whether the group is full: it holds
+/// `limit` packets, `pkt` ends a frame (its marker), or `pkt` is at offset 14.
+pub fn protect(mut g: Group, m: ext.ExtMap, pkt: Bytes, limit: u8) -> Result[bool, Refusal] {
+    let Ok(h) = header.parse(pkt) else {
+        return Error(Packet)
+    }
+    let len = list.len(pkt)
+    if len > LONGEST {
+        return Error(Long)
+    }
+    let Ok(f) = ext.scan(m, pkt, h) else {
+        return Error(Packet)
+    }
+    if g.count == 0 {
+        if limit == 0 || limit > 15 {
+            return Error(Span)
+        }
+        g.ssrc = h.ssrc
+        g.base = h.seq
+        g.size = limit
+    } else if h.ssrc != g.ssrc {
+        return Error(Stream)
+    }
+    let offset = int.wrapping_sub(h.seq, g.base)
+    if offset >= SPAN {
+        return Error(Span)
+    }
+    let bit = 0x4000u16 >> offset
+    if (g.mask & bit) != 0 {
+        return Error(Span)
+    }
+    let (a0, a1) = mutable(f, TransportSeq)
+    let (b0, b1) = mutable(f, AbsSendTime)
+    g.head = g.head ^ list.word_be(pkt, 0)
+    let size_word: u16 = int.narrow(len - 12)
+    g.length = g.length ^ size_word
+    g.ts = g.ts ^ h.ts
+    g.last = h.ts
+    while list.len(g.body) < len - 12 {
+        list.push(mut g.body, 0u8)
+    }
+    let mut i = 12u64
+    while i < len {
+        if (i >= a0 && i < a1) || (i >= b0 && i < b1) {
+            i += 1
+            continue
+        }
+        g.body[i - 12] = g.body[i - 12] ^ pkt[i]
+        i += 1
+    }
+    g.mask = g.mask | bit
+    g.count += 1
+    Ok(g.count >= g.size || h.marker || offset == SPAN - 1)
+}
+
+/// The repair packet's payload length: the FEC header and the longest protected
+/// packet's bytes 12 on.
+pub fn payload_len(g: Group) -> u64 {
+    HEADER + list.len(g.body)
+}
+
+/// The timestamp a repair packet takes: that of the last packet protected.
+pub fn timestamp(g: Group) -> u32 {
+    g.last
+}
+
+/// Append to `out` the FEC header and body of the group's repair packet, then clear
+/// the group. An empty group writes nothing; nothing is appended when `out` lacks
+/// room.
+pub fn write(mut g: Group, mut out: Bytes) -> Result[u64, Capacity] {
+    if g.count == 0 {
+        return Ok(0)
+    }
+    let n = payload_len(g)
+    let available = list.capacity(out) - list.len(out)
+    if n > available {
+        return Error(Capacity(requested: n, available: available))
+    }
+    // R and F are 0: a mask, not a fixed-offset list (draft-03 section 4.2).
+    list.put_word_be(mut out, g.head & 0x3fffu16)
+    list.put_word_be(mut out, g.length)
+    list.put_word_be(mut out, g.ts)
+    list.push(mut out, 1u8)
+    list.push(mut out, 0u8)
+    list.put_word_be(mut out, 0u16)
+    list.put_word_be(mut out, g.ssrc)
+    list.put_word_be(mut out, g.base)
+    list.put_word_be(mut out, 0x8000u16 | g.mask)
+    list.append(mut out, g.body)
+    clear(mut g)
+    Ok(n)
+}
+
+/// What a packet's frame is to protection (RTP-14 F4).
+pub type Class: key = Key | Base | Upper
+
+/// A down-track's protection level, 0 to 3, from its last report.
+pub type Policy: key {
+    level: u8
+}
+
+const KEY_SIZE: Inline[u8, 4] =[8, 4, 2, 2]
+
+const BASE_SIZE: Inline[u8, 4] =[0, 15, 8, 4]
+
+/// A round trip this long makes repair by NACK cost a frame, so protection steps
+/// up one level.
+pub const SLOW_RTT_NS: u64 = 100000000
+
+pub fn policy() -> Policy {
+    Policy(level: 0)
+}
+
+/// Take one report's loss fraction (in 1/256) and round trip: no loss is level 0,
+/// under 3/256 level 1, under 13/256 level 2 and more level 3; a round trip of
+/// `SLOW_RTT_NS` or more steps a level from 1 or 2 one up.
+pub fn on_report(mut p: Policy, fraction: u8, rtt_ns: Option[u64]) {
+    let mut level = if fraction == 0 {
+        0u8
+    } else if fraction < 3 {
+        1u8
+    } else if fraction < 13 {
+        2u8
+    } else {
+        3u8
+    }
+    if let Some(rtt) = rtt_ns {
+        if rtt >= SLOW_RTT_NS && level > 0 && level < 3 {
+            level += 1
+        }
+    }
+    p.level = level
+}
+
+/// The group size for a frame of class `c`, 0 for none.
+pub fn size(p: Policy, c: Class) -> u8 {
+    let l: u64 = int.widen(p.level)
+    match c {
+        Key => KEY_SIZE[l],
+        Base => BASE_SIZE[l],
+        Upper => 0,
+    }
+}

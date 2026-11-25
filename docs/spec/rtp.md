@@ -7,6 +7,9 @@ RTP-11 gaps slice S9 (2362) found: `Unit.frame`, `Unit`'s home, the H.264 caller
 target-number sentence, and AV1 without chains; and for the switch projection's rounding. Amended by webrtc-opus-red-c1-2652 (2026-11-25) for [RTP-13](#rtp-13-redundant-audio-red), RFC 2198
 redundant audio: the `red` module, its ring and the redundancy policy, the RTP-12 exception for a
 ring of depth 0, and the matching line of *Not taken in Wave 1*.
+Amended 2026-11-25 by webrtc-rtp-fec-2771 for [RTP-14](#rtp-14-flexfec-03), FlexFEC-03:
+the `fec` module, its wire format with mutable extensions zeroed, groups, the keyframe and
+base-layer policy, the FEC/NACK rule, slice S14 and the matching line of *Not taken*.
 Amended 2026-11-25 by webrtc-bwe-probe-2669: RTP-9 counts the media a pacer lets out during a
 cluster as members and allows probing on a media stream through RTP-11's new `pad`; RTP-10
 gains `cluster`. Amended 2026-11-25 by webrtc-hdrext-pack-2682 for plan item C4:
@@ -91,10 +94,12 @@ section here or to a named owner.
 | revocation: stop forwarding, flush or cancel queued RTX | the fence is the forwarding spec's; [RTP-12](#rtp-12-state-charges-and-close) gives the synchronous `close` of rewrite, history and pacer state |
 | DTLS, SRTP and SRTCP | the DTLS spec |
 | Opus RED (RFC 2198) redundancy on lossy down-tracks | [RTP-13](#rtp-13-redundant-audio-red); which leg carries it is the forwarding spec's (RTC-5) |
+| FlexFEC-03 video repair per down-track | [RTP-14](#rtp-14-flexfec-03); negotiation and the leg that carries it are the WebRTC spec's (RTC-2, RTC-4, RTC-5) |
 
 **Not taken in Wave 1**, each a later decision with no hook left for it here: REMB, RTCP XR,
-RTCP APP (parsed as `Other` and skipped), FEC other than RED (ULPFEC, FlexFEC; RED is
-[RTP-13](#rtp-13-redundant-audio-red)), the video
+RTCP APP (parsed as `Other` and skipped), FEC other than RED and FlexFEC-03 (ULPFEC, the
+RFC 8627 FlexFEC format; RED is [RTP-13](#rtp-13-redundant-audio-red), FlexFEC-03
+[RTP-14](#rtp-14-flexfec-03)), the video
 layers allocation extension, transport-cc v2's feedback request, RFC 8888 congestion control
 feedback, abs-capture-time, playout-delay, video-orientation, RFC 6465 mixer-to-client audio
 levels, SDES items other than CNAME, and libwebrtc's second-generation loss-based estimator.
@@ -1594,6 +1599,102 @@ receiver's; a forwarder that receives RED forwards the primary or rebuilds RED, 
 repair its own uplink. RED for video, and redundancy in another encoding than the primary's,
 are not taken.
 
+## RTP-14: FlexFEC-03
+
+```hirsel unbuilt
+// module fec
+pub const HEADER: u64 = 20
+pub const SPAN: u16 = 15
+pub const LONGEST: u64 = 1400
+pub type Refusal: key = Packet | Stream | Span | Long
+
+pub opaque type Group
+pub fn group() -> Result[Group, Capacity]
+pub fn count(g: Group) -> u8
+pub fn clear(mut g: Group)
+pub fn protect(mut g: Group, m: ext.ExtMap, pkt: Bytes, size: u8) -> Result[bool, Refusal]
+pub fn payload_len(g: Group) -> u64
+pub fn timestamp(g: Group) -> u32
+pub fn write(mut g: Group, mut out: Bytes) -> Result[u64, Capacity]
+
+pub type Class: key = Key | Base | Upper
+pub type Policy: key { level: u8 }
+pub const SLOW_RTT_NS: u64 = 100000000
+pub fn policy() -> Policy
+pub fn on_report(mut p: Policy, fraction: u8, rtt_ns: Option[u64])
+pub fn size(p: Policy, c: Class) -> u8
+```
+
+FlexFEC-03 (draft-ietf-payload-flexible-fec-scheme-03, as libwebrtc's `FlexfecReceiver`
+and `Flexfec03HeaderReader` read it) sends a repair packet on its own SSRC: the XOR of a
+group of media packets of one SSRC, from which a receiver rebuilds any one of them it lost.
+It is the one video FEC this package writes; ULPFEC and the FlexFEC RFC 8627 format are not
+taken. The module is pure and sans-IO: a `Group` XORs the packets it is handed and writes
+the repair payload; the RTP header of the repair packet, its pacing and its numbers are the
+forwarder's (RTC-5).
+
+**F1. Wire.** A repair payload is a 20-byte FEC header and then a body. The header, for one
+protected SSRC and a 15-bit mask:
+
+| bytes | field |
+|---|---|
+| 0-1 | the XOR of every protected packet's bytes 0-1, then `& 0x3fff`, so `R` = `F` = 0 (a mask follows, not a fixed-offset list) |
+| 2-3 | the XOR of every protected packet's length less 12 |
+| 4-7 | the XOR of their timestamps |
+| 8 | SSRCCount = 1 |
+| 9-11 | 0 |
+| 12-15 | the protected SSRC |
+| 16-17 | SN base, the sequence number of the group's first packet |
+| 18-19 | the mask: `0x8000` (K = 1, no second word) or'd with `0x4000 >> d` for each packet at offset `d` (0 to 14) from SN base |
+
+The body is the XOR of every protected packet's bytes from 12 on, each zero-padded to the
+longest. A receiver recovers the one missing packet by XORing the others into the repair,
+then sets `V` = 2, the length (bytes 2-3 plus 12), the sequence number (SN base plus its
+offset) and the protected SSRC. A group holds at most one packet per offset and spans at
+most `SPAN` (15) sequence numbers, so one repair needs no second mask word.
+
+**F2. Mutable extensions are zero.** A forwarder rewrites a packet's transport-wide
+sequence number and absolute send time after it is protected, and libwebrtc's receiver
+zeroes those values before it XORs (`RtpPacket::ZeroMutableExtensions`). So `protect`
+counts the value bytes of `TransportSeq` and `AbsSendTime`, as the section's `ExtMap` binds
+them, as zero; every other byte, the extension headers included, is XORed as sent.
+
+**F3. Groups.** `protect` adds one packet. The first packet of an empty group sets its
+SSRC, SN base and `size` (1 to 15). A packet that does not parse (`Packet`), is longer than
+`LONGEST` (1,400 bytes, header included: `Long`), is on another SSRC (`Stream`), lies
+outside offsets 0 to 14 or repeats an offset (`Span`) is refused and the group is left as it
+was; a caller that is refused `Stream` or `Span` clears the group and starts a new one with
+that packet, so the packets before it go without repair. The answer is whether the group is
+full: it holds `size` packets, the packet carries the marker (a group never spans two
+frames), or the packet is at offset 14. `write` appends the header and body of a non-empty
+group and clears it, refusing with `Capacity` and appending nothing when `out` lacks room;
+the repair's timestamp is the last protected packet's (`timestamp`). A group reserves
+`LONGEST` bytes once, when it is made, so protecting and writing allocate nothing.
+
+**F4. Priority and policy.** A `Policy` is one down-track's protection level, 0 to 3, set
+by each report block for it from the loss fraction in RTP-5's unit (1/256) and the round
+trip:
+
+| fraction | level | keyframe group | base-layer group |
+|---|---|---|---|
+| 0 | 0 | 8 | none |
+| under 3 (1.2%) | 1 | 4 | 15 |
+| under 13 (5.1%) | 2 | 2 | 8 |
+| 13 or more | 3 | 2 | 4 |
+
+A round trip of `SLOW_RTT_NS` (100 ms) or more makes a level 1 or 2 one higher: there a
+NACK repair costs more than a frame. `size` gives the group size for a packet's `Class`:
+`Key` for every packet of a keyframe, `Base` for a frame the lowest target needs (bit 0 of
+RTP-11's `needs`), and `Upper`, never protected, for the rest. So a keyframe is protected
+on every leg, even a clean one, and the frames no other frame depends on carry no repair
+bytes.
+
+**F5. FEC and NACK.** A repair packet is RTP: it is sent once, never stored for RTX, and a
+NACK or report block naming the FEC SSRC is ignored. A receiver that rebuilds a packet from
+a repair does not NACK it; only a group with two or more losses leaves packets to NACK and
+RTX (RTP-6, RTP-7). The forwarder sends each group's repair right behind its last packet,
+before the next frame's, so the repair reaches the receiver before it NACKs the gap.
+
 ## Prior art
 
 Goose (`/tmp/ref-goose` at `d5ae5bb`) is the language peer. `str0m` (`/tmp/ref-str0m` at
@@ -1987,6 +2088,7 @@ package. Each law is carried by exactly one slice.
 | **S11** cost | the RTP-12 cost path; the only slice with a cost target and the only one that runs a benchmark | S1, S3, S8 | `parse_rewrite_cost`: [`python3 bench/rtp/cost.py <scratch-dir>`](../../bench/rtp/cost.py) checks 0 allocations per packet (the default mode), reports instructions (mode `instructions`) and times the path on a shielded CPU (mode `time`) | S | Sol |
 | **S12** protected RTX | the SRTP wire case of RTP-7, in `core/programs/srtp/` | S4, DTLS slice S5 | `rtx_protected` in `core/programs/srtp/laws.hirsel` | S | Devin |
 | **S13** RED | RTP-13: module `red` (parse, ring, write, policy); its webrtc use is RTC-5's | S1, S3 | `red_parse`, `red_write_round_trip` | S | Opus |
+| **S14** FlexFEC-03 | RTP-14: module `fec` (group, write, policy); its webrtc use is RTC-5's | S1, S3, S8 | WebRTC's W30 `flexfec_recovers_drops_without_nack` decodes its repairs | M | Opus |
 
 Every slice that changes a `.hirsel` source under `core/programs/rtp` <!-- doc-ref: planned --> or
 `core/programs/media_bits` refreshes that package's `hirsel.laws` in the same commit.

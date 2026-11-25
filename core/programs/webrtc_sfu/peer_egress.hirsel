@@ -29,7 +29,8 @@ fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut out: Outbox) -> Result[(
         return Ok(())
     }
     for t in 0u64 .. list.len(p.tracks) {
-        if p.tracks[t].ssrc == ssrc || (p.tracks[t].rtx_ssrc != 0 && p.tracks[t].rtx_ssrc == ssrc) {
+        let fec = p.tracks[t].fec_ssrc
+        if p.tracks[t].ssrc == ssrc || (p.tracks[t].rtx_ssrc != 0 && p.tracks[t].rtx_ssrc == ssrc) || (fec != 0 && fec == ssrc) {
             let old = p.tracks[t].ssrc
             let old_rtx = p.tracks[t].rtx_ssrc
             retire(mut p, old, mut out)?
@@ -39,6 +40,12 @@ fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut out: Outbox) -> Result[(
                 retire(mut p, old_rtx, mut out)?
                 let fresh_rtx = draw(mut p)
                 p.tracks[t].rtx_ssrc = fresh_rtx
+            }
+            if fec != 0 {
+                retire(mut p, fec, mut out)?
+                let fresh_fec = draw(mut p)
+                p.tracks[t].fec_ssrc = fresh_fec
+                rtp.fec.clear(mut p.tracks[t].fec)
             }
             p.tracks[t].highest = EMPTY
             p.tracks[t].sent = rtp.stats.sent(0)
@@ -82,7 +89,8 @@ pub fn collided(mut p: PeerSession) -> Option[u16] {
 }
 
 /// Make a down-track on a sending section. It draws its media SSRC and, for video
-/// with RTX agreed, its RTX SSRC; both keep for the track's life while collision-free.
+/// with RTX agreed, its RTX SSRC and with `flexfec-03` agreed, its FlexFEC SSRC; each
+/// keeps for the track's life while collision-free.
 /// `first_seq` and `first_ts` are the outgoing stream's first number and timestamp
 /// (RFC 3550 section 5.1: the router draws them at random).
 pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32) -> Result[u16, PeerError] {
@@ -103,12 +111,20 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     } else {
         0
     }
+    // RTP-14: a FlexFEC SSRC is drawn where the section agreed `flexfec-03`; it is
+    // used once a re-offer's answer takes its `FEC-FR` pair.
+    let fec_ssrc = if video && send_pt(p.sections[si].agreed, Flexfec) != None {
+        draw(mut p)
+    } else {
+        0
+    }
+    let fec = rtp.fec.group() ?=> |c| Capacity(c)
     let history: rtp.history.History[Record] = rtp.history.history(HISTORY_SLOTS, HISTORY_AGE_NS) ?=> |c| Capacity(c)
     let rewrite = rtp.rewrite.rewrite(clock, REWRITE_RANGES, REWRITE_FRAMES, int.widen(first_seq), first_ts) ?=> |c| Capacity(c)
     let pictures = rtp.counter.counter(15, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let frames = rtp.counter.counter(16, Translate, COUNTER_SLOTS) ?=> |c| Capacity(c)
-    let track = Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None)
+    let track = Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None, fec_ssrc: fec_ssrc, fec_seq: first_seq, fec_key: false, fec: take fec, fec_policy: rtp.fec.policy())
     for t in 0u64 .. list.len(p.tracks) {
         if p.tracks[t].ended {
             p.tracks[t] = take track
@@ -321,7 +337,7 @@ fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, rec: Rec
     }
     let f = rtp.header.Fields(marker: rec.marker, pt: rpt, seq: p.tracks[t].rtx_seq, ts: ts, ssrc: p.tracks[t].rtx_ssrc)
     let osn: u16 = int.truncate(index)
-    let q = Paced(slot: 0, track: int.narrow(t), media: false, fields: f, level: None, voice: false, src: rec.src, dd: 0, cvo: rec.cvo, capture: rec.capture)
+    let q = Paced(slot: 0, track: int.narrow(t), media: false, guard: 0, fields: f, level: None, voice: false, src: rec.src, dd: 0, cvo: rec.cvo, capture: rec.capture)
     if stage(mut p, now, mut out, q, Retransmit, Some(osn), payload, rec.from, rec.len, rec.picture, rec.tl0, rec.dd)? {
         p.tracks[t].rtx_seq = int.wrapping_add(p.tracks[t].rtx_seq, 1u16)
     }
@@ -362,9 +378,13 @@ fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pac
             list.clear(mut p.pkt)
             return Error(take e)
         }
+        let full = fec_protect(mut p, t, si, q.guard)
         seal_out(mut p, q.src, mut out)?
         if q.media {
             rtp.stats.on_sent(mut p.tracks[t].sent, len)
+        }
+        if full {
+            fec_send(mut p, now, t, q.src, mut out)?
         }
         return Ok(true)
     }
@@ -398,7 +418,7 @@ fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pac
         list.push(mut p.free, slot)
         return Error(take e)
     }
-    let entry = Paced(slot: slot, track: q.track, media: q.media, fields: q.fields, level: q.level, voice: q.voice, src: q.src, dd: tail, cvo: q.cvo, capture: q.capture)
+    let entry = Paced(slot: slot, track: q.track, media: q.media, guard: q.guard, fields: q.fields, level: q.level, voice: q.voice, src: q.src, dd: tail, cvo: q.cvo, capture: q.capture)
     if let Error(_) = rtp.pacer.push(mut p.pacer, int.widen(q.track), class, RTP_HEADER + size, now, entry) {
         list.push(mut p.free, slot)
         p.drops.paced += 1
@@ -506,7 +526,7 @@ fn pad_out(mut p: PeerSession, now: u64, pad: u8, mut out: Outbox) -> Result[(),
         }
         let si: u64 = int.widen(p.tracks[t].section)
         let wide: u32 = int.widen(pad)
-        let q = Paced(slot: 0, track: int.narrow(t), media: false, fields: f, level: None, voice: false, src: p.who.gen, dd: 0, cvo: None, capture: None)
+        let q = Paced(slot: 0, track: int.narrow(t), media: false, guard: 0, fields: f, level: None, voice: false, src: p.who.gen, dd: 0, cvo: None, capture: None)
         leg_ext(mut p, now, si, RTP_HEADER + wide, q)?
         let _ = rtp.rtx.write_probe(f, view p.ext, pad, mut p.pkt) ?=> |take x| Rtp(x)
         let tag = own_tag(p)
@@ -557,10 +577,12 @@ fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), P
     }
     let ssrc = if q.media {
         p.tracks[t].ssrc
+    } else if q.fields.ssrc == p.tracks[t].fec_ssrc {
+        p.tracks[t].fec_ssrc
     } else {
         p.tracks[t].rtx_ssrc
     }
-    if ssrc != q.fields.ssrc {
+    if ssrc == 0 || ssrc != q.fields.ssrc {
         return Ok(())
     }
     let si: u64 = int.widen(p.tracks[t].section)
@@ -577,11 +599,15 @@ fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), P
         return Error(Capacity(Capacity(requested: len + 16, available: list.capacity(p.pkt) - list.len(p.pkt))))
     }
     list.append(mut p.pkt, list.slice(p.slab[at], 0, len))
+    let full = fec_protect(mut p, t, si, q.guard)
     seal_out(mut p, q.src, mut out)?
     if q.media {
         rtp.stats.on_sent(mut p.tracks[t].sent, len)
         p.tracks[t].last_ts = q.fields.ts
         p.tracks[t].last_pt = q.fields.pt
+    }
+    if full {
+        fec_send(mut p, now, t, q.src, mut out)?
     }
     Ok(())
 }
@@ -594,6 +620,7 @@ pub fn end_track(mut p: PeerSession, track: u16) {
     if t < list.len(p.tracks) {
         rtp.rewrite.close(mut p.tracks[t].rewrite)
         let _ = rtp.history.clear(mut p.tracks[t].history)
+        rtp.fec.clear(mut p.tracks[t].fec)
         p.tracks[t].ended = true
     }
     unpace(mut p, track)
@@ -680,7 +707,8 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
         return Ok(AsRepair)
     }
     let f = rtp.header.Fields(marker: marker, pt: pt, seq: int.truncate(index), ts: ts, ssrc: p.tracks[t].ssrc)
-    let q = Paced(slot: 0, track: track, media: true, fields: f, level: leg.level, voice: leg.voice, src: leg.src, dd: 0, cvo: cvo, capture: leg.capture)
+    let size = guard(mut p, t, leg.unit)
+    let q = Paced(slot: 0, track: track, media: true, guard: size, fields: f, level: leg.level, voice: leg.voice, src: leg.src, dd: 0, cvo: cvo, capture: leg.capture)
     let class: rtp.pacer.Class = if p.tracks[t].video {
         Video
     } else {
@@ -897,86 +925,6 @@ pub fn poll(mut p: PeerSession, now: u64, mut out: Outbox) -> Poll {
         Some(w) => WakeAt(w),
         None => Idle,
     }
-}
-
-/// RTC-4's re-offer after a collision: every section a down-track sends on carries the
-/// track's current SSRC and, for video, its RTX SSRC as `a=ssrc` and `a=ssrc-group:FID`
-/// lines (RTC-2). Every other line keeps the running agreement, at the next origin
-/// version, which is also the returned version. The offer stays in flight until
-/// `answer_reoffer` takes its answer.
-pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Result[u64, PeerError] {
-    if p.closed {
-        return Error(Closed)
-    }
-    let mut current: sdp.Negotiated = clone(p.agreed)
-    // A section whose down-track ended announces no SSRC; a live one announces its own.
-    for t in p.tracks {
-        let si: u64 = int.widen(t.section)
-        if si < list.len(current.sections) {
-            list.clear(mut current.sections[si].local.ssrcs)
-            list.clear(mut current.sections[si].local.rtx_pairs)
-        }
-    }
-    for t in p.tracks {
-        let si: u64 = int.widen(t.section)
-        if t.ended || si >= list.len(current.sections) {
-            continue
-        }
-        list.push(mut current.sections[si].local.ssrcs, t.ssrc)
-        if t.rtx_ssrc != 0 {
-            list.push(mut current.sections[si].local.rtx_pairs, (t.ssrc, t.rtx_ssrc))
-            list.push(mut current.sections[si].local.ssrcs, t.rtx_ssrc)
-        }
-    }
-    current.local.origin_version += 1
-    let mut d = sdp.description()
-    sdp.offer(policy, current, current.local, list.new(), mut d) ?=> |take e| Sdp(e)
-    list.clear(mut text)
-    let _ = sdp.write(d, mut text) ?=> |take e| Sdp(e)
-    let version = d.origin_version
-    p.offered = Some((version, take d))
-    Ok(version)
-}
-
-/// Take the answer to the re-offer in flight. One that answers no offer in flight, names
-/// another version, does not parse or does not match the offer is refused (RTC-4) and
-/// changes nothing here: the caller revokes the participant, which closes the session,
-/// and the participant renegotiates by rejoining. A matching answer installs the agreement.
-pub fn answer_reoffer(mut p: PeerSession, version: u64, text: Bytes) -> Result[(), PeerError] {
-    if p.closed {
-        return Error(Closed)
-    }
-    let Some((v, take sent)) = replace(mut p.offered, None) else {
-        return Error(Sdp(AnswerMismatch(0)))
-    }
-    if v != version {
-        return Error(Sdp(AnswerMismatch(0)))
-    }
-    let mut remote = sdp.description()
-    sdp.parse(text, mut remote) ?=> |take e| Sdp(e)
-    let mut agreed = sdp.negotiated(p.agreed.local)
-    sdp.accept_answer(p.agreed, sent, remote, mut agreed) ?=> |take e| Sdp(e)
-    renegotiated(mut p, agreed)
-}
-
-/// Install a renegotiated agreement. Bindings of sections no longer receiving go.
-pub fn renegotiated(mut p: PeerSession, agreed: sdp.Negotiated) -> Result[(), PeerError] {
-    if p.closed {
-        return Error(Closed)
-    }
-    let sections = build_sections(agreed, p.limits)?
-    p.sections = take sections
-    p.agreed = clone(agreed)
-    let mut kept: List[Inbound] = list.new()
-    let old = replace(mut p.inbound, list.new())
-    for take i in take old {
-        let si: u64 = int.widen(i.section)
-        if si < list.len(p.sections) && p.sections[si].agreed.recv {
-            list.push(mut kept, take i)
-        }
-    }
-    p.inbound = take kept
-    Ok(())
 }
 
 /// Erase the session. With `notify` (an ordinary leave), a DTLS close_notify is

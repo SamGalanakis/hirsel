@@ -4,7 +4,7 @@ pub type Direction: key = SendRecv | SendOnly | RecvOnly | Inactive
 
 pub type Setup: key = Active | Passive | ActPass
 
-pub type Codec: key = Opus | Vp8 | Vp9 | H264 | Av1 | Rtx | Red | Ulpfec
+pub type Codec: key = Opus | Vp8 | Vp9 | H264 | Av1 | Rtx | Red | Ulpfec | Flexfec
 
 pub type Ext: key = Mid | RidExtension | RepairedRid | AudioLevel | AbsSendTime | TransportCc | DependencyDescriptor | VideoLayersAllocation | PlayoutDelay | VideoOrientation | AbsCaptureTime
 
@@ -77,6 +77,8 @@ pub type Section {
     simulcast: Simulcast,
     ssrcs: List[u32],
     rtx_pairs: List[(u32, u32)],
+    // RTP-14: each (media, repair) FlexFEC-03 pair, `a=ssrc-group:FEC-FR`.
+    fec_pairs: List[(u32, u32)],
     msid: Bytes,
     rtcp_mux: bool,
     rtcp_rsize: bool
@@ -115,7 +117,7 @@ pub fn description() -> Description {
 }
 
 fn empty_section(media: Media, port: Port, take protocol: Bytes) -> Section {
-    Section(media: media, protocol: take protocol, fallback: b"", connection: b"IN IP4 0.0.0.0", port: port, mid:[0; 16], mid_len: 0, dir: SendRecv, formats: list.new(), extmaps: list.new(), mixed_extmaps: false, rids: list.new(), simulcast: empty_simulcast(), ssrcs: list.new(), rtx_pairs: list.new(), msid: b"", rtcp_mux: false, rtcp_rsize: false)
+    Section(media: media, protocol: take protocol, fallback: b"", connection: b"IN IP4 0.0.0.0", port: port, mid:[0; 16], mid_len: 0, dir: SendRecv, formats: list.new(), extmaps: list.new(), mixed_extmaps: false, rids: list.new(), simulcast: empty_simulcast(), ssrcs: list.new(), rtx_pairs: list.new(), fec_pairs: list.new(), msid: b"", rtcp_mux: false, rtcp_rsize: false)
 }
 
 fn empty_simulcast() -> Simulcast {
@@ -435,6 +437,7 @@ fn codec_name(codec: Codec) -> Bytes {
         Rtx => b"rtx",
         Red => b"red",
         Ulpfec => b"ulpfec",
+        Flexfec => b"flexfec-03",
     }
 }
 

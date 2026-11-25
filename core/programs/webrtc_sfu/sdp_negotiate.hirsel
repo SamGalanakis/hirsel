@@ -77,7 +77,7 @@ pub fn default_policy() -> Policy {
     let mut exts: List[Ext] = list.new()
     list.push(mut audio, Opus)
     list.push(mut audio, Red)
-    for codec in[Vp8, Vp9, H264, Av1] {
+    for codec in[Vp8, Vp9, H264, Av1, Flexfec] {
         list.push(mut video, codec)
     }
     for ext in[Mid, RidExtension, RepairedRid, AudioLevel, AbsSendTime, TransportCc, DependencyDescriptor, VideoLayersAllocation, PlayoutDelay, VideoOrientation, AbsCaptureTime] {
@@ -186,7 +186,7 @@ fn local_bundle(local: LocalEnd, mut d: Description) -> Result[(), SdpError] {
 }
 
 fn supports(policy: Policy, media: Media, f: Format) -> bool {
-    if media == Application || f.codec == Rtx || f.codec == Red {
+    if media == Application || f.codec == Rtx || f.codec == Red || f.codec == Flexfec {
         return false
     }
     let supported = if media == Audio {
@@ -229,6 +229,15 @@ fn put_formats(policy: Policy, offered: Section, mut out: List[Format]) -> Resul
                 }
             }
         }
+        // RTP-14: `flexfec-03` is kept on a video section the router only sends on,
+        // when the policy lists it and the section keeps a media format.
+        if f.codec == Flexfec && offered.media == Video && offered.dir == RecvOnly && list_has(policy.video, Flexfec) {
+            for base in offered.formats {
+                if supports(policy, offered.media, base) {
+                    keep = true
+                }
+            }
+        }
         if keep {
             add(mut out, clone(f))?
         }
@@ -254,7 +263,7 @@ fn describes_av1(s: Section, mixed: bool) -> bool {
         if f.codec == Av1 {
             return true
         }
-        if has_recv(s.dir) && f.codec != Rtx && f.codec != Red && f.codec != Ulpfec {
+        if has_recv(s.dir) && f.codec != Rtx && f.codec != Red && f.codec != Ulpfec && f.codec != Flexfec {
             return false
         }
     }
@@ -483,6 +492,7 @@ pub fn answer(policy: Policy, current: Option[Negotiated], remote: Description, 
                 if i < list.len(old.sections) && was_sending && has_send(s.dir) {
                     s.ssrcs = clone(old.sections[i].local.ssrcs)
                     s.rtx_pairs = clone(old.sections[i].local.rtx_pairs)
+                    s.fec_pairs = clone(old.sections[i].local.fec_pairs)
                     s.msid = clone(old.sections[i].local.msid)
                 }
             }
@@ -652,6 +662,7 @@ pub fn offer(policy: Policy, current: Negotiated, local: LocalEnd, adds: List[Se
                 d.sections[i].dir = Inactive
                 list.clear(mut d.sections[i].ssrcs)
                 list.clear(mut d.sections[i].rtx_pairs)
+                list.clear(mut d.sections[i].fec_pairs)
                 d.sections[i].msid = b""
             },
         }

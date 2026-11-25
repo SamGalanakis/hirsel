@@ -22,6 +22,7 @@ std = { major = 1 }
 "rewrite.hirsel" = "rewrite"
 "counter.hirsel" = "counter"
 "red.hirsel" = "red"
+"fec.hirsel" = "fec"
 
 [tests]
 limit = 67108864

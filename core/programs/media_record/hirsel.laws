@@ -1,6 +1,6 @@
 hirsel.laws 1
-media_record@1/laws/audio_and_video_line_up_by_sender_reports src=98a5b9c0204529c8 sig=909bda026eec5cea run=1ddd99282e86b5b8 bug=1faa569417200600 oracle=df1ded64d4838b5c rows=pending
-media_record@1/laws/loss_asks_a_key_frame_and_skips_to_it src=c13fa20a5d7717cb sig=909bda026eec5cea run=1ddd99282e86b5b8 bug=37f2d7c27b3dd300 oracle=881698d2c0ce3a6c rows=pending
-media_record@1/laws/recording_keeps_every_frame_on_the_sender_clock src=87be9641967b752a sig=9b364d61383fe796 run=1ddd99282e86b5b8 bug=d317a0bc920be6e3 oracle=9a4e55e2332f6941 rows=pending
-media_record@1/laws/revoke_fences_buffered_media src=a30aae8e8a097d9e sig=909bda026eec5cea run=1ddd99282e86b5b8 bug=d5f037013dcc8f93 oracle=254ad75c93bd772e rows=pending
-media_record@1/laws/suspend_drops_buffered_media src=e366d0ff2ec6e5de sig=909bda026eec5cea run=1ddd99282e86b5b8 bug=12e1d495be2768da oracle=7d7f63573ba24ebc rows=pending
+media_record@1/laws/audio_and_video_line_up_by_sender_reports src=98a5b9c0204529c8 sig=1c3ed01eba7eb3db run=1ddd99282e86b5b8 bug=1faa569417200600 oracle=df1ded64d4838b5c rows=pending
+media_record@1/laws/loss_asks_a_key_frame_and_skips_to_it src=c13fa20a5d7717cb sig=1c3ed01eba7eb3db run=1ddd99282e86b5b8 bug=37f2d7c27b3dd300 oracle=881698d2c0ce3a6c rows=pending
+media_record@1/laws/recording_keeps_every_frame_on_the_sender_clock src=87be9641967b752a sig=2415b3e9dd045e14 run=1ddd99282e86b5b8 bug=d317a0bc920be6e3 oracle=9a4e55e2332f6941 rows=pending
+media_record@1/laws/revoke_fences_buffered_media src=a30aae8e8a097d9e sig=1c3ed01eba7eb3db run=1ddd99282e86b5b8 bug=d5f037013dcc8f93 oracle=254ad75c93bd772e rows=pending
+media_record@1/laws/suspend_drops_buffered_media src=e366d0ff2ec6e5de sig=1c3ed01eba7eb3db run=1ddd99282e86b5b8 bug=12e1d495be2768da oracle=7d7f63573ba24ebc rows=pending

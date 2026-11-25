@@ -245,6 +245,27 @@ async function scenarioCall() {
       await flowing(a);
       await flowing(b);
     });
+    // RTP-14: a Chromium subscriber keeps flexfec-03 (page.ts preferVp8), takes the
+    // service's re-offer with an `a=ssrc-group:FEC-FR` pair for its video section, and
+    // receives FlexFEC repair packets there (keyframes are protected at any loss). A
+    // Firefox subscriber, which offers no flexfec-03, is answered without it and gets
+    // no FEC-FR pair.
+    await check('flexfec_per_leg', async () => {
+      for (const x of [a, b]) {
+        const v = videoOf(x).id;
+        const st = await x.state();
+        const mid = (await x.stats()).subs.find(s => s.id === String(v)).mid;
+        const section = (st.remote ?? '').split(/\r\nm=/).find(m => m.includes(`\r\na=mid:${mid}\r\n`)) ?? '';
+        if (x.kind === 'chromium') {
+          assert(/a=rtpmap:\d+ flexfec-03\/90000/.test(section), `${x.name}: the service dropped flexfec-03 from section ${mid}`);
+          assert(/a=ssrc-group:FEC-FR \d+ \d+/.test(section), `${x.name}: no FEC-FR pair in section ${mid}`);
+          const s = await poll(x, s => (inboundOf(s, v)?.fec ?? 0) > 0, 30000, 'no FlexFEC packets on the video section');
+          log(`${x.name}: ${inboundOf(s, v).fec} FlexFEC packets, ${inboundOf(s, v).fecDiscarded} discarded, ${inboundOf(s, v).nacks} NACKs`);
+        } else {
+          assert(!/flexfec-03/.test(section) && !/FEC-FR/.test(section), `${x.name}: FlexFEC in a section it never offered: ${section}`);
+        }
+      }
+    });
     // The subscriber retargets the publisher's video to encoding 0 (rid q) and back to 2
     // (rid f), and its decoded width follows the width the publisher reports sending on that
     // rid (outbound-rtp; encodings are indexed in the offer's simulcast order q, h, f).

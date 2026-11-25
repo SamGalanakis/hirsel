@@ -734,8 +734,15 @@ const VOPR_EARLY: u64 = 2
 
 const VOPR_NET: u64 = 4
 
-// Campaign cases per nightly seed; seed s explores cases from s * VOPR_CASES.
-const VOPR_CASES: u64 = 8
+// Campaign cases per nightly seed; seed s explores scripts from s * VOPR_STRIDE.
+const VOPR_CASES: u64 = 16
+
+const VOPR_STRIDE: u64 = 64
+
+// Draws observed per end, so an end that injects without end cannot starve the others.
+const VOPR_DRAWS: u64 = 64
+
+const VOPR_OBSERVED: u64 = 4
 
 fn vopr_script(seed: u64) -> std.sim.world.Script {
     let mut streams: List[List[u64]] = list.with_capacity(VOPR_NET)
@@ -759,9 +766,9 @@ fn vopr_note_clean(mut why: String, o: Outcome) {
 
 /// Both arms of the attack under one schedule: the first broken DTLS-5 rule, or "", and the
 /// four ends (late client, late server, early client, early server).
-fn vopr_attack_verdict(tasks: Tasks, script: std.sim.world.Script) -> (String, List[Outcome]) waits {
+fn vopr_late_verdict(tasks: Tasks, script: std.sim.world.Script) -> String waits {
     let seed = script.tail_seed
-    let small = (seed / VOPR_CASES) % 2 == 0
+    let small = (seed / VOPR_STRIDE) % 2 == 0
     let mut why = string.new()
     let (c, s) = vopr_pair(tasks, seed, std.sim.world.plan_from(script, VOPR_NET), vopr_link(0), small, true, false, script, VOPR_LATE)
     vopr_note_clean(mut why, c)
@@ -772,6 +779,13 @@ fn vopr_attack_verdict(tasks: Tasks, script: std.sim.world.Script) -> (String, L
     if !c.crossed || !s.crossed {
         vopr_note(mut why, "application data did not cross both ways")
     }
+    take why
+}
+
+fn vopr_attack_verdict(tasks: Tasks, script: std.sim.world.Script) -> (String, List[Outcome]) waits {
+    let seed = script.tail_seed
+    let small = (seed / VOPR_STRIDE) % 2 == 0
+    let mut why = string.new()
     let (c0, s0) = vopr_pair(tasks, seed, std.sim.world.plan_from(script, VOPR_NET), vopr_link(0), small, true, true, script, VOPR_EARLY)
     vopr_note_clean(mut why, c0)
     vopr_note_clean(mut why, s0)
@@ -795,8 +809,8 @@ fn vopr_attack_verdict(tasks: Tasks, script: std.sim.world.Script) -> (String, L
         }
     }
     let mut ends: List[Outcome] = list.with_capacity(4)
-    list.push(mut ends, take c)
-    list.push(mut ends, take s)
+    list.push(mut ends, vopr_faulted(""))
+    list.push(mut ends, vopr_faulted(""))
     list.push(mut ends, take c0)
     list.push(mut ends, take s0)
     (take why, take ends)
@@ -811,8 +825,9 @@ fn vopr_case(take given: std.sim.world.ScriptRun) -> (bool, std.sim.world.Feedba
     let (why, ends) = vopr_attack_verdict(tasks, trial.script)
     for provider in 0u64 .. list.len(ends) {
         let mut p = std.sim.world.plan_from(trial.script, provider)
-        for code in ends[provider].draws {
-            let _ = std.sim.world.pick_observed(mut p, mut trace, provider, code / 16, code % 16)
+        let draws = ends[provider].draws
+        for i in 0u64 .. order.min(list.len(draws), VOPR_OBSERVED) {
+            let _ = std.sim.world.pick_observed(mut p, mut trace, provider, draws[i] / 16, draws[i] % 16)
         }
     }
     (string.byte_len(why) == 0, take trace)
@@ -835,13 +850,18 @@ fn vopr_case(take given: std.sim.world.ScriptRun) -> (bool, std.sim.world.Feedba
 /// class matches OpenSSL's is lane T2d's. No end may fault, and the client never connects
 /// without the server. A mutation sets message_seq, epoch, record length, fragment offset or
 /// length (0, 1, 0xFFFF, the 24-bit end, the original plus or minus one) or truncates; mtu
-/// 300 on even seeds. A std.sim.world campaign drives the schedule: at each opportunity an
-/// end draws whether to inject and which field and value, and the campaign mutates draws
-/// whose outcome was new for that injection kind and datagram type.
+/// 300 on even seeds. At each opportunity an end draws whether to inject and which field and
+/// value. The first arm runs once on the seed's own schedule; a std.sim.world campaign then
+/// drives the second arm's schedules, mutating each end's first draws whose outcome was new
+/// for that injection kind and datagram type (steering rounds, dtls-campaign-steer-2532).
 @test
 fn vopr_attacker_never_interferes(tasks: Tasks, seed_grant: Env) -> Result[(), ()] waits {
     let seed = vopr_seed(seed_grant, 4)
-    let cfg = std.sim.world.CampaignConfig(seed: seed * VOPR_CASES, cases: VOPR_CASES, providers: VOPR_NET, max_draws: 64, max_features: 4096, case_steps: 1099511627776, case_bytes: 50331648)
+    let late = vopr_late_verdict(tasks, vopr_script(seed * VOPR_STRIDE))
+    if string.byte_len(late) != 0 {
+        fail(clone(late))
+    }
+    let cfg = std.sim.world.CampaignConfig(seed: seed * VOPR_STRIDE, cases: VOPR_CASES, providers: VOPR_NET, max_draws: VOPR_DRAWS, max_features: 4096, case_steps: 1099511627776, case_bytes: 46137344)
     let result = std.sim.world.campaign(tasks, cfg, vopr_script, vopr_case)
     let std.sim.world.CampaignResult(failure: take failure, ..) = take result
     let Some(take hit) = take failure else {

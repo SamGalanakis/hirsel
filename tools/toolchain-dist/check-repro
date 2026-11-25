@@ -129,8 +129,11 @@ def main():
             (profile,) = (output / 'profile').glob('*.profdata')
         flags = ['--pgo', profile] * bool(profile) + ['--bolt'] * args.bolt
         print(f'check-repro: building {revision} twice {" ".join(map(str, flags)) or "without PGO"}', flush=True)
+        # A checkout's Buck2 state is about 18 GB; keep only the bundles.
         build(revision, first, args.num_threads, ['--output', left, *flags])
+        shutil.rmtree(first)
         build(revision, second, args.num_threads, ['--output', right, *flags])
+        shutil.rmtree(second)
     equal = compare(left, right)
     with tempfile.TemporaryDirectory(prefix='hirsel-std-jobs-', dir=output) as scratch:
         equal &= check_std_jobs(left, Path(scratch))

@@ -723,10 +723,8 @@ merge and counted on stderr as an unobserved run, since the merge cannot tell wh
 was. A run killed after its header reads as failed. Coverage never changes the campaign's
 exit status. The recording builds have no coverage, so tapes record and replay as before.
 `tools/nightly-vopr.sh` merges each group's batch profiles into the night's `coverage/`.
-When a law's coverage build fails, preparation prints `coverage off for LAWS: why`, builds
-the leg again without coverage, and the law runs in the campaign with no profile. Since the
-returnable rewrite declares its block moves, postgres, contracts, turn, platform and dtls
-prepare with coverage; the fallback goes once harness, runner and store are shown to as well.
+Every law prepares with coverage; a law whose coverage build fails stops preparation, as any
+other build failure does.
 Seed 0 runs at preparation under `hirsel test` and is not in the campaign's profiles.
 
 ## Caching

@@ -230,27 +230,14 @@ def run_preparation(command, scratch, report, expected):
 
 
 def covered_preparation(command, scratch, report, expected):
-    """Prepare the normal (`bin`) leg as a coverage build, and return its rows
-    and whether coverage is on. Coverage never costs a law its campaign: when
-    the coverage build fails (C3's rebound check, lane 2623), the leg is
-    built again without it and the failure is reported."""
-    try:
-        rows = run_preparation(command + ['--coverage'], scratch, report, expected)
-        for definition in expected:
-            binary = scratch / 'bin' / output_name(definition)
-            if rows[definition].get('source') != 'executed' or not Path(f'{binary}.covmap').is_file():
-                raise ValueError(f'{definition} produced no coverage executable and map; see {report}')
-        return rows, True
-    except ValueError as error:
-        print(f'coverage off for {", ".join(expected)}: {error}', flush=True)
-        for definition in expected:
-            for path in (scratch / 'bin' / output_name(definition),
-                         scratch / 'bin' / f'{output_name(definition)}.covmap'):
-                path.unlink(missing_ok=True)
-        try:
-            return run_preparation(command, scratch, report.with_name(f'{report.stem}-plain.json'), expected), False
-        except ValueError as plain:
-            raise error from plain
+    """Prepare the normal (`bin`) leg as a coverage build and return its rows.
+    Every law must produce its executable and `.covmap`."""
+    rows = run_preparation(command + ['--coverage'], scratch, report, expected)
+    for definition in expected:
+        binary = scratch / 'bin' / output_name(definition)
+        if rows[definition].get('source') != 'executed' or not Path(f'{binary}.covmap').is_file():
+            raise ValueError(f'{definition} produced no coverage executable and map; see {report}')
+    return rows
 
 
 def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_runtime):
@@ -271,7 +258,6 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
             'recording': lambda definition: recording}
     reports = {}
     rows = {}
-    covered = set()
     if kind in PACKAGE_LAWS:
         # Package mode writes a workspace lock. Stage the manifests and their
         # relative dependencies away from the checkout.
@@ -287,8 +273,7 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
                 reports[leg, definition] = report
                 command = base + ['-o', str(scratch / leg)] + launch(definition) + libraries + [str(programs / kind)]
                 if leg == 'bin':
-                    prepared, on = covered_preparation(command, scratch, report, [definition])
-                    covered |= {definition} if on else set()
+                    prepared = covered_preparation(command, scratch, report, [definition])
                 else:
                     prepared = run_preparation(command, scratch, report, [definition])
                 rows[leg, definition] = prepared[definition]
@@ -312,9 +297,8 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         for leg in legs:
             report = scratch / f'prepare-{leg}.json'
             if leg == 'bin':
-                prepared, on = covered_preparation(command + ['-o', str(scratch / leg)] + normal,
-                                                   scratch, report, list(entries.values()))
-                covered |= set(entries.values()) if on else set()
+                prepared = covered_preparation(command + ['-o', str(scratch / leg)] + normal,
+                                               scratch, report, list(entries.values()))
             else:
                 prepared = run_preparation(command + ['-o', str(scratch / leg)] + recording,
                                            scratch, report, entries.values())
@@ -336,9 +320,8 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         laws.append({'build': build, 'law': law, 'executable': binaries['bin'],
                      'recording': binaries['recording'], 'seeds': count,
                      'seed_zero': seed_zero, 'min_traces': min(count, TRACE_FLOORS.get(law, 0)),
-                     'required_witnesses': REACH_WITNESSES.get(law, [])})
-        if definition in covered:
-            laws[-1]['coverage'] = {'group': kind, 'map': binaries['bin'] + '.covmap', 'tool': str(compiler)}
+                     'required_witnesses': REACH_WITNESSES.get(law, []),
+                     'coverage': {'group': kind, 'map': binaries['bin'] + '.covmap', 'tool': str(compiler)}})
     shutil.rmtree(scratch / 'objects')
     return laws
 

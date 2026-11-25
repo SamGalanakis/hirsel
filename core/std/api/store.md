@@ -59,7 +59,9 @@ refusal publishes nothing. An abort with no reply writes returns `Undone {
 value, ticket: None }`; an abort that wrote a reply keeps it (F2, below).
 `fetch`, `range`, `range_prefix`, `count`, `lookup`, `lookup_prefix` and `entries`
 read through a `Table` or `Index` in any `Tx`; `put` and `delete` need `mut Tx`.
-`fetch` returns a fresh decoded value. `put` and `delete` maintain every index in
+`fetch` returns a fresh decoded value. `fetch_many(tx, t, keys)` is `fetch` on each
+key in order; on a Tiered store it demands every Cold row its keys miss as one batch,
+so the body reruns once for them, not once per row. `put` and `delete` maintain every index in
 the registry atomically, including when an extractor returns Capacity, and a
 `Conflict` (below) changes nothing. Dropping and recreating a name does not make the
 previous handle valid. An old handle reads an older snapshot normally and returns

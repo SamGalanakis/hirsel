@@ -78,3 +78,151 @@ fn l62_stop_sweep() -> Result[(), Error] {
     }
     Ok(())
 }
+
+// §13.3 "Batched point misses": `fetch_many` demands every Cold row its keys
+// miss in one fetch round, so the body reruns once, and it returns what
+// `fetch` returns key by key. Values are 3 * key, so the rows are known
+// without the store.
+const FETCH_MANY_ROWS: u64 = 4096
+
+fn fetch_many_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+        for key in 0u64 .. FETCH_MANY_ROWS {
+            put(mut tx, t, key, key * 3)?
+        }
+        Ok(())
+    })? else {
+        fail("fetch_many: the fixture puts commit")
+    }
+    let id = prefix(rows.id)?
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let (take root, take descriptor) = {
+        let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
+            fail("fetch_many: the fixture has its table")
+        }
+        (arc.share(here), rooted_collection_record(here, before[52u64], 1)?)
+    }
+    let mut draw = stamp_after(db.next_node)?
+    let first = draw
+    page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw))?
+    page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw))?
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    let _ = checkpoint(mut db)?
+    close(take db)
+}
+
+// Sixteen keys a leaf apart, an absent key and a repeat of the first.
+fn fetch_many_keys() -> List[u64] {
+    let mut keys: List[u64] = list.new()
+    for i in 0u64 .. 16 {
+        list.push(mut keys, i * (FETCH_MANY_ROWS / 16) + 7)
+    }
+    list.push(mut keys, FETCH_MANY_ROWS + 5)
+    list.push(mut keys, 7)
+    keys
+}
+
+fn fetch_many_expected(keys: List[u64]) -> List[Option[u64]] {
+    let mut rows: List[Option[u64]] = list.new()
+    for key in keys {
+        list.push(mut rows, if key < FETCH_MANY_ROWS { Some(key * 3) } else { None })
+    }
+    rows
+}
+
+fn fetch_many_body(tx: Tx, env: (Table[u64, u64], bool)) -> Result[List[Option[u64]], Error] {
+    let keys = fetch_many_keys()
+    if env.1 {
+        return fetch_many(tx, env.0, keys)
+    }
+    let mut rows: List[Option[u64]] = list.new()
+    for key in keys {
+        list.push(mut rows, fetch(tx, env.0, key)?)
+    }
+    Ok(rows)
+}
+
+// look's attempts, one serve between each: the attempts the body takes and
+// the rows it returns.
+fn fetch_many_look(r: Reader, s: Snapshot, rows: Table[u64, u64], batched: bool) -> Result[(u64, List[Option[u64]]), Error] waits {
+    let Some(pool) = view r.pool else { fail("fetch_many: the reader has a pool") }
+    let partition = pool.grant.pin_bytes
+    let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
+        Some(inventory) => inventory.generation,
+        None => 0,
+    }, root_stamp: tree_stamp(s.roots.collections))
+    let mut pins = empty_tiered_pins(root, partition)
+    let mut pending: Option[(TieredTarget, Error)] = None
+    let mut attempts = 0u64
+    loop {
+        attempts += 1
+        let attempt = call_attempt(s.roots.collections.root, partition)
+        let looked = look_attempt(s, Some(100000000), (copy_env(rows), batched), fetch_many_body, attempt, pins.frames)
+        let Some(state) = call_attempt_finish(take attempt) else {
+            fail("fetch_many: the table is Tiered")
+        }
+        match state.stopped {
+            None => {
+                let Seen(seen) = looked else { fail("fetch_many: the look runs") }
+                let Ok(found) = view seen.value else { fail("fetch_many: the body reads its rows") }
+                return Ok((attempts, clone(found)))
+            },
+            Some(AttemptMiss(_)) => {
+                let SeekKey(sought) = view state.seek else { fail("fetch_many: a point miss seeks its key") }
+                let pager: Option[View[Sender[TieredPagerMessage]]] = Some(view pool.requests)
+                let source = tx_page_source(pager, s.roots.collections)?
+                serve_tiered_miss(source, root, state, sought, TieredPoint, Some(arc.share(pool.grant)), mut pins, mut pending)?
+            },
+            _ => fail("fetch_many: only point misses stop the body"),
+        }
+    }
+}
+
+@test
+fn test_fetch_many_cold_keys_rerun_once(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    fetch_many_fixture(d, c, r, tasks, floor)?
+    let expected = fetch_many_expected(fetch_many_keys())
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let (single, one_by_one) = fetch_many_look(read_handle, s, rows, false)?
+    drop(take s)
+    let again = snapshot(db)
+    let (batched, together) = fetch_many_look(read_handle, again, rows, true)?
+    drop(take again)
+    drop(take read_handle)
+    if one_by_one != expected || together != one_by_one {
+        fail("fetch_many: the rows are what fetch returns key by key")
+    }
+    // The sixteen keys sit in different Cold leaves, so fetch reruns for
+    // more than one of them; fetch_many reruns once for all.
+    if single < 3 || batched != 2 {
+        fail("fetch_many: the Cold rows of one body cost one rerun")
+    }
+    // Staged edits in the same body: fetch_many still answers as fetch does.
+    let Committed(done) = run(mut db, Some(100000000), copy_env(rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[bool, Error] {
+        put(mut tx, t, 7u64, 1u64)?
+        let _ = delete(mut tx, t, FETCH_MANY_ROWS / 16 + 7)?
+        put(mut tx, t, FETCH_MANY_ROWS + 5, 5u64)?
+        let staged_many = fetch_many_body(tx, (copy_env(t), true))?
+        let staged_each = fetch_many_body(tx, (copy_env(t), false))?
+        let mut edited = fetch_many_expected(fetch_many_keys())
+        edited[0u64] = Some(1)
+        edited[1u64] = None
+        edited[16u64] = Some(5)
+        edited[17u64] = Some(1)
+        Ok(staged_many == staged_each && staged_each == edited)
+    })? else {
+        fail("fetch_many: the staged call commits")
+    }
+    if !done.value {
+        fail("fetch_many: staged rows answer fetch_many as they answer fetch")
+    }
+    close(take db)
+}

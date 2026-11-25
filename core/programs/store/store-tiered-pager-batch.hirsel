@@ -12,30 +12,29 @@ type TieredBucketBatch {
     members: List[List[u64]],
 }
 
-fn tiered_batch_edge(demand: TieredPointDemand, slot: u64) -> View[TieredTarget] in demand {
-    if slot == 0 { view demand.target } else { view demand.siblings[slot - 1] }
-}
-
-fn tiered_pager_read_batch(mut input: TieredPagerInput, mut pager_cache: TieredCache, owner: StoreId,
-    demand: TieredPointDemand) -> Result[List[Result[Arc[TieredFrame], Error]], Error] waits {
-    match input {
-        PagerLocal(_) => {
-            let mut fetched: List[Result[Arc[TieredFrame], Error]] = list.new()
-            capacity(list.try_reserve(mut fetched, 1 + list.len(demand.siblings)))?
-            for slot in 0u64 .. 1 + list.len(demand.siblings) {
-                let edge = tiered_batch_edge(demand, slot)
-                let delivered = tiered_pager_point_frame(mut input, mut pager_cache, owner, demand, edge)
-                list.push(mut fetched, take delivered)
-            }
-            Ok(take fetched)
-        },
-        PagerObjects(..) => tiered_pager_bucket_batch(mut input, mut pager_cache, owner, demand),
+// Reads one round's edges, in order. One edge is read alone; more are read
+// as a batch, with one GET window per pack on a Bucket.
+fn tiered_pager_read_edges(mut input: TieredPagerInput, mut pager_cache: TieredCache, owner: StoreId,
+    demand: TieredPointDemand, edges: List[TieredTarget]) -> Result[List[Result[Arc[TieredFrame], Error]], Error] waits {
+    let mut fetched: List[Result[Arc[TieredFrame], Error]] = list.new()
+    let local = match input {
+        PagerLocal(_) => true,
+        PagerObjects(..) => false,
     }
+    if local || list.len(edges) == 1 {
+        capacity(list.try_reserve(mut fetched, list.len(edges)))?
+        for edge in edges {
+            let delivered = tiered_pager_point_frame(mut input, mut pager_cache, owner, demand, edge)
+            list.push(mut fetched, take delivered)
+        }
+        return Ok(take fetched)
+    }
+    tiered_pager_bucket_batch(mut input, mut pager_cache, owner, demand, edges)
 }
 
 fn tiered_pager_bucket_batch(mut input: TieredPagerInput, mut pager_cache: TieredCache, owner: StoreId,
-    demand: TieredPointDemand) -> Result[List[Result[Arc[TieredFrame], Error]], Error] waits {
-    let width = 1 + list.len(demand.siblings)
+    demand: TieredPointDemand, edges: List[TieredTarget]) -> Result[List[Result[Arc[TieredFrame], Error]], Error] waits {
+    let width = list.len(edges)
     let (take positions, take pending) = disk_allocation(scoped fn() -> Result[(List[Option[Result[Arc[TieredFrame], Error]]], List[TieredBucketTarget]), Error] {
         // Reserve the two lists before probing the cache.
         let mut positions: List[Option[Result[Arc[TieredFrame], Error]]] = list.with_capacity(width)
@@ -47,7 +46,7 @@ fn tiered_pager_bucket_batch(mut input: TieredPagerInput, mut pager_cache: Tiere
     let mut outcomes = take positions
     let mut misses = take pending
     for slot in 0u64 .. width {
-        let edge = tiered_batch_edge(demand, slot)
+        let edge = view edges[slot]
         let bound_target = tiered_pager_demand_target(demand, edge)
         let target = match take bound_target {
             Ok(take ready) => take ready,

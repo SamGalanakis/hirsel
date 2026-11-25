@@ -104,19 +104,40 @@ fn tiered_miss_demand(source: TieredPageSource, state: TieredTouchSet, sought: B
         let (_, take problem) = option.unwrap(replace(mut pending, None))
         return Error(take problem)
     }
-    Ok(TieredPointDemand(target: clone(target), key: copied(sought)?, direction: direction,
+    Ok(TieredPointDemand(target: clone(target), key: copied(sought)?, direction: direction, paths: clone(state.gather.paths),
         siblings: clone(state.siblings), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: take grant))
 }
 
-// Installs a delivered batch in its order and records its failure. It is
-// false when a frame did not fit the map's partition (§13.3a "crowded").
+// Installs a delivered batch in its order and records its failure. The
+// path frames of a multi-path batch are protected like touched ones once
+// installed, so a later frame of the same batch never evicts one and the
+// next attempt finds every path it was demanded for. It is false when a frame
+// did not fit the map's partition (§13.3a "crowded").
 fn tiered_install_delivery(take delivered: TieredPointDelivery, root: TieredPinRoot, touched: Map[u64, ()], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[bool, Error] {
-    let TieredPointDelivery(frames: take frames, failure: take failure, ..) = take delivered
+    let TieredPointDelivery(frames: take frames, held: held, failure: take failure, ..) = take delivered
+    let mut kept: Map[u64, ()] = map.new()
+    if held != 0 {
+        capacity(map.try_reserve(mut kept, map.len(touched) + held))?
+        for (stamp, _) in touched {
+            map.insert(mut kept, stamp, ())
+        }
+    }
     let mut fit = true
+    let mut at = 0u64
     for frame in frames {
-        if !tiered_install_pin(mut pins, root, touched, frame)? {
+        let installed = if held == 0 {
+            tiered_install_pin(mut pins, root, touched, frame)?
+        } else {
+            tiered_install_pin(mut pins, root, kept, frame)?
+        }
+        if installed {
+            if at < held {
+                map.insert(mut kept, frame.identity.stamp, ())
+            }
+        } else {
             fit = false
         }
+        at += 1
     }
     if let Some(take refused) = take failure {
         pending = Some(take refused)

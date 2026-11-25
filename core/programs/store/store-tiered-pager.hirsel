@@ -31,10 +31,13 @@ type TieredPageSource {
     deadline: u64
 }
 
+// A latched miss's batch: the target and its key, `paths` more key paths
+// gathered by `fetch_many`, and a scan's sibling window.
 type TieredPointDemand: send {
     target: TieredTarget,
     key: Bytes,
     direction: TieredDirection,
+    paths: List[TieredPath],
     siblings: List[TieredTarget],
     packs: std.omap.OMap[u64, TieredPagerPack],
     next_stamp: u64,
@@ -44,6 +47,9 @@ type TieredPointDemand: send {
 
 type TieredPointDelivery: send {
     frames: List[Arc[TieredFrame]],
+    // A batch's path frames lead `frames`; installing a later frame of the
+    // delivery never evicts one of these. 0 for a single-path demand.
+    held: u64,
     failure: Option[(TieredTarget, Error)],
     grant: Option[Arc[TieredReaderGrant]]
 }
@@ -208,44 +214,123 @@ fn tiered_point_continuation(frame: TieredFrame, key: Bytes, direction: TieredDi
     Ok(Some((TieredPage(child), height - 1)))
 }
 
+// One live key path of a demand: the path's index (0 is the target's), the
+// edge it reads next and the level that edge must have.
+type TieredDescent {
+    path: u64,
+    edge: TieredTarget,
+    level: Option[u8]
+}
+
+fn tiered_demand_key(demand: TieredPointDemand, path: u64) -> View[Bytes] in demand {
+    if path == 0 { view demand.key } else { view demand.paths[path - 1].key }
+}
+
+// Descends every key path of the demand together, one frame of each path per
+// round, so the frames a round needs are read as one batch (one GET window
+// per pack on a Bucket) and a frame several paths share is read once. The
+// delivery names each path's frames in path order, then the siblings. Its
+// failure is the first failed path's, so the attempt that demands that edge
+// again is the one that meets the failure.
 fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPointDemand) -> Result[TieredPointDelivery, Error] waits {
-    let mut frames: List[Arc[TieredFrame]] = list.new()
-    let mut edge: TieredTarget = clone(demand.target)
-    let mut expected_level: Option[u8] = None
-    let mut failure: Option[(TieredTarget, Error)] = None
+    let width = 1 + list.len(demand.paths)
+    let mut found: List[List[Arc[TieredFrame]]] = list.new()
+    let mut failed: List[Option[(TieredTarget, Error)]] = list.new()
+    let mut walking: List[TieredDescent] = list.new()
+    capacity(list.try_reserve(mut found, width))?
+    capacity(list.try_reserve(mut failed, width))?
+    capacity(list.try_reserve(mut walking, width))?
+    for path in 0u64 .. width {
+        list.push(mut found, list.new())
+        list.push(mut failed, None)
+        let edge: TieredTarget = if path == 0 { clone(demand.target) } else { clone(demand.paths[path - 1].target) }
+        list.push(mut walking, TieredDescent(path: path, edge: take edge, level: None))
+    }
     let mut siblings: List[Result[Arc[TieredFrame], Error]] = list.new()
-    let mut outcome = if list.len(demand.siblings) != 0 {
-        let mut batch = tiered_pager_read_batch(mut input, mut private_cache, owner, demand)?
-        let first = list.remove(mut batch, 0)
-        siblings = take batch
-        take first
-    } else {
-        tiered_pager_point_frame(mut input, mut private_cache, owner, demand, edge)
-    }
-    loop {
-        let frame = match take outcome {
-            Ok(take found) => take found,
-            Error(take problem) => {
-                failure = Some((take edge, take problem))
-                break
-            },
+    let mut round = 0u64
+    while list.len(walking) != 0 {
+        // This round's distinct edges; the first round adds the siblings.
+        let mut edges: List[TieredTarget] = list.new()
+        let mut slot_of: Map[TieredCacheKey, u64] = map.new()
+        let mut slots: List[u64] = list.new()
+        capacity(list.try_reserve(mut slots, list.len(walking)))?
+        for descent in walking {
+            let id = tiered_cache_key(tiered_frame_id(descent.edge))
+            let known: Option[u64] = match map.get(slot_of, id) {
+                Some(slot) => Some(slot),
+                None => None,
+            }
+            let slot = list.len(edges)
+            match known {
+                Some(seen) => list.push(mut slots, seen),
+                None => {
+                    capacity(list.try_reserve(mut edges, 1))?
+                    capacity(map.try_reserve(mut slot_of, 1))?
+                    list.push(mut edges, clone(descent.edge))
+                    map.insert(mut slot_of, id, slot)
+                    list.push(mut slots, slot)
+                },
+            }
         }
-        let following = tiered_point_continuation(frame, demand.key, demand.direction, expected_level)
-        capacity(list.try_reserve(mut frames, 1))?
-        list.push(mut frames, take frame)
-        match take following {
-            Ok(Some((take child, height))) => {
-                edge = take child
-                expected_level = Some(height)
-                outcome = tiered_pager_point_frame(mut input, mut private_cache, owner, demand, edge)
-            },
-            Ok(None) => break,
-            Error(take problem) => {
-                failure = Some((take edge, take problem))
-                break
-            },
+        let distinct = list.len(edges)
+        if round == 0 {
+            capacity(list.try_reserve(mut edges, list.len(demand.siblings)))?
+            for sibling in demand.siblings {
+                list.push(mut edges, clone(sibling))
+            }
+        }
+        let mut read: List[Result[Arc[TieredFrame], Error]] = list.new()
+        capacity(list.try_reserve(mut read, distinct))?
+        for take item in tiered_pager_read_edges(mut input, mut private_cache, owner, demand, edges)? {
+            if list.len(read) < distinct {
+                list.push(mut read, take item)
+            } else {
+                capacity(list.try_reserve(mut siblings, 1))?
+                list.push(mut siblings, take item)
+            }
+        }
+        let mut deeper: List[TieredDescent] = list.new()
+        let mut at = 0u64
+        for take descent in take walking {
+            let TieredDescent(path: path, edge: take edge, level: depth) = take descent
+            let slot = slots[at]
+            at += 1
+            let frame = match view read[slot] {
+                Ok(frame) => arc.share(frame),
+                Error(problem) => {
+                    failed[path] = Some((take edge, clone(problem)))
+                    continue
+                },
+            }
+            let following = tiered_point_continuation(frame, tiered_demand_key(demand, path), demand.direction, depth)
+            capacity(list.try_reserve(mut found[path], 1))?
+            list.push(mut found[path], take frame)
+            match take following {
+                Ok(Some((take child, height))) => {
+                    capacity(list.try_reserve(mut deeper, 1))?
+                    list.push(mut deeper, TieredDescent(path: path, edge: take child, level: Some(height)))
+                },
+                Ok(None) => (),
+                Error(take problem) => {
+                    failed[path] = Some((take edge, take problem))
+                },
+            }
+        }
+        walking = take deeper
+        round += 1
+    }
+    let mut frames: List[Arc[TieredFrame]] = list.new()
+    let mut failure: Option[(TieredTarget, Error)] = None
+    for path in 0u64 .. width {
+        capacity(list.try_reserve(mut frames, list.len(found[path])))?
+        for frame in found[path] {
+            list.push(mut frames, arc.share(frame))
+        }
+        if let None = failure {
+            failure = replace(mut failed[path], None)
         }
     }
+    let held = if list.len(demand.paths) == 0 { 0u64 } else { list.len(frames) }
     if let None = failure {
         let mut slot = 0u64
         for take sibling in take siblings {
@@ -262,7 +347,7 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
             slot += 1
         }
     }
-    Ok(TieredPointDelivery(frames: take frames, failure: take failure, grant: clone(demand.grant)))
+    Ok(TieredPointDelivery(frames: take frames, held: held, failure: take failure, grant: clone(demand.grant)))
 }
 
 fn tiered_pager_demand_target(demand: TieredPointDemand, edge: TieredTarget) -> Result[TieredPagerTarget, Error] {

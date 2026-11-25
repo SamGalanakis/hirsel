@@ -338,7 +338,7 @@ fn transaction_write_height(tx: Tx, key: Bytes) -> Result[u64, Error] {
 
 fn transaction_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
     if let Some(attempt) = tx.attempt {
-        if tiered_stopped(attempt) {
+        if tiered_blocked(attempt) {
             return Error(Missed)
         }
     }

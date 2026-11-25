@@ -418,3 +418,6 @@ limit = 536870912
 
 [tests.runs."store@1/store/test_tiered_log_range_reads_cold_leaves_and_staged_tail"]
 limit = 268435456
+
+[tests.runs."store@1/store/test_fetch_many_cold_keys_rerun_once"]
+limit = 536870912

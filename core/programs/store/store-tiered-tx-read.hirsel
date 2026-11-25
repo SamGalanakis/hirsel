@@ -272,3 +272,47 @@ fn tx_tiered_index_row[K, V](tiered: TxIndexTiered, r: RowDecoder[K, V], data: P
     let value = tiered_snapshot_primary(attempt, tiered.pins, data, edge, primary, r.table)?
     finish_row(r, take k, primary, value, None, seen)
 }
+
+/// The row of each key, in order: what `fetch` returns key by key, the same
+/// read log included. On a Tiered store the Cold rows the keys miss are
+/// demanded as one batch, so the body reruns once for them, not once per row
+/// (STORE-SPEC §13.3 "Batched point misses").
+/// Alloc: the result list. Cost: one `fetch` per key.
+pub fn fetch_many[K, V](tx: Tx, t: Table[K, V], keys: List[K]) -> Result[List[Option[V]], Error] {
+    let mut rows: List[Option[V]] = list.new()
+    capacity(list.try_reserve(mut rows, list.len(keys)))?
+    let Some(attempt) = tx.attempt else {
+        for k in keys {
+            list.push(mut rows, fetch(tx, t, k)?)
+        }
+        return Ok(take rows)
+    }
+    if tiered_stopped(attempt) {
+        return Error(Missed)
+    }
+    // A missed key no longer stops the keys after it: each one resolves, and
+    // each further miss joins the latched one's batch. The batch ends here,
+    // on every return, and the latched attempt reruns however the body ends.
+    tiered_gather(attempt, true)
+    let mut missed = false
+    for k in keys {
+        match fetch(tx, t, k) {
+            Ok(take row) => list.push(mut rows, take row),
+            Error(Missed) => {
+                missed = true
+                if tiered_blocked(attempt) {
+                    break
+                }
+            },
+            Error(take problem) => {
+                tiered_gather(attempt, false)
+                return Error(take problem)
+            },
+        }
+    }
+    tiered_gather(attempt, false)
+    if missed {
+        return Error(Missed)
+    }
+    Ok(take rows)
+}

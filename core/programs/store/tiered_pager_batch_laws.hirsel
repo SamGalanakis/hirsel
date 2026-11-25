@@ -38,7 +38,7 @@ fn l84_bucket_pager_batch(model: BucketSim, tasks: Tasks) -> Result[(), Error] w
     list.push(mut siblings, clone(first_blobs[0u64]))
     list.push(mut siblings, clone(large_blobs[0u64]))
     list.push(mut siblings, clone(large_blobs[0u64]))
-    let demand = TieredPointDemand(target: clone(second_blobs[0u64]), key: key_word(42), direction: TieredBackward,
+    let demand = TieredPointDemand(target: clone(second_blobs[0u64]), key: key_word(42), direction: TieredBackward, paths: list.new(),
         siblings: take siblings, packs: take packs, next_stamp: 44, deadline: 0, grant: None)
     let mut input = PagerObjects(take client, BUCKET_LAW_OP_MS)
     let mut cache_state = new_tiered_cache(1048576)
@@ -52,6 +52,38 @@ fn l84_bucket_pager_batch(model: BucketSim, tasks: Tasks) -> Result[(), Error] w
             delivered.frames[3u64].identity.stamp != 43 || delivered.frames[4u64].identity.stamp != 43 {
             fail("L84: the pager must deliver the requested target and siblings in logical order")
         }
+    }
+    Ok(())
+}
+
+// A demand with several key paths (§13.3 "Batched point misses") delivers
+// each path's frames in path order, a frame two paths share once per path,
+// and reads the paths' frames as one batch: one GET per pack.
+fn l84_bucket_pager_paths(model: BucketSim, tasks: Tasks) -> Result[(), Error] waits {
+    let owner = StoreId(hi: 1, lo: 2)
+    let mut client = bucket_law_client_lanes(model, tasks, "s3.test", 802, true, 2)?
+    let (first, first_pack, take first_blobs) = l84_write_blob_pack(mut client, owner, 8, 40, 2, 1025)?
+    let (second, second_pack, take second_blobs) = l84_write_blob_pack(mut client, owner, 9, 42, 1, 1025)?
+    let mut ids = 0u64
+    let blank: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let (take first_listed, _) = std.omap.insert(mut ids, blank, first.seq, TieredPagerPack(inventory: first_pack, object: Some(first)))
+    let (take packs, _) = std.omap.insert(mut ids, first_listed, second.seq, TieredPagerPack(inventory: second_pack, object: Some(second)))
+    let mut paths: List[TieredPath] = list.with_capacity(3)
+    list.push(mut paths, TieredPath(target: clone(first_blobs[1u64]), key: key_word(41)))
+    list.push(mut paths, TieredPath(target: clone(second_blobs[0u64]), key: key_word(42)))
+    list.push(mut paths, TieredPath(target: clone(first_blobs[0u64]), key: key_word(40)))
+    let demand = TieredPointDemand(target: clone(second_blobs[0u64]), key: key_word(42), direction: TieredForward, paths: take paths,
+        siblings: list.new(), packs: take packs, next_stamp: 43, deadline: 0, grant: None)
+    let mut input = PagerObjects(take client, BUCKET_LAW_OP_MS)
+    let mut cache_state = new_tiered_cache(1048576)
+    let delivered = tiered_pager_point(mut input, mut cache_state, owner, demand)?
+    if let Some(_) = delivered.failure {
+        fail("L84: every path's frame exists")
+    }
+    if list.len(delivered.frames) != 4 || delivered.frames[0u64].identity.stamp != 42 ||
+        delivered.frames[1u64].identity.stamp != 41 || delivered.frames[2u64].identity.stamp != 42 ||
+        delivered.frames[3u64].identity.stamp != 40 {
+        fail("L84: a multi-path demand delivers each path's frames in path order")
     }
     Ok(())
 }
@@ -91,6 +123,15 @@ fn test_l84_pager_coalesces_sibling_demands(c: Clock, tasks: Tasks) -> Result[()
     // frame. The second demand is fully cached.
     if report.attempts != 6 {
         fail("L84: nearby frames and duplicate oversized ranges share a GET")
+    }
+    let paths_model = bucket_law_sim(tasks, c, 8465, None, list.new())
+    let paths_result = l84_bucket_pager_paths(paths_model, tasks)
+    let paths_report = bucket_law_report(take paths_model)
+    paths_result?
+    // Two PUTs and one GET per pack: the three distinct frames of four paths
+    // are read as one batch.
+    if paths_report.attempts != 4 {
+        fail("L84: the frames of a demand's paths share a GET per pack")
     }
     Ok(())
 }

@@ -290,10 +290,10 @@ fn f0 = n0 g0 {
 ",
     );
     let encoded = encode(&module, FuncId(0));
-    // Literal v3 wire fields and hashes derived independently from PROG-10.
+    // Literal v4 wire fields and hashes derived independently from PROG-10.
     // SHA-256 frames the domain and payload with u64le lengths.
     let body = hex(concat!(
-        "484952424f4459000300",               // HIRBODY, NUL, u16le version 3
+        "484952424f4459000400",               // HIRBODY, NUL, u16le version 4
         "000100010009000000",                 // types, () -> u64 signature, statics
         "010c61707040312f6d61696e2f66000000", // instance app@1/main/f
         "01000000010100010000",               // one function and block, const v0
@@ -304,7 +304,7 @@ fn f0 = n0 g0 {
     let hash = encoded.hash();
     assert_eq!(
         hash.0.as_slice(),
-        hex("70d217292a1c1b58a5875c3697c24c54fdbf94b7dda75ef63ff5260f5d688cf3")
+        hex("1b611743d13fe9634de92926820f2fbfe3e860143f4d49f19a0e1fb95b3197ae")
     );
     let identity = module.identity(module.functions[0].instance);
     let addresses = crate::address::code_groups(
@@ -318,7 +318,7 @@ fn f0 = n0 g0 {
         |group, _| {
             assert_eq!(
                 group.0.as_slice(),
-                hex("d190a1b6ef77e6cf37ea63faa2441f1ba3ba00efabf32a4f00022566354b15e0"),
+                hex("50fd0605180676a94727071b2a598461c35266d03e571a3011322fbf80c3c15f"),
             )
         },
     )
@@ -326,11 +326,11 @@ fn f0 = n0 g0 {
     let address = addresses[&identity];
     assert_eq!(
         address.0.as_slice(),
-        hex("0a30531a567deac330fdd29690c48f2af408b21df2b2cbc06b5dc2f15b587048")
+        hex("3bbd4c135cd648b900e70dcad2f32fad13a356a1c2f8004ea78658df6620f609")
     );
     assert_eq!(
         crate::code_revision(address).0.as_slice(),
-        hex("fcd105fff20b0fbaf91b5312af005b5aed9bf772bfa79d66a3d9a8b4f4eb5662")
+        hex("5b9edd11a6a14703adeb34634fd468f1aa349080197f6df45036332bac1e7a4f")
     );
     let widen = Identity::plain(DefPath::core("float.widen"));
     assert_eq!(

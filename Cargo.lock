@@ -707,6 +707,7 @@ dependencies = [
  "hirsel-core-front",
  "hirsel-core-ids",
  "hirsel-core-ir",
+ "hirsel-core-layout",
  "rustc-hash",
 ]
 

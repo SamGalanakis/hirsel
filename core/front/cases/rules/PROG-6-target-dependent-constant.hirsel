@@ -1,0 +1,6 @@
+// expect: refuse LANG-20 at 6:26
+// PROG-6: a constant that depends on `target` is evaluated for every target, and a
+// failure on one (here aarch64-apple-darwin divides by zero) refuses it on all.
+const MAC: bool = target.os == (Macos : target.Os)
+
+const BAD: bool = MAC && 1u8 / 0u8 == 0u8

@@ -16,3 +16,4 @@ rustc-hash = "2"
 hirsel-core-front = { path = "../hirsel-core-front" }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-ir = { path = "../hirsel-core-ir" }
+hirsel-core-layout = { path = "../hirsel-core-layout" }

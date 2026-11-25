@@ -16,25 +16,25 @@ enum Mode {
     Refused,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Head {
+pub(super) enum Head {
     Any,
     Bind(u32, Mode),
     Product(Option<u32>),
     Range(i128, i128),
 }
 #[derive(Clone, Copy)]
-struct Pat {
+pub(super) struct Pat {
     site: NodeId,
-    ty: TyId,
-    head: Head,
+    pub(super) ty: TyId,
+    pub(super) head: Head,
     viewed: bool,
-    fields: PoolRange<u32>,
+    pub(super) fields: PoolRange<u32>,
     order: PoolRange<u32>,
 }
 #[derive(Default)]
 pub(super) struct Patterns {
     pats: Vec<Pat>,
-    fields: Vec<u32>,
+    pub(super) fields: Vec<u32>,
     order: Vec<u32>,
     // Exhaustiveness workspaces. Recursive specialization appends and truncates
     // these arenas, reusing their capacity across every arm and match in the body.
@@ -81,9 +81,9 @@ struct Scope {
 }
 
 #[derive(Clone, Copy)]
-struct Subject {
+pub(super) struct Subject {
     anchors: anchors::Fact,
-    ty: TyId,
+    pub(super) ty: TyId,
     value: Option<ValueId>,
     place: Option<At>,
     /// The storage of `place`, for a part reached by a pattern.
@@ -107,7 +107,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         id
     }
-    fn pat(&self, id: u32) -> Pat {
+    pub(super) fn pat(&self, id: u32) -> Pat {
         self.patterns.pats[id as usize - 1]
     }
     fn pat_fields(&self, id: u32) -> PoolRange<u32> {
@@ -835,7 +835,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.start(yes);
         }
     }
-    fn pattern_tests(&mut self, id: u32, subject: Subject, no: Option<BlockId>) {
+    pub(super) fn pattern_tests(&mut self, id: u32, subject: Subject, no: Option<BlockId>) {
         if id == 0 {
             return;
         }
@@ -1337,7 +1337,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.check_lends(id, true);
             let guarded = a.len() == 3;
             let no = (i + 2 < c.len() && self.live()).then(|| self.new_block(&[]));
-            self.pattern_tests(id, subject, no);
+            self.arm_tests(c[0], id, subject, no);
             if let Some(i) = temp {
                 self.set_temp(i, Avail::Live);
             }

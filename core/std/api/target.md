@@ -2,12 +2,12 @@
 
 [API overview](../API.md). [One meaning](../../../docs/spec/programs.md#prog-6-one-meaning).
 
-Not yet built (macOS decision D1, 2026-11-25). Core module `target` names the target a build
+Built except `unsupported` (macOS decision D1, 2026-11-25). Core module `target` names the target a build
 is for, so a program can branch on it at compile time:
 
 ```
-pub type Os = Linux | Macos
-pub type Arch = X86_64 | Aarch64
+pub type Os: key = Linux | Macos
+pub type Arch: key = X86_64 | Aarch64
 pub const os: Os        // supplied by the toolchain (LANG-20)
 pub const arch: Arch    // supplied by the toolchain (LANG-20)
 pub fn unsupported(why: String) -> Never
@@ -31,9 +31,11 @@ module names maps to one pair, whether or not Hirsel supports that target yet:
 expression built from them, keeps only its taken arm in retained code, and every arm is
 still checked on every target
 ([PROG-6](../../../docs/spec/programs.md#prog-6-one-meaning)). Binding the value to a local
-first keeps every arm. So a foreign call in an arm the target rules out does not need an
-archive for that target
+first keeps every arm. So a foreign function called only in an arm the target rules out
+is not in that target's reach, and its archive need not define it
 ([FFI-3](../../../docs/spec/foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)).
+A granted interface still pins its archive for the target whatever the code reaches
+([FFI-4](../../../docs/spec/foreign.md)).
 A constant whose initialiser uses `target.os` or `target.arch` is evaluated for every
 target in the table above, and a failure on any one refuses it everywhere.
 

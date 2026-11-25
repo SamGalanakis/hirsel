@@ -743,15 +743,15 @@ under the literal's contract ([core](core.md)): static, allocating nothing and n
 charged. A `String` appears in no other constant's type, so `(String, u64)` and a record
 with a `String` field are refused here, at the type, and so is every other non-plain type.
 
-**Toolchain constants** (not yet built). The constants of core module `target`, `os` and
+**Toolchain constants**. The constants of core module `target`, `os` and
 `arch`, end at their type, by the core library's power to leave a declaration to the
 implementation ([core](core.md)): the toolchain supplies each value from the build's target
 ([PROG-6](programs.md#prog-6-one-meaning)). They are the only constants of that kind, and a
 constant without an initialiser anywhere else is refused. A constant whose initialiser uses a
 toolchain constant is evaluated once for each target the `target` module names, reserved
 ones included, and a failure on any one refuses it on every target, so the target never
-decides acceptance. The checker
-evaluates no body for it: a constant still calls no function.
+decides acceptance. Each such refusal ends `, for target <triple>`, naming the first target
+that fails. The checker evaluates no body for it: a constant still calls no function.
 
 ```hirsel
 const WORDS: u64 = 64

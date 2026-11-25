@@ -1,5 +1,7 @@
 //! Published plain constants lowered in declaration order.
+use super::patterns::{Head, Subject};
 use super::*;
+use hirsel_core_ir::{LayoutQuery, SwitchArm};
 
 impl Cx<'_, '_, '_> {
     /// Store a published aggregate once per module, before native layout.
@@ -65,6 +67,211 @@ impl Cx<'_, '_, '_> {
                     .map(|i| self.static_value(self.p.constant_parts[i]))
                     .collect(),
             },
+        }
+    }
+}
+
+/// Target-dependent constants and constant-form branches (PROG-6). Checked code keeps
+/// every arm; a targeted selection names the arm each target takes, and retention
+/// (`hirsel_core_ir::select_target`) keeps only that arm.
+impl Cx<'_, '_, '_> {
+    /// A path naming published constant `constant`, through its projections.
+    pub(super) fn constant_path(
+        &mut self,
+        n: NodeId,
+        constant: u32,
+        u: &hirsel_core_resolve::ResolvedUse,
+        want: Option<Want>,
+    ) -> (TyId, Option<ValueId>) {
+        let p = self.p;
+        let c = &p.constants[constant as usize];
+        let mut values = match (c.targets, c.value) {
+            (Some(values), _) => values,
+            (None, Some(value)) => [value; 3],
+            (None, None) => {
+                self.halt();
+                return (ERROR, None);
+            }
+        };
+        for token_id in u.projections.start..u.projections.end {
+            let token_id = hirsel_core_syntax::TokenId(token_id);
+            let token = &self.item.tree.tokens[token_id.0 as usize];
+            if token.kind != TokenKind::Ident {
+                continue;
+            }
+            let name = p.index.symbols.text(token.symbol);
+            for value in &mut values {
+                match p.constant_field(p.modules[self.at.module as usize].id, *value, name) {
+                    Ok(field) => *value = field,
+                    Err(rule) => {
+                        self.push_refusal(p.constant_field_refusal(
+                            rule,
+                            self.cause(n),
+                            self.item.token_span(token_id),
+                            *value,
+                            name,
+                        ));
+                        return (ERROR, None);
+                    }
+                }
+            }
+        }
+        let value = values[0];
+        if let crate::ConstData::StaticString(id) = value.data {
+            return self.static_string_value(&p.constant_strings[id as usize], value.ty, n, want);
+        }
+        if values.iter().all(|v| *v == value) {
+            let emitted = self.constant_value(value, n);
+            return (value.ty, emitted);
+        }
+        // A value that differs by target: one block per target, joined.
+        let join = self.new_result_join();
+        if self.live() {
+            let blocks = [(); 3].map(|_| self.new_block(&[]));
+            let sel = self.layout_word(LayoutQuery::Target, n);
+            let edges = [0, 1].map(|t| SwitchArm {
+                value: t as u64,
+                edge: self.edge(blocks[t], &[]),
+            });
+            let otherwise = self.edge(blocks[2], &[]);
+            let arms = PoolRange::push(&mut self.b.pools.arms, edges);
+            self.end(
+                Terminator::Switch {
+                    value: sel,
+                    arms,
+                    otherwise,
+                },
+                Some(n),
+            );
+            for (block, value) in blocks.into_iter().zip(values) {
+                self.start(block);
+                let emitted = self.constant_value(value, n);
+                self.goto(join, value.ty, emitted, n);
+            }
+        }
+        (value.ty, self.land(join))
+    }
+
+    /// The scrutinee or condition at `n` as a constant expression, on each target.
+    fn constant_branch(&self, n: NodeId) -> Option<[crate::ConstValue; 3]> {
+        self.p.constant_branches.get(&(self.at, n)).copied()
+    }
+
+    /// Leave for `yes` on each target `taken` names and for `no` on the others. The
+    /// otherwise edge, which no target takes, keeps both blocks in checked code.
+    fn targeted_switch(&mut self, taken: [bool; 3], yes: BlockId, no: BlockId, n: NodeId) {
+        let sel = self.layout_word(LayoutQuery::Target, n);
+        let edges = [0, 1, 2].map(|t| SwitchArm {
+            value: t as u64,
+            edge: self.edge(if taken[t] { yes } else { no }, &[]),
+        });
+        let otherwise = self.edge(if taken == [true; 3] { no } else { yes }, &[]);
+        let arms = PoolRange::push(&mut self.b.pools.arms, edges);
+        self.end(
+            Terminator::Switch {
+                value: sel,
+                arms,
+                otherwise,
+            },
+            Some(n),
+        );
+    }
+
+    /// An `if` condition's branch: a constant-form condition keeps only the arm each
+    /// target takes in retained code.
+    pub(super) fn condition_branch(&mut self, at: NodeId, cv: ValueId, yes: BlockId, no: BlockId) {
+        if let Some(values) = self.constant_branch(at)
+            && values[0].ty == BOOL
+        {
+            let taken = values.map(|v| v.data == crate::ConstData::Bits(1));
+            return self.targeted_switch(taken, yes, no, at);
+        }
+        let (yes, no) = (self.edge(yes, &[]), self.edge(no, &[]));
+        self.end(
+            Terminator::Branch {
+                condition: cv,
+                yes,
+                no,
+            },
+            Some(at),
+        );
+    }
+
+    /// The tests of a `match` arm. On a constant-form scrutinee the pattern is decided
+    /// per target, so the arm is selected by target rather than tested.
+    pub(super) fn arm_tests(
+        &mut self,
+        scrutinee: NodeId,
+        id: u32,
+        subject: Subject,
+        no: Option<BlockId>,
+    ) {
+        let decided = self
+            .constant_branch(scrutinee)
+            .filter(|values| values[0].ty == subject.ty)
+            .and_then(|values| {
+                let mut taken = [false; 3];
+                for (t, value) in values.into_iter().enumerate() {
+                    taken[t] = self.const_admits(id, value)?;
+                }
+                Some(taken)
+            });
+        let Some(taken) = decided else {
+            return self.pattern_tests(id, subject, no);
+        };
+        // The last arm takes what the earlier arms leave.
+        if let Some(no) = no
+            && self.live()
+        {
+            let yes = self.new_block(&[]);
+            self.targeted_switch(taken, yes, no, scrutinee);
+            self.start(yes);
+        }
+    }
+
+    /// Whether pattern `id` admits constant `value`, or None when that is not decided
+    /// here (the arm is then tested at run time).
+    fn const_admits(&self, id: u32, value: crate::ConstValue) -> Option<bool> {
+        if id == 0 {
+            return Some(true);
+        }
+        let pat = self.pat(id);
+        match pat.head {
+            Head::Any | Head::Bind(..) => Some(true),
+            Head::Range(lo, hi) => {
+                let crate::ConstData::Bits(bits) = value.data else {
+                    return None;
+                };
+                let TyKind::Scalar(s) = *self.t.kind(value.ty) else {
+                    return None;
+                };
+                if matches!(s, Scalar::F32 | Scalar::F64) {
+                    return None;
+                }
+                let v = crate::constants::integer(s, bits);
+                Some(lo <= v && v <= hi)
+            }
+            Head::Product(case) => {
+                let (start, len, held) = match value.data {
+                    crate::ConstData::Fields { start, len, case } => (start, len, case),
+                    crate::ConstData::Unit => (0, 0, None),
+                    _ => return None,
+                };
+                if case.is_some() && case != held {
+                    return Some(false);
+                }
+                for i in 0..pat.fields.len {
+                    if i >= len {
+                        return None;
+                    }
+                    let child = self.patterns.fields[(pat.fields.start + i) as usize];
+                    let part = self.p.constant_parts[(start + i) as usize];
+                    if !self.const_admits(child, part)? {
+                        return Some(false);
+                    }
+                }
+                Some(true)
+            }
         }
     }
 }

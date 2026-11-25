@@ -1,0 +1,10 @@
+// Module `target` (PROG-6): the target a build is for, as constants the toolchain supplies.
+pub type Os: key = Linux | Macos
+
+pub type Arch: key = X86_64 | Aarch64
+
+/// Supplied by the toolchain from the build's target (LANG-20).
+pub const os: Os
+
+/// Supplied by the toolchain from the build's target (LANG-20).
+pub const arch: Arch

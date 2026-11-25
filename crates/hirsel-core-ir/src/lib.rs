@@ -1129,6 +1129,7 @@ pub mod snapshot;
 pub mod source;
 mod static_data;
 pub mod step_contexts;
+mod target;
 pub mod text;
 #[cfg(any(test, feature = "wf"))]
 pub mod wf;
@@ -1136,6 +1137,7 @@ pub mod wf;
 pub use address::{CodeRow, builtin_address, code_addresses, code_revision, is_versioned_builtin};
 pub use hirsel_core_layout::{FuncRef, TypeRef, intern_shape};
 pub use ir::*;
+pub use target::select as select_target;
 
 #[cfg(test)]
 mod net_tests;

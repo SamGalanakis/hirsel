@@ -2679,6 +2679,15 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
     Ok(())
 }
 pub fn pure() -> Result[(), Exit] { Ok(()) }
+pub fn retained(f: Foreign[laws.Laws]) -> Result[(), Exit] {
+    let _ = match target.arch { X86_64 => 0u64, Aarch64 => native.made(f) }
+    Ok(())
+}
+pub fn kept(f: Foreign[laws.Laws]) -> Result[(), Exit] {
+    let a = target.arch
+    let _ = match a { X86_64 => 0u64, Aarch64 => native.made(f) }
+    Ok(())
+}
 "#);
     law.write("ffi_laws/tests.hirsel", r#"
 @test
@@ -2776,6 +2785,15 @@ __attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
         fail_build(engine, TARGET, &format!("{PREFIX}: member laws.o is not a relocatable object for {TARGET}"));
         pin_bytes(stale_index.clone());
         fail_build(engine, TARGET, &format!("{PREFIX} does not define hfl_make, declared at ffi_laws@1/native/make"));
+        // PROG-6: FFI-3 checks the reach of retained code, so x86_64 needs no hfl_made for the
+        // arm it rules out, and a scrutinee read through a local keeps both arms.
+        let entry = |name| invoke("build", engine, &["--target", TARGET, "--grant", GRANT, "--entry", name]).2;
+        let made = format!("{PREFIX} does not define hfl_made, declared at ffi_laws@1/native/made");
+        let retained = entry("ffi_laws@1/main/retained");
+        assert!(!retained.contains("FFI-3"), "{retained}");
+        let _ = (fs::remove_file(&called), fs::remove_file(law.path("image")));
+        let kept = entry("ffi_laws@1/main/kept");
+        assert!(kept.lines().any(|line| line == made) && !called.exists(), "{kept}");
         pin_bytes(initializer.clone());
         let refusal = format!("{PREFIX}: member laws.o has section .init_array of type SHT_INIT_ARRAY, which is not an admitted object feature");
         fail_build(engine, TARGET, &refusal);

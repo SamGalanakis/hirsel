@@ -52,9 +52,9 @@ pub(crate) fn decoded_closure_hash(
     ))
 }
 
-pub const VERSION: u16 = 3;
-const BODY_MAGIC: &[u8] = b"HIRBODY\0\x03\x00";
-pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v3";
+pub const VERSION: u16 = 4;
+const BODY_MAGIC: &[u8] = b"HIRBODY\0\x04\x00";
+pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v4";
 const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x01\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 

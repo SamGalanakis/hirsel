@@ -32,7 +32,6 @@ impl Units {
     pub fn revision(&self, root: &Identity) -> Option<ContentHash> {
         self.address(root).map(code_revision)
     }
-
     /// The code address before native linking.
     pub fn address(&self, root: &Identity) -> Option<ContentHash> {
         self.instances
@@ -133,6 +132,7 @@ pub(crate) struct InstanceSet {
     pub fields: std::collections::BTreeMap<Identity, Fields>,
     summarize_foreign: bool,
     compact_recipe: bool,
+    target: Option<hirsel_core_layout::Target>,
     pub(crate) foreign: BTreeSet<Identity>,
     pub(crate) foreign_addresses: BTreeMap<Identity, ContentHash>,
 }
@@ -270,7 +270,6 @@ impl InstanceBody {
             _ => Ok(hirsel_core_ir::source::anchored_items(self.ir()?)),
         }
     }
-
     pub(crate) fn annex(
         &self,
         sources: &hirsel_core_ir::source::SourcePositions<'_>,
@@ -280,7 +279,6 @@ impl InstanceBody {
             _ => Ok(hirsel_core_ir::normal::retained_annex(self.ir()?, sources)),
         }
     }
-
     pub(crate) fn prepare_assembly(
         &self,
         sources: &hirsel_core_ir::source::SourcePositions<'_>,
@@ -293,7 +291,6 @@ impl InstanceBody {
             _ => Ok(normal::prepare_retained_assembly(self.ir()?, sources)),
         }
     }
-
     /// A published body's module is hashed in its record; a materialized
     /// one is hashed here, by the same rule, through the caller's `scratch`.
     pub fn ir_hash(&self, scratch: &mut Vec<u8>) -> io::Result<ContentHash> {
@@ -320,7 +317,11 @@ impl InstanceSet {
             ..Self::default()
         }
     }
-
+    /// Materialise each instance's retained code for `target` (PROG-10).
+    pub(crate) fn for_target(mut self, target: Option<hirsel_core_layout::Target>) -> Self {
+        self.target = target;
+        self
+    }
     /// Each of `instances`' index in the reach record's table, if expanded,
     /// by one walk of both: `instances` is in identity order, as the table is.
     pub(crate) fn expansions<'a>(
@@ -402,7 +403,6 @@ impl InstanceSet {
             })
             .as_ref()
     }
-
     /// Bind the canonical slots once, including the existing ABI and shared
     /// adapter agreement checks, and pass each group frame to the caller.
     pub(crate) fn groups(
@@ -427,7 +427,6 @@ impl InstanceSet {
             group,
         )
     }
-
     pub(crate) fn group_plan(
         &self,
         entry: &Identity,
@@ -446,7 +445,6 @@ impl InstanceSet {
             |identity| self.foreign_addresses.get(identity).copied(),
         )
     }
-
     fn group_rows<'a>(
         &'a self,
         instances: &'a [Identity],
@@ -494,7 +492,6 @@ impl InstanceSet {
         }
         Some(rows)
     }
-
     /// Each instance that one of `instances` describes, with its code
     /// revision over this walk (`revision`), by identity.
     pub(crate) fn revisions(
@@ -547,7 +544,6 @@ impl CheckProduct {
             .get(&path.0.package)
             .is_some_and(|modules| modules.contains_key(&path.0.modules))
     }
-
     /// A body stopped before emission can have only a request-level refusal.
     /// Use the current sites, since a conflicting name can move in another item
     /// without changing this body's record.
@@ -580,7 +576,6 @@ impl CheckProduct {
         }
         Ok(None)
     }
-
     /// Materialize every unit reached from `roots`, without native object records.
     /// A program entry is one root; source corpora can select several definitions.
     pub fn units(
@@ -588,7 +583,15 @@ impl CheckProduct {
         roots: impl IntoIterator<Item = Identity>,
         limit: usize,
     ) -> Result<Units, InstanceStop> {
-        let mut instances = InstanceSet::default();
+        self.units_for(roots, limit, crate::reachability::default_target())
+    }
+    pub fn units_for(
+        &self,
+        roots: impl IntoIterator<Item = Identity>,
+        limit: usize,
+        target: hirsel_core_layout::Target,
+    ) -> Result<Units, InstanceStop> {
+        let mut instances = InstanceSet::default().for_target(Some(target));
         let reached = self.instances_into(roots, limit, &mut instances)?;
         Ok(Units { reached, instances })
     }
@@ -771,7 +774,11 @@ impl CheckProduct {
             })?;
             // A function of the instance's identity and its definition's
             // published record: a resident compiler keeps it across requests.
-            let memo_key = (own != Some(ContentHash::default())).then(|| (key.clone(), own));
+            let target = instances
+                .target
+                .unwrap_or_else(crate::reachability::default_target);
+            let memo_key =
+                (own != Some(ContentHash::default())).then(|| (key.clone(), own, target));
             let made = crate::resident::MATERIALISED.get_or(memo_key, || {
                 materialise(
                     key,
@@ -779,6 +786,7 @@ impl CheckProduct {
                     &arguments,
                     observe,
                     instances.compact_recipe,
+                    target,
                 )
             })?;
             let Materialised {
@@ -890,6 +898,7 @@ fn materialise(
     arguments: &[&hirsel_core_ir::Closure],
     observe: &mut impl FnMut(&Identity, &'static str),
     compact_recipe: bool,
+    target: hirsel_core_layout::Target,
 ) -> Result<Materialised, InstanceStop> {
     let input = |message: String| InstanceStop::Input {
         definition: key.definition.clone(),
@@ -898,7 +907,7 @@ fn materialise(
     let built = match product {
         None => {
             observe(key, "load");
-            hirsel_core_materialize::materialize_glue(key, arguments).map_err(input)?
+            hirsel_core_materialize::materialize_glue(key, arguments, target).map_err(input)?
         }
         Some(product) => {
             let own = Published {
@@ -907,7 +916,7 @@ fn materialise(
                 template: product.check.template.as_ref(),
             };
             observe(key, "load");
-            hirsel_core_materialize::materialize(&own, key, arguments).map_err(input)?
+            hirsel_core_materialize::materialize(&own, key, arguments, target).map_err(input)?
         }
     };
     observe(key, "materialize");

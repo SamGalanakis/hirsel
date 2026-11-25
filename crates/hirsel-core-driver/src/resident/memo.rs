@@ -254,6 +254,7 @@ pub(crate) static MATERIALISED: Memo<
     (
         hirsel_core_ir::Identity,
         Option<hirsel_core_ids::ContentHash>,
+        hirsel_core_layout::Target,
     ),
     crate::instances::Materialised,
 > = Memo::new();

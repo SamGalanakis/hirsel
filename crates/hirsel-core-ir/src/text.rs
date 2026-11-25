@@ -477,6 +477,7 @@ impl Printer {
                         LayoutQuery::BlockSize { ty, prefix } => {
                             format!("{} = block_size t{} {prefix}", def(*result), ty.0)
                         }
+                        LayoutQuery::Target => format!("{} = target", def(*result)),
                     },
                     Inst::ReadStatic { result, data } => {
                         format!("{} = static d{}", def(*result), data.0)
@@ -1684,13 +1685,14 @@ impl BodyParser {
             }
         } else if matches!(
             op,
-            "field_size" | "held_size" | "block_size" | "frame_capacity"
+            "field_size" | "held_size" | "block_size" | "frame_capacity" | "target"
         ) {
             one(&defs)?;
             let query = match op {
                 "field_size" => LayoutQuery::FieldSize(l.field_ty()?),
                 "frame_capacity" => LayoutQuery::FrameCapacity(l.field_ty()?),
                 "held_size" => LayoutQuery::HeldSize(TypeId(l.id('t')?)),
+                "target" => LayoutQuery::Target,
                 _ => LayoutQuery::BlockSize {
                     ty: TypeId(l.id('t')?),
                     prefix: l.num()?,

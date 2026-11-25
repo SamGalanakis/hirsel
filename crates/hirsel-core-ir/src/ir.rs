@@ -729,6 +729,9 @@ pub enum LayoutQuery {
     /// Number of elements that fit in the frame-backed List buffer. A row is
     /// eligible only if the frame holds the first growth of four elements.
     FrameCapacity(FieldTy),
+    /// The index of the build's target in [`hirsel_core_layout::Target::ALL`]. Only a targeted
+    /// selection reads it, and retention replaces it before any engine runs (PROG-6).
+    Target,
 }
 
 /// What an `Alloc` makes. The block's bookkeeping (its limit record,

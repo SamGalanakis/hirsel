@@ -554,8 +554,9 @@ impl Parser<'_> {
             let name = self.name()?;
             self.expect(sym::COLON)?;
             c.push(self.ty()?);
-            self.expect(sym::EQ)?;
-            c.push(self.required(|p| p.expr(0))?);
+            if self.eat(sym::EQ) {
+                c.push(self.required(|p| p.expr(0))?); // Without `=`: a toolchain constant (LANG-20).
+            }
             return Ok(self.node(s, NodeKind::Constant, Some(name), &c));
         }
         let kind = if self.eat(sym::RESOURCE) {

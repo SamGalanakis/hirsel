@@ -74,7 +74,7 @@ pub use native::{
     Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, ReplayPlan, grant_kind,
 };
 pub use reach::ReachCounters;
-pub use reachability::{GapStop, Reachable};
+pub use reachability::{GapStop, Reachable, default_target};
 pub use test_run::{Runner, Source, TestCache, TestOutcome};
 mod meter;
 pub use diagnostics::{

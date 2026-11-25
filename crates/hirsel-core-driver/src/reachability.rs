@@ -307,7 +307,7 @@ impl Reached<'_> {
 impl CheckProduct {
     pub fn reachable(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
         hirsel_core_ids::published::catch_io(|| {
-            self.reachable_inner(entry, limit, None, None, false)
+            self.reachable_inner(entry, limit, None, None, false, None)
         })
     }
 
@@ -318,9 +318,10 @@ impl CheckProduct {
     ) -> io::Result<Reachable<'_>> {
         let _phase = crate::meter::trace::span("reach");
         let limit = options.instance_limit;
+        let target = build_target(options)?;
         if !crate::resident::serving() {
             return hirsel_core_ids::published::catch_io(|| {
-                self.reachable_inner(entry, limit, None, None, true)
+                self.reachable_inner(entry, limit, None, None, true, Some(target))
             });
         }
         let key = crate::native::key(
@@ -330,6 +331,7 @@ impl CheckProduct {
                 self.image.as_ref().map(|image| image.identity),
                 entry,
                 limit,
+                target.triple(),
             ),
         )?;
         let record = crate::resident::RECIPE_REACH
@@ -339,6 +341,7 @@ impl CheckProduct {
             limit,
             matches!(options.backend, crate::native::Backend::Cranelift),
             &mut record.lock().unwrap(),
+            Some(target),
         )
     }
 
@@ -348,9 +351,10 @@ impl CheckProduct {
         limit: usize,
         compact_recipe: bool,
         record: &mut Option<RecipeGraph>,
+        target: Option<hirsel_core_layout::Target>,
     ) -> io::Result<Reachable<'_>> {
         hirsel_core_ids::published::catch_io(|| {
-            self.reachable_inner(entry, limit, None, Some(record), compact_recipe)
+            self.reachable_inner(entry, limit, None, Some(record), compact_recipe, target)
         })
     }
     /// The build's reachable set for `options`. A Cranelift development build
@@ -373,9 +377,17 @@ impl CheckProduct {
     ) -> io::Result<Reachable<'_>> {
         let _phase = crate::meter::trace::span("reach");
         let inputs = crate::native::native_inputs(self, options)?;
+        let target = Some(build_target(options)?);
         let mut reached = hirsel_core_ids::published::catch_io(|| {
             let Some(records) = inputs.records.as_ref() else {
-                return self.reachable_inner(entry, options.instance_limit, None, None, false);
+                return self.reachable_inner(
+                    entry,
+                    options.instance_limit,
+                    None,
+                    None,
+                    false,
+                    target,
+                );
             };
             let Some(selection) = crate::reach::selection(self, records, entry, options)? else {
                 return self.reachable_inner(
@@ -384,6 +396,7 @@ impl CheckProduct {
                     Some((records, None, damaged)),
                     None,
                     false,
+                    target,
                 );
             };
             let loaded = crate::reach::load(&records.store, selection)?;
@@ -453,6 +466,7 @@ impl CheckProduct {
                 )),
                 None,
                 false,
+                target,
             )?;
             reached.counters.record_bytes = record_bytes as u64;
             let complete = reached.accepted() && reached.first_stops.is_empty();
@@ -591,8 +605,10 @@ impl CheckProduct {
         )>,
         mut recipe_record: Option<&mut Option<RecipeGraph>>,
         compact_recipe: bool,
+        target: Option<hirsel_core_layout::Target>,
     ) -> io::Result<Reachable<'_>> {
-        let mut materialized = crate::instances::InstanceSet::for_reach(compact_recipe);
+        let mut materialized =
+            crate::instances::InstanceSet::for_reach(compact_recipe).for_target(target);
         let roots = [Identity::plain(entry.clone())];
         let prior = records.and_then(|(_, p, _)| p);
         let instances = {
@@ -935,4 +951,18 @@ impl CheckProduct {
             reach: None,
         })
     }
+}
+
+/// The target a native build retains code for (PROG-10).
+/// The target a build without `--target`, and an in-process evaluation, retains code for.
+pub fn default_target() -> hirsel_core_layout::Target {
+    hirsel_core_layout::Target::from_triple(crate::native::TARGET).expect("a supported target")
+}
+pub(crate) fn build_target(options: &NativeOptions) -> io::Result<hirsel_core_layout::Target> {
+    hirsel_core_layout::Target::from_triple(&options.target).ok_or_else(|| {
+        io::Error::other(format!(
+            "PROG-6: `target` names no target {}",
+            options.target
+        ))
+    })
 }

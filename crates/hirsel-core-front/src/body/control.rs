@@ -470,15 +470,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             let yes = self.new_block(&[]);
             let no = self.new_block(&[]);
-            let (ye, ne) = (self.edge(yes, &[]), self.edge(no, &[]));
-            self.end(
-                Terminator::Branch {
-                    condition: cv,
-                    yes: ye,
-                    no: ne,
-                },
-                Some(c[0]),
-            );
+            self.condition_branch(c[0], cv, yes, no);
             self.start(yes);
             no_block = Some(no);
         }

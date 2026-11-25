@@ -394,7 +394,7 @@ fn a_resident_recipe_reaches_added_and_removed_calls_like_a_fresh_walk() {
         let source = format!("fn leaf() -> u64 {{ 9u64 }}\nfn root() -> u64 {{ {body} }}\n");
         let current = check(&source, dir.path(), &mut driver);
         let reached = current
-            .reachable_recipe_record(&entry, 256, true, &mut record)
+            .reachable_recipe_record(&entry, 256, true, &mut record, None)
             .unwrap();
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh = check(&source, fresh_dir.path(), &mut Driver::default());

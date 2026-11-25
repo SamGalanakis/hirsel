@@ -50,6 +50,10 @@ impl<T> Rows<T> {
     pub fn reserve(&mut self, additional: usize) {
         self.own.reserve(additional);
     }
+    /// Drop own rows from `len` on; library rows stay.
+    pub fn truncate(&mut self, len: usize) {
+        self.own.truncate(len - self.base_len);
+    }
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.base.iter().chain(&self.own)
     }

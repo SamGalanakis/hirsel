@@ -1,0 +1,4 @@
+// expect: refuse LANG-20 at 4:1
+// LANG-20: only the toolchain supplies a constant without an initialiser, and only
+// `target.os` and `target.arch`.
+const WIDTH: u64

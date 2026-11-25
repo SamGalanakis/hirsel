@@ -1,0 +1,56 @@
+// expect: accept
+// expect: on x86_64-unknown-linux-gnu run code() = 101
+// expect: on aarch64-unknown-linux-gnu run code() = 102
+// expect: on aarch64-apple-darwin run code() = 202
+// expect: on x86_64-unknown-linux-gnu run via_local() = 1
+// expect: on aarch64-apple-darwin run via_local() = 2
+// expect: on x86_64-unknown-linux-gnu run gated() = 3
+// expect: on aarch64-apple-darwin run gated() = 7
+// expect: on aarch64-unknown-linux-gnu run read() = 20
+// expect: on x86_64-unknown-linux-gnu run read() = 10
+// PROG-6: each build's code takes the arm its target's constants name, whether the branch
+// names `target` directly, a dependent constant, or (both arms kept) a local holding it.
+const MAC: bool = target.os == (Macos : target.Os)
+
+fn os_code() -> u64 {
+    match target.os {
+        Linux => 100,
+        Macos => 200
+    }
+}
+
+fn arch_code() -> u64 {
+    if target.arch == (Aarch64 : target.Arch) {
+        2
+    } else {
+        1
+    }
+}
+
+fn code() -> u64 {
+    os_code() + arch_code()
+}
+
+fn via_local() -> u64 {
+    let o = target.os
+    match o {
+        Linux => 1,
+        Macos => 2
+    }
+}
+
+fn gated() -> u64 {
+    if MAC {
+        7
+    } else {
+        3
+    }
+}
+
+fn read() -> u64 {
+    let a: target.Arch = target.arch
+    match a {
+        X86_64 => 10,
+        Aarch64 => 20
+    }
+}

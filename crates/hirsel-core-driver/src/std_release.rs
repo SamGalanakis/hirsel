@@ -330,11 +330,14 @@ impl CheckProduct {
     /// image: every plain root the image checked whole and what it reaches,
     /// less each held root, prepared as a recipe names them. Reads the library
     /// image only.
-    fn image_side(&self) -> Result<(SideUnits, Vec<ModuleRoots>), NativeStop> {
+    fn image_side(
+        &self,
+        target: hirsel_core_layout::Target,
+    ) -> Result<(SideUnits, Vec<ModuleRoots>), NativeStop> {
         let plain = self.std_plain_roots()?;
         // Every reached instance stays materialised until partitioning, so
         // each keeps a compact recipe, decoded only while it is used.
-        let mut materialized = crate::instances::InstanceSet::compact();
+        let mut materialized = crate::instances::InstanceSet::compact().for_target(Some(target));
         // A root whose walk stops is left out alone; a program reaching it
         // lowers it itself and stops there.
         let mut walks = Vec::new();
@@ -445,7 +448,9 @@ impl CheckProduct {
             .image
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
-        let (units, modules) = self.image_side()?;
+        let build = hirsel_core_layout::Target::from_triple(target)
+            .ok_or_else(|| NativeStop::Entry(format!("`target` names no target {target}")))?;
+        let (units, modules) = self.image_side(build)?;
         Ok(PrebuiltStd {
             target: target.to_owned(),
             store: Store::new(&image.store_root().join(PREBUILT))?,

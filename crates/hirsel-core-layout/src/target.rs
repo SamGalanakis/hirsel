@@ -4,7 +4,7 @@
 
 /// The supported targets. They share FORM's little-endian, 64-bit layout
 /// recipes; calling conventions, object format and OS facts derive from them.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum Target {
     X86_64Linux,
     Aarch64Linux,
@@ -34,6 +34,11 @@ pub enum ObjectFormat {
 
 impl Target {
     pub const ALL: [Self; 3] = [Self::X86_64Linux, Self::Aarch64Linux, Self::Aarch64Darwin];
+
+    /// The target's position in [`Self::ALL`], as a targeted selection numbers it (PROG-6).
+    pub const fn index(self) -> usize {
+        self as usize
+    }
 
     /// Select a supported target from its compiler triple.
     pub fn from_triple(triple: &str) -> Option<Self> {

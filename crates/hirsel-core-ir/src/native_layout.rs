@@ -9,6 +9,7 @@ impl LayoutQuery {
         match self {
             Self::FieldSize(field) | Self::FrameCapacity(field) => field.map_refs(&mut map),
             Self::HeldSize(ty) | Self::BlockSize { ty, .. } => ty.0 = map(TypeRef(ty.0)).0,
+            Self::Target => {}
         }
     }
 
@@ -35,6 +36,7 @@ impl LayoutQuery {
                 let capacity = hirsel_core_layout::FRAME_LIST_BYTES / stride;
                 if capacity >= 4 { capacity } else { 0 }
             }
+            Self::Target => unreachable!("a targeted selection is retained before layout"),
         }
     }
 }

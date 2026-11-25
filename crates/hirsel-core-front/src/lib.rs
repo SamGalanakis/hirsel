@@ -122,6 +122,9 @@ pub struct Program<'a> {
     pub constant_parts: Rows<ConstValue>,
     pub(crate) constant_strings: Rows<Vec<u8>>,
     pub(crate) constant_ids: Rows<Option<u32>>,
+    /// Each `match` scrutinee and `if` condition that is a constant expression, by its
+    /// item and node: its value on each target (PROG-6).
+    pub(crate) constant_branches: HashMap<(ItemRef, NodeId), [ConstValue; 3]>,
     /// This program's own definitions by path. A path lives once, in its
     /// row: an entry is hashed and compared through its row's path.
     by_path: hashbrown::HashTable<Def>,
@@ -638,6 +641,7 @@ impl<'a> Program<'a> {
         p.register_constants();
         p.summarize();
         p.evaluate_constants();
+        p.decide_constant_branches();
         test_functions::check(&mut p);
 
         for f in p.fns.base_len()..p.fns.len() {
@@ -705,6 +709,7 @@ impl<'a> Program<'a> {
                 ids.resize(index.definitions.len(), None);
                 ids
             },
+            constant_branches: HashMap::new(),
             by_path: hashbrown::HashTable::new(),
             library_paths: library.map(|l| std::sync::Arc::new(l.paths.clone())),
             core_never: index

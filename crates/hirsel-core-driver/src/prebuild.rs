@@ -48,7 +48,9 @@ impl CheckProduct {
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("a prebuild emits an image's instances".into()))?;
         let inputs = crate::native::native_inputs(self, options).map_err(NativeStop::Input)?;
-        let mut materialized = crate::instances::InstanceSet::default();
+        let mut materialized = crate::instances::InstanceSet::default().for_target(Some(
+            crate::reachability::build_target(options).map_err(NativeStop::Input)?,
+        ));
         let mut resolver = hirsel_core_materialize::Resolver::default();
         let mut prebuilt = Prebuilt::default();
         // No prior reach record: every instance walks its own record or body.

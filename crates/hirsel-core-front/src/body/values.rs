@@ -264,7 +264,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.static_string_value(&data, ty, n, want)
     }
 
-    fn static_string_value(
+    pub(super) fn static_string_value(
         &mut self,
         data: &[u8],
         ty: TyId,
@@ -577,48 +577,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (ERROR, None)
             }
             &Target::Definition(id) if self.p.constant_ids[id.0 as usize].is_some() => {
-                let p = self.p;
-                let constant = p.constant_ids[id.0 as usize].unwrap();
-                let Some(value) = p.constants[constant as usize].value else {
-                    self.halt();
-                    return (ERROR, None);
-                };
-                let mut value = value;
-                for token_id in u.projections.start..u.projections.end {
-                    let token_id = hirsel_core_syntax::TokenId(token_id);
-                    let token = &self.item.tree.tokens[token_id.0 as usize];
-                    if token.kind == TokenKind::Ident {
-                        let name = p.index.symbols.text(token.symbol);
-                        let field = match p.constant_field(
-                            p.modules[self.at.module as usize].id,
-                            value,
-                            name,
-                        ) {
-                            Ok(field) => field,
-                            Err(rule) => {
-                                self.push_refusal(p.constant_field_refusal(
-                                    rule,
-                                    self.cause(n),
-                                    self.item.token_span(token_id),
-                                    value,
-                                    name,
-                                ));
-                                return (ERROR, None);
-                            }
-                        };
-                        value = field;
-                    }
-                }
-                if let crate::ConstData::StaticString(id) = value.data {
-                    return self.static_string_value(
-                        &p.constant_strings[id as usize],
-                        value.ty,
-                        n,
-                        want,
-                    );
-                }
-                let emitted = self.constant_value(value, n);
-                (value.ty, emitted)
+                self.constant_path(n, self.p.constant_ids[id.0 as usize].unwrap(), u, want)
             }
             &Target::ContextualConstructor { name } => self.construct_variant(n, name, &[], want),
             &Target::Definition(id) if u.projections.is_empty() => {

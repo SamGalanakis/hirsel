@@ -304,6 +304,7 @@ tags!(LayoutQuery {
     1 => HeldSize(part0),
     2 => BlockSize { ty, prefix },
     3 => FrameCapacity(part0),
+    4 => Target,
 });
 
 tags!(AllocKind {

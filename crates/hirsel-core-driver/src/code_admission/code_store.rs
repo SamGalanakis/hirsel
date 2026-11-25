@@ -553,7 +553,7 @@ fn m6_requires_canonical_object_frames() {
     });
     let mut uleb = fixture.recipe.encode();
     // The first identity text starts immediately after the recipe headers.
-    let len = b"HIRRECIP\0\x02\x00\x03\x00".len();
+    let len = b"HIRRECIP\0\x02\x00\x04\x00".len();
     uleb.splice(len..=len, [uleb[len] | 128, 0]);
     let mut trailing = fixture.recipe.encode();
     trailing.push(0);
@@ -707,7 +707,7 @@ fn a_current_recipe_cannot_admit_an_old_normal_form_body() {
             hash: callee.body.hash,
         })
         .unwrap();
-    old[..10].copy_from_slice(b"HIRBODY\0\x02\0");
+    old[..10].copy_from_slice(b"HIRBODY\0\x03\0");
     fixture.recipe.bodies.clear();
     let old = BodyRef {
         body: fixture.object(ObjectKind::Body, old),

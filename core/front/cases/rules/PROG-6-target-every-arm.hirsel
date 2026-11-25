@@ -1,0 +1,10 @@
+// expect: refuse LANG-11 at 8:18
+// expect: compared LANG-11 at 8:18 | bool | u64
+// PROG-6: every arm is checked on every target, so an arm only another target keeps
+// is refused on this one, and a `match` on `target.os` names every case.
+fn pick() -> u64 {
+    match target.os {
+        Linux => 1,
+        Macos => true
+    }
+}

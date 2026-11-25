@@ -12,6 +12,7 @@
 use hirsel_core_front::GenericTemplate;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::{Closure, FuncId, Identity, Module, TypeId};
+use hirsel_core_layout::Target;
 use rustc_hash::FxHashMap as HashMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -84,29 +85,33 @@ pub fn materialize(
     own: &Published,
     identity: &Identity,
     arguments: &[&Closure],
+    target: Target,
 ) -> Result<Materialized, String> {
     let Some(template) = own.template else {
         if !identity.closures.is_empty() || !identity.dictionaries.is_empty() {
             return Err("a non-generic body has no type or dictionary arguments".into());
         }
-        return Ok(retained(own.module, own.function));
+        return Ok(retained(own.module, own.function, target));
     };
     let (module, function) =
         hirsel_core_front::materialize(own.module, own.function, template, identity, arguments)?;
-    Ok(retained(&module, function))
+    Ok(retained(&module, function, target))
 }
 
 /// The instance `identity` of a glue operation ([`hirsel_core_front::is_glue`]).
 pub fn materialize_glue(
     identity: &Identity,
     arguments: &[&Closure],
+    target: Target,
 ) -> Result<Materialized, String> {
     let (module, function) = hirsel_core_front::materialize_glue(identity, arguments)?;
-    Ok(retained(&module, function))
+    Ok(retained(&module, function, target))
 }
 
-fn retained(module: &Module, function: FuncId) -> Materialized {
-    let (code, module) = hirsel_core_ir::normal::retain(module, function);
+/// The retained code of `function` for `target` (PROG-10).
+fn retained(module: &Module, function: FuncId, target: Target) -> Materialized {
+    let module = hirsel_core_ir::select_target(module, target);
+    let (code, module) = hirsel_core_ir::normal::retain(&module, function);
     let children = children_for_slots(&module, &code.slots);
     Materialized {
         children,

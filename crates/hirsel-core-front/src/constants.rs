@@ -2,6 +2,7 @@
 //! Values share one append-only field arena; no expression owns a child vector.
 mod bytes;
 mod index;
+mod targets;
 
 use crate::*;
 use hirsel_core_ir::Ty;
@@ -16,6 +17,8 @@ pub struct Constant {
     pub at: ItemRef,
     pub ty: TyId,
     pub value: Option<ConstValue>,
+    /// A constant that depends on `target`: its value on each `Target::ALL`.
+    pub targets: Option<[ConstValue; 3]>,
     pub(crate) expr: NodeId,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -52,17 +55,24 @@ impl Program<'_> {
                     continue;
                 };
                 let kids = item.tree.children(item.root);
-                let expr = *kids.last().unwrap();
-                let type_node = kids[kids.len() - 2];
+                let (expr, initialised) = targets::initialiser(item.tree, kids);
+                let type_node = kids[kids.len() - 1 - usize::from(initialised)];
                 let ty = self.lower_ty(at, type_node, &[]);
                 let ty = self.outside_vector(at, type_node, ty, "a constant");
+                let targets = (!initialised).then(|| self.toolchain(at, ty)).flatten();
                 let id = self.constants.len() as u32;
                 self.constant_ids[definition.0 as usize] = Some(id);
+                let ty = if initialised || targets.is_some() {
+                    ty
+                } else {
+                    ERROR
+                };
                 self.constants.push(Constant {
                     path: self.index.definition_path(definition),
                     at,
                     ty,
                     value: None,
+                    targets,
                     expr,
                 });
             }
@@ -117,23 +127,9 @@ impl Program<'_> {
             .collect::<VecDeque<_>>();
         let mut done = vec![false; len - base];
         while let Some(i) = ready.pop_front() {
-            let c = &self.constants[i];
-            let (at, expr, ty) = (c.at, c.expr, c.ty);
-            let value = if ty == ERROR {
-                None
-            } else {
-                let mut cx = ConstCx {
-                    p: self,
-                    at,
-                    ascribing: false,
-                };
-                if Some(ty) == string {
-                    cx.static_string(expr, ty)
-                } else {
-                    cx.expr(expr, Some(ty), true)
-                }
-            };
-            self.constants[i].value = value;
+            if self.constants[i].targets.is_none() {
+                self.evaluate_constant(i, string);
+            }
             done[i - base] = true;
             let mut next = heads[i - base];
             while let Some(edge) = next {
@@ -249,6 +245,10 @@ struct ConstCx<'p, 'a> {
     p: &'p mut Program<'a>,
     at: ItemRef,
     ascribing: bool,
+    /// The `Target::ALL` index a target-dependent constant reads at, if any.
+    target: Option<usize>,
+    /// Set when a read needed a target this evaluation does not have.
+    targeted: bool,
 }
 impl ConstCx<'_, '_> {
     fn fail(&mut self, n: NodeId, message: &str) -> Option<ConstValue> {
@@ -360,9 +360,9 @@ impl ConstCx<'_, '_> {
                 };
                 match use_.target {
                     Target::Definition(def) if self.p.constant_ids[def.0 as usize].is_some() => {
-                        let id = self.p.constant_ids[def.0 as usize]?;
-                        let mut value = self.p.constants[id as usize].value?;
-                        for token in use_.projections.start..use_.projections.end {
+                        let (id, span) = (self.p.constant_ids[def.0 as usize]?, use_.projections);
+                        let mut value = self.read(id)?;
+                        for token in span.start..span.end {
                             if item.tree.tokens[token as usize].kind == TokenKind::Ident {
                                 value =
                                     self.project(n, value, hirsel_core_syntax::TokenId(token))?;
@@ -967,7 +967,7 @@ fn order(p: &Program<'_>, a: ConstValue, b: ConstValue) -> std::cmp::Ordering {
 fn mask(s: Scalar, x: u64) -> u64 {
     x & (u64::MAX >> (64 - s.size() * 8))
 }
-fn integer(s: Scalar, x: u64) -> i128 {
+pub(crate) fn integer(s: Scalar, x: u64) -> i128 {
     match Ty::Scalar(s).int() {
         Some((true, w)) => i128::from(((x << (64 - w)) as i64) >> (64 - w)),
         _ => i128::from(x),

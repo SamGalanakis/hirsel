@@ -9,7 +9,7 @@ this page, and nothing is inferred from its body ([LANG-8](language.md#lang-8-si
 A bodiless function that is not `pub` is visible only in its module
 ([PROG-2](programs.md#prog-2-visibility)) and is not part of the contract. A type declared
 there with no body is built in, so its summary is the one the table below gives it.
-Likewise (not yet built), a `pub const` there may end at its type, `pub const os: Os`, and
+Likewise, a `pub const` there may end at its type, `pub const os: Os`, and
 the toolchain then supplies its value from the build's target; module `target`'s `os` and
 `arch` are the only such constants ([LANG-20](language.md#lang-20-constants)).
 

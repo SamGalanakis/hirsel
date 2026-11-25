@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 #[path = "../../../core/front/support/cases.rs"]
 mod case_source;
+mod targets;
 use case_source::DiagnosticExpectation;
 
 fn root() -> PathBuf {
@@ -239,6 +240,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
     let units = product
         .units(roots.clone(), 65_536)
         .unwrap_or_else(|e| panic!("{}: units: {e:?}", path.display()));
+    let on = targets::OnTargets::new(product, &roots);
     let unit_modules = units.modules().unwrap();
     let joined = match roots.first() {
         Some(entry) => {
@@ -764,11 +766,13 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                     format!("{line}:{column}")
                 };
                 failures.extend(run_expect(module, &functions, call, want, &site));
+                failures.extend(on.others(call, want, module, &site));
                 failures.extend(
                     run_expect(&shared, &functions, call, want, &site)
                         .map(|f| format!("with shared slots: {f}")),
                 );
             }
+            ["on", t, "run", call, "=", want @ ..] => failures.extend(on.run(t, call, want)),
             _ => failures.push(format!("unreadable expectation `{e}`")),
         }
     }
@@ -1719,7 +1723,6 @@ fn foreign_declaration_restore() {
     use hirsel_core_ir::normal;
     use hirsel_core_resolve::{ResolutionScratch, SourceId};
     use std::sync::Arc;
-
     let files = tempfile::tempdir().unwrap();
     let main = files.path().join("main.hirsel");
     let native = files.path().join("native.hirsel");
@@ -1795,7 +1798,6 @@ pub fn release(f: Foreign[main.Law], take p: foreign.Ptr[main.Obj]) -> i32 waits
             header.as_bytes(),
             b"(core@1/core/Foreign[app@1/main/Law])->core@1/core/Option[core@1/foreign/Ptr[app@1/main/Obj]]"
         );
-
         let abi = p.foreign_abi(make.site.module).unwrap();
         let [makes, frees] = abi.as_slice() else {
             panic!("expected the make and release ABI signatures");
@@ -1814,7 +1816,6 @@ pub fn release(f: Foreign[main.Law], take p: foreign.Ptr[main.Obj]) -> i32 waits
             frees.result,
             AbiResult::Scalar(hirsel_core_layout::Scalar::I32)
         ));
-
         let mut emitter = Emitter::new();
         let check = p.check_lower(p.function_id(&use_make).unwrap(), &mut emitter);
         assert!(
@@ -2062,7 +2063,6 @@ fn field_puns() {
     .into_iter()
     .flat_map(|name| run_case(&root().join("cases/rules").join(name)))
     .collect();
-
     let address = |source: &str| {
         let path = DefPath::from_full("app@1/main/probe").unwrap();
         let request = Checked::source(source, None);

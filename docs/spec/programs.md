@@ -427,12 +427,12 @@ owner's generated functions of that kind, in the order the checker emits them. N
 number enters the name, so wrapping an earlier expression in parentheses never renames a later
 closure. A generated adapter that several owners share keeps its one shared identity.
 
-**Retained code** (not yet built; macOS decision D1). An instance's **retained code** is its
+**Retained code** (macOS decision D1). An instance's **retained code** is its
 checked IR with the arms that a constant expression rules out removed
 ([PROG-6](#prog-6-one-meaning)); a body the checker keeps is one that retained code holds.
 Only retained code makes slots, calls and reach. Because the rule covers every constant, not
-only `target`'s, building it takes a new normal-form version: a body whose function branches
-on any constant changes. Until it is built, retained code is the whole checked IR.
+only `target`'s, it took normal form 4: a body whose function branches on any constant
+changes. Retained code is computed for one target at a time, before the body is encoded.
 
 **Body.** An instance's **body** is the normal form of its retained code: its own function, the
 functions generated beside it, the shapes, signatures, statics and instance rows they use, and
@@ -476,13 +476,12 @@ slots are its bodiless functions in number order.
 
 Every enumeration is written with a tag from a fixed, append-only table, and every count and
 index as unsigned LEB128. The body starts with the seven ASCII bytes `HIRBODY`, a zero byte
-and its normal-form version as a 16-bit little-endian number. The current version is 3, which
-places Map keys in the grouped index of [PROG-11](#prog-11-map-index); a reader accepts version 3
-only.
+and its normal-form version as a 16-bit little-endian number. The current version is 4, whose bodies hold
+retained code ([PROG-6](#prog-6-one-meaning)); a reader accepts version 4 only.
 Each value has exactly one encoding: a reader refuses a LEB128 number with a redundant byte,
 an unknown tag, a list out of its required order or with a repeat, or bytes left over at the
 end. Decoding and re-encoding a body gives the same bytes. Its
-**body hash** is `H("hirsel.code-body.v3", body)`. Positions and hints go to the body's
+**body hash** is `H("hirsel.code-body.v4", body)`. Positions and hints go to the body's
 **annex** instead, in the body's order: each entry names a position of that body, and an annex
 whose entries do not match its body's instructions, terminators and calls in number and kind is
 malformed. The annex is hashed under `hirsel.code-annex.v1` and never enters an address.
@@ -538,7 +537,8 @@ code.
 The domains `hirsel.code-annex.v1`, `hirsel.code-group.v1`, `hirsel.code-address.v1`,
 `hirsel.code-builtin.v1` and `hirsel.code-revision.v2` are added by the 2026-11-21 version of
 this section, and `hirsel.code-body.v3` by the 2026-11-22 version, which retires
-`hirsel.code-body.v2`. A change to the normal form or to a group's encoding takes a new version
+`hirsel.code-body.v2`; `hirsel.code-body.v4` by the 2026-11-25 version retires
+`hirsel.code-body.v3`. A change to the normal form or to a group's encoding takes a new version
 and a new domain. It never reuses an old one.
 
 Version note (2026-11-21, code-address attacks): the traversal now follows every instruction's
@@ -561,6 +561,11 @@ also gained one writer with a staged commit, promotion that abandons a partial r
 capacity bound of 2^59, unaligned group loads, the entry recipe's own field order, and the
 private builtin table with its numbers. The body header is `HIRBODY`, a zero byte, then 3 as a
 16-bit little-endian number, and both the writer and the reader use it.
+
+Version note (2026-11-25, macos-s9-target-consts-2508): normal form 4 encodes retained code,
+so a branch on a constant expression keeps only its taken arm, per target. The header carries
+4, the body domain is `hirsel.code-body.v4`, and bodies of version 3 are refused, not
+converted.
 
 ### PROG-11: Map index
 
@@ -592,7 +597,8 @@ published library by its root, a workspace member by its captured files, and a t
 package by the toolchain, so `--locked` and `--frozen` decide only whether a command
 proceeds.
 
-Version note (2026-11-25, macos-s0-spec-2495; macOS decision D1, not yet built): the target
+Version note (2026-11-25, macos-s0-spec-2495; macOS decision D1; built by
+macos-s9-target-consts-2508 except `target.unsupported`): the target
 becomes a named input through core module `target`, whose contract is
 [target](../../core/std/api/target.md). Nothing is conditionally compiled out of checking,
 and the host stays invisible.
@@ -652,6 +658,16 @@ fn pick() -> u64 {
 
 `o` is a local, so the scrutinee is not a constant expression, both arms are retained, and
 every build whose entry reaches `pick` reaches `target.unsupported`.
+
+**Constant-form branches, exactly** (macos-s9-target-consts-2508). Only a `match` scrutinee and
+an `if` condition qualify; `if let`, `while` and `loop` never do. The expression qualifies when
+it evaluates as a constant on every target the module names. One that fails on any target, or
+names a local, a call or a type parameter, keeps every arm and is refused for nothing here; so
+does a `match` scrutinee that is an unsuffixed literal, which has no type of its own. Each arm
+is decided on each target: an arm whose pattern the value matches is taken and the arms after
+it are dropped, and an arm whose pattern no constant decides (a float pattern) stays an
+ordinary run-time test. A guard stays a run-time test. `target.Os` and `target.Arch` are
+`key`, so `target.arch == (Aarch64 : target.Arch)` is a constant expression.
 
 `target` describes the artifact, never the machine a run is on: one binary has one value
 on every run and every replay, so it passes no replay point

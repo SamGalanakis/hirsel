@@ -1,6 +1,7 @@
 // L69's random arm (§13.6, §13.12): under seeded random edits on every
-// head, forks, pins of a head and of a historical Snapshot, unpins, branch
-// deletes and cuts, with a crash on each side of the MANIFEST rename, every
+// head (page values and BLOBs), forks, pins of a head and of a historical
+// Snapshot, unpins, branch deletes, cuts and residency round trips on main,
+// with a crash on each side of the MANIFEST rename, every
 // head and every pin reads exactly what an independent model of its commits
 // says. The oracle is the model plus the frame walker of 5860634f, run over
 // every published root together: each stamp sits at one location in the
@@ -19,6 +20,19 @@ const RANDOM_ROWS: u64 = 160
 
 const RANDOM_WIDTH: u64 = 48
 
+// Past the 1,024-byte inline limit, so the value is stored as a BLOB.
+const RANDOM_BLOB_WIDTH: u64 = 1100
+
+// An edit of 192 or more writes a BLOB, so a quarter of the edits move a
+// row between page values and BLOBs; the fixture's edit 0 stays inline.
+fn random_width(edit: u8) -> u64 {
+    if edit >= 192 {
+        RANDOM_BLOB_WIDTH
+    } else {
+        RANDOM_WIDTH
+    }
+}
+
 fn random_branch_name(n: u64) -> String {
     let mut name: String = clone("b")
     string.push_uint(mut name, n, 10, 0, '0')
@@ -35,7 +49,7 @@ fn random_pin_name(n: u64) -> String {
 
 fn random_expected(model: Map[u64, u8], key: u64) -> Option[Bytes] {
     match map.get(model, key) {
-        Some(edit) => Some(compact_value_of(key, edit, RANDOM_WIDTH)),
+        Some(edit) => Some(compact_value_of(key, edit, random_width(edit))),
         None => None,
     }
 }
@@ -45,6 +59,42 @@ fn random_reads(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], model
         if get(read_handle, s, rows, key)? != random_expected(model, key) {
             fail("L69 random: every head and pin reads what its commits wrote")
         }
+    }
+    random_scan(read_handle, s, rows, model, false)?
+    random_scan(read_handle, s, rows, model, true)?
+    let mut window = 0u64
+    for key in 40u64 .. 120 {
+        if map.contains(model, key) {
+            window += 1
+        }
+    }
+    if count_at(read_handle, s, rows, Unbounded, Unbounded)? != map.len(model) || count_at(read_handle, s, rows, Included(40u64), Excluded(120u64))? != window {
+        fail("L69 random: every head and pin counts the rows its commits wrote")
+    }
+    Ok(())
+}
+
+// A scan, forward or reverse, yields exactly the model's rows in key order.
+fn random_scan(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], model: Map[u64, u8], reverse: bool) -> Result[(), Error] waits {
+    let mut scanned = if reverse {
+        scan_reverse(read_handle, s, rows, Unbounded, Unbounded)?
+    } else {
+        scan(read_handle, s, rows, Unbounded, Unbounded)?
+    }
+    for at in 0u64 .. RANDOM_ROWS {
+        let key = if reverse {
+            RANDOM_ROWS - 1 - at
+        } else {
+            at
+        }
+        if let Some(edit) = map.get(model, key) {
+            if next(read_handle, mut scanned)? != Some((key, compact_value_of(key, edit, random_width(edit)))) {
+                fail("L69 random: a scan of every head and pin yields its commits' rows in key order")
+            }
+        }
+    }
+    if next(read_handle, mut scanned)? != None {
+        fail("L69 random: a scan of every head and pin yields its commits' rows in key order")
     }
     Ok(())
 }
@@ -94,7 +144,7 @@ fn random_edit(mut db: Db, rows: Table[u64, Bytes], id: u32, key: u64, edit: Opt
     let target = Branch(store: db.store, id)
     let Committed(_) = run_on(mut db, target, Some(100000000), copy_env((fixture, key, edit)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, Option[u8])) -> Result[(), Error] {
         match env.2 {
-            Some(e) => put(mut tx, env.0, env.1, compact_value_of(env.1, e, RANDOM_WIDTH)),
+            Some(e) => put(mut tx, env.0, env.1, compact_value_of(env.1, e, random_width(e))),
             None => {
                 let _ = delete(mut tx, env.0, env.1)?
                 Ok(())
@@ -104,6 +154,23 @@ fn random_edit(mut db: Db, rows: Table[u64, Bytes], id: u32, key: u64, edit: Opt
         fail("L69 random: every edit commits")
     }
     Ok(())
+}
+
+// §13.8 residency changes on main: the table moves to Memory, where main
+// reads its model, and back to Tiered, so the next cut finds every root Cold
+// as before. Forks and pins keep reaching the frames main's old Tiered tree
+// shared with them while the move releases that tree.
+fn random_residency_round_trip(mut db: Db, rows: Table[u64, Bytes], model: RandomModel) -> Result[(), Error] waits {
+    set_residency(mut db, rows.id, Memory)?
+    let Some(expected) = map.get(model.heads, db.heads[0u64].id) else {
+        fail("L69 random: main is in the model")
+    }
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot_of(db, Branch(store: db.store, id: db.heads[0u64].id))?
+    random_reads(read_handle, s, rows, expected)?
+    drop(take s)
+    drop(take read_handle)
+    set_residency(mut db, rows.id, Tiered)
 }
 
 // A cut whose every MANIFEST seal is refused after its packs are written.
@@ -163,7 +230,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
     let mut history: Option[(Snapshot, Map[u64, u8])] = None
     let mut crashes = 0u64
     for _ in 0u64 .. 80 {
-        let op = std.rand.below(mut g, 14)
+        let op = std.rand.below(mut g, 15)
         if op < 6 {
             let slot = std.rand.below(mut g, list.len(db.heads))
             let id = db.heads[slot].id
@@ -271,6 +338,9 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             let _ = checkpoint(mut db)?
             random_check(d, db, rows, model)?
             let _ = std.prop.sometimes("cut", true)
+        } else if op == 14 {
+            random_residency_round_trip(mut db, rows, model)?
+            let _ = std.prop.sometimes("residency round trip", true)
         } else if op >= 12 {
             if let Some((take s, _)) = take history {
                 drop(take s)

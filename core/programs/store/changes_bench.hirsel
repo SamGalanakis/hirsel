@@ -1,0 +1,157 @@
+// M6 (OPTIMAL-STORE-ENDSTATE Part IV): the cost of changes_page between two
+// snapshots of one memory store, against the store size N and the changed
+// rows k. argv: N k layout reps. layout "spread" changes every (N / k)th key,
+// so each change lands in its own leaf once N / k exceeds a leaf's fanout;
+// "clustered" changes keys 0 .. k, so changes share leaves. The diff is
+// checked against the keys the bench wrote. With reps 0 the program only
+// builds and checks, so a reps-R run minus a reps-0 run under perf stat is
+// R diffs' instructions.
+pub type Account: send + codec {
+    id: u64,
+    balance: i64,
+    owner: String
+}
+
+const BATCH: u64 = 1000
+
+fn write_batch(mut db: store.Db, t: store.Table[u64, Account], first: u64, until: u64, stride: u64, bump: i64) waits {
+    let done = result.unwrap(store.run(mut db, None, (first, until, stride, bump, store.copy_env(t)), fn(mut tx: store.Tx, e: (u64, u64, u64, i64, store.Table[u64, Account])) -> Result[u64, store.Error] {
+        for i in e.0 .. e.1 {
+            let k = i * e.2
+            let base: i64 = int.narrow(k)
+            let a = Account(id: k, balance: base + e.3, owner: string.from("owner000"))
+            store.put(mut tx, e.4, k, a)?
+        }
+        Ok(e.1)
+    }))
+    match take done {
+        Committed(_) => (),
+        _ => fail("changes bench write refused")
+    }
+}
+
+fn write_rows(mut db: store.Db, t: store.Table[u64, Account], count: u64, stride: u64, bump: i64) waits {
+    let mut first = 0u64
+    while first < count {
+        let until = order.min(count, first + BATCH)
+        write_batch(mut db, t, first, until, stride, bump)
+        first = until
+    }
+}
+
+fn span_low() -> Bytes {
+    let mut raw: Bytes = list.new()
+    list.put_word_be(mut raw, 0u32)
+    take raw
+}
+
+fn span_high() -> Bytes {
+    let mut raw: Bytes = list.new()
+    list.put_word_be(mut raw, 4294967295u32)
+    list.push(mut raw, 255u8)
+    take raw
+}
+
+// One full diff, paged to the end. Returns the number of changed rows.
+fn diff_all(db: store.Db, a: store.Snapshot, b: store.Snapshot, check: Option[(u64, u64)]) -> u64 waits {
+    let high = span_high()
+    let mut low = span_low()
+    let mut seen = 0u64
+    loop {
+        let page = result.unwrap(store.changes_page(result.unwrap(store.reader(db, 0u64)), Some(clone(a)), b, low, high, store.Limits(rows: 4096, byte_limit: 16777216)))
+        if list.len(page.trimmed) != 0 || list.len(page.bounds) != 0 {
+            fail("changes bench: unexpected trims")
+        }
+        if let Some((stride, _)) = check {
+            for row in page.changes {
+                let key: u64 = list.word_be(row.tree_key, 4)
+                if list.len(row.tree_key) != 12 || key != seen * stride {
+                    fail("changes bench: wrong changed key")
+                }
+                if let None = row.value {
+                    fail("changes bench: change without a value")
+                }
+                seen += 1
+            }
+        } else {
+            seen += list.len(page.changes)
+        }
+        match page.next {
+            Some(resume) => {
+                low = clone(resume)
+            },
+            None => return seen,
+        }
+    }
+}
+
+fn arg_u64(argv: Args, i: u64) -> u64 {
+    let Some(text) = args.get(argv, i) else {
+        fail("missing argument")
+    }
+    let Ok(n) = int.parse_uint(clone(text), 10u32) else {
+        fail("bad number")
+    }
+    n
+}
+
+pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let n = arg_u64(argv, 0)
+    let k = arg_u64(argv, 1)
+    let spread = option.unwrap(args.get(argv, 2)) == "spread"
+    let reps = arg_u64(argv, 3)
+    if k > n || n == 0 {
+        return Error(Exit(status: 2))
+    }
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1610612736u64)))
+    let accounts: std.codec.Codec[Account] = std.codec.of()
+    result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), accounts)))
+    let t = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), accounts))
+    write_rows(mut db, t, n, 1u64, 0i64)
+    let a = store.snapshot(db)
+    let stride = if spread && k != 0 {
+        n / k
+    } else {
+        1u64
+    }
+    write_rows(mut db, t, k, stride, 1i64)
+    let b = store.snapshot(db)
+    if diff_all(db, a, b, Some((stride, k))) != k {
+        fail("changes bench: wrong change count")
+    }
+    let mut best = 18446744073709551615u64
+    let mut total = 0u64
+    for _ in 0u64 .. reps {
+        let start = host.mono_ns(clock)
+        let got = diff_all(db, a, b, None)
+        let spent = host.mono_ns(clock) - start
+        if got != k {
+            fail("changes bench: wrong repeat count")
+        }
+        best = order.min(best, spent)
+        total += spent
+    }
+    let mut line = string.new()
+    string.push(mut line, "M6 n=")
+    string.push_u64(mut line, n)
+    string.push(mut line, " k=")
+    string.push_u64(mut line, k)
+    string.push(mut line, if spread {
+        " spread"
+    } else {
+        " clustered"
+    })
+    string.push(mut line, " reps=")
+    string.push_u64(mut line, reps)
+    string.push(mut line, " min_ns=")
+    string.push_u64(mut line, if reps == 0 {
+        0u64
+    } else {
+        best
+    })
+    string.push(mut line, " total_ns=")
+    string.push_u64(mut line, total)
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+    Ok(())
+}

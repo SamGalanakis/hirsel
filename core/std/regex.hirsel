@@ -4250,7 +4250,7 @@ fn dfa_walk(
     DfaVisit(len_out, matched)
 }
 
-cold fn dfa_transition(
+fn dfa_transition(
     program: List[NfaState],
     edges: List[NfaEdge],
     mut work: List[u32],

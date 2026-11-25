@@ -84,6 +84,10 @@ pub(super) fn definition(
         // pivot.rs leaves the recursive sample to the inliner.
         "core@1/list/median3_rec" => Inline::Default,
         "std@1/float/shortest64" | "std@1/float/push_fixed64" => Inline::Always,
+        // Keep lazy DFA misses off the cached transition path, but not as a `cold fn`: the
+        // unlikely weight on its call grows dfa_search's loop and cost Template::Regex 5.4% more
+        // instructions (board-regress-2606).
+        "std@1/regex/dfa_transition" => Inline::Never,
         // Small mutable loops, and larger ones a caller runs in a loop, carry their scopes in.
         _ if batch_steps
             && (body.insts.len() <= 256 || (body.insts.len() <= 4096 && called_in_loop))

@@ -1,0 +1,311 @@
+// The Hirsel-side room client (docs/spec/webrtc.md RTC-8, follow-up F1): one runner.room
+// membership on a hirsel.4 session (wire_client), the roster as the relay tells it, and the
+// RoomIn and RoomOut the signaling adapter reads and writes. The roster follows the SDK's
+// (sdk/client/room.ts, docs/spec/sdk.md#rooms), so both clients agree on every Part.
+
+// One life of a room's roster: the 16 bytes the relay drew, in order.
+pub type Incarnation: key + send = Incarnation(Inline[u8, 16])
+
+// Each room Part is its head, then its Joined, Message and Left entries in that order, then
+// PartEnd. Lost says messages were dropped: before a Part's head when the relay reports a gap,
+// or alone when the session or membership ended, after which nothing more of it arrives.
+pub type RoomIn[M] = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32) | Left(u32) | Message(u32, M) | Lost
+
+pub type RoomOut[M] = ToPeer(u32, M) | ToRoom(M)
+
+pub type RoomError: send = Connect(std.wsock.Error) | Encode(std.codec.EncodeError) | Decode(std.codec.DecodeError) | Disorder(u64, u64) | Closed
+
+// The roster as the relay has told it. A Part from another incarnation replaces it. A
+// `complete` Part on the same incarnation starts a new membership's image: each peer it shows
+// continues, and a peer it has not shown by the Part with `snapshot` set has left. `revision`
+// is the membership revision at which `peers` is complete, None while an image is partial;
+// `at` is the newest revision told in this incarnation, which a later Part never lowers.
+pub type Roster: send {
+    incarnation: Option[(u64, u64)],
+    revision: Option[u64],
+    at: u64,
+    peers: List[(u32, store.Caller)],
+    unconfirmed: Option[List[u32]],
+}
+
+// What one Part changed. `renewed` marks a new incarnation: every earlier peer is in `left`.
+pub type Change: send {
+    renewed: bool,
+    joined: List[u32],
+    left: List[u32],
+}
+
+// Where the session dials, and the room it subscribes to (entry and argument).
+pub type Dial {
+    tasks: Tasks,
+    net: Net,
+    address: Addr,
+    clock: Clock,
+    random: Random,
+    keys: List[Bytes],
+    token: Option[Bytes],
+    socket: std.wsock.Config,
+    entry: u32,
+    arg: Bytes,
+    within_ms: u64,
+    idle_ms: u64,
+}
+
+// One membership as the client sees it: the roster, its own peer number while admitted,
+// and whether the room was full when it asked.
+pub type Member: send {
+    roster: Roster,
+    you: Option[u32],
+    full: bool,
+}
+
+pub opaque type Room[M] {
+    conn: Option[wire_client.Conn],
+    dial: Dial,
+    message: std.codec.Codec[M],
+    member: Member,
+}
+
+// The client's one room subscription on its session.
+const ROOM_SUB: u32 = 0u32
+
+pub fn empty_roster() -> Roster {
+    Roster(incarnation: None, revision: None, at: 0u64, peers: list.new(), unconfirmed: None)
+}
+
+pub fn new_member() -> Member {
+    Member(roster: empty_roster(), you: None, full: false)
+}
+
+pub fn incarnation_of(words: (u64, u64)) -> Incarnation {
+    let (low, high) = words
+    let mut raw: Inline[u8, 16] =[0u8; 16]
+    for i in 0u64 .. 8u64 {
+        raw[i] = int.truncate(low >> (8u64 * i))
+        raw[8u64 + i] = int.truncate(high >> (8u64 * i))
+    }
+    Incarnation(raw)
+}
+
+fn peer_at(peers: List[(u32, store.Caller)], peer: u32) -> Option[u64] {
+    list.position(peers, scoped fn(entry: (u32, store.Caller)) -> bool {
+        entry.0 == peer
+    })
+}
+
+fn forget(mut pending: Option[List[u32]], peer: u32) {
+    if let Some(mut waiting) = pending {
+        list.retain(mut waiting, scoped fn(p: u32) -> bool {
+            p != peer
+        })
+    }
+}
+
+// Applies one Part's roster: head, joined, left, then the snapshot. A full Part's zero head
+// says nothing about the roster. A Part on the same incarnation whose revision is below one
+// already told is out of order, and nothing of it is applied.
+pub fn apply(mut r: Roster, part: runner.Part) -> Result[Change, RoomError] {
+    let mut change = Change(renewed: false, joined: list.new(), left: list.new())
+    if part.full {
+        return Ok(take change)
+    }
+    if r.incarnation != Some(part.incarnation) {
+        change.renewed = true
+        for (peer, _) in r.peers {
+            list.push(mut change.left, peer)
+        }
+        list.clear(mut r.peers)
+        r.unconfirmed = None
+        r.incarnation = Some(part.incarnation)
+        r.revision = None
+    } else {
+        if part.revision < r.at {
+            return Error(Disorder(r.at, part.revision))
+        }
+        if part.complete {
+            let mut shown: List[u32] = list.with_capacity(list.len(r.peers))
+            for (peer, _) in r.peers {
+                list.push(mut shown, peer)
+            }
+            r.unconfirmed = Some(take shown)
+            r.revision = None
+        }
+    }
+    r.at = part.revision
+    for (peer, caller) in part.joined {
+        forget(mut r.unconfirmed, peer)
+        if let Some(i) = peer_at(r.peers, peer) {
+            r.peers[i] = (peer, clone(caller))
+        } else {
+            list.push(mut r.peers, (peer, clone(caller)))
+            list.push(mut change.joined, peer)
+        }
+    }
+    for peer in part.left {
+        if let Some(i) = peer_at(r.peers, peer) {
+            let _ = list.remove(mut r.peers, i)
+            list.push(mut change.left, peer)
+        }
+    }
+    if part.snapshot {
+        if let Some(gone) = replace(mut r.unconfirmed, None) {
+            for peer in gone {
+                if let Some(i) = peer_at(r.peers, peer) {
+                    let _ = list.remove(mut r.peers, i)
+                    list.push(mut change.left, peer)
+                }
+            }
+        }
+        r.revision = Some(part.revision)
+    }
+    Ok(take change)
+}
+
+// Takes one room Part: applies it to the member and appends what it says, in the order the
+// relay wrote it: Lost first when the relay dropped messages for this member (`gap`), then the
+// head, Joined, Message and Left entries, and PartEnd. A full Part (the room had no seat)
+// carries no roster and appends nothing. Every message is decoded before anything is applied,
+// so a Part that fails applies nothing.
+pub fn take_part[M: codec](mut m: Member, message: std.codec.Codec[M], part: runner.Part, mut into: List[RoomIn[M]]) -> Result[(), RoomError] {
+    if part.complete {
+        m.you = None
+        m.full = false
+    }
+    if part.full {
+        m.full = true
+        m.you = None
+        return Ok(())
+    }
+    let mut messages: List[RoomIn[M]] = list.with_capacity(list.len(part.msgs))
+    for (from, _, raw) in part.msgs {
+        let value = std.codec.decode(message, raw) ?=> |e| Decode(e)
+        list.push(mut messages, Message(from, take value))
+    }
+    let _ = apply(mut m.roster, part)?
+    if let Some(peer) = part.you {
+        m.you = Some(peer)
+        m.full = false
+    }
+    if part.gap != 0u32 {
+        list.push(mut into, Lost)
+    }
+    list.push(mut into, Part(incarnation_of(part.incarnation), part.revision, part.complete, part.snapshot))
+    for (peer, _) in part.joined {
+        list.push(mut into, Joined(peer))
+    }
+    list.reverse(mut messages)
+    while let Some(take entry) = list.pop(mut messages) {
+        list.push(mut into, take entry)
+    }
+    for peer in part.left {
+        list.push(mut into, Left(peer))
+    }
+    list.push(mut into, PartEnd)
+    Ok(())
+}
+
+fn connect(d: Dial) -> Result[wire_client.Conn, RoomError] waits {
+    let conn = wire_client.connect_for(d.tasks, d.net, d.address, d.clock, d.random, d.keys, clone(d.token), d.socket, d.within_ms, d.idle_ms) ?=> |e| Connect(e)
+    if let Error(_) = channel.send(conn.to, Send(Subscribe(ROOM_SUB, d.entry, clone(d.arg), None))) {
+        let _ = wire_client.close(take conn)
+        return Error(Closed)
+    }
+    Ok(take conn)
+}
+
+// Opens a session and asks to join the room. The admission arrives as the first Part.
+pub fn join[M: codec](take dial: Dial) -> Result[Room[M], RoomError] waits {
+    let conn = connect(dial)?
+    Ok(Room(conn: Some(take conn), dial: take dial, message: std.codec.of(), member: new_member()))
+}
+
+// A new session and membership, after Lost. The roster is kept, so the new membership's image
+// continues it or, from another incarnation, replaces it.
+pub fn rejoin[M: codec](mut room: Room[M]) -> Result[(), RoomError] waits {
+    if let Some(old) = replace(mut room.conn, None) {
+        let _ = wire_client.close(take old)
+    }
+    room.member.you = None
+    room.member.full = false
+    let conn = connect(room.dial)?
+    room.conn = Some(take conn)
+    Ok(())
+}
+
+// Sends one message. Closed when the session has ended; the next `next` then says Lost.
+pub fn send[M: codec](mut room: Room[M], take out: RoomOut[M]) -> Result[(), RoomError] waits {
+    let (to, take value) = match take out {
+        ToPeer(peer, take m) => (Some(peer), take m),
+        ToRoom(take m) => (None, take m),
+    }
+    let mut raw: Bytes = list.new()
+    std.codec.encode(room.message, value, mut raw) ?=> |e| Encode(e)
+    let Some(conn) = replace(mut room.conn, None) else {
+        return Error(Closed)
+    }
+    let sent = channel.send(conn.to, Send(Send(ROOM_SUB, to, take raw)))
+    room.conn = Some(take conn)
+    if let Error(_) = sent {
+        return Error(Closed)
+    }
+    Ok(())
+}
+
+fn ended[M](mut room: Room[M], mut into: List[RoomIn[M]]) waits {
+    if let Some(old) = replace(mut room.conn, None) {
+        let _ = wire_client.close(take old)
+    }
+    room.member.you = None
+    room.member.full = false
+    list.push(mut into, Lost)
+}
+
+// Reads the session's next frame and appends what it says of the room (take_part). Returns
+// false once the session or the membership has ended, after appending Lost. A Part out of
+// order, or a message that does not decode, ends the session and returns the error after Lost.
+pub fn next[M: codec](mut room: Room[M], mut into: List[RoomIn[M]]) -> Result[bool, RoomError] waits {
+    let Some(conn) = replace(mut room.conn, None) else {
+        return Ok(false)
+    }
+    let frame = wire_client.next(conn)
+    room.conn = Some(take conn)
+    let parts = match take frame {
+        Ok(Live(take parts)) => take parts,
+        Ok(Ended(sub, _)) => {
+            if sub != ROOM_SUB {
+                return Ok(true)
+            }
+            ended(mut room, mut into)
+            return Ok(false)
+        },
+        Ok(_) => return Ok(true),
+        Error(_) => {
+            ended(mut room, mut into)
+            return Ok(false)
+        },
+    }
+    for part in parts {
+        if part.sub != ROOM_SUB {
+            continue
+        }
+        if let Error(e) = take_part(mut room.member, room.message, part, mut into) {
+            ended(mut room, mut into)
+            return Error(e)
+        }
+    }
+    Ok(true)
+}
+
+// Leaves the room and ends the session.
+pub fn leave[M](take room: Room[M]) -> bool waits {
+    let Room(conn: take conn, ..) = take room
+    let Some(open) = take conn else {
+        return true
+    }
+    let _ = channel.send(open.to, Send(Unsubscribe(ROOM_SUB)))
+    wire_client.close(take open)
+}
+
+pub fn member[M](room: Room[M]) -> Member {
+    clone(room.member)
+}

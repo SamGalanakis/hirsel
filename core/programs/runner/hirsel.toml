@@ -70,6 +70,7 @@ store = { major = 1, path = "../store" }
 "client.hirsel" = "client"
 "fixture.hirsel" = "fixture"
 "wire_client.hirsel" = "wire_client"
+"room_client.hirsel" = "room_client"
 
 [tests]
 limit = 67108864
@@ -131,6 +132,7 @@ dirs = ["."]
 "runner-staged-round-law.hirsel" = "runner"
 "runner-sim-release-law.hirsel" = "runner"
 "runner_owner_laws.hirsel" = "runner"
+"runner_room_client_law.hirsel" = "runner"
 "triggers_journal_laws.hirsel" = "triggers"
 "grant_mint_model.hirsel" = "grant_mint_model"
 
@@ -175,6 +177,9 @@ limit = 1342177280
 limit = 1342177280
 
 [tests.runs."runner@1/runner/room_decode_capacity_reports_loss"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner/room_client_over_socket"]
 limit = 1342177280
 
 [tests.runs."runner@1/runner/dev_identity_vectors"]

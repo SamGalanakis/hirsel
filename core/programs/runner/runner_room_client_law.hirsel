@@ -1,0 +1,283 @@
+// RTC-8 follow-up F1: the Hirsel room client (room_client) against the relay. The first law
+// feeds every Part the relay writes for one member into room_client.take_part, and at each
+// Part marked `snapshot` compares the client's roster with the relay's own (`relay.rooms[0]`:
+// its incarnation bytes, its revision and the peer number of every occupied slot). Between
+// the Parts of one split image the client's revision must be None. The second law runs the
+// client's session over a socket against a running place.
+
+// The relay's 16 incarnation bytes as the two little-endian words a Part carries.
+fn relay_words(raw: Inline[u8, 16]) -> (u64, u64) {
+    let mut low = 0u64
+    let mut high = 0u64
+    for i in 0u64 .. 8u64 {
+        let l: u64 = int.widen(raw[i])
+        let h: u64 = int.widen(raw[8u64 + i])
+        low = low | (l << (8u64 * i))
+        high = high | (h << (8u64 * i))
+    }
+    (low, high)
+}
+
+fn client_agrees(relay: RoomRelay, m: room_client.Member) -> bool {
+    let roster = relay.rooms[0u64]
+    if m.roster.incarnation != Some(relay_words(roster.incarnation)) || m.roster.revision != Some(roster.revision) {
+        return false
+    }
+    let mut relay_peers: List[u32] = list.new()
+    for occupied in roster.peers {
+        if let Some(p) = occupied {
+            let Some(seat) = room_desk_slot(relay, p.session, p.seat) else {
+                return false
+            }
+            list.push(mut relay_peers, seat.member.peer)
+        }
+    }
+    if list.len(relay_peers) != list.len(m.roster.peers) {
+        return false
+    }
+    for (peer, _) in m.roster.peers {
+        if !list.contains(relay_peers, peer) {
+            return false
+        }
+    }
+    true
+}
+
+// Flushes one Part to the watcher, gives it to the client and checks it. Returns the Part.
+// After a Part without `snapshot`, the revision is None while a new image is partial (a
+// `complete` Part, or a new incarnation) and otherwise stays at the last snapshot, as in F2.
+fn client_take(mut relay: RoomRelay, rounds: Latest[RoundAt], mut watcher: RoomOwner, mut m: room_client.Member, mut into: List[room_client.RoomIn[u32]], code: u64) -> Result[Part, u64] {
+    let Some(part) = room_law_part(mut relay, rounds, mut watcher, None) else {
+        return Error(code)
+    }
+    let before = m.roster.revision
+    let image = part.complete || m.roster.incarnation != Some(part.incarnation)
+    if let Error(_) = room_client.take_part(mut m, std.codec.of_u32(), part, mut into) {
+        return Error(code + 1u64)
+    }
+    if part.snapshot {
+        if !client_agrees(relay, m) {
+            return Error(code + 2u64)
+        }
+    } else if image && !none(m.roster.revision) || !image && m.roster.revision != before {
+        return Error(code + 3u64)
+    }
+    Ok(part)
+}
+
+fn client_member_leaves(mut relay: RoomRelay, rounds: Latest[RoundAt], inbox: Receiver[RoomRelayIn], mut owner: RoomOwner) {
+    latest.publish(owner.grants, arc.new(empty_room_grants()))
+    room_desk_flush(mut relay, rounds, owner.id)
+    room_law_disconnect(mut relay, rounds, inbox, mut owner)
+}
+
+fn heads_incarnation(into: List[room_client.RoomIn[u32]], words: (u64, u64)) -> bool {
+    let sought = room_client.incarnation_of(words)
+    for entry in into {
+        if let Part(seen, _, _, _) = entry {
+            if seen == sought {
+                return true
+            }
+        }
+    }
+    false
+}
+
+@test
+fn room_client_follows_relay_roster() -> Result[(), u64] {
+    let tape = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0fABCDEFGHIJKLMNOP"
+    let mut relay = room_relay_state(provide.random_tape(take tape), 1048576u64, 16u64)
+    let rounds = latest.new(arc.new(std.http.ReleaseRound(at: 0u64)))
+    let (to, inbox): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(64u64)
+    let (owner, _events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
+    let seat: (u32, u64, Grant) = (8u32, 65536u64, Join)
+    let mut m = room_client.new_member()
+    let mut into: List[room_client.RoomIn[u32]] = list.new()
+    // Joins: the watcher (peer 1, revision 2), then A (2, 3) and B (3, 4).
+    let mut watcher = room_law_seed_desk(mut relay, rounds, RoomSession(low: 1u64, high: 0u64), to, inbox, owner, seat)
+    let _ = client_take(mut relay, rounds, mut watcher, mut m, mut into, 100u64)?
+    if m.you != Some(1u32) || m.roster.revision != Some(2u64) {
+        return Error(1u64)
+    }
+    let a = room_law_seed_desk(mut relay, rounds, RoomSession(low: 2u64, high: 0u64), to, inbox, owner, seat)
+    let _ = client_take(mut relay, rounds, mut watcher, mut m, mut into, 110u64)?
+    let b = room_law_seed_desk(mut relay, rounds, RoomSession(low: 3u64, high: 0u64), to, inbox, owner, seat)
+    let stale = client_take(mut relay, rounds, mut watcher, mut m, mut into, 120u64)?
+    // A leaves (revision 5): the roster is {1, 3}.
+    let mut leaving = take a
+    client_member_leaves(mut relay, rounds, inbox, mut leaving)
+    let _ = client_take(mut relay, rounds, mut watcher, mut m, mut into, 130u64)?
+    if m.roster.revision != Some(5u64) || list.len(m.roster.peers) != 2u64 {
+        return Error(2u64)
+    }
+    // A gap on one incarnation: the watcher's session ends (6), C joins as peer 4 (7), B
+    // leaves (8) and the watcher returns as peer 5 (9). The new membership's image shows
+    // 4 and 5 and no Left for 1 or 3, so both leave at its snapshot.
+    room_law_disconnect(mut relay, rounds, inbox, mut watcher)
+    let c = room_law_seed_desk(mut relay, rounds, RoomSession(low: 4u64, high: 0u64), to, inbox, owner, seat)
+    let mut gone = take b
+    client_member_leaves(mut relay, rounds, inbox, mut gone)
+    let mut back = room_law_seed_desk(mut relay, rounds, RoomSession(low: 5u64, high: 0u64), to, inbox, owner, seat)
+    let image = client_take(mut relay, rounds, mut back, mut m, mut into, 140u64)?
+    if !image.complete || !image.snapshot || m.you != Some(5u32) || m.roster.revision != Some(9u64) || m.roster.incarnation != Some((0x0706050403020100u64, 0x0f0e0d0c0b0a0908u64)) {
+        return Error(3u64)
+    }
+    // A Part replayed from before the gap is out of order and changes nothing.
+    if let Error(Disorder(9u64, 4u64)) = room_client.take_part(mut m, std.codec.of_u32(), stale, mut into) {} else {
+        return Error(4u64)
+    }
+    if !client_agrees(relay, m) {
+        return Error(5u64)
+    }
+    // The room empties and refills: a new incarnation, whose roster replaces the old one.
+    room_law_disconnect(mut relay, rounds, inbox, mut back)
+    let mut last = take c
+    room_law_disconnect(mut relay, rounds, inbox, mut last)
+    // An empty roster is freed, so the next admission makes the room's roster afresh.
+    if list.len(relay.rooms) != 0u64 {
+        return Error(6u64)
+    }
+    // Three members refill it as peers 1 to 3, then the watcher returns as peer 4. Its image
+    // of four joins takes two Parts at a 146-byte Live limit (8 Live, 59 Part, then 23 per
+    // join: three, then one): the revision is None after the first and 5 (the roster's 1 and
+    // four admissions) at the second. The old roster's peer 5 is in no new Part, so a client
+    // that kept the old roster would still hold it.
+    let mut held: List[RoomOwner] = list.with_capacity(3u64)
+    for i in 6u64 .. 9u64 {
+        let member = room_law_seed_desk(mut relay, rounds, RoomSession(low: i, high: 0u64), to, inbox, owner, seat)
+        list.push(mut held, take member)
+    }
+    let mut narrow = room_law_seed_desk(mut relay, rounds, RoomSession(low: 9u64, high: 0u64), to, inbox, owner, (8u32, 146u64, Join))
+    list.clear(mut into)
+    let first = client_take(mut relay, rounds, mut narrow, mut m, mut into, 150u64)?
+    let second = client_take(mut relay, rounds, mut narrow, mut m, mut into, 160u64)?
+    let fresh = (0x4847464544434241u64, 0x504f4e4d4c4b4a49u64)
+    if first.snapshot || !second.snapshot || first.incarnation != fresh || m.you != Some(4u32) || m.roster.revision != Some(5u64) || list.len(m.roster.peers) != 4u64 || !heads_incarnation(into, fresh) {
+        return Error(7u64)
+    }
+    // One more join is a one-Part diff on the new incarnation (peer 5, revision 6).
+    let _late = room_law_seed_desk(mut relay, rounds, RoomSession(low: 10u64, high: 0u64), to, inbox, owner, seat)
+    let _ = client_take(mut relay, rounds, mut narrow, mut m, mut into, 170u64)?
+    if m.roster.revision != Some(6u64) || list.len(m.roster.peers) != 5u64 {
+        return Error(8u64)
+    }
+    Ok(())
+}
+
+fn client_dial(tasks: Tasks, net: Net, c: Clock, random: Random, running: fixture.Fixture) -> room_client.Dial {
+    let keys = result.unwrap(fixture.entry_keys(code.describe(room_law_large_entries)))
+    let address = option.unwrap(fixture.status(running).addr)
+    let session = wire_defaults(262144u64)
+    room_client.Dial(tasks, net, address, clock: c, random, keys, token: None, socket: session.socket, entry: 0u32, arg: list.new(), within_ms: 5000u64, idle_ms: 3000u64)
+}
+
+fn client_peers(m: room_client.Member) -> List[u32] {
+    let mut peers: List[u32] = list.new()
+    for (peer, _) in m.roster.peers {
+        list.push(mut peers, peer)
+    }
+    peers
+}
+
+// Reads until the client's roster image is complete at `revision` and holds exactly `peers`.
+fn client_until(mut joined_room: room_client.Room[Bytes], mut into: List[room_client.RoomIn[Bytes]], peers: List[u32], revision: u64) -> bool waits {
+    for _ in 0u64 .. 12u64 {
+        let m = room_client.member(joined_room)
+        if m.roster.revision == Some(revision) && client_peers(m) == peers {
+            return true
+        }
+        match room_client.next(mut joined_room, mut into) {
+            Ok(true) => (),
+            _ => return false,
+        }
+    }
+    false
+}
+
+// Whether the client appended a Joined, Left or Message equal to `sought`.
+fn saw(into: List[room_client.RoomIn[Bytes]], sought: room_client.RoomIn[Bytes]) -> bool {
+    for entry in into {
+        let same = match sought {
+            Joined(b) => match entry {
+                Joined(a) => a == b,
+                _ => false,
+            },
+            Left(b) => match entry {
+                Left(a) => a == b,
+                _ => false,
+            },
+            Message(b, y) => match entry {
+                Message(a, x) => a == b && x == y,
+                _ => false,
+            },
+            _ => false,
+        }
+        if same {
+            return true
+        }
+    }
+    false
+}
+
+fn one_peer(p: u32) -> List[u32] {
+    let mut ps: List[u32] = list.new()
+    list.push(mut ps, p)
+    ps
+}
+
+@test
+fn room_client_over_socket(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let running = fixture.start(room_law_settings(c, random, tasks, net, true), 5000u64) ?=> |_| 1u64
+    let mut joined_room: room_client.Room[Bytes] = room_client.join(client_dial(tasks, net, c, random, running)) ?=> |_| 2u64
+    let mut into: List[room_client.RoomIn[Bytes]] = list.new()
+    // Revisions by hand: the roster is made at 1, the client's admission is 2, the raw
+    // peer's is 3 and its removal 4.
+    if !client_until(mut joined_room, mut into, one_peer(1u32), 2u64) || room_client.member(joined_room).you != Some(1u32) {
+        return Error(3u64)
+    }
+    let other = room_law_socket(tasks, net, c, random, running, true)
+    if room_law_you(other) != Some(2u32) {
+        return Error(4u64)
+    }
+    let mut both = one_peer(1u32)
+    list.push(mut both, 2u32)
+    if !client_until(mut joined_room, mut into, both, 3u64) || !saw(into, Joined(2u32)) {
+        return Error(5u64)
+    }
+    let payload = room_law_bytes(5u64, 0x41u8)
+    let marker = room_law_bytes(1u64, 0x42u8)
+    room_client.send(mut joined_room, ToPeer(2u32, b"AAAAA")) ?=> |_| 6u64
+    room_client.send(mut joined_room, ToRoom(b"B")) ?=> |_| 7u64
+    if room_law_count(other, 1u32, payload, marker, true) != Some(1u64) {
+        return Error(8u64)
+    }
+    wire_client.send_frame(other, Send(0u32, Some(1u32), room_law_bytes(3u64, 0x43u8)))
+    wire_client.send_frame(other, Unsubscribe(0u32))
+    if !client_until(mut joined_room, mut into, one_peer(1u32), 4u64) || !saw(into, Message(2u32, b"CCC")) || !saw(into, Left(2u32)) {
+        return Error(9u64)
+    }
+    // A new session: whichever of the old seat's removal and the new admission the relay
+    // takes first, the settled roster holds only the client's new peer.
+    room_client.rejoin(mut joined_room) ?=> |_| 10u64
+    let mut settled = false
+    for _ in 0u64 .. 12u64 {
+        let m = room_client.member(joined_room)
+        if let (Some(me), Some(_)) = (m.you, m.roster.revision) {
+            if client_peers(m) == one_peer(me) {
+                settled = true
+                break
+            }
+        }
+        match room_client.next(mut joined_room, mut into) {
+            Ok(true) => (),
+            _ => break,
+        }
+    }
+    let _ = room_client.leave(take joined_room)
+    let _ = wire_client.close(take other)
+    let _ = fixture.end(take running, 5000u64)
+    if !settled {
+        return Error(11u64)
+    }
+    Ok(())
+}

@@ -73,7 +73,7 @@ where this package must use them in a particular way.
 | Synchronously stops ingress and egress, cancels queued RTX, invalidates DTLS and ICE | RTC-7 steps 1 to 5, by session-generation tags on every queue (W14, W15) |
 | Ack only once nothing more can be forwarded for the revoked epoch | RTC-7 acknowledgement: after every unit has applied the fence and every writer has handed off or cancelled its work, with both endpoints rechecked before any later send or retry (W14) |
 | TURN over TLS, or ICE-TCP, for strict firewalls | TURN over a stream with UDP relays, [turn.md](turn.md) TURN-2; ICE-TCP is withdrawn (S8, W17) |
-| runner.room: unicast, membership revision, targeted kick, expiry, SDK exposure | RTC-8's table: on main except the Hirsel room client (F1). The roster incarnation, revision and snapshot (runner slice R1, 2ec0de5b) and the incarnation and revision in the SDK's room API (`LiveRoom.incarnation` and `revision`, F2) are on main |
+| runner.room: unicast, membership revision, targeted kick, expiry, SDK exposure | RTC-8's table: on main. The roster incarnation, revision and snapshot (runner slice R1, 2ec0de5b), the incarnation and revision in the SDK's room API (`LiveRoom.incarnation` and `revision`, F2) and the Hirsel room client (`room_client`, F1) are on main |
 | Idle lease (contract §4) | not this package's: hirsel4-rooms-2301 reports it. The service holds a room membership for each room it routes, so it is affected only if that membership keeps a Place alive |
 
 ## Session shape
@@ -967,9 +967,18 @@ other caller (`Grant` `Join`). The application wraps `Signal` in its own `M`
 answers whether a peer may publish, and the adapter passes it to `join`. The application
 decides it from its own state (for example the peer's `S`), and the router never reads `S`.
 
+`Incarnation`, `RoomIn` and `RoomOut` are built in `room_client`
+(core/programs/runner/room_client.hirsel, F1), with `Incarnation` a `key` so the adapter can
+compare a snapshot's incarnation with the pre-gap one. `room_client.next` appends the
+`RoomIn` of each frame the service's session reads, and `room_client.send` sends one
+`RoomOut`. The rest of the block is S7's.
+
 **The roster the adapter reads.** Each room Part the relay sends begins with a head,
-`Part(incarnation, revision, complete, snapshot)`, followed by that Part's `Joined`, `Left` and
-`Message` entries. `complete` is the relay's existing flag on a membership's first Part.
+`Part(incarnation, revision, complete, snapshot)`, followed by that Part's `Joined`, then
+`Message`, then `Left` entries, the order the relay writes them. `complete` is the relay's
+existing flag on a membership's first Part. The room client appends `Lost` before a Part's
+head when that Part reports a gap (messages the relay dropped for this member), and appends
+`Lost` when its session or membership ends.
 `PartEnd` follows a Part's last entry. These are runner slice R1's fields (below):
 
 - the **incarnation** names one life of the room's roster. It is 16 random bytes, drawn by
@@ -1033,7 +1042,7 @@ decides it from its own state (for example the peer's `S`), and the router never
 
   Revoking every pre-gap session on any loss would also be sound. It is not the end state:
   the relay change costs one 16-byte incarnation, one revision counter and one flag per Part,
-  F1 is unbuilt and the SDK already exposes the head (F2), so no consumer migrates, while a blanket revoke would force every
+  the Hirsel room client (F1) and the SDK (F2) already read the head, so no consumer migrates, while a blanket revoke would force every
   participant in the room through a new ICE and DTLS handshake on every reconnect of the
   service's room session. The proof keeps an unchanged member's media flowing across a gap
   and still fails closed whenever continuity is not proved.
@@ -1048,11 +1057,11 @@ items belongs to hirsel4-rooms-2301's report.
 | Need | Status on main | Gap |
 | --- | --- | --- |
 | Authenticated addressed unicast | Built. `SendToPeer` exists and the relay checks the sender's grant and membership epoch (core/programs/runner/runner-room-relay.hirsel, `relay_message_target`) | none for the server side |
-| A room incarnation, a membership revision and admission identities | **Missing.** The relay mints an `adm` per admission and keeps `member_epoch` internally, but sends neither, and it resets `next_peer` to 1 whenever a room's count reaches 0 (core/programs/runner/runner-room-relay.hirsel, `room_remove_peer` and `room_reconcile_seat`), so a peer number can name two admissions | runner slice R1 |
-| A marked complete roster | **Missing.** A roster diff can span several Parts (`plan.included`, core/programs/runner/runner-room-flush.hirsel) and nothing marks the Part that completes it | runner slice R1 |
+| A room incarnation, a membership revision and admission identities | **Built** by runner slice R1 (2ec0de5b). Each Part's head carries the roster's 16-byte incarnation and its revision, and `next_peer` resets to 1 only when the next admission into an empty roster draws a new incarnation (core/programs/runner/runner-room-relay.hirsel, `room_reconcile_seat`), so `(incarnation, peer)` names one admission. Law `room_roster_identity` | none |
+| A marked complete roster | **Built** by R1. The flush sets `snapshot` on the Part after which the member has been told the whole roster at its revision, with no change pending (core/programs/runner/runner-room-live.hirsel, `room_part_start`) | none |
 | Targeted kick | The application withdraws the peer's `Grant` in its admission view, and the grant set's revocation path removes it | none |
 | Per-connection expiry | Built for WebSocket sessions by 7e01e2ee (rooms released at expiry, RUNNER-SPEC "Enforcement") | none |
-| A Hirsel-side room client | **Missing.** `std.websocket` has client framing but no `hirsel.4` session or room client | follow-up F1, which decodes the R1 Part head into `RoomIn.Part` |
+| A Hirsel-side room client | **Built** by F1. `room_client` (core/programs/runner/room_client.hirsel) holds one room membership on a `hirsel.4` session (`wire_client`), decodes each R1 Part head into `RoomIn.Part`, sends `RoomOut`, and keeps the roster as the SDK does: a new incarnation replaces it, a revision below one already told is refused, and the Part with `snapshot` completes an image. Laws `room_client_follows_relay_roster` (the relay's own roster is the oracle at every snapshot) and `room_client_over_socket` | none |
 | Room calls in the generated JS SDK | **Built.** `client.room` (sdk/client/room.ts) gives unicast and room `send`, the roster and state, and `LiveRoom.incarnation` and `revision` (F2): a new incarnation replaces the roster, and a same-incarnation image continues its peers ([sdk.md](sdk.md#rooms)) | none |
 
 **Runner slice R1 (the relay's roster identity).** In core/programs/runner:
@@ -1077,9 +1086,10 @@ items belongs to hirsel4-rooms-2301's report.
 
 The shipped JS SDK reads Live Parts (sdk/client/wire.ts), so R1's Part head changes a wire
 field it reads: the SDK decoder, the frame schema and the frame vectors change with the relay
-in the same commit. No Hirsel-side client reads it yet (F1).
-Until F1 lands, the adapter is driven by a test harness that feeds `RoomIn` and reads
-`RoomOut`. Its laws run that way. The browser end-to-end case waits on F1.
+in the same commit. The Hirsel room client (F1) reads it too.
+The adapter's laws drive it with a harness that feeds `RoomIn` and reads `RoomOut`. In
+service, `room_client` feeds it and carries its `RoomOut` (S7), and the browser end-to-end
+case runs that way.
 
 **Strict firewalls.** Media units listen on UDP only. A browser that cannot reach them over
 UDP uses TURN over TCP or TLS on 443 with a UDP relay ([turn.md](turn.md) TURN-2). The relay is
@@ -1303,7 +1313,7 @@ a land.
   simulcast, and subscribe to each other through the service. This is the interop oracle for
   RTC-2 to RTC-4 against a real DTLS, SRTP and RTCP stack. It covers a layer switch, an
   `audio_forward` gate, a revoke whose subscriber stops receiving at once, and a relayed
-  session over TURN with UDP blocked (turn.md U8). It waits on F1.
+  session over TURN with UDP blocked (turn.md U8). The service joins the room through `room_client` (F1).
 - **N2 `room_vopr`:** 100 participants over `sim.udp`, with Gilbert-Elliott loss, reordering,
   NAT rebinding, joins, leaves, revokes and target changes from a seed. The invariants are
   RTC-7's, the TLS-8 nonce rules (no `Reused`, `Issued` or `Range` from any sealer), RTC-4's
@@ -1340,9 +1350,9 @@ W19, blocks, because those are soundness reds.
 | **S4** One-unit router | RTC-5 on a single unit: rooms, publications, down-tracks, fan-out in the subscriber's wire identity, transport sequence numbers at send, bounds and fence capacity; RTC-6's stable target maps, current and pending presentation, switch timeline, and negotiated keyframe requests with in-place intervals | S2, S3; the rtp amend's in-place `Keyframes` interval | W6, W7, W9, W10, W18 (W6 and W7 need the router's down-tracks and switches) |
 | **S5** Units and fence | the control order, doorbells, `Media`, `RepairAsk` and `RepairReply` messages with tags, the uncommitted suffix; RTC-7 with its test seam, `suspend` and `resume` | S4 | W8, W14, W15 |
 | **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target with bandwidth pause, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S5 (remote units' masks) | W11, W12, W13 |
-| **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness until F1 | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
+| **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness in its laws and by `room_client` (F1) in service | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
 | **S8** withdrawn | ICE-TCP is replaced by TURN over a stream (turn.md TURN-2, slice U8) | — | — |
-| **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7; F1 for N1 | the cost targets |
+| **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7 | the cost targets |
 | **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 
 **S4 decisions.** Gaps the spec left open, decided while S4 was built:
@@ -1415,8 +1425,8 @@ W19, blocks, because those are soundness reds.
 
 **Follow-ups this spec names.**
 
-- **F1** (runner): a Hirsel-side `hirsel.4` room client, so a Hirsel service can be a room peer
-  and feed `RoomIn`, including R1's Part head.
+- **F1** (runner): on main. `room_client` is a Hirsel-side `hirsel.4` room client, so a Hirsel
+  service is a room peer and feeds `RoomIn`, including R1's Part head.
 - **F2** (SDK): on main. `LiveRoom` exposes the roster's incarnation and revision
   (sdk/client/room.ts, [sdk.md](sdk.md#rooms)), with room calls, unicast `Message`, the
   roster and state.

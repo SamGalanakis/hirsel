@@ -416,7 +416,7 @@ stay with the helper's owner, as the charges of its open connections do
 **No cleartext accessor.** No operation returns a secret's bytes, their length, any
 unkeyed digest of them, or the result of comparing them. The MAC sink's keyed tag and
 verdict or JWS key-size refusal, the SCRAM sink's verdict, `wrap`'s blob (ciphertext under the KEK), `sign`'s
-signature, the AEAD sink's sealed and opened bytes, and the CertificateVerify that
+signature, the AEAD sink's sealed and opened bytes, `tls.accept`'s `Tls(Key)` verdict, and the CertificateVerify that
 `tls.accept` sends to its client ([TLS-9](#tls-9-server-handshake)) are the only values
 computed from them that reach the program. A derivation
 returns an opaque designation. The SCRAM proof goes only onto an authorized stream (TLS-6). Because `Secret` is not `codec`, no
@@ -2005,8 +2005,22 @@ socket, with a certificate chain it holds and a private key that only the provid
 hosted place on the shared port 443 still sits behind the front
 ([launch.md H1](launch.md#stream-ingress-behind-a-tls-front)). That is a choice about
 deployment, not a missing operation. The section adds the `tls_serve` use (TLS-5), lets
-`p256_key` mint a serving key (TLS-8), adds the laws TL18 to TL23 and slice T15. It goes to
+`p256_key` mint a serving key (TLS-8), adds the laws TL18 to TL24 and slice T15. It goes to
 a crypto soundness review before it is built.*
+
+*Amendment (2026-11-25, tls-accept-build-2679): the one amend round after the crypto
+soundness review (tls-accept-review-2677, 0 Blockers, 10 Fixes, 10 Notes). A malformed SNI
+other than an IP literal is refused inside `hello`, as rustls 0.23.46 does (F1). rustls's
+default session cache and tickets are named and TL23 checks for no `NewSessionTicket` (F2).
+The RSA size bound is ring's, and TL19 gains a P-384 key that only the provider's kind check
+refuses (F3). The chain has a byte cap equal to the largest Certificate message
+`tls.connect` reads (F4). The provider loads the key with ring itself, so a host randomness
+failure is a terminal provider failure and never `Tls(Key)` (F5). TL21 pins the empty
+`secrets` case and `scram_final_len` (F6). TLS-5's closed list names the `Tls(Key)` verdict
+(F7). `hello` takes only a socket from a host TCP listener (F8). TL18 serves Ed25519 and
+RSA leaves (F9). The pairing argument with `sign(<alg>)` is corrected for RSA (F10). Notes
+N1, N3, N5 to N10 are applied where they correct or complete the text; N2 and N4 propose no
+change. There is no re-review.*
 
 ```hirsel unbuilt
 // module tls
@@ -2053,12 +2067,14 @@ client's ClientHello is complete.
 
 - **Name.** On success, `server_name(h)` is the ClientHello's `server_name` (RFC 6066 §3),
   normalised as TLS-1 normalises a name: ASCII lowercase, trailing dot removed. It is the
-  empty string when the client sent no SNI, and also when what it sent is not a DNS name
-  under TLS-1's rule. That includes an IP literal, which RFC 6066 §3 forbids in SNI and
-  which a few clients send anyway. rustls 0.23.46 already parses such a name as
-  `ServerNamePayload::IpAddress` or `Invalid` and reports no name. Two `host_name`
-  entries make the ClientHello malformed. An empty name is never a DNS name, so the empty string
-  is unambiguous. The view borrows the `Hello`. The bytes live in the `Hello`'s host
+  empty string when the client sent no SNI, and when it sent an IP address literal, which
+  RFC 6066 §3 forbids and a few clients send anyway (rustls 0.23.46 parses it as
+  `ServerNamePayload::IpAddress` and reports no name). Any other `host_name` that is not a
+  DNS name, an extension with no `host_name` entry, and two `host_name` entries each make
+  the ClientHello malformed: `hello` gives `Tls(Protocol(0))` after rustls's alert
+  (`illegal_parameter` for the first two, `decode_error` for the third), and the program
+  sees no name. So a name is always 1 to 253 bytes of `a`–`z`, `0`–`9`, `-`, `_` and `.`.
+  An empty name is never a DNS name, so the empty string is unambiguous. The view borrows the `Hello`. The bytes live in the `Hello`'s host
   record (at most 253) and are not charged, as TLS session state is not.
 - **The name is unauthenticated.** It is whatever the client wrote, in plaintext, before
   any key exchange. It chooses a certificate and nothing else. It is not a verified name
@@ -2074,7 +2090,7 @@ client's ClientHello is complete.
 
 Checks before issue, each with no host effect except closing `s`:
 
-1. `s` was not made by `host.accept` on a host listener, or by `net.join` of the halves of
+1. `s` was not made by `host.accept` on a host TCP listener, or by `net.join` of the halves of
    such a socket: `Denied`. A socket from `host.connect` is a client's. A socket of a
    `provide.net` Net is refused because a served Net has no server handshake. That is
    reversible: a served form can be added as `NetOp` variants later.
@@ -2096,7 +2112,8 @@ On success, `s` lives on in the `Hello` together with the ClientHello the provid
 **Dropping a `Hello`** declines the connection. The runtime makes one nonblocking attempt
 to send the 7-byte plaintext alert record `15 03 03 00 02 02 70`: a fatal
 `unrecognized_name` (112, RFC 8446 §6 and RFC 6066 §3). Then it closes the socket. Like
-any drop, it cannot wait or fail and passes no replay point. This is how a server answers
+any drop, it cannot wait or fail and passes no replay point. A client that sent bytes after
+its ClientHello may see a reset instead of the alert. This is how a server answers
 an unknown name. A program that has no certificate for an empty name declines that the
 same way, and one with a default certificate serves it. Go's server serves its first
 certificate when a client sends no SNI. Hirsel leaves that choice to the program.
@@ -2113,8 +2130,8 @@ certificate when a client sends no SNI. Hirsel leaves that choice to the program
 - **Key.** `key` is a `Secret` whose policy holds `tls_serve` (TLS-5). Its bytes are a
   PKCS#8 private key of one of `secret.sign`'s three kinds (TLS-5, key operations): Ed25519,
   P-256, or RSA of 2048 to 4096 bits. Its public half must be the leaf's subject public
-  key. The provider checks the kind and size itself, because rustls's
-  `any_supported_type` also takes P-384 keys and RSA keys up to 8192 bits. The TLS 1.3
+  key. The provider checks the kind itself, because rustls's `any_supported_type` also
+  takes P-384 keys. ring already refuses RSA keys outside 2048 to 4096 bits. The TLS 1.3
   signature scheme follows from the key: `ed25519`, `ecdsa_secp256r1_sha256`, or one of
   `rsa_pss_rsae_sha512`, `_sha384` and `_sha256` that the client offers (RFC 8446
   §4.2.3). For RSA, rustls 0.23's order picks among these.
@@ -2128,11 +2145,14 @@ certificate when a client sends no SNI. Hirsel leaves that choice to the program
   servers pass `["http/1.1"]`.
 - **Version and features.** Only TLS 1.3 is offered. A client that offers only TLS 1.2
   passes `hello` and then fails `accept` with `Tls(Protocol(0))`, after the
-  `protocol_version` alert. Every client a local HTTPS mock or proxy serves, such as
-  browsers, curl, Python, Node, Go and the JVM, has offered TLS 1.3 for years, and 1.3
-  alone removes the TLS 1.2 key-exchange signature over the client's random. *Reversible:*
-  TLS 1.2 can be added with its own review. The server issues no session tickets and keeps
-  no session cache, so every handshake is full. It accepts no early data and requests no
+  `protocol_version` alert. Current browsers, curl, Python, Node, Go and the JVM all offer
+  TLS 1.3. A client that does not cannot connect. 1.3 alone removes the TLS 1.2
+  key-exchange signature over the client's random. *Reversible:* TLS 1.2 can be added with
+  its own review. The server issues no session tickets and keeps no session cache, so every
+  handshake is full. rustls's default `ServerConfig` does both (a 256-entry cache and two
+  tickets per connection), so the provider builds its config with `NoServerSessionStorage`
+  and `send_tls13_tickets` 0, and keeps rustls's defaults of no key log and no secret
+  extraction. It accepts no early data and requests no
   client certificate. It computes no binding value, since SCRAM runs only on the client
   side (TLS-6).
 
@@ -2140,16 +2160,18 @@ Checks before issue. Each sends one nonblocking fatal `internal_error` alert (80
 the connection, and has no other host effect:
 
 1. `key`'s policy does not hold `tls_serve`: `Denied`.
-2. `chain` is empty, has more than 8 entries, or has an entry that is not exactly one DER
-   X.509 `Certificate` (RFC 5280 §4.1, with no trailing bytes): `Tls(Chain)`. The runtime
-   parses the outer structure only. It checks no signature.
+2. `chain` is empty, has more than 8 entries, has an entry that is not exactly one DER
+   X.509 `Certificate` (RFC 5280 §4.1, with no trailing bytes), or 4 plus the sum over the
+   entries of the DER length plus 5 is more than 65,535, the largest Certificate message
+   `tls.connect` reads: `Tls(Chain)`. With 8 entries that is 65,491 bytes of DER. The
+   runtime parses the outer structure only. It checks no signature.
 3. `alpn` breaks TLS-1's limits: `Tls(Alpn)`.
 
 When the provider is asked to perform the handshake, these failures are possible:
 
 | case | result |
 |---|---|
-| `key` is not PKCS#8 of a supported kind, or its public key is not the leaf's | `Tls(Key)`. A fatal `internal_error` alert is attempted, and no ServerHello is sent. |
+| `key` is not PKCS#8 of a supported kind, its public key is not the leaf's, or the leaf does not parse | `Tls(Key)`. A fatal `internal_error` alert is attempted, and no ServerHello is sent. |
 | the client's offer leaves no common version, cipher suite, group or signature scheme | `Tls(Protocol(0))` |
 | the client offered ALPN and nothing matched | `Tls(Protocol(120))`, after sending that alert |
 | the client sent a fatal alert | `Tls(Protocol(d))` |
@@ -2171,11 +2193,16 @@ when the server has sent its Finished and has read and verified the client's. So
 receive returns application data, never part of the handshake.
 
 **The key never leaves `Secret`.** The provider reads the key's bytes from run-owned
-memory, the same memory `secret.sign` reads. It parses them in place: `PrivateKeyDer::Pkcs8`
-borrows the bytes, and rustls's `crypto::ring::sign::any_supported_type`, which takes
-`&PrivateKeyDer<'_>`, makes ring's key types. The provider then calls
-`CertifiedKey::new` and `keys_match`, and any `keys_match` error, `Unknown` included, is
-`Tls(Key)`. It never copies the PKCS#8 document. In particular it does not use
+memory, the same memory `secret.sign` reads. It parses them in place with ring directly:
+`Ed25519KeyPair::from_pkcs8_maybe_unchecked`, `EcdsaKeyPair::from_pkcs8` for P-256, or
+`RsaKeyPair::from_pkcs8`, chosen by the document's algorithm identifier, each borrowing the
+bytes. The provider gives rustls its own `SigningKey` over that key pair. Any other
+algorithm, P-384 included, is `Tls(Key)`. It then calls `CertifiedKey::new` and
+`keys_match`, and any `keys_match` error, `Unknown` included, is `Tls(Key)`. A host
+randomness failure while loading the key or signing the CertificateVerify is a terminal
+provider failure (TLS-8), never `Tls(Key)`. rustls's `any_supported_type` discards the
+cause of a failed load, which is why the provider does not use it. It never copies the
+PKCS#8 document. In particular it does not use
 `CertifiedKey::from_der`, whose `PrivateKeyDer<'static>` would need an owned copy. While
 ring loads a P-256 key, a stack temporary (`ec::Seed`) holds the scalar's bytes, and
 nothing zeroes it. The parsed signing key is held by the connection until the handshake
@@ -2191,7 +2218,8 @@ print the parameter name and `[secret]` (TLS-5).
 **A server half authorizes no secret.** A stream from `accept` has no verified name, since
 the client is not authenticated and `server_name` is its unverified claim. The runtime
 keeps none on the socket record. So `tls.send_secret` and `secret.scram_sha256` on a
-server half give `Denied` before issue, as on a plain-TCP half (TLS-5, TLS-6). Without
+server half give `Denied` before issue, as on a plain-TCP half (TLS-5, TLS-6).
+`secret.scram_final_len` gives `Denied` too. Without
 this rule, a client that sent SNI `api.openai.com` would receive a secret granted
 `tls_send(api.openai.com)`. `net.join` of server halves gives `Unjoined`, as for any TLS
 stream ([NET-7](net.md#net-7-owned-connections)). `tls.connect` on an accepted socket stays
@@ -2213,19 +2241,27 @@ No grant kind changes ([CAP-4](capabilities.md#cap-4-entry-grants)). The file ho
 PKCS#8 document in DER, as `sign`'s keys are held. A PEM key converts with
 `openssl pkcs8 -topk8 -nocrypt -outform der`.
 
+Granting a serving key for a name the run's `Tls` rules trust makes the run that name: it
+can receive what the run may send there. `tls_serve` is authority to be the identity, not
+to be it at an address: a program with `Listen` on loopback only can relay bytes it
+received elsewhere into its own listener.
+
 **`tls_serve` and other uses on one key.** A policy may hold `tls_serve` together with any
 other use. The case that matters is `sign(<alg>)`. A self-signed certificate is signed by
 its own key. So a program that mints its server identity calls
 `p256_key(r, "tls_serve sign(p256)", …)`, builds the certificate with `std.x509_build`,
-narrows the key to `tls_serve`, and drops the key that can still sign (TLS-8). The pairing
-grants nothing new. A `sign(<alg>)` holder can already sign every message a TLS 1.3 server
-signs, and a `tls_serve` holder can get signatures only over the CertificateVerify content
+narrows the key to `tls_serve`, and drops the key that can still sign (TLS-8). For Ed25519
+and P-256 a `sign(<alg>)` holder can already make every signature a TLS 1.3 server makes.
+For RSA it cannot, because `sign(rs256)` is PKCS#1 v1.5 and TLS 1.3 signs with PSS; there
+the pairing adds PSS signatures over the content below and nothing else. In each case a
+`tls_serve` holder can get signatures only over the CertificateVerify content
 of RFC 8446 §4.4.3. That content is 64 spaces, the context string `TLS 1.3, server
 CertificateVerify`, a zero byte, and a transcript hash that covers the server's own random
 and key share, which the provider chooses. Alone, `tls_serve` is therefore not a signing
 oracle, either for other protocols or for a handshake the program could relay. Under
-`sign(rs256)` with `tls_serve`, one RSA key makes both PKCS#1 v1.5 and PSS signatures. TLS
-1.2 servers have long done this with one key. It is listed for review.
+`sign(rs256)` with `tls_serve`, one RSA key makes both PKCS#1 v1.5 and PSS signatures.
+Every server that offers TLS 1.2 and 1.3 with one RSA certificate does the same, and no
+rule could prevent it, since two grants of one key file give both uses.
 
 **Recording and replay.** `TLS_HELLO`'s delivery records the outcome and, on success, the
 normalised name. `TLS_ACCEPT`'s issue records the `Hello`'s ordinal, the chain's entries in
@@ -2281,16 +2317,17 @@ harness is named, the cases go into it. Certificate fixtures are a test CA and t
 certificates, `alpha.test` and `beta.test`, generated with `openssl` and checked in
 together with their SHA-256 leaf digests, which `openssl x509 -outform der | sha256sum`
 computes. CR4 uses a second test CA and a `localhost` leaf, since its source dials the
-endpoint by name. The server laws TL18 to TL23 also use the two leaves' P-256 private keys
-as PKCS#8 DER, from `openssl pkcs8 -topk8 -nocrypt -outform der`, and an RSA-1024 key with
-a leaf for it. Each leaf names its host in a `subjectAltName` dNSName, since rustls and Go
+endpoint by name. The server laws TL18 to TL24 also use the two leaves' P-256 private keys
+as PKCS#8 DER, from `openssl pkcs8 -topk8 -nocrypt -outform der`, an Ed25519 key and an
+RSA-2048 key each with an `alpha.test` leaf, a P-384 key and an RSA-1024 key each with a
+leaf for it, and a chain whose Certificate message is exactly 65,535 bytes. Each leaf names its host in a `subjectAltName` dNSName, since rustls and Go
 ignore the common name.
 
 | law | bug | oracle and setup |
 |---|---|---|
 | **TL1** wrong name | verification skipped, or SNI matched in place of the certificate | A loopback server presents `alpha.test`. `tls.connect` with name `beta.test` and roots holding the test CA gives `Tls(Certificate(NameMismatch))`. With name `alpha.test` it succeeds, and `Handshake.peer` equals the `openssl` digest of the alpha leaf split into four big-endian words. |
 | **TL2** trust is exact | `Roots` falling back to the host store, or accepting any chain | The same server with `Roots` set to an unrelated CA, and with `System`: both give `Tls(Certificate(UnknownIssuer))`. Malformed or empty PEM gives `Tls(Roots)`, and the provider records no call. The oracle is the fixture's issuer. |
-| **TL3** authority before effect | the handshake reaching the host without a covering rule | Using a counting provider, check that each of these gives `Denied` with zero provider calls past the socket: a name outside the rule's patterns, a peer port outside the range, trust `System` under a `Roots=` rule, a roots bundle whose digest differs from the pin, an accepted socket, and for the server, `tls.hello` on a socket from `host.connect`, on a socket of `provide.net` and on a Unix socket, each with zero provider calls past the socket, and, after a successful `hello`, `tls.accept` with a key granted `sign(p256)` only, with zero provider calls past the `hello`. The expected verdicts are worked out by hand for a corpus of names against `*.a.test` and `x.a.test` (`a.test`, `x.a.test`, `y.x.a.test`, `X.A.TEST.`, `xa.test`). |
+| **TL3** authority before effect | the handshake reaching the host without a covering rule | Using a counting provider, check that each of these gives `Denied` with zero provider calls past the socket: a name outside the rule's patterns, a peer port outside the range, trust `System` under a `Roots=` rule, a roots bundle whose digest differs from the pin, an accepted socket, and for the server, `tls.hello` on a socket from `host.connect`, on a socket of `provide.net` and on a Unix socket, each with zero provider calls past the socket, and, after a successful `hello`, `tls.accept` with a key granted `sign(p256)` only, with zero provider calls past the `hello` (the alert and close of the dropped `Hello` are not counted). The expected verdicts are worked out by hand for a corpus of names against `*.a.test` and `x.a.test` (`a.test`, `x.a.test`, `y.x.a.test`, `X.A.TEST.`, `xa.test`). |
 | **TL4** narrowing never widens | intersection returning the wider pattern | Over the TL3 name corpus, a pair of rules, and every order of two `narrow` calls: the set of names the result covers equals the intersection of the hand-computed sets. Put the cases in the existing NET-6 rule tests. |
 | **TL5** committed prefix | counting plaintext as committed that the session later drops or sends twice | The peer reads slowly over a small socket buffer. Sends of a 1 MiB pattern with deadlines that expire part way through. The caller continues from `written` each time. The peer's received plaintext equals the pattern byte for byte, so nothing is lost or repeated. |
 | **TL6** truncation | an unauthenticated EOF read as a clean end | The peer closes TCP after half of a body without `close_notify`, and the next receive gives `Tls(Truncated)`. With `close_notify`, the next receive gives `Ok(0)`. The oracle is RFC 8446 §6.1. |
@@ -2304,12 +2341,12 @@ ignore the common name.
 | **TL14** STARTTLS in place | `join` shutting down, rebuffering or losing the connection, or `tls.connect` refusing a joined socket | A loopback fixture server reads 8 bytes and checks they equal `00 00 00 08 04 D2 16 2F` (PostgreSQL's `SSLRequest`, from the protocol documentation's code 80877103). It answers `S`, then runs TLS as `alpha.test`. NET-7's `pg_starttls` succeeds, `Handshake.peer` equals the `openssl` digest of the alpha leaf, and `hello` sent on the TLS half reaches the server as plaintext. When the server answers `N`, the result is `Declined` with byte `0x4E`, and `hello` sent on the returned half reaches the server unencrypted. |
 | **TL15** injected plaintext before TLS | bytes after the go-ahead read as the server's (CVE-2021-23222) | The fixture server writes `S` followed by `R\x00\x00\x00\x08\x00\x00\x00\x00` (a fake `AuthenticationOk`) in one write, then waits. The client reads one byte, joins, and `tls.connect` gives `Tls(Protocol(0))`. The server receives no byte after the 8-byte request, and the open descriptor count is back to its value before `connect` (TL7's check). The oracle is TLS-1's peek rule and RFC 8446 §4.1.2, under which the client speaks first. |
 | **TL16** join and its refusals | halves of different sockets merged, a refusal that loses a half, or rejoining granting TLS client authority | Using a counting provider: halves of two different loopback sockets, the halves of a TLS stream, and the halves of a Unix stream each give `Unjoined` with zero provider calls. The returned halves remain usable on their original connections. The matching halves of an accepted TCP socket rejoin to that socket, and `tls.connect` gives `Denied` with zero provider calls. |
-| **TL18** SNI selects the chain | the wrong name read, a chain served for another name, or a no-SNI client refused | A program listens, and for each connection runs `hello`, then `accept` with alpha's chain and key when `server_name` is `alpha.test` or empty, beta's when it is `beta.test`, and drops the `Hello` otherwise. Its key grants are `file:` sources with `tls_serve`. `openssl s_client -servername beta.test -CAfile ca.pem` verifies (return code 0), and the leaf it prints hashes to beta's `openssl` digest. `-servername ALPHA.test.` gives alpha's, since TLS-9 normalises the name. `-noservername` gives alpha's. `tls.connect` with name `alpha.test` and `Roots` set to the test CA succeeds, and its `Handshake.peer` is alpha's digest. With name `beta.test` it gets beta's. The oracles are the fixture digests and RFC 6066 §3. `openssl` is the independent client, so the two ends are not both rustls. |
-| **TL19** wrong key or chain refused | a mismatched key served, or a malformed chain sent | With TL18's program changed per case: alpha's chain with beta's key gives `Tls(Key)` at `accept`, and the client gives `Tls(Protocol(80))` without receiving a ServerHello. A key that is not PKCS#8, and the RSA-1024 key with its leaf, give `Tls(Key)`. An empty chain, 9 entries, and an entry with one trailing byte appended give `Tls(Chain)` before issue. A key granted `sign(p256)` without `tls_serve` gives `Denied` (TL3). The oracle is the fixtures: beta's public key is not alpha's SPKI, and RSA-1024 is outside `sign`'s 2048 to 4096. |
+| **TL18** SNI selects the chain | the wrong name read, a chain served for another name, or a no-SNI client refused | A program listens, and for each connection runs `hello`, then `accept` with alpha's chain and key when `server_name` is `alpha.test` or empty, beta's when it is `beta.test`, and drops the `Hello` otherwise. Its key grants are `file:` sources with `tls_serve`. `openssl s_client -servername beta.test -CAfile ca.pem` verifies (return code 0), and the leaf it prints hashes to beta's `openssl` digest. `-servername ALPHA.test.` gives alpha's, since TLS-9 normalises the name. `-noservername` gives alpha's, and so does `-servername 10.0.0.1`, an IP literal. A chain whose Certificate message is exactly 65,535 bytes verifies. With an Ed25519 leaf and key, and with an RSA-2048 leaf and key, served for `alpha.test`, each verifies, and the RSA one reports an `RSA-PSS` peer signature. `tls.connect` with name `alpha.test` and `Roots` set to the test CA succeeds, and its `Handshake.peer` is alpha's digest. With name `beta.test` it gets beta's. The oracles are the fixture digests and RFC 6066 §3. `openssl` is the independent client, so the two ends are not both rustls. |
+| **TL19** wrong key or chain refused | a mismatched key served, or a malformed chain sent | With TL18's program changed per case: alpha's chain with beta's key gives `Tls(Key)` at `accept`, and the client gives `Tls(Protocol(80))` without receiving a ServerHello. A key that is not PKCS#8, the P-384 key with its leaf, and the RSA-1024 key with its leaf, give `Tls(Key)`. P-384 is one rustls's `any_supported_type` would load, so only the provider's kind check refuses it. An empty chain, 9 entries, an entry with one trailing byte appended, and a chain one byte over the 65,535-byte message give `Tls(Chain)` before issue. A key granted `sign(p256)` without `tls_serve` gives `Denied` (TL3). The oracle is the fixtures: beta's public key is not alpha's SPKI, P-384 is not one of `sign`'s kinds, and RSA-1024 is outside `sign`'s 2048 to 4096. |
 | **TL20** the key never leaves the provider | the PKCS#8 document copied into a program buffer, a rustls owned copy, or a host buffer that held it | Alpha's key is granted from a `file:` source as `tls_serve`. The program accepts one connection from `openssl s_client`, sends `ok`, and parks on a receive. While it is parked, the test reads every readable mapping of the run's process through `/proc/<pid>/mem`, as CR1 does. It searches for the PKCS#8 document's bytes and finds them exactly once: the sealed store, since TLS-9 parses in place. The bare scalar is not a needle, because ring's load leaves a stack temporary of it (TLS-9). The control also reads the same file through a `Dir` into a program `Bytes`, and finds the document at least twice. Neither the document nor the scalar, which `openssl pkey -text` prints, appears in stdout, stderr or the diagnostics, raw, hex or base64. |
-| **TL21** a server half authorizes no secret | an unverified SNI read as a verified name | The client sends SNI `alpha.test`. The program accepts with alpha's chain and calls `send_secret` with a secret granted `tls_send(alpha.test)` on the server's write half, and `scram_sha256` with the same secret. Both give `Denied`, with zero provider calls past the handshake. The client receives no application byte. `net.join` of the server halves gives `Unjoined`. The oracle is TLS-9's rule that a server half has no verified name. |
+| **TL21** a server half authorizes no secret | an unverified SNI read as a verified name | The client sends SNI `alpha.test`. The program accepts with alpha's chain and calls `send_secret` with a secret granted `tls_send(alpha.test)` on the server's write half, and `scram_sha256` with the same secret. Both give `Denied`, with zero provider calls past the handshake. The client receives no application byte. `send_secret` with an empty `secrets` list on the server's write half, and `scram_final_len` on it, give `Denied`; a client that sent no SNI gets the same three refusals. `net.join` of the server halves gives `Unjoined`. The oracle is TLS-9's rule that a server half has no verified name. |
 | **TL22** server ALPN | the client's preference used, a mismatch accepted, or an index into the wrong list | `accept` with `alpn` `[http/1.1, h2]`. `openssl s_client -alpn h2,http/1.1` negotiates `http/1.1`, and the result is `Some(0)`. `-alpn x` gives `Tls(Protocol(120))` on the server, and the client reports alert 120. No `-alpn` gives `None`. An empty `alpn` with `-alpn h2` gives `None`, and the client sees no protocol. The oracle is RFC 7301 §3.2 with server preference. |
-| **TL23** decline and version | an unknown name served with the default chain, a silent close, or TLS 1.2 negotiated | With TL18's program, `-servername gamma.test` gets alert 112 (`unrecognized_name`), which `openssl` prints, and `tls.connect` with name `gamma.test` gives `Tls(Protocol(112))`. The program's `hello` returned `gamma.test`, and its open descriptor count is back to its value before the accept (TL7's check). With `openssl s_client -tls1_2 -servername alpha.test`, `hello` succeeds, `accept` gives `Tls(Protocol(0))`, and the client reports alert 70 (`protocol_version`). A client that sends `GET / HTTP/1.1` in plaintext makes `hello` give `Tls(Protocol(0))`. The oracles are RFC 8446 §6, RFC 6066 §3, and TLS-9's version rule. |
+| **TL23** decline and version | an unknown name served with the default chain, a silent close, or TLS 1.2 negotiated | With TL18's program, `-servername gamma.test` gets alert 112 (`unrecognized_name`), which `openssl` prints, and `tls.connect` with name `gamma.test` gives `Tls(Protocol(112))`. The program's `hello` returned `gamma.test`, and its open descriptor count is back to its value before the accept (TL7's check). With `openssl s_client -tls1_2 -servername alpha.test`, `hello` succeeds, `accept` gives `Tls(Protocol(0))`, and the client reports alert 70 (`protocol_version`). A client that sends `GET / HTTP/1.1` in plaintext makes `hello` give `Tls(Protocol(0))`, and so does a client that writes PostgreSQL's 8-byte `SSLRequest` and a plaintext query in one segment to a server that answers `S` and joins (the server side of TL15). `openssl s_client -servername 'bad_name!.test'` makes `hello` give `Tls(Protocol(0))`, and the client reports alert 47 (`illegal_parameter`). `openssl s_client -msg -sess_out f` against TL18's program, with one line exchanged after the handshake: the output holds no `NewSessionTicket` and `f` is not created. The oracles are RFC 8446 §6, RFC 6066 §3, and TLS-9's version and no-ticket rules. |
 | **TL24** no server key in a recording | the key's bytes reaching a frame, or replay needing the key | Record TL18's run for one `beta.test` connection that echoes a line, with the keys from `file:` grants. The tape holds `beta.test`, beta's chain and the echoed plaintext. It holds neither key's PKCS#8 document nor its scalar, raw, hex or base64. Replayed with the key files removed and no client, the run gives the same `server_name`, ALPN index and echo, and ends `Sealed`. |
 | **SC1** RFC 7677 vector | a wrong derivation, AuthMessage or base64 | Use secret `pencil` granted `tls_send(alpha.test)`, over a loopback TLS stream verified as `alpha.test`. `client_first` is `n,,n=user,r=rOprNGfwEbeRWgbNEkqO`. `server_first` is `r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096`. `before` and `after` are empty. The server receives exactly `c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=`, and `scram_final_len` gives 106. `scram_verify` with `v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=` gives `true`. With the first signature character changed to `7`, with `e=invalid-proof`, and with the right `v=` on a `Scram` made from a different server nonce, it gives `false`. The oracle is RFC 7677 §3. |
 | **SC2** normalization and raw fallback | skipping SASLprep, or failing where PostgreSQL falls back | Use SC1's transcript with three passwords. `pen\u{AD}cil` (U+00AD, which RFC 4013 table B.1 maps to nothing) sends SC1's proof. The bytes `70 65 6E FF 63 69 6C` are not UTF-8 and are used raw, so the proof is `p=udNjQvoDM/dE+e/v63Vs504VHmXCmsAHQp5FC38JZcU=`. `pen\u{E000}cil` holds a private-use code point, which RFC 4013 §5 prohibits, so its raw UTF-8 bytes `70 65 6E EE 80 80 63 69 6C` are used and the proof is `p=S0CJLeozN1oaedLBR16sXAg8qzxE/6wMKY16FfthmYo=`. The last two proofs come from Python's `hashlib.pbkdf2_hmac` and `hmac` over those raw bytes. |
@@ -2373,7 +2410,7 @@ and L (more than three).
 | **T12** header mask | S | T11, T14 | `HeaderMask`; `schedule.header_mask` and `packet.mask` (5 bytes) over the AES block and ring's ChaCha20 | PC1's mask cases, PC6 |
 | **T13** key agreement and signing keys | M | T4, T10 | `KeyShare`, `Group`; `key_share`, `p256_key` over ring's `agreement` and `EcdsaKeyPair::generate_pkcs8` with `SystemRandom` for host draws, and over RustCrypto `p256` 0.14.0 and `x25519-dalek` 3.0.0 fed by the provider for virtual draws; `sign` gains its `Random` (all callers cut over, deterministic RFC 6979 signing for virtual keys, PKCS#8 decoding with ring's checks); `provide.random_tape` with its fault cleanup; opacity and bytes on replay; terminal provider failures for host draws, in the native adapter and the signing wrapper; std `x509_build` self-signed P-256 certificate with DER `ECDSA-Sig-Value` | PC7, PC8, PC9; build laws `dark_key_sign_replays`, `host_random_failure_ends_run` |
 | **T14** key schedules | M | T10, T13 | `schedule` module: `Schedule`, `Side`, `Suite13`, `Suite12`, `Profile13`, `SrtpProfile`, `ScheduleError`; `tls13`, `quic_initial`, `dtls12`, `application`, `key_update`, `srtp`, `finished`, `verify_finished`; the SRTP KDF; `import_srtp`, `import_traffic` and the `srtp_import(<dir>)` and `traffic_import(<dir>)` uses with the atomic spent mark and `wrap`'s refusal; the agreement registry with its share-count retirement and recorded root verdicts, in the OS, scripted and virtual paths. Helper verdicts follow the same rule when [unit recordings](../recording.md#unit-recordings) are built (slice U5) | PC1's Finished case, PC6's use cases, PC10's PRF fixtures; build laws `tls13_prehashed_context`, `same_agreement_same_side_refused`, `import_direction_from_policy` |
-| **T15** server handshake | M | T1, T3, T4, T13 | `Hello`, `tls.hello`, `tls.server_name`, `tls.accept` and the `TlsFailure` cases `Chain` and `Key` in core; `TLS_HELLO` and `TLS_ACCEPT` in `os.rs` and `os_net.rs` over rustls's `server::Acceptor`, TLS 1.3 only, with no tickets, no early data and no client authentication, the key parsed in place by `any_supported_type`; the `Hello` drop alert; the `tls_serve` use in policy parsing, `narrow`, the canonical text, the grant summary, and `p256_key`'s second policy; the server half's missing verified name in the `send_secret` and SCRAM checks; the C entries, and the LLVM and Cranelift lowering; the evaluator's call form and the scripted server script; the two operations' frames in a recording; std `tls` API page section | TL18–TL24, and the server cases of TL3 and TL7 and the `tls_serve` case of KD4 |
+| **T15** server handshake | M | T1, T3, T4, T13 | `Hello`, `tls.hello`, `tls.server_name`, `tls.accept` and the `TlsFailure` cases `Chain` and `Key` in core; `TLS_HELLO` and `TLS_ACCEPT` in `os.rs` and `os_net.rs` over rustls's `server::Acceptor`, TLS 1.3 only, with no tickets, no early data and no client authentication, no session cache, the key parsed in place by ring's own loaders behind a provider `SigningKey`, RSA of 2048 to 4096 bits, the chain's 65,535-byte cap, host randomness failures terminal; the `Hello` drop alert; the `tls_serve` use in policy parsing, `narrow`, the canonical text, the grant summary, and `p256_key`'s second policy; the server half's missing verified name in the `send_secret` and SCRAM checks; the C entries, and the LLVM and Cranelift lowering; the evaluator's call form and the scripted server script; the two operations' frames in a recording; std `tls` API page section | TL18–TL24, and the server cases of TL3 and TL7 and the `tls_serve` case of KD4 |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
 recording is part of its contract. T5, T6 and T7 run in any order once their dependencies land.

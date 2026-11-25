@@ -1,0 +1,306 @@
+const ROWS: u64 = 24
+
+const DIMS: u64 = 3
+
+const ROUNDS: u64 = 160
+
+type Points = store.Table[u64, List[i8]]
+
+type Near = vector.Vectors[u64, List[i8]]
+
+type Found = Result[List[vector.Hit[u64]], vector.Error]
+
+type Step = Put(u64, List[i8]) | Delete(u64)
+
+fn row_code(_key: u64, value: List[i8]) -> Result[List[i8], Capacity] {
+    Ok(clone(value))
+}
+
+fn open_points(clock: Clock, random: Random, metric: vector.Metric) -> (store.Db, Points, Near) waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut d = result.unwrap(store.declare(db, Migrate))
+    let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
+    let mut decl = result.unwrap(store.declare_table(mut d, "points", std.codec.key_u64(), codes))
+    let near = result.unwrap(vector.declare(mut d, mut decl, "near", metric, code.describe(row_code)))
+    let points = result.unwrap(store.finish(mut d, take decl))
+    let _ = result.unwrap(store.seal(mut db, take d))
+    (take db, points, take near)
+}
+
+// Runs the steps and then the query in one transaction, so the query sees
+// the transaction's own writes.
+fn run_query(mut db: store.Db, points: Points, near: Near, take steps: List[Step], q: List[i8], k: u64) -> Found waits {
+    let ran = result.unwrap(store.run(mut db, None, (store.copy_env(points), store.copy_env(near), take steps, store.copy_env(q), k), fn(mut tx, input) -> Result[Found, store.Error] {
+        for step in input.2 {
+            match step {
+                Put(key, c) => store.put(mut tx, input.0, key, clone(c))?,
+                Delete(key) => {
+                    let _ = store.delete(mut tx, input.0, key)?
+                },
+            }
+        }
+        Ok(vector.query(tx, input.1, input.3, input.4))
+    }))
+    match take ran {
+        Committed(take done) => clone(done.value),
+        _ => fail("vector law: the transaction did not commit"),
+    }
+}
+
+fn look_query(db: store.Db, near: Near, q: List[i8], k: u64) -> Found waits {
+    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(near), store.copy_env(q), k), fn(tx, input) -> Found {
+        vector.query(tx, input.0, input.1, input.2)
+    }))
+    match take looked {
+        Seen(take seen) => clone(seen.value),
+        _ => fail("vector law: the look did not run"),
+    }
+}
+
+// The model's brute force: score every present row with arithmetic written
+// here, sort them all by score descending and key ascending, and keep k.
+fn model_score(metric: vector.Metric, q: List[i8], c: List[i8]) -> i64 {
+    let mut dot = 0i64
+    let mut distance = 0i64
+    for i in 0u64 .. list.len(q) {
+        let a: i64 = int.widen(q[i])
+        let b: i64 = int.widen(c[i])
+        dot += a * b
+        let gap = if a > b {
+            a - b
+        } else {
+            b - a
+        }
+        distance += gap * gap
+    }
+    match metric {
+        Dot => dot,
+        L2 => 0i64 - distance,
+    }
+}
+
+fn model_ranking(metric: vector.Metric, model: List[Option[List[i8]]], q: List[i8]) -> List[(u64, i64)] {
+    let mut all: List[(u64, i64)] = list.new()
+    for key in 0u64 .. list.len(model) {
+        if let Some(c) = view model[key] {
+            list.push(mut all, (key, model_score(metric, q, c)))
+        }
+    }
+    std.list.sort(mut all, scoped fn(a: (u64, i64), b: (u64, i64)) -> Order {
+        if a.1 > b.1 || (a.1 == b.1 && a.0 < b.0) {
+            Less
+        } else if a.1 == b.1 && a.0 == b.0 {
+            Equal
+        } else {
+            Greater
+        }
+    })
+    take all
+}
+
+fn exact(hits: List[vector.Hit[u64]], ranking: List[(u64, i64)], k: u64) -> bool {
+    let want = if k < list.len(ranking) {
+        k
+    } else {
+        list.len(ranking)
+    }
+    if list.len(hits) != want {
+        return false
+    }
+    for i in 0u64 .. want {
+        if hits[i].key != ranking[i].0 || hits[i].score != ranking[i].1 {
+            return false
+        }
+    }
+    true
+}
+
+fn present(model: List[Option[List[i8]]], key: u64) -> bool {
+    match view model[key] {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn draw(mut state: u64) -> u64 {
+    state = store.splitmix64(state)
+    state
+}
+
+fn draw_code(mut state: u64) -> List[i8] {
+    let mut c: List[i8] = list.new()
+    let values: Inline[i8, 5] =[-2, -1, 0, 1, 2]
+    for _ in 0u64 .. DIMS {
+        list.push(mut c, values[draw(mut state) % 5])
+    }
+    take c
+}
+
+type Tally {
+    straddles: u64,
+    not_ready: u64,
+    queries: u64
+}
+
+// One seeded history. Each round writes up to three steps (a put of a drawn
+// code, a put of a row's own code again, or a delete that may find no row)
+// and queries, inside that transaction or through a look after it commits.
+// Some rounds rebuild the index or step its build: until the build ends a
+// query may answer NotReady, and any answer it gives is exact.
+fn history(clock: Clock, random: Random, metric: vector.Metric, seed: u64, mut tally: Tally) waits {
+    let (take opened, points, near) = open_points(clock, random, metric)
+    let mut db = take opened
+    let mut model: List[Option[List[i8]]] = list.new()
+    for _ in 0u64 .. ROWS {
+        list.push(mut model, None)
+    }
+    let mut state = seed
+    let mut building = false
+    for _ in 0u64 .. ROUNDS {
+        let pick = draw(mut state) % 16
+        if pick == 0 && !building {
+            result.unwrap(store.rebuild_index(mut db, vector.entry_index(near)))
+            building = true
+        } else if pick < 4 && building {
+            let limit = 1 + draw(mut state) % 5
+            if let None = result.unwrap(store.index_build_step(mut db, limit)) {
+                building = false
+            }
+        }
+        let mut steps: List[Step] = list.new()
+        for _ in 0u64 .. draw(mut state) % 4 {
+            let key = draw(mut state) % ROWS
+            let kind = draw(mut state) % 4
+            if kind == 0 {
+                list.push(mut steps, Delete(key))
+                model[key] = None
+            } else if kind == 1 && present(model, key) {
+                if let Some(same) = view model[key] {
+                    list.push(mut steps, Put(key, clone(same)))
+                }
+            } else {
+                let c = draw_code(mut state)
+                list.push(mut steps, Put(key, clone(c)))
+                model[key] = Some(take c)
+            }
+        }
+        let q = draw_code(mut state)
+        let k = draw(mut state) % (ROWS + 2)
+        let found = if draw(mut state) % 2 == 0 {
+            run_query(mut db, points, near, take steps, q, k)
+        } else {
+            let _ = run_query(mut db, points, near, take steps, q, 0)
+            look_query(db, near, q, k)
+        }
+        let ranking = model_ranking(metric, model, q)
+        if k > 0 && list.len(ranking) > k && ranking[k - 1].1 == ranking[k].1 {
+            tally.straddles += 1
+        }
+        tally.queries += 1
+        match take found {
+            Error(Store(NotReady(name))) if building && name == "near" => {
+                tally.not_ready += 1
+            },
+            Ok(take hits) => {
+                if !exact(hits, ranking, k) {
+                    fail("vector law: the top k differs from the model's brute-force ranking")
+                }
+                building = false
+            },
+            _ => fail("vector law: the query failed outside a build"),
+        }
+    }
+    while let Some(_) = result.unwrap(store.index_build_step(mut db, 7)) {}
+    for k in 0u64 .. ROWS + 2 {
+        let q = draw_code(mut state)
+        let Ok(hits) = look_query(db, near, q, k) else {
+            fail("vector law: a built index refused a query")
+        }
+        if !exact(hits, model_ranking(metric, model, q), k) {
+            fail("vector law: the top k differs from the model's brute-force ranking")
+        }
+    }
+    result.unwrap(store.close(take db))
+}
+
+/// bug: a top-k that admits an equal score in place of an earlier key, or
+/// that drops a deleted or overwritten row's old code, ranks differently
+/// from the model's brute-force scan.
+@test
+fn exact_top_k(clock: Clock, random: Random) -> Result[(), ()] waits {
+    let mut tally = Tally(straddles: 0, not_ready: 0, queries: 0)
+    let metrics: Inline[vector.Metric, 2] =[Dot, L2]
+    for metric in metrics {
+        for seed in 0u64 .. 6 {
+            history(clock, random, metric, seed * 7919 + 1, mut tally)
+        }
+    }
+    if tally.straddles == 0 || tally.not_ready == 0 {
+        fail("vector law: no query had a tie across the k boundary, or none met a build")
+    }
+    Ok(())
+}
+
+fn expect_keys(take found: Found, keys: Inline[u64, 4], scores: Inline[i64, 4]) {
+    let Ok(hits) = take found else {
+        fail("vector extremes: the query failed")
+    }
+    if list.len(hits) != 4 {
+        fail("vector extremes: expected four hits")
+    }
+    for i in 0u64 .. 4 {
+        if hits[i].key != keys[i] || hits[i].score != scores[i] {
+            fail("vector extremes: a hit differs from the hand-computed ranking")
+        }
+    }
+}
+
+fn four(a: i8, b: i8, c: i8, d: i8) -> List[i8] {
+    let mut v: List[i8] = list.new()
+    list.push(mut v, a)
+    list.push(mut v, b)
+    list.push(mut v, c)
+    list.push(mut v, d)
+    take v
+}
+
+/// bug: arithmetic that is not widened before it subtracts or multiplies
+/// overflows at 127 and -128, and a code of another length is scored.
+@test
+fn extremes(clock: Clock, random: Random) -> Result[(), ()] waits {
+    let mut steps: List[Step] = list.new()
+    list.push(mut steps, Put(1, four(127, 127, 127, 127)))
+    list.push(mut steps, Put(2, four(-128, -128, -128, -128)))
+    list.push(mut steps, Put(3, four(127, -128, 127, -128)))
+    list.push(mut steps, Put(4, four(0, 0, 0, 0)))
+    let q = four(-128, -128, -128, -128)
+    // By hand, with q all -128: Dot is 4 * -16256, 4 * 16384,
+    // 2 * -16256 + 2 * 16384 and 0; L2 is 4 * 255², 0, 2 * 255² and 4 * 128².
+    let (take dot_db, dot_points, dot_near) = open_points(clock, random, Dot)
+    let mut db = take dot_db
+    expect_keys(run_query(mut db, dot_points, dot_near, clone(steps), q, 9),[2, 3, 4, 1],[65536, 256, 0, -65024])
+    result.unwrap(store.close(take db))
+    let (take l2_db, l2_points, l2_near) = open_points(clock, random, L2)
+    db = take l2_db
+    expect_keys(run_query(mut db, l2_points, l2_near, take steps, q, 4),[2, 4, 3, 1],[0, -65536, -130050, -260100])
+    let mut short: List[i8] = list.new()
+    list.push(mut short, 1)
+    list.push(mut short, 2)
+    let mut more: List[Step] = list.new()
+    list.push(mut more, Put(0, take short))
+    match run_query(mut db, l2_points, l2_near, take more, q, 4) {
+        Error(Dimensions(4, 2)) => (),
+        _ => fail("vector extremes: a two-element code must refuse a four-element query"),
+    }
+    let mut three: List[i8] = list.new()
+    for _ in 0u64 .. 3 {
+        list.push(mut three, 0)
+    }
+    match look_query(db, l2_near, three, 4) {
+        Error(Dimensions(3, 2)) => (),
+        _ => fail("vector extremes: the first row's length must refuse a three-element query"),
+    }
+    result.unwrap(store.close(take db))
+    Ok(())
+}

@@ -1,0 +1,3 @@
+hirsel.laws 1
+vector@1/tests/exact_top_k src=0eed9105ba5a1b92 sig=18095d12db6a8a98 run=b1818af2b24835d3 bug=8a267a043582b1eb oracle=- rows=pending
+vector@1/tests/extremes src=79cf2f09d701ed9e sig=5f4607a3df4ead63 run=b1818af2b24835d3 bug=23f308d3853b54a8 oracle=- rows=pending

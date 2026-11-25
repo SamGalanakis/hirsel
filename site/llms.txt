@@ -46,6 +46,7 @@ First-party packages in this repository (bind locally with `path = "..."` in `[d
 - [sqlite](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/sqlite/) — SQLite bindings with explicit capabilities.
 - [mcp](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
 - [search](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/search/) — BM25 full-text search over `store` snapshots.
+- [vector](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
 - [harness](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/harness/) — durable agent sessions, tools, approvals, and model calls.
 - [notes](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/notes/) — offline notes agent with tools and an approval step.
 - [checkbox](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/checkbox/) — shared board of one million checkboxes.

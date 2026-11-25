@@ -1,0 +1,96 @@
+// Form A of a vector index (OPTIMAL-STORE-ENDSTATE §III.3): a covering
+// entry index on the source table whose payload is each row's i8 code. It
+// is written in the row's own transaction, so a query reads exactly the
+// rows its transaction sees, and the store's builder backfills it.
+pub type Metric = Dot | L2
+
+pub type Error = Store(store.Error) | Dimensions(u64, u64)
+
+pub type Hit[K] {
+    key: K,
+    score: i64
+}
+
+pub opaque type Vectors[K, V]: shareable + send {
+    index: store.Index[(), K, V, List[i8]],
+    metric: Metric
+}
+
+// Every row has one entry under the same index key, so the entries scan
+// in the table's primary key order.
+fn every_row[K, V](_key: K, _value: V) -> Result[List[()], Capacity] {
+    let mut keys: List[()] = list.new()
+    list.push(mut keys, ())
+    Ok(take keys)
+}
+
+pub fn declare[K, V](mut d: store.Declare, mut t: store.TableDecl[K, V], name: String, metric: Metric, extract: StaticFn[fn(K, V) -> Result[List[i8], Capacity]]) -> Result[Vectors[K, V], store.Error] {
+    let keys: StaticFn[fn(K, V) -> Result[List[()], Capacity]] = code.describe(every_row)
+    let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
+    let index = store.covering(mut d, mut t, name, Many, keys, std.codec.key_of(), extract, codes)?
+    Ok(Vectors(index: take index, metric: metric))
+}
+
+// The store's handle on the entry index, for the store's own index
+// operations such as rebuild_index.
+pub fn entry_index[K, V](v: Vectors[K, V]) -> store.Index[(), K, V, List[i8]] {
+    clone(v.index)
+}
+
+// The exact score of one code against the query; a larger score is nearer.
+// Dot is the inner product and L2 the negated squared Euclidean distance.
+// Both vectors have the same length, which the caller checks.
+pub fn score(metric: Metric, q: List[i8], code: List[i8]) -> i64 {
+    let mut total = 0i64
+    for i in 0u64 .. list.len(q) {
+        let a: i64 = int.widen(q[i])
+        let c: i64 = int.widen(code[i])
+        match metric {
+            Dot => {
+                total += a * c
+            },
+            L2 => {
+                total -= (a - c) * (a - c)
+            },
+        }
+    }
+    total
+}
+
+// Keeps the k best hits in rank order: score descending, then scan order.
+// A later entry ranks after an earlier one with the same score, so a full
+// list admits only a strictly better hit.
+fn keep[K](mut best: List[Hit[K]], k: u64, take hit: Hit[K]) {
+    let count = list.len(best)
+    if count == k && best[count - 1].score >= hit.score {
+        return
+    }
+    let mut at = count
+    while at > 0 && best[at - 1].score < hit.score {
+        at -= 1
+    }
+    std.list.insert(mut best, at, take hit)
+    if list.len(best) > k {
+        list.truncate(mut best, k)
+    }
+}
+
+// The k nearest rows to `q` among the rows `tx` sees, nearest first.
+// Equal scores rank in increasing primary key order. Every row's code must
+// have the query's length; a row that does not refuses the query with
+// Dimensions(query length, code length).
+pub fn query[K, V](tx: store.Tx, v: Vectors[K, V], q: List[i8], k: u64) -> Result[List[Hit[K]], Error] {
+    let mut best: List[Hit[K]] = list.new()
+    let mut entries = store.entries(tx, v.index, Unbounded, Unbounded) ?=> |e| Store(e)
+    if k == 0 {
+        return Ok(take best)
+    }
+    let width = list.len(q)
+    while let Some((_, take key, take code)) = (store.next_entry(mut entries) ?=> |e| Store(e)) {
+        if list.len(code) != width {
+            return Error(Dimensions(width, list.len(code)))
+        }
+        keep(mut best, k, Hit(key: take key, score: score(v.metric, q, code)))
+    }
+    Ok(take best)
+}

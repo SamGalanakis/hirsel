@@ -162,6 +162,11 @@ source = "member:tz"
 edges = ["std@1"]
 
 [[package]]
+id = "vector@1"
+source = "member:vector"
+edges = ["std@1", "store@1"]
+
+[[package]]
 id = "video_packager@1"
 source = "member:video_packager"
 edges = ["media_bits@1", "media_container@1", "std@1"]

@@ -121,6 +121,7 @@ First-party packages in this repository (bind locally with `path = "..."` in `[d
 - [sqlite](core/programs/sqlite/) — SQLite bindings with explicit capabilities.
 - [mcp](core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
 - [search](core/programs/search/) — BM25 full-text search over `store` snapshots.
+- [vector](core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
 - [harness](core/programs/harness/) — durable agent sessions, tools, approvals, and model calls.
 - [notes](core/programs/notes/) — offline notes agent with tools and an approval step.
 - [checkbox](core/programs/checkbox/) — shared board of one million checkboxes.

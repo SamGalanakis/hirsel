@@ -32,9 +32,13 @@ pub type Exported: send {
 
 type ExportSource: send = ExportLog(Dir, Bytes) | ExportObject(ObjectExportCopy)
 
+// A deploy export makes a fresh subdirectory of its scratch. A backup (§15)
+// writes into the empty target its caller named.
+type ExportInto: send = Scratch(Dir) | Target(Dir)
+
 pub opaque type ExportCopy: send {
     source: ExportSource,
-    scratch: Dir,
+    into: ExportInto,
     stamp: ExportStamp,
     lease: Arc[ExportLease]
 }
@@ -111,7 +115,10 @@ fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
 
 pub fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits {
     let mut name = string.with_capacity(32)
-    let to = scratch_result(disk_io(host.mkdtemp(job.scratch, mut name)))?
+    let to = match job.into {
+        Scratch(scratch) => scratch_result(disk_io(host.mkdtemp(scratch, mut name)))?,
+        Target(target) => target,
+    }
     let raw_stamp = scratch_result(export_bytes(job.stamp))?
     match job.source {
         ExportLog(from, raw) => copy_log_export(from, raw, to, job.lease, job.stamp)?,
@@ -162,6 +169,16 @@ pub fn begin_export(mut db: Db, tasks: Tasks, scratch: Dir, take attempt: Bytes,
 }
 
 pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activation: u64) -> Result[ExportCopy, DeployError] waits {
+    begin_copy(mut db, Scratch(scratch), take attempt, Some(activation))
+}
+
+// §15.3: a backup is the export lease and copy, into an empty target, with no
+// activation. The caller runs export_copy, then release_export.
+pub fn begin_backup(mut db: Db, target: Dir, take attempt: Bytes) -> Result[ExportCopy, DeployError] waits {
+    begin_copy(mut db, Target(target), take attempt, None)
+}
+
+fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation: Option[u64]) -> Result[ExportCopy, DeployError] waits {
     deploy_result(require_memory_collections(store_has_tiered(db), Export))?
     deploy_result(healthy(db))?
     if !is_disk(db) || list.len(attempt) != 16 {
@@ -170,20 +187,23 @@ pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activati
     if let Some(_) = disk_state(db).lease {
         return Error(AttemptBusy)
     }
-    if object_writer_open(db) { return begin_object_export_copy(mut db, scratch, take attempt, activation) }
+    if let Target(target) = into {
+        require_empty(target, "backup target")?
+    }
+    if object_writer_open(db) { return begin_object_export_copy(mut db, take into, take attempt, activation) }
     let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, final_item))?
     let from = deploy_result(log_directory(db))?
     let raw = deploy_result(disk_read_paged_file(from, "MANIFEST", 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM))?
     let lease_attempt = deploy_result(copied(attempt))?
-    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: activation, terminal: db.file_seq, end: db.file_end)
+    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: match activation { Some(given) => given, None => 0u64 }, terminal: db.file_seq, end: db.file_end)
     let first_live = disk_state(db).record_cut
     let packs = deploy_result(disk_allocation(scoped fn() -> Result[List[u64], Error] {
         Ok(live_pack_sequences(disk_state(db).pages.locations))
     }))?
     let kept = ExportLease(attempt: take lease_attempt, packs: take packs, collections: share_page_tree(db.heads[0].roots.collections), first: first_live, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
     let lease = arc.new(take kept)
-    let job = ExportCopy(source: ExportLog(from, take raw), scratch, stamp: take stamp, lease: arc.share(lease))
+    let job = ExportCopy(source: ExportLog(from, take raw), into: take into, stamp: take stamp, lease: arc.share(lease))
     write_disk(mut db.disk, take lease, scoped fn(mut state: DiskState, take held: Arc[ExportLease]) {
         state.lease = Some(take held)
     })
@@ -217,6 +237,44 @@ pub opaque type Preparation {
     stamp: ExportStamp
 }
 
+pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result[Preparation, DeployError] waits {
+    open_copied(d, c, attempt, options, true)
+}
+
+// A deploy export comes from a runner store, so its FENCE level is 1. A backup
+// (§15.3 R4) keeps whatever supported level its source had.
+fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool) -> Result[Preparation, DeployError] waits {
+    if let Bucket(_) = options.authority {
+        return Error(Store(Unsupported(1)))
+    }
+    let stamp = read_export_stamp(d)?
+    if stamp.attempt != attempt {
+        return Error(ExportMismatch)
+    }
+    let (id, take manifest) = deploy_result(read_page_manifest_file(d))?
+    if id.hi != stamp.store_hi || id.lo != stamp.store_lo || (deploy && manifest.fence != 1) || manifest.first_live > stamp.terminal || manifest.next_table > stamp.next_table {
+        return Error(ExportMismatch)
+    }
+    let validated = deploy_result(validate_page_manifest(d, id, take manifest))?
+    let mut decoded_packs = deploy_result(disk_loaded(id, take validated))?
+    let initial = deploy_result(capacity(manifest_state(decoded_packs.manifest, decoded_packs.all)))?
+    list.clear(mut decoded_packs.all)
+    let replay = deploy_result(journal_replay(take initial, decoded_packs.manifest.next_stamp - 1))?
+    let replayed = deploy_result(replay_export(d, id, decoded_packs.manifest.first_live, stamp.terminal, stamp.end, take replay))?
+    if replayed.state.tips[0].head != stamp.head {
+        return Error(ExportMismatch)
+    }
+    let live_bytes = deploy_result(journal_account(replayed))?
+    let JournalReplay(state: take state, next_node: ids, ..) = take replayed
+    deploy_result(over_ceiling(live_bytes, options.resident_limit))?
+    let mut db = empty_db(c, id, options)
+    deploy_result(open_heads(mut db, take state))?
+    db.resident = live_bytes
+    db.next_node = ids
+    db.next_table = stamp.next_table
+    Ok(Preparation(db: take db, stamp: take stamp))
+}
+
 fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
     let raw = scratch_result(disk_read_file(d, "EXPORT", 216))?
     let head = deploy_result(disk_read_header("EXPORT", raw, 5, None, None))?
@@ -229,5 +287,49 @@ fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
     if list.len(stamp.attempt) != 16 || stamp.store_hi != head.context.store.hi || stamp.store_lo != head.context.store.lo || stamp.opened != head.context.seq || stamp.branch != 0 || stamp.terminal == 0 || stamp.end < 72 || stamp.activation > stamp.head {
         return Error(ExportMismatch)
     }
+    Ok(take stamp)
+}
+
+fn backup_listing(d: Dir) -> Result[List[std.dir.Entry], DeployError] waits {
+    match std.dir.list(d, None) {
+        Ok(take names) => Ok(take names),
+        Error(Io(problem)) => Error(Scratch(Io(problem))),
+        Error(_) => Error(ExportMismatch),
+    }
+}
+
+fn require_empty(d: Dir, take what: String) -> Result[(), DeployError] waits {
+    if list.len(backup_listing(d)?) != 0 {
+        return Error(Scratch(Exists(take what)))
+    }
+    Ok(())
+}
+
+fn copy_restore_file(from: Dir, to: Dir, name: String) -> Result[(), DeployError] waits {
+    scratch_result(copy_export_file(from, to, name, None))
+}
+
+// §15.3 R1-R5. EXPORT is copied first and removed last, so an ordinary open
+// refuses `to` (ExportDirectory) until the copy has been validated by the
+// prepare opener. The restored store keeps the source's identity.
+pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportStamp, DeployError] waits {
+    require_empty(to, "restore target")?
+    let stamp = read_export_stamp(from)?
+    copy_restore_file(from, to, "EXPORT")?
+    scratch_result(disk_io(host.sync_dir(to)))?
+    copy_restore_file(from, to, "MANIFEST")?
+    let (_, take manifest) = deploy_result(read_page_manifest_file(to))?
+    for listed in backup_listing(from)? {
+        if string.starts_with(listed.name, "p-") {
+            copy_restore_file(from, to, listed.name)?
+        }
+    }
+    for seq in manifest.first_live .. stamp.terminal + 1 {
+        copy_restore_file(from, to, scratch_result(capacity(disk_path("j-", seq, "")))?)?
+    }
+    scratch_result(disk_io(host.sync_dir(to)))?
+    let _validated = open_copied(to, c, stamp.attempt, options, false)?
+    scratch_result(disk_io(host.remove(to, "EXPORT")))?
+    scratch_result(disk_io(host.sync_dir(to)))?
     Ok(take stamp)
 }

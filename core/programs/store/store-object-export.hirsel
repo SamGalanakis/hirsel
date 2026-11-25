@@ -44,13 +44,13 @@ fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: HistoryR
     Error(Io(Closed))
 }
 
-fn begin_object_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activation: u64) -> Result[ExportCopy, DeployError] waits {
+fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation: Option[u64]) -> Result[ExportCopy, DeployError] waits {
     let receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, receipt))?
     let (take parked, take resume) = deploy_result(take_object_journal(mut db))?
     let mut lane = take parked
     let (lifetime, stop): (Sender[()], Receiver[()]) = channel.new(1)
-    let captured: Result[ExportCopy, DeployError] = match object_export_capture(db, mut lane, scratch, take attempt, activation, take stop) {
+    let captured: Result[ExportCopy, DeployError] = match object_export_capture(db, mut lane, take into, take attempt, activation, take stop) {
         Error(Store(HistoryMissing(take key, _))) => {
             let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
             match history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due) {
@@ -73,8 +73,10 @@ fn begin_object_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activ
     Ok(take job)
 }
 
-fn object_export_capture(db: Db, mut lane: ObjectJournalSession, scratch: Dir, take attempt: Bytes, activation: u64, take stop: Receiver[()]) -> Result[ExportCopy, DeployError] waits {
+fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: ExportInto, take attempt: Bytes, wanted: Option[u64], take stop: Receiver[()]) -> Result[ExportCopy, DeployError] waits {
     let head = lane.register.head
+    // A backup (no activation) takes the activation the head has.
+    let activation = match wanted { Some(given) => given, None => head.activation }
     if activation != head.activation { return Error(Drift) }
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
     deploy_result(history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due))?
@@ -115,7 +117,7 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, scratch: Dir, t
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation, terminal: head.checkpoint.seq, end: journal_end)
     let lease = arc.new(ExportLease(attempt: take retained, packs: list.new(), collections: share_page_tree(db.heads[0].roots.collections), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
     lane.export_lease = Some(ObjectExportLease(names: take names, lifetime: take stop))
-    Ok(ExportCopy(source: ExportObject(take source), scratch, stamp: take stamp, lease: take lease))
+    Ok(ExportCopy(source: ExportObject(take source), into: take into, stamp: take stamp, lease: take lease))
 }
 
 fn export_write(mut file: HostFile, raw: Bytes) -> Result[(), DeployError] waits {

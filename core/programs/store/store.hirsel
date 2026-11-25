@@ -3363,38 +3363,6 @@ fn replay_export(d: Dir, id: StoreId, first: u64, terminal: u64, limit: u64, tak
     }
 }
 
-pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result[Preparation, DeployError] waits {
-    if let Bucket(_) = options.authority {
-        return Error(Store(Unsupported(1)))
-    }
-    let stamp = read_export_stamp(d)?
-    if stamp.attempt != attempt {
-        return Error(ExportMismatch)
-    }
-    let (id, take manifest) = deploy_result(read_page_manifest_file(d))?
-    if id.hi != stamp.store_hi || id.lo != stamp.store_lo || manifest.fence != 1 || manifest.first_live > stamp.terminal || manifest.next_table > stamp.next_table {
-        return Error(ExportMismatch)
-    }
-    let validated = deploy_result(validate_page_manifest(d, id, take manifest))?
-    let mut decoded_packs = deploy_result(disk_loaded(id, take validated))?
-    let initial = deploy_result(capacity(manifest_state(decoded_packs.manifest, decoded_packs.all)))?
-    list.clear(mut decoded_packs.all)
-    let replay = deploy_result(journal_replay(take initial, decoded_packs.manifest.next_stamp - 1))?
-    let replayed = deploy_result(replay_export(d, id, decoded_packs.manifest.first_live, stamp.terminal, stamp.end, take replay))?
-    if replayed.state.tips[0].head != stamp.head {
-        return Error(ExportMismatch)
-    }
-    let live_bytes = deploy_result(journal_account(replayed))?
-    let JournalReplay(state: take state, next_node: ids, ..) = take replayed
-    deploy_result(over_ceiling(live_bytes, options.resident_limit))?
-    let mut db = empty_db(c, id, options)
-    deploy_result(open_heads(mut db, take state))?
-    db.resident = live_bytes
-    db.next_node = ids
-    db.next_table = stamp.next_table
-    Ok(Preparation(db: take db, stamp: take stamp))
-}
-
 pub fn stage_export_migration(source: Preparation, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
     stage_migration(source.db, tasks, configure)
 }

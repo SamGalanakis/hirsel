@@ -11,7 +11,7 @@ store@1/store/bucket_test_m2_binding src=373fcd2f311df460 sig=b52f5144142a041c r
 store@1/store/bucket_test_m2_branch_position src=2be9ccd9b81940dd sig=9f8be8939204a2da run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_checkpoint_advance src=d97cb6d9f56afdf5 sig=4feb4efe02ee3b00 run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_claim_witness src=7949e58e70a4c02b sig=be113cad2057341a run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
-store@1/store/bucket_test_m2_export_replay src=9c5bebf8f7dbf697 sig=9637ab91eeba725f run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/bucket_test_m2_export_replay src=9c5bebf8f7dbf697 sig=24e90dfa19fe1bf9 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_follower src=4a109b1820ab3312 sig=b29127e42c40f74e run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_follower_overlap src=2593c024ac07b666 sig=5f6be89332602d01 run=bc45ceb73933dadb bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_follower_read_admission src=0c62afd69ac9449c sig=0b076a3a31e7118f run=a4d53c8932c841f6 bug=- oracle=- rows=pending
@@ -58,7 +58,7 @@ store@1/store/claim_terminal_credit_survives_reopen src=6e9a0ffce0c0bd71 sig=b1a
 store@1/store/claim_terminal_reserve_is_per_claim src=dc50b6ce9a59c660 sig=9526e10a074891e2 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/directory_grant_covers_journal_worker src=7b7a67d7a1078af0 sig=6827e302b7ebacc7 run=ba799caff9b50348 bug=- oracle=- rows=pending
 store@1/store/disk_pack_bound src=3031abe6e70c903a sig=5b83a87d2de403a8 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
-store@1/store/disk_test_activation_rewrites src=7e7ebb1831a9ea31 sig=6e844d2a972608e7 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/disk_test_activation_rewrites src=7e7ebb1831a9ea31 sig=df3c75861b37f09c run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_blob_threshold src=1603be365862436f sig=c5a58d10474d66f2 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_branches src=d8b67fed78a0f33f sig=f0d8e3ac9735fb0b run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_db src=86a0a4f74eac1694 sig=9918c87687e1c446 run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -100,6 +100,7 @@ store@1/store/journal_frame_oversize src=b30798267bb46832 sig=0117e730921e8a44 r
 store@1/store/journal_frame_size_boundary src=fa12362bb1790317 sig=612ec7b0dbe4fff7 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/journal_test_ack_channel src=7f1f0ea0a56dfc4f sig=ae03272e111cc4c5 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_apply src=f34daebfd0eb9944 sig=54facd1e9982ba5d run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/journal_test_backup_restore src=d4f657749ddddd99 sig=7934699dcb65719c run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_bootstrap src=63d3a5ab9b3df97c sig=7ca39feed3f626e4 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_call_vector src=4ac70ead719dc98b sig=7eafb9247a7a13f8 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/journal_test_cap_arithmetic src=877fc3f5b1cafeb7 sig=20722d93cdbb4742 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

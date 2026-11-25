@@ -171,7 +171,7 @@ and refused one past it:
 
 - `TooLarge`: the text is longer than 32,000 bytes. A room message is at most 32,768 bytes
   (`MESSAGE_MAX`, core/programs/runner/runner-room.hirsel), and RTC-8's envelope takes at
-  most 768 of the rest.
+  most 768 of the rest. RTC-8 **Offer size** says how a browser's offer fits.
 - `TooManySections`: more than 64 m-sections.
 - `TooManyFormats(i)`: more than 32 formats in section `i`.
 - `TooManyRids(i)`: more than 4 RIDs in section `i`, counted over both directions.
@@ -1275,6 +1275,43 @@ head when that Part reports a gap (messages the relay dropped for this member), 
 - **Refusals.** A `Signal` the router refuses is answered `Refused(code)` to the sender, with
   the `RouterError` tag as `code`. A malformed `M` never reaches the adapter, because the
   room's codec check refuses it first.
+- **Departures.** A publication lives as long as its owner's admission. When an admission
+  ends (its `Left`, its absence from the snapshot that ends a loss, or a refused re-offer
+  or session `Shut` that sends the seat to rejoin), the adapter drops each of
+  its publications. It sends `Unpublished(id)` to the room once per publication, and frees
+  the section each subscriber held for it. The revoke ends the subscribers' down-tracks on
+  every unit, and it runs before any later `Subscribe` in the control order, so a freed
+  section is never shared by two tracks. `PeerLimits.down_tracks` bounds a session's live
+  down-tracks, not the tracks it has ever held: an ended track's slot is taken by the next
+  one, and a re-offer names no SSRC for a section whose track ended. An `Unsubscribe` of a
+  publication the peer does not hold, because it was never subscribed or its owner left,
+  is already done and changes nothing; it is not refused, since a client that hears
+  `Unpublished` and unsubscribes is racing nothing. mediasoup closes each consumer when its
+  producer closes (`producerclose`), and LiveKit removes every subscriber's down-track when
+  a published track closes (`MediaTrackReceiver.Close`); both free the subscriber's
+  transceiver for reuse.
+- **Joining peers learn the room's publications.** At admission, after `Servers`, the
+  adapter sends the new peer alone one `Published(peer, id, kind, encodings)` for each live
+  publication (`ToPeer`), as LiveKit's join response lists the other participants and their
+  tracks. A publication made later reaches it in the room's `Published`. A client keys
+  publications by id, so an id it hears twice is one publication.
+- **Offer size.** An offer travels in one room message, and the adapter builds no session
+  from an offer longer than `signal.OFFER_MAX` (32,000 bytes, RTC-1's `TooLarge` bound). It
+  answers such an offer `Refused(11)` before any build. `MESSAGE_MAX` (32,768) is not raised
+  for SDP. A browser's offer grows with its codecs: Chrome with one audio and three
+  video send sections and 8 audio and 8 video receive sections offers about 71 KB, most
+  of it the H264, VP9, AV1 and HEVC profiles, FEC and audio codecs the SFU's policy never
+  accepts (`sdp.default_policy`). With `RTCRtpTransceiver.setCodecPreferences` on every
+  transceiver, Opus for audio and VP8 with its rtx for video, the same offer is 22.4 KB.
+  So a client sets codec preferences on every transceiver, and keeps its receive sections
+  to what it will use. The N1 page does this (`preferVp8`), and checks its offer against
+  `OFFER_MAX` before it sends, throwing an error that names the size and this fix.
+
+  Chunking or compressing the offer is not the end state. Chunking would raise RTC-1's
+  bound with the message size it is derived from, and add per-peer reassembly state that
+  must survive relay drops (`Lost`) and be bounded per peer. Compression would add a
+  bounded inflater in Hirsel and `CompressionStream` in every client, to carry bytes the
+  SFU discards. Filtering makes the offer smaller than either, with no new state.
 
 **What runner.room must provide.** media-webrtc-sfu-spec-2319 read main at `29c75134`, and
 this amend reread the relay at `0ea91569`. The verdict on each of CONSUMER-CONTRACT §3's
@@ -1650,6 +1687,22 @@ unless named otherwise.
   at the 750 kbps start rate (at most 2.14 ms, 3 ms polled). Red on main: the check refused
   the datagram as `NoCname` and nothing was answered.
 
+- **W28 `departures_free_subscriber_sections`.** *Harness:*
+  `core/programs/webrtc_sfu/signal_churn_laws.hirsel` over W16's room. A subscriber with 2
+  receiving video sections and 4 down-tracks stays while six publishers join and publish in
+  turn, and leave by `Left`, by absence from the snapshot after a `Lost`, and by a refused
+  re-offer, each twice. *Oracle:* RTC-8 by hand. Each subscription is granted and carries
+  the publisher's mark on the down-track's SSRC; the subscriber's session holds exactly one
+  live down-track while subscribed and none after the departure; the room hears
+  `Unpublished(id)` once; and the subscriber's later `Unsubscribe(id)` is not refused. Red
+  on main at the first `Unpublished` check; with that check off, red at round 3 with a
+  `Limit` refusal (the leaked sections); with sections freed and the session counting every
+  track it has held, red at round 5 (`Peer`, `Capacity`).
+- **W29 `late_joiner_learns_publications`.** *Harness:* `signal_churn_laws.hirsel`. Peer 1
+  publishes, then peer 2 joins. *Oracle:* RTC-8 by hand: peer 2 alone is sent exactly one
+  `Published(1, id, ..)`, and its subscription to `id` is granted and carries peer 1's mark.
+  Red on main, where peer 2 is told nothing.
+
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.
 
@@ -1901,7 +1954,9 @@ W12 and W13 in `speaker_laws.hirsel`):
   says the fence holds, or at once if the router had nothing to fence.
 - **Signals.** A `Candidate` or `EndOfCandidates` changes nothing, because the server is
   ICE-Lite (RTC-3). `Subscribe` takes the peer's first free send section of the
-  publication's kind, and is refused `Limit` when there is none. A server-only signal from
+  publication's kind, and is refused `Limit` when there is none. A section is free again
+  once its publication's owner departs (RTC-8 Departures). `Unsubscribe` of a publication
+  the peer does not hold changes nothing and is not answered. A server-only signal from
   a peer is answered `Refused(0)`. Otherwise a `Refused` code is the `RouterError` tag,
   counted from 1 (`signal.code`).
 - **Loss.** `Lost` puts `Suspend` ahead of every waiting call and drops a waiting resume.
@@ -1933,6 +1988,7 @@ W12 and W13 in `speaker_laws.hirsel`):
 - **Refused codes.** Code 0 is a signal the peer may not send. Codes 1 to 10 are the
   `RouterError` tags in declaration order: `NoRoom`, `NoParticipant`, `NoPublication`,
   `Fenced`, `Suspended`, `Exists`, `Limit`, `Unrepresentable`, `Peer` and `Capacity`.
+  Code 11 is an offer longer than `signal.OFFER_MAX` (RTC-8 Offer size).
 - **Embed callables.** In the native build, a named function converted to an `Embed`
   field crashes (SIGSEGV). Closures do not, so W16 uses closures.
 
@@ -2016,8 +2072,7 @@ W12 and W13 in `speaker_laws.hirsel`):
   carries the captured datagrams.
 - **Open.** After a real `Lost` the service rejoins with a new peer number, but a page
   learns the service's number once, from `Servers`, so its later signals go to the old
-  number. A page that joins after a publication is published learns it only from the
-  next `Published`.
+  number.
 
 **Follow-ups this spec names.**
 

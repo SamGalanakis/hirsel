@@ -39,9 +39,16 @@ pub type Built: cross {
     sends: List[(u8, sdp.Media)]
 }
 
-/// Codes of `Refused` (RTC-8 Refusals): the `RouterError` tag, from 1, and 0 for a
-/// signal the adapter does not take from a client.
+/// Codes of `Refused` (RTC-8 Refusals): the `RouterError` tag, from 1, 0 for a
+/// signal the adapter does not take from a client, and 11 for an offer longer than
+/// `OFFER_MAX`.
 pub const REFUSED_NOT_TAKEN: u32 = 0
+
+pub const REFUSED_OFFER_TOO_LARGE: u32 = 11
+
+/// The longest offer SDP the adapter builds a session from: RTC-1's text bound, inside
+/// one `runner.MESSAGE_MAX` room message (RTC-8 Offer size).
+pub const OFFER_MAX: u64 = sdp.TEXT_LIMIT
 
 // An admission's place in its life: no offer yet, a build asked of its home unit, its
 // `Admit` in the control order, admitted.
@@ -64,12 +71,14 @@ type Seat {
     ice: Option[(Bytes, Bytes)]
 }
 
-// A publication: its id, its owner's peer number and generation, and its kind.
+// A publication: its id, its owner's peer number and generation, its kind and its
+// encodings, as `Published` names them.
 type Pub {
     id: u64,
     owner: peer.Gen,
     peer: u32,
-    media: sdp.Media
+    media: sdp.Media,
+    encodings: u8
 }
 
 // What to do with a control call's answer.
@@ -319,6 +328,42 @@ fn admit_new[M](mut a: Adapter[M], peer: u32, mut out: List[runner.room_client.R
         }
     }
     list.push(mut a.seats, Seat(peer: peer, id: id, epoch: a.epoch, stage: Waiting, home: 0, version: 0, sends: list.new(), subs: list.new(), offered: None, ice: take ice))
+    // A joining peer learns the publications made before it joined (RTC-8 Joining).
+    for p in a.pubs {
+        to_peer(a, peer, Published(int.widen(p.peer), p.id, kind_of(p.media), p.encodings), mut out)
+    }
+}
+
+fn kind_of(media: sdp.Media) -> u8 {
+    if media == Audio {
+        0
+    } else {
+        1
+    }
+}
+
+// The publications of `g` end with its admission (RTC-8 Departures): each
+// subscriber's section for one is free again, since the revoke that ends its
+// down-tracks on every unit is ahead of any later call in the control order, and the
+// room is told `Unpublished`.
+fn drop_pubs[M](mut a: Adapter[M], g: peer.Gen, mut out: List[runner.room_client.RoomOut[M]]) {
+    let mut gone: List[u64] = list.new()
+    for p in a.pubs {
+        if p.owner == g {
+            list.push(mut gone, p.id)
+        }
+    }
+    list.retain(mut a.pubs, scoped fn(p: Pub) -> bool {
+        p.owner != g
+    })
+    for id in gone {
+        for i in 0u64 .. list.len(a.seats) {
+            list.retain(mut a.seats[i].subs, scoped fn(x: (u64, u8)) -> bool {
+                x.0 != id
+            })
+        }
+        to_room(a, Unpublished(id), mut out)
+    }
 }
 
 // End the admission at seat `i`: its session is revoked, and `Fenced` is sent once the
@@ -331,9 +376,7 @@ fn end_seat[M](mut a: Adapter[M], i: u64, mut out: List[runner.room_client.RoomO
         }
     }
     let g: peer.Gen = Gen(id: s.id, epoch: s.epoch)
-    list.retain(mut a.pubs, scoped fn(p: Pub) -> bool {
-        p.owner != g
-    })
+    drop_pubs(mut a, g, mut out)
     match s.stage {
         Waiting => to_room(a, Fenced(int.widen(s.peer), s.epoch), mut out),
         Building => list.push(mut a.gone, g),
@@ -347,14 +390,12 @@ fn end_seat[M](mut a: Adapter[M], i: u64, mut out: List[runner.room_client.RoomO
 // RTC-4's refused re-offer: the session closes and the participant renegotiates by
 // rejoining. Its admission at the old epoch is revoked as `end_seat` revokes it, and
 // the seat waits at the next epoch for the peer's fresh offer.
-fn rejoin_seat[M](mut a: Adapter[M], i: u64) {
+fn rejoin_seat[M](mut a: Adapter[M], i: u64, mut out: List[runner.room_client.RoomOut[M]]) {
     let number = a.seats[i].peer
     let id = a.seats[i].id
     let epoch = a.seats[i].epoch
     let g: peer.Gen = Gen(id: id, epoch: epoch)
-    list.retain(mut a.pubs, scoped fn(p: Pub) -> bool {
-        p.owner != g
-    })
+    drop_pubs(mut a, g, mut out)
     list.push(mut a.fencing, (g, number))
     list.push(mut a.jobs, Job(change: Revoke(room: a.room, id: id, epoch: epoch), after: Fence(number, g)))
     a.epoch += 1
@@ -543,6 +584,10 @@ fn signal[M](mut a: Adapter[M], p: u32, take s: Signal, mut out: List[runner.roo
                 to_peer(a, p, Refused(code(Exists)), mut out)
                 return
             }
+            if list.len(sdp_text) > OFFER_MAX {
+                to_peer(a, p, Refused(REFUSED_OFFER_TOO_LARGE), mut out)
+                return
+            }
             let home = home_for(a)
             a.seats[i].stage = Building
             a.seats[i].home = home
@@ -593,7 +638,18 @@ fn signal[M](mut a: Adapter[M], p: u32, take s: Signal, mut out: List[runner.roo
         Target(id, target) => {
             list.push(mut a.jobs, Job(change: Retarget(room: a.room, who: g, p: PublicationId(id), target: target), after: Changed(g)))
         },
+        // A publication the peer no longer holds, because it was never subscribed or
+        // its owner departed, is already unsubscribed.
         Unsubscribe(id) => {
+            let mut held = false
+            for (x, _) in a.seats[i].subs {
+                if x == id {
+                    held = true
+                }
+            }
+            if !held {
+                return
+            }
             list.push(mut a.jobs, Job(change: Unsubscribe(room: a.room, who: g, p: PublicationId(id)), after: Unsubscribed(g, id)))
         },
         // The answer to the server's re-offer goes to the session's home unit, which
@@ -603,7 +659,7 @@ fn signal[M](mut a: Adapter[M], p: u32, take s: Signal, mut out: List[runner.roo
             list.push(mut a.answers, (g, version, take sdp_text))
         },
         // A peer that refuses the re-offer rejoins (RTC-4).
-        Refused(_) if a.seats[i].offered != None => rejoin_seat(mut a, i),
+        Refused(_) if a.seats[i].offered != None => rejoin_seat(mut a, i, mut out),
         _ => to_peer(a, p, Refused(REFUSED_NOT_TAKEN), mut out),
     }
 }
@@ -709,7 +765,7 @@ pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: L
                     continue
                 }
                 if a.lost {
-                    rejoin_seat(mut a, i)
+                    rejoin_seat(mut a, i, mut out)
                     continue
                 }
                 a.seats[i].offered = Some(version)
@@ -718,7 +774,7 @@ pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: L
             },
             Shut(who: who) => {
                 if let Some(i) = seat_of(a, who) {
-                    rejoin_seat(mut a, i)
+                    rejoin_seat(mut a, i, mut out)
                 }
             },
         }
@@ -794,13 +850,8 @@ fn answered[M](mut a: Adapter[M], take after: After, take answer: Result[router.
                     } else {
                         Video
                     }
-                    list.push(mut a.pubs, Pub(id: id, owner: g, peer: p, media: media))
-                    let kind: u8 = if media == Audio {
-                        0
-                    } else {
-                        1
-                    }
-                    to_room(a, Published(int.widen(p), id, kind, shape.encodings), mut out)
+                    list.push(mut a.pubs, Pub(id: id, owner: g, peer: p, media: media, encodings: shape.encodings))
+                    to_room(a, Published(int.widen(p), id, kind_of(media), shape.encodings), mut out)
                 },
                 Ok(Done) => (),
                 Error(e) => to_peer(a, p, Refused(code(e)), mut out),

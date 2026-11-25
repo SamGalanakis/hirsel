@@ -98,7 +98,20 @@ async function onSignal(from: number, s: Signal, direct: boolean) {
       break;
     }
     case 'Published': {
-      published.push({peer: Number(values[0]), id: values[1] as bigint, kind: Number(values[2]), encodings: Number(values[3])});
+      // A joining peer is told the room's publications as well as hearing new ones, so
+      // one id can arrive twice (RTC-8 Joining).
+      const id = values[1] as bigint;
+      if (!published.some(p => p.id === id)) published.push({peer: Number(values[0]), id, kind: Number(values[2]), encodings: Number(values[3])});
+      break;
+    }
+    case 'Unpublished': {
+      // The owner departed: its publication and our subscription to it are gone, and
+      // the section is free for the next subscription (RTC-8 Departures).
+      const id = values[0] as bigint;
+      const p = published.findIndex(x => x.id === id);
+      if (p >= 0) published.splice(p, 1);
+      const s = subs.findIndex(x => x.id === id);
+      if (s >= 0) subs.splice(s, 1);
       break;
     }
     case 'Fenced': {
@@ -198,11 +211,19 @@ async function start(o: Start) {
   note('offering');
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
+  // The service builds no session from an offer past OFFER_MAX (RTC-8 Offer size).
+  const size = enc.encode(pc.localDescription!.sdp).length;
+  if (size > OFFER_MAX) {
+    throw new Error(`the offer SDP is ${size} bytes; the service takes at most ${OFFER_MAX}: keep each transceiver to Opus and VP8 with rtx (setCodecPreferences), or offer fewer receiving sections`);
+  }
   say({tag: 'Offer', values: [1n, enc.encode(pc.localDescription!.sdp)]}, service);
   await until(() => answered, 20000, 'the answer');
   await until(() => pc!.connectionState === 'connected', 20000, 'DTLS');
   return {self: room.self, service};
 }
+
+// signal.OFFER_MAX: the longest offer SDP the service builds a session from.
+const OFFER_MAX = 32000;
 
 // The receiving sections in the order the service fills them (RTC-8: the first free
 // section the server may send on, of the publication's kind).
@@ -215,8 +236,7 @@ function layer(encoding: number) {
 }
 
 function subscribe(id: bigint | number, kind: 'audio' | 'video', encoding = 2) {
-  const n = subs.filter(s => s.kind === kind).length;
-  const t = receiving(kind)[n];
+  const t = receiving(kind).find(r => !subs.some(s => s.mid !== null && s.mid === r.mid));
   subs.push({id: BigInt(id), kind, mid: t?.mid ?? null});
   say({tag: 'Subscribe', values: [BigInt(id), kind === 'video' ? layer(encoding) : layer(0)]}, service);
 }

@@ -975,6 +975,12 @@ pub fn session_drops(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[peer
     Some(peer.drops(r.members[mi].session))
 }
 
+/// The live down-tracks of `who`'s session, on its home unit.
+pub fn live_tracks(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[u64] {
+    let mi = member_at(r, room, who)?
+    Some(peer.live_tracks(r.members[mi].session))
+}
+
 pub fn control_ssrc(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[u32] {
     let mi = member_at(r, room, who)?
     Some(peer.control_ssrc(r.members[mi].session))

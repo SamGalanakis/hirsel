@@ -29,6 +29,9 @@ type Sig {
     refused: List[(u32, u32)],
     answered: List[u32],
     offers: List[(u32, u64)],
+    // Published sent to one peer (to, owner, publication), and every Unpublished.
+    told: List[(u32, u32, u64)],
+    unpublished: List[u64],
     // The case run, and the admissions its oracle revokes: no unit may route the room
     // while one of them is not fenced there.
     loss: Loss,
@@ -70,9 +73,11 @@ fn read_room_out(mut r: Sig) {
             ToRoom(take s) => match take s {
                 Fenced(p, e) => list.push(mut r.fenced, (int.narrow(p), e, at)),
                 Published(p, id, _, _) => list.push(mut r.pubs, (int.narrow(p), id)),
+                Unpublished(id) => list.push(mut r.unpublished, id),
                 _ => (),
             },
             ToPeer(p, take s) => match take s {
+                Published(q, id, _, _) => list.push(mut r.told, (p, int.narrow(q), id)),
                 Refused(c) => list.push(mut r.refused, (p, c)),
                 Answer(_, _) => list.push(mut r.answered, p),
                 Offer(v, _) => list.push(mut r.offers, (p, v)),
@@ -180,18 +185,7 @@ fn base_layer() -> router.Target {
 // and 1 share unit 0 and peer 2 is on unit 1; unit 2 hosts no session but takes every
 // control call and fence.
 fn opened_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
-    let h = hall(net, clock, seed)
-    // The application message is the signal itself, and every peer may publish.
-    let embed = signal.Embed(wrap: fn(take s: signal.Signal) -> signal.Signal {
-        take s
-    }, unwrap: fn(take s: signal.Signal) -> Option[signal.Signal] {
-        Some(take s)
-    }, publish: fn(n: u32) -> bool {
-        n != YOU
-    })
-    let mut a = signal.adapter(room_id(), revoke_limits(), take embed, 2)
-    signal.you(mut a, Some(YOU))
-    let mut r = Sig(h: take h, a: take a, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), offers: list.new(), loss: loss, revoking: list.new())
+    let mut r = adapter_room(net, clock, seed, loss)
     enter_room(mut r, Part(inc_of(1), 5, true, true))
     enter_room(mut r, Joined(YOU))
     for p in 1u32 .. 4u32 {
@@ -218,6 +212,23 @@ fn opened_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
         fail("a subscription was refused")
     }
     take r
+}
+
+// The service (9) alone in an empty room: the adapter over units 0 and 1, before
+// any roster entry.
+fn adapter_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
+    let h = hall(net, clock, seed)
+    // The application message is the signal itself, and every peer may publish.
+    let embed = signal.Embed(wrap: fn(take s: signal.Signal) -> signal.Signal {
+        take s
+    }, unwrap: fn(take s: signal.Signal) -> Option[signal.Signal] {
+        Some(take s)
+    }, publish: fn(n: u32) -> bool {
+        n != YOU
+    })
+    let mut a = signal.adapter(room_id(), revoke_limits(), take embed, 2)
+    signal.you(mut a, Some(YOU))
+    Sig(h: take h, a: take a, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), offers: list.new(), told: list.new(), unpublished: list.new(), loss: loss, revoking: list.new())
 }
 
 fn seam_on(mut h: Hall, k: u16, limit: u64) {

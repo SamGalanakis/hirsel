@@ -90,8 +90,10 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     if si >= list.len(p.sections) || !p.sections[si].agreed.send {
         return Error(Sdp(AnswerMismatch(section)))
     }
-    if list.len(p.tracks) >= int.widen(p.limits.down_tracks) {
-        return Error(Capacity(Capacity(requested: list.len(p.tracks) + 1, available: int.widen(p.limits.down_tracks))))
+    // The bound is on live down-tracks: an ended one's slot is taken again.
+    let live = live_tracks(p)
+    if live >= int.widen(p.limits.down_tracks) {
+        return Error(Capacity(Capacity(requested: live + 1, available: int.widen(p.limits.down_tracks))))
     }
     let video = p.sections[si].agreed.media == Video
     let clock = section_clock(p, section)
@@ -106,8 +108,15 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     let pictures = rtp.counter.counter(15, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let frames = rtp.counter.counter(16, Translate, COUNTER_SLOTS) ?=> |c| Capacity(c)
+    let track = Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None)
+    for t in 0u64 .. list.len(p.tracks) {
+        if p.tracks[t].ended {
+            p.tracks[t] = take track
+            return Ok(int.narrow(t))
+        }
+    }
     list.try_reserve(mut p.tracks, 1) ?=> |c| Capacity(c)
-    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None))
+    list.push(mut p.tracks, take track)
     Ok(int.narrow(list.len(p.tracks) - 1))
 }
 
@@ -590,6 +599,18 @@ pub fn end_track(mut p: PeerSession, track: u16) {
     unpace(mut p, track)
 }
 
+/// The down-tracks the session holds that have not ended: what `PeerLimits.down_tracks`
+/// bounds.
+pub fn live_tracks(p: PeerSession) -> u64 {
+    let mut n = 0u64
+    for t in p.tracks {
+        if !t.ended {
+            n += 1
+        }
+    }
+    n
+}
+
 /// Take a down-track's packets out of the pacer unsent: at a collision, and when the
 /// router ends the down-track (RTC-7's `Pacer.remove`).
 pub fn unpace(mut p: PeerSession, track: u16) {
@@ -888,13 +909,19 @@ pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Resul
         return Error(Closed)
     }
     let mut current: sdp.Negotiated = clone(p.agreed)
+    // A section whose down-track ended announces no SSRC; a live one announces its own.
     for t in p.tracks {
         let si: u64 = int.widen(t.section)
-        if si >= list.len(current.sections) {
+        if si < list.len(current.sections) {
+            list.clear(mut current.sections[si].local.ssrcs)
+            list.clear(mut current.sections[si].local.rtx_pairs)
+        }
+    }
+    for t in p.tracks {
+        let si: u64 = int.widen(t.section)
+        if t.ended || si >= list.len(current.sections) {
             continue
         }
-        list.clear(mut current.sections[si].local.ssrcs)
-        list.clear(mut current.sections[si].local.rtx_pairs)
         list.push(mut current.sections[si].local.ssrcs, t.ssrc)
         if t.rtx_ssrc != 0 {
             list.push(mut current.sections[si].local.rtx_pairs, (t.ssrc, t.rtx_ssrc))

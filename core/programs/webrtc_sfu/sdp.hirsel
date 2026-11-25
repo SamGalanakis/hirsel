@@ -101,7 +101,8 @@ pub type Description {
 
 pub type SdpError = TooLarge | Malformed(u64) | NoBundle | NotBundled(u8) | NoRtcpMux(u8) | NoMid(u8) | NoFingerprint | WrongFingerprint | NoIceCredentials | ExtmapConflict(u8) | PayloadConflict(u8) | TooManySections | TooManyFormats(u8) | TooManyRids(u8) | BadRid(u8) | AnswerMismatch(u8) | AssociationChanged | Capacity(Capacity)
 
-const TEXT_LIMIT: u64 = 32000
+/// The longest SDP text `parse` reads and `write` emits (RTC-1 Bounds).
+pub const TEXT_LIMIT: u64 = 32000
 
 const SECTION_LIMIT: u64 = 64
 

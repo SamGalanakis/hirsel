@@ -1,0 +1,246 @@
+// ---- RTC-8: a departure frees its subscribers' sections; a late joiner learns ----
+// W16's harness (signal_laws.hirsel) is the room and plays every browser over real
+// units on sim.udp.
+/// How a publisher leaves in the churn law: its `Left`, a signaling loss whose
+/// snapshot no longer holds it, or a refused re-offer that ends its session (RTC-4).
+type Departure: key = Leaves | Dropped | Refuses
+
+const SUBSCRIBER: u32 = 1
+
+// Six publishers in turn: past the subscriber's 2 receiving sections and past its
+// session's 4 down-tracks (`serve_builds`' `PeerLimits`), each departure kind twice.
+const CHURN_ROUNDS: u32 = 6
+
+fn fail_on(d: Departure, take what: String) -> Never {
+    let mut m = string.from(match d {
+        Leaves => "(left) ",
+        Dropped => "(lost from the snapshot) ",
+        Refuses => "(refused re-offer) ",
+    })
+    string.push(mut m, what)
+    fail(take m)
+}
+
+fn times(xs: List[u64], v: u64) -> u64 {
+    let mut n = 0u64
+    for x in xs {
+        if x == v {
+            n += 1
+        }
+    }
+    n
+}
+
+fn refused_to(r: Sig, p: u32, from: u64) -> bool {
+    for i in from .. list.len(r.refused) {
+        let (q, _) = r.refused[i]
+        if q == p {
+            return true
+        }
+    }
+    false
+}
+
+fn browser_offer() -> Bytes {
+    unit_offer(2, b"96", b"97", b"1", b"3")
+}
+
+// Incarnation 1 at revision 5: the service and the subscriber, peer 1, admitted on
+// unit 0 and publishing.
+fn subscriber_room(net: Net, clock: Clock) -> Sig waits {
+    let mut r = adapter_room(net, clock, 16000, Continued)
+    enter_room(mut r, Part(inc_of(1), 5, true, true))
+    enter_room(mut r, Joined(YOU))
+    enter_room(mut r, Joined(SUBSCRIBER))
+    enter_room(mut r, PartEnd)
+    say_as(mut r, SUBSCRIBER, Offer(1, browser_offer()))
+    until_idle(mut r)
+    if list.len(r.answered) != 1 || list.len(r.pubs) != 1 {
+        fail("peer 1 was not admitted and published")
+    }
+    take r
+}
+
+// Peer `p` joins in a Part at `revision`.
+fn join_at(mut r: Sig, p: u32, revision: u64) {
+    enter_room(mut r, Part(inc_of(1), revision, false, false))
+    enter_room(mut r, Joined(p))
+    enter_room(mut r, PartEnd)
+}
+
+// Peer `p` offers; its session is built on its home unit and admitted.
+fn offer_from(mut r: Sig, p: u32) waits {
+    say_as(mut r, p, Offer(1, browser_offer()))
+    serve_builds(mut r)
+    until_idle(mut r)
+}
+
+fn live_of(r: Sig, m: Member) -> u64 {
+    option.unwrap(router.live_tracks(router_on(r.h, m.home), room_id(), m.gen))
+}
+
+// The publisher's packet on the SSRC of its own down-track from the subscriber makes
+// one re-offer; an answer at the wrong version refuses it, and the session ends.
+fn refuse_reoffer(mut r: Sig, p: u32) waits {
+    let m = seat_of_peer(r, p)
+    let (ssrc, _) = down_track(r, p, SUBSCRIBER)
+    let clash = tagged(mut r.h.peers[m.index].c.cs, ssrc, 7, mark_for(p))
+    let before = list.len(r.offers)
+    send_from(mut r.h, m.index, clash)
+    let mut t = 0u64
+    while list.len(r.offers) == before {
+        if t >= 32 {
+            fail_on(Refuses, "the collision sent the publisher no re-offer")
+        }
+        turn_all(mut r)
+        t += 1
+    }
+    let (to, version) = r.offers[before]
+    if to != p {
+        fail_on(Refuses, "the re-offer went to another peer")
+    }
+    say_as(mut r, p, Answer(version + 1, b"answer"))
+}
+
+fn churn_run(net: Net, clock: Clock) waits {
+    let mut r = subscriber_room(net, clock)
+    let sub = seat_of_peer(r, SUBSCRIBER)
+    let PublicationId(own) = pub_for(r, SUBSCRIBER)
+    let mut revision = 5u64
+    for k in 0u32 .. CHURN_ROUNDS {
+        let p = 2 + k
+        let d = match k % 3 {
+            0 => Leaves,
+            1 => Dropped,
+            _ => Refuses,
+        }
+        revision += 1
+        join_at(mut r, p, revision)
+        offer_from(mut r, p)
+        if !holds_peer(r.answered, p) {
+            fail_on(d, "the publisher was not admitted")
+        }
+        let PublicationId(id) = pub_for(r, p)
+        let refused = list.len(r.refused)
+        say_as(mut r, SUBSCRIBER, Subscribe(id, base_layer()))
+        if d == Refuses {
+            say_as(mut r, p, Subscribe(own, base_layer()))
+        }
+        until_idle(mut r)
+        if list.len(r.refused) != refused {
+            fail_on(d, "a subscription was refused")
+        }
+        let at = list.len(r.h.seen)
+        chatter_all(mut r, 20)
+        let (ssrc, _) = down_track(r, SUBSCRIBER, p)
+        if !reaches_from(r.h, at, SUBSCRIBER, ssrc, p) {
+            fail_on(d, "the publisher's media did not reach the subscriber")
+        }
+        if live_of(r, sub) != 1 {
+            fail_on(d, "the subscriber does not hold exactly one live down-track")
+        }
+        match d {
+            Leaves => {
+                revision += 1
+                enter_room(mut r, Part(inc_of(1), revision, false, false))
+                enter_room(mut r, Left(p))
+                enter_room(mut r, PartEnd)
+            },
+            Dropped => {
+                revision += 1
+                enter_room(mut r, Lost)
+                enter_room(mut r, Part(inc_of(1), revision, true, true))
+                enter_room(mut r, Joined(YOU))
+                enter_room(mut r, Joined(SUBSCRIBER))
+                enter_room(mut r, PartEnd)
+            },
+            Refuses => refuse_reoffer(mut r, p),
+        }
+        talk_through(mut r)
+        if times(r.unpublished, id) != 1 {
+            fail_on(d, "the room was not told Unpublished exactly once for the publication")
+        }
+        if live_of(r, sub) != 0 {
+            fail_on(d, "the subscriber still holds a live down-track of the departed publication")
+        }
+        // A client that unsubscribes after hearing Unpublished is not refused.
+        let late = list.len(r.refused)
+        say_as(mut r, SUBSCRIBER, Unsubscribe(id))
+        until_idle(mut r)
+        if refused_to(r, SUBSCRIBER, late) {
+            fail_on(d, "unsubscribing from the departed publication was refused")
+        }
+        if d == Refuses {
+            revision += 1
+            enter_room(mut r, Part(inc_of(1), revision, false, false))
+            enter_room(mut r, Left(p))
+            enter_room(mut r, PartEnd)
+            until_idle(mut r)
+        }
+    }
+    let Sig(h: take h, ..) = take r
+    close_hall(take h)
+}
+
+fn late_join_run(net: Net, clock: Clock) waits {
+    let mut r = subscriber_room(net, clock)
+    let PublicationId(id) = pub_for(r, SUBSCRIBER)
+    join_at(mut r, 2, 6)
+    let mut told = 0u64
+    for (to, owner, x) in r.told {
+        if to != 2 || owner != SUBSCRIBER || x != id {
+            fail("a peer was told another publication than peer 1's, or another peer was told")
+        }
+        told += 1
+    }
+    if told != 1 {
+        fail("the late joiner was not told once of the publication made before it joined")
+    }
+    offer_from(mut r, 2)
+    say_as(mut r, 2, Subscribe(id, base_layer()))
+    until_idle(mut r)
+    if list.len(r.refused) != 0 {
+        fail("the late joiner's subscription was refused")
+    }
+    chatter_all(mut r, 20)
+    let (ssrc, _) = down_track(r, 2, SUBSCRIBER)
+    if !reaches_from(r.h, 0, 2, ssrc, SUBSCRIBER) {
+        fail("the earlier publication's media did not reach the late joiner")
+    }
+    let Sig(h: take h, ..) = take r
+    close_hall(take h)
+}
+
+/// bug: a subscriber's receiving section and its session's down-track stay taken
+/// after the publication's owner departs, whether by `Left`, by absence from the
+/// snapshot that ends a signaling loss, or by a refused re-offer that ends its session,
+/// so under publisher churn a subscriber that stays runs out of sections (`Limit`)
+/// and then down-tracks (`Capacity`) until it rejoins; the subscriber is not told
+/// the publication went; and its `Unsubscribe` of the gone publication is refused.
+/// oracle: RTC-8 by hand. The subscriber, peer 1, has 2 receiving sections and 4
+/// down-tracks; publishers 2 to 7 join one at a time, leaving by `Left`, loss and
+/// refused re-offer in turn, so at most one publication of another peer is live. Each
+/// subscription is granted, the publisher's mark reaches peer 1 on the down-track's
+/// SSRC, peer 1's session holds exactly 1 live down-track while subscribed and 0
+/// after the departure, `Unpublished(id)` goes to the room exactly once, and peer 1's
+/// later `Unsubscribe(id)` is not refused.
+@test
+fn departures_free_subscriber_sections(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 16000)
+    churn_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}
+
+/// bug: `Published` goes only to the peers present when the publication is made, so
+/// a peer that joins later never learns it and cannot subscribe to it.
+/// oracle: RTC-8 by hand: peer 1 publishes, then peer 2 joins; the adapter sends peer
+/// 2 alone exactly one `Published(1, id, ..)` for that publication, and peer 2's
+/// subscription to `id` is granted and carries peer 1's mark on its down-track SSRC.
+@test
+fn late_joiner_learns_publications(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 16000)
+    late_join_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}

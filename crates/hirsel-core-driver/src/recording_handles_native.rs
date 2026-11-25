@@ -299,10 +299,12 @@ pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
 /// - The root's end take: helper g+3, kind 0, the result with the `Random`
 ///   numbered g+4 and the client g+5, no survivors.
 /// - The root's draw is a `RANDOM` on g+4, and its send through the returned
-///   client reaches inbox g+1: the item take of 5.
+///   client is a `CONN_TRY_SEND` on g+5 that reaches inbox g+1: the item take
+///   of 5.
 ///
-/// The takes of the run's end (the inbox's close and the releases) are not
-/// this law's.
+/// The takes of the run's end, inbox g+1's close (tag 1), its seal answer
+/// (2) and the root's last release of connection g+1 (6), are not this
+/// law's.
 #[test]
 #[ignore = "explicit native integration target"]
 fn rl9_result_crosses_with_its_handles() {
@@ -381,5 +383,87 @@ fn rl9_result_crosses_with_its_handles() {
             })
             .collect();
         assert_eq!(draws, [u64::from(g + 4)], "{backend:?}: draw");
+        let sends: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op { op: o, object, .. } | Frame::Issue { op: o, object, .. }
+                    if *o == op::CONN_TRY_SEND =>
+                {
+                    Some(*object)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sends, [u64::from(g + 5)], "{backend:?}: send");
+    }
+}
+
+/// A `Shared` node whose payload is a `Shared` node crosses: the root sends
+/// the outer node to itself.
+const RL9_NESTED: &str = r#"
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let inner: Shared[u64] = shared.new(42)
+    let outer: Shared[Shared[u64]] = shared.new(take inner)
+    let (s, si): (Client[Shared[Shared[u64]]], Inbox[Shared[Shared[u64]]]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(s, take outer))
+    let kept = result.unwrap(conn.try_receive(si))
+    result.unwrap(stdout.write(out, "nested"))
+    Ok(())
+}
+"#;
+
+/// A `Shared` node nested in a `Shared` payload crosses (recording.md,
+/// "Values" and "Snapshots"), hand-derived before the first run. A holder's
+/// inline layout is private (MEM-13), so the law reads the take's value after
+/// its plain bytes: its part count and parts. `shared.new` numbers the inner
+/// node g+1 and the outer g+2; the connection is g+3 and its client g+4. The
+/// outer node arrives first, as g+5 (home stream 0, node g+2), its payload
+/// the inner holder's word zeroed and one part, the inner node's own
+/// snapshot, as g+6 (node g+1), whose payload is 42 with no parts.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_nested_shared_crosses() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame};
+
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_with(
+            RL9_NESTED,
+            dir.path(),
+            "nested",
+            backend,
+            "nested",
+            &["Tasks", "Stdout"],
+        );
+        let root = &rl8_root_frames(&path);
+        let g = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        let items: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)) => {
+                    Some(body.bytes().to_vec())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items.len(), 1, "{backend:?}: item takes {items:?}");
+        let body = &items[0];
+        assert_eq!(body[1], g + 3, "{backend:?}: the node's inbox");
+        // Past the plain bytes (each length and ordinal here is below 128,
+        // one varint byte).
+        let parts = &body[3 + usize::from(body[2])..];
+        let shared = [
+            vec![1, 1, 1, g + 5, 0, 0, 0, 0, g + 2, 8],
+            vec![0; 8],
+            vec![1, 1, 1, g + 6, 0, 0, 0, 0, g + 1, 8, 42],
+            vec![0; 7],
+            vec![0],
+        ]
+        .concat();
+        assert_eq!(parts, shared, "{backend:?}: node parts");
     }
 }

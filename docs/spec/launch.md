@@ -1166,6 +1166,7 @@ answered `Error(Protocol)` and closes only that exchange.
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
 | 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, listen, store, memory, args, record), with `memory` an `Option[u64]` in bytes and `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
 | 8 Decide(D, decision, fates, approve) | The operator's decision on D, which must be in AwaitDecision on exactly this `decision` ("Self-editing"); anything else is `Error(Denied)`. Only this socket accepts Decide. Planned shape (launch.md "Self-editing"; built: `Decide(D, grants, approve)`). `fates` settles the held runs the decision shows and is `Fates(all: None, entries: [])` when it shows none. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
+| 9 SetEditor(G, editor) | Planned ("Self-editing"). `editor` is `Option[EditorGrant]`, with `EditorGrant { uid: u32, named: List[String] }`: the editor's UID and the sorted, duplicate-free `Secret`, `Cred` and `Env` binding lines of G's approved recipe that the operator lets an editor's code use. It sets or clears G's editor in one transaction and answers `GroupInfo(G)`. It is refused `Denied` unless G passes "What editing delegates"; a UID equal to the operator's or the launcher's is `Invalid`; the platform host's group is `Denied`. Only this socket accepts it. |
 
 | Host → operator | Payload and rule |
 |---|---|
@@ -1264,8 +1265,23 @@ activation, assembly and report.
   `--request-id` from the request's own Status, then sends Begin. When the request awaits a decision on exactly
   the diff its `--approve-grant` lines name (`+` for a line gained, `-` for one lost), it
   sends Decide approving it, with the fates its `--held` and `--held-entry` options name, and goes on; otherwise it prints the state, with the decision and its trigger report, and
-  exits 2. `--held` sets `held.all`, and each `--held-entry` adds an element of `held.entries`, where PATH is the entry path as the trigger report prints it. Without either option, `held` is `Fates(all: None, entries: [])`. `hirsel deploy --state S --request-id D --refuse-grants` refuses the diff D
-  awaits a decision on. `hirsel deploy --state S --status D` sends only Status.
+  exits 2. `--held` sets `held.all`, and each `--held-entry` adds an element of `held.entries`, where PATH is the entry path as the trigger report prints it. Without either option, `held` is `Fates(all: None, entries: [])`. `hirsel deploy --state S --status D` sends only Status.
+- `hirsel decide --state S --request-id D`<!-- doc-ref: planned --> (planned), with the options
+  `--approve-grant +LINE|-LINE`, `--approve-migration DIGEST`<!-- doc-ref: planned -->,
+  `--approve-display SHA256`<!-- doc-ref: planned -->, `--held release|cancel`, `--held-entry PATH=release|cancel`
+  and `--refuse`<!-- doc-ref: planned -->, decides a held request of either
+  principal. It sends Status and prints the whole `Decision` ("Self-editing"), with its
+  tree, H and trigger report. With `--refuse`<!-- doc-ref: planned --> it sends `Decide(D, decision, Fates(all: None,
+  entries: []), false)`. Otherwise it sends Decide approving that exact decision only when
+  its options name every part the decision holds and nothing else: the grant diff line by
+  line, the migration digest, the SHA-256 of the approval text, and fates for the held
+  groups (`--held`, `--held-entry`, as for deploy); any other set of options prints the
+  decision and exits 2 with nothing sent. It never sends Begin. After an approval it
+  follows D to a terminal phase or the next hold, as deploy does. This is the only client
+  that decides another client's request; `hirsel deploy`'s own `--approve-grant`, `--held`
+  and `--held-entry` decide only the request it began.
+- `hirsel editor --state S --group NAME (--uid UID [--named LINE]... | --none)`<!-- doc-ref: planned --> (planned)
+  sends SetEditor for the registered incarnation and prints the group's JSON object.
 
 Register and deploy stream the admission input on AwaitInput, answer each Need with the missing objects,
 and on Display check that the text is the one their own approvals produce, print it, and
@@ -1325,8 +1341,14 @@ is separate from publishing.
 
 ### Self-editing: the editor, the law gate and the settler
 
-*Specified 2026-11-25 (self-edit-gate-spec-2794, with RUNNER-SPEC v2.81). Not built: every
-socket, ask field, phase, class and law in this section is planned.*
+*Specified 2026-11-25 (self-edit-gate-spec-2794, with RUNNER-SPEC v2.81), amended 2026-11-26
+after review self-edit-gate-review-2801 (self-edit-build-1c-2808, RUNNER-SPEC v2.82). Not built:
+every socket, ask field, phase, class and law in this section is planned. Only the building
+blocks are to be built now (Sam, 2026-11-26: "not building self editing into lash, just the
+building blocks"): the law gate, operator-decided holds with `hirsel decide`<!-- doc-ref: planned -->, the migration
+and runs facts from OLD's report of the bound PREPARED with its settlement check, and source
+by content with per-group package roots. The editor principal (its UID, socket, SetEditor and
+revocation), automatic cutover and the editor allow list stay unbuilt.*
 
 An agent edits a running group's program by submitting source. This section says who may
 submit it, what runs before the new revision serves, when a person must decide, and how the
@@ -1340,15 +1362,20 @@ tenant, request ID or Caller carried in a frame or by a program conveys no autho
   `STATE/operator.sock` ("The operator socket"). It is the only principal that approves
   authority, confirms approval text, supplies fates or decides a hold.
 - An **editor** is a group's editing principal. Each group's catalog row gains
-  `editor: Option[UID]`, which only the operator sets, through Register's `registration`
-  (a planned field) or a later operator ask. A group with no editor cannot be edited. The
-  operator's own group, the platform host, never has one. An editor connects to the
-  **editor socket**. `hirsel host --editor-listen PATH`<!-- doc-ref: planned --> makes the
-  launcher bind that second Unix stream listener under its lifetime lock and pass it only to
-  the host, as it passes the operator listener. Without the option there is no editor
-  socket. The frames are the operator socket's.
-- Before it decodes a byte, the host checks the peer's effective UID (`SO_PEERCRED`). A peer
-  whose UID is no group's editor is closed. An editor's Begin may name only a group whose
+  `editor: Option[EditorGrant]` (the UID and the named `Secret`, `Cred` and `Env` lines),
+  which only the operator sets, with SetEditor on `operator.sock` (`hirsel editor`<!-- doc-ref: planned -->). A
+  group with no editor cannot be edited. The operator's own group, the platform host, never
+  has one. An editor connects to the **editor socket**.
+  `hirsel host --editor-listen PATH`<!-- doc-ref: planned --> makes the launcher bind that
+  second Unix stream listener under its lifetime lock and pass it only to the host, in
+  `HIRSEL_EDITOR_LISTEN=PPID:FD`<!-- doc-ref: planned --> beside
+  `HIRSEL_OPERATOR_LISTEN`. The variable names no UID: the runtime admits every peer on
+  it, and its accept gives the program the peer's effective UID (`SO_PEERCRED`), so the
+  host checks the UID against its catalog. The host's compiled grant names the editor
+  socket beside `operator.sock`. Without the option there is no editor socket. The frames
+  are the operator socket's.
+- Before it decodes a byte, the host checks the peer's effective UID. A peer whose UID is
+  no group's editor is closed. An editor's Begin may name only a group whose
   `editor` is its UID; any other group is `Error(Denied)`, and its LookupGroup answers
   `UnknownGroup`. So an editor edits only the groups the operator gave it, and never another
   tenant's group.
@@ -1364,12 +1391,44 @@ tenant, request ID or Caller carried in a frame or by a program conveys no autho
 **What editing delegates.** Giving a group an editor delegates the group's approved bindings
 to code the editor writes. The settler stops the editor from widening those bindings, and
 never stops it from using them. NEW's serving child runs as the launcher's user, under
-bindings that OLD's operator approved. So the host refuses to set `editor` on a group, and
-refuses an editor's admission, with `Denied`, when any of the group's `Dir` bindings
-resolves to a path at, above or below `STATE`, the launcher's state directory, its code,
-image and compiler stores, or the editor socket's directory. The same refusal applies to an
-`Exec` or `Foreign` binding in the approved recipe, and an editor's NEW cannot gain one
-without a decision.
+bindings that OLD's operator approved, so the group's approved recipe must reach nothing
+of the operator's. The rule is an allow list. A group may have an editor only when every
+binding of its approved recipe is one of:
+
+- `Clock`, `Random`, `Tasks`, `Stdout` or `Stderr`;
+- `Net` whose rules are all inet rules (no `UnixRoot`, so no Unix endpoint at all);
+- `Secret`, `Cred` or `Env` whose line the operator named in the SetEditor that set the
+  editor;
+- `Dir` that passes the identity rule below.
+
+Anything else (`Exec`, `Foreign`, `Process`, a Unix `Net` rule, an unnamed `Secret`) is
+`Denied`. A `Dir` binding of an editable group is resolved from `/`, one component at a
+time, with `O_NOFOLLOW` and no `..`. Every component must be a directory, not a link, owned
+by root or by the launcher's user, and not writable by group or other. The catalog records
+the final directory's (device, inode) when the SetEditor or a Decide approves the binding.
+The resolved directory is refused when its (device, inode) is that of any **protected
+directory** or of any component on a protected directory's path from `/`, and when any of
+its own components is a protected directory. The protected directories are `STATE`, the
+launcher's code, image, compiler and package stores, its pass cache
+(`STATE/test-results`), the editor socket's directory, the launcher user's home directory,
+and `$XDG_RUNTIME_DIR` and `/tmp/hirsel-<uid>`, where the resident compiler's socket lives.
+So a binding is never at, above or below one of them, through a link or a bind mount.
+(Decision 2026-11-26, reversible: "contains or is contained by any directory the launcher's
+user owns" is not checkable exactly, because the rule itself requires the user to own the
+components; the closed protected list is.) The child's `Dir` resolves beneath its granted
+descriptor (`openat2`), so a link that the child makes inside its directory does not lead
+out of it.
+
+The host checks the whole rule, resolving every `Dir` again, when it sets `editor`, at
+every admission of the group by either principal while it has an editor, and in the
+transaction that clears a request for its cutover. Each serving start of the group opens
+each `Dir` the same way and refuses a launch whose (device, inode) differs from the
+recorded one, so a directory swapped after admission never reaches a child. A failure is
+`Denied` for an admission, and fails the request `Denied` at the cutover. An editor's NEW
+can never gain such a binding ("What the editor may ask"). The clean end state is a
+per-group child UID, neither the operator's nor the launcher's, so that the kernel
+separates every principal and the allow list shrinks to "no `Exec`, no `Foreign`". That
+needs a privileged launcher and is its own lane.
 
 **What the editor may ask.** On the editor socket the host accepts Begin, Data, EndInput,
 Status and LookupGroup. It answers Confirm, Decide, Register and ResolvePin with
@@ -1382,14 +1441,19 @@ Status and LookupGroup. It answers Confirm, Decide, Register and ResolvePin with
 
 Anything else is `Error(Denied)` before anything compiles. So the editor never approves an
 authority, never confirms an approval text, never chooses a run's fate, and never skips the
-gate. The author-class rules still apply first: an untrusted author's source that grants
-`Foreign` or `Exec` is `Denied` as above, whoever sends it.
+gate. An editor's tree that grants `Foreign` or `Exec`, or whose recipe declares a Foreign
+definition or an Exec request, is `Denied` at admission, for a trusted author too, and is
+never held: an approved Foreign or Exec binding would make the group fail the allow list
+above. Foreign code that a dependency brings in needs a `Foreign` grant (FFI-1), which is a
+line of the grant diff, so it is refused the same way.
 
-**The principal is part of D.** D's `requests` row records the principal whose socket sent
-its first Begin, as part of its canonical bytes. On the other principal's socket, a Begin
-for a known D is `Error(Conflict)`, and Data and EndInput for it are `Error(Protocol)`. The
-editor's Status of an operator's D is `Error(UnknownRequest)`. The operator may read any D's
-Status, because it must see a decision to make it. So the editor cannot attach to an
+**The principal is part of D.** D's `requests` row records the principal that sent its
+first Begin, as part of its canonical bytes: `Operator`, or `Editor(uid)` with the peer's
+UID. On another principal's socket or UID, a Begin for a known D is `Error(Conflict)`, and
+Data and EndInput for it are `Error(Protocol)`. On the editor socket, Status of a D whose
+recorded principal is not `Editor` of the peer's UID is `Error(UnknownRequest)`, so one
+editor cannot read an operator's request or another editor's. The operator may read any
+D's Status, because it must see a decision to make it. So the editor cannot attach to an
 operator's request, take its upload or answer its Display. An editor request needs no
 connection once its input is complete:
 
@@ -1400,6 +1464,12 @@ connection once its input is complete:
 While the group has an operator request that is active or held, an editor Begin for the
 group is `Error(Busy)`. An editor Begin supersedes only an editor's hold, so an agent cannot
 cancel the operator's pending deploy by sending source.
+
+**Revocation.** The transaction that changes or clears a group's `editor` fails every
+non-terminal request of the group recorded as `Editor(uid)` for another UID `Denied`, with
+the detail `editor revoked`. The transaction that clears an editor request for its cutover
+checks that the group's `editor` is still that UID, and otherwise fails it `Denied`, so a
+request already preparing under a revoked editor never cuts over.
 
 **The law gate.** Begin's `gate: bool` asks for it. It is valid only with a source input
 (otherwise `Invalid`). The operator may set it, and the editor must. A gated source is
@@ -1422,7 +1492,8 @@ it admits `Publication(H)`:
    never approved by a decision, because a test runs before any decision.
 2. **The run.** `hirsel test PACKAGE --frozen` runs as the launcher's child in the same
    scratch, on the same files and `hirsel.lock`. It uses the launcher's compiler store,
-   package store and pass cache, the toolchain's memory limit and no test filter, so it runs
+   package store and the pass cache at `STATE/test-results` (passed as the run's cache
+   root, never the user's default cache), the toolchain's memory limit and no test filter, so it runs
    every test of the package (PROG-4). Tests run in the `hirsel test` client, never in the
    compiler (cli.md "Resident compiler"). When the launcher user's resident compiler serves
    (lane cas-s4-shared-daemon-2781: one per user per toolchain), the session goes through
@@ -1430,8 +1501,10 @@ it admits `Publication(H)`:
 3. **Reuse is PROG-4's and no wider.** A test whose program and run configuration are
    unchanged since a recorded pass reports that pass (`Source::Cached`) without running. Only
    a pass is reused, only for a test without parameters, and never for one whose reach holds a
-   foreign function. The pass cache is the launcher user's, under the launcher's state. The
-   editor cannot write it, because its UID differs. The resident compiler only speeds the
+   foreign function. The pass cache is `STATE/test-results`, mode 0700 under `STATE`. The
+   editor cannot write it, because its UID differs, and an editable group's `Dir` can never
+   reach it ("What editing delegates"). Its key covers the test's program, its run
+   configuration and the toolchain's identity (PROG-4). The resident compiler only speeds the
    gate up: a one-shot `test` gives the same rows, verdicts and cache writes (cli.md), so the
    verdict never depends on whether a daemon served.
 4. **The verdict.**
@@ -1441,14 +1514,20 @@ it admits `Publication(H)`:
      passes while a test runs. The launcher stops the test child and answers
      `AdmissionFailed(Red(rows))`, and the host fails D `Red` (class 13). The detail names
      each such test and its outcome.
+   - **Lost**: the resident compiler's session is lost while the gate runs (cli.md: a
+     `test` request "reports the lost answer"). This is never green and never a durable
+     `Red`: the launcher answers `Busy`, the host sends `Release(A)`, and the same D is
+     admitted again.
 
    No `--laws` strength row is read: a row is never an input to acceptance (R28,
    [laws](../laws.md)). The gate runs inside the admission deadline (600 s from D's first
    Begin; a fresh one for each repeated admission) and holds one of the launcher's four
    admission slots while it runs.
-5. **The binding.** `Admitted`'s summary gains `gate: Option[Green(tree, H)]`. Here `tree`
-   is the SHA-256 of the assembled `launcher.Tree` codec bytes, and the host records both
-   in D's row. The tests and the publication are built from the same scratch files under
+5. **The binding.** `Admitted`'s summary gains `gate: Option[Green(tree, H, toolchain)]`.
+   Here `tree` is the SHA-256 of the assembled `launcher.Tree` codec bytes and `toolchain`
+   the launcher's toolchain identity, and the host records all three in D's row. H is the
+   content of the package's sources and does not move with the toolchain, so the toolchain
+   is recorded beside it. The tests and the publication are built from the same scratch files under
    `--frozen`, and one tree always gives one H, so the green verdict is the verdict of the
    code H publishes.
 
@@ -1463,11 +1542,13 @@ it needs no person. Each fact is read from bytes that the cutover names or is bo
 | gate | before `Admitted` | `Green(tree, H)` | the launcher's summary. The cutover installs H's recipe R, its assembly record, the Describe and release that the preview reported for that record, and PREPARED for that release |
 | grants | `Admitted` | the grant diff is empty | R's grant bindings against OLD's approved recipe. The cutover installs R |
 | approvals | `Admitted` | R declares no Foreign definition and no Exec request | R, and the display that is bound to it |
-| migration | prepare | the catalog delta (PREPARED kind 0x0082) and replacement inventory (0x0083) are both empty, so PREPARED carries no row (0x0084) | the prepare child's staged frames, which it reports beside TRIGGERS whether or not it writes PREPARED. At the cutover the fact is the frames of the PREPARED whose SHA-256 OLD binds (STORE-SPEC §3.5a M1–M3) and the cutover names |
-| runs | prepare | TRIGGERS has no `held` group and no `unmatched` path | TRIGGERS, and PREPARED's activation rewrites (0x0085) under the same digest |
+| migration | prepare | the catalog delta (PREPARED kind 0x0082) and replacement inventory (0x0083) are both empty, so PREPARED carries no row (0x0084) | the PREPARED bytes OLD validated and bound (STORE-SPEC §3.5a M1–M3), as OLD reports them on `PlaceImported` (RUNNER-SPEC §14.3 "Preparing"), and the cutover names that digest. When no PREPARED exists, the prepare child's side report beside TRIGGERS; then nothing can cut over |
+| runs | prepare | for an editor: TRIGGERS has no `held` group and no `unmatched` path, **and** the bound PREPARED has no activation rewrite (0x0085) and ships no range of `store.triggers.pending`; for an operator: as for an editor, or every held group has an approved fate and OLD's own settlement check passed | TRIGGERS, read only for the display and for a hold; the facts that clear it come from OLD's `PlaceImported` report of the bound PREPARED and from OLD's settlement check ("From check to cutover" item 4) |
 
 - **Editor requests.** The cutover is automatic only when all five facts are clear. Then
-  the request assembles, prepares and cuts over with no person. A red gate fails D `Red`. Any
+  the request assembles, prepares and cuts over with no person. A red gate fails D `Red`. An
+  editor tree with Foreign or Exec is `Denied` at admission ("What the editor may ask"),
+  so `approvals` is never held for an editor, whatever the next sentence says. Any
   other fact that is not clear holds D for the operator. So any grant diff, any Foreign or
   Exec, any schema change and any held run goes to a person. An editor supplies no fates, so
   for an editor "runs" is clear only when nothing is held.
@@ -1488,20 +1569,25 @@ it needs no person. Each fact is read from bytes that the cutover names or is bo
 fact. Its phase is `AwaitDecision(decision)`, with
 
 ```text
-Decision { stage: Stage, grants: Grants, approvals: Option[Approvals], migration: Option[Migration], triggers: TriggerReport }
+Decision { tree: H, root: H, stage: Stage, grants: Grants, approvals: Option[Approvals], migration: Option[Migration], triggers: TriggerReport }
 Stage = Admission | Prepared
 Approvals { r: H, foreign: List[String], exec: List[String], text: String }
 Migration { digest: H, changes: List[String] }
 ```
 
-`stage` says which facts are computed. At `Admission`, `migration` is `None` and `triggers`
+`tree` and `root` are the source tree's digest and its H, so the operator sees which source
+they approve (both are zero for an attested or publication input). `stage` says which facts
+are computed. At `Admission`, `migration` is `None` and `triggers`
 is empty because prepare has not run. At `Prepared`, every fact is computed, and an empty
 part means that fact is clear. `approvals` holds R's Foreign and Exec lines and the exact
 display text, as "Publish and assemble" step 3 makes them. The migration `digest` is the SHA-256 of the 0x0082 frames' payloads, in
 order, followed by the 0x0083 inventory's sorted (id, kind) list. Neither frame carries the
 export's head or version, which are in 0x0081, so the digest moves only when OLD's catalog
-moves, and only a deploy moves it. Kind is one of replaced, empty or
-dropped, and row counts and row digests are left out, so a change of OLD's data alone never
+moves: a deploy, or an index build step on OLD, since a catalog record carries the index's
+`state` (STORE-SPEC §3.5a "Catch-up"). The second only holds D again, which is safe.
+`Inventory` is `{ id, count, digest }` and has no kind, so kind is derived: **dropped** when
+the delta's change for `id` has no `after`, otherwise **empty** when `count` is 0, otherwise
+**replaced**. Row counts and row digests are left out, so a change of OLD's data alone never
 changes the digest. `changes` names each collection that the delta creates, gives a schema,
 rebuilds, migrates, renames or drops, for display.
 
@@ -1513,7 +1599,8 @@ rebuilds, migrates, renames or drops, for display.
   transaction, and OLD keeps serving with its store unchanged. The prepare child reports the
   migration even when an unsettled report stops it from writing PREPARED, so the migration
   and the runs hold together. A request therefore holds at most twice, once at each stage,
-  until a fact changes under it. No hold keeps an attempt, an export lease, a write pause or an assembly
+  until a fact changes under it. The approval given at the `Admission` stage stays in the
+  approved set, so the second hold's decision shows only the prepare facts as undecided. No hold keeps an attempt, an export lease, a write pause or an assembly
   reservation. A hold has no deadline and survives its connection and the host's restart.
 - **Decide(D, decision, fates, approve).** The operator sends it, only on `operator.sock`.
   Its `decision` must equal the held one byte for byte, or the Decide is `Error(Denied)`.
@@ -1526,16 +1613,25 @@ rebuilds, migrates, renames or drops, for display.
   the Decide stands for its Confirm, and no Display or Confirm is exchanged. Any other display
   holds D again. A refusal fails D `Denied`.
 - **Each repeated admission derives every fact again.** It publishes the tree again and
-  continues only when it gets the recorded H. Any other H (for example after a host
-  toolchain change) fails D `Invalid` with `republished root differs`. The recorded verdict
-  for that H stands, so the gate does not run again. A fact passes when it is clear, or when
+  continues only when it gets the recorded H. Any other H fails D `Invalid` with
+  `republished root differs`. The recorded verdict stands only for the same H and the same
+  toolchain identity, so the gate does not run again; under another toolchain it runs again. A fact passes when it is clear, or when
   it equals the approved value (the grant diff, the display text, the migration digest), or,
   for runs, when the approved fates give every held group a fate and leave no unmatched
-  path. For approvals the approved value is the whole `Approvals`. A fact that differs, or that newly needs a person, holds D again with the new
+  path. For fates that came from a Decide, every held group of the new report must also be
+  one the approved decision showed, by (kind, entry path, argument schema, `hold`); counts
+  and due times may differ. A group the decision did not show holds D again, even when
+  `all` would give it a fate. The fates an operator names on its own Begin keep the first
+  rule, because there `all` is the operator's stated policy. For approvals the approved value is the whole `Approvals`. A fact that differs, or that newly needs a person, holds D again with the new
   decision. Approval of one value never carries over to another.
+- **The verdict is durable.** The deploy row gains `settled: Option[H]`, the digest of the
+  PREPARED that the settler cleared, written in the transaction that moves the row to
+  `Pending`. The host sends or re-sends a cutover only for a row whose `settled` equals the
+  digest the cutover names, so a host restarted between import and settle never sends a
+  cutover the settler did not clear.
 - **Drift retry.** The settler evaluates the retry's own PREPARED and TRIGGERS before it
-  sends the retry's cutover. Any fact that fails the previous bullet aborts the retry's
-  export once and holds D.
+  sends the retry's cutover, and records `settled` again for the retry's digest. Any fact
+  that fails the previous bullets aborts the retry's export once and holds D.
 - **Supersession.** A hold ends at a Decide, or when a later Begin of the group supersedes
   it (`Failed(Denied)`), subject to the editor's limit above.
 
@@ -1552,12 +1648,26 @@ rebuilds, migrates, renames or drops, for display.
    needs the group's `active` row, and D holds that row. So OLD is the same at `Admitted`
    and at the cutover.
 3. **Schema.** The migration fact is a function of the PREPARED bytes whose digest OLD
-   binds and the cutover names. The cutover is refused `Drift` unless OLD's head is the
+   binds and the cutover names. OLD computes it while it validates those bytes and reports
+   it on `PlaceImported`; the host never reads a file that the prepare child wrote beside
+   PREPARED to clear it, because the prepare child runs submitted code, and
+   `store.write_prepared` and its siblings are public, so that code can write any report
+   it likes beside an honest PREPARED. The cutover is refused `Drift` unless OLD's head is the
    exported base. A catch-up round patches only the ranges that PREPARED ships, and a clear
    migration ships none.
 4. **Runs.** The prepare child writes PREPARED only when every held row of its scan has a
    fate (RUNNER-SPEC §14.6). The rewrites that settle those rows are in PREPARED, under the
-   digest that the cutover names. The settler never releases or cancels a run without a fate
+   digest that the cutover names. The prepare child's code is submitted, so OLD checks the
+   settlement itself (RUNNER-SPEC §14.3 "Preparing"): for an editor request with no
+   approved fates, a PREPARED with any activation rewrite (0x0085) or any shipped range of
+   `store.triggers.pending` is refused; with approved fates, OLD classifies its own pending
+   rows at the exported base under NEW's identity digest and entries and the approved
+   fates, derives each settled row's value, and refuses the import unless PREPARED applies
+   exactly those values, whether in 0x0085 rewrites or folded into a shipped range of
+   `store.triggers.pending`, and no rewrite on any other table. So a PREPARED that cancels a
+   run the operator released is refused. At the final catch-up round, inside the pause, OLD
+   runs the same scan on that round's base; a held row it finds that the approved fates do
+   not settle aborts the export and holds D. The settler never releases or cancels a run without a fate
    the operator gave. A run that the scan did not see stays parked by NEW's head under the
    identity guard (RUNNER-SPEC §14.6 "The identity guard"), and the next report shows it as
    held.
@@ -1570,7 +1680,8 @@ ManifestFile { path: String, digest: H, len: u64 }
 ```
 
 `package`, `grants`, `dirs` and `required_entries` are the Tree's fields. `files` is sorted
-by path with no repeats. Paths follow the Tree's rules, and the lengths add up to at most
+by path with no repeats, and no path is a directory of another (`a` beside `a/b` is
+`Invalid`). Paths follow the Tree's rules, and the lengths add up to at most
 4 MiB. This one form replaces the inline `Source(tree)` on the operator and editor sockets.
 The launcher still receives a whole `launcher.Tree`, which the host assembles.
 
@@ -1589,13 +1700,21 @@ The launcher still receives a whole `launcher.Tree`, which the host assembles.
 - **No path trust.** A blob is stored, found and compared only by its SHA-256. A path is a
   name in the manifest and nothing else. The host never opens a file by a submitted path,
   and the same bytes under two paths are one blob. The launcher writes the assembled tree
-  into fresh scratch, as it did before.
+  into fresh scratch under `STATE` (mode 0700), never in a shared temporary directory,
+  because the editor is another local user.
 - **Rooting.** D's row roots the blobs D received until D is terminal. The transaction that
   records D `Installed` makes D's manifest the group's installed manifest. The transaction
   that makes D terminal deletes every blob of the group that no remaining manifest names. A
   held request keeps its blobs, so the admission that a Decide repeats, on the operator's
   connection, reads every file from the host. An identical Begin after a lost upload Needs
   only what the set still lacks. The group's removal deletes its blobs with its rows.
+- **Package roots per group.** Each group's catalog row gains `packages: List[H]`, the
+  package roots the operator allows it, set by Register and SetEditor. A tree's
+  `hirsel.lock` root outside the group's set fails with the diagnostic of an absent root,
+  so one group's library is neither linked nor detected by another. The bytes are shared
+  in the one package store underneath, as blobs may be.
+- **Installs that are not source.** An install from an attested or publication input clears
+  the group's installed manifest, and its blobs go when no request names them.
 - **The request row** stores the manifest in place of the files. The rule that two trees fit
   one stored value no longer constrains `TREE_BYTES`.
 
@@ -1629,6 +1748,26 @@ The launcher still receives a whole `launcher.Tree`, which the host assembles.
   B gets `Need` for it. A blob whose bytes hash to another digest fails `Invalid`. Bug: a
   group probes or borrows another group's source.
 
+- `editor_bindings_allow_list`. SetEditor on a group whose approved recipe holds
+  `Net=UnixRoot s STATE;UnixConnect s operator.sock` is `Denied`, so editor code never
+  reaches `operator.sock` through a Unix rule; so is a `Dir` whose path runs through a link
+  or whose directory is `STATE`. Bug: the delegation check is a deny list.
+- `editor_dir_swap` (launcher). A `Dir` approved at one (device, inode) and then swapped
+  for a link to `STATE` is refused at the next admission and at the next serving start. Bug:
+  a binding is re-resolved by path after its check.
+- `settler_reads_bound_prepared`. A prepare child that writes an honest PREPARED with a
+  dropped table and, beside it, a migration report and TRIGGERS that show nothing, holds D
+  with the drop in its decision. Bug: the settler reads a file the submitted code wrote.
+- `editor_prepared_cannot_settle`. An editor's PREPARED whose 0x0085 frame releases a held
+  run, beside a TRIGGERS with nothing held, is refused by OLD and cuts nothing over; with
+  approved `Release` fates, a PREPARED that applies `Cancel` to that run is refused. Bug:
+  the activation commit applies a fate the operator did not give.
+- `decide_fates_only_shown_groups`. A decision showing one held group, approved with
+  `--held release`, holds again when the repeated admission finds a second held group.
+  Bug: an approval's `all` fates a run nobody saw.
+- `editor_revoked`. Clearing a group's `editor` fails its preparing editor request
+  `Denied`, and it does not cut over. Bug: a revoked editor's request still installs.
+
 L48 `deploy_admission_policy` keeps its hold and decision cases, which now use the
 `Decision` value.
 
@@ -1652,8 +1791,12 @@ the editor socket ("Self-editing" below); it runs as the editor UID and never op
 `operator.sock`. The app's tools propose the source rows and their build settings
 (`package`, `grants` and `dirs`). Its Begin is an editor's: gated, with no Foreign or Exec
 approvals and no fates for held runs (`held` is `Fates(all: None, entries: [])`). A proposal
-whose settler finds a grant diff, approval text, a migration or a held run waits in
-AwaitDecision for the operator, and the publisher keeps it outstanding. Whether a run's recorded
+whose settler finds a grant diff, a migration or a held run waits in
+AwaitDecision for the operator, and the publisher keeps it outstanding; one with Foreign or
+Exec is `Denied` and the publisher settles it Rejected. The proposing turn finishes its
+granted trigger before the publisher submits, so the proposing run is not held by its own
+edit. After Installed, the publisher starts a fresh turn on NEW. If the proposing run must
+continue across the edit, the proposal stays held for the operator's fate. Whether a run's recorded
 steps are still valid on new code is the operator's decision.
 
 Run one `harness.release_publish.Publisher` per group incarnation. Drive `poll` when
@@ -1933,9 +2076,11 @@ each `entries` path that is the entry path of no pending row and of no entry OLD
 registers. When every held group has a fate and `unmatched`
 is empty, the child writes PREPARED with one activation rewrite per held row (STORE-SPEC v2.103
 §3.5a; when NEW's migration replaces `store.triggers.pending`, the scan reads the staged range and the settled rows travel in that range instead); a rewrite list that does not fit fails prepare with `Limit(triggers)`. Otherwise it writes TRIGGERS and no PREPARED, and exits 0; the host holds the request for
-a decision ("Self-editing"). Either way (planned) the child also reports the migration, the
-0x0082 payloads and the 0x0083 (id, kind) list it staged, beside TRIGGERS, so the settler
-reads the migration fact even when no PREPARED is written. A report above the prepare child's bound fails
+a decision ("Self-editing"). When it writes no PREPARED (planned), the child also reports the
+migration it staged, the 0x0082 payloads and the 0x0083 (id, kind) list, beside TRIGGERS,
+so a hold shows the migration and the runs together. That side report is only displayed:
+with no PREPARED nothing can cut over, and a PREPARED's facts come from OLD ("Self-editing"
+"From check to cutover"). A report above the prepare child's bound fails
 prepare with `Limit(triggers)`. The guard on started granted runs uses the identity digest,
 whose entry revision covers changes in `handles` such as table names, bindings and key codecs,
 and which a rebuild of the same code by another backend leaves equal.

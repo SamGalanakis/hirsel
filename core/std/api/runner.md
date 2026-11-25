@@ -526,8 +526,9 @@ state is `Waiting`, so no attempt stays current:
 
 **There is no default.** An activation that finds a held row with no fate, or an
 `entries` path that names no pending row and no entry of OLD or NEW, is refused
-`Unsettled` before it publishes a cut. Nothing changes: a deploy fails with OLD
-still serving, and a standalone install exits 1 with the report on stderr. An
+`Unsettled` before it publishes a cut. Nothing changes: a hosted deploy is held for
+the operator's decision with OLD still serving (`hirsel decide`), and a standalone
+install exits 1 with the report on stderr. An
 activation with no held row needs no fate.
 
 Who supplies the fate:
@@ -537,7 +538,8 @@ Who supplies the fate:
 | `hirsel deploy` | `--held release\|cancel` and `--held-entry PATH=release\|cancel`, sent on Begin's `held` field |
 | A standalone install | the place arguments `--hirsel-held=release\|cancel`<!-- doc-ref: external --> and `--hirsel-held-entry=PATH=release\|cancel`<!-- doc-ref: external -->, next to `--hirsel-install` |
 | `hirsel dev` | always `Release` on every install into the store it supervises; dev refuses `--hirsel-held` among the program arguments |
-| A hosted install child, a harness proposal | none, so a held run fails `Unsettled` and an operator settles it |
+| A hosted install child | none, so a held run fails `Unsettled` and an operator settles it |
+| An editor's request, a harness proposal | none, so a held run holds the request until the operator decides it with `hirsel decide` |
 
 A released run can be held again. NEW's body runs from the top, and at a step whose
 recorded request differs from NEW's request the step library parks it under a

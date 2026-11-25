@@ -89,21 +89,18 @@ def add_checkout_source_projection(text: str) -> str:
 
 
 def narrow_transitive_source_inputs(text: str) -> str:
-    # Compiler and rustdoc actions take the checkout projection. The provider
+    # Compiler and rustdoc actions (their shared dependency arguments and the
+    # rustc invocation) take the checkout projection. The provider
     # and its full `artifacts` projection stay stock for every other user.
-    for old, new, what in (
-        (
-            'hidden = compile_ctx.transitive_srcs.project_as_args("artifacts") if compile_ctx else [],',
-            'hidden = compile_ctx.transitive_srcs.project_as_args("checkout_artifacts") if compile_ctx else [],',
-            "compiler transitive source inputs",
-        ),
-        (
-            'hidden = [toolchain_info.compiler, compile_ctx.transitive_srcs.project_as_args("artifacts")],',
-            'hidden = [toolchain_info.compiler, compile_ctx.transitive_srcs.project_as_args("checkout_artifacts")],',
-            "rustdoc transitive source inputs",
-        ),
+    for stock, what in (
+        ('dep_args.add(cmd_args(hidden = compile_ctx.transitive_srcs.project_as_args("artifacts")))',
+         "dependency transitive source inputs"),
+        ('arch_dep_args.add(cmd_args(hidden = compile_ctx.transitive_srcs.project_as_args("artifacts")), arch_dep_argsfiles)',
+         "per-architecture dependency transitive source inputs"),
+        ('hidden = [compile_ctx.transitive_srcs.project_as_args("artifacts")] + ([rustc_bin] if arch_programs == None else []),',
+         "compiler transitive source inputs"),
     ):
-        text = replace_once(text, old, new, what)
+        text = replace_once(text, stock, stock.replace('"artifacts"', '"checkout_artifacts"'), what)
     return text
 
 
@@ -228,7 +225,7 @@ STOCK_DEPENDENCY_DIRS = """    artifacts = transitive_deps.project_as_json("arti
     ctx.actions.run(
         arguments,
         category = "deps",
-        identifier = str(len(transitive_dependency_dirs)),
+        identifier = "{}-{}".format(prefix, len(transitive_dependency_dirs)),
     )
 """
 
@@ -282,29 +279,30 @@ def use_absolute_wrapper_interpreter(text: str) -> str:
     return replace_once(text, '"#!/usr/bin/env bash"', '"#!/bin/bash"', "command wrapper interpreter")
 
 
-def cache_doctest_verdicts(text: str) -> str:
-    # Like the libtest provider in defs.bzl, a rustdoc test is hermetic and
-    # uses repository-relative inputs. Failures remain uncached.
+def name_doctest_target(text: str) -> str:
+    # Like the libtest provider in defs.bzl, a rustdoc test names its target
+    # for the test executor (test_executor.py). Upstream caches its verdicts.
     return replace_once(
         text,
         '            type = "rustdoc",\n',
-        '            type = "rustdoc",\n            supports_test_execution_caching = True,\n            env = {"TEST_TARGET": "run:-:" + str(sources.owner.raw_target())},\n',
-        "rustdoc test caching",
+        '            type = "rustdoc",\n            env = {"TEST_TARGET": "run:-:" + str(sources.owner.raw_target())},\n',
+        "rustdoc test provider",
     )
 
 
-def explicit_test_executor_policy(text: str) -> str:
+def test_executor_priority(text: str) -> str:
+    # Upstream takes `remote_enabled` from the test's remote execution
+    # properties; Hirsel also sets the remote queue priority there.
     text = replace_once(
         text,
         '    local_enabled = re_props_copy.pop("local_enabled", False)\n',
         '    local_enabled = re_props_copy.pop("local_enabled", False)\n'
-        '    remote_enabled = re_props_copy.pop("remote_enabled", True)\n'
         '    priority = re_props_copy.pop("priority", 0)\n',
-        "explicit test executor policy",
+        "test executor properties",
     )
     for spaces in (8, 12):
         indent = ' ' * spaces
-        text = replace_once(text, '\n' + indent + 'remote_enabled = True,\n',
+        text = replace_once(text, '\n' + indent + 'remote_enabled = remote_enabled,\n',
                             '\n' + indent + 'remote_enabled = remote_enabled,\n' + indent + 'priority = priority,\n',
                             f"test executor at indentation {spaces}")
     return text
@@ -314,8 +312,8 @@ TRANSFORMS = {
     "rust/build.bzl": (narrow_transitive_source_inputs, lay_out_dependency_dirs_in_daemon),
     "rust/failure_filter.bzl": (filter_failures_in_daemon,),
     "rust/sources.bzl": (add_checkout_source_projection,),
-    "rust/rust_library.bzl": (cache_doctest_verdicts,),
-    "tests/re_utils.bzl": (explicit_test_executor_policy,),
+    "rust/rust_library.bzl": (name_doctest_target,),
+    "tests/re_utils.bzl": (test_executor_priority,),
     "utils/cmd_script.bzl": (use_absolute_wrapper_interpreter,),
 }
 

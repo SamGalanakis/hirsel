@@ -82,19 +82,22 @@ parser via `editors/tree-sitter-hirsel/check-local`.
 
 ## Stale outputs
 
-Buck2's scheduled stale sweep is off (`clean_stale_enabled = false`). In the
-pinned release it scans `buck-out` and deletes every path the materializer does
-not track, and the local executor drops a running action's outputs from the
-materializer before the action runs (`materializer.invalidate_many` in
-`executors/local.rs`), so a tick mid-build deleted in-flight outputs: rustc's
-`could not write output to .../extras/...` and `couldn't create a temp dir`,
-clang's `unable to rename temporary`. On 2026-11-25, 33 such failures in 15
-worktrees each followed a tick, and a strace of a repro daemon showed its own
-threads unlinking an in-flight `output_artifacts` directory. Buck2 releases from
-2026-11-01 skip the scheduled sweep while any command runs
-(`BackgroundCleanupGate`); re-enable the schedule only on such a pin.
+Buck2's scheduled stale sweep runs hourly, first 6 minutes after daemon start
+(`clean_stale_enabled = true`). Each tick scans `buck-out` and deletes inactive
+tracked outputs older than the TTL and every path the materializer does not
+track. A running local action's outputs are untracked, so the pinned release
+skips a tick while any command holds the daemon (`BackgroundCleanupGate` in
+`deferred.rs`): build, test and the other streaming commands except `lsp` and
+`dap` register a prevention guard that interrupts a running clean and waits for
+it, and `Op::CleanStaleRequest` in `deferred/command_processor.rs` starts a clean only
+when no guard is held. Releases before 2026-11-01 had no such gate. On
+2026-11-25, under the 2026-09-15 pin, 33 failures in 15 worktrees each followed
+a tick (rustc's `could not write output to .../extras/...` and `couldn't create
+a temp dir`, clang's `unable to rename temporary`), and a strace of a repro
+daemon showed its own threads unlinking an in-flight `output_artifacts`
+directory; the sweep was off from 99e5e724 until this pin.
 
-Reclaim space explicitly, with no build running in the checkout:
+Reclaim space between ticks, with no build running in the checkout:
 
 ```sh
 .buck2/bin/buck2 clean --stale --tracked-only
@@ -110,7 +113,7 @@ Lanes never delete another lane's `buck-out`. The policy is read at daemon
 startup; an existing daemon needs a restart.
 
 The settings were checked against the exact `pins.json` source commit
-[`6507dd157a6f81a810c48583edf1758dd0c337c5`](https://github.com/facebook/buck2/tree/6507dd157a6f81a810c48583edf1758dd0c337c5),
+[`5b3b13d3eacefe325bf971369197e33c5f4b3968`](https://github.com/facebook/buck2/tree/5b3b13d3eacefe325bf971369197e33c5f4b3968),
 and the installed executable's SHA-256 matched the pin. Source references below
 are relative to that commit:
 
@@ -140,12 +143,12 @@ are relative to that commit:
   when `unmaterialize_active` is false. Declarations and materialization mark
   current artifacts active (`deferred/command_processor.rs`); state loaded
   after a daemon restart begins inactive (`deferred/artifact_tree.rs`).
-  `MaterializerSender::send` cancels a cleaning
-  scan before processing new materializer work (`deferred.rs`), but that only
-  stops the scan between paths: the scheduled sweep
-  (`Op::CleanStaleRequest` in `deferred/command_processor.rs`) runs with
-  `tracked_only = false` and no check for commands in flight, so it still
-  deletes untracked in-flight outputs.
+  The scheduled sweep (`Op::CleanStaleRequest` in
+  `deferred/command_processor.rs`) runs with `tracked_only = false`, so it
+  deletes untracked paths, but only after `BackgroundCleanupGate::try_start_cleanup`
+  finds no command holding a prevention guard (`deferred.rs`; taken in
+  `daemon/server.rs` for streaming commands). An explicit
+  `buck2 clean --stale` is not gated against a build in another client.
 - `--materializations none` controls which final outputs Buck places on disk.
   The host remote-config hook writes only `[buck2_re_client]` and `[hirsel]`.
 

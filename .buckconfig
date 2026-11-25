@@ -31,20 +31,21 @@ num_tokio_workers = 4
 digest_algorithms = SHA256
 sqlite_materializer_state = true
 defer_write_actions = true
-# No scheduled sweep: in the pinned Buck2 it deletes every buck-out path the
-# materializer does not track, and a running action's outputs are untracked, so
-# a tick mid-build deletes them (tools/buck2/README.md, "Stale outputs").
-# `buck2 clean --stale --tracked-only` applies the policy below: outputs not
-# used for 6 h; below 10% free, adapt down to 1 h; active artifacts protected.
-clean_stale_enabled = false
+# Prune inactive outputs hourly after 6 h; below 10% free, adapt down to 1 h.
+# Keep active artifacts and the adaptive minimum TTL protected. The pinned
+# Buck2 skips a tick while any command runs (tools/buck2/README.md, "Stale
+# outputs"); releases before 2026-11-01 deleted in-flight outputs.
+clean_stale_enabled = true
 clean_stale_artifact_ttl_hours = 6
+clean_stale_period_hours = 1
+clean_stale_start_offset_hours = 0.1
 clean_stale_low_disk_threshold = 10
 clean_stale_low_disk_adaptive_enabled = true
 clean_stale_low_disk_adaptive_min_ttl_hours = 1
 clean_stale_low_disk_adaptive_delete_intermediate_within_min_ttl = false
 clean_stale_low_disk_adaptive_unmaterialize_active = false
 [project]
-ignore = .git, buck-out, .buck2, target, tools/buck2/bin, .hirsel-core, **/.hirsel-core, **/.hirsel-core/**
+ignore = .git, buck-out, .buck2/bin, .buck2/*.json, .buck2/*.lock, .buck2/cargo-deny-*, target, tools/buck2/bin, .hirsel-core, **/.hirsel-core, **/.hirsel-core/**
 [buck2_re_client]
 # Bound the number of remote actions one daemon keeps in flight.
 execution_concurrency_limit = 32

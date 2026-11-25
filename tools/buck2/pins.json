@@ -1,11 +1,11 @@
 {
   "buck2": {
-    "release": "2026-09-15",
-    "commit": "6507dd157a6f81a810c48583edf1758dd0c337c5",
-    "prelude_commit": "4d101dce3482c35b32f9f1e7072b354ae789d256",
-    "url": "https://github.com/facebook/buck2/releases/download/2026-09-15/buck2-x86_64-unknown-linux-musl.zst",
-    "archive_sha256": "631eb84a8925d19146e0f5d594b9f2d0b1f0864e63f24e0d5914a75a6a0a4dea",
-    "executable_sha256": "8d91d8d3654531f137ee1a0f2752cd67446065c8a2c65a02ee2c810b7899a4c9"
+    "release": "2026-11-15",
+    "commit": "5b3b13d3eacefe325bf971369197e33c5f4b3968",
+    "prelude_commit": "a377c4e4eb69b4bbea2e1309283ec7a699c2fb88",
+    "url": "https://github.com/facebook/buck2/releases/download/2026-11-15/buck2-x86_64-unknown-linux-musl.zst",
+    "archive_sha256": "0279c16e7229a484cb0e67d678ac3c6d1661648c89124917f2ae0d92472413ea",
+    "executable_sha256": "94279cf7268dbe3e773490952099ae1bba36f847529182beda4561430d6cb47f"
   },
   "cargo-deny": {
     "url": "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.22.0/cargo-deny-0.22.0-x86_64-unknown-linux-musl.tar.gz",
@@ -15,20 +15,20 @@
   },
   "prelude_overlay": {
     "inputs": {
-      "rust/build.bzl": "2a221551779f2e4668ec3e7acac0e97fc9d557126898a6d32843647bf19546ea",
+      "rust/build.bzl": "d849c45e74fb2f945f5355b16585b22ecf8be8d7aab706a98ce831e036b1847d",
       "rust/failure_filter.bzl": "b53d328b53f9b319784d121973c95dc63516a1f98c217859bf9151876465270c",
       "rust/sources.bzl": "a291683f417e408a6f7ba012dff370e83f859050c31b8a5a30dd2132f01e27b2",
       "utils/cmd_script.bzl": "b12d3d22b08ae2d1c170b6333854a0a0e047478f08c173d9595e0a160b79e20e",
-      "rust/rust_library.bzl": "17e84e3f3f608e07ac3a9365b354181d79e35510fe3bc6c8a7ddf8a1b12158fe",
-      "tests/re_utils.bzl": "f4cec641e0f72489c584e3a9e25b960f5b437561deb851accceffa2e1733b716"
+      "rust/rust_library.bzl": "a678e12e25c52580f7309239a9b1df6c7a431a8956c66bf87f65fc7ca519c02c",
+      "tests/re_utils.bzl": "5b105da5bfbdd26308d858465b039ba2e138c71bbd61b8a39fbc70ab243dea10"
     },
     "outputs": {
-      "rust/build.bzl": "7b5a38fdcedb5a2e20ccc66988ea80cf27d3532a54459158d04cdaa497d17384",
+      "rust/build.bzl": "85f283d76e87b8c8c7bea95fe6cd02ed991f4c0c5e17fff7d75d47e07fde0ecd",
       "rust/failure_filter.bzl": "d5213bc9ee0ab7acec4864d609a21768a8dde31cf1b0ed9cf8d75c08d4bfc512",
       "rust/sources.bzl": "eebeb2fa0f01e7026479e117f5fd1ef01983c9acce80ca51f6554108ea633cec",
       "utils/cmd_script.bzl": "c6898d8daa6c9fda2039b6ccd881803fa6fa27b697c458d621b31a32c6778e04",
-      "rust/rust_library.bzl": "6198cc5106583e34afc303f528a00af5c5770aec9e48f593d22f0ab7d26f12e0",
-      "tests/re_utils.bzl": "6a680b929f2b260e093bba2f79af452a1d8bc03e292e9ee75371c5403ab27ce6"
+      "rust/rust_library.bzl": "003f007681eecba0ee6a891d95e535525d60679f761dd077e009fd7745681bc5",
+      "tests/re_utils.bzl": "44167e2e321ca87aa53fc9136dcba621919264122876c8dfcaabd13e009fb3cd"
     }
   }
 }

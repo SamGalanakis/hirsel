@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Guard build/test entry before handing the original arguments to pinned Buck2."""
+import json
 import os
 from pathlib import Path
 import sys
@@ -33,7 +34,10 @@ def main():
             sys.exit('buck2: pinned LLVM tree or hermetic C++ headers missing/stale; run python3 tools/buck2/prepare.py')
         if generated.stale(ROOT):
             sys.exit('buck2: generated inputs are stale; run python3 tools/buck2/sync.py --if-stale')
-    executable = ROOT / '.buck2/bin/buck2-real'
+    pin = json.loads((ROOT / 'tools/buck2/pins.json').read_text())['buck2']['executable_sha256']
+    executable = ROOT / f'.buck2/bin/buck2-{pin}'
+    if not executable.is_file():
+        sys.exit('buck2: the pinned Buck2 release is not installed; run python3 tools/buck2/prepare.py')
     os.execv(executable, [str(executable), *sys.argv[1:]])
 
 

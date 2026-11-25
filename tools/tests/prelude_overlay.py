@@ -14,19 +14,20 @@ SPEC.loader.exec_module(overlay)
 # Each fixture file holds its stock anchors inside unrelated prelude text.
 STOCK = {
     'tests/re_utils.bzl': 'def executor():\n    local_enabled = re_props_copy.pop("local_enabled", False)\n'
-                          '    default = CommandExecutorConfig(\n        remote_enabled = True,\n    )\n'
-                          '    if listing:\n        other = CommandExecutorConfig(\n            remote_enabled = True,\n        )\n',
+                          '    default = CommandExecutorConfig(\n        remote_enabled = remote_enabled,\n    )\n'
+                          '    if listing:\n        other = CommandExecutorConfig(\n            remote_enabled = remote_enabled,\n        )\n',
     'rust/rust_library.bzl': 'def doctest():\n        rustdoc_test_info = ExternalRunnerTestInfo(\n            type = "rustdoc",\n            default_executor = re_executors.default_executor,\n        )\n',
     'rust/build.bzl': ''.join((
-        'def compile(ctx, compile_ctx):\n'
-        '    cmd_args(\n'
-        '        hidden = compile_ctx.transitive_srcs.project_as_args("artifacts") if compile_ctx else [],\n'
-        '    )\n\n'
+        'def _compute_common_args(ctx, compile_ctx):\n'
+        '    if not arch:\n'
+        '        dep_args.add(cmd_args(hidden = compile_ctx.transitive_srcs.project_as_args("artifacts")))\n'
+        '    else:\n'
+        '        arch_dep_args.add(cmd_args(hidden = compile_ctx.transitive_srcs.project_as_args("artifacts")), arch_dep_argsfiles)\n\n'
         'def symlinked_dirs(ctx):\n',
         overlay.STOCK_DEPENDENCY_DIRS,
-        '\ndef rustdoc(ctx, compile_ctx, toolchain_info):\n'
+        '\ndef _rustc_invoke(ctx, compile_ctx, rustc_bin):\n'
         '    cmd_args(\n'
-        '        hidden = [toolchain_info.compiler, compile_ctx.transitive_srcs.project_as_args("artifacts")],\n'
+        '        hidden = [compile_ctx.transitive_srcs.project_as_args("artifacts")] + ([rustc_bin] if arch_programs == None else []),\n'
         '    )\n',
     )),
     'rust/failure_filter.bzl': 'def failure_filter(ctx, compile_ctx):\n' + overlay.STOCK_FAILURE_FILTER,
@@ -57,11 +58,10 @@ class PreludeOverlayGuards(unittest.TestCase):
         build = outputs['rust/build.bzl'].decode()
         self.assertNotIn('category = "deps"', build)
         self.assertIn('ctx.actions.assembled_dir(transitive_dependency_dir', build)
-        self.assertEqual(build.count('project_as_args("checkout_artifacts")'), 2)
+        self.assertEqual(build.count('project_as_args("checkout_artifacts")'), 3)
         self.assertNotIn('project_as_args("artifacts")', build)
         self.assertIn('ctx.actions.dynamic_output(', outputs['rust/failure_filter.bzl'].decode())
         self.assertIn('owner.package == "third-party"', outputs['rust/sources.bzl'].decode())
-        self.assertIn('supports_test_execution_caching = True', outputs['rust/rust_library.bzl'].decode())
         self.assertEqual(outputs['tests/re_utils.bzl'].decode().count('priority = priority,'), 2)
         self.assertIn('TEST_TARGET', outputs['rust/rust_library.bzl'].decode())
         for relative, data in outputs.items():

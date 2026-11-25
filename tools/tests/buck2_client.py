@@ -4,6 +4,7 @@ import argparse
 from contextlib import redirect_stdout
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -34,11 +35,13 @@ class BuckClient(unittest.TestCase):
         binary = '#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/called"\nexit 17\n'
         state = self.root / '.buck2'
         (state / 'bin').mkdir(parents=True)
-        for name in ('buck2', 'buck2-real'):
+        pin = {'executable_sha256': hashlib.sha256(binary.encode()).hexdigest()}
+        (scripts / 'pins.json').write_text(json.dumps({'buck2': pin}))
+        # A release left by an earlier pin, which bootstrap removes.
+        for name in ('buck2', f"buck2-{pin['executable_sha256']}", 'buck2-real'):
             file = state / 'bin' / name
             file.write_text(binary)
             file.chmod(0o755)
-        pin = {'executable_sha256': hashlib.sha256(binary.encode()).hexdigest()}
         with patch.object(bootstrap, 'ROOT', self.root), patch.object(bootstrap, 'PIN', pin), redirect_stdout(io.StringIO()):
             bootstrap.prepare_client(argparse.Namespace(client_only=True), state, -1)
         self.client = state / 'bin/buck2'
@@ -62,7 +65,6 @@ class BuckClient(unittest.TestCase):
             file = llvm / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.touch()
-        import json
         wanted = bootstrap_llvm.identity()
         (llvm / bootstrap_llvm.RECEIPT).write_text(json.dumps(wanted))
         # identity() reads this lock relative to the copied checkout.
@@ -101,6 +103,16 @@ class BuckClient(unittest.TestCase):
         for command in ('kill', 'status', 'log'):
             result = self.run_client('--isolation-dir', 'test', command, 'build')
             self.assertEqual(result.returncode, 17, result.stderr)
+
+    def test_a_changed_pin_refuses_the_installed_release(self):
+        # An older release with the stale sweep must not run under a config made for the new pin.
+        self.assertFalse((self.root / '.buck2/bin/buck2-real').exists())
+        (self.root / 'tools/buck2/pins.json').write_text(json.dumps({'buck2': {'executable_sha256': 'f' * 64}}))
+        for command in ('build', 'kill'):
+            result = self.run_client(command, '//:target')
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('python3 tools/buck2/prepare.py', result.stderr)
+            self.assertFalse(self.called.exists())
 
     def test_missing_headers_name_prepare(self):
         header = self.root / 'tools/buck2/toolchains/llvm-files/sysroot/usr/include/c++/13/vector'

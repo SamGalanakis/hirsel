@@ -57,6 +57,17 @@ DIRECT = {
 }
 
 
+def unsupported_fixture(case):
+    """Name the native fixture a campaign build cannot reproduce, or None.
+
+    A file-level `test-env` is not one: it adds a second native run beside the
+    base run, and the campaign's seeded run is that base run."""
+    for fixture in ('stdout', 'stderr', 'schedule', 'host_op'):
+        if getattr(case, fixture):
+            return fixture
+    return None
+
+
 def seeded_package_laws(package):
     """A package test opts in with its simulation-specific Env parameter."""
     directory = ROOT / 'core/programs' / package
@@ -76,7 +87,7 @@ def seeded_package_laws(package):
 def selected_laws():
     laws = {'postgres': {f'postgres@1/sim_tests/{name}': name for name in POSTGRES}}
     for case in std_native.discover(ROOT, []):
-        if case.name in DIRECT or std_native.simulated_network_case(case):
+        if (case.name in DIRECT or std_native.simulated_network_case(case)) and not unsupported_fixture(case):
             module = case.test_of or f'tests/{case.file.stem}'
             name = case.call.split('(')[0]
             key = f'{case.package}@1/{module}/{name}'
@@ -147,8 +158,8 @@ def contract_inputs(group, work):
             else:
                 source += std_native.simulation_support('sim')
         for law, case in cases:
-            if case.stdout or case.stderr or case.schedule or case.host_op or case.run_env:
-                raise ValueError(f'{law} needs an unsupported campaign fixture')
+            if fixture := unsupported_fixture(case):
+                raise ValueError(f'{law} needs an unsupported campaign fixture: {fixture}')
             name = case.call.split('(')[0]
             test = f'campaign_{name}'
             if in_core:

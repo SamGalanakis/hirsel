@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import sim_campaign as prepare
 from vopr_failure_groups import group
 
 
@@ -81,6 +82,17 @@ class FailureGroups(unittest.TestCase):
             self.assertEqual(rows[0]["timed_out"], True)
             self.assertEqual(rows[0]["failure_class"], "timeout")
             self.assertEqual(rows[1]["status"], 0)
+
+
+class Preparation(unittest.TestCase):
+    def test_every_selected_contract_law_builds_a_campaign_entry(self):
+        # A law the inventory selects must never stop preparation as an
+        # unsupported fixture (NET-18 public_connect_preflight carries only a
+        # file-level test-env, which the seeded base run does not need).
+        contracts = prepare.selected_laws()["contracts"]
+        with tempfile.TemporaryDirectory() as held:
+            _, entries = prepare.contract_inputs(contracts, Path(held))
+        self.assertEqual(entries.keys(), contracts.keys())
 
 
 if __name__ == "__main__":

@@ -1,0 +1,499 @@
+// L88 (a)-(f) through the public path (§13.5 step 2, the "AP6 at promotion"
+// table and traces (e), (f)). The fixture is a Cold Tiered table of 160
+// 48-byte rows whose leaves and root one cut emitted into class-3 pack P,
+// the lowest Tiered pack, so P's PACK_INDEX row 0 is the first leaf A and
+// row 1 the second leaf F. Every pack is selected (`compact_permille` 1001)
+// and each cut probes one row (`probe_budget` 1). A pin's cut is the cut
+// that crashes, at each row of the §13.6 table. After every cut the walker
+// over every head, pin and queue row finds each stamp at one location in a
+// listed pack on disk (AP6), each pin reads the rows its Snapshot held, and
+// after P retires a reopen reads them again (no `Corrupt(Absent)`).
+
+type GateFixture {
+    rows: Table[u64, Bytes],
+    options: Options,
+    pack: u64,
+    frames: u64,
+    leaves: List[GateLeaf]
+}
+
+fn gate_l88_options(floor: u64) -> Result[Options, Error] {
+    let mut options = l70_open_options(floor)?
+    options.probe_budget = 1
+    options.compact_permille = 1001
+    Ok(take options)
+}
+
+// Builds the table, then checks the trace's shape from the pack files: the
+// root and every leaf in P, P the lowest listed Tiered pack, and A the
+// lowest data offset in P.
+fn gate_l88_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[GateFixture, Error] waits {
+    let floor = 182375272u64
+    let rows = compact_cold_table_of(d, c, r, tasks, floor, 160, 48)?
+    let probing = open(tasks, d, c, r, l69_options(floor)?)?
+    let (root, leaves) = gate_leaves(d, probing, 0, rows.id)?
+    let pack = root.pack
+    if list.len(leaves) < 3 {
+        fail("L88: the fixture table has at least three leaves")
+    }
+    for k in 0u64 .. list.len(leaves) {
+        if leaves[k].at.pack != pack || (k != 0 && leaves[k].at.offset <= leaves[0u64].at.offset) || root.offset <= leaves[0u64].at.offset {
+            fail("L88: the fixture's leaves and root are in P, with A at PACK_INDEX row 0")
+        }
+    }
+    let mut frames = 0u64
+    let mut inventory = std.omap.range(disk_state(probing).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, listed)) = std.omap.next(mut inventory) {
+        if listed.class < 3 {
+            continue
+        }
+        if seq < pack {
+            fail("L88: P is the lowest Tiered pack, so the budget-one probe starts there")
+        }
+        if seq == pack {
+            frames = int.widen(listed.frames)
+        }
+    }
+    close(take probing)?
+    Ok(GateFixture(rows: rows, options: gate_l88_options(floor)?, pack: pack, frames: frames, leaves: take leaves))
+}
+
+fn gate_put(mut db: Db, rows: Table[u64, Bytes], key: u64, edit: u8) -> Result[(), Error] waits {
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let Committed(_) = run(mut db, Some(100000000), copy_env((fixture, key, edit)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, u8)) -> Result[(), Error] {
+        put(mut tx, env.0, env.1, compact_value_of(env.1, env.2, 48))
+    })? else {
+        fail("L88: the overwrite commits")
+    }
+    Ok(())
+}
+
+// The pin's cut, crashed at `crash`'s row of the §13.6 table.
+fn gate_pin_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, take db: Db, name: String, take s: Snapshot, crash: GateCrash) -> Result[Db, Error] waits {
+    let mut carried = take db
+    if let NoCrash = crash {
+        let _ = pin(mut carried, clone(name), s)?
+        drop(take s)
+        return Ok(take carried)
+    }
+    let delta = pin_delta(mut carried, ApplicationPin, clone(name), s)?
+    drop(take s)
+    let first_output = disk_state(carried).pages.next_pack
+    let sealed = refused_cut_bytes(mut carried, take delta)?
+    if let Some(_) = pinned(carried, clone(name)) {
+        fail("§13.6 crash: a refused cut installs no pin")
+    }
+    let reopened = gate_crash_reopen(d, c, r, tasks, options, take carried, sealed, first_output, crash)?
+    if !gate_published(crash) {
+        if let Some(_) = pinned(reopened, name) {
+            fail("§13.6 crash: the previous generation recovers without the pin")
+        }
+    }
+    Ok(take reopened)
+}
+
+// Every row of `s` reads as written: 0 means the fixture's value, and
+// `deleted` rows are absent.
+fn gate_snapshot_rows(db: Db, s: Snapshot, rows: Table[u64, Bytes], edits: Map[u64, u8], deleted: Map[u64, ()]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    for key in 0u64 .. 160 {
+        let wanted: Option[Bytes] = if map.contains(deleted, key) { None } else { Some(compact_value_of(key, map.get_or(edits, key, 0u8), 48)) }
+        if get(read_handle, s, rows, key)? != wanted {
+            fail("L88: every holder reads the rows its Snapshot held")
+        }
+    }
+    drop(take read_handle)
+    Ok(())
+}
+
+fn gate_pin_rows(db: Db, name: String, rows: Table[u64, Bytes], edits: Map[u64, u8]) -> Result[(), Error] waits {
+    let Some(held) = pinned(db, name) else {
+        fail("§13.6 crash: the new generation recovers with the pin")
+    }
+    gate_snapshot_rows(db, held, rows, edits, map.new())?
+    drop(take held)
+    Ok(())
+}
+
+// Runs cuts until P retires, at most `bound`, walking every root after
+// each. Returns the cuts it ran.
+fn gate_settle(d: Dir, mut db: Db, collection: u32, pack: u64, cut_limit: u64) -> Result[u64, Error] waits {
+    let mut cuts = 0u64
+    while compact_listed(db, pack) {
+        if cuts == cut_limit {
+            fail("L88: P's probe finishes within its PACK_INDEX rows at budget one")
+        }
+        let _ = checkpoint(mut db)?
+        cuts += 1
+        let _ = gate_walk_all(d, db, collection)?
+    }
+    Ok(cuts)
+}
+
+fn gate_leaf_rows(leaf: GateLeaf) -> Map[u64, ()] {
+    let mut gone: Map[u64, ()] = map.new()
+    for key in leaf.first .. leaf.first + leaf.rows {
+        map.insert(mut gone, key, ())
+    }
+    take gone
+}
+
+fn gate_probe_rows(db: Db, pack: u64) -> u64 {
+    match map.get(disk_state(db).pages.compaction.probes, pack) {
+        Some(cursor) => cursor.rows,
+        None => 0,
+    }
+}
+
+// L88 (a): main overwrites a row of F, so its head is R₂ → {A, F₂}. Cut 1
+// probes A, matches it under R₂ and moves it to A′ with A's stamp, and P
+// stays listed. pin(S), S captured while R was main's root, finds R's slot
+// for A in main and takes A′; F and the other leaves keep P or take their
+// moved copies. A's stamp has one location in every generation. Seeded bug
+// `promote_in_place` (no lookup): the pin re-copies A, so its stamp is at
+// A′ and at the pin's copy.
+fn gate_l88_moved_leaf(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let fixture = gate_l88_fixture(d, c, r, tasks)?
+    let rows: Table[u64, Bytes] = clone(fixture.rows)
+    let mut db = open(tasks, d, c, r, fixture.options)?
+    let s = snapshot(db)
+    let edited = fixture.leaves[1u64].first
+    gate_put(mut db, rows, edited, 1)?
+    let _ = checkpoint(mut db)?
+    let (_, moved) = gate_leaves(d, db, 0, rows.id)?
+    if !compact_listed(db, fixture.pack) || moved[0u64].at.pack == fixture.pack || moved[0u64].at.stamp != fixture.leaves[0u64].at.stamp {
+        fail("L88 (a): cut 1 moves A out of P with its stamp, and P stays listed")
+    }
+    let mut pinned_db = gate_pin_cut(d, c, r, tasks, fixture.options, take db, "s", take s, crash)?
+    let _ = gate_walk_all(d, pinned_db, rows.id)?
+    let mut head_edits: Map[u64, u8] = map.new()
+    map.insert(mut head_edits, edited, 1u8)
+    gate_l88_finish(d, c, r, tasks, fixture, take pinned_db, "s", head_edits, map.new(), map.new(), gate_pin_kept(crash))
+}
+
+// Settles P, then reads the pin and the head, closes, reopens, walks and
+// reads again.
+fn gate_l88_finish(d: Dir, c: Clock, r: Random, tasks: Tasks, fixture: GateFixture, take db: Db, name: String, head_edits: Map[u64, u8], deleted: Map[u64, ()], pin_edits: Map[u64, u8], published: bool) -> Result[(), Error] waits {
+    let mut settling = take db
+    let _ = gate_settle(d, mut settling, fixture.rows.id, fixture.pack, 4 * fixture.frames + 8)?
+    gate_l88_reads(settling, clone(name), fixture.rows, head_edits, deleted, pin_edits, published)?
+    close(take settling)?
+    let reopened = open(tasks, d, c, r, fixture.options)?
+    let _ = gate_walk_all(d, reopened, fixture.rows.id)?
+    gate_l88_reads(reopened, name, fixture.rows, head_edits, deleted, pin_edits, published)?
+    close(take reopened)
+}
+
+fn gate_l88_reads(db: Db, name: String, rows: Table[u64, Bytes], head_edits: Map[u64, u8], deleted: Map[u64, ()], pin_edits: Map[u64, u8], published: bool) -> Result[(), Error] waits {
+    let head = snapshot(db)
+    gate_snapshot_rows(db, head, rows, head_edits, deleted)?
+    drop(take head)
+    if published {
+        gate_pin_rows(db, name, rows, pin_edits)?
+    }
+    Ok(())
+}
+
+fn gate_pin_kept(crash: GateCrash) -> bool {
+    match crash {
+        NoCrash => true,
+        AfterRename => true,
+        _ => false,
+    }
+}
+
+@test
+fn test_l88_pin_takes_the_moved_leaf(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_moved_leaf(d, c, r, tasks, NoCrash)
+}
+
+@test
+fn test_l88_pin_takes_the_moved_leaf_refused_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_moved_leaf(d, c, r, tasks, SealRefused)
+}
+
+@test
+fn test_l88_pin_takes_the_moved_leaf_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_moved_leaf(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l88_pin_takes_the_moved_leaf_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_moved_leaf(d, c, r, tasks, AfterRename)
+}
+
+// L88 (b), the v2.96 row: main deletes A's rows, so no head reaches A. Cut 1
+// probes A (PACK_INDEX row 0), finds no match and publishes with P's cursor
+// at 1. pin(S) at cut 2 finds A in no lookup root, and A is behind the
+// cursor, so the pin copies it with its stamp. Later cuts move F and the
+// rest and retire P, and the pin reads A after P's Remove and after a
+// reopen. Seeded bug `promote_behind_cursor` (`promotion_can_keep` ignores
+// the cursor): the pin keeps A in P, and P retires under it.
+fn gate_l88_behind_cursor(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let fixture = gate_l88_fixture(d, c, r, tasks)?
+    let rows: Table[u64, Bytes] = clone(fixture.rows)
+    let mut db = open(tasks, d, c, r, fixture.options)?
+    let s = snapshot(db)
+    let first = fixture.leaves[0u64]
+    gate_delete_rows(mut db, rows, first.first, first.first + first.rows)?
+    let _ = checkpoint(mut db)?
+    if !compact_listed(db, fixture.pack) || gate_probe_rows(db, fixture.pack) != 1 {
+        fail("L88 (b): cut 1 probes A, matches nothing, and leaves P's cursor at 1")
+    }
+    let pinned_db = gate_pin_cut(d, c, r, tasks, fixture.options, take db, "s", take s, crash)?
+    let _ = gate_walk_all(d, pinned_db, rows.id)?
+    gate_l88_finish(d, c, r, tasks, fixture, take pinned_db, "s", map.new(), gate_leaf_rows(first), map.new(), gate_pin_kept(crash))
+}
+
+// L88 (d): main deletes A's and F's rows, and P's probe moves the other
+// leaves and retires P while S's lease keeps its file. Pins P1 and P2 of S
+// publish at consecutive cuts. P1 finds A and F nowhere and P unlisted, so
+// it copies them with their stamps; P2's lookups include P1's root and take
+// P1's copies. Stamps 30 and 31 each have one location. Seeded bug
+// `promote_copies_each` (a promotion's lookups skip the other holders): P2
+// copies A and F again.
+fn gate_l88_two_pins(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let fixture = gate_l88_fixture(d, c, r, tasks)?
+    let rows: Table[u64, Bytes] = clone(fixture.rows)
+    let mut db = open(tasks, d, c, r, fixture.options)?
+    let s = snapshot(db)
+    let first = fixture.leaves[0u64]
+    let second = fixture.leaves[1u64]
+    gate_delete_rows(mut db, rows, first.first, second.first + second.rows)?
+    let mut deleted = gate_leaf_rows(first)
+    for key in second.first .. second.first + second.rows {
+        map.insert(mut deleted, key, ())
+    }
+    let _ = gate_settle(d, mut db, rows.id, fixture.pack, 4 * fixture.frames + 8)?
+    let _ = pin(mut db, "p1", s)?
+    let _ = gate_walk_all(d, db, rows.id)?
+    let pinned_db = gate_pin_cut(d, c, r, tasks, fixture.options, take db, "p2", take s, crash)?
+    let _ = gate_walk_all(d, pinned_db, rows.id)?
+    gate_pin_rows(pinned_db, "p1", rows, map.new())?
+    gate_l88_finish(d, c, r, tasks, fixture, take pinned_db, "p2", map.new(), take deleted, map.new(), gate_pin_kept(crash))
+}
+
+// L88 (e), trace (e): S0 is captured while R is main's root; main
+// overwrites a row of F; cut 1 moves A to A′ with stamp 30 and P stays
+// listed with its cursor at 1. S1 is captured (its root R₂ names A′); main
+// overwrites a row of A′. pin(S0) copies A, behind the cursor, to A″ with
+// stamp 30. pin(S1), at the next cut, finds stamp 30 in S0's pin and takes
+// A″, so A′ is reached by no root. Seeded bug `promote_shortcut` (no
+// lookup): S1 keeps A′, and stamp 30 is at A″ and A′.
+fn gate_l88_two_generations(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let fixture = gate_l88_fixture(d, c, r, tasks)?
+    let rows: Table[u64, Bytes] = clone(fixture.rows)
+    let mut db = open(tasks, d, c, r, fixture.options)?
+    let s0 = snapshot(db)
+    let a_row = fixture.leaves[0u64].first
+    let f_row = fixture.leaves[1u64].first
+    gate_put(mut db, rows, f_row, 1)?
+    let _ = checkpoint(mut db)?
+    let (_, moved) = gate_leaves(d, db, 0, rows.id)?
+    if !compact_listed(db, fixture.pack) || moved[0u64].at.pack == fixture.pack || moved[0u64].at.stamp != fixture.leaves[0u64].at.stamp || gate_probe_rows(db, fixture.pack) != 1 {
+        fail("L88 (e): cut 1 moves A out of P with its stamp, and P's cursor is 1")
+    }
+    let s1 = snapshot(db)
+    gate_put(mut db, rows, a_row, 2)?
+    let _ = pin(mut db, "s0", s0)?
+    drop(take s0)
+    let _ = gate_walk_all(d, db, rows.id)?
+    let pinned_db = gate_pin_cut(d, c, r, tasks, fixture.options, take db, "s1", take s1, crash)?
+    let _ = gate_walk_all(d, pinned_db, rows.id)?
+    gate_pin_rows(pinned_db, "s0", rows, map.new())?
+    let mut s1_edits: Map[u64, u8] = map.new()
+    map.insert(mut s1_edits, f_row, 1u8)
+    let mut head_edits: Map[u64, u8] = map.new()
+    map.insert(mut head_edits, f_row, 1u8)
+    map.insert(mut head_edits, a_row, 2u8)
+    gate_l88_finish(d, c, r, tasks, fixture, take pinned_db, "s1", head_edits, map.new(), s1_edits, gate_pin_kept(crash))
+}
+
+// L88 (f), trace (f): main deletes A's rows, and cut 1 probes A with no
+// match. A pin of S publishes at every later cut. Each pin copies A (behind
+// the cursor) or takes an earlier pin's copy, and restarts no probe, so P,
+// with N PACK_INDEX rows, retires at cut N: N - 1 pin cuts after cut 1. A
+// crashed pin (the first) is followed by plain cuts; the reopen restarts
+// the probe, so only the bound is checked there. Seeded bugs
+// `promote_resets_cursor` (P never retires while pins keep coming) and
+// `promote_behind_cursor` (P retires under the pins' A).
+fn gate_l88_pin_every_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let fixture = gate_l88_fixture(d, c, r, tasks)?
+    let rows: Table[u64, Bytes] = clone(fixture.rows)
+    let mut db = open(tasks, d, c, r, fixture.options)?
+    let s = snapshot(db)
+    let first = fixture.leaves[0u64]
+    gate_delete_rows(mut db, rows, first.first, first.first + first.rows)?
+    let _ = checkpoint(mut db)?
+    if gate_probe_rows(db, fixture.pack) != 1 {
+        fail("L88 (f): cut 1 probes A and leaves P's cursor at 1")
+    }
+    if let NoCrash = crash {
+        let mut pins = 0u64
+        while compact_listed(db, fixture.pack) {
+            if pins == fixture.frames {
+                fail("L88 (f): P retires within its PACK_INDEX rows while a pin publishes at every cut")
+            }
+            let mut name = string.from("p")
+            string.push_u64(mut name, pins)
+            let _ = pin(mut db, clone(name), s)?
+            pins += 1
+            let _ = gate_walk_all(d, db, rows.id)?
+            gate_pin_rows(db, name, rows, map.new())?
+        }
+        drop(take s)
+        if pins + 1 != fixture.frames {
+            fail("L88 (f): a probe of N rows at budget one retires P at cut N")
+        }
+        return gate_l88_finish(d, c, r, tasks, fixture, take db, "p0", map.new(), gate_leaf_rows(first), map.new(), true)
+    }
+    let pinned_db = gate_pin_cut(d, c, r, tasks, fixture.options, take db, "p0", take s, crash)?
+    let _ = gate_walk_all(d, pinned_db, rows.id)?
+    gate_l88_finish(d, c, r, tasks, fixture, take pinned_db, "p0", map.new(), gate_leaf_rows(first), map.new(), gate_pin_kept(crash))
+}
+
+@test
+fn test_l88_pin_copies_behind_the_cursor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_behind_cursor(d, c, r, tasks, NoCrash)
+}
+
+@test
+fn test_l88_pin_copies_behind_the_cursor_refused_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_behind_cursor(d, c, r, tasks, SealRefused)
+}
+
+@test
+fn test_l88_pin_copies_behind_the_cursor_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_behind_cursor(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l88_pin_copies_behind_the_cursor_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_behind_cursor(d, c, r, tasks, AfterRename)
+}
+
+@test
+fn test_l88_two_pins_share_one_copy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_two_pins(d, c, r, tasks, NoCrash)
+}
+
+@test
+fn test_l88_two_pins_share_one_copy_refused_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_two_pins(d, c, r, tasks, SealRefused)
+}
+
+@test
+fn test_l88_two_pins_share_one_copy_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_two_pins(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l88_two_pins_share_one_copy_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_two_pins(d, c, r, tasks, AfterRename)
+}
+
+@test
+fn test_l88_two_generations_share_one_copy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_two_generations(d, c, r, tasks, NoCrash)
+}
+
+@test
+fn test_l88_two_generations_share_one_copy_refused_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_two_generations(d, c, r, tasks, SealRefused)
+}
+
+@test
+fn test_l88_two_generations_share_one_copy_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_two_generations(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l88_two_generations_share_one_copy_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_two_generations(d, c, r, tasks, AfterRename)
+}
+
+@test
+fn test_l88_pin_every_cut_restarts_no_probe(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_pin_every_cut(d, c, r, tasks, NoCrash)
+}
+
+@test
+fn test_l88_pin_every_cut_restarts_no_probe_refused_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_pin_every_cut(d, c, r, tasks, SealRefused)
+}
+
+@test
+fn test_l88_pin_every_cut_restarts_no_probe_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_pin_every_cut(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l88_pin_every_cut_restarts_no_probe_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_pin_every_cut(d, c, r, tasks, AfterRename)
+}
+
+// L88 (c), Hot slots: an empty table becomes Tiered, and 160 rows are put
+// before any cut, so main's leaves H and root G₁ are Hot. Capture S′. Cut 1
+// seals them, and main's image of each leaf is the sealed one, while S′
+// keeps its Hot images. Main overwrites a row of the second leaf, so its
+// root G₂ still names the first leaf's sealed location. pin(S′) finds each
+// Hot leaf's stamp in main and takes the sealed location; G₁ and the
+// overwritten leaf are not found and T2 emits them. Seeded bug
+// `hot_promote_twice` (Hot slots skip the lookup): T2 emits S′'s first leaf
+// again under its stamp, which main already reaches at its sealed place.
+fn gate_l88_hot_slots(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let options = gate_l88_options(floor)?
+    let mut db = open(tasks, d, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    set_residency(mut db, rows.id, Tiered)?
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let Committed(_) = run(mut db, Some(100000000), copy_env(fixture), fn(mut tx: Tx, env: Table[u64, Bytes]) -> Result[(), Error] {
+        for key in 0u64 .. 160 {
+            put(mut tx, env, key, compact_value_of(key, 0, 48))?
+        }
+        Ok(())
+    })? else {
+        fail("L88 (c): the puts commit")
+    }
+    let s = snapshot(db)
+    match std.page.collection_slot(s.roots.collections.root, prefix(rows.id)?) {
+        Some((HotPage(_), _)) => (),
+        _ => fail("L88 (c): puts before any cut leave the captured Tiered root Hot"),
+    }
+    let _ = checkpoint(mut db)?
+    let (_, leaves) = gate_leaves(d, db, 0, rows.id)?
+    let edited = leaves[1u64].first
+    gate_put(mut db, rows, edited, 1)?
+    let pinned_db = gate_pin_cut(d, c, r, tasks, options, take db, "s", take s, crash)?
+    let _ = gate_walk_all(d, pinned_db, rows.id)?
+    let mut head_edits: Map[u64, u8] = map.new()
+    map.insert(mut head_edits, edited, 1u8)
+    gate_l88_reads(pinned_db, "s", rows, head_edits, map.new(), map.new(), gate_pin_kept(crash))?
+    close(take pinned_db)?
+    let reopened = open(tasks, d, c, r, options)?
+    let _ = gate_walk_all(d, reopened, rows.id)?
+    gate_l88_reads(reopened, "s", rows, head_edits, map.new(), map.new(), gate_pin_kept(crash))?
+    close(take reopened)
+}
+
+@test
+fn test_l88_hot_slot_takes_the_sealed_copy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_hot_slots(d, c, r, tasks, NoCrash)
+}
+
+@test
+fn test_l88_hot_slot_takes_the_sealed_copy_refused_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_hot_slots(d, c, r, tasks, SealRefused)
+}
+
+@test
+fn test_l88_hot_slot_takes_the_sealed_copy_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_hot_slots(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l88_hot_slot_takes_the_sealed_copy_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_l88_hot_slots(d, c, r, tasks, AfterRename)
+}

@@ -159,6 +159,7 @@ dirs = ["."]
 "tiered_residency_laws.hirsel" = "store"
 "tiered_crash_arm_laws.hirsel" = "store"
 "tiered_gate_laws.hirsel" = "store"
+"tiered_pin_gate_laws.hirsel" = "store"
 "tiered_random_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
@@ -450,4 +451,76 @@ limit = 536870912
 limit = 536870912
 
 [tests.runs."store@1/store/test_l87_queue_rows_move_as_roots_crash_after_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_takes_the_moved_leaf"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_takes_the_moved_leaf_refused_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_takes_the_moved_leaf_crash_before_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_takes_the_moved_leaf_crash_after_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_copies_behind_the_cursor"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_copies_behind_the_cursor_refused_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_copies_behind_the_cursor_crash_before_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_copies_behind_the_cursor_crash_after_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_two_pins_share_one_copy"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_two_pins_share_one_copy_refused_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_two_pins_share_one_copy_crash_before_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_two_pins_share_one_copy_crash_after_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_two_generations_share_one_copy"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_two_generations_share_one_copy_refused_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_two_generations_share_one_copy_crash_before_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_two_generations_share_one_copy_crash_after_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_every_cut_restarts_no_probe"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_every_cut_restarts_no_probe_refused_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_every_cut_restarts_no_probe_crash_before_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_pin_every_cut_restarts_no_probe_crash_after_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_hot_slot_takes_the_sealed_copy"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_hot_slot_takes_the_sealed_copy_refused_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_hot_slot_takes_the_sealed_copy_crash_before_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l88_hot_slot_takes_the_sealed_copy_crash_after_rename"]
 limit = 536870912

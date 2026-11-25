@@ -389,7 +389,7 @@ element a receiver of that negotiation would misread.
 ```hirsel unbuilt
 // module rtcp
 pub type Mode = Compound | Reduced
-pub type Error = Version | Length | Padding | NotCompound | NoCname | Body(u8) | Buffer | Index
+pub type Error = Version | Length | Padding | NotCompound | Body(u8) | Buffer | Index
 pub type Item = Sr(SenderInfo, u8) | Rr(u32, u8) | Sdes(u8) | Bye(u8, Option[(u64, u64)])
     | Nack(u32, u32) | Twcc(u32, u32) | Pli(u32, u32) | Fir(u32) | Other(u8, u8)
 pub type Packet = Packet(item: Item, at: u64, body: u64, end: u64, len: u64)
@@ -437,24 +437,27 @@ length computed in 64-bit arithmetic:
   body check below is on the **unpadded** body.
 - `Body(pt)`: the unpadded body breaks its table row below.
 - `NotCompound`: in `Compound` mode, the first packet is not SR or RR.
-- `NoCname`: in `Compound` mode, the datagram holds no SDES whose chunks include the first
-  packet's sender SSRC with a CNAME
-  ([RFC 3550 §6.1](https://www.rfc-editor.org/rfc/rfc3550#section-6.1)). A lone RR is
-  `NoCname` in `Compound` mode.
+
+`check` asks for no SDES and no CNAME in either mode. RFC 3550 §6.1 tells a sender to put
+an SDES CNAME in every compound packet, but the receive validity checks of
+[RFC 3550 §A.2](https://www.rfc-editor.org/rfc/rfc3550#appendix-A.2) are only version,
+first packet SR or RR, padding and lengths, and libwebrtc and str0m take a compound
+packet without one. Browsers send such packets: Firefox sends lone RRs with no SDES, and
+Chromium's simulcast SRs carry an SDES whose CNAME is empty. Refusing them drops every
+receiver report and sender report of those legs, and with them RTT and lip-sync. An SR or
+RR without a CNAME only leaves its SSRC unnamed.
 
 `Reduced` is passed when the session negotiated `a=rtcp-rsize`. Then every datagram may be
 reduced-size ([RFC 5506 §4.1](https://www.rfc-editor.org/rfc/rfc5506#section-4.1)): it
-need not follow the compound rules, so it may hold any packets in any order, and an SR or
-RR first does not ask for an SDES or a CNAME. libwebrtc sends its NACKs and transport-wide
-feedback this way, as an RR with its report blocks followed by the feedback and no SDES;
-refusing that would drop every NACK such a peer sends. Every other check holds in both
-modes.
+need not follow the compound rules, so it may hold any packets in any order. libwebrtc
+sends its transport-wide feedback alone in its datagram, and its NACKs as an RR with its
+report blocks followed by the NACK and no SDES. Every other check holds in both modes.
 
 | type, format | item | unpadded body |
 |---|---|---|
 | 200 SR | `Sr(info, count)` | at least `24 + 24·RC`; later bytes are a profile extension and are skipped |
 | 201 RR | `Rr(ssrc, count)` | at least `4 + 24·RC` |
-| 202 SDES | `Sdes(count)` | exactly `SC` chunks. Each chunk: an SSRC, then items of `type ‖ length ‖ value`, each inside the body; a CNAME (type 1) has length 1 to 255; then an END byte (0) and zero bytes to the next 32-bit boundary, inside the body |
+| 202 SDES | `Sdes(count)` | exactly `SC` chunks. Each chunk: an SSRC, then items of `type ‖ length ‖ value`, each inside the body; every item has length 0 to 255, a CNAME (type 1) included ([RFC 3550 §6.5](https://www.rfc-editor.org/rfc/rfc3550#section-6.5)); then an END byte (0) and zero bytes to the next 32-bit boundary, inside the body |
 | 203 BYE | `Bye(count, reason)` | `4·SC` bytes of SSRCs, then either nothing or a reason `length ‖ text` inside the body followed by zero bytes to the boundary |
 | 205, FMT 1 | `Nack(sender, media)` | both SSRCs, then an FCI of `4n` bytes, `n >= 1` ([RFC 4585 §6.2.1](https://www.rfc-editor.org/rfc/rfc4585#section-6.2.1)) |
 | 205, FMT 15 | `Twcc(sender, media)` | both SSRCs, then at least the 8-byte FCI prefix; the rest is checked by [RTP-8](#rtp-8-transport-wide-sequence-numbers-and-feedback)'s parser, which `check` runs |
@@ -467,7 +470,7 @@ its item, its start `at`, the start of its body `body`, the end of its unpadded 
 and the datagram length `len`. Every accessor that takes a `Packet` checks the buffer's
 length against `len` (`Buffer`) and stays inside `[body, end)`. `block(pkt, p, i)` answers
 `Index` when `i` is not below the item's count. `cname(pkt, p, ssrc)` finds that SSRC's
-CNAME in an SDES. `nack_next` reads `(PID, BLP)` pairs and `fir_next` reads `(SSRC, seq)`
+first CNAME in an SDES; an empty CNAME is answered as a name of length 0. `nack_next` reads `(PID, BLP)` pairs and `fir_next` reads `(SSRC, seq)`
 entries, each answering `None` at `end`. The caller expands each NACK pair into PID and every
 `PID + i + 1` whose bit `i` is set, and extends each with `seq.estimate` against the stream's
 highest sent index, skipping anything but `Index`.
@@ -493,7 +496,7 @@ always compound ([RFC 5506 §4](https://www.rfc-editor.org/rfc/rfc5506#section-4
 with `a=rtcp-rsize`, feedback that should go at once (NACK, PLI, FIR, TWCC) may go
 reduced-size.
 
-Law: `check` accepts exactly the compound datagrams RFC 3550 §6.1 and A.2 allow and, with
+Law: `check` accepts exactly the compound datagrams RFC 3550 §A.2 allows and, with
 `Reduced`, the reduced-size ones RFC 5506 §4.1 allows, and nothing reaches a stateful operation
 before it does. Every view is bounded by its packet. Each writer's output parses back to its
 inputs, and a refusal appends nothing.
@@ -1700,10 +1703,11 @@ written here and repeated in the law's comment.
   SDES and a count of 4; with `Reduced`, the lone PLI `81 CE 00 02 00 00 00 01 00 00 00 02`
   (sender 1, media 2), the NACK `81 CD 00 03 00 00 00 01 00 00 00 02 FF 9C 80 09` and the FIR
   `84 CE 00 04 00 00 00 01 00 00 00 00 00 00 00 02 07 00 00 00` (target 2, sequence 7,
-  reserved 0); with `Reduced`, a lone RR (count 1) and an RR with one report block followed
-  by a NACK and no SDES (count 2), the shape libwebrtc sends. *Refused:* `P` on the SR
-  (`Padding`); without `Reduced`, a lone RR, that RR + NACK, and an RR with an SDES whose
-  CNAME belongs to another SSRC (`NoCname`); the lone PLI without `Reduced` (`NotCompound`); a
+  reserved 0); without `Reduced` (and so with it), a lone RR (count 1), an RR with one report
+  block followed by a NACK and no SDES (count 2), the shape libwebrtc sends, an RR with an
+  SDES whose CNAME belongs to another SSRC (count 2), and two datagrams captured in N1
+  (2639): Firefox's RR with one report block and no SDES (count 1) and Chromium's simulcast
+  SR followed by an SDES whose CNAME is empty (count 2). *Refused:* `P` on the SR (`Padding`); the lone PLI without `Reduced` (`NotCompound`); a
   length word one past the datagram (`Length`); an SDES with `SC = 2` whose second chunk is
   cut (`Body(202)`); a BYE whose reason length runs past its body (`Body(203)`); a PLI with 4
   bytes of FCI, a NACK with an empty FCI and a FIR with 12 bytes of FCI (`Body(205)` for the NACK);

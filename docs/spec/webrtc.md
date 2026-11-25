@@ -2007,10 +2007,13 @@ W12 and W13 in `speaker_laws.hirsel`):
   compound rules, so in `Reduced` mode the check no longer asks for one. With that change,
   N1 traces show each dropped packet NACKed, found in the history (locally or through a
   unit's `RepairAsk`) and sent as RTX with its rewritten number as OSN. Firefox's lone RRs
-  pass for the same reason, so RR RTT reaches RTP-9 on both browsers. W27 is the law.
-- **Open: RTCP the session still drops.** Chromium's sender reports for its simulcast SSRCs
-  carry a zero-length CNAME and are refused as `Body(SDES)`, so those SRs give no lip-sync
-  and no RTT. They do not block the estimate, because TWCC arrives alone.
+  pass for the same reason on an `rtcp-rsize` session. W27 is the law.
+- **SDES-less and empty-CNAME RTCP (2755).** On a compound session Firefox's lone RRs were
+  still refused as `NoCname`, and Chromium's sender reports for its simulcast SSRCs, whose
+  SDES carries a zero-length CNAME, as `Body(SDES)`, so those legs gave no RTT and no
+  lip-sync. RFC 3550 §A.2 asks a receiver for no CNAME and §6.5 lets an item be empty, as
+  libwebrtc and str0m read them, so rtp.md's check now takes both; `rtcp_compound_rules`
+  carries the captured datagrams.
 - **Open.** After a real `Lost` the service rejoins with a new peer number, but a page
   learns the service's number once, from `Servers`, so its later signals go to the old
   number. A page that joins after a publication is published learns it only from the

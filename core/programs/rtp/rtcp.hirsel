@@ -1,6 +1,6 @@
 pub type Mode: key = Compound | Reduced
 
-pub type Error: key = Version | Length | Padding | NotCompound | NoCname | Body(u8) | Buffer | Index
+pub type Error: key = Version | Length | Padding | NotCompound | Body(u8) | Buffer | Index
 
 pub type SenderInfo: key {
     ssrc: u32,
@@ -98,7 +98,7 @@ fn sdes_walk(pkt: Bytes, body: u64, end: u64, count: u8, want: Option[u32]) -> R
             }
             let size: u64 = int.widen(pkt[pos + 1])
             pos += 2
-            if size > end - pos || (kind == CNAME && size == 0) {
+            if size > end - pos {
                 return Error(Body(SDES))
             }
             if kind == CNAME && mine {
@@ -272,40 +272,24 @@ fn sender_ssrc(it: Item) -> Option[u32] {
 pub fn check(pkt: Bytes, mode: Mode) -> Result[u64, Error] {
     let mut at = 0u64
     let mut packets = 0u64
-    let mut sender: Option[u32] = None
-    let mut named = false
     while let Some(p) = next(pkt, mut at)? {
         if let Twcc(_, _) = p.item {
             if let Error(_) = twcc.parse(pkt, p) {
                 return Error(Body(RTPFB))
             }
         }
-        // RFC 5506 §4.1: a reduced-size datagram need not follow the
-        // compound rules, so only Compound mode asks for a CNAME.
+        // RFC 5506 §4.1: a reduced-size datagram may begin with any packet.
+        // RFC 3550 §6.1's SDES CNAME is a sender rule; A.2's receive checks
+        // do not ask for it, so neither mode does.
         if packets == 0 && mode == Compound {
-            sender = sender_ssrc(p.item)
-            if let None = sender {
+            if let None = sender_ssrc(p.item) {
                 return Error(NotCompound)
-            }
-        }
-        if let Some(ssrc) = sender {
-            if !named {
-                if let Sdes(_) = p.item {
-                    if let Some(_) = cname(pkt, p, ssrc)? {
-                        named = true
-                    }
-                }
             }
         }
         packets += 1
     }
     if packets == 0 {
         return Error(Length)
-    }
-    if let Some(_) = sender {
-        if !named {
-            return Error(NoCname)
-        }
     }
     Ok(packets)
 }

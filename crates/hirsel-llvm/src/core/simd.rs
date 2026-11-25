@@ -310,20 +310,30 @@ impl FunctionEmitter<'_> {
         high: Option<&Value>,
         indices: &Value,
     ) -> Value {
-        if self.abi.target == Target::Aarch64Linux {
-            let mut args = vec![arg(ty.clone(), low.clone())];
-            if let Some(high) = high {
-                args.push(arg(ty.clone(), high.clone()));
-            }
-            args.push(arg(ty.clone(), indices.clone()));
-            let name = if high.is_some() {
-                "llvm.aarch64.neon.tbl2.v16i8"
-            } else {
-                "llvm.aarch64.neon.tbl1.v16i8"
-            };
-            return self.intrinsic(name, ty.clone(), &args);
+        match self.abi.target.arch() {
+            hirsel_core_layout::Arch::X86_64 => self.swizzle_pshufb(ty, 16, low, high, indices),
+            hirsel_core_layout::Arch::Aarch64 => self.neon_table(ty, low, high, indices),
         }
-        self.swizzle_pshufb(ty, 16, low, high, indices)
+    }
+
+    fn neon_table(
+        &mut self,
+        ty: &Type,
+        low: &Value,
+        high: Option<&Value>,
+        indices: &Value,
+    ) -> Value {
+        let mut args = vec![arg(ty.clone(), low.clone())];
+        if let Some(high) = high {
+            args.push(arg(ty.clone(), high.clone()));
+        }
+        args.push(arg(ty.clone(), indices.clone()));
+        let name = if high.is_some() {
+            "llvm.aarch64.neon.tbl2.v16i8"
+        } else {
+            "llvm.aarch64.neon.tbl1.v16i8"
+        };
+        self.intrinsic(name, ty.clone(), &args)
     }
 
     fn swizzle_pshufb(

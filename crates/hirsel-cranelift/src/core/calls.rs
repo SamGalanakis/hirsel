@@ -98,7 +98,7 @@ impl<'a> Calls<'a> {
         results: &[Ty],
         args: &[Value],
     ) -> Result<NativeValues> {
-        let arm = abi::aarch64(object);
+        let arm = abi::aapcs64(object);
         let structure = match name {
             "hirsel_core_spawn" => Some((5, 64)),
             "hirsel_core_channel_new" => Some((2, 32)),
@@ -192,7 +192,7 @@ impl<'a> Calls<'a> {
         } else {
             let mut signature = object.make_signature();
             signature.params.push(AbiParam::new(types::I64));
-            signature.params.push(if abi::aarch64(object) {
+            signature.params.push(if abi::aapcs64(object) {
                 AbiParam::new(types::I64)
             } else {
                 AbiParam::special(

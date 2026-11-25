@@ -317,8 +317,10 @@ fn lower_program_units(
         })
         .collect::<Vec<_>>();
     let neutral = core::step_neutral_program(&modules);
-    let versions = (target == hirsel_core_layout::Target::X86_64Linux)
-        .then(|| core::versioned_program(&modules));
+    let versions = match target.arch() {
+        hirsel_core_layout::Arch::X86_64 => Some(core::versioned_program(&modules)),
+        hirsel_core_layout::Arch::Aarch64 => None,
+    };
     let mut lowered = Vec::with_capacity(units.len());
     for unit in units {
         match unit {

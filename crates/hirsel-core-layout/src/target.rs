@@ -1,44 +1,108 @@
-//! Native targets sharing FORM's little-endian, 64-bit layout recipes.
+//! The native targets. Every platform decision in the compiler derives from
+//! one of these facts; matches on them are exhaustive, so a new target is a
+//! compile error at each decision site.
 
-/// The supported Linux C ABIs. Layout recipes are identical on these targets;
-/// scalar and aggregate calling conventions are selected by the backend.
+/// The supported targets. They share FORM's little-endian, 64-bit layout
+/// recipes; calling conventions, object format and OS facts derive from them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Target {
     X86_64Linux,
     Aarch64Linux,
+    Aarch64Darwin,
+}
+
+/// The instruction set a target runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Arch {
+    X86_64,
+    Aarch64,
+}
+
+/// The operating system a target's images run on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Os {
+    Linux,
+    Macos,
+}
+
+/// The container a target's objects and images use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectFormat {
+    Elf,
+    MachO,
 }
 
 impl Target {
+    pub const ALL: [Self; 3] = [Self::X86_64Linux, Self::Aarch64Linux, Self::Aarch64Darwin];
+
     /// Select a supported target from its compiler triple.
     pub fn from_triple(triple: &str) -> Option<Self> {
-        match triple {
-            "x86_64-unknown-linux-gnu" => Some(Self::X86_64Linux),
-            "aarch64-unknown-linux-gnu" => Some(Self::Aarch64Linux),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|target| target.triple() == triple)
     }
 
     pub const fn triple(self) -> &'static str {
         match self {
             Self::X86_64Linux => "x86_64-unknown-linux-gnu",
             Self::Aarch64Linux => "aarch64-unknown-linux-gnu",
+            Self::Aarch64Darwin => "aarch64-apple-darwin",
+        }
+    }
+
+    pub const fn arch(self) -> Arch {
+        match self {
+            Self::X86_64Linux => Arch::X86_64,
+            Self::Aarch64Linux | Self::Aarch64Darwin => Arch::Aarch64,
+        }
+    }
+
+    pub const fn os(self) -> Os {
+        match self {
+            Self::X86_64Linux | Self::Aarch64Linux => Os::Linux,
+            Self::Aarch64Darwin => Os::Macos,
+        }
+    }
+
+    pub const fn object_format(self) -> ObjectFormat {
+        match self.os() {
+            Os::Linux => ObjectFormat::Elf,
+            Os::Macos => ObjectFormat::MachO,
+        }
+    }
+
+    /// The prefix the object format puts before a C symbol name.
+    pub const fn symbol_prefix(self) -> &'static str {
+        match self.object_format() {
+            ObjectFormat::Elf => "",
+            ObjectFormat::MachO => "_",
+        }
+    }
+
+    /// log2 of the page size images are laid out for: 16 KiB on Apple Silicon.
+    pub const fn page_log2(self) -> u8 {
+        match self {
+            Self::X86_64Linux | Self::Aarch64Linux => 12,
+            Self::Aarch64Darwin => 14,
         }
     }
 
     /// Keep LLVM's generic tuning. The named x86-64-v2 model splits unaligned
     /// AVX2 accesses in v3 functions even though their features allow them.
+    /// Every Apple Silicon Mac is at least an M1, whose cpu implies its features.
     pub const fn cpu(self) -> &'static str {
         match self {
             Self::X86_64Linux => "x86-64",
             Self::Aarch64Linux => "generic",
+            Self::Aarch64Darwin => "apple-m1",
         }
     }
 
     /// LLVM features for all functions, before per-version SIMD attributes.
     pub fn llvm_features(self) -> String {
-        match self {
-            Self::X86_64Linux => crate::isa::X86_64_BASE.llvm_features(),
-            Self::Aarch64Linux => String::new(),
+        match self.arch() {
+            Arch::X86_64 => crate::isa::X86_64_BASE.llvm_features(),
+            Arch::Aarch64 => String::new(),
         }
     }
 }
@@ -71,6 +135,7 @@ impl Target {
         match self {
             Self::X86_64Linux => CAbi::SysV64,
             Self::Aarch64Linux => CAbi::Aapcs64,
+            Self::Aarch64Darwin => CAbi::DarwinPcs,
         }
     }
 }

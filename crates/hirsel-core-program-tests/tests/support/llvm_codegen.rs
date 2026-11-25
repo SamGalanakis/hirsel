@@ -294,12 +294,16 @@ fn release_machine_code_pins() {
             })
             .collect();
         let mut exports: Vec<_> = bodies.iter().map(|(_, name, _)| name.clone()).collect();
-        if target == Target::X86_64Linux {
+        let x86 = match target.arch() {
+            hirsel_core_layout::Arch::X86_64 => true,
+            hirsel_core_layout::Arch::Aarch64 => false,
+        };
+        if x86 {
             // The native semantic check calls through the public dispatcher.
             exports.push(symbol(&program, Kernel::Lookup.function()));
         }
         let bytes = hirsel_llvm_lazy::emit_program_for_target(&units, &exports, target).unwrap();
-        if target == Target::X86_64Linux {
+        if x86 {
             // At key 248 the additions wrap at lane 8. Table indices 0 and 15
             // then land at lanes 8 and 23, and lanes 0..8 and 24..32 yield zero.
             let cases = [
@@ -335,9 +339,9 @@ fn release_machine_code_pins() {
         assert_eq!(file.format(), object::BinaryFormat::Elf);
         assert_eq!(
             file.architecture(),
-            match target {
-                Target::X86_64Linux => object::Architecture::X86_64,
-                Target::Aarch64Linux => object::Architecture::Aarch64,
+            match target.arch() {
+                hirsel_core_layout::Arch::X86_64 => object::Architecture::X86_64,
+                hirsel_core_layout::Arch::Aarch64 => object::Architecture::Aarch64,
             }
         );
         for (body, name, pins) in bodies {
@@ -424,9 +428,9 @@ fn instructions<'a>(
     target: Target,
     label: &str,
 ) -> Vec<Instruction<'a>> {
-    let hex_digits_per_word = match target {
-        Target::X86_64Linux => 2,
-        Target::Aarch64Linux => 8,
+    let hex_digits_per_word = match target.arch() {
+        hirsel_core_layout::Arch::X86_64 => 2,
+        hirsel_core_layout::Arch::Aarch64 => 8,
     };
     let mut insns: Vec<Instruction<'_>> = Vec::new();
     let mut next = extent.start;
@@ -514,14 +518,16 @@ impl<'a> Instruction<'a> {
             Stack => {
                 self.registers()
                     .any(|r| matches!(r, "sp" | "wsp" | "rsp" | "esp" | "spl"))
-                    || target == Target::X86_64Linux
-                        && (self.opcode.starts_with("push")
-                            || self.opcode.starts_with("pop") && !self.opcode.starts_with("popcnt")
-                            || matches!(
-                                self.opcode.trim_end_matches(['w', 'l', 'q']),
-                                "enter" | "leave"
-                            )
-                            || self.opcode.starts_with("ret") && !self.operands.is_empty())
+                    || match target.arch() {
+                        hirsel_core_layout::Arch::X86_64 => true,
+                        hirsel_core_layout::Arch::Aarch64 => false,
+                    } && (self.opcode.starts_with("push")
+                        || self.opcode.starts_with("pop") && !self.opcode.starts_with("popcnt")
+                        || matches!(
+                            self.opcode.trim_end_matches(['w', 'l', 'q']),
+                            "enter" | "leave"
+                        )
+                        || self.opcode.starts_with("ret") && !self.operands.is_empty())
             }
             DivideOrRemainderCall => unreachable!("requires resolved call targets"),
         }
@@ -564,12 +570,12 @@ impl<'a> Instruction<'a> {
         name: &str,
         label: &str,
     ) -> Option<&'a str> {
-        let (call, branch) = match target {
-            Target::X86_64Linux => (
+        let (call, branch) = match target.arch() {
+            hirsel_core_layout::Arch::X86_64 => (
                 self.opcode.starts_with("call"),
                 self.opcode.starts_with('j') || self.opcode.starts_with("loop"),
             ),
-            Target::Aarch64Linux => (
+            hirsel_core_layout::Arch::Aarch64 => (
                 matches!(self.opcode, "bl" | "blr"),
                 matches!(self.opcode, "b" | "br" | "cbz" | "cbnz" | "tbz" | "tbnz")
                     || self.opcode.starts_with("b."),

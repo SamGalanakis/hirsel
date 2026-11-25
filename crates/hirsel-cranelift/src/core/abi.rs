@@ -56,7 +56,7 @@ impl Signature {
         object: &ObjectModule,
         context: bool,
     ) -> Self {
-        let arm = aarch64(object);
+        let arm = aapcs64(object);
         let record = layouts.and_then(|layouts| layouts.result(s));
         let dest = s.dest.is_some() && record.is_none();
         let mut results: Vec<Ty> = if let Some(record) = record {
@@ -317,8 +317,13 @@ fn result_flags(t: ir::Type) -> MemFlags {
 }
 
 /// The module owns one target; every imported/generated C signature uses it.
-pub(super) fn aarch64(object: &ObjectModule) -> bool {
-    object.isa().name() == "aarch64"
+/// Whether C aggregates follow AAPCS64 (Linux and Apple arm64 alike): large
+/// composites by pointer to a caller copy, not SysV stack byval.
+pub(super) fn aapcs64(object: &ObjectModule) -> bool {
+    match c_abi(object) {
+        hirsel_core_layout::CAbi::SysV64 => false,
+        hirsel_core_layout::CAbi::Aapcs64 | hirsel_core_layout::CAbi::DarwinPcs => true,
+    }
 }
 
 /// The C ABI of the module's one target.

@@ -239,9 +239,9 @@
     "reason": "cs-store-split-1935"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
-    "lines": 2532,
-    "raise_revision": 1,
-    "reason": "run-decode-raii-2112"
+    "lines": 2534,
+    "raise_revision": 2,
+    "reason": "macos-s2-target-2570"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2596,
@@ -502,7 +502,9 @@
     "lines": 1605
   },
   "crates/hirsel-cranelift/tests/support/native.rs": {
-    "lines": 1317
+    "lines": 1261,
+    "raise_revision": 1,
+    "reason": "macos-s2-target-2570"
   },
   "crates/hirsel-llvm/bridge/counter_range.h": {
     "lines": 1897
@@ -513,9 +515,9 @@
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-llvm/src/core/mod.rs": {
-    "lines": 2560,
-    "raise_revision": 3,
-    "reason": "ds-cold-fn-2520"
+    "lines": 2556,
+    "raise_revision": 4,
+    "reason": "macos-s2-target-2570"
   },
   "crates/hirsel-llvm/src/core/sink.rs": {
     "lines": 1161,
@@ -532,7 +534,9 @@
     "lines": 1229
   },
   "crates/hirsel-llvm/src/core/tests.rs": {
-    "lines": 3304
+    "lines": 3123,
+    "raise_revision": 1,
+    "reason": "macos-s2-target-2570"
   },
   "crates/hirsel-tape-format/src/lib.rs": {
     "lines": 1520

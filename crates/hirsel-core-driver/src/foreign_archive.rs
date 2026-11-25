@@ -556,18 +556,19 @@ fn parse_member(
             }
         };
     }
-    let (machine, unwind, irelative) = match target {
-        "x86_64-unknown-linux-gnu" => (
+    let (machine, unwind, irelative) = match hirsel_core_layout::Target::from_triple(target) {
+        Some(hirsel_core_layout::Target::X86_64Linux) => (
             elf::EM_X86_64,
             elf::SHT_X86_64_UNWIND,
             elf::R_X86_64_IRELATIVE,
         ),
-        "aarch64-unknown-linux-gnu" => (
+        Some(hirsel_core_layout::Target::Aarch64Linux) => (
             elf::EM_AARCH64,
             elf::SHT_AARCH64_ATTRIBUTES,
             elf::R_AARCH64_IRELATIVE,
         ),
-        _ => return Ok(None),
+        // Mach-O member admission is macOS slice S10.
+        Some(hirsel_core_layout::Target::Aarch64Darwin) | None => return Ok(None),
     };
     let endian = LittleEndian;
     let file = or_none!(ElfFile64::<LittleEndian>::parse(bytes));

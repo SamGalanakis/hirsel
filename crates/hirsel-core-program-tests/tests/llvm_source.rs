@@ -2371,10 +2371,11 @@ fn site_fixture(target: Target) {
                     // x86-64 code takes a site as a 32-bit immediate (SITE_END);
                     // data words and AArch64's pool keep 8 bytes.
                     let code = section.kind() == object::SectionKind::Text;
-                    let width = if code && target == Target::X86_64Linux {
-                        32
-                    } else {
-                        64
+                    // x86-64 code takes a 32-bit PC-relative site; AArch64
+                    // code and every data word take a 64-bit absolute one.
+                    let width = match (code, target.arch()) {
+                        (true, hirsel_core_layout::Arch::X86_64) => 32,
+                        (false, _) | (true, hirsel_core_layout::Arch::Aarch64) => 64,
                     };
                     assert_eq!(relocation.size(), width, "{target:?} {relocation:?}");
                     assert!(relocation.addend() >= 0);
@@ -2442,9 +2443,9 @@ fn site_fixture(target: Target) {
                     [function.address() as usize..(function.address() + function.size()) as usize];
                 // MergeFunctions retains public addresses through generated jump
                 // thunks. The destination's real source body owns their debug rows.
-                let branch = match target {
-                    Target::X86_64Linux => code.len() == 5 && code[0] == 0xe9,
-                    Target::Aarch64Linux => {
+                let branch = match target.arch() {
+                    hirsel_core_layout::Arch::X86_64 => code.len() == 5 && code[0] == 0xe9,
+                    hirsel_core_layout::Arch::Aarch64 => {
                         code.len() == 4
                             && u32::from_le_bytes(code.try_into().unwrap()) & 0xfc000000
                                 == 0x14000000
@@ -4647,13 +4648,12 @@ fn simd_llvm_matches_evaluator() {
             .collect();
         let exports: Vec<_> = exports.into_iter().collect();
         let release = hirsel_llvm_lazy::emit_program_for_target(&units, &exports, target).unwrap();
-        let caps: Vec<_> = if target == Target::X86_64Linux {
-            hirsel_core_layout::isa::X86_64_LEVELS
+        let caps: Vec<_> = match target.arch() {
+            hirsel_core_layout::Arch::X86_64 => hirsel_core_layout::isa::X86_64_LEVELS
                 .iter()
                 .map(|level| level.number)
-                .collect()
-        } else {
-            vec![0]
+                .collect(),
+            hirsel_core_layout::Arch::Aarch64 => vec![0],
         };
         for cap in caps {
             let bindings = if cap == 0 {

@@ -2166,6 +2166,7 @@ int main(void) {{
             command
         }
         Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
+        Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
     };
     output(
         compiler
@@ -2196,6 +2197,7 @@ int main(void) {{
                 .arg(dir.join("test"));
             command
         }
+        Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
     };
     output(&mut executable);
 }

@@ -1,6 +1,6 @@
 //! Source agreement through reached definition units and a C caller.
 #![allow(dead_code)]
-const NATIVE_TARGET: &str = "x86_64-unknown-linux-gnu";
+const NATIVE: hirsel_core_layout::Target = hirsel_core_layout::Target::X86_64Linux;
 hirsel_guard::install!();
 include!("support/cranelift_source.rs");
 include!("support/flow.rs");

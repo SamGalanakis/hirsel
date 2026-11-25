@@ -7,7 +7,8 @@ Changed new-language sources are checked, never rewritten, and the primer's copi
 (tools/site_sync.py --check) must match docs/PRIMER.md. Documentation references
 and the std operation index must match the code. Package law locks must be current.
 Changed source files must fit
-their line limits, and production sources must keep test code out. The editor
+their line limits, production sources must keep test code out, and platform decisions
+must be exhaustive on the target with host `cfg`s only in host seams. The editor
 parser checks the core and spec corpus. Explicit
 expectation comments exclude refusal/gap fixtures to preserve diagnostic coordinates.
 """
@@ -25,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 from check_boundaries import check as check_boundaries
 from check_file_lengths import check_changed as check_file_lengths
+from check_target import check as check_target
 
 BUCK2 = ROOT / '.buck2/bin/buck2'
 RUSTFMT = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
@@ -133,7 +135,7 @@ def check_cases(paths):
 
 
 def main():
-    if not check_file_lengths(ROOT) or not check_boundaries(ROOT):
+    if not check_file_lengths(ROOT) or not check_boundaries(ROOT) or not check_target(ROOT):
         return 1
     rustfmt_flags = sys.argv[1:]
     query = 'kind("^rust_(library|binary)$", root//:)'

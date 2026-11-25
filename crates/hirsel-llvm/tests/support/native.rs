@@ -860,8 +860,15 @@ fn c_linker(target: Target, memcheck: bool) -> Command {
             command
         }
         Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
+        Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
     };
-    if memcheck && target == Target::X86_64Linux {
+    let memcheck_loader = memcheck
+        && match target {
+            Target::X86_64Linux => true,
+            Target::Aarch64Linux => false,
+            Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
+        };
+    if memcheck_loader {
         // The pool's system loader is stripped; use the declared symbol-bearing
         // loader/runtime paired with Memcheck, just as the toolchain proof does.
         let runtime = PathBuf::from(
@@ -915,6 +922,7 @@ fn c_executable(target: Target, memcheck: bool, binary: &std::path::Path) -> Com
                 .arg(binary);
             command
         }
+        Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac"),
     }
 }
 

@@ -55,9 +55,13 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 type Result<T> = std::result::Result<T, Error>;
 
-/// Whether this engine implements the requested target's native ABI.
+/// Whether this engine implements the requested target's native ABI and
+/// object format. Mach-O objects are not written yet (macOS slice S5).
 pub fn supports_target(triple: &str) -> bool {
-    hirsel_core_layout::Target::from_triple(triple).is_some()
+    match hirsel_core_layout::Target::from_triple(triple).map(|t| t.object_format()) {
+        Some(hirsel_core_layout::ObjectFormat::Elf) => true,
+        Some(hirsel_core_layout::ObjectFormat::MachO) | None => false,
+    }
 }
 
 /// Target and optimization policy for CoreIR emission.
@@ -154,12 +158,15 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
     }
     let mut isa = cranelift_codegen::isa::lookup_by_name(options.target)
         .map_err(|e| refuse(e.to_string()))?;
-    if hirsel_core_layout::Target::from_triple(options.target)
-        == Some(hirsel_core_layout::Target::X86_64Linux)
-    {
-        for feature in hirsel_core_layout::isa::X86_64_BASE.cranelift_features() {
-            isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
+    let target = hirsel_core_layout::Target::from_triple(options.target)
+        .ok_or_else(|| refuse("not a Hirsel target".into()))?;
+    match target.arch() {
+        hirsel_core_layout::Arch::X86_64 => {
+            for feature in hirsel_core_layout::isa::X86_64_BASE.cranelift_features() {
+                isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
+            }
         }
+        hirsel_core_layout::Arch::Aarch64 => {}
     }
     isa.finish(settings::Flags::new(flags))
         .map_err(|e| refuse(e.to_string()))

@@ -33,7 +33,7 @@ mod target;
 
 pub use continuation::{Frames, Point, frames, spare_words};
 pub use foreign::{foreign_cleanup, foreign_kind, next_foreign_handle};
-pub use target::{CAbi, CExtension, Target, c_extension};
+pub use target::{Arch, CAbi, CExtension, ObjectFormat, Os, Target, c_extension};
 
 /// Reserve a shape before filling its references, using the caller's type identity.
 pub fn intern_shape<K: Eq + std::hash::Hash, S: std::hash::BuildHasher>(

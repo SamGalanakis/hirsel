@@ -318,6 +318,10 @@ pub(crate) fn bind<'a>(
     let architecture = match hirsel_core_layout::Target::from_triple(target) {
         Some(hirsel_core_layout::Target::X86_64Linux) => object::Architecture::X86_64,
         Some(hirsel_core_layout::Target::Aarch64Linux) => object::Architecture::Aarch64,
+        // A dSYM-shaped Mach-O debug file (macOS slice S5).
+        Some(hirsel_core_layout::Target::Aarch64Darwin) => {
+            return Err(format!("no Mach-O detached debug info for {target} yet"));
+        }
         None => return Err(format!("no native debug target {target}")),
     };
     let mut object = debug_object(architecture);

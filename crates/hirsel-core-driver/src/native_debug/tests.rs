@@ -370,6 +370,7 @@ fn llvm_unwind_covers_live_whole_split_and_reused_code() {
         for (section, jobs, expected_parts) in match target {
             Target::X86_64Linux => &[("", 0, 3), ("", 2, 3), ("section \".text.start\"", 0, 1)][..],
             Target::Aarch64Linux => &[("", 0, 1)][..],
+            Target::Aarch64Darwin => panic!("not an ELF link"),
         }
         .iter()
         .copied()
@@ -614,10 +615,9 @@ fn cranelift_unwind_links_into_pie_from_whole_and_cached_objects() {
             optimize: false,
             debug_lines: false,
         };
-        let modes: &[bool] = if target == Target::X86_64Linux {
-            &[false, true]
-        } else {
-            &[false]
+        let modes: &[bool] = match target {
+            Target::X86_64Linux => &[false, true],
+            Target::Aarch64Linux | Target::Aarch64Darwin => &[false],
         };
         for &split in modes {
             let input = if split {

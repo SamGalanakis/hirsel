@@ -29,8 +29,11 @@ pub(super) fn emit(
     f.b.switch_to_block(start);
     let parameters = f.b.block_params(start).to_vec();
     let triple = f.object.isa().triple().to_string();
-    if triple == hirsel_core_layout::Target::X86_64Linux.triple() {
-        f.void_call("hirsel_core_init_isa", &[])?;
+    let target = hirsel_core_layout::Target::from_triple(&triple)
+        .ok_or_else(|| format!("no Hirsel target {triple}"))?;
+    match target.arch() {
+        hirsel_core_layout::Arch::X86_64 => f.void_call("hirsel_core_init_isa", &[])?,
+        hirsel_core_layout::Arch::Aarch64 => {}
     }
     let argc = f.b.ins().uextend(I64, parameters[0]);
     let n = f.b.ins().iadd_imm_s(argc, -1);

@@ -178,9 +178,12 @@ pub fn facts_enabled() -> bool {
 /// The diagnostic switch [`facts_enabled`] reads.
 pub const NO_FACTS_VARIABLE: &str = "HIRSEL_LLVM_NO_FACTS";
 
-/// Whether this engine implements the requested target's native ABI.
+/// Whether this engine implements the target's ABI and object format (Mach-O: macOS S5).
 pub fn supports_target(triple: &str) -> bool {
-    Target::from_triple(triple).is_some()
+    match Target::from_triple(triple).map(Target::object_format) {
+        Some(hirsel_core_layout::ObjectFormat::Elf) => true,
+        Some(hirsel_core_layout::ObjectFormat::MachO) | None => false,
+    }
 }
 
 /// Emit x86-64 System V LLVM IR directly from CoreIR.
@@ -1996,7 +1999,7 @@ impl FunctionEmitter<'_> {
             align: 8,
             absolute_symbol: false,
         });
-        let pointer = if self.abi.target == Target::Aarch64Linux || !fixed {
+        let pointer = if argument.byval.is_none() || !fixed {
             let pointer = self.temp(shape);
             let words = Type::words(memory_layout::CAUSE_BYTES as u64 / 8);
             let value = self.load(&words, &Value::global(name), 8);

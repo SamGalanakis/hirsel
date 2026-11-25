@@ -1,6 +1,6 @@
 //! AArch64 source agreement through production definition units.
 #![allow(dead_code)]
-const NATIVE_TARGET: &str = "aarch64-unknown-linux-gnu";
+const NATIVE: hirsel_core_layout::Target = hirsel_core_layout::Target::Aarch64Linux;
 hirsel_guard::install!();
 include!("support/cranelift_source.rs");
 #[test]

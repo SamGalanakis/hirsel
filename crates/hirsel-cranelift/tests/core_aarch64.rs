@@ -1,6 +1,6 @@
 //! AArch64 execution through the declared QEMU/sysroot and a real C caller.
 #![allow(dead_code)] // The shared harness also serves the wider x86 fixture matrix.
-const NATIVE_TARGET: &str = "aarch64-unknown-linux-gnu";
+const NATIVE: hirsel_core_layout::Target = hirsel_core_layout::Target::Aarch64Linux;
 hirsel_guard::install!();
 include!("support/native.rs");
 include!("support/poison.rs");

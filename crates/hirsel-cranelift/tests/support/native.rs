@@ -29,6 +29,7 @@ fn anchor_word(sites: &[u64], anchor: Option<hirsel_core_ir::Anchor>) -> u64 {
     anchor.map_or(0, |a| sites[a.item.index()] + u64::from(a.start))
 }
 
+const NATIVE_TARGET: &str = NATIVE.triple();
 fn result_layout(s: &c::Signature) -> (bool, Vec<u32>, u32) {
     let mut offset = 0u32;
     let mut align = 1u32;
@@ -45,7 +46,7 @@ fn result_layout(s: &c::Signature) -> (bool, Vec<u32>, u32) {
         offset += size;
     }
     offset = offset.next_multiple_of(align);
-    let homogeneous = NATIVE_TARGET.starts_with("aarch64")
+    let homogeneous = match NATIVE.c_abi() { hirsel_core_layout::CAbi::SysV64 => false, hirsel_core_layout::CAbi::Aapcs64 | hirsel_core_layout::CAbi::DarwinPcs => true }
         && !s.results.is_empty()
         && s.results.len() <= 4
         && s.results[0].is_float()
@@ -640,7 +641,7 @@ fn link_program_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool)
         fs::write(scratch.path().join(name), text).unwrap();
     }
     let mut compiler = Command::new(c_compiler());
-    if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
+    if memcheck && !EMULATED {
         // The declared Memcheck tree carries its matching loader symbols.
         let runtime = PathBuf::from(
             std::env::var_os("HIRSEL_VALGRIND_RUNTIME").expect("declared Memcheck runtime"),
@@ -705,7 +706,7 @@ fn link_run_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool) -> 
     actual
 }
 fn native_command(binary: &std::path::Path, memcheck: bool) -> Command {
-    if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
+    if memcheck && !EMULATED {
         let mut command =
             Command::new(std::env::var_os("HIRSEL_VALGRIND").expect("declared Memcheck tool"));
         command
@@ -727,7 +728,7 @@ fn native_command(binary: &std::path::Path, memcheck: bool) -> Command {
             "timeout 30s \"$@\"; rc=$?; if [ $rc -gt 128 ]; then exit 1; else exit $rc; fi",
             "hirsel-native-timeout",
         ]);
-        if NATIVE_TARGET == "aarch64-unknown-linux-gnu" {
+        if EMULATED {
             command
                 .arg(std::env::var_os("HIRSEL_QEMU_AARCH64").map(PathBuf::from).unwrap_or_else(|| input_path("HIRSEL_TOOLCHAIN_QEMU").join("qemu-aarch64")))
                 .arg("-L")
@@ -848,8 +849,10 @@ fn input_path(variable: &str) -> PathBuf {
     };
     fs::canonicalize(path).unwrap()
 }
+/// AArch64 Linux images run under qemu and its sysroot; x86-64 ones natively, Memcheck included.
+const EMULATED: bool = match NATIVE { hirsel_core_layout::Target::X86_64Linux => false, hirsel_core_layout::Target::Aarch64Linux => true, hirsel_core_layout::Target::Aarch64Darwin => panic!("Mach-O images run only on a Mac") };
 fn c_compiler() -> PathBuf {
-    if NATIVE_TARGET == "aarch64-unknown-linux-gnu" {
+    if EMULATED {
         std::env::var_os("HIRSEL_AARCH64_CC").map(PathBuf::from).unwrap_or_else(|| input_path("HIRSEL_TOOLCHAIN_ARM").join("bin/aarch64-none-linux-gnu-gcc"))
     } else {
         PathBuf::from("cc")

@@ -50,7 +50,10 @@ impl FunctionEmitter<'_> {
 
     pub(super) fn keep_site_in_data(&self) -> bool {
         self.relocatable_sites
-            && (self.abi.target == Target::Aarch64Linux || self.items.release_sites.is_none())
+            && match self.abi.target.arch() {
+                hirsel_core_layout::Arch::Aarch64 => true,
+                hirsel_core_layout::Arch::X86_64 => self.items.release_sites.is_none(),
+            }
     }
 
     fn absolute_symbol(&mut self, name: String) {

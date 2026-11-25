@@ -311,12 +311,10 @@ fn mismatches(hirsel: &BTreeMap<String, Decl>, clang: &BTreeMap<String, Decl>) -
 }
 
 #[test]
-fn runtime_declarations_match_clang_on_linux() {
+fn runtime_declarations_match_clang() {
     let mut failures = Vec::new();
-    for (target, triple) in [
-        (Target::X86_64Linux, "x86_64-unknown-linux-gnu"),
-        (Target::Aarch64Linux, "aarch64-unknown-linux-gnu"),
-    ] {
+    for target in Target::ALL {
+        let triple = target.triple();
         for m in mismatches(&hirsel_declarations(target), &clang_declarations(triple)) {
             failures.push(format!("{triple}: {m}"));
         }
@@ -327,38 +325,4 @@ fn runtime_declarations_match_clang_on_linux() {
         failures.len(),
         failures.join("\n")
     );
-}
-
-/// Darwin has no Hirsel target yet (S2/S5). The AArch64 lowering with the
-/// shared `c_extension` rule for `DarwinPcs` is what a Darwin target would
-/// emit; this prints every difference from clang's arm64-apple-darwin
-/// lowering as the S2/S5 gap list.
-#[test]
-#[ignore = "Darwin gap list for S2/S5; prints and never fails"]
-fn darwin_runtime_declaration_gaps() {
-    let clang = clang_declarations("arm64-apple-darwin");
-    // `c_extension` gives DarwinPcs the SysV64 extensions, so a Darwin
-    // declaration is the AArch64 lowering with the x86-64 extensions.
-    let x86 = hirsel_declarations(Target::X86_64Linux);
-    let mut ours = hirsel_declarations(Target::Aarch64Linux);
-    for (name, decl) in &mut ours {
-        let Some(sysv) = x86
-            .get(name)
-            .filter(|d| d.params.len() == decl.params.len())
-        else {
-            continue;
-        };
-        let pairs = std::iter::once((&mut decl.ret, &sysv.ret))
-            .chain(decl.params.iter_mut().zip(&sysv.params));
-        for (slot, sysv) in pairs {
-            if slot.ty == sysv.ty {
-                slot.ext = sysv.ext;
-            }
-        }
-    }
-    let gaps = mismatches(&ours, &clang);
-    println!("arm64-apple-darwin: {} gaps", gaps.len());
-    for gap in gaps {
-        println!("  {gap}");
-    }
 }

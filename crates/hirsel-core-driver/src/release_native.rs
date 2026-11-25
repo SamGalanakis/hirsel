@@ -381,7 +381,7 @@ pub(super) fn emit_release_image(
         remarks = record.remarks;
         held = objects;
     } else if closed_executable
-        && target == hirsel_core_layout::Target::X86_64Linux
+        && direct_release(target)
         && std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE").is_none()
     {
         let (modules, facts) = core.as_ref().expect("the Core unit is not yet lowered");
@@ -605,6 +605,18 @@ mod tests {
                 before,
                 unit_key(&"unchanged body and signature", &[&changed]).unwrap()
             );
+        }
+    }
+}
+
+/// Whether the direct release unit ([`hirsel_llvm_lazy::ReleaseUnit`]) emits
+/// for `target`. It lowers for x86-64 Linux only; other targets take the
+/// printed-IR path.
+fn direct_release(target: hirsel_core_layout::Target) -> bool {
+    match target {
+        hirsel_core_layout::Target::X86_64Linux => true,
+        hirsel_core_layout::Target::Aarch64Linux | hirsel_core_layout::Target::Aarch64Darwin => {
+            false
         }
     }
 }

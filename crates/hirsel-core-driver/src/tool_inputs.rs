@@ -5,6 +5,7 @@
 use crate::native::Link;
 use crate::{PackageProduct, Store};
 use hirsel_core_ids::ContentHash;
+use hirsel_core_layout::Target;
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::io;
@@ -252,10 +253,11 @@ const INSTALLED_RECIPE_SCHEMA: u32 = 2;
 pub(crate) const INSTALLED_LINKER: &str = "bin/ld.lld";
 
 fn installed_interpreter(target: &str) -> io::Result<&'static str> {
-    match target {
-        "x86_64-unknown-linux-gnu" => Ok("/lib64/ld-linux-x86-64.so.2"),
-        "aarch64-unknown-linux-gnu" => Ok("/lib/ld-linux-aarch64.so.1"),
-        _ => Err(io::Error::other("unsupported installed link target")),
+    match Target::from_triple(target) {
+        Some(Target::X86_64Linux) => Ok("/lib64/ld-linux-x86-64.so.2"),
+        Some(Target::Aarch64Linux) => Ok("/lib/ld-linux-aarch64.so.1"),
+        // A Mach-O link has no interpreter; its recipe is macOS slice S5.
+        Some(Target::Aarch64Darwin) | None => Err(io::Error::other("no installed link target")),
     }
 }
 
@@ -304,8 +306,9 @@ pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Resul
     ]
     .map(str::to_owned)
     .to_vec();
-    if target == "aarch64-unknown-linux-gnu" {
-        args.push("--fix-cortex-a53-843419".into());
+    match Target::from_triple(target) {
+        Some(Target::Aarch64Linux) => args.push("--fix-cortex-a53-843419".into()),
+        Some(Target::X86_64Linux | Target::Aarch64Darwin) | None => {}
     }
     let placed = format!("link/kit/{target}");
     let copy = |path: &str| -> io::Result<String> {

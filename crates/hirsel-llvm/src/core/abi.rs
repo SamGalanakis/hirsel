@@ -224,7 +224,12 @@ impl Return {
         }
         let extent = end.next_multiple_of(alignment);
         let storage = Type::bytes(extent.max(16));
-        let homogeneous = target == hirsel_core_layout::Target::Aarch64Linux
+        // Apple's arm64 convention keeps AAPCS64's aggregate rules.
+        let aapcs64 = match target.c_abi() {
+            hirsel_core_layout::CAbi::SysV64 => false,
+            hirsel_core_layout::CAbi::Aapcs64 | hirsel_core_layout::CAbi::DarwinPcs => true,
+        };
+        let homogeneous = aapcs64
             && (2..=4).contains(&fields.len())
             && fields[0].is_float()
             && fields.iter().all(|t| *t == fields[0]);
@@ -235,7 +240,7 @@ impl Return {
             vec![]
         } else if homogeneous {
             fields.iter().map(|t| ty(*t)).collect()
-        } else if target == hirsel_core_layout::Target::Aarch64Linux {
+        } else if aapcs64 {
             if extent <= 8 {
                 vec![Type::Int(extent as u32 * 8)]
             } else {
@@ -896,15 +901,16 @@ impl FunctionEmitter<'_> {
 }
 
 /// Large C composites are stack byval on SysV and caller-owned copies passed
-/// by pointer on AAPCS64. All runtime composites here are larger than16 bytes.
+/// by pointer on AAPCS64 and Apple's arm64. All runtime composites here are
+/// larger than 16 bytes.
 pub(super) fn composite_argument(target: Target, bytes: usize) -> Parameter {
-    match target {
-        Target::X86_64Linux => Parameter {
+    match target.c_abi() {
+        hirsel_core_layout::CAbi::SysV64 => Parameter {
             byval: Some(Type::bytes(bytes as u64)),
             align: 8,
             ..Parameter::plain(Type::Ptr)
         },
-        Target::Aarch64Linux => Type::Ptr.into(),
+        hirsel_core_layout::CAbi::Aapcs64 | hirsel_core_layout::CAbi::DarwinPcs => Type::Ptr.into(),
     }
 }
 

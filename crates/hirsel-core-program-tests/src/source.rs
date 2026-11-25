@@ -336,6 +336,7 @@ fn combine(objects: &[Vec<u8>], target: Target) -> Vec<u8> {
             .into_os_string(),
         ),
         Target::Aarch64Linux => std::env::var_os("HIRSEL_AARCH64_CC"),
+        Target::Aarch64Darwin => None,
     }
     .expect("declared native compiler");
     let mut link = Command::new(compiler);

@@ -3,7 +3,7 @@
 //! the std side does not hold; the std side's exports stay declarations, with
 //! their small bodies lent `available_externally` so the whole-program pipeline
 //! can inline them. After cleanup, each definition's release tail runs alone
-//! and is held in the shared parts store under the key of its part at that cut
+//! and is held in the content store under the key of its part at that cut
 //! (`module_key`, a walk of the part's IR in memory, with the linkage facts the
 //! part does not keep), so an edit reruns only the tails whose input changed.
 //! Each out-of-line definition is then a part keyed by its own IR and the code
@@ -85,7 +85,7 @@ fn tail_key(
     )
 }
 
-/// What the shared parts cache holds for a release program: each part's
+/// What the content store holds for a release program: each part's
 /// object and each definition's release tail. A store error stops the
 /// program after generation; until then nothing more is loaded or kept.
 struct SharedParts<'a, G> {
@@ -115,11 +115,11 @@ impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
     fn part(&mut self, _: &str, machine: &str, ir: &[u8; 32]) -> bool {
         let loaded = part_key(self.generator, machine, ir, self.coverage).and_then(|key| {
             self.parts.push(key);
-            crate::native_object::load(self.shared, key)
+            Ok(crate::native_object::load(self.shared, key)?.map(|loaded| (key, loaded)))
         });
         match loaded {
-            Ok(Some((bare, object))) => {
-                self.held.push((bare, object, false));
+            Ok(Some((key, (bare, object)))) => {
+                self.held.push((key, bare, object, false));
                 true
             }
             Ok(None) => false,
@@ -184,16 +184,13 @@ struct Parts {
 const PARTS_SCHEMA: u32 = 5;
 
 type Held = (
+    ContentHash,
     crate::store::Bare,
     hirsel_core_ir::source::NativeObject,
     bool,
 );
 
-fn load_parts(
-    store: &Store,
-    shared: &Store,
-    key: ContentHash,
-) -> io::Result<Option<(Parts, Vec<Held>)>> {
+fn load_parts(store: &Store, key: ContentHash) -> io::Result<Option<(Parts, Vec<Held>)>> {
     let Some(record) = store.get(key)?.and_then(|bytes| decode::<Parts>(&bytes)) else {
         return Ok(None);
     };
@@ -202,10 +199,10 @@ fn load_parts(
     }
     let mut held = Vec::with_capacity(record.parts.len());
     for &key in &record.parts {
-        let Some((bare, object)) = crate::native_object::load(shared, key)? else {
+        let Some((bare, object)) = crate::native_object::load(store, key)? else {
             return Ok(None);
         };
-        held.push((bare, object, false));
+        held.push((key, bare, object, false));
     }
     Ok(Some((record, held)))
 }
@@ -386,8 +383,8 @@ pub(super) fn emit_release_image(
     drop(consumed);
     // The Core modules and facts are read only until the unit is lowered.
     let mut core = Some((modules, facts));
-    // Every part, whichever program reached it, is in the shared parts cache.
-    let shared = Store::release_parts(&options.parts)?;
+    // Every part, whichever program reached it, is in the content store.
+    let shared = store;
     let emit = |message: String| NativeStop::Emit {
         definition: entry.clone(),
         message,
@@ -398,7 +395,7 @@ pub(super) fn emit_release_image(
     let mut remarks;
     let mut lowered = None;
     let mut optimized_key = None;
-    if let Some((record, objects)) = load_parts(store, &shared, unit)? {
+    if let Some((record, objects)) = load_parts(store, unit)? {
         sites = record.sites;
         debug_sites = record.debug_sites;
         remarks = record.remarks;
@@ -428,7 +425,7 @@ pub(super) fn emit_release_image(
                 release.ir_key(),
             ),
         )?;
-        if let Some((mut record, objects)) = load_parts(store, &shared, key)? {
+        if let Some((mut record, objects)) = load_parts(store, key)? {
             record.sites.clone_from(&sites);
             record.debug_sites.clone_from(&debug_sites);
             store.put_keyed(unit, &encode(&record)?)?;
@@ -450,7 +447,7 @@ pub(super) fn emit_release_image(
             coverage: (fragment.as_ref())
                 .map(|f| crate::native::key("hirsel.core-release-part-coverage.v1", f))
                 .transpose()?,
-            shared: &shared,
+            shared,
             parts: &mut parts,
             held: &mut held,
             failure: &mut failure,
@@ -509,8 +506,8 @@ pub(super) fn emit_release_image(
                 true => hits.next().expect("a reused part was loaded"),
                 false => {
                     let object = made.next().expect("a missed part was generated");
-                    let bare = crate::native_object::publish(&shared, key, &object)?;
-                    (bare, object, true)
+                    let bare = crate::native_object::publish(shared, key, &object)?;
+                    (key, bare, object, true)
                 }
             });
         }
@@ -530,10 +527,11 @@ pub(super) fn emit_release_image(
     }
     let objects = held
         .into_iter()
-        .map(|(bare, object, compiled)| ObjectProduct {
+        .map(|(key, bare, object, compiled)| ObjectProduct {
+            key,
             private_variants: std::mem::take(&mut private_variants),
             instance: instance.clone(),
-            path: crate::native_object::path(&shared, bare.address),
+            path: crate::native_object::path(shared, bare.address),
             store: Some(shared.clone()),
             identity: bare.address,
             check: bare.check,

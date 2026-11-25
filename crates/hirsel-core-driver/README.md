@@ -74,6 +74,25 @@ checks the supplied library sources. In a checkout these controls use its `core`
 directory; `--libraries` supplies another source root. Installed product builds
 need no extracted library source files.
 
+Native objects and records live in the user's content store,
+`$XDG_CACHE_HOME/hirsel/cas` (or `$HOME/.cache/hirsel/cas`), which every build
+of the user's shares. A blob (an object, its debug rows, a release part, a std
+part's bitcode, an image unit, a code pack) is the file `o/<sha256>` of its
+bytes; a record is `k/<key>`, a frame that names blobs by digest and carries an
+origin, which a reader requires to be this machine's. Both are sharded by their
+first byte (`o/xx/<62 hex>`). A record whose blob is missing or fails its check
+is a miss and is rebuilt, and so is a record or blob stored under another's
+name. A release std side is a store of the same shape under `s/<key>/`, which a
+build pins with a shared lock while it reads it. An image ships its prebuilt
+objects (`native`) and release std (`release-std`) as stores of the same shape.
+A request's `--store` keeps its executables, request records and scratch.
+One collector keeps the content store under 10 GiB: at most once a day, or
+hourly while over, it removes the least recently used records, blobs and
+unpinned sides (a hit touches what it read) down to 7/8 of that. A file a
+running build has open stays readable after its removal; its next read misses.
+Opening a store of an older layout deletes its records and sides, and the user
+store also deletes, by name, the directories older formats kept beside it.
+
 The same producer and format contain declarations, summaries/layout recipes,
 checked generic templates and nongeneric CoreIR for both libraries. Stale source
 stamps and foreign compiler products miss and rebuild. Custom source manifests
@@ -161,9 +180,8 @@ out-of-line definition, with the declarations it references and the constants
 it uses, its local names derived from content. A part's object is keyed by the
 code generator (compiler, libLLVM, target, debug lines) and the part's bitcode,
 so an unchanged definition is generated once whichever program reached it.
-Parts of monomorphic core and std instances go to the user's cache
-(`release-parts`), every other part to the store; the unit's record in the
-store lists its parts, and an unchanged rebuild loads them all.
+Every part goes to the user's content store; the unit's record there lists its
+parts, and an unchanged rebuild loads them all.
 Release builds cache the program-wide role facts by their complete content
 inputs. An unchanged build restores the same consumed rows; an edit in the
 fixpoint's input set derives them again. Native object keys retain the exact

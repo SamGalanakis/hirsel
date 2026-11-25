@@ -14,9 +14,16 @@
 //! carry and admission verifies; the pack's own checks are xxh3-64, which
 //! detect damage and name nothing (`store::checksum`).
 //!
+//! A cache store's packs are blobs of the per-user content store, named by
+//! the SHA-256 of their bytes, and its pack set is a record there listing
+//! each pack with its sequence number. A durable store's packs, if it holds
+//! any, are files `packs/<sequence>-<xxh3>.pack`, which it only reads.
+//!
 //! Nothing is synced (cache, FOR-SAM #20): a pack is written whole to a
-//! locked temporary of the driver store and renamed to its name in `packs/`.
-//! After a power loss the renamed file may be short, zero-filled or torn.
+//! locked temporary of the content store and renamed to its blob name, and
+//! the pack set is rewritten under the store's `packs.lock`. After a power
+//! loss the renamed file may be short, zero-filled or torn, or a pack the set
+//! names may be gone (collected).
 //! A pack whose header, trailer or index check fails is ignored; a row whose
 //! payload check fails is absent. Either way the object is a miss and the
 //! next build writes it again; damaged bytes are never served. A row is
@@ -25,12 +32,14 @@
 //!
 //! Commits merge the newest packs (`merge_from`): every pack holds at least
 //! `RATIO` times the bytes of the next newer one, and there are at most
-//! `MAX_PACKS`. A merged pack is renamed in before the packs it absorbs
-//! are removed; a reader that misses lists `packs/` again.
+//! `MAX_PACKS`. A merged pack is written before the set stops naming the
+//! packs it absorbs, which the collector removes once unused; a reader that
+//! misses reads the set again.
 use super::ObjectKind;
-use crate::store::{Store, checksum};
+use crate::store::{Bare, Store, checksum};
 use hirsel_core_ids::ContentHash;
 use rustc_hash::FxHashMap;
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::hash::Hasher;
 use std::io::{self, BufWriter, Write};
@@ -88,6 +97,9 @@ impl Entry {
 /// One pack's rows, read and checked from its file.
 struct Pack {
     name: String,
+    sequence: u64,
+    /// The pack's blob, in a cache store.
+    blob: Bare,
     file: File,
     bytes: u64,
     entries: Vec<Entry>,
@@ -97,7 +109,7 @@ struct Pack {
 
 impl Pack {
     /// The pack at `path`, or `None` when it is not a whole pack.
-    fn open(path: &Path, name: String) -> io::Result<Option<Self>> {
+    fn open(path: &Path, name: String, sequence: u64, blob: Bare) -> io::Result<Option<Self>> {
         let file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -108,8 +120,11 @@ impl Pack {
             return Ok(None);
         };
         let checked = vec![false; entries.len()];
+        crate::store::collect::touch(&file);
         Ok(Some(Self {
             name,
+            sequence,
+            blob,
             file,
             bytes,
             entries,
@@ -187,20 +202,22 @@ fn read_index(file: &File, bytes: u64) -> io::Result<Option<Vec<Entry>>> {
     Ok((ordered && inside).then_some(entries))
 }
 
-/// Write sorted, unique rows directly to the unpublished pack. Keep the
-/// index in memory and hash the payloads as they are written.
+/// Write sorted, unique rows directly to the unpublished pack, a blob of
+/// `store`. Keep the index in memory and hash the payloads as they are
+/// written.
 fn write_pack<B: AsRef<[u8]>>(
     store: &Store,
-    directory: &Path,
     sequence: u64,
     rows: impl Iterator<Item = io::Result<(Key, B)>>,
 ) -> io::Result<Pack> {
-    let (name, bytes, entries) = store.publish_to(|file| {
+    let (path, blob, bytes, entries) = store.publish_to(|file| {
         let mut file = BufWriter::new(file);
         let mut hash = XxHash3_64::default();
+        let mut name = Sha256::new();
         let mut write = |bytes: &[u8]| {
             file.write_all(bytes)?;
             hash.write(bytes);
+            name.update(bytes);
             Ok::<(), io::Error>(())
         };
         let mut index = Vec::new();
@@ -231,17 +248,27 @@ fn write_pack<B: AsRef<[u8]>>(
         write(END)?;
         file.flush()?;
         let bytes = offset + (index.len() - HEADER + TRAILER) as u64;
-        let name = format!("{sequence:016x}-{:016x}{SUFFIX}", hash.finish());
-        Ok((directory.join(&name), (name, bytes, entries)))
+        let blob = Bare {
+            address: ContentHash(name.finalize().into()),
+            check: hash.finish(),
+        };
+        let path = store.blob_path(blob.address);
+        Ok((path.clone(), (path, blob, bytes, entries)))
     })?;
-    let file = File::open(directory.join(&name))?;
+    let file = File::open(&path)?;
     Ok(Pack {
-        name,
+        name: blob_name(blob),
+        sequence,
+        blob,
         file,
         bytes,
         checked: vec![true; entries.len()],
         entries,
     })
+}
+
+fn blob_name(blob: Bare) -> String {
+    crate::native::selection(blob.address)
 }
 
 fn sequence(name: &str) -> Option<u64> {
@@ -259,62 +286,110 @@ struct Pending {
     rows: FxHashMap<Key, Arc<[u8]>>,
 }
 
+/// Where a store's packs are listed.
+enum Source {
+    /// A durable store's `packs/` directory, read only.
+    Directory(PathBuf),
+    /// A cache store's pack set: a record of the content store under `set`.
+    Set { store: Store, set: ContentHash },
+}
+
 /// The packs of one code store, as this process has read them, and the
 /// objects it has put but not committed.
 pub(crate) struct Packs {
-    directory: PathBuf,
+    source: Source,
     listed: bool,
     packs: Vec<Pack>,
     pending: Pending,
 }
 
+const SET_SCHEMA: u32 = 1;
+
 impl Packs {
+    /// A durable store's packs, in `root/packs`.
     pub(super) fn new(root: &Path) -> Self {
+        Self::of(Source::Directory(root.join("packs")))
+    }
+
+    /// The cache store `name`'s packs in the content store `store`.
+    pub(super) fn cache(store: Store, name: &str) -> Self {
+        let set = ContentHash::of_parts("hirsel.code-pack-set.v1", [name.as_bytes()]);
+        Self::of(Source::Set { store, set })
+    }
+
+    fn of(source: Source) -> Self {
         Self {
-            directory: root.join("packs"),
+            source,
             listed: false,
             packs: Vec::new(),
             pending: Pending::default(),
         }
     }
 
-    /// List `packs/` again on the next lookup: another process may have
-    /// committed or merged since this one last listed it.
+    /// List the packs again on the next lookup: another process may have
+    /// committed or merged since this one last listed them.
     pub(crate) fn relist(&mut self) {
         self.listed = false;
     }
 
-    /// Read the packs named in `packs/` that are not read yet, in sequence
-    /// order, and let go of those a merge removed. A merge renames its pack
-    /// in before it removes the packs it absorbs, so their rows are listed.
-    fn list(&mut self) -> io::Result<()> {
-        self.listed = true;
-        let rows = match fs::read_dir(&self.directory) {
-            Ok(rows) => rows,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
+    /// The packs listed now: name, sequence, file and blob.
+    fn listing(&self) -> io::Result<Vec<(String, u64, PathBuf, Bare)>> {
         let mut listed = Vec::new();
-        for row in rows {
-            if let Ok(name) = row?.file_name().into_string()
-                && let Some(sequence) = sequence(&name)
-            {
-                listed.push((sequence, name));
+        match &self.source {
+            Source::Directory(directory) => {
+                let rows = match fs::read_dir(directory) {
+                    Ok(rows) => rows,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(listed),
+                    Err(error) => return Err(error),
+                };
+                for row in rows {
+                    if let Ok(name) = row?.file_name().into_string()
+                        && let Some(sequence) = sequence(&name)
+                    {
+                        let path = directory.join(&name);
+                        listed.push((name, sequence, path, Bare::default()));
+                    }
+                }
+            }
+            Source::Set { store, set } => {
+                let set = store
+                    .get(*set)?
+                    .and_then(|bytes| crate::decode::<(u32, Vec<(u64, Bare)>)>(&bytes))
+                    .filter(|(schema, _)| *schema == SET_SCHEMA)
+                    .map(|(_, packs)| packs)
+                    .unwrap_or_default();
+                for (sequence, blob) in set {
+                    listed.push((
+                        blob_name(blob),
+                        sequence,
+                        store.blob_path(blob.address),
+                        blob,
+                    ));
+                }
             }
         }
+        Ok(listed)
+    }
+
+    /// Read the packs listed that are not read yet, in sequence order, and
+    /// let go of those a merge absorbed. A merge writes its pack before the
+    /// listing stops naming the packs it absorbs, so their rows are listed.
+    fn list(&mut self) -> io::Result<()> {
+        self.listed = true;
+        let listed = self.listing()?;
         self.packs
-            .retain(|pack| listed.iter().any(|(_, name)| *name == pack.name));
+            .retain(|pack| listed.iter().any(|(name, ..)| *name == pack.name));
         let mut names = listed
             .into_iter()
-            .filter(|(_, name)| !self.packs.iter().any(|pack| pack.name == *name))
+            .filter(|(name, ..)| !self.packs.iter().any(|pack| pack.name == *name))
             .collect::<Vec<_>>();
-        names.sort();
-        for (_, name) in names {
-            if let Some(pack) = Pack::open(&self.directory.join(&name), name)? {
+        names.sort_by_key(|(_, sequence, ..)| *sequence);
+        for (name, sequence, path, blob) in names {
+            if let Some(pack) = Pack::open(&path, name, sequence, blob)? {
                 self.packs.push(pack);
             }
         }
-        self.packs.sort_by_key(|pack| sequence(&pack.name));
+        self.packs.sort_by_key(|pack| pack.sequence);
         Ok(())
     }
 
@@ -350,7 +425,7 @@ impl Packs {
             .is_some_and(|(pack, row)| self.packs[pack].entries[row].len == len))
     }
 
-    /// The bytes of the `kind` object named `hash`; a miss lists `packs/`
+    /// The bytes of the `kind` object named `hash`; a miss lists the packs
     /// again, since a merge may have replaced the packs read so far.
     pub(super) fn read(
         &mut self,
@@ -385,13 +460,18 @@ impl Packs {
             .or_insert_with(bytes);
     }
 
-    /// Write the pending objects as one pack through `store`'s temporaries,
-    /// then merge the newest packs. Nothing is synced.
-    pub(super) fn commit(&mut self, store: &Store) -> io::Result<()> {
+    /// Write the pending objects as one pack blob, merge the newest packs
+    /// and rewrite the pack set, under the content store's `packs.lock`.
+    /// Nothing is synced. A durable store's objects are written by `put`.
+    pub(super) fn commit(&mut self) -> io::Result<()> {
+        let Source::Set { store, set } = &self.source else {
+            return Ok(());
+        };
         if self.pending.rows.is_empty() {
             return Ok(());
         }
-        fs::create_dir_all(&self.directory)?;
+        let (store, set) = (store.clone(), *set);
+        let _held = store.hold("packs.lock")?;
         self.listed = false;
         self.list()?;
         let mut rows = self.pending.rows.iter().collect::<Vec<_>>();
@@ -399,30 +479,31 @@ impl Packs {
         let sequence = self
             .packs
             .iter()
-            .filter_map(|pack| sequence(&pack.name))
+            .map(|pack| pack.sequence)
             .max()
             .map_or(0, |last| last + 1);
         let pack = write_pack(
-            store,
-            &self.directory,
+            &store,
             sequence,
             rows.into_iter().map(|(&key, bytes)| Ok((key, bytes))),
         )?;
         self.pending.rows.clear();
         self.packs.push(pack);
-        self.merge(store)
+        self.merge(&store)?;
+        let listed: Vec<(u64, Bare)> = self.packs.iter().map(|p| (p.sequence, p.blob)).collect();
+        store.put_keyed(set, &crate::encode(&(SET_SCHEMA, listed))?)
     }
 
     /// Merge the newest packs into one while the pack before them holds less
     /// than `RATIO` times their bytes, or there are more than
-    /// `MAX_PACKS`. Damaged rows are left out; the absorbed packs are
-    /// removed after the merged pack is in place.
+    /// `MAX_PACKS`. Damaged rows are left out; the set stops naming the
+    /// absorbed packs once the merged pack is in place.
     fn merge(&mut self, store: &Store) -> io::Result<()> {
         let from = merge_from(&self.packs.iter().map(|pack| pack.bytes).collect::<Vec<_>>());
         if from + 1 >= self.packs.len() {
             return Ok(());
         }
-        let newest = sequence(&self.packs.last().unwrap().name).unwrap();
+        let newest = self.packs.last().unwrap().sequence;
         let packs = &mut self.packs[from..];
         let keys = packs
             .iter()
@@ -439,15 +520,8 @@ impl Packs {
             Ok(None)
         };
         let rows = keys.into_iter().filter_map(|key| payload(key).transpose());
-        let merged = write_pack(store, &self.directory, newest, rows)?;
-        for pack in self.packs.drain(from..) {
-            if pack.name != merged.name {
-                match fs::remove_file(self.directory.join(&pack.name)) {
-                    Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-                    _ => {}
-                }
-            }
-        }
+        let merged = write_pack(store, newest, rows)?;
+        self.packs.truncate(from);
         self.packs.push(merged);
         Ok(())
     }

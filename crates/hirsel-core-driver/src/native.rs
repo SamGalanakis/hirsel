@@ -15,6 +15,8 @@ mod cleanup;
 mod link;
 #[path = "link_input.rs"]
 pub(crate) mod link_input;
+#[path = "object_product.rs"]
+mod object_product;
 #[path = "recipe_native.rs"]
 pub(crate) mod recipe_build;
 #[path = "recipe_grants.rs"]
@@ -28,6 +30,7 @@ pub(crate) mod std_release;
 use cleanup::result_cleanup;
 pub(crate) use link::command;
 pub(crate) use link::direct_link;
+pub use object_product::ObjectProduct;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 
@@ -106,9 +109,9 @@ pub struct NativeOptions {
     pub runtime: PathBuf,
     pub link: Link,
     pub store: PathBuf,
-    /// The release parts every program shares: each optimised definition's
-    /// object under its exact key (the user's cache by default).
-    pub parts: PathBuf,
+    /// The content store every build's objects and records live in (the
+    /// user's by default).
+    pub cas: PathBuf,
     pub output: PathBuf,
     pub root_limit: u64,
     pub instance_limit: usize,
@@ -163,7 +166,7 @@ impl NativeOptions {
             runtime,
             link,
             store,
-            parts: crate::PackageProduct::default_cache().join("release-parts"),
+            cas: crate::store::collect::user(),
             output,
             root_limit: 64 * 1024 * 1024,
             instance_limit: DEFAULT_INSTANCE_LIMIT,
@@ -237,91 +240,6 @@ impl From<io::Error> for NativeStop {
 impl From<crate::code_admission::AdmissionError> for NativeStop {
     fn from(error: crate::code_admission::AdmissionError) -> Self {
         Self::Archive(error)
-    }
-}
-pub struct ObjectProduct {
-    pub private_variants: usize,
-    pub instance: Identity,
-    pub identity: ContentHash,
-    pub path: PathBuf,
-    /// The store that holds the object and, for a coverage object, its map
-    /// fragment, which the link joins from here; none for an object held
-    /// outside every store.
-    pub(crate) store: Option<Store>,
-    /// The object's read check (`Bare::check`).
-    pub(crate) check: u64,
-    /// The bytes this request checked or wrote, which the link hands the
-    /// linker. None: a stored object named by a record, which the link reads
-    /// and checks.
-    pub(crate) bytes: Option<std::sync::Arc<[u8]>>,
-    pub debug: Option<std::sync::Arc<hirsel_core_ir::source::NativeDebug>>,
-    /// Stored debug rows: their store and address. A link with debug lines
-    /// reads them when `debug` is not in hand.
-    pub(crate) debug_record: Option<(Store, ContentHash)>,
-    pub compiled: bool,
-}
-impl ObjectProduct {
-    /// A stored object named by a record this request did not write.
-    fn stored(instance: Identity, store: &Store, object: Bare, debug: Option<ContentHash>) -> Self {
-        Self {
-            private_variants: 0,
-            instance,
-            identity: object.address,
-            path: crate::native_object::path(store, object.address),
-            store: Some(store.clone()),
-            check: object.check,
-            bytes: None,
-            debug: None,
-            debug_record: debug.map(|d| (store.clone(), d)),
-            compiled: false,
-        }
-    }
-    /// An object this request read and checked, or emitted and wrote.
-    fn held(
-        instance: Identity,
-        store: &Store,
-        object: Bare,
-        native: hirsel_core_ir::source::NativeObject,
-        debug: Option<ContentHash>,
-        compiled: bool,
-    ) -> Self {
-        let mut product = Self::shared(
-            instance,
-            store,
-            (object, native.bytes.into()),
-            native.debug.map(std::sync::Arc::new),
-            compiled,
-        );
-        product.debug_record = debug.map(|d| (store.clone(), d));
-        product
-    }
-    /// An object whose checked `bytes` this request holds, its debug rows
-    /// `debug` in hand.
-    pub(crate) fn shared(
-        instance: Identity,
-        store: &Store,
-        (object, bytes): (Bare, std::sync::Arc<[u8]>),
-        debug: Option<std::sync::Arc<hirsel_core_ir::source::NativeDebug>>,
-        compiled: bool,
-    ) -> Self {
-        Self {
-            private_variants: 0,
-            instance,
-            identity: object.address,
-            path: crate::native_object::path(store, object.address),
-            store: Some(store.clone()),
-            check: object.check,
-            bytes: Some(bytes),
-            debug,
-            debug_record: None,
-            compiled,
-        }
-    }
-    fn bare(&self) -> Bare {
-        Bare {
-            address: self.identity,
-            check: self.check,
-        }
     }
 }
 #[derive(Debug, Serialize)]
@@ -493,11 +411,11 @@ pub(crate) fn native_inputs(
         Some(crate::instances::Records {
             digest: ContentHash::of_parts("hirsel.core-environment.v1", [&env[..]]),
             env,
-            store: Store::new(&options.store)?,
+            store: Store::cas(&options.cas)?,
             library: product
                 .image
                 .as_ref()
-                .map(|i| Store::new(&i.store_root().join("native")))
+                .map(|i| Store::cas(&i.store_root().join("native")))
                 .transpose()?,
         })
     } else {
@@ -529,7 +447,7 @@ impl Table {
         body: ContentHash,
         location: crate::instances::Location,
         object: Bare,
-        debug: Option<ContentHash>,
+        debug: Option<Bare>,
         children: impl IntoIterator<Item = (Option<u32>, &'c Identity)>,
         slots: &[Identity],
         signatures: &crate::instances::CodeSignatures,
@@ -619,7 +537,7 @@ impl CheckProduct {
         reached.require_native(self, entry, options)?;
         let inputs = reached.native.as_ref().expect("a build's reachable set");
         let root = Identity::plain(entry.clone());
-        let code = crate::code_store::CodeStore::cache(&options.store, "code")?;
+        let code = crate::code_store::CodeStore::cache(&options.cas, "code")?;
         let mut units = self
             .release_units(
                 &root,
@@ -636,7 +554,7 @@ impl CheckProduct {
         let std = std_release::std_side(&units, &root, library.as_deref(), options)?;
         units.retain(|identity, _| identity == &root || !std.roots.contains(identity));
         recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &std.points, true, None)?;
-        let store = Store::new(&options.store)?;
+        let store = Store::cas(&options.cas)?;
         Ok(release::release_objects(units, &root, std, options, runtime, &store, false)?.objects)
     }
     /// The reached instances' objects in link order, and for a Cranelift
@@ -679,7 +597,7 @@ impl CheckProduct {
                 options.backend, options.target
             )));
         }
-        let store = Store::new(&options.store)?;
+        let store = Store::cas(&options.cas)?;
         if matches!(options.backend, Backend::Llvm) && options.optimize {
             return Err(NativeStop::Entry(
                 "an optimised LLVM build is assembled from its recipe over the release std".into(),
@@ -688,7 +606,7 @@ impl CheckProduct {
         let library_store = self
             .image
             .as_ref()
-            .map(|i| Store::new(&i.store_root().join("native")))
+            .map(|i| Store::cas(&i.store_root().join("native")))
             .transpose()?;
         let mut objects = Vec::new();
         let mut names = Vec::new();
@@ -707,6 +625,7 @@ impl CheckProduct {
                     let e = prior.entry(i as usize);
                     objects.push(ObjectProduct::stored(
                         instance.clone(),
+                        records.key(instance, e.own)?,
                         records.store(e.location),
                         e.object,
                         e.debug,
@@ -741,6 +660,7 @@ impl CheckProduct {
                 if let Some(record) = materialized.hits.get(instance) {
                     objects.push(ObjectProduct::stored(
                         instance.clone(),
+                        object_key,
                         store,
                         record.object,
                         record.debug,
@@ -813,7 +733,7 @@ impl CheckProduct {
                     );
                 }
                 objects.push(ObjectProduct::held(
-                    instance.clone(),
+                    (instance.clone(), object_key),
                     store,
                     bare,
                     object,
@@ -865,7 +785,7 @@ impl CheckProduct {
                     )
                 };
             objects.push(ObjectProduct::held(
-                instance.clone(),
+                (instance.clone(), object_key),
                 store,
                 bare,
                 object,
@@ -913,7 +833,7 @@ impl CheckProduct {
         if matches!(options.backend, Backend::Llvm) && options.optimize {
             self.preflight_foreign_link(reached, options)?;
             reached.require_native(self, entry, options)?;
-            let code = crate::code_store::CodeStore::cache(&options.store, "code")?;
+            let code = crate::code_store::CodeStore::cache(&options.cas, "code")?;
             return self
                 .publish_release(
                     entry,
@@ -1008,7 +928,7 @@ impl CheckProduct {
             (None, None) => unreachable!("rows are built without a recorded digest"),
         };
         let (mut objects, table) = self.emit_reached(entry, reached, options)?;
-        let store = Store::new(&options.store)?;
+        let store = Store::cas(&options.cas)?;
         let (link, cleanup) = match (reach, prior) {
             (Some(reach), Some(prior))
                 if reach.entry_live
@@ -1018,10 +938,9 @@ impl CheckProduct {
                         .as_ref()
                         .is_none_or(|c| !damaged.contains(&c.identity)) =>
             {
-                let cleanup =
-                    prior.link().cleanup.as_ref().map(|c| {
-                        ObjectProduct::stored(c.identity.clone(), &store, c.object, c.debug)
-                    });
+                let cleanup = prior.link().cleanup.as_ref().map(|c| {
+                    ObjectProduct::stored(c.identity.clone(), c.key, &store, c.object, c.debug)
+                });
                 (prior.link().clone(), cleanup)
             }
             _ => {
@@ -1030,6 +949,7 @@ impl CheckProduct {
                     abi,
                     cleanup: cleanup.as_ref().map(|o| crate::reach::Cleanup {
                         identity: o.instance.clone(),
+                        key: o.key,
                         object: o.bare(),
                         debug: o.debug_record.as_ref().map(|(_, d)| *d),
                     }),
@@ -1094,7 +1014,7 @@ impl CheckProduct {
         let image = self
             .image
             .as_ref()
-            .map(|i| Store::new(&i.store_root().join("native")))
+            .map(|i| Store::cas(&i.store_root().join("native")))
             .transpose()?;
         link_objects(
             &entry_plan,
@@ -1176,7 +1096,7 @@ impl CheckProduct {
         damaged: &BTreeSet<Identity>,
     ) -> Result<(EntryAbi, Option<ObjectProduct>), NativeStop> {
         let decl = self.entry_decl(entry)?;
-        let store = Store::new(&options.store)?;
+        let store = Store::cas(&options.cas)?;
         let Some(records) = &inputs.records else {
             let (abi, cleanup) = self.entry_abi(entry, decl)?.map_err(NativeStop::Entry)?;
             let Some(module) = cleanup else {
@@ -1210,7 +1130,7 @@ impl CheckProduct {
                     )
                 };
             let object = ObjectProduct::held(
-                cleanup_identity(&module),
+                (cleanup_identity(&module), object_key),
                 &store,
                 bare,
                 object,
@@ -1279,6 +1199,7 @@ impl CheckProduct {
                 abi,
                 Some(ObjectProduct::stored(
                     identity,
+                    object_key,
                     &store,
                     record.object,
                     record.debug,
@@ -1333,7 +1254,12 @@ impl CheckProduct {
         Ok((
             abi,
             Some(ObjectProduct::held(
-                identity, &store, bare, object, debug, true,
+                (identity, object_key),
+                &store,
+                bare,
+                object,
+                debug,
+                true,
             )),
         ))
     }
@@ -1584,14 +1510,12 @@ fn link_objects(
         Some(assembly) => key("hirsel.recipe-final-link.v3", &assembly)?,
         None => key("hirsel.core-executable.v9", &(build, entry_plan))?,
     };
-    let store = Store::new(&options.store)?;
+    let store = Store::native(&options.store)?;
     let coverage = options
         .coverage
         .is_some()
         .then(|| {
-            crate::native_object::join_coverage(
-                objects.iter().map(|o| (o.store.as_ref(), o.identity)),
-            )
+            crate::native_object::join_coverage(objects.iter().map(|o| (o.store.as_ref(), o.key)))
         })
         .transpose()?
         .map(Arc::new);
@@ -1713,7 +1637,7 @@ fn link_objects(
                     }
                 };
                 #[cfg(test)]
-                UNIT.set(Some((unit_key, image.path(_unit.address), _prelinked)));
+                UNIT.set(Some((unit_key, image.blob_path(_unit.address), _prelinked)));
                 members.push(bytes.into());
                 Some(unit_key)
             }
@@ -2098,7 +2022,7 @@ pub(crate) mod tests {
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
             store: dir.join("native"),
-            parts: dir.join("parts"),
+            cas: dir.join("cas"),
             output: dir.join("program"),
             root_limit: 1_048_576,
             // Glue operations are instances of their own: a program's walk counts each.
@@ -2497,8 +2421,8 @@ fn f5 = n5 g5 extern
             .iter()
             .find(|o| o.instance.definition.0.name == "add")
             .unwrap();
-        let store = Store::new(&options.store).unwrap();
-        std::fs::write(store.path(callee.identity), b"bad object").unwrap();
+        let store = Store::cas(&options.cas).unwrap();
+        std::fs::write(store.blob_path(callee.identity), b"bad object").unwrap();
         // The executable's key names the object by identity. A Cranelift
         // build reads a stored object only to link it, so the executable's
         // hit reads none and the next link checks each stored object it did
@@ -2627,7 +2551,7 @@ fn f5 = n5 g5 extern
                 "the edited record needs new release code"
             );
 
-            // A fresh native store has to link using the shared release parts.
+            // A fresh native store has to link using the content store's parts.
             let store =
                 std::mem::replace(&mut options.store, dir.path().join("another-record-native"));
             let output = std::mem::replace(
@@ -2736,7 +2660,9 @@ fn f5 = n5 g5 extern
         let checked = Driver::default()
             .check(request.clone(), &mut Meter::new(false))
             .unwrap();
-        let native = checked.build(&entry, &options).unwrap();
+        let mut first = options.clone();
+        first.cas = dir.path().join("first-cas"); // so the image build below lowers its std
+        let native = checked.build(&entry, &first).unwrap();
         run_clean(&native.executable, 7);
         request.store = dir.path().join("image-request");
         let cache = dir.path().join("products");
@@ -2778,10 +2704,9 @@ fn f5 = n5 g5 extern
             2
         };
         assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), decoded);
-        // A second application's private native store: development reuses
-        // core's objects and compiles its own entry; a release build links no
-        // library object, and every part of the same program is already in
-        // the shared parts cache, so it generates none.
+        // A second application's private native store: every object and part of
+        // the same program is already in the user's content store, so it
+        // compiles and generates none and links no library object.
         let mut other_options = native_options(backend, dir.path());
         other_options.optimize = optimize;
         other_options.store = dir.path().join("another-app-native");
@@ -2797,8 +2722,7 @@ fn f5 = n5 g5 extern
                 .filter(|o| o.instance.definition.package_is("core", "1"))
                 .collect::<Vec<_>>();
             assert_eq!(core.len(), 2);
-            assert!(core.iter().all(|o| !o.compiled));
-            assert_eq!(objects.iter().filter(|o| o.compiled).count(), 1);
+            assert!(objects.iter().all(|o| !o.compiled));
         }
         // A cached negative body is refused only when this entry reaches it.
         let mut request = source_request(

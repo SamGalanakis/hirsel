@@ -11,7 +11,7 @@ fn release_link_holds_no_descriptor_on_its_parts() {
     let dir = tempfile::tempdir().unwrap();
     let mut options = native_options(Backend::Llvm, dir.path());
     options.optimize = true;
-    let parts = options.parts.clone();
+    let parts = options.cas.clone();
     let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let seen = std::rc::Rc::clone(&held);
     AFTER_CHECK.with(|hook| {

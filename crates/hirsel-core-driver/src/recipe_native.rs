@@ -579,7 +579,7 @@ impl Memos {
             "hirsel.recipe-unit-index.v1",
             &(crate::reuse::compiler_identity()?, entry, code.root()),
         )?;
-        let read = cached(&Store::new(&options.store)?, key)?
+        let read = cached(&Store::cas(&options.cas)?, key)?
             .and_then(|bytes| crate::decode::<UnitIndex>(&bytes))
             .filter(|index| index.schema == UNIT_INDEX_SCHEMA)
             .unwrap_or_default();
@@ -1441,7 +1441,7 @@ fn object<'m>(
         }
     };
     Ok(ObjectProduct::shared(
-        instance.clone(),
+        (instance.clone(), key),
         store,
         held,
         debug,
@@ -1693,11 +1693,11 @@ impl Publication {
                     .map(|path| path.as_os_str().as_bytes()),
             ),
         )?;
-        let store = Store::new(&options.store)?;
+        let store = Store::cas(&options.cas)?;
         let library = library
             .map(|root| root.join(LIBRARY_OBJECTS))
             .filter(|path| path.is_dir())
-            .map(|path| Store::new(&path))
+            .map(|path| Store::cas(&path))
             .transpose()?;
         let mut release_sites = Vec::new();
         let mut release_debug_sites = Vec::new();

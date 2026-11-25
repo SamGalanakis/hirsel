@@ -1,12 +1,19 @@
 //! Content-addressed records in one envelope, committed by atomic rename.
 //! Disk bytes are external input; a damaged record is a cache miss.
 //!
+//! A flat store (`Store::new`) keeps each file under its hex name in its
+//! root. A content store (`Store::cas`, the per-user compiler cache and an
+//! image's library objects) keeps records under `k/<key>` and blobs under
+//! `o/<sha256>`, each in a two-hex shard: a record maps a key its caller
+//! derives to the blobs it names, and a blob is named by the SHA-256 of its
+//! own bytes, so equal bytes are stored once whichever key made them.
+//!
 //! Every byte a read uses is covered by an xxh3-64 checksum it verifies:
-//! records and selections carry theirs in the frame, a bare object's sits
-//! beside its name in the record that names it (`Bare`). SHA-256 is
-//! computed once, at write, only to name content; keyed records, and the
-//! objects and debug rows named from their keys, hash no bytes to be named.
-//! Nothing is synced: a torn,
+//! records and selections carry theirs in the frame, a blob's sits beside
+//! its name in the record that names it (`Bare`). SHA-256 is computed once,
+//! at write, only to name content; keyed records hash no bytes to be named.
+//! Every frame carries its origin, the principal whose mapping it is: this
+//! machine's are all zeros, and a reader takes no other. Nothing is synced: a torn,
 //! short, zero-filled or missing file after a power loss fails its check or
 //! is absent, so it is a miss and is rebuilt.
 use hirsel_core_ids::{ContentHash, encoding};
@@ -21,8 +28,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use twox_hash::XxHash3_64;
 
-#[path = "release_cache.rs"]
-pub(crate) mod release_cache;
+#[path = "collect.rs"]
+pub(crate) mod collect;
 
 /// The most bytes one `write` hands the page cache. The kernel sizes the
 /// folios it allocates for a buffered write to the write's length, so one
@@ -83,9 +90,13 @@ const BODY_HEADER: usize = 28;
 /// framed as one part. A body record's IR part is hashed by it, and so is a
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
-// CoreIR signatures always encode their anchors in a body record, including an empty list.
-pub(crate) const VERSION: u32 = 43;
-pub(crate) const HEADER: usize = 12;
+// Every frame carries its origin; object records name content-addressed blobs.
+pub(crate) const VERSION: u32 = 44;
+/// `MAGIC`, `VERSION` and the frame's origin.
+pub(crate) const HEADER: usize = 44;
+/// The origin of a mapping this machine made. A record signed by another
+/// builder carries that builder's key id and lives apart from these.
+const LOCAL: [u8; 32] = [0; 32];
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;
 /// A body's two checksums and its address.
@@ -154,6 +165,19 @@ pub(crate) fn checksum(bytes: &[u8]) -> u64 {
 }
 fn word(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+/// A record naming one blob: its address and read check.
+fn encode_bare(bare: Bare) -> [u8; 40] {
+    let mut bytes = [0; 40];
+    bytes[..32].copy_from_slice(&bare.address.0);
+    bytes[32..].copy_from_slice(&bare.check.to_le_bytes());
+    bytes
+}
+fn decode_bare(bytes: &[u8]) -> Option<Bare> {
+    (bytes.len() == 40).then(|| Bare {
+        address: ContentHash(bytes[..32].try_into().unwrap()),
+        check: word(bytes, 32),
+    })
 }
 /// A bare object's name and the checksum a read verifies: the record that
 /// names the object carries both, so the object's own bytes stay the plain
@@ -262,7 +286,8 @@ impl ArchiveWriter {
 pub struct Store {
     root: PathBuf,
     image: bool,
-    release: Option<release_cache::Release>,
+    /// A content store's collection handle (`collect`); `None` for a flat one.
+    cas: Option<collect::Cas>,
 }
 
 pub(crate) fn default_path(directory: &Path) -> PathBuf {
@@ -323,7 +348,7 @@ impl Store {
         let store = Self {
             root: root.to_owned(),
             image: false,
-            release: None,
+            cas: None,
         };
         store.sweep()?;
         Ok(store)
@@ -425,8 +450,8 @@ impl Store {
             write_bounded(file, &parts)?;
             Ok((path, ()))
         })?;
-        if let Some(release) = &self.release {
-            release.wrote(parts.iter().map(|part| part.len()).sum());
+        if let Some(cas) = &self.cas {
+            cas.wrote(parts.iter().map(|part| part.len()).sum());
         }
         Ok(())
     }
@@ -444,9 +469,9 @@ impl Store {
         }
         let result = written.and_then(|(path, value)| {
             let path = path.as_ref();
-            match (&self.release, fs::rename(&temporary.path, path)) {
-                (Some(release), Err(e)) if e.kind() == io::ErrorKind::NotFound => {
-                    release.create_dir(path.parent().expect("a release cache shard"))?;
+            match (&self.cas, fs::rename(&temporary.path, path)) {
+                (Some(cas), Err(e)) if e.kind() == io::ErrorKind::NotFound => {
+                    cas.create_dir(path.parent().expect("a content store shard"))?;
                     fs::rename(&temporary.path, path)?;
                 }
                 (_, result) => result?,
@@ -458,47 +483,73 @@ impl Store {
         }
         result
     }
-    /// Whether `path` names a file of this store.
     /// The store's directory.
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
+    /// Whether `path` names a file of this store.
     pub(crate) fn holds(&self, path: &Path) -> bool {
-        path.parent() == Some(&*self.root)
+        path.starts_with(&self.root)
     }
+    /// The record under `key`: `k/<shard>/<rest>` in a content store, the
+    /// hex name in a flat one.
     pub fn path(&self, key: ContentHash) -> PathBuf {
+        self.named(collect::RECORDS, key)
+    }
+    /// The blob whose bytes hash to `address`: `o/<shard>/<rest>` in a
+    /// content store.
+    pub(crate) fn blob_path(&self, address: ContentHash) -> PathBuf {
+        self.named(collect::BLOBS, address)
+    }
+    fn named(&self, directory: &str, name: ContentHash) -> PathBuf {
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut name = [0; 64];
-        for (i, byte) in key.0.into_iter().enumerate() {
-            name[i * 2] = HEX[(byte >> 4) as usize];
-            name[i * 2 + 1] = HEX[(byte & 15) as usize];
+        let mut hex = [0; 64];
+        for (i, byte) in name.0.into_iter().enumerate() {
+            hex[i * 2] = HEX[(byte >> 4) as usize];
+            hex[i * 2 + 1] = HEX[(byte & 15) as usize];
         }
-        let name = std::str::from_utf8(&name).expect("hex digits are ASCII");
-        if self.release.is_some() {
-            self.root.join(&name[..2]).join(&name[2..])
+        let hex = std::str::from_utf8(&hex).expect("hex digits are ASCII");
+        if self.cas.is_some() {
+            self.root.join(directory).join(&hex[..2]).join(&hex[2..])
         } else {
-            self.root.join(name)
+            self.root.join(hex)
         }
     }
     pub fn put(&self, bytes: &[u8]) -> io::Result<ContentHash> {
         self.archive(|writer| writer.write_all(bytes))
     }
-    /// Publish an ELF/object payload under `name`, which its caller derives
-    /// from the key of the record that names it, never from its bytes. The
-    /// file is passed directly to native linkers by path, so it carries no
-    /// frame: its checksum travels in that record, and a file at the name
+    /// Publish `bytes` as a blob named by their SHA-256. The file is passed
+    /// directly to native linkers by path, so it carries no frame: its
+    /// checksum travels in the record that names it, and a file at the name
     /// whose bytes are not the record's fails the read check, a miss.
     /// The bytes always replace the file by a rename: a file already at the
     /// path may be one whose check just failed, and an existing name says
     /// nothing about its bytes.
-    pub(crate) fn put_bare(&self, name: ContentHash, bytes: &[u8]) -> io::Result<Bare> {
+    pub(crate) fn put_blob(&self, bytes: &[u8]) -> io::Result<Bare> {
         let bare = Bare {
-            address: name,
+            address: {
+                hirsel_core_front::cost_scope!("non-check", "archive write and digest");
+                ContentHash(Sha256::digest(bytes).into())
+            },
             check: checksum(bytes),
         };
-        self.publish(&self.path(bare.address), [bytes])?;
+        self.publish(&self.blob_path(bare.address), [bytes])?;
         wrote("bare");
         Ok(bare)
+    }
+    /// Publish `bytes` as a blob and a record under `key` naming it.
+    pub(crate) fn put_keyed_blob(&self, key: ContentHash, bytes: &[u8]) -> io::Result<Bare> {
+        let bare = self.put_blob(bytes)?;
+        self.put_keyed(key, &encode_bare(bare))?;
+        Ok(bare)
+    }
+    /// The blob the record under `key` names, with its bytes, when both
+    /// check.
+    pub(crate) fn get_keyed_blob(&self, key: ContentHash) -> io::Result<Option<(Bare, Vec<u8>)>> {
+        let Some(bare) = self.get(key)?.as_deref().and_then(decode_bare) else {
+            return Ok(None);
+        };
+        Ok(self.get_blob(bare)?.map(|bytes| (bare, bytes)))
     }
     pub(crate) fn archive(
         &self,
@@ -565,7 +616,8 @@ impl Store {
     fn header() -> [u8; HEADER] {
         let mut header = [0; HEADER];
         header[..8].copy_from_slice(MAGIC);
-        header[8..].copy_from_slice(&VERSION.to_le_bytes());
+        header[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        header[12..].copy_from_slice(&LOCAL);
         header
     }
     /// The hash of exactly a module's serialization (`IR`).
@@ -711,8 +763,8 @@ impl Store {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(size).map_err(io::Error::other)?;
         file.read_to_end(&mut bytes)?;
-        if self.release.is_some() && bytes.len() == size {
-            release_cache::touch(&file);
+        if self.cas.is_some() && bytes.len() == size {
+            collect::touch(&file);
         }
         if let Some(image) = image {
             image.bytes(bytes.len());
@@ -748,7 +800,10 @@ impl Store {
             return Ok(None);
         };
         let size = bytes.len();
-        if size < HEADER + TRAILER || &bytes[..8] != MAGIC || bytes[8..12] != VERSION.to_le_bytes()
+        if size < HEADER + TRAILER
+            || &bytes[..8] != MAGIC
+            || bytes[8..12] != VERSION.to_le_bytes()
+            || bytes[12..HEADER] != LOCAL
         {
             return Ok(None);
         }
@@ -765,9 +820,10 @@ impl Store {
         }
         Ok(Some((bytes, end)))
     }
-    /// A bare object's bytes when they pass their check.
-    pub(crate) fn get_bare(&self, bare: Bare) -> io::Result<Option<Vec<u8>>> {
-        let mut file = match File::open(self.path(bare.address)) {
+    /// A blob's bytes when they pass their check: a blob damaged, or
+    /// swapped for another's, is a miss.
+    pub(crate) fn get_blob(&self, bare: Bare) -> io::Result<Option<Vec<u8>>> {
+        let mut file = match File::open(self.blob_path(bare.address)) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
@@ -779,13 +835,24 @@ impl Store {
         if checksum(&bytes) != bare.check {
             return Ok(None);
         }
-        if self.release.is_some() {
-            release_cache::touch(&file);
+        if self.cas.is_some() {
+            collect::touch(&file);
         }
         Ok(Some(bytes))
     }
+    /// Where the selection `name` lives: at the root of a flat store, and
+    /// among a content store's records, where the collector sees it.
+    pub(crate) fn selection_path(&self, name: &str) -> PathBuf {
+        match self.cas {
+            Some(_) => self.path(ContentHash::of_parts(
+                "hirsel.store-selection.v1",
+                [name.as_bytes()],
+            )),
+            None => self.root.join(name),
+        }
+    }
     pub(crate) fn selection(&self, name: &str) -> io::Result<Option<ContentHash>> {
-        let bytes = match fs::read(self.root.join(name)) {
+        let bytes = match fs::read(self.selection_path(name)) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
@@ -809,7 +876,7 @@ impl Store {
         bytes.extend_from_slice(name.as_bytes());
         let check = checksum(&bytes);
         bytes.extend_from_slice(&check.to_le_bytes());
-        self.publish(&self.root.join(name), [&bytes])?;
+        self.publish(&self.selection_path(name), [&bytes])?;
         wrote("selection");
         Ok(())
     }

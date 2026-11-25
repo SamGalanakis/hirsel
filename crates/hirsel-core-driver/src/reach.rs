@@ -34,7 +34,7 @@ use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-pub(crate) const REACH_SCHEMA: u32 = 12;
+pub(crate) const REACH_SCHEMA: u32 = 13;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image
@@ -59,9 +59,8 @@ pub(crate) struct Node {
 /// The header walk's nodes, each with its edges and whether it is unavailable.
 pub(crate) type Graph = BTreeMap<(DefPath, bool), (Vec<(DefPath, bool)>, bool)>;
 
-/// One instance of the table, in link order: the instance record's fields
-/// with its children and closures as indices, and its items as indices of
-/// the record's paths.
+/// One instance of the table, in link order: the instance record's fields,
+/// its children, closures and items (of the record's paths) as indices.
 #[derive(Clone)]
 pub(crate) struct Entry {
     pub identity: Identity,
@@ -70,7 +69,7 @@ pub(crate) struct Entry {
     pub body: ContentHash,
     pub location: Location,
     pub object: Bare,
-    pub debug: Option<ContentHash>,
+    pub debug: Option<Bare>,
     pub children: Vec<u32>,
     pub slots: Vec<Identity>,
     pub signatures: CodeSignatures,
@@ -90,7 +89,7 @@ pub(crate) struct Fresh {
     pub body: ContentHash,
     pub location: Location,
     pub object: Bare,
-    pub debug: Option<ContentHash>,
+    pub debug: Option<Bare>,
     pub children: Vec<u32>,
     pub slots: Vec<Identity>,
     pub signatures: CodeSignatures,
@@ -101,12 +100,13 @@ pub(crate) struct Fresh {
     pub closures: Vec<u32>,
 }
 
-/// The entry's result cleanup object, in the request's store.
+/// The entry's result cleanup object, with its record's key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Cleanup {
     pub identity: Identity,
+    pub key: ContentHash,
     pub object: Bare,
-    pub debug: Option<ContentHash>,
+    pub debug: Option<Bare>,
 }
 
 /// What the entry record gives the link: the ABI and the cleanup object. The
@@ -128,7 +128,7 @@ struct StoredEntry<S, H, U, Slots, Signatures, Adapters> {
     body: ContentHash,
     location: Location,
     object: Bare,
-    debug: Option<ContentHash>,
+    debug: Option<Bare>,
     children: U,
     slots: Slots,
     signatures: Signatures,

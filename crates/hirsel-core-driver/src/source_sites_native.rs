@@ -319,6 +319,7 @@ fn failure_sites_discarded_by_linker() {
     objects.push(ObjectProduct {
         private_variants: 0,
         instance: main.clone(),
+        key: ContentHash::of_bytes(&bytes),
         identity: ContentHash::of_bytes(&bytes),
         check: crate::store::checksum(&bytes),
         bytes: Some(bytes.into()),

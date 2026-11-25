@@ -2544,8 +2544,8 @@ fn stored_executable(root: &Path) -> Vec<PathBuf> {
             if path.is_dir() {
                 dirs.push(path);
             } else if std::fs::read(&path).is_ok_and(|bytes| {
-                // A keyed frame: 12 header bytes, the payload, 48 trailer bytes.
-                bytes.len() == program.len() + 60 && bytes[12..12 + program.len()] == program
+                let after_header = bytes.get(crate::store::HEADER..).unwrap_or_default();
+                after_header.len() == program.len() + 48 && after_header.starts_with(&program)
             }) {
                 found.push(path);
             }

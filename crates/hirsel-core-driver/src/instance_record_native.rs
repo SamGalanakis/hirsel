@@ -33,17 +33,10 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 /// The entry records a native store holds.
 fn entry_records(root: &Path) -> usize {
-    let store = Store::new(root).unwrap();
-    std::fs::read_dir(root)
-        .unwrap()
-        .filter_map(|e| {
-            let name = e.ok()?.file_name().into_string().ok()?;
-            let bytes = (0..32)
-                .map(|i| u8::from_str_radix(name.get(i * 2..i * 2 + 2)?, 16).ok())
-                .collect::<Option<Vec<u8>>>()?;
-            Some(ContentHash(bytes.try_into().ok()?))
-        })
-        .filter(|key| entry_record(&store, *key).unwrap().is_some())
+    let store = Store::cas(root).unwrap();
+    crate::store::collect::records(root)
+        .into_iter()
+        .filter(|(_, key)| entry_record(&store, *key).unwrap().is_some())
         .count()
 }
 fn executable_bytes(product: &CheckProduct, options: &NativeOptions) -> (Vec<u8>, Option<i32>) {
@@ -72,7 +65,7 @@ fn exit_layout_misses_the_entry_record(backend: Backend) {
     let options = native_options(backend, dir.path());
     let primed = executable_bytes(&record_check(APP, &core, dir.path(), "store"), &options);
     assert_eq!(primed.1, Some(7), "{backend:?}: primed");
-    let before = entry_records(&options.store);
+    let before = entry_records(&options.cas);
     let moved = prelude.replace(
         "pub type Exit: key {\n    status: u8\n}",
         "pub type Exit: key {\n    status: u8,\n    pad: u64\n}",
@@ -88,12 +81,13 @@ fn exit_layout_misses_the_entry_record(backend: Backend) {
     .unwrap();
     let rebuilt = executable_bytes(&record_check(APP, &core, dir.path(), "store"), &options);
     if matches!(backend, Backend::Cranelift) {
-        assert_eq!(entry_records(&options.store), before + 1, "the entry record misses");
+        assert_eq!(entry_records(&options.cas), before + 1, "the entry record misses");
     }
     let fresh = executable_bytes(
         &record_check(APP, &core, dir.path(), "fresh"),
         &NativeOptions {
             store: dir.path().join("fresh-native"),
+            cas: dir.path().join("fresh-cas"),
             ..native_options(backend, dir.path())
         },
     );
@@ -164,6 +158,7 @@ fn same_length_ir_damage_refuses_once_then_builds_fresh() {
         &record_check(APP, &core, dir.path(), "fresh"),
         &NativeOptions {
             store: dir.path().join("fresh-native"),
+            cas: dir.path().join("fresh-cas"),
             ..lines(true)
         },
     );
@@ -213,6 +208,7 @@ fn each_plan_input_builds_a_fresh_stores_executable() {
             &record_check(APP, &core, dir.path(), &format!("fresh{n}")),
             &NativeOptions {
                 store: dir.path().join(format!("fresh-native{n}")),
+                cas: dir.path().join(format!("fresh-cas{n}")),
                 ..options
             },
         );
@@ -227,7 +223,7 @@ fn each_plan_input_builds_a_fresh_stores_executable() {
     let fresh = record_check(APP, &core, dir.path(), "fresh-limit");
     assert!(
         fresh
-            .build(&entry, &NativeOptions { store: dir.path().join("fresh-native-limit"), ..limited() })
+            .build(&entry, &NativeOptions { store: dir.path().join("fresh-native-limit"), cas: dir.path().join("fresh-cas-limit"), ..limited() })
             .is_err(),
         "instance limit: a fresh store stops"
     );
@@ -235,17 +231,9 @@ fn each_plan_input_builds_a_fresh_stores_executable() {
 
 /// The instance records a store holds, with their addresses.
 fn instance_records(store: &Store, root: &Path) -> Vec<(ContentHash, crate::native_object::Instance)> {
-    std::fs::read_dir(root)
-        .unwrap()
-        .filter_map(|e| {
-            let name = e.ok()?.file_name().into_string().ok()?;
-            let bytes = (0..32)
-                .map(|i| u8::from_str_radix(name.get(i * 2..i * 2 + 2)?, 16).ok())
-                .collect::<Option<Vec<u8>>>()?;
-            let address = ContentHash(bytes.try_into().ok()?);
-            let record = decode::<crate::native_object::Instance>(&store.get(address).ok()??)?;
-            Some((address, record))
-        })
+    crate::store::collect::records(root)
+        .into_iter()
+        .filter_map(|(_, key)| Some((key, decode::<crate::native_object::Instance>(&store.get(key).ok()??)?)))
         .collect()
 }
 
@@ -265,8 +253,8 @@ fn a_forged_closure_misses_its_parent() {
     let options = native_options(Backend::Cranelift, dir.path());
     let primed = record_check(APP, &core, dir.path(), "store");
     assert_eq!(executable_bytes(&primed, &options).1, Some(7));
-    let store = Store::new(&options.store).unwrap();
-    let records = instance_records(&store, &options.store);
+    let store = Store::cas(&options.cas).unwrap();
+    let records = instance_records(&store, &options.cas);
     let get = DefPath::from_full("app@1/main/get").unwrap();
     let echo = DefPath::from_full("app@1/main/echo").unwrap();
     let (_, mut parent) = records
@@ -309,6 +297,7 @@ fn a_forged_closure_misses_its_parent() {
         &record_check(APP, &core, dir.path(), "fresh"),
         &NativeOptions {
             store: dir.path().join("fresh-native"),
+            cas: dir.path().join("fresh-cas"),
             ..native_options(Backend::Cranelift, dir.path())
         },
     );
@@ -386,6 +375,7 @@ fn new_reachable_diagnostic(backend: Backend) {
     let edited = build_diagnostics(&library_check(&after, LIB, &core, dir.path(), "store"), &options);
     let fresh_options = NativeOptions {
         store: dir.path().join("fresh-native"),
+        cas: dir.path().join("fresh-cas"),
         ..native_options(backend, dir.path())
     };
     let fresh = build_diagnostics(&library_check(&after, LIB, &core, dir.path(), "fresh"), &fresh_options);
@@ -423,6 +413,7 @@ fn rejected_repair(backend: Backend) {
         &library_check(&app, REPAIRED, &core, dir.path(), "fresh"),
         &NativeOptions {
             store: dir.path().join("fresh-native"),
+            cas: dir.path().join("fresh-cas"),
             ..native_options(backend, dir.path())
         },
     );
@@ -453,13 +444,11 @@ enum Damage {
 /// The objects a native store holds: its ELF files (a record starts with the
 /// store's magic).
 fn stored_objects(root: &Path) -> Vec<PathBuf> {
-    let mut objects: Vec<_> = std::fs::read_dir(root)
-        .unwrap()
-        .map(|e| e.unwrap().path())
+    crate::store::collect::blobs(root)
+        .into_iter()
+        .map(|(path, _)| path)
         .filter(|p| std::fs::read(p).is_ok_and(|b| b.starts_with(b"\x7fELF")))
-        .collect();
-    objects.sort();
-    objects
+        .collect()
 }
 fn damage(path: &Path, how: Damage) {
     use object::{Object, ObjectSection};
@@ -502,7 +491,7 @@ fn damaged_objects_build_a_fresh_stores_executable(backend: Backend) {
         let core = core_sources();
         let options = native_options(backend, dir.path());
         executable_bytes(&record_check(DAMAGE_APP, &core, dir.path(), "store"), &options);
-        let objects = stored_objects(&options.store);
+        let objects = stored_objects(&options.cas);
         assert!(!objects.is_empty());
         for object in &objects {
             damage(object, how);
@@ -517,6 +506,7 @@ fn damaged_objects_build_a_fresh_stores_executable(backend: Backend) {
             &record_check(DAMAGE_EDIT, &core, dir.path(), "fresh"),
             &NativeOptions {
                 store: dir.path().join("fresh-native"),
+                cas: dir.path().join("fresh-cas"),
                 ..native_options(backend, dir.path())
             },
         );
@@ -553,7 +543,7 @@ fn damaged_executable_links_again(backend: Backend) {
     // DWARF, also an ELF file, is a record of its own.
     let record = Store::new(&options.store).unwrap().path(built.identity);
     assert!(
-        std::fs::read(&record).is_ok_and(|b| b.get(12..16) == Some(b"\x7fELF")),
+        std::fs::read(&record).is_ok_and(|b| b.get(crate::store::HEADER..crate::store::HEADER + 4) == Some(b"\x7fELF")),
         "the executable record"
     );
     damage(&record, Damage::Middle);

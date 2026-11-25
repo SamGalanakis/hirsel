@@ -4,6 +4,8 @@ use hirsel_core_ir::FuncId;
 
 #[path = "diagnostic_fixes.rs"]
 mod diagnostic_fixes;
+#[path = "disk_frames.rs"]
+mod disk_frames;
 #[path = "encoding_laws.rs"]
 mod encoding_laws;
 #[path = "poison_laws.rs"]
@@ -499,72 +501,6 @@ fn refused_body_is_published_and_unreached_demand_is_explicit() {
             .contains("outside reached")
     );
 }
-/// Each stored kind against its hand-built frame: a record is `HCORE VERSION
-/// payload len check address`, a selection `address check`, and a bare object
-/// its plain bytes under the checksum its referrer holds (each check the
-/// xxh3-64 of what precedes it). Every flipped byte, the checksum field's
-/// included, and every power-loss shape (short, zero-filled, missing) reads as
-/// nothing; the whole frame reads back.
-#[test]
-fn damaged_disk_bytes_are_a_miss() {
-    use sha2::Digest;
-    use twox_hash::XxHash3_64;
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::new(dir.path()).unwrap();
-    let payload = b"published payload";
-    let mut record = b"HCORE\0\0\0".to_vec();
-    record.extend(crate::store::VERSION.to_le_bytes());
-    record.extend(payload);
-    record.extend((payload.len() as u64).to_le_bytes());
-    let key = ContentHash(sha2::Sha256::digest(&record).into());
-    record.extend(XxHash3_64::oneshot(&record).to_le_bytes());
-    record.extend(key.0);
-    assert_eq!(store.put(payload).unwrap(), key);
-    assert_eq!(std::fs::read(store.path(key)).unwrap(), record);
-    let mut selection = key.0.to_vec();
-    selection.extend(b"live");
-    selection.extend(XxHash3_64::oneshot(&selection).to_le_bytes());
-    store.select("live", key).unwrap();
-    assert_eq!(std::fs::read(dir.path().join("live")).unwrap(), selection);
-    let object = b"\x7fELF object bytes".as_slice();
-    let bare = store
-        .put_bare(ContentHash::of_bytes(b"object"), object)
-        .unwrap();
-    assert_eq!(bare.check, XxHash3_64::oneshot(object));
-    let kinds: [(&str, PathBuf, &[u8], &dyn Fn() -> bool); 3] = [
-        ("record", store.path(key), &record, &|| {
-            store.get(key).unwrap().is_some()
-        }),
-        ("selection", dir.path().join("live"), &selection, &|| {
-            store.selection("live").unwrap() == Some(key)
-        }),
-        ("bare object", store.path(bare.address), object, &|| {
-            store.get_bare(bare).unwrap().is_some()
-        }),
-    ];
-    for (kind, path, good, reads) in kinds {
-        let write = |bytes: &[u8]| std::fs::write(&path, bytes).unwrap();
-        for at in 0..good.len() {
-            let mut damaged = good.to_vec();
-            damaged[at] ^= 1;
-            write(&damaged);
-            assert!(!reads(), "{kind}: byte {at}");
-        }
-        for len in 0..good.len() {
-            write(&good[..len]);
-            assert!(!reads(), "{kind}: {len} bytes");
-        }
-        write(&vec![0; good.len()]);
-        assert!(!reads(), "{kind}: zero-filled");
-        std::fs::remove_file(&path).unwrap();
-        assert!(!reads(), "{kind}: missing");
-        write(good);
-        assert!(reads(), "{kind}: whole");
-    }
-    assert_eq!(store.get(key).unwrap().unwrap(), payload);
-    assert_eq!(store.get_bare(bare).unwrap().unwrap(), object);
-}
-
 #[test]
 fn prog8_unrelated_parse_failure_does_not_suppress_other_results() {
     let dir = tempfile::tempdir().unwrap();
@@ -2483,7 +2419,7 @@ fn edit_kinds_publish_the_fresh_build() {
 /// checksum and address) of `old`: only the checksum tells it from the
 /// record it replaces.
 fn under_old_address(old: &[u8], payload: &[u8]) -> Vec<u8> {
-    let mut bytes = old[..12].to_vec();
+    let mut bytes = old[..crate::store::HEADER].to_vec();
     bytes.extend_from_slice(payload);
     bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&old[old.len() - 40..]);
@@ -2563,7 +2499,7 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                         let Some(bytes) = std::fs::read(f).ok().filter(|b| b.len() > 60) else {
                             return false;
                         };
-                        let payload = &bytes[12..bytes.len() - 48];
+                        let payload = &bytes[crate::store::HEADER..bytes.len() - 48];
                         // Node::Leaf is the second variant of the node encoding.
                         payload[..4] == [1, 0, 0, 0]
                             && decode::<Vec<(DefPath, check_index::Row)>>(&payload[4..])
@@ -2571,7 +2507,7 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                     })
                     .unwrap();
                 let bytes = std::fs::read(&leaf).unwrap();
-                let payload = &bytes[12..bytes.len() - 48];
+                let payload = &bytes[crate::store::HEADER..bytes.len() - 48];
                 let mut rows: Vec<(DefPath, check_index::Row)> = decode(&payload[4..]).unwrap();
                 rows.retain(|r| r.0 != dispatch);
                 let mut cut = payload[..4].to_vec();

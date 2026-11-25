@@ -49,6 +49,7 @@ fn fresh_objects(
     assert!(product.accepted(), "{:?}", product.diagnostics);
     let options = NativeOptions {
         store: dir.join(format!("fresh-native{n}")),
+        cas: dir.join(format!("fresh-cas{n}")),
         debug_lines: options.debug_lines,
         ..native_options(options.backend, dir)
     };

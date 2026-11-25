@@ -1,9 +1,9 @@
-//! An emitted object, its debug rows and the record naming them, all stored
-//! under names derived from the object's key: the record framed under the key
-//! itself, the object bare under [`object_name`] and the debug rows framed
-//! under [`debug_name`]. Every frame carries its key and a schema that its
-//! reader compares, and the object's checksum travels in the record, so a
-//! record, debug row or object moved under another key's name is a miss.
+//! An emitted object, its debug rows and the record naming them. The object
+//! and its debug rows are blobs, named by the SHA-256 of their bytes, so
+//! equal objects made under different keys are stored once; the record is
+//! framed under the object's key and names each blob with its read check, so
+//! a blob damaged or swapped for another's fails that check and is a miss.
+//! A coverage object's map fragment is a record named from the object's key.
 use crate::store::Bare;
 use crate::{Store, decode, encode};
 use hirsel_core_ids::ContentHash;
@@ -11,99 +11,82 @@ use hirsel_core_ir::source::{NativeDebug, NativeObject};
 use serde::{Deserialize, Serialize};
 use std::io;
 
-pub(crate) const SCHEMA: u32 = 3;
+pub(crate) const SCHEMA: u32 = 4;
 #[derive(Serialize, Deserialize)]
 struct Root {
     schema: u32,
     object: Bare,
-    debug: Option<ContentHash>,
+    debug: Option<Bare>,
 }
 
-/// The name of the bare object stored for the record under `key`.
-pub(crate) fn object_name(key: ContentHash) -> ContentHash {
-    ContentHash::of_parts("hirsel.core-object-file.v1", [&key.0[..]])
-}
-/// The name of the debug rows stored for the record under `key`.
-fn debug_name(key: ContentHash) -> ContentHash {
-    ContentHash::of_parts("hirsel.core-object-debug.v1", [&key.0[..]])
-}
-const DEBUG_SCHEMA: u32 = 1;
-/// The name of the coverage map fragment stored with the object named
-/// `identity` ([`object_name`]), a function of the object's key that a link
-/// holding the object's identity can derive.
-fn coverage_name(identity: ContentHash) -> ContentHash {
-    ContentHash::of_parts("hirsel.core-object-coverage.v1", [&identity.0[..]])
+const DEBUG_SCHEMA: u32 = 2;
+/// The name of the coverage map fragment stored with the object whose
+/// record is under `key`.
+fn coverage_name(key: ContentHash) -> ContentHash {
+    ContentHash::of_parts("hirsel.core-object-coverage.v2", [&key.0[..]])
 }
 const COVERAGE_SCHEMA: u32 = 1;
 
-/// Store `native`'s object and debug rows under the names `key` derives: the
-/// object and the debug rows' name.
+/// Store `native`'s object and debug rows as blobs, and its coverage
+/// fragment under `key`'s name.
 fn put_parts(
     store: &Store,
     key: ContentHash,
     native: &NativeObject,
-) -> io::Result<(Bare, Option<ContentHash>)> {
-    let object = store.put_bare(object_name(key), &native.bytes)?;
+) -> io::Result<(Bare, Option<Bare>)> {
+    let object = store.put_blob(&native.bytes)?;
     let debug = match &native.debug {
-        Some(debug) => {
-            let name = debug_name(key);
-            store.put_keyed(name, &encode(&(DEBUG_SCHEMA, debug))?)?;
-            Some(name)
-        }
+        Some(debug) => Some(store.put_blob(&encode(&(DEBUG_SCHEMA, debug))?)?),
         None => None,
     };
     // A coverage object's fragment is stored before its record, so a record
-    // under a coverage key always has one. The record does not name it: a
-    // plain record's bytes are the bytes it had before coverage.
+    // under a coverage key always has one.
     if let Some(fragment) = &native.coverage {
-        put_coverage(store, object.address, fragment)?;
+        put_coverage(store, key, fragment)?;
     }
     Ok((object, debug))
 }
 
-/// Store `fragment` as the map fragment of the coverage object named
-/// `identity`, beside the object ([`join_coverage`]).
+/// Store `fragment` as the map fragment of the coverage object whose record
+/// is under `key`, beside the object ([`join_coverage`]).
 fn put_coverage(
     store: &Store,
-    identity: ContentHash,
+    key: ContentHash,
     fragment: &hirsel_core_ir::coverage::Fragment,
 ) -> io::Result<()> {
-    store.put_keyed(
-        coverage_name(identity),
-        &encode(&(COVERAGE_SCHEMA, fragment))?,
-    )?;
+    store.put_keyed(coverage_name(key), &encode(&(COVERAGE_SCHEMA, fragment))?)?;
     Ok(())
 }
 
-/// The map fragment stored with the coverage object named `identity`
-/// ([`crate::native::ObjectProduct::identity`]), when it checks.
+/// The map fragment stored with the coverage object whose record is under
+/// `key` ([`crate::native::ObjectProduct::key`]), when it checks.
 fn load_coverage(
     store: &Store,
-    identity: ContentHash,
+    key: ContentHash,
 ) -> io::Result<Option<hirsel_core_ir::coverage::Fragment>> {
     Ok(store
-        .get(coverage_name(identity))?
+        .get(coverage_name(key))?
         .and_then(|bytes| decode::<(u32, hirsel_core_ir::coverage::Fragment)>(&bytes))
         .and_then(|(schema, fragment)| (schema == COVERAGE_SCHEMA).then_some(fragment)))
 }
 
 /// A coverage link's site map: the fragment of each linked object, read
-/// from the store that holds it (`objects`: each object's store and
-/// identity), in link order, keeping the first record of each id. Records of
-/// one id have the same sites; only the code variants' arm positions can
-/// differ, so the first in link order is the one kept. An object with no
-/// fragment in its store (a plain object, or one held in no store) adds no
-/// record, and a raw record of its id is refused when the file is read.
+/// from the store that holds it (`objects`: each object's store and record
+/// key), in link order, keeping the first record of each id. Records of one
+/// id have the same sites; only the code variants' arm positions can differ,
+/// so the first in link order is the one kept. An object with no fragment in
+/// its store (a plain object, or one held in no store) adds no record, and a
+/// raw record of its id is refused when the file is read.
 pub(crate) fn join_coverage<'s>(
     objects: impl Iterator<Item = (Option<&'s Store>, ContentHash)>,
 ) -> io::Result<hirsel_core_ir::coverage::Fragment> {
     let mut map = hirsel_core_ir::coverage::Fragment::default();
     let mut seen = std::collections::BTreeSet::new();
-    for (store, identity) in objects {
+    for (store, key) in objects {
         let Some(store) = store else {
             continue;
         };
-        for record in load_coverage(store, identity)?
+        for record in load_coverage(store, key)?
             .into_iter()
             .flat_map(|f| f.records)
         {
@@ -130,8 +113,9 @@ pub(crate) fn publish(store: &Store, key: ContentHash, native: &NativeObject) ->
     Ok(object)
 }
 
-pub(crate) fn path(store: &Store, identity: ContentHash) -> std::path::PathBuf {
-    store.path(identity)
+/// The file of the object blob named `address`.
+pub(crate) fn path(store: &Store, address: ContentHash) -> std::path::PathBuf {
+    store.blob_path(address)
 }
 
 /// The object stored under `key` when every part checks; the link hands its
@@ -140,7 +124,7 @@ pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, 
     let Some((object, debug)) = record(store, key)? else {
         return Ok(None);
     };
-    let Some(bytes) = store.get_bare(object)? else {
+    let Some(bytes) = store.get_blob(object)? else {
         return Ok(None);
     };
     Ok(Some((
@@ -153,23 +137,18 @@ pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, 
     )))
 }
 
-/// The parts of the record under `key` that are a function of the key: the
-/// bare object it names and its decoded debug rows, when every part checks.
+/// The parts of the record under `key`, which are a function of the key:
+/// the object blob it names and its decoded debug rows, when every part
+/// checks.
 fn record(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, Option<NativeDebug>)>> {
     let Some(bytes) = store.get(key)? else {
         return Ok(None);
     };
-    let Some(root) = decode::<Root>(&bytes) else {
+    let Some(root) = decode::<Root>(&bytes).filter(|root| root.schema == SCHEMA) else {
         return Ok(None);
     };
-    if root.schema != SCHEMA
-        || root.object.address != object_name(key)
-        || root.debug.is_some_and(|d| d != debug_name(key))
-    {
-        return Ok(None);
-    }
     let debug = match root.debug {
-        Some(name) => match load_debug(store, name)? {
+        Some(rows) => match load_debug(store, rows)? {
             Some(debug) => Some(debug),
             None => return Ok(None),
         },
@@ -188,21 +167,20 @@ pub(crate) type Shared = (
 
 /// [`load`] with its object read and checked: a resident compiler remembers
 /// each record it read with its object's bytes, which are a function of the
-/// record's key, and reads neither again.
+/// record's key alone, whichever store held them, and reads neither again.
 pub(crate) fn load_shared(store: &Store, key: ContentHash) -> io::Result<Option<Shared>> {
-    let shared =
-        crate::resident::OBJECT_RECORDS.get_or(Some((store.root().to_owned(), key)), || {
-            let (object, debug) = match record(store, key) {
-                Ok(Some(found)) => found,
-                Ok(None) => return Err(None),
-                Err(error) => return Err(Some(error)),
-            };
-            match store.get_bare(object) {
-                Ok(Some(bytes)) => Ok((object, debug.map(std::sync::Arc::new), bytes.into())),
-                Ok(None) => Err(None),
-                Err(error) => Err(Some(error)),
-            }
-        });
+    let shared = crate::resident::OBJECT_RECORDS.get_or(Some(key), || {
+        let (object, debug) = match record(store, key) {
+            Ok(Some(found)) => found,
+            Ok(None) => return Err(None),
+            Err(error) => return Err(Some(error)),
+        };
+        match store.get_blob(object) {
+            Ok(Some(bytes)) => Ok((object, debug.map(std::sync::Arc::new), bytes.into())),
+            Ok(None) => Err(None),
+            Err(error) => Err(Some(error)),
+        }
+    });
     match shared {
         Ok(shared) => Ok(Some(shared)),
         Err(None) => Ok(None),
@@ -227,7 +205,7 @@ pub(crate) struct Instance {
     /// The digest of the encoded environment the key was made with.
     pub env: ContentHash,
     pub object: Bare,
-    pub debug: Option<ContentHash>,
+    pub debug: Option<Bare>,
     /// The instances the module calls outside itself, sorted and deduplicated.
     pub children: Vec<hirsel_core_ir::Identity>,
     /// Exact PROG-10 slot order, including symbolic builtins.
@@ -240,16 +218,16 @@ pub(crate) struct Instance {
     /// Every closure a child's arguments name, deduplicated, by hash.
     pub closures: Vec<std::sync::Arc<hirsel_core_ir::Closure>>,
 }
-pub(crate) const INSTANCE_SCHEMA: u32 = 5;
+pub(crate) const INSTANCE_SCHEMA: u32 = 6;
 
 /// Publish an emitted instance's object, debug rows and record under its
-/// key; the object and the debug rows' name.
+/// key; the object and the debug rows' blobs.
 pub(crate) fn publish_instance(
     store: &Store,
     key: ContentHash,
     object: &NativeObject,
     mut record: Instance,
-) -> io::Result<(Bare, Option<ContentHash>)> {
+) -> io::Result<(Bare, Option<Bare>)> {
     let (bare, debug) = put_parts(store, key, object)?;
     record.object = bare;
     record.debug = debug;
@@ -257,9 +235,9 @@ pub(crate) fn publish_instance(
     Ok((record.object, record.debug))
 }
 
-/// The record stored under `key`, when it decodes, names its key's object and
-/// debug rows, and every closure's hash checks against its rows. Anything
-/// else is a miss.
+/// The record stored under `key`, when it decodes and every closure's hash
+/// checks against its rows. Anything else is a miss; the blobs it names are
+/// checked when they are read.
 pub(crate) fn load_instance(store: &Store, key: ContentHash) -> io::Result<Option<Instance>> {
     let Some(bytes) = store.get(key)? else {
         return Ok(None);
@@ -268,8 +246,6 @@ pub(crate) fn load_instance(store: &Store, key: ContentHash) -> io::Result<Optio
         return Ok(None);
     };
     let sound = record.schema == INSTANCE_SCHEMA
-        && record.object.address == object_name(key)
-        && record.debug.is_none_or(|d| d == debug_name(key))
         && record
             .closures
             .iter()
@@ -277,10 +253,10 @@ pub(crate) fn load_instance(store: &Store, key: ContentHash) -> io::Result<Optio
     Ok(sound.then_some(record))
 }
 
-/// Stored debug rows by their name; a damaged or foreign record is none.
-pub(crate) fn load_debug(store: &Store, name: ContentHash) -> io::Result<Option<NativeDebug>> {
+/// Stored debug rows by their blob; a damaged or foreign blob is none.
+pub(crate) fn load_debug(store: &Store, rows: Bare) -> io::Result<Option<NativeDebug>> {
     Ok(store
-        .get(name)?
+        .get_blob(rows)?
         .and_then(|bytes| decode::<(u32, NativeDebug)>(&bytes))
         .filter(|(schema, _)| *schema == DEBUG_SCHEMA)
         .map(|(_, debug)| debug))
@@ -290,16 +266,20 @@ pub(crate) fn load_debug(store: &Store, name: ContentHash) -> io::Result<Option<
 mod tests {
     use super::*;
     use hirsel_core_ir::source::*;
-    fn swap(store: &Store, a: ContentHash, b: ContentHash) {
-        let held = store.path(a).with_extension("swap");
-        std::fs::rename(store.path(a), &held).unwrap();
-        std::fs::rename(store.path(b), store.path(a)).unwrap();
-        std::fs::rename(&held, store.path(b)).unwrap();
+    fn swap(a: &std::path::Path, b: &std::path::Path) {
+        let held = a.with_extension("swap");
+        std::fs::rename(a, &held).unwrap();
+        std::fs::rename(b, a).unwrap();
+        std::fs::rename(&held, b).unwrap();
     }
-    /// Each kind stored under a key's name, moved under another key's name,
-    /// is a miss: an object record, an instance record, a bare object and
-    /// debug rows. Frames carry their key and schema; a bare object's check
-    /// travels in the record that names it.
+    /// Law: a record, object blob or debug-row blob swapped for another
+    /// key's, or a blob whose bytes are damaged, is a miss: an object record
+    /// or instance record never reads through to bytes that are not the
+    /// ones it was published with, and publishing again makes it a hit.
+    /// Frames carry their key and schema; a blob's check travels in the
+    /// record that names it. Bug: a blob read that skipped the check (or a
+    /// record read that skipped the frame's key) would hand the linker the
+    /// other object's bytes.
     #[test]
     fn records_stored_under_each_others_names_are_misses() {
         let object = |bytes: &[u8]| NativeObject {
@@ -333,57 +313,76 @@ mod tests {
         let (a, b) = (ContentHash::of_bytes(b"a"), ContentHash::of_bytes(b"b"));
         let fresh = || {
             let dir = tempfile::tempdir().unwrap();
-            let store = Store::new(dir.path()).unwrap();
+            let store = Store::cas(dir.path()).unwrap();
             (dir, store)
         };
-        type Name = fn(ContentHash) -> ContentHash;
-        let kinds: [(&str, Name); 3] = [
-            ("record", |k| k),
-            ("bare object", object_name),
-            ("debug rows", debug_name),
+        type Part = fn(&Store, ContentHash, (Bare, Option<Bare>)) -> std::path::PathBuf;
+        let kinds: [(&str, Part); 3] = [
+            ("record", |s, k, _| s.path(k)),
+            ("object blob", |s, _, (o, _)| s.blob_path(o.address)),
+            ("debug blob", |s, _, (_, d)| s.blob_path(d.unwrap().address)),
         ];
-        for (kind, name) in kinds {
-            let (_dir, store) = fresh();
-            // Object records: the link reads the object and debug rows.
-            publish(&store, a, &object(b"a")).unwrap();
-            publish(&store, b, &object(b"b")).unwrap();
-            swap(&store, name(a), name(b));
-            assert!(load(&store, a).unwrap().is_none(), "object {kind} a");
-            assert!(load(&store, b).unwrap().is_none(), "object {kind} b");
-            // Instance records: a hit names the object and debug rows, which
-            // the link reads through the record's check and name.
-            let (_dir, store) = fresh();
-            publish_instance(&store, a, &object(b"a"), instance("a")).unwrap();
-            publish_instance(&store, b, &object(b"b"), instance("b")).unwrap();
-            swap(&store, name(a), name(b));
-            for key in [a, b] {
-                let read = load_instance(&store, key).unwrap().is_some_and(|r| {
-                    store.get_bare(r.object).unwrap().is_some()
-                        && load_debug(&store, r.debug.unwrap()).unwrap().is_some()
-                });
-                assert!(!read, "instance {kind} {key:?}");
-            }
-        }
-        // An object record naming another key's debug rows, each stored
-        // soundly under its own name, links rows of another object.
-        let (_dir, store) = fresh();
-        let object_a = publish(&store, a, &object(b"a")).unwrap();
-        publish(&store, b, &object(b"b")).unwrap();
-        let foreign = Root {
-            schema: SCHEMA,
-            object: object_a,
-            debug: Some(debug_name(b)),
+        let damage = |path: &std::path::Path| {
+            let mut bytes = std::fs::read(path).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(path, bytes).unwrap();
         };
-        store.put_keyed(a, &encode(&foreign).unwrap()).unwrap();
-        assert!(
-            load(&store, a).unwrap().is_none(),
-            "object a naming b's debug rows"
-        );
+        let read_instance = |store: &Store, key| {
+            load_instance(store, key).unwrap().is_some_and(|r| {
+                store.get_blob(r.object).unwrap().is_some()
+                    && load_debug(store, r.debug.unwrap()).unwrap().is_some()
+            })
+        };
+        for (kind, part) in kinds {
+            // Object records: the link reads the object and debug rows.
+            let (_dir, store) = fresh();
+            let parts = |key, bytes: &[u8]| {
+                let object = object(bytes);
+                let bare = publish(&store, key, &object).unwrap();
+                (
+                    bare,
+                    Some(
+                        store
+                            .put_blob(&encode(&(DEBUG_SCHEMA, object.debug.unwrap())).unwrap())
+                            .unwrap(),
+                    ),
+                )
+            };
+            let (pa, pb) = (parts(a, b"a"), parts(b, b"b"));
+            swap(&part(&store, a, pa), &part(&store, b, pb));
+            assert!(
+                load(&store, a).unwrap().is_none(),
+                "object {kind} a swapped"
+            );
+            assert!(
+                load(&store, b).unwrap().is_none(),
+                "object {kind} b swapped"
+            );
+            damage(&part(&store, a, pa));
+            assert!(
+                load(&store, a).unwrap().is_none(),
+                "object {kind} a damaged"
+            );
+            publish(&store, a, &object(b"a")).unwrap();
+            assert!(load(&store, a).unwrap().is_some(), "object a rebuilt");
+            // Instance records: a hit names the object and debug rows, which
+            // the link reads through the record's checks.
+            let (_dir, store) = fresh();
+            let pa = publish_instance(&store, a, &object(b"a"), instance("a")).unwrap();
+            let pb = publish_instance(&store, b, &object(b"b"), instance("b")).unwrap();
+            swap(&part(&store, a, pa), &part(&store, b, pb));
+            for key in [a, b] {
+                assert!(!read_instance(&store, key), "instance {kind} {key:?}");
+            }
+            publish_instance(&store, a, &object(b"a"), instance("a")).unwrap();
+            damage(&part(&store, a, pa));
+            assert!(!read_instance(&store, a), "instance {kind} damaged");
+        }
     }
     #[test]
     fn native_object_caches_unchanged_code_and_optional_rows_atomically() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path()).unwrap();
+        let store = Store::cas(dir.path()).unwrap();
         for enabled in [false, true] {
             let key = ContentHash::of_bytes(if enabled { b"on" } else { b"off" });
             let object = NativeObject {

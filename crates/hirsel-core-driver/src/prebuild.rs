@@ -87,7 +87,7 @@ impl CheckProduct {
             self.emit_instances(&instances, &materialized, &inputs, None, options)?;
         prebuilt.instances = objects.len();
         prebuilt.compiled = objects.iter().filter(|o| o.compiled).count();
-        let library = Store::new(
+        let library = Store::cas(
             &image
                 .store_root()
                 .join(crate::native::recipe_build::LIBRARY_OBJECTS),

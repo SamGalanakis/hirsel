@@ -28,7 +28,7 @@ fn program_facts_source_changes(backend: Backend) {
             assert_eq!(&key, previous, "a callee body edit must keep the caller's check key");
         }
         caller_key = Some(key);
-        let before = facts_selections(&options.store);
+        let before = facts_selections(&options.cas);
         let built = checked.build(&entry,&options).unwrap();
         run_clean(&built.executable,status);
         if matches!(backend, Backend::Llvm) {
@@ -37,10 +37,14 @@ fn program_facts_source_changes(backend: Backend) {
             let ir = checked.demand(&caller).unwrap().ir().unwrap();
             let f = ir.functions.iter().position(|f| f.body.is_some()).unwrap();
             let code = ir.code_identity(hirsel_core_ir::FuncId(f as u32));
-            let fresh: Vec<_> = facts_selections(&options.store).difference(&before).cloned().collect();
-            let [name] = fresh.as_slice() else { panic!("one fresh facts selection, got {fresh:?}") };
-            let store = Store::new(&options.store).unwrap();
-            let bytes = store.get(store.selection(name).unwrap().unwrap()).unwrap().unwrap();
+            // A selection holds the address it selects, then its own name.
+            let fresh: Vec<_> = facts_selections(&options.cas).difference(&before).filter_map(|path| {
+                let bytes = std::fs::read(path).ok()?;
+                (bytes.get(32..38) == Some(b"facts-")).then(|| ContentHash(bytes[..32].try_into().unwrap()))
+            }).collect();
+            let [address] = fresh.as_slice() else { panic!("one fresh facts selection, got {fresh:?}") };
+            let store = Store::cas(&options.cas).unwrap();
+            let bytes = store.get(*address).unwrap().unwrap();
             let rows = decode::<Vec<Vec<hirsel_core_ir::roles::BodyFacts>>>(&bytes).unwrap();
             let caller_rows: Vec<_> = rows.concat().into_iter().filter(|r| r.code == code).map(|r| r.params).collect();
             assert!(!caller_rows.is_empty(), "the caller is in the consumed rows");
@@ -59,10 +63,8 @@ fn program_facts_source_changes(backend: Backend) {
         assert_ne!(truncate, push, "a callee's fact change must reach its unchanged caller's consumed rows");
     }
 }
-fn facts_selections(store: &Path) -> std::collections::BTreeSet<String> {
-    std::fs::read_dir(store).map_or_else(|_| Default::default(), |entries| {
-        entries.map(|e| e.unwrap().file_name().into_string().unwrap()).filter(|n| n.starts_with("facts-")).collect()
-    })
+fn facts_selections(store: &Path) -> std::collections::BTreeSet<std::path::PathBuf> {
+    crate::store::collect::records(store).into_iter().map(|(path, _)| path).collect()
 }
 #[test]
 #[ignore = "explicit native integration target"]

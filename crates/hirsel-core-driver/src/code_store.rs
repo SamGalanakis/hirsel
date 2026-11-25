@@ -4,9 +4,10 @@
 //! `packs/*.pack` (`pack`). Every store reads both. A durable store (`new`)
 //! writes loose objects, each synced and named atomically ("Durable
 //! publication" in docs/spec/launch.md): host, publish and supplied stores.
-//! A cache store (`cache`) is a build's own, inside its driver store: it
-//! holds what `put` gives it until `commit` writes one unsynced pack, and a
-//! lost or damaged object is a miss that the next build writes again.
+//! A cache store (`cache`) lives in the per-user content store, its packs
+//! blobs there: it holds what `put` gives it until `commit` writes one
+//! unsynced pack, and a lost or damaged object is a miss that the next build
+//! writes again.
 
 use crate::package_content::Sha256Writer;
 use crate::store::Store;
@@ -22,7 +23,8 @@ use std::{
 };
 mod pack;
 
-/// Each cache store's packs as a resident compiler has read them, by root.
+/// Each cache store's packs as a resident compiler has read them, by its
+/// content store and name.
 pub(crate) static PACKS: crate::resident::Memo<PathBuf, Arc<Mutex<pack::Packs>>> =
     crate::resident::Memo::new();
 
@@ -139,8 +141,8 @@ impl Read for Object {
 pub struct CodeStore {
     root: PathBuf,
     packs: Arc<Mutex<pack::Packs>>,
-    /// The driver store whose temporaries a cache store's packs are written
-    /// through; `None` for a durable store.
+    /// The content store a cache store's packs are blobs of; `None` for a
+    /// durable store.
     cache: Option<Store>,
     recipe_stage: Option<PathBuf>,
 }
@@ -157,18 +159,22 @@ impl CodeStore {
         }
     }
 
-    /// The cache store `name` inside driver store `store`. A resident
+    /// The cache store `name` in the content store at `cas`. A resident
     /// compiler is one process: its requests share the store's packs, so a
     /// row is checked once per process, as `pack` states.
-    pub(crate) fn cache(store: &Path, name: &str) -> io::Result<Self> {
-        let root = store.join(name);
+    pub(crate) fn cache(cas: &Path, name: &str) -> io::Result<Self> {
+        let root = cas.join(name);
+        let store = Store::cas(cas)?;
         let packs = PACKS.get_or(Some(root.clone()), || {
-            Ok::<_, io::Error>(Arc::new(Mutex::new(pack::Packs::new(&root))))
+            Ok::<_, io::Error>(Arc::new(Mutex::new(pack::Packs::cache(
+                store.clone(),
+                name,
+            ))))
         })?;
         // Another process may have committed or merged since the last request.
         packs.lock().unwrap().relist();
         Ok(Self {
-            cache: Some(Store::new(store)?),
+            cache: Some(store),
             packs,
             root,
             recipe_stage: None,
@@ -182,7 +188,9 @@ impl CodeStore {
     ) -> io::Result<Self> {
         let mut code = match path {
             Some(path) => Self::new(path),
-            None if command == "build" => Self::cache(compiler, "code-store")?,
+            None if command == "build" => {
+                Self::cache(&crate::store::collect::user(), "code-store")?
+            }
             None => Self::new(compiler.join("code-store")),
         };
         if command == "publish" {
@@ -247,10 +255,7 @@ impl CodeStore {
     /// Write a cache store's pending objects as one pack. A durable store's
     /// objects are written by `put`.
     pub(crate) fn commit(&self) -> io::Result<()> {
-        match &self.cache {
-            Some(store) => self.packs.lock().unwrap().commit(store),
-            None => Ok(()),
-        }
+        self.packs.lock().unwrap().commit()
     }
 
     /// Make a private, already verified admission file durable and visible.
@@ -440,13 +445,16 @@ mod tests {
         };
         let written = CodeStore::cache(&dir.path().join("written"), "code").unwrap();
         let refs = put_all(&written);
-        let packs = dir.path().join("written/code/packs");
-        let [pack] = fs::read_dir(&packs)
-            .unwrap()
-            .map(|row| row.unwrap().path())
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+        let files = |root: &Path| -> Vec<PathBuf> {
+            let mut found = Vec::new();
+            for shard in fs::read_dir(root).unwrap() {
+                for file in fs::read_dir(shard.unwrap().path()).unwrap() {
+                    found.push(file.unwrap().path());
+                }
+            }
+            found
+        };
+        let [pack] = files(&dir.path().join("written/o")).try_into().unwrap();
         let bytes = fs::read(&pack).unwrap();
         let cuts = pack::tests::boundaries(&bytes);
         let payloads = refs
@@ -473,9 +481,16 @@ mod tests {
                 Damage::Payload(at) => damaged[payloads[at].clone()].fill(0),
             }
             let driver = dir.path().join(format!("case-{case}"));
-            fs::create_dir_all(driver.join("code/packs")).unwrap();
+            for file in files(&dir.path().join("written/k"))
+                .into_iter()
+                .chain([pack.clone(), dir.path().join("written/layout")])
+            {
+                let to = driver.join(file.strip_prefix(dir.path().join("written")).unwrap());
+                fs::create_dir_all(to.parent().unwrap()).unwrap();
+                fs::copy(&file, &to).unwrap();
+            }
             fs::write(
-                driver.join("code/packs").join(pack.file_name().unwrap()),
+                driver.join(pack.strip_prefix(dir.path().join("written")).unwrap()),
                 &damaged,
             )
             .unwrap();

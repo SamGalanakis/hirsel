@@ -299,9 +299,9 @@ pub(crate) static DEBUG_POSITIONS: Memo<
     ),
 > = Memo::new();
 
-/// Each stored object record's key-determined parts, by store and key.
-pub(crate) static OBJECT_RECORDS: Memo<(PathBuf, ContentHash), crate::native_object::Shared> =
-    Memo::new();
+/// Each stored object record's key-determined parts, by its key alone: a
+/// key determines its object whichever store holds it.
+pub(crate) static OBJECT_RECORDS: Memo<ContentHash, crate::native_object::Shared> = Memo::new();
 
 #[derive(Clone)]
 struct SourceHash {

@@ -9,7 +9,7 @@
 //!   toolchain and target. A build over that image whose units agree with the
 //!   side's takes it, and lowers and generates none of it.
 //! - reached: any other build lowers the plain roots its own closure reaches
-//!   into the shared parts cache, keeping in the program the plain roots its
+//!   into its side of the content store, keeping in the program the plain roots its
 //!   helpers and specialised library instances call, so their call chains
 //!   optimise together; scalar floating-point routines are lent instead.
 //!
@@ -43,7 +43,7 @@ use super::*;
 use super::{recipe_build::Unit, release::LentBodies};
 use crate::native::{NativeOptions, NativeStop, ObjectProduct};
 use hirsel_core_ir::step_contexts::Summary;
-use hirsel_core_ir::{Callee, FuncId, Identity, Param};
+use hirsel_core_ir::{Callee, FuncId, Identity, Param, source::NativeObject};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 #[path = "std_release/held.rs"]
@@ -88,7 +88,7 @@ struct StdRecord {
     exports: Vec<BTreeSet<String>>,
     /// The unit's parts, in link order. Each part's bitcode is stored under
     /// [`code_name`]; its object, generated when a program first links the
-    /// part ([`StdSide::objects`]), under [`part_name`] in the shared cache.
+    /// part ([`StdSide::objects`]), under [`part_name`] in the side's store.
     parts: Vec<StdPart>,
     /// The store key of the bodies the unit lends, as bitcode.
     lent: ContentHash,
@@ -270,7 +270,7 @@ pub(crate) fn std_side(
             })
             .collect(),
     };
-    let shared = Store::release_parts(&options.parts)?;
+    let shared = Store::cas(&options.cas)?;
     let (store, key, record, lowered) = lower(&generator, kin, side_units, &shared, Vec::new())?;
     side(&store, key, record, lowered)
 }
@@ -288,7 +288,7 @@ fn prebuilt_side(
     else {
         return Ok(None);
     };
-    let store = Store::new(&path)?;
+    let store = Store::cas(&path)?;
     let Some(key) = store
         .get(prebuilt_name(kin)?)?
         .and_then(|bytes| decode::<ContentHash>(&bytes))
@@ -465,7 +465,7 @@ impl CheckProduct {
         let (units, modules) = self.image_side(build)?;
         Ok(PrebuiltStd {
             target: target.to_owned(),
-            store: Store::new(&image.store_root().join(PREBUILT))?,
+            store: Store::cas(&image.store_root().join(PREBUILT))?,
             units,
             modules,
         })
@@ -519,7 +519,7 @@ fn lower(
     let store = if prebuilt {
         cache.clone()
     } else {
-        cache.release_side(key)?
+        cache.side(key)?
     };
     if let Some(record) = load_record(&store, key, kin)? {
         return Ok((store, key, record, 0));
@@ -584,7 +584,7 @@ fn lower(
     if prebuilt {
         write_compressed(&store, lent_key, &lent)?;
     } else {
-        store.put_keyed(lent_key, &lent)?;
+        store.put_keyed_blob(lent_key, &lent)?;
     }
     store.put_keyed(key, &encode(&record)?)?;
     let lowered = record.units.len() as u64;
@@ -744,7 +744,7 @@ fn lower_module(
         }
     } else {
         for (i, part) in program.deferred.iter().enumerate() {
-            store.put_keyed(code_name(key, i)?, &part.code)?;
+            store.put_keyed_blob(code_name(key, i)?, &part.code)?;
         }
     }
     record.roots.extend(roots);
@@ -823,8 +823,9 @@ fn side(
     let lent = if record.prebuilt {
         read_compressed(store, record.lent)?
     } else {
-        store.get(record.lent)?
+        store.get_keyed_blob(record.lent)?
     }
+    .map(|(_, lent)| lent)
     .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
     Ok(StdSide {
         key,
@@ -1017,7 +1018,8 @@ impl StdSide {
                 let bitcode = missed
                     .iter()
                     .map(|&i| {
-                        store.get(code_name(self.key, i)?)?.ok_or_else(|| {
+                        let code = store.get_keyed_blob(code_name(self.key, i)?)?;
+                        code.map(|(_, code)| code).ok_or_else(|| {
                             NativeStop::Entry("a release std part's bitcode is missing".into())
                         })
                     })
@@ -1056,21 +1058,13 @@ impl StdSide {
                 reach(named)?
             };
         }
-        Ok(linked
-            .into_values()
-            .map(|(bare, object)| ObjectProduct {
-                private_variants: 0,
-                instance: instance.clone(),
-                path: crate::native_object::path(store, bare.address),
-                store: Some(store.clone()),
-                identity: bare.address,
-                check: bare.check,
-                bytes: Some(object.bytes.into()),
-                debug: object.debug.map(std::sync::Arc::new),
-                debug_record: None,
-                compiled: false,
-            })
-            .collect())
+        let product = |(i, (bare, object)): (usize, (Bare, NativeObject))| {
+            let named = (instance.clone(), part_name(self.key, i)?);
+            let debug = object.debug.map(std::sync::Arc::new);
+            let held = (bare, object.bytes.into());
+            io::Result::Ok(ObjectProduct::shared(named, store, held, debug, false))
+        };
+        Ok(linked.into_iter().map(product).collect::<io::Result<_>>()?)
     }
 
     /// Each part's bitcode, in part order.
@@ -1080,10 +1074,8 @@ impl StdSide {
         let store = parts.store.as_ref().expect("a std with parts");
         (0..parts.parts.len())
             .map(|i| {
-                store
-                    .get(code_name(self.key, i).unwrap())
-                    .unwrap()
-                    .expect("a part's bitcode")
+                let code = store.get_keyed_blob(code_name(self.key, i).unwrap());
+                code.unwrap().expect("a part's bitcode").1
             })
             .collect()
     }
@@ -1095,11 +1087,11 @@ fn write_compressed(store: &Store, key: ContentHash, bytes: &[u8]) -> io::Result
     let mut payload = Vec::with_capacity(8 + compressed.len());
     payload.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     payload.extend_from_slice(&compressed);
-    store.put_keyed(key, &payload)
+    store.put_keyed_blob(key, &payload).map(drop)
 }
 
-fn read_compressed(store: &Store, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
-    let Some(payload) = store.get(key)? else {
+fn read_compressed(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, Vec<u8>)>> {
+    let Some((blob, payload)) = store.get_keyed_blob(key)? else {
         return Ok(None);
     };
     let (header, bytes) = payload
@@ -1113,24 +1105,22 @@ fn read_compressed(store: &Store, key: ContentHash) -> io::Result<Option<Vec<u8>
     if decoded.len() != size.get() {
         return Err(io::Error::other("invalid release std record length"));
     }
-    Ok(Some(decoded))
+    Ok(Some((blob, decoded)))
 }
 
-/// A linker input only for a prebuilt part the program actually reaches.
+/// A linker input only for a prebuilt part the program actually reaches,
+/// named by its compressed blob and checked as the bytes it links.
 fn read_prebuilt_object(
     store: &Store,
     key: ContentHash,
-) -> io::Result<Option<(crate::store::Bare, hirsel_core_ir::source::NativeObject)>> {
-    let Some(payload) = read_compressed(store, key)? else {
+) -> io::Result<Option<(Bare, NativeObject)>> {
+    let Some((blob, payload)) = read_compressed(store, key)? else {
         return Ok(None);
     };
-    let native: hirsel_core_ir::source::NativeObject =
+    let native: NativeObject =
         decode(&payload).ok_or_else(|| io::Error::other("invalid prebuilt release std object"))?;
-    let bare = crate::store::Bare {
-        address: key,
-        check: crate::store::checksum(&native.bytes),
-    };
-    Ok(Some((bare, native)))
+    let check = crate::store::checksum(&native.bytes);
+    Ok(Some((Bare { check, ..blob }, native)))
 }
 
 /// The record stored under `key` when it decodes, is of `kin` and its own

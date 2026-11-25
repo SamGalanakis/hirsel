@@ -98,7 +98,7 @@ mod build_identity {
         let bytes = std::fs::read(built.executable).unwrap();
         std::fs::remove_file(dir.path().join("main.hirsel")).unwrap();
         options.store = dir.path().join("cold");
-        options.parts = dir.path().join("cold-parts");
+        options.cas = dir.path().join("cold-cas");
         let reopened =
             Publication::open(&code, root, &crate::request::local_admission_limits()).unwrap();
         let replayed = reopened.assemble(&options, Default::default()).unwrap();

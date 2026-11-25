@@ -725,7 +725,7 @@ impl CheckProduct {
         let built = if options.foreign_grants.is_empty() || options.recording {
             self.build_reachable(test, &reached, options)?
         } else {
-            let store = crate::code_store::CodeStore::cache(&options.store, "code")?;
+            let store = crate::code_store::CodeStore::cache(&options.cas, "code")?;
             let publication = self.publish_release(
                 test,
                 &reached,

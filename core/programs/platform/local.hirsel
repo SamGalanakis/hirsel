@@ -104,7 +104,7 @@ const NEXT_ID: u64 = 0u64
 type Launch[T: send]: send {
     supplied: Supplied,
     backing: runner.Backing,
-    sizes: store.Overrides,
+    sizing: PlaceSizing,
     selection: runner.Selection,
     idle: u64,
     sessions: u64,
@@ -114,6 +114,21 @@ type Launch[T: send]: send {
     to: Sender[In],
     name: String,
     gen: u64,
+}
+
+type PlaceSizing: send {
+    sizes: store.Overrides,
+    need: u64,
+}
+
+fn place_sizing(options: store.Options) -> PlaceSizing {
+    let mut sizes = store.derived_sizes()
+    sizes.resident_limit = Some(options.resident_limit)
+    sizes.pack_bytes = Some(options.pack_bytes)
+    sizes.group_bytes = Some(int.widen(options.group_bytes))
+    sizes.group_commits = Some(options.group_commits)
+    sizes.lock_wait_ms = Some(options.lock_wait_ms)
+    PlaceSizing(sizes, need: store.directory_writer_need(sizes))
 }
 
 type Started {
@@ -190,6 +205,7 @@ type Actor[T: send] {
     seed: T,
     root: Dir,
     options: store.Options,
+    sizing: PlaceSizing,
     max_sessions: u64,
     s: Sessions,
     // Each session's marks since the host started, who watches them and who waits for its next end.
@@ -268,13 +284,13 @@ pub fn seeded_factory[T: send, G: send, H: shareable + inert + send, S: send](ma
 }
 
 fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Started, Refused] {
-    let Launch(supplied: supplied, backing: take backing, sizes: sizes, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
+    let Launch(supplied: supplied, backing: take backing, sizing, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
     let mut config = match take made {
         Ok(take m) => take m,
         Error(_) => return Error(Full)
     }
     config.backing = take backing
-    config.sizes = sizes
+    config.sizes = sizing.sizes
     config.selection = selection
     config.idle = Some(idle)
     config.max_sessions = sessions
@@ -282,11 +298,7 @@ fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take reque
         Ok(total) => total,
         Error(_) => return Error(Full)
     }
-    let share = match store.sized_with(Directory, 0u64, sizes) {
-        Error(short) => short.need,
-        Ok(_) => 0u64,
-    }
-    let need = int.saturating_add(overhead, int.saturating_add(share, 1048576u64))
+    let need = int.saturating_add(overhead, int.saturating_add(sizing.need, 1048576u64))
     let charge = int.saturating_add(need, PLACE_TASK_BYTES)
     if charge > available {
         return Error(Full)
@@ -415,7 +427,7 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
         },
     }
     let supplied = Supplied(name: string.from(group.name), tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
-    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(a.options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(a.options.pack_bytes), group_bytes: Some(int.widen(a.options.group_bytes)), group_commits: Some(a.options.group_commits), lock_wait_ms: Some(a.options.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions, available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
+    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizing: a.sizing, selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions, available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
     match (a.factory.start)(take launched, a.seed) {
         Ok(take begun) => {
             let Started(task: take running, charge: charged) = take begun
@@ -820,7 +832,8 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let fwd: fn(take Forward) -> () waits = forward_host
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take host_from, to: channel.sender(me)), fwd)
     let timers = platform.driver(tasks, clock, take host_to)
-    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), refused: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
+    let sizing = place_sizing(options)
+    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, sizing, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), refused: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
     // Hello is answered with an empty inventory, so the host starts every Dirty group and
     // every passed due time (§14.5).
     apply(mut a, take hello)

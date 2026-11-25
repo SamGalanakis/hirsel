@@ -216,6 +216,14 @@ pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Short
     Ok(take options)
 }
 
+// The Directory need reported at a zero-byte share, before building shortage details.
+pub fn directory_writer_need(o: Overrides) -> u64 {
+    match disk_reservation(Directory, 0u64, o) {
+        Error(parts) => size_or(writer_total(parts), 18446744073709551615u64),
+        Ok((_, plan)) => writer_bytes(plan),
+    }
+}
+
 pub opaque type PlacePlan: send {
     options: Options,
     writer: WriterPlan,
@@ -299,7 +307,11 @@ fn writer_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, 
         }
         return Ok((make_sized_options(kind, o, commits, 4 * MIB, 0, 0, 0, resident), WriterPlan(total, parts: take parts)))
     }
-    disk_reservation(kind, share, o)
+    let fit = disk_reservation(kind, share, o)
+    match take fit {
+        Ok(take fitted) => Ok(take fitted),
+        Error(parts) => Error(writer_shortage(share, parts)),
+    }
 }
 
 fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkpoint_budget: u64, journal: u64, pack: u64, resident: u64) -> Options {
@@ -375,7 +387,7 @@ fn bucket_cut_parts(pack: u64) -> WriterParts {
 
 // The journal's fixed grants and workspace live through every phase. A
 // cut drains the outstanding frames before it takes the journal session.
-fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, WriterPlan), Shortage] {
+fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, WriterPlan), WriterParts] {
     let unbounded = 18446744073709551615u64
     let pack = size_or(o.pack_bytes, order.min(64 * MIB, share / 16))
     let checkpoint_budget = size_or(o.checkpoint_bytes, pack)
@@ -454,10 +466,10 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         }
     }
     let Some(total) = writer_total(parts) else {
-        return Error(writer_shortage(share, parts))
+        return Error(take parts)
     }
     if !valid || resident < MIB || total > share {
-        return Error(writer_shortage(share, parts))
+        return Error(take parts)
     }
     Ok((make_sized_options(kind, o, commits, group, checkpoint_budget, journal, pack, resident), WriterPlan(total, parts: take parts)))
 }

@@ -77,6 +77,12 @@ fn group_override(group: u64) -> Overrides {
 fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let o = group_override(67108864)
     let need = 101977524u64
+    match (bound bytes 0u64 {
+        directory_writer_need(o)
+    }) {
+        Ok(total) if total == need => (),
+        _ => fail("§1.1: the zero-share need must report the writer peak without allocating"),
+    }
     match planned(Directory, 39839262, o) {
         Error(short) if short.need == need && short.have == 39839262 => (),
         _ => fail("§1.1: a 64 MiB group sized inside a share its journal worker exceeds"),

@@ -1,4 +1,5 @@
 use super::{COMPLETION_READY, INTEREST, Uring, WAKE};
+use crate::ready::{Event, Ready};
 use io_uring::{cqueue, opcode, squeue, types};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -111,15 +112,12 @@ impl Watches {
         self.wake || !self.work.is_empty() || !self.rechecks.is_empty()
     }
 
-    pub(super) fn recheck(&mut self, out: &mut [libc::epoll_event]) -> usize {
+    pub(super) fn recheck(&mut self, out: &mut [Event]) -> usize {
         let mut n = 0;
         if let Some(event) = out.first_mut()
             && std::mem::take(&mut self.wake)
         {
-            *event = libc::epoll_event {
-                events: libc::EPOLLIN as u32,
-                u64: WAKE,
-            };
+            *event = Event::new(WAKE, Ready::READABLE);
             n = 1;
         }
         for _ in n..out.len() {
@@ -127,10 +125,7 @@ impl Watches {
                 break;
             };
             if tag != COMPLETION_READY && self.live.contains_key(&tag) {
-                out[n] = libc::epoll_event {
-                    events: (libc::EPOLLIN | libc::EPOLLOUT) as u32,
-                    u64: tag,
-                };
+                out[n] = Event::new(tag, Ready::READABLE | Ready::WRITABLE);
                 n += 1;
             }
         }
@@ -178,7 +173,7 @@ impl Uring {
         let mut watches = self.watches();
         let id = watches.id(tag)?;
         let interest = if tag == COMPLETION_READY {
-            libc::EPOLLIN as u32
+            Ready::READABLE.poll_mask()
         } else {
             INTEREST
         };

@@ -24,7 +24,7 @@ mod spawn;
 mod stores;
 
 use hirsel_core_ids::launch::LAUNCH_IMAGE_ENV;
-use ready::{CHANGE, Epoll, READ, WRITE, Watch};
+use ready::{CHANGE, NONE, READ, Readiness, ReadyEvent, WRITE, Watch};
 
 use session::{
     Approvals, Attempt, Child, ChildState, End, Event, Failure, Group, HostCommand, HostReply,
@@ -215,10 +215,10 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(epoll: &Epoll, stream: UnixStream) -> io::Result<Self> {
+    fn new(poll: &Readiness, stream: UnixStream) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
         Ok(Self {
-            watch: epoll.watch(stream.as_raw_fd()),
+            watch: poll.watch(stream.as_raw_fd()),
             stream,
             input: Vec::new(),
             output: Vec::new(),
@@ -228,9 +228,9 @@ impl Conn {
     }
 
     fn watch(&mut self) -> io::Result<()> {
-        let read = if self.paused { 0 } else { READ };
+        let read = if self.paused { NONE } else { READ };
         let interest = if self.closed {
-            0
+            NONE
         } else if self.output.is_empty() {
             read
         } else {
@@ -353,14 +353,14 @@ impl RunningChild {
 }
 
 impl Process {
-    fn complete(&mut self, epoll: &Epoll) -> io::Result<Option<Status>> {
+    fn complete(&mut self, poll: &Readiness) -> io::Result<Option<Status>> {
         self.watch.take();
         let child = self.child.as_mut().expect("a live child");
         child.reap_leader()?;
         if let Some(group) = &child.group
             && !group.empty()?
         {
-            let mut watch = epoll.watch(group.event_fd());
+            let mut watch = poll.watch(group.event_fd());
             watch.set(CHANGE)?;
             self.watch = Some(watch);
             return Ok(None);
@@ -437,7 +437,7 @@ struct Admitting {
 pub(crate) struct Launcher<I> {
     images: I,
     cgroup_root: Option<PathBuf>,
-    epoll: Epoll,
+    poll: Readiness,
     scratch: PathBuf,
     listeners: Vec<Listening>,
     children: Vec<Kept>,
@@ -533,7 +533,7 @@ impl<I: Images> Launcher<I> {
             cgroup::recover(root)?;
             cgroup::own_orphans()?;
         }
-        let epoll = Epoll::new()?;
+        let poll = Readiness::new()?;
         let images = open()?;
         let scratch = state.join("scratch");
         // A lost launcher's staging is not state: remove it.
@@ -545,7 +545,7 @@ impl<I: Images> Launcher<I> {
         Ok(Self {
             images,
             cgroup_root,
-            epoll,
+            poll,
             scratch,
             listeners: Vec::new(),
             children: Vec::new(),
@@ -566,7 +566,7 @@ impl<I: Images> Launcher<I> {
     /// Serve the control session on `listener`; the socket's permission is the host's.
     pub(crate) fn listen(&mut self, listener: UnixListener) -> io::Result<()> {
         listener.set_nonblocking(true)?;
-        let mut watch = self.epoll.watch(listener.as_raw_fd());
+        let mut watch = self.poll.watch(listener.as_raw_fd());
         watch.set(READ)?;
         self.control_watch = Some(watch);
         self.control = Some(listener);
@@ -576,7 +576,7 @@ impl<I: Images> Launcher<I> {
     /// Admit releases with `admission`'s stores; without it every `Admit` fails.
     pub(crate) fn admit_with(&mut self, admission: Admission) -> io::Result<()> {
         let (wake, write) = pipe()?;
-        let mut watch = self.epoll.watch(wake.as_raw_fd());
+        let mut watch = self.poll.watch(wake.as_raw_fd());
         watch.set(READ)?;
         let (sender, notes) = mpsc::channel();
         self.admitting = Some(Admitting {
@@ -777,7 +777,7 @@ impl<I: Images> Launcher<I> {
         let (sender, waker) = (admitting.sender.clone(), admitting.waker.clone());
         let worker = admit::Worker::spawn(
             admitting.admission.clone(),
-            &self.epoll,
+            &self.poll,
             id,
             attempt,
             source,
@@ -979,7 +979,7 @@ impl<I: Images> Launcher<I> {
         match TcpListener::bind(address) {
             Ok(socket) => {
                 self.listeners.push(Listening {
-                    watch: self.epoll.watch(socket.as_raw_fd()),
+                    watch: self.poll.watch(socket.as_raw_fd()),
                     group: group.clone(),
                     socket,
                     reported: false,
@@ -1106,7 +1106,7 @@ impl<I: Images> Launcher<I> {
                 slots.push((above_launch_slots(listener.socket.as_raw_fd())?, 3));
                 slots.push((above_launch_slots(theirs.as_raw_fd())?, 4));
                 slots.push((above_launch_slots(write.as_raw_fd())?, 5));
-                endpoint = Some(Conn::new(&self.epoll, ours)?);
+                endpoint = Some(Conn::new(&self.poll, ours)?);
                 report = Some(read);
             }
             Mode::Describe(_) | Mode::Preview(_, _) => {
@@ -1226,7 +1226,7 @@ impl<I: Images> Launcher<I> {
             group,
             status: None,
         };
-        let mut watch = self.epoll.watch(child.pidfd.as_raw_fd());
+        let mut watch = self.poll.watch(child.pidfd.as_raw_fd());
         if let Err(error) = watch.set(READ) {
             if child.signal(libc::SIGKILL).is_ok() {
                 let _ = child.wait();
@@ -1366,7 +1366,7 @@ impl<I: Images> Launcher<I> {
             let listener = &self.listeners[i];
             let cold =
                 !listener.reported && !listener.retiring && !self.serving_live(&listener.group);
-            self.listeners[i].watch.set(if cold { READ } else { 0 })?;
+            Watch::set(&mut self.listeners[i].watch, if cold { READ } else { NONE })?;
         }
         let backlogged = self.backlogged();
         if let Some(conn) = &mut self.session {
@@ -1380,15 +1380,15 @@ impl<I: Images> Launcher<I> {
                 }
             }
         }
-        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
+        let mut events = [ReadyEvent::EMPTY; 64];
         let timeout = match (timeout, self.bootstrap.as_ref().and_then(|b| b.timeout())) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        let count = self.epoll.wait(timeout, &mut events)?;
+        let count = self.poll.wait(timeout, &mut events)?;
         let events = &events[..count];
         if let Some(bootstrap) = &mut self.bootstrap {
-            bootstrap.turn(&self.epoll, events)?;
+            bootstrap.turn(&self.poll, events)?;
         }
         for i in 0..self.children.len() {
             if self.children[i]
@@ -1406,7 +1406,7 @@ impl<I: Images> Launcher<I> {
                     .watch
                     .as_ref()
                     .is_some_and(|watch| watch.fired(events))
-                && let Some(status) = process.complete(&self.epoll)?
+                && let Some(status) = process.complete(&self.poll)?
             {
                 self.ended(i, status)?;
             }
@@ -1446,7 +1446,7 @@ impl<I: Images> Launcher<I> {
                 {
                     continue;
                 }
-                accepted = Conn::new(&self.epoll, stream).ok().or(accepted);
+                accepted = Conn::new(&self.poll, stream).ok().or(accepted);
             }
         }
         if let Some(conn) = accepted {

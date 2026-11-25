@@ -115,11 +115,11 @@ struct Th {
 /// One slot's epoll set as the kernel holds it.
 #[derive(Debug)]
 struct KSlot {
-    epfd: i32,
-    wakefd: i32,
+    handle: hirsel_core_net::ready::Handle,
+    waker: hirsel_core_net::ready::Waker,
     /// A wake queued on the set and not yet reported (edge-triggered).
     wake: bool,
-    edges: VecDeque<(u64, u32)>,
+    edges: VecDeque<(u64, hirsel_core_net::ready::Ready)>,
 }
 struct Kernel {
     slots: Vec<KSlot>,
@@ -634,7 +634,7 @@ fn edge(unit: u32, ident: u64) {
     let mut st = lock();
     st.kernel.slots[k].edges.push_back((
         (u64::from(unit) << hirsel_core_net::SHARED_UNIT_SHIFT) | ident,
-        libc::EPOLLIN as u32,
+        hirsel_core_net::ready::Ready::READABLE,
     ));
     st.wake_epoll(k);
 }
@@ -1151,8 +1151,8 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
             slots: pollers
                 .iter()
                 .map(|p| KSlot {
-                    epfd: p.raw_fd(),
-                    wakefd: p.wake_fd(),
+                    handle: p.handle(),
+                    waker: p.waker().expect("the checker's slots use epoll pollers"),
                     wake: false,
                     edges: VecDeque::new(),
                 })

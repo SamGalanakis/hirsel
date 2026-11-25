@@ -39,6 +39,7 @@ mod report;
 pub(crate) mod sync;
 #[path = "units_sync_cells.rs"]
 mod sync_cells;
+use hirsel_core_net::ready::Ready;
 use std::{
     cell::Cell,
     collections::VecDeque,
@@ -260,15 +261,15 @@ pub(crate) struct Unit {
     inside: AtomicBool,
     after: Cell<After>,
     sync_cells: URefCell<Vec<*mut crate::os_sync::SyncCell>>,
-    /// Readiness for this unit's keys, as (reactor identity, epoll flags):
+    /// Readiness for this unit's keys, as (reactor identity, conditions):
     /// crossing events and the shared poller's socket edges. The unit's
     /// scheduler takes them at its next turn, in this order.
-    xready: Mutex<Vec<(u64, u32)>>,
+    xready: Mutex<Vec<(u64, Ready)>>,
     /// Set with the lock held whenever `xready` gains an entry, so an empty
     /// take costs one load.
     xpending: AtomicBool,
     /// The running unit's batch buffer, swapped with `xready` at a take.
-    xspare: UnsafeCell<Vec<(u64, u32)>>,
+    xspare: UnsafeCell<Vec<(u64, Ready)>>,
     status: AtomicU8,
     stop_fd: Cell<i32>,
     slice_start: Cell<Option<u64>>,
@@ -378,9 +379,10 @@ pub(crate) struct Pool {
 /// by its readiness, its timers and the pool's wakes alike.
 struct Slot {
     poller: Arc<hirsel_core_net::Poller>,
-    /// epoll: the epoll fd and its edge-triggered wake eventfd.
-    epfd: i32,
-    wakefd: i32,
+    /// The poller's readiness set, waited on directly when it is not an
+    /// io_uring ring, and that set's wake.
+    handle: hirsel_core_net::ready::Handle,
+    waker: Option<hirsel_core_net::ready::Waker>,
     /// Live park deadlines on this slot as (deadline, unit id): at most one
     /// per unit.
     timers: Mutex<BTreeSet<(u64, u32)>>,
@@ -391,10 +393,9 @@ struct Slot {
 }
 impl Slot {
     fn new(poller: Arc<hirsel_core_net::Poller>) -> Self {
-        let epoll = poller.reactor() == hirsel_core_net::Reactor::Epoll;
         Slot {
-            epfd: poller.raw_fd(),
-            wakefd: if epoll { poller.wake_fd() } else { -1 },
+            handle: poller.handle(),
+            waker: poller.waker(),
             poller,
             timers: Mutex::new(BTreeSet::new()),
             next_timer: AtomicU64::new(u64::MAX),
@@ -779,7 +780,7 @@ fn wake_unit_by_id(id: u32) {
     }
 }
 
-fn push_arrival(u: &Unit, id: u64, flags: u32) {
+fn push_arrival(u: &Unit, id: u64, flags: Ready) {
     let mut q = u.xready.lock().unwrap();
     q.push((id, flags));
     u.xpending.store(true, Ordering::Release);
@@ -790,7 +791,7 @@ fn push_arrival(u: &Unit, id: u64, flags: u32) {
 /// it is taken at the unit's next switch. Nobody else takes the readiness of
 /// the slot this unit runs on, so each scheduler turn takes it here first
 /// rather than going dry, parking and resuming for readiness already there.
-pub(crate) fn take_xready(mut each: impl FnMut(u64, u32)) {
+pub(crate) fn take_xready(mut each: impl FnMut(u64, Ready)) {
     if untied() {
         (pool_hooks().take_slot)();
     }
@@ -1000,15 +1001,12 @@ fn hand_search(p: &Pool, mut idle: sync::MutexGuard<'_, Vec<usize>>) -> bool {
 }
 
 /// Wake slot `ix`'s thread out of its poller, or make its next wait return
-/// at once: a MSG_RING completion on io_uring, an eventfd edge on epoll.
+/// at once: a MSG_RING completion on io_uring, the set's own wake otherwise.
 fn wake_slot(p: &Pool, ix: usize) {
     bump(S_OS_WAKES);
-    if p.uring {
-        p.slots[ix].poller.wake();
-    } else {
-        let one = 1u64;
-        // SAFETY: eight-byte write to a live eventfd.
-        unsafe { sync::write(p.slots[ix].wakefd, (&one as *const u64).cast(), 8) };
+    match p.slots[ix].waker {
+        Some(waker) => sync::wake(waker),
+        None => p.slots[ix].poller.wake(),
     }
 }
 

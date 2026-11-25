@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use super::ready::{Epoll, READ, Watch};
+use super::ready::{READ, Readiness, Watch};
 use super::{above_launch_slots, send, spawn, wait_pid};
+use hirsel_core_net::ready::Event;
 
 /// The descriptor the host receives the operator listener on.
 pub(super) const OPERATOR_FD: i32 = 3;
@@ -119,7 +120,7 @@ impl Bootstrap {
             .map(|at| at.saturating_duration_since(Instant::now()))
     }
 
-    fn start(&mut self, epoll: &Epoll) -> io::Result<()> {
+    fn start(&mut self, poll: &Readiness) -> io::Result<()> {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
         // SAFETY: getpid has no failure.
@@ -138,7 +139,7 @@ impl Bootstrap {
             (above_launch_slots(self.operator.as_raw_fd())?, OPERATOR_FD),
         ];
         let (pid, pidfd) = spawn::start(&command, &self.cwd, &slots, None, false)?;
-        let mut watch = epoll.watch(pidfd.as_raw_fd());
+        let mut watch = poll.watch(pidfd.as_raw_fd());
         if let Err(error) = watch.set(READ) {
             let _ = send(pidfd.as_raw_fd(), libc::SIGKILL);
             let _ = wait_pid(pid);
@@ -154,7 +155,7 @@ impl Bootstrap {
     }
 
     /// One launcher turn: reap an ended host and schedule it, and start one that is due.
-    pub(super) fn turn(&mut self, epoll: &Epoll, events: &[libc::epoll_event]) -> io::Result<()> {
+    pub(super) fn turn(&mut self, poll: &Readiness, events: &[Event]) -> io::Result<()> {
         if let Some(running) = &self.running
             && running.watch.fired(events)
         {
@@ -174,7 +175,7 @@ impl Bootstrap {
             && self.due.is_some_and(|at| at <= Instant::now())
         {
             self.due = None;
-            if let Err(error) = self.start(epoll) {
+            if let Err(error) = self.start(poll) {
                 eprintln!("hirsel launcher: cannot start the platform host: {error}");
                 let delay = match self.schedule.ended(None, Duration::ZERO) {
                     Next::After(delay) => delay,

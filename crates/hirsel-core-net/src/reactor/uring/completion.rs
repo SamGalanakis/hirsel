@@ -105,7 +105,7 @@ impl Completion {
     pub(super) fn reap(
         &self,
         owner: &Uring,
-        out: &mut [libc::epoll_event],
+        out: &mut [crate::ready::Event],
         left: &mut usize,
     ) -> usize {
         let mut n = 0;
@@ -124,10 +124,7 @@ impl Completion {
                 }
                 id => {
                     if let Some(tag) = owner.tx_complete(id, cqe.result(), cqe.flags()) {
-                        out[n] = libc::epoll_event {
-                            events: libc::EPOLLOUT as u32,
-                            u64: tag,
-                        };
+                        out[n] = crate::ready::Event::new(tag, crate::ready::Ready::WRITABLE);
                         n += 1;
                     }
                 }

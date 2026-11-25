@@ -1,4 +1,5 @@
 use super::*;
+use crate::ready::Ready;
 
 impl Sockets {
     /// Register a socket once and publish this direction's current waiter.
@@ -24,7 +25,7 @@ impl Sockets {
     }
     /// An edge names a live socket. A direction's waiter still retries its
     /// syscall before committing a result, including after stale readiness.
-    pub fn dispatch(&mut self, identity: u64, flags: u32, ready: impl FnMut(u64)) {
+    pub fn dispatch(&mut self, identity: u64, flags: Ready, ready: impl FnMut(u64)) {
         Self::dispatch_edge(&mut self.slots, &mut self.waiting, identity, flags, ready);
     }
 
@@ -32,7 +33,7 @@ impl Sockets {
         slots: &mut [Slot],
         waiting: &mut usize,
         identity: u64,
-        flags: u32,
+        flags: Ready,
         mut ready: impl FnMut(u64),
     ) {
         let index = identity as u32 as usize;
@@ -47,9 +48,9 @@ impl Sockets {
         let Some(r) = slot.record.as_mut() else {
             return;
         };
-        let failed = flags & (libc::EPOLLERR | libc::EPOLLHUP) as u32 != 0;
-        let terminal = failed || flags & libc::EPOLLRDHUP as u32 != 0;
-        if terminal || flags & libc::EPOLLIN as u32 != 0 {
+        let failed = flags.is_failed();
+        let terminal = failed || flags.is_read_closed();
+        if terminal || flags.is_readable() {
             r.read_drained = false;
             r.read_terminal |= terminal;
             if let Some(token) = r.waiters[0].take() {
@@ -57,7 +58,7 @@ impl Sockets {
                 ready(token);
             }
         }
-        if (failed || flags & libc::EPOLLOUT as u32 != 0)
+        if (failed || flags.is_writable())
             && let Some(token) = r.waiters[1].take()
         {
             *waiting -= 1;
@@ -100,8 +101,8 @@ impl Sockets {
         mut ready: impl FnMut(u64),
     ) -> usize {
         for event in events.0.iter() {
-            if event.u64 != WAKE {
-                Self::dispatch_edge(slots, waiting, event.u64, event.events, &mut ready);
+            if event.token() != WAKE {
+                Self::dispatch_edge(slots, waiting, event.token(), event.ready(), &mut ready);
             }
         }
         events.0.len()

@@ -1289,7 +1289,7 @@ fn s0_children_keep_distinct_host_file_slots() {
 /// socket cannot wake a waiter on the replacement in the same slot.
 #[test]
 fn s0_net_rearm_ignores_stale_directional_readiness() {
-    use std::os::unix::net::UnixStream;
+    use {hirsel_core_net::ready::Ready, std::os::unix::net::UnixStream};
 
     let (socket, _peer) = UnixStream::pair().unwrap();
     let mut sockets = hirsel_core_net::Sockets::default();
@@ -1297,9 +1297,9 @@ fn s0_net_rearm_ignores_stale_directional_readiness() {
     sockets.arm(key, false, 101).unwrap();
     let first = sockets.arm(key, true, 201).unwrap();
     let mut ready = Vec::new();
-    sockets.dispatch(first, libc::EPOLLIN as u32, |t| ready.push(t));
+    sockets.dispatch(first, Ready::READABLE, |t| ready.push(t));
     assert_eq!(ready, [101]);
-    sockets.dispatch(first, libc::EPOLLOUT as u32, |t| ready.push(t));
+    sockets.dispatch(first, Ready::WRITABLE, |t| ready.push(t));
     assert_eq!(ready, [101, 201]);
 
     sockets.release(key);
@@ -1307,9 +1307,9 @@ fn s0_net_rearm_ignores_stale_directional_readiness() {
     let replacement = sockets.insert(socket.into()).unwrap();
     let second = sockets.arm(replacement, false, 102).unwrap();
     assert_eq!(first as u32, second as u32, "the registry reuses the slot");
-    sockets.dispatch(first, libc::EPOLLIN as u32, |t| ready.push(t));
+    sockets.dispatch(first, Ready::READABLE, |t| ready.push(t));
     assert_eq!(ready, [101, 201], "the old edge must not wake a new reader");
-    sockets.dispatch(second, libc::EPOLLIN as u32, |t| ready.push(t));
+    sockets.dispatch(second, Ready::READABLE, |t| ready.push(t));
     assert_eq!(ready, [101, 201, 102]);
 }
 

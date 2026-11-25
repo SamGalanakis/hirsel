@@ -80,7 +80,7 @@ fn spawn_child(
             .env("HIRSEL_CONTROL_FD", "4")
             .env("HIRSEL_HOST_PID", std::process::id().to_string())
             .env("HIRSEL_SCRATCH", scratch);
-        Some(Conn::new(&Epoll::new()?, ours)?)
+        Some(Conn::new(&Readiness::new()?, ours)?)
     } else {
         None
     };

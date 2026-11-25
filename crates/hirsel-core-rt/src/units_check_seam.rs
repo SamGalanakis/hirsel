@@ -336,20 +336,20 @@ pub(crate) fn monotonic_ns() -> u64 {
 }
 use super::SCHED;
 
-/// # Safety
-/// `evs` has room for `max` events.
+/// The pool's wait on a slot's readiness set (`Handle::wait`): passes
+/// through outside a checker run, and is the modelled epoll_wait inside one.
 #[track_caller]
-pub(crate) unsafe fn epoll_wait(
-    epfd: i32,
-    evs: *mut libc::epoll_event,
-    max: i32,
-    timeout: i32,
-) -> i32 {
+pub(crate) fn wait(
+    handle: hirsel_core_net::ready::Handle,
+    evs: &mut [hirsel_core_net::ready::Event],
+    timeout_ns: Option<u64>,
+) -> usize {
     let at = Location::caller();
     let Some(m) = me() else {
-        // SAFETY: the caller's contract.
-        return unsafe { libc::epoll_wait(epfd, evs, max, timeout) };
+        return handle.wait(evs, timeout_ns).unwrap_or(0);
     };
+    let timeout = timeout_ns.map_or(-1, |ns| ns.div_ceil(1_000_000).min(i32::MAX as u64) as i32);
+    let max = evs.len();
     point(
         m,
         Wait::Run,
@@ -361,33 +361,24 @@ pub(crate) unsafe fn epoll_wait(
         .kernel
         .slots
         .iter()
-        .position(|s| s.epfd == epfd)
+        .position(|s| s.handle == handle)
         .expect("epoll_wait on an unmodelled descriptor");
     loop {
         let mut st = lock();
         let mut n = 0usize;
         let mut got = Vec::new();
-        if std::mem::take(&mut st.kernel.slots[k].wake) && n < max as usize {
-            // SAFETY: n < max.
-            unsafe {
-                *evs.add(n) = libc::epoll_event {
-                    events: libc::EPOLLIN as u32,
-                    u64: super::super::WAKE_TAG,
-                }
-            };
+        if std::mem::take(&mut st.kernel.slots[k].wake) && n < max {
+            evs[n] = hirsel_core_net::ready::Event::new(
+                super::super::WAKE_TAG,
+                hirsel_core_net::ready::Ready::READABLE,
+            );
             n += 1;
             got.push("wake eventfd".to_string());
         }
-        while n < max as usize
+        while n < max
             && let Some((tag, ev)) = st.kernel.slots[k].edges.pop_front()
         {
-            // SAFETY: n < max.
-            unsafe {
-                *evs.add(n) = libc::epoll_event {
-                    events: ev,
-                    u64: tag,
-                }
-            };
+            evs[n] = hirsel_core_net::ready::Event::new(tag, ev);
             n += 1;
             got.push(format!(
                 "edge unit {} key {}",
@@ -397,7 +388,7 @@ pub(crate) unsafe fn epoll_wait(
         }
         if n > 0 {
             st.log(m, format!("epoll_wait returns {n}: {}", got.join(", ")));
-            return n as i32;
+            return n;
         }
         if timeout == 0 {
             st.log(m, "epoll_wait returns 0".into());
@@ -426,14 +417,13 @@ pub(crate) unsafe fn epoll_wait(
         );
     }
 }
-/// # Safety
-/// `buf` has eight readable bytes.
+/// A slot's wake (`Waker::wake`): passes through outside a checker run,
+/// and is the modelled eventfd write inside one.
 #[track_caller]
-pub(crate) unsafe fn write(fd: i32, buf: *const libc::c_void, n: usize) -> isize {
+pub(crate) fn wake(waker: hirsel_core_net::ready::Waker) {
     let at = Location::caller();
     let Some(m) = me() else {
-        // SAFETY: the caller's contract.
-        return unsafe { libc::write(fd, buf, n) };
+        return waker.wake();
     };
     point(m, Wait::Run, |_| "write wake eventfd".into(), at);
     let mut st = lock();
@@ -441,12 +431,8 @@ pub(crate) unsafe fn write(fd: i32, buf: *const libc::c_void, n: usize) -> isize
         .kernel
         .slots
         .iter()
-        .position(|s| s.wakefd == fd)
-        .filter(|_| n == 8)
+        .position(|s| s.waker == waker)
         .expect("write on an unmodelled descriptor");
-    // SAFETY: eight readable bytes.
-    assert_ne!(unsafe { *buf.cast::<u64>() }, 0);
     st.kernel.slots[k].wake = true;
     st.wake_epoll(k);
-    8
 }

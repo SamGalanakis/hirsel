@@ -1,4 +1,5 @@
 use super::*;
+use std::os::fd::FromRawFd;
 use std::{io::Write, os::unix::net::UnixStream};
 
 #[test]
@@ -217,7 +218,7 @@ fn reaping_counts_every_completion() {
 
     // Removal completions produce no event in the caller's array.
     let ring = Uring::with_cq_size(512).unwrap();
-    let mut events = [libc::epoll_event { events: 0, u64: 0 }; 128];
+    let mut events = [crate::ready::Event::EMPTY; 128];
     let pending = || ring.ring.cq_len();
     for initial in [129, 100] {
         for submitted in 1..=129 {
@@ -257,7 +258,7 @@ fn replaced_watch_leaves_one_poll() {
     let fd = Arc::new(OwnedFd::from(socket));
     let tag = 3;
     let settle = || {
-        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 128];
+        let mut events = [crate::ready::Event::EMPTY; 128];
         for _ in 0..16 {
             if !ring.due() {
                 return;
@@ -414,14 +415,14 @@ fn a_ready_listener_behind_a_full_sq_of_idle_watches_is_reported() {
 
     let bound = std::time::Duration::from_secs(5);
     let start = std::time::Instant::now();
-    let mut out = vec![libc::epoll_event { events: 0, u64: 0 }; 2 * POLL_BATCH as usize];
+    let mut out = vec![crate::ready::Event::EMPTY; 2 * POLL_BATCH as usize];
     let mut reported = false;
     while !reported && start.elapsed() < bound {
         let left = bound.saturating_sub(start.elapsed()).as_nanos() as u64;
         let n = ring.wait(&mut out, Some(left)).unwrap();
         reported = out[..n]
             .iter()
-            .any(|event| event.u64 == ready_tag && event.events & libc::EPOLLIN as u32 != 0);
+            .any(|event| event.token() == ready_tag && event.ready().is_readable());
     }
     assert!(reported, "ready listener unreported after {bound:?}");
 }

@@ -1,10 +1,11 @@
 use super::*;
+use hirsel_core_net::ready::Event;
 
 /// Poll one slot and return the number of units queued by socket arrivals.
 /// `None` waits for an event and `Some(0)` is nonblocking.
 fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) -> usize {
     let slot = &p.slots[ix];
-    let mut evs = [libc::epoll_event { events: 0, u64: 0 }; 256];
+    let mut evs = [Event::EMPTY; 256];
     bump(S_GPOLLS);
     if timeout_ns != Some(0) {
         bump(S_GPOLL_BLOCKS);
@@ -14,25 +15,24 @@ fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) -> usize {
             .wait_slot(&mut evs, timeout_ns)
             .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
     } else {
-        let timeout = if slot.poller.udp_due() {
-            0
+        let timeout_ns = if slot.poller.udp_due() {
+            Some(0)
         } else {
-            timeout_ns.map_or(-1, |ns| ns.div_ceil(1_000_000).min(i32::MAX as u64) as i32)
+            timeout_ns
         };
-        // SAFETY: a live epoll and a writable event array.
-        let n = unsafe { sync::epoll_wait(slot.epfd, evs.as_mut_ptr(), 128, timeout) };
+        let n = sync::wait(slot.handle, &mut evs[..128], timeout_ns);
         slot.last_poll.store(now(), Ordering::Relaxed);
-        slot.poller.dispatch_udp_slot(&mut evs[..n.max(0) as usize])
+        slot.poller.dispatch_udp_slot(&mut evs[..n])
     };
     let mut published = 0;
     // A wake carries nothing; epoll's eventfd is edge-triggered and never read.
-    for e in evs.iter().take(n).filter(|e| e.u64 != WAKE_TAG) {
+    for e in evs.iter().take(n).filter(|e| e.token() != WAKE_TAG) {
         bump(S_GPOLL_EVENTS);
-        let tag = e.u64;
+        let tag = e.token();
         let unit = (tag >> hirsel_core_net::SHARED_UNIT_SHIFT) as u32;
         if let Some(u) = unit_ref(unit) {
             let ident = tag & ((1 << hirsel_core_net::SHARED_UNIT_SHIFT) - 1);
-            push_arrival(u, ident, e.events);
+            push_arrival(u, ident, e.ready());
             if mark_ready(u) {
                 #[cfg(feature = "testing")]
                 observe::queued(u);

@@ -1,4 +1,5 @@
 use super::Poller;
+use crate::ready::Event;
 use crate::udp::{
     Captured, MemberProducer, MemberReader, Options, ReceivePool, Socket, Steer, TurnBudget,
     WriterList, measure, member_queue,
@@ -14,9 +15,6 @@ use std::{
 // Unit 0xffff is reserved for poller-owned registrations.
 const FIRST: u64 = 0xffff_0000_0000_0000;
 const LAST: u64 = super::uring::COMPLETION_READY;
-const READ: u32 = libc::EPOLLIN as u32;
-const WRITE: u32 = libc::EPOLLOUT as u32;
-const FAILED: u32 = (libc::EPOLLERR | libc::EPOLLHUP) as u32;
 
 struct Group {
     socket: Socket,
@@ -235,7 +233,7 @@ impl Groups {
     pub(super) fn turn(
         &mut self,
         poller: &Poller,
-        events: &mut [libc::epoll_event],
+        events: &mut [Event],
         budget: &mut TurnBudget,
     ) -> usize {
         while let Some((tag, index)) = self.retired.pop_front() {
@@ -252,13 +250,14 @@ impl Groups {
         let mut visible = 0;
         for i in 0..events.len() {
             let event = events[i];
-            let tag = event.u64;
+            let tag = event.token();
             if !(FIRST..LAST).contains(&tag) {
                 events[visible] = event;
                 visible += 1;
             } else if let Some(intake) = self.live.get_mut(&tag) {
-                intake.reading |= event.events & (READ | FAILED) != 0;
-                intake.writer_edge |= event.events & (WRITE | FAILED) != 0;
+                let ready = event.ready();
+                intake.reading |= ready.is_readable() || ready.is_failed();
+                intake.writer_edge |= ready.is_writable() || ready.is_failed();
                 Self::enqueue(&mut self.runnable, tag, intake);
             }
         }
@@ -306,7 +305,7 @@ impl Poller {
                 .is_some_and(|groups| groups.lock().unwrap().due())
     }
 
-    pub fn dispatch_udp_slot(&self, events: &mut [libc::epoll_event]) -> usize {
+    pub fn dispatch_udp_slot(&self, events: &mut [Event]) -> usize {
         let reader = {
             let mut deferred = self.udp_deferred.lock().unwrap();
             if deferred.readers.is_empty() {

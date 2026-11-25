@@ -1,10 +1,11 @@
 //! Linux Exec child creation and custody. Only the supervisor creates children.
 //! Wait, drop and orphan adoption use the same registry lock and pinned pidfds.
 
+use hirsel_core_net::ready::{Event, Selector, Wake};
 use std::{
     ffi::{CStr, CString},
     fs, io, mem,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
 };
@@ -115,8 +116,8 @@ struct Registry {
 struct Shared {
     registry: Mutex<Registry>,
     completed: Condvar,
-    change: OwnedFd,
-    poller: OwnedFd,
+    change: Wake,
+    poller: Selector,
 }
 
 /// Owns the thread that checks launch credentials, creates direct children,
@@ -131,9 +132,8 @@ impl Supervisor {
     /// The launcher supplies its startup tests. They run on the child-creating
     /// thread before it makes the run non-dumpable and enables subreaping.
     pub fn start(probe: fn() -> io::Result<()>) -> io::Result<Self> {
-        let change = owned(unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) })?;
-        let poller = owned(unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) })?;
-        watch(&poller, &change, 0, false)?;
+        let poller = Selector::new()?;
+        let change = Wake::new(&poller, 0)?;
         let shared = Arc::new(Shared {
             registry: Mutex::new(Registry::default()),
             completed: Condvar::new(),
@@ -357,41 +357,25 @@ fn start_thread(probe: fn() -> io::Result<()>) -> io::Result<()> {
 
 impl Shared {
     fn wake(&self) {
-        let one = 1u64;
-        // SAFETY: eventfd is live and reads exactly one u64. EAGAIN means
-        // a wake is already pending in the saturated counter.
-        while unsafe { libc::write(self.change.as_raw_fd(), (&raw const one).cast(), 8) } < 0
-            && errno() == libc::EINTR
-        {}
+        self.change.wake();
     }
 
     fn run(&self) {
         loop {
-            let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
-            // SAFETY: the epoll instance is live and writes at most this array.
-            let count = unsafe {
-                libc::epoll_wait(
-                    self.poller.as_raw_fd(),
-                    events.as_mut_ptr(),
-                    events.len() as i32,
-                    -1,
-                )
+            let mut events = [Event::EMPTY; 16];
+            let count = match self.poller.wait(&mut events, None) {
+                Ok(count) => count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => crate::process::stop(b"ExecSupervisor"),
             };
-            if count < 0 {
-                if errno() == libc::EINTR {
-                    continue;
-                }
-                crate::process::stop(b"ExecSupervisor");
-            }
-            if events[..count as usize].iter().any(|e| e.u64 == 0) {
-                let mut pending = 0u64;
-                // SAFETY: only this thread drains the live eventfd.
-                unsafe { libc::read(self.change.as_raw_fd(), (&raw mut pending).cast(), 8) };
+            if events[..count].iter().any(|e| e.token() == 0) {
+                // Only this thread takes the pending wake.
+                self.change.reset();
             }
             let mut registry = self.registry.lock().unwrap();
             let mut ready: [_; 16] = std::array::from_fn(|_| None);
-            for (event, slot) in events[..count as usize].iter().zip(&mut ready) {
-                if let Some(fd) = event.u64.checked_sub(1)
+            for (event, slot) in events[..count].iter().zip(&mut ready) {
+                if let Some(fd) = event.token().checked_sub(1)
                     && let Some(child) = registry
                         .children
                         .iter_mut()
@@ -488,7 +472,7 @@ impl Shared {
         check(pid)?;
         // SAFETY: CLONE_PIDFD transfers a fresh descriptor to the parent.
         let fd = unsafe { OwnedFd::from_raw_fd(pidfd) };
-        let monitored = watch(&self.poller, &fd, pidfd as u64 + 1, true);
+        let monitored = self.poller.add_exit(fd.as_fd(), pidfd as u64 + 1);
         registry.children.push(Child {
             pid: pid as libc::pid_t,
             fd,
@@ -572,7 +556,10 @@ impl Shared {
                 }
                 match wait(fd.as_raw_fd(), libc::WNOHANG) {
                     Ok(None)
-                        if watch(&self.poller, &fd, fd.as_raw_fd() as u64 + 1, true).is_ok() =>
+                        if self
+                            .poller
+                            .add_exit(fd.as_fd(), fd.as_raw_fd() as u64 + 1)
+                            .is_ok() =>
                     {
                         registry.children.push(Child {
                             pid,
@@ -608,22 +595,6 @@ fn release(child: &mut Child) {
         crate::process::stop(b"ExecKill");
     }
     child.disposition = Disposition::Released;
-}
-
-fn watch(poller: &OwnedFd, fd: &OwnedFd, tag: u64, once: bool) -> io::Result<()> {
-    let mut event = libc::epoll_event {
-        events: (libc::EPOLLIN | if once { libc::EPOLLONESHOT } else { 0 }) as u32,
-        u64: tag,
-    };
-    // SAFETY: both fds are live and the event is read synchronously.
-    check(unsafe {
-        libc::epoll_ctl(
-            poller.as_raw_fd(),
-            libc::EPOLL_CTL_ADD,
-            fd.as_raw_fd(),
-            &mut event,
-        )
-    })
 }
 
 fn wait(fd: RawFd, options: i32) -> io::Result<Option<Termination>> {

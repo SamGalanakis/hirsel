@@ -7,17 +7,23 @@
 //! unit pool's worker slot, or a tied run's driver) submits to it and waits
 //! in it; other threads post to its mailbox and wake it ([`slot_pollers`]).
 //! One interface is chosen once per process ([`reactor`]); both turn a
-//! kernel turn into the same `(tag, flags)` events, so dispatch is shared.
+//! kernel turn into the same [`Event`]s, so dispatch is shared.
 use std::{
     io,
     mem::ManuallyDrop,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, OwnedFd},
     sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError},
 };
+#[cfg(target_os = "linux")]
+pub(crate) mod epoll;
 mod sendzc;
+#[cfg(target_os = "linux")]
+pub(crate) use epoll as sys;
 mod udp_group;
 mod uring;
+use crate::ready::{Event, Handle, Waker};
 pub use sendzc::{TxSlot, TxState};
+use sys::INTEREST;
 pub use udp_group::UdpMember;
 use uring::{Uring, msg_ring_wake};
 
@@ -26,7 +32,6 @@ const POLL_BATCH: i32 = 128;
 const WAKE: u64 = u64::MAX;
 /// io_uring: the completion of a poll removal, which carries no readiness.
 const REMOVED: u64 = u64::MAX - 1;
-const INTEREST: u32 = (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP) as u32;
 /// `IORING_REGISTER_SEND_MSG_RING`: a MSG_RING issued without a source ring.
 const REGISTER_SEND_MSG_RING: libc::c_long = 31;
 
@@ -197,7 +202,7 @@ pub struct Poller {
     udp_deferred: ManuallyDrop<Mutex<udp_group::Deferred>>,
     /// The owner's turn: held while a thread submits to or waits in this
     /// poller, which makes it the poller's owner for that turn.
-    events: Mutex<Vec<libc::epoll_event>>,
+    events: Mutex<Vec<Event>>,
     operations: &'static PollOperations,
 }
 
@@ -227,7 +232,7 @@ impl Drop for Poller {
 }
 
 /// The driver token: one thread at a time submits, polls and dispatches.
-type Turn<'a> = MutexGuard<'a, Vec<libc::epoll_event>>;
+type Turn<'a> = MutexGuard<'a, Vec<Event>>;
 
 /// The initialized prefix of one kernel turn, held until registry dispatch.
 pub struct PollEvents<'a>(Turn<'a>);
@@ -237,15 +242,6 @@ fn checked(rc: i32) -> io::Result<i32> {
     } else {
         Ok(rc)
     }
-}
-fn eventfd() -> io::Result<OwnedFd> {
-    // SAFETY: creates a new, uniquely owned CLOEXEC descriptor.
-    Ok(unsafe {
-        OwnedFd::from_raw_fd(checked(libc::eventfd(
-            0,
-            libc::EFD_CLOEXEC | libc::EFD_NONBLOCK,
-        ))?)
-    })
 }
 fn timeout_ns(timeout_ms: i32) -> Option<u64> {
     u64::try_from(timeout_ms).ok().map(|ms| ms * 1_000_000)
@@ -283,53 +279,12 @@ impl Poller {
             },
         })
     }
-    fn new_epoll() -> io::Result<Arc<Self>> {
-        // SAFETY: creates a new, uniquely owned CLOEXEC descriptor.
-        let epoll =
-            unsafe { OwnedFd::from_raw_fd(checked(libc::epoll_create1(libc::EPOLL_CLOEXEC))?) };
-        let poller = Arc::new(Self {
-            backend: Backend::Epoll {
-                epoll,
-                wake: eventfd()?,
-            },
-            udp_groups: ManuallyDrop::new(OnceLock::new()),
-            udp_budget: Mutex::default(),
-            udp_deferred: ManuallyDrop::default(),
-            events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
-            operations: &PollOperations {
-                poll: Self::poll_epoll,
-                wake: Self::wake_eventfd,
-                add: Self::add_epoll,
-                remove: Self::remove_epoll,
-                release: Self::release_udp,
-            },
-        });
-        poller.epoll_ctl(
-            libc::EPOLL_CTL_ADD,
-            poller.wake_fd(),
-            (libc::EPOLLIN | libc::EPOLLET) as u32,
-            WAKE,
-        )?;
-        Ok(poller)
-    }
     /// The interface this poller waits on.
     pub fn reactor(&self) -> Reactor {
         match self.backend {
             Backend::Epoll { .. } => Reactor::Epoll,
             Backend::Uring(_) => Reactor::IoUring,
         }
-    }
-    fn epoll_ctl(&self, op: i32, fd: i32, flags: u32, token: u64) -> io::Result<()> {
-        let Backend::Epoll { epoll, .. } = &self.backend else {
-            unreachable!()
-        };
-        let mut event = libc::epoll_event {
-            events: flags,
-            u64: token,
-        };
-        // SAFETY: live descriptors and writable event; DEL ignores the event.
-        checked(unsafe { libc::epoll_ctl(epoll.as_raw_fd(), op, fd, &mut event) })?;
-        Ok(())
     }
     /// Watch `fd` for every direction under `tag`. epoll's interest takes
     /// effect at once from any thread; an io_uring poll is posted to the
@@ -345,14 +300,6 @@ impl Poller {
             ManuallyDrop::drop(&mut self.udp_deferred);
         }
     }
-    fn add_epoll(&self, fd: &Arc<OwnedFd>, tag: u64, _owner: bool) -> io::Result<()> {
-        self.epoll_ctl(
-            libc::EPOLL_CTL_ADD,
-            fd.as_raw_fd(),
-            INTEREST | libc::EPOLLET as u32,
-            tag,
-        )
-    }
     /// Stop watching `fd`. `closing` names a listener whose only holder is
     /// about to close it: an io_uring poll holds its own file reference until
     /// the kernel retires it, so the listener is shut down first and its
@@ -362,9 +309,6 @@ impl Poller {
     /// goes out) without waiting for the owner's next turn.
     fn remove(&self, fd: i32, tag: u64, closing: bool, owner: bool) -> io::Result<()> {
         (self.operations.remove)(self, fd, tag, closing, owner)
-    }
-    fn remove_epoll(&self, fd: i32, _tag: u64, _closing: bool, _owner: bool) -> io::Result<()> {
-        self.epoll_ctl(libc::EPOLL_CTL_DEL, fd, 0, 0)
     }
     /// io_uring: submit the mailbox now when the caller owns this poller and
     /// its turn is free; otherwise wake the owner to submit it.
@@ -411,75 +355,30 @@ impl Poller {
         (self.operations.poll)(self, events, timeout_ns(timeout_ms))
     }
 
-    // The optional operations are installed with the native poller, so a
-    // scheduler that can never construct one does not link this syscall path.
-    fn poll_epoll<'a>(
-        &'a self,
-        mut events: Turn<'a>,
-        timeout_ns: Option<u64>,
-    ) -> io::Result<Option<PollEvents<'a>>> {
-        let Backend::Epoll { epoll, .. } = &self.backend else {
-            unreachable!()
-        };
-        let timeout_ms = timeout_ns.map_or(-1, |ns| {
-            i32::try_from(ns.div_ceil(1_000_000)).unwrap_or(i32::MAX)
-        });
-        events.clear();
-        crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // SAFETY: epoll owns its descriptor and events has POLL_BATCH spare slots.
-        let count = unsafe {
-            libc::epoll_wait(
-                epoll.as_raw_fd(),
-                events.as_mut_ptr(),
-                POLL_BATCH,
-                timeout_ms,
-            )
-        };
-        if count < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-            return Ok(None);
-        }
-        let len = checked(count)? as usize;
-        // SAFETY: epoll_wait initialized exactly this prefix of the buffer.
-        unsafe { events.set_len(len) };
-        let visible = self.dispatch_udp_slot(&mut events);
-        events.truncate(visible);
-        Ok(Some(PollEvents(events)))
-    }
-
     /// Wake this poller's owner from any thread: an eventfd edge on epoll, a
     /// MSG_RING completion on io_uring. Either is reported as a `WAKE` event.
     pub fn wake(&self) {
         (self.operations.wake)(self);
     }
-    /// The epoll fd, for a pool slot that waits on it directly.
-    pub fn raw_fd(&self) -> i32 {
+    /// The readiness set's handle, for a pool slot that waits on it
+    /// directly (a descriptor-waited poller; an io_uring ring's is its
+    /// ring descriptor).
+    pub fn handle(&self) -> Handle {
         match &self.backend {
-            Backend::Epoll { epoll, .. } => epoll.as_raw_fd(),
-            Backend::Uring(ring) => ring.ring.as_raw_fd(),
+            Backend::Epoll { epoll, .. } => Handle(epoll.as_raw_fd()),
+            Backend::Uring(ring) => Handle(ring.ring.as_raw_fd()),
         }
     }
-    /// epoll: the wake eventfd, registered edge-triggered under tag `u64::MAX`.
-    pub fn wake_fd(&self) -> i32 {
+    /// A descriptor-waited poller's wake, reported as a `WAKE` event; None
+    /// for an io_uring ring, which [`Poller::wake`] wakes by MSG_RING.
+    pub fn waker(&self) -> Option<Waker> {
         match &self.backend {
-            Backend::Epoll { wake, .. } => wake.as_raw_fd(),
-            Backend::Uring(_) => unreachable!("a ring is woken by MSG_RING"),
-        }
-    }
-
-    fn wake_eventfd(&self) {
-        let fd = self.wake_fd();
-        let one = 1u64;
-        loop {
-            // SAFETY: nonblocking eventfd, readable eight-byte counter.
-            if unsafe { libc::write(fd, (&raw const one).cast(), 8) } >= 0
-                || io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
-            {
-                return;
-            }
+            Backend::Epoll { .. } => Some(Waker(self.wake_fd())),
+            Backend::Uring(_) => None,
         }
     }
     fn wake_ring(&self) {
-        let _ = msg_ring_wake(self.raw_fd());
+        let _ = msg_ring_wake(self.handle().0);
     }
 }
 

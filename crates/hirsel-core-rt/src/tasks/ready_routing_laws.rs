@@ -248,7 +248,9 @@ fn ready_routes_one_and_work_is_independent_of_parked_count() {
             tasks[0].state = State::Provider;
             run.parked.insert(4, &mut *tasks[0]);
             sockets.arm(replacement, false, 4).unwrap();
-            sockets.dispatch(stale, libc::EPOLLIN as u32, |token| run.readies.push(token));
+            sockets.dispatch(stale, hirsel_core_net::ready::Ready::READABLE, |token| {
+                run.readies.push(token)
+            });
             unsafe {
                 run.take_wakes(0);
             }

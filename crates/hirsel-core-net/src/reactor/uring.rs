@@ -3,6 +3,7 @@
 use super::{
     Backend, INTEREST, POLL_BATCH, PollEvents, Poller, REGISTER_SEND_MSG_RING, Turn, WAKE, sendzc,
 };
+use crate::ready::{Event, Ready};
 use std::{
     collections::VecDeque,
     io,
@@ -261,11 +262,7 @@ impl Uring {
 
     /// One owner turn into `out`. A timeout of Some(0) does not block and
     /// None blocks until a completion.
-    pub(super) fn wait(
-        &self,
-        out: &mut [libc::epoll_event],
-        timeout_ns: Option<u64>,
-    ) -> io::Result<usize> {
+    pub(super) fn wait(&self, out: &mut [Event], timeout_ns: Option<u64>) -> io::Result<usize> {
         self.recover_watches(false);
         self.completion.check_dropped()?;
         let limit = POLL_BATCH as usize;
@@ -300,7 +297,7 @@ impl Uring {
     /// ends (no `F_MORE`) is re-armed through the mailbox unless a removal or
     /// an adoption replaced it: the kernel ends a multishot poll when the
     /// completion queue overflows, and cancels it when its arming thread exits.
-    fn reap(&self, out: &mut [libc::epoll_event], remaining: &mut usize) -> io::Result<usize> {
+    fn reap(&self, out: &mut [Event], remaining: &mut usize) -> io::Result<usize> {
         let mut watched = self.watches();
         let mut n = 0;
         while *remaining != 0 && n < out.len() {
@@ -311,7 +308,7 @@ impl Uring {
             *remaining -= 1;
             let data = cqe.user_data();
             let (tag, flags) = match data {
-                WAKE => (WAKE, libc::EPOLLIN as u32),
+                WAKE => (WAKE, Ready::READABLE),
                 data if data & REMOVE != 0 => {
                     watched.removed(data & !REMOVE, cqe.result())?;
                     continue;
@@ -324,13 +321,10 @@ impl Uring {
                     if res <= 0 || tag == COMPLETION_READY {
                         continue;
                     }
-                    (tag, res as u32)
+                    (tag, Ready::from_poll_mask(res as u32))
                 }
             };
-            out[n] = libc::epoll_event {
-                events: flags,
-                u64: tag,
-            };
+            out[n] = Event::new(tag, flags);
             n += 1;
         }
         Ok(n)
@@ -381,10 +375,7 @@ impl Poller {
         };
         events.clear();
         crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        events.resize(
-            2 * POLL_BATCH as usize,
-            libc::epoll_event { events: 0, u64: 0 },
-        );
+        events.resize(2 * POLL_BATCH as usize, Event::EMPTY);
         let len = ring.wait(&mut events, timeout_ns)?;
         let len = self.dispatch_udp_slot(&mut events[..len]);
         events.truncate(len);
@@ -394,11 +385,7 @@ impl Poller {
     /// A unit pool slot's turn on its own io_uring ring: submit its mailbox
     /// and reap into `out`, blocking up to `timeout_ns` (None: until a
     /// completion; Some(0): not at all). Returns the events written.
-    pub fn wait_slot(
-        &self,
-        out: &mut [libc::epoll_event],
-        timeout_ns: Option<u64>,
-    ) -> io::Result<usize> {
+    pub fn wait_slot(&self, out: &mut [Event], timeout_ns: Option<u64>) -> io::Result<usize> {
         let Backend::Uring(ring) = &self.backend else {
             unreachable!("a pool waits on an epoll slot poller directly")
         };

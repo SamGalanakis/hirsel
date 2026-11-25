@@ -6,8 +6,21 @@
 //! one (see `units_check.rs`).
 #[cfg(not(test))]
 pub(crate) use crate::os::monotonic_ns;
+/// A slot's wait on its readiness set; an error reports no events.
 #[cfg(not(test))]
-pub(crate) use libc::{epoll_wait, write};
+#[inline(always)]
+pub(crate) fn wait(
+    handle: hirsel_core_net::ready::Handle,
+    events: &mut [hirsel_core_net::ready::Event],
+    timeout_ns: Option<u64>,
+) -> usize {
+    handle.wait(events, timeout_ns).unwrap_or(0)
+}
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn wake(waker: hirsel_core_net::ready::Waker) {
+    waker.wake()
+}
 #[cfg(not(test))]
 pub(crate) use std::sync::{
     Mutex, MutexGuard,

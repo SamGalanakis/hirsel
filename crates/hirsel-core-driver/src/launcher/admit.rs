@@ -7,7 +7,7 @@
 //! admitted as that publication.
 use super::objects::Records;
 use super::session::{Approvals, Attempt, Failure, Grants, Reader, Summary, Wire, Writer};
-use super::{Conn, Epoll};
+use super::{Conn, Readiness};
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, AdmissionStore, AdmittedRelease, ControlConnection,
     NativeSemantics, ObjectKey, ObjectKind, send_release,
@@ -274,7 +274,7 @@ impl Worker {
     #[expect(clippy::too_many_arguments, reason = "one worker's whole input")]
     pub(super) fn spawn(
         admission: Arc<Admission>,
-        epoll: &Epoll,
+        poll: &Readiness,
         id: u64,
         attempt: Attempt,
         source: Source,
@@ -285,7 +285,7 @@ impl Worker {
         let (go, gone) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let (conn, attested, local) = match source {
-            Source::Attested(root) => (Some(Conn::new(epoll, ours)?), Some(root), None),
+            Source::Attested(root) => (Some(Conn::new(poll, ours)?), Some(root), None),
             Source::Publication(root) => (None, None, Some((Ok(root), ours))),
             Source::Tree(tree) => (None, None, Some((Err(tree), ours))),
         };

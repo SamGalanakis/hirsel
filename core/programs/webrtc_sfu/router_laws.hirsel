@@ -59,9 +59,13 @@ type Client {
 }
 
 fn admit(mut r: router.Router, seed: u64, offer: Bytes, id: u64) -> Client {
+    admit_with(mut r, seed, offer, id, 64)
+}
+
+fn admit_with(mut r: router.Router, seed: u64, offer: Bytes, id: u64, pacer_packets: u32) -> Client {
     let at = addr_of(int.narrow(id))
     let who = peer.Participant(gen: gen_of(id), room: room_id())
-    let Rig(p: take p, c: _, cs: take cs, out: _) = established_on(seed, offer, who, at)
+    let Rig(p: take p, c: _, cs: take cs, out: _) = established_with(seed, offer, who, at, pacer_packets)
     result.unwrap(router.join(mut r, take p))
     Client(who: gen_of(id), at: at, cs: take cs)
 }
@@ -283,6 +287,8 @@ fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
         fail("subscriber 2's NACK answer MID or transport number")
     }
     peer.clear_outbox(mut out)
+    // 1 ms on, so the NACK answer above has left subscriber 1's pacer (RTP-10).
+    now += MS
     // A switch (Off, then the layer again, at source 15's keyframe) gates the history.
     result.unwrap(router.set_target(mut r, room, s1.who, pa, Off, now, mut out))
     result.unwrap(router.set_target(mut r, room, s1.who, pa, base, now, mut out))
@@ -290,8 +296,8 @@ fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
     let sent5 = media_carrying(mut pub_.cs, MEDIA_SSRC, 15, 45000, b"a", 96, vp8_key())
     feed(mut r, now, pub_.who, pub_.at, sent5, mut out)
     // RTP-11: a resume from Off anchors at the last output timestamp (source 14,
-    // t1 + 12000 at 14 ms) plus the wall clock since, 6 ms at 90 kHz: t1 + 12540.
-    expect_media(one(received(mut s1, out), "the switch packet"), m1, plus(n1, 5), later(t1, 12540), 96, "the switch keeps the numbering")
+    // t1 + 12000 at 14 ms) plus the wall clock since, 7 ms at 90 kHz: t1 + 12630.
+    expect_media(one(received(mut s1, out), "the switch packet"), m1, plus(n1, 5), later(t1, 12630), 96, "the switch keeps the numbering")
     peer.clear_outbox(mut out)
     now += 20 * MS
     let sent6 = nack(mut s1.cs, m1, plus(n1, 4))
@@ -359,5 +365,80 @@ fn forward_allocates_nothing() -> Result[(), router.RouterError] {
             fail("a subscriber's packet does not open to the publisher's payload")
         }
     }
+    Ok(())
+}
+
+// Each poll at `at` lets out exactly the packets `seqs` names, in order, to `c`.
+fn paced_out(mut r: router.Router, at: u64, mut c: Client, seqs: List[u16], mut out: peer.Outbox, take what: String) {
+    peer.clear_outbox(mut out)
+    let _ = router.poll(mut r, at, mut out)
+    let got = received(mut c, out)
+    let mut same_seqs = list.len(got) == list.len(seqs)
+    if same_seqs {
+        for i in 0u64 .. list.len(seqs) {
+            same_seqs = same_seqs && got[i].h.seq == seqs[i]
+        }
+    }
+    if !same_seqs {
+        fail(take what)
+    }
+}
+
+/// bug: let `pacer_packets` bound nothing, send a burst at once instead of at the pacing
+/// rate, drop a queued packet instead of the one a full pacer refuses, or leave the
+/// pacer's next send out of `router.poll`'s deadline.
+/// oracle: RTP-10 by hand: the pacing rate is 2.5 times the 300 kbps start estimate, so
+/// 750 kbps, and a 750-byte packet (12 header bytes and 738 payload bytes) holds the
+/// pacer 8 ms. With 4 slots, a burst of 6 at 10 ms sends one at once, queues 4, refuses
+/// the 6th, and lets one out at each of 18, 26, 34 and 42 ms.
+@test
+fn pacer_holds_back_a_burst() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(140))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut pub_ = admit(mut r, 141, session_offer(), 1)
+    let mut offer = minimal_head(b" d")
+    recv_section(mut offer, b"d", b"96", b"97", b"1", b"3")
+    let mut s = admit_with(mut r, 143, offer, 2, 4)
+    let room = room_id()
+    let pa = result.unwrap(router.publish(mut r, room, pub_.who, 0))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 0, mut out))
+    let mut body = vp8_key()
+    while list.len(body) < 738 {
+        list.push(mut body, 0x55)
+    }
+    // Reports and feedback due at 10 ms go first, so the second poll sees only the pacer.
+    let _ = router.poll(mut r, 10 * MS, mut out)
+    peer.clear_outbox(mut out)
+    for k in 0u16 .. 6u16 {
+        let ts: u32 = int.widen(k)
+        let packet = media_carrying(mut pub_.cs, MEDIA_SSRC, 200 + k, 3000 * ts, b"a", 96, body)
+        feed(mut r, 10 * MS, pub_.who, pub_.at, packet, mut out)
+    }
+    let first = one(received(mut s, out), "a burst sends exactly one packet at once")
+    let o = first.h.seq
+    if list.len(payload_of(first)) != 738 {
+        fail("the paced packet's payload is not the publisher's 738 bytes")
+    }
+    let Some(d) = router.session_drops(r, room, s.who) else {
+        fail("the subscriber's session is gone")
+    }
+    if d.paced != 1 {
+        fail("the full pacer did not refuse and count exactly the 6th packet")
+    }
+    peer.clear_outbox(mut out)
+    if router.poll(mut r, 10 * MS, mut out) != Some(18 * MS) {
+        fail("router.poll's deadline is not the pacer's next send at 18 ms")
+    }
+    let none: List[u16] = list.new()
+    paced_out(mut r, 17 * MS, mut s, none, mut out, "a packet left before its 8 ms")
+    for k in 1u16 .. 5u16 {
+        let at: u64 = int.widen(k)
+        let mut seqs: List[u16] = list.new()
+        list.push(mut seqs, plus(o, k))
+        paced_out(mut r, (10 + 8 * at) * MS, mut s, seqs, mut out, "the pacer did not let out the next queued packet on time")
+    }
+    paced_out(mut r, 60 * MS, mut s, none, mut out, "the refused packet went out")
     Ok(())
 }

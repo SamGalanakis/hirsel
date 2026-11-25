@@ -472,6 +472,7 @@ pub fn unsubscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: Publicati
     }
     let track = r.downs[di].track
     let _ = peer.set_target(mut r.members[mi].session, track, Off)
+    peer.unpace(mut r.members[mi].session, track)
     let _ = list.remove(mut r.downs, di)
     r.members[mi].downs -= 1
     Ok(())
@@ -531,6 +532,7 @@ fn drop_member(mut r: Router, mi: u64, notify: bool, mut out: peer.Outbox) {
                     let sub = r.downs[d].sub
                     if let Some(si) = member_at(r, who.room, sub) {
                         let _ = peer.set_target(mut r.members[si].session, r.downs[d].track, Off)
+                        peer.unpace(mut r.members[si].session, r.downs[d].track)
                         r.members[si].downs -= 1
                     }
                     let _ = list.remove(mut r.downs, d)

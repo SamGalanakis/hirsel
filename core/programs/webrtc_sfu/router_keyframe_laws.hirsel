@@ -366,7 +366,8 @@ fn router_maps_vp9_layers() -> Result[(), router.RouterError] {
     let mut both = admit(mut r, 113, vp9_offer(b"y", b"a=recvonly"), 2)
     let mut base = admit(mut r, 115, vp9_offer(b"y", b"a=recvonly"), 3)
     let pv = result.unwrap(router.publish(mut r, room, p.who, 0))
-    let now = 10 * MS
+    // One packet per millisecond, so each has left the legs' pacers before the next (RTP-10).
+    let mut now = 10 * MS
     result.unwrap(router.subscribe(mut r, room, both.who, pv, 0, Layer(encoding: 0, spatial: 1, temporal: 0), now, mut out))
     result.unwrap(router.subscribe(mut r, room, base.who, pv, 0, Layer(encoding: 0, spatial: 0, temporal: 0), now, mut out))
     peer.clear_outbox(mut out)
@@ -377,6 +378,7 @@ fn router_maps_vp9_layers() -> Result[(), router.RouterError] {
         for spatial in 0u8 .. 2u8 {
             svc_send(mut r, now, mut p, seq, ts, svc_packet(picture == 6, spatial, picture), spatial == 1, mut out)
             seq += 1
+            now += MS
             for g in received(mut both, out) {
                 let kept: Got = clone(g)
                 list.push(mut seen_both, take kept)
@@ -421,6 +423,7 @@ fn router_maps_vp9_layers() -> Result[(), router.RouterError] {
         }
         svc_send(mut r, now, mut p, seq, ts, frame, spatial == 4 || (picture == 8 && spatial == 1), mut out)
         seq += 1
+        now += MS
         for g in received(mut both, out) {
             let kept: Got = clone(g)
             list.push(mut late_both, take kept)

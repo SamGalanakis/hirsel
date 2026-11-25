@@ -1392,8 +1392,24 @@ W19, blocks, because those are soundness reds.
 - **Keyframe request buffer.** `peer.request_keyframe` builds a compound RR, SDES CNAME and
   PLI or FIR with the SRTCP trailer in a 320-byte buffer, allocated per request (off the
   forward path).
-- **Not closed in S4.** The pacer: `pacer_packets` bounds nothing yet, and egress goes
-  straight to the outbox. AV1 routing needs a dependency-descriptor kind in `rtp.ext` (an rtp
+- **Pacer.** Each session has one RTP-10 pacer of `pacer_packets` slots. Every packet to
+  the subscriber on a section that agreed TWCC goes through it. A section without TWCC
+  feeds no estimate, so the 300 kbps start rate would hold for good: its packets go
+  straight to `out`, as RTC-5 step 2 allows. Paced packets go as media on the track's class (Audio, which leaves
+  whatever the debt, or Video) and RTX repairs as Retransmit. Each slot owns a 1500-byte
+  payload buffer, reserved at `open`, so pacing allocates nothing. A queued entry holds the
+  payload as the leg sends it (descriptor rewritten, an RTX repair's OSN first) and the
+  header fields. The header, with the next transport number of the session's TWCC
+  (RTP-8), is written when the pacer lets the packet out, and then the packet is sealed.
+  The rate is 2.5 times the BWE target (libwebrtc's pace multiplier), raised so a queue
+  drains within 2 s. A packet the full pacer refuses is dropped and counted `paced`. Its
+  outbound number stays used, so the subscriber's NACK repairs it from the history. The
+  session drains its pacer after each push and at each `poll`, and `poll`'s wake includes
+  the pacer's next send. A let-out packet that cannot be queued (a full outbox) is dropped
+  and counted `capacity`, and the drain goes on. `unpace` takes a down-track's entries out when the router ends
+  the track and at a collision. An entry whose SSRC a collision has retired is dropped
+  when it is let out. S4 does not probe and sends no padding.
+- **Not closed in S4.** AV1 routing needs a dependency-descriptor kind in `rtp.ext` (an rtp
   amend). W9 waits for captured or reference simulcast and SVC packets. The re-offer after an
   SSRC collision (RTC-4) waits for the renegotiation path. Each is an open red on S4's ticket.
 

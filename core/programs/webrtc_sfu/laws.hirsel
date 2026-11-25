@@ -559,6 +559,11 @@ fn established(seed: u64) -> Rig {
 
 /// A session for `who`, from the browser at `client` that sent `offer`.
 fn established_on(seed: u64, offer_bytes: Bytes, who: peer.Participant, client: Addr) -> Rig {
+    established_with(seed, offer_bytes, who, client, 64)
+}
+
+/// The same, with a pacer of `pacer_packets` slots.
+fn established_with(seed: u64, offer_bytes: Bytes, who: peer.Participant, client: Addr, pacer_packets: u32) -> Rig {
     let Party(id: take server_id, certificate: server_certificate) = party(seed)
     let Party(id: take client_id, certificate: client_certificate) = party(seed + 1)
     let mut offer = sdp.description()
@@ -570,7 +575,7 @@ fn established_on(seed: u64, offer_bytes: Bytes, who: peer.Participant, client: 
     for i in 0u64 .. 32 {
         n.remote_fingerprint[i] = d[i]
     }
-    let limits = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64)
+    let limits = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: pacer_packets)
     let mut p = result.unwrap(peer.open(rig_local(), take server_id, provide.random(seed + 2), server_addr(), limits, n, who))
     let mut out = result.unwrap(peer.outbox(65536, 64))
     let mut pkt: Bytes = list.with_capacity(576)

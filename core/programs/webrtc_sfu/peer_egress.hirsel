@@ -44,6 +44,7 @@ fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut out: Outbox) -> Result[(
             p.tracks[t].sent = rtp.stats.sent(0)
             let _ = rtp.history.clear(mut p.tracks[t].history)
             p.tracks[t].gated = None
+            unpace(mut p, int.narrow(t))
             let mut b: Bytes = list.with_capacity(6)
             host.random(p.random, mut b)
             let first_seq: u16 = list.word_be(b, 0)
@@ -233,12 +234,12 @@ fn descriptor(mut p: PeerSession, t: u64, leg: Leg, payload: Bytes) -> (Option[u
 }
 
 // The payload as the leg sends it: the source bytes, with the descriptor's picture ID
-// and TL0PICIDX rewritten in place in the scratch packet from `at`.
-fn put_payload(mut p: PeerSession, at: u64, payload: Bytes, from: u64, len: u64, picture: Option[u16], tl0: Option[u8]) -> Result[(), PeerError] {
-    if list.capacity(p.pkt) - list.len(p.pkt) < len + 16 {
-        return Error(Capacity(Capacity(requested: len + 16, available: list.capacity(p.pkt) - list.len(p.pkt))))
+// and TL0PICIDX rewritten in place in `buf` from `at`.
+fn put_payload(mut buf: Bytes, at: u64, payload: Bytes, from: u64, len: u64, picture: Option[u16], tl0: Option[u8]) -> Result[(), PeerError] {
+    if list.capacity(buf) - list.len(buf) < len {
+        return Error(Capacity(Capacity(requested: len, available: list.capacity(buf) - list.len(buf))))
     }
-    list.append(mut p.pkt, list.slice(payload, from, from + len))
+    list.append(mut buf, list.slice(payload, from, from + len))
     if picture == None && tl0 == None {
         return Ok(())
     }
@@ -250,15 +251,15 @@ fn put_payload(mut p: PeerSession, at: u64, payload: Bytes, from: u64, len: u64,
     match d.picture_id {
         Some(ShortId(_)) => {
             if let Some(v) = picture {
-                p.pkt[next] = int.narrow(v % 128)
+                buf[next] = int.narrow(v % 128)
             }
             next += 1
         },
         Some(LongId(_)) => {
             if let Some(v) = picture {
                 let high: u8 = int.narrow((v >> 8) & 127)
-                p.pkt[next] = 128 | high
-                p.pkt[next + 1] = int.narrow(v & 255)
+                buf[next] = 128 | high
+                buf[next + 1] = int.narrow(v & 255)
             }
             next += 2
         },
@@ -266,7 +267,7 @@ fn put_payload(mut p: PeerSession, at: u64, payload: Bytes, from: u64, len: u64,
     }
     if d.tl0picidx != None {
         if let Some(v) = tl0 {
-            p.pkt[next] = v
+            buf[next] = v
         }
     }
     Ok(())
@@ -280,16 +281,140 @@ fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, rec: Rec
     if p.tracks[t].rtx_ssrc == 0 {
         return Ok(false)
     }
-    let size: u32 = int.narrow(12 + 2 + rec.len)
-    leg_ext(mut p, now, si, size, None, false)?
     let f = rtp.header.Fields(marker: rec.marker, pt: rpt, seq: p.tracks[t].rtx_seq, ts: ts, ssrc: p.tracks[t].rtx_ssrc)
-    let head = rtp.ext.write_header(f, view p.ext, mut p.pkt) ?=> |take x| Rtp(x)
-    list.push(mut p.pkt, int.truncate(index >> 8))
-    list.push(mut p.pkt, int.truncate(index))
-    put_payload(mut p, head + 2, payload, rec.from, rec.len, rec.picture, rec.tl0)?
-    p.tracks[t].rtx_seq = int.wrapping_add(p.tracks[t].rtx_seq, 1u16)
-    seal_out(mut p, rec.src, mut out)?
+    let osn: u16 = int.truncate(index)
+    let q = Paced(slot: 0, track: int.narrow(t), media: false, fields: f, level: None, voice: false, src: rec.src)
+    if stage(mut p, now, mut out, q, Retransmit, Some(osn), payload, rec.from, rec.len, rec.picture, rec.tl0)? {
+        p.tracks[t].rtx_seq = int.wrapping_add(p.tracks[t].rtx_seq, 1u16)
+    }
+    let _ = drain(mut p, now, mut out)
     Ok(true)
+}
+
+// Put one packet in the pacer: its payload goes into a free slab slot now, and its
+// header is written when the pacer lets it out (`emit`). A full pacer refuses it,
+// and the refusal is counted. A section without TWCC has no estimate to pace at, so its
+// packets go out at once (RTC-5 step 2).
+fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pacer.Class, osn: Option[u16], payload: Bytes, from: u64, len: u64, picture: Option[u16], tl0: Option[u8]) -> Result[bool, PeerError] {
+    let t: u64 = int.widen(q.track)
+    let si: u64 = int.widen(p.tracks[t].section)
+    if !p.sections[si].twcc {
+        let extra: u64 = if osn == None {
+            0
+        } else {
+            2
+        }
+        leg_ext(mut p, now, si, int.narrow(12 + extra + len), q.level, q.voice)?
+        let head = rtp.ext.write_header(q.fields, view p.ext, mut p.pkt) ?=> |take x| Rtp(x)
+        if let Some(n) = osn {
+            list.push(mut p.pkt, int.truncate(n >> 8))
+            list.push(mut p.pkt, int.truncate(n))
+        }
+        let mut buf = replace(mut p.pkt, list.new())
+        let put = put_payload(mut buf, head + extra, payload, from, len, picture, tl0)
+        p.pkt = take buf
+        if let Error(take e) = put {
+            list.clear(mut p.pkt)
+            return Error(take e)
+        }
+        seal_out(mut p, q.src, mut out)?
+        if q.media {
+            rtp.stats.on_sent(mut p.tracks[t].sent, len)
+        }
+        return Ok(true)
+    }
+    let Some(slot) = list.pop(mut p.free) else {
+        p.drops.paced += 1
+        return Ok(false)
+    }
+    let at: u64 = int.widen(slot)
+    let mut buf = replace(mut p.slab[at], list.new())
+    list.clear(mut buf)
+    let start = if let Some(n) = osn {
+        list.push(mut buf, int.truncate(n >> 8))
+        list.push(mut buf, int.truncate(n))
+        2u64
+    } else {
+        0u64
+    }
+    let put = put_payload(mut buf, start, payload, from, len, picture, tl0)
+    let size: u32 = int.narrow(list.len(buf))
+    p.slab[at] = take buf
+    if let Error(take e) = put {
+        list.push(mut p.free, slot)
+        return Error(take e)
+    }
+    let entry = Paced(slot: slot, track: q.track, media: q.media, fields: q.fields, level: q.level, voice: q.voice, src: q.src)
+    if let Error(_) = rtp.pacer.push(mut p.pacer, int.widen(q.track), class, RTP_HEADER + size, now, entry) {
+        list.push(mut p.free, slot)
+        p.drops.paced += 1
+        return Ok(false)
+    }
+    Ok(true)
+}
+
+// Send what the pacer lets out at `now` (RTP-10), at 2.5 times the estimate. The
+// answer is when it lets out the next packet, if one waits. A packet that cannot go
+// out (a full outbox) is dropped and counted, and the rest still go.
+fn drain(mut p: PeerSession, now: u64, mut out: Outbox) -> Option[u64] {
+    rtp.pacer.set_rate(mut p.pacer, rtp.bwe.target(p.bwe), 0)
+    loop {
+        match rtp.pacer.poll(mut p.pacer, now) {
+            Send(q) => {
+                if let Error(_) = emit(mut p, now, q, mut out) {
+                    p.drops.capacity += 1
+                }
+            },
+            Wait(at) => return Some(at),
+            _ => return None,
+        }
+    }
+}
+
+// Write the header of a packet the pacer let out, with the next transport number,
+// and seal it. A packet whose SSRC a collision retired since it was queued is dropped.
+fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), PeerError] {
+    let at: u64 = int.widen(q.slot)
+    list.push(mut p.free, q.slot)
+    let t: u64 = int.widen(q.track)
+    if p.closed || t >= list.len(p.tracks) {
+        return Ok(())
+    }
+    let ssrc = if q.media {
+        p.tracks[t].ssrc
+    } else {
+        p.tracks[t].rtx_ssrc
+    }
+    if ssrc != q.fields.ssrc {
+        return Ok(())
+    }
+    let si: u64 = int.widen(p.tracks[t].section)
+    let len = list.len(p.slab[at])
+    let size: u32 = int.narrow(12 + len)
+    leg_ext(mut p, now, si, size, q.level, q.voice)?
+    let _ = rtp.ext.write_header(q.fields, view p.ext, mut p.pkt) ?=> |take x| Rtp(x)
+    if list.capacity(p.pkt) - list.len(p.pkt) < len + 16 {
+        list.clear(mut p.pkt)
+        return Error(Capacity(Capacity(requested: len + 16, available: list.capacity(p.pkt) - list.len(p.pkt))))
+    }
+    list.append(mut p.pkt, p.slab[at])
+    seal_out(mut p, q.src, mut out)?
+    if q.media {
+        rtp.stats.on_sent(mut p.tracks[t].sent, len)
+    }
+    Ok(())
+}
+
+/// Take a down-track's packets out of the pacer unsent: at a collision, and when the
+/// router ends the down-track (RTC-7's `Pacer.remove`).
+pub fn unpace(mut p: PeerSession, track: u16) {
+    list.clear(mut p.unpaced)
+    let _ = rtp.pacer.remove(mut p.pacer, int.widen(track), mut p.unpaced)
+    for i in 0u64 .. list.len(p.unpaced) {
+        let slot = p.unpaced[i].slot
+        list.push(mut p.free, slot)
+    }
+    list.clear(mut p.unpaced)
 }
 
 /// Present one source packet to a down-track (RTC-5 fan-out step 2). The track's
@@ -335,19 +460,25 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
         }
         return Ok(AsRepair)
     }
-    let size: u32 = int.narrow(12 + leg.len)
-    leg_ext(mut p, now, si, size, leg.level, leg.voice)?
     let f = rtp.header.Fields(marker: leg.marker, pt: pt, seq: int.truncate(index), ts: ts, ssrc: p.tracks[t].ssrc)
-    let head = rtp.ext.write_header(f, view p.ext, mut p.pkt) ?=> |take x| Rtp(x)
-    put_payload(mut p, head, payload, leg.from, leg.len, picture, tl0)?
-    seal_out(mut p, leg.src, mut out)?
+    let q = Paced(slot: 0, track: track, media: true, fields: f, level: leg.level, voice: leg.voice, src: leg.src)
+    let class: rtp.pacer.Class = if p.tracks[t].video {
+        Video
+    } else {
+        Audio
+    }
+    let staged = stage(mut p, now, mut out, q, class, None, payload, leg.from, leg.len, picture, tl0)?
     p.tracks[t].highest = index
     p.tracks[t].src = Some(leg.src)
-    rtp.stats.on_sent(mut p.tracks[t].sent, leg.len)
     if p.tracks[t].video {
         drop(rtp.history.put(mut p.tracks[t].history, index, now, rec))
     }
-    Ok(OnMedia)
+    let _ = drain(mut p, now, mut out)
+    Ok(if staged {
+        OnMedia
+    } else {
+        Dropped
+    })
 }
 
 /// Answer a `RepairAsk` with the plaintext its handle names, rebuilt from the
@@ -484,7 +615,9 @@ pub fn poll(mut p: PeerSession, now: u64, mut out: Outbox) -> Poll {
     if let Error(_) = start_srtp(mut p) {
         return Idle
     }
+    let mut paced: Option[u64] = None
     if connected(p) {
+        paced = drain(mut p, now, mut out)
         if now >= p.next_report {
             let _ = reports(mut p, now, mut out)
             p.next_report = now + REPORT_NS
@@ -507,6 +640,12 @@ pub fn poll(mut p: PeerSession, now: u64, mut out: Outbox) -> Poll {
         wake = match wake {
             Some(w) if w < next => Some(w),
             _ => Some(next),
+        }
+    }
+    if let Some(w) = paced {
+        wake = match wake {
+            Some(x) if x <= w => Some(x),
+            _ => Some(w),
         }
     }
     match wake {

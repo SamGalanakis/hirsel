@@ -48,7 +48,9 @@ pub type Drops: key {
     repair: u64,
     late: u64,
     nack: u64,
-    capacity: u64
+    capacity: u64,
+    // A packet the session's full pacer refused (`pacer_packets`).
+    paced: u64
 }
 
 /// An authenticated media packet, with views into the receive slot.
@@ -143,6 +145,19 @@ type Record {
     tl0: Option[u8]
 }
 
+// One packet waiting in the session's pacer (RTP-10's `Q`): its slab slot holds the
+// payload as the leg sends it (an RTX repair's begins with its OSN), and the header is
+// written at send, when the transport number is taken (RTP-8).
+type Paced {
+    slot: u32,
+    track: u16,
+    media: bool,
+    fields: rtp.header.Fields,
+    level: Option[u8],
+    voice: bool,
+    src: Gen
+}
+
 type Inbound {
     ssrc: u32,
     section: u8,
@@ -217,7 +232,13 @@ pub opaque type PeerSession {
     // value, and the extension writer `ext.reset` empties per packet.
     pkt: Bytes,
     word: Bytes,
-    ext: rtp.ext.ExtWriter
+    ext: rtp.ext.ExtWriter,
+    // The pacer, its `pacer_packets` payload slots reserved at `open`, the free ones,
+    // and the entries `unpace` takes out.
+    pacer: rtp.pacer.Pacer[Paced],
+    slab: List[Bytes],
+    free: List[u32],
+    unpaced: List[Paced]
 }
 
 const EMPTY: u64 = 0xffffffffffffffff
@@ -243,6 +264,14 @@ const COUNTER_SLOTS: u32 = 64
 const MAX_NACK_PAIRS: u32 = 16
 
 const SLOT: u64 = 1500
+
+// RTP-10: the pacing rate is 2.5 times the estimate, and the rate rises so a queue
+// drains within 2 s (libwebrtc's kDefaultPaceMultiplier and kMaxExpectedQueueLength).
+const PACE_FACTOR: f64 = 2.5
+
+const QUEUE_LIMIT_NS: u64 = 2000000000
+
+const RTP_HEADER: u32 = 12
 
 const STUN_BUFFER: u64 = 576
 
@@ -288,7 +317,7 @@ pub fn clear_outbox(mut out: Outbox) {
 }
 
 fn no_drops() -> Drops {
-    Drops(classified: 0, short_stun: 0, short_dtls: 0, short_rtp: 0, short_rtcp: 0, off_path: 0, stun: 0, early: 0, srtp: 0, malformed: 0, unbound: 0, format: 0, repair: 0, late: 0, nack: 0, capacity: 0)
+    Drops(classified: 0, short_stun: 0, short_dtls: 0, short_rtp: 0, short_rtcp: 0, off_path: 0, stun: 0, early: 0, srtp: 0, malformed: 0, unbound: 0, format: 0, repair: 0, late: 0, nack: 0, capacity: 0, paced: 0)
 }
 
 fn ext_kind(e: sdp.Ext) -> Option[rtp.ext.Kind] {
@@ -366,7 +395,21 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
     let send_log = rtp.twcc.send_log(1024) ?=> |c| Capacity(c)
     let mut cname: Bytes = list.with_capacity(16)
     list.append(mut cname, b"hirsel-sfu")
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), ext: rtp.ext.writer())
+    let pacer: rtp.pacer.Pacer[Paced] = rtp.pacer.pacer(limits.pacer_packets, PACE_FACTOR, QUEUE_LIMIT_NS, RTP_HEADER) ?=> |c| Capacity(c)
+    let n: u64 = int.widen(limits.pacer_packets)
+    let mut slab: List[Bytes] = list.new()
+    let mut free: List[u32] = list.new()
+    let mut unpaced: List[Paced] = list.new()
+    list.try_reserve(mut slab, n) ?=> |c| Capacity(c)
+    list.try_reserve(mut free, n) ?=> |c| Capacity(c)
+    list.try_reserve(mut unpaced, n) ?=> |c| Capacity(c)
+    for i in 0u64 .. n {
+        let mut b: Bytes = list.new()
+        list.try_reserve(mut b, SLOT) ?=> |c| Capacity(c)
+        list.push(mut slab, take b)
+        list.push(mut free, int.narrow(n - 1 - i))
+    }
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced)
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.word, 2) ?=> |c| Capacity(c)
     let fresh = draw(mut p)

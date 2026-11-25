@@ -273,14 +273,28 @@ impl OsProvider {
                 // cursor. No read_exact retry can discard an already consumed prefix.
                 if b.capacity > b.len {
                     // SAFETY: spare capacity is writable; fd is held by this provider.
-                    let n = unsafe {
-                        let data = b.data.add(b.len).cast();
-                        let spare = b.capacity - b.len;
-                        match offset {
-                            Some(at) if at > i64::MAX as u64 => 0,
-                            Some(at) => libc::pread(fd, data, spare, at as i64),
-                            None => libc::read(fd, data, spare),
+                    let data = unsafe { b.data.add(b.len) };
+                    let spare = b.capacity - b.len;
+                    let n = match offset {
+                        Some(at) if at > i64::MAX as u64 => 0,
+                        // §3.3b: a ring host issues one buffered ring READ, which
+                        // completes from the page cache or through task_work. An
+                        // offset of -1 reads at, and advances, the file cursor.
+                        _ if crate::units::uses_file_ring() => {
+                            let entry = io_uring::opcode::Read::new(
+                                io_uring::types::Fd(fd),
+                                data,
+                                spare.min(i32::MAX as usize) as u32,
+                            )
+                            .offset(offset.unwrap_or(u64::MAX))
+                            .build();
+                            // SAFETY: the issuing unit stays parked, with fd and the
+                            // buffer pinned, until the call's CQE.
+                            unsafe { crate::units::file_request(entry) }? as isize
                         }
+                        // SAFETY: as above; the syscall completes before return.
+                        Some(at) => unsafe { libc::pread(fd, data.cast(), spare, at as i64) },
+                        None => unsafe { libc::read(fd, data.cast(), spare) },
                     };
                     let n = syscall(n)? as usize;
                     b.len += n;
@@ -799,7 +813,8 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
             // SAFETY: nonblocking flock completes in place.
             return unsafe { issue_now(state, request) };
         }
-        OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE | WRITE | WRITE_AT | ZERO_AT
+        OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE | READ | READ_AT | WRITE | WRITE_AT
+        | ZERO_AT
             if crate::units::uses_file_ring() =>
         {
             // SAFETY: the request is pinned until the CQE completes.

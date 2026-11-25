@@ -214,9 +214,11 @@ pub opaque type PeerSession {
     next_feedback: u64,
     // Down-tracks a collision found on the RTP path, for the next `Control`.
     collided: List[u16],
-    // Egress scratch, reused for every packet: the packet, the descriptor and a TWCC value.
+    // Egress scratch, reused for every packet: the packet, the descriptor and a TWCC
+    // value, and the extension writer `ext.reset` empties per packet.
     pkt: Bytes,
-    word: Bytes
+    word: Bytes,
+    ext: rtp.ext.ExtWriter
 }
 
 const EMPTY: u64 = 0xffffffffffffffff
@@ -365,7 +367,7 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
     let send_log = rtp.twcc.send_log(1024) ?=> |c| Capacity(c)
     let mut cname: Bytes = list.with_capacity(16)
     list.append(mut cname, b"hirsel-sfu")
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new())
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), ext: rtp.ext.writer())
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.word, 2) ?=> |c| Capacity(c)
     let fresh = draw(mut p)

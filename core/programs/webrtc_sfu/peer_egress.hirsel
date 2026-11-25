@@ -142,23 +142,24 @@ fn rtx_pt(a: sdp.Agreed, pt: u8) -> Option[u8] {
     None
 }
 
-// The subscriber leg's extensions: its MID value and, at send, the next number of
-// its own transport (RTP-8). The publisher's MID, RID and transport number never pass.
-fn leg_writer(mut p: PeerSession, now: u64, si: u64, size: u32, level: Option[u8], voice: bool) -> Result[rtp.ext.ExtWriter, PeerError] {
+// The subscriber leg's extensions, written into the session's one reused writer
+// (RTP-12): its MID value and, at send, the next number of its own transport
+// (RTP-8). The publisher's MID, RID and transport number never pass.
+fn leg_ext(mut p: PeerSession, now: u64, si: u64, size: u32, level: Option[u8], voice: bool) -> Result[(), PeerError] {
     let map = p.sections[si].map
-    let mut w = rtp.ext.writer()
+    rtp.ext.reset(mut p.ext)
     let n = list.len(p.sections[si].mid)
-    rtp.ext.put(mut w, map, Mid, p.sections[si].mid, 0, n) ?=> |_| Rtp(Form)
+    rtp.ext.put(mut p.ext, map, Mid, p.sections[si].mid, 0, n) ?=> |_| Rtp(Form)
     if let Some(l) = level {
-        rtp.ext.put_level(mut w, map, voice, l) ?=> |_| Rtp(Form)
+        rtp.ext.put_level(mut p.ext, map, voice, l) ?=> |_| Rtp(Form)
     }
     if p.sections[si].twcc {
         let number = rtp.twcc.assign(mut p.send_log, now, size)
         list.clear(mut p.word)
         list.put_word_be(mut p.word, number)
-        rtp.ext.put(mut w, map, TransportSeq, p.word, 0, 2) ?=> |_| Rtp(Form)
+        rtp.ext.put(mut p.ext, map, TransportSeq, p.word, 0, 2) ?=> |_| Rtp(Form)
     }
-    Ok(w)
+    Ok(())
 }
 
 // Seal the scratch packet in place and copy it into the subscriber's span of `out`.
@@ -259,9 +260,9 @@ fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, rec: Rec
         return Ok(false)
     }
     let size: u32 = int.narrow(12 + 2 + rec.len)
-    let w = leg_writer(mut p, now, si, size, None, false)?
+    leg_ext(mut p, now, si, size, None, false)?
     let f = rtp.header.Fields(marker: rec.marker, pt: rpt, seq: p.tracks[t].rtx_seq, ts: ts, ssrc: p.tracks[t].rtx_ssrc)
-    let head = rtp.ext.write_header(f, view w, mut p.pkt) ?=> |take x| Rtp(x)
+    let head = rtp.ext.write_header(f, view p.ext, mut p.pkt) ?=> |take x| Rtp(x)
     list.push(mut p.pkt, int.truncate(index >> 8))
     list.push(mut p.pkt, int.truncate(index))
     put_payload(mut p, head + 2, payload, rec.from, rec.len, rec.picture, rec.tl0)?
@@ -314,9 +315,9 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
         return Ok(AsRepair)
     }
     let size: u32 = int.narrow(12 + leg.len)
-    let w = leg_writer(mut p, now, si, size, leg.level, leg.voice)?
+    leg_ext(mut p, now, si, size, leg.level, leg.voice)?
     let f = rtp.header.Fields(marker: leg.marker, pt: pt, seq: int.truncate(index), ts: ts, ssrc: p.tracks[t].ssrc)
-    let head = rtp.ext.write_header(f, view w, mut p.pkt) ?=> |take x| Rtp(x)
+    let head = rtp.ext.write_header(f, view p.ext, mut p.pkt) ?=> |take x| Rtp(x)
     put_payload(mut p, head, payload, leg.from, leg.len, picture, tl0)?
     seal_out(mut p, leg.src, mut out)?
     p.tracks[t].highest = index

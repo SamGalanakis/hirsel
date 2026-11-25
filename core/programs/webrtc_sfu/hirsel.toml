@@ -28,6 +28,7 @@ limit = 67108864
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"ingress_laws.hirsel" = "laws"
 "router_laws.hirsel" = "laws"
 "router_keyframe_laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"

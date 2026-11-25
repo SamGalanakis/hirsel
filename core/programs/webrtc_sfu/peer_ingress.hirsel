@@ -84,16 +84,29 @@ fn any_map(p: PeerSession) -> Option[rtp.ext.ExtMap] {
     None
 }
 
-fn find_ext(m: Option[rtp.ext.ExtMap], pkt: Bytes, h: rtp.header.Header, k: rtp.ext.Kind) -> Option[rtp.ext.Element] {
+// One walk of the extension block for every kind `m` binds (RTP-12); a block that
+// overruns reads as carrying nothing.
+fn scanned(m: Option[rtp.ext.ExtMap], pkt: Bytes, h: rtp.header.Header) -> Option[rtp.ext.Found] {
     let Some(map) = m else {
         return None
     }
-    match rtp.ext.find(map, pkt, h, k) {
-        Ok(Some(found)) => match rtp.ext.token(pkt, h, k, found) {
-            Ok(t) => Some(t),
-            Error(_) => None,
-        },
-        _ => None,
+    match rtp.ext.scan(map, pkt, h) {
+        Ok(f) => Some(f),
+        Error(_) => None,
+    }
+}
+
+// A MID, RID or repaired RID element whose value is a valid token.
+fn token_in(f: Option[rtp.ext.Found], pkt: Bytes, h: rtp.header.Header, k: rtp.ext.Kind) -> Option[rtp.ext.Element] {
+    let Some(found) = f else {
+        return None
+    }
+    let Some(e) = rtp.ext.found(found, k) else {
+        return None
+    }
+    match rtp.ext.token(pkt, h, k, e) {
+        Ok(t) => Some(t),
+        Error(_) => None,
     }
 }
 
@@ -178,12 +191,14 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
     for t in collided {
         list.push(mut p.collided, t)
     }
-    let m = any_map(p)
+    // MID is bundle-wide, so any receiving section's map reads it; every other kind
+    // is read with the bound section's own map below.
+    let bundle = scanned(any_map(p), slot, h)
     let known = find_inbound(p, h.ssrc)
     // RTC-3 binding steps 1 to 3.
     let mut section: Option[u8] = None
     let mut rebind = false
-    if let Some(e) = find_ext(m, slot, h, Mid) {
+    if let Some(e) = token_in(bundle, slot, h, Mid) {
         let Some(s) = mid_section(p, slot, e) else {
             p.drops.unbound += 1
             return Ok(Nothing)
@@ -220,7 +235,17 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
     let si: u64 = int.widen(sec)
     let map = p.sections[si].map
     let is_rtx = format.codec == Rtx
-    let rid = find_ext(Some(map), slot, h, if is_rtx {
+    let found = scanned(Some(map), slot, h)
+    // Every authenticated packet the section binds, RTX included, carries its
+    // transport-wide number into the feedback (RTP-8).
+    if let Some(f) = found {
+        if let Some(e) = rtp.ext.found(f, TransportSeq) {
+            if let Ok(n) = rtp.ext.transport_seq(slot, h, e) {
+                rtp.twcc.on_packet(mut p.recv_log, n, now)
+            }
+        }
+    }
+    let rid = token_in(found, slot, h, if is_rtx {
         RepairedRid
     } else {
         Rid
@@ -235,7 +260,7 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
     if is_rtx {
         return repair_in(mut p, now, sec, encoding, format, h, opened.index, slot, known)
     }
-    let level = find_level(map, slot, h)
+    let level = level_in(map, found, slot, h)
     let i = match known {
         Some(i) => {
             if rebind {
@@ -258,11 +283,6 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
         },
     }
     let (wide, reset) = arrived(mut p, i, opened.index, h.ts, now, known != None)
-    if let Some(e) = find_ext(Some(map), slot, h, TransportSeq) {
-        if let Ok(n) = rtp.ext.transport_seq(slot, h, e) {
-            rtp.twcc.on_packet(mut p.recv_log, n, now)
-        }
-    }
     let layer = if format.codec == Vp8 {
         match media_bits.unit.vp8(list.slice(slot, payload_at, payload_at + payload_len), h.marker) {
             Ok(u) => Some(u),
@@ -275,13 +295,16 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
     Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: h.pt, ts: h.ts, wide: wide, reset: reset, marker: h.marker, payload_at: payload_at, payload_len: payload_len, audio_level: audio_level, voice: voice, layer: layer)))
 }
 
-fn find_level(map: rtp.ext.ExtMap, pkt: Bytes, h: rtp.header.Header) -> (Option[bool], Option[u8]) {
-    match rtp.ext.find(map, pkt, h, AudioLevel) {
-        Ok(Some(e)) => match rtp.ext.audio_level(map, pkt, h, e) {
-            Ok((voice, level)) => (voice, Some(level)),
-            Error(_) => (None, None),
-        },
-        _ => (None, None),
+fn level_in(map: rtp.ext.ExtMap, f: Option[rtp.ext.Found], pkt: Bytes, h: rtp.header.Header) -> (Option[bool], Option[u8]) {
+    let Some(found) = f else {
+        return (None, None)
+    }
+    let Some(e) = rtp.ext.found(found, AudioLevel) else {
+        return (None, None)
+    }
+    match rtp.ext.audio_level(map, pkt, h, e) {
+        Ok((voice, level)) => (voice, Some(level)),
+        Error(_) => (None, None),
     }
 }
 

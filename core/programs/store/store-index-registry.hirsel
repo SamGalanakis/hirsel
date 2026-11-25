@@ -1,6 +1,9 @@
+// A row's index values: its sorted, distinct keys and the payload each
+// carries; an aggregate's `sums` give each group's value, by position.
 type IndexValue {
     keys: List[Bytes],
-    payload: Bytes
+    payload: Bytes,
+    sums: List[u64]
 }
 
 type RegisteredIndex: send {
@@ -68,7 +71,7 @@ fn extract_declared[J, K, V, P](extractor: DeclaredExtractor[J, K, V, P], raw: B
         list.push(mut encoded, take row)
     }
     if list.len(encoded) == 0 {
-        return Ok(IndexValue(keys: take encoded, payload: list.new()))
+        return Ok(IndexValue(keys: take encoded, payload: list.new(), sums: list.new()))
     }
     list.sort_stable(mut encoded, list.compare_bytes)
     let mut keys: List[Bytes] = list.new()
@@ -94,12 +97,12 @@ fn extract_declared[J, K, V, P](extractor: DeclaredExtractor[J, K, V, P], raw: B
     if list.len(payload) > VALUE_LIMIT {
         return Error(Limit(Value))
     }
-    Ok(IndexValue(keys: take keys, payload: take payload))
+    Ok(IndexValue(keys: take keys, payload: take payload, sums: list.new()))
 }
 
-fn declare_binding[J, K, V, P](t: Table[K, V], record: Catalog, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], key: std.codec.Key[J],
+fn declare_binding[J, K, V, P](t: Table[K, V], record: Catalog, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], key: std.codec.Key[J],
     take project: Option[IndexProjection[K, V, P]], cover_row: bool) -> IndexRegistration {
-    let extractor: DeclaredExtractor[J, K, V, P] = DeclaredExtractor(table: clone(t), kind: record.index_kind, id: record.id, key: key, by: by, project: take project, cover_row: cover_row)
+    let extractor: DeclaredExtractor[J, K, V, P] = DeclaredExtractor(table: clone(t), kind: kind, id: record.id, key: key, by: by, project: take project, cover_row: cover_row)
     let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
         extract_declared(extractor, raw, primary)
     }
@@ -140,7 +143,7 @@ fn unique_owner_end(raw: Bytes) -> Result[u64, Error] {
 
 fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes,
     old_keys: List[Bytes], take incoming: IndexValue) -> Result[(), Error] {
-    let IndexValue(keys: take keys, payload: take payload) = take incoming
+    let IndexValue(keys: take keys, payload: take payload, ..) = take incoming
     let mut old = 0u64
     for take key in take keys {
         while old < list.len(old_keys) && old_keys[old] < key {
@@ -151,7 +154,7 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
         let stored = transaction_row(tx, key)?
         if unchanged {
             old += 1
-        } else if let Unique = record.index_kind {
+        } else if let Entries(Unique) = record.shape {
             list.push(mut edits.probes, (record.id, copied(key)?))
         }
         if let Some(prior) = stored {
@@ -230,11 +233,43 @@ type Catalog {
     next: u16,
     by: Bytes,
     revision: Bytes,
-    index_kind: IndexKind,
+    shape: IndexShape,
     payload_schemas: List[Bytes],
     projection: Option[(Bytes, Bytes)],
     // An index record's build state (§1.2); table, cell and log records keep Public.
     state: IndexState
+}
+
+// What an index record's collection holds (§1.2): the entries of a Many or
+// Unique index, or an aggregate's one count-and-sum row per group.
+type IndexShape: send = Entries(IndexKind) | Sums
+
+// The shape's catalog byte, which also compares two shapes.
+fn shape_byte(shape: IndexShape) -> u64 {
+    match shape {
+        Entries(Many) => 0,
+        Entries(Unique) => 1,
+        Sums => 2,
+    }
+}
+
+// The kind an entry-index handle reads with. An aggregate has no entries.
+fn entry_kind(shape: IndexShape) -> Result[IndexKind, Error] {
+    match shape {
+        Entries(kind) => Ok(kind),
+        Sums => Error(Schema(0)),
+    }
+}
+
+// Whether the index holds a row's values: every row of a Public index, and
+// the rows at or before a building index's cursor. A Failed index is
+// incomplete and claims none.
+fn index_claims(state: IndexState, primary: Bytes) -> bool {
+    match state {
+        Public => true,
+        Backfilling(Some(cursor)) => primary <= cursor,
+        _ => false,
+    }
 }
 
 // Backfilling's cursor is the last primary key whose entries are complete,
@@ -311,14 +346,15 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
     let next_number: u16 = int.truncate(take_le(raw, mut at, 2)?)
     let by = take_blob(raw, mut at)?
     let revision = take_blob(raw, mut at)?
-    let mut index_kind: IndexKind = Many
+    let mut shape: IndexShape = Entries(Many)
     let mut payload_schemas: List[Bytes] = list.new()
     let mut projection_record: Option[(Bytes, Bytes)] = None
     let mut state: IndexState = Public
     if kind == 2 {
-        index_kind = match take_le(raw, mut at, 1)? {
-            0 => Many,
-            1 => Unique,
+        shape = match take_le(raw, mut at, 1)? {
+            0 => Entries(Many),
+            1 => Entries(Unique),
+            2 => Sums,
             _ => return Error(malformed(at - 1)),
         }
         let payload_count = take_le(raw, mut at, 2)?
@@ -331,6 +367,13 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
             projection_record = Some((take project_id, take project_revision))
         } else if list.len(project_revision) > 0 {
             return Error(malformed(at))
+        }
+        // An aggregate's rows carry totals, never a payload.
+        if let Sums = shape {
+            let projected = if let Some(_) = projection_record { true } else { false }
+            if payload_count != 0 || projected {
+                return Error(malformed(at))
+            }
         }
         if at >= list.len(raw) {
             return Error(malformed(at))
@@ -354,7 +397,7 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
     if at != list.len(raw) {
         return Error(malformed(at))
     }
-    Ok(Catalog(kind: kind, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision, index_kind: index_kind, payload_schemas: take payload_schemas, projection: take projection_record, state: take state))
+    Ok(Catalog(kind: kind, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision, shape: take shape, payload_schemas: take payload_schemas, projection: take projection_record, state: take state))
 }
 
 fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
@@ -374,8 +417,7 @@ fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
     capacity(blob(mut raw, c.by))?
     capacity(blob(mut raw, c.revision))?
     if c.kind == 2 {
-        let index_kind = match c.index_kind { Many => 0u64, Unique => 1u64 }
-        capacity(le(mut raw, index_kind, 1))?
+        capacity(le(mut raw, shape_byte(c.shape), 1))?
         capacity(le(mut raw, list.len(c.payload_schemas), 2))?
         for schema in c.payload_schemas {
             capacity(blob(mut raw, schema))?
@@ -434,17 +476,16 @@ fn append_index_remove(tx: Tx, mut edits: IndexEdits, record: Catalog, primary: 
         push_index_edit(mut edits, RemoveRow(take key, refund))
         return Ok(())
     }
-    let claimed = match record.state {
-        Public => true,
-        Backfilling(Some(cursor)) => primary <= cursor,
-        _ => false,
-    }
-    if claimed {
-        let mut seen: List[(u32, u32)] = list.new()
-        list.push(mut seen, (record.owner, record.id))
-        stage_drift(mut edits.drift, take seen)
+    if index_claims(record.state, primary) {
+        stage_index_drift(mut edits, record)
     }
     Ok(())
+}
+
+fn stage_index_drift(mut edits: IndexEdits, record: Catalog) {
+    let mut seen: List[(u32, u32)] = list.new()
+    list.push(mut seen, (record.owner, record.id))
+    stage_drift(mut edits.drift, take seen)
 }
 
 // Makes the transaction abort-only with `Drift`, keeping the evidence its
@@ -518,6 +559,14 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
             for (_, ix) in indexes {
                 let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
                 let incoming = (bound_index.extract)(raw, primary)?
+                if let Sums = ix.shape {
+                    let old = match previous {
+                        Some(value) => Some((bound_index.extract)(value, primary)?),
+                        None => None,
+                    }
+                    plan_aggregate_edit(tx, mut pending, mut frame, ix, primary, take old, Some(take incoming))?
+                    continue
+                }
                 let old_keys = match previous {
                     Some(value) => {
                         let IndexValue(keys: take keys, ..) = (bound_index.extract)(value, primary)?
@@ -564,7 +613,12 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], 
         let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
         for (_, ix) in indexes {
             let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
-            let IndexValue(keys: take keys, ..) = (bound_index.extract)(old, key)?
+            let removed = (bound_index.extract)(old, key)?
+            if let Sums = ix.shape {
+                plan_aggregate_edit(tx, mut pending, mut frame, ix, key, Some(take removed), None)?
+                continue
+            }
+            let IndexValue(keys: take keys, ..) = take removed
             for take row in take keys {
                 append_index_remove(tx, mut pending, ix, key, take row, mut frame)?
             }

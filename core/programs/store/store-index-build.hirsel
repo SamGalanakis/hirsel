@@ -80,31 +80,38 @@ fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, ext
     let mut next_stamp = first
     let mut duplicate: Option[(Bytes, Bytes)] = None
     let mut cursor: Option[Bytes] = None
-    for (logical, raw) in rows {
-        let primary = list.slice(logical, 4, list.len(logical))
-        let values = (extractor.extract)(raw, primary)?
-        for row in values.keys {
-            if list.len(row) > 4096 { return Error(Limit(Key)) }
-            if let Some(prior) = get_page_row(roots.collections, row) {
-                if let Unique = record.index_kind {
-                    let owner = list.slice(prior, 4, unique_owner_end(prior)?)
-                    if owner != primary {
-                        if let None = duplicate {
-                            duplicate = Some((copied(owner)?, copied(primary)?))
+    if let Sums = record.shape {
+        add_chunk_totals(mut roots.collections, mut live_bytes, plan.retained, plan.ceiling, first, mut next_stamp, extractor, rows)?
+        if let Some((logical, _)) = list.last(rows) {
+            cursor = Some(copied(list.slice(logical, 4, list.len(logical)))?)
+        }
+    } else {
+        for (logical, raw) in rows {
+            let primary = list.slice(logical, 4, list.len(logical))
+            let values = (extractor.extract)(raw, primary)?
+            for row in values.keys {
+                if list.len(row) > 4096 { return Error(Limit(Key)) }
+                if let Some(prior) = get_page_row(roots.collections, row) {
+                    if let Entries(Unique) = record.shape {
+                        let owner = list.slice(prior, 4, unique_owner_end(prior)?)
+                        if owner != primary {
+                            if let None = duplicate {
+                                duplicate = Some((copied(owner)?, copied(primary)?))
+                            }
+                            if !preview { return Ok(take duplicate) }
+                            continue
                         }
-                        if !preview { return Ok(take duplicate) }
-                        continue
+                    }
+                    if !plan.retained {
+                        live_bytes = int.saturating_sub(live_bytes, entry(row, prior))
                     }
                 }
-                if !plan.retained {
-                    live_bytes = int.saturating_sub(live_bytes, entry(row, prior))
-                }
+                live_bytes = int.saturating_add(live_bytes, entry(row, values.payload))
+                over_ceiling(live_bytes, plan.ceiling)?
+                put_page_row(mut roots.collections, row, values.payload, first, mut next_stamp)?
             }
-            live_bytes = int.saturating_add(live_bytes, entry(row, values.payload))
-            over_ceiling(live_bytes, plan.ceiling)?
-            put_page_row(mut roots.collections, row, values.payload, first, mut next_stamp)?
+            cursor = Some(copied(primary)?)
         }
-        cursor = Some(copied(primary)?)
     }
     canonical_tree(mut roots.collections)?
     plan.next_node = next_stamp - 1

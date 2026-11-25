@@ -50,7 +50,7 @@ fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schem
         },
         None => {
             let Migrate = d.mode else { return Error(Missing(named(name)?)) }
-            let initial = Catalog(kind: kind, id: d.plan.next_table, owner: 0, epoch: 1, key: copied(key_schema)?, schemas: list.new(), next: 0, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public)
+            let initial = Catalog(kind: kind, id: d.plan.next_table, owner: 0, epoch: 1, key: copied(key_schema)?, schemas: list.new(), next: 0, by: list.new(), revision: list.new(), shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Public)
             (take initial, true)
         },
     }

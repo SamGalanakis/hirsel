@@ -2228,7 +2228,7 @@ fn stage_create_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.K
     let fp = std.codec.fingerprint_of(schema)
     list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))
     let id = plan.next_table
-    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public)
+    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new(), shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Public)
     let raw = encode_catalog(c)?
     let live_bytes = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
     let base = share_roots(plan.roots)
@@ -2348,7 +2348,7 @@ fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalo
         Some(raw) => record_public(raw),
         None => false,
     }
-    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: c.index_kind, payload: take payload, payload_codec: payload_codec, public: public))
+    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: entry_kind(c.shape)?, payload: take payload, payload_codec: payload_codec, public: public))
 }
 
 fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32) -> Result[(), Error] {
@@ -2456,7 +2456,7 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
     let fp = std.codec.fingerprint_of(schema)
     let mut schemas: List[ValueSchema] = list.new()
     list.push(mut schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
-    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to_key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public))?
+    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to_key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new(), shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Public))?
     let mut live_bytes = int.saturating_add(start, 126 + entry(target, table_raw))
     let mut workspace = live_bytes
     over_ceiling(workspace, ceiling)?
@@ -2727,7 +2727,7 @@ fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, ret
 }
 
 // Store disk format. STORE-SPEC §2.3 and §11.10.
-const DISK_FORMAT: u64 = 8
+const DISK_FORMAT: u64 = 9
 
 type DiskContext {
     store: StoreId,

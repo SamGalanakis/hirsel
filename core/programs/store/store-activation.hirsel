@@ -42,7 +42,7 @@ fn check_rewrite_indexes(plan: SchemaPlan, id: u32, schema: u16, key: Bytes, old
             if registered.table == id && ix.id == record.id && ix.schema == schema && ix.by == record.by && ix.key == record.key {
                 let before = (ix.extract)(old, key)?
                 let after = (ix.extract)(raw, key)?
-                if before.keys != after.keys || before.payload != after.payload {
+                if before.keys != after.keys || before.payload != after.payload || before.sums != after.sums {
                     return Error(Changed(declaration_index_name(name_key)?))
                 }
                 verified = true

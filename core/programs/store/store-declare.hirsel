@@ -283,16 +283,8 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
     let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1,
         key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0,
         by: copied(code.identity(by))?, revision: index_revision(d.versioned, by, t.handle, key, codec)?,
-        index_kind: kind, payload_schemas: list.new(), projection: None, state: Backfilling(None))
-    let existing = match get_page_row(d.plan.roots.catalog, lookup_key) {
-        Some(raw) => Some(decode_catalog(raw)?),
-        None => None,
-    }
-    if let Some(record) = existing {
-        if map.contains(d.indexes, record.id) {
-            return Error(Exists(named(name)?))
-        }
-    }
+        shape: Entries(kind), payload_schemas: list.new(), projection: None, state: Backfilling(None))
+    let existing = existing_index_record(d, lookup_key, name)?
     let mut extractor_project: Option[IndexProjection[K, V, P]] = None
     let mut payload_readers = take row_readers
     if cover_row {
@@ -318,47 +310,9 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
         }
         extractor_project = Some(IndexProjection(by: projection_record, codec: codec, number: number))
     }
-    let needs_rebuild = match take existing {
-        None => {
-            if let Migrate = d.mode { true } else { return Error(Missing(named(name)?)) }
-        },
-        Some(take old) => {
-            let schemas_changed = old.key != proposed.key || old.payload_schemas != proposed.payload_schemas
-            let code_changed = old.index_kind != kind || old.by != proposed.by || old.revision != proposed.revision || old.projection != proposed.projection
-            if schemas_changed || code_changed {
-                if let Migrate = d.mode {
-                    remove_declared_index(mut d.plan, lookup_key, old)?
-                    true
-                } else if schemas_changed {
-                    return Error(Schema(0))
-                } else {
-                    return Error(Changed(named(name)?))
-                }
-            } else {
-                proposed.id = old.id
-                proposed.state = copied_state(old.state)?
-                false
-            }
-        },
-    }
-    // Migrate finishes an index left building or failed by an earlier build;
-    // Open and Follower accept it, and its reads refuse until it is Public.
-    let migrating = if let Migrate = d.mode { true } else { false }
-    let resume = match proposed.state {
-        Public => false,
-        _ => !needs_rebuild && migrating,
-    }
-    let schema_binding = declare_binding(t.handle, proposed, by, key, take extractor_project, cover_row)
-    if needs_rebuild || resume {
-        match stage_index_build(mut d.plan, t.handle, lookup_key, name, copied_record(proposed)?, schema_binding.index, needs_rebuild) {
-            Error(Conflict(take conflict)) => {
-                d.conflict = Some(clone(conflict))
-                return Error(Conflict(take conflict))
-            },
-            Error(take problem) => return Error(take problem),
-            Ok(()) => (),
-        }
-    }
+    let needs_rebuild = settle_index_record(mut d, lookup_key, name, take existing, mut proposed)?
+    let schema_binding = declare_binding(t.handle, proposed, kind, by, key, take extractor_project, cover_row)
+    build_declared_record(mut d, t.handle, lookup_key, name, proposed, schema_binding.index, needs_rebuild)?
     let handle = catalog_index_handle(d.plan.roots.catalog, t.handle, proposed, take lookup_key, key, take payload_readers, codec)?
     if let Follower = d.mode {
     } else {
@@ -367,6 +321,66 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
     map.insert(mut d.indexes, proposed.id, ())
     d.failed = false
     Ok(take handle)
+}
+
+// The index record a declaration names, refusing a second declaration of
+// one index.
+fn existing_index_record(d: Declare, lookup_key: Bytes, name: String) -> Result[Option[Catalog], Error] {
+    let Some(raw) = get_page_row(d.plan.roots.catalog, lookup_key) else { return Ok(None) }
+    let record = decode_catalog(raw)?
+    if map.contains(d.indexes, record.id) {
+        return Error(Exists(named(name)?))
+    }
+    Ok(Some(take record))
+}
+
+// Whether a declared index needs a fresh build. An unchanged record keeps
+// its id and state; a changed one is rebuilt under Migrate and refused
+// otherwise. A change of shape (Many, Unique, aggregate) is a change.
+fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take existing: Option[Catalog], mut proposed: Catalog) -> Result[bool, Error] {
+    match take existing {
+        None => {
+            if let Migrate = d.mode { Ok(true) } else { Error(Missing(named(name)?)) }
+        },
+        Some(take old) => {
+            let schemas_changed = old.key != proposed.key || old.payload_schemas != proposed.payload_schemas
+            let code_changed = shape_byte(old.shape) != shape_byte(proposed.shape) || old.by != proposed.by || old.revision != proposed.revision || old.projection != proposed.projection
+            if schemas_changed || code_changed {
+                if let Migrate = d.mode {
+                    remove_declared_index(mut d.plan, lookup_key, old)?
+                    Ok(true)
+                } else if schemas_changed {
+                    Error(Schema(0))
+                } else {
+                    Error(Changed(named(name)?))
+                }
+            } else {
+                proposed.id = old.id
+                proposed.state = copied_state(old.state)?
+                Ok(false)
+            }
+        },
+    }
+}
+
+// Migrate builds a new or changed index, and finishes one left building or
+// failed by an earlier build; Open and Follower accept it, and its reads
+// refuse until it is Public.
+fn build_declared_record[K, V](mut d: Declare, t: Table[K, V], lookup_key: Bytes, name: String, proposed: Catalog, extractor: RegisteredIndex, needs_rebuild: bool) -> Result[(), Error] {
+    let migrating = if let Migrate = d.mode { true } else { false }
+    let resume = match proposed.state {
+        Public => false,
+        _ => !needs_rebuild && migrating,
+    }
+    if !needs_rebuild && !resume { return Ok(()) }
+    match stage_index_build(mut d.plan, t, lookup_key, name, copied_record(proposed)?, extractor, needs_rebuild) {
+        Error(Conflict(take conflict)) => {
+            d.conflict = Some(clone(conflict))
+            Error(Conflict(take conflict))
+        },
+        Error(take problem) => Error(take problem),
+        Ok(()) => Ok(()),
+    }
 }
 
 fn index_payload_number(mut schemas: List[Bytes], description: Bytes) -> Result[u16, Error] {

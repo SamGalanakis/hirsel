@@ -1,0 +1,280 @@
+// Aggregate indexes (Store 2.1, D12): per group, the count of rows and the
+// sum of their values, kept by every put and delete and built through the
+// index states and builder of §I.3.
+//
+// An aggregate is an index record (catalog kind 2) of shape Sums. Its
+// collection holds one row per group with rows: key `id u32 BE ‖ G`, value
+// `count u64 LE ‖ sum u64 LE`. A group whose count reaches 0 has no row.
+// The extractor gives each row its (group, value) pairs; a row counts once
+// in each distinct group, with the sum of the values it gave that group.
+//
+// A write changes the totals only where the index claims the row: a Public
+// aggregate, or a building one at or before its cursor. A row past the
+// cursor is counted when the builder reaches it, so no row counts twice.
+// Every group is one row, so a hot group is a point every writer to it
+// touches; the store's one writer serialises them.
+
+pub opaque type Aggregate[G]: shareable + send {
+    store: StoreId,
+    id: u32,
+    catalog_key: Arc[Bytes],
+    catalog_page: Arc[Bytes],
+    key: std.codec.Key[G],
+    // The record was Public in the catalog root page `catalog_page` names.
+    public: bool
+}
+
+/// A group's totals: how many rows it holds and the sum of their values.
+pub type Totals: key + shareable + send {
+    count: u64,
+    sum: u64
+}
+
+// One group a row is in, by its encoded key, and the value it adds there.
+type GroupPart {
+    key: Bytes,
+    value: u64
+}
+
+fn by_group(a: GroupPart, b: GroupPart) -> Order {
+    list.compare_bytes(a.key, b.key)
+}
+
+// Sorts parts by group and merges each group's parts: the distinct keys,
+// how many parts each had, and the sum of their values, by position.
+fn merged_groups(take parts: List[GroupPart]) -> Result[(List[Bytes], List[u64], List[u64]), Error] {
+    let mut sorted = take parts
+    list.sort_stable(mut sorted, by_group)
+    let mut keys: List[Bytes] = list.new()
+    let mut counts: List[u64] = list.new()
+    let mut sums: List[u64] = list.new()
+    let mut pending: Option[(Bytes, u64, u64)] = None
+    for take GroupPart(key: take key, value: value) in take sorted {
+        if let Some((take held, members, sum)) = take pending {
+            if held == key {
+                let Some(total) = int.checked_add(sum, value) else { return Error(Limit(Value)) }
+                pending = Some((take held, members + 1, total))
+                continue
+            }
+            list.push(mut keys, take held)
+            list.push(mut counts, members)
+            list.push(mut sums, sum)
+        }
+        pending = Some((take key, 1u64, value))
+    }
+    if let Some((take held, members, sum)) = take pending {
+        list.push(mut keys, take held)
+        list.push(mut counts, members)
+        list.push(mut sums, sum)
+    }
+    Ok((take keys, take counts, take sums))
+}
+
+type AggregateExtractor[G, K, V]: send {
+    table: Table[K, V],
+    id: u32,
+    key: std.codec.Key[G],
+    by: StaticFn[fn(K, V) -> Result[List[(G, u64)], Capacity]]
+}
+
+/// Declares an aggregate over `t`: `by` gives each row its groups and
+/// values. Under Migrate a new or changed aggregate is built from the
+/// table's rows; reads of it refuse with NotReady until it is Public.
+pub fn aggregate[G, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String,
+    by: StaticFn[fn(K, V) -> Result[List[(G, u64)], Capacity]], take key: std.codec.Key[G]) -> Result[Aggregate[G], Error] {
+    active_table(d, t)?
+    d.failed = true
+    declaration_name(name)?
+    let lookup_key = catalog_index_key(t.handle.id, name)?
+    let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1,
+        key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0,
+        by: copied(code.identity(by))?, revision: index_revision(d.versioned, by, t.handle, key, std.codec.of_unit())?,
+        shape: Sums, payload_schemas: list.new(), projection: None, state: Backfilling(None))
+    let existing = existing_index_record(d, lookup_key, name)?
+    let needs_rebuild = settle_index_record(mut d, lookup_key, name, take existing, mut proposed)?
+    let schema_binding = aggregate_binding(t.handle, proposed, by, key)
+    build_declared_record(mut d, t.handle, lookup_key, name, proposed, schema_binding.index, needs_rebuild)?
+    let public = match get_page_row(d.plan.roots.catalog, lookup_key) {
+        Some(raw) => record_public(raw),
+        None => false,
+    }
+    let handle = Aggregate(store: t.handle.store, id: proposed.id, catalog_key: catalog_key_handle(take lookup_key)?,
+        catalog_page: catalog_page(d.plan.roots.catalog)?, key: key, public: public)
+    if let Follower = d.mode {
+    } else {
+        list.push(mut d.plan.bindings, take schema_binding)
+    }
+    map.insert(mut d.indexes, proposed.id, ())
+    d.failed = false
+    Ok(take handle)
+}
+
+/// The totals of group `g`; a group no row is in has count and sum 0.
+pub fn totals[G](tx: Tx, a: Aggregate[G], g: G) -> Result[Totals, Error] {
+    if !same(tx.store, a.store) {
+        return Error(Foreign)
+    }
+    index_readable(tx.roots, a.catalog_key, a.catalog_page, a.id, a.public)?
+    let mut k = prefix(a.id)?
+    std.codec.encode_key(a.key, g, mut k)
+    match fetch_logical(tx, take k)? {
+        Some(raw) => {
+            let (members, sum) = group_totals(raw)?
+            Ok(Totals(count: members, sum: sum))
+        },
+        None => Ok(Totals(count: 0, sum: 0)),
+    }
+}
+
+/// Demotes the aggregate to an empty build from the table's first row;
+/// reads refuse until the builder finishes it.
+pub fn rebuild_aggregate[G](mut db: Db, a: Aggregate[G]) -> Result[(), Error] waits {
+    healthy(db)?
+    if !same(db.store, a.store) { return Error(Foreign) }
+    let mut plan = schema_plan(db)
+    let record = catalog_entry_in(plan.roots.catalog, a.catalog_key)?
+    if record.id != a.id { return Error(Stale(a.id)) }
+    demote_index(mut plan, a.catalog_key)?
+    if plan.changed {
+        let _ = publish_schema_plan(mut db, take plan)?
+    }
+    Ok(())
+}
+
+fn aggregate_binding[G, K, V](t: Table[K, V], record: Catalog, by: StaticFn[fn(K, V) -> Result[List[(G, u64)], Capacity]],
+    key: std.codec.Key[G]) -> IndexRegistration {
+    let extractor: AggregateExtractor[G, K, V] = AggregateExtractor(table: clone(t), id: record.id, key: key, by: by)
+    let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
+        extract_aggregate(extractor, raw, primary)
+    }
+    index_registration(t, record, take extract)
+}
+
+// A row's groups as sorted, distinct keys, with each group's summed value
+// at the same position in `sums`.
+fn extract_aggregate[G, K, V](extractor: AggregateExtractor[G, K, V], raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
+    let t = view extractor.table
+    let k = decoded(std.codec.decode_key(t.key, primary))?
+    let v = row_value(t.readers, t.id, raw)?
+    let pairs = capacity((code.callable(extractor.by))(k, v))?
+    let mut parts: List[GroupPart] = list.new()
+    for (g, value) in pairs {
+        let mut row = prefix(extractor.id)?
+        std.codec.encode_key(extractor.key, g, mut row)
+        if list.len(row) > 4096 {
+            return Error(Limit(Key))
+        }
+        list.push(mut parts, GroupPart(key: take row, value: value))
+    }
+    let (take keys, _, take sums) = merged_groups(take parts)?
+    Ok(IndexValue(keys: take keys, payload: list.new(), sums: take sums))
+}
+
+fn group_totals(raw: Bytes) -> Result[(u64, u64), Error] {
+    if list.len(raw) != 16 {
+        return Error(malformed(0))
+    }
+    Ok((read_le(raw, 0, 8), read_le(raw, 8, 8)))
+}
+
+fn totals_bytes(members: u64, sum: u64) -> Result[Bytes, Error] {
+    let mut raw: Bytes = list.with_capacity(16)
+    capacity(le(mut raw, members, 8))?
+    capacity(le(mut raw, sum, 8))?
+    Ok(take raw)
+}
+
+// The group rows a write changes: for each group the old or new row is in,
+// its count and sum less the old row's part and plus the new row's. The
+// edits are planned against the transaction's rows before any is applied;
+// a claimed row whose old part is not in its group's totals is drift.
+fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes,
+    take old: Option[IndexValue], take new: Option[IndexValue]) -> Result[(), Error] {
+    if !index_claims(record.state, primary) {
+        return Ok(())
+    }
+    let (take old_keys, take old_sums) = match take old {
+        Some(IndexValue(keys: take keys, sums: take sums, ..)) => (take keys, take sums),
+        None => (list.new(), list.new()),
+    }
+    let (take new_keys, take new_sums) = match take new {
+        Some(IndexValue(keys: take keys, sums: take sums, ..)) => (take keys, take sums),
+        None => (list.new(), list.new()),
+    }
+    let mut i = 0u64
+    let mut j = 0u64
+    while i < list.len(old_keys) || j < list.len(new_keys) {
+        let take_old = i < list.len(old_keys) && (j >= list.len(new_keys) || old_keys[i] <= new_keys[j])
+        let take_new = j < list.len(new_keys) && (i >= list.len(old_keys) || new_keys[j] <= old_keys[i])
+        let key = if take_old { copied(old_keys[i])? } else { copied(new_keys[j])? }
+        let (less_count, less_sum) = if take_old { (1u64, old_sums[i]) } else { (0u64, 0u64) }
+        let (more_count, more_sum) = if take_new { (1u64, new_sums[j]) } else { (0u64, 0u64) }
+        if take_old { i += 1 }
+        if take_new { j += 1 }
+        if less_count == more_count && less_sum == more_sum {
+            continue
+        }
+        let (members, sum) = match transaction_row(tx, key)? {
+            Some(raw) => group_totals(raw)?,
+            None => (0u64, 0u64),
+        }
+        if less_count > members || less_sum > sum {
+            stage_index_drift(mut edits, record)
+            return Ok(())
+        }
+        let next_count = members - less_count + more_count
+        let Some(next_sum) = int.checked_add(sum - less_sum, more_sum) else { return Error(Limit(Value)) }
+        if next_count == 0 {
+            if next_sum != 0 {
+                stage_index_drift(mut edits, record)
+                return Ok(())
+            }
+            if let Some(refund) = delete_refund(tx, key)? {
+                frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame)?
+                push_index_edit(mut edits, RemoveRow(take key, refund))
+            }
+            continue
+        }
+        let value = totals_bytes(next_count, next_sum)?
+        frame = put_frame(tx, key, value, frame)?
+        push_index_edit(mut edits, StoreRow(take key, take value))
+    }
+    Ok(())
+}
+
+// A build chunk's totals: each row's groups and values, gathered and
+// sorted by group, then added to each group's totals in one write.
+fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bool, ceiling: u64, first: u64, mut next_stamp: u64,
+    extractor: RegisteredIndex, rows: List[(Bytes, Bytes)]) -> Result[(), Error] {
+    let mut parts: List[GroupPart] = list.new()
+    for (logical, raw) in rows {
+        let primary = list.slice(logical, 4, list.len(logical))
+        let IndexValue(keys: take keys, sums: take sums, ..) = (extractor.extract)(raw, primary)?
+        let mut at = 0u64
+        for take group in take keys {
+            list.push(mut parts, GroupPart(key: take group, value: sums[at]))
+            at += 1
+        }
+    }
+    let (take groups, take counts, take added_sums) = merged_groups(take parts)?
+    for at in 0u64 .. list.len(groups) {
+        let group = view groups[at]
+        let added = counts[at]
+        let total = added_sums[at]
+        let (members, sum) = match get_page_row(collections, group) {
+            Some(prior) => {
+                if !retained {
+                    live_bytes = int.saturating_sub(live_bytes, entry(group, prior))
+                }
+                group_totals(prior)?
+            },
+            None => (0u64, 0u64),
+        }
+        let Some(next_sum) = int.checked_add(sum, total) else { return Error(Limit(Value)) }
+        let value = totals_bytes(members + added, next_sum)?
+        live_bytes = int.saturating_add(live_bytes, entry(group, value))
+        over_ceiling(live_bytes, ceiling)?
+        put_page_row(mut collections, group, value, first, mut next_stamp)?
+    }
+    Ok(())
+}

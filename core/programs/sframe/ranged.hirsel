@@ -89,14 +89,15 @@ pub fn seal_ranged(mut s: Sender, layout: ranges.Layout, metadata: Bytes, frame:
     let h = Header(kid: s.kid, ctr: s.next)
     let hlen = header_len(h)
     let elen = ranges.layout_len(layout)
+    let slen = ranges.starts_len(nals)
     let shown = clear_len(layout)
     let hidden_len = n - shown
-    let cost = 1 + blocks(hidden_len) + blocks(hlen + elen + shown + list.len(metadata))
+    let cost = 1 + blocks(hidden_len) + blocks(hlen + elen + slen + shown + list.len(metadata))
     admit(s, cost)?
     let trailer = TAG + hlen + elen + 2
     short_of(out, ranges.wire_bound(s.framing, n + trailer)) ?=> |c| Capacity(c)
     let mut aad: Bytes = list.new()
-    list.try_reserve(mut aad, hlen + elen + shown + list.len(metadata)) ?=> |c| Capacity(c)
+    list.try_reserve(mut aad, hlen + elen + slen + shown + list.len(metadata)) ?=> |c| Capacity(c)
     let mut hidden: Bytes = list.new()
     list.try_reserve(mut hidden, hidden_len) ?=> |c| Capacity(c)
     let mut sealed: Bytes = list.new()
@@ -105,6 +106,7 @@ pub fn seal_ranged(mut s: Sender, layout: ranges.Layout, metadata: Bytes, frame:
     list.try_reserve(mut body, n + trailer) ?=> |c| Capacity(c)
     let _ = encode_header(h, mut aad) ?=> |c| Capacity(c)
     ranges.encode_layout(layout, mut aad)
+    ranges.encode_starts(nals, mut aad)
     gather(nals.work, n, layout, mut aad, mut hidden)
     list.append(mut aad, metadata)
     let iv = nonce(s.salt, h.ctr)
@@ -171,10 +173,11 @@ pub fn open_ranged(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Byte
     }
     let shown = clear_len(layout)
     let mut aad: Bytes = list.new()
-    list.try_reserve(mut aad, tail + shown + list.len(metadata)) ?=> |c| Capacity(c)
+    list.try_reserve(mut aad, tail + ranges.starts_len(nals) + shown + list.len(metadata)) ?=> |c| Capacity(c)
     let mut sealed: Bytes = list.new()
     list.try_reserve(mut sealed, body_len - shown + TAG) ?=> |c| Capacity(c)
     list.append(mut aad, list.slice(nals.work, hstart, n - 2))
+    ranges.encode_starts(nals, mut aad)
     gather(nals.work, body_len, layout, mut aad, mut sealed)
     list.append(mut aad, metadata)
     list.append(mut sealed, list.slice(nals.work, body_len, hstart))

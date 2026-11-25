@@ -130,6 +130,27 @@ fn malformed(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
     }
 }
 
+fn too_old(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
+    match r {
+        Error(Discarded(TooOld)) => true,
+        _ => false,
+    }
+}
+
+fn too_far(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
+    match r {
+        Error(Discarded(TooFar)) => true,
+        _ => false,
+    }
+}
+
+fn replayed(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
+    match r {
+        Error(Discarded(Replayed)) => true,
+        _ => false,
+    }
+}
+
 fn no_key(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
     match r {
         Error(NoKey(_)) => true,
@@ -566,13 +587,15 @@ fn tamper_case(framing: ranges.Framing) {
     check(again == frame, "the genuine frame does not open after the flips")
 }
 
-/// bug: a header, ciphertext, tag, clear byte, layout or L not authenticated.
-/// oracle: AEAD integrity (RFC 9605 §4.4.3): only the sealed bytes open.
+/// bug: a header, ciphertext, tag, clear byte, layout, L or NAL boundary not authenticated, or a start code inside a hidden range accepted.
+/// oracle: AEAD integrity (RFC 9605 §4.4.3): only the sealed bytes open, and SFRAME-9 opening step 6: on success out is the sender's frame.
 @test
 fn tamper_rejection() -> Result[(), ()] {
     tamper_case(Rfc)
     tamper_case(Ranged(Bare))
     tamper_case(Ranged(AnnexB))
+    boundary_case()
+    hidden_start_case()
     Ok(())
 }
 
@@ -618,7 +641,7 @@ fn model_accepts(m: Model, size: u64, jump: u64, ctr: u64) -> bool {
         return false
     }
     match m.top {
-        None => true,
+        None => jump == 0 || ctr - m.floor <= jump,
         Some(top) => if ctr > top {
             jump == 0 || ctr - top <= jump
         } else {
@@ -665,7 +688,7 @@ fn top_of(m: Model) -> u64 {
 }
 
 /// bug: the window marked before the tag check, an off-by-one at W, a shift that drops bits on a large gap, a floor not applied, or jump off by one.
-/// oracle: a set model: accepted iff unseen, at or above the floor, ctr > highest - W and, with jump, ctr <= highest + jump.
+/// oracle: a set model: accepted iff unseen, at or above the floor, ctr > highest - W and, with jump, ctr <= highest + jump, with highest read as the floor before the first frame.
 @test
 fn replay_window() -> Result[(), ()] {
     let mut g = Rng(s: 7)
@@ -680,7 +703,8 @@ fn replay_window() -> Result[(), ()] {
             let l = sframe.Limits(frame: 4096, window: size, keys: 4, ranges: 4, jump)
             let mut r = receiver_for(Rfc, 5, base_of(3), floor, l)
             let mut m = Model(floor, top: None, seen: map.new())
-            let mut at: u64 = floor - 20
+            // The walk starts at the floor; the picks below it reach under the floor too.
+            let mut at: u64 = floor
             for _ in 0u64 .. 150 {
                 let pick = below(mut g, 10)
                 let ctr = if pick < 5 {
@@ -713,7 +737,37 @@ fn replay_window() -> Result[(), ()] {
             check(opened(open_rfc(mut r, b"", frame_at(high + 1, l))), "a forged frame moved the window")
         }
     }
+    floor_cases()
     Ok(())
+}
+
+// SFRAME-7's floors and jump bound on an empty window, and SFRAME-8's refused reinstall.
+fn floor_cases() {
+    let l = sframe.Limits(frame: 4096, window: 64, keys: 16, ranges: 4, jump: 64)
+    {
+        let mut r = receiver_for(Rfc, 5, base_of(3), 10, l)
+        check(too_far(open_rfc(mut r, b"", frame_at(75, l))), "a first frame more than jump above the floor is not TooFar")
+        check(opened(open_rfc(mut r, b"", frame_at(74, l))), "a first frame jump above the floor does not open")
+    }
+    let open_l = sframe.limits()
+    {
+        let follow = sframe.Follow(generation: 3, bits: 4, step: 5, forward: 2, keep: 2, floor: 4)
+        let mut r = result.unwrap(sframe.receiver(suite(), Rfc, open_l))
+        result.unwrap(sframe.install_ratcheted(mut r, follow, steps(counting(), 5)))
+        check(too_old(open_rfc(mut r, b"", step_frame(5, 3, open_l))), "install_ratcheted ignores Follow.floor")
+        check(opened(open_rfc(mut r, b"", step_frame(5, 4, open_l))), "a frame at Follow.floor does not open")
+        result.unwrap(sframe.advance(mut r, 4, 3, 8, steps(counting(), 8), 7))
+        check(too_old(open_rfc(mut r, b"", step_frame(8, 6, open_l))), "advance ignores its floor")
+        check(opened(open_rfc(mut r, b"", step_frame(8, 7, open_l))), "a frame at advance's floor does not open")
+    }
+    let mut r = receiver_for(Rfc, 5, base_of(3), 0, open_l)
+    let first = frame_at(20, open_l)
+    check(opened(open_rfc(mut r, b"", first)), "a fresh key's frame does not open")
+    match sframe.install(mut r, 5, base_of(3), 0) {
+        Error(Invalid) => {},
+        _ => fail("install over an installed KID is not Invalid"),
+    }
+    check(replayed(open_rfc(mut r, b"", first)), "a refused reinstall reopened replay")
 }
 
 // ---------------------------------------------------------------- K1
@@ -785,6 +839,12 @@ fn forward_bounds() -> Result[(), ()] {
     check(no_key(open_rfc(mut r, b"", step_frame(13, 0, l))), "a frame forward + 3 steps ahead has a key")
     result.unwrap(sframe.advance(mut r, 4, 3, 13, steps(counting(), 13), 0))
     check(opened(open_rfc(mut r, b"", step_frame(13, 0, l))), "advance does not re-key a lagging receiver")
+    let jl = sframe.Limits(frame: 4096, window: 64, keys: 16, ranges: 4, jump: 64)
+    let mut j = result.unwrap(sframe.receiver(suite(), Rfc, jl))
+    result.unwrap(sframe.install_ratcheted(mut j, follow, steps(counting(), 5)))
+    check(too_far(open_rfc(mut j, b"", step_frame(7, 65, jl))), "a step's first frame more than jump above 0 is not TooFar")
+    check(no_key(open_rfc(mut j, b"", step_frame(8, 0, jl))), "a TooFar candidate moved the current step")
+    check(opened(open_rfc(mut j, b"", step_frame(7, 64, jl))), "a step's first frame at jump does not open")
     Ok(())
 }
 
@@ -841,5 +901,41 @@ fn sender_counters() -> Result[(), ()] {
             _ => fail("a seal past the volume limit"),
         }
     }
+    {
+        let mut over = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), sframe.Mark(ctr: 0, volume: (1 << 34) + 1), l))
+        match sframe.reserve(mut over, 5, 5) {
+            Error(Exhausted) => {},
+            _ => fail("a sender resumed past the volume limit reserves"),
+        }
+        match seal_result(mut over, b"abc", 64) {
+            Error(Exhausted) => {},
+            _ => fail("a sender resumed past the volume limit is not Exhausted"),
+        }
+    }
+    volume_cases()
     Ok(())
+}
+
+// SFRAME-5's cost 1 + blocks(plain) + blocks(aad), counted by hand from 2^34 - 3, so three units
+// are left. KID 1 and CTR 0 give a 1-byte header. RFC: 16 plaintext bytes cost 1 + 1 + 1 = 3 and
+// seal; 17 cost 1 + 2 + 1 = 4. Ranged(Bare), no ranges, no metadata: the AAD is the header,
+// enc(layout) = 00 and enc(starts) = 00, 3 bytes and 1 block, and the hidden bytes are the frame,
+// so 16 bytes cost 3 and 17 cost 4.
+fn volume_cases() {
+    let l = sframe.limits()
+    for k in 0u64 .. 2 {
+        let framing = framing_of(k)
+        for n in[16u64, 17u64] {
+            let mut s = result.unwrap(sframe.sender(suite(), framing, Fixed(1), counting(), sframe.Mark(ctr: 0, volume: (1 << 34) - 3), l))
+            let _ = result.unwrap(sframe.reserve(mut s, 5, 8))
+            let mut plain: Bytes = list.new()
+            list.fill(mut plain, n, 0x42u8)
+            let mut out = room(128)
+            match seal_any(mut s, framing, ranges.none(), b"", plain, mut out) {
+                Ok(_) => check(n == 16, "a seal costing 4 units passed a limit 3 away"),
+                Error(Exhausted) => check(n == 17, "a seal costing 3 units is Exhausted 3 from the limit"),
+                _ => fail("an unexpected seal refusal at the volume limit"),
+            }
+        }
+    }
 }

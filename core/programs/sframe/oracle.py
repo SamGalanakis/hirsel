@@ -98,6 +98,19 @@ def enc_layout(layout):
     return out
 
 
+def enc_starts(starts):
+    """SFRAME-9 v4: the NAL count, then each start code's gap from the end of the previous one
+    (from 0 for the first), in working-form offsets. Starts 0 and 8 give 02 00 04."""
+    out, end = uleb(len(starts)), 0
+    for p in starts:
+        out += uleb(p - end)
+        end = p + 4
+    return out
+
+
+assert enc_starts([0, 8]) == bytes([2, 0, 4]) and enc_starts([]) == b"\x00"
+
+
 def unescape(body):
     out, zeros = bytearray(), 0
     for x in body:
@@ -161,7 +174,7 @@ def seal_ranged(base, kid, ctr, annexb, layout, metadata, frame):
     secret += work[pos:]
     h, e = header(kid, ctr), enc_layout(layout)
     key, salt = keys(base, kid)
-    sealed = AESGCM(key).encrypt(nonce(salt, ctr), secret, h + e + clear + metadata)
+    sealed = AESGCM(key).encrypt(nonce(salt, ctr), secret, h + e + enc_starts(starts) + clear + metadata)
     ct, tag = sealed[:-16], sealed[-16:]
     body, pos, src = bytearray(work), 0, 0
     for at, n in layout:

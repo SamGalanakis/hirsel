@@ -376,7 +376,7 @@ pub fn ratchet(mut s: Sender) -> Result[(), SframeError] {
 
 // The refusals every seal makes before any work, in SFRAME-5's order after Framing and Invalid.
 fn admit(s: Sender, cost: u64) -> Result[(), SframeError] {
-    if s.next >= CTR_LIMIT || cost > VOLUME_LIMIT - s.volume {
+    if s.next >= CTR_LIMIT || s.volume >= VOLUME_LIMIT || cost > VOLUME_LIMIT - s.volume {
         return Error(Exhausted)
     }
     if s.next >= s.ceiling.ctr || s.volume + cost > s.ceiling.volume {
@@ -450,6 +450,10 @@ fn bit_set(w: Window, i: u64) -> bool {
 fn check_window(w: Window, size: u64, jump: u64, ctr: u64) -> Result[(), Discard] {
     if ctr < w.floor {
         return Error(TooOld)
+    }
+    // Before the first frame the floor is the anchor of the jump bound.
+    if w.top == None && jump != 0 && ctr - w.floor > jump {
+        return Error(TooFar)
     }
     if let Some(top) = w.top {
         if ctr > top {

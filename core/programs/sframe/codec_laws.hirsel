@@ -75,6 +75,86 @@ fn ranged_lengths() -> Result[(), ()] {
     Ok(())
 }
 
+// ---------------------------------------------------------------- T1's boundary cases
+fn insert_at(b: Bytes, at: u64, x: u8) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b) + 1)
+    list.append(mut out, list.slice(b, 0, at))
+    list.push(mut out, x)
+    list.append(mut out, list.slice(b, at, list.len(b)))
+    out
+}
+
+fn delete_at(b: Bytes, at: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, list.slice(b, 0, at))
+    list.append(mut out, list.slice(b, at + 1, list.len(b)))
+    out
+}
+
+// One edited wire frame on a fresh receiver: refused, or opened to exactly the sender's frame.
+fn edit_holds(edited: Bytes, frame: Bytes, l: sframe.Limits) {
+    let mut r = receiver_for(Ranged(AnnexB), 4, counting(), 0, l)
+    let mut back = room(512)
+    match sframe.open_ranged(mut r, b"", edited, mut back) {
+        Ok(_) => check(back == frame, "a wire edit moved a NAL boundary and the frame still opens"),
+        Error(_) => {},
+    }
+}
+
+// SFRAME-9 opening step 6: a frame of four NALs, the first holding a working 00 00 00 01 in a
+// clear range (the codec form 00 00 03 00 01) and the third ending in ciphertext before a start
+// code. Every one-byte insertion of 03 and every deletion of a wire 03 is refused or opens to
+// the sender's frame. On e3cdca3b the 03 inserted before a start code's 01 merges two NALs, and
+// the 03 deleted from 00 00 03 00 01 splits one, and both open.
+fn boundary_case() {
+    let l = sframe.limits()
+    // SC 68 00 00 00 01 42 80 (0..11), SC 67 41 42 80 (11..19), SC 65 88 + 6 hidden (19..31), SC 65 88 + 6 hidden (31..43).
+    let frame = annexb(nals4(unhex("68000000014280"), unhex("67414280"), unhex("658880a1a2a3a4a5a6"), unhex("658840b1b2b3b4b5b6")))
+    let layout = layout4(0, 25, 31, 6)
+    let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+    let mut out = room(256)
+    let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", frame, mut out))
+    for at in 0u64 .. list.len(out) + 1 {
+        edit_holds(insert_at(out, at, 3u8), frame, l)
+    }
+    for at in 0u64 .. list.len(out) {
+        if out[at] == 3u8 {
+            edit_holds(delete_at(out, at), frame, l)
+        }
+    }
+}
+
+// A start code made inside a hidden range by deleting a wire 03 is Malformed (SFRAME-9 opening
+// step 3), before any key work. The ciphertext is chosen: seal sixteen 11s to learn the
+// keystream at CTR 0, then seal the plaintext whose ciphertext is aa bb 00 00 00 01 cc dd ...
+fn hidden_start_case() {
+    let l = sframe.limits()
+    let layout = layout2(0, 6)
+    let mut probe_body = unhex("6588")
+    list.fill(mut probe_body, 18, 0x11u8)
+    let probe = annexb(nals1(copy_of(probe_body)))
+    let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+    let mut sealed = room(256)
+    let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", probe, mut sealed))
+    let Some(probe_work) = ranges.unwire(sealed) else {
+        fail("a sealed frame does not unwire")
+    }
+    let want = unhex("aabb00000001ccddeeff5152535455aa")
+    let mut body = unhex("6588")
+    for i in 0u64 .. 16 {
+        list.push(mut body, want[i] ^ probe_work.work[6 + i] ^ 0x11u8)
+    }
+    check(body[17] != 0u8, "the chosen plaintext ends in 00")
+    let frame = annexb(nals1(copy_of(body)))
+    let mut again = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+    let mut out = room(256)
+    let _ = result.unwrap(sframe.seal_ranged(mut again, layout, b"", frame, mut out))
+    check(list.slice(out, 6, 13) == unhex("aabb0000030001"), "the chosen ciphertext is not on the wire")
+    let mut r = receiver_for(Ranged(AnnexB), 4, counting(), 0, l)
+    let mut back = room(256)
+    check(malformed(sframe.open_ranged(mut r, b"", delete_at(out, 10), mut back)), "a start code in a hidden range is not Malformed")
+}
+
 // ---------------------------------------------------------------- G1
 /// bug: a wrong VP8 keyframe bit, a start code left out, a parameter set encrypted, a PPS id cut by a wrong ue(v) length, a wrong H.265 header length, or an SPS Chrome would rewrite accepted.
 /// oracle: RFC 6386 §9.1; H.264 §7.3.3 and §9.1 and H.265 §7.3.6.1 counted by hand; libwebrtc's sps_vui_rewriter_unittest.cc modes.

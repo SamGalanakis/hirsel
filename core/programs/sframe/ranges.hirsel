@@ -318,6 +318,27 @@ pub fn nal_end(nals: Nals, k: u64) -> u64 {
     }
 }
 
+// enc(starts): the NAL count, then each start code's gap from the end of the previous start
+// code (from 0 for the first), all minimal ULEB128. A Bare frame has no starts, so it is 00.
+pub fn starts_len(nals: Nals) -> u64 {
+    let mut n = uleb_len(list.len(nals.starts))
+    let mut end: u64 = 0
+    for p in nals.starts {
+        n += uleb_len(p - end)
+        end = p + 4
+    }
+    n
+}
+
+pub fn encode_starts(nals: Nals, mut out: Bytes) {
+    put_uleb(mut out, list.len(nals.starts))
+    let mut end: u64 = 0
+    for p in nals.starts {
+        put_uleb(mut out, p - end)
+        end = p + 4
+    }
+}
+
 // Every start code lies inside a clear range.
 pub fn starts_clear(nals: Nals, layout: Layout) -> bool {
     let mut r: u64 = 0

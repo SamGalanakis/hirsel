@@ -1,0 +1,424 @@
+// A std.model of the place's grant mints (RUNNER-SPEC v2.69 CHANGES F1, F3 and F5,
+// v2.70 F4 and F5, and §12.1 "Mint tasks"), with v2.67's single grant task (CHANGES-v2.67 item 1) as
+// the variant that must fail.
+//
+// Each request is one use's ask for a G: a trigger attempt that came due, a wire call
+// to a listed granted entry, a keyed claim's pre-authentication mint, or a bind
+// (v2.70), the two unauthenticated requests. Each use's requests arrive in their own order, and the
+// uses interleave freely. A minted G stays charged to the mint task that made it
+// until its call, attempt or claim ends (MEM-20). Every G here costs one unit.
+//
+// v2.69 and v2.70: one mint task per use, each with its own queue and `bytes`. A mint never
+// waits, and runs as `isolate` around `bound steps`, so a fault is `Raised` and a
+// step overrun `OutOfTime` for that request alone, and the task keeps serving.
+// v2.67: one grant task owns the seed, runs every mint from one queue in arrival
+// order, so a waiting mint delays the next one, and charges every G to one `bytes`.
+// Claims mint from `call` (item 4), and there is no bind mint. Its mint runs outside `isolate`, so a fault ends
+// the task (v2.69 F1(b)). v2.67 states no step bound, so its runs use no looping mint.
+type Use: key = Attempt | Call | Claim | Bind
+
+type Ask: key = Plain | Faults | Loops
+
+type Cause: key = OutOfBytes | Raised | OutOfTime
+
+type Phase: key = Unsent | Queued | Minting | Holding | Ended | Failed(Cause)
+
+type Request: key {
+    use: Use,
+    ask: Ask,
+    phase: Phase
+}
+
+type MintTask: key {
+    queue: List[u64],
+    busy: Option[u64],
+    serving: bool,
+    room: u64,
+    held: u64
+}
+
+type Place: key {
+    shared: bool,
+    own_bytes: List[u64],
+    requests: List[Request],
+    tasks: List[MintTask]
+}
+
+type GrantAction: key = Open | Arrive(u64) | Mint(u64) | Resolve(u64) | Finish(u64)
+
+fn use_index(u: Use) -> u64 {
+    match u {
+        Attempt => 0,
+        Call => 1,
+        Claim => 2,
+        Bind => 3,
+    }
+}
+
+fn task_of(p: Place, u: Use) -> u64 {
+    if p.shared {
+        0
+    } else {
+        use_index(u)
+    }
+}
+
+fn mint_task(room: u64) -> MintTask {
+    MintTask(queue: list.new(), busy: None, serving: true, room: room, held: 0)
+}
+
+fn add_requests(mut requests: List[Request], u: Use, asks: List[Ask]) {
+    for ask in asks {
+        list.push(mut requests, Request(use: u, ask: ask, phase: Unsent))
+    }
+}
+
+// own_bytes is (attempt, call, claim, bind). v2.67's one allowance is their sum, so
+// both variants have the same total room.
+fn place(shared: bool, own_bytes: List[u64], attempts: List[Ask], calls: List[Ask], claims: List[Ask], binds: List[Ask]) -> Place {
+    let mut requests: List[Request] = list.new()
+    add_requests(mut requests, Attempt, attempts)
+    add_requests(mut requests, Call, calls)
+    add_requests(mut requests, Claim, claims)
+    add_requests(mut requests, Bind, binds)
+    let mut tasks: List[MintTask] = list.new()
+    if shared {
+        list.push(mut tasks, mint_task(own_bytes[0] + own_bytes[1] + own_bytes[2] + own_bytes[3]))
+    } else {
+        for room in own_bytes {
+            list.push(mut tasks, mint_task(room))
+        }
+    }
+    Place(shared: shared, own_bytes: clone(own_bytes), requests: take requests, tasks: take tasks)
+}
+
+fn first_unsent(p: Place, i: u64) -> bool {
+    let r = view p.requests[i]
+    if r.phase != Unsent {
+        return false
+    }
+    for j in 0 .. i {
+        if p.requests[j].use == r.use && p.requests[j].phase == Unsent {
+            return false
+        }
+    }
+    true
+}
+
+fn grant_actions(p: Place, mut out: List[GrantAction]) {
+    for i in 0 .. list.len(p.requests) {
+        if first_unsent(p, i) {
+            list.push(mut out, Arrive(i))
+        }
+        if p.requests[i].phase == Holding {
+            list.push(mut out, Finish(i))
+        }
+    }
+    for t in 0 .. list.len(p.tasks) {
+        let task = view p.tasks[t]
+        match task.busy {
+            Some(_) => list.push(mut out, Resolve(t)),
+            None => {
+                if task.serving && list.len(task.queue) > 0 {
+                    list.push(mut out, Mint(t))
+                }
+            },
+        }
+    }
+}
+
+fn resolve(mut p: Place, t: u64, i: u64) {
+    match p.requests[i].ask {
+        Faults => {
+            p.requests[i].phase = Failed(Raised)
+            if p.shared {
+                p.tasks[t].serving = false
+            }
+        },
+        Loops => {
+            p.requests[i].phase = Failed(OutOfTime)
+        },
+        Plain => {
+            if p.tasks[t].held + 1 > p.tasks[t].room {
+                p.requests[i].phase = Failed(OutOfBytes)
+            } else {
+                p.tasks[t].held += 1
+                p.requests[i].phase = Holding
+            }
+        },
+    }
+}
+
+fn grant_step(p: Place, action: GrantAction) -> Place {
+    let mut next: Place = clone(p)
+    match action {
+        Open => {},
+        Arrive(i) => {
+            let t = task_of(next, next.requests[i].use)
+            next.requests[i].phase = Queued
+            list.push(mut next.tasks[t].queue, i)
+        },
+        Mint(t) => {
+            let i = list.remove(mut next.tasks[t].queue, 0)
+            if next.shared {
+                next.tasks[t].busy = Some(i)
+                next.requests[i].phase = Minting
+            } else {
+                resolve(mut next, t, i)
+            }
+        },
+        Resolve(t) => {
+            let Some(i) = next.tasks[t].busy else {
+                fail("grant model: resolve with no mint")
+            }
+            next.tasks[t].busy = None
+            resolve(mut next, t, i)
+        },
+        Finish(i) => {
+            let t = task_of(next, next.requests[i].use)
+            next.requests[i].phase = Ended
+            next.tasks[t].held -= 1
+        },
+    }
+    take next
+}
+
+fn settled(p: Place) -> bool {
+    for r in p.requests {
+        match r.phase {
+            Ended => {},
+            Failed(_) => {},
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn newly_failed(prev: Place, next: Place, i: u64) -> Option[Cause] {
+    if let Failed(_) = prev.requests[i].phase {
+        return None
+    }
+    match next.requests[i].phase {
+        Failed(cause) => Some(cause),
+        _ => None,
+    }
+}
+
+// F1/F3: a fault or step overrun fails its own request, and its mint task keeps
+// serving the requests queued behind it.
+fn fault_contained(prev: Place, action: GrantAction, next: Place) -> bool {
+    for t in 0 .. list.len(prev.tasks) {
+        if prev.tasks[t].serving && !next.tasks[t].serving {
+            return false
+        }
+    }
+    for i in 0 .. list.len(next.requests) {
+        let own = match newly_failed(prev, next, i) {
+            None => true,
+            Some(Raised) => next.requests[i].ask == Faults,
+            Some(OutOfTime) => next.requests[i].ask == Loops,
+            Some(OutOfBytes) => next.requests[i].ask == Plain,
+        }
+        if !own {
+            return false
+        }
+    }
+    true
+}
+
+fn holding(p: Place, u: Use) -> u64 {
+    let mut count: u64 = 0
+    for r in p.requests {
+        if r.use == u && r.phase == Holding {
+            count += 1
+        }
+    }
+    count
+}
+
+// F1/F3: a due attempt never queues behind a call or claim, never waits on their
+// mint, and is refused for bytes only when attempts' own allowance is full.
+fn attempt_unblocked(prev: Place, action: GrantAction, next: Place) -> bool {
+    for task in next.tasks {
+        if let Some(i) = task.busy {
+            if next.requests[i].use != Attempt && list.any(task.queue, scoped fn(j: u64) -> bool {
+                next.requests[j].use == Attempt
+            }) {
+                return false
+            }
+        }
+        let mut other_ahead = false
+        for j in task.queue {
+            if next.requests[j].use != Attempt {
+                other_ahead = true
+            } else if other_ahead {
+                return false
+            }
+        }
+    }
+    for i in 0 .. list.len(next.requests) {
+        if next.requests[i].use == Attempt {
+            if let Some(OutOfBytes) = newly_failed(prev, next, i) {
+                if holding(prev, Attempt) < next.own_bytes[0] {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}
+
+fn attempt_while_calls_saturate(p: Place) -> bool {
+    holding(p, Attempt) > 0 && holding(p, Call) == p.own_bytes[1]
+}
+
+fn call_out_of_own_bytes(p: Place) -> bool {
+    for r in p.requests {
+        if r.use == Call && r.phase == Failed(OutOfBytes) {
+            return true
+        }
+    }
+    false
+}
+
+fn served_after_contained_failure(p: Place) -> bool {
+    for i in 0 .. list.len(p.requests) {
+        let contained = match p.requests[i].phase {
+            Failed(Raised) => true,
+            Failed(OutOfTime) => true,
+            _ => false,
+        }
+        if contained {
+            for j in i + 1 .. list.len(p.requests) {
+                if p.requests[j].use == p.requests[i].use && p.requests[j].phase == Holding {
+                    return true
+                }
+            }
+        }
+    }
+    false
+}
+
+fn show_grant(action: GrantAction, mut out: String) {
+    let (name, n) = match action {
+        Open => return string.push(mut out, "open"),
+        Arrive(i) => ("arrive ", i),
+        Mint(t) => ("mint ", t),
+        Resolve(t) => ("resolve ", t),
+        Finish(i) => ("finish ", i),
+    }
+    string.push(mut out, name)
+    string.push_u64(mut out, n)
+}
+
+type Law = Contained | Unblocked
+
+fn grant_model(take start: Place, laws: List[Law]) -> std.model.Model[Place, GrantAction] {
+    let mut init: List[Place] = list.new()
+    list.push(mut init, take start)
+    let mut always: List[std.model.Always[Place, GrantAction]] = list.new()
+    for law in laws {
+        match law {
+            Contained => list.push(mut always, std.model.Always(label: string.from("mint_fault_fails_only_its_own_request"), holds: fault_contained)),
+            Unblocked => list.push(mut always, std.model.Always(label: string.from("due_attempt_never_blocked_by_call"), holds: attempt_unblocked)),
+        }
+    }
+    let mut sometimes: List[std.model.Sometimes[Place]] = list.new()
+    list.push(mut sometimes, std.model.Sometimes(label: string.from("attempt_runs_while_calls_saturate"), holds: attempt_while_calls_saturate))
+    list.push(mut sometimes, std.model.Sometimes(label: string.from("call_out_of_own_bytes"), holds: call_out_of_own_bytes))
+    list.push(mut sometimes, std.model.Sometimes(label: string.from("served_after_contained_failure"), holds: served_after_contained_failure))
+    std.model.Model(
+        init: take init,
+        start: Open,
+        actions: grant_actions,
+        step: grant_step,
+        done: settled,
+        always: take always,
+        sometimes: take sometimes,
+        show: show_grant,
+    )
+}
+
+fn grant_bounds() -> std.model.Bounds {
+    std.model.Bounds(depth: 64, states: 200000, step_steps: 100000, step_bytes: 1048576)
+}
+
+fn one_each() -> List[u64] {
+    let mut room: List[u64] = list.new()
+    list.push(mut room, 1u64)
+    list.push(mut room, 1u64)
+    list.push(mut room, 1u64)
+    list.push(mut room, 1u64)
+    take room
+}
+
+fn three(a: Ask, b: Ask, c: Ask) -> List[Ask] {
+    let mut out: List[Ask] = list.new()
+    list.push(mut out, a)
+    list.push(mut out, b)
+    list.push(mut out, c)
+    take out
+}
+
+fn one(a: Ask) -> List[Ask] {
+    let mut out: List[Ask] = list.new()
+    list.push(mut out, a)
+    take out
+}
+
+fn two(a: Ask, b: Ask) -> List[Ask] {
+    let mut out: List[Ask] = list.new()
+    list.push(mut out, a)
+    list.push(mut out, b)
+    take out
+}
+
+fn all_laws() -> List[Law] {
+    let mut laws: List[Law] = list.new()
+    list.push(mut laws, Contained)
+    list.push(mut laws, Unblocked)
+    take laws
+}
+
+fn just(law: Law) -> List[Law] {
+    let mut laws: List[Law] = list.new()
+    list.push(mut laws, law)
+    take laws
+}
+
+/// bug: wire calls starve the attempt mint, or a mint fault or step overrun ends the mint task (review 2486 F1, F3).
+/// oracle: RUNNER-SPEC v2.69 CHANGES F1, F3, F5, v2.70 F4, F5 and §12.1 "Mint tasks": one task, queue and `bytes` per use; isolate around bound steps.
+@test
+fn grant_mints_v269_closed() -> Result[(), ()] {
+    let mut calls = three(Plain, Faults, Plain)
+    list.push(mut calls, Loops)
+    let start = place(false, one_each(), two(Plain, Plain), calls, two(Faults, Plain), one(Plain))
+    std.model.check(grant_model(take start, all_laws()), grant_bounds())
+}
+
+fn failed_as(take outcome: std.model.Outcome, expected: std.model.Kind) -> bool {
+    match outcome {
+        Failed(f) => std.model.kind(f) == expected,
+        _ => false,
+    }
+}
+
+fn v267_place() -> Place {
+    place(true, one_each(), two(Plain, Plain), three(Plain, Faults, Plain), two(Faults, Plain), list.new())
+}
+
+// Each law runs alone, so each shows its own counterexample: explore stops at the
+// shallowest failure.
+/// bug: v2.67's one grant task, queue and allowance pass for a bulkhead (review 2486 F1, F3).
+/// oracle: CHANGES-v2.67 item 1 (one task, arrival order, a waiting mint delays the next, one `bytes`) against v2.69 F1 and F3.
+@test
+fn grant_mints_v267_shared_fails() -> Result[(), ()] {
+    let contained = failed_as(std.model.explore(grant_model(v267_place(), just(Contained)), grant_bounds()), Violated(string.from("mint_fault_fails_only_its_own_request")))
+    let unblocked = failed_as(std.model.explore(grant_model(v267_place(), just(Unblocked)), grant_bounds()), Violated(string.from("due_attempt_never_blocked_by_call")))
+    let stuck = failed_as(std.model.explore(grant_model(v267_place(), list.new()), grant_bounds()), Stuck)
+    if contained && unblocked && stuck {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

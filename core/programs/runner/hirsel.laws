@@ -1,4 +1,6 @@
 hirsel.laws 1
+runner@1/grant_mint_model/grant_mints_v267_shared_fails src=39d2001fc9a8d6f8 sig=5266bfd5770130d8 run=c2c0c6612d4cbb79 bug=dc93619197d69383 oracle=29fcfa93e0579655 rows=pending
+runner@1/grant_mint_model/grant_mints_v269_closed src=daa83685aac7d256 sig=802ab22626f28d48 run=c2c0c6612d4cbb79 bug=1ba03595acb46c9e oracle=47356e082d5eaf6f rows=pending
 runner@1/runner/activation_settles_held src=36237b7b3667ca5c sig=b834b10d097db7bb run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/dev_identity_vectors src=59bbe7300fe06ff8 sig=f08a82083c9dc605 run=45ef62becccc2336 bug=- oracle=- rows=pending
 runner@1/runner/direct_destination_survives_full_block src=270bf8c269e9c638 sig=688ae7109b739b2b run=607dcf6bff52df2b bug=- oracle=- rows=pending

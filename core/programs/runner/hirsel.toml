@@ -130,6 +130,7 @@ dirs = ["."]
 "runner-sim-release-law.hirsel" = "runner"
 "runner_owner_laws.hirsel" = "runner"
 "triggers_journal_laws.hirsel" = "triggers"
+"grant_mint_model.hirsel" = "grant_mint_model"
 
 [tests.runs."runner@1/runner_calls/test_fixture_granted"]
 limit = 1342177280

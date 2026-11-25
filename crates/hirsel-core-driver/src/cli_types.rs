@@ -115,6 +115,8 @@ pub enum OptionId {
     FrontStream,
     ApproveGrant,
     RefuseGrants,
+    HeldAll,
+    HeldEntry,
     HostMemory,
     TapeRetention,
     GroupName,

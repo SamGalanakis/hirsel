@@ -1239,7 +1239,7 @@ activation, assembly and report.
   `--request-id` from the request's own Status, then sends Begin. When the request awaits a decision on exactly
   the diff its `--approve-grant` lines name (`+` for a line gained, `-` for one lost), it
   sends Decide approving it and goes on; otherwise it prints the state, with the diff, and
-  exits 2. `--held`<!-- doc-ref: planned --> sets `held.all`, and each `--held-entry`<!-- doc-ref: planned --> adds an element of `held.entries`, where PATH is the entry path as the trigger report prints it. Without either option, `held` is `Fates(all: None, entries: [])`. `hirsel deploy --state S --request-id D --refuse-grants` refuses the diff D
+  exits 2. `--held` sets `held.all`, and each `--held-entry` adds an element of `held.entries`, where PATH is the entry path as the trigger report prints it. Without either option, `held` is `Fates(all: None, entries: [])`. `hirsel deploy --state S --request-id D --refuse-grants` refuses the diff D
   awaits a decision on. `hirsel deploy --state S --status D` sends only Status.
 
 Register and deploy stream the admission input on AwaitInput, answer each Need with the missing objects,

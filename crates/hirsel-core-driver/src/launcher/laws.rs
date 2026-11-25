@@ -2,9 +2,9 @@
 //! launcher's one state loop with stand-in children: shell scripts that take the
 //! descriptors of launch.md "Child modes" and behave as the law needs. The real-place
 //! halves (a NEW head opening the store only after OLD closed it) are the platform host's.
-use super::session::serve_fixture as serve;
+use super::session::tests::serve_fixture as serve;
 use super::session::*;
-use super::{Image, Images, Launcher};
+use super::{Image, Images, Launcher, hex};
 use std::collections::BTreeSet;
 use std::fs;
 use std::net::TcpStream;
@@ -19,10 +19,6 @@ use std::time::{Duration, Instant};
 pub(super) struct Scripts {
     scripts: Vec<PathBuf>,
     objects: PathBuf,
-}
-
-fn name_hex(name: [u8; 32]) -> String {
-    name.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 impl Images for Scripts {
@@ -46,7 +42,7 @@ impl Images for Scripts {
         keep: &BTreeSet<[u8; 32]>,
         _: &dyn Fn(crate::code_admission::ObjectKey) -> bool,
     ) -> std::io::Result<u64> {
-        let kept: BTreeSet<_> = keep.iter().map(|&k| name_hex(k)).collect();
+        let kept: BTreeSet<_> = keep.iter().map(|&k| hex(&k)).collect();
         let mut removed = 0;
         for entry in fs::read_dir(&self.objects)? {
             let entry = entry?;
@@ -392,8 +388,9 @@ fn group_one_head() {
         held(serving(3))
     );
     let preparing = role(Role::Prepare(attempt(9)));
+    let prepare = Mode::Prepare(attempt(9), "x".into(), Vec::new());
     assert_eq!(
-        rig.ask(launch(1, &work, Mode::Prepare(attempt(9), "x".into()))),
+        rig.ask(launch(1, &work, prepare)),
         started(preparing.clone())
     );
     // The same identity again answers its phase and starts no second process.
@@ -590,9 +587,9 @@ fn collect_reservation_handoff() {
     let mut rig = rig(&[]);
     let objects = rig.launcher.images.objects.clone();
     let name = |n: u8| [n; 32];
-    let exists = |n: u8| objects.join(name_hex(name(n))).exists();
+    let exists = |n: u8| objects.join(hex(&name(n))).exists();
     for n in [1, 2, 3] {
-        fs::write(objects.join(name_hex(name(n))), b"object").unwrap();
+        fs::write(objects.join(hex(&name(n))), b"object").unwrap();
     }
     // 1 is a root, 2 is reserved by the deploy attempt, 3 is garbage.
     rig.launcher.reserve(attempt(5), BTreeSet::from([name(2)]));
@@ -618,7 +615,7 @@ fn collect_reservation_handoff() {
 
     // A host that cannot read its roots aborts: nothing is removed, the fence ends at
     // once, and the release it deferred applies, so the next collection removes 4.
-    fs::write(objects.join(name_hex(name(4))), b"object").unwrap();
+    fs::write(objects.join(hex(&name(4))), b"object").unwrap();
     rig.launcher.reserve(attempt(6), BTreeSet::from([name(4)]));
     rig.ask(Request::CollectBegin);
     assert!(rig.ask(Request::Release(attempt(6))).is_empty());
@@ -698,7 +695,7 @@ fn child_mode_authority() {
     rig.ask(launch(
         3,
         &work,
-        Mode::Prepare(attempt(3), "export-1".into()),
+        Mode::Prepare(attempt(3), "export-1".into(), vec![0xf0]),
     ));
     rig.until(|e| ended(e, &preparing));
     for name in ["describe", "preview", "prepare"] {
@@ -712,7 +709,7 @@ fn child_mode_authority() {
     let attempt_hex = "03".to_owned() + &"00".repeat(7) + "03" + &"00".repeat(7);
     let image_hex = "03".repeat(32);
     assert!(held("prepare")[0].ends_with(&format!(
-        "--hirsel-prepare {} {attempt_hex} {image_hex}",
+        "--hirsel-prepare {} {attempt_hex} {image_hex} f0",
         export.display()
     )));
 

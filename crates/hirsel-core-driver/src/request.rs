@@ -470,6 +470,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::FrontStream
             | Opt::ApproveGrant
             | Opt::RefuseGrants
+            | Opt::HeldAll
+            | Opt::HeldEntry
             | Opt::HostMemory
             | Opt::TapeRetention
             | Opt::GroupName
@@ -1853,6 +1855,7 @@ pub enum Outcome {
 #[path = "request_launch.rs"]
 mod launch;
 pub use launch::Launch;
+pub(crate) use launch::serve;
 use launch::{conclude, finish, report_request_error};
 
 /// Run the request `args` names (the arguments after the program name) and
@@ -1871,19 +1874,6 @@ pub fn main(args: Vec<String>) -> ! {
         Err(e) => e,
     };
     std::process::exit(report_request_error(error.as_ref()))
-}
-
-/// Serve one request in a resident compiler: [`main`]'s request, with its
-/// error answered as main reports it.
-pub(crate) fn serve(args: Vec<String>) -> Outcome {
-    match run(args) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            let outcome = Outcome::Exit(report_request_error(e.as_ref()));
-            crate::resident::answer(&outcome);
-            outcome
-        }
-    }
 }
 
 #[cfg(test)]

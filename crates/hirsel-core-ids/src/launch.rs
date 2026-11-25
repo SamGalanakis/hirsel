@@ -66,7 +66,7 @@ pub struct Metadata {
     idle_ms: u64,
     store_id: Option<(u64, u64)>,
     preview: Option<Vec<u8>>,
-    preparing: Option<([u8; 16], [u8; 32])>,
+    preparing: Option<([u8; 16], [u8; 32], Vec<u8>)>,
     install_child: Option<u64>,
     install_predecessor: Option<[u8; 32]>,
     witness: Option<u64>,
@@ -198,8 +198,10 @@ impl Metadata {
         self.preview = Some(old);
         self
     }
-    pub fn with_prepare(mut self, attempt: [u8; 16], digest: [u8; 32]) -> Self {
-        self.preparing = Some((attempt, digest));
+    /// `fates` is the deploy's value-codec `Fates` (launch.md, the prepare launch's
+    /// fourth argument); the place decodes it.
+    pub fn with_prepare(mut self, attempt: [u8; 16], digest: [u8; 32], fates: Vec<u8>) -> Self {
+        self.preparing = Some((attempt, digest, fates));
         self
     }
 
@@ -250,11 +252,11 @@ impl Metadata {
             10 => self
                 .preparing
                 .as_ref()
-                .map_or(0, |(attempt, _)| byte(attempt)),
+                .map_or(0, |(attempt, _, _)| byte(attempt)),
             11 => self
                 .preparing
                 .as_ref()
-                .map_or(0, |(_, digest)| byte(digest)),
+                .map_or(0, |(_, digest, _)| byte(digest)),
             12 => u64::from(self.wake),
             13 => self.idle_ms,
             14 => match (self.store_id, index) {
@@ -281,6 +283,14 @@ impl Metadata {
                 .install_predecessor
                 .as_ref()
                 .map_or(0, |digest| byte(digest)),
+            23 => self
+                .preparing
+                .as_ref()
+                .map_or(0, |(_, _, fates)| fates.len() as u64),
+            24 => self
+                .preparing
+                .as_ref()
+                .map_or(0, |(_, _, fates)| byte(fates)),
             _ => 0,
         }
     }

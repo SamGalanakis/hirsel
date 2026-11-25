@@ -160,9 +160,9 @@ fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Task
 pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
     runner.main(a, process, errors, tasks, c, code.describe(place), code.describe(schema), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
         if let Some(take candidate) = runner.launch_prepare_args(a) ?=> Usage {
-            let runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
+            let runner.PrepareArgs(attempt: take attempt, digest: take digest, fates: take fates) = take candidate
             let configured = config(n, directory, web, c, random, tasks, Reopen, Addr(ip: V4(0x7f000001u32), port: 0u16), list.new())
-            return Ok(runner.prepare_place(take configured, take attempt, take digest, errors) ?=> Start)
+            return Ok(runner.prepare_place(take configured, take attempt, take digest, take fates, errors) ?=> Start)
         }
         start(n, directory, web, c, random, tasks, a, errors, take stop)
     })

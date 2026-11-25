@@ -87,8 +87,8 @@ fn session_vectors() {
             "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610300000008070605040302011817161514131211010000000100000000".into(),
         ),
         (
-            launch(Mode::Prepare(attempt(), "x".into())),
-            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610400000008070605040302011817161514131211010000007800000000".into(),
+            launch(Mode::Prepare(attempt(), "x".into(), vec![0xf0])),
+            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610400000008070605040302011817161514131211010000007801000000f000000000".into(),
         ),
         (
             Request::Stop(serving()),
@@ -350,5 +350,15 @@ fn session_vectors() {
     for (value, expected) in &events {
         assert_eq!(value.encode(), hex(expected), "{value:?}");
         assert_eq!(&Event::decode(&hex(expected)).unwrap(), value);
+    }
+}
+
+pub(in crate::launcher) fn serve_fixture(activation: u64, candidate: Option<u64>) -> Serve {
+    Serve {
+        activation,
+        idle: 250,
+        candidate,
+        store_id: None,
+        witness: None,
     }
 }

@@ -1,0 +1,66 @@
+// RUNNER-SPEC L70 (e): the store of (a) under a hot deploy of r2 with (a)'s
+// fates. The prepare child stages the settle into PREPARED, the import carries
+// it, and the cutover's one commit holds the same rows (a) states: A, B and F
+// `Waiting` at r2 with their attempts, C a `Waiting` cancel with its r0 stamp,
+// and D and E byte-identical.
+@test
+fn activation_fate_hot_deploy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let dir = triggers.law_directory(d)
+    let n_place = 1048576u64
+    let options = triggers.law_options()
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, clone(options)))
+    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, code.describe(fate_law_r1), None, code.describe(trigger_law_schema), n_place, tasks))
+    let t: triggers.Tables = clone(h.triggers)
+    let r1 = result.unwrap(trigger_stamp(reg1.exported, reg1.bindings, n_place))
+    let r2 = {
+        let reg2 = result.unwrap(placed(code.describe(fate_law_r2), n_place))
+        result.unwrap(trigger_stamp(reg2.exported, reg2.bindings, n_place))
+    }
+    let (rows, _) = fate_law_setup(mut db, t, h, reg1, r1)
+    let before = fate_law_bytes(db, t, rows)
+    let activation = result.unwrap(current_description(db))
+    let attempt = trigger_scan_law_bytes(16u64, 5u8)
+    let at = result.unwrap(activation_version(db))
+    let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), at))
+    let exported = result.unwrap(store.export_copy(take copying))
+    let exported_version = store.version(store.snapshot(db))
+    let source = result.unwrap(store.open_export(exported.dir, c, clone(attempt), clone(options)))
+    let setup = PrepareConfig(scratch: exported.dir, options: clone(options), attempt: clone(attempt), image_digest: trigger_scan_law_bytes(32u64, 2u8), clock: c, tasks: tasks, n_place: n_place, place: code.describe(fate_law_r2), on_migrate: None, schema: code.describe(trigger_law_schema), triggers: fate_law_entries(false), fates: fate_crash_flags())
+    result.unwrap(prepare_export(setup, source))
+    let report = trigger_scan_report(exported.dir)
+    if trigger_report_unsettled(report) {
+        fail("L70 (e): the prepare report of (a)'s fates is unsettled")
+    }
+    // One activation rewrite per held row: A, B, C and F.
+    let validated = result.unwrap(store.validate_prepared(exported.dir))
+    if store.prepared_rewrites(validated) != 4u64 {
+        fail("L70 (e): PREPARED does not carry one rewrite per held row")
+    }
+    let work = result.unwrap(store.reserve_import(mut db, take validated))
+    let imported = result.unwrap(store.import_trees(take work))
+    let digest = store.imported_digest(imported)
+    result.unwrap(store.keep_import(mut db, take imported))
+    let reg_old = result.unwrap(placed(code.describe(fate_law_r1), n_place))
+    let installed = result.unwrap(cutover_store(mut db, store.Cutover(attempt: take attempt, digest: digest, deadline: 0xffffffffffffffffu64), reg_old, n_place, scoped fn() -> bool {
+        true
+    }))
+    if installed != exported_version + 1u64 || store.version(store.snapshot(db)) != installed || result.unwrap(current_description(db)) == activation {
+        fail("L70 (e): the cutover is not the one commit after the export")
+    }
+    for (id, attempt_number) in[(rows.a, 1u64), (rows.b, 2u64), (rows.f, 1u64)] {
+        let row = fate_law_row(db, t, id)
+        if !triggers.waiting(row) || !triggers.stamped(row, r2) || triggers.attempts(row) != attempt_number || triggers.cancelling(row) {
+            fail("L70 (e): a released row is not Waiting at r2 with its attempt")
+        }
+    }
+    let cancelled = fate_law_row(db, t, rows.c)
+    if !triggers.waiting(cancelled) || !triggers.cancelling(cancelled) || triggers.stamped(cancelled, r1) || triggers.stamped(cancelled, r2) || triggers.attempts(cancelled) != 1u64 {
+        fail("L70 (e): C is not a Waiting cancel with its r0 stamp")
+    }
+    let after = fate_law_bytes(db, t, rows)
+    if after[3u64] != before[3u64] || after[4u64] != before[4u64] {
+        fail("L70 (e): an unheld row changed")
+    }
+    result.unwrap(store.close(take db))
+    Ok(())
+}

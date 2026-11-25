@@ -361,6 +361,7 @@ fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartEr
             Open(IdentityUnknown) => InstallIdentity,
             Open(InstallVersion(next)) => InstallWrongVersion(next),
             Open(PredecessorChanged(found)) => InstallPredecessor(clone(found)),
+            Open(Unsettled(_)) => InstallUnsettled,
             _ => InstallConfig,
         })),
     }

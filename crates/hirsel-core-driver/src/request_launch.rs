@@ -192,3 +192,16 @@ pub(super) fn finish(
     drop(run_output);
     conclude(launch.map_or(Outcome::Exit(exit), Outcome::Launch))
 }
+
+/// Serve one request in a resident compiler: [`super::main`]'s request, with its
+/// error answered as main reports it.
+pub(crate) fn serve(args: Vec<String>) -> Outcome {
+    match super::run(args) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let outcome = Outcome::Exit(report_request_error(e.as_ref()));
+            crate::resident::answer(&outcome);
+            outcome
+        }
+    }
+}

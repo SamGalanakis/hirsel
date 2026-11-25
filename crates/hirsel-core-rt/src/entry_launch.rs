@@ -1,5 +1,5 @@
 //! Options read before the first program argument.
-use super::{FromRawFd, OsStr, OsStrExt, OwnedFd, Path, StartupError, io};
+use super::{FromRawFd, Metadata, OsStr, OsStrExt, OwnedFd, Path, StartupError, io};
 
 pub(super) struct LaunchOptions<'a> {
     pub(super) n_place: u64,
@@ -167,7 +167,7 @@ impl LaunchOptions<'_> {
         directories: usize,
     ) -> Result<Option<&'b Path>, StartupError> {
         let prepare_path = if args.first().is_some_and(|arg| arg == b"--hirsel-prepare") {
-            if self.describe_mode || args.len() != 4 || directories == 0 {
+            if self.describe_mode || args.len() != 5 || directories == 0 {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
             let dir = Path::new(OsStr::from_bytes(&args[1]));
@@ -195,16 +195,11 @@ impl LaunchOptions<'_> {
 }
 
 pub(crate) fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
-    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
     if text.len() != 2 * N {
-        return Err(invalid());
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }
     let mut out = [0u8; N];
-    for (byte, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
-        let hi = char::from(pair[0]).to_digit(16).ok_or_else(invalid)?;
-        let lo = char::from(pair[1]).to_digit(16).ok_or_else(invalid)?;
-        *byte = (hi * 16 + lo) as u8;
-    }
+    out.copy_from_slice(&prepare_hex_bytes(text)?);
     Ok(out)
 }
 
@@ -235,4 +230,27 @@ pub(super) fn receive_host_control() -> io::Result<Option<OwnedFd>> {
         }
         Ok(Some(fd))
     }
+}
+
+/// `--hirsel-prepare DIR ATTEMPT IMAGE FATES`: the attempt, the image digest and the fates.
+pub(super) fn with_prepare(launch: Metadata, args: &[Vec<u8>]) -> io::Result<Metadata> {
+    let fates = prepare_hex_bytes(&args[4])?;
+    Ok(launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?, fates))
+}
+
+/// Hex of any even length, as the prepare launch passes its fates.
+fn prepare_hex_bytes(text: &[u8]) -> io::Result<Vec<u8>> {
+    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
+    if text.len() % 2 != 0 {
+        return Err(invalid());
+    }
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err(invalid()),
+    };
+    text.chunks_exact(2)
+        .map(|pair| Ok(digit(pair[0])? * 16 + digit(pair[1])?))
+        .collect()
 }

@@ -348,11 +348,13 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
     if launch.dry_run {
         return operate_dry_run(p, take options, n_place)
     }
-    if let Some((attempt, image)) = launch.prepare {
-        return operate_prepare(take p, take options, n_place, attempt, image)
+    if let Some((attempt, image, held)) = launch.prepare {
+        return operate_prepare(take p, take options, n_place, attempt, image, held)
     }
     if let Some(selection) = install {
-        // A hosted install's fates arrive with F3's Begin `held`; until then it settles no held run.
+        // A hosted install child has no deploy request and so no fates: a held
+        // run refuses it `Unsettled`, and a hand install names the fate
+        // (RUNNER-SPEC CHANGES-v2.72).
         return finish_install(operate_install(take p, take options, selection, n_place))
     }
     let installing = match p.selection {
@@ -767,36 +769,6 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
                 }
             },
         }
-    }
-}
-
-pub fn prepare_place[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
-    let (take options, _, _, _, _) = place_store(p, Some(errors))?
-    let n_place = p.n_place
-    prepare_placed(take p, take options, n_place, take attempt, take image)
-}
-
-fn operate_prepare[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
-    prepare_placed(take p, take options, n_place, launch_bytes(attempt), launch_bytes(image))
-}
-
-fn prepare_placed[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64, take attempt: Bytes, take image: Bytes) -> Result[Ended, StartError] waits {
-    let PlaceConfig(backing: take backing, place: place, on_migrate: on_migrate, schema: schema, clock: clock, tasks: tasks, triggers: take config, ..) = take p
-    let Disk(scratch) = backing else {
-        return Error(Missing("scratch"))
-    }
-    let entries = match take config {
-        Some(TriggerConfig(entries: take listed, ..)) => take listed,
-        None => triggers.empty_entries(),
-    }
-    let setup = PrepareConfig(scratch: scratch, options: take options, attempt: take attempt, image_digest: take image, clock: clock, tasks: tasks, n_place: n_place, place: place, on_migrate: on_migrate, schema: schema, triggers: take entries)
-    match prepare_deploy(setup) {
-        Ok(()) => Ok(Unstarted),
-        Error(Open(take problem)) => Error(Open(take problem)),
-        Error(Identity) => Error(Open(IdentityUnknown)),
-        Error(Deploy(Store(take problem))) => Error(Open(Store(take problem))),
-        Error(Deploy(Scratch(Limit(Triggers)))) => Error(Open(Store(Limit(Triggers)))),
-        Error(Deploy(_)) => Error(Missing("prepared")),
     }
 }
 
@@ -1927,7 +1899,7 @@ pub type PlaceReady: codec + send {
 
 pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String) | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64) | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal)
 
-pub type InstallRefusal: codec + send = InstallHeld | InstallStore | InstallPlace | InstallMigration | InstallCurrent | InstallIdentity | InstallCapacity | InstallConfig | InstallWrongVersion(u64) | InstallPredecessor(Bytes)
+pub type InstallRefusal: codec + send = InstallHeld | InstallStore | InstallPlace | InstallMigration | InstallCurrent | InstallIdentity | InstallCapacity | InstallConfig | InstallWrongVersion(u64) | InstallPredecessor(Bytes) | InstallUnsettled
 
 pub fn store_mismatch(expected: (u64, u64), actual: (u64, u64)) -> String {
     let mut msg = string.from("store identity mismatch (expected ")
@@ -2196,216 +2168,6 @@ type HeadDrain {
     n_place: u64,
     cut: CutActivity,
     idle: Option[u64],
-}
-
-pub type PrepareError: send = Open(OpenError) | Deploy(store.DeployError) | Identity
-
-pub type PrepareConfig[G: send, H: shareable + inert + send] {
-    scratch: Dir,
-    options: store.Options,
-    attempt: Bytes,
-    image_digest: Bytes,
-    clock: Clock,
-    tasks: Tasks,
-    n_place: u64,
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]],
-    schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
-    triggers: triggers.Entries
-}
-
-pub type TriggerScanClass: codec + key + send = Cancelling | Held | Gone | Changed | Unchanged
-
-// TRIGGERS contains one value-codec List[TriggerScanRow].
-pub type TriggerScanRow: codec + send {
-    class: TriggerScanClass,
-    kind: Kind,
-    path: Bytes,
-    schema: Bytes,
-    count: u64,
-    earliest_due: u64
-}
-
-pub type PrepareArgs {
-    attempt: Bytes,
-    digest: Bytes
-}
-
-pub fn launch_prepare_args(a: Args) -> Result[Option[PrepareArgs], Exit] {
-    let Some(mode) = args.get(a, 0u64) else {
-        return Ok(None)
-    }
-    if mode != "--hirsel-prepare" {
-        return Ok(None)
-    }
-    let invalid = Exit(status: 1u8)
-    if args.len(a) != 4u64 {
-        return Error(invalid)
-    }
-    let Some(attempt_text) = args.get(a, 2u64) else {
-        return Error(invalid)
-    }
-    let Some(image_text) = args.get(a, 3u64) else {
-        return Error(invalid)
-    }
-    let attempt = prepare_hex(attempt_text, 16u64)
-    let digest = prepare_hex(image_text, 32u64)
-    match (take attempt, take digest) {
-        (Some(take ticket), Some(take image)) => Ok(Some(PrepareArgs(attempt: take ticket, digest: take image))),
-        _ => Error(invalid),
-    }
-}
-
-// The launcher passes the attempt and image digest as fixed-width hex.
-fn prepare_hex(text: String, count: u64) -> Option[Bytes] {
-    let raw = string.as_bytes(text)
-    if list.len(raw) != 2u64 * count {
-        return None
-    }
-    for byte in raw {
-        if byte >= b'A' && byte <= b'F' {
-            return None
-        }
-    }
-    std.hex.decode(raw)
-}
-
-fn prepare_result[T](take outcome: Result[T, store.DeployError]) -> Result[T, PrepareError] {
-    match take outcome {
-        Ok(take answer) => Ok(take answer),
-        Error(take reason) => Error(Deploy(take reason)),
-    }
-}
-
-fn prepare_open_result[T](take outcome: Result[T, store.Error]) -> Result[T, PrepareError] {
-    match take outcome {
-        Ok(take answer) => Ok(take answer),
-        Error(take reason) => Error(Open(Store(take reason))),
-    }
-}
-
-// The process receives its export directory as a scratch capability. It
-// creates no listener or live-store lock.
-pub fn prepare_deploy[G: send, H: shareable + inert + send](p: PrepareConfig[G, H]) -> Result[(), PrepareError] waits {
-    let source = prepare_result(store.open_export(p.scratch, p.clock, p.attempt, p.options))?
-    let digest = match launch_digest() {
-        Ok(take hash) => take hash,
-        Error(c) => return Error(Open(Store(Full(Allocation(c))))),
-    }
-    if list.len(digest) != 32 || digest != p.image_digest || launch_env().revision.size == 0u64 {
-        return Error(Identity)
-    }
-    prepare_export(p, source)
-}
-
-fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], source: store.Preparation) -> Result[(), PrepareError] waits {
-    let registered = match placed(p.place, p.n_place) {
-        Ok(take reg) => take reg,
-        Error(take error) => return Error(Open(Place(take error))),
-    }
-    if let Error(take problem) = activation_identity(code.identity(p.place), p.on_migrate, code.identity(p.schema)) {
-        return Error(Open(take problem))
-    }
-    let mut declaration = store.declare_export(source, p.tasks, p.on_migrate) ?=> |problem| Open(Migrate(problem))
-    let handles = (code.callable(p.schema))(mut declaration) ?=> |problem| Open(Migrate(problem))
-    let staged = store.finish_export_declaration(source, take declaration) ?=> |problem| Open(Migrate(problem))
-    if let Error(take problem) = store.validate_preparation(source, staged) {
-        return Error(Open(Store(take problem)))
-    }
-    let (take description, take record) = prepare_activation(registered, p.n_place, prepare_open_result(store.describe_declarations(p.clock, p.schema))?) ?=> |problem| Open(Place(problem))
-    let ReleaseRecord(release: take release, digest: take image, binding: take binding, ..) = take record
-    let target = store.PreparedTarget(describe: take description, release: take release, digest: take image, resident_limit: p.options.resident_limit, pack_bytes: p.options.pack_bytes, checkpoint_bytes: p.options.checkpoint_bytes, journal_limit: p.options.journal_limit)
-    let snapshot = store.staged_snapshot(source, staged)
-    let tables = prepare_open_result(declared_triggers(registered, handles, snapshot))?
-    let scan = prepare_trigger_scan(source, snapshot, tables, registered, p.triggers, binding)?
-    write_trigger_scan(p.scratch, scan)?
-    prepare_result(store.write_prepared(source, staged, p.scratch, take target))
-}
-
-fn trigger_scan_limit() -> PrepareError {
-    Deploy(Scratch(Limit(Triggers)))
-}
-
-fn prepare_trigger_scan[G: send, H: shareable + inert + send](source: store.Preparation, snapshot: store.Snapshot, tables: Option[triggers.Tables], reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[Bytes, PrepareError] waits {
-    let rows = match tables {
-        Some(table) => {
-            let read_handle = prepare_open_result(store.staged_reader(source, 0u64))?
-            let cursor = prepare_open_result(triggers.scan_pending(read_handle, snapshot, table))?
-            collect_trigger_scan(read_handle, take cursor, source, reg, choices, digest)?
-        },
-        None => list.new(),
-    }
-    let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
-    let mut raw: Bytes = list.new()
-    std.codec.encode(codec, rows, mut raw) ?=> |_| trigger_scan_limit()
-    Ok(take raw)
-}
-
-fn collect_trigger_scan[G: send, H: shareable + inert + send](read_handle: store.Reader, take cursor: triggers.PendingRows, source: store.Preparation, reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[List[TriggerScanRow], PrepareError] waits {
-    let mut remaining = take cursor
-    let raw = match store.export_system_get(source, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes(), 0u8) {
-        Ok(take row) => take row,
-        Error(Missing(_)) => None,
-        Error(take problem) => return Error(Open(Store(take problem))),
-    }
-    let old = if let Some(take prior_description) = take raw {
-        let codec: std.codec.Codec[Describe] = std.codec.of()
-        let Describe(exported: take prior_entries, ..) = std.codec.decode(codec, prior_description) ?=> |problem| Open(Store(Decode(problem)))
-        take prior_entries
-    } else {
-        list.new()
-    }
-    let mut grouped: Map[(TriggerScanClass, Kind, Bytes, Bytes), (u64, u64)] = map.new()
-    while let Some(take pending) = prepare_open_result(triggers.next_scanned(read_handle, mut remaining))? {
-        let class = prepare_open_result(trigger_scan_class(reg, choices, old, pending, digest))?
-        let due = triggers.due_time(pending)
-        let path: Bytes = clone(triggers.entry_path(pending))
-        let schema: Bytes = clone(triggers.argument_schema(pending))
-        let kind: Kind = if triggers.is_granted(pending) {
-            Granted
-        } else {
-            Transact
-        }
-        let key = (class, kind, take path, take schema)
-        map.update_or_insert(mut grouped, take key, (0u64, due), scoped fn(mut totals: (u64, u64)) {
-            totals = (totals.0 + 1u64, std.order.min(totals.1, due))
-        })
-    }
-    let mut rows: List[TriggerScanRow] = list.with_capacity(map.len(grouped))
-    for take ((class, kind, take path, take schema), (count, earliest)) in take grouped {
-        list.push(mut rows, TriggerScanRow(class: class, kind: kind, path: take path, schema: take schema, count: count, earliest_due: earliest))
-    }
-    Ok(take rows)
-}
-
-fn trigger_scan_class[G: send, H: shareable + inert + send](reg: Registry[G, H], choices: triggers.Entries, old: List[Exported], pending: triggers.Pending, digest: Bytes) -> Result[TriggerScanClass, store.Error] {
-    if triggers.cancelling(pending) {
-        return Ok(Cancelling)
-    }
-    if triggers.held_on_start(pending, digest) {
-        return Ok(Held)
-    }
-    let Some((_, index)) = trigger_key(reg, pending, choices)? else {
-        return Ok(Gone)
-    }
-    for entry in old {
-        if trigger_matches(pending, entry.described) {
-            return Ok(if entry.revision != reg.exported[index].revision {
-                Changed
-            } else {
-                Unchanged
-            })
-        }
-    }
-    Ok(Unchanged)
-}
-
-fn write_trigger_scan(d: Dir, raw: Bytes) -> Result[(), PrepareError] waits {
-    let mut file = host.open(d, "TRIGGERS", Write) ?=> |e| Deploy(Scratch(Io(e)))
-    host.write(mut file, raw) ?=> |e| Deploy(Scratch(Io(e.error)))
-    host.sync(mut file) ?=> |e| Deploy(Scratch(Io(e)))
-    host.close(take file) ?=> |e| Deploy(Scratch(Io(e)))
-    Ok(())
 }
 
 fn target_release(target: store.PreparedTarget, prepared: Inline[u8, 32]) -> Result[ReleaseRecord, store.DeployError] {
@@ -3251,7 +3013,7 @@ fn invoke_trigger_transaction[G: send, H: shareable + inert + send](mut db: stor
     Ok(TriggerSettled(take terminal))
 }
 
-type TriggerReport: send {
+type TriggerNotice: send {
     attempt: triggers.Attempt,
     to: Sender[HeadInput]
 }
@@ -3263,7 +3025,7 @@ type WireGrantReport: send {
     deadline: u64
 }
 
-type JobReport: send = Triggered(TriggerReport) | WireGrant(WireGrantReport)
+type JobReport: send = Triggered(TriggerNotice) | WireGrant(WireGrantReport)
 
 type WatchedJob[G: send, A, R]: send {
     job: Job[G, A, R],
@@ -3318,7 +3080,7 @@ fn launch_trigger[G: send, H: shareable + inert + send](r: Registry[G, H], mut d
         Error(Full(cap)) => return Error(Budget(capacity_room(store_capacity(cap)))),
         Error(_) => return Error(NoEntry),
     }
-    let notice = TriggerReport(attempt: a, to: channel.sender(drive.to))
+    let notice = TriggerNotice(attempt: a, to: channel.sender(drive.to))
     let copied: Caller = clone(drive.author)
     let caller = take copied
     match go(drive.tasks, take source, take caller, take raw, Some(Triggered(take notice))) {

@@ -42,6 +42,7 @@ dirs = ["."]
 "platform_sim_laws.hirsel" = "platform"
 "platform_source_laws.hirsel" = "platform"
 "platform_preview_laws.hirsel" = "platform"
+"platform_request_laws.hirsel" = "platform"
 
 [tests.runs."platform@1/local_laws/test_local_genesis_recovers"]
 limit = 134217728

@@ -12,6 +12,7 @@
 // D is the client's random 16-byte request ID, A a host-generated launcher.Attempt, and a
 // hash H is 32 bytes. A known D names the same group and input for its whole life.
 pub const PATH: String = "operator.sock"
+
 pub const MAX_FRAME: u64 = 16777216u64
 
 // A recorded group's tapes: each serving start writes `dir`/<recording ID in hex>.tape,
@@ -48,9 +49,10 @@ pub type Registration: codec + send {
 // One operator request. Tags: 0 Begin, 1 Data, 2 EndInput, 3 Confirm, 4 Status,
 // 5 ResolvePin, 6 LookupGroup, 7 Register, 8 Decide.
 pub type Ask: codec + send =
-// Begin(D, group, input, foreign, exec): deploy `input` to the group's current incarnation,
-// approving exactly these sorted Foreign and Exec lines.
-BeginAsk(Bytes, launcher.Group, launcher.Input, List[String], List[String])
+// Begin(D, group, input, foreign, exec, held): deploy `input` to the group's current
+// incarnation, approving exactly these sorted Foreign and Exec lines, with `held` the fate of
+// each run the deploy holds (RUNNER-SPEC §14.6). Unsorted or repeated entries are Invalid.
+BeginAsk(Bytes, launcher.Group, launcher.Input, List[String], List[String], runner.fate.Fates)
 // One nonempty chunk of an attested input's admission bytes, on the connection that owns A.
     | DataAsk(Bytes, launcher.Attempt, Bytes)
 // The attested input is complete.
@@ -89,15 +91,20 @@ pub type EntryLine: codec + send {
 
 // A deploy's preview (launch.md "Deploy preview"): the grant diff against OLD's recipe,
 // every entry of OLD or NEW sorted by identity, and the prepare child's report of what NEW
-// does with each pending trigger. A part not yet computed when the deploy ended is empty.
+// does with each pending trigger, with each held group's fate and the unmatched held entry
+// paths. A part not yet computed when the deploy ended is empty.
 pub type Preview: codec + send {
     grants: launcher.Grants,
     entries: List[EntryLine],
-    triggers: List[runner.TriggerScanRow]
+    triggers: runner.TriggerReport
+}
+
+pub fn no_triggers() -> runner.TriggerReport {
+    runner.TriggerReport(rows: list.new(), unmatched: list.new())
 }
 
 pub fn no_preview() -> Preview {
-    Preview(grants: launcher.no_grants(), entries: list.new(), triggers: list.new())
+    Preview(grants: launcher.no_grants(), entries: list.new(), triggers: no_triggers())
 }
 
 // A deploy's timing and preview: fetch and assembly nanoseconds, the write pause, and the
@@ -111,8 +118,8 @@ pub type Report: codec + send {
 
 // The error and failure classes. Tags 0 Protocol, 1 Denied, 2 UnknownRequest,
 // 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store,
-// 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted.
-pub type Class: codec + send = ProtocolClass | DeniedClass | UnknownRequestClass | UnknownGroupClass | ConflictClass | BusyClass | FullClass | InvalidClass | UnassembledClass | StoreClass | UncompiledClass | NotInstalledClass | ExhaustedClass
+// 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Unsettled.
+pub type Class: codec + send = ProtocolClass | DeniedClass | UnknownRequestClass | UnknownGroupClass | ConflictClass | BusyClass | FullClass | InvalidClass | UnassembledClass | StoreClass | UncompiledClass | NotInstalledClass | ExhaustedClass | UnsettledClass
 
 // Where a request stands. Tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A),
 // 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason),
@@ -128,10 +135,7 @@ StateAnswer(Bytes, launcher.Group, launcher.Input, Phase)
 // Need(D, A, keys, last): one part of the verifier's missing set.
     | NeedAnswer(Bytes, launcher.Attempt, List[launcher.Wanted], bool)
 // Display(D, A, R, text): the exact Foreign and Exec text to confirm for verified R.
-    | DisplayAnswer(Bytes, launcher.Attempt, Bytes, String)
-    | PinAnswer(Resolved)
-    | ErrorAnswer(Class, String)
-    | GroupAnswer(launcher.Group)
+    | DisplayAnswer(Bytes, launcher.Attempt, Bytes, String) | PinAnswer(Resolved) | ErrorAnswer(Class, String) | GroupAnswer(launcher.Group)
 // Part(total, offset, bytes): one in-order chunk of an encoded reply larger than a frame.
     | PartAnswer(u64, u64, Bytes)
 
@@ -180,18 +184,21 @@ pub fn send_frame(mut output: WriteHalf, body: Bytes, until: Until) -> bool wait
     runner.send_frame(mut output, body, MAX_FRAME, until)
 }
 
-
 // Open one operator exchange and read its first answer. Source Begin carries its whole
 // input, so a complete admission keeps running after this connection closes.
 pub fn exchange(n: Net, root: String, ask: Ask, until: Until) -> Option[Answer] waits {
-    let Ok(take socket) = host.connect_unix(n, root, PATH, until) else { return None }
+    let Ok(take socket) = host.connect_unix(n, root, PATH, until) else {
+        return None
+    }
     let (take rd, take wr) = net.split(take socket)
     let mut w = take wr
     if !send_frame(mut w, ask_bytes(ask), until) {
         return None
     }
     let mut r = take rd
-    let Some(body) = read_frame(mut r, until) else { return None }
+    let Some(body) = read_frame(mut r, until) else {
+        return None
+    }
     let codec: std.codec.Codec[Answer] = std.codec.of()
     match std.codec.decode(codec, body) {
         Ok(take a) => Some(take a),

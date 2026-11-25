@@ -51,7 +51,7 @@ pub(crate) struct Registration {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ask {
-    Begin(Vec<u8>, Group, Input, Vec<String>, Vec<String>),
+    Begin(Vec<u8>, Group, Input, Vec<String>, Vec<String>, Fates),
     Data(Vec<u8>, Attempt, Vec<u8>),
     End(Vec<u8>, Attempt),
     Confirm(Vec<u8>, Attempt, Vec<u8>),
@@ -91,7 +91,7 @@ pub(crate) struct Report {
 pub(crate) struct Preview {
     pub(crate) grants: Grants,
     pub(crate) entries: Vec<EntryLine>,
-    pub(crate) triggers: Vec<TriggerLine>,
+    pub(crate) triggers: TriggerReport,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,17 +115,94 @@ pub(crate) struct EntryLine {
     pub(crate) change: EntryChange,
 }
 
+/// The fate of a held run (RUNNER-SPEC §14.6, `runner.fate.HeldFate`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldFate {
+    Release,
+    Cancel,
+}
+
+impl HeldFate {
+    fn put(self, w: &mut Writer) {
+        w.u32(match self {
+            Self::Release => 0,
+            Self::Cancel => 1,
+        });
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        match r.u32()? {
+            0 => Ok(Self::Release),
+            1 => Ok(Self::Cancel),
+            _ => Err(malformed("held fate tag")),
+        }
+    }
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
+/// A deploy's fates, Begin's `held` (`runner.fate.Fates`): `all`, and `entries` sorted by
+/// path with no path repeated.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Fates {
+    pub(crate) all: Option<HeldFate>,
+    pub(crate) entries: Vec<(Vec<u8>, HeldFate)>,
+}
+
+impl Wire for Fates {
+    fn put(&self, w: &mut Writer) {
+        w.option(&self.all, |w, f| f.put(w));
+        w.u32(self.entries.len() as u32);
+        for (path, fate) in &self.entries {
+            w.bytes(path);
+            fate.put(w);
+        }
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        let all = r.option(HeldFate::get)?;
+        let n = r.u32()?;
+        let mut entries = Vec::new();
+        for _ in 0..n {
+            entries.push((r.bytes()?, HeldFate::get(r)?));
+        }
+        Ok(Self { all, entries })
+    }
+}
+
+/// What holds a held group (`runner.fate.HeldBy`): a cut run, or a `Revision` or `Request`
+/// hold, with whether the row's stamp equals NEW's identity digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldBy {
+    Cut,
+    Revision(bool),
+    Request(bool),
+}
+
 /// One group of pending triggers in the prepare child's report (`runner.TriggerScanRow`):
 /// class tag (0 cancelling, 1 held, 2 gone, 3 changed, 4 unchanged), kind tag (0 compute,
-/// 1 transact, 2 query, 3 granted), path, schema, count and earliest due time.
+/// 1 transact, 2 query, 3 granted), path, schema, the hold and fate of a held group, count
+/// and earliest due time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TriggerLine {
     pub(crate) class: u32,
     pub(crate) kind: u32,
     pub(crate) path: Vec<u8>,
     pub(crate) schema: Vec<u8>,
+    pub(crate) hold: Option<HeldBy>,
+    pub(crate) fate: Option<HeldFate>,
     pub(crate) count: u64,
     pub(crate) earliest_due: u64,
+}
+
+/// The prepare child's trigger report (`runner.TriggerReport`): its groups, and each held
+/// entry path that names no pending run and no entry OLD or NEW registers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TriggerReport {
+    pub(crate) rows: Vec<TriggerLine>,
+    pub(crate) unmatched: Vec<Vec<u8>>,
 }
 
 impl Wire for Preview {
@@ -136,14 +213,30 @@ impl Wire for Preview {
             w.bytes(&e.identity);
             w.u32(ENTRY_CHANGES.iter().position(|c| *c == e.change).unwrap() as u32);
         }
-        w.u32(self.triggers.len() as u32);
-        for t in &self.triggers {
+        w.u32(self.triggers.rows.len() as u32);
+        for t in &self.triggers.rows {
             w.u32(t.class);
             w.u32(t.kind);
             w.bytes(&t.path);
             w.bytes(&t.schema);
+            w.option(&t.hold, |w, hold| match *hold {
+                HeldBy::Cut => w.u32(0),
+                HeldBy::Revision(same) => {
+                    w.u32(1);
+                    w.bool(same);
+                }
+                HeldBy::Request(same) => {
+                    w.u32(2);
+                    w.bool(same);
+                }
+            });
+            w.option(&t.fate, |w, f| f.put(w));
             w.u64(t.count);
             w.u64(t.earliest_due);
+        }
+        w.u32(self.triggers.unmatched.len() as u32);
+        for path in &self.triggers.unmatched {
+            w.bytes(path);
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -158,26 +251,41 @@ impl Wire for Preview {
             entries.push(EntryLine { identity, change });
         }
         let n = r.u32()?;
-        let mut triggers = Vec::new();
+        let mut rows = Vec::new();
         for _ in 0..n {
             let class = r.u32()?;
             let kind = r.u32()?;
             if class > 4 || kind > 3 {
                 return Err(malformed("trigger report tag"));
             }
-            triggers.push(TriggerLine {
+            let path = r.bytes()?;
+            let schema = r.bytes()?;
+            let hold = r.option(|r| match r.u32()? {
+                0 => Ok(HeldBy::Cut),
+                1 => Ok(HeldBy::Revision(r.bool()?)),
+                2 => Ok(HeldBy::Request(r.bool()?)),
+                _ => Err(malformed("held-by tag")),
+            })?;
+            rows.push(TriggerLine {
                 class,
                 kind,
-                path: r.bytes()?,
-                schema: r.bytes()?,
+                path,
+                schema,
+                hold,
+                fate: r.option(HeldFate::get)?,
                 count: r.u64()?,
                 earliest_due: r.u64()?,
             });
         }
+        let n = r.u32()?;
+        let mut unmatched = Vec::new();
+        for _ in 0..n {
+            unmatched.push(r.bytes()?);
+        }
         Ok(Self {
             grants,
             entries,
-            triggers,
+            triggers: TriggerReport { rows, unmatched },
         })
     }
 }
@@ -197,9 +305,11 @@ pub(crate) enum Class {
     Uncompiled,
     NotInstalledAfterRecovery,
     Exhausted,
+    /// A held run has no fate, or a held entry path is unmatched (RUNNER-SPEC §14.6).
+    Unsettled,
 }
 
-const CLASSES: [Class; 13] = [
+const CLASSES: [Class; 14] = [
     Class::Protocol,
     Class::Denied,
     Class::UnknownRequest,
@@ -213,6 +323,7 @@ const CLASSES: [Class; 13] = [
     Class::Uncompiled,
     Class::NotInstalledAfterRecovery,
     Class::Exhausted,
+    Class::Unsettled,
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -295,13 +406,14 @@ impl Wire for Registration {
 impl Wire for Ask {
     fn put(&self, w: &mut Writer) {
         match self {
-            Self::Begin(d, g, input, foreign, exec) => {
+            Self::Begin(d, g, input, foreign, exec, held) => {
                 w.u32(0);
                 w.bytes(d);
                 g.put(w);
                 input.put(w);
                 w.strings(foreign);
                 w.strings(exec);
+                held.put(w);
             }
             Self::Data(d, a, bytes) => {
                 w.u32(1);
@@ -347,6 +459,7 @@ impl Wire for Ask {
                 Input::get(r)?,
                 r.strings()?,
                 r.strings()?,
+                Fates::get(r)?,
             ),
             1 => Self::Data(r.bytes()?, Attempt::get(r)?, r.bytes()?),
             2 => Self::End(r.bytes()?, Attempt::get(r)?),
@@ -665,225 +778,4 @@ impl Connection {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::code_admission::ObjectKind;
-    use hirsel_core_ids::ContentHash;
-
-    fn hex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-            .collect()
-    }
-    fn d() -> Vec<u8> {
-        vec![0x21; 16]
-    }
-    fn group() -> Group {
-        Group {
-            name: "g".into(),
-            incarnation: 3,
-        }
-    }
-    fn attempt() -> Attempt {
-        Attempt {
-            hi: 0x0102030405060708,
-            lo: 0x1112131415161718,
-        }
-    }
-    fn state(phase: Phase) -> Answer {
-        Answer::State(d(), group(), Input::Publication(vec![1]), phase)
-    }
-    fn report(pause: Pause) -> Report {
-        Report {
-            fetch_ns: None,
-            assemble_ns: None,
-            pause,
-            preview: Preview::default(),
-        }
-    }
-    fn grants() -> Grants {
-        Grants {
-            added: vec!["Clock".into()],
-            removed: vec!["Dir=a".into()],
-        }
-    }
-
-    // The expected bytes are shared with core/programs/platform/operator_wire.hirsel. They were
-    // derived from core/std/api/codec.md's format by an encoder written apart from both
-    // implementations.
-    #[test]
-    fn operator_vectors() {
-        let asks = [
-            (
-                Ask::Begin(
-                    d(),
-                    group(),
-                    Input::Attested(vec![0xcc; 32]),
-                    vec!["f".into()],
-                    vec!["e".into()],
-                ),
-                "000000001000000021212121212121212121212121212121010000006703000000000000000000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc010000000100000066010000000100000065",
-            ),
-            (
-                Ask::Data(d(), attempt(), vec![1, 2]),
-                "01000000100000002121212121212121212121212121212108070605040302011817161514131211020000000102",
-            ),
-            (
-                Ask::End(d(), attempt()),
-                "02000000100000002121212121212121212121212121212108070605040302011817161514131211",
-            ),
-            (
-                Ask::Confirm(d(), attempt(), vec![0xdd; 32]),
-                "0300000010000000212121212121212121212121212121210807060504030201181716151413121120000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-            ),
-            (
-                Ask::Status(d()),
-                "040000001000000021212121212121212121212121212121",
-            ),
-            (
-                Ask::Resolve(vec![0x31; 16]),
-                "050000001000000031313131313131313131313131313131",
-            ),
-            (Ask::Lookup("g".into()), "060000000100000067"),
-            (
-                Ask::Decide(d(), grants(), true),
-                "0800000010000000212121212121212121212121212121210100000005000000436c6f636b01000000050000004469723d6101",
-            ),
-            (
-                Ask::Register(
-                    d(),
-                    Box::new(Registration {
-                        name: "g".into(),
-                        tenant: "t".into(),
-                        workdir: "/w".into(),
-                        trusted: false,
-                        listen: "127.0.0.1:9".into(),
-                        store: "/store".into(),
-                        memory: Some(4096),
-                        args: vec!["--port".into()],
-                        record: Some(Record {
-                            dir: "/tapes".into(),
-                            retention_s: 60,
-                        }),
-                        front: Some(Front {
-                            names: vec!["edge.example".into()],
-                            forward: Forward::Stream,
-                        }),
-                    }),
-                    Input::Publication(vec![1]),
-                    Vec::new(),
-                    Vec::new(),
-                ),
-                "07000000100000002121212121212121212121212121212101000000670100000074020000002f77000b0000003132372e302e302e313a39060000002f73746f726501000000001000000000000001000000060000002d2d706f727401000000060000002f74617065733c0000000000000001000000010000000c000000656467652e6578616d706c65010000000100000001000000010000000000000000",
-            ),
-        ];
-        let answers = [
-            (
-                Answer::State(
-                    d(),
-                    group(),
-                    Input::Attested(vec![0xcc; 32]),
-                    Phase::AwaitInput(attempt()),
-                ),
-                "000000001000000021212121212121212121212121212121010000006703000000000000000000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc0000000008070605040302011817161514131211",
-            ),
-            (
-                state(Phase::Pending(attempt(), 5)),
-                "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000105000000080706050403020118171615141312110500000000000000",
-            ),
-            (
-                state(Phase::Undecided(attempt(), 5, "lost".into())),
-                "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000106000000080706050403020118171615141312110500000000000000040000006c6f7374",
-            ),
-            (
-                state(Phase::Installed(
-                    5,
-                    vec![0xaa; 32],
-                    Report {
-                        fetch_ns: Some(7),
-                        assemble_ns: None,
-                        pause: Pause::Measured(2000),
-                        preview: Preview {
-                            grants: Grants {
-                                added: vec!["Clock".into()],
-                                removed: Vec::new(),
-                            },
-                            entries: vec![EntryLine {
-                                identity: vec![0xee],
-                                change: EntryChange::Changed,
-                            }],
-                            triggers: vec![TriggerLine {
-                                class: 1,
-                                kind: 1,
-                                path: vec![1],
-                                schema: vec![2],
-                                count: 3,
-                                earliest_due: 4,
-                            }],
-                        },
-                    },
-                )),
-                "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000107000000050000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0100000007000000000000000000000002000000d0070000000000000100000005000000436c6f636b000000000100000001000000ee020000000100000001000000010000000100000001010000000203000000000000000400000000000000",
-            ),
-            (
-                state(Phase::Installed(
-                    0,
-                    vec![0xaa; 32],
-                    report(Pause::StartFailed("x".into())),
-                )),
-                "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000107000000000000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000004000000010000007800000000000000000000000000000000",
-            ),
-            (
-                state(Phase::Failed(
-                    Class::Denied,
-                    "no".into(),
-                    report(Pause::NotStarted),
-                )),
-                "000000001000000021212121212121212121212121212121010000006703000000000000000100000001000000010800000001000000020000006e6f00000000000000000000000000000000000000000000000000000000",
-            ),
-            (
-                state(Phase::AwaitDecision(grants())),
-                "00000000100000002121212121212121212121212121212101000000670300000000000000010000000100000001090000000100000005000000436c6f636b01000000050000004469723d61",
-            ),
-            (
-                Answer::Need(
-                    d(),
-                    attempt(),
-                    vec![ObjectKey {
-                        kind: ObjectKind::Group,
-                        hash: ContentHash([0xaa; 32]),
-                    }],
-                    true,
-                ),
-                "01000000100000002121212121212121212121212121212108070605040302011817161514131211010000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
-            ),
-            (
-                Answer::Display(d(), attempt(), vec![0xcc; 32], "foreign: x\n".into()),
-                "0200000010000000212121212121212121212121212121210807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc0b000000666f726569676e3a20780a",
-            ),
-            (
-                Answer::Pin(Resolved::Found(vec![0xaa; 32])),
-                "030000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            ),
-            (Answer::Pin(Resolved::Gone), "0300000001000000"),
-            (
-                Answer::Error(Class::NotInstalledAfterRecovery, "x".into()),
-                "040000000b0000000100000078",
-            ),
-            (Answer::Group(group()), "0500000001000000670300000000000000"),
-            (
-                Answer::Part(10, 0, vec![1, 2]),
-                "060000000a000000000000000000000000000000020000000102",
-            ),
-        ];
-        for (value, expected) in &asks {
-            assert_eq!(value.encode(), hex(expected), "{value:?}");
-            assert_eq!(&Ask::decode(&hex(expected)).unwrap(), value);
-        }
-        for (value, expected) in &answers {
-            assert_eq!(value.encode(), hex(expected), "{value:?}");
-            assert_eq!(&Answer::decode(&hex(expected)).unwrap(), value);
-        }
-    }
-}
+mod tests;

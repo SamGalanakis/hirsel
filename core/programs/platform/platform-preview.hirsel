@@ -1,7 +1,6 @@
 // Module platform, the deploy preview and its decision (launch.md "Deploy preview"): the
 // hold of a request whose grant diff awaits a person, the Decide that ends it, and the
 // entry and trigger parts of a deploy's preview.
-
 fn same_grants(a: launcher.Grants, b: launcher.Grants) -> bool {
     a.added == b.added && a.dropped == b.dropped
 }
@@ -13,7 +12,7 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
         let t = view h.t
         let shown = view diff
         store.run(mut h.db, None, (store.copy_env(d), store.copy_env(t), store.copy_env(shown)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let Some(found) = st(store.fetch(tx, call_env.1.requests, call_env.0))? else {
+            let Some(found) = st(store.fetch(tx, call_env.1 .requests, call_env.0))? else {
                 return Ok(())
             }
             let mut row = found
@@ -21,7 +20,7 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
                 return Ok(())
             }
             row.held = Some(clone(call_env.2))
-            st(store.put(mut tx, call_env.1.requests, call_env.0, row))?
+            st(store.put(mut tx, call_env.1 .requests, call_env.0, row))?
             Ok(())
         })
     }
@@ -81,10 +80,10 @@ fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool
         let t = view h.t
         let approved = view diff
         store.run(mut h.db, None, (store.copy_env(d), store.copy_env(now), store.copy_env(t), store.copy_env(approved)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
-            let Some(found) = st(store.fetch(tx, call_env.2.requests, call_env.0))? else {
+            let Some(found) = st(store.fetch(tx, call_env.2 .requests, call_env.0))? else {
                 return Error(Missing("request"))
             }
-            if let Some(x) = st(store.fetch(tx, call_env.2.active, found.group.name))? {
+            if let Some(x) = st(store.fetch(tx, call_env.2 .active, found.group.name))? {
                 if x != call_env.0 {
                     return Error(Busy(0u64))
                 }
@@ -92,10 +91,10 @@ fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool
             let mut row = found
             let a = fresh_attempt(mut tx, call_env.2)?
             row.attempt = a
-            row.deadline_ms = call_env.1.wall_ms + ADMISSION_MS
+            row.deadline_ms = call_env.1 .wall_ms + ADMISSION_MS
             row.held = None
             row.approved = clone(call_env.3)
-            st(store.put(mut tx, call_env.2.requests, call_env.0, row))?
+            st(store.put(mut tx, call_env.2 .requests, call_env.0, row))?
             Ok(a)
         })
     }
@@ -120,7 +119,11 @@ fn entry_diff(old: List[runner.Exported], new: List[runner.Exported]) -> List[op
         let mut change: operator.EntryChange = EntryRemoved
         for n in new {
             if n.described.identity == o.described.identity {
-                change = if n.revision == o.revision { EntryUnchanged } else { EntryChanged }
+                change = if n.revision == o.revision {
+                    EntryUnchanged
+                } else {
+                    EntryChanged
+                }
                 break
             }
         }
@@ -138,18 +141,31 @@ fn entry_diff(old: List[runner.Exported], new: List[runner.Exported]) -> List[op
             list.push(mut lines, operator.EntryLine(identity: clone(n.described.identity), change: EntryAdded))
         }
     }
-    list.sort(mut lines, fn(a: operator.EntryLine, b: operator.EntryLine) -> Order { order.compare(a.identity, b.identity) })
+    list.sort(mut lines, fn(a: operator.EntryLine, b: operator.EntryLine) -> Order {
+        order.compare(a.identity, b.identity)
+    })
     lines
 }
 
 // The prepare child's answer: its whole trigger report (launch.md "Preparing the pending
 // trigger report").
-fn trigger_rows(b: Bytes) -> Option[List[runner.TriggerScanRow]] {
-    let codec: std.codec.Codec[List[runner.TriggerScanRow]] = std.codec.of_list()
+fn trigger_report(b: Bytes) -> Option[runner.TriggerReport] {
+    let codec: std.codec.Codec[runner.TriggerReport] = std.codec.of()
     match std.codec.decode(codec, b) {
-        Ok(take rows) => Some(take rows),
+        Ok(take report) => Some(take report),
         Error(_) => None,
     }
+}
+
+// The deploy's fates: the `held` field of its recorded Begin.
+fn deploy_held(h: Host, d: Bytes) -> Result[runner.fate.Fates, Refused] waits {
+    let Some(row) = request_row(h, d)? else {
+        return Error(Missing("deploy request"))
+    }
+    let Some(BeginAsk(_, _, _, _, _, held)) = operator.decode_ask(row.begin) else {
+        return Error(Missing("deploy Begin"))
+    }
+    Ok(clone(held))
 }
 
 // Read the contract from the original Begin, including after a grant decision or reconnect.
@@ -180,11 +196,55 @@ fn keeps_entries(required: List[launcher.RequiredEntry], exported: List[runner.E
         map.insert(mut keys, take key, e.described.kind)
     }
     for entry in required {
-        let Some(kind) = map.get(keys, entry.key) else { return false }
+        let Some(kind) = map.get(keys, entry.key) else {
+            return false
+        }
         let actual: runner.Kind = clone(kind)
         if actual != entry.kind {
             return false
         }
     }
     true
+}
+
+// The new image's preview receives the old image's exported list.
+fn old_entries(b: Bytes) -> Option[(Bytes, List[runner.Exported], Binding)] {
+    let Some(take describe) = runner.decode_description(b) else {
+        return None
+    }
+    let Some(take binding) = binding_of(describe) else {
+        return None
+    }
+    let runner.Describe(exported: take exported, ..) = take describe
+    let list_codec: std.codec.Codec[List[runner.Exported]] = std.codec.of_list()
+    let mut raw: Bytes = list.new()
+    if let Error(_) = std.codec.encode(list_codec, exported, mut raw) {
+        return None
+    }
+    Some((take raw, take exported, take binding))
+}
+
+// The canonical Describe encoding is also the prefix of the Preview encoding.
+fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes, List[runner.Exported]), String] {
+    let codec: std.codec.Codec[runner.Preview] = std.codec.of()
+    let Ok(runner.Preview(describe: take description, release: take release, answers: take answers)) = std.codec.decode(codec, b) else {
+        return Error("preview: a malformed answer")
+    }
+    if description.digest != p.image || description.target != p.target || description.n_place != p.n_place {
+        return Error("preview does not describe the selected assembly")
+    }
+    if list.len(description.revision) != 32u64 {
+        return Error("preview: entry revision is unavailable")
+    }
+    if list.len(release) != 32u64 {
+        return Error("preview: the release is not 32 bytes")
+    }
+    if list.len(answers) != count {
+        return Error("preview answer count")
+    }
+    let describe_codec: std.codec.Codec[runner.Describe] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    let _ = std.codec.encode(describe_codec, description, mut raw) ?=> |_| "preview: a malformed answer"
+    let runner.Describe(exported: take exported, ..) = take description
+    Ok((take raw, take release, take exported))
 }

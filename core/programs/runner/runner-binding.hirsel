@@ -211,7 +211,7 @@ type LaunchEnv {
     target: LaunchBytes,
     describe: bool,
     preview: Option[LaunchBytes],
-    prepare: Option[(LaunchBytes, LaunchBytes)],
+    prepare: Option[(LaunchBytes, LaunchBytes, LaunchBytes)],
     wake: bool,
     idle: Option[u64],
     store_id: Option[(u64, u64)],
@@ -228,7 +228,7 @@ fn launch_env() -> LaunchEnv {
         None
     }
     let prepare_mode = if launch_word(9u64, 0u64) != 0u64 {
-        Some((LaunchBytes(field: 10u64, size: 16u64), LaunchBytes(field: 11u64, size: 32u64)))
+        Some((LaunchBytes(field: 10u64, size: 16u64), LaunchBytes(field: 11u64, size: 32u64), LaunchBytes(field: 24u64, size: launch_word(23u64, 0u64))))
     } else {
         None
     }

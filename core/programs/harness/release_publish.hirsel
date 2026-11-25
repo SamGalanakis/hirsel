@@ -12,6 +12,7 @@ pub type Target: send {
 }
 
 pub type Progress: send = Idle | InProgress(Bytes, platform.operator.Phase) | Settled(Bytes, release.State)
+
 pub type Error: send = App(runner.client.CallError) | AppRefused(harness.Refused) | Wire | Operator | Refused(platform.operator.Class, String)
 
 // A proposal's D remains the same on every host restart. Group incarnation distinguishes
@@ -75,12 +76,16 @@ fn read_app[A: codec](mut app: runner.client.Client, entry: runner.client.Callee
 
 fn next_proposal(mut app: runner.client.Client, e: Entries, within_ms: u64) -> Result[Option[(Bytes, release.Proposal)], Error] waits {
     let seen = read_app(mut app, e.pending, (), within_ms)?
-    if list.len(seen.rows) == 0u64 { return Ok(None) }
+    if list.len(seen.rows) == 0u64 {
+        return Ok(None)
+    }
     let row = view seen.rows[0u64]
     // WIRE keys start with the store's four-byte table prefix.
     let mut at = 4u64
     let id = std.codec.take_key_bytes(row.key, mut at) ?=> |_| Wire
-    let Some(raw) = row.value else { return Error(Wire) }
+    let Some(raw) = row.value else {
+        return Error(Wire)
+    }
     let codec: std.codec.Codec[release.Proposal] = std.codec.of()
     let proposal = std.codec.decode(codec, raw) ?=> |_| Wire
     if let Filed = proposal.state {
@@ -105,15 +110,23 @@ fn source_of(mut app: runner.client.Client, e: Entries, p: release.Proposal, wit
     let mut size = 4u64
     loop {
         let seen = read_app(mut app, e.source, clone(after), within_ms)?
-        if list.len(seen.rows) == 0u64 { break }
-        if list.len(seen.rows) != 1u64 { return Error(Wire) }
+        if list.len(seen.rows) == 0u64 {
+            break
+        }
+        if list.len(seen.rows) != 1u64 {
+            return Error(Wire)
+        }
         let row = view seen.rows[0u64]
         let mut at = 4u64
         let path = std.codec.take_key_string(row.key, mut at) ?=> |_| Wire
         if let Some(previous) = after {
-            if order.compare(path, previous) != Greater { return Error(Wire) }
+            if order.compare(path, previous) != Greater {
+                return Error(Wire)
+            }
         }
-        let Some(raw) = row.value else { return Error(Wire) }
+        let Some(raw) = row.value else {
+            return Error(Wire)
+        }
         let text = std.codec.decode(std.codec.of_string(), raw) ?=> |_| Wire
         size += 8u64 + string.byte_len(path) + string.byte_len(text)
         if size > platform.launcher.TREE_BYTES {
@@ -138,9 +151,13 @@ fn ask(net: Net, target: Target, clock: Clock, within_ms: u32, a: platform.opera
 
 // Keep the proposal in memory between polls so observing a running deploy does not
 // repeatedly query the app while OLD's store is being exported.
-pub opaque type Publisher { pending: Option[(Bytes, release.Proposal)] }
+pub opaque type Publisher {
+    pending: Option[(Bytes, release.Proposal)]
+}
 
-pub fn publisher() -> Publisher { Publisher(pending: None) }
+pub fn publisher() -> Publisher {
+    Publisher(pending: None)
+}
 
 // Run one publisher per group. Reconnect the app's WIRE client when it closes at cutover.
 // After a publisher restart its first poll reads the pending row again.
@@ -150,7 +167,9 @@ pub fn poll(mut worker: Publisher, mut app: runner.client.Client, e: Entries, ne
         worker.pending = take found
     }
     let result = {
-        let Some((id, p)) = view worker.pending else { return Ok(Idle) }
+        let Some((id, p)) = view worker.pending else {
+            return Ok(Idle)
+        }
         drive(mut app, e, net, target, clock, within_ms, id, p)?
     }
     if let Settled(_, _) = result {
@@ -173,7 +192,7 @@ fn drive(mut app: runner.client.Client, e: Entries, net: Net, target: Target, cl
     // AwaitInput after a restart means the launcher lost its attempt. Repeat the original
     // Begin from the catalog, even if the harness has edited the source rows since then.
     let state = match take submitted {
-        Some(take input) => ask(net, target, clock, within_ms, BeginAsk(clone(d), clone(target.group), take input, list.new(), list.new()))?,
+        Some(take input) => ask(net, target, clock, within_ms, BeginAsk(clone(d), clone(target.group), take input, list.new(), list.new(), runner.fate.none()))?,
         None => take first,
     }
     match take state {

@@ -1,0 +1,51 @@
+// L49 `operator_request_identity` (launch.md "The operator socket"): a deploy is named by
+// its client's 16-byte request ID D, durably. A Begin retried with the same D after the host
+// is lost gets the recorded outcome and admits nothing; the same D with other content is a
+// Conflict; an upload whose connection closes before its end releases its attempt, and the
+// same Begin admits again under a fresh attempt; Status(D) still reports an installed
+// request after a later deploy of the group.
+@test
+fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "g", "t")
+    op_wake(mut r, "g")
+    let old = last(r, "g")
+    let go = prepared(mut r, old)
+    pump(mut r, take go)
+    answer(mut r, old, PlaceInstalled(2u64, true))
+    let first: Bytes = clone(r.req)
+    expect(is_installed(phase_on(r, r.conn)), "L49: the owner was not sent Installed")
+    let mut b = restart(take r, 4u64)
+    let retry = begin_with(mut b, first, Attested(image_two()))
+    expect(is_installed(phase_on(b, retry)) && admits(b) == 0u64, "L49: a Begin retried after host loss admitted again or lost its outcome")
+    let other = begin_with(mut b, first, Attested(image()))
+    expect(errored(b, other, ConflictClass) && admits(b) == 0u64, "L49: the same request ID with other content was not a Conflict")
+    // (v2.71) The fates are part of Begin's canonical bytes.
+    let mut release_all = runner.fate.none()
+    release_all.all = Some(Release)
+    let refated = begin_held(mut b, first, Attested(image_two()), take release_all)
+    expect(errored(b, refated, ConflictClass) && admits(b) == 0u64, "L49: the same request ID and content with another held value was not a Conflict")
+    // Entries out of path order are Invalid before any row is written.
+    let mut unsorted = runner.fate.none()
+    list.push(mut unsorted.entries, runner.fate.EntryFate(path: bytes_of(1u64, 98u8), fate: Release))
+    list.push(mut unsorted.entries, runner.fate.EntryFate(path: bytes_of(1u64, 97u8), fate: Cancel))
+    let disordered = begin_held(mut b, request_id(90u64), Attested(image_two()), take unsorted)
+    expect(errored(b, disordered, InvalidClass) && admits(b) == 0u64, "L49: unsorted held entries were not Invalid")
+    let cut = begin_new(mut b)
+    let a1 = b.a
+    expect(admits(b) == 1u64, "L49: a new request ID did not admit")
+    hang_up(mut b, cut)
+    expect(released(b, a1), "L49: an upload cut off before its end kept its attempt")
+    let second: Bytes = clone(b.req)
+    let _ = begin_with(mut b, second, Attested(image_two()))
+    expect(admits(b) == 2u64 && !same_attempt(a1, b.a), "L49: the repeated Begin did not admit again under a fresh attempt")
+    // The second request reaches its own deploy row; the first's Status is unchanged.
+    let mut ev: List[launcher.Event] = list.new()
+    list.push(mut ev, Admitted(b.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), ""))
+    feed(mut b, take ev)
+    assembled_new(mut b)
+    expect(still_preparing(b), "L49: the second request did not reach its deploy row")
+    expect(is_installed(status_of(mut b, first)), "L49: Status lost the installed request after a later deploy")
+    unplug(mut b)
+    Ok(())
+}

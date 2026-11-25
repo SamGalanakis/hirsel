@@ -1125,7 +1125,7 @@ impl<I: Images> Launcher<I> {
                     input = Some(old_entries);
                 }
             }
-            Mode::Prepare(attempt, export) => {
+            Mode::Prepare(attempt, export, fates) => {
                 if export.is_empty()
                     || !export
                         .bytes()
@@ -1139,8 +1139,7 @@ impl<I: Images> Launcher<I> {
                     .arg(&n_place)
                     .arg("--hirsel-prepare")
                     .arg(&path)
-                    .arg(hex(&attempt.bytes()))
-                    .arg(hex(&image.digest));
+                    .args([hex(&attempt.bytes()), hex(&image.digest), hex(&fates)]);
                 triggers = Some((path.join("TRIGGERS"), image.n_place));
             }
             Mode::Install(_, kind) => {

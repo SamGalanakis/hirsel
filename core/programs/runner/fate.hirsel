@@ -124,7 +124,13 @@ pub fn held_by(p: triggers.Pending, image: Bytes) -> HeldBy {
 /// `entries` element is unmatched.
 pub fn settle(db: store.Db, mut staged: store.StagedMigration, t: triggers.Tables, image: Bytes, registered: List[Bytes], f: Fates) -> Result[Option[HeldReport], store.Error] waits {
     let snap = store.staged_install_snapshot(db, staged)
-    let read_handle = store.reader(db, 0u64)?
+    settle_read(store.reader(db, 0u64)?, snap, mut staged, t, image, registered, f)
+}
+
+/// `settle` over a reader and snapshot of the staged store, which the prepare
+/// child reads through `store.staged_reader` (launch.md "Preparing the pending
+/// trigger report").
+pub fn settle_read(read_handle: store.Reader, snap: store.Snapshot, mut staged: store.StagedMigration, t: triggers.Tables, image: Bytes, registered: List[Bytes], f: Fates) -> Result[Option[HeldReport], store.Error] waits {
     let mut cursor = triggers.scan_pending(read_handle, snap, t)?
     let mut seen: List[bool] = list.new()
     for _ in f.entries {
@@ -227,4 +233,39 @@ pub fn push_report(mut line: String, report: HeldReport) {
         string.push(mut line, "\nunmatched ")
         push_path(mut line, path)
     }
+}
+
+/// The value-codec bytes of `f`: the prepare launch's fourth argument and the
+/// operator Begin's `held` (docs/spec/launch.md).
+pub fn encode(f: Fates) -> Option[Bytes] {
+    let codec: std.codec.Codec[Fates] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    match std.codec.encode(codec, f, mut raw) {
+        Ok(()) => Some(take raw),
+        Error(_) => None,
+    }
+}
+
+/// Decodes `encode`'s bytes. None when they do not decode, or when `entries`
+/// is not sorted by path or repeats one.
+pub fn decode(raw: Bytes) -> Option[Fates] {
+    let codec: std.codec.Codec[Fates] = std.codec.of()
+    let Ok(take f) = std.codec.decode(codec, raw) else {
+        return None
+    }
+    if !well_formed(f) {
+        return None
+    }
+    Some(take f)
+}
+
+/// `entries` is sorted by path with no path repeated.
+pub fn well_formed(f: Fates) -> bool {
+    for i in 1u64 .. list.len(f.entries) {
+        match list.compare_bytes(f.entries[i - 1u64].path, f.entries[i].path) {
+            Less => {},
+            _ => return false,
+        }
+    }
+    true
 }

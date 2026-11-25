@@ -390,3 +390,8 @@ fn apply_import_rewrites(mut plan: SchemaPlan, rewrites: List[ActivationRewrite]
     }
     Ok(())
 }
+
+/// The number of activation rewrites (frame 0x0085 rows) the import carries.
+pub fn prepared_rewrites(value: ValidatedImport) -> u64 {
+    list.len(value.rewrites)
+}

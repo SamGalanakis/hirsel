@@ -16,6 +16,8 @@ pub(crate) enum InstallRefusal {
     Config,
     WrongVersion(u64),
     Predecessor(Vec<u8>),
+    /// A held run with no fate, or an unmatched entry path (RUNNER-SPEC §14.6).
+    Unsettled,
 }
 
 impl session::Selection {
@@ -206,6 +208,7 @@ impl Wire for InstallRefusal {
                 w.u32(9);
                 w.bytes(found);
             }
+            Self::Unsettled => w.u32(10),
         }
     }
 
@@ -221,6 +224,7 @@ impl Wire for InstallRefusal {
             7 => Self::Config,
             8 => Self::WrongVersion(r.u64()?),
             9 => Self::Predecessor(r.bytes()?),
+            10 => Self::Unsettled,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

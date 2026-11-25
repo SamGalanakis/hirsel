@@ -75,7 +75,8 @@ pub(crate) enum Mode {
     Serving(u64, Serve),
     Describe(Attempt),
     Preview(Attempt, Vec<u8>),
-    Prepare(Attempt, String),
+    /// The export directory's name and the deploy's value-codec `Fates`.
+    Prepare(Attempt, String, Vec<u8>),
 }
 
 impl Mode {
@@ -85,7 +86,7 @@ impl Mode {
             Self::Serving(g, _) => Role::Serving(g),
             Self::Describe(a) => Role::Describe(a),
             Self::Preview(a, _) => Role::Preview(a),
-            Self::Prepare(a, _) => Role::Prepare(a),
+            Self::Prepare(a, _, _) => Role::Prepare(a),
         }
     }
 }
@@ -509,10 +510,11 @@ impl Wire for Mode {
                 a.put(w);
                 w.bytes(old);
             }
-            Self::Prepare(a, export) => {
+            Self::Prepare(a, export, fates) => {
                 w.u32(4);
                 a.put(w);
                 w.bytes(export.as_bytes());
+                w.bytes(fates);
             }
         }
     }
@@ -538,7 +540,7 @@ impl Wire for Mode {
             ),
             2 => Self::Describe(Attempt::get(r)?),
             3 => Self::Preview(Attempt::get(r)?, r.bytes()?),
-            4 => Self::Prepare(Attempt::get(r)?, r.string()?),
+            4 => Self::Prepare(Attempt::get(r)?, r.string()?, r.bytes()?),
             _ => return Err(malformed("mode tag")),
         })
     }
@@ -1055,16 +1057,5 @@ pub(crate) fn write_frame(out: &mut impl Write, value: &impl Wire) -> io::Result
 }
 
 #[cfg(test)]
-pub(super) fn serve_fixture(activation: u64, candidate: Option<u64>) -> Serve {
-    Serve {
-        activation,
-        idle: 250,
-        candidate,
-        store_id: None,
-        witness: None,
-    }
-}
-
-#[cfg(test)]
 #[path = "session_laws.rs"]
-mod tests;
+pub(super) mod tests;

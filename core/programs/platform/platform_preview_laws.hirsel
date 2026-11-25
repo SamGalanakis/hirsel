@@ -1,7 +1,6 @@
 // Laws of the platform host's deploy preview and its decision (launch.md "Deploy preview";
 // RUNNER-SPEC §14.7: L48's decision half and L54) over the faked launcher, with their rig
 // helpers.
-
 // A grant diff of at most one added and one removed line; "" is none.
 fn grants_of(added: String, removed: String) -> launcher.Grants {
     let mut g = launcher.no_grants()
@@ -37,14 +36,88 @@ fn decide_on(mut r: Rig, d: Bytes, take diff: launcher.Grants, approve: bool) ->
     conn
 }
 
-// The prepare child's trigger report: one held Transact trigger.
-fn trigger_answer() -> Bytes {
-    let c: std.codec.Codec[List[runner.TriggerScanRow]] = std.codec.of_list()
+// The prepare child's trigger report: one held Transact trigger with fate `chosen`.
+fn trigger_report_of(chosen: Option[runner.fate.HeldFate]) -> Bytes {
+    let c: std.codec.Codec[runner.TriggerReport] = std.codec.of()
     let mut rows: List[runner.TriggerScanRow] = list.new()
-    list.push(mut rows, runner.TriggerScanRow(class: Held, kind: Transact, path: bytes_of(4u64, 7u8), schema: bytes_of(4u64, 8u8), count: 2u64, earliest_due: 9u64))
+    list.push(mut rows, runner.TriggerScanRow(class: Held, kind: Transact, path: bytes_of(4u64, 7u8), schema: bytes_of(4u64, 8u8), hold: Some(Cut), fate: chosen, count: 2u64, earliest_due: 9u64))
     let mut out: Bytes = list.new()
-    let _ = std.codec.encode(c, rows, mut out)
+    let _ = std.codec.encode(c, runner.TriggerReport(rows: take rows, unmatched: list.new()), mut out)
     out
+}
+
+// A settled report: its one held group is released.
+fn trigger_answer() -> Bytes {
+    trigger_report_of(Some(Release))
+}
+
+fn imports_of(r: Rig) -> u64 {
+    let mut n = 0u64
+    for q in r.asked {
+        if let Command(_, HostImport(_, _, _)) = q {
+            n += 1u64
+        }
+    }
+    n
+}
+
+// The fates bytes of every prepare child the host started, in order.
+fn prepare_fates(r: Rig) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    for q in r.asked {
+        if let Start(l) = q {
+            if let PrepareMode(_, _, f) = l.mode {
+                list.push(mut out, clone(f))
+            }
+        }
+    }
+    out
+}
+
+// L54 (v2.62): a report whose held group has no fate aborts OLD's export once and fails the
+// deploy `Unsettled` with that report; nothing is imported and OLD serves on. The same
+// deploy under a new D with `held.all` Release passes the fates to its prepare child as the
+// hand-encoded `Fates(all: Some(Release), entries: [])` and is Installed.
+fn unsettled_deploy(c: Clock, rnd: Random) waits {
+    let mut u = rig(c, rnd, 4u64)
+    add(mut u, "g", "t")
+    op_wake(mut u, "g")
+    let old = last(u, "g")
+    let unsettled = request_id(u.conns + 1u64)
+    to_export(mut u, old, preview_answer(image_two(), release_two()))
+    old_says(mut u, old, PlaceExported(1u64, "export-1"))
+    let ua = u.a
+    helper_answers(mut u, helper_child(old, PrepareMode(ua, "export-1", list.new())), trigger_report_of(None))
+    expect(asked_of(u, 3u64) == 1u64 && imports_of(u) == 0u64 && still_preparing(u), "L54: an Unsettled report did not abort OLD's export once before any import")
+    old_says(mut u, old, PlaceAborted)
+    let why = "a held run has no fate, or a held entry path is unmatched"
+    let failed = status_of(mut u, unsettled)
+    expect(phase_failed(failed, UnsettledClass, why) && asked_of(u, 3u64) == 1u64 && imports_of(u) == 0u64 && old_serves(u), "L54: an Unsettled report did not fail the deploy Unsettled with OLD serving")
+    let report_ok = match failed {
+        Some(FailedPhase(_, _, report)) => list.len(report.preview.triggers.rows) == 1u64 && report.preview.triggers.rows[0u64].fate == None,
+        _ => false,
+    }
+    expect(report_ok, "L54: the Unsettled failure does not carry the trigger report")
+    let mut release_all = runner.fate.none()
+    release_all.all = Some(Release)
+    let settled = request_id(u.conns + 1u64)
+    let _ = begin_held(mut u, settled, Attested(image_two()), take release_all)
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Admitted(u.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), ""))
+    feed(mut u, take events)
+    assembled_new(mut u)
+    let a = u.a
+    helper_answers(mut u, helper_child(old, DescribeMode(a)), describe_answer())
+    helper_answers(mut u, helper_child(old, PreviewMode(a, list.new())), preview_answer(image_two(), release_two()))
+    old_says(mut u, old, PlaceExported(1u64, "export-2"))
+    helper_answers(mut u, helper_child(old, PrepareMode(a, "export-2", list.new())), trigger_answer())
+    let fates = prepare_fates(u)
+    expect(list.len(fates) == 2u64 && std.hex.encode(fates[0u64]) == "0000000000000000" && std.hex.encode(fates[1u64]) == "010000000000000000000000", "L54: the prepare children did not get each Begin's held fates")
+    let cut = apply(mut u, Got(Placed(clone(old), PlaceImported(image_two()))))
+    pump(mut u, take cut)
+    answer(mut u, old, PlaceInstalled(2u64, true))
+    expect(is_installed(status_of(mut u, settled)), "L54: the deploy with a fate for its held run was not Installed")
+    unplug(mut u)
 }
 
 // One exported entry: Transact, `identity` and code revision `revision`.
@@ -97,7 +170,7 @@ fn deploy_preview(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let _ = std.codec.encode(pc, runner.Preview(describe: describing(image_two(), take now), release: release_two(), answers: take answers), mut preview_bytes)
     helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), take preview_bytes)
     old_says(mut r, old, PlaceExported(1u64, "export-1"))
-    helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1")), trigger_answer())
+    helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), trigger_answer())
     let cut = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two()))))
     pump(mut r, take cut)
     answer(mut r, old, PlaceInstalled(2u64, true))
@@ -124,7 +197,8 @@ fn deploy_preview(c: Clock, rnd: Random) -> Result[(), ()] waits {
         }
     }
     expect(entries_ok, "L54: the entry diff is not exactly 1 unchanged, 2 changed, 3 added, 4 removed")
-    let triggers_ok = list.len(shown.triggers) == 1u64 && shown.triggers[0u64].count == 2u64 && shown.triggers[0u64].earliest_due == 9u64 && shown.triggers[0u64].path == bytes_of(4u64, 7u8)
+    let rows = view shown.triggers.rows
+    let triggers_ok = list.len(rows) == 1u64 && rows[0u64].count == 2u64 && rows[0u64].earliest_due == 9u64 && rows[0u64].path == bytes_of(4u64, 7u8) && rows[0u64].fate == Some(Release)
     expect(triggers_ok, "L54: the report does not carry the prepare child's trigger report")
     // A prepare child that exits 0 without its report fails the deploy before OLD imports.
     let mut q = rig(c, rnd, 4u64)
@@ -134,11 +208,12 @@ fn deploy_preview(c: Clock, rnd: Random) -> Result[(), ()] waits {
     to_export(mut q, old2, preview_answer(image_two(), release_two()))
     old_says(mut q, old2, PlaceExported(1u64, "export-1"))
     let qa = q.a
-    finish(mut q, helper_child(old2, PrepareMode(qa, "export-1")), Code(0i32), None)
+    finish(mut q, helper_child(old2, PrepareMode(qa, "export-1", list.new())), Code(0i32), None)
     expect(asked_of(q, 3u64) == 1u64 && still_preparing(q), "L54: a prepare without its trigger report did not abort OLD's export")
     old_says(mut q, old2, PlaceAborted)
     expect(failed_with(q, "prepare ended without its trigger report"), "L54: a prepare without its trigger report went on to the import")
     source_refusals(c, rnd)
+    unsettled_deploy(c, rnd)
     Ok(())
 }
 
@@ -187,20 +262,15 @@ fn source_refusals(c: Clock, rnd: Random) waits {
     let granted = request_id(52u64)
     let _ = begin_with(mut r, granted, release_source("Clock", 2u8))
     source_admitted(mut r, grants_of("Clock", ""))
-    expect(awaits(status_of(mut r, granted), "Clock", "") && asked_of(r, 4u64) == 0u64 && old_serves(r),
-        "L54: the grant widening neither held before assembly nor left OLD serving")
+    expect(awaits(status_of(mut r, granted), "Clock", "") && asked_of(r, 4u64) == 0u64 && old_serves(r), "L54: the grant widening neither held before assembly nor left OLD serving")
     let _ = decide_on(mut r, granted, grants_of("Clock", ""), false)
-    expect(phase_failed(status_of(mut r, granted), DeniedClass, "a person refused the grant diff") && old_serves(r),
-        "L54: refused grant diff did not end against OLD")
-
+    expect(phase_failed(status_of(mut r, granted), DeniedClass, "a person refused the grant diff") && old_serves(r), "L54: refused grant diff did not end against OLD")
     let ill_typed = request_id(53u64)
     let _ = begin_with(mut r, ill_typed, release_source("", 2u8))
     let mut events: List[launcher.Event] = list.new()
     list.push(mut events, AdmissionFailed(r.a, Uncompiled("main.hirsel:1:37-41: LANG-11 found `u64`")))
     feed(mut r, take events)
-    expect(phase_failed(status_of(mut r, ill_typed), UncompiledClass, "main.hirsel:1:37-41: LANG-11 found `u64`") && old_serves(r),
-        "L54: bad proposed source lost the checker refusal or replaced OLD")
-
+    expect(phase_failed(status_of(mut r, ill_typed), UncompiledClass, "main.hirsel:1:37-41: LANG-11 found `u64`") && old_serves(r), "L54: bad proposed source lost the checker refusal or replaced OLD")
     let missing = request_id(54u64)
     let _ = begin_with(mut r, missing, release_source("", 2u8))
     source_admitted(mut r, launcher.no_grants())
@@ -210,6 +280,5 @@ fn source_refusals(c: Clock, rnd: Random) waits {
     let a = r.a
     helper_answers(mut r, helper_child(old, DescribeMode(a)), describe_answer())
     helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), preview_answer(image_two(), release_two()))
-    expect(phase_failed(status_of(mut r, missing), UncompiledClass, "candidate removes or changes a required release entry") &&
-        old_serves(r) && asked_of(r, 1u64) == 0u64, "L54: a missing release entry reached export")
+    expect(phase_failed(status_of(mut r, missing), UncompiledClass, "candidate removes or changes a required release entry") && old_serves(r) && asked_of(r, 1u64) == 0u64, "L54: a missing release entry reached export")
 }

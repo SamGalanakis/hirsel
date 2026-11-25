@@ -184,6 +184,20 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Refuse the grant diff the request named by --request-id awaits a decision on."
     ),
     option!(
+        HeldAll,
+        ["--held"],
+        Some("release|cancel"),
+        ["deploy"],
+        "The fate of every run the deploy holds that no --held-entry names."
+    ),
+    option!(
+        HeldEntry,
+        ["--held-entry"],
+        Some("PATH=release|cancel"),
+        ["deploy"],
+        "The fate of the held runs of one entry path, as the trigger report prints it. Repeat for more paths."
+    ),
+    option!(
         HostMemory,
         ["--memory"],
         Some("BYTES"),

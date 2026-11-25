@@ -9,7 +9,7 @@ use crate::code_store::CodeStore;
 use crate::launcher::session::{Attempt, Grants, Group, Input};
 use crate::native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root};
 use crate::operator::{
-    self, Answer, Ask, Class, Forward, Front, Pause, Phase, Record, Registration, Report,
+    self, Answer, Ask, Class, Fates, Forward, Front, Pause, Phase, Record, Registration, Report,
 };
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::release_recipe::Recipe;
@@ -24,9 +24,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(test)]
+mod laws;
 mod preview;
 
-use preview::{approve_grant, decide, grants_json, preview_json};
+use preview::{approve_grant, decide, grants_json, held_fate, preview_json};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -281,6 +283,8 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     let mut decision = Grants::default();
     let mut refuse = false;
     let mut grants = crate::package_dir::Grants::default();
+    let mut held = Fates::default();
+    let mut held_given = false;
     for (option, value) in invocation.options {
         let text = value.unwrap_or_default();
         match option {
@@ -292,6 +296,10 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
             Opt::ApproveGrant => approve_grant(&mut decision, &text)?,
             Opt::RefuseGrants => refuse = true,
             Opt::Grant => grant(&mut grants, &text)?,
+            Opt::HeldAll | Opt::HeldEntry => {
+                held_fate(&mut held, option == Opt::HeldAll, &text)?;
+                held_given = true;
+            }
             _ => return Err("unexpected deploy option".into()),
         }
     }
@@ -300,8 +308,11 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         return Err("deploy takes no program arguments; a group's arguments are registered".into());
     }
     let has_decision = decision != Grants::default();
-    let submission_options =
-        code.is_some() || name.is_some() || !grants.foreign.is_empty() || !grants.exec.is_empty();
+    let submission_options = code.is_some()
+        || name.is_some()
+        || !grants.foreign.is_empty()
+        || !grants.exec.is_empty()
+        || held_given;
     if let Some(text) = status {
         if invocation.positional.is_some()
             || d.is_some()
@@ -374,55 +385,11 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         Input::Attested(upload.root.0.to_vec()),
         approvals.foreign.clone(),
         approvals.exec.clone(),
+        held,
     );
     let mut exchange = Exchange::new(&state, d, "deploy", Some(upload), approvals);
     exchange.decision = Some(decision);
     exchange.run(ask)
-}
-
-#[test]
-fn contradictory_deploy_actions_refuse_before_io() {
-    let recipe = "ab".repeat(32);
-    let request = "01".repeat(16);
-    let directory = tempfile::tempdir().unwrap();
-    let state = directory.path().join("no-host");
-    let invoke = |extra: &[&str]| {
-        let arguments = ["deploy", "--state", state.to_str().unwrap()]
-            .into_iter()
-            .chain(extra.iter().copied())
-            .map(str::to_owned);
-        let crate::cli::Action::Invoke(invocation) = crate::cli::parse(arguments).unwrap() else {
-            panic!("expected a deploy invocation");
-        };
-        deploy(invocation)
-    };
-    for (args, want) in [
-        (
-            &["--status", &request, "--refuse-grants"][..],
-            "deploy --status takes only --state",
-        ),
-        (
-            &["--status", &request, "--approve-grant", "+Clock"],
-            "deploy --status takes only --state",
-        ),
-        (
-            &[&recipe, "--refuse-grants"],
-            "deploy with a recipe takes no --refuse-grants",
-        ),
-        (
-            &[&recipe, "--refuse-grants", "--approve-grant", "+Clock"],
-            "--refuse-grants takes no --approve-grant",
-        ),
-    ] {
-        assert_eq!(invoke(args).unwrap_err().to_string(), want);
-    }
-    assert_eq!(invoke(&["--status", &request]).unwrap(), UNAVAILABLE);
-    assert_eq!(
-        invoke(&["--request-id", &request, "--refuse-grants"]).unwrap(),
-        UNAVAILABLE
-    );
-    let error = invoke(&[&recipe, "--approve-grant", "+Clock"]).unwrap_err();
-    assert_eq!(error.to_string(), "requires --code-store DIR");
 }
 
 /// One request and its one reply, on a fresh connection.
@@ -504,6 +471,7 @@ fn class_name(class: Class) -> &'static str {
         Class::Uncompiled => "uncompiled",
         Class::NotInstalledAfterRecovery => "not installed after recovery",
         Class::Exhausted => "exhausted",
+        Class::Unsettled => "unsettled",
     }
 }
 
@@ -793,7 +761,8 @@ impl<'a> Exchange<'a> {
                     Phase::Failed(class, detail, _) => {
                         eprintln!("{}: {}: {detail}", self.command, class_name(*class));
                         println!("{}", state_json(&d, &group, &phase));
-                        break Ok(Some(if *class == Class::Denied && policy_refusal(detail) {
+                        let refused = *class == Class::Denied && policy_refusal(detail);
+                        break Ok(Some(if refused || *class == Class::Unsettled {
                             2
                         } else {
                             1

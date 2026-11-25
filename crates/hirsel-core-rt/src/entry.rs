@@ -487,7 +487,7 @@ impl OsProcess {
                     .with_witness(witness);
             }
             if prepare_path.is_some() {
-                launch = launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?);
+                launch = launch_options::with_prepare(launch, &args)?;
             }
             if dry_run {
                 launch = launch.with_dry_run();

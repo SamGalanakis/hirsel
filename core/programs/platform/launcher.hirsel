@@ -46,7 +46,7 @@ pub type Serve: codec + send {
 
 // What the child runs, by mode (launch.md "Child modes"). Preview carries OLD's entry
 // list; prepare carries the export name OLD answered.
-pub type Mode: codec + send = InstallMode(u64, InstallKind) | ServingMode(u64, Serve) | DescribeMode(Attempt) | PreviewMode(Attempt, Bytes) | PrepareMode(Attempt, String)
+pub type Mode: codec + send = InstallMode(u64, InstallKind) | ServingMode(u64, Serve) | DescribeMode(Attempt) | PreviewMode(Attempt, Bytes) | PrepareMode(Attempt, String, Bytes)
 
 // A recorded serving launch: the 16-byte recording ID whose catalog pin the host made
 // durable before this start, and the designated recording destination.
@@ -84,7 +84,10 @@ pub type Tree: codec + send {
     required_entries: List[RequiredEntry]
 }
 
-pub type RequiredEntry: codec + send { kind: runner.Kind, key: Bytes }
+pub type RequiredEntry: codec + send {
+    kind: runner.Kind,
+    key: Bytes
+}
 
 pub type SourceFile: codec + send {
     path: String,
@@ -207,7 +210,10 @@ pub type End: codec + send {
 
 pub type Phase: codec + send = Started | Exited(End)
 
-pub type Selection: codec + send { activation: u64, assembly: Bytes }
+pub type Selection: codec + send {
+    activation: u64,
+    assembly: Bytes
+}
 
 pub type ChildState: codec + send {
     child: Child,
@@ -235,8 +241,7 @@ Inventory(List[ChildState], List[Group], List[CutoverKey])
     | Admitted(Attempt, Bytes, Summary, String)
 // Publication through the assembly record is synced: assembly name, image digest, fetch
 // and assembly times in nanoseconds. The launcher holds the attempt's reservation.
-    | Assembled(Attempt, Bytes, Bytes, u64, u64)
-    | AdmissionFailed(Attempt, Failure)
+    | Assembled(Attempt, Bytes, Bytes, u64, u64) | AdmissionFailed(Attempt, Failure)
 // OLD's answer to the cutover forwarded for this attempt, or Uncertain if OLD ended first.
     | CutoverResult(Child, Attempt, runner.HostReply)
 
@@ -246,7 +251,7 @@ pub fn role_of(m: Mode) -> Role {
         ServingMode(g, _) => Serving(g),
         DescribeMode(a) => Describe(a),
         PreviewMode(a, _) => Preview(a),
-        PrepareMode(a, _) => Prepare(a),
+        PrepareMode(a, _, _) => Prepare(a),
     }
 }
 
@@ -605,7 +610,9 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
 // The fake can keep a startup reply while the host has no session.
 pub fn remember_place_answer(mut f: Fake, c: Child, take answer: runner.HostReply) {
     if let Some(i) = find_child(f, c) {
-        if live(f.children[i].state.phase) { f.children[i].state.answer = Some(take answer) }
+        if live(f.children[i].state.phase) {
+            f.children[i].state.answer = Some(take answer)
+        }
     }
 }
 

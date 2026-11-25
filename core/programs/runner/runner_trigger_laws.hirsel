@@ -117,12 +117,18 @@ fn trigger_law_config(take entries: triggers.Entries) -> TriggerConfig {
     TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()))
 }
 
-// The law's attempt mint, served by a grant task the law starts beside the drive.
-fn trigger_law_attempts(tasks: Tasks, h: TriggerLawTables) -> Option[Sender[MintRequest[TriggerContext, TriggerContext]]] {
+// The law's attempt mint, served by a grant task the law starts beside the
+// drive and keeps: dropping a PlaceGrants cancels its worker.
+fn trigger_law_grant_task(tasks: Tasks, h: TriggerLawTables) -> PlaceGrants[TriggerContext] {
     let given: Grants[TriggerContext, TriggerLawTables, ()] = Grants(attempt: Some(Mint(seed: (), mint: trigger_law_grants, mint_bytes: 65536u64, mint_steps: DEFAULT_STEPS)), call: None, claim: None, bind: None)
-    let running = start_grants(tasks, h, grant_start(take given))
-    let PlaceGrants(attempts: take attempts, ..) = take running
-    take attempts
+    start_grants(tasks, h, grant_start(take given))
+}
+
+fn trigger_law_attempts(running: PlaceGrants[TriggerContext]) -> Option[Sender[MintRequest[TriggerContext, TriggerContext]]] {
+    match running.attempts {
+        Some(mint) => Some(channel.sender(mint)),
+        None => None
+    }
 }
 
 fn trigger_law_places(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
@@ -133,15 +139,16 @@ fn trigger_law_places(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Re
     granted(mut reg, code.describe(trigger_law_granted_body), 131072u64, DEFAULT_STEPS)
 }
 
-fn trigger_law_initial(take db: store.Db, c: Clock, tasks: Tasks, take to: Sender[HeadInput], take allowed: triggers.Entries) -> (Head[TriggerContext, TriggerLawTables], Receiver[PubIn]) waits {
+fn trigger_law_head(take db: store.Db, c: Clock, tasks: Tasks, take to: Sender[HeadInput], take allowed: triggers.Entries) -> (Head[TriggerContext, TriggerLawTables], Receiver[PubIn], PlaceGrants[TriggerContext]) waits {
     let revision = result.unwrap(copy_bytes(string.as_bytes("trigger-law-r1")))
     let config = trigger_law_config(take allowed)
     let h = result.unwrap(store.bind_declaration(mut db, Open, trigger_law_schema))
-    let drive = result.unwrap(make_trigger_drive(clone(h.triggers), c, tasks, take to, revision, take config, trigger_law_attempts(tasks, h)))
+    let running = trigger_law_grant_task(tasks, h)
+    let drive = result.unwrap(make_trigger_drive(clone(h.triggers), c, tasks, take to, revision, take config, trigger_law_attempts(running)))
     let reg = result.unwrap(placed(code.describe(trigger_law_places), 1048576u64))
     let (out, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(32u64)
     let head = Head(db: take db, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None)
-    (take head, take from)
+    (take head, take from, take running)
 }
 
 fn trigger_law_outcome[G: send, H: shareable + inert + send](head: Head[G, H], id: triggers.Id) -> Option[triggers.Terminal] waits {
@@ -210,7 +217,7 @@ pub fn journal_law_trigger_transact(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     }
     let reopened = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
     let (wake, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
-    let (take built, take published) = trigger_law_initial(take reopened, c, tasks, take wake, take allowed)
+    let (take built, take published, take grants1) = trigger_law_head(take reopened, c, tasks, take wake, take allowed)
     let mut head = take built
     let initial_version = store.version(store.snapshot(head.db))
     if !result.unwrap(advance_triggers(mut head)) {
@@ -334,7 +341,7 @@ pub fn journal_law_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     result.unwrap(store.durable(mut initial, committed.ticket))
     let (first_to, first_inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
     let first_allowed: triggers.Entries = clone(allowed)
-    let (take first_head, take first_published) = trigger_law_initial(take initial, c, tasks, take first_to, take first_allowed)
+    let (take first_head, take first_published, take grants2) = trigger_law_head(take initial, c, tasks, take first_to, take first_allowed)
     let mut running_head = take first_head
     if !result.unwrap(advance_triggers(mut running_head)) {
         return false
@@ -356,7 +363,7 @@ pub fn journal_law_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     result.unwrap(store.close(take before))
     let reopened = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
     let (to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
-    let (take built, take published) = trigger_law_initial(take reopened, c, tasks, take to, take allowed)
+    let (take built, take published, take grants3) = trigger_law_head(take reopened, c, tasks, take to, take allowed)
     let mut head = take built
     if !result.unwrap(advance_triggers(mut head)) {
         return false
@@ -440,7 +447,7 @@ pub fn journal_law_trigger_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     result.unwrap(store.durable(mut initial, committed.ticket))
     let (first_to, first_inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
     let first_allowed: triggers.Entries = clone(allowed)
-    let (take first_head, take first_published) = trigger_law_initial(take initial, c, tasks, take first_to, take first_allowed)
+    let (take first_head, take first_published, take grants4) = trigger_law_head(take initial, c, tasks, take first_to, take first_allowed)
     let mut running_head = take first_head
     if !result.unwrap(advance_triggers(mut running_head)) {
         return false
@@ -460,7 +467,7 @@ pub fn journal_law_trigger_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     result.unwrap(store.close(take before))
     let reopened = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
     let (to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
-    let (take built, take published) = trigger_law_initial(take reopened, c, tasks, take to, take allowed)
+    let (take built, take published, take grants5) = trigger_law_head(take reopened, c, tasks, take to, take allowed)
     let mut head = take built
     if !result.unwrap(advance_triggers(mut head)) {
         return false
@@ -545,6 +552,26 @@ fn trigger_scan_law_bytes(n: u64, byte: u8) -> Bytes {
     let mut raw: Bytes = list.with_capacity(n)
     list.fill(mut raw, n, byte)
     take raw
+}
+
+fn trigger_scan_path(name: String) -> Bytes {
+    let mut qualified: String = clone("runner@1/runner/")
+    string.push(mut qualified, name)
+    clone(string.as_bytes(qualified))
+}
+
+fn trigger_scan_report(d: Dir) -> TriggerReport waits {
+    let raw = result.unwrap(std.file.read(d, "TRIGGERS"))
+    let codec: std.codec.Codec[TriggerReport] = std.codec.of()
+    result.unwrap(std.codec.decode(codec, raw))
+}
+
+// The activation rewrites PREPARED carries, or None when prepare wrote none.
+fn trigger_scan_prepared(d: Dir) -> Option[u64] waits {
+    if let Error(_) = std.file.read(d, "PREPARED") {
+        return None
+    }
+    Some(store.prepared_rewrites(result.unwrap(store.validate_prepared(d))))
 }
 
 // L40. Use the real export and prepare writer against a recorded OLD revision.
@@ -654,11 +681,8 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), 1u64))
     let exported_store = result.unwrap(store.export_copy(take copying))
     let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
-    let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(new_digest), clock: c, tasks: tasks, n_place: new_n_place, place: new_place, on_migrate: None, schema: code.describe(trigger_law_schema), triggers: clone(new_entries))
-    result.unwrap(prepare_export(setup, source))
-    let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
-    let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
-    let rows = result.unwrap(std.codec.decode(codec, raw))
+    let mut setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(new_digest), clock: c, tasks: tasks, n_place: new_n_place, place: new_place, on_migrate: None, schema: code.describe(trigger_law_schema), triggers: clone(new_entries), fates: fate.none())
+    let rows = trigger_scan_fates(mut setup, source, same_image)
     if list.len(rows) != (if same_image {
         8u64
     } else {
@@ -720,7 +744,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     }
     store.release_export(mut db, attempt)
     let (to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
-    let (take running, take published) = trigger_law_initial(take db, c, tasks, take to, take new_entries)
+    let (take running, take published, take grants) = trigger_law_head(take db, c, tasks, take to, take new_entries)
     let mut head = take running
     head.r = result.unwrap(placed(new_place, new_n_place))
     let mut drive = option.unwrap(replace(mut head.trigger_drive, None))
@@ -777,127 +801,9 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     }
     let Head(db: take done, trigger_drive: take active, ..) = take head
     stop_triggers(option.unwrap(take active))
+    stop_grants(Some(take grants))
     result.unwrap(store.close(take done))
     Ok(())
-}
-
-fn trigger_scan_law_last(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
-    use_trigger_tables(mut reg, fn(h: TriggerLawTables) -> triggers.Tables {
-        clone(h.triggers)
-    })
-    transact(mut reg, code.describe(trigger_scan_law_removed), 131072u64, DEFAULT_STEPS)
-}
-
-fn trigger_scan_law_empty(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
-    use_trigger_tables(mut reg, fn(h: TriggerLawTables) -> triggers.Tables {
-        clone(h.triggers)
-    })
-    Ok(())
-}
-
-fn trigger_scan_law_install(mut db: store.Db, n_place: u64, place: StaticFn[fn(mut Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError]]) -> u64 waits {
-    let reg = result.unwrap(placed(place, n_place))
-    let (take description, take record) = result.unwrap(prepare_activation(reg, n_place, list.new()))
-    let mut declaration = result.unwrap(store.declare(db, Migrate))
-    let _ = result.unwrap(trigger_law_schema(mut declaration))
-    let mut pending_install = result.unwrap(store.finish_migration(db, take declaration))
-    let version = store.version(store.snapshot(db)) + 1u64
-    let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
-    result.unwrap(store.stage_activation(mut pending_install, version, result.unwrap(current_description(db)), description, release_codec, record))
-    result.unwrap(store.install_activation(mut db, take pending_install))
-    version
-}
-
-fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.Options, explicit_empty: bool) -> Result[(), ()] waits {
-    let dir = triggers.law_directory(d)
-    let n_place = 1048576u64
-    let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
-    let _ = trigger_scan_law_install(mut db, n_place, code.describe(trigger_scan_law_last))
-    let tables = trigger_law_tables(mut db)
-    let target = result.unwrap(triggers.transact(code.describe(trigger_scan_law_removed)))
-    let mut listed = triggers.empty_entries()
-    result.unwrap(triggers.allow(mut listed, target))
-    let due = host.wall_ms(c) + 100u64
-    let written = store.run(mut db, None, (store.copy_env(tables), store.copy_env(target), store.copy_env(listed), store.copy_env(due)), fn(mut tx, call_env) -> Result[triggers.Id, triggers.Error] {
-        triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 0u64, At(call_env.3))
-    })
-    let id = result.unwrap(trigger_commit(take written)).value
-    let attempt = trigger_scan_law_bytes(16u64, 9u8)
-    let digest = trigger_scan_law_bytes(32u64, 2u8)
-    let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), 1u64))
-    let exported_store = result.unwrap(store.export_copy(take copying))
-    let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
-    let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(digest), clock: c, tasks: tasks, n_place: n_place, place: code.describe(trigger_scan_law_empty), on_migrate: None, schema: code.describe(trigger_law_schema), triggers: triggers.empty_entries())
-    result.unwrap(prepare_export(setup, source))
-    let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
-    let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
-    let rows = result.unwrap(std.codec.decode(codec, raw))
-    if list.len(rows) != 1u64 || rows[0u64].class != Gone || rows[0u64].count != 1u64 || rows[0u64].earliest_due != due {
-        fail("L40: final entry did not scan as Gone")
-    }
-    // The import accepts only the preview's exact Describe (launch.md "Hot
-    // deploy"), whose tables come from describe mode's Migrate run of `schema`.
-    let launch = launch_env()
-    let Registry(exported: take shown, bindings: take shown_bindings, ..) = result.unwrap(placed(code.describe(trigger_scan_law_empty), n_place))
-    let shown_release = result.unwrap(http_release_digest(shown, shown_bindings))
-    let shown_tables = result.unwrap(store.describe_declarations(c, code.describe(trigger_law_schema)))
-    if list.len(shown_tables) == 0u64 {
-        fail("L40: the law schema declares no table")
-    }
-    let preview = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: n_place, revision: launch_bytes(launch.revision), exported: take shown, tables: take shown_tables, bindings: take shown_bindings)
-    let prepared = result.unwrap(store.validate_prepared(exported_store.dir))
-    if !store.prepared_matches(prepared, result.unwrap(encode_describe(preview)), shown_release, launch_bytes(launch.digest)) {
-        fail("L40: PREPARED's Describe is not the preview's")
-    }
-    store.release_export(mut db, attempt)
-    let selection = Current(trigger_scan_law_install(mut db, n_place, code.describe(trigger_scan_law_empty)))
-    result.unwrap(store.close(take db))
-    let (to, events): (Sender[LifeEvent], Receiver[LifeEvent]) = channel.new(12u64)
-    let (head_to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(8u64)
-    let (finish_to, finish_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let initial_window: Option[DrainWindow] = None
-    let drain = latest.new(arc.new(initial_window))
-    let triggering = if explicit_empty {
-        Some(trigger_law_config(triggers.empty_entries()))
-    } else {
-        None
-    }
-    let granting: Option[GrantStart[TriggerContext, TriggerLawTables, ()]] = None
-    let job = ManagedHead(backing: Disk(dir), options: clone(options), follower_plan: None, selection: selection, tasks: tasks, clock: c, random: r, place: code.describe(trigger_scan_law_empty), on_migrate: None, schema: code.describe(trigger_law_schema), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to), cut: result.unwrap(cut_activity()), triggering: take triggering, granting: take granting, idle: None, expected_store: None)
-    let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options)))
-    let allowance = writer + job.n_place + job.n_publisher
-    let server = task.spawn(tasks, bytes allowance, take job, head_ended)
-    if let Ok(Recovered) = channel.receive(events) {} else {
-        fail("L40: serving head did not recover")
-    }
-    result.unwrap(channel.send(head_to, HeadContinue))
-    if let Ok(Activated(_, _, _, _, _)) = channel.receive(events) {} else {
-        fail("L40: serving head did not activate")
-    }
-    result.unwrap(channel.send(head_to, HeadContinue))
-    if let Ok(Published(_)) = channel.receive(events) {} else {
-        fail("L40: serving head did not publish")
-    }
-    host.sleep_until_wall(c, due)
-    result.unwrap(channel.send(head_to, HeadContinue))
-    // The serving loop dispatches due rows before it receives HeadClose.
-    result.unwrap(channel.send(head_to, HeadClose))
-    if let Ok(Settled) = channel.receive(events) {} else {
-        fail("L40: serving head did not settle")
-    }
-    result.unwrap(channel.send(head_to, HeadFinish))
-    if let Ok(HeadEnded(Ok(None))) = channel.receive(events) {} else {
-        fail("L40: serving head did not close")
-    }
-    result.unwrap(task.join(take server))
-    let reopened = result.unwrap(store.open(tasks, dir, c, r, options))
-    let outcome = result.unwrap(triggers.outcome(result.unwrap(store.reader(reopened, 0u64)), store.snapshot(reopened), tables, id))
-    result.unwrap(store.close(take reopened))
-    if let Some(Gone) = outcome {
-        Ok(())
-    } else {
-        fail("L40: Gone did not survive reopen")
-    }
 }
 
 // ENDSTATE steps law 7. A committed request reaches the waiting body at its
@@ -919,7 +825,7 @@ pub fn journal_law_trigger_cancel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let (live, held) = writing.value
     result.unwrap(store.durable(mut db, writing.ticket))
     let (to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
-    let (take built, take published) = trigger_law_initial(take db, c, tasks, take to, take allowed)
+    let (take built, take published, take grants6) = trigger_law_head(take db, c, tasks, take to, take allowed)
     let mut head = take built
     if !result.unwrap(advance_triggers(mut head)) {
         return false

@@ -1,0 +1,192 @@
+// RUNNER-SPEC L40, parts of trigger_scan_classes: the held rows of its exports
+// prepared under fates (d), and the image whose last entry is removed.
+// The report's `held` group on `name`, keyed by `hold`, carries `chosen`.
+fn trigger_scan_held(report: TriggerReport, name: String, hold: fate.HeldBy, chosen: Option[fate.HeldFate]) -> bool {
+    let path = trigger_scan_path(name)
+    for row in report.rows {
+        if row.class == Held && row.path == path {
+            return row.hold == Some(hold) && row.fate == chosen && row.count == 1u64
+        }
+    }
+    false
+}
+
+fn trigger_scan_fate(chosen: Option[fate.HeldFate], take entry: Option[(Bytes, fate.HeldFate)]) -> fate.Fates {
+    let mut f = fate.none()
+    f.all = chosen
+    if let Some((take path, which)) = take entry {
+        list.push(mut f.entries, fate.EntryFate(path: take path, fate: which))
+    }
+    take f
+}
+
+// L40 (d) (RUNNER-SPEC §14.6, every expectation derived by hand): the prepare
+// of (a)'s or (b)'s export under several fates. An unsettled report writes no
+// PREPARED; a settled one writes one rewrite per held row and none for any
+// other row. Returns the rows of the report with no fates, for (a) and (b).
+fn trigger_scan_fates[G: send, H: shareable + inert + send](mut setup: PrepareConfig[G, H], source: store.Preparation, same_image: bool) -> List[TriggerScanRow] waits {
+    let d = setup.scratch
+    result.unwrap(prepare_export(setup, source))
+    let bare = trigger_scan_report(d)
+    if list.len(bare.unmatched) != 0u64 || trigger_scan_prepared(d) != None {
+        fail("L40 (d): a report with unfated held rows wrote PREPARED")
+    }
+    if same_image {
+        // (b): the Request-parked run is held under its equal digest.
+        if !trigger_scan_held(bare, "trigger_law_granted_body", Request(true), None) {
+            fail("L40 (d): the Request-parked run is not held Request(same_code: true)")
+        }
+        setup.fates = trigger_scan_fate(Some(Cancel), None)
+        result.unwrap(prepare_export(setup, source))
+        let cancelled = trigger_scan_report(d)
+        if !trigger_scan_held(cancelled, "trigger_law_granted_body", Request(true), Some(Cancel)) || list.len(cancelled.unmatched) != 0u64 || trigger_scan_prepared(d) != Some(1u64) {
+            fail("L40 (d): Cancel for all did not settle the one held row")
+        }
+        let TriggerReport(rows: take same_rows, ..) = take bare
+        return take same_rows
+    }
+    if !trigger_scan_held(bare, "trigger_law_granted_body", Cut, None) || !trigger_scan_held(bare, "trigger_scan_law_removed_run", Cut, None) {
+        fail("L40 (d): the started runs are not held Cut with no fate")
+    }
+    setup.fates = trigger_scan_fate(Some(Release), Some((clone(string.as_bytes("no.such")), Cancel)))
+    result.unwrap(prepare_export(setup, source))
+    let typo = trigger_scan_report(d)
+    let mut typo_paths: List[Bytes] = list.new()
+    list.push(mut typo_paths, clone(string.as_bytes("no.such")))
+    if !trigger_scan_held(typo, "trigger_law_granted_body", Cut, Some(Release)) || !trigger_scan_held(typo, "trigger_scan_law_removed_run", Cut, Some(Release)) || typo.unmatched != typo_paths || trigger_scan_prepared(d) != None {
+        fail("L40 (d): an unmatched path did not leave the report unsettled")
+    }
+    // (v2.66) A Cancel for an entry with only unheld rows is matched and changes no row.
+    setup.fates = trigger_scan_fate(Some(Release), Some((trigger_scan_path("trigger_scan_law_unchanged"), Cancel)))
+    result.unwrap(prepare_export(setup, source))
+    let unheld = trigger_scan_report(d)
+    if list.len(unheld.unmatched) != 0u64 || trigger_scan_prepared(d) != Some(2u64) {
+        fail("L40 (d): a fate for unheld rows rewrote one or was unmatched")
+    }
+    setup.fates = trigger_scan_fate(Some(Release), Some((trigger_scan_path("trigger_scan_law_removed_run"), Cancel)))
+    result.unwrap(prepare_export(setup, source))
+    let settled = trigger_scan_report(d)
+    if !trigger_scan_held(settled, "trigger_law_granted_body", Cut, Some(Release)) || !trigger_scan_held(settled, "trigger_scan_law_removed_run", Cut, Some(Cancel)) || list.len(settled.unmatched) != 0u64 || trigger_scan_prepared(d) != Some(2u64) {
+        fail("L40 (d): the settled report or its PREPARED rewrites are wrong")
+    }
+    let TriggerReport(rows: take bare_rows, ..) = take bare
+    take bare_rows
+}
+
+fn trigger_scan_law_last(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    use_trigger_tables(mut reg, fn(h: TriggerLawTables) -> triggers.Tables {
+        clone(h.triggers)
+    })
+    transact(mut reg, code.describe(trigger_scan_law_removed), 131072u64, DEFAULT_STEPS)
+}
+
+fn trigger_scan_law_empty(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    use_trigger_tables(mut reg, fn(h: TriggerLawTables) -> triggers.Tables {
+        clone(h.triggers)
+    })
+    Ok(())
+}
+
+fn trigger_scan_law_install(mut db: store.Db, n_place: u64, place: StaticFn[fn(mut Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError]]) -> u64 waits {
+    let reg = result.unwrap(placed(place, n_place))
+    let (take description, take record) = result.unwrap(prepare_activation(reg, n_place, list.new()))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let _ = result.unwrap(trigger_law_schema(mut declaration))
+    let mut pending_install = result.unwrap(store.finish_migration(db, take declaration))
+    let version = store.version(store.snapshot(db)) + 1u64
+    let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
+    result.unwrap(store.stage_activation(mut pending_install, version, result.unwrap(current_description(db)), description, release_codec, record))
+    result.unwrap(store.install_activation(mut db, take pending_install))
+    version
+}
+
+fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.Options, explicit_empty: bool) -> Result[(), ()] waits {
+    let dir = triggers.law_directory(d)
+    let n_place = 1048576u64
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
+    let _ = trigger_scan_law_install(mut db, n_place, code.describe(trigger_scan_law_last))
+    let tables = trigger_law_tables(mut db)
+    let target = result.unwrap(triggers.transact(code.describe(trigger_scan_law_removed)))
+    let mut listed = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut listed, target))
+    let due = host.wall_ms(c) + 100u64
+    let written = store.run(mut db, None, (store.copy_env(tables), store.copy_env(target), store.copy_env(listed), store.copy_env(due)), fn(mut tx, call_env) -> Result[triggers.Id, triggers.Error] {
+        triggers.write(mut tx, call_env.0, call_env.2, call_env.1, 0u64, At(call_env.3))
+    })
+    let id = result.unwrap(trigger_commit(take written)).value
+    let attempt = trigger_scan_law_bytes(16u64, 9u8)
+    let digest = trigger_scan_law_bytes(32u64, 2u8)
+    let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), 1u64))
+    let exported_store = result.unwrap(store.export_copy(take copying))
+    let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
+    let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(digest), clock: c, tasks: tasks, n_place: n_place, place: code.describe(trigger_scan_law_empty), on_migrate: None, schema: code.describe(trigger_law_schema), triggers: triggers.empty_entries(), fates: fate.none())
+    result.unwrap(prepare_export(setup, source))
+    let report = trigger_scan_report(exported_store.dir)
+    let rows = view report.rows
+    if list.len(rows) != 1u64 || rows[0u64].class != Gone || rows[0u64].count != 1u64 || rows[0u64].earliest_due != due {
+        fail("L40: final entry did not scan as Gone")
+    }
+    // The import accepts only the preview's exact Describe (launch.md "Hot
+    // deploy"), whose tables come from describe mode's Migrate run of `schema`.
+    let launch = launch_env()
+    let Registry(exported: take shown, bindings: take shown_bindings, ..) = result.unwrap(placed(code.describe(trigger_scan_law_empty), n_place))
+    let shown_release = result.unwrap(http_release_digest(shown, shown_bindings))
+    let shown_tables = result.unwrap(store.describe_declarations(c, code.describe(trigger_law_schema)))
+    if list.len(shown_tables) == 0u64 {
+        fail("L40: the law schema declares no table")
+    }
+    let preview = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: n_place, revision: launch_bytes(launch.revision), exported: take shown, tables: take shown_tables, bindings: take shown_bindings)
+    let prepared = result.unwrap(store.validate_prepared(exported_store.dir))
+    if !store.prepared_matches(prepared, result.unwrap(encode_describe(preview)), shown_release, launch_bytes(launch.digest)) {
+        fail("L40: PREPARED's Describe is not the preview's")
+    }
+    store.release_export(mut db, attempt)
+    let selection = Current(trigger_scan_law_install(mut db, n_place, code.describe(trigger_scan_law_empty)))
+    result.unwrap(store.close(take db))
+    let (to, events): (Sender[LifeEvent], Receiver[LifeEvent]) = channel.new(12u64)
+    let (head_to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(8u64)
+    let (finish_to, finish_from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let initial_window: Option[DrainWindow] = None
+    let drain = latest.new(arc.new(initial_window))
+    let triggering = if explicit_empty {
+        Some(trigger_law_config(triggers.empty_entries()))
+    } else {
+        None
+    }
+    let granting: Option[GrantStart[TriggerContext, TriggerLawTables, ()]] = None
+    let job = ManagedHead(backing: Disk(dir), options: clone(options), follower_plan: None, selection: selection, tasks: tasks, clock: c, random: r, place: code.describe(trigger_scan_law_empty), on_migrate: None, schema: code.describe(trigger_law_schema), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to), cut: result.unwrap(cut_activity()), triggering: take triggering, granting: take granting, idle: None, expected_store: None)
+    let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options)))
+    let allowance = writer + job.n_place + job.n_publisher
+    let server = task.spawn(tasks, bytes allowance, take job, head_ended)
+    if let Ok(Recovered) = channel.receive(events) {} else {
+        fail("L40: serving head did not recover")
+    }
+    result.unwrap(channel.send(head_to, HeadContinue))
+    if let Ok(Activated(_, _, _, _, _)) = channel.receive(events) {} else {
+        fail("L40: serving head did not activate")
+    }
+    result.unwrap(channel.send(head_to, HeadContinue))
+    if let Ok(Published(_)) = channel.receive(events) {} else {
+        fail("L40: serving head did not publish")
+    }
+    host.sleep_until_wall(c, due)
+    result.unwrap(channel.send(head_to, HeadContinue))
+    // The serving loop dispatches due rows before it receives HeadClose.
+    result.unwrap(channel.send(head_to, HeadClose))
+    if let Ok(Settled) = channel.receive(events) {} else {
+        fail("L40: serving head did not settle")
+    }
+    result.unwrap(channel.send(head_to, HeadFinish))
+    if let Ok(HeadEnded(Ok(None))) = channel.receive(events) {} else {
+        fail("L40: serving head did not close")
+    }
+    result.unwrap(task.join(take server))
+    let reopened = result.unwrap(store.open(tasks, dir, c, r, options))
+    let outcome = result.unwrap(triggers.outcome(result.unwrap(store.reader(reopened, 0u64)), store.snapshot(reopened), tables, id))
+    result.unwrap(store.close(take reopened))
+    if let Some(Gone) = outcome {
+        Ok(())
+    } else {
+        fail("L40: Gone did not survive reopen")
+    }
+}

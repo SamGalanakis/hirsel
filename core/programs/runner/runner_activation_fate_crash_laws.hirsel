@@ -1,0 +1,133 @@
+// RUNNER-SPEC L70 (d) on a disk store: the install of r2 with (a)'s fates is
+// cut at each of its filesystem operations in turn (an Eio at that site, then a
+// crash that drops what was not synced), and the reopened store holds r1 with
+// all six rows unchanged, or r2 with all six settled as (a) states. The sweep
+// must see both, so cuts land before and after the MANIFEST rename.
+type FateCrashMount: send {
+    fs: std.sim.fs.Fs,
+    plan: std.sim.world.Plan,
+    port: Served[DirOp],
+    clock: Clock
+}
+
+fn fate_crash_served(take m: FateCrashMount) -> (std.sim.fs.Fs, std.sim.world.Plan) waits {
+    let FateCrashMount(fs: take image, plan: take scripted, port: take port, clock) = take m
+    let mut fs = take image
+    let mut plan = take scripted
+    std.sim.fs.serve(mut fs, mut plan, clock, take port)
+    (take fs, take plan)
+}
+
+fn fate_crash_mount(tasks: Tasks, clock: Clock, take fs: std.sim.fs.Fs, take plan: std.sim.world.Plan) -> (Dir, Task[(std.sim.fs.Fs, std.sim.world.Plan)]) {
+    let (d, port) = provide.dir(bytes 65536u64)
+    let server = task.spawn(tasks, bytes 16777216u64, FateCrashMount(fs: take fs, plan: take plan, port: take port, clock: clock), fate_crash_served)
+    (d, take server)
+}
+
+fn fate_crash_unmount(take d: Dir, take server: Task[(std.sim.fs.Fs, std.sim.world.Plan)]) -> (std.sim.fs.Fs, std.sim.world.Plan) waits {
+    drop(take d)
+    result.unwrap(task.join(take server))
+}
+
+fn fate_crash_flags() -> fate.Fates {
+    let mut entry_flag: String = clone("--hirsel-held-entry=")
+    string.push(mut entry_flag, "runner@1/runner/fate_law_c")
+    string.push(mut entry_flag, "=cancel")
+    fate_law_flags(fate_law_two(string.from("--hirsel-held=release"), take entry_flag))
+}
+
+type FateCrashCut = CutAtR1 | CutAtR2 | CutBeyond
+
+// One cut: the install faults at operation `site` of its mount. CutBeyond is a
+// site the install never reached.
+fn fate_crash_case(c: Clock, r: Random, tasks: Tasks, site: u64) -> FateCrashCut waits {
+    let n_place = 1048576u64
+    let (dir, server) = fate_crash_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(0u64))
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
+    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, code.describe(fate_law_r1), None, code.describe(trigger_law_schema), n_place, tasks))
+    let t: triggers.Tables = clone(h.triggers)
+    let r1 = result.unwrap(trigger_stamp(reg1.exported, reg1.bindings, n_place))
+    let r2 = {
+        let reg2 = result.unwrap(placed(code.describe(fate_law_r2), n_place))
+        result.unwrap(trigger_stamp(reg2.exported, reg2.bindings, n_place))
+    }
+    let (rows, _) = fate_law_setup(mut db, t, h, reg1, r1)
+    let before = fate_law_bytes(db, t, rows)
+    let version = store.version(store.snapshot(db))
+    let activation = result.unwrap(current_description(db))
+    result.unwrap(store.close(take db))
+    let (image, _) = fate_crash_unmount(take dir, take server)
+    let mut faults = std.sim.world.plan(site)
+    std.sim.world.script(mut faults, site, Eio)
+    let (dir2, server2) = fate_crash_mount(tasks, c, take image, take faults)
+    if let Ok(take db2) = store.open(tasks, dir2, c, r, triggers.law_options()) {
+        let mut installing = take db2
+        let _ = head_prepare(mut installing, Install(fate_crash_flags()), false, code.describe(fate_law_r2), None, code.describe(trigger_law_schema), n_place, tasks)
+        let _ = store.close(take installing)
+    }
+    let (cut_image, after) = fate_crash_unmount(take dir2, take server2)
+    let mut left = take after
+    if let Some(_) = std.sim.world.take_fault(mut left, site) {
+        return CutBeyond
+    }
+    let mut cut = take cut_image
+    let mut cutting = std.sim.world.plan(site + 1u64)
+    std.sim.fs.crash(mut cut, mut cutting)
+    let (dir3, server3) = fate_crash_mount(tasks, c, take cut, std.sim.world.plan(0u64))
+    let mut db3 = result.unwrap(store.open(tasks, dir3, c, r, triggers.law_options()))
+    let reopened = result.unwrap(store.bind_declaration(mut db3, Open, trigger_law_schema))
+    let t3: triggers.Tables = clone(reopened.triggers)
+    let at = store.version(store.snapshot(db3))
+    let now = result.unwrap(current_description(db3))
+    let outcome = if at == version {
+        if now != activation || fate_law_bytes(db3, t3, rows) != before {
+            fail("L70 (d): a cut before the rename did not recover r1 with its rows")
+        }
+        CutAtR1
+    } else {
+        if at != version + 1u64 || now == activation {
+            fail("L70 (d): a cut after the rename did not recover the activation commit")
+        }
+        for (id, attempt) in[(rows.a, 1u64), (rows.b, 2u64), (rows.f, 1u64)] {
+            let row = fate_law_row(db3, t3, id)
+            if !triggers.waiting(row) || !triggers.stamped(row, r2) || triggers.attempts(row) != attempt || triggers.cancelling(row) {
+                fail("L70 (d): a released row is not Waiting at r2 with its attempt")
+            }
+        }
+        let cancelled = fate_law_row(db3, t3, rows.c)
+        if !triggers.waiting(cancelled) || !triggers.cancelling(cancelled) || triggers.stamped(cancelled, r1) || triggers.stamped(cancelled, r2) || triggers.attempts(cancelled) != 1u64 {
+            fail("L70 (d): C is not a Waiting cancel with its r0 stamp")
+        }
+        let after_rows = fate_law_bytes(db3, t3, rows)
+        if after_rows[3u64] != before[3u64] || after_rows[4u64] != before[4u64] {
+            fail("L70 (d): an unheld row changed")
+        }
+        CutAtR2
+    }
+    result.unwrap(store.close(take db3))
+    let _ = fate_crash_unmount(take dir3, take server3)
+    outcome
+}
+
+@test
+fn activation_fate_survives_crash(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut old = 0u64
+    let mut new = 0u64
+    let mut site = 0u64
+    loop {
+        match fate_crash_case(c, r, tasks, site) {
+            CutAtR1 => {
+                old += 1u64
+            },
+            CutAtR2 => {
+                new += 1u64
+            },
+            CutBeyond => break,
+        }
+        site += 1u64
+    }
+    if old == 0u64 || new == 0u64 {
+        fail("L70 (d): the cuts did not land on both sides of the MANIFEST rename")
+    }
+    Ok(())
+}

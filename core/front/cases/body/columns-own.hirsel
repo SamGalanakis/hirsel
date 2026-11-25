@@ -1,0 +1,47 @@
+// OWN-9: two columns of one Columns do not overlap, so one may be lent `mut`
+// while another is read or held; `list.set_lanes` writes a column's elements in place.
+// expect: accept
+// expect: run two_columns() = 43
+// expect: run held_column() = 1005
+// expect: run set_lanes_column() = 136
+type P {
+    x: u64,
+    y: u64
+}
+
+type B {
+    k: u8,
+    w: u64
+}
+
+fn add_into(mut to: u64, from: u64) {
+    to += from
+}
+
+fn two_columns() -> u64 {
+    let mut c: Columns[P] = columns.new()
+    columns.push(mut c, P(x: 3u64, y: 40u64))
+    add_into(mut c.x[0], c.y[0])
+    c.x[0]
+}
+
+fn held_column() -> u64 {
+    let mut c: Columns[P] = columns.new()
+    columns.push(mut c, P(x: 1u64, y: 2u64))
+    let held = view c.x
+    c.y[0] = 1000u64
+    held[0] + c.y[0] + list.len(held) * 4u64
+}
+
+fn set_lanes_column() -> u64 {
+    let mut c: Columns[B] = columns.new()
+    columns.fill(mut c, 16u64, B(k: 0u8, w: 9u64))
+    let v: Simd[u8, 16] = list.lanes(c.k, 0u64)
+    list.set_lanes(mut c.k, 0u64, simd.wrapping_add(v, simd.splat(1u8)))
+    let mut sum = 0u64
+    for b in c.k {
+        let wide: u64 = int.widen(b)
+        sum += wide
+    }
+    sum + c.w[15] * 13u64 + 3u64
+}

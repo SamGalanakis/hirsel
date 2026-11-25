@@ -744,7 +744,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for i in at.place.start..at.place.start + at.place.len {
             let component = match self.steps[i as usize] {
                 PStep::Field(i) => Component::Field(i),
-                PStep::Index { .. } => Component::Element(None),
+                PStep::Index { .. } | PStep::Column(_) => Component::Element(None),
                 PStep::Payload | PStep::Case(..) => continue,
             };
             fact = self.anchors.project(fact, component);
@@ -829,7 +829,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for i in at.place.start..at.place.start + at.place.len {
             match self.steps[i as usize] {
                 PStep::Field(i) => path.push(Component::Field(i)),
-                PStep::Index { .. } => path.push(Component::Element(None)),
+                PStep::Index { .. } | PStep::Column(_) => path.push(Component::Element(None)),
                 PStep::Payload | PStep::Case(..) => {}
             }
         }

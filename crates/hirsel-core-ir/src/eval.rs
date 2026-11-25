@@ -16,6 +16,7 @@ mod conn;
 mod crc;
 mod footprint;
 mod frame;
+mod rows;
 use footprint::Footprint;
 mod host;
 mod key_share;
@@ -4740,31 +4741,7 @@ impl Machine<'_> {
                 }
                 false
             }
-            FieldTy::Seq(element) => {
-                let block = self.load(at, 8);
-                let length = self.load(at + 8, 8);
-                let capacity = self.load(at + 16, 8);
-                let stride = self.stride(element);
-                if stride == 0 {
-                    // SEM-4: no element storage, nothing to clean (capacity 2^64 - 1).
-                    return false;
-                }
-                if capacity != 0 {
-                    self.edge(block, ty, "list storage");
-                }
-                let mut failed = false;
-                for i in 0..length {
-                    self.drop_marked(block + i * stride, stride as usize);
-                    failed |= self.drop_field(t, block + i * stride, element);
-                }
-                // Capacity 0 has no storage: empty, or static data the carrier does
-                // not own (core.md "Literals").
-                if capacity != 0 {
-                    let element = field_size(&self.m.types, &self.recipes, element).2;
-                    self.free_as(block, charge::seq(capacity, element), None, "list storage");
-                }
-                failed
-            }
+            FieldTy::Seq(element) | FieldTy::Columns(element) => self.drop_rows(t, at, ty, element),
             // SEM-5, SEM-9: live entries in insertion order, each key before its
             // value (`map_entry`); removed entries (state 0) were cleaned by
             // `map.remove`. Storage exists exactly when the capacity is not 0.

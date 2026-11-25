@@ -64,7 +64,9 @@ impl Cx<'_, '_, '_> {
             let mut header = None;
             let mut found = vec![None; g.generics.len()];
             let (param, result) = (g.params[0].ty, g.result);
+            self.column_mut = op == SimdCall::SetLanes;
             self.argument(Mode::Mut, param, call, 0, args[0], &mut found, &mut header);
+            self.column_mut = false;
             let (value_arg, value, other, shape, label) = match op {
                 SimdCall::PutLanes => {
                     let (ty, value) = self.expr(args[1], None);

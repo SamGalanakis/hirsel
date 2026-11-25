@@ -13,6 +13,14 @@ pub type Why: key = Loss | Switch
 
 pub type Request: key = Pli | Fir(u8)
 
+// A missing index's state: when it was found missing, when it was last asked
+// for and how many times.
+type Slot {
+    found_at: u64,
+    asked_at: u64,
+    asked: u8
+}
+
 // A ring of window slots over the indices [highest - window, highest - 1].
 // Slot index mod window holds that index's state; the highest itself is
 // never missing, so its slot holds highest - window.
@@ -20,9 +28,7 @@ pub opaque type Losses {
     config: NackConfig,
     highest: u64,
     missing: std.bitset.BitSet,
-    found_at: List[u64],
-    asked_at: List[u64],
-    asked: List[u8]
+    slots: Columns[Slot]
 }
 
 pub opaque type Keyframes {
@@ -41,16 +47,10 @@ pub fn losses(c: NackConfig, first: u64, at_ns: u64) -> Result[Losses, Capacity]
         return Error(Capacity(requested: 0, available: 0))
     }
     let missing = std.bitset.try_new(n)?
-    let mut found_at: List[u64] = list.new()
-    let mut asked_at: List[u64] = list.new()
-    let mut asked: List[u8] = list.new()
-    list.try_reserve(mut found_at, n)?
-    list.try_reserve(mut asked_at, n)?
-    list.try_reserve(mut asked, n)?
-    list.fill(mut found_at, n, at_ns)
-    list.fill(mut asked_at, n, 0u64)
-    list.fill(mut asked, n, 0u8)
-    Ok(Losses(config: c, highest: first, missing: missing, found_at: found_at, asked_at: asked_at, asked: asked))
+    let mut slots: Columns[Slot] = columns.new()
+    columns.try_reserve(mut slots, n)?
+    columns.fill(mut slots, n, Slot(found_at: at_ns, asked_at: 0, asked: 0))
+    Ok(Losses(config: c, highest: first, missing: missing, slots: slots))
 }
 
 fn window(l: Losses) -> u64 {
@@ -59,9 +59,7 @@ fn window(l: Losses) -> u64 {
 
 fn mark(mut l: Losses, slot: u64, at_ns: u64) {
     std.bitset.set(mut l.missing, slot)
-    l.found_at[slot] = at_ns
-    l.asked_at[slot] = 0
-    l.asked[slot] = 0
+    let _ = columns.set(mut l.slots, slot, Slot(found_at: at_ns, asked_at: 0, asked: 0))
 }
 
 pub fn on_packet(mut l: Losses, index: u64, at_ns: u64) -> Gap {
@@ -104,7 +102,7 @@ fn earlier(a: Option[u64], t: u64) -> Option[u64] {
 // it is dropped first.
 fn retry_at(l: Losses, slot: u64, tries: u8, asked_at: u64, retry: u64) -> Option[u64] {
     let again = int.saturating_add(asked_at, retry)
-    if tries >= l.config.tries || again >= int.saturating_add(l.found_at[slot], l.config.max_age_ns) {
+    if tries >= l.config.tries || again >= int.saturating_add(l.slots.found_at[slot], l.config.max_age_ns) {
         return None
     }
     Some(again)
@@ -134,13 +132,13 @@ pub fn due(mut l: Losses, now_ns: u64, rtt_ns: Option[u64], max: u32, mut pairs:
     while index < l.highest {
         let slot = index % w
         if std.bitset.get(l.missing, slot) {
-            let tries = l.asked[slot]
-            let age = int.saturating_sub(now_ns, l.found_at[slot])
-            let waiting = tries > 0 && now_ns < int.saturating_add(l.asked_at[slot], retry)
+            let tries = l.slots.asked[slot]
+            let age = int.saturating_sub(now_ns, l.slots.found_at[slot])
+            let waiting = tries > 0 && now_ns < int.saturating_add(l.slots.asked_at[slot], retry)
             if tries >= l.config.tries || age >= l.config.max_age_ns {
                 std.bitset.clear(mut l.missing, slot)
             } else if waiting {
-                if let Some(t) = retry_at(l, slot, tries, l.asked_at[slot], retry) {
+                if let Some(t) = retry_at(l, slot, tries, l.slots.asked_at[slot], retry) {
                     next = earlier(next, t)
                 }
             } else {
@@ -158,8 +156,8 @@ pub fn due(mut l: Losses, now_ns: u64, rtt_ns: Option[u64], max: u32, mut pairs:
                     took = true
                 }
                 if took {
-                    l.asked_at[slot] = now_ns
-                    l.asked[slot] = tries + 1
+                    l.slots.asked_at[slot] = now_ns
+                    l.slots.asked[slot] = tries + 1
                     if let Some(t) = retry_at(l, slot, tries + 1, now_ns, retry) {
                         next = earlier(next, t)
                     }

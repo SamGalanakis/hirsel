@@ -39,7 +39,7 @@ impl Glues {
                 FieldTy::Rc(t) | FieldTy::Arc(t) => {
                     roots.insert(t.index());
                 }
-                FieldTy::Array(e, _) | FieldTy::Seq(e) => counted(e, roots),
+                FieldTy::Array(e, _) | FieldTy::Seq(e) | FieldTy::Columns(e) => counted(e, roots),
                 FieldTy::Map(k, v) => {
                     counted(k, roots);
                     counted(v, roots);
@@ -120,7 +120,9 @@ impl Glues {
                     FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                         roots.insert(t.index());
                     }
-                    FieldTy::Array(e, _) | FieldTy::Seq(e) => element(e, roots, buffered),
+                    FieldTy::Array(e, _) | FieldTy::Seq(e) | FieldTy::Columns(e) => {
+                        element(e, roots, buffered)
+                    }
                     FieldTy::Map(k, v) => {
                         element(k, roots, buffered);
                         element(v, roots, buffered);
@@ -152,7 +154,9 @@ impl Glues {
                     FieldTy::Array(e, _) => {
                         field(e, layouts, resources, needed, roots, buffered, seen)
                     }
-                    FieldTy::Seq(_) | FieldTy::Map(..) => element(f, roots, buffered),
+                    FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(..) => {
+                        element(f, roots, buffered)
+                    }
                     _ => counted(f, roots),
                 }
             }
@@ -207,7 +211,7 @@ impl Glues {
                         roots.insert(t.index());
                         descendants(t.index(), layouts, resources, roots, visited, resourced);
                     }
-                    FieldTy::Array(e, _) | FieldTy::Seq(e) => {
+                    FieldTy::Array(e, _) | FieldTy::Seq(e) | FieldTy::Columns(e) => {
                         field(e, layouts, resources, roots, visited, resourced)
                     }
                     FieldTy::Map(k, v) => {
@@ -375,7 +379,7 @@ impl Glues {
         let mut buffers = Vec::new();
         fn collect(t: &FieldTy, buffers: &mut Vec<FieldTy>) {
             match t {
-                FieldTy::Seq(e) => {
+                FieldTy::Seq(e) | FieldTy::Columns(e) => {
                     if !buffers.contains(t) {
                         buffers.push(t.clone());
                     }
@@ -905,7 +909,9 @@ impl Glue<'_, '_, '_> {
             }
             // SEM-4: a List of a zero-sized element has no storage to clean.
             FieldTy::Seq(_) if hirsel_core_layout::storage_free(&self.tables.input.types, t) => {}
-            FieldTy::Seq(_) | FieldTy::Map(..) => self.release_buffer(at, t)?,
+            FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(..) => {
+                self.release_buffer(at, t)?
+            }
             FieldTy::FrozenBytes => {
                 self.call(
                     "hirsel_core_drop_frozen_bytes",
@@ -1028,7 +1034,10 @@ impl Glue<'_, '_, '_> {
     /// carrier (capacity 0) owns nothing.
     fn release_buffer(&mut self, carrier: Value, t: &FieldTy) -> Result<()> {
         let logical = match t {
-            FieldTy::Seq(e) => field_size(&self.tables.input.types, self.tables.layouts, e).2,
+            // MEM-24: Columns charge as List of the row.
+            FieldTy::Seq(e) | FieldTy::Columns(e) => {
+                field_size(&self.tables.input.types, self.tables.layouts, e).2
+            }
             FieldTy::Map(k, v) => {
                 field_size(&self.tables.input.types, self.tables.layouts, k).2
                     + field_size(&self.tables.input.types, self.tables.layouts, v).2

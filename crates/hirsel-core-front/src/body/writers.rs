@@ -1359,7 +1359,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some((blob, region_entry))
     }
     /// `x` rounded up to a multiple of 8; `x` is below the blob cap, so it does not wrap.
-    fn round8(&mut self, x: ValueId, n: NodeId) -> Option<ValueId> {
+    pub(super) fn round8(&mut self, x: ValueId, n: NodeId) -> Option<ValueId> {
         let seven = self.u64k(7, n)?;
         let up = self.add(x, seven, n);
         let mask = self.u64k(!7, n)?;

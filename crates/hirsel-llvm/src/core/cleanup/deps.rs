@@ -20,7 +20,9 @@ pub(super) fn cleanup_dependencies(
             cleanup_dependencies(key, true, pending);
             cleanup_dependencies(value, true, pending);
         }
-        FieldTy::Seq(element) => cleanup_dependencies(element, true, pending),
+        FieldTy::Seq(element) | FieldTy::Columns(element) => {
+            cleanup_dependencies(element, true, pending)
+        }
         FieldTy::Array(element, _) => cleanup_dependencies(element, counted, pending),
         _ => {}
     }

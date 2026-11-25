@@ -110,6 +110,7 @@ fn holds_authority(closure: &Closure) -> bool {
                 false
             }
             FieldTy::Seq(t)
+            | FieldTy::Columns(t)
             | FieldTy::Array(t, _)
             | FieldTy::View(t)
             | FieldTy::FixedSpan(t)

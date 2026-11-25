@@ -615,6 +615,7 @@ impl Substitution<'_> {
             FieldTy::RegionRef(id) => FieldTy::RegionRef(row(id, self)),
             FieldTy::Link(id) => FieldTy::Link(row(id, self)),
             FieldTy::Seq(x) => FieldTy::Seq(Box::new(self.field(x, false))),
+            FieldTy::Columns(x) => FieldTy::Columns(Box::new(self.field(x, false))),
             FieldTy::Array(x, n) => FieldTy::Array(Box::new(self.field(x, false)), *n),
             FieldTy::Map(k, v) => FieldTy::Map(
                 Box::new(self.field(k, false)),

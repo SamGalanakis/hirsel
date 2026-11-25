@@ -23,6 +23,22 @@ type Report {
     at_ns: u64
 }
 
+// A range of outgoing indices from from on, shifted by offset.
+type Range {
+    from: u64,
+    offset: i64
+}
+
+// The decision for a frame (gen, ts, id), with the highest index seen.
+type Frame {
+    gen: u64,
+    ts: i64,
+    id: u16,
+    forward: bool,
+    max: u64,
+    used: bool
+}
+
 pub opaque type Rewrite {
     clock: i64,
     first_ts: i64,
@@ -47,18 +63,11 @@ pub opaque type Rewrite {
     ts_offset: i64,
     // The source timestamp of the last packet forwarded, for extending SRs.
     last_src_ts: i64,
-    // Ranges: (from index, offset), newest at range_head.
-    range_from: List[u64],
-    range_offset: List[i64],
+    // Ranges, newest at range_head.
+    ranges: Columns[Range],
     range_count: u64,
     range_head: u64,
-    // Frames: decision per (generation, ts, frame), with the highest index seen.
-    frame_gen: List[u64],
-    frame_ts: List[i64],
-    frame_id: List[u16],
-    frame_forward: List[bool],
-    frame_max: List[u64],
-    frame_used: List[bool],
+    frames: Columns[Frame],
     frame_next: u64,
     // The highest timestamp of any frame the current generation added.
     gen_frames: bool,
@@ -88,31 +97,13 @@ pub fn rewrite(clock: u32, ranges: u32, frames: u32, first_seq: u64, first_ts: u
     if f == 0 {
         return Error(Capacity(requested: f, available: 0))
     }
-    let mut range_from: List[u64] = list.new()
-    let mut range_offset: List[i64] = list.new()
-    let mut frame_gen: List[u64] = list.new()
-    let mut frame_ts: List[i64] = list.new()
-    let mut frame_id: List[u16] = list.new()
-    let mut frame_forward: List[bool] = list.new()
-    let mut frame_max: List[u64] = list.new()
-    let mut frame_used: List[bool] = list.new()
-    list.try_reserve(mut range_from, r)?
-    list.try_reserve(mut range_offset, r)?
-    list.try_reserve(mut frame_gen, f)?
-    list.try_reserve(mut frame_ts, f)?
-    list.try_reserve(mut frame_id, f)?
-    list.try_reserve(mut frame_forward, f)?
-    list.try_reserve(mut frame_max, f)?
-    list.try_reserve(mut frame_used, f)?
-    list.fill(mut range_from, r, 0u64)
-    list.fill(mut range_offset, r, 0i64)
-    list.fill(mut frame_gen, f, 0u64)
-    list.fill(mut frame_ts, f, 0i64)
-    list.fill(mut frame_id, f, 0u16)
-    list.fill(mut frame_forward, f, false)
-    list.fill(mut frame_max, f, 0u64)
-    list.fill(mut frame_used, f, false)
-    Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), closed: false, live: false, source: 0, layer: 0, wanting: false, want_source: 0, want_layer: 0, current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, range_from: range_from, range_offset: range_offset, range_count: 0, range_head: 0, frame_gen: frame_gen, frame_ts: frame_ts, frame_id: frame_id, frame_forward: frame_forward, frame_max: frame_max, frame_used: frame_used, frame_next: 0, gen_frames: false, gen_ts_max: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, switch_at: None))
+    let mut range_rows: Columns[Range] = columns.new()
+    let mut frame_rows: Columns[Frame] = columns.new()
+    columns.try_reserve(mut range_rows, r)?
+    columns.try_reserve(mut frame_rows, f)?
+    columns.fill(mut range_rows, r, Range(from: 0, offset: 0))
+    columns.fill(mut frame_rows, f, Frame(gen: 0, ts: 0, id: 0, forward: false, max: 0, used: false))
+    Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), closed: false, live: false, source: 0, layer: 0, wanting: false, want_source: 0, want_layer: 0, current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, ranges: range_rows, range_count: 0, range_head: 0, frames: frame_rows, frame_next: 0, gen_frames: false, gen_ts_max: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, switch_at: None))
 }
 
 pub fn target(mut r: Rewrite, t: Target) -> Result[(), TargetError] {
@@ -155,7 +146,7 @@ fn find_frame(r: Rewrite, ts: i64, frame: u16) -> Option[u64] {
     if !r.gen_frames || ts > r.gen_ts_max {
         return None
     }
-    let n = list.len(r.frame_used)
+    let n = columns.len(r.frames)
     // Newest first, stepping back without a division per slot. Entries are
     // written in order and generations only grow, so the first older
     // generation (or unused slot) ends the current generation's entries.
@@ -166,10 +157,10 @@ fn find_frame(r: Rewrite, ts: i64, frame: u16) -> Option[u64] {
     }
     let mut k = 0u64
     while k < n {
-        if !r.frame_used[i] || r.frame_gen[i] != r.generation {
+        if !r.frames.used[i] || r.frames.gen[i] != r.generation {
             return None
         }
-        if r.frame_ts[i] == ts && r.frame_id[i] == frame {
+        if r.frames.ts[i] == ts && r.frames.id[i] == frame {
             return Some(i)
         }
         i = if i == 0 {
@@ -184,24 +175,19 @@ fn find_frame(r: Rewrite, ts: i64, frame: u16) -> Option[u64] {
 
 fn add_frame(mut r: Rewrite, ts: i64, frame: u16, forward: bool, index: u64) {
     let i = r.frame_next
-    if r.frame_used[i] && r.frame_gen[i] == r.generation {
-        let upto = r.frame_max[i]
+    if r.frames.used[i] && r.frames.gen[i] == r.generation {
+        let upto = r.frames.max[i]
         if !r.evicted || upto > r.evicted_upto {
             r.evicted_upto = upto
         }
         r.evicted = true
     }
-    r.frame_used[i] = true
-    r.frame_gen[i] = r.generation
-    r.frame_ts[i] = ts
-    r.frame_id[i] = frame
-    r.frame_forward[i] = forward
-    r.frame_max[i] = index
+    let _ = columns.set(mut r.frames, i, Frame(gen: r.generation, ts: ts, id: frame, forward: forward, max: index, used: true))
     if !r.gen_frames || ts > r.gen_ts_max {
         r.gen_ts_max = ts
     }
     r.gen_frames = true
-    r.frame_next = if i + 1 == list.len(r.frame_used) {
+    r.frame_next = if i + 1 == columns.len(r.frames) {
         0u64
     } else {
         i + 1
@@ -209,14 +195,13 @@ fn add_frame(mut r: Rewrite, ts: i64, frame: u16, forward: bool, index: u64) {
 }
 
 fn push_range(mut r: Rewrite, from: u64, offset: i64) {
-    let n = list.len(r.range_from)
+    let n = columns.len(r.ranges)
     let i = if r.range_count == 0 {
         0u64
     } else {
         (r.range_head + 1) % n
     }
-    r.range_from[i] = from
-    r.range_offset[i] = offset
+    let _ = columns.set(mut r.ranges, i, Range(from: from, offset: offset))
     r.range_head = i
     if r.range_count < n {
         r.range_count += 1
@@ -226,12 +211,12 @@ fn push_range(mut r: Rewrite, from: u64, offset: i64) {
 
 // The offset of the newest range at or below `index`.
 fn offset_at(r: Rewrite, index: u64) -> Option[i64] {
-    let n = list.len(r.range_from)
+    let n = columns.len(r.ranges)
     let mut k = 0u64
     while k < r.range_count {
         let i = (r.range_head + n - k) % n
-        if r.range_from[i] <= index {
-            return Some(r.range_offset[i])
+        if r.ranges.from[i] <= index {
+            return Some(r.ranges.offset[i])
         }
         k += 1
     }
@@ -361,10 +346,10 @@ pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, p
     }
     let forward = match find_frame(r, ts, u.frame) {
         Some(i) => {
-            if index > r.frame_max[i] {
-                r.frame_max[i] = index
+            if index > r.frames.max[i] {
+                r.frames.max[i] = index
             }
-            r.frame_forward[i]
+            r.frames.forward[i]
         },
         None => {
             if r.evicted && index <= r.evicted_upto {
@@ -384,9 +369,9 @@ pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, p
         }
         // Close it up: every later packet's offset grows by one.
         let offset = r.offset + 1
-        if r.range_from[r.range_head] == index {
-            r.range_from[r.range_head] = index + 1
-            r.range_offset[r.range_head] = offset
+        if r.ranges.from[r.range_head] == index {
+            r.ranges.from[r.range_head] = index + 1
+            r.ranges.offset[r.range_head] = offset
             r.offset = offset
         } else {
             push_range(mut r, index + 1, offset)

@@ -308,6 +308,12 @@ impl<T: TyRead> Shapes<'_, T> {
                             self.structural_codec(r, d, ty, &args);
                         return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
+                    Some(Role::Columns) => {
+                        let items = FieldTy::Columns(Box::new(self.field(args[0])?));
+                        let held = Some(items.clone());
+                        let body = record(vec![("items", items)]);
+                        return self.fill(r, ty, LRepr::Own, body, None, held);
+                    }
                     Some(Role::ForeignHandle) => {
                         let body = record(vec![("handle", FieldTy::Scalar(Scalar::U64))]);
                         return self.fill(r, ty, LRepr::Own, body, None, None);
@@ -643,6 +649,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Arc) => FieldTy::Arc(self.shape(args[0])?),
                 Some(Role::Shared) => FieldTy::Shared(self.shape(args[0])?),
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
+                Some(Role::Columns) => FieldTy::Columns(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
                 Some(Role::FrozenBytes) => FieldTy::FrozenBytes,
                 Some(Role::Map | Role::Cell) => FieldTy::Inline(self.shape(ty)?),

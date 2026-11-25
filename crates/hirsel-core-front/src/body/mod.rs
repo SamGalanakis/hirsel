@@ -53,6 +53,7 @@ mod clone_glue;
 mod closures;
 mod code_describe;
 mod codec_glue;
+mod columns;
 mod compact;
 mod compare;
 mod constants;
@@ -918,7 +919,7 @@ fn field_runs_code(t: &FieldTy, row: &mut impl FnMut(TypeId)) -> bool {
             row(TypeId(r.0));
             false
         }
-        FieldTy::Seq(e) | FieldTy::Array(e, _) => field_runs_code(e, row),
+        FieldTy::Seq(e) | FieldTy::Columns(e) | FieldTy::Array(e, _) => field_runs_code(e, row),
         FieldTy::Map(k, v) => field_runs_code(k, row) || field_runs_code(v, row),
         // An abandoned task or receiver cleans results or items whose type the handle
         // does not name, which may run finalizers (CONC-8).
@@ -1250,6 +1251,11 @@ struct Cx<'c, 'a, 'e> {
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
     generated_ordinals: [HashMap<NodeId, usize>; 3],
     call_seq: u32,
+    /// The argument being checked is `list.set_lanes`'s, the one `mut` loan a
+    /// column takes (MEM-24).
+    column_mut: bool,
+    /// The cut rows of each `Columns` drain owner (`Owner::Columns`).
+    column_drains: Vec<columns::ColumnDrain>,
     /// The call whose copyable view arguments are passed by address rather than
     /// snapshotted, and the arguments so passed.
     direct_call: Option<(u32, Option<SlotId>)>,
@@ -1425,6 +1431,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             nested: Default::default(),
             generated_ordinals: Default::default(),
             call_seq: 0,
+            column_mut: false,
+            column_drains: Vec::new(),
             direct_call: None,
             direct_args: vec![],
             scalar_calls: vec![],

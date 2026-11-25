@@ -369,7 +369,7 @@ fn inert_field(
     use hirsel_core_layout::FieldTy::*;
     match field {
         Inline(t) => inert_drop(module, t.index(), seen),
-        Seq(e) | Array(e, _) => inert_field(module, e, seen),
+        Seq(e) | Columns(e) | Array(e, _) => inert_field(module, e, seen),
         Map(_, _) | Box(_) => false,
         // Counted payloads are shareable; their cleanup runs no user code.
         Rc(_) | Arc(_) => true,

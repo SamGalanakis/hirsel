@@ -176,6 +176,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if module == ["list"] {
             return self.list_value(name, types[0], vals, result, n);
         }
+        if module == ["columns"] {
+            return self.columns_value(name, types[0], vals, result, n);
+        }
         if module == ["core"] {
             match name {
                 "replace" => return Some(self.replace_value(types[0], vals[0], vals[1], n)),

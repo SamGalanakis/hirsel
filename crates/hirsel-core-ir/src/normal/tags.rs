@@ -98,6 +98,7 @@ tags!(FieldTy {
     19 => Locator(part0),
     20 => FrozenBytes,
     21 => Shared(part0),
+    22 => Columns(part0),
 });
 
 tags!(hirsel_core_layout::Body {

@@ -1185,7 +1185,13 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 need(
                     matches!(
                         edge,
-                        F::Box(_) | F::Rc(_) | F::Arc(_) | F::Seq(_) | F::Map(..) | F::FrozenBytes
+                        F::Box(_)
+                            | F::Rc(_)
+                            | F::Arc(_)
+                            | F::Seq(_)
+                            | F::Columns(_)
+                            | F::Map(..)
+                            | F::FrozenBytes
                     ),
                     || format!("allocation edge {edge:?} is not an own block's edge"),
                 )?;

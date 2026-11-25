@@ -615,7 +615,7 @@ impl Sendable {
     fn ty(&mut self, shapes: &[Row], ty: &FieldTy) -> bool {
         match ty {
             FieldTy::Inline(t) | FieldTy::Box(t) => self.row(shapes, *t),
-            FieldTy::Seq(e) | FieldTy::Array(e, _) => self.ty(shapes, e),
+            FieldTy::Seq(e) | FieldTy::Columns(e) | FieldTy::Array(e, _) => self.ty(shapes, e),
             FieldTy::Map(k, v) => self.ty(shapes, k) && self.ty(shapes, v),
             FieldTy::Rc(_) | FieldTy::Borrow | FieldTy::View(_) | FieldTy::RegionRef(_) => false,
             FieldTy::Text
@@ -642,13 +642,15 @@ impl Sendable {
 fn owned_rows(shapes: &[Row], send: &mut Sendable, ty: &FieldTy, rows: &mut Vec<TypeRef>) -> bool {
     match ty {
         FieldTy::Box(t) if send.row(shapes, *t) => false,
-        FieldTy::Seq(e) if send.ty(shapes, e) => false,
+        FieldTy::Seq(e) | FieldTy::Columns(e) if send.ty(shapes, e) => false,
         FieldTy::Map(k, v) if send.ty(shapes, k) && send.ty(shapes, v) => false,
         FieldTy::Inline(t) | FieldTy::Box(t) | FieldTy::Rc(t) => {
             rows.push(*t);
             true
         }
-        FieldTy::Seq(e) | FieldTy::Array(e, _) => owned_rows(shapes, send, e, rows),
+        FieldTy::Seq(e) | FieldTy::Columns(e) | FieldTy::Array(e, _) => {
+            owned_rows(shapes, send, e, rows)
+        }
         FieldTy::Map(k, v) => {
             owned_rows(shapes, send, k, rows) && owned_rows(shapes, send, v, rows)
         }
@@ -1006,7 +1008,7 @@ pub fn field_niche<'r>(
         FieldTy::RegionRef(t) if !matches!(shapes[t.index()].repr, Repr::Compact(_)) => {
             n(0, POINTER, 0, 1)
         }
-        FieldTy::Seq(_) | FieldTy::Map(..) | FieldTy::FrozenBytes => {
+        FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(..) | FieldTy::FrozenBytes => {
             n(16, 8, 1 << 63, (1 << 63) - 1)
         }
         FieldTy::Scalar(crate::shape::Scalar::Bool) => n(0, 1, 2, 254),
@@ -1406,7 +1408,9 @@ fn measure<'r>(
         | FieldTy::Arc(_)
         | FieldTy::Shared(_)
         | FieldTy::Handle(_) => (POINTER, POINTER, 8),
-        FieldTy::Seq(_) | FieldTy::Map(..) | FieldTy::FrozenBytes => (SEQ_CARRIER, POINTER, 24),
+        FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(..) | FieldTy::FrozenBytes => {
+            (SEQ_CARRIER, POINTER, 24)
+        }
         FieldTy::OwnFn => (CLOSURE_CARRIER, POINTER, 16),
         FieldTy::Text
         | FieldTy::FixedSpan(_)
@@ -1479,10 +1483,34 @@ pub fn held_size(
     measure(shapes, holder, ty, &|t| &recipes[t.index()]).expect("an accepted field type")
 }
 
+/// The columns of `Columns(row)` storage, in field order: the front end gives a
+/// `Columns` edge only to an own record row with fields, and stores each field in
+/// its own column (a `Seq` edge holds every other row).
+pub fn columns<'s>(shapes: &'s [Row], row: &'s FieldTy) -> Vec<&'s FieldTy> {
+    if let FieldTy::Inline(t) = row
+        && let Body::Record(fields) = &shapes[t.index()].body
+        && !fields.is_empty()
+    {
+        return fields.iter().map(|f| &f.ty).collect();
+    }
+    vec![row]
+}
+
+/// Each column of `Columns[T]` storage with its native stride (see [`columns`]).
+/// Column `k` of a block of capacity `c` starts at the sum, over the columns
+/// before it, of `c × stride` rounded up to 8; the block is that sum over all of
+/// them. Its charge is `Seq(T)`'s, `c × logical(T)` rounded up to 8 (MEM-24).
+pub fn column_strides(shapes: &[Row], recipes: &[RecipeRow], row: &FieldTy) -> Vec<(FieldTy, u64)> {
+    columns(shapes, row)
+        .into_iter()
+        .map(|c| (c.clone(), field_size(shapes, recipes, c).0))
+        .collect()
+}
+
 /// SEM-4: a `List` of a zero-sized element has no element storage (its capacity is
 /// 2^64 - 1 from creation and nothing is admitted), so it has nothing to clean.
 pub fn storage_free(shapes: &[Row], ty: &FieldTy) -> bool {
-    matches!(ty, FieldTy::Seq(e) if zero_sized(shapes, e, &mut vec![]))
+    matches!(ty, FieldTy::Seq(e) | FieldTy::Columns(e) if zero_sized(shapes, e, &mut vec![]))
 }
 
 /// Whether a field of type `ty` has size 0, read from the shapes alone (a list's
@@ -1555,11 +1583,11 @@ pub fn cleanup_class(shapes: &[Row], recipes: &[RecipeRow], edge: &FieldTy) -> O
             }
         }
         FieldTy::FrozenBytes => Cleanup::Terminal,
-        FieldTy::Seq(e) if !drops(shapes, e, &drop) => Cleanup::Terminal,
+        FieldTy::Seq(e) | FieldTy::Columns(e) if !drops(shapes, e, &drop) => Cleanup::Terminal,
         FieldTy::Map(k, v) if !drops(shapes, k, &drop) && !drops(shapes, v, &drop) => {
             Cleanup::Terminal
         }
-        FieldTy::Seq(_) | FieldTy::Map(..) => Cleanup::Dynamic,
+        FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(..) => Cleanup::Dynamic,
         FieldTy::OwnFn => Cleanup::Fixed,
         _ => return None,
     })
@@ -1568,7 +1596,7 @@ pub fn cleanup_class(shapes: &[Row], recipes: &[RecipeRow], edge: &FieldTy) -> O
 /// Whether a value of `ty` has anything to drop, given which rows have a recipe.
 fn drops(shapes: &[Row], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool {
     match ty {
-        FieldTy::Seq(e) => !zero_sized(shapes, e, &mut vec![]),
+        FieldTy::Seq(e) | FieldTy::Columns(e) => !zero_sized(shapes, e, &mut vec![]),
         FieldTy::FrozenBytes => true,
         FieldTy::Inline(t) => !matches!(shapes[t.index()].repr, Repr::Compact(_)) && drop(*t),
         FieldTy::Handle(Handle::Capability) => false,

@@ -87,9 +87,12 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
     Ok(match t {
         FieldTy::Inline(t) => plan_type(tables, *t)?,
         FieldTy::Seq(_) if hirsel_core_layout::storage_free(&tables.input.types, t) => Plan::Empty,
-        FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Seq(_) | FieldTy::Map(..) => {
-            Plan::Leaf(t.clone())
-        }
+        FieldTy::Box(_)
+        | FieldTy::Rc(_)
+        | FieldTy::Arc(_)
+        | FieldTy::Seq(_)
+        | FieldTy::Columns(_)
+        | FieldTy::Map(..) => Plan::Leaf(t.clone()),
         FieldTy::Scalar(_)
         | FieldTy::RegionRef(_)
         | FieldTy::Fn
@@ -154,6 +157,7 @@ impl Glue<'_, '_, '_> {
             | FieldTy::Rc(_)
             | FieldTy::Arc(_)
             | FieldTy::Seq(_)
+            | FieldTy::Columns(_)
             | FieldTy::Map(..) => {
                 hirsel_core_layout::terminal(&self.tables.input.types, self.tables.layouts, field)
             }
@@ -304,6 +308,9 @@ impl Glue<'_, '_, '_> {
         let len = self.load(carrier, 8);
         let cursor = self.load(slot, 0);
         let rank = self.icon(0);
+        if let FieldTy::Columns(row) = field {
+            return self.resume_columns(row, carrier, [base, rank, cursor, slot, list, len]);
+        }
         let (plan, stride, state) = match field {
             FieldTy::Seq(e) => (
                 plan_field(self.tables, e)?,
@@ -331,6 +338,65 @@ impl Glue<'_, '_, '_> {
         if plan.count() != 0 {
             self.resume_array(&plan, [base, rank, cursor, slot, list, len], stride, state)?;
         }
+        Ok(())
+    }
+    /// MEM-24: the rows of a Columns block in order, each row's columns in field
+    /// order; column k starts past the columns before it, each `cap × stride`
+    /// rounded up to 8. A row's leaves rank as its columns' leaves in turn.
+    fn resume_columns(
+        &mut self,
+        row: &FieldTy,
+        carrier: Value,
+        traversal: [Value; 6],
+    ) -> Result<()> {
+        let [data, rank, cursor, slot, list, len] = traversal;
+        let cap = self.load(carrier, 16);
+        let mut columns = Vec::new();
+        let mut base = data;
+        for (column, stride) in
+            hirsel_core_layout::column_strides(&self.tables.input.types, self.tables.layouts, row)
+        {
+            columns.push((plan_field(self.tables, &column)?, base, stride));
+            let bytes = self.b.ins().imul_imm_s(cap, stride as i64);
+            let bytes = self.round8(bytes);
+            base = self.b.ins().iadd(base, bytes);
+        }
+        let count: u64 = columns.iter().map(|(p, ..)| p.count()).sum();
+        if count == 0 {
+            return Ok(());
+        }
+        let delta = self.b.ins().isub(cursor, rank);
+        let past = self.b.ins().icmp(IntCC::UnsignedGreaterThan, cursor, rank);
+        let zero = self.icon(0);
+        let delta = self.b.ins().select(past, delta, zero);
+        let count_value = self.icon(count);
+        let first = self.b.ins().udiv(delta, count_value);
+        let (head, body, done) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        self.b.append_block_param(head, types::I64);
+        self.b.ins().jump(head, &[first.into()]);
+        self.b.switch_to_block(head);
+        let i = self.b.block_params(head)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        self.b.ins().brif(more, body, &[], done, &[]);
+        self.b.switch_to_block(body);
+        let r = self.b.ins().imul_imm_s(i, count as i64);
+        let mut r = self.b.ins().iadd(rank, r);
+        for (plan, base, stride) in &columns {
+            if plan.count() == 0 {
+                continue;
+            }
+            let off = self.b.ins().imul_imm_s(i, *stride as i64);
+            let at = self.b.ins().iadd(*base, off);
+            self.resume(plan, at, r, cursor, slot, list)?;
+            r = self.b.ins().iadd_imm_s(r, plan.count() as i64);
+        }
+        let next = self.b.ins().iadd_imm_s(i, 1);
+        self.b.ins().jump(head, &[next.into()]);
+        self.b.switch_to_block(done);
         Ok(())
     }
     fn resume_array(
@@ -528,7 +594,7 @@ impl Glue<'_, '_, '_> {
                             self.stage(list, node, descriptor, point);
                         }
                     }
-                    FieldTy::Seq(e) => {
+                    FieldTy::Seq(e) | FieldTy::Columns(e) => {
                         let logical =
                             field_size(&self.tables.input.types, self.tables.layouts, e).2;
                         self.enqueue_buffer(field, base, node, logical, list)?;

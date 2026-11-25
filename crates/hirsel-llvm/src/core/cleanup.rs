@@ -10,9 +10,12 @@ use deps::cleanup_dependencies;
 /// drain: scalars, terminal storage and inline values with no drop.
 fn flat_field(module: &Module, recipes: &[hirsel_core_layout::RecipeRow], field: &FieldTy) -> bool {
     match field {
-        FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Seq(_) | FieldTy::Map(..) => {
-            hirsel_core_layout::terminal(&module.types, recipes, field)
-        }
+        FieldTy::Box(_)
+        | FieldTy::Rc(_)
+        | FieldTy::Arc(_)
+        | FieldTy::Seq(_)
+        | FieldTy::Columns(_)
+        | FieldTy::Map(..) => hirsel_core_layout::terminal(&module.types, recipes, field),
         FieldTy::Inline(t) => recipes[t.index()].drop.is_none(),
         FieldTy::Array(e, _) => flat_field(module, recipes, e),
         FieldTy::Scalar(_)
@@ -93,7 +96,7 @@ fn direct_types(
     ) {
         match field {
             FieldTy::Array(e, _) => boxes(module, recipes, e, pending),
-            FieldTy::Seq(e) => reach(module, recipes, e, pending),
+            FieldTy::Seq(e) | FieldTy::Columns(e) => reach(module, recipes, e, pending),
             _ => pending.extend(fixed_box(module, recipes, field)),
         }
     }
@@ -550,7 +553,9 @@ impl FunctionEmitter<'_> {
                 self.block(done);
                 None
             }
-            FieldTy::Seq(_) | FieldTy::Map(_, _) => self.release_collection(field, p)?,
+            FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(_, _) => {
+                self.release_collection(field, p)?
+            }
             FieldTy::FrozenBytes => {
                 self.runtime_void(
                     "hirsel_core_drop_frozen_bytes",
@@ -849,6 +854,7 @@ pub(super) fn mechanical_count(
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
         | FieldTy::Seq(_)
+        | FieldTy::Columns(_)
         | FieldTy::Map(_, _)
         | FieldTy::FrozenBytes
         | FieldTy::Shared(_) => 1,
@@ -1057,7 +1063,9 @@ impl FunctionEmitter<'_> {
                 self.fixed_rank = rank;
                 self.br(Label::plain("resume"));
             }
-            FieldTy::Seq(_) | FieldTy::Map(_, _) => self.enqueue_collection(field, p),
+            FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(_, _) => {
+                self.enqueue_collection(field, p)
+            }
             FieldTy::FrozenBytes | FieldTy::Shared(_) => self.clean_whole(field, p)?,
             FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                 let node = self.load(&Type::Ptr, p, 1);

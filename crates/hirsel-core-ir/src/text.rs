@@ -189,6 +189,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::Inline(t) => format!("t{}", t.0),
         FieldTy::Box(t) => format!("box t{}", t.0),
         FieldTy::Seq(e) => format!("seq {}", field_ty(e)),
+        FieldTy::Columns(e) => format!("columns {}", field_ty(e)),
         FieldTy::FrozenBytes => "frozen_bytes".into(),
         FieldTy::Rc(t) => format!("rc t{}", t.0),
         FieldTy::Arc(t) => format!("arc t{}", t.0),
@@ -1073,11 +1074,12 @@ impl<'a> Line<'a> {
                 self.next()?;
                 FieldTy::FrozenBytes
             }
-            "seq" | "fixed" | "seqspan" | "indexed" => {
+            "seq" | "columns" | "fixed" | "seqspan" | "indexed" => {
                 let w = self.next()?;
                 let e = boxed(self)?;
                 match w {
                     "seq" => FieldTy::Seq(e),
+                    "columns" => FieldTy::Columns(e),
                     "fixed" => FieldTy::FixedSpan(e),
                     "seqspan" => FieldTy::SeqSpan(e),
                     _ => FieldTy::IndexedSpan(e),

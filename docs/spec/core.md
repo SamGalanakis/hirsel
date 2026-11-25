@@ -37,6 +37,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
 | `charge` | [charge](../../core/core/charge.hirsel) | MEM-24, MEM-33 |
 | `bytebuf` | [bytebuf](../../core/core/bytebuf.hirsel) | MEM-21, MEM-28 |
+| `columns` | [columns](../../core/core/columns.hirsel) | Columns, SEM-6, OWN-9, MEM-24 |
 | `deque` | [deque](../../core/core/deque.hirsel) | Deques and heaps, MEM-24 |
 | `heap` | [heap](../../core/core/heap.hirsel) | Deques and heaps, MEM-24 |
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
@@ -92,6 +93,7 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `FrozenBytes` | own | `shareable`, `send` | 24 | nothing |
 | `List[T]` | own | `shareable`, `send`, `key`, `ordered`, `codec` when T | 24 | T's |
 | `Map[K, V]` | own | `shareable`, `send`, `codec` when K and V | 24 | K's and V's |
+| `Columns[T]` | own | `shareable`, `send` when T | 24 | T's |
 | `Deque[T]` | own | `shareable`, `send` when T | 32 | T's |
 | `Heap[T]` | own | `shareable`, `send` when T | 24 | T's |
 | `Box[T]` | own | `shareable`, `send`, `key`, `ordered` when T | 8 | T's |
@@ -373,6 +375,18 @@ operations it names; nothing else about them may be inferred from an implementat
   unspecified order, refunds the scratch and propagates. The number and order of calls to
   `before`, and so the steps they take, are the build's: fixed for one build and one input,
   and not the same across builds ([MEM-30](budgets.md#mem-30-step-bounds)).
+- **Columns.** A `Columns[T]` holds a `List[T]`'s rows in one block stored by column: a
+  record `T` has one column per field, named `c.f` wherever the field is visible, and any
+  other `T` is one column. `columns.push`, `pop`, `set`, `swap_remove`, `clear`,
+  `truncate`, `reserve` and `try_reserve` behave and charge as the `list` calls of the same
+  name; `get` and `fill` copy rows and take a `plain` `T`. A row has no address and moves
+  by value; an element is `c.f[i]`, and `c.f` is a view of a `List` of the field's type.
+  Growth admits every column at once, so a refused growth leaves the length and the
+  charge unchanged ([MEM-26](budgets.md#mem-26-growth-charges-the-current-limit)). A column is lent `mut` only to
+  `list.set_lanes`, which keeps its length. A `Columns` is cleaned as a `List` is: rows in
+  ascending index order, each row's owning columns in field order. It does not cross a unit
+  boundary ([CONC-15](tasks.md#conc-15-units)), and a clone of one whose rows own storage
+  is not built.
 - **Deques and heaps.** `deque.push_back` and `deque.push_front` add at either end of a
   `Deque[T]`, and `heap.push` adds to a `Heap[T]`; a refused growth leaves the collection
   unchanged and `x` untaken. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and

@@ -14,6 +14,8 @@ pub enum Role {
     Client,
     Inbox,
     List,
+    /// `Columns[T]` (MEM-24): List's rows and charge, stored by column.
+    Columns,
     String,
     Text,
     Map,
@@ -77,6 +79,7 @@ impl Role {
             "Client" => Role::Client,
             "Inbox" => Role::Inbox,
             "List" => Role::List,
+            "Columns" => Role::Columns,
             "String" => Role::String,
             "FrozenBytes" => Role::FrozenBytes,
             "Text" => Role::Text,
@@ -119,6 +122,7 @@ impl Role {
         match self {
             Role::Box
             | Role::List
+            | Role::Columns
             | Role::String
             | Role::FrozenBytes
             | Role::Map

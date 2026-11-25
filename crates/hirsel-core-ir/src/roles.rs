@@ -45,9 +45,9 @@ pub enum Role {
     ViewBuffers,
 }
 
-/// A carrier type: an own record whose one field is a `seq` of a plain element
-/// (`String`, `Bytes`, `List` of scalars or of pointer-free own records). Its buffer
-/// holds plain bytes only, never a carrier or a pointer.
+/// A carrier type: an own record whose one field is a `seq` or `columns` of a plain
+/// element (`String`, `Bytes`, `List` or `Columns` of scalars or of pointer-free own
+/// records). Its buffer holds plain bytes only, never a carrier or a pointer.
 pub fn carrier(m: &Module, t: TypeId) -> bool {
     let Some(shape) = m.types.get(t.index()) else {
         return false;
@@ -55,7 +55,7 @@ pub fn carrier(m: &Module, t: TypeId) -> bool {
     matches!(
         (&shape.repr, &shape.body),
         (Repr::Own, Shaped::Record(fields))
-            if matches!(&fields[..], [f] if matches!(&f.ty, FieldTy::Seq(e) if plain(m, e)))
+            if matches!(&fields[..], [f] if matches!(&f.ty, FieldTy::Seq(e) | FieldTy::Columns(e) if plain(m, e)))
     )
 }
 
@@ -179,7 +179,7 @@ fn shape<'a>(m: &Module, f: &'a Function) -> Option<Shape<'a>> {
 /// The version of what [`Facts`] derive (crate docs, "Roles"). A product that
 /// records [`BodyFacts`] includes it in its key, and a change to what a fact
 /// claims or how it is derived bumps it.
-pub const FACTS_SCHEMA: u32 = 2;
+pub const FACTS_SCHEMA: u32 = 3;
 
 /// One parameter's facts, as a published body records them.
 #[derive(

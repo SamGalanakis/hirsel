@@ -3,11 +3,16 @@ pub type Lookup = Found(u64) | Missing | Throttled | BeforeSwitch
 // An index is at most 2^48 - 1 (RTP-2), so this marks an empty slot.
 const EMPTY: u64 = 0xffffffffffffffff
 
+// A slot's index, when it was sent and last resent, and its value.
+type Slot[P] {
+    index: u64,
+    sent: u64,
+    resent: u64,
+    value: Option[P]
+}
+
 pub opaque type History[P] {
-    indices: List[u64],
-    sent: List[u64],
-    resent: List[u64],
-    values: List[Option[P]],
+    slots: Columns[Slot[P]],
     max_age_ns: u64,
     gate: u64
 }
@@ -17,57 +22,44 @@ pub fn history[P](slots: u32, max_age_ns: u64) -> Result[History[P], Capacity] {
     if n == 0 || n > 32768 {
         return Error(Capacity(requested: n, available: 32768))
     }
-    let mut indices: List[u64] = list.new()
-    let mut sent: List[u64] = list.new()
-    let mut resent: List[u64] = list.new()
-    let mut values: List[Option[P]] = list.new()
-    list.try_reserve(mut indices, n)?
-    list.try_reserve(mut sent, n)?
-    list.try_reserve(mut resent, n)?
-    list.try_reserve(mut values, n)?
-    list.fill(mut indices, n, EMPTY)
-    list.fill(mut sent, n, 0u64)
-    list.fill(mut resent, n, EMPTY)
-    let mut i = 0u64
-    while i < n {
-        list.push(mut values, None)
-        i += 1
+    let mut rows: Columns[Slot[P]] = columns.new()
+    columns.try_reserve(mut rows, n)?
+    while columns.len(rows) < n {
+        columns.push(mut rows, Slot(index: EMPTY, sent: 0, resent: EMPTY, value: None))
     }
-    Ok(History(indices: indices, sent: sent, resent: resent, values: values, max_age_ns: max_age_ns, gate: 0))
+    Ok(History(slots: rows, max_age_ns: max_age_ns, gate: 0))
 }
 
 pub fn put[P](mut h: History[P], index: u64, at_ns: u64, take p: P) -> Option[P] {
-    let i = index % list.len(h.indices)
-    h.indices[i] = index
-    h.sent[i] = at_ns
-    h.resent[i] = EMPTY
-    list.set(mut h.values, i, Some(p))
+    let i = index % columns.len(h.slots)
+    let Slot(value: take old, ..) = columns.set(mut h.slots, i, Slot(index: index, sent: at_ns, resent: EMPTY, value: Some(p)))
+    old
 }
 
 pub fn get[P](mut h: History[P], index: u64, now_ns: u64, min_resend_ns: u64) -> Lookup {
     if index < h.gate {
         return BeforeSwitch
     }
-    let i = index % list.len(h.indices)
-    if index == EMPTY || h.indices[i] != index || (now_ns > h.sent[i] && now_ns - h.sent[i] > h.max_age_ns) {
+    let i = index % columns.len(h.slots)
+    if index == EMPTY || h.slots.index[i] != index || (now_ns > h.slots.sent[i] && now_ns - h.slots.sent[i] > h.max_age_ns) {
         return Missing
     }
-    let last = h.resent[i]
+    let last = h.slots.resent[i]
     if last != EMPTY && (now_ns < last || now_ns - last < min_resend_ns) {
         return Throttled
     }
-    h.resent[i] = now_ns
+    h.slots.resent[i] = now_ns
     Found(index)
 }
 
 pub fn entry[P](h: History[P], index: u64) -> Option[View[P]] in h {
-    let i = index % list.len(h.indices)
-    if index == EMPTY || h.indices[i] != index {
+    let i = index % columns.len(h.slots)
+    if index == EMPTY || h.slots.index[i] != index {
         return None
     }
-    match list.get(h.values, i) {
-        Some(Some(p)) => Some(p),
-        _ => None,
+    match h.slots.value[i] {
+        Some(p) => Some(p),
+        None => None,
     }
 }
 
@@ -81,12 +73,12 @@ pub fn gate[P](mut h: History[P], index: u64) {
 pub fn clear[P](mut h: History[P]) -> u64 {
     let mut dropped = 0u64
     let mut i = 0u64
-    while i < list.len(h.indices) {
-        if h.indices[i] != EMPTY {
+    while i < columns.len(h.slots) {
+        if h.slots.index[i] != EMPTY {
             dropped += 1
-            h.indices[i] = EMPTY
-            h.resent[i] = EMPTY
-            drop(list.set(mut h.values, i, None))
+            h.slots.index[i] = EMPTY
+            h.slots.resent[i] = EMPTY
+            h.slots.value[i] = None
         }
         i += 1
     }

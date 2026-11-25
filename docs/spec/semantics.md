@@ -137,7 +137,8 @@ fn bump(mut m: Map[u64, u64]) -> Option[()] {
 
 ### SEM-6: Iteration
 
-`for x in e` iterates a range, or a view of a `List`, an `Inline` array, a `FixedSpan`, a
+`for x in e` iterates a range, or a view of a `List` (a column `c.f` of a `Columns` is
+one, [core](core.md)), an `Inline` array, a `FixedSpan`, a
 `SeqSpan` or `IndexedSpan` ([MEM-12](memory.md#mem-12-region-sequences)) or a `Causes`
 ([core](core.md)), binding a view of each element from the lowest index. Over a view of a
 `Map` it binds `(View[K], View[V])` for each entry in insertion order. `for take x in e`

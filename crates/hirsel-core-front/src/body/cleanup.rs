@@ -19,6 +19,8 @@ pub(super) enum Owner {
         end: ValueId,
         elem: TypeId,
     },
+    /// Remaining rows of a cut `Columns` (MEM-24): its row `column_drains` entry.
+    Columns(u32),
     /// A destructured resource's block, freed with its charge once its omitted
     /// fields are cleaned (T3.7).
     Free {
@@ -115,7 +117,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn owner_mark(&self) -> usize {
         self.owners.len()
     }
-    fn changed(&mut self) {
+    pub(super) fn changed(&mut self) {
         self.epoch += 1;
     }
 
@@ -389,6 +391,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.inst(Inst::Free { block, charge }, n);
                 return;
             }
+            Owner::Columns(i) => {
+                self.clean_columns(i, n);
+                return;
+            }
         };
         match (avail, flag) {
             (Avail::Live, _) => self.drop_owner(base, id, frame, n),
@@ -609,7 +615,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let done = |cx: &Self, i: usize| match cx.owners[i] {
             // A drain resumes where it stopped, and ends at once when it finished.
-            Owner::Drain { .. } => false,
+            Owner::Drain { .. } | Owner::Columns(_) => false,
             Owner::Temp(t) if Some(t.value) == edge.keep => edge.pending.is_some(),
             Owner::Slot(_) if skip_slots => false,
             Owner::Temp(t) if held_temps.is_some_and(|temps| cx.temporary_held(t, temps)) => false,
@@ -805,7 +811,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let any = self.owners.iter().any(|&o| match o {
             Owner::Slot(s) => matches!(self.var(s).avail, Avail::Live | Avail::Maybe),
             Owner::Temp(t) => matches!(t.avail, Avail::Live | Avail::Maybe),
-            Owner::Drain { .. } | Owner::Free { .. } => true,
+            Owner::Drain { .. } | Owner::Columns(_) | Owner::Free { .. } => true,
         });
         if !any && !self.open_scopes() {
             return None;

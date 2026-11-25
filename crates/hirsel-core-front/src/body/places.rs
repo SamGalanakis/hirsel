@@ -374,6 +374,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     };
                     ty = args[0];
                 }
+                PStep::Column(i) => {
+                    let (name, column) = self.column_shown(ty, i);
+                    write!(text, ".{name}").unwrap();
+                    ty = column;
+                }
                 PStep::Index {
                     collection, index, ..
                 } => {
@@ -624,6 +629,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 args[0]
             };
             return self.field(at, token, n);
+        }
+        if let Some(found) = self.column_field(at, inner, view, name, n) {
+            return found;
         }
         // A region value in region `r`: its region fields are in `r` unless they name
         // another region (MEM-6).
@@ -900,6 +908,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         place,
                         n,
                     );
+                }
+                PStep::Column(k) => {
+                    let header = self.pointer(address, n);
+                    let (_, list) = self.column_shown(ty, k);
+                    let TyKind::Adt(_, args) = self.t.kind(self.bare(ty)).clone() else {
+                        unreachable!("a column step follows a Columns")
+                    };
+                    address = self.column_list(args[0], k, header, list, n)?;
+                    ty = list;
                 }
                 PStep::Case(..) => unreachable!("a pattern's payload place is not emitted"),
             }

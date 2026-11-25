@@ -115,7 +115,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.set_carrier_word(value, carrier, SeqWord::Cap, cap, n);
         Some(value)
     }
-    fn list_refused(
+    pub(super) fn list_refused(
         &mut self,
         to: AddressId,
         cap_id: TypeId,

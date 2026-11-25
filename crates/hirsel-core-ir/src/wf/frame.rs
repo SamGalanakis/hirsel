@@ -159,7 +159,9 @@ fn drop_can_fail(rows: &[Row], ty: TypeId) -> bool {
                 work.push(TypeId(row.0));
                 false
             }
-            FieldTy::Seq(item) | FieldTy::Array(item, _) => field(item, work),
+            FieldTy::Seq(item) | FieldTy::Columns(item) | FieldTy::Array(item, _) => {
+                field(item, work)
+            }
             FieldTy::Map(key, value) => field(key, work) || field(value, work),
             FieldTy::Handle(Handle::Task | Handle::Receiver) => true,
             _ => false,

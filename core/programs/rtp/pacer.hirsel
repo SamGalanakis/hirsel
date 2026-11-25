@@ -16,6 +16,20 @@ type Active {
 
 // Queued entries live in slots, linked per class in push order. A free slot
 // is linked into the free list through next.
+type Entry[Q] {
+    stream: u32,
+    size: u32,
+    pushed: u64,
+    next: u32,
+    value: Option[Q]
+}
+
+// A class's first and last queued slot.
+type Ends {
+    head: u32,
+    tail: u32
+}
+
 pub opaque type Pacer[Q] {
     factor: f64,
     queue_limit_ns: u64,
@@ -32,13 +46,8 @@ pub opaque type Pacer[Q] {
     // The sum of the queued entries' push times, as two words.
     pushed_hi: u64,
     pushed_lo: u64,
-    streams: List[u32],
-    sizes: List[u32],
-    pushed: List[u64],
-    next: List[u32],
-    values: List[Option[Q]],
-    heads: List[u32],
-    tails: List[u32],
+    entries: Columns[Entry[Q]],
+    ends: Columns[Ends],
     free: u32
 }
 
@@ -65,36 +74,22 @@ pub fn pacer[Q](slots: u32, factor: f64, queue_limit_ns: u64, header: u32) -> Re
     if n == 0 || slots == NIL {
         return Error(Capacity(requested: n, available: 0))
     }
-    let mut streams: List[u32] = list.new()
-    let mut sizes: List[u32] = list.new()
-    let mut pushed: List[u64] = list.new()
-    let mut next: List[u32] = list.new()
-    let mut values: List[Option[Q]] = list.new()
-    let mut heads: List[u32] = list.new()
-    let mut tails: List[u32] = list.new()
-    list.try_reserve(mut streams, n)?
-    list.try_reserve(mut sizes, n)?
-    list.try_reserve(mut pushed, n)?
-    list.try_reserve(mut next, n)?
-    list.try_reserve(mut values, n)?
-    list.try_reserve(mut heads, CLASSES)?
-    list.try_reserve(mut tails, CLASSES)?
-    list.fill(mut streams, n, 0u32)
-    list.fill(mut sizes, n, 0u32)
-    list.fill(mut pushed, n, 0u64)
+    let mut entries: Columns[Entry[Q]] = columns.new()
+    let mut ends: Columns[Ends] = columns.new()
+    columns.try_reserve(mut entries, n)?
+    columns.try_reserve(mut ends, CLASSES)?
     let mut i = 0u32
     while i < slots {
-        list.push(mut next, if i + 1 < slots {
+        let next = if i + 1 < slots {
             i + 1
         } else {
             NIL
-        })
-        list.push(mut values, None)
+        }
+        columns.push(mut entries, Entry(stream: 0, size: 0, pushed: 0, next: next, value: None))
         i += 1
     }
-    list.fill(mut heads, CLASSES, NIL)
-    list.fill(mut tails, CLASSES, NIL)
-    Ok(Pacer(factor: factor, queue_limit_ns: queue_limit_ns, header: header, target_bps: 0, padding_bps: 0, debt: 0.0, padding_debt: 0.0, last_ns: None, cluster: None, queued: 0, count: 0, pushed_hi: 0, pushed_lo: 0, streams: streams, sizes: sizes, pushed: pushed, next: next, values: values, heads: heads, tails: tails, free: 0))
+    columns.fill(mut ends, CLASSES, Ends(head: NIL, tail: NIL))
+    Ok(Pacer(factor: factor, queue_limit_ns: queue_limit_ns, header: header, target_bps: 0, padding_bps: 0, debt: 0.0, padding_debt: 0.0, last_ns: None, cluster: None, queued: 0, count: 0, pushed_hi: 0, pushed_lo: 0, entries: entries, ends: ends, free: 0))
 }
 
 pub fn set_rate[Q](mut p: Pacer[Q], target_bps: u64, padding_bps: u64) {
@@ -130,21 +125,17 @@ pub fn push[Q](mut p: Pacer[Q], stream: u32, class: Class, size: u32, now_ns: u6
     }
     let i = p.free
     let at: u64 = int.widen(i)
-    p.free = p.next[at]
-    p.streams[at] = stream
-    p.sizes[at] = size
-    p.pushed[at] = now_ns
-    p.next[at] = NIL
-    drop(list.set(mut p.values, at, Some(q)))
+    p.free = p.entries.next[at]
+    drop(columns.set(mut p.entries, at, Entry(stream: stream, size: size, pushed: now_ns, next: NIL, value: Some(q))))
     let k = order(class)
-    let tail = p.tails[k]
+    let tail = p.ends.tail[k]
     if tail == NIL {
-        p.heads[k] = i
+        p.ends.head[k] = i
     } else {
         let t: u64 = int.widen(tail)
-        p.next[t] = i
+        p.entries.next[t] = i
     }
-    p.tails[k] = i
+    p.ends.tail[k] = i
     let wide: u64 = int.widen(size)
     p.queued += wide
     p.count += 1
@@ -157,15 +148,15 @@ pub fn push[Q](mut p: Pacer[Q], stream: u32, class: Class, size: u32, now_ns: u6
 
 // Unlink bookkeeping for slot at, leaving its value for the caller.
 fn release[Q](mut p: Pacer[Q], at: u64) {
-    let size: u64 = int.widen(p.sizes[at])
-    let t = p.pushed[at]
+    let size: u64 = int.widen(p.entries.size[at])
+    let t = p.entries.pushed[at]
     p.queued -= size
     p.count -= 1
     if p.pushed_lo < t {
         p.pushed_hi -= 1
     }
     p.pushed_lo = int.wrapping_sub(p.pushed_lo, t)
-    p.next[at] = p.free
+    p.entries.next[at] = p.free
     p.free = int.narrow(at)
 }
 
@@ -252,14 +243,14 @@ fn due(now_ns: u64, debt: f64, r: f64) -> u64 {
 }
 
 fn take_head[Q](mut p: Pacer[Q], k: u64) -> Q {
-    let i = p.heads[k]
+    let i = p.ends.head[k]
     let at: u64 = int.widen(i)
-    p.heads[k] = p.next[at]
-    if p.heads[k] == NIL {
-        p.tails[k] = NIL
+    p.ends.head[k] = p.entries.next[at]
+    if p.ends.head[k] == NIL {
+        p.ends.tail[k] = NIL
     }
     release(mut p, at)
-    let Some(q) = list.set(mut p.values, at, None) else {
+    let Some(q) = replace(mut p.entries.value[at], None) else {
         fail("a linked pacer slot was empty")
     }
     q
@@ -282,8 +273,8 @@ pub fn poll[Q](mut p: Pacer[Q], now_ns: u64) -> Next[Q] {
         }
     }
     // Audio leaves whatever the debt.
-    if p.heads[0] != NIL {
-        let size = p.sizes[int.widen(p.heads[0])]
+    if p.ends.head[0] != NIL {
+        let size = p.entries.size[int.widen(p.ends.head[0])]
         let q = take_head(mut p, 0)
         charge(mut p, size, r)
         return Send(q)
@@ -291,11 +282,11 @@ pub fn poll[Q](mut p: Pacer[Q], now_ns: u64) -> Next[Q] {
     let free = !float.gt(p.debt, 0.0)
     let mut k = 1u64
     while k < CLASSES {
-        if p.heads[k] != NIL {
+        if p.ends.head[k] != NIL {
             if !free {
                 return Wait(due(now_ns, p.debt, r))
             }
-            let size = p.sizes[int.widen(p.heads[k])]
+            let size = p.entries.size[int.widen(p.ends.head[k])]
             let q = take_head(mut p, k)
             charge(mut p, size, r)
             return Send(q)
@@ -343,22 +334,22 @@ pub fn remove[Q](mut p: Pacer[Q], stream: u32, mut out: List[Q]) -> u64 {
     let mut k = 0u64
     while k < CLASSES {
         let mut prev = NIL
-        let mut i = p.heads[k]
+        let mut i = p.ends.head[k]
         while i != NIL {
             let at: u64 = int.widen(i)
-            let after = p.next[at]
-            if p.streams[at] == stream {
+            let after = p.entries.next[at]
+            if p.entries.stream[at] == stream {
                 if prev == NIL {
-                    p.heads[k] = after
+                    p.ends.head[k] = after
                 } else {
                     let b: u64 = int.widen(prev)
-                    p.next[b] = after
+                    p.entries.next[b] = after
                 }
-                if p.tails[k] == i {
-                    p.tails[k] = prev
+                if p.ends.tail[k] == i {
+                    p.ends.tail[k] = prev
                 }
                 release(mut p, at)
-                let Some(q) = list.set(mut p.values, at, None) else {
+                let Some(q) = replace(mut p.entries.value[at], None) else {
                     fail("a linked pacer slot was empty")
                 }
                 list.push(mut out, take q)

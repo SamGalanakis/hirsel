@@ -18,6 +18,10 @@ pub opaque type String
 
 pub opaque type List[T]
 
+// A sequence of T rows stored by column, with List's row operations and charge
+// (module `columns`, MEM-24). A record T has one column per field, c.f.
+pub opaque type Columns[T]
+
 pub type Bytes = List[u8]
 
 pub opaque type FrozenBytes

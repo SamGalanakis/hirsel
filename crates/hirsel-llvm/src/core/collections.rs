@@ -9,10 +9,33 @@ struct Entries<'a> {
     logical: u64,
     fields: Vec<(u64, &'a FieldTy)>,
     state: Option<u64>,
+    /// MEM-24: a Columns block's column strides. Field k is then column k, at
+    /// the sum of the columns before it, each `capacity × stride` rounded up to 8.
+    columns: Option<Vec<u64>>,
 }
 impl<'a> Entries<'a> {
-    fn new(module: &Module, recipes: &[hirsel_core_layout::RecipeRow], field: &'a FieldTy) -> Self {
+    fn new(
+        module: &'a Module,
+        recipes: &[hirsel_core_layout::RecipeRow],
+        field: &'a FieldTy,
+    ) -> Self {
         match field {
+            // MEM-24: Columns charge as List of the row.
+            FieldTy::Columns(e) => {
+                let logical = field_size(&module.types, recipes, e).2;
+                let fields = hirsel_core_layout::columns(&module.types, e);
+                let strides = fields
+                    .iter()
+                    .map(|f| field_size(&module.types, recipes, f).0)
+                    .collect();
+                Self {
+                    stride: 0,
+                    logical,
+                    fields: fields.into_iter().map(|f| (0, f)).collect(),
+                    state: None,
+                    columns: Some(strides),
+                }
+            }
             FieldTy::Seq(e) => {
                 let (stride, _, logical) = field_size(&module.types, recipes, e);
                 Self {
@@ -20,6 +43,7 @@ impl<'a> Entries<'a> {
                     logical,
                     fields: vec![(0, e)],
                     state: None,
+                    columns: None,
                 }
             }
             FieldTy::Map(k, v) => {
@@ -32,6 +56,7 @@ impl<'a> Entries<'a> {
                     logical,
                     fields: vec![(layout.key, k), (layout.value, v)],
                     state: Some(layout.meta),
+                    columns: None,
                 }
             }
             _ => unreachable!(),
@@ -45,7 +70,7 @@ pub(super) fn symbol(field: &FieldTy) -> String {
 
 pub(super) fn collect(field: &FieldTy, collections: &mut Vec<FieldTy>) {
     match field {
-        FieldTy::Seq(e) => {
+        FieldTy::Seq(e) | FieldTy::Columns(e) => {
             if !collections.contains(field) {
                 collections.push(field.clone());
             }
@@ -106,6 +131,7 @@ impl FunctionEmitter<'_> {
         // element as its own ordinary release, then freed as the drain frees it.
         let direct = !terminal
             && entries.state.is_none()
+            && entries.columns.is_none()
             && entries.fields.iter().all(|(_, f)| {
                 super::cleanup::direct_field(self.module, self.recipes, f, &self.items.direct)
             });
@@ -266,6 +292,27 @@ pub(super) fn glue(
             let next = e.bin(Binary::Add, &i64, &cursor, &int(1));
             e.store(&i64, &next, &cursor_at, 0);
             let buffer = e.load(&Type::Ptr, &payload, 1);
+            let inner = e.bin(Binary::URem, &i64, &cursor, &int(count));
+            if let Some(strides) = &entries.columns {
+                let capacity = e.carrier_word(&payload, 16);
+                let mut offset = int(0);
+                let mut base = 0;
+                for ((_, f), (stride, steps)) in entries.fields.iter().zip(strides.iter().zip(per))
+                {
+                    let column = e.gep(&Type::bytes(1), &buffer, &offset, false);
+                    let at = e.gep(&Type::bytes(*stride), &column, &index, false);
+                    e.mechanical_field(f, &at, &inner, base)?;
+                    base += steps;
+                    let bytes = e.collection_charge(&capacity, *stride);
+                    offset = e.bin(Binary::Add, &i64, &offset, &bytes);
+                }
+                e.br(Label::plain("resume"));
+                e.block(done);
+                e.ret(&Type::I1, &true.into());
+                drop(e);
+                sink.end_function();
+                continue;
+            }
             // Only this edge has index < the allocated collection extent.
             let entry = e.gep(
                 &Type::bytes(entries.stride),
@@ -283,7 +330,6 @@ pub(super) fn glue(
                 e.br(Label::plain("resume"));
                 e.block(live_label);
             }
-            let inner = e.bin(Binary::URem, &i64, &cursor, &int(count));
             let mut base = 0;
             for ((offset, f), steps) in entries.fields.iter().zip(per) {
                 let at = e.offset(&entry, *offset);

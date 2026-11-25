@@ -2620,6 +2620,7 @@ fn mentions_for_bound(
                 | Role::Arc
                 | Role::Shared
                 | Role::List
+                | Role::Columns
                 | Role::Map
                 | Role::Task
                 | Role::FixedSpan
@@ -3005,6 +3006,9 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
             _ => SEND,
         },
         Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
+        // MEM-24: a Columns sends and shares as its rows do. It does not cross a unit
+        // boundary (CONC-15), which copies one contiguous run per sequence.
+        Some(Role::Columns) => meet() & (SHAREABLE | SEND),
         Some(Role::Capability) => PLAIN | SHAREABLE | SEND | CROSS,
         Some(Role::ForeignHandle) => PLAIN | SEND,
         Some(_) => 0,

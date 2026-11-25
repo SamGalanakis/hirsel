@@ -1,0 +1,41 @@
+// Module `columns` (SEM-4, MEM-24): a sequence of T rows stored by column. A
+// record T has one column per top-level field, named c.f where the field is
+// visible (PROG-2); any other T is one column. Rows, their order, the charge and
+// cleanup are a List[T]'s; growth admits every column at once, so a refusal
+// leaves len and the charge unchanged (MEM-26). A row has no address: whole rows
+// move by value through push, pop, set, get and swap_remove, and an element is
+// c.f[i]. get and fill copy rows, so they take a plain T.
+pub fn new[T]() -> Columns[T]
+
+pub fn with_capacity[T](n: u64) -> Columns[T]
+
+pub fn len[T](c: Columns[T]) -> u64
+
+pub fn capacity[T](c: Columns[T]) -> u64
+
+pub fn reserve[T](mut c: Columns[T], n: u64)
+
+// Like reserve, returning a refusal as a value instead of raising it (MEM-21).
+pub fn try_reserve[T](mut c: Columns[T], n: u64) -> Result[(), Capacity]
+
+pub fn push[T](mut c: Columns[T], take x: T)
+
+pub fn pop[T](mut c: Columns[T]) -> Option[T]
+
+// Remove row i and move the last row into its place. Fails with Bounds unless
+// i < len.
+pub fn swap_remove[T](mut c: Columns[T], i: u64) -> T
+
+// Replace row i, returning the old row. Fails with Bounds unless i < len.
+pub fn set[T](mut c: Columns[T], i: u64, take x: T) -> T
+
+// A copy of row i, or None past the end.
+pub fn get[T: plain](c: Columns[T], i: u64) -> Option[T]
+
+pub fn fill[T: plain](mut c: Columns[T], n: u64, x: T)
+
+pub fn clear[T](mut c: Columns[T])
+
+// Keep the first n rows and clean the rest in ascending index order, as clear
+// does; no change when n >= len. The capacity stays.
+pub fn truncate[T](mut c: Columns[T], n: u64)

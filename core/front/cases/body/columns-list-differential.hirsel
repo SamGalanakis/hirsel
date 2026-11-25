@@ -1,0 +1,307 @@
+// MEM-24: a Columns[T] holds a List[T]'s rows and is charged as one. The same
+// seeded row operations run on a List[Row] and a Columns[Row], each under its own
+// bound; after every step the digest takes len, capacity and the bytes the bound
+// has left, and at the end every row, so the two digests agree only when rows
+// and charges do. A growth the bound refuses leaves len and the charge as they
+// were (MEM-26): each digest counts its refusals and adds 1000 for one that moved them.
+// expect: accept
+// expect: run agree(1) = true
+// expect: run agree(77) = true
+// expect: run agree(4242) = true
+// expect: run agree(90001) = true
+// expect: run refusals(1) = true
+// expect: run owned_agree(5) = true
+// expect: run owned_agree(31337) = true
+type Row {
+    a: u64,
+    b: u8,
+    c: u32
+}
+
+fn next(s: u64) -> u64 {
+    (s * 1103515245u64 + 12345u64) % 2147483648u64
+}
+
+fn mix(h: u64, x: u64) -> u64 {
+    (h * 31u64 + x % 1000003u64) % 1000000007u64
+}
+
+fn row(v: u64) -> Row {
+    Row(a: v * 1009u64, b: int.truncate(v), c: int.truncate(v * 7u64))
+}
+
+fn key(r: Row) -> u64 {
+    let b: u64 = int.widen(r.b)
+    let c: u64 = int.widen(r.c)
+    r.a + b * 7u64 + c * 13u64
+}
+
+// The bytes the enclosing bound has left: a refused probe reports them.
+fn room() -> u64 {
+    let mut probe: List[u8] = list.new()
+    match list.try_reserve(mut probe, 1099511627776u64) {
+        Ok(()) => 0u64,
+        Error(e) => e.available
+    }
+}
+
+// The digest of `steps` seeded operations on a List; `refused` counts each refusal
+// and adds 1000 for one that changed len or the charge.
+fn list_digest(seed: u64, steps: u64) -> (u64, u64) {
+    let r = bound bytes 2048 {
+        let mut xs: List[Row] = list.new()
+        let mut s = seed
+        let mut h = 0u64
+        let mut refused = 0u64
+        let mut k = 0u64
+        while k < steps {
+            s = next(s)
+            let op = s % 11u64
+            let v = s / 16u64 % 1000u64
+            let len = list.len(xs)
+            if op < 4u64 {
+                let before = room()
+                match list.try_reserve(mut xs, 1u64) {
+                    Ok(()) => list.push(mut xs, row(v)),
+                    Error(e) => {
+                        refused += 1u64
+                        if list.len(xs) != len || room() != before {
+                            refused += 1000u64
+                        }
+                        h = mix(h, e.requested)
+                    }
+                }
+            } else if op == 4u64 {
+                match list.pop(mut xs) {
+                    Some(x) => { h = mix(h, key(x)) },
+                    None => { h = mix(h, 7u64) }
+                }
+            } else if op == 5u64 && len > 0u64 {
+                let old = list.set(mut xs, v % len, row(v + 1u64))
+                h = mix(h, key(old))
+            } else if op == 6u64 && len > 0u64 {
+                // swap_remove, as List spells it.
+                let i = v % len
+                let last = option.unwrap(list.pop(mut xs))
+                if i < len - 1u64 {
+                    let old = list.set(mut xs, i, last)
+                    h = mix(h, key(old))
+                } else {
+                    h = mix(h, key(last))
+                }
+            } else if op == 7u64 && len > 0u64 {
+                let i = v % len
+                xs[i].a += 3u64
+                xs[i].b = int.truncate(v)
+                h = mix(h, xs[i].a)
+            } else if op == 8u64 {
+                list.truncate(mut xs, v % 6u64)
+            } else if op == 9u64 {
+                let n = v % 40u64
+                let before = room()
+                match list.try_reserve(mut xs, n) {
+                    Ok(()) => list.fill(mut xs, n, row(v)),
+                    Error(e) => {
+                        refused += 1u64
+                        if list.len(xs) != len || room() != before {
+                            refused += 1000u64
+                        }
+                        h = mix(h, e.requested)
+                    }
+                }
+            } else if op == 10u64 && v % 9u64 == 0u64 {
+                list.clear(mut xs)
+            }
+            h = mix(mix(mix(h, list.len(xs)), list.capacity(xs)), room())
+            k += 1u64
+        }
+        for x in xs {
+            h = mix(h, key(x))
+        }
+        (h, refused)
+    }
+    match r {
+        Ok(x) => x,
+        Error(_) => (1u64, 1u64)
+    }
+}
+
+// One seeded step on a Columns lent `mut`: growth, row moves and column writes
+// in one activation.
+fn columns_step(mut xs: Columns[Row], s: u64, mut h: u64, mut refused: u64) {
+    let op = s % 11u64
+    let v = s / 16u64 % 1000u64
+    let len = columns.len(xs)
+    if op < 4u64 {
+        let before = room()
+        match columns.try_reserve(mut xs, 1u64) {
+            Ok(()) => columns.push(mut xs, row(v)),
+            Error(e) => {
+                refused += 1u64
+                if columns.len(xs) != len || room() != before {
+                    refused += 1000u64
+                }
+                h = mix(h, e.requested)
+            }
+        }
+    } else if op == 4u64 {
+        match columns.pop(mut xs) {
+            Some(x) => { h = mix(h, key(x)) },
+            None => { h = mix(h, 7u64) }
+        }
+    } else if op == 5u64 && len > 0u64 {
+        let old = columns.set(mut xs, v % len, row(v + 1u64))
+        h = mix(h, key(old))
+    } else if op == 6u64 && len > 0u64 {
+        let old = columns.swap_remove(mut xs, v % len)
+        h = mix(h, key(old))
+    } else if op == 7u64 && len > 0u64 {
+        let i = v % len
+        xs.a[i] += 3u64
+        xs.b[i] = int.truncate(v)
+        h = mix(h, xs.a[i])
+    } else if op == 8u64 {
+        columns.truncate(mut xs, v % 6u64)
+    } else if op == 9u64 {
+        let n = v % 40u64
+        let before = room()
+        match columns.try_reserve(mut xs, n) {
+            Ok(()) => columns.fill(mut xs, n, row(v)),
+            Error(e) => {
+                refused += 1u64
+                if columns.len(xs) != len || room() != before {
+                    refused += 1000u64
+                }
+                h = mix(h, e.requested)
+            }
+        }
+    } else if op == 10u64 && v % 9u64 == 0u64 {
+        columns.clear(mut xs)
+    }
+    h = mix(mix(mix(h, columns.len(xs)), columns.capacity(xs)), room())
+}
+
+fn columns_digest(seed: u64, steps: u64) -> (u64, u64) {
+    let r = bound bytes 2048 {
+        let mut xs: Columns[Row] = columns.new()
+        let mut s = seed
+        let mut h = 0u64
+        let mut refused = 0u64
+        let mut k = 0u64
+        while k < steps {
+            s = next(s)
+            columns_step(mut xs, s, mut h, mut refused)
+            k += 1u64
+        }
+        let mut i = 0u64
+        while i < columns.len(xs) {
+            let x = option.unwrap(columns.get(xs, i))
+            h = mix(h, key(x))
+            i += 1u64
+        }
+        (h, refused)
+    }
+    match r {
+        Ok(x) => x,
+        Error(_) => (2u64, 2u64)
+    }
+}
+
+fn agree(seed: u64) -> bool {
+    let (lh, lr) = list_digest(seed, 400u64)
+    let (ch, cr) = columns_digest(seed, 400u64)
+    lh == ch && lr == cr && lr < 1000u64
+}
+
+// The seed meets refusals, and none of them moved len or the charge.
+fn refusals(seed: u64) -> bool {
+    let (_, r) = columns_digest(seed, 400u64)
+    r > 0u64 && r < 1000u64
+}
+
+// Rows that own storage, moved through generic code: each step runs on a List and
+// a Columns of Tagged[P] and returns the keys each one gave up. A row the Columns
+// loses, leaks or frees twice shows in the keys or in the bytes still admitted
+// when the run returns.
+type Tagged[P] {
+    k: u64,
+    p: P
+}
+
+fn tagged_step[P](mut ys: List[Tagged[P]], mut xs: Columns[Tagged[P]], op: u64, v: u64, take a: P, take b: P) -> (u64, u64) {
+    let len = list.len(ys)
+    if op < 4u64 {
+        list.push(mut ys, Tagged(k: v, p: a))
+        columns.push(mut xs, Tagged(k: v, p: b))
+        return (0u64, 0u64)
+    }
+    if op == 4u64 {
+        let l = match list.pop(mut ys) {
+            Some(x) => x.k,
+            None => 7u64
+        }
+        let c = match columns.pop(mut xs) {
+            Some(x) => x.k,
+            None => 7u64
+        }
+        return (l, c)
+    }
+    if len == 0u64 {
+        return (1u64, 1u64)
+    }
+    let i = v % len
+    if op == 5u64 {
+        let l = list.set(mut ys, i, Tagged(k: v + 1u64, p: a))
+        let c = columns.set(mut xs, i, Tagged(k: v + 1u64, p: b))
+        return (l.k, c.k)
+    }
+    if op == 6u64 {
+        // swap_remove, as List spells it.
+        let last = option.unwrap(list.pop(mut ys))
+        let l = if i < len - 1u64 {
+            list.set(mut ys, i, take last).k
+        } else {
+            last.k
+        }
+        let c = columns.swap_remove(mut xs, i)
+        return (l, c.k)
+    }
+    if op == 7u64 {
+        list.truncate(mut ys, v % 6u64)
+        columns.truncate(mut xs, v % 6u64)
+    } else if op == 8u64 && v % 9u64 == 0u64 {
+        list.clear(mut ys)
+        columns.clear(mut xs)
+    } else {
+        ys[i].k += 3u64
+        xs.k[i] += 3u64
+    }
+    (2u64, 2u64)
+}
+
+fn blob(v: u64) -> List[u8] {
+    let mut b: List[u8] = list.new()
+    list.fill(mut b, v % 5u64 + 1u64, int.truncate(v))
+    b
+}
+
+fn owned_agree(seed: u64) -> bool {
+    let mut ys: List[Tagged[List[u8]]] = list.new()
+    let mut xs: Columns[Tagged[List[u8]]] = columns.new()
+    let mut s = seed
+    let mut same = true
+    let mut k = 0u64
+    while k < 300u64 {
+        s = next(s)
+        let v = s / 16u64 % 1000u64
+        let (l, c) = tagged_step(mut ys, mut xs, s % 10u64, v, blob(v), blob(v))
+        same = same && l == c && list.len(ys) == columns.len(xs)
+        k += 1u64
+    }
+    let mut i = 0u64
+    while i < list.len(ys) {
+        same = same && ys[i].k == xs.k[i] && list.len(ys[i].p) == list.len(xs.p[i])
+        i += 1u64
+    }
+    same
+}

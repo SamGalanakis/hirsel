@@ -127,6 +127,7 @@ is the most any build charges for the allocation (MEM-28):
 |---|---|
 | `Box[T]` node | the payload's size, rounded up to 8 |
 | `List[T]`, `Deque[T]`, `Heap[T]`, `String` storage | capacity × element size (`String`: 1), rounded up to 8 |
+| `Columns[T]` storage | as `List[T]`: capacity × size(T), rounded up to 8, one block holding every column |
 | `list.sort_stable` scratch | at most length × element size, rounded up to 8, refunded before it returns; how much scratch, if any, is the build's ([core](core.md)) |
 | `Map[K, V]` storage | capacity × (key size + value size + 16), rounded up to 8 |
 | counted node | payload size + 8, rounded up to 8 |

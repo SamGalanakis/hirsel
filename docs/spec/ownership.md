@@ -424,7 +424,7 @@ fn last_len(xs: List[String]) -> u64 {
 Two places overlap when one is a prefix of the other, when they differ first at two
 indexes of the same sequence, or when they differ first at the payloads of two different
 variants of the same value. Two different fields of one record, or of one variant, do not
-overlap. Index operands are
+overlap, and neither do two columns of one `Columns`. Index operands are
 evaluated left to right into temporaries before the places are compared, and so is a
 by-value argument of scalar type, whatever expression gives it: `f(mut t, t.root)` and
 `f(mut t, int.widen(t.root))` read `t.root` before the call, as `let r = t.root` on the
@@ -437,7 +437,7 @@ relation governs views, reservations, `mut` loans, moves, assignments, replaceme
 arguments of one call and captures.
 
 A compiler may rely on this rule for the call's whole extent: storage a `mut` argument
-owns, its place and the buffer of a `List`, `String` or `Bytes`, shares no byte with any
+owns, its place and the buffer of a `List`, `Columns`, `String` or `Bytes`, shares no byte with any
 other argument's, and nothing writes the buffer of a viewed one. It may assume nothing
 about storage that values only refer to, which two arguments can share: `Rc` and `Arc`
 payloads, region and compact storage, map and queue storage.

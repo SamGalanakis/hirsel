@@ -120,6 +120,7 @@ fn concrete_rows_reaching_rigid(module: &Module) -> Vec<(String, String)> {
             | FieldTy::RegionRef(r)
             | FieldTy::Link(r) => out.push(r.0),
             FieldTy::Seq(e)
+            | FieldTy::Columns(e)
             | FieldTy::Array(e, _)
             | FieldTy::View(e)
             | FieldTy::Locator(e)

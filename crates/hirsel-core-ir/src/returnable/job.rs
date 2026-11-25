@@ -184,6 +184,7 @@ pub(super) fn transfer_job(
                     rows.push(x.0 as usize)
                 }
                 F::Seq(e)
+                | F::Columns(e)
                 | F::Array(e, _)
                 | F::FixedSpan(e)
                 | F::SeqSpan(e)

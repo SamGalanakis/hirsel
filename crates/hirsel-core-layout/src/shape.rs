@@ -290,6 +290,10 @@ pub enum FieldTy {
     Box(TypeRef),
     /// `List[T]`, `String` (`Seq(u8)` of UTF-8), `Bytes` (`Seq(u8)`): ptr/len/cap.
     Seq(Box<FieldTy>),
+    /// `Columns[T]`: a `Seq` carrier (ptr/len/cap) whose one block holds a column
+    /// per field of the row `T` ([`crate::columns`]), each at its own stride. It is
+    /// charged and cleaned row by row as `Seq(T)` is (MEM-24, SEM-6).
+    Columns(Box<FieldTy>),
     Rc(TypeRef),
     Arc(TypeRef),
     /// A reference to a published region value of this type (logically 16, MEM-24).
@@ -352,6 +356,7 @@ impl FieldTy {
             | FieldTy::RegionRef(_)
             | FieldTy::Link(_) => true,
             FieldTy::Seq(ty)
+            | FieldTy::Columns(ty)
             | FieldTy::Array(ty, _)
             | FieldTy::View(ty)
             | FieldTy::Locator(ty)
@@ -379,6 +384,7 @@ impl FieldTy {
             | FieldTy::RegionRef(id)
             | FieldTy::Link(id) => *id = f(*id),
             FieldTy::Seq(ty)
+            | FieldTy::Columns(ty)
             | FieldTy::Array(ty, _)
             | FieldTy::View(ty)
             | FieldTy::Locator(ty)

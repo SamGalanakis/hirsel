@@ -152,7 +152,7 @@ fn plan_field(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64) -> N
         },
         FieldTy::Inline(t) => plan_type(shapes, recipes, *t, at),
         FieldTy::FrozenBytes => whole(crate::SEQ_CARRIER),
-        FieldTy::Seq(_) if crate::storage_free(shapes, ty) => Node::Empty,
+        FieldTy::Seq(_) | FieldTy::Columns(_) if crate::storage_free(shapes, ty) => Node::Empty,
         FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) => Node::Leaf {
             at,
             live: vec![(at, 8)],
@@ -161,12 +161,12 @@ fn plan_field(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64) -> N
         // A counted drain frees terminal storage from its pointer and capacity
         // alone (cranelift resume.rs `enqueue_buffer`, llvm `enqueue_collection`);
         // its length is never read there, and frames exist only in such drains.
-        FieldTy::Seq(_) | FieldTy::Map(..) if !fixed(ty) => Node::Leaf {
+        FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(..) if !fixed(ty) => Node::Leaf {
             at,
             live: vec![(at, 8), (at + 16, 8)],
             yields: None,
         },
-        FieldTy::Seq(_) | FieldTy::Map(..) => Node::Leaf {
+        FieldTy::Seq(_) | FieldTy::Columns(_) | FieldTy::Map(..) => Node::Leaf {
             at,
             live: vec![(at, crate::SEQ_CARRIER)],
             yields: Some(true),

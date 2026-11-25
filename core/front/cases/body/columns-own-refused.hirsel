@@ -1,0 +1,10 @@
+type P { x: u64, y: u64 }
+type B { k: u8, w: u64 }
+fn takes(mut xs: List[u64]) { list.clear(mut xs) }
+fn row_op(mut c: Columns[P]) { let held = view c.x; columns.push(mut c, P(x: 1u64, y: 2u64)); let _ = held }
+fn whole_column(mut c: Columns[P]) { takes(mut c.x) }
+fn put_column(mut c: Columns[B], v: Simd[u8, 16]) { list.put_lanes(mut c.k, v, 1u64) }
+// expect: refuse OWN-10 at 4:66
+// expect: refuse MEM-24 at 5:44
+// expect: refuse MEM-24 at 6:68
+// expect: cause OWN-10 at 4:66 from 4:43

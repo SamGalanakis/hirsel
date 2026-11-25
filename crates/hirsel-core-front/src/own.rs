@@ -44,6 +44,9 @@ impl Origin {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PStep {
     Field(u32),
+    /// Column `.0` of a `Columns` (MEM-24): two columns of one Columns do not
+    /// overlap (OWN-9).
+    Column(u32),
     /// The payload of a `Box`, `Rc` or `Arc` (OWN-8).
     Payload,
     Index {
@@ -84,6 +87,8 @@ pub(crate) fn overlap(steps: &[PStep], a: Place, b: Place) -> bool {
         match (x, y) {
             (PStep::Field(i), PStep::Field(j)) if i != j => return false,
             (PStep::Field(_), PStep::Field(_)) => {}
+            (PStep::Column(i), PStep::Column(j)) if i != j => return false,
+            (PStep::Column(_), PStep::Column(_)) => {}
             (PStep::Case(c, i), PStep::Case(d, j)) if c == d && i != j => return false,
             (PStep::Case(c, _), PStep::Case(d, _)) if c == d => {}
             _ => return true,

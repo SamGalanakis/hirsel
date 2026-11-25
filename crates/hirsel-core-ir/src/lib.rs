@@ -993,10 +993,10 @@
 //! bytes, or static bytes, which nothing writes, throughout one activation; other
 //! roles may also read `ViewBuffers` bytes ([`roles`]). An emitter may rely on
 //! that, and may ignore it. An address without a role makes no claim.
-//! - A **carrier type** is an own record whose one field is a `seq` of a plain
-//!   element (a scalar, an array of plain elements, or an own record or variant of
-//!   plain fields with no finalizer or clone body): `String`, `Bytes`, `List` of
-//!   one. Its buffer holds plain bytes, never a carrier or a pointer.
+//! - A **carrier type** is an own record whose one field is a `seq` or `columns` of
+//!   a plain element (a scalar, an array of plain elements, or an own record or
+//!   variant of plain fields with no finalizer or clone body): `String`, `Bytes`,
+//!   `List` or `Columns` of one. Its buffer holds plain bytes, never a carrier or a pointer.
 //! - `Carrier(root)`: bytes of the carrier held in a slot of a carrier type, or
 //!   lent by a `mut` or `take` parameter of one (Loans). The address reaches it
 //!   through `pointer` values, `field 0` and constant `byte` steps, and stays

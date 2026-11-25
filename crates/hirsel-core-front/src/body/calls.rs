@@ -902,6 +902,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             self.refuse("OWN-8", e, "nothing is written through a view");
                             return true;
                         }
+                        if !self.column_mut && self.ends_in_column(at) {
+                            let message = "a column is lent `mut` only to `list.set_lanes`";
+                            self.refuse("MEM-24", e, message);
+                            self.arg_ty_rooted(pt, at.ty, e, found, roots);
+                            return true;
+                        }
                         self.use_place(at, Use::Mut(Hold::CallMut(call, i as u32)), e);
                         self.flow_expression(e, at.ty);
                         self.arg_ty_rooted(pt, at.ty, e, found, roots);

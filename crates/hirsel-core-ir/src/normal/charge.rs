@@ -28,6 +28,7 @@ pub(crate) fn charge_shape(shape: &Shape, budget: &Debit<'_>) -> DecodeResult<()
     fn field(ty: &FieldTy, budget: &Debit<'_>) -> DecodeResult<()> {
         match ty {
             FieldTy::Seq(element)
+            | FieldTy::Columns(element)
             | FieldTy::Array(element, _)
             | FieldTy::View(element)
             | FieldTy::Locator(element)

@@ -69,6 +69,7 @@ impl Derive<'_> {
                 | FieldTy::RegionRef(t)
                 | FieldTy::Link(t) => row(types, t.0, seen, allow_hooks),
                 FieldTy::Seq(x)
+                | FieldTy::Columns(x)
                 | FieldTy::Array(x, _)
                 | FieldTy::View(x)
                 | FieldTy::FixedSpan(x)
@@ -155,6 +156,7 @@ impl Derive<'_> {
     fn owns(&self, field: &FieldTy, seen: &mut Vec<u32>) -> bool {
         match field {
             FieldTy::Seq(_)
+            | FieldTy::Columns(_)
             | FieldTy::FrozenBytes
             | FieldTy::Box(_)
             | FieldTy::Rc(_)
@@ -384,6 +386,67 @@ impl Derive<'_> {
                 c.jump(done, &[]);
                 c.start(done);
             }
+            // A copy holds `len` rows at capacity `len`, each column at its own
+            // base, and is charged as `List[T]`'s copy (MEM-24). Rows that own
+            // nothing are their bytes; a clone of owning rows is not built.
+            FieldTy::Columns(row) if self.owns(row, &mut vec![]) => {
+                return Err("a clone of a Columns whose rows own storage is not built");
+            }
+            FieldTy::Columns(row) => {
+                let u = Ty::Scalar(Scalar::U64);
+                let at = c.offset(from, 8);
+                let len = c.read(at, u);
+                let at = c.offset(from, 16);
+                let old_cap = c.read(at, u);
+                let zero = c.constant(0);
+                let empty = c.compare(CompareOp::Eq, len, zero);
+                let (none, some, done) = (c.block(&[]), c.block(&[]), c.block(&[]));
+                c.branch(empty, none, some);
+                c.start(none);
+                let null = c.value(Ty::Ptr);
+                c.inst(Inst::Const {
+                    result: null,
+                    bits: 0,
+                });
+                store(c, to, null);
+                let cap = c.offset(to, 16);
+                store(c, cap, zero);
+                c.jump(done, &[]);
+                c.start(some);
+                let strides: Vec<ValueId> = hirsel_core_layout::columns(&self.module.types, row)
+                    .into_iter()
+                    .map(|k| c.field_size(k))
+                    .collect();
+                let mut bytes = zero;
+                for &s in &strides {
+                    let column = c.mul(len, s);
+                    let column = round8_value(c, column);
+                    bytes = c.binary(BinaryOp::Add, bytes, column);
+                }
+                let charge = self.seq_charge(c, row, len);
+                let kind = AllocKind::Own {
+                    edge: field.clone(),
+                };
+                let block = alloc_kind(c, kind, charge, bytes, fail);
+                let old = c.read(from, Ty::Ptr);
+                let (mut from_base, mut to_base) = (zero, zero);
+                for &s in &strides {
+                    let column = c.mul(len, s);
+                    let source = c.offset_value(old, from_base);
+                    let target = c.offset_value(block, to_base);
+                    copy_value(c, target, source, column);
+                    let old_column = c.mul(old_cap, s);
+                    let old_column = round8_value(c, old_column);
+                    from_base = c.binary(BinaryOp::Add, from_base, old_column);
+                    let new_column = round8_value(c, column);
+                    to_base = c.binary(BinaryOp::Add, to_base, new_column);
+                }
+                store(c, to, block);
+                let cap = c.offset(to, 16);
+                store(c, cap, len);
+                c.jump(done, &[]);
+                c.start(done);
+            }
             FieldTy::Array(item, n) => {
                 let len = c.constant(*n);
                 self.each(c, item, from, to, len, None, fail)?;
@@ -530,6 +593,23 @@ impl Derive<'_> {
                     self.drop_items(c, item, block, len)?;
                 }
                 let charge = self.seq_charge(c, item, cap);
+                c.inst(Inst::Free { block, charge });
+                c.jump(done, &[]);
+                c.start(done);
+            }
+            FieldTy::Columns(row) if self.owns(row, &mut vec![]) => {
+                return Err("a clone of a Columns whose rows own storage is not built");
+            }
+            FieldTy::Columns(row) => {
+                let block = c.read(at, Ty::Ptr);
+                let cap_at = c.offset(at, 16);
+                let cap = c.read(cap_at, Ty::Scalar(Scalar::U64));
+                let zero = c.constant(0);
+                let held = c.compare(CompareOp::Ne, cap, zero);
+                let (yes, done) = (c.block(&[]), c.block(&[]));
+                c.branch(held, yes, done);
+                c.start(yes);
+                let charge = self.seq_charge(c, row, cap);
                 c.inst(Inst::Free { block, charge });
                 c.jump(done, &[]);
                 c.start(done);

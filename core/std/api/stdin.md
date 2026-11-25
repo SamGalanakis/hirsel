@@ -41,6 +41,13 @@ waits on the host, as Tokio's `stdin` does.
 **Failures.** `Other(errno)` reports any other host error, for example `EIO` from a
 closed terminal. A failed read leaves the stream where it was.
 
+**Writes to `Stdout` and `Stderr`.** A write whose reader has gone, such as `tool | head -1`
+after `head` exits, reports `WriteError(written, error: Closed)`, where `written` counts the
+bytes the reader's end accepted first. `Closed` is also the answer for a stream that was
+absent at launch ([CAP-4](../../../docs/spec/capabilities.md#cap-4-entry-grants)). A
+command-line program that stops quietly when its output is closed matches `Closed`; it never
+needs the host's `EPIPE` number.
+
 **Charging.** `read` admits nothing and charges no limit. The bytes land in capacity
 the caller already holds ([core](../../../docs/spec/core.md#contracts-the-signatures-do-not-state)).
 

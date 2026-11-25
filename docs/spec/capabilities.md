@@ -91,6 +91,14 @@ still allows the grant, with a false terminal bit. A read that needs input repor
 one is a startup error. Once the provider owns a descriptor, `EBADF` from an
 operation on it is an error under that operation's contract.
 
+A write to a standard stream whose reader has gone (`EPIPE`) reports
+`Closed` with the bytes written before it, as a write to a sealed virtual stream does
+([core](core.md#provide)). `Closed` therefore means the other end is gone,
+whether it was absent at launch or closed later; no write reports `Other(EPIPE)`. The process
+ignores `SIGPIPE`, so the write returns rather than ending the run. A recording made before
+this rule replays its recorded `Other(32)`. A socket's or child pipe's `EPIPE` is not an
+`IoError`: those halves report `Reset` ([net](net.md), [exec](exec.md)).
+
 ### CAP-5: Provider operations
 
 The **provider operations** are exactly the host primitives listed in [core](core.md). A

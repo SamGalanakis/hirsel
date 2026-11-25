@@ -3,7 +3,8 @@ use crate::{Context, causes};
 
 pub use hirsel_core_ids::host_op::*;
 
-/// IoError tags. Other carries the host error number.
+/// IoError tags. Other carries the host error number. `EPIPE` and `EBADF`
+/// both give `Closed`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IoError {
@@ -17,7 +18,8 @@ impl IoError {
             libc::ENOENT => 1,
             libc::EACCES | libc::EPERM | libc::EXDEV | libc::ELOOP => 2,
             libc::EEXIST => 3,
-            libc::EBADF => 4,
+            // The stream is gone: absent at launch, or its reader has closed (R2).
+            libc::EBADF | libc::EPIPE => 4,
             _ => 5,
         };
         Self {

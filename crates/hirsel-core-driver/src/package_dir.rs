@@ -253,19 +253,52 @@ pub(crate) fn path_rule(path: &str, suffix: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A manifest's `grants` and `dirs`, in `--grant` and `--dir` syntax.
+fn manifest_grants(path: &Path, grants: &[String], dirs: &[String]) -> io::Result<Grants> {
+    let mut out = Grants {
+        directories: dirs.to_vec(),
+        ..Grants::default()
+    };
+    for grant in grants {
+        out.grant(grant)
+            .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
+    }
+    Ok(out)
+}
+
+/// `[program]`'s `limit`, `grants` and `dirs` (R3), present when the manifest
+/// declares any of them.
+pub(crate) struct ProgramRun {
+    limit: Option<u64>,
+    grants: Vec<String>,
+    dirs: Vec<String>,
+}
+
+impl ProgramRun {
+    pub(crate) fn declared(
+        limit: Option<u64>,
+        grants: Option<Vec<String>>,
+        dirs: Option<Vec<String>>,
+    ) -> Option<Self> {
+        (limit.is_some() || grants.is_some() || dirs.is_some()).then(|| Self {
+            limit,
+            grants: grants.unwrap_or_default(),
+            dirs: dirs.unwrap_or_default(),
+        })
+    }
+}
+
+/// The selected package's `[program]` run configuration, read only for the
+/// package a command builds: never a dependency's.
+pub(crate) struct ProgramGrants {
+    limit: Option<u64>,
+    grants: Grants,
+}
+
 impl TestFile {
     fn runs(&self, path: &Path) -> io::Result<TestRuns> {
         let refuse = |message| io::Error::other(format!("{}: {message}", path.display()));
-        let grants = |grants: &[String], dirs: &[String]| {
-            let mut out = Grants {
-                directories: dirs.to_vec(),
-                ..Grants::default()
-            };
-            for grant in grants {
-                out.grant(grant).map_err(|e| refuse(e.to_string()))?;
-            }
-            Ok::<_, io::Error>(out)
-        };
+        let grants = |grants: &[String], dirs: &[String]| manifest_grants(path, grants, dirs);
         let package = Run {
             limit: self.limit,
             grants: grants(&self.grants, &self.dirs)?,
@@ -295,6 +328,7 @@ pub(crate) struct PackageDir {
     pub(crate) entry: DefPath,
     pub(crate) manifest: Option<PathBuf>,
     pub(crate) tests: Option<TestRuns>,
+    pub(crate) program: Option<ProgramGrants>,
 }
 
 impl PackageDir {
@@ -324,6 +358,7 @@ impl PackageDir {
             entry: DefPath::from_full("app@1/main/main").unwrap(),
             manifest: None,
             tests: None,
+            program: None,
         })
     }
 
@@ -401,6 +436,19 @@ impl PackageDir {
         } else {
             None
         };
+        let program = selected_member
+            .and_then(|member| {
+                let run = member.package.program.as_ref()?;
+                Some(
+                    manifest_grants(&member.manifest_path, &run.grants, &run.dirs).map(|grants| {
+                        ProgramGrants {
+                            limit: run.limit,
+                            grants,
+                        }
+                    }),
+                )
+            })
+            .transpose()?;
         Ok(Self {
             package: main.expect("the selection is a non-toolchain package"),
             dependencies,
@@ -413,6 +461,7 @@ impl PackageDir {
                 |member| member.manifest_path.parent().unwrap().to_owned(),
             )),
             tests,
+            program,
         })
     }
 
@@ -473,6 +522,7 @@ impl PackageDir {
             entry: Self::archive_entry(&head.id),
             manifest: None,
             tests: None,
+            program: None,
         })
     }
 
@@ -534,6 +584,38 @@ impl PackageDir {
             dependencies,
             sources,
         }
+    }
+
+    /// R3: the grants and root limit of a `build`, `publish` or `run`. A package
+    /// that declares `[program]` grants takes them from there alone, and the
+    /// command line may add only Foreign and Exec grants, as for `[tests]`.
+    pub(crate) fn program_grants(
+        &mut self,
+        command: &str,
+        grants: &mut Grants,
+        root_limit: &mut u64,
+        explicit_limit: bool,
+    ) -> Result<(), String> {
+        let Some(program) = self.program.take() else {
+            return Ok(());
+        };
+        if !matches!(command, "build" | "publish" | "run") {
+            return Ok(());
+        }
+        let mut configured = grants.clone();
+        configured.foreign.clear();
+        configured.exec.clear();
+        if explicit_limit || !configured.is_empty() {
+            return Err("this package declares [program] grants in hirsel.toml. Set limit, dirs and grants there".into());
+        }
+        let mut manifest = program.grants;
+        manifest.foreign.append(&mut grants.foreign);
+        manifest.exec.append(&mut grants.exec);
+        *grants = manifest;
+        if let Some(limit) = program.limit {
+            *root_limit = limit;
+        }
+        Ok(())
     }
 
     pub(crate) fn needs_std(&self) -> bool {

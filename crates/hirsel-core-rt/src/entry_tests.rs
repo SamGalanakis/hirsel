@@ -703,8 +703,8 @@ fn broken_pipe_child() {
                 &mut request,
             );
             assert_eq!(
-                (out.status, out.written, out.error.code),
-                (0, 0, libc::EPIPE as u32)
+                (out.status, out.written, out.error),
+                (0, 0, crate::provider::IoError { tag: 4, code: 0 })
             );
             *result = MainResult {
                 kind: 2,
@@ -715,7 +715,7 @@ fn broken_pipe_child() {
         0
     }
     // SAFETY: this isolated child owns both pipe ends and restores the C process's
-    // default policy to prove Run supplies EPIPE rather than signal termination.
+    // default policy to prove Run supplies Closed (EPIPE) rather than signal termination.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         let mut fds = [0; 2];

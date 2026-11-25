@@ -238,6 +238,8 @@ pub struct Publication {
     index: Option<Memos>,
     addresses: Arc<BTreeMap<Identity, ContentHash>>,
     link_archives: LinkArchives,
+    /// The entry's parameters the recipe leaves ungranted, in order (R3).
+    pub(crate) ungranted: Vec<String>,
 }
 
 impl CheckProduct {
@@ -292,6 +294,7 @@ impl CheckProduct {
         coded.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         let mut bodies = coded.into_iter().map(|(_, code)| code).collect::<Vec<_>>();
         bodies.sort_unstable_by_key(|body| body.body.hash);
+        let ungranted = super::recipe_grants::ungranted(&foreign.grants, &decl.parameters);
         let launch = Launch {
             backend: match options.backend {
                 Backend::Cranelift => wire::Backend::Cranelift,
@@ -322,6 +325,7 @@ impl CheckProduct {
             index,
             addresses,
             link_archives: foreign.link_archives,
+            ungranted,
         })
     }
 
@@ -1320,6 +1324,7 @@ impl Publication {
             index: None,
             addresses: Arc::new(addresses),
             link_archives,
+            ungranted: Vec::new(),
         }
     }
 }

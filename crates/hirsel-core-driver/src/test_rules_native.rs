@@ -263,3 +263,81 @@ fn reads_env(e: Env, out: Stdout) -> Result[(), ()] waits {
     assert!(stderr.contains("the server ended without an answer"), "{stderr}");
     server.join().unwrap();
 }
+
+/// R3's warnings in a build's stderr, one per ungranted `main` parameter.
+fn ungranted_warnings(stderr: &str) -> Vec<&str> {
+    stderr.lines().filter(|line| line.starts_with("hirsel: warning: grant")).collect()
+}
+
+fn ungranted(name: &str) -> String {
+    format!("hirsel: warning: grant `{name}` is not in the build's configuration; the executable will not start")
+}
+
+const PROGRAM_GRANTED: &str = "pub fn main(out: Stdout, clock: Clock) -> Result[(), Exit] waits {\n    let _ = host.mono_ns(clock)\n    result.unwrap(stdout.write(out, \"granted\\n\"))\n    Ok(())\n}\n";
+
+/// Law A (R3): `[program]` grants and limit reach the recipe, so the built
+/// executable starts with no flags of its own. Red when the keys are parsed
+/// but never applied (the launch refuses `out` and `clock`, status 103).
+#[test]
+fn program_manifest_grants_build_an_executable_that_starts() {
+    let law = PackageLaw::new();
+    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\nlimit = 1048576\ngrants = [\"Stdout\", \"Clock\"]\n");
+    law.write("app/main.hirsel", PROGRAM_GRANTED);
+    let (status, stdout, stderr) = law.run(&["build", "app", "--output", "program"]);
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    assert_eq!(ungranted_warnings(&stderr), Vec::<&str>::new());
+    let run = Command::new(law.path("program")).output().unwrap();
+    assert_eq!(run.status.code(), Some(0), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(run.stdout, b"granted\n");
+}
+
+/// Law B (R3): a package that declares `[program]` grants takes none from the
+/// command line, as `[tests]` does (PROG-4). Red when `--dir`, `--grant` or
+/// `--limit` silently overrides or joins the manifest.
+#[test]
+fn program_manifest_grants_refuse_command_line_grants() {
+    let law = PackageLaw::new();
+    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\", \"Clock\"]\n");
+    law.write("app/main.hirsel", PROGRAM_GRANTED);
+    let reason = "this package declares [program] grants in hirsel.toml. Set limit, dirs and grants there";
+    for flags in [&["--dir", "data"][..], &["--grant", "Stdout"], &["--limit", "1048576"]] {
+        for command in ["build", "run"] {
+            let mut args = vec![command, "app"];
+            args.extend(flags);
+            let (status, stdout, stderr) = law.run(&args);
+            assert_eq!(status, Some(2), "{command} {flags:?}: {stdout}\n{stderr}");
+            assert!(stderr.ends_with(&format!("hirsel: {reason}\n")), "{command} {flags:?}: {stderr}");
+        }
+    }
+}
+
+/// Law C (R3, guard): a dependency's `[program]` is never read, so it cannot
+/// grant the program that binds it anything.
+#[test]
+fn program_grants_of_a_dependency_are_never_applied() {
+    let law = PackageLaw::new();
+    law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\", \"util\"]\n");
+    law.manifest("work/app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nutil = { major = 1, path = \"../util\" }\n");
+    law.write("work/app/main.hirsel", PROGRAM_GRANTED);
+    law.library("work/util", "util", 1, "pub fn one() -> u64 { 1u64 }\n", "[program]\ngrants = [\"Stdout\", \"Clock\"]\n");
+    let (status, stdout, stderr) = law.run(&["build", "work/app", "--output", "program"]);
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    assert_eq!(ungranted_warnings(&stderr), [ungranted("out"), ungranted("clock")]);
+}
+
+/// Law D (R3): a build names every `main` parameter it leaves ungranted, in
+/// parameter order, and is still accepted. `dir` takes the manifest's one
+/// directory and `clock` its grant, so only `out` and `err` are named. Red
+/// with no warning, with the warning in kind order, or with `dirs` dropped.
+#[test]
+fn program_build_warns_for_each_ungranted_parameter_in_order() {
+    let law = PackageLaw::new();
+    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ndirs = [\"data\"]\ngrants = [\"Clock\"]\n");
+    law.write(
+        "app/main.hirsel",
+        "pub fn main(err: Stderr, dir: Dir, clock: Clock, out: Stdout) -> Result[(), Exit] waits {\n    let _ = host.mono_ns(clock)\n    result.unwrap(stdout.write(out, \"x\"))\n    result.unwrap(stderr.write(err, \"x\"))\n    Ok(())\n}\n",
+    );
+    let (status, stdout, stderr) = law.run(&["build", "app", "--output", "program"]);
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    assert_eq!(ungranted_warnings(&stderr), [ungranted("err"), ungranted("out")]);
+}

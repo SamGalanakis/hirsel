@@ -192,6 +192,9 @@ shared = { workspace = true }                            # see section 4
 [program]                 # optional
 module = "main"           # default "main"
 function = "main"         # default "main"
+limit = 67108864          # optional; the executable's root limit
+grants = ["Stdout", "Clock"]   # optional; --grant syntax
+dirs = ["data"]           # optional; --dir paths, one per Dir parameter in order
 
 [tests]                   # optional; the test configuration of PROG-4
 limit = 67108864          # required when [tests] is present
@@ -266,6 +269,18 @@ the last.
 **`[program]`.** The entry is the `pub fn` named `function` in module `module` (PROG-3). With
 no `[program]` the entry is `main` in module `main`, as today. A command that needs an entry
 refuses a package without that function. A dependency's `[program]` is never read.
+
+`limit`, `grants` and `dirs` are the executable's run configuration. `grants` take the `--grant`
+syntax and `dirs` the `--dir` paths, one per Dir parameter in order. A relative `dirs` path is
+kept as written and resolves where the executable starts, as a `--dir` path does. `build`,
+`publish` and `run` read them; `test`, `replay`, `register` and `deploy` do not. When any of the
+three is present, they are the build's only source of `limit`, `dir` and `grant`: a `--limit`,
+`--dir` or `--grant` flag is refused with `this package declares [program] grants in
+hirsel.toml. Set limit, dirs and grants there`. `Foreign` and `Exec` approvals are outside the
+rule and still come from the command line. Without `limit` the build's default root limit
+applies. `build` accepts a recipe that leaves a `main` parameter ungranted and writes one
+``hirsel: warning: grant `NAME` is not in the build's configuration; the executable will not
+start`` line per such parameter, in parameter order, whichever source configured it.
 
 **`[tests]`.** This is today's test configuration (PROG-4, from 7b1fd64c), unchanged in
 meaning. `limit` is the root limit of every test run, required when `[tests]` is present.

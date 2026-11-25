@@ -102,6 +102,12 @@ sockets, [Net sockets](spec/net.md)), `Env` ([Env](../core/std/api/env.md)), `Se
 ungranted parameter at once, one ``not started: grant `NAME` ...`` line each in parameter order;
 an ungranted `Foreign` interface is refused before native code is emitted, one
 `not granted: Foreign[D]` line per interface. Everything after `--` is passed to the program as `Args`.
+A package whose `hirsel.toml` declares `limit`, `dirs` or `grants` in `[program]`
+([packages](spec/packages.md)) builds and runs under them, and `--limit`, `--dir` and
+`--grant` are refused; `Foreign` and `Exec` approvals still come from the command line.
+A dependency's `[program]` is never applied. `hirsel build` warns once for each `main`
+parameter the build leaves ungranted, in parameter order:
+``hirsel: warning: grant `NAME` is not in the build's configuration; the executable will not start``.
 `run` exits with the program's status. A `main` that returns `Error(e)` writes
 `e` as Hirsel source after `error: `, with every `Secret` shown as `[secret]`; an
 `Exit` writes nothing ([PROG-3](spec/programs.md#prog-3-entry)). For every nonzero

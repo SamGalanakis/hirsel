@@ -2,7 +2,7 @@
 //! and the refusals of an entry's grants that do not match its parameters.
 use super::selection;
 use super::{EntryParameter, NativeOptions, NativeStop};
-use hirsel_core_ir::release_recipe::{GrantKind, Recipe};
+use hirsel_core_ir::release_recipe::{GrantBinding, GrantKind, Recipe};
 use std::collections::BTreeSet;
 
 pub(super) const GRANT_NAMES: [&str; 15] = [
@@ -49,6 +49,27 @@ pub(crate) fn grant_units(recipe: &Recipe) -> BTreeSet<String> {
         }
     }
     units
+}
+
+/// R3: the names of the entry's parameters that a recipe's grant bindings leave
+/// ungranted, in parameter order. A binding gives a parameter no values exactly
+/// when the launch would refuse it (CAP-4); `Args` is always present.
+pub(crate) fn ungranted(bindings: &[GrantBinding], parameters: &[EntryParameter]) -> Vec<String> {
+    bindings
+        .iter()
+        .filter(|binding| binding.kind != GrantKind::Args && binding.values.is_empty())
+        .map(|binding| parameters[binding.ordinal as usize].name.clone())
+        .collect()
+}
+
+/// R3: one warning line per `main` parameter the build leaves ungranted, in
+/// parameter order. The build is still accepted.
+pub(crate) fn warn_ungranted(names: &[String]) {
+    for name in names {
+        eprintln!(
+            "hirsel: warning: grant `{name}` is not in the build's configuration; the executable will not start"
+        );
+    }
 }
 
 /// CAP-4: a grant with no matching parameter of the entry, then FFI-4's

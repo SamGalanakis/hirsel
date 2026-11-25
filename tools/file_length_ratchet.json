@@ -192,9 +192,9 @@
     "lines": 1001
   },
   "crates/hirsel-core-driver/src/recipe_native.rs": {
-    "lines": 1952,
-    "raise_revision": 4,
-    "reason": "coverage-c3-followups-2623"
+    "lines": 1872,
+    "raise_revision": 5,
+    "reason": "run-cli-s1b-manifest-2710"
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
     "lines": 4070,
@@ -202,9 +202,9 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1933,
-    "raise_revision": 11,
-    "reason": "coverage-c4-tool-2604"
+    "lines": 1931,
+    "raise_revision": 12,
+    "reason": "run-cli-s1b-manifest-2710"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2649,

@@ -1070,6 +1070,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         };
         (test_owner, package_root) = (Some(app.package.package.clone()), app.manifest.clone());
         manifest_runs = app.tests.take();
+        app.program_grants(command, &mut grants, &mut root_limit, explicit_limit)?;
         let program =
             native_command || installed.is_some() || inspection.is_some() || image.is_some();
         let libraries = if source_libraries || !program {
@@ -1633,6 +1634,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 n_place.unwrap_or(hirsel_core_ids::launch::DEFAULT_N_PLACE),
             ) {
                 Ok(publication) => {
+                    if command == "build" {
+                        crate::native::recipe_grants::warn_ungranted(&publication.ungranted);
+                    }
                     let root = publication.root;
                     if command == "publish" {
                         if let Some(path) = metrics {

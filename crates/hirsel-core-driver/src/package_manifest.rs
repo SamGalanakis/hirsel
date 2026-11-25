@@ -1,5 +1,5 @@
 use crate::package_content::{Id, PathTree, Root, parse_digest, symbol_prefix, target_name};
-use crate::package_dir::{TestFile, module_path, package_name, path_rule};
+use crate::package_dir::{ProgramRun, TestFile, module_path, package_name, path_rule};
 use hirsel_core_ids::DefPath;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,10 +36,13 @@ enum Charge {
     Inherit { workspace: bool },
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, PartialEq)]
 struct Program {
     module: Option<String>,
     function: Option<String>,
+    limit: Option<u64>,
+    grants: Option<Vec<String>>,
+    dirs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -203,6 +206,8 @@ pub(crate) struct Package {
     pub(crate) dependencies: BTreeMap<String, Dependency>,
     pub(crate) entry: DefPath,
     pub(crate) tests: Option<TestFile>,
+    /// `[program]`'s run configuration, when it declares any of its keys.
+    pub(crate) program: Option<ProgramRun>,
     pub(crate) foreign: BTreeMap<Vec<String>, Foreign>,
 }
 
@@ -297,8 +302,7 @@ impl Manifest {
                 || !document.dependencies.is_empty()
                 || !document.foreign.is_empty()
                 || document.tests.is_some()
-                || document.program.module.is_some()
-                || document.program.function.is_some()
+                || document.program != Program::default()
             {
                 return Err("package: package tables require [package]".into());
             }
@@ -430,6 +434,11 @@ impl Manifest {
                 dependencies,
                 entry,
                 tests,
+                program: ProgramRun::declared(
+                    document.program.limit,
+                    document.program.grants,
+                    document.program.dirs,
+                ),
                 foreign,
             }),
             workspace,
@@ -638,14 +647,14 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
                 "major" | "path" | "root" | "url" | "archive" | "git" | "rev" | "ref" | "dir"
                 | "workspace",
             )
-            | (Program, "module" | "function")
+            | (Program, "module" | "function" | "limit" | "grants" | "dirs")
             | (Tests, "sources" | "limit" | "grants" | "dirs")
             | (Run, "limit" | "grants" | "dirs")
             | (Module, "symbols")
             | (Archive, "target" | "file" | "sha256")
             | (Workspace, "members")
             | (WorkspacePackage, "charge") => continue,
-            (Tests | Run, "grant" | "dir") => {
+            (Tests | Run | Program, "grant" | "dir") => {
                 unknown.push(format!("{path}. Use `{key}s`"));
                 continue;
             }

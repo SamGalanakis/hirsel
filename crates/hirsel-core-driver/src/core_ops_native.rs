@@ -343,13 +343,13 @@ fn stream_operations(backend: Backend) {
     use std::os::{fd::OwnedFd, unix::net::UnixStream};
     use std::process::Stdio;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (name, argv, stdout, stderr, closed) in [
-        ("streams", vec![], "out", "err", 0),
-        ("args-print", vec!["alpha", "beta", ""], "alphabeta", "", 0),
-        ("stdout-closed", vec![], "", "", 1),
-        ("stderr-closed", vec![], "", "", 2),
-        ("stdout-cancel", vec![], "", "", 0),
-        ("stderr-cancel", vec![], "", "", 0),
+    for (name, argv, stdout, stderr, closed, mask) in [
+        ("streams", vec![], "out", "err", 0, (1 << 4) | (1 << 5)),
+        ("args-print", vec!["alpha", "beta", ""], "alphabeta", "", 0, 1 << 4),
+        ("stdout-closed", vec![], "", "", 1, 1 << 4),
+        ("stderr-closed", vec![], "", "", 2, 1 << 5),
+        ("stdout-cancel", vec![], "", "", 0, (1 << 4) | (1 << 9)),
+        ("stderr-cancel", vec![], "", "", 0, (1 << 5) | (1 << 9)),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let source =
@@ -380,7 +380,7 @@ fn stream_operations(backend: Backend) {
             root_limit: 1_048_576,
             instance_limit: 64,
             directories: vec![],
-            grant_mask: (1 << 4) | (1 << 5) | (1 << 9),
+            grant_mask: mask,
             logical_charge_report: None,
             net_rules: vec![],
             unix_roots: Default::default(),
@@ -849,7 +849,7 @@ fn stream_partial_progress(backend: Backend) {
     // closes, so the writer must report both positive progress and EPIPE.
     let payload = "x".repeat(1_048_576);
     let source = format!(
-        "pub fn main(out:Stdout) -> Result[(),Exit] {{ match stdout.write(out,\"{payload}\") {{ Ok(()) => Error(Exit(status:1)), Error(e) => if e.written==0u64 || e.written>=1048576u64 {{ Error(Exit(status:2)) }} else {{ match e.error {{ Other(32u32) => Ok(()), _ => Error(Exit(status:3)) }} }} }} }}"
+        "pub fn main(out:Stdout) -> Result[(),Exit] {{ match stdout.write(out,\"{payload}\") {{ Ok(()) => Error(Exit(status:1)), Error(e) => if e.written==0u64 || e.written>=1048576u64 {{ Error(Exit(status:2)) }} else {{ match e.error {{ Closed => Ok(()), _ => Error(Exit(status:3)) }} }} }} }}"
     );
     let mut request = source_request(&source, dir.path());
     request.inputs.packages[1] =

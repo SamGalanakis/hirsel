@@ -101,3 +101,95 @@ pub(crate) fn detach_tape(group: Group) {
         unsafe { (*(*task).run).tapes.close(group) };
     }
 }
+
+impl Scheduler {
+    /// Record writes a turn's inputs in two places: CANCEL before its
+    /// cancels, then WAKE and DONE at its readiness. Replay takes each at the
+    /// same place: `readiness` false takes only CANCEL, true takes the rest.
+    pub(super) unsafe fn take_tape_inputs(&mut self, readiness: bool) {
+        // SAFETY: idle owns tasks; retirement removes queued requests.
+        unsafe {
+            for task in std::mem::take(&mut self.outside_cancels) {
+                if let Some(group) = (*task).group
+                    && group.cancel(None)
+                {
+                    cancel_flag(task).store(true, Ordering::Release);
+                    if (*task).state == State::Provider {
+                        self.cancels.push(task);
+                    }
+                    self.wake_cancelled(task);
+                }
+            }
+            for index in 0..self.tapes.live.len() {
+                let group = self.tapes.live[index].group;
+                use crate::tape::schedule::Turn;
+                loop {
+                    let turn = group.turn();
+                    if !readiness && !matches!(turn, Turn::Cancel(_)) {
+                        break;
+                    }
+                    let id = match turn {
+                        Turn::Wake(id) | Turn::Cancel(id) | Turn::Done(id) => id,
+                        Turn::Choose(index) => {
+                            let live = self.live_group_tasks(group);
+                            match usize::try_from(index).ok().and_then(|i| live.get(i)) {
+                                Some(&(id, at)) if (*at).state == State::Ready => group.choose(id),
+                                _ => group.fail_choice(
+                                    live.iter()
+                                        .filter(|&&(_, at)| (*at).state == State::Ready)
+                                        .count(),
+                                ),
+                            }
+                            break;
+                        }
+                        _ => break,
+                    };
+                    let target = self.group_task(group, id);
+                    if target.is_null() {
+                        group.fail();
+                        break;
+                    }
+                    match turn {
+                        Turn::Cancel(_) if (*target).state != State::Ended => {
+                            group.consume_input();
+                            cancel_flag(target).store(true, Ordering::Release);
+                            if (*target).state == State::Provider {
+                                self.wake_operation(target, Wake::Cancel);
+                            }
+                            self.wake_cancelled(target);
+                        }
+                        Turn::Wake(_)
+                            if (*target).state == State::Provider
+                                && matches!(
+                                    (*(*target).operation).state,
+                                    OperationState::Waiting
+                                ) =>
+                        {
+                            group.consume_input();
+                            group.cancel_wait((*(*target).operation).request);
+                            self.runnable(
+                                target,
+                                OperationState::ReadyToIssue,
+                                #[cfg(feature = "prof")]
+                                Wake::Ready,
+                            );
+                        }
+                        Turn::Done(_)
+                            if (*target).state == State::Provider
+                                && matches!(
+                                    (*(*target).operation).state,
+                                    OperationState::Issued { .. }
+                                ) =>
+                        {
+                            self.wake_operation(target, Wake::Ready);
+                        }
+                        _ => {
+                            group.fail();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

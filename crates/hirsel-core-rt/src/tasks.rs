@@ -404,7 +404,7 @@ struct Tapes {
     live: Vec<LiveTape>,
     next_open: u64,
     // Opening a tape links its scheduler input path, including task ordering.
-    take_inputs: Option<unsafe fn(&mut Scheduler)>,
+    take_inputs: Option<unsafe fn(&mut Scheduler, bool)>,
 }
 
 #[cfg(feature = "record")]
@@ -1017,9 +1017,11 @@ impl Scheduler {
     /// rule that readiness wins a tie with a deadline (net-proposal-999 D3).
     unsafe fn capture_wakes(&mut self, captured: &mut Vec<ReadyArm>, net_timeout: i32) {
         #[cfg(feature = "record")]
-        if let Some(take_inputs) = self.tapes.take_inputs {
+        let take_inputs = self.tapes.take_inputs;
+        #[cfg(feature = "record")]
+        if let Some(take_inputs) = take_inputs {
             // SAFETY: idle owns every task and operation frame.
-            unsafe { take_inputs(self) };
+            unsafe { take_inputs(self, false) };
         }
         self.poll_net(net_timeout);
         if !self.lang.is_null() {
@@ -1044,6 +1046,14 @@ impl Scheduler {
                     }
                 }
             }
+        }
+        // A recorded WAKE or DONE was written by the readiness below, after
+        // this turn's cancels, so replay takes it here: a task cancelled in
+        // the same turn is still queued ahead of the one the input readies.
+        #[cfg(feature = "record")]
+        if let Some(take_inputs) = take_inputs {
+            // SAFETY: idle owns every task and operation frame.
+            unsafe { take_inputs(self, true) };
         }
         if self.readies.pending.swap(false, Ordering::Acquire) {
             std::mem::swap(&mut self.ready_tokens, &mut *self.readies.lock());
@@ -1117,91 +1127,6 @@ impl Scheduler {
                 self.ready_arms = captured;
             }
             self.take_timers();
-        }
-    }
-
-    #[cfg(feature = "record")]
-    unsafe fn take_tape_inputs(&mut self) {
-        // SAFETY: idle owns tasks; retirement removes queued requests.
-        unsafe {
-            for task in std::mem::take(&mut self.outside_cancels) {
-                if let Some(group) = (*task).group
-                    && group.cancel(None)
-                {
-                    cancel_flag(task).store(true, Ordering::Release);
-                    if (*task).state == State::Provider {
-                        self.cancels.push(task);
-                    }
-                    self.wake_cancelled(task);
-                }
-            }
-            for index in 0..self.tapes.live.len() {
-                let group = self.tapes.live[index].group;
-                use crate::tape::schedule::Turn;
-                loop {
-                    let turn = group.turn();
-                    let id = match turn {
-                        Turn::Wake(id) | Turn::Cancel(id) | Turn::Done(id) => id,
-                        Turn::Choose(index) => {
-                            let live = self.live_group_tasks(group);
-                            match usize::try_from(index).ok().and_then(|i| live.get(i)) {
-                                Some(&(id, at)) if (*at).state == State::Ready => group.choose(id),
-                                _ => group.fail_choice(
-                                    live.iter()
-                                        .filter(|&&(_, at)| (*at).state == State::Ready)
-                                        .count(),
-                                ),
-                            }
-                            break;
-                        }
-                        _ => break,
-                    };
-                    let target = self.group_task(group, id);
-                    if target.is_null() {
-                        group.fail();
-                        break;
-                    }
-                    match turn {
-                        Turn::Cancel(_) if (*target).state != State::Ended => {
-                            group.consume_input();
-                            cancel_flag(target).store(true, Ordering::Release);
-                            if (*target).state == State::Provider {
-                                self.wake_operation(target, Wake::Cancel);
-                            }
-                            self.wake_cancelled(target);
-                        }
-                        Turn::Wake(_)
-                            if (*target).state == State::Provider
-                                && matches!(
-                                    (*(*target).operation).state,
-                                    OperationState::Waiting
-                                ) =>
-                        {
-                            group.consume_input();
-                            group.cancel_wait((*(*target).operation).request);
-                            self.runnable(
-                                target,
-                                OperationState::ReadyToIssue,
-                                #[cfg(feature = "prof")]
-                                Wake::Ready,
-                            );
-                        }
-                        Turn::Done(_)
-                            if (*target).state == State::Provider
-                                && matches!(
-                                    (*(*target).operation).state,
-                                    OperationState::Issued { .. }
-                                ) =>
-                        {
-                            self.wake_operation(target, Wake::Ready);
-                        }
-                        _ => {
-                            group.fail();
-                            break;
-                        }
-                    }
-                }
-            }
         }
     }
 

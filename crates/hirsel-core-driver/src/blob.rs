@@ -5,6 +5,7 @@ use hirsel_core_ids::ContentHash;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, Read};
+use std::path::Path;
 
 impl Bare {
     /// The name and read check of `bytes` as a blob: SHA-256 names them,
@@ -96,7 +97,20 @@ impl Store {
     /// read from: whatever later replaces or evicts the name, that file
     /// holds the checked bytes.
     pub(crate) fn open_blob(&self, bare: Bare) -> io::Result<Option<(Vec<u8>, File)>> {
-        let mut file = match File::open(self.blob_path(bare.address)) {
+        for (path, own) in self.layers(self.blob_path(bare.address)) {
+            if let Some(blob) = self.open_blob_at(&path, own, bare)? {
+                return Ok(Some(blob));
+            }
+        }
+        Ok(None)
+    }
+    fn open_blob_at(
+        &self,
+        path: &Path,
+        own: bool,
+        bare: Bare,
+    ) -> io::Result<Option<(Vec<u8>, File)>> {
+        let mut file = match File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
@@ -108,7 +122,7 @@ impl Store {
         if checksum(&bytes) != bare.check {
             return Ok(None);
         }
-        if self.cas.is_some() {
+        if own && self.cas.is_some() {
             collect::touch(&file);
         }
         Ok(Some((bytes, file)))

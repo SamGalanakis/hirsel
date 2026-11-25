@@ -388,6 +388,8 @@ pub(crate) struct NativeInputs {
     pub toolchain: crate::tool_inputs::Toolchain,
     pub recipe: crate::tool_inputs::LinkRecipe,
     pub records: Option<crate::instances::Records>,
+    /// The image's library objects (`Store::library`), when there is an image.
+    pub library: Option<Store>,
 }
 pub(crate) fn native_inputs(
     product: &CheckProduct,
@@ -397,6 +399,9 @@ pub(crate) fn native_inputs(
         Some(observed) => observed.as_ref().clone(),
         None => crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?,
     };
+    let library = (product.image.as_ref())
+        .map(|i| Store::library(&options.cas, &i.store_root(), i.identity))
+        .transpose()?;
     // LLVM development objects keep the v4 key, and LLVM release reads full IR.
     let records = if matches!(options.backend, Backend::Cranelift) && !options.optimize {
         let env = environment(options, toolchain.runtime)?;
@@ -404,11 +409,7 @@ pub(crate) fn native_inputs(
             digest: ContentHash::of_parts("hirsel.core-environment.v1", [&env[..]]),
             env,
             store: Store::cas(&options.cas)?,
-            library: product
-                .image
-                .as_ref()
-                .map(|i| Store::cas(&i.store_root().join("native")))
-                .transpose()?,
+            library: library.clone(),
         })
     } else {
         None
@@ -417,6 +418,7 @@ pub(crate) fn native_inputs(
         toolchain,
         recipe,
         records,
+        library,
     })
 }
 
@@ -595,11 +597,7 @@ impl CheckProduct {
                 "an optimised LLVM build is assembled from its recipe over the release std".into(),
             ));
         }
-        let library_store = self
-            .image
-            .as_ref()
-            .map(|i| Store::cas(&i.store_root().join("native")))
-            .transpose()?;
+        let library_store = inputs.library.as_ref();
         let mut objects = Vec::new();
         let mut names = Vec::new();
         if let Some(records) = &inputs.records {
@@ -745,7 +743,7 @@ impl CheckProduct {
             let store = if !self.definitions.contains_key(&instance.definition)
                 && !hirsel_core_front::is_glue(&instance.definition)
             {
-                library_store.as_ref().unwrap_or(&store)
+                library_store.unwrap_or(&store)
             } else {
                 &store
             };
@@ -1003,16 +1001,11 @@ impl CheckProduct {
             options,
         )?
         .with_foreign(foreign_modules.values());
-        let image = self
-            .image
-            .as_ref()
-            .map(|i| Store::cas(&i.store_root().join("native")))
-            .transpose()?;
         link_objects(
             &entry_plan,
             &objects,
             &link_archives,
-            image.as_ref(),
+            inputs.library.as_ref(),
             options,
             sources,
             || {
@@ -1629,7 +1622,11 @@ fn link_objects(
                     }
                 };
                 #[cfg(test)]
-                UNIT.set(Some((unit_key, image.blob_path(_unit.address), _prelinked)));
+                UNIT.set(Some((
+                    unit_key,
+                    image.object_path(_unit.address),
+                    _prelinked,
+                )));
                 members.push(bytes.into());
                 Some(unit_key)
             }

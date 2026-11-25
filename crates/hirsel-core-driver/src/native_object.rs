@@ -115,7 +115,7 @@ pub(crate) fn publish(store: &Store, key: ContentHash, native: &NativeObject) ->
 
 /// The file of the object blob named `address`.
 pub(crate) fn path(store: &Store, address: ContentHash) -> std::path::PathBuf {
-    store.blob_path(address)
+    store.object_path(address)
 }
 
 /// The object stored under `key` when every part checks; the link hands its

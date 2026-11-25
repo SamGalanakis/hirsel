@@ -1329,25 +1329,20 @@ impl Publication {
     }
 }
 
-/// The object of `instance`'s module under `key`: stored in `store`, else
-/// prebuilt in `library` (an installed image's store, only read), else
-/// emitted now from `module` and published in `store`.
+/// The object of `instance`'s module under `key`: stored in one of
+/// `store`'s layers (an installed image's prebuilt objects under the user's
+/// store, `Store::over`), else emitted now from `module` and published in
+/// `store`'s own layer.
 fn object<'m>(
     store: &Store,
-    library: Option<&Store>,
     options: &NativeOptions,
     key: ContentHash,
     instance: &Identity,
     module: impl FnOnce() -> Result<Cow<'m, Module>, NativeStop>,
 ) -> Result<ObjectProduct, NativeStop> {
-    let mut found = crate::native_object::load_shared(store, key)?.map(|hit| (store, hit));
-    if found.is_none()
-        && let Some(library) = library
-    {
-        found = crate::native_object::load_shared(library, key)?.map(|hit| (library, hit));
-    }
-    let (store, held, debug, compiled) = match found {
-        Some((store, (bare, debug, bytes))) => (store, (bare, bytes), debug, false),
+    let found = crate::native_object::load_shared(store, key)?;
+    let (held, debug, compiled) = match found {
+        Some((bare, debug, bytes)) => ((bare, bytes), debug, false),
         None => {
             let module = module()?;
             let object = emit_unit(&module, || module.link_symbols(), options, key, instance)
@@ -1357,7 +1352,7 @@ fn object<'m>(
                 })?;
             let bare = crate::native_object::publish(store, key, &object)?;
             let debug = object.debug.map(Arc::new);
-            (store, (bare, object.bytes.into()), debug, true)
+            ((bare, object.bytes.into()), debug, true)
         }
     };
     Ok(ObjectProduct::shared(
@@ -1451,7 +1446,7 @@ impl CheckProduct {
         let mut compiled = 0;
         for (identity, unit) in &units {
             let key = unit_object_key(emitter, identity, unit.module(), &unit.builtins)?;
-            let object = object(store, None, options, key, identity, || {
+            let object = object(store, options, key, identity, || {
                 Ok(Cow::Borrowed(unit.module()))
             })?;
             compiled += usize::from(object.compiled);
@@ -1614,11 +1609,7 @@ impl Publication {
             ),
         )?;
         let store = Store::cas(&options.cas)?;
-        let library = library
-            .map(|root| root.join(LIBRARY_OBJECTS))
-            .filter(|path| path.is_dir())
-            .map(|path| Store::cas(&path))
-            .transpose()?;
+        let layered = library.map_or_else(|| store.clone(), |root| store.clone().over(root));
         let mut release_sites = Vec::new();
         let mut release_debug_sites = Vec::new();
         let mut remarks = Vec::new();
@@ -1677,14 +1668,9 @@ impl Publication {
                         }
                         drop(annex);
                         let object_key = unit_object_key(emitter, &identity, &module, &builtins)?;
-                        objects.push(object(
-                            &store,
-                            library.as_ref(),
-                            &options,
-                            object_key,
-                            &identity,
-                            || Ok(Cow::Owned(module)),
-                        )?);
+                        objects.push(object(&layered, &options, object_key, &identity, || {
+                            Ok(Cow::Owned(module))
+                        })?);
                         if let (Some(memo), Some(bound)) = (memo, bound.remove(&identity)) {
                             let object = |object: ObjectRef| (object.hash, object.len);
                             kept.insert(
@@ -1712,17 +1698,12 @@ impl Publication {
                             let key = unit_object_key(emitter, &identity, &module, &memo.builtins)?;
                             (key, Some(module))
                         };
-                        objects.push(object(
-                            &store,
-                            library.as_ref(),
-                            &options,
-                            object_key,
-                            &identity,
-                            || match decoded {
+                        objects.push(object(&layered, &options, object_key, &identity, || {
+                            match decoded {
                                 Some(module) => Ok(Cow::Owned(module)),
                                 None => index.module(&identity, &memo).map(Cow::Owned),
-                            },
-                        )?);
+                            }
+                        })?);
                         let memo = if memo.object.0 == emitter {
                             memo
                         } else {
@@ -1749,14 +1730,9 @@ impl Publication {
         let cleanup = if let Some(module) = cleanup {
             let identity = cleanup_identity(&module);
             let cleanup_key = key("hirsel.recipe-entry-cleanup.v1", &(emitter, root_body))?;
-            objects.push(object(
-                &store,
-                None,
-                &options,
-                cleanup_key,
-                &identity,
-                || Ok(Cow::Borrowed(&module)),
-            )?);
+            objects.push(object(&store, &options, cleanup_key, &identity, || {
+                Ok(Cow::Borrowed(&module))
+            })?);
             Some(identity.symbol())
         } else {
             None

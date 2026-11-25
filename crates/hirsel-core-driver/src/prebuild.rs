@@ -41,7 +41,17 @@ impl CheckProduct {
             .image
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("a prebuild emits an image's instances".into()))?;
-        let inputs = crate::native::native_inputs(self, options).map_err(NativeStop::Input)?;
+        let mut inputs = crate::native::native_inputs(self, options).map_err(NativeStop::Input)?;
+        // An installation writes its image's shipped objects themselves.
+        let library = Store::cas(
+            &image
+                .store_root()
+                .join(crate::native::recipe_build::LIBRARY_OBJECTS),
+        )?;
+        inputs.library = Some(library.clone());
+        if let Some(records) = &mut inputs.records {
+            records.library = Some(library.clone());
+        }
         let mut materialized = crate::instances::InstanceSet::default().for_target(Some(
             crate::reachability::build_target(options).map_err(NativeStop::Input)?,
         ));
@@ -81,11 +91,6 @@ impl CheckProduct {
             self.emit_instances(&instances, &materialized, &inputs, None, options)?;
         prebuilt.instances = objects.len();
         prebuilt.compiled = objects.iter().filter(|o| o.compiled).count();
-        let library = Store::cas(
-            &image
-                .store_root()
-                .join(crate::native::recipe_build::LIBRARY_OBJECTS),
-        )?;
         prebuilt.recipe_compiled =
             self.prebuild_recipe_objects(&instances, &materialized, options, &library)?;
         Ok(prebuilt)

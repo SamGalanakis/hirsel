@@ -32,6 +32,8 @@ use twox_hash::XxHash3_64;
 mod blob;
 #[path = "collect.rs"]
 pub(crate) mod collect;
+#[path = "layer.rs"]
+mod layer;
 
 /// The most bytes one `write` hands the page cache. The kernel sizes the
 /// folios it allocates for a buffered write to the write's length, so one
@@ -290,6 +292,9 @@ pub struct Store {
     image: bool,
     /// A content store's collection handle (`collect`); `None` for a flat one.
     cas: Option<collect::Cas>,
+    /// The read-only layer reads try first (`layer`): an image's shipped
+    /// objects.
+    shipped: Option<Arc<Path>>,
 }
 
 pub(crate) fn default_path(directory: &Path) -> PathBuf {
@@ -351,6 +356,7 @@ impl Store {
             root: root.to_owned(),
             image: false,
             cas: None,
+            shipped: None,
         };
         store.sweep()?;
         Ok(store)
@@ -497,7 +503,7 @@ impl Store {
     }
     /// Whether `path` names a file of this store.
     pub(crate) fn holds(&self, path: &Path) -> bool {
-        path.starts_with(&self.root)
+        path.starts_with(&self.root) || self.shipped.as_ref().is_some_and(|s| path.starts_with(s))
     }
     /// The record under `key`: `k/<shard>/<rest>` in a content store, the
     /// hex name in a flat one.
@@ -615,7 +621,7 @@ impl Store {
     /// its checksums check; a short, long, foreign or damaged file is `None`.
     pub(crate) fn get_body(&self, key: ContentHash) -> io::Result<Option<Body>> {
         let image = crate::meter::ImageRead::start(self.image);
-        let Some(bytes) = self.read_whole(key, image.as_ref())? else {
+        let Some(bytes) = self.read_whole(&self.path(key), true, image.as_ref())? else {
             return Ok(None);
         };
         if self.image {
@@ -705,12 +711,14 @@ impl Store {
             _ => Ok(()),
         }
     }
+    /// The whole file at `path`; `own` when it is this store's to touch.
     fn read_whole(
         &self,
-        key: ContentHash,
+        path: &Path,
+        own: bool,
         image: Option<&crate::meter::ImageRead>,
     ) -> io::Result<Option<Vec<u8>>> {
-        let mut file = match File::open(self.path(key)) {
+        let mut file = match File::open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
@@ -723,7 +731,7 @@ impl Store {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(size).map_err(io::Error::other)?;
         file.read_to_end(&mut bytes)?;
-        if self.cas.is_some() && bytes.len() == size {
+        if own && self.cas.is_some() && bytes.len() == size {
             collect::touch(&file);
         }
         if let Some(image) = image {
@@ -755,8 +763,21 @@ impl Store {
     /// A framed record's bytes when they pass their check, and where its
     /// payload ends.
     fn checked(&self, key: ContentHash) -> io::Result<Option<(Vec<u8>, usize)>> {
+        for (path, own) in self.layers(self.path(key)) {
+            if let Some(checked) = self.checked_at(&path, own, key)? {
+                return Ok(Some(checked));
+            }
+        }
+        Ok(None)
+    }
+    fn checked_at(
+        &self,
+        path: &Path,
+        own: bool,
+        key: ContentHash,
+    ) -> io::Result<Option<(Vec<u8>, usize)>> {
         let image = crate::meter::ImageRead::start(self.image);
-        let Some(bytes) = self.read_whole(key, image.as_ref())? else {
+        let Some(bytes) = self.read_whole(path, own, image.as_ref())? else {
             return Ok(None);
         };
         let size = bytes.len();

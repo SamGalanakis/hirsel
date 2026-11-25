@@ -24,6 +24,7 @@ b0(v0: ptr, v1: u64, v2: ptr, v3: ptr):
   address a2
   put_lanes a0, v11, v8
   move a0, a2, v8
+  prefetch v0, v1
   promote_frame a1
   v12: ptr, v13: u64 = grow a1 v8 align 8 charge v8 capacity v8 moved v8 refund v8
   unmark a0, v8, live : u8

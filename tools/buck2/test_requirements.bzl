@@ -49,7 +49,7 @@ OPENAT2_TEST_CASES = {
         "tape::tests::filesystem_observations_survive_removing_the_recorded_directory",
     ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("provider_tests::")],
     "hirsel-core-driver-unittest": [
-        "host::child::terminal_fixture::terminal_bits_follow_each_granted_descriptor",
+        "terminal_fixture::terminal_bits_follow_each_granted_descriptor",
         "native::tests::dir_cranelift_entry",
         "native::tests::dir_llvm_entry",
         "native::tests::host_operations_cranelift",

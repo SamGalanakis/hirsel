@@ -104,7 +104,7 @@ fn held_quiet(from: Receiver[PubIn]) -> bool {
 // writer holds no content unit. Otherwise the publisher forgets the read set the held unit
 // was computed from, a later hit no longer fences it, and the writer releases it stale.
 // Red on v2.19.1, which sent each removal at once.
-pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool {
+pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let service: Service[WireSession[()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), string.new())
@@ -124,24 +124,27 @@ pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool {
         (Ok(PubIn(e: WireSubscribed(1u64, 8u32, _, _))), Ok(PubIn(e: WireSubscribed(1u64, 9u32, _, _)))) => true,
         _ => false,
     }
-    // The writer holds a content unit: a replacement of 9 and an Unsubscribe of 8 wait.
+    // The writer holds a content unit. RUNNER-SPEC §3 "Subscription instances"
+    // requires a fresh, strictly increasing id for a successor, and "The owner
+    // asks for removal" posts deferred successors only after the removals.
     work.check = Some(4u64)
-    let replace_9: ServicePlan = PlannedSubscribe(9u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(qf)), arg: no_arg(), caller: law_caller(1u64)))
-    let replaced = match wire_step(mut owner, mut work, WPrepared(box.new(take replace_9))) {
-        Ok(_) => true,
-        Error(_) => false
-    }
     let unsubscribed = match wire_step(mut owner, mut work, WClient(Unsubscribe(8u32), 0u64)) {
         Ok(_) => true,
         Error(_) => false
     }
-    let held = replaced && unsubscribed && held_quiet(from)
+    let successor_10: ServicePlan = PlannedSubscribe(10u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(qf)), arg: no_arg(), caller: law_caller(1u64)))
+    let successor = match wire_step(mut owner, mut work, WPrepared(box.new(take successor_10))) {
+        Ok(_) => true,
+        Error(_) => false
+    }
+    let held = successor && unsubscribed && held_quiet(from)
     let sent = match wire_step(mut owner, mut work, WSent) {
         Ok(_) => true,
         Error(_) => false
     }
+    wire_flush_subscriptions(mut owner, mut work)
     let flushed = sent && match (channel.try_receive(from), channel.try_receive(from)) {
-        (Ok(PubIn(e: WireSubscribed(1u64, 9u32, _, _))), Ok(PubIn(e: Unsubscribed(1u64, 8u32)))) => true,
+        (Ok(PubIn(e: Unsubscribed(1u64, 8u32))), Ok(PubIn(e: WireSubscribed(1u64, 10u32, _, _)))) => true,
         _ => false,
     } && held_quiet(from)
     // A Reset made while the writer holds a unit keeps the session joined until it is sent.
@@ -156,6 +159,7 @@ pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool {
         _ => false
     } && held_quiet(from)
     let _ = wire_step(mut owner, mut work, WSent)
+    wire_flush_subscriptions(mut owner, mut work)
     let left = match channel.try_receive(closed) {
         Ok(()) => true,
         _ => false
@@ -165,7 +169,7 @@ pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool {
 }
 
 @test
-fn test_removal_waits_for_writer(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] {
+fn test_removal_waits_for_writer(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
     if law_removal_waits_for_writer(tasks, clock, random) {
         Ok(())
     } else {

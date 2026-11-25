@@ -313,7 +313,7 @@ fn is_ended(take d: Down, sub: u32) -> bool {
 // waits on nothing: the session's own Drained is on PubIn before `join_marked` in (0), and in
 // (1) it was dropped, so `join_marked` adds only its own. In (2) and (3) only the joiner offers
 // one. The mark is closed after the join in each. (1) also holds v2.12 item 3: on the full
-// PubIn, a Subscribe of sub 2 is answered Ended(2, Refused(Overloaded)), and an Unsubscribe of
+// PubIn, a Subscribe of sub 4 is answered Ended(4, Refused(Overloaded)), and an Unsubscribe of
 // sub 1 is applied at the owner, which drops sub 1's rows from later content.
 fn fixture_generations(g: u64) -> List[(u32, u64)] {
     let mut stamps: List[(u32, u64)] = list.new()
@@ -423,7 +423,7 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
         list.push(mut groups, fixture_owed_group(1u32, rows))
         list.push(mut groups, fixture_owed_group(3u32, rows))
         let o = Owe(session: 7u64, version: 9u64, generations: fixture_generations(generation), complete: list.new(), rows: take rows, groups: take groups, ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
-        if let Error(_) = channel.send(inbox, wire_event(Input(Subscribe(2u32, 0u32, no_arg(), None), 0u64))) {
+        if let Error(_) = channel.send(inbox, wire_event(Input(Subscribe(4u32, 0u32, no_arg(), None), 0u64))) {
             return false
         }
         if let Error(_) = channel.send(inbox, wire_event(Input(Unsubscribe(1u32), 0u64))) {
@@ -433,7 +433,7 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
             return false
         }
         let refused = match channel.receive(down) {
-            Ok(take d) => is_ended(take d, 2u32),
+            Ok(take d) => is_ended(take d, 4u32),
             Error(_) => false,
         }
         let only_three = match channel.receive(down) {

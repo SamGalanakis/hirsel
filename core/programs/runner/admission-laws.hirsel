@@ -592,6 +592,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let service: Service[WireSession[()]] = wire_service_seed(r, no_wire(), head, c, tasks, config, string.new())
     let Service(context: take initial, ..) = take service
     let mut owner = take initial
+    owner.phase = 3u8
     let mut work = wire_work()
     let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
     let (told, who): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
@@ -608,20 +609,26 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let sub = 8u32
     wire_subscribed(mut owner, mut work, sub, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
     wire_deliver_content(mut owner, mut work, inbox)
-    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(qf)), arg: no_arg(), caller: law_caller(1u64)))
+    // RUNNER-SPEC §3 "Subscription instances" requires strictly increasing
+    // hirsel.4 sub ids: the replacement removes the old id and uses a fresh one.
+    let _ = wire_step(mut owner, mut work, WClient(Unsubscribe(sub), 0u64))
+    wire_flush_subscriptions(mut owner, mut work)
+    wire_subscribed(mut owner, mut work, 9u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(qf)), arg: no_arg(), caller: law_caller(1u64)))
     let old_initial_discarded = match transport_receive(mut owner, mut work) {
         None => true,
         _ => false
     }
     wire_deliver_content(mut owner, mut work, inbox)
     let new_initial = transport_receive(mut owner, mut work)
-    let replacement_published = wire_initial_count(new_initial, sub, 1u64)
+    let replacement_published = wire_initial_count(new_initial, 9u32, 1u64)
     set(mut db, t, 2u64, 2u64)
     let snapshot = store.snapshot(db)
     let version = store.version(snapshot)
     result.unwrap(channel.send(to, PubIn(e: Released(Release(version: version, snapshot: Some(take snapshot), answers: list.new())))))
     let stale = result.unwrap(channel.receive(inbox))
-    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    let _ = wire_step(mut owner, mut work, WClient(Unsubscribe(9u32), 0u64))
+    wire_flush_subscriptions(mut owner, mut work)
+    wire_subscribed(mut owner, mut work, 11u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
     if let WireEvent(e: FromRunner(take old_end)) = take stale {
         result.unwrap(wire_step(mut owner, mut work, WRunner(take old_end)))
     } else {
@@ -634,14 +641,16 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
         _ => false,
     }
     let renewed = transport_receive(mut owner, mut work)
-    let stale_end_discarded = other_sub_kept && wire_initial_count(renewed, sub, 2u64)
+    let stale_end_discarded = other_sub_kept && wire_initial_count(renewed, 11u32, 2u64)
     // The old complete can still be in the owner inbox when a replacement arrives.
-    wire_subscribed(mut owner, mut work, 3u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
-    wire_subscribed(mut owner, mut work, 3u32, SubscriptionInput(grants: None, room: None, key: list.new(), arg: no_arg(), caller: law_caller(1u64)))
+    wire_subscribed(mut owner, mut work, 12u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    let _ = wire_step(mut owner, mut work, WClient(Unsubscribe(12u32), 0u64))
+    wire_flush_subscriptions(mut owner, mut work)
+    wire_subscribed(mut owner, mut work, 13u32, SubscriptionInput(grants: None, room: None, key: list.new(), arg: no_arg(), caller: law_caller(1u64)))
     wire_deliver_content(mut owner, mut work, inbox)
     wire_deliver_content(mut owner, mut work, inbox)
     let stale_complete_discarded = match transport_receive(mut owner, mut work) {
-        Some(Ended(3u32, Refused(NoEntry))) => true,
+        Some(Ended(13u32, Refused(NoEntry))) => true,
         _ => false,
     }
     result.unwrap(channel.send(to, PubIn(e: Halt)))

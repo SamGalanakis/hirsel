@@ -15,6 +15,27 @@ fn frame_sizer_matches_vectors() -> Result[(), u64] {
     Ok(())
 }
 
+// Welcome carries the head's stream clock and retention (2410c3d2), so the fixture's head
+// answers ReadStreamTime as the head loop does.
+type ProtocolTimeAnswers: send {
+    requests: Receiver[HeadInput],
+    clock: Clock
+}
+
+fn protocol_answer_time(take job: ProtocolTimeAnswers) -> () waits {
+    let ProtocolTimeAnswers(requests: take held_inbox, clock: clock) = take job
+    let mut inbox = take held_inbox
+    protocol_stream_time(mut inbox, clock)
+}
+
+fn protocol_stream_time(mut requests: Receiver[HeadInput], clock: Clock) -> () waits {
+    while let Ok(take input) = channel.receive(requests) {
+        if let ReadStreamTime(to) = take input {
+            let _ = channel.try_send(to, StreamTime(now_ms: host.wall_ms(clock), retention_ms: store.STREAM_RETENTION_MS))
+        }
+    }
+}
+
 fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network: Net,
     routed: bool, offered: Bytes, selected: Bytes) -> bool waits {
     let mut config = wire_defaults(0u64)
@@ -29,6 +50,7 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
     let (to, inbox): (Sender[ServeInput], Receiver[ServeInput]) = channel.new(1u64)
     let (pub_input, published): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
+    let time_answers = task.spawn(tasks, bytes 4096u64, ProtocolTimeAnswers(requests: take requests, clock: clock), protocol_answer_time)
     let held: Registry[(), ()] = registry()
     let allocate = fn(mut context: WireSession[()], take plan: ServiceAllocation) -> Result[ServicePlan, u16] {
         wire_service_allocate(mut context, held, take plan)
@@ -87,6 +109,8 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
     let _ = take reader
     let _ = take writer
     let _ = task.join(take owner)
+    let _ = take head
+    let _ = task.join(take time_answers)
     let _ = take pooling
     let at = list.len(expected)
     if !current { return response == expected }

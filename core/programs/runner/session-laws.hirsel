@@ -123,9 +123,8 @@ fn pool_durable_add(mut tx: store.Tx, table: store.Table[u64, u32], author: Call
 }
 
 fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
-    take key: Bytes, take arg: Bytes, version: u64) -> bool waits {
+    stream: store.StreamId, take key: Bytes, take arg: Bytes, version: u64) -> bool waits {
     let (to, heard): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
-    let stream = store.StreamId(t: store.keyed_time(head.db), n: 0u64)
     let request = head_request(store.Caller(issuer: 1, subject: list.new()), stream, 0u64, take key, take arg, take to)
     result.unwrap(head_arrival(mut head, take request, false, false))
     if list.len(head.group) != 0u64 { result.unwrap(gate(mut head)) }
@@ -147,7 +146,7 @@ fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
 
 fn pool_full_frame() -> Frame {
     let mut body: Bytes = list.new()
-    for i in 0u8 .. 14u8 { list.push(mut body, i) }
+    for i in 0u8 .. 64u8 { list.push(mut body, i) }
     Ended(0u32, Returned(take body))
 }
 
@@ -157,7 +156,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let pending = result.unwrap(std.wsock.pending(config.socket))
     // A second live lease leaves room for a duplicate refund to add a token.
     let other_slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
-    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 80u64, 2u64, fn(mut context: (), take plan: ServiceAllocation) -> Result[ServicePlan, u16] { Error(1013u16) })
+    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 128u64, 2u64, fn(mut context: (), take plan: ServiceAllocation) -> Result[ServicePlan, u16] { Error(1013u16) })
     let (pool, take pooled_task) = result.unwrap(take allocated)
     let (reply, result_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) =
         channel.new(1u64)
@@ -180,15 +179,19 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
         h: arc.new(take table), out: take release_to, busy: map.new(), waiting: list.new(),
         group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None)
 
-    // The retained writer block costs 32 bytes. An Ended frame with a 30-byte
-    // payload encodes in place in capacity 44, charged 48: the remaining 48,
-    // so even one retained decoder charge refuses it until the refund.
+    // The retained writer block costs 32 bytes. The Call's 44-byte payload
+    // can arrive in fragments; the decoder doubles its message storage and
+    // admits each new block before refunding the old, so the worst decode
+    // peak is 32 + 32 + 64 = 128. Once decoding finishes only the decoded
+    // 4-byte argument retains 8. The Ended frame's 82 codec bytes reserve
+    // 96, charged 96: before cancellation 128 - 32 - 8 = 88 refuses it, and
+    // the argument's refund leaves exactly 96.
     let held = pool_call_queued(tasks, clock, random, net, config, pool, pending, clone(payload),
         scoped fn() -> bool waits {
             match wire_pack(pool, reply, result_from, pool_full_frame(), list.new()) { Error(Protocol(1013u16)) => true, _ => false }
         })
     let bytes_refunded = match wire_pack(pool, reply, result_from, pool_full_frame(), list.new()) {
-        Ok(body) => list.len(body) == 32u64,
+        Ok(body) => list.len(body) == 82u64,
         _ => false,
     }
     let slot_returned_once = match std.wsock.acquire(pending) {
@@ -209,8 +212,9 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let reply_codec: std.codec.Codec[Result[u32, u32]] = std.codec.of()
     let (take key, _) = result.unwrap(described(code.identity(add), code.revision(add), Transact, std.codec.of_u32(), reply_codec))
     let Call(_, _, _, _, take retry_arg) = result.unwrap(wire_decode(payload)) else { return false }
-    let committed = pool_retry(mut head, releases, clone(key), clone(retry_arg), 3u64)
-    let replayed = pool_retry(mut head, releases, take key, take retry_arg, 3u64)
+    let retry_stream = store.StreamId(t: store.keyed_time(head.db), n: 0u64)
+    let committed = pool_retry(mut head, releases, retry_stream, clone(key), clone(retry_arg), 3u64)
+    let replayed = pool_retry(mut head, releases, retry_stream, take key, take retry_arg, 3u64)
     let one_effect = result.unwrap(store.get(result.unwrap(store.reader(head.db, 0u64)), store.snapshot(head.db), head.h, 0u64)) == Some(7u32)
     held && bytes_refunded && slot_returned_once && untouched && committed && replayed && one_effect
 }

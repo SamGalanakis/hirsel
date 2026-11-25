@@ -71,7 +71,9 @@ def check_glibc(prefix):
                   f'dist: {relative} has no dynamic glibc requirements', flush=True)
     failures.extend(f'{path} is missing or is not ELF' for path in sorted(required - seen))
     if 'hirsel' in seen:
-        symbols = subprocess.check_output(['readelf', '--wide', '--symbols', prefix / 'hirsel'], text=True)
+        # Only .dynsym reaches the loader. BOLT's --emit-relocs keeps a weak reference the
+        # link left unresolved in .symtab, with no dynamic symbol or relocation behind it.
+        symbols = subprocess.check_output(['readelf', '--wide', '--dyn-syms', prefix / 'hirsel'], text=True)
         for name in ('pidfd_spawnp', 'pidfd_getpid'):
             if re.search(rf'\bUND\s+{name}(?:@|\s|$)', symbols):
                 failures.append(f'hirsel has an undefined {name} reference')

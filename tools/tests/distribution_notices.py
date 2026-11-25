@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Packaging controls use a pinned archive and a tiny relocatable bundle."""
+import contextlib
+import importlib.machinery
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -240,6 +243,46 @@ class Notices(unittest.TestCase):
         self.assertIn('no alternative license elected', record['selection'])
 
 
+class GlibcBaseline(unittest.TestCase):
+    """The release gate refuses what the loader would import, not what .symtab records.
+
+    tools/tests/fixtures/glibc-gate holds three links of weak.c and strong.c: weak-symtab and
+    weak-dynsym were linked against glibc 2.28 (manylinux_2_28, bfd), weak-symtab with
+    -z nodynamic-undefined-weak and the --emit-relocs BOLT needs, weak-dynsym with neither;
+    strong-glibc239 was linked against glibc 2.39.
+    """
+    FIXTURES = ROOT / 'tools/tests/fixtures/glibc-gate'
+
+    @classmethod
+    def setUpClass(cls):
+        sys.modules.setdefault('notices', notices)
+        loader = importlib.machinery.SourceFileLoader('dist_build', str(ROOT / 'tools/toolchain-dist/build'))
+        cls.build = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(cls.build)
+
+    def check(self, fixture):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory)
+            for relative in ('hirsel', 'lib/libLLVM.so.23.1', 'bin/ld.lld'):
+                (prefix / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(self.FIXTURES / fixture, prefix / relative)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.build.check_glibc(prefix)
+
+    def test_weak_reference_only_in_symtab_passes(self):
+        # Red before 2760: the gate read .symtab and refused the v0.2.0-pre BOLT binary.
+        self.check('weak-symtab')
+
+    def test_unversioned_weak_import_still_refuses(self):
+        with self.assertRaisesRegex(SystemExit, '^hirsel has an undefined pidfd_spawnp reference$'):
+            self.check('weak-dynsym')
+
+    def test_versioned_strong_import_still_refuses(self):
+        with self.assertRaisesRegex(SystemExit, r'hirsel requires GLIBC_2\.39, newer than glibc 2\.28(.|\n)*'
+                                    r'hirsel has an undefined pidfd_spawnp reference'):
+            self.check('strong-glibc239')
+
+
 class Citations(unittest.TestCase):
     def test_braces_and_line_ranges_name_each_file(self):
         text = ('| Source | Adapted | Where in this tree | Upstream revision | License |\n|---|---|---|---|---|\n'
@@ -271,7 +314,6 @@ class Repository(unittest.TestCase):
 
 if __name__ == '__main__':
     import argparse
-    import sys
     parser = argparse.ArgumentParser()
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     parser.add_argument('--present', nargs='*')

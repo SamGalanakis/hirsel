@@ -2,6 +2,7 @@ hirsel.laws 1
 webrtc_sfu@1/laws/active_speaker_scores src=c978cd8c06f474d6 sig=5ebf2c14f5eecc73 run=c2c0c6612d4cbb79 bug=3fb5dbb4d4e5d16d oracle=c94df2145669f389 rows=pending
 webrtc_sfu@1/laws/audio_forward_gate src=9232d1cbea5eb6e6 sig=6ecf123df2a49c9d run=c2c0c6612d4cbb79 bug=868ec304fb3f43c2 oracle=bca71a86f27b3815 rows=pending
 webrtc_sfu@1/laws/av1_across_units src=42f26f9415cee3f5 sig=acc8e36c8b9f5ab8 run=c7b2a52baff70a63 bug=cce8d5f2c7f0c976 oracle=3e2b42bf26a8c63f rows=pending
+webrtc_sfu@1/laws/browser_feedback_reaches_bwe src=68030d63b7f1bc98 sig=434fe667d50348ad run=c2c0c6612d4cbb79 bug=1f3cc0edfb8f41ce oracle=c749db7ddbeb5971 rows=pending
 webrtc_sfu@1/laws/demux_prefix src=53e426639f6adbb0 sig=c437f52f2ce42265 run=c2c0c6612d4cbb79 bug=274d143e0a1ab832 oracle=5aa9732b60953b5a rows=pending
 webrtc_sfu@1/laws/dynacast_mask src=b04eb925ccc7f5d8 sig=b959a1679aa91682 run=c2c0c6612d4cbb79 bug=23d87c9b4cec5755 oracle=6889ad59b37e63b4 rows=pending
 webrtc_sfu@1/laws/fanout_across_units src=be58e9bae978a693 sig=5df269fd2c7669fc run=c7b2a52baff70a63 bug=c998b5664139cd3a oracle=e7efc77afeb879ea rows=pending
@@ -19,7 +20,7 @@ webrtc_sfu@1/laws/revoke_stops_everything src=13e6e3fe689c750e sig=345420cb523f1
 webrtc_sfu@1/laws/router_fills_units src=be9fc39257ad13e4 sig=76f53a0faa60436e run=c2c0c6612d4cbb79 bug=7989206a12ea29b1 oracle=31daf208a5c62e43 rows=pending
 webrtc_sfu@1/laws/router_maps_av1_targets src=6ee7ba9d42ae32f6 sig=a29d1c4f136c8658 run=c2c0c6612d4cbb79 bug=bd88b6333830eaa5 oracle=2385ed2fc06f0a60 rows=pending
 webrtc_sfu@1/laws/router_maps_vp9_layers src=f521fcbf6118863d sig=8e3a67cad9df6cba run=c2c0c6612d4cbb79 bug=1a110adf7c82b9d8 oracle=104353da13ae6b67 rows=pending
-webrtc_sfu@1/laws/sdp_browser_offers src=091a589fc1368713 sig=27a8867defd021ce run=c2c0c6612d4cbb79 bug=bcd1fc3864a5e468 oracle=4db7b7146b92e029 rows=pending
+webrtc_sfu@1/laws/sdp_browser_offers src=72aa04acfd6ed9bb sig=27a8867defd021ce run=c2c0c6612d4cbb79 bug=bcd1fc3864a5e468 oracle=4db7b7146b92e029 rows=pending
 webrtc_sfu@1/laws/sdp_descriptor_on_av1_only src=0df0cee9a7b3a9c0 sig=929676be500eacd7 run=c2c0c6612d4cbb79 bug=e5d7cadead6878b7 oracle=c5946798397dcf06 rows=pending
 webrtc_sfu@1/laws/sdp_refusals src=3ddf011a8a38e14b sig=761d96d0c07b43f9 run=c2c0c6612d4cbb79 bug=c5d4fb3e5b1de441 oracle=9b65796e47db47a5 rows=pending
 webrtc_sfu@1/laws/sdp_rfc_examples src=81b5ac44fee02f57 sig=f1845804d683a253 run=c2c0c6612d4cbb79 bug=e7f7502401bccf8d oracle=86792fafb6d5c439 rows=pending

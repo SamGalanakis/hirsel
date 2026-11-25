@@ -200,3 +200,55 @@ fn unauthenticated_changes_nothing() -> Result[(), peer.PeerError] {
     }
     Ok(())
 }
+
+// ---- RTC-3 reduced-size feedback law ----
+const MALFORMED: u64 = 9
+
+// session_offer with every media section offering rtcp-rsize, as Chromium and Firefox
+// offer it (vectors/browser.hirsel; libwebrtc pc/media_session.cc sets
+// rtcp_reduced_size on every offer it makes).
+fn rsize_offer() -> Bytes {
+    let mut b = minimal_head(b" a b c")
+    list.append(mut b, minimal_video(b"96 97", b"a", true))
+    list.append(mut b, b"a=rtcp-rsize\na=sendonly\na=rtpmap:96 VP8/90000\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtcp-fb:96 nack\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n")
+    list.append(mut b, minimal_video(b"96", b"b", true))
+    list.append(mut b, b"a=rtcp-rsize\na=sendonly\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\n")
+    list.append(mut b, minimal_video(b"96 97", b"c", true))
+    list.append(mut b, b"a=rtcp-rsize\na=recvonly\na=rtpmap:96 VP8/90000\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtcp-fb:96 nack\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n")
+    take b
+}
+
+// Firefox's first transport-cc feedback of an N1 call, as captured at the SFU
+// (2639, firefox-b): V=2 with P set, FMT 15, PT 205, length 5; sender 0xaca72756,
+// media 0x1db6dd62; base 0, one status, reference time 0x0010b3, feedback count 0;
+// one run-length chunk (one received packet, small delta) with delta 0x3b; one
+// padding octet of count 1. It is alone in its datagram, as libwebrtc's
+// RTCPSender::SendCombinedRtcpPacket (modules/rtp_rtcp/source/rtcp_sender.cc) sends
+// transport feedback in compound and reduced-size mode alike.
+fn firefox_twcc(mut cs: srtp.Session) -> Bytes {
+    let plain: Bytes = b"\xaf\xcd\x00\x05\xac\xa7\x27\x56\x1d\xb6\xdd\x62\x00\x00\x00\x01\x00\x10\xb3\x00\x20\x01\x3b\x01"
+    sealed_rtcp(mut cs, copy_of(plain))
+}
+
+/// bug: answer a browser offer without rtcp-rsize, so the session reads RTCP as compound only and drops the browser's standalone transport-cc feedback, and the send-side estimate never leaves its start (N1 layer_switch with a Firefox subscriber, 2639).
+/// oracle: Firefox's own first transport-cc feedback captured in N1, read by hand as one received status for transport number 0; libwebrtc's answer rule (pc/media_session.cc: the answer's rtcp_reduced_size is the offer's) and its feedback shape (rtcp_sender.cc SendCombinedRtcpPacket: transport feedback alone in its datagram); RFC 5506 section 5: reduced-size RTCP only once negotiated, so the same datagram on a session whose offer had no rtcp-rsize is one malformed drop.
+@test
+fn browser_feedback_reaches_bwe() -> Result[(), peer.PeerError] {
+    let who = peer.Participant(gen: Gen(id: 1, epoch: 1), room: RoomId(7))
+    let mut a = established_on(61, rsize_offer(), who, client_addr())
+    let mut b = established(61)
+    let payload: Bytes = b"\x10\x00\x9d\x01\x2a\x00\x00\x00\x00\x00"
+    egress(mut a, payload)
+    egress(mut b, payload)
+    let now = 20 * MS
+    let feedback = firefox_twcc(mut a.cs)
+    let fed = control_at(mut a, now, feedback)
+    if fed.acked != 1 {
+        fail("standalone transport-cc feedback on an rtcp-rsize session did not reach the estimate")
+    }
+    // RFC 5506 section 5: without rtcp-rsize in the offer, the same datagram is not
+    // compound and is dropped as malformed.
+    let compound_only = firefox_twcc(mut b.cs)
+    dropped(mut b, now, client_addr(), compound_only, MALFORMED, "standalone feedback taken without rtcp-rsize")
+    Ok(())
+}

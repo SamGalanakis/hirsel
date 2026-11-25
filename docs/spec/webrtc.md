@@ -289,7 +289,11 @@ server adds (RTC-5).
    none is silent.
 6. Every kept section names the server's ICE credentials, `setup:passive`, the fingerprint
    and `tls-id`, and, in the tagged section, the candidate and `end-of-candidates`.
-   `ice-lite` is a session-level line.
+   `ice-lite` is a session-level line. A section offered with `rtcp-rsize` is answered with
+   it ([RFC 5506 §5](https://www.rfc-editor.org/rfc/rfc5506#section-5); libwebrtc's answer
+   copies the offer's `rtcp_reduced_size`), and RTC-3 then reads RTCP as `Reduced`
+   (rtp.md). Chromium and Firefox both offer it and send transport-cc feedback alone in its
+   datagram, which `Compound` refuses as `NotCompound`.
 
 The BUNDLE group lists the MIDs of the sections that are not `Rejected`, in the offer's
 order. A `Rejected` section's MID is left out of the group (RFC 9143 §7.3). `agreed` records
@@ -308,7 +312,8 @@ must keep the running sections' count prefix, order, MIDs and media kinds (RFC 9
 `recvonly`-for-the-client section per added down-track, with a new MID drawn from the
 session's counter (`"s0"`, `"s1"`, ...), the first matching format from the publication's
 agreed formats (with the publication's agreed `Red` format whose blocks name it, when the
-policy lists `Red`), and one SSRC and one RTX SSRC (RTC-4). It marks a removed down-track's section
+policy lists `Red`), `rtcp-rsize` as libwebrtc offers it, and one SSRC and one RTX SSRC (RTC-4).
+`accept_answer` keeps `rtcp-rsize` on a section only when the answer repeats it. It marks a removed down-track's section
 `inactive` and reuses it for a later down-track of the same media kind, keeping its MID.
 A server offer carries `a=setup:actpass` as RFC 8842 §5.5 requires of every offer. Its ICE
 credentials, fingerprint, `tls-id` and candidate are those of the current session, and none
@@ -1730,18 +1735,33 @@ W12 and W13 in `speaker_laws.hirsel`):
 - **Layer switch.** The subscriber is retargeted to q and must decode a narrower width
   than it decoded before; retargeted to f, it must decode wider again. The width is matched
   to a rid by the publisher's `outbound-rtp` widths.
-- **Open red: a Firefox subscriber's estimate stays below h.** Receiving Chromium's
-  simulcast, Firefox drops from h to q within 1 to 4 s of the call, before any retarget,
-  and never climbs back, so `layer_switch` is red for Firefox; a Chromium subscriber on the
-  same publisher (`N1_CALL=chromium,chromium`) reaches f and comes back from q. The
-  feedback is not the cause: over a 16 s capture Firefox's TWCC feedback reported all 1171
-  transport numbers received, none missing, with small deltas only. The 1.5 times
-  acked-rate cap in RTP-9 lowers A by less than 10 kbit/s, so what is left is the delay
-  detector's Overuse arm on Firefox's arrival times, feedback the SFU drops (`peer_ingress`
-  ignores an `on_feedback` error), or an estimate that never rises past the 300 kbit/s
-  start on that leg. In that capture Firefox's sender reports carry no report blocks, so
-  the SFU has no RTT for that leg. The next step is to log A, L, the acked rate and the
-  usage per feedback for that leg.
+- **Reduced-size RTCP (2639).** `layer_switch` was red for a Firefox subscriber:
+  receiving Chromium's simulcast, Firefox dropped from h to q within seconds and never
+  climbed back. The answer left out `rtcp-rsize`, so the session read RTCP as `Compound`
+  and dropped as malformed every datagram that did not start with SR or RR. Both browsers
+  send transport-cc feedback alone in its datagram (libwebrtc
+  `RTCPSender::SendCombinedRtcpPacket`), so no feedback reached RTP-9 and every leg's
+  estimate stayed at the 300 kbit/s start. After Opus, that budget fits only Chromium's
+  q encoding once its rates are measured. The answer now carries `rtcp-rsize` (step 6
+  above), and `browser_feedback_reaches_bwe` feeds Firefox's own captured feedback.
+- **Open red: `layer_switch` for a Firefox subscriber is not yet shown green.** On
+  2026-11-25 the host was saturated (load about 60 on 32 CPUs, CPUs 8 to 11 at 92 to 95%
+  busy with other builds), and N1 scored 5 of 10 both with and without the rsize answer,
+  with the same five cases red. The publishers were CPU-limited: a Chromium f encoding
+  measured about 17 kbit/s, so the allocation (RTC-6, on measured rates) put the Firefox
+  subscriber on f, which then delivered a few frames and stalled. Two questions remain for
+  an unloaded run. Does a Firefox subscriber now reach h and f? And can A climb at all?
+  RTP-9 raises A only while A is below 1.5 times the acked rate plus 10 kbit/s, and S4
+  sends no probes or padding. A leg that carries Opus and q at their nominal rates, about
+  180 kbit/s, would hold A at the 300 kbit/s start, and h would never fit. libwebrtc
+  leaves that state by probing. `rtp.bwe.probe` and the pacer's clusters exist (RTP-9,
+  RTP-10), but `peer_egress` neither asks for a cluster nor sends the pacer's `Probe` and
+  `Pad` answers.
+- **Open: RTCP the session still drops.** Firefox sends lone RRs, with no SDES, which
+  rtp.md's check refuses as `NoCname` in either mode, so that leg has no RTT. Chromium's
+  sender reports for its simulcast SSRCs carry a zero-length CNAME, which is
+  `Body(SDES)`, so those SRs give no lip-sync or RTT. Neither blocks the estimate, since
+  TWCC arrives alone.
 - **Open.** After a real `Lost` the service rejoins with a new peer number, but a page
   learns the service's number once, from `Servers`, so its later signals go to the old
   number. A page that joins after a publication is published learns it only from the

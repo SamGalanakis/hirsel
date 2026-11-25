@@ -471,6 +471,9 @@ pub fn answer(policy: Policy, current: Option[Negotiated], remote: Description, 
             drops.direction = int.narrow(list.len(orig.rids))
         } else {
             s.rtcp_mux = true
+            // RFC 5506 section 5: an offered rtcp-rsize is answered. Browsers send
+            // transport-cc feedback, and Firefox its RRs, outside compound packets.
+            s.rtcp_rsize = orig.rtcp_rsize
             s.mixed_extmaps = orig.mixed_extmaps
             put_extmaps(policy, orig, s.dir, describes_av1(s, d.mixed_extmaps), mut s.extmaps)?
             if !has_mid(s) {
@@ -522,6 +525,8 @@ fn track_section(policy: Policy, source: TrackSource, s: Section, index: u8, por
     out.mid_len = s.mid_len
     out.dir = SendOnly
     out.rtcp_mux = true
+    // Offered as libwebrtc offers it; the answer decides (RFC 5506 section 5).
+    out.rtcp_rsize = true
     out.extmaps = clone(s.extmaps)
     out.mixed_extmaps = s.mixed_extmaps
     out.msid = clone(source.msid)
@@ -688,6 +693,7 @@ fn narrow_local(sent: Section, remote: Section, index: u8) -> Result[Section, Sd
         }
     }
     s.dir = complement(remote.dir)
+    s.rtcp_rsize = sent.rtcp_rsize && remote.rtcp_rsize
     s.formats = clone(remote.formats)
     list.clear(mut s.extmaps)
     for e in remote.extmaps {

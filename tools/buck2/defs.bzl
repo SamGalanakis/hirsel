@@ -599,6 +599,71 @@ def hirsel_toolchain_packages(name, hirsel):
         sources += native.glob(["core/programs/{}/**/*.hirsel".format(package)]) + ["core/programs/{}/hirsel.toml".format(package)]
     _toolchain_packages(name = name, hirsel = hirsel, packages = TOOLCHAIN_PACKAGES, sources = sources)
 
+def _dev_fixture_cache_impl(ctx):
+    # The content store ($XDG_CACHE_HOME/hirsel/cas) after the dev_laws
+    # fixture's builds: the workspace dev_fixture.sh lays out, at each release
+    # the laws install, built with the flags `hirsel dev` gives its build child
+    # (dev.rs Options::read). Its objects are keyed by the compiler and the
+    # sources, never by paths, so the dev_laws Fixture copies it in and the dev
+    # child's builds find them; the cold build runs here, once per compiler,
+    # outside the tests' startup waits.
+    libraries = ctx.actions.symlinked_dir("libraries", {
+        src.short_path.removeprefix("core/"): src
+        for src in ctx.attrs.libraries
+    })
+    testdata = ctx.actions.symlinked_dir("testdata", {src.basename: src for src in ctx.attrs.testdata})
+    cache = ctx.actions.declare_output("cache", dir = True)
+    scratch = ctx.actions.declare_output("scratch", dir = True)
+    script = ctx.actions.write("seed.sh", [
+        "set -eu",
+        'absolute() { echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"; }',
+        'compiler="$(absolute "$1")"; libraries="$(cd "$2" && pwd)"; testdata="$(cd "$3" && pwd)"; runtime="$(absolute "$4")"',
+        'mkdir -p "$5" "$6"; cache="$(cd "$5" && pwd)"; work="$(cd "$6" && pwd)"',
+        'export LLVM_SYS_231_PREFIX="$(cd "$7" && pwd)" TMPDIR="$work/tmp"; mkdir -p "$TMPDIR"',
+        '/bin/sh "$testdata/dev_fixture.sh" "$libraries" "$testdata" "$work/workspace"',
+        'dev="$work/workspace/runner/.hirsel-dev"; mkdir -p "$dev/stores/1"; cd "$work/workspace"',
+        'build() {',
+        '  sed "s/DEV_FIXTURE_RELEASE: u64 = 0u64/DEV_FIXTURE_RELEASE: u64 = $1u64/" "$testdata/dev_place.hirsel" > "$work/workspace/runner/dev_place.hirsel"',
+        '  XDG_CACHE_HOME="$cache" "$compiler" build "$work/workspace/runner" --store "$dev/compiler" --dir "$dev/stores/1"'
+        + ' --backend "$2" --source-core --source-std --runtime "$runtime" --libraries "$libraries" --limit 1610612736'
+        + ' --grant Clock --grant Random --grant Tasks --grant Process --grant Stderr --grant "Net=Listen 127.0.0.1/32 0-65535"'
+        + ' --output "$work/place" > /dev/null',
+        '}',
+        # Each release the laws install (Fixture::release), and the release
+        # persistence_and_fencing reopens with --backend llvm.
+        'for release in 0 1 2 3; do build $release cranelift; done',
+        'build 2 llvm',
+    ])
+    llvm = ctx.attrs._llvm[DefaultInfo].default_outputs[0]
+    ctx.actions.run(
+        cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0], libraries, testdata,
+                 ctx.attrs.runtime[DefaultInfo].default_outputs[0], cache.as_output(), scratch.as_output(), llvm,
+                 hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
+        env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
+        category = "dev_fixture_cache",
+    )
+    return [DefaultInfo(default_output = cache)]
+
+_dev_fixture_cache = rule(
+    impl = _dev_fixture_cache_impl,
+    attrs = {
+        "hirsel": attrs.dep(),
+        "runtime": attrs.dep(),
+        "libraries": attrs.list(attrs.source()),
+        "testdata": attrs.list(attrs.source()),
+        "_llvm": attrs.dep(default = "root//tools/buck2/native-toolchain:llvm"),
+        "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
+    },
+)
+
+def hirsel_dev_fixture_cache(name, hirsel, runtime):
+    libraries = native.glob(["core/core/**", "core/std/**"])
+    for package in ["runner", "store"]:
+        libraries += native.glob(["core/programs/{}/*.hirsel".format(package)]) + ["core/programs/{}/hirsel.toml".format(package)]
+    libraries.append("core/programs/runner/tests/b9-vectors.hirsel")
+    testdata = ["crates/hirsel-core-driver/src/testdata/" + file for file in ["dev_fixture.sh", "dev_place.hirsel"]]
+    _dev_fixture_cache(name = name, hirsel = hirsel, runtime = runtime, libraries = libraries, testdata = testdata, visibility = ["PUBLIC"])
+
 def _toolchain_bundle_impl(ctx):
     # The self-contained installation the driver discovers beside itself: the
     # compiler as `hirsel` with RPATH $ORIGIN/lib, libLLVM and the libraries it

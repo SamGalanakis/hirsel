@@ -32,32 +32,40 @@ impl Fixture {
     fn new() -> Self {
         let law = PackageLaw::new();
         let options = super::native_options(super::Backend::Cranelift, law.dir.path());
-        for package in ["runner", "store"] {
-            let source = law.libraries.join("programs").join(package);
-            for file in fs::read_dir(source).unwrap() {
-                let file = file.unwrap();
-                let name = file.file_name().into_string().unwrap();
-                if name == "hirsel.toml" || name.ends_with(".hirsel") {
-                    law.write(&format!("{package}/{name}"), fs::read(file.path()).unwrap());
-                }
-            }
-        }
-        let nested = "runner/tests/b9-vectors.hirsel";
-        law.write(
-            nested,
-            fs::read(law.libraries.join("programs").join(nested)).unwrap(),
+        let testdata = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testdata");
+        // The //:dev-fixture-cache action lays out this workspace with the same
+        // script and builds it as the dev child does, so the child's first build
+        // finds its objects in the seeded content store instead of compiling
+        // core, std, runner and store inside the startup wait.
+        let laid = Command::new("/bin/sh")
+            .arg(testdata.join("dev_fixture.sh"))
+            .arg(&law.libraries)
+            .arg(&testdata)
+            .arg(law.dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            laid.status.success(),
+            "{}",
+            String::from_utf8_lossy(&laid.stderr)
         );
-        law.write(
-            "hirsel.toml",
-            "[workspace]\nmembers = [\"runner\", \"store\"]\n",
-        );
-        let manifest = fs::read_to_string(law.path("runner/hirsel.toml")).unwrap();
-        law.write(
-            "runner/hirsel.toml",
-            manifest.replace(
-                "[sources]\n",
-                "[sources]\n\"dev_place.hirsel\" = \"runner\"\n",
-            ) + "\n[program]\nmodule = \"runner\"\nfunction = \"dev_fixture\"\n",
+        let seed = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(std::env::var_os("HIRSEL_DEV_TEST_CACHE").unwrap());
+        let seeded = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "mkdir -p \"$2\" && cp -R --reflink=auto \"$1\"/. \"$2\" && chmod -R u+w \"$2\"",
+                "seed",
+            ])
+            .arg(&seed)
+            .arg(law.path("cache"))
+            .output()
+            .unwrap();
+        assert!(
+            seeded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&seeded.stderr)
         );
         fs::create_dir(law.path("run")).unwrap();
         let super::Link::Driver(cc) = options.link else {

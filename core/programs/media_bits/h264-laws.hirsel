@@ -4,8 +4,8 @@ fn invalid_rtp(payload: Bytes) {
     }
 }
 
-/// bug: Mis-reconstruct a fragmented NAL header, miss an aggregation boundary, or misread cropped SPS dimensions and PPS IDs.
-/// oracle: RFC 6184 sections 5.7.1 and 5.8, and FFmpeg trace_headers and ffprobe on str0m tests/data/h264.pcap.
+/// bug: Mis-reconstruct a fragmented NAL header, miss an aggregation boundary, misread cropped SPS dimensions and PPS IDs, or refuse a parameter set followed by trailing zero bytes.
+/// oracle: RFC 6184 sections 5.7.1 and 5.8, FFmpeg trace_headers and ffprobe on str0m tests/data/h264.pcap, and H.264 7.3.2.1.1 by hand on Chromium's captured SPS.
 @test
 fn h264_rtp_parameter_sets() -> Result[(), ()] {
     // First two units in STAP-A packet 19249. FFmpeg reports 494 by 370,
@@ -43,6 +43,15 @@ fn h264_rtp_parameter_sets() -> Result[(), ()] {
     if let Ok(_) = h264.parse_sps(list.slice(packet, seq_unit.start, seq_unit.end - 1)) {
         fail("truncated SPS accepted")
     }
+    // Chromium 156's 640x360 simulcast SPS (vectors/chromium_rtp.hirsel,
+    // h264_simulcast packet 7) ends in a trailing_zero_8bits byte. By hand
+    // (7.3.2.1.1): 40 by 23 macroblocks, frame_mbs_only, bottom crop 4.
+    let chromium = result.unwrap(h264.parse_sps(b"\x67\x42\xc0\x1f\x8c\x68\x0a\x02\xff\x96\x6a\x0c\x0c\x0c\x0f\x08\x84\x6a\x00"))
+    let chromium_size = h264.sequence(chromium)
+    if chromium_size.id != 0 || chromium_size.width != 640 || chromium_size.height != 360 || chromium_size.profile != 66 || chromium_size.level != 31 {
+        fail("SPS followed by a trailing zero byte")
+    }
+    let _ = result.unwrap(h264.parse_pps(b"\x68\xce\x3c\x80\x00", chromium))
     // FFmpeg libx264 (High profile) and FFprobe independently produce
     // 640x360. The timing fields contain two emulation-prevention octets.
     let high = result.unwrap(h264.parse_sps(b"\x67\x64\x00\x1e\xac\xd9\x40\xa0\x2f\xf9\x70\x11\x00\x00\x03\x00\x01\x00\x00\x03\x00\x32\x0f\x16\x2d\x96"))

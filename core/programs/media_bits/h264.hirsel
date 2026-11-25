@@ -374,7 +374,19 @@ fn extended_profile(profile: u64) -> bool {
     profile == 100 || profile == 110 || profile == 122 || profile == 244 || profile == 44 || profile == 83 || profile == 86 || profile == 118 || profile == 128 || profile == 138 || profile == 139 || profile == 134 || profile == 135 || profile == 144
 }
 
-pub fn parse_sps(unit: Bytes) -> Result[Sps, Error] {
+// Annex B trailing_zero_8bits can follow a parameter set into a depacketizer
+// (Chromium's 640x360 simulcast SPS ends in one); FFmpeg and libwebrtc drop
+// them before looking for rbsp_trailing_bits, and so does this.
+fn content_end(unit: Bytes) -> u64 {
+    let mut end = list.len(unit)
+    while end > 1 && unit[end - 1] == 0 {
+        end -= 1
+    }
+    end
+}
+
+pub fn parse_sps(received: Bytes) -> Result[Sps, Error] {
+    let unit = list.slice(received, 0, content_end(received))
     if nal(unit)?.kind != 7 {
         return Error(WrongParameterSet)
     }
@@ -520,7 +532,8 @@ fn slice_groups(unit: Bytes, mut cursor: Rbsp, sps: Sps) -> Result[(), Error] {
     Ok(())
 }
 
-pub fn parse_pps(unit: Bytes, sps: Sps) -> Result[Picture, Error] {
+pub fn parse_pps(received: Bytes, sps: Sps) -> Result[Picture, Error] {
+    let unit = list.slice(received, 0, content_end(received))
     if nal(unit)?.kind != 8 {
         return Error(WrongParameterSet)
     }

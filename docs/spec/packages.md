@@ -95,7 +95,10 @@ opens each path one component at a time relative to the directory handle it hold
 `openat` does), and checks every opened object on its handle (as `fstat` does). A component
 may be a symbolic link. The tool follows it by resolving its target the same way: a relative
 target from the directory that holds the link, one component at a time, and `..` steps to
-the walk's parent directory; an absolute target is refused. The walk must never leave the
+the walk's parent directory; an absolute target is refused. A target is split on `/`; empty
+and `.` components are skipped, and a target that ends in `/` must reach a directory. At most
+40 links are followed on one path, Linux's own bound on a path walk; the 41st makes the path a
+link loop. The walk must never leave the
 package directory, not even on the way to a file inside it. The final object must
 be a regular file. Then the listed path names that file's bytes, and nothing about the link is
 recorded. A path is refused (section 9) when it leaves the package, when it ends at a
@@ -512,8 +515,8 @@ There is no registry, no version range and no search.
 **Bundles.** What a fetch yields is a **bundle**: a head `C` and the `C` of every package the
 head's bindings reach, other than toolchain packages. An archive's bundle is its entries. A git
 source's bundle is the content the tool packs from the commit (GIT-2). Whenever `hirsel pack`
-succeeds for that package in a checkout of that commit that applied no conversion, the bundle
-is exactly the archive it writes; a git source may also succeed where that `pack` would not,
+succeeds for that package in a checkout of that commit, on a file system that keeps every name
+by its exact bytes, that applied no conversion, the bundle is exactly the archive it writes; a git source may also succeed where that `pack` would not,
 because it reads only the members the package reaches (GIT-2 step 4). Every rule below that speaks of an archive's entries holds for every bundle.
 
 **Verifying a fetch.** For a binding of `name@major` to root P, the tool takes the bundle and,
@@ -566,9 +569,10 @@ repository can run code on the host.
 **GIT-1. The binding.** A git binding is
 `{ major, root, git, rev }`, optionally with `dir` and `ref`:
 
-1. `git` is an `https://` URL with a host, an optional port and a path, and no user
-   information, query or fragment. It is kept exactly as written, and nothing is appended to
-   it or removed (no `.git`, no trailing `/`).
+1. `git` is an `https://` URL with a lower-case host, an optional port and a path, and no
+   user information, query or fragment. It is kept exactly as written, and nothing is
+   appended to it or removed (no `.git`, no trailing `/`). A host in another case is refused,
+   so one repository is not two sources by its spelling.
 2. `rev` is the commit's full object id in lower-case hex: 40 digits names a SHA-1
    repository and 64 a SHA-256 one. It is never shortened.
 3. `dir` is the package's directory in the commit's tree, under the path component rules of
@@ -610,10 +614,12 @@ manifest or file of the commit in diagnostics (`git:https://…#32e2…/wrap/hir
    acquires the `C` of every published root those packages reach (GIT-6). The package's `C`
    is the bundle's head;
 6. verifies the bundle as section 7 does (head root, identity, closure, no extra), and only
-   then puts its entries in the store.
+   then puts its entries in the store. Written as an archive, the bundle is at most 512 MiB,
+   the archive limit; a larger one refuses as `over the limit of 512 MiB` before anything is
+   kept.
 
-Whenever `hirsel pack` succeeds for the same package over a checkout of the same commit that
-applied no conversion (GIT-4), the roots this computes are the roots it prints: the same
+Whenever `hirsel pack` succeeds for the same package over a checkout of the same commit, on a
+file system that keeps every name by its exact bytes, that applied no conversion (GIT-4), the roots this computes are the roots it prints: the same
 files, the same manifests, the same member closure. (`pack` reads every member of the
 workspace, so an unreached broken member refuses it and not the git source.) A git source and a release archive of the same content
 therefore bind the same root, and two consumers that reach one package by both forms
@@ -622,21 +628,28 @@ coalesce.
 **GIT-3. Reading the snapshot.** Paths are looked up one component at a time in tree
 objects, by exact bytes, never through a file system:
 
-1. A tree entry's mode is `100644` or `100755` (a regular file; the executable bit is
-   ignored, as permissions are in section 1), `040000` (a directory), `120000` (a symbolic
-   link) or `160000` (a submodule commit). A tree that holds any other mode, or two entries of
-   one name, is refused when it is read. A tree that is never read is never checked.
-2. A symbolic link's target is its blob's bytes. It is followed by section 1's reading rule
-   within the walk's containing directory: a relative target from the directory that holds the
-   link, one component at a time, `..` stepping to the walk's parent; an absolute target, an
-   empty target, or one that is not UTF-8 is refused as `resolves outside the package` (or
-   the workspace, for a member directory). The walk must never leave its containing
-   directory, not even on the way to a file inside it. The containing directory is the
-   package's directory for its sources, archives and manifest, the snapshot's workspace root
-   for a member directory, and the top of the tree for `dir` and for the search of GIT-2
-   step 3, which comes before the workspace root is known.
-3. At most 40 links are followed on one path, Linux's own bound on a path walk; the 41st
-   makes the path a link loop, which is refused as `does not resolve to a regular file`.
+1. A tree entry's mode is an octal number, written in the tree object without leading
+   zeros: `100644` or `100755` (a regular file; the executable bit is ignored, as permissions
+   are in section 1), `40000` (a directory), `120000` (a symbolic link) or `160000` (a
+   submodule commit). Two legacy spellings that old Git versions wrote and Git still reads are
+   read as Git reads them: `040000` as a directory and `100664` as a regular file. Neither
+   changes a root, which never depends on a mode. A tree that holds any other mode, or two
+   entries of one name, is refused when it is read. A tree that is never read is never
+   checked.
+2. A symbolic link's target is its blob's bytes, at most 4096 bytes. It is followed by
+   section 1's reading rule within the walk's containing directory: a relative target from the
+   directory that holds the link, split on `/`, with empty and `.` components skipped, `..`
+   stepping to the walk's parent, and a trailing `/` requiring a directory; an absolute
+   target, an empty target, a target over 4096 bytes, or one that is not UTF-8 is refused as
+   `resolves outside the package` (or the workspace, for a member directory). The walk must
+   never leave its containing directory, not even on the way to a file inside it. The
+   containing directory is the package's directory for its sources, its `[foreign]` archives
+   and its manifest; the snapshot's workspace root for a member directory and for an
+   `archive` declaration of GIT-6, which section 2 contains in the workspace root; and the
+   top of the tree for `dir` and for the search of GIT-2 step 3, which comes before the
+   workspace root is known.
+3. At most 40 links are followed on one path, section 1's bound; the 41st makes the path a
+   link loop, which is refused as `does not resolve to a regular file`.
 4. The final object of a file path is a regular file's blob, and the listed path names its
    bytes. A path that ends at a directory, at nothing or at a submodule is refused.
 5. A walk that meets a `160000` entry is refused as reaching a submodule (GIT-5).
@@ -674,47 +687,80 @@ inherited as section 4 says:
 
 1. a toolchain binding is a toolchain binding;
 2. a `path` binding names a reached member, packed by GIT-2 step 5;
-3. a published binding `{ major, root, … }` is acquired as resolution step 3 acquires one:
-   from the store when it holds the root undamaged, and otherwise from the source the
-   snapshot declares for it, an `archive` resolved lexically against the snapshot's workspace
-   root and read from the snapshot by GIT-3, a `url` fetched by one GET, or a `git` source
-   fetched by GIT-2. With no declared source and no store entry it is refused as `no source`.
+3. a published binding `{ major, root, … }` is acquired as the whole of resolution step 3
+   acquires one, carriers included, with the snapshot's declarations as the declarations:
+   from the store when it holds the root undamaged, then from the source the snapshot
+   declares for it, then from the declared source of its nearest carrier in the snapshot, so a
+   store entry whose own child was lost is refilled from its binder's source. A declared
+   source is an `archive` resolved lexically against the snapshot's workspace root and read
+   from the snapshot by GIT-3, a `url` fetched by one GET, or a `git` source fetched by GIT-2
+   at its `rev`, never by a ref. With none of these it is refused as `no source`.
 
-Every `C` acquired is verified against the root that binds it (section 7) before the bundle
-is admitted. One bundle holds at most 4096 packages, as an archive does, and the fetches one
-git source causes, its own and every nested one, are at most 4096; the next refuses
-(`fetch count`, section 9). Published content forms no cycle (section 4), so nesting
-ends. Under `--frozen` no git source is fetched at all (section 8).
+A nested fetch is verified against the root that binds it and held in memory. Nothing a git
+source acquires is written to the store until the outermost bundle passes section 7; a
+refusal anywhere, the outer root included, keeps nothing. One bundle holds at most 4096
+packages, as an archive does. The fetches one git source causes, its own and every nested
+one, are at most 256, the next refusing (`fetch count`, section 9), and their responses
+together are at most 1 GiB as received, the next byte refusing as `over the limit of 1 GiB
+received`. One command fetches one (`git`, `rev`) once, whatever the `dir`, and every later
+use of that commit reads the snapshot already held. Published content forms no cycle
+(section 4), so nesting ends. Under `--frozen` no git source is fetched at all (section 8).
+
+A git dependency chooses hosts its consumers contact: the `url` and `git` declarations in its
+snapshot are fetched on a cold store, during `add`, `fetch`, `--locked` and plain builds,
+though the lock records them only as `via:<id>`. An archive cannot do this, because it is
+complete on its own. The set is fixed by `rev`, which the pack check binds, so only the
+commit's author chooses it, never a server; `hirsel add` and `hirsel fetch` print every
+source they contact, nested ones included, under `fetched`.
 
 **GIT-7. Transport.** The tool speaks Git's smart HTTP protocol, version 2, over the HTTPS
 client a `url` uses (the same roots, proxy settings and redirect rule):
 
 1. `GET <git>/info/refs?service=git-upload-pack` with the header `Git-Protocol: version=2`,
-   following redirects only to `https://` URLs, at most 3. The URL it ends at, less the
-   `/info/refs` suffix and query, is the base for every later request. The response must be a
-   version 2 capability advertisement that offers `fetch`; anything else refuses as
-   `the server does not speak Git protocol version 2`. Its `object-format` (absent means
-   `sha1`) must match the length of `rev`.
+   following redirects only to `https://` URLs, at most 3. A redirect target must itself be
+   an info/refs request: its path ends in `/info/refs`, its query is exactly
+   `service=git-upload-pack`, and it has no user information; any other target refuses as
+   `redirected to <url>, which is not a Git endpoint`. The URL it ends at, less the
+   `/info/refs` suffix and query, is the base for every later request of the command, and it
+   is never written to a manifest or a lock. The response must be a version 2 capability
+   advertisement that offers `fetch`; anything else refuses as `the server does not speak Git
+   protocol version 2`. Its `object-format` (absent means `sha1`) must match the length of
+   `rev`.
 2. A fetch is one `POST <base>/git-upload-pack`, `Content-Type:
    application/x-git-upload-pack-request`, `Git-Protocol: version=2`, that never follows a
    redirect. Its request is `command=fetch`, `object-format`, then `ofs-delta`,
    `no-progress`, `deepen 1` when the advertisement offers `shallow`, exactly one
    `want <rev>`, and `done`. It never sends `have`, `thin-pack`, `filter`, `include-tag`,
-   `packfile-uris` or `sideband-all`.
-3. The response's `packfile` section is read as Git's side band: band 1 is pack bytes, band 2
-   is progress and is discarded, and band 3, like an `ERR` packet anywhere, refuses with the
-   server's text. Other sections (`acknowledgments`, `shallow-info`) are read and not used.
+   `packfile-uris` or `sideband-all`. So the pack holds every blob of the commit, not only
+   the package's: one request and one pack, with no state between requests. A repository
+   whose commit is over the response limit cannot be a git source, and the limit's refusal
+   says so (section 9).
+3. The response is read section by section. Exactly `acknowledgments` and `shallow-info` are
+   read and not used; any other section, `packfile-uris` and `wanted-refs` included, refuses
+   as `the server sent an unexpected <name> section`. The `packfile` section is read as Git's
+   side band: band 1 is pack bytes, band 2 is progress and is discarded, and band 3, like an
+   `ERR` packet anywhere, refuses with the server's text. A text that contains `not our ref`
+   refuses as `the server would not send commit <rev>` (GIT-8). Band 1 bytes after the pack's
+   trailing checksum refuse as `trailing bytes at <offset>`.
 4. The tool sends no credentials, reads no `.netrc`, cookie or credential helper, and refuses
-   a 401 or 403 as `the repository requires authentication; hirsel fetches public
-   repositories only`.
+   a 401 or 403 as `the repository does not exist or requires authentication; hirsel fetches
+   public repositories only`. A host may answer 401 for a repository that does not exist, so
+   the text names both causes.
 
-**Limits.** The response body is at most 512 MiB, the archive limit. A pack holds at most
-4 194 304 objects, checked on its header before any object is read. Every object is inflated
-to find where the next begins: its inflated length must equal its header's, and the inflated
-bytes of all objects together are at most 4 GiB. A delta chain is at most 4095 links, Git's
-own maximum pack depth. Each packed `C` keeps section 1's limits. A pack limit refuses as a
-`bad pack` (section 9), `over the limit of <limit>`, with nothing admitted, as soon as it is
-passed and never after reading the rest of the response.
+**Limits.** The bytes of each response are counted as received, and a response with any
+`Content-Encoding` refuses as `the server answered with Content-Encoding <coding>`. The
+advertisement is at most 64 KiB and the `ls-refs` listing at most 16 MiB; the fetch response
+is at most 512 MiB, the archive limit. A response that delivers no byte for 60 s refuses as
+`the server sent nothing for 60 s`; the same bound applies to a `url` fetch. A pack holds at
+most 4 194 304 objects, checked on its header before any object is read. Every object is
+inflated to find where the next begins, and its inflated length must equal its header's. An
+object's **size** is its length after any delta is applied: a delta's result size, read from
+the start of its instructions, is checked before anything is built for it. One object's size
+is at most 512 MiB (the largest blob any rule reads is a snapshot `archive`), and the sizes of
+all objects together, a delta counted by its result, are at most 4 GiB. A delta chain is at
+most 4095 links, Git's own maximum pack depth. Each packed `C` keeps section 1's limits. A
+pack limit refuses as a `bad pack` (section 9), `over the limit of <limit>`, with nothing
+admitted, as soon as it is passed and never after reading the rest of the response.
 
 **GIT-8. A build asks for the commit, never a ref.** Every fetch outside `hirsel add` sends
 `want <rev>` and lists no refs, so a branch that advanced or a tag that moved never changes
@@ -722,20 +768,30 @@ what a build gets. Git's own server serves any commit it holds to a protocol ver
 `want` (`upload-pack.c`'s `parse_want`), but a hosted server may serve only commits that a
 ref reaches, so a commit that was force-pushed away can become unfetchable. A server that refuses
 (`not our ref`) refuses the fetch as `the server would not send commit <rev>`; then the
-content is gone from that source, and only the store or another declared source can supply
-the root.
+content is gone from that source, and only the store or a source the manifest is edited to
+declare (resolution tries only the first) can supply the root: `hirsel pack`'s archive of
+the commit, kept beside the workspace or served at a `url`, binds the same root (GIT-2), so
+the swap changes only the lock's source. A served commit need not belong to the named
+repository's history: a host that shares objects between a repository and its forks may serve
+a commit that exists only in a fork under the upstream URL. The root, not the URL, says what
+the content is (GIT-12).
 
 **GIT-9. Checking the pack.** Before reading the snapshot, the tool checks:
 
 1. the pack's header, version 2 or 3, and its trailing checksum;
-2. every object's id, recomputed from its type, its inflated length and its bytes with the
-   repository's hash, for every object the walk reads and every delta base it is built from;
-   a SHA-1 id is computed with collision detection, as Git does, and an object flagged as a
-   collision attack is refused;
-3. that every `REF_DELTA` base is in the pack (a thin pack is refused) and every
-   `OFS_DELTA` base lies before its delta;
-4. that the object `rev` is in the pack and is a commit, and that its tree and every tree and
-   blob the walk reads are in the pack with the type the walk expects.
+2. every object's id. An id is computed from the object's type, size and bytes with the
+   repository's hash, and is never taken from the server, so a lookup by id finds only bytes
+   that hash to it. Every object in the pack is hashed, because the lookup needs every id. A
+   SHA-1 id is computed with collision detection, as Git does, through the one hash function
+   every object id goes through, and an object flagged as a collision attack refuses the pack
+   whether or not the walk reads it;
+3. that every `REF_DELTA` base is in the pack (a thin pack is refused), and every
+   `OFS_DELTA` base is the start of an earlier entry of the pack;
+4. that the object `rev` is in the pack and is a commit, that its tree and every tree and blob
+   the walk reads are in the pack with the type the walk expects, and that each commit and
+   tree read is well formed: a commit begins with a `tree` line naming an object id, and a
+   tree is a sequence of entries, each a mode, a space, a non-empty name without `/` or NUL,
+   a NUL and an object id.
 
 `rev` is a locator, and the root is the authority: a server that serves different bytes
 under a commit id fails step 2, and a commit id that was made to collide still has to pack to
@@ -759,20 +815,29 @@ An annotated tag is peeled to the object it names, and the resolved object must 
 
 **GIT-11. Mutable references.** A binding names a commit, so a moved reference never changes
 a manifest, a lock or a build. Only `hirsel add` with `--update` takes a new commit. The
-**same source** for `add` is the pair (`git`, `dir`). When `add` resolves a source already
-bound to another `rev`, it refuses without `--update` and says which case it is: the bound
-`ref` is the requested tag and now names another commit (`moved`, which a tag should never
-do), the bound `ref` is the requested branch and it advanced (`advanced`), or neither
-(`bound to another commit`). Each prints the bound and the fetched commit and root. A source
-bound to the same `rev` and root is `unchanged`.
+**same source** for `add` is the pair (`git`, `dir`). When `add` resolves the bound `ref`
+again, the requested `REF` naming the same full name, and it now names another commit, `add`
+refuses without `--update` and says only what it saw: a tag `moved`, which a tag should never
+do, and a branch `now names another commit`. The fetch has depth 1 and no ancestry, so the
+tool cannot tell a branch that went forward from one rolled back to an old commit, and it
+never says which. Each prints the bound and the fetched commit and root. A different `REF`,
+or a commit id, for the same source is a named update, as a new URL is: it replaces the
+binding and prints both commits and roots. A source bound to the same `rev` and root is
+`unchanged`.
 
 **GIT-12. Offline and locked.** A root in the store is opened from the store and its source
 is never contacted, whatever the source is. Under `--locked`, a root missing from the store
 is fetched by GIT-8 from the lock source, and the bundle must reproduce the pinned root or
 the command refuses with the `fetch mismatch` refusal and keeps nothing. Under `--frozen`
 the tool never fetches, so a git source is never contacted and a missing root refuses as
-`frozen, absent`. The store holds verified `C`s only, never Git objects: fetching the same
-commit for another `dir` fetches it again.
+`frozen, absent`. The store holds verified `C`s only, never Git objects: another command
+that needs the same commit for another `dir` fetches it again.
+
+Only `root` identifies content. `git`, `rev` and `ref` are locators that no warm build checks:
+a change that edits `root` and keeps `git` and `rev` passes every command over a store that
+already holds the new root, however it got there. The review gate for a changed binding is
+`hirsel fetch --locked --package-store <empty directory>`, which fetches every root from its
+lock source and refuses one that the source does not reproduce.
 
 **The discovery index.** A website may list published libraries as rows
 `{id, root, url, first_seen}`, where `first_seen` is when the index first fetched that URL and
@@ -943,8 +1008,8 @@ Roots are always written in full.
 | bad git field | `hirsel: <manifest>: dependencies.<name>.<field>: <what is wrong>`: for `git`, `"<url>" is not an https:// URL`, `has user information`, `has a query` or `has a fragment`; for `rev`, `"<r>" is not a full commit id of 40 or 64 lower-case hex digits`; for `ref`, `"<r>" is not refs/heads/<name> or refs/tags/<name>`; for `dir`, `"<d>" breaks the path rules: <which rule>` |
 | git package missing | `hirsel: <manifest>: dependencies.<name>: <source> has no hirsel.toml`, or `<source> is a workspace root, not a package` |
 | reaches submodule | `hirsel: <snapshot manifest>: sources: "<path>" reaches submodule "<entry>", and hirsel does not fetch submodules` (and the `archive file` and member forms) |
-| bad pack | `hirsel: <id>: <source> sent a bad pack: <first failure>`, the failure one of `bad header`, `checksum mismatch`, `truncated at <offset>`, `object <oid> does not hash to its name`, `object <oid> is a SHA-1 collision attack`, `delta base <oid> is not in the pack`, `commit <rev> is not in the pack`, `object <oid> is not in the pack`, `object <oid> is a <type>, not a <type>`, `tree <oid> has mode <mode>`, `tree <oid> names "<entry>" twice`, `object at <offset> inflates to <n> bytes, not <m>`, `over the limit of <limit>` with `<limit>` one of `512 MiB`, `4194304 objects`, `4 GiB inflated` or `4095 delta links` |
-| git protocol | `hirsel: <id>: fetching <source> failed: <cause>`, with the causes of GIT-7 and GIT-8 in their words: `the server does not speak Git protocol version 2`, `the server's object format is <f>, not <g>`, `the server would not send commit <rev>`, `redirected to <url>, which is not https`, `too many redirects`, `the server answered <status>` (any status other than 200 on a request, 401 and 403 aside), `the repository requires authentication; hirsel fetches public repositories only`, `the server said: <text>` |
+| bad pack | `hirsel: <id>: <source> sent a bad pack: <first failure>`, the failure one of `bad header`, `checksum mismatch`, `truncated at <offset>`, `trailing bytes at <offset>`, `object <oid> is a SHA-1 collision attack`, `delta base <oid> is not in the pack`, `delta base at <offset> is not an earlier entry`, `commit <rev> is not in the pack`, `object <oid> is not in the pack`, `object <oid> is a <type>, not a <type>`, `object <oid> is not a well-formed <type>`, `tree <oid> has mode <mode>`, `tree <oid> names "<entry>" twice`, `object at <offset> inflates to <n> bytes, not <m>`, `over the limit of <limit>` with `<limit>` one of `512 MiB object`, `4194304 objects`, `4 GiB inflated` or `4095 delta links` |
+| git protocol | `hirsel: <id>: fetching <source> failed: <cause>`, with the causes of GIT-7 and GIT-8 in their words: `the server does not speak Git protocol version 2`, `the server's object format is <f>, not <g>`, `the server would not send commit <rev>`, `redirected to <url>, which is not https`, `redirected to <url>, which is not a Git endpoint`, `too many redirects`, `the server answered <status>` (any status other than 200 on a request, 401 and 403 aside), `the repository does not exist or requires authentication; hirsel fetches public repositories only`, `the server answered with Content-Encoding <coding>`, `the server sent an unexpected <name> section`, `the server sent nothing for 60 s`, `the response is over the limit of <limit>` with `<limit>` `64 KiB`, `16 MiB`, or `512 MiB; hirsel fetches the whole commit, so a repository whose commit is larger cannot be a git source` (GIT-7 step 2), `over the limit of 1 GiB received` (GIT-6), `the server said: <text>` |
 | toolchain major | `hirsel: <manifest>: dependencies.std: the toolchain has std@1, not std@<n>` |
 | declared core | `hirsel: <manifest>: dependencies.core: core@1 is bound in every package and is not declared` |
 | path not a member | `hirsel: <manifest>: dependencies.<name>: <path> is not a member of the workspace at <root manifest>` |
@@ -961,7 +1026,7 @@ Roots are always written in full.
 | fetched identity | `hirsel: <id>: sha256:<P> is <other>@<m>`, for every edge whatever the content's origin |
 | malformed | `hirsel: <id>: <source> is not a package archive: <first decoding failure>`, the failure in the words of section 1, and `<source>` the archive or url the bytes came from |
 | fetch failed | `hirsel: <id>: fetching <url> failed: <cause>` |
-| fetch count | `hirsel: <id>: <source> causes more than 4096 fetches` (GIT-6) |
+| fetch count | `hirsel: <id>: <source> causes more than 256 fetches` (GIT-6) |
 | diamond | `hirsel: <id> is bound to more than one root:` then one line per distinct root, each `  <path> = sha256:<root>`, in path order, each with its first path |
 | member and root | `hirsel: <id> is a member and is also bound to sha256:<P>, which is not the member's root:` then `  <path> = member` and `  <path> = sha256:<P>`, in path order |
 | missing lock | `hirsel: hirsel.lock is missing under --locked; run hirsel lock` (or `--frozen`) |
@@ -971,6 +1036,10 @@ Roots are always written in full.
 
 Several manifest refusals are reported together, in member order and then key order, so that
 one run shows all of them. The first refusal of a later resolution step is the only one shown.
+
+Text that comes from a server (an `ERR` packet, band 3, a status line) or from a tree (an
+entry name, a mode) is written with the lock's string escapes (section 8) and cut at
+256 bytes, so no byte a server chooses reaches the terminal as a control sequence.
 
 `hirsel add`<!-- doc-ref: planned --> (section 11) adds these refusals, each exit 2 with nothing written (the store may
 hold verified entries):
@@ -987,12 +1056,12 @@ hold verified entries):
 | add, root absent | `hirsel: sha256:<P> is not in the package store` |
 | add, toolchain | `hirsel: the toolchain does not provide <id>` |
 | add, not a member | `hirsel: <dir> is not a member of the workspace at <root manifest>` |
-| add, bad git source | `hirsel: <SOURCE> is not git+https://HOST/PATH[?dir=DIR][#REF] or github:OWNER/REPO[/DIR][@REF]: <which part>`, for a scheme after `git+` other than `https`, a query other than one `dir=`, a `dir` or `DIR` that breaks the path rules, user information, an `OWNER` or `REPO` that is not one non-empty component, or an empty `REF` |
+| add, bad git source | `hirsel: <SOURCE> is not git+https://HOST/PATH[?dir=DIR][#REF] or github:OWNER/REPO[/DIR][@REF]: <which part>`, for a scheme after `git+` other than `https`, a query other than one `dir=`, a `dir` or `DIR` that breaks the path rules, user information, an `OWNER` that is not `[A-Za-z0-9-]+`, a `REPO` that is not `[A-Za-z0-9._-]+` or is `.` or `..`, a `HOST` that is not lower case, or an empty `REF` |
 | add, no such ref | `hirsel: <git> has no branch or tag <REF>` |
 | add, ambiguous ref | `hirsel: <git>: <REF> names both refs/tags/<REF> and refs/heads/<REF>; write the full name` |
 | add, not a commit | `hirsel: <git>: <REF> names a <type>, not a commit` |
 | add, no HEAD branch | `hirsel: <git>: HEAD names no branch; give a branch, a tag or a commit` |
-| add, ref moved | `hirsel: <git> <ref> moved:` (a tag) or `hirsel: <git> <ref> advanced:` (a branch), or `hirsel: <source> is already bound to another commit:` (neither), then `  bound: <rev> sha256:<P>`, `  fetched: <rev> sha256:<Q>` and `pass --update to accept it`<!-- doc-ref: planned --> (GIT-11) |
+| add, ref moved | `hirsel: <git> <ref> moved:` (a tag) or `hirsel: <git> <ref> now names another commit:` (a branch), then `  bound: <rev> sha256:<P>`, `  fetched: <rev> sha256:<Q>` and `pass --update to accept it`<!-- doc-ref: planned --> (GIT-11) |
 | add, virtual root | `hirsel: <root manifest>: no package manifest here; pass --workspace to declare it for the workspace`<!-- doc-ref: planned --> |
 | add, no workspace | `hirsel: <manifest>: no [workspace]; hirsel add does not create a workspace boundary`<!-- doc-ref: planned --> |
 | add, root on a local form | `hirsel: --root applies to a fetched source`<!-- doc-ref: planned --> |
@@ -1113,12 +1182,10 @@ library is published by `pack`.
 
 ### Adding a dependency
 
-`hirsel add` edits a manifest and updates its lock. The implemented forms accept HTTPS URLs,
-`.hpkg` paths, package-store roots, toolchain names and member directories, in a member's own
-table or, with `--workspace`, in the workspace's. The git forms, `git+https://` and
-`github:`, are specified here and not yet built; `github:` names a repository commit, and no
-longer a release asset (below). Until they are built, the shipped `hirsel add` still reads
-`github:` as a release asset.
+`hirsel add` edits a manifest and updates its lock. It accepts HTTPS URLs, git sources
+(`git+https://` and `github:`), `.hpkg` paths, package-store roots, toolchain names and member
+directories, in a member's own table or, with `--workspace`, in the workspace's. `github:`
+names a repository commit, never a release asset (below).
 
 `hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
 
@@ -1147,7 +1214,8 @@ directory, or the workspace root when it has none (then `--workspace`<!-- doc-re
 as immutable: other bytes there are a moved tag or tampering, so `add` refuses and prints both
 roots, and `--update`<!-- doc-ref: planned --> accepts the new one. The same git source, the
 pair (`git`, `dir`), resolving to another commit is refused the same way and says whether a
-tag moved or a branch advanced (GIT-11); `--update` takes the new commit and its root. A different source for a name already bound
+tag moved or a branch now names another commit (GIT-11); `--update` takes the new commit and
+its root. Another `REF` or a commit id for the same pair is a named update. A different source for a name already bound
 replaces the binding and prints the old and new roots; naming a new source is how a dependency
 is updated when there are no version ranges.
 
@@ -1194,7 +1262,8 @@ member never drifts from the shared binding by accident.
 7. Build the edited manifests in memory and resolve the workspace through the real resolver on
    that overlay. Every refusal of section 5 refuses here, with nothing written. Roots the
    resolution needs that the store lacks are fetched under `fetch`'s rules and listed as
-   `fetched`, never silently. If every target manifest already has the same name, root and
+   `fetched`, never silently, as is every source a git source's snapshot made the tool
+   contact (GIT-6). If every target manifest already has the same name, root and
    source, the result is `unchanged`: derive and commit the lock if it is missing or stale, and
    exit 0. `--dry-run`<!-- doc-ref: planned --> prints and exits 0 here.
 8. Capture each target manifest again; bytes or file identity that differ from step 2 refuse
@@ -1231,8 +1300,10 @@ repository URL), never a redirect target. A git binding's keys are written in th
    `#`, taken as written and resolved by GIT-10. There is no `git+http://`, `git+ssh://` or
    `git+file://` form; each is refused as `add, bad git source`.
 3. `github:OWNER/REPO[/DIR][@REF]` is exactly `git+https://github.com/OWNER/REPO?dir=DIR#REF`.
-   `OWNER` and `REPO` are one non-empty component each, `DIR` is every component after them up
-   to the first `@`, and `REF` is everything after it. `/DIR` always names a directory, and
+   `OWNER` is `[A-Za-z0-9-]+` and `REPO` is `[A-Za-z0-9._-]+`, and neither is `.` or `..`;
+   `DIR` is every component after them up to the first `@`, and `REF` is everything after it.
+   Without `@REF` the default branch's tip is taken, and `add` prints the branch and commit
+   it chose. `/DIR` always names a directory, and
    never an asset or a package name.
 
 A release asset is still reachable by its plain `https://` URL; the shorthand names the
@@ -1603,7 +1674,12 @@ catches an image keyed without file names and a producer that synthesises names.
 **Laws for `hirsel add`.** L15–L22 cover S6 in `s6_add_protocol`, L25–L28 cover S8 in
 `s8_add_workspace`, and L29 covers S9 in `s9_add_forms_that_fetch_nothing`. L23 and L24
 specify the `github:` form as a git source, and L30 to L37 the git sources of section 7;
-their fixtures are under **Git fixtures** after L29.
+their fixtures are under **Git fixtures** after L29. No CLI law claims collision detection:
+no public SHA-1 collision is a Git object, because the `blob <size>` header changes the state
+the collision blocks need. The check is a unit case beside the hash's own vectors instead: the
+one function every object id goes through (GIT-9 step 2) is given the raw bytes of the
+published `shattered-1.pdf` (SHA-1 `38762cf7f55934b34d179ae6a4c80cadccbb7f0a`) and must report
+a collision.
 X and Y are `jx`'s and `jy`'s roots and W is `wrap@1`'s (L6). Each `add` runs in a workspace
 whose `hirsel.toml` and `hirsel.lock` bytes the law records before it starts.
 
@@ -1835,7 +1911,11 @@ prints `wrap@1 <W>` then `json@1 <X>`: the same roots. Three variants keep W:
   is never reached, so it is never read;
 - `wrap` binds `json = { major = 1, root = "<X>", archive = "../vendor/jx.hpkg" }` and the
   commit holds `vendor/jx.hpkg`, `jx`'s archive: X is read from the snapshot, and the request
-  log gains nothing.
+  log gains nothing;
+- `wrap` binds `json = { major = 1, root = "<X>", git = "https://alpha.test/rj", rev = "<J>" }`,
+  where `rj` is a server-built commit J holding `jx` at the top of its tree: X is fetched from
+  `rj`, the request log gains one `info/refs` GET and one `fetch` whose only `want` is J and
+  no `ls-refs`, and `fetched` lists `git:https://alpha.test/rj#<J>`.
 
 The law catches a sibling `path` dependency that is not packed to its own root, a member
 binding encoded by its path instead of its root, a `dir` that selects the wrong package, a
@@ -1849,12 +1929,21 @@ never reaches.
 and the store stays empty. With the binding's root W restored, two servers that lie are
 refused, each leaving the store empty:
 
-- one that sends `wrap/wrap.hirsel` with the bytes of C2 under C1's blob id
-  `b8b63ee2ea62f1ec73509eedeed52c7206deaffe`: `sent a bad pack: object b8b63ee2ea62f1ec73509eedeed52c7206deaffe does not hash to its name`;
+- one that sends `wrap/wrap.hirsel` with the bytes of C2 in place of C1's blob
+  `b8b63ee2ea62f1ec73509eedeed52c7206deaffe`: `sent a bad pack: object b8b63ee2ea62f1ec73509eedeed52c7206deaffe is not in the pack`,
+  because the bytes sent hash to C2's blob id and nothing names that;
 - one that answers `want <C1>` with C2's objects: `sent a bad pack: commit 32e212a4b69a9f3b39893b29f4e4f1e935626a2b is not in the pack`.
 
-The law catches a fetch that trusts the server's object ids or the ref, and an admission
-before the root check.
+Two packs built by the server with bad deltas are refused the same way: a `REF_DELTA` whose
+base is absent, and two `REF_DELTA` entries that name each other, each `sent a bad pack: delta
+base <oid> is not in the pack` with the base the first delta names. And with L30's nested
+variant (`wrap` binding `json` by `git` from `rj`), the binding's root set to X makes the
+outer root differ after the nested source fetched and verified X: the command refuses and the
+store stays empty, X included.
+
+The law catches a fetch that trusts the server's object ids or the ref, a missing delta base
+treated as empty or followed for ever, and an admission, nested or outer, before the root
+check.
 
 **L32. A link that leaves the package.** `hirsel add git+https://alpha.test/r2?dir=wrap#v1`
 exits 2, writes nothing and leaves the store empty, with exactly
@@ -1863,8 +1952,21 @@ although the target is inside the commit. In the control r3, the link stays insi
 the add writes root W: the link's bytes are never hashed and the unlisted `real` directory
 never enters. A server-built commit in which `wrap/wrap.hirsel` reaches its file through a
 chain of 40 links inside `wrap` gives W; with 41 it is refused as `does not resolve to a
-regular file`. The law catches a walk that contains links only to the commit instead of the
-package, a link loop decided by the host, and an encoder that hashes link text.
+regular file`. Three more cases:
+
+- r1 with an extra top-level tree entry named `json/json.hirsel`, holding `jy`'s source (a
+  server-built tree; Git never writes a name with `/`): the add still writes W and the lock
+  still pins X, because a path is looked up one component at a time;
+- `wrap/up` is a link to `..` and `wrap/wrap.hirsel` a link to `up/wrap/real.hirsel`, with
+  `wrap/real.hirsel` holding the bytes: refused as `"wrap.hirsel" resolves outside the
+  package`, although the final file is inside, as L12 is for a member;
+- the workspace at `ws/` lists `lib`, `ws/lib` is a link to `../elsewhere/lib` holding a
+  valid package, and `ws/app` binds it by `path`, with `dir = "ws/app"`: refused as
+  `hirsel: git:https://alpha.test/<repo>#<rev>/ws/hirsel.toml: workspace.members: "lib" resolves outside the workspace`.
+
+The law catches a walk that contains links only to the commit instead of the package or the
+workspace, containment decided on a normalised path, a tree flattened into a map of paths, a
+link loop decided by the host, and an encoder that hashes link text.
 
 **L33. Nothing in the repository runs or changes bytes.** The law's `PATH` begins with a
 directory holding an executable `git` that creates the file `SENTINEL` and exits 1, and
@@ -1893,8 +1995,15 @@ another root; one that applies `export-ignore` loses `wrap.hirsel`; one that fol
    `hirsel: wrap@1 sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689 is not in the package store, and --frozen does not fetch (source git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap)`,
    and the request log is empty.
 
+7. With `info/refs` on `alpha.test` redirecting to the same repository on a second fixture
+   host `beta.test`, step 2 passes and the request log shows the `fetch` POST once, on
+   `beta.test`. When `beta.test` answers that POST with a redirect, step 2 exits 2 with
+   `the server answered 302`, and when the first redirect points at `http://beta.test/…`, it
+   exits 2 with `redirected to http://beta.test/r1/info/refs?service=git-upload-pack, which is not https`.
+
 The law catches a build that resolves a ref, a `--frozen` command that touches the network,
-and a store miss that cannot be refilled from the pinned commit.
+a store miss that cannot be refilled from the pinned commit, and a POST that follows a
+redirect or a base taken from anywhere but the `info/refs` answer.
 
 **L35. A moved tag is reported and never taken silently.** After L30, move `refs/tags/v1` to
 C2 on the server. `hirsel add git+https://alpha.test/r1?dir=wrap#v1` exits 2, leaves every
@@ -1910,8 +2019,11 @@ pass --update to accept it
 With `--update` it writes `rev = "0b8c48e76c8462464b5ce67fd884449440d57844"` and root W2 and
 prints `hirsel: updated wrap@1 sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689 -> sha256:27b883e20a7c9640cf072d584cd1e8dd198aecd0795e034a7cfba52048f523a0`.
 Bound instead from `#main` and with `refs/heads/main` moved to C2, the first line reads
-`hirsel: https://alpha.test/r1 refs/heads/main advanced:`. The law catches an add that follows a
-moved tag, and one that cannot tell a moved tag from a new source.
+`hirsel: https://alpha.test/r1 refs/heads/main now names another commit:`. Bound from `#v1`,
+with a tag `v2` at C2 and `v1` unmoved, `hirsel add git+https://alpha.test/r1?dir=wrap#v2`
+exits 0 without `--update`, writes `rev` C2, `ref = "refs/tags/v2"` and root W2, and prints the
+update line. The law catches an add that follows a moved tag, one that cannot tell a moved tag
+from a new source, and one that calls a branch's change progress.
 
 **L36. Submodules and LFS pointers.** `hirsel add git+https://alpha.test/r5?dir=wrap#v1` exits
 2 with exactly
@@ -1927,7 +2039,14 @@ pointer packed as if it were the archive.
 <limit>` and leaves the store empty: a pack header declaring 4 194 305 objects (`4194304
 objects`), refused before any object arrives, which the server's still-open response shows;
 a response that streams past 512 MiB (`512 MiB`); objects whose inflated bytes pass 4 GiB
-together (`4 GiB inflated`); and a chain of 4096 deltas (`4095 delta links`). An object whose
-inflated length is not its header's is refused as
-`object at <offset> inflates to <n> bytes, not <m>`. The law catches a client that reads a
-hostile pack to its end before applying a bound.
+together (`4 GiB inflated`); a chain of 4096 deltas (`4095 delta links`); and a delta bomb, a
+16 MiB blob of zeros and one `OFS_DELTA` of 4096 copy instructions of 16 MiB each, whose
+instructions are 32 KiB and whose result would be 64 GiB (`512 MiB object`), refused before
+anything is built for it. An object whose inflated length is not its header's is refused as
+`object at <offset> inflates to <n> bytes, not <m>`. A pack near the bounds, 500 MiB of
+objects whose sizes add to just under 4 GiB through deltas, is checked by a child process
+whose peak RSS stays under L21's 2 GiB cap. A chain of 257 repositories, each commit's package
+binding the next by `git` and `rev`, makes `hirsel add` of the first refuse with
+`hirsel: <id>: git:https://alpha.test/n0#<rev> causes more than 256 fetches` and leaves the
+store empty. The law catches a client that reads a hostile pack to its end before applying a
+bound, a delta whose result is built before its size is checked, and nesting with no bound.

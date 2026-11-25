@@ -160,8 +160,9 @@ no coverage option. Coverage never enters a law row or `hirsel.laws`.
 
 `hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`
 binds one dependency in the nearest package manifest and updates `hirsel.lock`. `SOURCE` is an
-`https://` URL, `github:OWNER/REPO[/PACKAGE][@TAG]` (a release asset; untagged, one lookup of
-the latest tag), a `.hpkg` path, a `sha256:` root already in the package store, a toolchain
+`https://` URL (one archive), a git source `git+https://HOST/PATH[?dir=DIR][#REF]` or its
+shorthand `github:OWNER/REPO[/DIR][@REF]` (a commit, bound by `git` and `rev`; untagged, the
+default branch's tip), a `.hpkg` path, a `sha256:` root already in the package store, a toolchain
 `NAME@MAJOR`, or a listed member's directory. `--workspace` declares it in the root's
 `[workspace.dependencies]` and binds the member with `{ workspace = true }`, one manifest at a
 time. It verifies any archive and resolves the workspace before publishing the manifest. It

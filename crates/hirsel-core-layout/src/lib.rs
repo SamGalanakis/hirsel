@@ -25,6 +25,7 @@ pub mod isa;
 pub mod law;
 pub mod map_hash;
 pub mod map_index;
+mod pieces;
 mod recipe;
 mod shape;
 pub mod show;
@@ -33,6 +34,7 @@ mod target;
 
 pub use continuation::{Frames, Point, frames, spare_words};
 pub use foreign::{foreign_cleanup, foreign_kind, next_foreign_handle};
+pub use pieces::{LEAF_PIECES, holed_pieces, leaf_pieces};
 pub use target::{Arch, CAbi, CExtension, ObjectFormat, Os, Target, c_extension};
 
 /// Reserve a shape before filling its references, using the caller's type identity.

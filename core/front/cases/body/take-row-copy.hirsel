@@ -1,0 +1,102 @@
+// A row moved by value out of a generic `take` parameter keeps every byte of
+// every field: mixed widths with padding after narrow fields, a nested record,
+// an inline array and each case of a variant payload, pushed and overwritten.
+// Each result bit is one field that differs from the literal it was built from.
+// expect: accept
+// expect: run rows() = 0
+// expect: run picks() = 0
+type Inner {
+    a: u8,
+    b: u16
+}
+
+type Row {
+    x: u64,
+    tag: u8,
+    n: u32,
+    arr: Inline[u16, 3],
+    inner: Inner
+}
+
+type Pick = Small(u8, u16) | Big(u32, u64) | Nothing
+
+fn put[T](mut xs: List[T], take v: T) {
+    list.push(mut xs, take v)
+}
+
+fn over[T](mut xs: List[T], i: u64, take v: T) {
+    let _ = list.set(mut xs, i, take v)
+}
+
+fn bit(differs: bool, b: u64) -> u64 {
+    if differs {
+        b
+    } else {
+        0
+    }
+}
+
+fn row_bits(r: Row, x: u64, tag: u8, n: u32, a0: u16, a1: u16, a2: u16, ia: u8, ib: u16) -> u64 {
+    bit(r.x != x, 1) | bit(r.tag != tag, 2) | bit(r.n != n, 4) | bit(r.arr[0] != a0, 8)
+        | bit(r.arr[1] != a1, 16) | bit(r.arr[2] != a2, 32) | bit(r.inner.a != ia, 64)
+        | bit(r.inner.b != ib, 128)
+}
+
+fn rows() -> u64 {
+    let mut xs: List[Row] = list.new()
+    put(mut xs, Row(x: 1, tag: 2, n: 3, arr: [4, 5, 6], inner: Inner(a: 7, b: 8)))
+    put(mut xs, Row(
+        x: 0x8877665544332211u64,
+        tag: 0xA5u8,
+        n: 0xDEADBEEFu32,
+        arr: [0x1234u16, 0x5678u16, 0x9ABCu16],
+        inner: Inner(a: 0xC3u8, b: 0xF00Du16)
+    ))
+    over(mut xs, 0, Row(
+        x: 0xF1E2D3C4B5A69788u64,
+        tag: 0x5Au8,
+        n: 0x0BADF00Du32,
+        arr: [0xFEDCu16, 0xBA98u16, 0x7654u16],
+        inner: Inner(a: 0x3Cu8, b: 0xCAFEu16)
+    ))
+    let first = row_bits(xs[0], 0xF1E2D3C4B5A69788u64, 0x5Au8, 0x0BADF00Du32,
+        0xFEDCu16, 0xBA98u16, 0x7654u16, 0x3Cu8, 0xCAFEu16)
+    let second = row_bits(xs[1], 0x8877665544332211u64, 0xA5u8, 0xDEADBEEFu32,
+        0x1234u16, 0x5678u16, 0x9ABCu16, 0xC3u8, 0xF00Du16)
+    first | (second << 8)
+}
+
+fn small_bits(p: Pick, a: u8, b: u16) -> u64 {
+    match p {
+        Small(x, y) => bit(x != a, 1) | bit(y != b, 2),
+        _ => 4,
+    }
+}
+
+fn big_bits(p: Pick, a: u32, b: u64) -> u64 {
+    match p {
+        Big(x, y) => bit(x != a, 1) | bit(y != b, 2),
+        _ => 4,
+    }
+}
+
+fn nothing_bits(p: Pick) -> u64 {
+    match p {
+        Nothing => 0,
+        _ => 4,
+    }
+}
+
+fn picks() -> u64 {
+    let mut xs: List[Pick] = list.new()
+    put(mut xs, Small(0x81u8, 0x8001u16))
+    put(mut xs, Big(0x80000001u32, 0x8000000000000001u64))
+    put(mut xs, Nothing)
+    over(mut xs, 0, Big(0xC0FFEE11u32, 0xFFFFFFFFFFFFFFFEu64))
+    over(mut xs, 1, Small(0xEEu8, 0xBEEFu16))
+    over(mut xs, 2, Small(0x7Fu8, 0x7FFFu16))
+    big_bits(xs[0], 0xC0FFEE11u32, 0xFFFFFFFFFFFFFFFEu64)
+        | (small_bits(xs[1], 0xEEu8, 0xBEEFu16) << 3)
+        | (small_bits(xs[2], 0x7Fu8, 0x7FFFu16) << 6)
+        | (nothing_bits(Nothing) << 9)
+}

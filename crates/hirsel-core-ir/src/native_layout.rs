@@ -4,6 +4,8 @@ use hirsel_core_layout::{
 };
 use std::borrow::Cow;
 
+pub mod copies;
+
 impl LayoutQuery {
     pub fn map_types(&mut self, mut map: impl FnMut(TypeRef) -> TypeRef) {
         match self {

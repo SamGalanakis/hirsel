@@ -60,6 +60,8 @@ pub(super) struct Function<'a, 'b, 'c> {
     record_dest: Option<Value>,
     /// By value: the constant an `Inst::Const` defines.
     pub constants: Vec<Option<u64>>,
+    /// This function's core signature, for how its copies split.
+    pub core_signature: &'c c::Signature,
     pub raise_blocks: Vec<PendingRaise>,
     pub raise_lookup: std::collections::HashMap<(u8, Option<BlockId>, Option<Anchor>), ir::Block>,
     pub site_reference: Option<ir::GlobalValue>,
@@ -289,6 +291,7 @@ pub(super) fn emit(
         result_storage,
         record_dest,
         constants: c::failure::constants(body),
+        core_signature: &input.signatures[function.signature.index()],
         raise_blocks: Vec::with_capacity(4),
         raise_lookup: Default::default(),
         site_reference: None,

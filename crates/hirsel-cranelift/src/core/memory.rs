@@ -6,6 +6,26 @@ use cranelift_codegen::ir::{
 };
 
 impl Function<'_, '_, '_> {
+    /// Move each (offset, width) integer piece, all loads before any store.
+    fn piece_copy(&mut self, to: Value, from: Value, pieces: &[(u64, u64)]) {
+        let loaded: Vec<_> = pieces
+            .iter()
+            .map(|&(at, width)| {
+                let ty = match width {
+                    8 => types::I64,
+                    4 => types::I32,
+                    2 => types::I16,
+                    _ => types::I8,
+                };
+                let at = at as i32;
+                (self.b.ins().load(ty, MemFlagsData::new(), from, at), at)
+            })
+            .collect();
+        for (value, at) in loaded {
+            self.b.ins().store(MemFlagsData::new(), value, to, at);
+        }
+    }
+
     fn small_copy(&mut self, to: Value, from: Value, bytes: Value) -> bool {
         let ValueDef::Result(inst, _) = self.b.func.dfg.value_def(bytes) else {
             return false;
@@ -500,11 +520,24 @@ impl Function<'_, '_, '_> {
                 self.b.ins().stack_store(types::I8, inactive, obligation, 8);
             }
             Inst::Copy { to, from, bytes } => {
+                let split = c::native_layout::copies::split(
+                    self.input,
+                    self.layouts,
+                    self.body,
+                    Some(self.core_signature),
+                    to,
+                    from,
+                    self.constants[bytes.index()],
+                );
                 let to = self.addr(to);
                 let from = self.addr(from);
-                let bytes = self.get(bytes);
-                if !self.small_copy(to, from, bytes) {
-                    self.c_call("memcpy", &[p, p, u], &[p], &[to, from, bytes])?;
+                if let Some(split) = split {
+                    self.piece_copy(to, from, &split.pieces);
+                } else {
+                    let bytes = self.get(bytes);
+                    if !self.small_copy(to, from, bytes) {
+                        self.c_call("memcpy", &[p, p, u], &[p], &[to, from, bytes])?;
+                    }
                 }
             }
             Inst::Move { to, from, bytes } => {

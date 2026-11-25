@@ -376,7 +376,9 @@ is core's plain record `{ steps: u64 }`.
   User code entered without a call expression takes one step on entry: a finalizer when
   cleanup runs it, and a callable a core function calls back (a callable argument, a codec's
   `via`). Iteration (SEM-6), operators, field and index access, literals and constructors,
-  `?`, patterns and `match` run no user code and take none. A core function's call, and a
+  `?`, patterns and `match` run no user code and take none. A call of `list.prefetch` or
+  `inline.prefetch` takes none either, since a hint must not fail
+  ([core](core.md#contracts-the-signatures-do-not-state)). Any other core function's call, and a
   foreign function's ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)), is one
   step plus any steps taken by the user code it enters. `secret.scram_sha256` takes
   one further step for each PBKDF2 iteration it admits, at the call and before any

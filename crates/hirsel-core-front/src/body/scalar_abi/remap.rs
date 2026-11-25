@@ -169,6 +169,10 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
         Inst::FrameActive { result, .. } => f(result),
         Inst::FrameRefund { .. } => {}
         Inst::Copy { bytes, .. } | Inst::Move { bytes, .. } => f(bytes),
+        Inst::Prefetch { data, offset } => {
+            f(data);
+            f(offset);
+        }
         Inst::Grow {
             result,
             available,

@@ -835,6 +835,9 @@ impl<'a> Seal<'a> {
                     self.used(v, Use::Other);
                 }
             }
+            // A hint reads nothing and keeps no pointer: the buffer neither escapes
+            // nor leaves its carrier.
+            Inst::Prefetch { offset, .. } => self.used(offset, Use::Other),
             Inst::Copy { to, from, bytes } | Inst::Move { to, from, bytes } => {
                 self.whole(to);
                 self.whole(from);

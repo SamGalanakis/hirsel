@@ -709,6 +709,13 @@ pub enum Inst {
         from: AddressId,
         bytes: ValueId,
     },
+    /// A read hint for the byte `offset` (wrapping) past the pointer `data`. The
+    /// address need not lie in any storage: it is not an access, it never fails and
+    /// it has no observable effect, so an engine may emit nothing for it.
+    Prefetch {
+        data: ValueId,
+        offset: ValueId,
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

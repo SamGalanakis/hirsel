@@ -675,10 +675,12 @@ impl Function<'_, '_, '_> {
                 let v = self.scalar_unary(op, v)?;
                 self.set(result, v);
             }
-            // FORM v1c: a mark is the evaluator's alone; no code.
+            // FORM v1c: a mark is the evaluator's alone; no code. A read hint
+            // has no observable effect, so Cranelift emits nothing for it.
             Inst::StorageLive { .. }
             | Inst::StorageDead { .. }
             | Inst::BuiltinUse { .. }
+            | Inst::Prefetch { .. }
             | Inst::Mark { .. }
             | Inst::Unmark { .. } => {}
             Inst::Address { address, fail } => {

@@ -174,6 +174,7 @@ pub fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
             defs.push(v(result));
         }
         Inst::FrameRefund { storage } => uses.push(a(storage)),
+        Inst::Prefetch { data, offset } => uses.extend([v(data), v(offset)]),
         Inst::PromoteFrame { carrier } => uses.push(a(carrier)),
         Inst::Copy { to, from, bytes } | Inst::Move { to, from, bytes } => {
             uses.extend([a(to), a(from), v(bytes)])

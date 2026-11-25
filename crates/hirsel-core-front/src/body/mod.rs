@@ -73,6 +73,7 @@ mod ops;
 pub(crate) mod ordered_codec;
 mod patterns;
 mod places;
+mod prefetch;
 mod row_closures;
 pub(crate) use row_closures::RowClosures;
 mod scalar_abi;

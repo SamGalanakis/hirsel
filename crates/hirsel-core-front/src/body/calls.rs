@@ -774,7 +774,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             map_insertion = self.map_insertion(&[tys[0], tys[1]], header, vals[1], false, n);
         }
-        self.source_step(n);
+        // A prefetch never fails, so it takes no step (MEM-30).
+        if !(g.path.is_core("list.prefetch") || g.path.is_core("inline.prefetch")) {
+            self.source_step(n);
+        }
         let v = if let Some(insertion) = map_insertion {
             self.builtin_use(f, n);
             self.finish_map_insertion(insertion, map_key_at, f, &[tys[0], tys[1]], vals, result, n)

@@ -1311,6 +1311,10 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             })
         }
         Inst::Step { fail } => c.fail(fail, true),
+        Inst::Prefetch { data, offset } => {
+            c.is(data, Ty::Ptr)?;
+            c.is(offset, Ty::Scalar(Scalar::U64))
+        }
         Inst::Mark {
             address,
             count,

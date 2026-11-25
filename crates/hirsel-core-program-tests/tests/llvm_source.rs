@@ -13,6 +13,7 @@ include!("../../hirsel-llvm/tests/support/native.rs");
 include!("support/flow.rs");
 include!("support/front_cases.rs");
 include!("support/copy_within.rs");
+include!("support/prefetch.rs");
 #[path = "support/llvm_codegen.rs"]
 mod llvm_codegen;
 

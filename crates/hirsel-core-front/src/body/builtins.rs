@@ -88,6 +88,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 n,
             ));
         }
+        if matches!(module, [m] if m == "list" || m == "inline") && name == "prefetch" {
+            self.prefetch(module == ["inline"], types[0], vals[0], vals[1]?, n);
+            return Some(None);
+        }
         if module == ["inline"] && name == "copy_within" {
             self.inline_copy_within(types[0], vals[0], vals[1]?, vals[2]?, vals[3]?, n)?;
             return Some(None);

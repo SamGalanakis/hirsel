@@ -44,6 +44,7 @@ fn supported(i: &Inst) -> bool {
             | Inst::Pointer { .. }
             | Inst::Copy { .. }
             | Inst::Move { .. }
+            | Inst::Prefetch { .. }
             | Inst::Case { .. }
             | Inst::SetCase { .. }
             | Inst::Step { .. }
@@ -204,6 +205,10 @@ impl Rename {
                 v(bytes);
             }
             Inst::SetCase { address, .. } => *address = self.a(*address),
+            Inst::Prefetch { data, offset } => {
+                v(data);
+                v(offset);
+            }
             Inst::Simd {
                 result,
                 op,

@@ -2228,6 +2228,15 @@ impl FunctionEmitter<'_> {
                 fail,
             } => self.simd(result, op, first, second, fail)?,
             Inst::PutLanes { to, vector, count } => self.put_lanes(to, vector, count),
+            // A read hint with high locality. The address may lie past the
+            // storage, so the GEP is not inbounds; a prefetch never faults.
+            Inst::Prefetch { data, offset } => {
+                let base = self.numeric(data);
+                let offset = self.numeric(offset);
+                let at = self.gep(&Type::I8, &base, &offset, false);
+                let i32 = |n: i128| arg(Type::I32, int(n));
+                self.runtime_void("llvm.prefetch.p0", &[ptr(at), i32(0), i32(3), i32(1)]);
+            }
             Inst::Address { address, fail } => self.project(address, fail)?,
             Inst::Read {
                 result, address, ..

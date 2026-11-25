@@ -71,7 +71,8 @@ pub(super) fn results<'a>(inst: &'a Inst, body: &'a Body) -> impl Iterator<Item 
         | Inst::Unmark { .. }
         | Inst::Step { .. }
         | Inst::PromoteFrame { .. }
-        | Inst::PutLanes { .. } => ([None; 3], &[]),
+        | Inst::PutLanes { .. }
+        | Inst::Prefetch { .. } => ([None; 3], &[]),
     };
     fixed.into_iter().flatten().chain(variable.iter().copied())
 }

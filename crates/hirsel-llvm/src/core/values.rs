@@ -126,6 +126,10 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     read(vector);
                     read(count);
                 }
+                Inst::Prefetch { data, offset } => {
+                    read(data);
+                    read(offset);
+                }
                 Inst::Unary { operand, .. }
                 | Inst::CompactWidth { word: operand, .. }
                 | Inst::ScalarUnary { operand, .. }
@@ -413,6 +417,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::LimitExit
                 | Inst::Share { .. }
                 | Inst::Release { .. }
+                | Inst::Prefetch { .. }
                 | Inst::TryUnwrap { .. } => {}
             }
         }

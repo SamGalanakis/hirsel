@@ -295,6 +295,7 @@ tags!(Inst {
     45 => FrameAdmit { storage, admitted, available, charge, overflow, replace },
     46 => FrameActive { storage, result },
     47 => FrameRefund { storage },
+    48 => Prefetch { data, offset },
 });
 
 tags!(LayoutQuery {

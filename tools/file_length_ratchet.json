@@ -242,9 +242,9 @@
     "reason": "run-decode-raii-2112"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
-    "lines": 2619,
-    "raise_revision": 2,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 2606,
+    "raise_revision": 3,
+    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-core-front/src/body/closures.rs": {
     "lines": 2983
@@ -271,9 +271,9 @@
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3050,
-    "raise_revision": 3,
-    "reason": "law-signature-scope-2443"
+    "lines": 3051,
+    "raise_revision": 4,
+    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
     "lines": 2531,
@@ -320,17 +320,17 @@
     "lines": 1198
   },
   "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 7144,
-    "raise_revision": 8,
-    "reason": "net18-s3-2482"
+    "lines": 7145,
+    "raise_revision": 9,
+    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2340,
-    "raise_revision": 8,
-    "reason": "coreir-own-2127: OWN-20 dest view mark"
+    "lines": 1937,
+    "raise_revision": 9,
+    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1151,
@@ -347,12 +347,14 @@
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2390,
-    "raise_revision": 6,
-    "reason": "coreir-own-2127: OWN-20 dest view mark"
+    "lines": 2388,
+    "raise_revision": 7,
+    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
-    "lines": 1905
+    "lines": 1846,
+    "raise_revision": 1,
+    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-core-layout/src/recipe.rs": {
     "lines": 1970,
@@ -373,7 +375,9 @@
     "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-program-tests/tests/llvm_source.rs": {
-    "lines": 4760
+    "lines": 4718,
+    "raise_revision": 1,
+    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-core-resolve/src/index.rs": {
     "lines": 1039
@@ -501,9 +505,9 @@
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-llvm/src/core/mod.rs": {
-    "lines": 2593,
-    "raise_revision": 1,
-    "reason": "verify-observer-2037"
+    "lines": 2557,
+    "raise_revision": 2,
+    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-llvm/src/core/sink.rs": {
     "lines": 1222

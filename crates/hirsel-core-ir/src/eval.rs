@@ -6778,7 +6778,8 @@ impl Machine<'_> {
                 }
                 (vals[admitted.index()], vals[available.index()]) = (ok, room);
             }
-            Inst::BuiltinUse { .. } => {}
+            // A read hint has no observable effect (core.md, Prefetch).
+            Inst::BuiltinUse { .. } | Inst::Prefetch { .. } => {}
             Inst::LimitExit => {
                 let l = t.limits.pop().unwrap();
                 self.end_limit(l, None);

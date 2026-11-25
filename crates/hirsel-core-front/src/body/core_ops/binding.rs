@@ -235,6 +235,8 @@ operations! {
     ("list", "fill_slice", Lane::Value, "A", "core-perf-primitives-1606", false),
     ("list", "copy_within", Lane::Value, "A", "core-perf-primitives-1606", false),
     ("inline", "copy_within", Lane::Value, "A", "core-perf-primitives-1606", false),
+    ("list", "prefetch", Lane::Value, "A", "ds-prefetch-2519", false),
+    ("inline", "prefetch", Lane::Value, "A", "ds-prefetch-2519", false),
     ("inline", "copy_from_slice", Lane::Value, "A", "port-fidelity-1360", false),
     ("inline", "word_le", Lane::Value, "A", "dedup-1357", false),
     ("inline", "word_be", Lane::Value, "A", "dedup-1357", false),

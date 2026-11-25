@@ -6,6 +6,10 @@ pub fn copy_from_slice[A: plain](mut dst: A, at: u64, src: A, count: u64)
 // through a temporary. A range outside a fails with Bounds before any write.
 pub fn copy_within[A: plain](mut a: A, src: u64, dst: u64, count: u64)
 
+// Hint that element i of a will be read soon, as list.prefetch does. An index
+// past the end does nothing. It never fails, admits nothing and takes no step.
+pub fn prefetch[A: plain](a: A, i: u64)
+
 // Read a u16, u32 or u64 (as fixed by the expected type) from an Inline byte
 // array. Invalid ranges fail with Bounds. Alloc: nothing.
 pub fn word_le[A: plain, T: integer](b: A, at: u64) -> T

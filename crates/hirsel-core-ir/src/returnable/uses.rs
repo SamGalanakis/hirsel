@@ -89,6 +89,10 @@ pub(super) fn map_uses(inst: &Inst, f: &mut impl FnMut(ValueId) -> ValueId) -> I
         }
         Inst::FrameActive { .. } | Inst::FrameRefund { .. } => {}
         Inst::Copy { bytes, .. } | Inst::Move { bytes, .. } => *bytes = f(*bytes),
+        Inst::Prefetch { data, offset } => {
+            *data = f(*data);
+            *offset = f(*offset);
+        }
         Inst::Grow {
             charge,
             overflow,

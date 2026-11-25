@@ -40,6 +40,11 @@ an index respectively. Both return `None` if no element matches. The view
 freezes the list (OWN-10). Use `position` to find an element for mutation
 because Hirsel has no mutable views (OWN-8).
 
+Core's `list.prefetch(xs, i)` hints that `xs[i]` will be read soon, as
+`__builtin_prefetch` does in C. An index past the end does nothing; the call never
+fails, allocates nothing and takes no step. Issue it a few iterations ahead of the
+read it serves, for example for the children of a heap node before descending.
+
 `list.any` stops at the first match and returns `false` for an empty list.
 `list.all` stops at the first nonmatch and returns `true` for an empty list.
 All seven helpers accept non-plain elements and pass them to callbacks by view.

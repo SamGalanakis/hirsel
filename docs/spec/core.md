@@ -264,6 +264,14 @@ operations it names; nothing else about them may be inferred from an implementat
   only what the cleaned elements own, admits nothing, and takes one Step
   ([MEM-30](budgets.md#mem-30-step-bounds)); for plain elements it does no work per
   element.
+- **Prefetch.** `list.prefetch(xs, i)` hints that element `i` of `xs` will be read
+  soon, and `inline.prefetch(a, i)` does the same for an Inline array. Any index is
+  allowed: one at or past the length, of an empty list, or near `2^64`, does nothing.
+  Neither checks bounds, fails, admits bytes or takes a Step
+  ([MEM-30](budgets.md#mem-30-step-bounds)), and neither has any observable effect, so
+  an engine may emit nothing for it. Under LLVM each is one `llvm.prefetch` for a
+  read with high locality at the element's address; the evaluator and Cranelift emit
+  nothing. There are no locality or write parameters.
 - **Inline lanes.** `inline.lanes(a, at)` reads bytes `at .. at + n` of an
   `Inline[u8, N]` as the expected `Simd[u8, n]`, `n` being 16 or 32, and
   `inline.set_lanes(mut a, at, v)` overwrites them with the lanes of `v`. Each raises

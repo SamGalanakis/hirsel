@@ -117,6 +117,7 @@ pub fn uses_v1(m: &Module) -> bool {
                                 | Inst::PromoteFrame { .. }
                                 | Inst::Copy { .. }
                                 | Inst::Move { .. }
+                                | Inst::Prefetch { .. }
                                 | Inst::RegionOpen { .. }
                                 | Inst::RegionClose { .. }
                                 | Inst::Trim { .. }
@@ -725,6 +726,9 @@ impl Printer {
                     }
                     Inst::Move { to, from, bytes } => {
                         format!("move a{}, a{}, {}", to.0, from.0, v(bytes))
+                    }
+                    Inst::Prefetch { data, offset } => {
+                        format!("prefetch {}, {}", v(data), v(offset))
                     }
                     Inst::Case { result, address } => {
                         format!("{} = case a{}", def(*result), address.0)
@@ -1415,6 +1419,15 @@ impl BodyParser {
                     Inst::Move { to, from, bytes }
                 } else {
                     Inst::Copy { to, from, bytes }
+                });
+            }
+            Some("prefetch") => {
+                l.next()?;
+                let data = l.value()?;
+                l.expect(",")?;
+                return Ok(Inst::Prefetch {
+                    data,
+                    offset: l.value()?,
                 });
             }
             Some("set_case") => {

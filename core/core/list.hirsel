@@ -102,6 +102,10 @@ pub fn copy_from_slice[T: plain](mut dst: List[T], at: u64, src: List[T])
 // an overflowing end) fails with Bounds before any write.
 pub fn copy_within[T: plain](mut xs: List[T], src: u64, dst: u64, count: u64)
 
+// Hint that element i of xs will be read soon. An index past the end does
+// nothing. It never fails, admits nothing and takes no step.
+pub fn prefetch[T](xs: List[T], i: u64)
+
 pub fn sum[T: integer](xs: List[T]) -> T {
     let mut t: T = int.narrow(0u8)
     for x in xs {

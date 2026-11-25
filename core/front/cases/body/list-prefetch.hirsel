@@ -1,0 +1,45 @@
+// expect: accept
+// expect: run on_list(0) = 15 used 0
+// expect: run on_list(3) = 15 used 0
+// expect: run on_list(18446744073709551615) = 15 used 0
+// expect: run on_empty(0) = 0 used 0
+// expect: run on_empty(18446744073709551615) = 0 used 0
+// expect: run on_inline(2) = 6 used 0
+// expect: run on_inline(18446744073709551615) = 6 used 0
+// expect: run takes_no_step() = 7 used 0
+// A prefetch at any index, in range or not, leaves every value as it was, never
+// fails and takes no step, so a zero step bound around two of them completes.
+fn on_list(i: u64) -> u64 {
+    let mut xs: List[u64] = list.with_capacity(3)
+    list.push(mut xs, 3u64)
+    list.push(mut xs, 5u64)
+    list.push(mut xs, 7u64)
+    list.prefetch(xs, i)
+    xs[0] + xs[1] + xs[2]
+}
+
+fn on_empty(i: u64) -> u64 {
+    let xs: List[u64] = list.new()
+    list.prefetch(xs, i)
+    list.len(xs)
+}
+
+fn on_inline(i: u64) -> u64 {
+    let a: Inline[u16, 3] = [1, 2, 3]
+    inline.prefetch(a, i)
+    int.widen(a[0] + a[1] + a[2])
+}
+
+fn takes_no_step() -> u64 {
+    let mut xs: List[u64] = list.with_capacity(1)
+    list.push(mut xs, 1u64)
+    let r = bound steps 0 {
+        list.prefetch(xs, 0u64)
+        list.prefetch(xs, 9u64)
+        7u64
+    }
+    match r {
+        Ok(v) => v,
+        _ => 0u64
+    }
+}

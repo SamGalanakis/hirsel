@@ -22,6 +22,7 @@ mod blocks;
 mod chan;
 mod conn;
 mod crc;
+mod flat;
 mod footprint;
 mod frame;
 mod rows;
@@ -56,7 +57,7 @@ mod net;
 mod net_tests;
 #[cfg(test)]
 mod tests;
-pub use pure::{PureRun, run_pure};
+pub use pure::{Engine, PureInput, PureRun, run_pure};
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -863,6 +864,8 @@ struct Machine<'m, H = WorldHost<'m>> {
     causes: HashMap<u64, Vec<(Limit, u64)>>,
     /// Every inline array field type of the module: element and length.
     arrays: Vec<(FieldTy, u64)>,
+    /// By inline array, its element's stride and what an element holds.
+    array_steps: Vec<(u64, At)>,
     trace: Vec<u64>,
     /// The last destination identity handed out (`rt.dest_id`).
     dests: u64,
@@ -905,7 +908,11 @@ struct Machine<'m, H = WorldHost<'m>> {
     field_steps: Vec<std::cell::OnceCell<FieldSteps>>,
     /// Word and place buffers of ended frames, reused by the next.
     words: Vec<Vec<u64>>,
+    /// Byte buffers of ended slot blocks, reused by the next block.
+    spare: Vec<Vec<u8>>,
     places: Vec<Vec<(u64, At)>>,
+    /// A flat run's lowered bodies ([`flat`]), by function; None on the tree walker.
+    flat: Option<flat::Cache>,
     /// What the run sits on: the provider world and its scheduler, or [`Pure`].
     host: H,
 }
@@ -1500,6 +1507,8 @@ struct Core<'a> {
     checks: bool,
     /// The deepest the activation stack may go; one more call stops the run.
     activations: usize,
+    /// Run bodies on the flat engine ([`flat`]) rather than the tree walker.
+    flat: bool,
 }
 impl Default for Core<'_> {
     fn default() -> Self {
@@ -1514,6 +1523,7 @@ impl Default for Core<'_> {
             sites: &[],
             checks: true,
             activations: usize::MAX,
+            flat: false,
         }
     }
 }
@@ -1870,6 +1880,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             regions: Vec::new(),
             causes: HashMap::new(),
             arrays: Vec::new(),
+            array_steps: Vec::new(),
             trace: Vec::new(),
             dests: 0,
             admissions: 0,
@@ -1902,7 +1913,9 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             results: Vec::new(),
             field_steps: m.types.iter().map(|_| std::cell::OnceCell::new()).collect(),
             words: Vec::new(),
+            spare: Vec::new(),
             places: Vec::new(),
+            flat: input.flat.then(|| flat::cache(m)),
             host,
         }
     }
@@ -1985,6 +1998,9 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 collect_arrays(&f.ty, &mut self.arrays);
             }
         }
+        self.array_steps = (self.arrays.iter())
+            .map(|(e, _)| (self.stride(e), self.at_field(e)))
+            .collect();
     }
 
     /// The root task, its primary obligation cell prepaid by `primary_charge`.
@@ -2064,6 +2080,7 @@ impl<'m> Machine<'m> {
             regions: Vec::new(),
             causes: HashMap::new(),
             arrays: Vec::new(),
+            array_steps: Vec::new(),
             trace: Vec::new(),
             dests: 0,
             admissions: 0,
@@ -2088,7 +2105,9 @@ impl<'m> Machine<'m> {
             results: Vec::new(),
             field_steps: Vec::new(),
             words: Vec::new(),
+            spare: Vec::new(),
             places: Vec::new(),
+            flat: None,
             host: WorldHost {
                 world: World::default(),
                 sched: Sched::default(),
@@ -4251,8 +4270,16 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             size <= HOST_BYTES,
             "host out of memory: a block of {size} bytes was admitted (a run stop, not Capacity)"
         );
+        let bytes = match self.spare.pop() {
+            Some(mut bytes) => {
+                bytes.clear();
+                bytes.resize(size as usize, 0);
+                bytes
+            }
+            None => vec![0; size as usize],
+        };
         let id = self.mem.insert(Blk {
-            bytes: vec![0; size as usize],
+            bytes,
             align: 8,
             live: true,
             limit,
@@ -4328,6 +4355,18 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 "read of the empty slot at +{at}: a slot kernel read a slot it took"
             );
         }
+    }
+    /// A typed read of `n <= 8` bytes at `p`: `read_marked`, then `load`.
+    fn read_scalar(&self, p: u64, n: usize) -> u64 {
+        let (b, o) = split(p);
+        let blk = &self.mem[b];
+        if !blk.marks.is_empty() {
+            self.read_marked(p, n);
+        }
+        assert!(blk.live, "use of a freed block");
+        let mut x = [0u8; 8];
+        x[..n].copy_from_slice(&blk.bytes[o..o + n]);
+        u64::from_le_bytes(x)
     }
     /// `mark`: a put (`live`) needs a slot not marked live, a take (`empty`) one not
     /// marked empty. An unmarked slot may be either (storage a `List` handed over).
@@ -5529,177 +5568,6 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         words
     }
 
-    fn blocks(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<()> {
-        let depth = t.limits.len();
-        let reserved = t.reserved.len();
-        let mut vals = self.take_words();
-        vals.resize(b.values.len(), 0);
-        let mut vectors = simd::Vectors::default();
-        let mut places = self.places.pop().unwrap_or_default();
-        places.clear();
-        places.resize(b.addresses.len(), (0u64, At::Other));
-        let mut frame_charges = HashMap::new();
-        let pool = |r: PoolRange<ValueId>| r.get(&b.pools.values).unwrap();
-        let mut block = BlockId(0);
-        let mut incoming = self.take_words();
-        incoming.extend_from_slice(args);
-        let mut outgoing = self.take_words();
-        let r = 'blocks: loop {
-            assert!(
-                self.instructions != 0,
-                "evaluator instruction budget exhausted"
-            );
-            self.instructions -= 1;
-            let blk = &b.blocks[block.index()];
-            vectors.unpack(b, &mut vals, pool(blk.params), &incoming);
-            let first = blk.insts.start as usize;
-            for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
-                if matches!(inst, Inst::BuiltinUse { .. }) {
-                    #[cfg(feature = "map-observation")]
-                    if let Inst::BuiltinUse { definition } = inst
-                        && let Some(stats) = &mut self.maps.observed
-                    {
-                        if definition.is_core("map.group_match") {
-                            stats.groups += 1;
-                        } else if definition.is_core("map.set_strong") {
-                            stats.promotions += 1;
-                            stats.rebuild_promotions += u64::from(stats.rebuilding);
-                        } else if stats.promoted_in_rebuild && definition.is_core("map.install") {
-                            stats.resumed_installs += 1;
-                        }
-                    }
-                    continue;
-                }
-                assert!(
-                    self.instructions != 0,
-                    "evaluator instruction budget exhausted"
-                );
-                self.instructions -= 1;
-                t.at.last_mut().unwrap().at = Pos::Inst((first + k) as u32);
-                // Keep the large instruction dispatcher off the recursive call stack.
-                let r = match *inst {
-                    Inst::Call { call } => self.call_inst(
-                        t,
-                        b,
-                        &mut vals,
-                        &mut vectors,
-                        &places,
-                        &b.calls[call.index()],
-                    ),
-                    _ => self.inst(
-                        t,
-                        b,
-                        slots,
-                        &mut vals,
-                        &mut vectors,
-                        &mut places,
-                        &mut frame_charges,
-                        inst,
-                    ),
-                };
-                if let Err(stop) = r {
-                    if let Stop::Cause(c) = stop {
-                        let site = self.site(t);
-                        let cause = Cause {
-                            kind: c,
-                            message: [0; 3],
-                            site,
-                        };
-                        self.record(t, cause);
-                    }
-                    match inst.fail(b) {
-                        Some(fb) => {
-                            block = fb;
-                            incoming.clear();
-                            continue 'blocks;
-                        }
-                        None => break 'blocks Err(Stop::Chained),
-                    }
-                }
-            }
-            let edge = match &b.terminators[block.index()] {
-                Terminator::Jump(e) => e,
-                Terminator::Branch { condition, yes, no } => {
-                    if vals[condition.index()] != 0 {
-                        yes
-                    } else {
-                        no
-                    }
-                }
-                Terminator::Switch {
-                    value,
-                    arms,
-                    otherwise,
-                } => {
-                    let x = vals[value.index()];
-                    let arms = arms.get(&b.pools.arms).unwrap();
-                    arms.iter()
-                        .find(|a| a.value == x)
-                        .map_or(otherwise, |a| &a.edge)
-                }
-                Terminator::Return(r) => {
-                    assert_eq!(t.limits.len(), depth, "a return left a bound scope open");
-                    assert_eq!(t.reserved.len(), reserved, "a return left an isolate open");
-                    self.results.clear();
-                    for &id in pool(*r) {
-                        vectors.push(b, &vals, id, &mut self.results);
-                    }
-                    break 'blocks Ok(());
-                }
-                Terminator::Raise { cause: c, cleanup } => {
-                    let mut message = [0; 3];
-                    match c {
-                        RaiseCause::Fail(a) => {
-                            let (p, _) = match self.address(b, slots, &vals, &places, *a) {
-                                Ok(p) => p,
-                                Err(stop) => break 'blocks Err(stop),
-                            };
-                            message = [0, 8, 16].map(|o| self.load(p + o, 8));
-                        }
-                        // `Capacity(c)`'s payload sits where `Fail`'s carrier does.
-                        RaiseCause::Capacity {
-                            requested,
-                            available,
-                        } => message = [vals[requested.index()], vals[available.index()], 0],
-                        RaiseCause::Unwrap | RaiseCause::Bounds => {}
-                    }
-                    t.at.last_mut().unwrap().at = Pos::Block(block.0);
-                    let site = self.site(t);
-                    let cause = Cause {
-                        kind: cause(*c),
-                        message,
-                        site,
-                    };
-                    self.record(t, cause);
-                    match cleanup {
-                        Some(c) => {
-                            block = *c;
-                            incoming.clear();
-                            continue 'blocks;
-                        }
-                        None => break 'blocks Err(Stop::Chained),
-                    }
-                }
-                Terminator::Propagate => break 'blocks Err(Stop::Chained),
-                Terminator::Unreachable => panic!("an unreachable point was reached"),
-            };
-            let edge = &b.edges[edge.index()];
-            outgoing.clear();
-            for &id in pool(edge.args) {
-                vectors.push(b, &vals, id, &mut outgoing);
-            }
-            std::mem::swap(&mut incoming, &mut outgoing);
-            block = edge.target;
-        };
-        if r.is_err() {
-            assert_eq!(t.limits.len(), depth, "a failure left a bound scope open");
-            assert_eq!(t.reserved.len(), reserved, "a failure left an isolate open");
-        }
-        self.words.extend([vals, incoming, outgoing]);
-        self.places.push(places);
-        r
-    }
-
     fn address(
         &self,
         b: &Body,
@@ -5740,13 +5608,13 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     let At::Array(k) = at else {
                         panic!("element of a place that is not an inline array")
                     };
-                    let (e, n) = &self.arrays[k];
                     let i = vals[i.index()];
-                    if i >= *n {
+                    if i >= self.arrays[k].1 {
                         return Err(Stop::Cause("Bounds"));
                     }
-                    p += i * self.stride(e);
-                    at = self.at_field(e);
+                    let (stride, element) = self.array_steps[k];
+                    p += i * stride;
+                    at = element;
                     continue;
                 }
                 Step::Byte(n) => {
@@ -6001,43 +5869,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 operand,
                 mode,
             } => {
-                let (from, to, x) = (ty(operand), ty(result), vals[operand.index()]);
-                let char_ty = Ty::Scalar(Scalar::Char);
-                let (r, fl) = match mode {
-                    ConvertMode::Widen if from == char_ty => (x, 0),
-                    ConvertMode::TryNarrow if to == char_ty => {
-                        let ok = (x < 0xD800) || (0xE000..=0x10FFFF).contains(&x);
-                        (if ok { x } else { 0 }, u64::from(ok))
-                    }
-                    ConvertMode::Widen => (fit(to, int(from, x)).expect("widen fits"), 0),
-                    ConvertMode::Truncate => (mask(to, x), 0),
-                    ConvertMode::TryNarrow => {
-                        (mask(to, x), u64::from(fit(to, int(from, x)).is_some()))
-                    }
-                    ConvertMode::FloatToInt => {
-                        let f = float(from, x);
-                        let (lo, hi) = range(to);
-                        if f.is_nan() {
-                            (0, 1)
-                        } else if f.trunc() >= lo as f64 && f.trunc() < (hi + 1) as f64 {
-                            (mask(to, f.trunc() as i128 as u64), 0)
-                        } else {
-                            (0, 2)
-                        }
-                    }
-                    ConvertMode::IntToFloat => {
-                        let v = int(from, x);
-                        let r = if is_f32(to) {
-                            u64::from((v as f32).to_bits())
-                        } else {
-                            (v as f64).to_bits()
-                        };
-                        (r, 0)
-                    }
-                    ConvertMode::Reinterpret if from.is_float() => (bits(from, float(from, x)), 0),
-                    ConvertMode::Reinterpret => (bits(to, float(to, x)), 0),
-                    ConvertMode::FloatResize => (bits(to, float(from, x)), 0),
-                };
+                let (r, fl) = convert(mode, ty(operand), ty(result), vals[operand.index()]);
                 vals[result.index()] = r;
                 if let Some(f) = flag {
                     vals[f.index()] = fl;
@@ -6143,8 +5975,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 if matches!(ty(result), Ty::Vector(_)) {
                     vectors.set(result, self.load_vector(places[address.index()].0, n));
                 } else {
-                    self.read_marked(places[address.index()].0, n);
-                    vals[result.index()] = self.load(places[address.index()].0, n);
+                    vals[result.index()] = self.read_scalar(places[address.index()].0, n);
                 }
                 if let (p, At::Word(w, size)) = places[address.index()] {
                     self.check_carrier(p - w.offset(), size, None);
@@ -6187,7 +6018,8 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             Inst::StorageLive { slot } => {
                 let size = self.place_size(b.slots[slot.index()]) as usize;
                 let blk = &mut self.mem[split(slots[slot.index()]).0];
-                blk.bytes = vec![0; size];
+                blk.bytes.clear();
+                blk.bytes.resize(size, 0);
                 blk.marks.clear();
                 blk.live = true;
             }
@@ -6197,7 +6029,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             Inst::StorageDead { slot } => {
                 let blk = &mut self.mem[split(slots[slot.index()]).0];
                 blk.live = false;
-                blk.bytes = Vec::new();
+                blk.bytes.clear();
                 blk.marks.clear();
             }
             Inst::UpdateMask {
@@ -6407,8 +6239,14 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     "copy of {n} bytes between overlapping ranges"
                 );
                 self.read_marked(f, n);
-                let src = self.get(f, n).to_vec();
-                self.put(places[to.index()].0, &src);
+                let mut small = [0u8; 64];
+                if n <= small.len() {
+                    small[..n].copy_from_slice(self.get(f, n));
+                    self.put(t, &small[..n]);
+                } else {
+                    let src = self.get(f, n).to_vec();
+                    self.put(t, &src);
+                }
             }
             Inst::Move { to, from, bytes } => {
                 let n = vals[bytes.index()] as usize;
@@ -6638,6 +6476,43 @@ fn scrambled(t: Ty, k: u64) -> u64 {
     }
 }
 
+/// A `Convert` of `x` from `from` to `to`: the result and its flag.
+fn convert(mode: ConvertMode, from: Ty, to: Ty, x: u64) -> (u64, u64) {
+    let char_ty = Ty::Scalar(Scalar::Char);
+    match mode {
+        ConvertMode::Widen if from == char_ty => (x, 0),
+        ConvertMode::TryNarrow if to == char_ty => {
+            let ok = (x < 0xD800) || (0xE000..=0x10FFFF).contains(&x);
+            (if ok { x } else { 0 }, u64::from(ok))
+        }
+        ConvertMode::Widen => (fit(to, int(from, x)).expect("widen fits"), 0),
+        ConvertMode::Truncate => (mask(to, x), 0),
+        ConvertMode::TryNarrow => (mask(to, x), u64::from(fit(to, int(from, x)).is_some())),
+        ConvertMode::FloatToInt => {
+            let f = float(from, x);
+            let (lo, hi) = range(to);
+            if f.is_nan() {
+                (0, 1)
+            } else if f.trunc() >= lo as f64 && f.trunc() < (hi + 1) as f64 {
+                (mask(to, f.trunc() as i128 as u64), 0)
+            } else {
+                (0, 2)
+            }
+        }
+        ConvertMode::IntToFloat => {
+            let v = int(from, x);
+            let r = if is_f32(to) {
+                u64::from((v as f32).to_bits())
+            } else {
+                (v as f64).to_bits()
+            };
+            (r, 0)
+        }
+        ConvertMode::Reinterpret if from.is_float() => (bits(from, float(from, x)), 0),
+        ConvertMode::Reinterpret => (bits(to, float(to, x)), 0),
+        ConvertMode::FloatResize => (bits(to, float(from, x)), 0),
+    }
+}
 fn int_binary(t: Ty, op: BinaryOp, a: u64, c: u64) -> Option<u64> {
     let (x, y) = (int(t, a), int(t, c));
     let w = width(t);

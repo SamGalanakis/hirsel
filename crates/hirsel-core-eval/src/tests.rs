@@ -291,15 +291,51 @@ fn samples_behave_as_derived_by_hand() {
                 ),
             };
             assert_eq!(got.outcome, want, "{name}: {run}");
-            // The pure core alone gives a world-free run the same outcome and use.
+            // The pure core alone gives a world-free run the same outcome and use,
+            // and the flat engine runs it exactly as the tree walker does, with
+            // the test-mode checks off and on.
             if injection.is_none() && argv.is_empty() {
-                let pure = eval::run_pure(&m, f, &args, limit, usize::MAX, false);
+                let pure = |checks, engine| {
+                    let input = eval::PureInput {
+                        limit,
+                        checks,
+                        engine,
+                        map_hash_key: Some([0x5a; 16]),
+                        ..eval::PureInput::default()
+                    };
+                    eval::run_pure(&m, f, &args, input)
+                };
+                let tree = pure(false, eval::Engine::Tree);
                 if !matches!(
-                    pure.outcome,
+                    tree.outcome,
                     eval::Outcome::Stopped("WorldOperation" | "WorldHandle")
                 ) {
-                    assert_eq!(pure.outcome, got.outcome, "{name}: {run}: pure");
-                    assert_eq!(pure.used, got.used, "{name}: {run}: pure used");
+                    assert_eq!(tree.outcome, got.outcome, "{name}: {run}: pure");
+                    assert_eq!(tree.used, got.used, "{name}: {run}: pure used");
+                }
+                for checks in [false, true] {
+                    let tree = if checks {
+                        pure(true, eval::Engine::Tree)
+                    } else {
+                        pure(false, eval::Engine::Tree)
+                    };
+                    let flat = pure(checks, eval::Engine::Flat);
+                    let what = format!("{name}: {run}: flat (checks {checks})");
+                    assert_eq!(flat.outcome, tree.outcome, "{what}");
+                    // How deep the host stack goes differs between the engines.
+                    if tree.outcome != eval::Outcome::Stopped("Stack") {
+                        let facts = |r: &eval::PureRun| {
+                            (
+                                r.used,
+                                r.peak_reserved,
+                                r.steps,
+                                r.instructions,
+                                r.chain.clone(),
+                                r.destination.clone(),
+                            )
+                        };
+                        assert_eq!(facts(&flat), facts(&tree), "{what}");
+                    }
                 }
             }
             for part in parts {

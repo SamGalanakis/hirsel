@@ -14,25 +14,60 @@ pub struct PureRun {
     pub steps: u64,
     /// Executed IR instructions.
     pub instructions: u64,
+    /// The failure's chain, primary first: each cause's kind, message words and
+    /// site.
+    pub chain: Vec<String>,
+}
+
+/// What a pure run executes on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Engine {
+    /// The flat engine (E3). It replaces the tree walker for a constant's
+    /// initializer once it meets G1 (COMPTIME-DIRECTION 3.2); until then it
+    /// runs where a caller asks for it.
+    Flat,
+    /// The tree walker, what a pure run runs on by default, and the flat
+    /// engine's differential oracle.
+    Tree,
+}
+
+/// How a pure run runs.
+#[derive(Clone, Copy, Debug)]
+pub struct PureInput {
+    /// The run's byte limit.
+    pub limit: u64,
+    /// The run's call-depth bound.
+    pub activations: usize,
+    /// The test-mode loan and role checks.
+    pub checks: bool,
+    pub engine: Engine,
+    /// The run's map hash key; a fresh one when `None`.
+    pub map_hash_key: Option<[u8; 16]>,
+}
+
+impl Default for PureInput {
+    fn default() -> Self {
+        Self {
+            limit: u64::MAX,
+            activations: usize::MAX,
+            checks: false,
+            engine: Engine::Tree,
+            map_hash_key: None,
+        }
+    }
 }
 
 /// Run `f` on the pure core alone: no scheduler, threads, network or provider,
-/// so a world operation or handle stops the run. `limit` bounds the run's bytes
-/// and `activations` its call depth; `checks` turns on the test-mode loan and
-/// role checks.
-pub fn run_pure(
-    m: &Module,
-    f: FuncId,
-    args: &[u64],
-    limit: u64,
-    activations: usize,
-    checks: bool,
-) -> PureRun {
+/// so a world operation or handle stops the run.
+pub fn run_pure(m: &Module, f: FuncId, args: &[u64], input: PureInput) -> PureRun {
     let core = Core {
-        checks,
-        activations,
+        checks: input.checks,
+        activations: input.activations,
+        flat: input.engine == Engine::Flat,
+        map_hash_key: input.map_hash_key,
         ..Core::default()
     };
+    let limit = input.limit;
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(ROOT_STACK)
@@ -80,5 +115,10 @@ fn pure_root(m: &Module, f: FuncId, args: &[u64], limit: u64, core: &Core<'_>) -
         peak_reserved: mach.peak_reserved,
         steps: mach.steps,
         instructions: core.instructions - mach.instructions,
+        chain: t
+            .chain
+            .iter()
+            .map(|c| format!("{} {:?} {:?}", c.kind, c.message, c.site))
+            .collect(),
     }
 }

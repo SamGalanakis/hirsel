@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 #[path = "../../../core/front/support/cases.rs"]
 mod case_source;
+mod engines;
 mod targets;
 use case_source::DiagnosticExpectation;
 
@@ -997,6 +998,9 @@ pub(super) fn run_expect(
         Some(i) => (&want[..i], want.get(i + 1).copied()),
         None => (want, None),
     };
+    if let Some(e) = engines::agree(module, f, &args, call) {
+        return Some(e);
+    }
     // The evaluator stops (panics) on a malformed run; that is this run's failure, so
     // the corpus names the case it stopped in and checks the rest. Every stored NaN is
     // scrambled, so a reader of float bytes other than `reinterpret` misses its run

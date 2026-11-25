@@ -1,5 +1,10 @@
 use super::*;
 
+/// The largest slot buffer, and the most buffers, an ended activation keeps for
+/// the next block.
+const SPARE_BYTES: usize = 1 << 16;
+const SPARE_BUFFERS: usize = 256;
+
 impl<'m, H: Host<'m>> Machine<'m, H> {
     /// Run one activation of `f`. Its slots are frame memory: they end when the
     /// activation does, by return or by failure, so a later use of an address into
@@ -15,7 +20,10 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         }
         let r = self.frame(t, f, b, args, &slots);
         for &p in &slots {
-            self.mem.remove(split(p).0);
+            let bytes = self.mem.remove(split(p).0).bytes;
+            if bytes.capacity() <= SPARE_BYTES && self.spare.len() < SPARE_BUFFERS {
+                self.spare.push(bytes);
+            }
         }
         self.words.push(slots);
         r
@@ -33,9 +41,201 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             at: Pos::Entry,
             inherits: self.inherits[f.index()],
         });
-        let r = self.blocks(t, b, args, slots);
+        let r = match self.lowered(f, b) {
+            Some(l) => self.flat_blocks(t, &l, b, args, slots),
+            None => self.blocks(t, b, args, slots),
+        };
         t.at.pop();
         r
+    }
+    pub(super) fn blocks(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<()> {
+        let depth = t.limits.len();
+        let reserved = t.reserved.len();
+        let mut vals = self.take_words();
+        vals.resize(b.values.len(), 0);
+        let mut vectors = simd::Vectors::default();
+        let mut places = self.places.pop().unwrap_or_default();
+        places.clear();
+        places.resize(b.addresses.len(), (0u64, At::Other));
+        let mut frame_charges = HashMap::new();
+        let pool = |r: PoolRange<ValueId>| r.get(&b.pools.values).unwrap();
+        let mut block = BlockId(0);
+        let mut incoming = self.take_words();
+        incoming.extend_from_slice(args);
+        let mut outgoing = self.take_words();
+        let r = 'blocks: loop {
+            assert!(
+                self.instructions != 0,
+                "evaluator instruction budget exhausted"
+            );
+            self.instructions -= 1;
+            let blk = &b.blocks[block.index()];
+            vectors.unpack(b, &mut vals, pool(blk.params), &incoming);
+            let first = blk.insts.start as usize;
+            for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
+                if matches!(inst, Inst::BuiltinUse { .. }) {
+                    #[cfg(feature = "map-observation")]
+                    if let Inst::BuiltinUse { definition } = inst
+                        && let Some(stats) = &mut self.maps.observed
+                    {
+                        if definition.is_core("map.group_match") {
+                            stats.groups += 1;
+                        } else if definition.is_core("map.set_strong") {
+                            stats.promotions += 1;
+                            stats.rebuild_promotions += u64::from(stats.rebuilding);
+                        } else if stats.promoted_in_rebuild && definition.is_core("map.install") {
+                            stats.resumed_installs += 1;
+                        }
+                    }
+                    continue;
+                }
+                assert!(
+                    self.instructions != 0,
+                    "evaluator instruction budget exhausted"
+                );
+                self.instructions -= 1;
+                t.at.last_mut().unwrap().at = Pos::Inst((first + k) as u32);
+                // Keep the large instruction dispatcher off the recursive call stack.
+                let r = match *inst {
+                    Inst::Call { call } => self.call_inst(
+                        t,
+                        b,
+                        &mut vals,
+                        &mut vectors,
+                        &places,
+                        &b.calls[call.index()],
+                    ),
+                    _ => self.inst(
+                        t,
+                        b,
+                        slots,
+                        &mut vals,
+                        &mut vectors,
+                        &mut places,
+                        &mut frame_charges,
+                        inst,
+                    ),
+                };
+                if let Err(stop) = r {
+                    self.stopped(t, stop);
+                    match inst.fail(b) {
+                        Some(fb) => {
+                            block = fb;
+                            incoming.clear();
+                            continue 'blocks;
+                        }
+                        None => break 'blocks Err(Stop::Chained),
+                    }
+                }
+            }
+            let edge = match &b.terminators[block.index()] {
+                Terminator::Jump(e) => e,
+                Terminator::Branch { condition, yes, no } => {
+                    if vals[condition.index()] != 0 {
+                        yes
+                    } else {
+                        no
+                    }
+                }
+                Terminator::Switch {
+                    value,
+                    arms,
+                    otherwise,
+                } => {
+                    let x = vals[value.index()];
+                    let arms = arms.get(&b.pools.arms).unwrap();
+                    arms.iter()
+                        .find(|a| a.value == x)
+                        .map_or(otherwise, |a| &a.edge)
+                }
+                Terminator::Return(r) => {
+                    assert_eq!(t.limits.len(), depth, "a return left a bound scope open");
+                    assert_eq!(t.reserved.len(), reserved, "a return left an isolate open");
+                    self.results.clear();
+                    for &id in pool(*r) {
+                        vectors.push(b, &vals, id, &mut self.results);
+                    }
+                    break 'blocks Ok(());
+                }
+                Terminator::Raise { cause: c, cleanup } => {
+                    match self.raise(t, b, slots, &vals, &places, block, c, *cleanup) {
+                        Ok(c) => {
+                            block = c;
+                            incoming.clear();
+                            continue 'blocks;
+                        }
+                        Err(stop) => break 'blocks Err(stop),
+                    }
+                }
+                Terminator::Propagate => break 'blocks Err(Stop::Chained),
+                Terminator::Unreachable => panic!("an unreachable point was reached"),
+            };
+            let edge = &b.edges[edge.index()];
+            outgoing.clear();
+            for &id in pool(edge.args) {
+                vectors.push(b, &vals, id, &mut outgoing);
+            }
+            std::mem::swap(&mut incoming, &mut outgoing);
+            block = edge.target;
+        };
+        if r.is_err() {
+            assert_eq!(t.limits.len(), depth, "a failure left a bound scope open");
+            assert_eq!(t.reserved.len(), reserved, "a failure left an isolate open");
+        }
+        self.words.extend([vals, incoming, outgoing]);
+        self.places.push(places);
+        r
+    }
+
+    /// An instruction stopped: a new cause is recorded at the activation's site.
+    pub(super) fn stopped(&mut self, t: &mut Task, stop: Stop) {
+        if let Stop::Cause(c) = stop {
+            let site = self.site(t);
+            let cause = Cause {
+                kind: c,
+                message: [0; 3],
+                site,
+            };
+            self.record(t, cause);
+        }
+    }
+
+    /// Block `block`'s `raise`: its cause is recorded at the block's site, and the
+    /// run goes on in `cleanup`, or the failure leaves the activation.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn raise(
+        &mut self,
+        t: &mut Task,
+        b: &Body,
+        slots: &[u64],
+        vals: &[u64],
+        places: &[(u64, At)],
+        block: BlockId,
+        c: &RaiseCause,
+        cleanup: Option<BlockId>,
+    ) -> X<BlockId> {
+        let mut message = [0; 3];
+        match c {
+            RaiseCause::Fail(a) => {
+                let (p, _) = self.address(b, slots, vals, places, *a)?;
+                message = [0, 8, 16].map(|o| self.load(p + o, 8));
+            }
+            // `Capacity(c)`'s payload sits where `Fail`'s carrier does.
+            RaiseCause::Capacity {
+                requested,
+                available,
+            } => message = [vals[requested.index()], vals[available.index()], 0],
+            RaiseCause::Unwrap | RaiseCause::Bounds => {}
+        }
+        t.at.last_mut().unwrap().at = Pos::Block(block.0);
+        let site = self.site(t);
+        let cause = Cause {
+            kind: cause(*c),
+            message,
+            site,
+        };
+        self.record(t, cause);
+        cleanup.ok_or(Stop::Chained)
     }
     pub(super) fn frame_budget(
         &mut self,

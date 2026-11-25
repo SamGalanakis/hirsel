@@ -375,9 +375,9 @@
     "lines": 2003
   },
   "crates/hirsel-core-program-tests/src/cases.rs": {
-    "lines": 2724,
-    "raise_revision": 4,
-    "reason": "comptime-eval-split-2612"
+    "lines": 2728,
+    "raise_revision": 5,
+    "reason": "comptime-e3-flat-ir-2631"
   },
   "crates/hirsel-core-program-tests/tests/llvm_source.rs": {
     "lines": 4698,

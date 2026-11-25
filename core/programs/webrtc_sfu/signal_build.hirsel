@@ -71,7 +71,13 @@ pub fn build(h: Home, r: Random, b: Build) -> Result[(peer.PeerSession, Built), 
     for x in drawn(r, 8) {
         origin = (origin << 8) | int.widen(x)
     }
-    let local = sdp.LocalEnd(origin_session: origin >> 2, origin_version: 1, port: h.at.port, ice_ufrag: hex_of(r, UFRAG_BYTES), ice_pwd: hex_of(r, PWD_BYTES), fingerprint: fingerprint, tls_id: hex_of(r, 8), candidate: host_candidate(h.at)?)
+    // The ICE credentials minted with the peer's TURN ones (TURN-5), or fresh ones.
+    let (ufrag, pwd) = if list.len(b.ice_ufrag) != 0 {
+        (copied(b.ice_ufrag), copied(b.ice_pwd))
+    } else {
+        (hex_of(r, UFRAG_BYTES), hex_of(r, PWD_BYTES))
+    }
+    let local = sdp.LocalEnd(origin_session: origin >> 2, origin_version: 1, port: h.at.port, ice_ufrag: take ufrag, ice_pwd: take pwd, fingerprint: fingerprint, tls_id: hex_of(r, 8), candidate: host_candidate(h.at)?)
     let mut offer = sdp.description()
     sdp.parse(b.offer, mut offer) ?=> |take e| Peer(Sdp(e))
     let mut reply = sdp.description()

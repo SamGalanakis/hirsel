@@ -35,6 +35,7 @@ runner@1/runner/recovery_queue_runs_each_claim_once src=2e0b6e375203dab8 sig=0f6
 runner@1/runner/relay_handler_expiry_leaves_ask_queued src=bf998c44d4e3ffd7 sig=72b841f3ddd052c8 run=c7b2a52baff70a63 bug=- oracle=- rows=pending
 runner@1/runner/retired_quota_checked_before_idle_keyed_recovery src=d3673f29826cee44 sig=67905cce0e848d94 run=52846919a3decb1f bug=- oracle=- rows=pending
 runner@1/runner/room_client_follows_relay_roster src=48a4a56c4d9ca00b sig=4e77c6c5d76a67d8 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+runner@1/runner/room_client_keeps_quiet_link src=0ab115c719c9a3e0 sig=1d9f935d690e0eb0 run=607dcf6bff52df2b bug=- oracle=- rows=pending
 runner@1/runner/room_client_over_socket src=1a2d338249568938 sig=aea90abf6fefba89 run=607dcf6bff52df2b bug=- oracle=- rows=pending
 runner@1/runner/room_decode_capacity_reports_loss src=1afdefe98e861cb5 sig=9bd642262d9110fa run=607dcf6bff52df2b bug=- oracle=- rows=pending
 runner@1/runner/room_roster_identity src=3d9b4d6005a1b830 sig=d24da42b50a2c734 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

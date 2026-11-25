@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hirsel SFU call</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root { color-scheme: light dark; background: Canvas; color: CanvasText; font: 15px system-ui, sans-serif; }
+    body { margin: 0; padding: 16px; }
+    main { max-width: 900px; margin: auto; }
+    label { margin-right: 1rem; }
+    pre { white-space: pre-wrap; font-size: 12px; opacity: .8; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Hirsel SFU call</h1>
+  <p>Publishes a 440 Hz tone and the camera (three VP8 encodings) and subscribes to every other publication.</p>
+  <label>Path <select id="relay"><option value="">direct</option><option value="udp">TURN over UDP</option><option value="tcp">TURN over TCP</option></select></label>
+  <label>TURN port <input id="turn" value="3478" size="6"></label>
+  <button id="join">Join</button>
+  <pre id="log"></pre>
+</main>
+<script type="module" src="client.js"></script>
+</body>
+</html>

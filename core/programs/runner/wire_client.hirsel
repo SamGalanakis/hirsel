@@ -93,6 +93,10 @@ fn read(take seed: Read) -> () waits {
 fn read_frames(take seed: Read) -> () waits {
     let Read(reader: take input, to: take to, control: take control, credits: take credits, clock: c, idle_ms: idle_ms, shut: take shut) = take seed
     let mut r = take input
+    // A read that waits `idle_ms` with nothing sends a ping, and a second such read ends the
+    // session, as the server's reader does (RFC 6455 section 5.5.2). Waiting for the server's
+    // own ping instead would tie the client's window to the server's `idle_ms`.
+    let mut probing = false
     loop {
         if let Error(_) = channel.receive(credits) {
             return
@@ -109,15 +113,25 @@ fn read_frames(take seed: Read) -> () waits {
                     if let Error(_) = channel.send(to, Got(take f)) {
                         return
                     }
+                    probing = false;
                     pending = false
                 },
                 Ok(Ping(p)) => {
+                    probing = false;
                     if let Error(_) = channel.send(control, Control(10u8, p)) {
                         break
                     }
                 },
-                Ok(Pong(_)) => (),
+                Ok(Pong(_)) => {
+                    probing = false
+                },
                 Ok(Need) => (),
+                Error(Network(TimedOut)) if !probing => {
+                    probing = true;
+                    if let Error(_) = channel.send(control, Control(9u8, std.websocket.Control(data: [0u8; 125], len: 0u64))) {
+                        return
+                    }
+                },
                 Ok(Closed(p)) => {
                     if p.len >= 2u64 {
                         let high: u16 = int.widen(p.data[0u64])

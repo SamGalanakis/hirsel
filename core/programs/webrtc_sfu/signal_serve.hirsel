@@ -6,7 +6,8 @@
 // then each runs `units.turn` and builds the sessions the adapter homes on it.
 /// The service's settings. `binds` names one address per unit (port 0 takes any free
 /// port; the bound address is the one sessions advertise); `until` is the monotonic
-/// time every unit stops at (`u64` max in a service that runs until killed).
+/// time every unit stops at (`u64` max in a service that runs until killed). `relay`
+/// is the sibling TURN relay place, if the deployment runs one (TURN-8).
 pub type Service[M] {
     tasks: Tasks,
     net: Net,
@@ -20,7 +21,16 @@ pub type Service[M] {
     policy: sdp.Policy,
     session: peer.PeerLimits,
     unit_bytes: u64,
-    until: u64
+    until: u64,
+    relay: Option[RelayLink]
+}
+
+/// What signaling shares with the relay place (TURN-11): the master it mints with (it
+/// needs `mac`), the plan both places were configured from, and where revokes go.
+pub type RelayLink {
+    master: Secret,
+    plan: RelayPlan,
+    revokes: Sender[RelayRevoke]
 }
 
 pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units
@@ -98,6 +108,16 @@ fn dup(d: units.Doors) -> units.Doors {
 // A unit's self-signed certificate (RFC 8827 section 6.5: WebRTC pins it by its
 // fingerprint in the answer, so it names no host).
 fn unit_identity(r: Random, clock: Clock) -> Result[dtls.Identity, ServeError] {
+    let (take key, take der) = unit_certificate(r, clock)?
+    Ok(dtls.identity(take key, take der, r) ?=> |_| Identity)
+}
+
+/// A unit's key and self-signed certificate. Every unit, of this service and of any
+/// other, names the same issuer, so the serial is drawn at random (63 bits, never 0):
+/// RFC 5280 section 4.1.2.2 makes issuer and serial unique, and a browser that has
+/// seen one certificate under a pair refuses a second one under it (Firefox's
+/// `SEC_ERROR_REUSED_ISSUER_AND_SERIAL` on its second call to another unit).
+pub fn unit_certificate(r: Random, clock: Clock) -> Result[(Secret, Bytes), ServeError] {
     let mut point: Bytes = list.with_capacity(65)
     let key = secret.p256_key(r, "sign(p256)", mut point) ?=> |_| Identity
     let now: i64 = int.narrow(host.wall_ms(clock) / 1000)
@@ -107,8 +127,20 @@ fn unit_identity(r: Random, clock: Clock) -> Result[dtls.Identity, ServeError] {
     let Some(end) = std.time.from_unix(now + 30 * 86400, 0) else {
         return Error(Identity)
     }
-    let der = std.x509_build.self_signed_p256(key, r, point, 1, "hirsel-sfu", start, end) ?=> |_| Identity
-    Ok(dtls.identity(take key, take der, r) ?=> |_| Identity)
+    let der = std.x509_build.self_signed_p256(key, r, point, serial(r), "hirsel-sfu", start, end) ?=> |_| Identity
+    Ok((take key, take der))
+}
+
+fn serial(r: Random) -> u64 {
+    loop {
+        let mut b: Bytes = list.with_capacity(8)
+        host.random(r, mut b)
+        let v: u64 = list.word_be(b, 0)
+        let s = v >> 1
+        if s != 0 {
+            return s
+        }
+    }
 }
 
 // Build `b` on unit `u` and park its session there.
@@ -179,7 +211,7 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
 /// `Lost` the adapter suspends the room and the client rejoins, every `REJOIN_NS` until
 /// it gets a session, while unit 0 keeps turning.
 pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
-    let Service(tasks: tasks, net: net, clock: clock, random: random, dial: take dial, room: room_id, limits: limits, embed: take embed, binds: binds, policy: policy, session: session, unit_bytes: unit_bytes, until: until) = take s
+    let Service(tasks: tasks, net: net, clock: clock, random: random, dial: take dial, room: room_id, limits: limits, embed: take embed, binds: binds, policy: policy, session: session, unit_bytes: unit_bytes, until: until, relay: take linked) = take s
     let n: u16 = int.narrow(list.len(binds))
     if n == 0 {
         return Error(Units)
@@ -237,6 +269,12 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
     let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS) ?=> |take e| Router(e)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
     let mut a = adapter(room_id, limits, take embed, n)
+    let mut revokes_to: Option[Sender[RelayRevoke]] = None
+    if let Some(take link) = take linked {
+        let RelayLink(master: take master, plan: take plan, revokes: take to) = take link
+        relay(mut a, Relaying(master: take master, plan: take plan, random: random))
+        revokes_to = Some(take to)
+    }
     let mut sock = take opened
     let mut wake: Option[u64] = None
     let mut out: List[runner.room_client.RoomOut[M]] = list.new()
@@ -251,6 +289,7 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
         }
         wake = units.turn(mut u, clock, mut sock, wait_until(wake, now)) ?=> |take e| Router(e)
         let after = host.mono_ns(clock)
+        wall(mut a, host.wall_ms(clock) / 1000)
         // The room: join, rejoin after Lost, or take what has come.
         if let Some(take d) = replace(mut pending_dial, None) {
             let mut entered = false
@@ -322,6 +361,13 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
             }
         }
         units.send(mut u, clock, mut sock, after)
+        // A revoke reaches the relay outside RTC-7's acknowledgement (TURN-9): the fence
+        // already drops the epoch's packets, so a full queue only delays reclaiming.
+        for take r in take_revokes(mut a) {
+            if let Some(to) = revokes_to {
+                let _ = channel.try_send(to, take r)
+            }
+        }
         if let Some(take r) = replace(mut joined, None) {
             let mut joined_room = take r
             for take o in replace(mut out, list.new()) {

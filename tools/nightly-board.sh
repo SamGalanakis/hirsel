@@ -166,6 +166,7 @@ elif (( vopr_status != 0 )); then
 fi
 printf 'Boat exit %s · VOPR exit %s · Laws exit %s\n' "$boat_status" "$vopr_status" "$law_status" |
   tee -a "$run/run.log" >&2
+toolchain_hirsel="$checkout/$compiler/hirsel"
 
 run_w2() (
   local output compiler runtime bridge
@@ -186,6 +187,22 @@ if (( w2_status == 75 )); then
   echo "W2 damage sweep deferred until a spare Boat start is available." >>"$run/run.log"
 elif (( w2_status != 0 )); then
   printf 'W2 damage sweep exited %s. See %s/w2.log.\n' "$w2_status" "$run" >>"$run/run.log"
+fi
+# N1 browser_room (webrtc.md): headless Chromium and Firefox against the SFU deployment on
+# 127.0.0.1 (ports 7800, 7810-7811 and 3478). Playwright installs into ~/.cache/hirsel/n1.
+run_n1() (
+  local work="$run/n1"
+  taskset -c 8-11 python3 core/programs/webrtc_sfu/service/run.py \
+    --hirsel "$toolchain_hirsel" --work "$work" --build-only || return
+  TMPDIR="$work" exec timeout 900 taskset -c 8-11 node core/programs/webrtc_sfu/service/n1.mjs --sfu "$work/sfu"
+)
+
+n1_status=$toolchain_status
+if (( n1_status == 0 )); then
+  run_n1 >>"$run/n1.log" 2>&1 || n1_status=$?
+fi
+if (( n1_status != 0 )); then
+  printf 'N1 browser_room exited %s. See %s/n1.log.\n' "$n1_status" "$run" >>"$run/run.log"
 fi
 echo "$run"
 exit "$status"

@@ -193,5 +193,8 @@ limit = 1342177280
 [tests.runs."runner@1/runner/room_client_over_socket"]
 limit = 1342177280
 
+[tests.runs."runner@1/runner/room_client_keeps_quiet_link"]
+limit = 1342177280
+
 [tests.runs."runner@1/runner/dev_identity_vectors"]
 grants = ["Stdout"]

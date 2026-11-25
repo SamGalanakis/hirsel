@@ -1321,6 +1321,8 @@ a land.
   RTC-2 to RTC-4 against a real DTLS, SRTP and RTCP stack. It covers a layer switch, an
   `audio_forward` gate, a revoke whose subscriber stops receiving at once, and a relayed
   session over TURN with UDP blocked (turn.md U8). The service joins the room through `room_client` (F1).
+  It runs from `core/programs/webrtc_sfu/service` (`run.py` builds the deployment, `n1.mjs`
+  drives the browsers); the N1 decisions below say how.
 - **N2 `room_vopr`:** 100 participants over `sim.udp`, with Gilbert-Elliott loss, reordering,
   NAT rebinding, joins, leaves, revokes and target changes from a seed. The invariants are
   RTC-7's, the TLS-8 nonce rules (no `Reused`, `Issued` or `Range` from any sealer), RTC-4's
@@ -1588,6 +1590,63 @@ W12 and W13 in `speaker_laws.hirsel`):
   `Fenced`, `Suspended`, `Exists`, `Limit`, `Unrepresentable`, `Peer` and `Capacity`.
 - **Embed callables.** In the native build, a named function converted to an `Embed`
   field crashes (SIGSEGV). Closures do not, so W16 uses closures.
+
+**N1 decisions.** Gaps the spec left open, decided while N1 was built (2626)
+
+- **Deployment.** `service/main.hirsel` runs the room place, `signal.serve` and the TURN
+  relay in one process on 127.0.0.1: the place listens on `--listen` (7800) and serves the
+  call page (`index.html`, the bundled `page.ts`) from its site directory, media units bind
+  `--media` and the next port (7810, 7811), and the relay listens on `--turn` (3478) over
+  UDP and TCP. The relay's `allow` is the media units' addresses (TURN-7). `run.py
+  --build-only` builds it with `sdk ts` and esbuild; `run.py` alone also starts it.
+- **TURN credentials at admission.** `signal.relay(adapter, Relaying)` gives the adapter the
+  master, the relay plan and randomness; each admission then gets `mint_session`'s ICE and
+  TURN credentials together, `Servers(username, password)` goes to the peer before any
+  offer, the home unit answers with the minted ICE credentials (`Build.ice_ufrag`,
+  `ice_pwd`), and each ended admission is queued as a `RelayRevoke` that serve forwards to
+  the relay (TURN-9). With no relay the unit draws ICE credentials, as before.
+- **Unit certificates differ in serial.** Each unit's self-signed certificate takes a
+  random nonzero 63-bit serial (RFC 5280 section 4.1.2.2). Firefox's NSS refuses a second
+  certificate with the issuer and serial of one it has seen (`SEC_ERROR_REUSED_ISSUER_AND_SERIAL`),
+  so with serial 1 everywhere its second session, on another unit, failed DTLS.
+  `unit_certificates_differ_in_serial` is red on serial 1.
+- **The service's room link pings.** `room_client`'s reader pings after `idle_ms` with
+  nothing read and ends the session only when a second window passes unanswered, as the
+  server's reader does. It used to end the session at the first quiet window, so a room
+  quiet for longer than `idle_ms` lost the service, which rejoined as a new peer.
+  runner's `room_client_keeps_quiet_link` is red on that. The service dials with 10 s.
+- **Harness.** Playwright (`playwright-core` 1.63.0) and its Chromium and Firefox install
+  into `~/.cache/hirsel/n1`, never the repo. Pages run with fake devices; Firefox needs
+  `media.navigator.permission.fake` and an active capture to expose loopback host
+  candidates, so a page that sends nothing still holds a microphone capture. Every case
+  judges by `getStats` (inbound bytes, decoded frames, frame width, the selected pair's
+  candidate types and relay protocol) and by what the service prints (`allocations`,
+  `revoked`), never by timing alone. Relay-only pages use `iceTransportPolicy: "relay"`
+  with the minted `Servers` credentials, over `turn:` with `?transport=udp` or `tcp`.
+- **Cases.** `publish_subscribe_both_directions` (Chromium and Firefox each publish Opus
+  and three-encoding VP8 and receive the other), `layer_switch`, `revoke_stops_media` and
+  `revoke_stops_media_chromium_leaves` (after `Fenced` the subscriber's inbound bytes stop),
+  `audio_forward_gate_chromium` and `_firefox` (a listener receives a speaker's audio only
+  while `audio_forward` allows it), and `relay_only_udp` and `relay_only_tcp`.
+- **Layer switch.** The subscriber is retargeted to q and must decode a narrower width
+  than it decoded before; retargeted to f, it must decode wider again. The width is matched
+  to a rid by the publisher's `outbound-rtp` widths.
+- **Open red: a Firefox subscriber's estimate stays below h.** Receiving Chromium's
+  simulcast, Firefox drops from h to q within 1 to 4 s of the call, before any retarget,
+  and never climbs back, so `layer_switch` is red for Firefox; a Chromium subscriber on the
+  same publisher (`N1_CALL=chromium,chromium`) reaches f and comes back from q. The
+  feedback is not the cause: over a 16 s capture Firefox's TWCC feedback reported all 1171
+  transport numbers received, none missing, with small deltas only. The 1.5 times
+  acked-rate cap in RTP-9 lowers A by less than 10 kbit/s, so what is left is the delay
+  detector's Overuse arm on Firefox's arrival times, feedback the SFU drops (`peer_ingress`
+  ignores an `on_feedback` error), or an estimate that never rises past the 300 kbit/s
+  start on that leg. In that capture Firefox's sender reports carry no report blocks, so
+  the SFU has no RTT for that leg. The next step is to log A, L, the acked rate and the
+  usage per feedback for that leg.
+- **Open.** After a real `Lost` the service rejoins with a new peer number, but a page
+  learns the service's number once, from `Servers`, so its later signals go to the old
+  number. A page that joins after a publication is published learns it only from the
+  next `Published`.
 
 **Follow-ups this spec names.**
 

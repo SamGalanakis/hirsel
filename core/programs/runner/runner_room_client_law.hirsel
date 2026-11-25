@@ -281,3 +281,46 @@ fn room_client_over_socket(c: Clock, random: Random, tasks: Tasks, net: Net) -> 
     }
     Ok(())
 }
+
+// A quiet link outlives the client's idle window: the client pings when a read waits
+// `idle_ms` with nothing, the server answers, and the session stays up across five windows.
+// The fixture server pings only after its own 30 s, so a client that waited for that ping
+// instead would end the session after 200 ms and the next read would say Lost.
+@test
+fn room_client_keeps_quiet_link(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let running = fixture.start(room_law_settings(c, random, tasks, net, true), 5000u64) ?=> |_| 1u64
+    let mut dial = client_dial(tasks, net, c, random, running)
+    dial.idle_ms = 200u64
+    let mut joined_room: room_client.Room[Bytes] = room_client.join(take dial) ?=> |_| 2u64
+    let mut into: List[room_client.RoomIn[Bytes]] = list.new()
+    if !client_until(mut joined_room, mut into, one_peer(1u32), 2u64) {
+        return Error(3u64)
+    }
+    // try_next owes the reader one read, so it waits on the quiet socket through the sleep.
+    let _ = room_client.try_next(mut joined_room, mut into)
+    std.clock.sleep_ns(c, 1000000000u64)
+    let other = room_law_socket(tasks, net, c, random, running, true)
+    let mut both = one_peer(1u32)
+    list.push(mut both, 2u32)
+    let kept = client_until(mut joined_room, mut into, both, 3u64)
+    let lost = saw_lost(into)
+    let _ = room_client.leave(take joined_room)
+    let _ = wire_client.close(take other)
+    let _ = fixture.end(take running, 5000u64)
+    if lost {
+        return Error(4u64)
+    }
+    if !kept {
+        return Error(5u64)
+    }
+    Ok(())
+}
+
+fn saw_lost(into: List[room_client.RoomIn[Bytes]]) -> bool {
+    for entry in into {
+        if let Lost = entry {
+            return true
+        }
+    }
+    false
+}

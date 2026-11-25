@@ -100,7 +100,7 @@ fn serve_builds(mut r: Sig) waits {
         let Party(id: take unit_id, certificate: _) = party(16100)
         let built = signal.build(signal.Home(id: take unit_id, at: r.h.addrs[b.home], policy: sdp.default_policy(), limits: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64)), provide.random(16200), b)
         let (_, take outcome) = result.unwrap(take built)
-        let signal.Build(who: who, home: home, peer: p, version: _, offer: take offer, publish: _) = take b
+        let signal.Build(who: who, home: home, peer: p, version: _, offer: take offer, publish: _, ..) = take b
         let mut ufrag: Bytes = list.new()
         list.append(mut ufrag, b"ufrags")
         let digit: u8 = int.narrow(p)

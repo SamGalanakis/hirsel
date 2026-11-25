@@ -24,7 +24,11 @@ pub type Build: cross {
     peer: u32,
     version: u64,
     offer: Bytes,
-    publish: bool
+    publish: bool,
+    // The ICE credentials minted with the peer's TURN ones at admission (TURN-5), which
+    // the answer carries; empty when the service has no relay, and the unit draws them.
+    ice_ufrag: Bytes,
+    ice_pwd: Bytes
 }
 
 /// What the home unit made of a `Build`: the answer's SDP text, the sections the peer
@@ -55,7 +59,9 @@ type Seat {
     sends: List[(u8, sdp.Media)],
     subs: List[(u64, u8)],
     // The version of the server's re-offer the peer has not answered (RTC-4).
-    offered: Option[u64]
+    offered: Option[u64],
+    // The ICE ufrag and password minted at admission with the TURN credentials.
+    ice: Option[(Bytes, Bytes)]
 }
 
 // A publication: its id, its owner's peer number and generation, and its kind.
@@ -72,6 +78,15 @@ type After = Quiet | Admitted(peer.Gen, u64, Bytes, List[u8]) | Discard | Fence(
 type Job {
     change: router.Change,
     after: After
+}
+
+/// The TURN side of signaling (TURN-5, TURN-9; turn.md's U8 decisions): the master that
+/// mints each admission's credentials (it needs `mac`), the plan the relay place shares,
+/// and the randomness of the ICE credentials minted beside them.
+pub type Relaying {
+    master: Secret,
+    plan: RelayPlan,
+    random: Random
 }
 
 pub opaque type Adapter[M] {
@@ -109,14 +124,44 @@ pub opaque type Adapter[M] {
     gone: List[peer.Gen],
     builds: List[Build],
     // Answers to re-offers, for the control unit's router at the next `step`.
-    answers: List[(peer.Gen, u64, Bytes)]
+    answers: List[(peer.Gen, u64, Bytes)],
+    // The relay this room's admissions get TURN credentials for, the wall clock in
+    // Unix seconds the driver last gave, and revokes for the relay place.
+    relaying: Option[Relaying],
+    unix_s: u64,
+    revokes: List[RelayRevoke]
 }
 
 /// The adapter of `room` over `units` media units. Its first control call opens the room.
 pub fn adapter[M: codec](room: peer.RoomId, limits: router.RoomLimits, take embed: Embed[M], units: u16) -> Adapter[M] {
     let mut jobs: List[Job] = list.new()
     list.push(mut jobs, Job(change: Open(room: room, limits: limits), after: Quiet))
-    Adapter(room: room, limits: limits, embed: take embed, units: units, you: None, former: list.new(), incarnation: None, applied: 0, seats: list.new(), epoch: 0, pubs: list.new(), lost: false, scratch: list.new(), scratch_incarnation: None, scratch_revision: 0, headed: false, headless: false, snapshot: false, calling: None, jobs: take jobs, fencing: list.new(), gone: list.new(), builds: list.new(), answers: list.new())
+    Adapter(room: room, limits: limits, embed: take embed, units: units, you: None, former: list.new(), incarnation: None, applied: 0, seats: list.new(), epoch: 0, pubs: list.new(), lost: false, scratch: list.new(), scratch_incarnation: None, scratch_revision: 0, headed: false, headless: false, snapshot: false, calling: None, jobs: take jobs, fencing: list.new(), gone: list.new(), builds: list.new(), answers: list.new(), relaying: None, unix_s: 0, revokes: list.new())
+}
+
+/// Give the adapter a relay: from now on each admission is minted TURN credentials and
+/// ICE ones together (TURN-5), sent `Servers(username, password)` before any offer, and
+/// answered with those ICE credentials; each admission that ends is revoked at the relay.
+pub fn relay[M](mut a: Adapter[M], take r: Relaying) {
+    a.relaying = Some(take r)
+}
+
+/// The wall clock, in Unix seconds, that credentials and relay revokes are dated by.
+pub fn wall[M](mut a: Adapter[M], unix_s: u64) {
+    a.unix_s = unix_s
+}
+
+/// Take the relay revokes (TURN-9) for admissions that ended since the last call.
+pub fn take_revokes[M](mut a: Adapter[M]) -> List[RelayRevoke] {
+    replace(mut a.revokes, list.new())
+}
+
+// The admission's TURN subject (incarnation, peer), once the roster's incarnation is known.
+fn subject_of[M](a: Adapter[M], peer: u32) -> Option[Bytes] {
+    let Some(Incarnation(inc)) = a.incarnation else {
+        return None
+    }
+    Some(admission_subject(inc, int.widen(peer)))
 }
 
 /// The service's own peer number in the room, which the room client knows
@@ -260,13 +305,31 @@ fn admit_new[M](mut a: Adapter[M], peer: u32, mut out: List[runner.room_client.R
         return
     }
     a.epoch += 1
-    list.push(mut a.seats, Seat(peer: peer, id: id, epoch: a.epoch, stage: Waiting, home: 0, version: 0, sends: list.new(), subs: list.new(), offered: None))
+    let mut ice: Option[(Bytes, Bytes)] = None
+    if let Some(subject) = subject_of(a, peer) {
+        if let Some(r) = a.relaying {
+            match mint_session(r.master, r.random, subject, a.unix_s, r.plan) {
+                Ok(take c) => {
+                    let SessionCredentials(ice_ufrag: take ufrag, ice_pwd: take pwd, turn_username: take username, turn_password: take password, expiry_unix_s: _) = take c
+                    ice = Some((take ufrag, take pwd))
+                    to_peer(a, peer, Servers(take username, take password), mut out)
+                },
+                Error(_) => (),
+            }
+        }
+    }
+    list.push(mut a.seats, Seat(peer: peer, id: id, epoch: a.epoch, stage: Waiting, home: 0, version: 0, sends: list.new(), subs: list.new(), offered: None, ice: take ice))
 }
 
 // End the admission at seat `i`: its session is revoked, and `Fenced` is sent once the
 // fence holds. An admission with no session anywhere is fenced at once.
 fn end_seat[M](mut a: Adapter[M], i: u64, mut out: List[runner.room_client.RoomOut[M]]) {
     let s = list.remove(mut a.seats, i)
+    if let Some(subject) = subject_of(a, s.peer) {
+        if let Some(r) = a.relaying {
+            list.push(mut a.revokes, relay_revoke(subject, a.unix_s, r.plan))
+        }
+    }
     let g: peer.Gen = Gen(id: s.id, epoch: s.epoch)
     list.retain(mut a.pubs, scoped fn(p: Pub) -> bool {
         p.owner != g
@@ -485,7 +548,11 @@ fn signal[M](mut a: Adapter[M], p: u32, take s: Signal, mut out: List[runner.roo
             a.seats[i].home = home
             a.seats[i].version = version
             let publish = (a.embed.publish)(p)
-            list.push(mut a.builds, Build(who: peer.Participant(gen: g, room: a.room), home: home, peer: p, version: version, offer: take sdp_text, publish: publish))
+            let (ufrag, pwd) = match a.seats[i].ice {
+                Some((u, w)) => (copied(u), copied(w)),
+                None => (list.new(), list.new()),
+            }
+            list.push(mut a.builds, Build(who: peer.Participant(gen: g, room: a.room), home: home, peer: p, version: version, offer: take sdp_text, publish: publish, ice_ufrag: take ufrag, ice_pwd: take pwd))
         },
         // ICE-Lite (RTC-3): the server learns the browser's path from its checks, so a
         // remote candidate changes nothing.

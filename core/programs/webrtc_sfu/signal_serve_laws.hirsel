@@ -97,7 +97,7 @@ fn service_answers_over_the_room(c: Clock, random: Random, tasks: Tasks, net: Ne
     let mut binds: List[Addr] = list.new()
     list.push(mut binds, loopback(0))
     list.push(mut binds, loopback(0))
-    let service = signal.Service(tasks: tasks, net: net, clock: c, random: random, dial: sfu_dial(tasks, net, c, random, address), room: room_id(), limits: revoke_limits(), embed: take embed, binds: binds, policy: sdp.default_policy(), session: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64), unit_bytes: 16777216, until: until)
+    let service = signal.Service(tasks: tasks, net: net, clock: c, random: random, dial: sfu_dial(tasks, net, c, random, address), room: room_id(), limits: revoke_limits(), embed: take embed, binds: binds, policy: sdp.default_policy(), session: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64), unit_bytes: 16777216, until: until, relay: None)
     let served = signal.serve(take service)
     let answer = result.unwrap(task.join(take browser))
     let _ = runner.fixture.end(take running, 5000u64)
@@ -138,4 +138,83 @@ fn sdp_words(b: Bytes) -> List[Bytes] {
     }
     list.push(mut out, take cur)
     out
+}
+
+// ---- Unit certificates (RFC 5280 section 4.1.2.2) ----
+// Issuer and serial name one certificate, and every unit's certificate names the same
+// issuer, so no two units (of one service or of a restart) share a serial. Red when the
+// serial is fixed: Firefox refuses the second unit it calls (SEC_ERROR_REUSED_ISSUER_AND_SERIAL).
+@test
+fn unit_certificates_differ_in_serial(c: Clock, random: Random) -> Result[(), u64] {
+    let mut seen: List[Bytes] = list.new()
+    for i in 0u64 .. 4 {
+        let (_key, take der) = match signal.unit_certificate(random, c) {
+            Ok(take made) => take made,
+            Error(_) => return Error(1),
+        }
+        let Some(s) = der_serial(der) else {
+            return Error(2)
+        }
+        for x in seen {
+            if same_bytes(x, s) {
+                return Error(10 + i)
+            }
+        }
+        list.push(mut seen, take s)
+    }
+    Ok(())
+}
+
+// The header length and content length of the DER element at `at`.
+fn der_head(b: Bytes, at: u64) -> Option[(u64, u64)] {
+    if at + 2 > list.len(b) {
+        return None
+    }
+    let first: u64 = int.widen(b[at + 1])
+    if first < 0x80 {
+        return Some((2, first))
+    }
+    let n = first & 0x7f
+    if n == 0 || n > 2 || at + 2 + n > list.len(b) {
+        return None
+    }
+    let mut len = 0u64
+    for k in 0u64 .. n {
+        let byte: u64 = int.widen(b[at + 2 + k])
+        len = (len << 8) | byte
+    }
+    Some((2 + n, len))
+}
+
+// The serial INTEGER's content: Certificate, then TBSCertificate, then the [0] version.
+fn der_serial(b: Bytes) -> Option[Bytes] {
+    let (outer, _) = der_head(b, 0)?
+    let (inner, _) = der_head(b, outer)?
+    let mut at = outer + inner
+    if at < list.len(b) && b[at] == 0xa0 {
+        let (h, n) = der_head(b, at)?
+        at += h + n
+    }
+    if at >= list.len(b) || b[at] != 0x02 {
+        return None
+    }
+    let (h, n) = der_head(b, at)?
+    if at + h + n > list.len(b) {
+        return None
+    }
+    let mut out: Bytes = list.with_capacity(n)
+    list.append(mut out, list.slice(b, at + h, at + h + n))
+    Some(take out)
+}
+
+fn same_bytes(a: Bytes, b: Bytes) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    for i in 0u64 .. list.len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    true
 }

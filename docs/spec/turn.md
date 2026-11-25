@@ -726,19 +726,23 @@ module (`signal_turn.hirsel`), and the turn package names no application.
 - **The client's CreatePermission carries the peer's port** (TURN-6). U3 sent port 0,
   which a relay-only `allow` with a port range answered 403, so the client could reach no
   media port; `relay_only_session` found it.
-  Open: RFC 8656 §9.1 lets a client put any port in CreatePermission's XOR-PEER-ADDRESS,
-  and the relay still judges that port, so a conforming client that sends another port is
-  answered 403 by a relay-only policy. N1's browser run shows what browsers send; if one
-  sends another port, the relay judges CreatePermission on the IP alone (any `allow` entry
-  covering it) and keeps the full-address check on Send, ChannelData and `from_peer`.
-- **Not built here.** The SFU's deployment, which binds the sockets and runs the relay as
-  a sibling place, needs webrtc S5's units and S7's adapter, and webrtc_sfu has neither yet.
-  Until then `relay_only_session` (in webrtc_sfu's laws) is the proving case: a browser end
-  (ICE, DTLS, SRTP) reaches a PeerSession only through `turn.Client` and the relay, over
-  UDP and over a stream through two `Framer`s, with the relay-only policy and a revoke sent
-  as its codec bytes. `mint_session`, `relay_revoke` and `apply_revoke` have no caller but
-  that law until S7's adapter calls them and sends `Servers`. Two gaps remain against the
-  browser case: `turn.Client` takes the SHA-256 path where browsers take MD5, and nothing
+  Answered by N1 (webrtc.md, 2626): relay-only Chromium and Firefox, over UDP and over
+  TCP, put the media unit's own port (7810 or 7811) in every CreatePermission's
+  XOR-PEER-ADDRESS, and Chromium's ChannelBind carries the same port. The relay keeps
+  judging CreatePermission on the full address; no IP-only rule is needed.
+- **Built in N1.** webrtc_sfu's `service/main.hirsel` runs the relay beside the room
+  place and `signal.serve` in one process (webrtc.md, N1 decisions): the adapter mints
+  each admission's credentials with `mint_session`, sends `Servers`, and forwards
+  `relay_revoke` to the relay, which applies it with `apply_revoke`. `relay_only_session`
+  stays the in-process law; N1's `relay_only_udp` and `relay_only_tcp` are the browser
+  cases.
+- **What browsers send** (N1's captures of each STUN request the relay took). Each
+  browser first sends an Allocate without credentials, answered 401 (over UDP a Binding
+  request also arrives). Chromium then sends Allocate, CreatePermission and ChannelBind,
+  each with MESSAGE-INTEGRITY and neither
+  MESSAGE-INTEGRITY-SHA256 nor PASSWORD-ALGORITHM: the MD5 long-term path TURN-5 takes
+  when no algorithm is negotiated. Firefox sends the same without ChannelBind, so its
+  media goes in Send indications. `turn.Client` still takes the SHA-256 path, and nothing
   runs under `std.sim`.
 
 **Decisions made building U7.** Each is reversible inside the package.
@@ -1040,10 +1044,9 @@ not re-pinned; U0 must leave it green.
   from the case occur nowhere in the recording file, raw, hex or base64, as TLS-5's KD6
   searches.
 
-Browser behaviour (Chromium sending MESSAGE-INTEGRITY with MD5 and no
-PASSWORD-ALGORITHMS, ChannelBind before media) is covered by Pion's interop history and
-checked end to end by webrtc.md's headless Chromium case once it runs with
-`iceTransportPolicy: "relay"`; this text adds no browser harness.
+Browser behaviour is checked end to end by webrtc.md's N1 (`relay_only_udp`,
+`relay_only_tcp`), which runs Chromium and Firefox with `iceTransportPolicy: "relay"`;
+the U8 decisions record what they send.
 
 ## Cost targets
 

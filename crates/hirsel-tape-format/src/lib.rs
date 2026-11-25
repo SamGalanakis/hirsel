@@ -13,6 +13,8 @@ mod arguments;
 mod blocks;
 mod exec;
 mod frames;
+#[cfg(test)]
+mod generator_tests;
 mod index;
 mod payload;
 mod units;

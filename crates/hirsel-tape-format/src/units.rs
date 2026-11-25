@@ -53,6 +53,9 @@ pub struct Credit {
     pub amount: u64,
 }
 
+/// Every survivor kind the format admits, in tag order.
+pub(crate) const SURVIVOR_KINDS: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7];
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct Survivor {
     pub kind: u8,
@@ -359,7 +362,10 @@ fn read_arrival<'a>(c: &mut Cursor<'a>) -> Result<Arrival<'a>, Corrupt> {
             let outcome = outcome(c, kind, read_value)?;
             let survivors = (0..c.varint()?)
                 .map(|_| {
-                    let kind = tag(c, 7)?;
+                    let kind = c.u8()?;
+                    if !SURVIVOR_KINDS.contains(&kind) {
+                        return Err(Corrupt);
+                    }
                     let origin_kind = matches!(kind, 2 | 7).then(|| tag(c, 5)).transpose()?;
                     Ok(Survivor {
                         kind,

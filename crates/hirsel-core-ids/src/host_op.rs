@@ -4,6 +4,9 @@ macro_rules! host_ops {
     ($($(#[$attr:meta])* $name:ident = $code:literal),+ $(,)?) => {
         $($(#[$attr])* pub const $name: u8 = $code;)+
 
+        /// Every provider operation code in declaration order.
+        pub const OPERATIONS: &[u8] = &[$($code),+];
+
         const _: () = {
             let mut used = [false; 256];
             $(

@@ -21,6 +21,7 @@ from pathlib import Path
 
 from render_code_svg import ensure_binding, load_grammar, tokenize_lines
 from site_docs_theme import COPY_ICON, GITHUB_REPO, OK_ICON, render_page, render_sidebar
+from site_spec import build_spec_pages, list_spec_files
 
 
 # Same earth-toned capture classes as site/index.html (tools/site_highlight.py).
@@ -48,7 +49,7 @@ CLASS = {
 
 DOC_REF_COMMENT = re.compile(r"\s*<!--\s*doc-ref:[^>]*-->")
 FENCE_RE = re.compile(r"^([ \t]*)(`{3,}|~{3,})([^\r\n]*)$")
-HEADING_RE = re.compile(r"^(#{1,3})\s+(.*)$")
+HEADING_RE = re.compile(r"^(#{1,4})\s+(.*)$")
 BULLET_RE = re.compile(r"^- (.*)$")
 ORDERED_RE = re.compile(r"^(\d+)\. (.*)$")
 TABLE_SEP_RE = re.compile(r"^\|?[\s:-]+\|[\s|:-]*$")
@@ -82,7 +83,16 @@ def slugify(text: str) -> str:
     return plain or "section"
 
 
-def rewrite_human_href(url: str, ref: str) -> str:
+def slugify_github(text: str) -> str:
+    plain = re.sub(r"`([^`]+)`", r"\1", text)
+    plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", plain)
+    plain = re.sub(r"[*_]", "", plain).lower()
+    plain = re.sub(r"[^a-z0-9 -]+", "", plain).strip()
+    plain = re.sub(r" ", "-", plain)
+    return plain or "section"
+
+
+def rewrite_human_href(url: str, ref: str, spec_files: set[str] | None = None) -> str:
     if url in ("PRIMER.md", "https://hirsel.ai/primer.md", "/primer.md"):
         return "/docs/#language"
     if url in ("COOKBOOK.md", "https://hirsel.ai/cookbook.md", "/cookbook.md"):
@@ -91,14 +101,28 @@ def rewrite_human_href(url: str, ref: str) -> str:
         return "/docs/std/"
     if url in ("https://hirsel.ai/install.sh", "/install.sh"):
         return "/docs/#install"
+    gh_spec = re.match(
+        r"^https://github\.com/SamGalanakis/hirsel/blob/[^/]+/docs/spec/([a-z0-9_-]+\.md)(#.*)?$",
+        url,
+    )
+    if gh_spec:
+        fname, frag = gh_spec.group(1), gh_spec.group(2) or ""
+        if spec_files is None or fname in spec_files:
+            return f"/docs/spec/{frag}" if fname == "index.md" else f"/docs/spec/{fname[:-3]}/{frag}"
     if url.startswith("spec/"):
+        path_part, hash_sep, frag = url[5:].partition("#")
+        anchor = f"#{frag}" if hash_sep else ""
+        if path_part == "index.md":
+            return f"/docs/spec/{anchor}"
+        if path_part.endswith(".md") and (spec_files is None or path_part in spec_files):
+            return f"/docs/spec/{path_part[:-3]}/{anchor}"
         return f"{GITHUB_REPO}/blob/{ref}/docs/{url}"
     if url.startswith("api/") or url == "API.md":
         return f"{GITHUB_REPO}/blob/{ref}/core/std/{url}"
     return url
 
 
-def render_inline(text: str, ref: str) -> str:
+def render_inline(text: str, ref: str, href_rewriter=rewrite_human_href) -> str:
     text = DOC_REF_COMMENT.sub("", text)
     parts: list[str] = []
     pos = 0
@@ -112,15 +136,15 @@ def render_inline(text: str, ref: str) -> str:
             cls = ' class="w"' if len(body) > 28 else ""
             parts.append(f"<code{cls}>{html.escape(body, quote=False)}</code>")
         elif tok.startswith("**"):
-            parts.append(f"<strong>{render_inline(tok[2:-2], ref)}</strong>")
+            parts.append(f"<strong>{render_inline(tok[2:-2], ref, href_rewriter)}</strong>")
         elif tok.startswith("*"):
-            parts.append(f"<em>{render_inline(tok[1:-1], ref)}</em>")
+            parts.append(f"<em>{render_inline(tok[1:-1], ref, href_rewriter)}</em>")
         elif tok.startswith("["):
             split = tok.index("](")
             label = tok[1:split]
-            href = rewrite_human_href(tok[split + 2 : -1], ref)
+            href = href_rewriter(tok[split + 2 : -1], ref)
             parts.append(
-                f'<a href="{html.escape(href, quote=True)}">{render_inline(label, ref)}</a>'
+                f'<a href="{html.escape(href, quote=True)}">{render_inline(label, ref, href_rewriter)}</a>'
             )
         pos = m.end()
     if pos < len(text):
@@ -192,6 +216,7 @@ def render_code_card(
     label: str,
     *,
     is_output_hint: bool = False,
+    tolerant_highlight: bool = False,
 ) -> str:
     tokens = info.strip().split()
     lang = tokens[0] if tokens else "text"
@@ -199,8 +224,27 @@ def render_code_card(
     has_refusal = False
     is_output = False
     if lang == "hirsel":
-        inner, has_refusal = highlight_hirsel_html(lines, parser, query, label)
-        lang_label = "hirsel · runnable" if "run" in extra else "hirsel"
+        try:
+            inner, has_refusal = highlight_hirsel_html(lines, parser, query, label)
+        except ValueError:
+            if not tolerant_highlight:
+                raise
+            rendered_lines: list[str] = []
+            for line in lines:
+                is_no = "// refused:" in line
+                if is_no:
+                    has_refusal = True
+                cls_attr = "ln no" if is_no else "ln"
+                rendered_lines.append(f'<span class="{cls_attr}">{html.escape(line, quote=False)}</span>')
+            inner = "\n".join(rendered_lines)
+        if "run" in extra:
+            lang_label = "hirsel · runnable"
+        elif "unbuilt" in extra:
+            lang_label = "hirsel · unbuilt"
+        elif "core" in extra:
+            lang_label = "hirsel · core"
+        else:
+            lang_label = "hirsel"
     elif lang in ("sh", "bash", "shell"):
         inner = highlight_shell_html(lines)
         lang_label = "sh"
@@ -253,6 +297,9 @@ def render_markdown(
     ref: str,
     label: str,
     used_ids: set[str],
+    href_rewriter=rewrite_human_href,
+    tolerant_highlight: bool = False,
+    slug_fn=slugify,
 ) -> tuple[str, str, list[tuple[str, str]], str]:
     """Parse Markdown into (lead_html, body_html, toc, release_banner_html)."""
     lines = md_text.splitlines()
@@ -273,7 +320,7 @@ def render_markdown(
         while idx < n and lines[idx].startswith(">"):
             bq_lines.append(lines[idx][1:].lstrip())
             idx += 1
-        release_banner_html = f"<p>{render_inline(' '.join(bq_lines), ref)}</p>"
+        release_banner_html = f"<p>{render_inline(' '.join(bq_lines), ref, href_rewriter)}</p>"
 
     # First intro paragraph before the first ## becomes hero lead
     while idx < n and not lines[idx].strip():
@@ -290,14 +337,14 @@ def render_markdown(
     ):
         lead_lines.append(lines[idx].strip())
         idx += 1
-    lead_html = render_inline(" ".join(lead_lines), ref)
+    lead_html = render_inline(" ".join(lead_lines), ref, href_rewriter)
 
     out: list[str] = []
     toc: list[tuple[str, str]] = []
     prev_was_runnable = False
 
     def next_id(raw: str) -> str:
-        base = slugify(raw)
+        base = slug_fn(raw)
         cand = base
         k = 2
         while cand in used_ids:
@@ -332,8 +379,8 @@ def render_markdown(
             level = len(hm.group(1))
             raw = hm.group(2).strip()
             hid = next_id(raw)
-            rendered = render_inline(raw, ref)
-            tag = f"h{min(level, 3)}"
+            rendered = render_inline(raw, ref, href_rewriter)
+            tag = f"h{min(level, 4)}"
             out.append(
                 f'<{tag} id="{hid}">{rendered}'
                 f'<a class="anchor" href="#{hid}" aria-label="Link to section">#</a></{tag}>'
@@ -356,6 +403,7 @@ def render_markdown(
                     query,
                     f"{label}:{fence_line}",
                     is_output_hint=is_out,
+                    tolerant_highlight=tolerant_highlight,
                 )
             )
             prev_was_runnable = info.strip() == "hirsel run"
@@ -372,7 +420,7 @@ def render_markdown(
             while idx < n and lines[idx].startswith(">"):
                 bq.append(lines[idx][1:].lstrip())
                 idx += 1
-            out.append(f"<blockquote><p>{render_inline(' '.join(bq), ref)}</p></blockquote>")
+            out.append(f"<blockquote><p>{render_inline(' '.join(bq), ref, href_rewriter)}</p></blockquote>")
             prev_was_runnable = False
             continue
 
@@ -383,9 +431,9 @@ def render_markdown(
             while idx < n and lines[idx].lstrip().startswith("|"):
                 rows.append(parse_table_row(lines[idx]))
                 idx += 1
-            ths = "".join(f"<th>{render_inline(h, ref)}</th>" for h in headers)
+            ths = "".join(f"<th>{render_inline(h, ref, href_rewriter)}</th>" for h in headers)
             trs = "".join(
-                "<tr>" + "".join(f"<td>{render_inline(c, ref)}</td>" for c in r) + "</tr>"
+                "<tr>" + "".join(f"<td>{render_inline(c, ref, href_rewriter)}</td>" for c in r) + "</tr>"
                 for r in rows
             )
             out.append(
@@ -416,7 +464,14 @@ def render_markdown(
                                 fl = idx + 1
                                 info, buf, idx = read_fence(idx)
                                 item_blocks.append(
-                                    render_code_card(buf, info, parser, query, f"{label}:{fl}")
+                                    render_code_card(
+                                        buf,
+                                        info,
+                                        parser,
+                                        query,
+                                        f"{label}:{fl}",
+                                        tolerant_highlight=tolerant_highlight,
+                                    )
                                 )
                                 while idx < n and not lines[idx].strip():
                                     idx += 1
@@ -428,7 +483,7 @@ def render_markdown(
                         idx += 1
                     else:
                         break
-                item_html = f"<p>{render_inline(' '.join(item_parts), ref)}</p>" + "".join(item_blocks)
+                item_html = f"<p>{render_inline(' '.join(item_parts), ref, href_rewriter)}</p>" + "".join(item_blocks)
                 items.append(f"<li>{item_html}</li>")
             out.append(f"<ul>{''.join(items)}</ul>")
             prev_was_runnable = False
@@ -445,7 +500,7 @@ def render_markdown(
                 while idx < n and lines[idx].startswith("  ") and lines[idx].strip():
                     parts.append(lines[idx].strip())
                     idx += 1
-                items.append(f"<li>{render_inline(' '.join(parts), ref)}</li>")
+                items.append(f"<li>{render_inline(' '.join(parts), ref, href_rewriter)}</li>")
             out.append(f"<ol>{''.join(items)}</ol>")
             prev_was_runnable = False
             continue
@@ -469,18 +524,106 @@ def render_markdown(
         if text == "Outcome: success.":
             out.append('<p class="outcome-note">Outcome: success.</p>')
         else:
-            out.append(f"<p>{render_inline(text, ref)}</p>")
+            out.append(f"<p>{render_inline(text, ref, href_rewriter)}</p>")
         prev_was_runnable = False
 
     return lead_html, "\n".join(out), toc, release_banner_html
 
 
-PART_IDS = ("install", "language", "cookbook")
+PART_IDS = ("install", "language", "cookbook", "tooling")
 INSTALL_TOC = [
     ("first-project", "Your first project"),
     ("options", "Pin a version or uninstall"),
     ("source", "Read the installer"),
 ]
+TOOLING_TOC = [
+    ("hirsel-explain", "<code>hirsel explain</code>"),
+    ("hirsel-prof", "<code>hirsel prof</code>"),
+    ("record-and-replay", "Record &amp; replay"),
+    ("aarch64-cross-compiling", "AArch64 cross-compiling"),
+]
+
+
+def tooling_part_html(ref: str, parser, query) -> str:
+    card = lambda lines, lang, label: render_code_card(lines, lang, parser, query, label)
+    explain_cmd = card(
+        [
+            "hirsel explain OWN-7               # normative rule + refused example",
+            "hirsel explain clock               # find core & std module declarations",
+            "hirsel explain --list              # list every rule ID (--json supported)",
+            "hirsel inspect --std --interface   # exact std signatures for this binary",
+        ],
+        "sh",
+        "tooling-explain",
+    )
+    prof_cmd = card(
+        [
+            "hirsel prof run . --release --pmu cycles,branch-misses --out run1.hprof -- ARGS",
+            "hirsel prof replay . --tape run.tape --mem=exact --out mem.hprof",
+            "hirsel prof top run1.hprof --limit 10",
+            "hirsel prof annotate run1.hprof main.hirsel:42",
+            "hirsel prof diff run1.hprof run2.hprof",
+        ],
+        "sh",
+        "tooling-prof",
+    )
+    replay_cmd = card(
+        [
+            "hirsel run app --record session.tape --dir inputs --grant Stdout -- input.json",
+            "hirsel replay app --tape session.tape",
+            "hirsel replay app --tape session.tape --diagnose",
+            "hirsel tape show session.tape --include-credentials",
+            "hirsel test app --replay",
+        ],
+        "sh",
+        "tooling-replay",
+    )
+    aarch64_cmd = card(
+        [
+            "hirsel build app --release --target aarch64-unknown-linux-gnu -o app-arm64",
+            "hirsel test app --target aarch64-unknown-linux-gnu \\",
+            "  --emulator qemu-aarch64 --sysroot /path/to/aarch64-sysroot",
+        ],
+        "sh",
+        "tooling-aarch64",
+    )
+    rec_url = f"{GITHUB_REPO}/blob/{ref}/docs/recording.md"
+    return "\n".join(
+        [
+            part_open(
+                4,
+                "tooling",
+                "Tooling",
+                "Built-in CLI tools for inspecting rules, sampling CPU and replay memory, recording and replaying runs, and cross-compiling for AArch64 Linux.",
+            ),
+            heading("h2", "hirsel-explain", "<code>hirsel explain</code>"),
+            "<p>Every checker refusal cites one rule ID (such as <code>OWN-7</code> or <code>CAP-1</code>). "
+            "Run <code>hirsel explain RULE</code> to print the normative rule and refused example from the installed binary, "
+            "or pass a module keyword or <code>--list</code> (with optional <code>--json</code>). See the "
+            '<a href="/docs/spec/diagnostics/">diagnostics specification</a> for the error contract.</p>',
+            explain_cmd,
+            heading("h2", "hirsel-prof", "<code>hirsel prof</code>"),
+            "<p><code>hirsel prof</code> captures portable SQLite profiles (<code>.hprof</code>) from live runs "
+            "(<code>prof run</code>, <code>prof attach</code>) and deterministic tape replays (<code>prof replay --mem=exact</code>). "
+            'Query profiles with <code>top</code>, <code>annotate</code>, <code>peak-mem</code>, <code>callers</code>, <code>diff</code>, '
+            '<code>sql</code>, or <code>export --format pprof</code>. See <a href="#find-the-hot-spot-with-hirsel-prof">Cookbook &sect;7</a> '
+            'and the <a href="/docs/spec/profiling/">profiling specification</a>.</p>',
+            prof_cmd,
+            heading("h2", "record-and-replay", "Record and replay"),
+            "<p>Pass <code>--record FILE.tape</code> to record every host provider input and delivery of a run into a new, owner-only tape file, "
+            "without altering the program (<a href=\"/docs/spec/capabilities/#cap-9-recording-is-outside-the-program\">CAP-9</a>). "
+            "Replay the tape with <code>hirsel replay</code> using zero host grants; programs reaching <code>Foreign</code> code cannot be recorded or replayed. "
+            f'Full format and verdict rules live in <a href="{html.escape(rec_url, quote=True)}">docs/recording.md</a>.</p>',
+            replay_cmd,
+            heading("h2", "aarch64-cross-compiling", "AArch64 cross-compiling"),
+            "<p>The installed toolchain ships the AArch64 Linux runtime archive and link kit alongside <code>x86_64</code>. "
+            "Pass <code>--target aarch64-unknown-linux-gnu</code> to <code>hirsel build</code> to emit a native AArch64 ELF binary; "
+            "add <code>--emulator</code> and <code>--sysroot</code> when running or testing under QEMU. See "
+            '<a href="/docs/spec/cli/">the CLI specification</a> for native build and target options.</p>',
+            aarch64_cmd,
+            "</section>",
+        ]
+    )
 
 
 def heading(tag: str, hid: str, text: str) -> str:
@@ -538,7 +681,7 @@ def install_part_html(install_sh: str, ref: str, parser, query) -> str:
                 1,
                 "install",
                 "Install",
-                "One self-contained native toolchain with Cranelift, LLVM, the simulator, the profiler "
+                "One self-contained native toolchain with Cranelift, LLVM, the simulation libraries, the profiler "
                 "and recorded replay. The installer checks the release bundle against <code>SHA256SUMS</code> "
                 "and links <code>hirsel</code> into <code>~/.hirsel/bin</code> without touching system packages.",
             ),
@@ -684,8 +827,8 @@ def build_std_page(api_index_md: str, ref: str, parser, query, groups) -> str:
         ),
         body_html=body_html,
         nav_key="std",
-        sidebar_html=render_sidebar(groups, on_docs=False, std_toc=toc, ref=ref),
-        pager=(("/docs/", "Docs"), None),
+        sidebar_html=render_sidebar(groups, active_page="std", page_toc=toc, ref=ref),
+        pager=(("/docs/", "Docs"), ("/docs/spec/", "Spec reference")),
         ref=ref,
         markdown_alternates=["/api-index.md"],
     )
@@ -701,17 +844,32 @@ def build_docs_pages(
     parser,
     query,
 ) -> dict[str, str]:
-    used_ids = set(PART_IDS) | {hid for hid, _ in INSTALL_TOC}
+    spec_set = set(list_spec_files(ref))
+    human_href = lambda url, r: rewrite_human_href(url, r, spec_set)
+    used_ids = set(PART_IDS) | {hid for hid, _ in INSTALL_TOC} | {hid for hid, _ in TOOLING_TOC}
     primer_lead, primer_body, primer_toc, primer_banner = render_markdown(
-        primer_md, parser=parser, query=query, ref=ref, label="docs/PRIMER.md", used_ids=used_ids
+        primer_md,
+        parser=parser,
+        query=query,
+        ref=ref,
+        label="docs/PRIMER.md",
+        used_ids=used_ids,
+        href_rewriter=human_href,
     )
     cook_lead, cook_body, cook_toc, cook_banner = render_markdown(
-        cookbook_md, parser=parser, query=query, ref=ref, label="docs/COOKBOOK.md", used_ids=used_ids
+        cookbook_md,
+        parser=parser,
+        query=query,
+        ref=ref,
+        label="docs/COOKBOOK.md",
+        used_ids=used_ids,
+        href_rewriter=human_href,
     )
     groups = [
         ("Install", "install", INSTALL_TOC),
         ("Language", "language", primer_toc),
         ("Cookbook", "cookbook", cook_toc),
+        ("Tooling", "tooling", TOOLING_TOC),
     ]
     body = "\n".join(
         [
@@ -722,32 +880,44 @@ def build_docs_pages(
             part_open(3, "cookbook", "Cookbook", cook_lead, cook_banner),
             cook_body,
             "</section>",
+            tooling_part_html(ref, parser, query),
         ]
     )
     docs_page = render_page(
         slug="/docs/",
-        title="Hirsel docs: install, language and cookbook",
+        title="Hirsel docs: install, language, cookbook and tooling",
         description=(
-            "Install Hirsel, learn the language section by section, and build from "
-            f"{len(cook_toc)} compiler-checked recipes, all on one page."
+            "Install Hirsel, learn the language section by section, build from "
+            f"{len(cook_toc)} compiler-checked recipes, and use explain, prof, replay and AArch64 cross-compilation."
         ),
         eyebrow=f"Docs · {ref}" if ref != "main" else "Docs",
         heading="Hirsel docs",
         lead=(
-            f"Install the toolchain, read the language in {len(primer_toc)} short sections, then build from "
-            f"{len(cook_toc)} compiler-checked recipes. Every <code>hirsel</code> block here is checked by CI."
+            f"Install the toolchain, read the language in {len(primer_toc)} short sections, build from "
+            f"{len(cook_toc)} compiler-checked recipes, and explore built-in tooling. Every <code>hirsel</code> block here is checked by CI."
         ),
         body_html=body,
         nav_key="docs",
-        sidebar_html=render_sidebar(groups, on_docs=True, std_toc=[], ref=ref),
+        sidebar_html=render_sidebar(groups, active_page="docs", page_toc=[], ref=ref),
         pager=(None, ("/docs/std/", "Standard library")),
         ref=ref,
         markdown_alternates=["/primer.md", "/cookbook.md"],
     )
-    return {
+    pages = {
         "docs/index.html": docs_page,
         "docs/std/index.html": build_std_page(api_index_md, ref, parser, query, groups),
     }
+    pages.update(
+        build_spec_pages(
+            ref=ref,
+            parser=parser,
+            query=query,
+            docs_groups=groups,
+            render_markdown_fn=render_markdown,
+            slug_fn=slugify_github,
+        )
+    )
+    return pages
 
 
 def main() -> None:

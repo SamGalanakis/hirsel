@@ -59,7 +59,7 @@
         "downloadUrl": "https://hirsel.ai/install.sh",
         "codeRepository": "https://github.com/SamGalanakis/hirsel",
         "license": "https://github.com/SamGalanakis/hirsel/blob/main/LICENSE",
-        "description": "Native Cranelift and LLVM compiler toolchain, deterministic simulator, profiler, and runtime for the Hirsel systems programming language.",
+        "description": "Native Cranelift and LLVM compiler toolchain, simulation and property-testing libraries, profiler, and runtime for the Hirsel systems programming language.",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -80,7 +80,8 @@
   the behaviour on screen is the property.
 -->
 <style>
-:root{--ink:#11110F;--cream:#FBF6EC;--red:#CB271F;--mute:#5E5A50;--rule:rgba(17,17,15,.14);--ground:#ECE3CF;
+:root{--ink:#11110F;--body:#2B2A26;--cream:#FBF6EC;--paper:#F4EDE0;--red:#CB271F;--red-soft:rgba(203,39,31,.08);--mute:#5E5A50;--rule:rgba(17,17,15,.14);--rule-strong:rgba(17,17,15,.26);--ground:#ECE3CF;--umber:#80552A;--moss:#4F6A2E;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;
   /* one motion language: a confident deceleration; feedback quick, state changes routine, arrivals slow */
   --ease:cubic-bezier(.16,1,.3,1);--t-press:110ms;--t-state:260ms;--t-arrive:640ms;
   /* the notch and the home bar: zero on a desktop, so nothing there moves */
@@ -88,20 +89,30 @@
 ::selection{background:rgba(203,39,31,.16);color:var(--ink)}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
-html,body{margin:0;height:100%;overflow:hidden;background:var(--cream);color:var(--ink)}
-/* the page claims sideways drags for walking the hill; vertical scroll and zoom stay the browser's */
-body,.panel{touch-action:pan-y pinch-zoom}
-/* zoomed in, a sideways drag pans the zoomed page again, and walks nothing */
-.zoomed body,.zoomed .panel{touch-action:auto}
+html{scroll-behavior:smooth;background:var(--cream);color:var(--ink)}
+body{margin:0;min-height:100%;background:var(--cream);color:var(--ink);overflow-x:hidden}
+html.walk-mode,body.in-walk{height:100%;overflow:hidden}
+/* the page claims sideways drags for walking the hill only while walking; overview scrolls normally */
+body.in-walk,.panel{touch-action:pan-y pinch-zoom}
+.zoomed body.in-walk,.zoomed .panel{touch-action:auto}
 body{font:400 16px/1.55 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;font-kerning:normal;-webkit-font-smoothing:antialiased}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
 button:disabled{cursor:default;opacity:.38}
 a{color:inherit}
-canvas#c{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+.hero-stage{position:relative;width:100%;height:92svh;min-height:560px;max-height:880px;overflow:hidden;border-bottom:1px solid var(--rule)}
+body.in-walk .hero-stage{position:fixed;inset:0;height:100vh;max-height:none;border-bottom:0;z-index:1}
+canvas#c{position:absolute;inset:0;width:100%;height:100%;display:block}
 .wmfont{font-family:"Archivo Black","Arial Black","Inter",system-ui,sans-serif;font-weight:400;font-synthesis:none;letter-spacing:-.035em}
 
-header{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:28px;padding:calc(18px + var(--sat)) max(48px,var(--sar)) 18px max(48px,var(--sal));z-index:3}
+header{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:24px;padding:calc(14px + var(--sat)) max(48px,var(--sar)) 14px max(48px,var(--sal));z-index:20;background:rgba(251,246,236,.88);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border-bottom:1px solid var(--rule)}
+body.in-walk header{background:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;border-bottom:0;padding-top:calc(18px + var(--sat));padding-bottom:18px}
 header .wm{font-size:22px;line-height:1;flex:none}
+header .ov-nav{display:flex;align-items:center;gap:20px;font-size:14px;font-weight:500;white-space:nowrap;min-width:0;overflow-x:auto;scrollbar-width:none}
+header .ov-nav::-webkit-scrollbar{display:none}
+header .ov-nav a{position:relative;color:var(--mute);text-decoration:none;padding:4px 0 5px;transition:color var(--t-state) var(--ease);flex:none}
+header .ov-nav a::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.5px;background:currentColor;transform:scaleX(0);transform-origin:left;opacity:.35;transition:transform var(--t-state) var(--ease),opacity var(--t-state) var(--ease)}
+header .ov-nav a:hover,header .ov-nav a:focus-visible{color:var(--ink)}
+header .ov-nav a:hover::after,header .ov-nav a:focus-visible::after{transform:scaleX(1)}
 header .idx{flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
 header .idx::-webkit-scrollbar{display:none}
 header .strip{position:relative;display:flex;gap:20px;font-size:14px;font-weight:500;white-space:nowrap}
@@ -129,14 +140,16 @@ header .gh svg{width:20px;height:20px;display:block;transition:transform var(--t
 header .gh:hover svg,header .gh:focus-visible svg{transform:rotate(-8deg) scale(1.06)}
 header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
 
-.land{position:fixed;left:max(48px,var(--sal));bottom:52px;z-index:2;pointer-events:none}
+.land{position:absolute;left:max(48px,var(--sal));bottom:44px;z-index:2;pointer-events:none;max-width:min(620px,calc(100% - 96px))}
 .land>*{pointer-events:auto}
-.land h1{margin:0;font-size:clamp(76px,12.5vw,176px);line-height:.8}
-.land .head{margin:24px 0 0 4px;font-size:26px;line-height:1.2;font-weight:600;letter-spacing:-.02em;color:var(--ink);text-wrap:balance}
-.land .tag{margin:10px 0 0 5px;max-width:40ch;font-size:16px;line-height:1.5;font-weight:400;color:#3d3b35;text-wrap:pretty}
-.land .actions{margin:24px 0 0 4px;display:flex;flex-direction:column;align-items:flex-start;gap:10px}
-.land .row{display:flex;flex-wrap:wrap;align-items:baseline;gap:28px}
-.land .in,.land .sublink{margin:0;font-size:16px;font-weight:500;line-height:1.4;padding-bottom:3px;border-bottom:1.5px solid var(--ink);border-radius:1px}
+.land h1{margin:0;font-size:clamp(72px,11vw,156px);line-height:.82}
+.land .head{margin:20px 0 0 4px;font-size:25px;line-height:1.2;font-weight:600;letter-spacing:-.02em;color:var(--ink);text-wrap:balance}
+.land .tag{margin:10px 0 0 5px;max-width:46ch;font-size:16px;line-height:1.5;font-weight:400;color:#3d3b35;text-wrap:pretty}
+.land .install-pill{margin:16px 0 0 4px;display:inline-flex;align-items:center;gap:10px;padding:7px 12px;border-radius:8px;background:rgba(251,246,236,.92);border:1px solid var(--rule-strong);font:500 13px/1.3 var(--mono);color:var(--ink);max-width:100%;overflow-x:auto}
+.land .install-pill .plat{color:var(--mute);font-weight:400}
+.land .actions{margin:20px 0 0 4px;display:flex;flex-direction:column;align-items:flex-start;gap:10px}
+.land .row{display:flex;flex-wrap:wrap;align-items:baseline;gap:24px}
+.land .in,.land .sublink{margin:0;font-size:15.5px;font-weight:500;line-height:1.4;padding-bottom:3px;border-bottom:1.5px solid var(--ink);border-radius:1px}
 .land .in{display:inline-flex;gap:10px;align-items:center;transition:border-color var(--t-state) var(--ease)}
 .land .in:focus-visible,.land .sublink:focus-visible{outline-offset:6px}
 .land .in span{transition:transform var(--t-state) var(--ease)}
@@ -144,6 +157,60 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
 .land .in:active span{transform:translateX(10px);transition-duration:var(--t-press)}
 .land .sublink{color:var(--mute);text-decoration:none;border-bottom-color:rgba(17,17,15,.3);transition:color var(--t-state) var(--ease),border-color var(--t-state) var(--ease)}
 .land .sublink:hover,.land .sublink:focus-visible{color:var(--ink);border-bottom-color:var(--ink)}
+
+/* Scrollable overview: unmistakably separated Core Language & Runtime vs Built on Top, in Hirsel */
+main.overview{position:relative;z-index:2;background:var(--cream)}
+.band{padding:76px max(48px,var(--sar)) 84px max(48px,var(--sal));scroll-margin-top:64px}
+.band-inner{max-width:1140px;margin:0 auto}
+.band-core{background:var(--cream)}
+.band-top{background:var(--ground);border-top:3px solid var(--ink);position:relative}
+.band-top::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--red);width:min(280px,38vw)}
+.band-head{max-width:74ch;margin-bottom:36px}
+.band-eyebrow{display:inline-flex;align-items:center;gap:9px;margin:0 0 12px;font:600 12px/1 var(--mono);letter-spacing:.09em;text-transform:uppercase;color:var(--red)}
+.band-eyebrow .num{display:inline-flex;align-items:center;justify-content:center;padding:3px 8px;border-radius:999px;background:var(--ink);color:var(--cream);font-size:11px;letter-spacing:.04em}
+.band-top .band-eyebrow .num{background:var(--red);color:var(--cream)}
+.band-head h2{margin:0 0 12px;font-family:"Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-weight:400;font-synthesis:none;font-size:clamp(30px,3.8vw,44px);line-height:1.06;letter-spacing:-.03em;color:var(--ink)}
+.band-head p{margin:0;font-size:17px;line-height:1.58;color:var(--body);text-wrap:pretty}
+
+.card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.card{display:flex;flex-direction:column;gap:12px;padding:24px 26px;border-radius:14px;background:var(--paper);border:1px solid var(--rule);scroll-margin-top:78px}
+.band-top .card{background:var(--cream);border:1px solid var(--rule-strong);border-top:3px solid var(--ink)}
+.card-top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.card h3{margin:0;font-family:"Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-weight:400;font-synthesis:none;font-size:21px;line-height:1.18;letter-spacing:-.02em;color:var(--ink)}
+.card-tag{font:500 11.5px/1 var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--mute);padding:4px 8px;border-radius:999px;background:rgba(17,17,15,.06)}
+.card-tag.new{background:var(--red-soft);color:var(--red)}
+.card p{margin:0;font-size:15px;line-height:1.6;color:var(--body);text-wrap:pretty}
+.card ul{margin:0;padding-left:19px;font-size:14.5px;line-height:1.58;color:var(--body)}
+.card li{margin:0 0 6px}
+.card li:last-child{margin-bottom:0}
+.card code{font-family:var(--mono);font-size:.86em;background:rgba(17,17,15,.06);border:1px solid rgba(17,17,15,.08);padding:.08em .34em;border-radius:4px;color:var(--ink)}
+.card .note{padding:10px 13px;border-radius:8px;background:rgba(17,17,15,.04);border-left:3px solid var(--umber);font-size:13.5px;line-height:1.54;color:var(--body)}
+.card .note.scope{border-left-color:var(--red);background:var(--red-soft)}
+.card .quiet{font-size:13.5px;color:var(--mute)}
+.card-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:2px 0}
+.stat-box{padding:10px 12px;border-radius:9px;background:var(--cream);border:1px solid var(--rule)}
+.stat-box .sv{display:block;font-family:"Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-size:20px;line-height:1.1;color:var(--moss);letter-spacing:-.02em}
+.stat-box .sl{display:block;margin-top:3px;font:500 11.5px/1.3 var(--mono);color:var(--mute)}
+.card-foot{margin-top:auto;padding-top:10px;border-top:1px solid var(--rule);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;font-size:13.5px;font-weight:500}
+.card-link{color:var(--ink);text-decoration:none;border-bottom:1.5px solid rgba(203,39,31,.45);padding-bottom:1px;transition:color var(--t-state) var(--ease),border-color var(--t-state) var(--ease)}
+.card-link:hover,.card-link:focus-visible{color:var(--red);border-bottom-color:var(--red)}
+.walk-btn{display:inline-flex;align-items:center;gap:5px;font-size:13.5px;font-weight:500;color:var(--mute);border-bottom:1px solid var(--rule);padding-bottom:1px;transition:color var(--t-state) var(--ease),border-color var(--t-state) var(--ease)}
+.walk-btn:hover,.walk-btn:focus-visible{color:var(--ink);border-bottom-color:var(--ink)}
+
+.stack-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+.pkg-list{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}
+.pkg-chip{font:500 12px/1.2 var(--mono);padding:4px 8px;border-radius:6px;background:var(--paper);border:1px solid var(--rule);color:var(--ink)}
+.pkg-chip.bundle{background:var(--ground);border-color:var(--rule-strong)}
+.pkg-chip.ffi{background:rgba(128,85,42,.1);border-color:rgba(128,85,42,.28);color:var(--umber)}
+
+.site-foot{padding:44px max(48px,var(--sar)) 56px max(48px,var(--sal));background:var(--cream);border-top:1px solid var(--rule)}
+.foot-inner{max-width:1140px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:18px}
+.foot-left{display:flex;flex-direction:column;gap:6px}
+.foot-left .wm{font-size:22px;line-height:1}
+.foot-left p{margin:0;font-size:13.5px;color:var(--mute)}
+.foot-links{display:flex;flex-wrap:wrap;gap:18px;font-size:14px;font-weight:500;color:var(--mute)}
+.foot-links a{text-decoration:none;border-bottom:1px solid transparent;padding-bottom:2px;transition:color var(--t-state) var(--ease),border-color var(--t-state) var(--ease)}
+.foot-links a:hover,.foot-links a:focus-visible{color:var(--ink);border-bottom-color:var(--ink)}
 
 .panel{position:fixed;left:max(48px,var(--sal));top:50%;transform:translateY(-50%);width:340px;z-index:2}
 .panel h2{margin:0;font:400 31px/1.1 "Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-synthesis:none;letter-spacing:-.025em;text-wrap:balance}
@@ -223,23 +290,39 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
   .panel .body{max-width:62ch}
   .walk{margin-top:16px;padding-top:12px}
 }
+@media (max-width:920px){
+  .card-grid,.stack-grid{grid-template-columns:1fr}
+  .band{padding:56px max(24px,var(--sar)) 64px max(24px,var(--sal))}
+  .site-foot{padding:36px max(24px,var(--sar)) 44px max(24px,var(--sal))}
+}
 @media (max-width:700px){
-  header{padding:calc(12px + var(--sat)) max(16px,var(--sar)) 0 max(16px,var(--sal));gap:12px}
+  header{padding:calc(10px + var(--sat)) max(14px,var(--sar)) 10px max(14px,var(--sal));gap:10px}
+  body.in-walk header{padding:calc(12px + var(--sat)) max(16px,var(--sar)) 0 max(16px,var(--sal))}
   /* phone targets are 44px; the negative margins keep the header the height it was, so the ridge stays put */
-  header .wm{font-size:19px;padding:13px 8px 13px 0;margin:-13px -8px -13px 0}
+  header .wm{font-size:19px;padding:10px 6px 10px 0;margin:-10px -6px -10px 0}
+  header .ov-nav{gap:12px;font-size:13px}
+  header .ov-nav .hide-sm{display:none}
   header .idx{display:none}
-  header .links{gap:8px}
-  header .copy{font-size:13px;padding:6px 10px}
+  header .links{gap:6px}
+  header .copy{font-size:12.5px;padding:6px 8px}
+  header .copy .lbl{display:none}
   header .copy::before{content:"";position:absolute;inset:-8px -4px}
-  header .gh{width:44px;height:44px;margin:-4px -12px -4px 0}
-  .land{left:max(16px,var(--sal));right:max(16px,var(--sar));bottom:calc(34px + var(--sab))}
-  .land h1{font-size:84px}
-  .land .head{font-size:21px;margin-top:16px;margin-left:3px}
-  .land .tag{font-size:15px;margin-top:8px;margin-left:3px}
-  .land .actions{margin-top:18px;margin-left:3px;gap:8px}
-  .land .row{gap:24px}
-  .land .in,.land .sublink{position:relative}
-  .land .in::after,.land .sublink::after{content:"";position:absolute;inset:-10px -12px -8px}
+  header .gh{width:40px;height:40px;margin:-4px -8px -4px 0}
+  .hero-stage{height:86svh;min-height:500px}
+  .land{left:max(16px,var(--sal));right:max(16px,var(--sar));bottom:24px;max-width:none}
+  .land h1{font-size:68px}
+  .land .head{font-size:20px;margin-top:14px;margin-left:2px}
+  .land .tag{font-size:14.5px;margin-top:8px;margin-left:2px}
+  .land .install-pill{margin-top:12px;margin-left:2px;font-size:11.5px;padding:6px 10px}
+  .land .install-pill .plat{display:none}
+  .land .actions{margin-top:14px;margin-left:2px;gap:8px}
+  .land .row{gap:18px}
+  .land .in,.land .sublink{position:relative;font-size:14.5px}
+  .land .in::after,.land .sublink::after{content:"";position:absolute;inset:-8px -8px -6px}
+  .band{padding:44px max(16px,var(--sar)) 52px max(16px,var(--sal))}
+  .card{padding:18px 18px}
+  .card-stats{grid-template-columns:1fr}
+  .site-foot{padding:32px max(16px,var(--sar)) 44px max(16px,var(--sal))}
   .panel{left:max(16px,var(--sal));right:max(16px,var(--sar));top:auto;bottom:calc(var(--bar) + var(--sab) + 12px);transform:none;width:auto;max-height:52vh;overflow:auto;overscroll-behavior:contain}
   .panel h2{font-size:24px}
   .slot{margin-top:10px}
@@ -325,104 +408,23 @@ header .menu:active{background:rgba(17,17,15,.06)}
   @starting-style{.list[open]{opacity:0}}
 }
 </style>
-<!-- without scripts there is no hill to walk: the same words, as one quiet page -->
+<!-- without scripts: keep the full static page, hide only the interactive canvas and walk buttons -->
 <noscript><style>
-html,body{height:auto;overflow:auto}
-#c,header,.land,.panel,.bar,.list{display:none!important}
-.ns{max-width:38rem;margin:0 auto;padding:56px max(24px,var(--sar)) 72px max(24px,var(--sal))}
-.ns h1{margin:0;font-size:clamp(64px,14vw,112px);line-height:.85}
-.ns .head{margin:20px 0 0 3px;font-size:24px;line-height:1.25;font-weight:600;letter-spacing:-.02em}
-.ns .tag{margin:10px 0 0 4px;max-width:40ch;color:#3d3b35;text-wrap:pretty}
-.ns section{margin-top:44px;padding-top:20px;border-top:1px solid var(--rule)}
-.ns h2{margin:0;font:400 26px/1.1 "Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-synthesis:none;letter-spacing:-.025em}
-.ns p{margin:10px 0 0;color:#2b2a26;max-width:62ch;text-wrap:pretty}
-.ns .lead{margin-top:8px;font-size:18px;font-weight:600;color:var(--ink);letter-spacing:-.01em}
-.ns b{font-weight:600;color:var(--ink)}
-.ns pre{margin:16px 0 0;padding:14px 16px;border-radius:8px;background:var(--ground);overflow-x:auto;font:400 13px/1.6 ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;color:var(--ink)}
-.ns .plat{margin-top:8px;font-size:13.5px;color:var(--mute)}
-.ns .out{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);font-size:14px;font-weight:500}
-.ns .out a{color:var(--mute);text-decoration:none}
-.ns .out a:hover,.ns .out a:focus-visible{color:var(--ink)}
+#c,#walkIn,.walk-btn,#menuBtn,#copyAgent,.panel,.bar,.list{display:none!important}
+.hero-stage{height:auto;min-height:0;max-height:none;padding:96px max(48px,var(--sar)) 48px max(48px,var(--sal))}
+.land{position:static;max-width:42rem}
 </style></noscript>
 </head>
 <body>
-<canvas id="c" aria-hidden="true"></canvas>
-<noscript>
-  <main class="ns">
-    <h1 class="wmfont">hirsel</h1>
-    <p class="head">Good fences make fast systems.</p>
-    <p class="tag">A native systems language for coding agents, with explicit authority, logical byte budgets and recorded replay.</p>
-    <p class="plat">Install: <code>curl -fsSL https://hirsel.ai/install.sh | sh</code> &middot; Linux x86_64 &middot; glibc 2.28+ &middot; Apple Silicon macOS in progress</p>
-    <pre><code>pub fn main(out: Stdout) -> Result[(), WriteError] waits {
-  let mut names: List[String] = list.new()
-  list.push(mut names, "ada")
-  list.push(mut names, "grace")
-  stdout.write(out, "ada grace 2\n")
-}</code></pre>
-    <section>
-      <h2>Safe</h2>
-      <p class="lead">Nothing is left lying on the hill.</p>
-      <p>An accepted program has no undefined behaviour, no data races, no use after free and no leaked resources. When a sheep leaves, its ground goes with it.</p>
-      <pre><code>fn keep(take name: String) -> String {
-  let kept = name
-  name       // refused: OWN-5, name moved
-}</code></pre>
-    </section>
-    <section>
-      <h2>Parallel</h2>
-      <p class="lead">Every task keeps to its own ground.</p>
-      <p>Tasks share nothing. A value passes from one task to another only by moving through a spawn, a channel or a join. The only memory two tasks can both read is the immutable payload of an Arc.</p>
-    </section>
-    <section>
-      <h2>Memory</h2>
-      <p class="lead">The type decides who frees.</p>
-      <p>An ordinary type has one owner, and its value is freed when the owner goes away. Data that dies together lives in one region and is freed at once. Sharing is opt-in and counted, and a move never copies the data a value owns.</p>
-      <pre><code>fn width(take s: String) -> u64 {
-  let owned = s        // moved: one owner
-  region r {
-    let t = text.copy_in(r, owned)
-    text.len(t)
-  }                    // r freed at once
-}</code></pre>
-    </section>
-    <section>
-      <h2>Bounded</h2>
-      <p class="lead">A full patch refuses the next mouthful.</p>
-      <p>Every allocation is made against a limit. Running out raises Capacity, an ordinary failure the program can catch and recover from. Bound scopes nest one limit inside another.</p>
-      <pre><code>fn fill() -> Result[List[u64], Capacity] {
-  bound bytes 64 { list.with_capacity(100) }
-}</code></pre>
-    </section>
-    <section>
-      <h2>Deterministic</h2>
-      <p class="lead">One run, every time.</p>
-      <p>Given the same outside inputs and limits, a program behaves identically on every engine and build, down to the moment it runs out of memory. No flag, build mode, optimiser or engine changes what a program means. A run can be recorded from outside, without altering the program, and replayed.</p>
-    </section>
-    <section>
-      <h2>Explicit authority</h2>
-      <p class="lead">Only a sheep handed the key goes through the gate.</p>
-      <p>Files, network, clocks, randomness, tasks and output are values passed as parameters. A function holds exactly the authority it is handed.</p>
-      <pre><code>fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
-fn sneak() -> u64 { host.mono_ns() } // refused: CAP-1, no Clock</code></pre>
-    </section>
-    <section>
-      <h2>Local</h2>
-      <p class="lead">Each sheep needs only its own ground.</p>
-      <p>Correct code needs no global knowledge. Checking a definition reads only its own body and the declarations it names, and each refusal names one rule and one site.</p>
-    </section>
-    <section>
-      <h2>Fast</h2>
-      <p class="lead">A straight line across the hill.</p>
-      <p>Native code through Cranelift and LLVM, with no garbage collector.</p>
-      <p><b>Build.</b> The compiler checks and lowers each definition once and caches it by content, so an edit rechecks only that definition and callers of a changed signature.</p>
-      <p><b>Run.</b> Every type declares how its values are represented, so costs follow from the declaration, not from an analysis. A region is freed at once, with no per-node walk.</p>
-    </section>
-    <p class="out"><a href="/docs/">Docs</a> &middot; <a href="/docs/std/">Standard library</a> &middot; <a href="https://github.com/SamGalanakis/hirsel">Source on GitHub &rarr;</a></p>
-  </main>
-</noscript>
-
 <header>
-  <button class="wm wmfont" id="wm" aria-label="hirsel, back to the hill" hidden>hirsel</button>
+  <button class="wm wmfont" id="wm" aria-label="Hirsel home">hirsel</button>
+  <nav class="ov-nav" id="ovNav" aria-label="Overview">
+    <a href="#core" class="hide-sm">Core</a>
+    <a href="#built-on-top" class="hide-sm">Built on Top</a>
+    <a href="/docs/">Learn</a>
+    <a href="/docs/spec/" class="hide-sm">Spec</a>
+    <a href="/benchmarks/">Benchmarks</a>
+  </nav>
   <nav class="idx" id="idx" aria-label="Properties" hidden>
     <div class="strip" id="strip">
       <button data-v="safe">Safe</button>
@@ -448,17 +450,200 @@ fn sneak() -> u64 { host.mono_ns() } // refused: CAP-1, no Clock</code></pre>
   </nav>
 </header>
 
-<section class="land" id="land">
-  <h1 class="wmfont">hirsel</h1>
-  <p class="head">Good fences make fast systems.</p>
-  <p class="tag">A native systems language for coding agents, with explicit authority, logical byte budgets and recorded replay.</p>
-  <div class="actions">
-    <div class="row">
-      <button class="in" id="walkIn">Take a walk <span aria-hidden="true">&rarr;</span></button>
-      <a class="sublink" href="/docs/">Docs</a>
+<div class="hero-stage" id="heroStage">
+  <canvas id="c" aria-hidden="true"></canvas>
+  <section class="land" id="land">
+    <h1 class="wmfont">hirsel</h1>
+    <p class="head">Good fences make fast systems.</p>
+    <p class="tag">A zero-GC native systems language with explicit capabilities, logical byte and step budgets, deterministic execution, and recorded replay.</p>
+    <div class="install-pill"><code>curl -fsSL https://hirsel.ai/install.sh | sh</code><span class="plat">Linux x86_64</span></div>
+    <div class="actions">
+      <div class="row">
+        <button class="in" id="walkIn">Take a walk <span aria-hidden="true">&rarr;</span></button>
+        <a class="sublink" href="#core">Core language</a>
+        <a class="sublink" href="#built-on-top">Built on top</a>
+        <a class="sublink" href="/docs/">Docs</a>
+      </div>
     </div>
-  </div>
-</section>
+  </section>
+</div>
+
+<main class="overview" id="overview">
+  <section class="band band-core" id="core" aria-labelledby="core-heading">
+    <div class="band-inner">
+      <div class="band-head">
+        <p class="band-eyebrow"><span class="num">01</span> Core Language &amp; Runtime</p>
+        <h2 id="core-heading">Core Language &amp; Runtime</h2>
+        <p>Everything in this section is enforced by the Hirsel compiler and runtime itself: memory safety, capability parameters, logical budgets, deterministic execution, simulation hooks, and content-addressed builds.</p>
+      </div>
+
+      <div class="card-grid">
+        <article class="card" id="safe">
+          <div class="card-top"><h3>Safe</h3><span class="card-tag">OWN-1 &middot; FFI-1</span></div>
+          <p>An accepted Hirsel program has no undefined behaviour, no data races, no use after free, and no leaked resources. Types declare their ownership representation once, and values are freed deterministically without a garbage collector.</p>
+          <p class="note">Native C libraries called behind <code>Foreign</code> are trusted, not checked (<code>FFI-1</code>): safety guarantees hold while foreign code keeps its native contract.</p>
+          <div class="card-foot">
+            <a class="card-link" href="/docs/spec/ownership/">Ownership spec</a>
+            <button class="walk-btn" type="button" data-walk="safe">Walk this &rarr;</button>
+          </div>
+        </article>
+
+        <article class="card" id="deterministic">
+          <div class="card-top"><h3>Deterministic</h3><span class="card-tag">SEM-8 &middot; CAP-9</span></div>
+          <p>Given the same outside inputs, replay values, and limits, every run of one build behaves identically — down to its steps and where it runs out of memory. Across engines and builds, values, output, and host effects match.</p>
+          <p class="note">Applies to pure Hirsel and host-provider code; excludes <code>Foreign</code> (FFI) code and runs stopped from outside (<code>SEM-8</code>, <code>FFI-8</code>).</p>
+          <div class="card-foot">
+            <a class="card-link" href="/docs/spec/semantics/#sem-8-determinism">SEM-8 contract</a>
+            <button class="walk-btn" type="button" data-walk="deterministic">Walk this &rarr;</button>
+          </div>
+        </article>
+
+        <article class="card" id="simulate">
+          <div class="card-top"><h3>Simulate</h3><span class="card-tag new">std.sim &middot; std.prop</span></div>
+          <p>Because capabilities are ordinary values, tests swap real host providers for <code>std.sim</code> simulators without altering application code: a virtual clock and SplitMix64 decision stream (<code>std.sim.world</code>), network partitions and packet loss (<code>std.sim.net</code>), filesystem faults and <code>crash</code> recovery (<code>std.sim.fs</code>), plus UDP, <code>exec</code>, and S3 simulators.</p>
+          <ul>
+            <li>Run seeded sweeps with <code>hirsel test --sim --seeds N</code> or replay a single failure with <code>--seed S</code>.</li>
+            <li>Pair with <code>std.prop</code> shrinking, <code>hirsel test --coverage</code>, <code>std.refuse.sweep</code> refusal sweeps, coverage-steered campaigns, and external record/replay (<code>hirsel run --record</code> / <code>hirsel replay</code>).</li>
+          </ul>
+          <div class="card-foot">
+            <a class="card-link" href="/docs/#6-deterministic-sim-clock-network-testing-and-property-laws">Cookbook &sect;6: Simulation &amp; laws &rarr;</a>
+            <a class="card-link" href="/docs/#record-and-replay">Record &amp; replay</a>
+          </div>
+        </article>
+
+        <article class="card" id="authority">
+          <div class="card-top"><h3>Capability security</h3><span class="card-tag">CAP-1 &middot; NET-1 &middot; EXEC-1</span></div>
+          <p>Files, network, clocks, randomness, environment variables, secrets, child processes, foreign interfaces, and tasks arrive only as explicit parameters.</p>
+          <ul>
+            <li><code>Dir</code> resolves every Linux path traversal with <code>openat2(RESOLVE_BENEATH)</code> and no fallback.</li>
+            <li><code>--grant 'Net=...'</code> enforces explicit CIDR and port allowlists; <code>Secret</code> bytes remain unreadable to Hirsel code.</li>
+            <li>Missing grants fail before <code>main</code> with exit <code>103</code>, naming every ungranted parameter at once.</li>
+          </ul>
+          <p class="note">Honest boundaries: TLS uses <code>rustls</code>, child processes started through <code>Exec</code> are not confined (<code>EXEC-1</code>), and Hirsel does not apply seccomp or Landlock.</p>
+          <div class="card-foot">
+            <a class="card-link" href="/docs/spec/capabilities/">Capabilities spec</a>
+            <button class="walk-btn" type="button" data-walk="authority">Walk this &rarr;</button>
+          </div>
+        </article>
+
+        <article class="card" id="local">
+          <div class="card-top"><h3>Content-addressed builds &amp; deploys</h3><span class="card-tag">LANG-8 &middot; PROG-10</span></div>
+          <p>Checking a definition reads only its own body and the signatures it names, backed by a per-definition Merkle cache so edits recheck only changed bodies and callers of changed signatures.</p>
+          <ul>
+            <li>Hash-addressed code (<code>PROG-10</code>) with capability-typed purity: functions hold no ambient authority.</li>
+            <li><code>hirsel publish</code> and <code>hirsel deploy</code> transfer only missing code objects by hash; <code>hirsel.lock</code> pins dependencies by <code>sha256:</code> roots.</li>
+          </ul>
+          <div class="card-foot">
+            <a class="card-link" href="/docs/spec/programs/#prog-10-code-addresses">PROG-10 code addresses</a>
+            <button class="walk-btn" type="button" data-walk="local">Walk this &rarr;</button>
+          </div>
+        </article>
+
+        <article class="card" id="memory">
+          <div class="card-top"><h3>Memory, data layout &amp; tooling</h3><span class="card-tag">MEM-1 &middot; MEM-30</span></div>
+          <p>Value semantics with declared representation: <code>region</code> arenas freed at once, <code>Columns[T]</code> struct-of-arrays storage, <code>Inline[T, N]</code>, portable <code>Simd[T, N]</code>, and nested <code>bound bytes</code> and <code>bound steps</code> limits that raise catchable <code>Capacity</code> or <code>OutOfTime</code>.</p>
+          <ul>
+            <li>Built-in <code>hirsel prof</code> for CPU sampling, compiler remarks, and exact replay memory profiles.</li>
+            <li>Cross-compile to <code>aarch64-unknown-linux-gnu</code> out of the box with the bundled link kit.</li>
+          </ul>
+          <p class="quiet">Selected <code>std</code> components carry Lean proofs.</p>
+          <div class="card-foot">
+            <a class="card-link" href="/docs/#tooling">Tooling &amp; cross-compile</a>
+            <button class="walk-btn" type="button" data-walk="memory">Walk this &rarr;</button>
+          </div>
+        </article>
+
+        <article class="card" id="fast">
+          <div class="card-top"><h3>Fast</h3><span class="card-tag">Cranelift &middot; LLVM</span></div>
+          <p>Native code via Cranelift (dev) and LLVM (<code>--release</code>), with no garbage collector. Headline ratios against Rust from the latest board (<code>48e50bad</code>, 2026-11-25; Hirsel keeps bounds, overflow, and step checks on vs Rust bounds-only):</p>
+          <div class="card-stats">
+            <div class="stat-box"><span class="sv">0.78&times;</span><span class="sl">AWFY insn (11/14)</span></div>
+            <div class="stat-box"><span class="sv">0.81&times;</span><span class="sl">LangArena s (32/50)</span></div>
+            <div class="stat-box"><span class="sv">0.91&times;</span><span class="sl">Warm edit compile</span></div>
+          </div>
+          <p class="quiet">Some rows trail Rust (e.g. <code>Json::Generate</code>, <code>LogParser</code>, compile instructions, Checkbox throughput/unsubscribed RSS), and the latest board reports <code>Passed: no</code>.</p>
+          <div class="card-foot">
+            <a class="card-link" href="/benchmarks/">Full benchmarks &amp; methodology &rarr;</a>
+            <button class="walk-btn" type="button" data-walk="fast">Walk this &rarr;</button>
+          </div>
+        </article>
+
+        <article class="card" id="parallel">
+          <div class="card-top"><h3>Parallel</h3><span class="card-tag">CONC-2 &middot; CONC-15</span></div>
+          <p>Tasks share nothing. Values move between tasks through <code>task.spawn</code>, bounded channels, or joins, and immutable sharing is explicit via <code>Arc</code>. For strict budget isolation, <code>task.spawn_unit</code> runs work in an independent memory-accounted unit.</p>
+          <div class="card-foot">
+            <a class="card-link" href="/docs/spec/tasks/">Tasks spec</a>
+            <button class="walk-btn" type="button" data-walk="parallel">Walk this &rarr;</button>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="band band-top" id="built-on-top" aria-labelledby="built-heading">
+    <div class="band-inner">
+      <div class="band-head">
+        <p class="band-eyebrow"><span class="num">02</span> Built on Top, in Hirsel</p>
+        <h2 id="built-heading">Built on Top, in Hirsel</h2>
+        <p>These are not compiler magic or runtime primitives — they are ordinary Hirsel packages written in Hirsel itself on top of the core language, capabilities, and budgets above.</p>
+      </div>
+
+      <div class="stack-grid">
+        <article class="card" id="serve">
+          <div class="card-top"><h3>Serve &mdash; the durable server platform</h3><span class="card-tag">store &middot; runner &middot; platform</span></div>
+          <p>A batteries-included durable server stack composed of <code>store</code>, <code>runner</code>, <code>platform</code>, and the <code>hirsel host</code>, <code>hirsel deploy</code>, <code>hirsel dev</code>, and <code>hirsel sdk ts</code> CLI commands.</p>
+          <ul>
+            <li><strong>Durable storage:</strong> copy-on-write B+tree with a checksummed journal (single writer, no MVCC).</li>
+            <li><strong>Rich indexing &amp; projections:</strong> secondary, unique, aggregate, BM25 full-text (<code>search</code>), exact-vector (<code>vector</code>), and Hilbert-spatial (<code>spatial</code>) indexes; row TTL expiry; incremental projections.</li>
+            <li><strong>Migrations &amp; live sync:</strong> transactional <code>Migrate</code> and <code>preview_migration</code> (<code>hirsel dry-run</code>); live diff subscriptions; typed <code>Rooms</code>.</li>
+            <li><strong>TypeScript SDK:</strong> <code>hirsel sdk ts</code> generates typed clients with reconnect recovery and optimistic writes.</li>
+          </ul>
+          <p class="note scope"><strong>Single machine, pre-release.</strong> Single-writer transactions only — no MVCC, no multi-node clustering, and no automatic release rollback.</p>
+          <div class="card-foot">
+            <a class="card-link" href="/docs/#4-store-typed-table-secondary-index-and-transactions">Cookbook &sect;4: Store &rarr;</a>
+            <a class="card-link" href="/docs/spec/launch/">Launch &amp; deploy spec</a>
+          </div>
+        </article>
+
+        <article class="card" id="media">
+          <div class="card-top"><h3>Real-time media &amp; networking in pure Hirsel</h3><span class="card-tag">~62k lines &middot; no FFI</span></div>
+          <p>A complete real-time media and transport stack written in <strong>62,418 lines of pure Hirsel</strong> across 11 packages with zero <code>Foreign</code> code, so <code>hirsel test --sim</code> and recorded replay cover it end to end:</p>
+          <ul>
+            <li><strong>Transport &amp; security:</strong> DTLS 1.2 (<code>dtls</code>), SRTP/SRTCP (<code>srtp</code>), RTP/RTCP with RTX, BWE, and pacing (<code>rtp</code>), jitter buffer (<code>rtp_jitter</code>), STUN/ICE-lite (<code>stun_ice</code>), TURN client &amp; relay (<code>turn</code>), and RFC 9605 SFrame E2EE (<code>sframe</code>).</li>
+            <li><strong>WebRTC SFU &amp; containers:</strong> <code>webrtc_sfu</code> (simulcast, VP9/AV1 SVC, dynacast, Opus RED, E2EE clear-range routing), codec bitstream parsers (<code>media_bits</code>), Ogg/MP4/WebM containers (<code>media_container</code>), and room recording (<code>media_record</code>).</li>
+          </ul>
+          <p class="note"><strong>Thin C FFI wrappers:</strong> <code>opus</code>, <code>av1</code>, <code>h264</code>, <code>image_jpeg</code>, and <code>image_webp</code> are thin C FFI wrappers behind <code>Foreign</code> (trusted under <code>FFI-1</code>).</p>
+          <p class="quiet"><strong>Shipped in the toolchain bundle</strong> (17 packages; bind by <code>major = 1</code>, per <code>tools/buck2/defs.bzl</code>):</p>
+          <div class="pkg-list">
+            <span class="pkg-chip bundle">std</span><span class="pkg-chip bundle">store</span><span class="pkg-chip bundle">runner</span><span class="pkg-chip bundle">platform</span><span class="pkg-chip bundle">search</span><span class="pkg-chip bundle">mcp</span><span class="pkg-chip bundle">webrtc_sfu</span><span class="pkg-chip bundle">dtls</span><span class="pkg-chip bundle">srtp</span><span class="pkg-chip bundle">rtp</span><span class="pkg-chip bundle">rtp_jitter</span><span class="pkg-chip bundle">turn</span><span class="pkg-chip bundle">stun_ice</span><span class="pkg-chip bundle">sframe</span><span class="pkg-chip bundle">media_bits</span><span class="pkg-chip bundle">media_container</span><span class="pkg-chip bundle">media_record</span>
+          </div>
+          <p class="quiet">Additional in-repo packages under <code>core/programs/</code> (bind by path): <code>vector</code>, <code>spatial</code>, <code>video_packager</code>, <code>image_core</code>, <code>postgres</code>, <code>jwtbind</code>, <code>toml</code>, <code>yaml</code>, <code>archive</code>, <code>tz</code>, <code>xml</code>, and the C FFI wrappers.</p>
+          <div class="card-foot">
+            <a class="card-link" href="/docs/spec/webrtc/">WebRTC SFU spec</a>
+            <a class="card-link" href="/docs/spec/dtls/">DTLS &amp; SRTP spec</a>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <footer class="site-foot">
+    <div class="foot-inner">
+      <div class="foot-left">
+        <span class="wm wmfont">hirsel</span>
+        <p>Linux x86_64 (glibc 2.28+) &middot; Apple Silicon macOS in progress &middot; MIT License</p>
+      </div>
+      <nav class="foot-links" aria-label="Footer">
+        <a href="/docs/">Learn &amp; Cookbook</a>
+        <a href="/docs/std/">Standard library</a>
+        <a href="/docs/spec/">Spec reference</a>
+        <a href="/benchmarks/">Benchmarks</a>
+        <a href="/llms.txt">llms.txt</a>
+        <a href="https://github.com/SamGalanakis/hirsel">GitHub</a>
+      </nav>
+    </div>
+  </footer>
+</main>
 
 <section class="panel" id="panel" aria-live="polite" hidden>
   <h2 id="pTitle"></h2>
@@ -520,23 +705,23 @@ const viewOf = h => ALIAS[h] || h;
 const COPY = {
   hill: ['The hill', '', ''],
   safe: ['Safe', 'Nothing is left lying on the hill.',
-    'An accepted program has no undefined behaviour, no data races, no use after free and no leaked resources. When a sheep leaves, its ground goes with it.'],
+    'An accepted program has no undefined behaviour, no data races, no use after free and no leaked resources. Native C libraries called behind Foreign are trusted, not checked (FFI-1).'],
   parallel: ['Parallel', 'Every task keeps to its own ground.',
-    'Tasks share nothing. A value passes from one task to another only by moving through a spawn, a channel or a join. The only memory two tasks can both read is the immutable payload of an Arc.'],
+    'Tasks share nothing. A value passes from one task to another only by moving through a spawn, a channel or a join. The only memory two tasks can both read is the immutable payload of an Arc, and spawn_unit isolates memory budgets across units.'],
   memory: ['Memory', 'The type decides who frees.',
-    'An ordinary type has one owner, and its value is freed when the owner goes away. Data that dies together lives in one region and is freed at once. Sharing is opt-in and counted, and a move never copies the data a value owns.'],
+    'An ordinary type has one owner, freed when its owner leaves scope. Data that dies together lives in one region and is freed at once; Columns[T] stores structs by column. Sharing is opt-in and counted, and a move never copies owned data.'],
   bounded: ['Bounded', 'A full patch refuses the next mouthful.',
-    'Every allocation is made against a limit. Running out raises Capacity, an ordinary failure the program can catch and recover from. Bound scopes nest one limit inside another.'],
+    'Every allocation is made against a byte limit (bound bytes) and loops can be capped by steps (bound steps). Running out raises Capacity or OutOfTime, ordinary failures the program can catch and recover from.'],
   deterministic: ['Deterministic', 'One run, every time.',
-    'Given the same outside inputs and limits, a program behaves identically on every engine and build, down to the moment it runs out of memory. No flag, build mode, optimiser or engine changes what a program means. A run can be recorded from outside, without altering the program, and replayed.'],
+    'Given the same outside inputs, replay values and limits, every run of one build behaves identically — down to its steps and where it runs out of memory. Across engines and builds, values, output and host effects match. Excludes Foreign (FFI) code and runs stopped from outside (SEM-8).'],
   authority: ['Explicit authority', 'Only a sheep handed the key goes through the gate.',
-    'Files, network, clocks, randomness, tasks and output are values passed as parameters. A function holds exactly the authority it is handed.'],
+    'Files, network, clocks, randomness, tasks, secrets and output are values passed as parameters. Linux Dir uses openat2(RESOLVE_BENEATH) with no fallback, Net uses explicit allowlists, Secret is unreadable, and missing grants exit 103 naming every missing grant. TLS uses rustls; Exec children are not confined (EXEC-1).'],
   local: ['Local', 'Each sheep needs only its own ground.',
-    'Correct code needs no global knowledge. Checking a definition reads only its own body and the declarations it names, and each refusal names one rule and one site.'],
+    'Checking a definition reads only its own body and the signatures it names, backed by a per-definition Merkle cache and hash-addressed code (PROG-10). hirsel publish and deploy transfer only missing objects by hash, and hirsel.lock pins sha256 roots.'],
   fast: ['Fast', 'A straight line across the hill.',
-    ['Native code through Cranelift and LLVM, with no garbage collector.',
-      ['build', 'The compiler checks and lowers each definition once and caches it by content, so an edit rechecks only that definition and callers of a changed signature.'],
-      ['run', 'Every type declares how its values are represented, so costs follow from the declaration, not from an analysis. A region is freed at once, with no per-node walk.']]],
+    ['Native code through Cranelift and LLVM, with no garbage collector. Latest board (48e50bad, Passed: no): 0.78× AWFY instructions (11/14), 0.81× LangArena wall time (32/50), and 0.91× warm edit compile vs Rust, keeping bounds, overflow and step checks on.',
+      ['build', 'Per-definition content-addressed caching checks and lowers each definition once, so an edit rechecks only that definition and callers of a changed signature.'],
+      ['run', 'Every type declares its representation, regions free at once, and Columns[T] / Simd[T, N] keep hot loops tight. See /benchmarks/ for every suite, losing row and caveat.']]],
 };
 /* In code: each property as real Hirsel, opened on request. Every program here is checked by
    `hirsel check` as shown (refusals cite the rule the checker prints); the shell lines are
@@ -982,7 +1167,9 @@ function isoGrid(cx, cy, cols, rows, cw) {
 const SC = {};
 
 SC.hill = (g) => {
-  const land = document.getElementById('land').getBoundingClientRect();
+  const st = document.getElementById('heroStage').getBoundingClientRect();
+  const lr = document.getElementById('land').getBoundingClientRect();
+  const land = { left: lr.left - st.left, right: lr.right - st.left, top: lr.top - st.top };
   const ex = { l: land.left - 30, r: land.right + 96, t: land.top - (MOB ? 30 : 34) };
   /* hefting: no two sheep get edge-neighbouring diamonds, so every patch has open hill round it.
      A big screen sizes the patches so the whole flock grazes the near slope. A phone keeps them
@@ -1736,7 +1923,12 @@ const rend = Array.from({ length: N }, () => ({ x: 0, y: 0, s: 0, a: 0, face: 1,
 let snap = null, hop = new Float32Array(N);
 
 function resize() {
-  DPR = Math.min(2, window.devicePixelRatio || 1); W = innerWidth; H = innerHeight; MOB = W <= 700; STACK = W <= 900; VS = Math.max(1, Math.min(1.3, W / 1280, H / 900));
+  const stage = document.getElementById('heroStage');
+  const inWalk = document.body.classList.contains('in-walk');
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = inWalk ? innerWidth : (stage ? stage.clientWidth : innerWidth);
+  H = inWalk ? innerHeight : (stage ? stage.clientHeight : innerHeight);
+  MOB = W <= 700; STACK = W <= 900; VS = Math.max(1, Math.min(1.3, W / 1280, H / 900));
   cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   makeGrain(); SKY = null;
 }
@@ -1799,8 +1991,14 @@ function plan() {
 }
 function setView(v, first) {
   if (v === view) return;
+  const wasHill = view === null || view === 'hill';
+  const nowHill = v === 'hill';
   view = v;
   renderDom(v);
+  if (wasHill !== nowHill) {
+    resize();
+    if (!nowHill) window.scrollTo(0, 0);
+  }
   const instant = first || reduced;
   try { history.replaceState(null, '', v === 'hill' ? location.pathname : '#' + v); } catch (e) {}
   if (instant) fading = [];
@@ -1994,8 +2192,10 @@ function fitCode(root) {
 function fadeMore(el) { el.classList.toggle('more', el.scrollTop + el.clientHeight < el.scrollHeight - 1); }
 function renderDom(v, quiet) {
   const hill = v === 'hill', i = VIEWS.indexOf(v), c = COPY[v], wasHill = $('panel').hidden;
-  $('wm').hidden = hill; $('idx').hidden = hill; $('land').hidden = !hill; $('panel').hidden = hill;
-  $('bar').hidden = hill; $('menuBtn').hidden = !hill;
+  document.documentElement.classList.toggle('walk-mode', !hill);
+  document.body.classList.toggle('in-walk', !hill);
+  $('ovNav').hidden = !hill; $('idx').hidden = hill; $('land').hidden = !hill; $('overview').hidden = !hill;
+  $('panel').hidden = hill; $('bar').hidden = hill; $('menuBtn').hidden = !hill;
   [...idxBtns, ...listBtns].forEach(b => { const on = b.dataset.v === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   if (!hill) {
     fillPanel($('panel'), v);
@@ -2015,7 +2215,9 @@ function go(d) { setView(VIEWS[Math.max(0, Math.min(VIEWS.length - 1, VIEWS.inde
 
 resize();
 const h0 = location.hash.slice(1);
-setView(VIEWS.includes(viewOf(h0)) ? viewOf(h0) : 'hill', true);
+const WALK_VIEWS = VIEWS.filter(v => v !== 'hill');
+setView('hill', true);
+if (WALK_VIEWS.includes(viewOf(h0)) && !document.getElementById(h0)) setView(viewOf(h0), true);
 if (!reduced) requestAnimationFrame(frame); else still();
 const rebuild = () => {
   resize(); if (!MOB && list.open) list.close();
@@ -2032,8 +2234,9 @@ addEventListener('resize', rebuild);
 /* headings reflow when the web fonts arrive; re-measure the panel and landing block then */
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { SKY = null; if (tr >= 1) rebuild(); else refit = true; });
 
-$('wm').addEventListener('click', () => setView('hill'));
+$('wm').addEventListener('click', () => { if (view === 'hill') window.scrollTo({ top: 0, behavior: 'smooth' }); else setView('hill'); });
 $('walkIn').addEventListener('click', () => go(1));
+document.querySelectorAll('[data-walk]').forEach(b => b.addEventListener('click', () => setView(b.dataset.walk)));
 $('prevBtn').addEventListener('click', () => go(-1));
 $('nextBtn').addEventListener('click', () => go(1));
 idxBtns.forEach(b => b.addEventListener('click', () => setView(b.dataset.v)));
@@ -2088,6 +2291,8 @@ addEventListener('keydown', e => {
   /* a panel control pressed with the pointer lets go of focus when the keys walk on, so the walk
      does not light a keyboard ring on a button the reader never reached by keyboard */
   if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && ptrFocus && document.activeElement === ptrFocus) ptrFocus.blur();
+  if (e.key === 'Escape' && view !== 'hill') { setView('hill'); return; }
+  if (view === 'hill') return;
   if (e.key === 'ArrowRight') go(1); if (e.key === 'ArrowLeft') go(-1);
 });
 /* swipe: a sideways stroke walks one view, left on and right back, through the same go() as every
@@ -2098,7 +2303,7 @@ let sw = null, swiped = false;
 const touching = new Set(), vv = window.visualViewport, zoomed = () => !!vv && vv.scale > 1.01;
 if (vv) vv.addEventListener('resize', () => document.documentElement.classList.toggle('zoomed', zoomed()));
 addEventListener('pointerdown', e => {
-  swiped = false; if (e.pointerType === 'mouse') return;
+  swiped = false; if (view === 'hill' || e.pointerType === 'mouse') return;
   touching.add(e.pointerId);
   if (touching.size > 1 || list.open || zoomed() || e.clientX < SW.EDGE || e.clientX > innerWidth - SW.EDGE) { sw = null; return; }
   sw = { id: e.pointerId, x: e.clientX, y: e.clientY, lock: '', pts: [[e.clientX, e.timeStamp]] };
@@ -2145,7 +2350,7 @@ function scrollsFurther(el, dy) {
   return false;
 }
 addEventListener('wheel', e => {
-  if (e.ctrlKey || list.open) return;
+  if (view === 'hill' || e.ctrlKey || list.open) return;
   const k = e.deltaMode === 1 ? WH.LINE : e.deltaMode === 2 ? innerHeight : 1, dx = e.deltaX * k, dy = e.deltaY * k;
   if (!dy || Math.abs(dx) >= Math.abs(dy)) return;
   const t = e.timeStamp, gap = t - whAt; whAt = t;
@@ -2168,6 +2373,8 @@ const AGENT_TXT = [
   '- Primer (whole language in one page): https://hirsel.ai/primer.md',
   '- Cookbook (tested recipes): https://hirsel.ai/cookbook.md',
   '- Standard library index: https://hirsel.ai/api-index.md',
+  '- Specification reference: https://hirsel.ai/docs/spec/',
+  '- Benchmarks: https://hirsel.ai/benchmarks/',
   '- Agent skill: https://github.com/SamGalanakis/hirsel/blob/main/skills/hirsel/SKILL.md',
   '- Install (Linux x86_64, glibc 2.28+; Apple Silicon macOS in progress): curl -fsSL https://hirsel.ai/install.sh | sh',
 ].join('\n');

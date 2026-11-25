@@ -29,6 +29,8 @@ import re
 import subprocess
 import sys
 
+from site_spec import list_spec_files
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PRIMER = ROOT / "docs" / "PRIMER.md"
 COOKBOOK = ROOT / "docs" / "COOKBOOK.md"
@@ -45,8 +47,10 @@ SITEMAP_LASTMOD = "2026-11-25"
 
 SITEMAP_ENTRIES = (
     ("https://hirsel.ai/", "weekly", "1.0"),
+    ("https://hirsel.ai/benchmarks/", "weekly", "0.9"),
     ("https://hirsel.ai/docs/", "weekly", "0.95"),
     ("https://hirsel.ai/docs/std/", "weekly", "0.85"),
+    ("https://hirsel.ai/docs/spec/", "weekly", "0.85"),
     ("https://hirsel.ai/llms.txt", "weekly", "0.5"),
     ("https://hirsel.ai/llms-full.txt", "weekly", "0.5"),
 )
@@ -71,7 +75,7 @@ curl -fsSL https://hirsel.ai/install.sh | sh   # Linux x86_64 (glibc 2.28+); App
 hirsel new app && cd app
 hirsel check
 hirsel test
-hirsel run --grant Stdout
+hirsel run
 ```
 
 ## Docs
@@ -79,6 +83,8 @@ hirsel run --grant Stdout
 - [Primer](https://hirsel.ai/primer.md): whole language in one page — syntax, ownership, capabilities, budgets, and the CLI loop
 - [Cookbook](https://hirsel.ai/cookbook.md): tested task-shaped recipes (CLI, files, HTTP router, Store, tasks/units, `sim` testing & laws, `Inline`/`Simd`)
 - [Standard library index](https://hirsel.ai/api-index.md): every `std` module and its operations
+- [Specification reference](https://hirsel.ai/docs/spec/): normative chapters for syntax, ownership, memory, budgets, capabilities, CLI, packages, and protocols
+- [Benchmarks](https://hirsel.ai/benchmarks/): goal-board results, losing rows, and methodology
 - [Full agent bundle (llms-full.txt)](https://hirsel.ai/llms-full.txt): single-file bundle containing intro, primer, cookbook, std API index, and agent skill
 - [Agent skill (SKILL.md)]({GITHUB}blob/{ref}/skills/hirsel/SKILL.md): iterative check/explain/inspect workflow for coding agents
 - [Install script](https://hirsel.ai/install.sh): Linux x86_64 release installer
@@ -141,14 +147,21 @@ def rewrite_index_links(index: bytes, ref: str) -> bytes:
 
 
 def readme_catalog(readme_text: str, ref: str) -> str:
-    start = readme_text.index("\n## Toolchain packages\n")
+    marker = "\n## Toolchain packages\n"
+    if marker not in readme_text:
+        return ""
+    start = readme_text.index(marker)
     end = readme_text.index("\n## License\n", start)
     return rewrite_github_links(readme_text[start:end], ref)
 
 
-def render_sitemap(lastmod: str = SITEMAP_LASTMOD) -> bytes:
+def render_sitemap(ref: str = "main", lastmod: str = SITEMAP_LASTMOD) -> bytes:
+    entries = list(SITEMAP_ENTRIES)
+    for fname in list_spec_files(ref):
+        if fname != "index.md" and fname.endswith(".md"):
+            entries.append((f"https://hirsel.ai/docs/spec/{fname[:-3]}/", "weekly", "0.75"))
     rows = []
-    for loc, freq, priority in SITEMAP_ENTRIES:
+    for loc, freq, priority in entries:
         rows.append(
             "  <url>\n"
             f"    <loc>{loc}</loc>\n"
@@ -204,8 +217,13 @@ def build_site_docs(ref: str = "main", lastmod: str = SITEMAP_LASTMOD) -> dict[s
                 f"> Note: this cookbook tracks `main`. Always run `hirsel primer` and `hirsel inspect --std --interface` from your installed `{ref}` binary for exact signatures.",
             )
             cookbook_ref = "main"
-        skill_raw = SKILL.read_bytes()
-        readme_text = README.read_text(encoding="utf-8")
+        skill_raw = git_read(ref, "skills/hirsel/SKILL.md")
+        if skill_raw is None:
+            raise ValueError(f"git ref {ref!r} has no skills/hirsel/SKILL.md")
+        readme_raw = git_read(ref, "README.md")
+        if readme_raw is None:
+            raise ValueError(f"git ref {ref!r} has no README.md")
+        readme_text = readme_raw.decode("utf-8")
 
     primer = rewrite_primer_links(primer_raw, ref)
     cookbook = rewrite_cookbook_links(cookbook_raw, cookbook_ref)
@@ -232,7 +250,7 @@ def build_site_docs(ref: str = "main", lastmod: str = SITEMAP_LASTMOD) -> dict[s
         "api-index.md": index,
         "llms.txt": llms,
         "llms-full.txt": llms_full,
-        "sitemap.xml": render_sitemap(lastmod),
+        "sitemap.xml": render_sitemap(ref=ref, lastmod=lastmod),
     }
 
 

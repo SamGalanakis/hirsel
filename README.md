@@ -75,7 +75,7 @@ Start a project with the installed binary:
 hirsel new app && cd app
 hirsel check
 hirsel test
-hirsel run --grant Stdout
+hirsel run
 ```
 
 See [docs/PRIMER.md](docs/PRIMER.md) for the language in one page,
@@ -100,7 +100,8 @@ Hirsel's CLI is designed as a self-contained feedback loop for agents:
 
 ## Toolchain packages
 
-Three packages ship with the Hirsel toolchain and bind by major version in `hirsel.toml`:
+Seventeen packages ship with the Hirsel toolchain (`std` plus the sixteen packages in
+`core-packages/`) and bind by major version in `hirsel.toml`:
 
 ```text
 [dependencies]
@@ -110,25 +111,41 @@ runner = { major = 1 }
 ```
 
 - [std](core/std/API-INDEX.md) — standard library: files, directories, HTTP server/client, router, JSON, codecs, simulation (`std.sim`), property testing (`std.prop`), and crypto.
-- [store](core/programs/store/) — typed tables, secondary indexes, durable transactions, snapshots, and replay.
-- [runner](core/programs/runner/) — durable calls, typed subscriptions, TypeScript SDK generation ([sdk/client/README.md](sdk/client/README.md)), and place hosting.
-
-## Libraries and applications
-
-First-party packages in this repository (bind locally with `path = "..."` in `[dependencies]`):
-
-- [postgres](core/programs/postgres/) — PostgreSQL client with TLS and streaming query results.
-- [sqlite](core/programs/sqlite/) — SQLite bindings with explicit capabilities.
-- [mcp](core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
-- [search](core/programs/search/) — BM25 full-text search over a `store` table, callable from a transaction.
-- [vector](core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
-- [checkbox](core/programs/checkbox/) — shared board of one million checkboxes.
+- [store](core/programs/store/) — copy-on-write B+tree durable store: typed tables, secondary/unique/aggregate indexes, TTL expiry, projections, transactions, snapshots, and replay.
+- [runner](core/programs/runner/) — durable calls, live diff subscriptions, Rooms, TypeScript SDK generation ([sdk/client/README.md](sdk/client/README.md)), and place hosting.
 - [platform](core/programs/platform/) — deployed place management, cutovers, and recovery.
+- [search](core/programs/search/) — BM25 full-text search over a `store` table, callable from a transaction.
+- [mcp](core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
+- Real-time media and networking (**pure Hirsel, no `Foreign` code**): [webrtc_sfu](core/programs/webrtc_sfu/) (WebRTC SFU with simulcast, VP9/AV1 SVC, dynacast, Opus RED, and E2EE routing), [dtls](core/programs/dtls/) (sans-IO DTLS 1.2), [srtp](core/programs/srtp/) (SRTP/SRTCP), [rtp](core/programs/rtp/) (RTP/RTCP, RTX, BWE, pacing, RED), [rtp_jitter](core/programs/rtp_jitter/) (jitter buffer), [turn](core/programs/turn/) (TURN client/relay), [stun_ice](core/programs/stun_ice/) (STUN and ICE-lite), [sframe](core/programs/sframe/) (RFC 9605 SFrame E2EE), [media_bits](core/programs/media_bits/) (codec bitstream parsers), [media_container](core/programs/media_container/) (Ogg/MP4/WebM containers), and [media_record](core/programs/media_record/) (room publication recorder).
+
+## Built on top, in Hirsel
+
+Additional first-party packages in this repository (bind locally with `path = "..."` in
+`[dependencies]`):
+
+**Pure Hirsel libraries (no `Foreign` code):**
+
+- [video_packager](core/programs/video_packager/) — CMAF, HLS, and DASH media packaging.
+- [image_core](core/programs/image_core/) — image probing, transforms, and PNG, QOI, GIF, and AVIF codecs.
+- [vector](core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
+- [spatial](core/programs/spatial/) — Hilbert-curve spatial indexing over a `store` table.
+- [postgres](core/programs/postgres/) — PostgreSQL client with TLS and streaming query results.
+- [jwtbind](core/programs/jwtbind/) — JWT verification and runner caller binding.
+- [toml](core/programs/toml/) — TOML parser and serializer.
+- [yaml](core/programs/yaml/) — YAML parser and serializer.
+- [archive](core/programs/archive/) — tar (ustar/pax) and zip archive reader and writer with explicit safety limits.
 - [tz](core/programs/tz/) — IANA time zones and instant/local-time conversion.
 - [xml](core/programs/xml/) — streaming and tree XML parser and UTF-8 serializer.
-- [stun_ice](core/programs/stun_ice/) — STUN message encoding and ICE connectivity checks.
-- [image_core](core/programs/image_core/), [image_jpeg](core/programs/image_jpeg/), [image_webp](core/programs/image_webp/) — image probing, transforms, PNG, QOI, GIF, AVIF, JPEG, and WebP codecs.
-- [av1](core/programs/av1/), [h264](core/programs/h264/), [opus](core/programs/opus/), [media_bits](core/programs/media_bits/), [media_container](core/programs/media_container/), [video_packager](core/programs/video_packager/), [video_yuv](core/programs/video_yuv/) — audio/video codecs, MP4/WebM/Ogg containers, YUV conversion, and CMAF/HLS/DASH packaging.
+
+**Thin C FFI wrappers (`Foreign`):**
+
+- [opus](core/programs/opus/), [av1](core/programs/av1/), [h264](core/programs/h264/) — thin C FFI wrappers for Opus, AV1, and H.264 codecs (used with [video_yuv](core/programs/video_yuv/), [video_thumb](core/programs/video_thumb/), and [video_transcode](core/programs/video_transcode/)).
+- [image_jpeg](core/programs/image_jpeg/), [image_webp](core/programs/image_webp/) — thin C FFI wrappers for JPEG and WebP codecs (used with [image_pipeline](core/programs/image_pipeline/)).
+- [sqlite](core/programs/sqlite/) — SQLite bindings with explicit `Foreign` capabilities.
+
+**Applications:**
+
+- [checkbox](core/programs/checkbox/) — shared board of one million checkboxes.
 
 The durable LLM agent harness and its notes example app live in their own repository,
 [lash-hirsel](https://github.com/SamGalanakis/lash-hirsel), and build against an installed toolchain.

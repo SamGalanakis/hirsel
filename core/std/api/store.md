@@ -1,8 +1,8 @@
 # Store
 
 Package `store`, root module `store` (reached as `store.x`, LANG-7), implements the M4 store in Hirsel over
-copy-on-write B+ trees of packed pages (STORE-SPEC v2.44). Each table and index has its own
-tree. The package provides memory and Format-3 disk/bucket stores, typed tables and
+copy-on-write B+ trees of packed pages (STORE-SPEC v2.128). Each table and index has its own
+tree. The package provides memory and Format-9 disk/bucket stores, typed tables and
 indexes, isolated transactions, read sets, frozen cursors and snapshots,
 CallInfo, followers, resident admission, online scrub, offline read-only opens, and foreign-handle checks.
 
@@ -160,7 +160,7 @@ The transaction limit is 16,777,280 COMMIT payload bytes, excluding the 16-byte
 head. Body-time arithmetic enforces it before publishing. The account uses the
 stored value's length, including its schema number, when subtracting an old row.
 
-The disk contract follows STORE-SPEC v2.44 §11.
+The disk contract follows STORE-SPEC §11.
 `open(tasks, dir, clock, random, options)` validates the options, locks the
 directory, and validates the selected manifest and page graph before removing
 unreachable files. It replays the journal and rotates to a new segment.

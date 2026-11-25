@@ -98,16 +98,16 @@ capability and its explicit grant syntax.
 The [TLS and secrets specification](tls.md) defines the client TLS provider
 operations and `Secret`.
 The [DTLS and SRTP specification](dtls.md) defines the sans-IO DTLS 1.2 endpoint, its
-certificate fingerprints and SRTP exporter, and SRTP/SRTCP sessions (design, not yet built).
+certificate fingerprints and SRTP exporter, and SRTP/SRTCP sessions (built; `dtls@1`, `srtp@1`).
 The [RTP and RTCP specification](rtp.md) defines the sans-IO `rtp` package: headers and
-extensions, RTCP, retransmission, congestion control, pacing and stream rewriting (design, not yet built).
+extensions, RTCP, retransmission, congestion control, pacing and stream rewriting (built; `rtp@1`).
 The [HTTP specification](http.md) defines std `http` (built, Layer 1), the runner's HTTP bindings
 and keyed operations (Part B, design).
-The [WebRTC specification](webrtc.md) defines the `webrtc_sfu` package (design, RTC-1 to RTC-8):
-JSEP SDP, the sans-IO PeerSession, and the room router with dynacast, active speakers and
-the revocation fence.
-The [TURN specification](turn.md) defines the sans-IO TURN client and relay, long-term credentials and the TCP fallback (design, not yet built).
-The [SFrame specification](sframe.md) defines the `sframe` package: RFC 9605 end-to-end media encryption with AES-128-GCM, the sender-key ratchet, a replay window, and a ranged framing that keeps codec headers clear and authenticated (design, not yet built).
+The [WebRTC specification](webrtc.md) defines the `webrtc_sfu` package (built; `webrtc_sfu@1`, RTC-1 to RTC-9):
+JSEP SDP, the sans-IO PeerSession, the room router with dynacast, active speakers,
+the revocation fence, and `media_record`.
+The [TURN specification](turn.md) defines the sans-IO TURN client and relay, long-term credentials and the TCP fallback (built; `turn@1`).
+The [SFrame specification](sframe.md) defines the `sframe` package: RFC 9605 end-to-end media encryption with AES-128-GCM, the sender-key ratchet, a replay window, and a ranged framing that keeps codec headers clear and authenticated (built; `sframe@1`, v4; v5 TLS-8 schedule slice E1 planned).
 The [packages specification](packages.md) defines `hirsel.toml`, `hirsel.lock`, local
 workspaces, library roots and package archives.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over

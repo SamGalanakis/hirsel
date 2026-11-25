@@ -1,7 +1,7 @@
 # WebRTC sessions and the SFU router
 
 Version note (2026-11-24, media-webrtc-sfu-spec-2319): first text of RTC-1 to RTC-8, Wave 1.6
-of the real-time media track. Not yet built; the fences are `unbuilt`.
+of the real-time media track. Built at `core/programs/webrtc_sfu/` and `core/programs/media_record/` (RTC-9), both shipped in the toolchain bundle (`webrtc_sfu@1`, `media_record@1`).
 Amended 2026-11-24 (webrtc-spec-amend-2337) for the 15 findings of design review 2333: session
 generations on every queue and an all-writer fence acknowledgement (RTC-7), a proven roster
 across signaling loss (RTC-8, runner slice R1), per-down-track sender reports and wire

@@ -80,10 +80,11 @@ its launched clients finish. It also exits after a request that panics.
 
 ## Dev loop
 
-*Specified, not built; [launch](launch.md#the-dev-loop) is the full text.* `hirsel dev`
+*`hirsel dev` (`--listen`, `--store`, `--fresh`, `--n-place`, `--json`) is built; `--sdk`<!-- doc-ref: planned -->,
+`--wait`<!-- doc-ref: planned -->, `--status` and `--stop` remain planned. [launch](launch.md#the-dev-loop) is the full
+text.* `hirsel dev`
 rebuilds a local place as its sources change, keeps its store across sessions, and activates
-each edit by the ordinary install and reopen. Its catalogue row reads "Rebuild a local place on
-each edit; the SDK client restores its subscriptions."
+each edit by the ordinary install and reopen. Its catalogue row reads "Rebuild a local place and restore its open subscriptions."
 
 | Form | Does |
 |---|---|

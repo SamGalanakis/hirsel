@@ -24,13 +24,21 @@ SITE = TOOLS.parent / "site"
 JSONLD_TAG = '<script type="application/ld+json">'
 
 
+_ESBUILD_CACHE: dict[tuple[str, str], str] = {}
+_NODE_CHECKED: set[str] = set()
+
+
 def esbuild(code: str, loader: str) -> str:
+    key = (loader, code)
+    if key in _ESBUILD_CACHE:
+        return _ESBUILD_CACHE[key]
     out = subprocess.run(
         [*ESBUILD, f"--loader={loader}", "--minify", "--charset=utf8"],
         input=code.encode(), capture_output=True, check=True,
     ).stdout.decode().rstrip("\n")
     if not out.strip():
         sys.exit(f"site_build: esbuild returned nothing for a {loader} block")
+    _ESBUILD_CACHE[key] = out
     return out
 
 
@@ -71,10 +79,14 @@ def minify_html_file(path: Path) -> None:
     html = splice(html, "script", "js")
     html = splice(html, "style", "css")
     for m in re.finditer(r"<script>(.*?)</script>", html, re.S):
+        body = m.group(1)
+        if body in _NODE_CHECKED:
+            continue
         with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8") as f:
-            f.write(m.group(1))
+            f.write(body)
             f.flush()
             subprocess.run(["node", "--check", f.name], check=True)
+        _NODE_CHECKED.add(body)
     path.write_text(html, encoding="utf-8")
 
 

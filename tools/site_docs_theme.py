@@ -296,6 +296,21 @@ main.doc .part-lead{font-size:16.5px;line-height:1.6;color:var(--body);margin-bo
   margin:30px 0 10px;font:600 18px/1.3 var(--sans);letter-spacing:-.015em;color:var(--ink);
   scroll-margin-top:78px;
 }
+:where(main.doc) h4{
+  margin:22px 0 8px;font:600 15.5px/1.35 var(--sans);color:var(--ink);
+  scroll-margin-top:78px;
+}
+.spec-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:16px 0 28px}
+.spec-card{
+  display:flex;flex-direction:column;gap:3px;padding:12px 15px;border-radius:9px;
+  background:var(--paper);border:1px solid var(--rule);text-decoration:none!important;
+  transition:border-color var(--t-state) var(--ease),background-color var(--t-state) var(--ease);
+}
+.spec-card:hover,.spec-card:focus-visible{border-color:var(--ink);background:var(--ground)}
+.spec-card .sc-title{font:600 14.5px/1.3 var(--sans);color:var(--ink)}
+.spec-card .sc-file{font:400 12px/1.3 var(--mono);color:var(--mute)}
+.spec-source{margin:0 0 18px;font-size:13.5px;color:var(--mute)}
+@media (max-width:640px){.spec-grid{grid-template-columns:1fr}}
 :where(main.doc) .anchor{
   margin-left:8px;color:var(--mute);text-decoration:none;font-family:var(--sans);
   font-weight:400;font-size:.78em;opacity:0;transition:opacity var(--t-state) var(--ease),color var(--t-state) var(--ease);
@@ -503,6 +518,8 @@ const AGENT_TXT = [
   '- Primer (whole language in one page): https://hirsel.ai/primer.md',
   '- Cookbook (tested recipes): https://hirsel.ai/cookbook.md',
   '- Standard library index: https://hirsel.ai/api-index.md',
+  '- Specification reference: https://hirsel.ai/docs/spec/',
+  '- Benchmarks: https://hirsel.ai/benchmarks/',
   '- Agent skill: https://github.com/SamGalanakis/hirsel/blob/main/skills/hirsel/SKILL.md',
   '- Install (Linux x86_64, glibc 2.28+; Apple Silicon macOS in progress): curl -fsSL https://hirsel.ai/install.sh | sh',
 ].join('\\n');
@@ -637,46 +654,74 @@ if (stdInput) {
 def render_sidebar(
     groups: list[tuple[str, str, list[tuple[str, str]]]],
     *,
-    on_docs: bool,
-    std_toc: list[tuple[str, str]],
+    active_page: str,
+    page_toc: list[tuple[str, str]],
     ref: str,
+    spec_chapters: list[tuple[str, str]] | None = None,
+    active_spec: str | None = None,
 ) -> str:
-    """Sidebar for both pages: the /docs/ parts (Install, Language, Cookbook) with their
-    sections when on /docs/, then the reference links (standard library, spec)."""
-    spec_url = f"{GITHUB_REPO}/tree/{ref}/docs/spec"
+    """Sidebar across /docs/, /docs/std/, and /docs/spec/*."""
 
     def sub(items: list[tuple[str, str]]) -> str:
+        if not items:
+            return ""
         lis = "".join(
             f'<li><a href="#{html.escape(anchor, quote=True)}">{text_html}</a></li>'
             for anchor, text_html in items
         )
         return f'<ul class="toc-sub">{lis}</ul>'
 
-    if on_docs:
+    if active_page == "docs":
         parts = "".join(
             f'<div class="side-group"><a class="side-label" href="#{pid}">{label}</a>{sub(items)}</div>'
             for label, pid, items in groups
         )
-        std_entry = '<li><a class="side-page" href="/docs/std/"><span>Standard library</span><span class="tag">std</span></a></li>'
     else:
         links = "".join(
             f'<li><a class="side-page" href="/docs/#{pid}"><span>{label}</span></a></li>'
             for label, pid, _items in groups
         )
-        parts = f'<div class="side-group"><p class="side-label">Docs</p><ul class="side-list">{links}</ul></div>'
+        parts = f'<div class="side-group"><p class="side-label">Learn</p><ul class="side-list">{links}</ul></div>'
+
+    if active_page == "std":
         std_entry = (
             '<li><a class="side-page" href="/docs/std/" aria-current="page"><span>Standard library</span>'
-            f'<span class="tag">std</span></a>{sub(std_toc)}</li>'
+            f'<span class="tag">std</span></a>{sub(page_toc)}</li>'
         )
+    else:
+        std_entry = '<li><a class="side-page" href="/docs/std/"><span>Standard library</span><span class="tag">std</span></a></li>'
+
+    spec_cur = ' aria-current="page"' if (active_page == "spec" and active_spec is None) else ""
+    spec_entry = f'<li><a class="side-page" href="/docs/spec/"{spec_cur}><span>Spec reference</span><span class="tag">spec</span></a></li>'
+    bench_entry = '<li><a class="side-page" href="/benchmarks/"><span>Benchmarks</span><span class="tag">perf</span></a></li>'
+
+    spec_group = ""
+    if active_page == "spec" and spec_chapters:
+        ch_items: list[str] = []
+        for stem, title in spec_chapters:
+            if stem == active_spec:
+                ch_items.append(
+                    f'<li><a class="side-page" href="/docs/spec/{html.escape(stem, quote=True)}/" aria-current="page">'
+                    f"<span>{html.escape(title)}</span></a>{sub(page_toc)}</li>"
+                )
+            else:
+                ch_items.append(
+                    f'<li><a class="side-page" href="/docs/spec/{html.escape(stem, quote=True)}/">'
+                    f"<span>{html.escape(title)}</span></a></li>"
+                )
+        spec_group = (
+            f'<div class="side-group"><p class="side-label">Spec chapters</p>'
+            f'<ul class="side-list">{"".join(ch_items)}</ul></div>'
+        )
+
     return (
         f'<aside class="sidebar" id="sidebar" aria-label="Documentation navigation">'
         f'<div class="drawer-head"><span class="wm wmfont">hirsel docs</span>'
         f'<button class="drawer-close" id="drawerClose" type="button" aria-label="Close navigation">{CLOSE_ICON}</button></div>'
         f"{parts}"
-        f'<div class="side-group"><p class="side-label">Reference</p><ul class="side-list">{std_entry}'
-        f'<li><a class="side-page" href="{html.escape(spec_url, quote=True)}"><span>Language spec</span><span class="tag">&#8599;</span></a></li>'
-        f"</ul></div>"
-        f'<div class="side-foot"><a href="/"><span>&larr; Take a walk</span><span class="sub">The hill</span></a></div>'
+        f'<div class="side-group"><p class="side-label">Reference</p><ul class="side-list">{std_entry}{spec_entry}{bench_entry}</ul></div>'
+        f"{spec_group}"
+        f'<div class="side-foot"><a href="/"><span>&larr; Overview &amp; walk</span><span class="sub">Home</span></a></div>'
         f"</aside>"
     )
 
@@ -695,6 +740,7 @@ def render_page(
     pager: tuple[tuple[str, str] | None, tuple[str, str] | None],
     ref: str,
     markdown_alternates: list[str],
+    heading_id: str | None = None,
 ) -> str:
     canonical = f"{ORIGIN}{slug}"
     crumb_items = [
@@ -732,7 +778,13 @@ def render_page(
 
     top_nav_html = "".join(
         f'<a href="{href}"' + (' aria-current="page"' if key == nav_key else "") + f">{label}</a>"
-        for key, href, label in (("docs", "/docs/", "Docs"), ("std", "/docs/std/", "Standard library"))
+        for key, href, label in (
+            ("docs", "/docs/", "Learn"),
+            ("cookbook", "/docs/#cookbook", "Cookbook"),
+            ("std", "/docs/std/", "Std"),
+            ("spec", "/docs/spec/", "Spec"),
+            ("benchmarks", "/benchmarks/", "Benchmarks"),
+        )
     )
 
     prev_item, next_item = pager
@@ -819,7 +871,7 @@ def render_page(
             '  <div class="hero-doc">',
             f"    {TOPO_ACCENT_SVG}",
             f'    <p class="eyebrow"><span class="pip" aria-hidden="true"></span>{html.escape(eyebrow)}</p>',
-            f"    <h1>{html.escape(heading)}</h1>",
+            f'    <h1 id="{html.escape(heading_id, quote=True)}">{html.escape(heading)}</h1>' if heading_id else f"    <h1>{html.escape(heading)}</h1>",
             f'    <p class="lead">{lead}</p>',
             "  </div>",
             body_html,

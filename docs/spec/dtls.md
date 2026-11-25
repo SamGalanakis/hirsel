@@ -10,8 +10,9 @@ ChangeCipherSpec has arrived, every other epoch-0 record is `stale_epoch` (DTLS-
 and a first ClientHello with `message_seq` above 1 is not admitted (DTLS-3).
 
 Version note (2026-11-24, media-dtls-spec-2317): first text of DTLS-1 to DTLS-9 and SRTP-1
-to SRTP-6, the Wave 1 rows 1.2 and 1.3 of the real-time media track. Not yet built: every
-fence is `unbuilt`, and every test path is planned. The sections end with
+to SRTP-6, the Wave 1 rows 1.2 and 1.3 of the real-time media track. Built at
+`core/programs/dtls/` and `core/programs/srtp/`, and shipped in the toolchain bundle
+(`dtls@1`, `srtp@1`). The sections end with
 [build laws](#build-laws), [cost targets](#cost-targets) and [build slices](#build-slices).
 
 Amended 2026-11-24 (dtls-spec-amend-2341) for the soundness review dtls-spec-review-2331:
@@ -23,12 +24,12 @@ flight 6 resent only for an authenticated Finished, kept replay floors after `en
 Two pure Hirsel packages sit over [TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement) and
 under any program that carries real-time media over UDP ([NET-15 to NET-17](net.md#udp)):
 
-- `core/programs/dtls/`<!-- doc-ref: planned -->: a sans-IO DTLS 1.2 endpoint
+- `core/programs/dtls/`: a sans-IO DTLS 1.2 endpoint
   ([RFC 6347](https://www.rfc-editor.org/rfc/rfc6347)) for ECDHE-ECDSA AEAD suites, with
   certificate-fingerprint pinning ([RFC 8122](https://www.rfc-editor.org/rfc/rfc8122)), the
   SDP `setup` role rule, and the one-use `use_srtp` exporter
   ([RFC 5764](https://www.rfc-editor.org/rfc/rfc5764)).
-- `core/programs/srtp/`<!-- doc-ref: planned -->: SRTP and SRTCP sessions
+- `core/programs/srtp/`: SRTP and SRTCP sessions
   ([RFC 3711](https://www.rfc-editor.org/rfc/rfc3711), [RFC 7714](https://www.rfc-editor.org/rfc/rfc7714))
   over TLS-8 schedules: header parsing, the rollover counter, the replay window and the SRTCP
   trailer.

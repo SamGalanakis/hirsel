@@ -1,0 +1,167 @@
+// TURN cost targets (docs/spec/turn.md, Cost targets): the relay's data path after setup.
+// Usage: relay_packets OPERATION ALLOCATIONS PACKETS
+//   OPERATION 0: from_client on ChannelData; 1: from_peer on a bound channel.
+// Setup drives ALLOCATIONS clients, each from its own address with its own subject,
+// against one relay in process to an allocation and a confirmed channel; the last one
+// made is measured, so the relay's scans by origin and by relayed address pass every
+// allocation. Between READY and DONE each packet is checked against the one answer it must
+// get, and at DONE every discard counter must still be zero.
+const SIZE: u64 = 1200
+
+const UNIX: u64 = 1700000000
+
+const NOW: turn.Now = turn.Now(mono_ns: 1000000000, unix_s: UNIX)
+
+const SERVER: Addr = Addr(ip: V4(0xc6336464), port: 3478)
+
+const PEER: Addr = Addr(ip: V4(0xc6336401), port: 9000)
+
+fn number(argv: Args, index: u64) -> u64 {
+    let Some(value) = args.get(argv, index) else {
+        fail("missing argument")
+    }
+    result.unwrap(int.parse(value))
+}
+
+fn sealed(uses: String) -> Secret {
+    let mut b: Bytes = list.with_capacity(32)
+    list.fill(mut b, 32, 0x0b)
+    result.unwrap(secret.seal(take b, uses))
+}
+
+fn zeros(n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(n)
+    list.fill(mut b, n, 0)
+    b
+}
+
+fn copy_of(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    out
+}
+
+/// Client i's address, from 11.0.0.0 up; only peers pass the policy, so any address will do.
+fn client_addr(i: u64) -> Addr {
+    let low: u32 = int.narrow(i)
+    Addr(ip: V4(0x0b000000 + low), port: 40000)
+}
+
+fn pool_addr(i: u64) -> Addr {
+    let p: u16 = int.narrow(49152 + i % 16000)
+    let high: u32 = int.narrow(i / 16000)
+    Addr(ip: V4(0xc6336464 + high), port: p)
+}
+
+/// One request/response round trip for every request the client has queued.
+fn rounds(mut cl: turn.Client, mut rl: turn.Relay, rnd: Random, o: turn.Origin) {
+    loop {
+        let mut out = zeros(512)
+        let Send(n) = result.unwrap(turn.poll(mut cl, NOW, rnd, mut out)) else {
+            return
+        }
+        let mut packet = copy_of(list.slice(out, 0, n))
+        let mut reply = zeros(0)
+        let Reply(_, k) = result.unwrap(turn.from_client(mut rl, NOW, rnd, o, mut packet, mut reply)) else {
+            fail("the relay did not answer a request")
+        }
+        let mut answer = copy_of(list.slice(reply, 0, k))
+        let _ = result.unwrap(turn.receive(mut cl, NOW, rnd, mut answer))
+    }
+}
+
+/// Client i allocated, its channel to PEER confirmed; the ChannelData of a SIZE payload.
+fn established(mut rl: turn.Relay, rnd: Random, i: u64) -> Bytes {
+    let master = sealed("mac")
+    let mut subject = string.from("s")
+    string.push_u64(mut subject, i)
+    let mut name: Bytes = list.new()
+    let mut password: Bytes = list.new()
+    result.unwrap(turn.mint(master, UNIX + 3600, string.as_bytes(subject), mut name, mut password))
+    let o = turn.Origin(ingress: Udp(SERVER), client: client_addr(i))
+    let mut cl = result.unwrap(turn.client(turn.client_defaults(), SERVER, take name, result.unwrap(secret.seal(take password, "digest"))))
+    rounds(mut cl, mut rl, rnd, o)
+    let Allocated(_) = turn.client_state(cl) else {
+        fail("no allocation")
+    }
+    result.unwrap(turn.permit(mut cl, PEER, NOW))
+    let _ = result.unwrap(turn.bind(mut cl, PEER, NOW))
+    rounds(mut cl, mut rl, rnd, o)
+    let mut slot = zeros(turn.HEADROOM + SIZE + 3)
+    list.fill_slice(mut slot, turn.HEADROOM, SIZE, 0x5a)
+    let range = result.unwrap(turn.send_to(mut cl, PEER, mut slot, turn.HEADROOM, turn.HEADROOM + SIZE))
+    if range.lo != turn.HEADROOM - 4 || range.hi != turn.HEADROOM + SIZE {
+        fail("the channel was not confirmed")
+    }
+    copy_of(list.slice(slot, range.lo, range.hi))
+}
+
+pub fn main(out: Stdout, argv: Args, rnd: Random) -> Result[(), Exit] waits {
+    let op = number(argv, 0)
+    let allocations = number(argv, 1)
+    let packets = number(argv, 2)
+    if op > 1 || allocations == 0 {
+        return Error(Exit(status: 2))
+    }
+    let mut c = turn.relay_defaults(b"example.org")
+    c.sources = 65536
+    c.challenge_per_s = 65535
+    c.derive_per_source_s = 65535
+    let mut allow: List[turn.Allow] = list.new()
+    list.push(mut allow, turn.Allow(prefix: turn.Prefix(ip: V4(0xc6336400), bits: 24), ports_lo: 1, ports_hi: 65535))
+    c.policy.allow = take allow
+    let mut pool: List[Addr] = list.with_capacity(allocations)
+    for i in 0u64 .. allocations {
+        list.push(mut pool, pool_addr(i))
+    }
+    let mut rl = result.unwrap(turn.relay(take c, rnd, sealed("kdf"), sealed("mac"), take pool))
+    let mut channel_data: Bytes = list.new()
+    for i in 0u64 .. allocations {
+        channel_data = established(mut rl, rnd, i)
+    }
+    let measured = client_addr(allocations - 1)
+    let o = turn.Origin(ingress: Udp(SERVER), client: measured)
+    let mut packet = take channel_data
+    let mut reply = zeros(512)
+    let mut relayed = SERVER
+    let lo = turn.HEADROOM
+    let mut slot = zeros(lo + SIZE + 3)
+    list.fill_slice(mut slot, lo, SIZE, 0xa5)
+    // The relayed address of the measured allocation, from one packet before READY.
+    match result.unwrap(turn.from_client(mut rl, NOW, rnd, o, mut packet, mut reply)) {
+        ToPeer(r, to, range) => {
+            if to != PEER || range.lo != 4 || range.hi != 4 + SIZE {
+                fail("ChannelData was not relayed to the peer")
+            }
+            relayed = r
+        },
+        _ => fail("ChannelData was not relayed"),
+    }
+    let mut done = string.from("DONE ")
+    string.push_u64(mut done, packets)
+    string.push(mut done, "\n")
+    result.unwrap(stdout.write(out, "READY\n"))
+    for _ in 0u64 .. packets {
+        if op == 0 {
+            let ToPeer(r, to, range) = result.unwrap(turn.from_client(mut rl, NOW, rnd, o, mut packet, mut reply)) else {
+                fail("ChannelData was not relayed")
+            }
+            if r != relayed || to != PEER || range.lo != 4 || range.hi != 4 + SIZE {
+                fail("ChannelData relayed wrong")
+            }
+        } else {
+            let ToClient(back, range) = result.unwrap(turn.from_peer(mut rl, NOW, relayed, PEER, mut slot, lo, lo + SIZE)) else {
+                fail("the peer's datagram was not relayed")
+            }
+            if back != o || range.lo != lo - 4 || range.hi != lo + SIZE {
+                fail("the peer's datagram relayed wrong")
+            }
+        }
+    }
+    let d = turn.relay_discards(rl)
+    if d.malformed + d.no_allocation + d.no_permission + d.policy + d.unbound_channel + d.reserved_channel + d.throttled + d.challenged + d.oversize + d.unknown_stream + d.idle_stream != 0 {
+        fail("the relay discarded a packet")
+    }
+    result.unwrap(stdout.write(out, done))
+    Ok(())
+}

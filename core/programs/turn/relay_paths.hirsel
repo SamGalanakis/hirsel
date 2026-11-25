@@ -228,6 +228,12 @@ fn grow(mut b: Bytes, n: u64) -> Result[(), TurnError] {
 fn serve_request(mut r: Relay, now: Now, rnd: Random, o: Origin, local: Addr, h: stun_ice.Header, packet: Bytes, mut out: Bytes) -> Result[Out, TurnError] {
     grow(mut out, RESPONSE_MAX)?
     grow(mut r.scratch, list.len(packet) + RESPONSE_MAX)?
+    if h.method == 1 {
+        return match binding_answer(mut r.g, now, o, h.transaction, mut out, mut r.scratch)? {
+            Reply(n) => Ok(Reply(o, n)),
+            _ => Ok(Nothing),
+        }
+    }
     let on = lease_on(r, o)
     let mut existing: Option[Held] = None
     if let Some(i) = on {

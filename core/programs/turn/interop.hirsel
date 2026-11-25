@@ -1,0 +1,408 @@
+// The Hirsel end that interop.py runs on loopback against coturn and Pion (TURN slice U7).
+// Usage:
+//   interop client udp|tcp SERVER_PORT USERNAME PASSWORD PEER_PORT
+//   interop relay REALM
+// client: allocates on the server, permits and then binds the peer, and sends numbered
+// payloads until one went as a Send indication and one as ChannelData and both came back.
+// Stdout: `allocated <relayed port>`, `sent send|channel <payload hex>`, `echo <payload hex>`, `done`.
+// relay: one relay on a UDP port and a TCP listener on the same port, with one pool address.
+// Stdout: `listening <port>`, `user <username>`, `password <password>` (minted for an hour),
+// then `allocated <count>` whenever the live allocation count changes.
+const MS: u64 = 1000000
+
+const SECOND: u64 = 1000000000
+
+const LOOPBACK: u32 = 0x7f000001
+
+const SOCKET: UdpOptions = UdpOptions(slots: 16, slot_bytes: 65536)
+
+const CONN: u64 = 1
+
+fn say(out: Stdout, line: String) waits {
+    let mut text = string.from(line)
+    string.push(mut text, "\n")
+    result.unwrap(stdout.write(out, text))
+}
+
+fn say_hex(out: Stdout, tag: String, b: Bytes) waits {
+    let mut line = string.from(tag)
+    string.push(mut line, " ")
+    string.push(mut line, std.hex.encode(b))
+    say(out, line)
+}
+
+fn say_number(out: Stdout, tag: String, n: u64) waits {
+    let mut line = string.from(tag)
+    string.push(mut line, " ")
+    string.push_u64(mut line, n)
+    say(out, line)
+}
+
+fn argument(a: Args, i: u64) -> String {
+    let Some(v) = args.get(a, i) else {
+        fail("missing argument")
+    }
+    string.from(v)
+}
+
+fn copy_of(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    out
+}
+
+fn zeros(n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(n)
+    list.fill(mut b, n, 0)
+    b
+}
+
+/// payload at HEADROOM in a slot with 3 spare bytes after it.
+fn slot_of(p: Bytes) -> Bytes {
+    let mut slot = zeros(turn.HEADROOM)
+    list.append(mut slot, p)
+    list.append(mut slot, b"\x00\x00\x00")
+    slot
+}
+
+fn now_of(clock: Clock) -> turn.Now {
+    turn.Now(mono_ns: host.mono_ns(clock), unix_s: host.wall_ms(clock) / 1000)
+}
+
+fn transmit(mut socket: UdpSocket, to: Addr, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn: 0))
+    if result.unwrap(host.udp_send(mut socket, data, tx, Never)) != 1 {
+        fail("datagram not sent")
+    }
+}
+
+fn send_all(mut writer: WriteHalf, data: Bytes) waits {
+    let end = list.len(data)
+    let mut pos = 0u64
+    while pos < end {
+        let Ok(count) = host.send_pair(mut writer, list.slice(data, pos, end), b"", Never) else {
+            fail("stream send failed")
+        }
+        if count == 0 {
+            fail("a stream send committed nothing")
+        }
+        pos += count
+    }
+}
+
+/// The datagrams that arrive before until, appended to messages; false at the deadline.
+fn arrive(mut socket: UdpSocket, until: Until, mut data: Bytes, mut packets: List[UdpPacket], mut messages: List[(Addr, Bytes)]) waits {
+    list.clear(mut data)
+    list.clear(mut packets)
+    match host.udp_recv(mut socket, mut data, mut packets, until) {
+        Ok(_) => {
+            for d in packets {
+                let UdpPacket(peer: source, at: start, len: size, ..) = d
+                list.push(mut messages, (source, copy_of(list.slice(data, start, start + size))))
+            }
+        },
+        Error(TimedOut) => (),
+        Error(_) => fail("UDP receive failed"),
+    }
+}
+
+/// Whole framed messages read from the stream before until; Ok(false) when it ended.
+fn stream_in(mut reader: ReadHalf, mut buf: Bytes, mut f: turn.Framer, until: Until, mut messages: List[Bytes]) -> bool waits {
+    turn.frame_consumed(mut f, mut buf)
+    list.reserve(mut buf, 4096)
+    match host.recv_bounded(mut reader, mut buf, 4096, until) {
+        Ok(0) => return false,
+        Ok(_) => (),
+        Error(TimedOut) => return true,
+        Error(_) => return false,
+    }
+    loop {
+        let Ok(next) = turn.frame_next(mut f, buf) else {
+            fail("the stream lost its framing")
+        }
+        let Message(range) = next else {
+            return true
+        }
+        list.push(mut messages, copy_of(list.slice(buf, range.lo, range.hi)))
+    }
+}
+
+/// payload k: k in 4 bytes, then a fixed text.
+fn payload(k: u64) -> Bytes {
+    let mut p: Bytes = list.with_capacity(32)
+    let k32: u32 = int.narrow(k)
+    list.put_word_be(mut p, k32)
+    list.append(mut p, b"hirsel turn interop payload")
+    p
+}
+
+type Link = Datagrams(UdpSocket) | Connection(ReadHalf, WriteHalf, Bytes, turn.Framer)
+
+fn client_send(mut link: Link, server: Addr, data: Bytes) waits {
+    match link {
+        Datagrams(mut s) => transmit(mut s, server, data),
+        Connection(_, mut w, _, _) => send_all(mut w, data),
+    }
+}
+
+fn run_client(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) waits {
+    let tcp = argument(a, 1) == "tcp"
+    let port: u16 = result.unwrap(int.parse(argument(a, 2)))
+    let username = copy_of(string.as_bytes(argument(a, 3)))
+    let password = result.unwrap(secret.seal(copy_of(string.as_bytes(argument(a, 4))), "digest"))
+    let peer_port: u16 = result.unwrap(int.parse(argument(a, 5)))
+    let server = Addr(ip: V4(LOOPBACK), port)
+    let peer = Addr(ip: V4(LOOPBACK), port: peer_port)
+    let start = host.mono_ns(clock)
+    let deadline = start + 30 * SECOND
+    let mut c = turn.client_defaults()
+    let mut link: Link = if tcp {
+        c.transport = Stream
+        let socket = result.unwrap(host.connect(n, server, At(clock, deadline)))
+        let (reader, writer) = net.split(take socket)
+        Connection(take reader, take writer, list.new(), turn.framer())
+    } else {
+        let (take socket, _) = result.unwrap(host.udp_bind(n, Addr(ip: V4(LOOPBACK), port: 0), SOCKET))
+        Datagrams(take socket)
+    }
+    let mut cl = result.unwrap(turn.client(c, server, take username, take password))
+    let mut allocated = false
+    let mut channel_asked = false
+    let mut kinds: List[bool] = list.new()
+    let mut sent_send = false
+    let mut sent_channel = false
+    let mut echo_send = false
+    let mut echo_channel = false
+    let mut next_send = 0u64
+    let mut data: Bytes = list.with_capacity(65536)
+    let mut packets: List[UdpPacket] = list.with_capacity(16)
+    while !(echo_send && echo_channel) {
+        let now = host.mono_ns(clock)
+        if now >= deadline {
+            fail("interop deadline")
+        }
+        match turn.client_state(cl) {
+            Allocated(al) => if !allocated {
+                allocated = true
+                let relayed: u64 = int.widen(al.relayed.port)
+                say_number(out, "allocated", relayed)
+                result.unwrap(turn.permit(mut cl, peer, now_of(clock)))
+                next_send = now
+            },
+            Closed(_) => fail("the client closed"),
+            Allocating => (),
+        }
+        if allocated && now >= next_send && !(sent_send && sent_channel) {
+            let p = payload(list.len(kinds))
+            let mut slot = slot_of(p)
+            let lo = turn.HEADROOM
+            match turn.send_to(mut cl, peer, mut slot, lo, lo + list.len(p)) {
+                Ok(range) => {
+                    let channel = range.lo == lo - 4
+                    client_send(mut link, server, list.slice(slot, range.lo, range.hi))
+                    say_hex(out, if channel {
+                        "sent channel"
+                    } else {
+                        "sent send"
+                    }, p)
+                    list.push(mut kinds, channel)
+                    if channel {
+                        sent_channel = true
+                    } else {
+                        sent_send = true
+                    }
+                    if !channel_asked {
+                        let _ = result.unwrap(turn.bind(mut cl, peer, now_of(clock)))
+                        channel_asked = true
+                    }
+                },
+                Error(Unpermitted(_)) => (),
+                Error(_) => fail("send_to failed"),
+            }
+            next_send = now + 50 * MS
+        }
+        let mut wake = now + 10 * MS
+        loop {
+            let mut o = zeros(512)
+            match result.unwrap(turn.poll(mut cl, now_of(clock), r, mut o)) {
+                Send(k) => client_send(mut link, server, list.slice(o, 0, k)),
+                WakeAt(t) => {
+                    wake = order.min(wake, t)
+                    break
+                },
+                _ => break,
+            }
+        }
+        let until = At(clock, order.max(wake, host.mono_ns(clock) + MS))
+        let mut messages: List[Bytes] = list.new()
+        match link {
+            Datagrams(mut s) => {
+                let mut datagrams: List[(Addr, Bytes)] = list.new()
+                arrive(mut s, until, mut data, mut packets, mut datagrams)
+                for (from, m) in datagrams {
+                    if from == server {
+                        list.push(mut messages, copy_of(m))
+                    }
+                }
+            },
+            Connection(mut rd, _, mut buf, mut f) => if !stream_in(mut rd, mut buf, mut f, until, mut messages) {
+                fail("the server closed the stream")
+            },
+        }
+        for m in messages {
+            let mut packet = copy_of(m)
+            match result.unwrap(turn.receive(mut cl, now_of(clock), r, mut packet)) {
+                Data(from, range) => {
+                    let echo = list.slice(packet, range.lo, range.hi)
+                    if from != peer || list.len(echo) < 4 {
+                        fail("data from another peer")
+                    }
+                    let k32: u32 = list.word_be(echo, 0)
+                    let k: u64 = int.widen(k32)
+                    if k >= list.len(kinds) || list.compare_bytes(echo, payload(k)) != Equal {
+                        fail("an echo that is not a payload sent, byte-exact")
+                    }
+                    say_hex(out, "echo", echo)
+                    if kinds[k] {
+                        echo_channel = true
+                    } else {
+                        echo_send = true
+                    }
+                },
+                _ => (),
+            }
+        }
+    }
+    turn.close(mut cl, now_of(clock))
+    let mut o = zeros(512)
+    if let Ok(Send(k)) = turn.poll(mut cl, now_of(clock), r, mut o) {
+        client_send(mut link, server, list.slice(o, 0, k))
+    }
+    say(out, "done")
+}
+
+type Accepted = NoStream | Open(ReadHalf, WriteHalf, Addr, Bytes, turn.Framer)
+
+fn to_client(mut server: UdpSocket, mut stream: Accepted, o: turn.Origin, data: Bytes) waits {
+    match o.ingress {
+        Udp(_) => transmit(mut server, o.client, data),
+        Stream(_) => if let Open(_, mut w, _, _, _) = stream {
+            send_all(mut w, data)
+        },
+    }
+}
+
+fn serve(mut rl: turn.Relay, clock: Clock, rnd: Random, mut server: UdpSocket, mut pool: UdpSocket, mut stream: Accepted, o: turn.Origin, m: Bytes) waits {
+    let mut packet = copy_of(m)
+    let mut reply = zeros(0)
+    match result.unwrap(turn.from_client(mut rl, now_of(clock), rnd, o, mut packet, mut reply)) {
+        Reply(to, k) => to_client(mut server, mut stream, to, list.slice(reply, 0, k)),
+        ToPeer(_, to, range) => transmit(mut pool, to, list.slice(packet, range.lo, range.hi)),
+        _ => (),
+    }
+}
+
+fn run_relay(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) waits {
+    let realm = copy_of(string.as_bytes(argument(a, 1)))
+    let (take server_socket, local) = result.unwrap(host.udp_bind(n, Addr(ip: V4(LOOPBACK), port: 0), SOCKET))
+    let mut server = take server_socket
+    let (take pool_socket, relayed) = result.unwrap(host.udp_bind(n, Addr(ip: V4(LOOPBACK), port: 0), SOCKET))
+    let mut pool = take pool_socket
+    let (take owned_listener, _) = result.unwrap(host.listen(n, local, 4))
+    let mut listener = take owned_listener
+    let mut master_bytes: Bytes = list.with_capacity(32)
+    host.random(r, mut master_bytes)
+    let master = result.unwrap(secret.seal(take master_bytes, "mac kdf"))
+    let mut nonce_bytes: Bytes = list.with_capacity(32)
+    host.random(r, mut nonce_bytes)
+    let nonce_key = result.unwrap(secret.seal(take nonce_bytes, "mac"))
+    let mut username: Bytes = list.new()
+    let mut password: Bytes = list.new()
+    result.unwrap(turn.mint(master, now_of(clock).unix_s + 3600, b"pion", mut username, mut password))
+    let mut c = turn.relay_defaults(take realm)
+    let mut allow: List[turn.Allow] = list.new()
+    list.push(mut allow, turn.Allow(prefix: turn.Prefix(ip: V4(LOOPBACK), bits: 32), ports_lo: 1, ports_hi: 65535))
+    c.policy.allow = take allow
+    let mut pool_addrs: List[Addr] = list.new()
+    list.push(mut pool_addrs, relayed)
+    let mut rl = result.unwrap(turn.relay(take c, r, take master, take nonce_key, take pool_addrs))
+    let port: u64 = int.widen(local.port)
+    say_number(out, "listening", port)
+    let mut line = string.from("user ")
+    string.push(mut line, result.unwrap(string.from_utf8(copy_of(username))))
+    say(out, line)
+    let mut pass_line = string.from("password ")
+    string.push(mut pass_line, result.unwrap(string.from_utf8(copy_of(password))))
+    say(out, pass_line)
+    let mut stream: Accepted = NoStream
+    let mut live = 0u64
+    let deadline = host.mono_ns(clock) + 120 * SECOND
+    let mut data: Bytes = list.with_capacity(65536)
+    let mut packets: List[UdpPacket] = list.with_capacity(16)
+    while host.mono_ns(clock) < deadline {
+        let mut datagrams: List[(Addr, Bytes)] = list.new()
+        arrive(mut server, At(clock, host.mono_ns(clock) + MS), mut data, mut packets, mut datagrams)
+        for (from, m) in datagrams {
+            let o = turn.Origin(ingress: Udp(local), client: from)
+            serve(mut rl, clock, r, mut server, mut pool, mut stream, o, m)
+        }
+        let mut from_peers: List[(Addr, Bytes)] = list.new()
+        arrive(mut pool, At(clock, host.mono_ns(clock) + MS), mut data, mut packets, mut from_peers)
+        for (from, m) in from_peers {
+            let mut slot = slot_of(m)
+            let lo = turn.HEADROOM
+            if let ToClient(o, range) = result.unwrap(turn.from_peer(mut rl, now_of(clock), relayed, from, mut slot, lo, lo + list.len(m))) {
+                to_client(mut server, mut stream, o, list.slice(slot, range.lo, range.hi))
+            }
+        }
+        let mut ended = false
+        let mut messages: List[Bytes] = list.new()
+        let mut source = local
+        match stream {
+            NoStream => match host.accept(mut listener, At(clock, host.mono_ns(clock) + MS)) {
+                Ok((socket, s)) => {
+                    result.unwrap(turn.connected(mut rl, CONN, local, s, now_of(clock)))
+                    let (reader, writer) = net.split(take socket)
+                    stream = Open(take reader, take writer, s, list.new(), turn.framer())
+                },
+                Error(TimedOut) => (),
+                Error(_) => fail("accept failed"),
+            },
+            Open(mut rd, _, s, mut buf, mut f) => {
+                source = s
+                ended = !stream_in(mut rd, mut buf, mut f, At(clock, host.mono_ns(clock) + MS), mut messages)
+            },
+        }
+        for m in messages {
+            let o = turn.Origin(ingress: Stream(CONN), client: source)
+            serve(mut rl, clock, r, mut server, mut pool, mut stream, o, m)
+        }
+        if ended {
+            turn.disconnected(mut rl, CONN)
+            stream = NoStream
+        }
+        loop {
+            match turn.relay_poll(mut rl, now_of(clock)) {
+                Close(_) => {
+                    stream = NoStream
+                },
+                _ => break,
+            }
+        }
+        let count = turn.relay_counts(rl).allocations
+        if count != live {
+            live = count
+            say_number(out, "allocated", live)
+        }
+    }
+}
+
+pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    if argument(a, 0) == "client" {
+        run_client(a, n, clock, r, out)
+    } else {
+        run_relay(a, n, clock, r, out)
+    }
+    Ok(())
+}

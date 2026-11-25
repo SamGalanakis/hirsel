@@ -325,6 +325,19 @@ fn challenge_reply(mut g: Gate, r: Request, code: u16, challenge_attrs: bool, no
     Ok(Reply(refuse(g, r, code, challenge_attrs, now, o, local, mut out, mut scratch)?))
 }
 
+/// RFC 8656 section 4: a TURN server is a STUN server, so a Binding request (method 1) is
+/// answered with XOR-MAPPED-ADDRESS and no integrity, as a pre-authentication reply.
+pub fn binding_answer(mut g: Gate, now: Now, o: Origin, tx: stun_ice.Transaction, mut out: Bytes, mut scratch: Bytes) -> Result[Admit, TurnError] {
+    if now.mono_ns < g.last_ns {
+        return Error(Clock)
+    }
+    g.last_ns = now.mono_ns
+    if !challenge(mut g, o, now) {
+        return Ok(Dropped)
+    }
+    Ok(Reply(stun_ice.binding_success(tx, o.client, NoIntegrity, false, b"", mut out, mut scratch) ?=> Wire))
+}
+
 /// Sign a response to an authenticated request under its key and integrity.
 pub fn sign(v: Verified, take b: stun_ice.Builder, mut out: Bytes, mut scratch: Bytes) -> Result[u64, TurnError] {
     Ok(stun_ice.finish(take b, v.respond, Long(secret.share(v.key)), false, mut out, mut scratch) ?=> Wire)

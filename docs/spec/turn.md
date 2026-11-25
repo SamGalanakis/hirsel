@@ -734,6 +734,29 @@ module (`signal_turn.hirsel`), and the turn package names no application.
   browser case: `turn.Client` takes the SHA-256 path where browsers take MD5, and nothing
   runs under `std.sim`.
 
+**Decisions made building U7.** Each is reversible inside the package.
+
+- The relay answers a Binding request (RFC 8656 §4: a TURN server is a STUN server) with
+  XOR-MAPPED-ADDRESS and no integrity, before authentication, as RFC 8489 answers it. On a
+  `Udp` ingress it is charged to `challenge_per_s`, as a 401 is, so it amplifies no more
+  than a challenge. Pion's `examples/turn-client` sends one before it allocates.
+- `interop.py` drives the Hirsel client against
+  `turnserver --lt-cred-mech --allow-loopback-peers --no-tls` with one static user: coturn
+  denies loopback peers by default, and DTLS and the CLI are off by default at `04fad0c`.
+  The relay range is 200 ports, because coturn opens its whole range at start and 16,384
+  ports take minutes. Pion's client runs with `-ping` against the relay, whose policy
+  allows `127.0.0.1/32` because loopback is not `Public`. A missing `cmake`, `make`,
+  `pkg-config`, `go` or clone is reported as SKIP and the run exits 2, never 0. It runs on
+  any host with those tools; it is not part of `hirsel test`.
+- The cost run is `bench/turn/cost.py` over `bench/turn/relay_packets.hirsel`: setup drives
+  each client to an allocation and a confirmed channel in process, and the last allocation
+  made is measured, so both linear scans pass every live allocation. "No frame per packet"
+  is checked as equal recording sizes at 10^6 and 2 × 10^6 packets. Instructions per
+  packet are reported at 1 and 1,000 live allocations.
+  Measured at U7 (LLVM release): 0 allocations per packet both ways; 1,174-byte recordings
+  at both counts; 515 instructions per `from_client` ChannelData and 328 per `from_peer`
+  with 1 allocation, 47,468 and 18,310 with 1,000, the cost of the linear scans (U3).
+
 **No byte-rate limit.** Decision: the relay limits allocations (`quota`, the pool),
 permissions and channels, not relayed bytes per second, which RFC 8656 §21.1.7 and §21.3.1
 suggest per username and coturn offers as `max-bps`. Every relayed byte goes to a peer
@@ -891,7 +914,7 @@ Goose (`/tmp/ref-goose` at `d5ae5bb`), LiveKit (`/tmp/ref-livekit` at `d210b4d`)
 Each law is written red first in its named harness, with an oracle outside the code under
 test. The harnesses are `core/programs/turn/laws.hirsel`, the
 existing `core/programs/stun_ice/laws.hirsel` for U0, and TLS-5's sink laws for U1. Interop
-runs from `core/programs/turn/interop.py`<!-- doc-ref: planned --> on loopback, with coturn
+runs from `core/programs/turn/interop.py` on loopback, with coturn
 and Pion built from clones in `/tmp`, never vendored. The existing `binding_vectors` law is
 not re-pinned; U0 must leave it green.
 

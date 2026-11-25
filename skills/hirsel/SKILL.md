@@ -5,9 +5,14 @@ description: Write, check, test and fix Hirsel programs with the installed hirse
 
 # Hirsel
 
-Read `references/PRIMER.md` before writing Hirsel; it is the language in one page. Hirsel has
-no imports, methods, traits or turbofish. Call core modules by path (`list.push(mut xs, 1)`),
-write every top-level signature in full, and repeat each `mut` and `take` mode at the call.
+**Authority rule:** Always run `hirsel primer` from your installed binary as the exact
+authority for your installed version (`references/PRIMER.md` is the repository copy).
+For task-shaped recipes, see [hirsel.ai/cookbook.md](https://hirsel.ai/cookbook.md) or
+the single-file agent bundle at [hirsel.ai/llms-full.txt](https://hirsel.ai/llms-full.txt).
+
+Hirsel has no imports, methods, traits or turbofish. Call core and std modules by path
+(`list.push(mut xs, 1)`, `std.json.parse(...)`), write every top-level signature in full,
+and repeat each `mut` and `take` mode at the call site.
 
 ## The loop
 
@@ -20,27 +25,39 @@ write every top-level signature in full, and repeat each `mut` and `take` mode a
    ```
 
 3. Read the rule ID and the span first, then the message. For automation,
-   `hirsel check --json` supplies source coordinates, causal roles and `fixes`.
-   Apply each selected fix's edits together at their byte spans. Review
-   `maybe` fixes and fill in bodies supplied by `placeholder` fixes.
-4. Run `hirsel explain OWN-7` for the rule's exact statement and a refused example.
+   `hirsel check --json` returns structured rule IDs, byte spans, and causal sites (and on
+   `main` / newer toolchains, `line`/`column`/`line_text` plus machine-applicable `fixes`;
+   when `fixes` are present, apply a fix's edits together at their byte spans, review
+   `maybe` fixes, and fill in bodies supplied by `placeholder` fixes).
+4. Run `hirsel explain OWN-7` (or `hirsel explain OWN-7 --json`) for the rule's exact
+   statement and a refused example, or `hirsel explain --list` to list all rules.
    Fix to the rule, not to the message's wording.
 5. Repeat from step 2 until it prints `accepted`.
 6. Run `hirsel test`. It runs every `@test` in its own process under the `[tests]`
-   limit in `hirsel.toml`, and prints one row per test.
+   limit in `hirsel.toml`, and prints one row per test (use `--filter TEXT` to select
+   tests, or `--sim --seeds N` for deterministic simulation runs).
 7. Run `hirsel run --grant Stdout` (one `--grant KIND` or `--dir PATH` per
    capability parameter of `main`). A missing grant exits 103 before the program starts.
 
 ## Finding an operation
 
-Never guess a function name. `hirsel inspect --std --interface` lists every public std
-declaration with its full signature. Read the signature's modes: an unmarked parameter is a view, `mut` is lent and `take` is moved.
+Never guess a function name. Inspect your installed toolchain directly:
+
+- `hirsel inspect --core --interface` — every public core declaration and signature
+- `hirsel inspect --std --interface` — every public std declaration and signature
+- `hirsel env --json` — active compiler, root, target, and runtime info
+
+Read every parameter mode in a signature: unmarked is a read-only view, `mut` is lent,
+and `take` is moved.
 
 ## Habits that avoid refusals
 
-- Give every `let` of a literal or a generic call a type: `let n: u64 = 0`.
+- Give every `let` of a literal or a generic call an explicit type: `let n: u64 = 0`,
+  `let mut xs: List[u64] = list.new()`.
 - Never reuse a name: no shadowing, and no local named like a function.
 - Bind or `?` every `Result`; discard one only with `let _ = e`.
-- Pass capabilities (`Stdout`, `Dir`, `Clock`) as parameters; mark a function other
-  than `main` `waits` exactly when it calls a `waits` function.
-- `hirsel primer` prints the same primer as `references/PRIMER.md`.
+- Pass capabilities (`Stdout`, `Dir`, `Clock`, `Net`, `Tasks`, `Env`, `Args`, `Random`)
+  as explicit parameters; mark a function other than `main` `waits` exactly when it calls
+  a `waits` function.
+- Always trust `hirsel primer`, `hirsel explain`, and `hirsel inspect` from your installed
+  binary over any web copy.

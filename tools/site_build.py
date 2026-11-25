@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Build the deployed site: site/ copied as is, with index.html's inline script and styles minified.
+"""Build the deployed site: site/ copied as is, with index.html's inline script, styles,
+and JSON-LD minified.
 
 The source stays readable; only the deployed copy is minified. Every file but index.html is
-copied byte for byte. Usage: tools/site_build.py <out-dir>
+copied byte for byte (and when --release-tag TAG is passed, primer.md, cookbook.md,
+api-index.md, llms.txt, llms-full.txt, and sitemap.xml are regenerated aligned to TAG).
+
+Usage: tools/site_build.py <out-dir> [--release-tag TAG]
 """
+import argparse
+import json
 import re
 import shutil
 import subprocess
@@ -12,7 +18,9 @@ import tempfile
 from pathlib import Path
 
 ESBUILD = ["npx", "--yes", "esbuild@0.28.2"]
-SITE = Path(__file__).resolve().parent.parent / "site"
+TOOLS = Path(__file__).resolve().parent
+SITE = TOOLS.parent / "site"
+JSONLD_TAG = '<script type="application/ld+json">'
 
 
 def esbuild(code: str, loader: str) -> str:
@@ -37,16 +45,37 @@ def splice(html: str, tag: str, loader: str) -> str:
     return "".join(parts) + html[at:]
 
 
+def splice_jsonld(html: str) -> str:
+    """Validate and minify every <script type="application/ld+json">...</script> block."""
+    parts, at = [], 0
+    pattern = re.compile(re.escape(JSONLD_TAG) + r"(.*?)</script>", re.S)
+    for m in pattern.finditer(html):
+        parsed = json.loads(m.group(1))
+        body = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+        if "</script" in body.lower():
+            sys.exit("site_build: minified JSON-LD contains </script")
+        parts += [html[at:m.start(1)], body]
+        at = m.end(1)
+    return "".join(parts) + html[at:]
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
-        sys.exit("usage: site_build.py <out-dir>")
-    out = Path(sys.argv[1])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("out_dir", type=Path)
+    parser.add_argument("--release-tag", metavar="TAG",
+                        help="Emit release-aligned docs for TAG into out_dir")
+    args = parser.parse_args()
+    out = args.out_dir
     if out.exists():
         shutil.rmtree(out)
     shutil.copytree(SITE, out)
     html = (SITE / "index.html").read_text(encoding="utf-8")
-    if len(re.findall(r"<script\b", html)) != len(re.findall(r"<script>", html)):
-        sys.exit("site_build: index.html has a <script> with attributes; teach site_build about it")
+    all_scripts = len(re.findall(r"<script\b", html))
+    bare_scripts = len(re.findall(r"<script>", html))
+    jsonld_scripts = html.count(JSONLD_TAG)
+    if all_scripts != bare_scripts + jsonld_scripts:
+        sys.exit("site_build: index.html has an unsupported <script> with attributes; teach site_build about it")
+    html = splice_jsonld(html)
     html = splice(html, "script", "js")
     html = splice(html, "style", "css")
     for m in re.finditer(r"<script>(.*?)</script>", html, re.S):
@@ -55,6 +84,12 @@ def main() -> None:
             f.flush()
             subprocess.run(["node", "--check", f.name], check=True)
     (out / "index.html").write_text(html, encoding="utf-8")
+    if args.release_tag:
+        subprocess.run(
+            [sys.executable, str(TOOLS / "site_sync.py"),
+             "--release-tag", args.release_tag, "--out-dir", str(out)],
+            check=True,
+        )
 
 
 if __name__ == "__main__":

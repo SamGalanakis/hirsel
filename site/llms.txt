@@ -1,78 +1,90 @@
 # Hirsel
 
-> Hirsel is a native systems language for coding agents, with explicit capabilities and byte budgets.
+> Hirsel is a zero-GC native systems programming language with explicit capabilities, bounded memory and steps, deterministic runtime execution, and recorded replay.
 
-The primer is the whole language in one page; with the installed `hirsel` binary it is
-enough to write, check and test working programs.
+**Authority rule:** Always run `hirsel primer` from your installed binary as the exact authority for your installed version. Use `hirsel explain RULE` for any diagnostic rule ID and `hirsel inspect --core --interface` / `hirsel inspect --std --interface` for exact function signatures. Repository docs track `main`.
+
+## Quick start
+
+```sh
+curl -fsSL https://hirsel.ai/install.sh | sh   # Linux x86_64 (glibc 2.28+); Apple Silicon macOS in progress
+hirsel new app && cd app
+hirsel check
+hirsel test
+hirsel run --grant Stdout
+```
 
 ## Docs
 
-- [Primer](https://hirsel.ai/primer.md): syntax, ownership, capabilities and the command-line loop
-- [Standard library index](https://hirsel.ai/api-index.md): every std module and its operations
+- [Primer](https://hirsel.ai/primer.md): whole language in one page — syntax, ownership, capabilities, budgets, and the CLI loop
+- [Cookbook](https://hirsel.ai/cookbook.md): tested task-shaped recipes (CLI, files, HTTP router, Store, tasks/units, `sim` testing & laws, `Inline`/`Simd`)
+- [Standard library index](https://hirsel.ai/api-index.md): every `std` module and its operations
+- [Full agent bundle (llms-full.txt)](https://hirsel.ai/llms-full.txt): single-file bundle containing intro, primer, cookbook, std API index, and agent skill
+- [Agent skill (SKILL.md)](https://github.com/SamGalanakis/hirsel/blob/main/skills/hirsel/SKILL.md): iterative check/explain/inspect workflow for coding agents
 - [Install script](https://hirsel.ai/install.sh): Linux x86_64 release installer
 
-## Subscriptions
+## Toolchain packages
 
-The TypeScript SDK exposes a frozen subscription image through `rows(slot)`, `map(slot)`, and `get(slot, key)`. Reads share row references. Each `onChange(sub, change)` callback sees the applied Batch and receives typed insertions, updates, and deletions. Reset and connection loss clear the image and send a data-free invalidation. [SDK subscription contract](https://github.com/samgalanakis/hirsel/blob/main/docs/spec/sdk.md#subscriptions)
+Three packages ship with the Hirsel toolchain and bind by major version in `hirsel.toml`:
 
-## Packages
+```text
+[dependencies]
+std = { major = 1 }
+store = { major = 1 }
+runner = { major = 1 }
+```
 
-- [av1](https://github.com/samgalanakis/hirsel/tree/main/core/programs/av1/) encodes and decodes AV1 video.
-- [checkbox](https://github.com/samgalanakis/hirsel/tree/main/core/programs/checkbox/) runs a shared board of one million checkboxes.
-- [ffi_laws](https://github.com/samgalanakis/hirsel/tree/main/core/programs/ffi_laws/) checks native FFI calls, resource lifetimes, and authority.
-- [h264](https://github.com/samgalanakis/hirsel/tree/main/core/programs/h264/) encodes and decodes H.264 video.
-- [harness](https://github.com/samgalanakis/hirsel/tree/main/core/programs/harness/) runs durable agent sessions, tools, approvals, and model calls.
-- [harness_dev_serve](https://github.com/samgalanakis/hirsel/tree/main/core/programs/harness/serve/) serves the notes agent through the development gateway.
-- [harness_ts_gateway](https://github.com/samgalanakis/hirsel/tree/main/core/programs/harness/ts-client/gateway/) serves the notes agent for the TypeScript gateway client checks.
-- [image_core](https://github.com/samgalanakis/hirsel/tree/main/core/programs/image_core/) probes and transforms images and handles PNG, QOI, GIF, and AVIF data.
-- [image_jpeg](https://github.com/samgalanakis/hirsel/tree/main/core/programs/image_jpeg/) encodes and decodes JPEG images.
-- [image_webp](https://github.com/samgalanakis/hirsel/tree/main/core/programs/image_webp/) encodes and decodes WebP images and animations.
-- [m1](https://github.com/samgalanakis/hirsel/tree/main/core/programs/m1/) contains runnable programs used to check the native backends.
-- [m2b](https://github.com/samgalanakis/hirsel/tree/main/core/programs/m2b/) contains runnable programs for dispatch, transactions, and replay.
-- [mcp](https://github.com/samgalanakis/hirsel/tree/main/core/programs/mcp/) implements the Model Context Protocol client and server over Streamable HTTP.
-- [media_bits](https://github.com/samgalanakis/hirsel/tree/main/core/programs/media_bits/) parses codec headers and packet metadata.
-- [media_container](https://github.com/samgalanakis/hirsel/tree/main/core/programs/media_container/) reads and writes MP4, WebM, and Ogg containers.
-- [notes](https://github.com/samgalanakis/hirsel/tree/main/core/programs/notes/) runs an offline notes agent with tools and an approval step.
-- [observe](https://github.com/samgalanakis/hirsel/tree/main/core/programs/observe/) exercises observation, session positions, and version tracking.
-- [omap](https://github.com/samgalanakis/hirsel/tree/main/core/programs/omap/) runs the persistent ordered map benchmark.
-- [opus](https://github.com/samgalanakis/hirsel/tree/main/core/programs/opus/) encodes and decodes Opus audio.
-- [platform](https://github.com/samgalanakis/hirsel/tree/main/core/programs/platform/) starts and manages deployed places, including cutovers and recovery.
-- [postgres](https://github.com/samgalanakis/hirsel/tree/main/core/programs/postgres/) connects to PostgreSQL with TLS and streams query results.
-- [runner](https://github.com/samgalanakis/hirsel/tree/main/core/programs/runner/) registers calls and subscriptions and serves them from a place.
-- [search](https://github.com/samgalanakis/hirsel/tree/main/core/programs/search/) indexes and ranks text with BM25 over store snapshots.
-- [sha256](https://github.com/samgalanakis/hirsel/tree/main/core/programs/sha256/) runs the SHA-256 benchmark.
-- [sqlite](https://github.com/samgalanakis/hirsel/tree/main/core/programs/sqlite/) opens SQLite databases and runs SQL with explicit capabilities.
-- [store](https://github.com/samgalanakis/hirsel/tree/main/core/programs/store/) provides typed tables, durable transactions, snapshots, and replay.
-- [store-crash](https://github.com/samgalanakis/hirsel/tree/main/core/programs/store-crash/) checks store, runner, and platform recovery after crashes.
-- [stun_ice](https://github.com/samgalanakis/hirsel/tree/main/core/programs/stun_ice/) encodes STUN messages and checks ICE connectivity.
-- [tz](https://github.com/samgalanakis/hirsel/tree/main/core/programs/tz/) resolves IANA time zones and converts between instants and local time.
-- [video_packager](https://github.com/samgalanakis/hirsel/tree/main/core/programs/video_packager/) packages CMAF segments and writes HLS and DASH manifests.
-- [video_yuv](https://github.com/samgalanakis/hirsel/tree/main/core/programs/video_yuv/) converts and scales video pixel formats.
-- [wire](https://github.com/samgalanakis/hirsel/tree/main/core/programs/wire/) contains runnable protocol examples for clients and places.
-- [xml](https://github.com/samgalanakis/hirsel/tree/main/core/programs/xml/) parses XML as events or a document tree and writes it back as UTF-8.
+- [std](https://github.com/SamGalanakis/hirsel/blob/main/core/std/API-INDEX.md) — standard library: files, directories, HTTP server/client, router, JSON, codecs, simulation (`std.sim`), property testing (`std.prop`), and crypto.
+- [store](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/store/) — typed tables, secondary indexes, durable transactions, snapshots, and replay.
+- [runner](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/runner/) — durable calls, typed subscriptions, TypeScript SDK generation ([sdk/client/README.md](https://github.com/SamGalanakis/hirsel/blob/main/sdk/client/README.md)), and place hosting.
+
+## Libraries and applications
+
+First-party packages in this repository (bind locally with `path = "..."` in `[dependencies]`):
+
+- [postgres](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/postgres/) — PostgreSQL client with TLS and streaming query results.
+- [sqlite](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/sqlite/) — SQLite bindings with explicit capabilities.
+- [mcp](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
+- [search](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/search/) — BM25 full-text search over `store` snapshots.
+- [harness](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/harness/) — durable agent sessions, tools, approvals, and model calls.
+- [notes](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/notes/) — offline notes agent with tools and an approval step.
+- [checkbox](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/checkbox/) — shared board of one million checkboxes.
+- [platform](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/platform/) — deployed place management, cutovers, and recovery.
+- [tz](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/tz/) — IANA time zones and instant/local-time conversion.
+- [xml](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/xml/) — streaming and tree XML parser and UTF-8 serializer.
+- [stun_ice](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/stun_ice/) — STUN message encoding and ICE connectivity checks.
+- [image_core](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/image_core/), [image_jpeg](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/image_jpeg/), [image_webp](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/image_webp/) — image probing, transforms, PNG, QOI, GIF, AVIF, JPEG, and WebP codecs.
+- [av1](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/av1/), [h264](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/h264/), [opus](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/opus/), [media_bits](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/media_bits/), [media_container](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/media_container/), [video_packager](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/video_packager/), [video_yuv](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/video_yuv/) — audio/video codecs, MP4/WebM/Ogg containers, YUV conversion, and CMAF/HLS/DASH packaging.
+
+Internal verification harnesses and benchmarks (`m1`, `m2b`, `ffi_laws`, `store-crash`,
+`harness_dev_serve`, `harness_ts_gateway`, `observe`, `wire`, `omap`, `sha256`) also live
+under [core/programs/](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/) for compiler and runtime testing.
 
 ## Runnable examples
 
-- [Subscription cache](https://github.com/samgalanakis/hirsel/blob/main/sdk/client/tests/subscription-cache.ts) reads a store row from a runner subscription, observes cache changes, and applies an optimistic edit. [Run the SDK check](https://github.com/samgalanakis/hirsel/blob/main/sdk/client/README.md#run-the-subscription-example).
-- [PostgreSQL](https://github.com/samgalanakis/hirsel/blob/main/core/programs/postgres/example.hirsel) reads a typed column and drains the cursor before reusing the connection.
-- [SQLite](https://github.com/samgalanakis/hirsel/blob/main/core/programs/sqlite/example.hirsel) binds a customer ID and reads the total from an in-memory database.
-- [MCP](https://github.com/samgalanakis/hirsel/blob/main/core/programs/mcp/example.hirsel) decodes a tool-list reply and reads the tool name.
-- [Search](https://github.com/samgalanakis/hirsel/blob/main/core/programs/search/example.hirsel) indexes two recipes in store and queries a snapshot for the published match.
-- [JPEG](https://github.com/samgalanakis/hirsel/blob/main/core/programs/image_jpeg/vectors/example.hirsel) probes an image with `image_core` and reads packed RGB strips.
-- [WebP](https://github.com/samgalanakis/hirsel/blob/main/core/programs/image_webp/vectors/example.hirsel) sizes an RGBA buffer from `image_core` metadata and decodes a lossless still.
-- [HLS](https://github.com/samgalanakis/hirsel/blob/main/core/programs/video_packager/example.hirsel) packages MP4 track samples and writes their VOD playlist.
-- [Opus](https://github.com/samgalanakis/hirsel/blob/main/core/programs/opus/vectors/example.hirsel) decodes a 20 ms stereo packet to PCM.
+Standalone recipes that work in any fresh project (`hirsel new app`) are in
+[docs/COOKBOOK.md](https://github.com/SamGalanakis/hirsel/blob/main/docs/COOKBOOK.md).
 
-Run the package examples from the repository root with the Hirsel toolchain.
+Repository examples (run from a checkout of this repo):
+
+- [Subscription cache](https://github.com/SamGalanakis/hirsel/blob/main/sdk/client/tests/subscription-cache.ts) reads a `store` row from a `runner` subscription, observes cache changes, and applies an optimistic edit ([run the SDK check](https://github.com/SamGalanakis/hirsel/blob/main/sdk/client/README.md#run-the-subscription-example)).
+- [PostgreSQL](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/postgres/example.hirsel) reads a typed column and drains the cursor before reusing the connection.
+- [SQLite](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/sqlite/example.hirsel) binds a customer ID and reads the total from an in-memory database.
+- [MCP](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/mcp/example.hirsel) decodes a tool-list reply and reads the tool name.
+- [Search](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/search/example.hirsel) indexes two recipes in `store` and queries a snapshot for the published match.
+- [JPEG](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/image_jpeg/vectors/example.hirsel), [WebP](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/image_webp/vectors/example.hirsel), [HLS](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/video_packager/example.hirsel), and [Opus](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/opus/vectors/example.hirsel) media codec and packaging examples.
+
+Run the package examples from the repository root with the `hirsel` binary:
 
 ```sh
-hirsel test core/programs/postgres --exact postgres@1/sim_tests/select_answer
-hirsel test core/programs/sqlite --exact sqlite@1/example/sum_orders --grant Foreign=sqlite@1/sqlite/Sqlite
-hirsel test core/programs/mcp --exact mcp@1/example/read_tool_catalog
-hirsel test core/programs/search --exact search@1/example/find_document
-hirsel test core/programs/video_packager --exact video_packager@1/tests/hls_cmaf
+hirsel test core/programs/postgres --filter select_answer
+hirsel test core/programs/sqlite --filter sum_orders --grant Foreign=sqlite@1/sqlite/Sqlite
+hirsel test core/programs/mcp --filter read_tool_catalog
+hirsel test core/programs/search --filter find_document
+hirsel test core/programs/video_packager --filter hls_cmaf
 ```
 
-The codec examples run with the existing [JPEG](https://github.com/samgalanakis/hirsel/blob/main/core/programs/image_jpeg/test-vectors.sh),
-[WebP](https://github.com/samgalanakis/hirsel/blob/main/core/programs/image_webp/test-vectors.sh), and [Opus](https://github.com/samgalanakis/hirsel/blob/main/core/programs/opus/test-vectors.sh)
-vector scripts. Each script lists the reference inputs it needs.
+The codec examples run with the [JPEG](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/image_jpeg/test-vectors.sh),
+[WebP](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/image_webp/test-vectors.sh), and
+[Opus](https://github.com/SamGalanakis/hirsel/blob/main/core/programs/opus/test-vectors.sh) vector scripts. Each script lists the
+reference inputs it needs.

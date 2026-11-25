@@ -16,6 +16,7 @@ DOCS = (
     'README.md',
     'docs/building.md',
     'docs/PRIMER.md',
+    'docs/COOKBOOK.md',
     'core/programs/store/STORE-SPEC.md',
     'core/programs/runner/RUNNER-SPEC.md',
     'core/programs/harness/README.md',

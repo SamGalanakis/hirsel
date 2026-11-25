@@ -196,12 +196,15 @@ allocation (`Capacity`) each clean every scope and end the task. A failure in `m
 task exits 101 and prints the cause chain (FAIL-1, PROG-3). `isolate(fn() -> R { .. })`
 catches a failure as `Ok(Error(causes))`, and it undoes nothing (FAIL-16).
 
-## 7. Memory: `bound bytes`, `region` and `@compact`
+## 7. Memory: `bound bytes`, `bound steps`, `bytes[T]`, `region`, `@compact`, `Inline`, and `Simd`
 
 Every allocation is charged against a byte limit. `bound bytes n { .. }` runs its body
 under a new limit of `n` and returns `Result[T, Capacity]`. The `Error` means only that
 the `n` itself was refused. An allocation the body cannot fit raises the failure
-`Capacity`, which `isolate` catches (MEM-25, MEM-21). `region r { .. }` opens a region:
+`Capacity`, which `isolate` catches (MEM-25, MEM-21). `bound steps n { .. }` bounds
+computation steps independently of memory and returns `Result[T, OutOfTime]` (MEM-30).
+`bytes[T]` evaluates at compile time to `T`'s logical byte size under `charge-v1`, usable
+in `const` and generic functions alongside `charge.*` sizing helpers (MEM-33). `region r { .. }` opens a region:
 region data in it is freed at once when the block exits, and no value naming `r` may
 leave it (MEM-1, MEM-7, MEM-8).
 
@@ -272,11 +275,41 @@ fn leak(s: String) -> u64 {
 }
 ```
 
-## 8. Capabilities and `waits`
+Fixed-size values and deterministic budgets avoid heap traffic on hot paths:
+
+- `Inline[T, N]` is a fixed-length inline array of `N` elements (plain when `T` is plain,
+  own when `T` is own), indexed with `u64` and zero heap allocation.
+- `Simd[T, N]` is a 16- or 32-byte plain vector of integer lanes (local, parameter, or
+  result only — never a struct field), operated on through `simd.*`, `list.lanes`, and
+  `inline.lanes` with target-independent semantics (SEM-11).
+- `bytes[T]` gives the compile-time logical charge of `T` (MEM-33), and `bound steps n { .. }`
+  caps loop back-edges and calls to `n` steps (MEM-30).
+
+```hirsel
+const MASK: Inline[u8, 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+const MASK_BYTES: u64 = bytes[Inline[u8, 16]]
+
+fn has_byte(b: Bytes, at: u64, needle: u8) -> bool {
+  let chunk: Simd[u8, 16] = list.lanes(b, at)
+  let target: Simd[u8, 16] = simd.splat(needle)
+  simd.any(simd.eq(chunk, target))
+}
+
+fn bounded_sum(n: u64) -> Result[u64, OutOfTime] {
+  bound steps 1000 {
+    let mut i: u64 = 0
+    let mut acc: u64 = 0
+    while i < n { acc += i; i += 1 }
+    acc
+  }
+}
+```
+
+## 8. Capabilities, `waits`, and units
 
 Files, directories, network, clocks, randomness, standard streams, environment variables,
 secrets, credentials, foreign interfaces, child processes (`Exec`), and tasks are reached
-only through capability parameters (CAP-1; full list in [capabilities](spec/capabilities.md)). A function
+only through capability parameters (CAP-1; full list in [capabilities](https://github.com/SamGalanakis/hirsel/blob/main/docs/spec/capabilities.md)). A function
 holds exactly the authority it is passed, and no constant holds any (CAP-1, CAP-3).
 `main`'s parameters are granted at launch with `--grant` and `--dir` (CAP-4).
 
@@ -307,7 +340,17 @@ Any function but `main` is `waits` exactly when it calls something that is `wait
 a needless `waits` is refused too (LANG-8). A waiting call may observe cancellation
 (CONC-7). Tasks share nothing: `task.spawn(tasks, bytes n, take payload, f)` moves a
 `send` payload into a new task, and channels carry values between tasks (CONC-2, CONC-3,
-CONC-4).
+CONC-4). To isolate work into a separate **unit** (sharing no mutable memory and charging
+transferred `List`/`String` content to the helper's limit), use `task.spawn_unit` with
+`cross` payload/result types and `Shared[T]` for immutable cross-unit sharing (CONC-15):
+
+```hirsel
+fn unit_len(take xs: List[u64]) -> u64 { list.len(xs) }
+
+fn run_helper(tasks: Tasks, take xs: List[u64]) -> Result[Task[u64], (Capacity, List[u64])] {
+  task.spawn_unit(tasks, bytes 4096, take xs, unit_len)
+}
+```
 
 ```hirsel
 fn twice(x: u64) -> u64 waits { x * 2 }                   // refused: LANG-8, waits with no waiting call

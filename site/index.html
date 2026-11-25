@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>hirsel</title>
-  <meta name="description" content="Good fences make fast systems. A native systems language for coding agents, with explicit authority, logical byte budgets and recorded replay.">
+  <title>Hirsel — Deterministic Systems Programming Language</title>
+  <meta name="description" content="Hirsel is a zero-GC native systems programming language with explicit capabilities, bounded memory and steps, deterministic runtime execution, and recorded replay.">
   <meta name="theme-color" content="#FBF6EC">
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -12,15 +12,62 @@
   <link rel="canonical" href="https://hirsel.ai/">
   <link rel="alternate" type="text/markdown" href="/primer.md">
   <meta property="og:type" content="website">
-  <meta property="og:site_name" content="hirsel">
-  <meta property="og:title" content="hirsel: Good fences make fast systems.">
-  <meta property="og:description" content="A native systems language for coding agents, with explicit authority, logical byte budgets and recorded replay.">
+  <meta property="og:site_name" content="Hirsel">
+  <meta property="og:title" content="Hirsel — Good fences make fast systems.">
+  <meta property="og:description" content="A zero-GC native systems programming language with explicit capabilities, bounded memory and steps, deterministic runtime execution, and recorded replay.">
   <meta property="og:url" content="https://hirsel.ai/">
-  <meta property="og:image" content="https://hirsel.ai/social-card.png">
+  <meta property="og:image" content="https://hirsel.ai/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="The hirsel ram mark and wordmark with the line: Good fences make fast systems.">
+  <meta property="og:image:alt" content="Hirsel ram mark, wordmark, and Hirsel code snippet showing explicit capabilities and byte budgets on warm cream.">
   <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Hirsel — Good fences make fast systems.">
+  <meta name="twitter:description" content="A zero-GC native systems programming language with explicit capabilities, bounded memory and steps, deterministic runtime execution, and recorded replay.">
+  <meta name="twitter:image" content="https://hirsel.ai/og-image.png">
+  <meta name="twitter:image:alt" content="Hirsel ram mark, wordmark, and Hirsel code snippet showing explicit capabilities and byte budgets on warm cream.">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebSite",
+        "@id": "https://hirsel.ai/#website",
+        "name": "Hirsel",
+        "url": "https://hirsel.ai/",
+        "description": "Hirsel is a zero-GC native systems programming language with explicit capabilities, bounded memory and steps, deterministic runtime execution, and recorded replay.",
+        "inLanguage": "en"
+      },
+      {
+        "@type": "ComputerLanguage",
+        "@id": "https://hirsel.ai/#language",
+        "name": "Hirsel",
+        "url": "https://hirsel.ai/",
+        "description": "A zero-GC native systems programming language with value semantics, explicit capability parameters, logical byte and step budgets, and deterministic recorded replay.",
+        "sameAs": [
+          "https://github.com/SamGalanakis/hirsel"
+        ]
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://hirsel.ai/#toolchain",
+        "name": "Hirsel",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Linux (x86_64, glibc 2.28+)",
+        "softwareVersion": "0.1.0-pre",
+        "url": "https://hirsel.ai/",
+        "downloadUrl": "https://hirsel.ai/install.sh",
+        "codeRepository": "https://github.com/SamGalanakis/hirsel",
+        "license": "https://github.com/SamGalanakis/hirsel/blob/main/LICENSE",
+        "description": "Native Cranelift and LLVM compiler toolchain, deterministic simulator, profiler, and runtime for the Hirsel systems programming language.",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      }
+    ]
+  }
+  </script>
   <link rel="preload" href="fonts/archivo-black-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
 <style>
@@ -86,11 +133,16 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
 .land h1{margin:0;font-size:clamp(76px,12.5vw,176px);line-height:.8}
 .land .head{margin:24px 0 0 4px;font-size:26px;line-height:1.2;font-weight:600;letter-spacing:-.02em;color:var(--ink);text-wrap:balance}
 .land .tag{margin:10px 0 0 5px;max-width:40ch;font-size:16px;line-height:1.5;font-weight:400;color:#3d3b35;text-wrap:pretty}
-.land .in{margin:26px 0 0 4px;font-size:16px;font-weight:500;display:inline-flex;gap:10px;align-items:center;border-bottom:1.5px solid var(--ink);padding-bottom:3px}
+.land .actions{margin:24px 0 0 4px;display:flex;flex-direction:column;align-items:flex-start;gap:10px}
+.land .row{display:flex;flex-wrap:wrap;align-items:baseline;gap:18px}
+.land .in{margin:0;font-size:16px;font-weight:500;display:inline-flex;gap:10px;align-items:center;border-bottom:1.5px solid var(--ink);padding-bottom:3px}
 .land .in{transition:border-color var(--t-state) var(--ease)}
 .land .in span{transition:transform var(--t-state) var(--ease)}
 .land .in:hover span,.land .in:focus-visible span{transform:translateX(6px)}
 .land .in:active span{transform:translateX(10px);transition-duration:var(--t-press)}
+.land .sublink{font-size:14.5px;font-weight:500;color:var(--mute);text-decoration:none;border-bottom:1px solid var(--rule);padding-bottom:2px;transition:color var(--t-state) var(--ease),border-color var(--t-state) var(--ease)}
+.land .sublink:hover,.land .sublink:focus-visible{color:var(--ink);border-bottom-color:var(--ink)}
+.land .plat{margin:0;font-size:13px;line-height:1.4;color:var(--mute)}
 
 .panel{position:fixed;left:max(48px,var(--sal));top:50%;transform:translateY(-50%);width:340px;z-index:2}
 .panel h2{margin:0;font:400 31px/1.1 "Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-synthesis:none;letter-spacing:-.025em;text-wrap:balance}
@@ -183,8 +235,11 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
   .land h1{font-size:84px}
   .land .head{font-size:21px;margin-top:16px;margin-left:3px}
   .land .tag{font-size:15px;margin-top:8px;margin-left:3px}
-  .land .in{margin-top:20px;position:relative}
+  .land .actions{margin-top:18px;margin-left:3px;gap:8px}
+  .land .row{gap:14px}
+  .land .in{margin:0;position:relative}
   .land .in::after{content:"";position:absolute;inset:-10px -12px -8px}
+  .land .plat{font-size:12.5px}
   .panel{left:max(16px,var(--sal));right:max(16px,var(--sar));top:auto;bottom:calc(var(--bar) + var(--sab) + 12px);transform:none;width:auto;max-height:52vh;overflow:auto;overscroll-behavior:contain}
   .panel h2{font-size:24px}
   .slot{margin-top:10px}
@@ -283,6 +338,8 @@ html,body{height:auto;overflow:auto}
 .ns p{margin:10px 0 0;color:#2b2a26;max-width:62ch;text-wrap:pretty}
 .ns .lead{margin-top:8px;font-size:18px;font-weight:600;color:var(--ink);letter-spacing:-.01em}
 .ns b{font-weight:600;color:var(--ink)}
+.ns pre{margin:16px 0 0;padding:14px 16px;border-radius:8px;background:var(--ground);overflow-x:auto;font:400 13px/1.6 ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;color:var(--ink)}
+.ns .plat{margin-top:8px;font-size:13.5px;color:var(--mute)}
 .ns .out{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);font-size:14px;font-weight:500}
 .ns .out a{color:var(--mute);text-decoration:none}
 .ns .out a:hover,.ns .out a:focus-visible{color:var(--ink)}
@@ -295,10 +352,21 @@ html,body{height:auto;overflow:auto}
     <h1 class="wmfont">hirsel</h1>
     <p class="head">Good fences make fast systems.</p>
     <p class="tag">A native systems language for coding agents, with explicit authority, logical byte budgets and recorded replay.</p>
+    <p class="plat">Install: <code>curl -fsSL https://hirsel.ai/install.sh | sh</code> &middot; Linux x86_64 &middot; glibc 2.28+ &middot; Apple Silicon macOS in progress</p>
+    <pre><code>pub fn main(out: Stdout) -> Result[(), WriteError] waits {
+  let mut names: List[String] = list.new()
+  list.push(mut names, "ada")
+  list.push(mut names, "grace")
+  stdout.write(out, "ada grace 2\n")
+}</code></pre>
     <section>
       <h2>Safe</h2>
       <p class="lead">Nothing is left lying on the hill.</p>
       <p>An accepted program has no undefined behaviour, no data races, no use after free and no leaked resources. When a sheep leaves, its ground goes with it.</p>
+      <pre><code>fn keep(take name: String) -> String {
+  let kept = name
+  name       // refused: OWN-5, name moved
+}</code></pre>
     </section>
     <section>
       <h2>Parallel</h2>
@@ -309,11 +377,21 @@ html,body{height:auto;overflow:auto}
       <h2>Memory</h2>
       <p class="lead">The type decides who frees.</p>
       <p>An ordinary type has one owner, and its value is freed when the owner goes away. Data that dies together lives in one region and is freed at once. Sharing is opt-in and counted, and a move never copies the data a value owns.</p>
+      <pre><code>fn width(take s: String) -> u64 {
+  let owned = s        // moved: one owner
+  region r {
+    let t = text.copy_in(r, owned)
+    text.len(t)
+  }                    // r freed at once
+}</code></pre>
     </section>
     <section>
       <h2>Bounded</h2>
       <p class="lead">A full patch refuses the next mouthful.</p>
       <p>Every allocation is made against a limit. Running out raises Capacity, an ordinary failure the program can catch and recover from. Bound scopes nest one limit inside another.</p>
+      <pre><code>fn fill() -> Result[List[u64], Capacity] {
+  bound bytes 64 { list.with_capacity(100) }
+}</code></pre>
     </section>
     <section>
       <h2>Deterministic</h2>
@@ -324,6 +402,8 @@ html,body{height:auto;overflow:auto}
       <h2>Explicit authority</h2>
       <p class="lead">Only a sheep handed the key goes through the gate.</p>
       <p>Files, network, clocks, randomness, tasks and output are values passed as parameters. A function holds exactly the authority it is handed.</p>
+      <pre><code>fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
+fn sneak() -> u64 { host.mono_ns() } // refused: CAP-1, no Clock</code></pre>
     </section>
     <section>
       <h2>Local</h2>
@@ -337,7 +417,7 @@ html,body{height:auto;overflow:auto}
       <p><b>Build.</b> The compiler checks and lowers each definition once and caches it by content, so an edit rechecks only that definition and callers of a changed signature.</p>
       <p><b>Run.</b> Every type declares how its values are represented, so costs follow from the declaration, not from an analysis. A region is freed at once, with no per-node walk.</p>
     </section>
-    <p class="out"><a href="/llms.txt">For agents (llms.txt)</a> &middot; <a href="/install.sh">Install</a> &middot; <a href="https://github.com/samgalanakis/hirsel">Source on GitHub &rarr;</a></p>
+    <p class="out"><a href="/primer.md">Primer</a> &middot; <a href="/cookbook.md">Cookbook</a> &middot; <a href="/api-index.md">Std API</a> &middot; <a href="/llms.txt">llms.txt</a> &middot; <a href="/llms-full.txt">llms-full.txt</a> &middot; <a href="https://github.com/SamGalanakis/hirsel/blob/main/skills/hirsel/SKILL.md">Agent skill</a> &middot; <a href="/install.sh">Install</a> &middot; <a href="https://github.com/SamGalanakis/hirsel">Source on GitHub &rarr;</a></p>
   </main>
 </noscript>
 
@@ -372,14 +452,25 @@ html,body{height:auto;overflow:auto}
   <h1 class="wmfont">hirsel</h1>
   <p class="head">Good fences make fast systems.</p>
   <p class="tag">A native systems language for coding agents, with explicit authority, logical byte budgets and recorded replay.</p>
-  <button class="in" id="walkIn">walk the hill <span aria-hidden="true">&rarr;</span></button>
+  <div class="actions">
+    <div class="row">
+      <button class="in" id="walkIn">walk the hill <span aria-hidden="true">&rarr;</span></button>
+      <a class="sublink" href="/install.sh">Install</a>
+      <a class="sublink" href="/primer.md">Primer</a>
+      <a class="sublink" href="/cookbook.md">Cookbook</a>
+    </div>
+    <p class="plat">Linux x86_64 &middot; glibc 2.28+ &middot; Apple Silicon macOS in progress</p>
+  </div>
 </section>
 
 <section class="panel" id="panel" aria-live="polite" hidden>
   <h2 id="pTitle"></h2>
   <div class="slot" id="slot">
     <div class="body" id="pBody"></div>
-    <div class="code" id="code" role="region" aria-label="In code"><pre id="codeTxt"></pre></div>
+    <div class="code" id="code" role="region" aria-label="In code"><pre id="codeTxt">fn stamp(c: Clock) -&gt; u64 { host.mono_ns(c) }
+fn fill() -&gt; Result[List[u64], Capacity] {
+  bound bytes 64 { list.with_capacity(100) }
+}</pre></div>
   </div>
   <div class="det" id="det" hidden>
     <button id="replayBtn"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.75 8a5.25 5.25 0 1 0 1.6-3.78"/><path d="M2.6 1.9v2.9h2.9"/></svg>Replay the run</button>
@@ -2074,10 +2165,14 @@ cv.addEventListener('mousemove', e => { cv.style.cursor = view === 'hill' && nea
 
 const AGENT_TXT = [
   'Hirsel docs and install for coding agents:',
+  'Authority rule: Always run `hirsel primer` from your installed binary as the exact authority for your installed version.',
   '- Index: https://hirsel.ai/llms.txt',
+  '- Full single-file bundle: https://hirsel.ai/llms-full.txt',
   '- Primer (whole language in one page): https://hirsel.ai/primer.md',
+  '- Cookbook (tested recipes): https://hirsel.ai/cookbook.md',
   '- Standard library index: https://hirsel.ai/api-index.md',
-  '- Install (Linux x86_64): curl -fsSL https://hirsel.ai/install.sh | sh',
+  '- Agent skill: https://github.com/SamGalanakis/hirsel/blob/main/skills/hirsel/SKILL.md',
+  '- Install (Linux x86_64, glibc 2.28+; Apple Silicon macOS in progress): curl -fsSL https://hirsel.ai/install.sh | sh',
 ].join('\n');
 let copyTimer = 0;
 $('copyAgent').addEventListener('click', () => {

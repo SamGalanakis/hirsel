@@ -359,6 +359,8 @@ fn net_words(e: NetError) -> (u64, u64) {
                 },
                 Closed => 5,
                 Truncated => 6,
+                Chain => 7,
+                Key => 8,
             }
             (9, code)
         },

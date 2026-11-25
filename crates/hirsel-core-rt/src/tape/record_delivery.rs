@@ -185,6 +185,17 @@ pub(super) unsafe fn record_out(
             out.payload.push(binding.len() as u8);
             out.payload.extend_from_slice(binding);
         }
+    } else if ok && r.operation == TLS_HELLO {
+        // SAFETY: the hello pins its name buffer through delivery.
+        unsafe {
+            let hello = &*r.path.cast::<crate::tls_server::HelloRequest>();
+            out.payload = buffer_bytes(&*hello.name_out).to_vec();
+        }
+    } else if ok && r.operation == TLS_ACCEPT {
+        // SAFETY: the handshake pins its protocol slot through delivery.
+        let chosen =
+            unsafe { *(*r.path.cast::<crate::tls_server::TlsAcceptRequest>()).protocol_out };
+        out.payload = vec![chosen.wrapping_add(1) as u8];
     } else if ok
         && carries_payload(r.operation)
         && r.buffer.len.saturating_sub(before) > 256

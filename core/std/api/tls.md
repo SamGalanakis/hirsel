@@ -1,4 +1,4 @@
-# TLS client and secrets
+# TLS client, server and secrets
 
 [API overview](../API.md). [TLS and secrets specification](../../../docs/spec/tls.md).
 
@@ -24,6 +24,20 @@ secret ([TLS-5](../../../docs/spec/tls.md#tls-5-secrets)). Malformed marks raise
 or a name outside any secret's patterns gives `Denied` before sending any bytes.
 Failure after a partial commit spends the write half. Later sends on it give
 `Reset`.
+
+To serve TLS on a socket from `host.accept`, call `tls.hello(s, until)`. It reads
+the ClientHello and returns a `Hello`; `tls.server_name(h)` is the client's SNI,
+lowercased without a trailing dot, or empty when the client sent none or sent an
+IP literal. Then call `tls.accept(h, chain, key, alpn, until)` with the chain as
+DER certificates, leaf first, and a `Secret` granted `tls_serve`. It returns the
+halves and the zero-based index into your `alpn` list that the server's
+preference chose, if any. Dropping the `Hello` declines the connection with the
+`unrecognized_name` alert. Only TLS 1.3 is served, with no session tickets.
+The key never leaves the provider: it must be a P-256, Ed25519 or 2048 to 4096
+bit RSA PKCS#8 key matching the leaf, else `Tls(Key)`; a chain that is empty,
+longer than 8 entries, malformed, or over a 65,535-byte Certificate message
+gives `Tls(Chain)`. A server half has no verified name, so `send_secret` and
+SCRAM on it give `Denied` ([TLS-9](../../../docs/spec/tls.md#tls-9-server-handshake)).
 
 The launcher can grant a `Secret` from the environment or a file. Use
 `secret.seal` to transfer owned bytes into secret storage. If sealing refuses, its

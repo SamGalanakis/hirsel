@@ -1,4 +1,5 @@
 mod authority;
+mod server;
 
 use super::*;
 use crate::{entry::*, host_file::Files, net::*, tasks::*};

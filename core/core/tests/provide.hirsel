@@ -1043,6 +1043,39 @@ fn tls_crossing(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     dialed && whole && client && quiet
 }
 
+fn hello_client(take n: Net) -> bool waits {
+    let socket = result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 8080), Never))
+    match tls.hello(take socket, Never) {
+        Ok(take h) => {
+            let _ = take h
+            false
+        },
+        Error(Denied) => true,
+        Error(_) => false
+    }
+}
+
+// TL3 (TLS-9 check 1): a provide.net socket is not one a host TCP listener
+// accepted, so hello is Denied before any call and the socket it consumed
+// reaches its server only as Released Whole.
+// expect: run tls_hello_scripted(tasks) = true
+fn tls_hello_scripted(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, hello_client)
+    let dialed = net_connect(mut served, 8, 8080)
+    let whole = net_released(mut served, 8, 0)
+    let client = result.unwrap(task.join(take child))
+    let quiet = match provide.next(mut served) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+    dialed && whole && client && quiet
+}
+
 fn bad_secured(take s: Served[NetOp]) -> bool waits {
     let mut served = take s
     let dialed = net_connect(mut served, 8, 8080)

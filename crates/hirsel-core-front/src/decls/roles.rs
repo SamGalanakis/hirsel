@@ -63,6 +63,10 @@ impl Role {
         if path.package_is("core", "1") && path.0.modules == ["secret"] && path.0.name == "Scram" {
             return Some(Role::HostFile);
         }
+        // TLS-9: a Hello holds its accepted socket; its drop declines it.
+        if path.package_is("core", "1") && path.0.modules == ["tls"] && path.0.name == "Hello" {
+            return Some(Role::Socket);
+        }
         if path.is_core("foreign.Ptr") {
             return Some(Role::ForeignHandle);
         }

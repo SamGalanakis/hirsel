@@ -252,7 +252,7 @@ unsafe fn connect(
             (*files).tls_writes.insert(
                 outcome.value,
                 crate::secret::TlsWrite {
-                    name: verified,
+                    name: Some(verified),
                     spent: false,
                     binding: hirsel_core_net::scram::Binding::from_bytes(tls.binding())
                         .unwrap_or_default(),

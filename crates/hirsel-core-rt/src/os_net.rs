@@ -2,7 +2,9 @@
 //! spurious writable connect events; combined interests live in core-net.
 mod addr;
 pub(crate) use addr::is_operation;
+mod tls_server;
 use addr::{address, decoded, query_address};
+pub(crate) use tls_server::{ACCEPT_OPERATIONS, HELLO_OPERATIONS};
 
 use crate::{
     entry::SocketActivation,

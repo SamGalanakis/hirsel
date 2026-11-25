@@ -38,6 +38,9 @@ impl HostOp {
             Self::UdpLocalAddr => "hirsel_core_host_udp_local_addr",
             Self::NetNarrowUnix => "hirsel_core_net_narrow_unix",
             Self::TlsConnect => "hirsel_core_tls_connect",
+            Self::TlsHello => "hirsel_core_host_tls_hello",
+            Self::TlsAccept => "hirsel_core_tls_accept",
+            Self::TlsServerName => "hirsel_core_tls_server_name",
             Self::SendSecret => "hirsel_core_host_send_secret",
             Self::SecretSeal => "hirsel_core_secret_seal",
             Self::SecretNarrow => "hirsel_core_secret_narrow",
@@ -131,4 +134,16 @@ impl HostOp {
             _ => None,
         }
     }
+}
+
+/// Cleanup for one-word provider handles that borrow the runtime context.
+pub fn host_drop_symbol(handle: hirsel_core_layout::Handle) -> Option<&'static str> {
+    use hirsel_core_layout::Handle;
+    Some(match handle {
+        Handle::HostFile => "hirsel_core_hostfile_drop",
+        Handle::Socket => "hirsel_core_socket_drop",
+        Handle::Secret => "hirsel_core_secret_drop",
+        Handle::Media => "hirsel_core_media_drop",
+        _ => return None,
+    })
 }

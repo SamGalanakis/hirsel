@@ -150,6 +150,10 @@ fn out_for(opcode: u8, size: usize, entropy: &[u8]) -> Out {
             payload = temp_suffix(size);
         } else if opcode == op::TLS_CONNECT {
             payload = tls_payload();
+        } else if opcode == op::TLS_HELLO {
+            payload = vec![b'a'; size.min(253)];
+        } else if opcode == op::TLS_ACCEPT {
+            payload = vec![(size % 17) as u8];
         } else {
             payload = entropy[..size.min(PAYLOAD_CHUNK)].to_vec();
         }

@@ -1,3 +1,11 @@
+pub opaque resource type Hello
+
 pub fn connect(n: Net, take s: Socket, name: String, trust: Trust, alpn: List[String], until: Until) -> Result[(ReadHalf, WriteHalf, Handshake), NetError] waits
 
 pub fn send_secret(mut w: WriteHalf, wire: Bytes, secrets: List[Secret], marks: List[u64], until: Until) -> Result[(), NetError] waits
+
+pub fn hello(take s: Socket, until: Until) -> Result[Hello, NetError] waits
+
+pub fn server_name(h: Hello) -> View[String] in h
+
+pub fn accept(take h: Hello, chain: List[Bytes], key: Secret, alpn: List[String], until: Until) -> Result[(ReadHalf, WriteHalf, Option[u64]), NetError] waits

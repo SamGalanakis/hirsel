@@ -1003,7 +1003,13 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             return DENIED;
         }
         let narrowed = {
-            let Some(write) = (*files).tls_writes.get(&(key & !3)) else {
+            // A server half has no verified name: refused even with no secrets.
+            let Some(
+                write @ crate::secret::TlsWrite {
+                    name: Some(name), ..
+                },
+            ) = (*files).tls_writes.get(&(key & !3))
+            else {
                 return DENIED;
             };
             if key & 3 != 2 {
@@ -1018,7 +1024,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                     .policy
                     .send
                     .iter()
-                    .any(|pattern| pattern.covers(&write.name))
+                    .any(|pattern| pattern.covers(name))
             }) {
                 return DENIED;
             }
@@ -1028,7 +1034,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 resolved
                     .iter()
                     .map(|secret| crate::secret::Secret {
-                        policy: hirsel_core_net::SecretPolicy::exactly(&write.name),
+                        policy: hirsel_core_net::SecretPolicy::exactly(name),
                         ..secret.clone()
                     })
                     .collect()
@@ -1146,6 +1152,7 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             return;
         }
         let files = (*context).host_files;
+        crate::tls_server::decline(context, key);
         let served = served_socket(context, key);
         #[cfg(feature = "record")]
         if let Some(tape) = (*files).net_tape.filter(|_| served.is_none())

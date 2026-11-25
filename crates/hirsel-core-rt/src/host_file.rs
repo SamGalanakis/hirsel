@@ -218,6 +218,8 @@ pub(crate) struct Files {
     #[cfg(feature = "record")]
     pub(crate) managed_control: (u64, u64),
     pub(crate) tls_writes: BTreeMap<u64, crate::secret::TlsWrite>,
+    /// TLS-9: each live `Hello`, keyed by its socket's key.
+    pub(crate) tls_hellos: BTreeMap<u64, Box<crate::tls_server::Hello>>,
     pub(crate) registry: Registry,
 }
 impl Registry {
@@ -374,6 +376,7 @@ impl Files {
             tls_sessions: Default::default(),
             tls_cache: Default::default(),
             tls_writes: Default::default(),
+            tls_hellos: Default::default(),
             #[cfg(feature = "record")]
             net_tape: None,
             #[cfg(feature = "record")]
@@ -388,6 +391,7 @@ impl Files {
         self.sockets = hirsel_core_net::Sockets::default();
         self.udp_sockets.clear();
         self.tls_sessions.clear();
+        self.tls_hellos.clear();
         self.tcp_routes.clear();
         self.datagrams.clear();
         self.unix_served.clear();

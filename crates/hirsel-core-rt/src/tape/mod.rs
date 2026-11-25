@@ -30,6 +30,7 @@ mod replay_delivery;
 pub mod run;
 pub(crate) mod schedule;
 mod secret;
+mod tls;
 pub(crate) mod units;
 mod unix;
 pub(crate) mod writer;
@@ -727,6 +728,8 @@ fn socket_op(op: u8) -> bool {
             | RECV_READY
             | SEND_PAIR
             | TLS_CONNECT
+            | TLS_HELLO
+            | TLS_ACCEPT
             | SEND_SECRET
             | RESOLVE
             | SCRAM
@@ -744,6 +747,7 @@ fn creates_object(op: u8) -> bool {
             | CONNECT
             | ACCEPT
             | TLS_CONNECT
+            | TLS_ACCEPT
             | SCRAM
             | EXEC_SPAWN
     )
@@ -789,23 +793,7 @@ unsafe fn socket_args(request: &Request) -> Args {
             put_varint(&mut args, name.len() as u64);
             args.extend_from_slice(name);
         }
-        if request.operation == TLS_CONNECT {
-            let tls = &*request.path.cast::<crate::tls::TlsRequest>();
-            let name = crate::tls::view_bytes(&tls.name);
-            put_varint(&mut args, name.len() as u64);
-            args.extend_from_slice(name);
-            match tls.pin() {
-                hirsel_core_net::TlsTrust::System => args.push(0),
-                hirsel_core_net::TlsTrust::Roots(digest) => {
-                    args.push(1);
-                    args.extend_from_slice(&digest);
-                }
-                hirsel_core_net::TlsTrust::Any => args.push(2),
-            }
-            let alpn = crate::tls::view_bytes(&tls.alpn);
-            put_varint(&mut args, alpn.len() as u64);
-            args.extend_from_slice(alpn);
-        }
+        tls::args(request, &mut args);
         if let Some((_, clock, at)) = n.until {
             put_varint(&mut args, ordinal_of(clock) as u64);
             args.extend_from_slice(&at.to_le_bytes());

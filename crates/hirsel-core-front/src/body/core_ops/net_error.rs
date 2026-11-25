@@ -150,7 +150,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         let join = self.new_block(&[]);
-        for i in 0..6 {
+        // TlsFailure's cases in declaration order; the runtime sends no other.
+        for i in 0..8 {
             let on = self.runtime_compare(k, case, u64::from(i), n).unwrap();
             let yes = self.new_block(&[]);
             let no = self.new_block(&[]);
@@ -197,7 +198,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.inst(
             Inst::SetCase {
                 address: to,
-                case: 6,
+                case: 8,
             },
             n,
         );

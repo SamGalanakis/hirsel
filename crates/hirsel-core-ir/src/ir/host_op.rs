@@ -154,9 +154,16 @@ pub enum HostOp {
     NetNarrowEnd = 171,
     TryLockShared = hirsel_core_ids::host_op::TRY_LOCK_SHARED as isize,
     ZeroAt = hirsel_core_ids::host_op::ZERO_AT as isize,
+    /// TLS-9: read a ClientHello on an accepted socket.
+    TlsHello = hirsel_core_ids::host_op::TLS_HELLO as isize,
+    /// TLS-9: complete a server handshake.
+    TlsAccept = hirsel_core_ids::host_op::TLS_ACCEPT as isize,
+    /// TLS-9: a `Hello`'s server name, a view of its record.
+    TlsServerName = 176,
 }
 
 mod symbol;
+pub use symbol::host_drop_symbol;
 
 impl HostOp {
     /// Whether the native adapter returns an IP endpoint with its outcome.
@@ -240,6 +247,9 @@ impl HostOp {
         HostOp::LocalAddr,
         HostOp::PeerAddr,
         HostOp::TlsConnect,
+        HostOp::TlsHello,
+        HostOp::TlsAccept,
+        HostOp::TlsServerName,
         HostOp::SendSecret,
         HostOp::SecretSeal,
         HostOp::SecretNarrow,
@@ -468,6 +478,13 @@ impl HostOp {
                 vec![V(u64_), V(p), V(p), V(p), V(u8_), V(u64_), V(u64_)],
                 outcome,
             ),
+            HostOp::TlsHello => (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome),
+            // The Hello, the chain and ALPN carriers and the key's designation.
+            HostOp::TlsAccept => (
+                vec![V(u64_), V(p), V(u64_), V(p), V(u8_), V(u64_), V(u64_)],
+                outcome,
+            ),
+            HostOp::TlsServerName => (vec![V(u64_)], vec![p, u8_, Ty::Scalar(Scalar::U32), u64_]),
             HostOp::ScramSha256 => (
                 vec![
                     V(u64_),
@@ -750,6 +767,9 @@ impl HostOp {
             HostOp::UdpLocalAddr => "host_udp_local_addr",
             HostOp::NetNarrowUnix => "net_narrow_unix",
             HostOp::TlsConnect => "tls_connect",
+            HostOp::TlsHello => "tls_hello",
+            HostOp::TlsAccept => "tls_accept",
+            HostOp::TlsServerName => "tls_server_name",
             HostOp::SendSecret => "send_secret",
             HostOp::SecretSeal => "secret_seal",
             HostOp::SecretNarrow => "secret_narrow",
@@ -954,6 +974,7 @@ impl HostOp {
                     | HostOp::EnvLen
                     | HostOp::EnvName
                     | HostOp::EnvNarrow
+                    | HostOp::TlsServerName
                     | HostOp::ProvideClock
                     | HostOp::ProvideRandom
                     | HostOp::ProvideRandomTape
@@ -974,16 +995,4 @@ impl HostOp {
                     | HostOp::StreamTerminal
             )
     }
-}
-
-/// Cleanup for one-word provider handles that borrow the runtime context.
-pub fn host_drop_symbol(handle: hirsel_core_layout::Handle) -> Option<&'static str> {
-    use hirsel_core_layout::Handle;
-    Some(match handle {
-        Handle::HostFile => "hirsel_core_hostfile_drop",
-        Handle::Socket => "hirsel_core_socket_drop",
-        Handle::Secret => "hirsel_core_secret_drop",
-        Handle::Media => "hirsel_core_media_drop",
-        _ => return None,
-    })
 }

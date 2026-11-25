@@ -151,6 +151,20 @@ impl Machine<'_> {
         Ok(vec![0, 1, 0, 0, 0, 0, 0, 0])
     }
 
+    /// `tls.hello` and `tls.accept` (TLS-9): no evaluator socket was made by
+    /// `host.accept` on a host TCP listener, and a served Net has no server
+    /// handshake, so both give `Denied` before issue. The Socket, or the
+    /// Hello's socket, is consumed on every return, as natively.
+    pub(super) fn tls_server(&mut self, a: &[u64]) -> Vec<u64> {
+        let key = a[0];
+        if self.host.world.port_keys.contains_key(&(key & !3)) {
+            self.port_socket_part(key, false);
+        } else {
+            self.host.world.network.sockets.release(key);
+        }
+        vec![0, 1, 0, 0]
+    }
+
     /// `tls.connect` on a served Net's socket (native `tls::connect` through
     /// the port): the handshake is a call its server answers with Secured,
     /// and only through that Net (NOTES 32). The Socket is consumed on every

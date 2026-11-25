@@ -5,6 +5,8 @@ pub(crate) struct CrossedSocket {
     carrier: Option<hirsel_core_net::SocketTransfer>,
     udp: Option<crate::udp_net::Transfer>,
     route: Option<TcpRoute>,
+    /// A `Hello`'s record moves with its socket (TLS-9: `Hello` is `send`).
+    hello: Option<Box<crate::tls_server::Hello>>,
 }
 
 // SAFETY: the provider descriptor moves as opaque data and is used only
@@ -36,6 +38,7 @@ impl CrossedSocket {
                 carrier: None,
                 udp: Some(crate::udp_net::Transfer::detach(files, key)),
                 route: None,
+                hello: None,
             };
         }
         #[cfg(feature = "record")]
@@ -50,6 +53,7 @@ impl CrossedSocket {
             carrier: Some(carrier),
             udp: None,
             route: files.tcp_routes.remove(&key),
+            hello: files.tls_hellos.remove(&key),
         }
     }
 
@@ -63,6 +67,9 @@ impl CrossedSocket {
             .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
         if let Some(route) = self.route.take() {
             files.tcp_routes.insert(key, route);
+        }
+        if let Some(hello) = self.hello.take() {
+            files.tls_hellos.insert(key, hello);
         }
         key
     }

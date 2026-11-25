@@ -566,6 +566,9 @@ tags!(HostOp {
     175 => NetNarrowEnd,
     176 => TryLockShared,
     177 => ZeroAt,
+    178 => TlsHello,
+    179 => TlsAccept,
+    180 => TlsServerName,
 });
 
 tags!(RaiseCause {

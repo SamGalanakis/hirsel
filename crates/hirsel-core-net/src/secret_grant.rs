@@ -31,6 +31,8 @@ impl SecretUse {
     pub const MTLS_CLIENT_ID: Self = Self(64);
     pub const KDF: Self = Self(128);
     pub const DIGEST: Self = Self(1 << 18);
+    /// `tls.accept` with the secret as the server's private key (TLS-9).
+    pub const TLS_SERVE: Self = Self(1 << 19);
     const SRTP_SEND: Self = Self(1 << 14);
     const SRTP_RECEIVE: Self = Self(1 << 15);
     const TRAFFIC_SEND: Self = Self(1 << 16);
@@ -57,7 +59,8 @@ impl SecretUse {
     }
 
     /// Each use word in canonical order, with a use ahead of any it implies.
-    const WORDS: [(&str, Self); 19] = [
+    const WORDS: [(&str, Self); 20] = [
+        ("tls_serve", Self::TLS_SERVE),
         ("mac", Self::MAC),
         ("verify", Self::VERIFY),
         ("kdf", Self::KDF),
@@ -113,7 +116,7 @@ impl SecretUse {
     }
 }
 
-/// A Secret's typed set of uses (TLS-5): `tls_send(<patterns>)`, `mac`,
+/// A Secret's typed set of uses (TLS-5): `tls_send(<patterns>)`, `tls_serve`, `mac`,
 /// `verify`, `kdf`, `digest`, `sign(<alg>)`, `aead(<alg>)`, `open(<alg>)`, `wrap` and `mtls_client_id`, written in that
 /// order, separated by single spaces. A DNS name appears only inside
 /// `tls_send(...)`, so no name can be read as a use.
@@ -191,6 +194,15 @@ impl SecretPolicy {
                 | SecretUse::aead(AeadAlg::Aes256Gcm, AeadMode::Seal).0,
         );
         (child.send.is_empty() && allowed.permits(child.uses)).then_some(child)
+    }
+
+    /// `secret.p256_key`'s policy (TLS-8): its uses are exactly
+    /// `{sign(p256)}` or `{sign(p256), tls_serve}`, in any order.
+    pub fn p256_generation(text: &[u8]) -> Option<Self> {
+        let policy = Self::parse(std::str::from_utf8(text).ok()?)?;
+        let serving = SecretUse(SecretUse::SIGN_P256.0 | SecretUse::TLS_SERVE.0);
+        (policy.send.is_empty() && (policy.uses == SecretUse::SIGN_P256 || policy.uses == serving))
+            .then_some(policy)
     }
 
     pub fn intersect(&self, requested: &Self) -> Option<Self> {
@@ -276,7 +288,7 @@ impl<'a> SecretSource<'a> {
 }
 
 impl SecretGrant {
-    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, kdf, digest, sign(<alg>), aead(<alg>), open(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
+    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), tls_serve, mac, verify, kdf, digest, sign(<alg>), aead(<alg>), open(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
 
     pub fn logical_size(patterns: &[Pattern], len: u64) -> Option<u64> {
         Pattern::list_bytes(patterns)

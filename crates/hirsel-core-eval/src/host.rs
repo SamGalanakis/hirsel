@@ -52,6 +52,9 @@ impl Machine<'_> {
         }
         match op {
             HostOp::TlsConnect => return self.tls_connect(t, a),
+            HostOp::TlsHello | HostOp::TlsAccept => return Ok(self.tls_server(a)),
+            // No Hello lives in the evaluator, so its name is always empty.
+            HostOp::TlsServerName => return Ok(vec![self.host_view(&[]), 0, 0, 0]),
             HostOp::SendSecret => return self.send_secret(t, a),
             HostOp::ScramSha256 => return self.scram_send(t, a),
             HostOp::ScramFinalLen => return Ok(self.scram_final_len(a)),
@@ -123,6 +126,9 @@ impl Machine<'_> {
                 return self.network_host(t, op, a);
             }
             HostOp::TlsConnect
+            | HostOp::TlsHello
+            | HostOp::TlsAccept
+            | HostOp::TlsServerName
             | HostOp::SendSecret
             | HostOp::ScramSha256
             | HostOp::ScramFinalLen

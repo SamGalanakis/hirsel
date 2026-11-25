@@ -103,10 +103,9 @@ impl Machine<'_> {
             key_wrap::KeyFailure,
             p256_key::{self, DOCUMENT_LEN, PUBLIC_LEN},
         };
-        const USE: &str = "sign(p256)";
-        if self.carrier_bytes(a[1]) != USE.as_bytes() {
+        let Some(policy) = SecretPolicy::p256_generation(self.carrier_bytes(a[1])) else {
             return Ok(vec![0, 2, 0, 0]);
-        }
+        };
         let (_, data, len, cap) = self.carrier(a[2]);
         let spare = cap - len;
         if spare < PUBLIC_LEN as u64 {
@@ -143,7 +142,7 @@ impl Machine<'_> {
             }
         };
         let key = self.store_sealed(
-            SecretPolicy::parse(USE).unwrap(),
+            policy,
             Zeroizing::new(document.to_vec()),
             payer,
             charge,

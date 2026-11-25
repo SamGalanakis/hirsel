@@ -150,7 +150,9 @@ fn read_file(path: &str) -> Option<Zeroizing<Vec<u8>>> {
 }
 
 pub(crate) struct TlsWrite {
-    pub(crate) name: Name,
+    /// The name `tls.connect` verified. A half from `tls.accept` has none
+    /// (TLS-9), so no secret is ever sent or proved on it.
+    pub(crate) name: Option<Name>,
     pub(crate) spent: bool,
     pub(crate) binding: hirsel_core_net::scram::Binding,
 }

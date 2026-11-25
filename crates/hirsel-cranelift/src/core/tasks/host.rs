@@ -16,7 +16,7 @@ impl Function<'_, '_, '_> {
         operands.extend_from_slice(&args[..count]);
         operands.push(site);
         let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
-        if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
+        if matches!(op, HostOp::EnvGet | HostOp::EnvName | HostOp::TlsServerName) {
             results[0] = P;
         }
         if op.address_outcome() {

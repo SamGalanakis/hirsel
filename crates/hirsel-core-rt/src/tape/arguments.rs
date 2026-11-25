@@ -66,7 +66,7 @@ unsafe fn operands(r: &Request) -> Args {
             let mut random = Vec::new();
             put_varint(&mut random, call.random);
             put_varint(&mut random, (r.buffer.capacity - r.buffer.len) as u64);
-            return Args::of_parts(&[&random, crate::secret::p256_generation::USE.as_bytes()]);
+            return Args::of_parts(&[&random, call.policy.as_bytes()]);
         }
         if r.operation == MEDIA_CAPTURE {
             return crate::media::capture::canonical(r);

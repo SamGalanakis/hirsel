@@ -81,6 +81,8 @@ pub(crate) fn is_operation(op: u8) -> bool {
             | RECV_READY
             | SEND_PAIR
             | TLS_CONNECT
+            | TLS_HELLO
+            | TLS_ACCEPT
             | SEND_SECRET
             | SCRAM
             | RESOLVE

@@ -26,7 +26,7 @@ pub use blocks::{
 pub use exec::exec_snapshot_rules;
 pub use frames::{Decoder, Encoder};
 pub use index::{Index, StreamBlocks};
-pub use payload::{carries_payload, tls_connect_payload};
+pub use payload::{carries_payload, tls_accept_payload, tls_connect_payload, tls_hello_payload};
 pub use units::{
     Arrival, CanonicalValue, Cause, CauseDetail, Credit, Entry, EntryBody, HelperEnding,
     HelperOutcome, Settlement, Survivor, TakeBody, TakePoint, Value,
@@ -416,9 +416,16 @@ impl Out {
             {
                 return Err(Corrupt);
             }
-            if op == op::TLS_CONNECT {
+            if matches!(op, op::TLS_CONNECT | op::TLS_HELLO | op::TLS_ACCEPT) {
                 if status == OK {
-                    tls_connect_payload(b)?;
+                    let valid = match op {
+                        op::TLS_CONNECT => tls_connect_payload(b).is_ok(),
+                        op::TLS_HELLO => tls_hello_payload(b).is_ok(),
+                        _ => tls_accept_payload(b).is_ok(),
+                    };
+                    if !valid {
+                        return Err(Corrupt);
+                    }
                 } else if !b.is_empty() {
                     return Err(Corrupt);
                 }

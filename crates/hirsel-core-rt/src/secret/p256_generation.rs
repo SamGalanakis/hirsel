@@ -4,10 +4,10 @@ use super::{key::*, *};
 use crate::provider::{CANCELLED, MEDIA_P256_KEY};
 use hirsel_core_net::p256_key::{self, DOCUMENT_LEN, PUBLIC_LEN};
 
-pub(crate) const USE: &str = "sign(p256)";
-
 pub(crate) struct Generation {
     pub(crate) random: u64,
+    /// The canonical policy text, which the tape records as the call's uses.
+    pub(crate) policy: String,
     pub(in crate::secret) document: Option<Zeroizing<[u8; DOCUMENT_LEN]>>,
 }
 
@@ -65,10 +65,9 @@ pub unsafe extern "C" fn hirsel_core_secret_p256_key(
     // SAFETY: forwarded from the checked call.
     unsafe {
         crate::process::deny_describe_capability(context);
-        if crate::tls::bytes(&*uses) != USE.as_bytes() {
+        let Some(policy) = SecretPolicy::p256_generation(crate::tls::bytes(&*uses)) else {
             return key_error(KEY_INVALID);
-        }
-        let policy = SecretPolicy::parse(USE).unwrap();
+        };
         let spare = (*public).capacity - (*public).len;
         if spare < PUBLIC_LEN {
             return key_capacity(PUBLIC_LEN, spare);
@@ -97,6 +96,7 @@ pub unsafe extern "C" fn hirsel_core_secret_p256_key(
 
         let mut call = Generation {
             random,
+            policy: policy.text(),
             document: None,
         };
         let mut request = Request {

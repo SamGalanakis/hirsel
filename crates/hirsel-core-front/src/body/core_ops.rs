@@ -20,6 +20,7 @@ mod provide;
 mod secret_kdf;
 mod secret_key;
 mod target_unsupported;
+mod tls_result;
 mod udp_runtime;
 use binding::OPERATIONS;
 pub(crate) use binding::binding;
@@ -1673,14 +1674,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let args: Vec<_> = vals
-            .iter()
-            .copied()
-            .map(|v| v.map(Arg::Value))
-            .collect::<Option<_>>()?;
+        let args: Vec<_> = if op == HostOp::TlsServerName {
+            vec![Arg::Value(self.runtime_key(vals[0]?, n))]
+        } else {
+            vals.iter()
+                .copied()
+                .map(|v| v.map(Arg::Value))
+                .collect::<Option<_>>()?
+        };
         let [value, error, ..] = self.runtime_row(RtOp::Host(op), &args, n)?;
         match op {
             HostOp::EnvLen => Some(value),
+            // The view borrows the Hello's record (TLS-9).
+            HostOp::TlsServerName => self.runtime_carrier_view(value, result, n),
             HostOp::EnvName => self.runtime_optional_view(value, result, n),
             HostOp::EnvGet => {
                 let tag = Ty::Scalar(Scalar::U8);
@@ -2831,6 +2837,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::SecretNarrow
                 | HostOp::NetSplit
                 | HostOp::NetJoin
+                | HostOp::TlsHello
+                | HostOp::TlsAccept
         ) {
             self.runtime_key(vals[0]?, n)
         } else {
@@ -2864,6 +2872,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 HostOp::Accept | HostOp::UnixAccept | HostOp::RecvReady => {
                     operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
+                }
+                HostOp::TlsHello => {
+                    operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?);
+                    // The Socket is consumed on every edge, as by `tls.connect`.
+                    self.consume(vals[0], n);
+                }
+                HostOp::TlsAccept => {
+                    // The chain and ALPN carriers and the key's designation.
+                    operands.extend([vals[1]?, self.runtime_key(vals[2]?, n), vals[3]?]);
+                    operands.extend(self.net_until(self.p.fns[f].params[4].ty, vals[4]?, n)?);
+                    // The Hello is consumed on every edge.
+                    self.consume(vals[0], n);
                 }
                 HostOp::UnixConnect
                 | HostOp::UnixListen
@@ -3029,6 +3049,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         | HostOp::UnixAccept
                         | HostOp::DatagramOpen
                         | HostOp::DatagramBind
+                        | HostOp::TlsHello
                 ) {
                     if let Some(at) =
                         cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
@@ -3037,6 +3058,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     }
                 } else if op == HostOp::TlsConnect {
                     cx.runtime_tls_result(to, ty, value, written, &values[4..], n);
+                } else if op == HostOp::TlsAccept {
+                    cx.runtime_accept_result(to, ty, value, written, n);
                 } else if matches!(op, HostOp::LocalAddr | HostOp::PeerAddr) {
                     if let Some(addr) =
                         cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
@@ -3199,88 +3222,5 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 cx.start(join);
             },
         )
-    }
-
-    fn runtime_tls_result(
-        &mut self,
-        to: AddressId,
-        ty: TyId,
-        key: ValueId,
-        protocol: ValueId,
-        words: &[ValueId],
-        n: NodeId,
-    ) {
-        let u = Ty::Scalar(Scalar::U64);
-        let Some(pair) = self.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
-        else {
-            return;
-        };
-        for direction in 1..=2 {
-            let bit = self.konst(u, direction, n).unwrap();
-            let half = self.value(u);
-            self.inst(
-                Inst::Binary {
-                    result: half,
-                    op: BinaryOp::BitOr,
-                    left: key,
-                    right: bit,
-                    fail: None,
-                },
-                n,
-            );
-            self.runtime_store(pair, &[Step::Field(direction as u32 - 1)], u, half, n);
-        }
-        let Some((ty, handshake)) = self.net_field(ty, pair, 2, n) else {
-            return;
-        };
-        let (_, selected) = self.net_field(ty, handshake, 0, n).unwrap();
-        let (_, peer) = self.net_field(ty, handshake, 1, n).unwrap();
-        for (i, word) in words.iter().enumerate() {
-            self.runtime_store(peer, &[Step::Field(i as u32)], u, *word, n);
-        }
-        let none = self.runtime_compare(u, protocol, 0, n).unwrap();
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let join = self.new_block(&[]);
-        self.runtime_branch(none, yes, no, n);
-        self.start(yes);
-        self.inst(
-            Inst::SetCase {
-                address: selected,
-                case: 0,
-            },
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(no);
-        let one = self.konst(u, 1, n).unwrap();
-        let index = self.value(u);
-        self.inst(
-            Inst::IntArith {
-                result: index,
-                flag: None,
-                op: ArithOp::Sub,
-                mode: ArithMode::Wrapping,
-                left: protocol,
-                right: one,
-            },
-            n,
-        );
-        self.inst(
-            Inst::SetCase {
-                address: selected,
-                case: 1,
-            },
-            n,
-        );
-        self.runtime_store(
-            selected,
-            &[Step::CaseField { case: 1, field: 0 }],
-            u,
-            index,
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(join);
     }
 }

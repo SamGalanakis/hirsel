@@ -367,6 +367,38 @@ typedef struct {
     HirselCoreBuffer secret;
 } HirselCoreSendSecretRequest;
 HirselCoreHostOutcome hirsel_core_host_send_secret(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+/* TLS_HELLO (174): reads a ClientHello on a socket a host TCP listener
+   accepted. name_out points to a 253-byte buffer with length initially zero
+   and receives the normalised server name, empty for none. Success returns
+   the Hello's key; the Socket is consumed on every return. */
+#define HIRSEL_CORE_TLS_HELLO 174
+typedef struct {
+    uint64_t network[21];
+    HirselCoreBuffer *name_out;
+    void *runtime_state;
+} HirselCoreTlsHelloRequest;
+HirselCoreHostOutcome hirsel_core_host_tls_hello(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
+/* TLS_ACCEPT (175): completes the server handshake. chain is entries of a
+   u32 little-endian length and that many DER bytes; key is the Secret's
+   designation, whose bytes only the provider reads; alpn is as TLS_CONNECT's.
+   protocol_out receives the chosen alpn index, or UINT64_MAX for none.
+   IoError.code's low byte encodes Chain as 7 and Key as 8. The Hello is
+   consumed on every return. */
+#define HIRSEL_CORE_TLS_ACCEPT 175
+typedef struct {
+    uint64_t network[21];
+    HirselCoreView chain;
+    uint64_t key;
+    HirselCoreView alpn;
+    uint64_t *protocol_out;
+    void *runtime_state;
+} HirselCoreTlsAcceptRequest;
+HirselCoreHostOutcome hirsel_core_host_tls_accept(HirselCoreContext *, uint64_t, const HirselCoreView *, uint64_t, const HirselCoreView *, uint64_t *, uint8_t, uint64_t, uint64_t, uint64_t);
+/* FORM TLS accept: the chain is a List[Bytes] and alpn a List[String];
+   on success written is the chosen index plus one, or 0. */
+HirselCoreHostOutcome hirsel_core_tls_accept(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+/* server_name: value points to a buffer viewing the Hello's name. */
+HirselCoreHostOutcome hirsel_core_tls_server_name(HirselCoreContext *, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_seal(HirselCoreContext *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_narrow(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
 #define HIRSEL_CORE_SCRAM 68

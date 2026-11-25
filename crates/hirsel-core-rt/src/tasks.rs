@@ -1362,19 +1362,7 @@ impl Scheduler {
                     Wake::Ready
                         if crate::os::owns(&op.provider)
                             && (host::unix_operation(request.operation)
-                                || matches!(
-                                    request.operation,
-                                    host::CONNECT
-                                        | host::ACCEPT
-                                        | host::RECV_BOUNDED
-                                        | host::RECV_READY
-                                        | host::SEND_PAIR
-                                        | host::TLS_CONNECT
-                                        | host::SEND_SECRET
-                                        | host::SCRAM
-                                        | host::RESOLVE
-                                        | host::CRED_FETCH
-                                )) =>
+                                || crate::os_net::is_operation(request.operation)) =>
                     {
                         WakeSource::Net
                     }

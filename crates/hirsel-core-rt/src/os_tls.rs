@@ -3,6 +3,7 @@ mod gcm;
 pub(crate) mod packet_cipher;
 mod records;
 mod rustls_stream;
+pub(crate) mod server;
 
 use crate::{
     net::{SecureStream, ZeroCopy, tls_failure},

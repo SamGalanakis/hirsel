@@ -225,7 +225,7 @@ pub type Handshake {
     peer: (u64, u64, u64, u64)
 }
 
-pub type TlsFailure = Certificate(CertFailure) | Name | Alpn | Roots | Protocol(u8) | Closed | Truncated
+pub type TlsFailure = Certificate(CertFailure) | Name | Alpn | Roots | Protocol(u8) | Closed | Truncated | Chain | Key
 
 pub type CertFailure = UnknownIssuer | NameMismatch | Expired | NotYetValid | Invalid
 

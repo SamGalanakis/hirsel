@@ -315,6 +315,9 @@ impl Function<'_, '_, '_> {
                     | HostOp::Resolve
                     | HostOp::CredFetch
                     | HostOp::TlsConnect
+                    | HostOp::TlsHello
+                    | HostOp::TlsAccept
+                    | HostOp::TlsServerName
                     | HostOp::SendSecret
                     | HostOp::ScramSha256
                     | HostOp::ScramFinalLen

@@ -14,6 +14,8 @@ pub fn carries_payload(op: u8) -> bool {
             | PEER_ADDR
             | RECV_BOUNDED
             | TLS_CONNECT
+            | TLS_HELLO
+            | TLS_ACCEPT
             | SECRET_MAC
             | MEDIA_P256_KEY
             | MEDIA_KEY_SHARE
@@ -48,6 +50,26 @@ pub fn tls_connect_payload(bytes: &[u8]) -> Result<(&[u8], &[u8; 32], &[u8]), Co
         return Err(Corrupt);
     }
     Ok((alpn, peer, binding))
+}
+
+/// A successful TLS_HELLO carries the normalised server name (TLS-9): 0 to
+/// 253 bytes of `a`-`z`, `0`-`9`, `-`, `_` and `.`, empty for no name.
+pub fn tls_hello_payload(bytes: &[u8]) -> Result<&[u8], Corrupt> {
+    let valid = |&b: &u8| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.');
+    if bytes.len() > 253 || !bytes.iter().all(valid) {
+        return Err(Corrupt);
+    }
+    Ok(bytes)
+}
+
+/// A successful TLS_ACCEPT carries one byte: 0 for no protocol, or the
+/// chosen entry's index in the server's list plus one (at most 16 entries).
+pub fn tls_accept_payload(bytes: &[u8]) -> Result<Option<u8>, Corrupt> {
+    match bytes {
+        [0] => Ok(None),
+        [n @ 1..=16] => Ok(Some(n - 1)),
+        _ => Err(Corrupt),
+    }
 }
 
 pub(super) fn address(bytes: &[u8]) -> Result<(), Corrupt> {

@@ -19,6 +19,9 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::SendPair => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
         HostOp::NetNarrow => &["u64", "u8", "u8", "u64", "u64", "u8", "u8", "u16", "u16"],
         HostOp::TlsConnect => &["u64", "u64", "ptr", "u8", "ptr", "ptr", "u8", "u64", "u64"],
+        HostOp::TlsHello => &["u64", "u8", "u64", "u64"],
+        HostOp::TlsAccept => &["u64", "ptr", "u64", "ptr", "u8", "u64", "u64"],
+        HostOp::TlsServerName => &["u64"],
         HostOp::NetNarrowTls => &["u64", "ptr", "u16", "u16", "u8", "ptr"],
         HostOp::NetNarrowResolve => &["u64", "ptr"],
         HostOp::UnixConnect => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
@@ -126,7 +129,8 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
 /// One function that calls provider row `op` and returns its results.
 pub(super) fn provider_source(op: HostOp) -> String {
     let params = host_abi::parameters(op);
-    let results: &[&str] = if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
+    let results: &[&str] = if matches!(op, HostOp::EnvGet | HostOp::EnvName | HostOp::TlsServerName)
+    {
         &["ptr", "u8", "u32", "u64"]
     } else if matches!(op, HostOp::Random | HostOp::Stopped) {
         &[]

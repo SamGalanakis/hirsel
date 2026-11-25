@@ -44,3 +44,47 @@ pub fn peer_words(digest: [u8; 32]) -> [u64; 4] {
     let (words, _) = digest.as_chunks::<8>();
     std::array::from_fn(|i| u64::from_be_bytes(words[i]))
 }
+
+/// The largest Certificate message body `tls.connect` reads (TLS-9, check 2).
+pub const CHAIN_MESSAGE_MAX: usize = 65_535;
+
+/// TLS-9 check 2: 1 to 8 entries, each exactly one DER `Certificate`
+/// SEQUENCE with no trailing bytes, and a TLS 1.3 Certificate message body of
+/// 4 + Σ(DER length + 5) bytes (RFC 8446 §4.4.2) within [`CHAIN_MESSAGE_MAX`].
+/// Only the outer structure is parsed.
+pub fn valid_chain(chain: &[impl AsRef<[u8]>]) -> bool {
+    (1..=8).contains(&chain.len())
+        && chain.iter().all(|entry| one_sequence(entry.as_ref()))
+        && 4 + chain
+            .iter()
+            .map(|entry| entry.as_ref().len() + 5)
+            .sum::<usize>()
+            <= CHAIN_MESSAGE_MAX
+}
+
+/// One definite-length DER SEQUENCE spanning all of `bytes`.
+fn one_sequence(bytes: &[u8]) -> bool {
+    let [0x30, length, tail @ ..] = bytes else {
+        return false;
+    };
+    let (len, content) = match *length {
+        n if n < 0x80 => (usize::from(n), tail),
+        0x81..=0x83 => {
+            let size = usize::from(length & 0x7f);
+            let Some((encoded, content)) = tail.split_at_checked(size) else {
+                return false;
+            };
+            // DER: the shortest length encoding, so no leading zero byte and
+            // no long form for a length below 128.
+            let len = encoded
+                .iter()
+                .fold(0usize, |n, &b| (n << 8) | usize::from(b));
+            if encoded[0] == 0 || len < 0x80 {
+                return false;
+            }
+            (len, content)
+        }
+        _ => return false,
+    };
+    content.len() == len
+}

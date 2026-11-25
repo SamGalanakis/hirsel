@@ -116,7 +116,7 @@ impl FunctionEmitter<'_> {
         let mode = args.get(2).cloned().unwrap_or(int(0));
         let at = self.site_word();
         let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
-        if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
+        if matches!(op, HostOp::EnvGet | HostOp::EnvName | HostOp::TlsServerName) {
             results[0] = Ty::Ptr;
         }
         if op.address_outcome() {
@@ -165,6 +165,9 @@ impl FunctionEmitter<'_> {
             | HostOp::Resolve
             | HostOp::CredFetch
             | HostOp::TlsConnect
+            | HostOp::TlsHello
+            | HostOp::TlsAccept
+            | HostOp::TlsServerName
             | HostOp::SendSecret
             | HostOp::ScramSha256
             | HostOp::ScramFinalLen

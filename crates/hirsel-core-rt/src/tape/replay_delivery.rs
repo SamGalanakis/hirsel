@@ -306,6 +306,35 @@ pub(super) unsafe fn replay_out(
                 out.len = binding.len();
             }
         }
+    } else if op == TLS_HELLO {
+        if ok {
+            let name =
+                hirsel_tape_format::tls_hello_payload(&out.payload).map_err(|_| Fault::Corrupt)?;
+            // SAFETY: TLS_HELLO pins its 253-byte name buffer through delivery.
+            unsafe {
+                let buffer = &mut *(*r.path.cast::<crate::tls_server::HelloRequest>()).name_out;
+                if name.len() > buffer.capacity {
+                    return Err(Fault::Corrupt);
+                }
+                ptr::copy_nonoverlapping(name.as_ptr(), buffer.data, name.len());
+                buffer.len = name.len();
+            }
+        }
+    } else if op == TLS_ACCEPT {
+        if ok {
+            let chosen =
+                hirsel_tape_format::tls_accept_payload(&out.payload).map_err(|_| Fault::Corrupt)?;
+            // SAFETY: TLS_ACCEPT pins its list and protocol slot through delivery.
+            unsafe {
+                let tls = &*r.path.cast::<crate::tls_server::TlsAcceptRequest>();
+                let count = tls.protocol_count();
+                *tls.protocol_out = match chosen {
+                    None => u64::MAX,
+                    Some(index) if u64::from(index) < count => u64::from(index),
+                    Some(_) => return Err(Fault::Corrupt),
+                };
+            }
+        }
     } else if op == RESOLVE {
         if ok {
             let count = usize::try_from(out.value).map_err(|_| Fault::Corrupt)?;

@@ -100,12 +100,14 @@ unsafe fn check_tls(
 ) -> Result<(Binding, bool), Outcome> {
     unsafe {
         let write = (*files).tls_writes.get(&(key & !3)).ok_or(net::DENIED)?;
+        // A server half has no verified name (TLS-9), with or without a secret.
+        let name = write.name.as_ref().ok_or(net::DENIED)?;
         if let Some(secret) = secret
             && !secret
                 .policy
                 .send
                 .iter()
-                .any(|pattern| pattern.covers(&write.name))
+                .any(|pattern| pattern.covers(name))
         {
             return Err(net::DENIED);
         }

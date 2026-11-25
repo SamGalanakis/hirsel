@@ -6,9 +6,9 @@
     "lines": 1018
   },
   "core/core/tests/provide.hirsel": {
-    "lines": 2350,
-    "raise_revision": 1,
-    "reason": "net18-s2-2481"
+    "lines": 2383,
+    "raise_revision": 2,
+    "reason": "tls-accept-build-2679"
   },
   "core/programs/platform/platform.hirsel": {
     "lines": 3851,
@@ -176,9 +176,9 @@
     "reason": "coverage-c4-tool-2604"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2843,
-    "raise_revision": 9,
-    "reason": "coverage-c3-followups-2623"
+    "lines": 2756,
+    "raise_revision": 10,
+    "reason": "tls-accept-build-2679"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1126,
@@ -406,9 +406,9 @@
     "reason": "unit-tapes-u3c-2638"
   },
   "crates/hirsel-core-rt/src/net.rs": {
-    "lines": 1390,
-    "raise_revision": 3,
-    "reason": "net18-s3-2482"
+    "lines": 1397,
+    "raise_revision": 4,
+    "reason": "tls-accept-build-2679"
   },
   "crates/hirsel-core-rt/src/net_tests.rs": {
     "lines": 1529,
@@ -466,7 +466,9 @@
     "lines": 1061
   },
   "crates/hirsel-core-rt/src/tls/tests.rs": {
-    "lines": 1715
+    "lines": 1620,
+    "raise_revision": 1,
+    "reason": "tls-accept-build-2679"
   },
   "crates/hirsel-core-rt/src/units.rs": {
     "lines": 1810

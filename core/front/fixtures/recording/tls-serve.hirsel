@@ -1,0 +1,310 @@
+// TLS-9 server laws (TL18 to TL24): one connection per run.
+// argv: mode, key, alpn..., "--", chain files...
+// Modes:
+//   sni     chooses alpha or beta by server_name (TL18), drops the Hello otherwise
+//   fixed   serves the given key and chain whatever the name
+//   half    as fixed, then tries the server half's secret operations (TL21)
+//   connect runs hello on a socket from host.connect (TL3)
+//   unix    runs hello on a socket from a Unix listener at sock/s.sock (TL3)
+//   client  <port> <name>: tls.connect with ca.pem as roots, prints the peer digest
+//   control as sni, and holds beta.p8 read through the Dir (TL20)
+//   join    answers a PostgreSQL SSLRequest with S, joins, then as sni (TL23)
+// The run prints the listening port, then one line per step, then waits
+// for one byte on stdin before it releases anything (TL7, TL20).
+
+fn failure(e: NetError) -> String {
+    let mut s = string.new()
+    match e {
+        Denied => string.push(mut s, "denied"),
+        TimedOut => string.push(mut s, "timed-out"),
+        Reset => string.push(mut s, "reset"),
+        Tls(Chain) => string.push(mut s, "chain"),
+        Tls(Key) => string.push(mut s, "key"),
+        Tls(Closed) => string.push(mut s, "closed"),
+        Tls(Alpn) => string.push(mut s, "alpn"),
+        Tls(Name) => string.push(mut s, "name"),
+        Tls(Roots) => string.push(mut s, "roots"),
+        Tls(Truncated) => string.push(mut s, "truncated"),
+        Tls(Certificate(_)) => string.push(mut s, "certificate"),
+        Refused => string.push(mut s, "refused"),
+        Aborted => string.push(mut s, "aborted"),
+        Other(code) => {
+            string.push(mut s, "other ")
+            string.push_u64(mut s, int.widen(code))
+        },
+        Tls(Protocol(code)) => {
+            string.push(mut s, "protocol ")
+            string.push_u64(mut s, int.widen(code))
+        },
+        _ => string.push(mut s, "other"),
+    }
+    take s
+}
+
+fn say(out: Stdout, a: String, b: String) waits {
+    let mut line = string.from(a)
+    string.push(mut line, b)
+    string.push_char(mut line, '\n')
+    result.unwrap(stdout.write(out, line))
+}
+
+fn file(d: Dir, name: String) -> Bytes waits {
+    let size = result.unwrap(host.stat(d, name)).size
+    let mut f = result.unwrap(host.open(d, name, Read))
+    let mut data: Bytes = list.with_capacity(size)
+    while list.len(data) < size {
+        if result.unwrap(host.read(mut f, mut data)) == 0 {
+            break
+        }
+    }
+    result.unwrap(host.close(take f))
+    take data
+}
+
+fn ended(line: Bytes) -> bool {
+    for c in line {
+        if c == b'\n' {
+            return true
+        }
+    }
+    false
+}
+
+fn wait(i: Stdin) waits {
+    let mut go: Bytes = list.with_capacity(1)
+    let _ = stdin.read(i, mut go, Never)
+}
+
+type Keys {
+    alpha: Secret,
+    beta: Secret,
+    ed: Secret,
+    rsa: Secret,
+    p384: Secret,
+    rsa1024: Secret,
+    raw: Secret,
+    signer: Secret
+}
+
+fn serve(take h: tls.Hello, keys: Keys, key: String, chain: List[Bytes], alpn: List[String]) -> Result[(ReadHalf, WriteHalf, Option[u64]), NetError] waits {
+    if key == "beta" {
+        tls.accept(take h, chain, keys.beta, alpn, Never)
+    } else if key == "ed" {
+        tls.accept(take h, chain, keys.ed, alpn, Never)
+    } else if key == "rsa" {
+        tls.accept(take h, chain, keys.rsa, alpn, Never)
+    } else if key == "p384" {
+        tls.accept(take h, chain, keys.p384, alpn, Never)
+    } else if key == "rsa1024" {
+        tls.accept(take h, chain, keys.rsa1024, alpn, Never)
+    } else if key == "raw" {
+        tls.accept(take h, chain, keys.raw, alpn, Never)
+    } else if key == "signer" {
+        tls.accept(take h, chain, keys.signer, alpn, Never)
+    } else {
+        tls.accept(take h, chain, keys.alpha, alpn, Never)
+    }
+}
+
+// TL21: every secret operation on a server half is refused.
+fn half(out: Stdout, mut w: WriteHalf, send: Secret) waits {
+    let wire = string.into_bytes(string.from("x"))
+    let mut one: List[Secret] = list.new()
+    list.push(mut one, secret.share(send))
+    let mut marks: List[u64] = list.new()
+    for m in [0u64, 0u64, 0u64, 0u64] {
+        list.push(mut marks, m)
+    }
+    let none: List[Secret] = list.new()
+    let empty: List[u64] = list.new()
+    let first = string.into_bytes(string.from("n,,n=user,r=rOprNGfwEbeRWgbNEkqO"))
+    let server = string.into_bytes(string.from("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"))
+    let nothing: Bytes = list.new()
+    let a = match tls.send_secret(mut w, wire, one, marks, Never) {
+        Error(Denied) => "denied",
+        _ => "allowed",
+    }
+    let b = match tls.send_secret(mut w, nothing, none, empty, Never) {
+        Error(Denied) => "denied",
+        _ => "allowed",
+    }
+    let c = match secret.scram_sha256(mut w, send, first, server, nothing, nothing, Never) {
+        Error(Denied) => "denied",
+        _ => "allowed",
+    }
+    let d = match secret.scram_final_len(w, first, server) {
+        Error(Denied) => "denied",
+        _ => "allowed",
+    }
+    let mut line = string.from(a)
+    for word in [b, c, d] {
+        string.push_char(mut line, ' ')
+        string.push(mut line, word)
+    }
+    say(out, "half ", line)
+}
+
+pub fn main(n: Net, d: Dir, i: Stdin, out: Stdout, argv: Args, alpha: Secret, beta: Secret, ed: Secret, rsa: Secret, p384: Secret, rsa1024: Secret, raw: Secret, signer: Secret, send: Secret) -> Result[(), Exit] waits {
+    let keys = Keys(alpha: secret.share(alpha), beta: secret.share(beta), ed: secret.share(ed), rsa: secret.share(rsa), p384: secret.share(p384), rsa1024: secret.share(rsa1024), raw: secret.share(raw), signer: secret.share(signer))
+    let first = option.unwrap(args.get(argv, 0))
+    let mode = string.from(first)
+    let second = option.unwrap(args.get(argv, 1))
+    let mut key = string.from(second)
+    let mut alpn: List[String] = list.new()
+    let mut at: u64 = 2
+    while at < args.len(argv) {
+        let word = option.unwrap(args.get(argv, at))
+        at = at + 1
+        if word == "--" {
+            break
+        }
+        list.push(mut alpn, string.from(word))
+    }
+    let mut chain: List[Bytes] = list.new()
+    while at < args.len(argv) {
+        let path = option.unwrap(args.get(argv, at))
+        list.push(mut chain, file(d, string.from(path)))
+        at = at + 1
+    }
+    let ip = V4(2130706433)
+    if mode == "client" {
+        // client <port> <name>: tls.connect with the test CA as roots.
+        let mut port: u64 = 0
+        for b in string.into_bytes(take key) {
+            port = port * 10 + int.widen(b - b'0')
+        }
+        let wanted = option.unwrap(list.get(alpn, 0))
+        let name = string.from(wanted)
+        let socket = result.unwrap(host.connect(n, Addr(ip: ip, port: int.narrow(port)), Never))
+        let none: List[String] = list.new()
+        match tls.connect(n, take socket, name, Roots(file(d, "ca.pem")), none, Never) {
+            Ok((_, _, shake)) => {
+                let (a, b, c, e) = shake.peer
+                let mut line = string.new()
+                for word in [a, b, c, e] {
+                    string.push_char(mut line, ' ')
+                    string.push_u64(mut line, word)
+                }
+                say(out, "peer", line)
+            },
+            Error(e) => say(out, "connect ", failure(e)),
+        }
+        return Ok(())
+    }
+    if mode == "unix" {
+        // TL3: a socket from a Unix listener is refused before issue.
+        let mut l = result.unwrap(host.listen_unix(n, "sock", "s.sock", 1))
+        say(out, "0", "")
+        let s = result.unwrap(host.accept_unix(mut l, Never))
+        match tls.hello(take s, Never) {
+            Ok(h) => {
+                let _ = take h
+                say(out, "hello ok", "")
+            },
+            Error(e) => say(out, "hello ", failure(e)),
+        }
+        wait(i)
+        return Ok(())
+    }
+    let (opened, addr) = result.unwrap(host.listen(n, Addr(ip: ip, port: 0), 1))
+    let mut line = string.new()
+    string.push_u64(mut line, int.widen(addr.port))
+    say(out, "", line)
+    let mut listener = take opened
+    let accepted = if mode == "connect" {
+        // TL3: a client's socket is refused before issue.
+        let (other, peer) = result.unwrap(host.listen(n, Addr(ip: ip, port: 0), 1))
+        let socket = result.unwrap(host.connect(n, peer, Never))
+        let _ = take other
+        take socket
+    } else {
+        let (s, _) = result.unwrap(host.accept(mut listener, Never))
+        take s
+    }
+    let socket = if mode == "join" {
+        // The server side of TL15: SSLRequest, then S, then the handshake.
+        let (r, w) = net.split(take accepted)
+        let mut read = take r
+        let mut write = take w
+        let mut request: Bytes = list.with_capacity(8)
+        while list.len(request) < 8 {
+            if result.unwrap(host.recv_bounded(mut read, mut request, 8 - list.len(request), Never)) == 0 {
+                break
+            }
+        }
+        let empty: Bytes = list.new()
+        let _ = result.unwrap(host.send_pair(mut write, string.into_bytes(string.from("S")), empty, Never))
+        match net.join(take read, take write) {
+            Ok(s) => take s,
+            Error(_) => return Error(Exit(status: 3)),
+        }
+    } else {
+        take accepted
+    }
+    let h = match tls.hello(take socket, Never) {
+        Ok(h) => take h,
+        Error(e) => {
+            say(out, "hello ", failure(e))
+            wait(i)
+            return Ok(())
+        },
+    }
+    let name = string.from(tls.server_name(h))
+    say(out, "name ", name)
+    if mode == "sni" || mode == "join" || mode == "control" {
+        if name == "alpha.test" || name == "" {
+            key = string.from("alpha")
+            list.push(mut chain, file(d, "alpha.der"))
+        } else if name == "beta.test" {
+            key = string.from("beta")
+            list.push(mut chain, file(d, "beta.der"))
+        } else {
+            let _ = take h
+            say(out, "declined", "")
+            wait(i)
+            return Ok(())
+        }
+    }
+    let (r, w, protocol) = match serve(take h, keys, key, chain, alpn) {
+        Ok(served) => take served,
+        Error(e) => {
+            say(out, "accept ", failure(e))
+            wait(i)
+            return Ok(())
+        },
+    }
+    let mut read = take r
+    let mut write = take w
+    let mut chosen = string.new()
+    match protocol {
+        Some(index) => string.push_u64(mut chosen, index),
+        None => string.push(mut chosen, "none"),
+    }
+    say(out, "accept ", chosen)
+    if mode == "half" {
+        half(out, mut write, send)
+        match net.join(take read, take write) {
+            Ok(_) => say(out, "join joined", ""),
+            Error(Unjoined(_, _)) => say(out, "join unjoined", ""),
+        }
+        wait(i)
+        return Ok(())
+    }
+    // Echo one line, then hold the halves until stdin says go (TL20).
+    // In mode control the program also holds beta.p8 read through its Dir.
+    let held: Bytes = if mode == "control" { file(d, "beta.p8") } else { list.new() }
+    let mut got: Bytes = list.with_capacity(256)
+    while !ended(got) {
+        if result.unwrap(host.recv_bounded(mut read, mut got, 256 - list.len(got), Never)) == 0 {
+            break
+        }
+    }
+    let empty: Bytes = list.new()
+    let _ = host.send_pair(mut write, got, empty, Never)
+    say(out, "echo ", result.unwrap(string.from_utf8(take got)))
+    wait(i)
+    if list.len(held) == 1 {
+        return Error(Exit(status: 4))
+    }
+    Ok(())
+}

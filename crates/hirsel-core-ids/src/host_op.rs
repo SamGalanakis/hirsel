@@ -156,6 +156,10 @@ host_ops! {
     UNIT_CANCEL = 167,
     TRY_LOCK_SHARED = 172,
     ZERO_AT = 173,
+    /// TLS-9: read a ClientHello on an accepted socket and stop.
+    TLS_HELLO = 174,
+    /// TLS-9: complete a server handshake with a chain and a `tls_serve` key.
+    TLS_ACCEPT = 175,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

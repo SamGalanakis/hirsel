@@ -125,6 +125,7 @@ fn host_p256_generation_and_signing_rng_failure_end_run() {
             let mut public = [0; 65];
             let mut call = crate::secret::p256_generation::Generation {
                 random: 0,
+                policy: String::new(),
                 document: None,
             };
             let mut request = Request {

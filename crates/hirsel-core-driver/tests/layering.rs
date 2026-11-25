@@ -44,6 +44,11 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-cranelift", Class::Implementation),
     ("hirsel-llvm", Class::Implementation),
     ("hirsel-llvm-lazy", Class::Implementation),
+    // The reference evaluator: the pure core and the test world, the oracle the
+    // backends and the front run cases are compared against.
+    ("hirsel-core-eval", Class::Implementation),
+    // Native profiles: samples, symbolization and the profile store.
+    ("hirsel-prof", Class::Implementation),
     ("hirsel-core-driver", Class::Wiring),
     ("hirsel-core-contract-eval", Class::Tool),
     ("hirsel-core-program-tests", Class::Tool),
@@ -96,6 +101,7 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-guard"
                 | "hirsel-cranelift"
                 | "hirsel-llvm-lazy"
+                | "hirsel-prof"
         ),
         _ if from == "hirsel-core-materialize" => matches!(
             to,

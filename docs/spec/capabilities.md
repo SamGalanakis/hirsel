@@ -284,7 +284,7 @@ used ([runner](../../core/std/api/runner.md#store-triggers)).
 **Simulation.** Grant the **model world** simulation provider (CAP-5) to a test that
 needs controlled inputs. On the evaluator it is the whole host: `Args`, `Stdout`,
 `Stderr`, a virtual `Clock`, `Dir` and its files, `Random` and `Net`, each capability
-parameter of a law or case bound to a fresh one (`crates/hirsel-core-ir/src/eval.rs`). Its
+parameter of a law or case bound to a fresh one (`crates/hirsel-core-eval/src/lib.rs`). Its
 network and clock are the deterministic model of `crates/hirsel-core-net` (`model`), which
 native runs select through the runtime's model provider for `Net` and `Clock`, with every
 other operation going to the host. Wire cause number 9 stays retired. Choose a testing or

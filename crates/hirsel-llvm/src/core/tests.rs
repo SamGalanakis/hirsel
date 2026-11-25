@@ -2,7 +2,8 @@ use super::*;
 mod clang_abi;
 mod host_abi;
 
-use hirsel_core_ir::{eval, text, wf};
+use hirsel_core_eval as eval;
+use hirsel_core_ir::{text, wf};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;

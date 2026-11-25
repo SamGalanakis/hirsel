@@ -234,14 +234,19 @@
     "reason": "macos-s9-target-consts-2508"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
-    "lines": 4108,
-    "raise_revision": 1,
-    "reason": "cs-store-split-1935"
+    "lines": 4000,
+    "raise_revision": 2,
+    "reason": "comptime-eval-split-2612"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
     "lines": 2587,
     "raise_revision": 3,
     "reason": "macos-s5-macho-2582"
+  },
+  "crates/hirsel-core-eval/src/lib.rs": {
+    "lines": 7145,
+    "raise_revision": 9,
+    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2602,
@@ -260,9 +265,9 @@
     "reason": "macos-s9-target-consts-2508"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
-    "lines": 2849,
-    "raise_revision": 3,
-    "reason": "coverage-gen-anchors-2579"
+    "lines": 2851,
+    "raise_revision": 4,
+    "reason": "comptime-eval-split-2612"
   },
   "crates/hirsel-core-front/src/body/lists.rs": {
     "lines": 2361,
@@ -313,18 +318,15 @@
     "reason": "dod-columns-soa-2533"
   },
   "crates/hirsel-core-front/src/tests.rs": {
-    "lines": 1512
+    "lines": 1370,
+    "raise_revision": 1,
+    "reason": "comptime-eval-split-2612"
   },
   "crates/hirsel-core-front/src/types.rs": {
     "lines": 1164
   },
   "crates/hirsel-core-ids/src/published.rs": {
     "lines": 1198
-  },
-  "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 7145,
-    "raise_revision": 9,
-    "reason": "ds-prefetch-2519"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
@@ -348,9 +350,6 @@
     "lines": 2418,
     "raise_revision": 2,
     "reason": "coverage-gen-anchors-2579"
-  },
-  "crates/hirsel-core-ir/src/tests.rs": {
-    "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
     "lines": 2401,
@@ -376,9 +375,9 @@
     "lines": 2003
   },
   "crates/hirsel-core-program-tests/src/cases.rs": {
-    "lines": 2723,
-    "raise_revision": 3,
-    "reason": "macos-s9-target-consts-2508"
+    "lines": 2724,
+    "raise_revision": 4,
+    "reason": "comptime-eval-split-2612"
   },
   "crates/hirsel-core-program-tests/tests/llvm_source.rs": {
     "lines": 4718,
@@ -542,9 +541,9 @@
     "lines": 1229
   },
   "crates/hirsel-llvm/src/core/tests.rs": {
-    "lines": 3123,
-    "raise_revision": 1,
-    "reason": "macos-s2-target-2570"
+    "lines": 3124,
+    "raise_revision": 2,
+    "reason": "comptime-eval-split-2612"
   },
   "crates/hirsel-tape-format/src/lib.rs": {
     "lines": 1520

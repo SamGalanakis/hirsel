@@ -1,6 +1,7 @@
 //! Release code generation can regress while returning the same values.
 use super::{Case, Optimization, execute_object, output, symbol};
-use hirsel_core_ir::{FuncId, eval};
+use hirsel_core_eval as eval;
+use hirsel_core_ir::FuncId;
 use hirsel_core_layout::Target;
 use hirsel_llvm_lazy::Unit;
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _};

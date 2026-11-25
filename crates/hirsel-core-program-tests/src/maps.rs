@@ -1,6 +1,6 @@
 use crate::cases::inputs_with_core;
+use hirsel_core_eval as eval;
 use hirsel_core_front::Program;
-use hirsel_core_ir::eval;
 fn core_dir() -> std::path::PathBuf {
     crate::repo().join("core/core")
 }

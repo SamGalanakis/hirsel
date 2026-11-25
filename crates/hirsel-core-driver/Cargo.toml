@@ -50,7 +50,8 @@ twox-hash = { version = "=2.1.5", default-features = false, features = ["std", "
 [dev-dependencies]
 hirsel-core-front = { path = "../hirsel-core-front", features = ["cost-profile"] }
 tempfile = "3"
-hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }
+hirsel-core-eval = { path = "../hirsel-core-eval" }
+hirsel-core-ir = { path = "../hirsel-core-ir", features = ["wf"] }
 
 [build-dependencies]
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }

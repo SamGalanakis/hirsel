@@ -759,14 +759,14 @@ mod tests {
         assert_eq!(repaired.image.identity, first.image.identity);
         let body = changed.image.demand(&answer).unwrap();
         assert_eq!(
-            hirsel_core_ir::eval::run(
+            hirsel_core_eval::run(
                 body.ir().unwrap(),
                 body.check.function.unwrap(),
                 &[],
                 1_000_000
             )
             .outcome,
-            hirsel_core_ir::eval::Outcome::Returned(vec![9])
+            hirsel_core_eval::Outcome::Returned(vec![9])
         );
     }
     #[test]

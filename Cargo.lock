@@ -585,6 +585,7 @@ name = "hirsel-core-contract-eval"
 version = "0.1.0"
 dependencies = [
  "hirsel-core-driver",
+ "hirsel-core-eval",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
@@ -618,6 +619,7 @@ dependencies = [
  "cranelift-object",
  "gimli",
  "hirsel-core-diag",
+ "hirsel-core-eval",
  "hirsel-core-front",
  "hirsel-core-ids",
  "hirsel-core-ir",
@@ -649,10 +651,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-core-eval"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-ids",
+ "hirsel-core-ir",
+ "hirsel-core-layout",
+ "hirsel-core-net",
+ "hirsel-guard",
+ "serde_json",
+ "twox-hash",
+ "zeroize",
+]
+
+[[package]]
 name = "hirsel-core-front"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.16.1",
+ "hirsel-core-eval",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
@@ -684,12 +701,9 @@ version = "0.1.0"
 dependencies = [
  "hirsel-core-ids",
  "hirsel-core-layout",
- "hirsel-core-net",
  "hirsel-guard",
  "serde",
  "serde_json",
- "twox-hash",
- "zeroize",
 ]
 
 [[package]]
@@ -745,6 +759,7 @@ dependencies = [
  "cranelift-object",
  "gimli",
  "hirsel-core-driver",
+ "hirsel-core-eval",
  "hirsel-core-front",
  "hirsel-core-ids",
  "hirsel-core-ir",
@@ -822,6 +837,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-object",
  "gimli",
+ "hirsel-core-eval",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
@@ -849,6 +865,7 @@ name = "hirsel-llvm"
 version = "0.1.0"
 dependencies = [
  "gimli",
+ "hirsel-core-eval",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",

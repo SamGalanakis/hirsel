@@ -2437,8 +2437,8 @@ pub fn main(e: Env, secret: Secret) -> Result[(), Exit] {
         ],
     };
     assert_eq!(
-        hirsel_core_ir::eval::run_stdio(&module, function, &[0], 1 << 20, &[], Some(env)).outcome,
-        hirsel_core_ir::eval::Outcome::Returned(vec![0]),
+        hirsel_core_eval::run_stdio(&module, function, &[0], 1 << 20, &[], Some(env)).outcome,
+        hirsel_core_eval::Outcome::Returned(vec![0]),
         "11 means an ungranted value escaped, 12 means narrowing widened or failed to remove a name, 13 means the intersection lost a covered value",
     );
 

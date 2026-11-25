@@ -1,10 +1,11 @@
 //! Test backend for core/tools/std_native.py. Selection and oracles live in the walker.
 use hirsel_core_driver::{CheckProduct, CheckRequest, Driver, LibraryInput, Meter};
+use hirsel_core_eval as eval;
 use hirsel_core_ids::{
     DefPath,
     launch::{DEFAULT_N_PLACE, Metadata},
 };
-use hirsel_core_ir::{Identity, Module, eval};
+use hirsel_core_ir::{Identity, Module};
 use hirsel_core_layout::{Layout, case_of, compute};
 use hirsel_core_resolve::CorpusManifest;
 use serde_json::{Value, json};

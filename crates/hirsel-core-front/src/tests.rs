@@ -1,8 +1,9 @@
 //! Definition-local checking, lowering and declaration queries.
 
 use crate::*;
+use hirsel_core_eval as eval;
 use hirsel_core_ids::PackageId;
-use hirsel_core_ir::{FuncId, Param, Ty, eval, wf};
+use hirsel_core_ir::{FuncId, Param, Ty, wf};
 use hirsel_core_resolve::{ModuleSource, PackageManifest};
 use hirsel_core_syntax::{ParseMode, Symbols, parse};
 use std::collections::HashMap;

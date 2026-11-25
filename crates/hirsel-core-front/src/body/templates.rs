@@ -1311,10 +1311,10 @@ mod tests {
             };
             let (module, target) =
                 materialize(&emitter.module, source, &template, &identity, &[&closure]).unwrap();
-            let report = hirsel_core_ir::eval::run(&module, target, &[0], u64::MAX);
+            let report = hirsel_core_eval::run(&module, target, &[0], u64::MAX);
             assert_eq!(
                 report.outcome,
-                hirsel_core_ir::eval::Outcome::Returned(vec![expected])
+                hirsel_core_eval::Outcome::Returned(vec![expected])
             );
         }
 
@@ -1349,8 +1349,8 @@ mod tests {
         let (module, target) =
             materialize(&emitter.module, source, &template, &identity, &[&closure]).unwrap();
         assert_eq!(
-            hirsel_core_ir::eval::run(&module, target, &[0], u64::MAX).outcome,
-            hirsel_core_ir::eval::Outcome::Returned(vec![0])
+            hirsel_core_eval::run(&module, target, &[0], u64::MAX).outcome,
+            hirsel_core_eval::Outcome::Returned(vec![0])
         );
     }
 }

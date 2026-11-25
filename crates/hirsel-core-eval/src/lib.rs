@@ -41,11 +41,18 @@ pub use map::run_map_hash;
 pub use map::run_map_observed;
 
 mod net;
+#[cfg(test)]
+mod net_tests;
+#[cfg(test)]
+mod tests;
 
-use crate::*;
+#[cfg(test)]
+hirsel_guard::install!();
+
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ids::host_op::{DIR_READ_ONLY, needs_writable_dir};
 use hirsel_core_ids::host_op::{DIRECT_ALIGNMENT, MODE_DIRECT, MODE_DURABLE};
+use hirsel_core_ir::*;
 use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, RecipeRow, Repr, TypeRef, charge,
     cleanup_class, compute, field_size, map_entry,
@@ -1043,7 +1050,7 @@ struct Machine<'m> {
 // blocked task newest first, and a poll queue that runs only when nothing else
 // is ready. So the event order is the native order by construction.
 
-use conn::{CONN_BASE, Conn};
+use conn::Conn;
 use event::*;
 /// The CONC-10 event kinds: the one table native and the evaluator share.
 pub use hirsel_core_layout::event;
@@ -1546,7 +1553,7 @@ fn run_world(
     mut input: WorldInput<'_>,
 ) -> (Report, Checked) {
     let recipes = compute(&m.types).expect("layouts");
-    let native = crate::native_layout::resolve(m, &recipes);
+    let native = hirsel_core_ir::native_layout::resolve(m, &recipes);
     let m = native.as_ref();
     let mut mach = Machine::new(m, recipes, limit, &input);
     for s in &m.statics {
@@ -2007,10 +2014,10 @@ impl<'m> Machine<'m> {
             inherits: m
                 .functions
                 .iter()
-                .map(|f| crate::source::inherits_site(&m.instances[f.instance.index()]))
+                .map(|f| hirsel_core_ir::source::inherits_site(&m.instances[f.instance.index()]))
                 .collect(),
             sites: if input.sites.is_empty() {
-                crate::source::module_sites(m).into()
+                hirsel_core_ir::source::module_sites(m).into()
             } else {
                 input.sites.into()
             },
@@ -6955,7 +6962,7 @@ pub fn scalar(t: Ty, s: &str) -> u64 {
             f.to_bits()
         };
     }
-    crate::text::parse_constant(t, s).unwrap_or_else(|e| panic!("{e}"))
+    hirsel_core_ir::text::parse_constant(t, s).unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn width(t: Ty) -> u32 {
@@ -7079,44 +7086,4 @@ impl MinimumOrNumber for f64 {
         }
         x.min(y)
     }
-}
-
-#[cfg(test)]
-#[test]
-fn ended_byte_limits_release_their_records() {
-    use hirsel_guard::admission::{Owner, OwnerKind};
-
-    let module = Module::default();
-    let mut machine = Machine::new(&module, vec![], 64, &WorldInput::default());
-    let meter = Owner::new(OwnerKind::Ledger);
-    let measure = meter.enter();
-    let mut peak = 0;
-    // MEM-20: each zero-byte scope has ended with no surviving reference.
-    // Only the root and the current scope need records, regardless of count.
-    let root = machine.root().clone();
-    for _ in 0..4096 {
-        machine.admit(&root, 0).unwrap();
-        let scope = Limit::new(0, Some(root.clone()), 0);
-        peak = peak.max(meter.bytes());
-        machine.end_limit(scope, None);
-    }
-    assert_eq!(root.used(), 0);
-    assert_eq!(meter.bytes(), 0);
-    eprintln!("peak live byte-limit record allocations: {peak} bytes");
-    assert!(peak <= 1024, "limit records used {peak} bytes");
-
-    // A live allocation pins both ended records through hand-over. Freeing the
-    // block refunds exactly its surviving charge to the root.
-    drop(measure);
-    machine.admit(&root, 64).unwrap();
-    let outer = Limit::new(64, Some(root.clone()), 0);
-    machine.admit(&outer, 48).unwrap();
-    let inner = Limit::new(48, Some(outer.clone()), 0);
-    machine.admit(&inner, 8).unwrap();
-    let block = machine.block(8, Some(inner.clone()), 8, None);
-    machine.end_limit(inner, None);
-    machine.end_limit(outer, None);
-    assert_eq!(root.used(), 8);
-    machine.free(block);
-    assert_eq!(root.used(), 0);
 }

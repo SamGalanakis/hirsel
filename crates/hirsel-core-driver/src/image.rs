@@ -487,7 +487,7 @@ fn source_package_image_uses_the_captured_text_and_name() {
         let answer = image
             .demand(&DefPath::from_full("core@1/core/answer").unwrap())
             .unwrap();
-        let result = hirsel_core_ir::eval::run(
+        let result = hirsel_core_eval::run(
             answer.ir().unwrap(),
             answer.check.function.unwrap(),
             &[],
@@ -495,7 +495,7 @@ fn source_package_image_uses_the_captured_text_and_name() {
         );
         assert_eq!(
             result.outcome,
-            hirsel_core_ir::eval::Outcome::Returned(vec![value])
+            hirsel_core_eval::Outcome::Returned(vec![value])
         );
         product.rebuilt
     };

@@ -1,8 +1,9 @@
 //! Check the source and output in the spec without maintaining a second fixture corpus.
 use crate::{Checked, package, repo, std_manifest};
 use hirsel_core_driver::{SourceSite, line_column};
+use hirsel_core_eval as eval;
 use hirsel_core_ids::DefPath;
-use hirsel_core_ir::{Identity, eval};
+use hirsel_core_ir::Identity;
 use hirsel_core_layout::{Layout, case_of, compute};
 use hirsel_core_resolve::{CorpusManifest, ModuleSource, PackageManifest};
 use hirsel_core_syntax::{NodeKind, ParseMode, Symbols, TokenKind, format, parse};

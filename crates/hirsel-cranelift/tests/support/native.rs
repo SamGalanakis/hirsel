@@ -15,7 +15,7 @@ impl NativeInput for c::Module {
 }
 // Execute objects through a separately compiled C caller. This catches both
 // scalar semantics and the register packing a same-backend caller could mask.
-use hirsel_core_ir::eval::{self, Outcome};
+use hirsel_core_eval::{self as eval, Outcome};
 use hirsel_core_ir::{self as c, *};
 use hirsel_cranelift::core::*;
 use std::{fmt::Write as _, fs, path::PathBuf, process::Command};

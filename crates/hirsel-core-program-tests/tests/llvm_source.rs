@@ -1,6 +1,6 @@
 //! Source LLVM agreement uses independently checked definition units.
 #![allow(dead_code)]
-use hirsel_core_ir::eval;
+use hirsel_core_eval as eval;
 use hirsel_core_ir::*;
 use hirsel_core_layout::Target;
 use hirsel_core_program_tests::counted_loops::{CollectionShape, SEEDS, choices};

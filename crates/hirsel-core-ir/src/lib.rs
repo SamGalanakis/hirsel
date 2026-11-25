@@ -862,14 +862,14 @@
 //!
 //! Producers read float-holding bytes only at their float type. Key and byte
 //! glue excludes floats, and no niche is a float pattern. The conformance
-//! harnesses check this by running the evaluator with [`eval::Nans::Scrambled`].
+//! harnesses check this by running the evaluator with `hirsel_core_eval::Nans::Scrambled`.
 //!
 //! An API that exposes float-holding bytes outside the program is an observer too.
 //! That covers an FFI argument or result, a view of a compact blob or other non-`u8`
 //! storage as bytes, and a durable or exchange encoding. Such an API canonicalises
 //! every float it exposes, and the change that adds it must say so. v1 has none: host
 //! operations carry only integers, pointers and bytes. A harness that reads a float
-//! result is an observer as well ([`eval::observed`]).
+//! result is an observer as well (`hirsel_core_eval::observed`).
 //!
 //! A float `const` that is a NaN is the canonical pattern (wf). A constant then has
 //! one spelling whatever host folded it, so products and their identities do not
@@ -1111,9 +1111,6 @@ hirsel_guard::install!();
 pub mod address;
 pub mod coverage;
 pub mod decode;
-/// Reference evaluator for samples and producers' behaviour cases.
-#[cfg(any(test, feature = "eval"))]
-pub mod eval;
 pub mod extent;
 pub mod failure;
 pub mod fills;
@@ -1139,7 +1136,5 @@ pub use hirsel_core_layout::{FuncRef, TypeRef, intern_shape};
 pub use ir::*;
 pub use target::{select as select_target, unsupported as unsupported_reason};
 
-#[cfg(test)]
-mod net_tests;
 #[cfg(test)]
 mod tests;

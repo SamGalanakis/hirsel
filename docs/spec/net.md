@@ -341,7 +341,7 @@ The check has two parts, kept apart because they depend on different things.
 1. **Address class.** A pure function of the address: `net.class(ip)` must be `Public`.
    It runs in the same preflight as the rule match (`hirsel_core_net::address_denial`,
    called by the native runtime in `crates/hirsel-core-rt/src/net/addr.rs` and by the
-   interpreter in `crates/hirsel-core-ir/src/eval/net.rs`). That is before issue, with no
+   interpreter in `crates/hirsel-core-eval/src/net.rs`). That is before issue, with no
    host effect and no replay point passed. NET-6's own refusals come first: an
    IPv4-mapped IPv6 address, an unscoped `fe80::/10` and the unspecified address are
    already `Denied` by every rule, whatever its reach. A replay makes the same check from

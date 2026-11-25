@@ -722,8 +722,8 @@ fn revision_builtin_dependencies_use_the_producer() {
         expected.push(builtin_group(normal.hash(), normal.slots.len()));
     }
     let (module, descriptor) = hirsel_core_materialize::join(&modules, &roots[2]).unwrap();
-    let result = hirsel_core_ir::eval::run(&module, descriptor, &[0], 4096);
-    assert_eq!(result.outcome, hirsel_core_ir::eval::Outcome::Returned(vec![1]));
+    let result = hirsel_core_eval::run(&module, descriptor, &[0], 4096);
+    assert_eq!(result.outcome, hirsel_core_eval::Outcome::Returned(vec![1]));
     // SHA-256 of the framed revision domain and the V0 float.widen address.
     let revision = [
         0xa6, 0x0a, 0x72, 0xe6, 0xe0, 0x12, 0x67, 0xbd, 0x93, 0xfe, 0x57, 0x58, 0xfe, 0x4c, 0xeb, 0xd3,
@@ -950,7 +950,7 @@ fn revision_parser_and_source_keys_are_distinct_inputs() {
         let modules = units.modules().unwrap();
         let (module, function) = hirsel_core_materialize::join(&modules, &root).unwrap();
         let address = units.address(&root).unwrap();
-        (key, address, hirsel_core_ir::eval::run(&module, function, &[], 4096).outcome)
+        (key, address, hirsel_core_eval::run(&module, function, &[], 4096).outcome)
     };
     for case in revision_cases().into_iter().filter(|case| {
         ["s01 ", "c01 ", "c02 ", "c04 "].into_iter().any(|prefix| case.name.starts_with(prefix))
@@ -987,7 +987,7 @@ fn revision_opaque_identity_ignores_unreached_items() {
         let units = product.units([main.clone()], 4096).unwrap();
         let modules = units.modules().unwrap();
         let (module, function) = hirsel_core_materialize::join(&modules, &main).unwrap();
-        let report = hirsel_core_ir::eval::run(&module, function, &[], 4096);
+        let report = hirsel_core_eval::run(&module, function, &[], 4096);
         (product.root, units.address(&main).unwrap(), report.outcome)
     };
     for case in revision_cases().into_iter().filter(|case| case.name.starts_with("i1 ") || case.name.starts_with("i2 ")) {

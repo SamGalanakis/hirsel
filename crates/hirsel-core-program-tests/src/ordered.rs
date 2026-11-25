@@ -63,8 +63,8 @@ fn text()->bool { let a="a"; let b="b"; less(view a,view b) }
             .position(|f| module.instances[f.instance.index()].definition.0.name == name)
             .unwrap();
         assert_eq!(
-            hirsel_core_ir::eval::run(&module, FuncId(f as u32), &[], 0).outcome,
-            hirsel_core_ir::eval::Outcome::Returned(vec![expected]),
+            hirsel_core_eval::run(&module, FuncId(f as u32), &[], 0).outcome,
+            hirsel_core_eval::Outcome::Returned(vec![expected]),
         );
     }
     eprintln!("{}", hirsel_core_ir::text::print(&module));

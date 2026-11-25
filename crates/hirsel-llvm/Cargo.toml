@@ -24,5 +24,6 @@ hirsel-llvm-lazy = { path = "../hirsel-llvm-lazy" }
 hirsel-intern = { path = "../hirsel-intern" }
 hirsel-core-rt = { path = "../hirsel-core-rt", features = ["testing", "charge-observation"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
-hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }
+hirsel-core-eval = { path = "../hirsel-core-eval" }
+hirsel-core-ir = { path = "../hirsel-core-ir", features = ["wf"] }
 hirsel-guard = { path = "../hirsel-guard" }

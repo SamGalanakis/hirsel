@@ -2318,7 +2318,8 @@ impl Code {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_core_ir::{eval, text, wf};
+    use hirsel_core_eval as eval;
+    use hirsel_core_ir::{text, wf};
 
     #[test]
     fn scalar_carriers_hash_their_logical_bits() {
@@ -2630,7 +2631,8 @@ mod tests {
 #[cfg(test)]
 mod located_order_tests {
     use super::*;
-    use hirsel_core_ir::{eval, text, wf};
+    use hirsel_core_eval as eval;
+    use hirsel_core_ir::{text, wf};
     fn word(bytes: &mut Vec<u8>, value: u64, width: usize) {
         bytes.extend_from_slice(&value.to_le_bytes()[..width]);
     }

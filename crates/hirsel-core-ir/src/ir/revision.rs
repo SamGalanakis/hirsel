@@ -45,7 +45,9 @@ impl Module {
         }
     }
 
-    pub(crate) fn descriptor_identity(&self, function: FuncId) -> ContentHash {
+    /// The identity a descriptor names for `function`: its source instance's for a
+    /// callable adapter, else its own code identity.
+    pub fn descriptor_identity(&self, function: FuncId) -> ContentHash {
         self.described_instance(function).map_or_else(
             || self.code_identity(function),
             |identity| identity.digest(),

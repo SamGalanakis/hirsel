@@ -1,7 +1,7 @@
 //! Source runtime laws consume one sealed product per definition.
 use crate::cases::inputs_with_core;
+use hirsel_core_eval as eval;
 use hirsel_core_front::*;
-use hirsel_core_ir::eval;
 use hirsel_core_resolve::NameIndex;
 use std::path::Path;
 fn canonical(source: &str) -> (NameIndex, Vec<ModuleInput>) {

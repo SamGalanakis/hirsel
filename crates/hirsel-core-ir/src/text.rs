@@ -1253,7 +1253,7 @@ impl<'a> Line<'a> {
 }
 
 /// Parse a constant written for type `t` (the inverse of `constant`).
-pub(crate) fn parse_constant(t: Ty, s: &str) -> R<u64> {
+pub fn parse_constant(t: Ty, s: &str) -> Result<u64, String> {
     let bad = || format!("constant `{s}` does not fit {t:?}");
     if let Some(hex) = s.strip_prefix("0x") {
         if !(t.is_float() || t == Ty::Ptr) {

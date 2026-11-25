@@ -1,6 +1,6 @@
 //! The evaluator's role check (crate docs, "Roles").
 
-use crate::roles::Role;
+use hirsel_core_ir::roles::Role;
 use std::collections::{BTreeMap, HashMap};
 
 /// Per running activation: its roles, and by block the byte spans each role

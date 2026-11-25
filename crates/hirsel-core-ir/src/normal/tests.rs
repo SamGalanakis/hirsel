@@ -250,23 +250,9 @@ fn cleanup_only_edit_changes_body_and_failure() {
         address(&b),
         "D7 the overflow observer changes the address"
     );
-    let (a, b) = (round_trip(&a), round_trip(&b));
-    let run = |m, arg| crate::eval::run(m, FuncId(0), &[arg], 4096);
-    let (a_ok, b_ok) = (run(&a, 7), run(&b, 7));
-    assert_eq!(a_ok.outcome, crate::eval::Outcome::Returned(vec![8]));
-    assert_eq!(b_ok.outcome, a_ok.outcome);
-    assert_eq!(
-        b_ok.peak_reserved, a_ok.peak_reserved,
-        "normal input skips the observer"
-    );
-    let (a_failed, b_failed) = (run(&a, u64::MAX), run(&b, u64::MAX));
-    assert_eq!(a_failed.outcome, b_failed.outcome);
-    assert!(matches!(b_failed.outcome, crate::eval::Outcome::Failed(_)));
-    assert_eq!(
-        b_failed.peak_reserved,
-        a_failed.peak_reserved + 37,
-        "overflow cleanup ran the observer"
-    );
+    // The evaluator half (the observer runs only on overflow) is in hirsel-core-eval.
+    round_trip(&a);
+    round_trip(&b);
 }
 
 fn hex(text: &str) -> Vec<u8> {
@@ -337,9 +323,7 @@ fn f0 = n0 g0 {
         crate::builtin_address(&widen).unwrap().0.as_slice(),
         hex("bb63c4ef24b5d261f66965edd632ade0cf2ff8d99540fd2be8bef1111448a41e")
     );
-    let decoded = round_trip(&encoded);
-    let result = crate::eval::run(&decoded, FuncId(0), &[], 4096).outcome;
-    assert_eq!(result, crate::eval::Outcome::Returned(vec![7]));
+    round_trip(&encoded);
 }
 
 #[test]
@@ -573,17 +557,9 @@ fn logical_admission_is_in_the_body() {
         b.hash(),
         "D11 logical admission enters checked code identity"
     );
-    let (a, b) = (round_trip(&a), round_trip(&b));
-    let run = |module, limit| crate::eval::run(module, FuncId(0), &[], limit).outcome;
-    let returned = crate::eval::Outcome::Returned(vec![1]);
-    assert_eq!(run(&a, 8), returned);
-    assert_eq!(run(&b, 8), returned);
-    assert_eq!(run(&a, 6), returned);
-    assert_eq!(
-        run(&b, 6),
-        crate::eval::Outcome::Returned(vec![6]),
-        "seven requested, six available"
-    );
+    // The evaluator half (seven requested, six available) is in hirsel-core-eval.
+    round_trip(&a);
+    round_trip(&b);
 }
 
 #[test]

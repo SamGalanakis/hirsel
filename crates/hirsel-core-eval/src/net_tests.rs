@@ -1,9 +1,10 @@
-use crate::{FuncId, eval, text, wf};
+use crate as eval;
+use hirsel_core_ir::{FuncId, text, wf};
 use std::os::{fd::OwnedFd, unix::net::UnixStream};
 fn fds() -> usize {
     std::fs::read_dir("/proc/self/fd").unwrap().count()
 }
-const SOURCE: &str = include_str!("../samples/net.core");
+const SOURCE: &str = include_str!("../../hirsel-core-ir/samples/net.core");
 fn isolate(law: &str) {
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "net_tests::wire_eval_child", "--nocapture"])

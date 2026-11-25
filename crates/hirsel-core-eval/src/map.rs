@@ -1,5 +1,5 @@
 use super::{Report, WorldInput, run_world};
-use crate::{FuncId, Module};
+use hirsel_core_ir::{FuncId, Module};
 use std::{collections::hash_map::RandomState, hash::BuildHasher};
 
 #[cfg(feature = "map-observation")]

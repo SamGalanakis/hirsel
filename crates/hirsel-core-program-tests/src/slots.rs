@@ -73,10 +73,10 @@ fn private_slot_contracts_and_misuse() {
             let f = functions[name];
             eprintln!("running {name}");
             let sig = &module.signatures[module.functions[f.index()].signature.index()];
-            let report = hirsel_core_ir::eval::run(&module, f, &[], u64::MAX);
+            let report = hirsel_core_eval::run(&module, f, &[], u64::MAX);
             assert_eq!(
                 report.outcome,
-                hirsel_core_ir::eval::Outcome::Returned(vec![hirsel_core_ir::eval::scalar(
+                hirsel_core_eval::Outcome::Returned(vec![hirsel_core_eval::scalar(
                     sig.results[0],
                     want
                 )]),
@@ -89,7 +89,7 @@ fn private_slot_contracts_and_misuse() {
         } else if let Some(fault) = pending_fault.take() {
             let name = line.strip_prefix("fn ").unwrap().split('(').next().unwrap();
             let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                hirsel_core_ir::eval::run(&module, functions[name], &[], u64::MAX)
+                hirsel_core_eval::run(&module, functions[name], &[], u64::MAX)
             }))
             .err()
             .expect("slot misuse must fault on the evaluator");

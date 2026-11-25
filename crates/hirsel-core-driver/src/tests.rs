@@ -1,5 +1,6 @@
 use super::*;
-use hirsel_core_ir::{FuncId, eval};
+use hirsel_core_eval as eval;
+use hirsel_core_ir::FuncId;
 
 #[path = "diagnostic_fixes.rs"]
 mod diagnostic_fixes;

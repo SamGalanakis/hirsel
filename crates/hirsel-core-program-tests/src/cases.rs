@@ -1,9 +1,10 @@
 //! Source corpus assertions over per-definition products and reached units.
 mod budgets;
 use crate::{Checked, repo};
+use hirsel_core_eval as eval;
 use hirsel_core_front::*;
 use hirsel_core_ids::{DefPath, PackageId};
-use hirsel_core_ir::{FuncId, Identity, Module, Param, Ty, eval, wf};
+use hirsel_core_ir::{FuncId, Identity, Module, Param, Ty, wf};
 use hirsel_core_resolve::{
     CorpusManifest, ModulePath, ModuleSource, NameIndex, PackageManifest, Site,
 };

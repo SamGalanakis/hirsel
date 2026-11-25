@@ -382,10 +382,10 @@ A run stop other than `Deadlock` writes no `END` to any stream, and each then re
 `Truncated`, as a root's does today. A `Deadlock` `END` is written to the stream of the
 unit that stops.
 
-**Run-wide marks.** An `import_srtp` or `import_traffic` passes the replay point in every
-unit, whatever its secret's bytes on replay: its issue holds the designation and profile,
-and its delivery the schedule origin or the refusal. A `Spent` found at the run's atomic
-mark is that delivery, not a refusal before issue. Replay supplies it from the stream and
+**Run-wide marks.** An `import_srtp`, `import_traffic` or `import_sframe` passes the replay
+point in every unit, whatever its secret's bytes on replay: its issue holds the designation
+and profile or suite, and its delivery the schedule origin or the refusal. A `Spent` found
+at the run's atomic mark is that delivery, not a refusal before issue. Replay supplies it from the stream and
 never reads the mark ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement) gives
 the order).
 

@@ -606,23 +606,6 @@ impl FunctionEmitter<'_> {
             i
         }
     }
-    /// A runtime entry with C argument extensions for this target.
-    pub(super) fn runtime(
-        &mut self,
-        name: &str,
-        result: Type,
-        args: &[CArg],
-        attrs: &CallAttrs,
-    ) -> Value {
-        let args: Vec<CArg> = args
-            .iter()
-            .map(|(p, v)| (self.c_param(p.clone()), v.clone()))
-            .collect();
-        self.call_declared(name, result, &args, FnAttrs::default(), attrs)
-    }
-    pub(super) fn runtime_void(&mut self, name: &str, args: &[CArg]) {
-        self.runtime(name, Type::Void, args, &CallAttrs::default());
-    }
     fn allocation(&mut self, name: &str, args: &[CArg]) -> (Value, Value) {
         self.allocation_call(name, args, false)
     }

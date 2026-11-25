@@ -171,6 +171,9 @@ typedef struct HirselCoreRegion HirselCoreRegion;
 HirselCoreRegion *hirsel_core_region_open(const HirselCoreContext *);
 HirselCoreAllocation hirsel_core_region_alloc(const HirselCoreContext *,
     HirselCoreRegion *, size_t bytes, size_t alignment, uint64_t charge, bool charge_overflow);
+/* Opens the slot's region on first use (the slot starts null), then allocates. */
+HirselCoreAllocation hirsel_core_region_slot_alloc(const HirselCoreContext *,
+    HirselCoreRegion **slot, size_t bytes, size_t alignment, uint64_t charge, bool charge_overflow);
 void hirsel_core_region_lower_charge(HirselCoreRegion *, size_t entry,
     uint64_t previous_charge, uint64_t retained_charge);
 void hirsel_core_region_close(HirselCoreRegion *);

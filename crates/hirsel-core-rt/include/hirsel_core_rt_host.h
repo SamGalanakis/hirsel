@@ -256,6 +256,29 @@ HirselCoreAddressOutcome hirsel_core_net_local_addr(HirselCoreContext *, uint64_
 HirselCoreAddressOutcome hirsel_core_net_peer_addr(HirselCoreContext *, uint64_t, uint64_t);
 HirselCoreAddressOutcome hirsel_core_host_listen(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint16_t, uint64_t);
 HirselCoreAddressOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
+/* Unix-socket and datagram adapters: context, handle, operands, site. */
+HirselCoreHostOutcome hirsel_core_host_connect_unix(HirselCoreContext *, uint64_t, const HirselCoreBuffer *root, const HirselCoreBuffer *path, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_listen_unix(HirselCoreContext *, uint64_t, const HirselCoreBuffer *root, const HirselCoreBuffer *path, uint16_t backlog, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_accept_unix(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_open_datagram(HirselCoreContext *, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_bind_datagram(HirselCoreContext *, uint64_t, const HirselCoreBuffer *root, const HirselCoreBuffer *path, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_connect_datagram(HirselCoreContext *, uint64_t, const HirselCoreBuffer *root, const HirselCoreBuffer *path, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_send_datagram(HirselCoreContext *, uint64_t, const HirselCoreBuffer *bytes, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_send_to(HirselCoreContext *, uint64_t, const HirselCoreBuffer *root, const HirselCoreBuffer *path, const HirselCoreBuffer *bytes, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_recv_datagram(HirselCoreContext *, uint64_t, HirselCoreBuffer *bytes, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_narrow_unix(HirselCoreContext *, uint64_t net, uint8_t direction, const HirselCoreBuffer *root, const HirselCoreBuffer *path, uint64_t);
+/* UDP: bind (family, hi, lo, port, slots, slot_bytes[, members, steer, out]). */
+HirselCoreHostOutcome hirsel_core_host_udp_open(HirselCoreContext *, uint64_t net, bool v6, uint32_t slots, uint32_t slot_bytes, uint64_t);
+HirselCoreAddressOutcome hirsel_core_host_udp_bind(HirselCoreContext *, uint64_t net, uint8_t, uint64_t, uint64_t, uint16_t, uint32_t, uint32_t, uint64_t);
+HirselCoreAddressOutcome hirsel_core_host_udp_bind_group(HirselCoreContext *, uint64_t net, uint8_t, uint64_t, uint64_t, uint16_t, uint32_t, uint32_t, uint16_t members, uint32_t steer, HirselCoreBuffer *out, uint64_t);
+HirselCoreAddressOutcome hirsel_core_host_udp_local_addr(HirselCoreContext *, uint64_t key, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_udp_recv(HirselCoreContext *, uint64_t key, HirselCoreBuffer *bytes, HirselCoreBuffer *packets, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_udp_send(HirselCoreContext *, uint64_t key, const HirselCoreBuffer *bytes, const HirselCoreBuffer *packets, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_udp_fill_packets(HirselCoreContext *, uint64_t served_key, uint64_t call_key, const HirselCoreBuffer *packets, uint64_t);
+HirselCoreHostOutcome hirsel_core_exec_narrow(HirselCoreContext *, uint64_t exec, uint32_t, const HirselCoreBuffer *name, const HirselCoreBuffer *argument, uint64_t);
+/* FORM TLS connect: the outcome and four network-order peer digest words. */
+typedef struct { HirselCoreHostOutcome outcome; uint64_t peer[4]; } HirselCoreTlsConnectOutcome;
+HirselCoreTlsConnectOutcome hirsel_core_tls_connect(HirselCoreContext *, uint64_t, uint64_t key, const HirselCoreBuffer *name, uint8_t trust, const HirselCoreBuffer *roots, const HirselCoreBuffer *alpn, uint8_t, uint64_t, uint64_t, uint64_t);
 /* RECV_BOUNDED (27): max_receive clips the request buffer's writable spare
    capacity. The caller's carrier publishes only the delivered length. */
 HirselCoreHostOutcome hirsel_core_host_recv_bounded(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint64_t max_receive, uint8_t, uint64_t, uint64_t, uint64_t);

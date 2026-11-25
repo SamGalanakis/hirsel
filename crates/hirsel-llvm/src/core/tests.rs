@@ -1,4 +1,5 @@
 use super::*;
+mod clang_abi;
 mod host_abi;
 
 use hirsel_core_ir::{eval, text, wf};
@@ -2404,66 +2405,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
         assert!(expected.stderr.is_empty());
     }
     for &op in HostOp::ALL {
-        let params = host_abi::parameters(op);
-        let results: &[&str] = if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
-            &["ptr", "u8", "u32", "u64"]
-        } else if matches!(op, HostOp::Random | HostOp::Stopped) {
-            &[]
-        } else if op.address_outcome() {
-            &["u64", "u8", "u32", "u64", "u8", "u64", "u64", "u16"]
-        } else if op == HostOp::TlsConnect {
-            &["u64", "u8", "u32", "u64", "u64", "u64", "u64", "u64"]
-        } else if op == HostOp::ExecSpawn {
-            &["u64", "u8", "u32", "u64", "u64", "u64", "u64"]
-        } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
-            &["u64", "u8", "u32", "i64", "u8"]
-        } else if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {
-            &["u64", "u8", "u32", "u64"]
-        } else {
-            &["u64"]
-        };
-        let names = |n: usize| {
-            (0..n)
-                .map(|i| format!("v{i}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let typed = |ts: &[&str], offset: usize| {
-            ts.iter()
-                .enumerate()
-                .map(|(i, t)| format!("v{}: {t}", i + offset))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let outputs = typed(results, params.len());
-        let returned = (params.len()..params.len() + results.len())
-            .map(|i| format!("v{i}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let call = if results.is_empty() {
-            format!("call rt.{} g0 ({})", op.name(), names(params.len()))
-        } else {
-            format!(
-                "{} = call rt.{} g0 ({})",
-                outputs,
-                op.name(),
-                names(params.len())
-            )
-        };
-        let ret = if returned.is_empty() {
-            "return".to_owned()
-        } else {
-            format!("return {returned}")
-        };
-        let source = format!(
-            "core v1\nsig g0 = ({}) -> ({})\ninst n0 = tests@0/provider/{} [] []\nfn f0 = n0 g0 {{\nb0({}):\n {}\n {}\n}}\n",
-            params.join(", "),
-            results.join(", "),
-            op.name(),
-            typed(params, 0),
-            call,
-            ret
-        );
+        let source = host_abi::provider_source(op);
         let module = text::parse(&source).unwrap();
         wf::module(&module).unwrap();
         let ir = emit_ir(&module).unwrap();
@@ -2472,14 +2414,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             .verify()
             .unwrap();
         // HirselCoreSpawnOutcome is a 32-byte HirselCoreHostOutcome and three u64 pipes.
-        let storage = if matches!(
-            op,
-            HostOp::Listen
-                | HostOp::Accept
-                | HostOp::LocalAddr
-                | HostOp::PeerAddr
-                | HostOp::ExecSpawn
-        ) {
+        let storage = if op.address_outcome() || op == HostOp::ExecSpawn {
             "sret([56 x i8])"
         } else if op == HostOp::TlsConnect {
             "sret([64 x i8])"

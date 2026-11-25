@@ -932,6 +932,47 @@ impl FunctionEmitter<'_> {
 }
 
 impl FunctionEmitter<'_> {
+    /// A runtime entry with C argument extensions for this target. An `i1`
+    /// result is a C `bool` and takes its extension too.
+    pub(super) fn runtime(
+        &mut self,
+        name: &str,
+        result: Type,
+        args: &[CArg],
+        attrs: &CallAttrs,
+    ) -> Value {
+        let extension = if result == Type::I1 && name.starts_with("hirsel_core_") {
+            abi::extension(self.abi.target, Ty::Scalar(Scalar::Bool))
+        } else {
+            Extension::None
+        };
+        self.runtime_returning(name, result, extension, args, attrs)
+    }
+    /// A runtime entry whose C `bool` result is a failure byte.
+    pub(super) fn runtime_bool(&mut self, name: &str, args: &[CArg], attrs: &CallAttrs) -> Value {
+        let extension = abi::extension(self.abi.target, Ty::Scalar(Scalar::Bool));
+        self.runtime_returning(name, Type::I8, extension, args, attrs)
+    }
+    fn runtime_returning(
+        &mut self,
+        name: &str,
+        result: Type,
+        extension: Extension,
+        args: &[CArg],
+        attrs: &CallAttrs,
+    ) -> Value {
+        let params = args.iter().map(|(p, _)| self.c_param(p.clone())).collect();
+        let sig = FnSig {
+            extension,
+            ..FnSig::new(result, params)
+        };
+        self.items.declare(name, sig.clone(), FnAttrs::default());
+        let values: Vec<_> = args.iter().map(|(_, v)| v.clone()).collect();
+        self.call(&sig, &Value::global(name.to_owned()), &values, attrs)
+    }
+    pub(super) fn runtime_void(&mut self, name: &str, args: &[CArg]) {
+        self.runtime(name, Type::Void, args, &CallAttrs::default());
+    }
     /// A runtime C argument under the target's extension rule. Call sites
     /// name a narrow argument's signedness as `Zero` or `Sign`; the rule
     /// decides whether the target extends it.

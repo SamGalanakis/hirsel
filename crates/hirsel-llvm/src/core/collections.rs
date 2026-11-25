@@ -149,9 +149,8 @@ impl FunctionEmitter<'_> {
         }
         if let Some(status) = &status {
             let site = self.site_word();
-            let failed = self.runtime(
+            let failed = self.runtime_bool(
                 "hirsel_core_release_buffer",
-                Type::I8,
                 &[
                     ptr(CONTEXT),
                     ptr(buffer),

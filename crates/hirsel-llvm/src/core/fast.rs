@@ -188,7 +188,7 @@ impl FunctionEmitter<'_> {
                 Type::Ptr.into(),
                 Type::I64.into(),
                 Type::I64.into(),
-                Parameter::extended(Type::I8, Extension::Zero),
+                self.c_param(Parameter::extended(Type::I8, Extension::Zero)),
             ],
             ..FnSig::plain(Type::Ptr, [])
         };
@@ -624,9 +624,8 @@ impl FunctionEmitter<'_> {
                 cold: true,
                 ..CallAttrs::default()
             };
-            self.runtime(
+            self.runtime_bool(
                 "hirsel_core_release",
-                Type::I8,
                 &[
                     ptr(CONTEXT),
                     ptr(node.clone()),

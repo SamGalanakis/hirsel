@@ -502,9 +502,8 @@ impl FunctionEmitter<'_> {
                 if !hirsel_core_layout::terminal(&self.module.types, self.recipes, field) =>
             {
                 let block = self.load(&Type::Ptr, p, 1);
-                Some(self.runtime(
+                Some(self.runtime_bool(
                     "hirsel_core_release",
-                    Type::I8,
                     &[
                         ptr(CONTEXT),
                         ptr(block),
@@ -571,9 +570,8 @@ impl FunctionEmitter<'_> {
                 // LANG-19: the environment is a drained block; word 0 names
                 // its fixed descriptor.
                 let descriptor = self.load(&Type::Ptr, &environment, 8);
-                let failed = self.runtime(
+                let failed = self.runtime_bool(
                     "hirsel_core_release",
-                    Type::I8,
                     &[ptr(CONTEXT), ptr(environment), ptr(descriptor), word(site)],
                     &CallAttrs::default(),
                 );
@@ -746,9 +744,8 @@ impl FunctionEmitter<'_> {
         let far = self.cmp(Predicate::Uge, &i64, depth, &int(DIRECT_DEPTH));
         self.cond(&far, deep, here);
         self.block(deep);
-        self.runtime(
+        self.runtime_bool(
             "hirsel_core_release",
-            Type::I8,
             &[
                 ptr(CONTEXT),
                 ptr(block.clone()),
@@ -1407,9 +1404,8 @@ impl FunctionEmitter<'_> {
     fn release_resource(&mut self, t: usize, resource: &Value) -> Value {
         let storage = self.recipes[t].logical_size.expect("resource storage");
         let site = self.site_word();
-        self.runtime(
+        self.runtime_bool(
             "hirsel_core_resource_release",
-            Type::I8,
             &[
                 ptr(CONTEXT),
                 ptr(resource.clone()),

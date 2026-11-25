@@ -209,7 +209,7 @@ fn counted_hot_paths_are_inline_and_last_release_is_cold() {
         ("replay_arc_share", "call void @hirsel_core_share"),
         (
             "replay_arc_decrement",
-            "call i1 @hirsel_core_arc_decrement_for_replay",
+            "call zeroext i1 @hirsel_core_arc_decrement_for_replay",
         ),
     ] {
         assert!(ir.lines().any(|line| line.contains(call)), "{call}");

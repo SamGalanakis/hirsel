@@ -539,6 +539,32 @@ fn rl9_record_net(
     grants: &[&str],
     net_rules: &[&str],
 ) -> PathBuf {
+    let rules = net_rules
+        .iter()
+        .map(|r| hirsel_core_net::GrantRule::parse(r).unwrap())
+        .collect();
+    rl9_record_configured(
+        source,
+        dir,
+        name,
+        (backend, printed),
+        grants,
+        |options| options.net_rules = rules,
+        &[],
+    )
+}
+
+/// Record `source` with `configure` applied to its build options and `envs`
+/// set for the run, which must print `printed` and exit 0 untruncated.
+fn rl9_record_configured(
+    source: &str,
+    dir: &Path,
+    name: &str,
+    (backend, printed): (Backend, &str),
+    grants: &[&str],
+    configure: impl FnOnce(&mut NativeOptions),
+    envs: &[(&str, &str)],
+) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut request = source_request(source, dir);
     request.inputs.packages[1] =
@@ -554,15 +580,24 @@ fn rl9_record_net(
     options.grant_mask = grants
         .iter()
         .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
-    options.net_rules = net_rules
-        .iter()
-        .map(|r| hirsel_core_net::GrantRule::parse(r).unwrap())
-        .collect();
+    configure(&mut options);
     options.output = dir.join(format!("{name}-{backend:?}"));
     let program = product.build(&entry, &options).unwrap().executable;
     let path = dir.join(format!("{name}-{backend:?}.tape"));
-    let (code, out, err) = tape_run(&program, &[], Some(&path));
-    assert_eq!((code, out.as_str()), (Some(0), printed), "{name}/{backend:?}: {err}");
+    let output = Command::new(&program)
+        .envs(envs.iter().copied())
+        .env("HIRSEL_RECORD", &path)
+        .output()
+        .unwrap();
+    let (out, err) = (
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    );
+    assert_eq!(
+        (output.status.code(), out.as_str()),
+        (Some(0), printed),
+        "{name}/{backend:?}: {err}"
+    );
     assert!(!err.contains("truncated"), "{name}/{backend:?}: {err}");
     path
 }

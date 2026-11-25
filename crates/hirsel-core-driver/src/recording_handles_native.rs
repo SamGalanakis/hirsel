@@ -137,3 +137,131 @@ fn rl9_net_crosses_in_an_item_and_an_entry() {
         );
     }
 }
+
+/// The root sends its Env and its Cred to itself, reads a variable through
+/// the Env it took, and moves the Cred it took into a helper's entry, which
+/// fetches through it.
+const RL9_HOST: &str = r#"
+fn fetcher(take c: Cred) -> u64 waits {
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    let (_key, _expires) = result.unwrap(cred.fetch(c, mut key_id, mut token, Never))
+    7
+}
+
+pub fn main(e: Env, c: Cred, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (ec, ei): (Client[Env], Inbox[Env]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(ec, e))
+    let read = result.unwrap(conn.try_receive(ei))
+    let value = match env.get(read, "HIRSEL_U3F") {
+        Ok(Some(s)) => s,
+        _ => return Error(Exit(status: 4)),
+    }
+    let (cc, ci): (Client[Cred], Inbox[Cred]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(cc, c))
+    let fetch = result.unwrap(conn.try_receive(ci))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, fetch, fetcher))
+    if result.unwrap(task.join(take h)) != 7 { return Error(Exit(status: 3)) }
+    result.unwrap(stdout.write(out, value))
+    Ok(())
+}
+"#;
+
+/// An Env and a Cred cross in an item and a Cred in an entry (recording.md,
+/// "Snapshots", tag 5), hand-derived before the first run. The run's Env is
+/// granted the pattern `HIRSEL_U3F`, set to `env`; its Cred `c` is
+/// `imds:127.0.0.1:<port>` with policy `mac`.
+/// - Their stored bytes are what the header writes after the kind byte. An
+///   Env's: its patterns' text as bytes (10, `HIRSEL_U3F`), the entry count
+///   1, then the entry's name and value as bytes (10, `HIRSEL_U3F`; 3,
+///   `env`), 27 bytes. A Cred's: parameter, source and policy as bytes.
+/// - An item holding one is 8 plain bytes (the zeroed word), one part, a
+///   handle (1): tag 5, its ordinal, kind (Env 7, Cred 14), the stored
+///   bytes' length and the stored bytes.
+/// - After g GRANT frames, the first connection takes g+1 (inbox) and g+2,
+///   the Env arrives as g+3; the second g+4 and g+5, the Cred g+6.
+/// - The helper's entry holds the Cred as its ordinal 1, and its fetch is a
+///   `CRED_FETCH` on that ordinal in the helper's stream, none in the root's.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_env_and_cred_cross_in_an_item_and_an_entry() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame, op};
+
+    let field = |text: &str| [vec![text.len() as u8], text.as_bytes().to_vec()].concat();
+    let env = [field("HIRSEL_U3F"), vec![1], field("HIRSEL_U3F"), field("env")].concat();
+    assert_eq!(env.len(), 27);
+    let value = |ordinal: u8, kind: u8, stored: &[u8]| -> Vec<u8> {
+        [
+            vec![8],
+            vec![0; 8],
+            vec![1, 1, 5, ordinal, kind, stored.len() as u8],
+            stored.to_vec(),
+        ]
+        .concat()
+    };
+    let fetches = |frames: &[Frame]| -> Vec<u64> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op { op: o, object, .. } | Frame::Issue { op: o, object, .. }
+                    if *o == op::CRED_FETCH =>
+                {
+                    Some(*object)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let (port, server) = fake_imds(b"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", b"T".to_vec(), 1);
+        let source = format!("imds:127.0.0.1:{port}");
+        let cred = [field("c"), field(&source), field("mac")].concat();
+        let path = rl9_record_configured(
+            RL9_HOST,
+            dir.path(),
+            "host",
+            (backend, "env"),
+            &["Env", "Tasks", "Stdout"],
+            |options| {
+                options.env_patterns = hirsel_core_net::EnvPatterns::parse("HIRSEL_U3F");
+                options.cred_grants =
+                    vec![hirsel_core_net::CredGrant::new("c", &source, "mac").unwrap()];
+            },
+            &[("HIRSEL_U3F", "env")],
+        );
+        server.join().unwrap();
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
+        let root = &streams[0].1;
+        let g = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        let takes: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)) => {
+                    Some(body.bytes().to_vec())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            takes,
+            [
+                [vec![0, g + 1], value(g + 3, 7, &env)].concat(),
+                [vec![0, g + 4], value(g + 6, 14, &cred)].concat(),
+            ],
+            "{backend:?}: takes"
+        );
+        let entry = streams[1].0.as_ref().expect("a helper entry");
+        assert_eq!(
+            entry.body().value.bytes(),
+            value(1, 14, &cred).as_slice(),
+            "{backend:?}: entry"
+        );
+        assert_eq!(fetches(root), [] as [u64; 0], "{backend:?}: root fetches");
+        assert_eq!(fetches(&streams[1].1), [1], "{backend:?}: helper fetch");
+    }
+}

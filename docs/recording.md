@@ -765,6 +765,14 @@ index in its declared order in `Suite13`, `Suite12` or `SrtpProfile`, and 0 for
 `quic_initial`. A space is its case index in `Space`'s declared order (`Initial` 0 to
 `Rtcp` 4). A position is a frame position in the named stream, counted as verdicts count it.
 
+A capability (tag 5) that arrives gets its new ordinal in the receiving unit, and its later
+operations there belong to that unit, on that ordinal. If the same word arrives again, the
+latest ordinal is the one used. An `Env` is read through the run's own grant wherever it is
+used, so it gets an ordinal but no operation names it. A `Cred` is rebound to the receiving
+unit's ordinal, so a fetch through it is written in that unit's stream. A value holding a
+narrowed `Exec`, whose profile no snapshot holds, or a capability of virtual construction
+still ends the stream at that value.
+
 **`TAKE` frames.** `TAKE` is frame kind 14 (kind 10 is `END`), and its head is `0x0E`: the
 task bit is 0, because a take names no task. Then:
 
@@ -967,7 +975,7 @@ take order, and `hirsel test --replay` for whole programs.
 | **Stream framing and corruption** | a stream number outside the block check, a `TAKE` that decodes to another arrival, or an earlier-format tape admitted | Hand-built byte strings verify that changing a block's stream number fails its check, each `TAKE` body decodes to its expected arrival, earlier-format tapes are refused at open, structural errors (sequence gaps, duplicate headers, repeated or swapped blocks, post-`END` blocks, missing helper headers, duplicate `(parent, spawn index)`, parent cycles, flipped bytes, trailing bytes) report `Damaged` at the exact block, and invalid tags or payloads report `Corrupt`. |
 | **Per-unit standalone replay** | a helper's input missing from its stream (an unrecorded take path, or an entry stored only as a digest) | A program whose root spawns two helpers exchanging items over connections (with host randomness and crossed virtual capabilities) is recorded and each unit is replayed alone with `--unit` and every other helper stream removed. Each replay ends `Sealed` with zero host provider calls and matching outputs. |
 | **Exact take positions** | a take applied at another point in the unit's order than recorded | Scripted delivery positions verify that recorded `TAKE` gaps, point kinds (in-operation vs scheduler pump), and counts match hand-counted positions across `try_receive`, parked `receive`, `release_take`, `Shared` snapshots, and `shared release` takes on both Cranelift and LLVM. |
-| **Cross-stream agreement** | a recorder writing a sent item differently from what the receiver took, or a helper entry unlike its spawn | A test reader pairs every `CONN_SEND` with the `TAKE` it reached and every `UNIT_SPAWN` with its child's entry, checking that canonical arguments, `Shared` snapshots, survivor lists, settlements, and crossed capabilities (including granted and narrowed `Net`) agree across streams. |
+| **Cross-stream agreement** | a recorder writing a sent item differently from what the receiver took, or a helper entry unlike its spawn | A test reader pairs every `CONN_SEND` with the `TAKE` it reached and every `UNIT_SPAWN` with its child's entry, checking that canonical arguments, `Shared` snapshots, survivor lists, settlements, and crossed capabilities (including granted and narrowed `Net` and `Env`, and `Cred`) agree across streams, and that a `Cred` moved into a helper is fetched there on the helper's own ordinal. |
 | **Worker-count independence** | a replay depending on scheduling across units | Recording at `HIRSEL_UNTIED=1` and `HIRSEL_UNTIED=8` and replaying each tape at both worker counts yields `Sealed` with identical outputs. |
 | **Per-helper divergence reporting** | a divergence stopping other units, going unreported, or printing in timing-dependent order | Replaying with edited helper code verifies that each diverged helper reports `Diverged(Arg)` or `Diverged(Take)` at its exact position in deterministic unit-name order while other streams still finish `Sealed`, and a missing helper stream reports `Truncated at 0 in UNIT`. |
 | **Zero overhead on observations** | unit recording adding a charge, step, poll, or event | Running a multi-unit program across an uninstrumented build, a recording build with recording off, and a recording build with recording on produces identical outputs, `Capacity` refusals, step counts per unit, and provider call logs. |

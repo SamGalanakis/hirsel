@@ -214,6 +214,41 @@ fn write_patterns(out: &mut Vec<u8>, text: &str) -> Result<(), HeaderTooLarge> {
     Ok(())
 }
 
+/// An `Env` capability as the header's grant snapshot writes it after the
+/// `Env` kind byte: its patterns' text, then each covered entry's name and
+/// value in name order.
+pub fn env_snapshot(env: &EnvSnapshot) -> Result<Vec<u8>, HeaderTooLarge> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, env.patterns.text().as_bytes());
+    put_varint(&mut out, env.entries.len() as u64);
+    for (name, value) in &env.entries {
+        if out
+            .len()
+            .saturating_add(name.len())
+            .saturating_add(value.len())
+            > MAX_LEN
+        {
+            return Err(HeaderTooLarge);
+        }
+        put_bytes(&mut out, name.as_bytes());
+        put_bytes(&mut out, value);
+    }
+    Ok(out)
+}
+
+/// A `Cred` capability as the header's grant snapshot writes it after the
+/// `Cred` kind byte: its parameter, source and policy.
+pub fn cred_snapshot(grant: &hirsel_core_net::CredGrant) -> Result<Vec<u8>, HeaderTooLarge> {
+    let mut out = Vec::new();
+    for field in [&grant.parameter, &grant.source, &grant.policy] {
+        if out.len().saturating_add(field.len()) > MAX_LEN {
+            return Err(HeaderTooLarge);
+        }
+        put_bytes(&mut out, field.as_bytes());
+    }
+    Ok(out)
+}
+
 fn read_env(c: &mut Cursor<'_>) -> Result<EnvSnapshot, Corrupt> {
     let text = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
     let patterns = EnvPatterns::parse(text).ok_or(Corrupt)?;
@@ -291,20 +326,7 @@ impl Header {
         let mut grants = write_net_rules(&self.net_rules)?;
         if let Some(env) = &self.env {
             grants.push(ENV_KIND);
-            put_bytes(&mut grants, env.patterns.text().as_bytes());
-            put_varint(&mut grants, env.entries.len() as u64);
-            for (name, value) in &env.entries {
-                if grants
-                    .len()
-                    .saturating_add(name.len())
-                    .saturating_add(value.len())
-                    > MAX_LEN
-                {
-                    return Err(HeaderTooLarge);
-                }
-                put_bytes(&mut grants, name.as_bytes());
-                put_bytes(&mut grants, value);
-            }
+            grants.extend(env_snapshot(env)?);
         }
         for grant in &self.secret_grants {
             grants.push(SECRET_KIND);
@@ -317,12 +339,7 @@ impl Header {
         }
         for grant in &self.cred_grants {
             grants.push(CRED_KIND);
-            for field in [&grant.parameter, &grant.source, &grant.policy] {
-                if grants.len().saturating_add(field.len()) > MAX_LEN {
-                    return Err(HeaderTooLarge);
-                }
-                put_bytes(&mut grants, field.as_bytes());
-            }
+            grants.extend(cred_snapshot(grant)?);
         }
         let len = Self::encoded_len(self.identity.len(), self.arg.len(), grants.len())?;
         let mut out = Vec::with_capacity(len);

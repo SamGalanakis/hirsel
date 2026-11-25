@@ -20,8 +20,8 @@ mod payload;
 mod units;
 pub use arguments::Args;
 pub use blocks::{
-    Blocks, Header, HeaderTooLarge, ReadError, Stop, TAPE_ID_AT, block, net_snapshot, run_route,
-    seal, stream_block,
+    Blocks, Header, HeaderTooLarge, ReadError, Stop, TAPE_ID_AT, block, cred_snapshot,
+    env_snapshot, net_snapshot, run_route, seal, stream_block,
 };
 pub use exec::exec_snapshot_rules;
 pub use frames::{Decoder, Encoder};

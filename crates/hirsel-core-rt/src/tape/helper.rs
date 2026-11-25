@@ -30,7 +30,7 @@ pub(crate) struct Helper {
     /// The parts of its `UNIT_SPAWN` arguments, one after another: the code
     /// descriptor, `n` and `x` in canonical form. None when its entry is cut.
     spawn_args: Option<Vec<u8>>,
-    grants: Vec<(u64, u64)>,
+    grants: Vec<units::item_grants::Designation>,
     sources: Vec<(u64, Box<Provider>, u64)>,
 }
 
@@ -51,8 +51,8 @@ impl Helper {
     /// cell, or on their sources when its stream is cut.
     pub(crate) fn designate(&self, registry: &mut crate::host_file::Registry) {
         if let Some(group) = self.group {
-            for &(word, handle) in &self.grants {
-                registry.designate_in_unit(word, &group.cell.provider, handle);
+            for d in &self.grants {
+                d.apply(&group.cell.provider, registry);
             }
         }
         for (word, provider, handle) in &self.sources {

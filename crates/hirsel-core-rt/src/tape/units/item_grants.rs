@@ -9,7 +9,7 @@
 use super::super::schedule::Group;
 use super::super::*;
 use crate::host_file::{DYNAMIC_GRANT, Registry};
-use hirsel_core_net::exec::ExecRules;
+use hirsel_core_net::{CredGrant, exec::ExecRules};
 use std::sync::Arc;
 
 /// One capability word's grant as the cell that recorded it holds it.
@@ -23,6 +23,37 @@ struct Grant {
     stored: Vec<u8>,
     inner: Option<Inner>,
     exec: Option<Arc<ExecRules>>,
+    /// A `Cred`'s record, which the receiving unit binds to its own ordinal.
+    cred: Option<CredGrant>,
+}
+
+/// An arrived word's designation in the receiving unit: its handle on the
+/// receiver's cell, or for a `Cred` the grant bound to that handle.
+pub(in crate::tape) struct Designation {
+    word: u64,
+    handle: u64,
+    cred: Option<CredGrant>,
+}
+
+impl Designation {
+    /// Designate the word on `provider`, the receiving unit's cell.
+    pub(in crate::tape) fn apply(&self, provider: *const Provider, registry: &mut Registry) {
+        let handle = match &self.cred {
+            None => self.handle,
+            Some(record) => {
+                // A fetch carries its grant's handle, so the receiver's own
+                // grant names the receiver's ordinal.
+                let bound = Box::new(
+                    crate::cred::Granted::bound(record.clone(), self.handle)
+                        .expect("a recorded Cred grant parses"),
+                );
+                let pointer = &*bound as *const crate::cred::Granted as u64;
+                registry.run_grants().unit_creds.lock().unwrap().push(bound);
+                pointer
+            }
+        };
+        registry.designate_in_unit(self.word, provider, handle);
+    }
 }
 
 const UNGRANTED: &str = "a value holds a capability not granted through the recording";
@@ -30,8 +61,7 @@ const VIRTUAL: &str =
     "a value holds a capability of virtual construction, whose snapshot this build does not write";
 const NARROWED: &str =
     "a value holds a narrowed Exec capability, whose profile snapshot this build does not write";
-const KIND: &str =
-    "a value holds an Env or Cred capability, whose snapshot this build does not write";
+const HOST_SIZE: &str = "a value holds an Env or Cred capability whose snapshot a tape cannot hold";
 const NET_RULES: &str = "a value holds a Net capability whose rules a snapshot cannot hold";
 const UNRESOLVED: &str = "a value holds a capability the recording did not resolve";
 
@@ -56,6 +86,9 @@ fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
     if !dispatch::owns(provider) {
         return Err(VIRTUAL);
     }
+    if let Some(&kind) = registry.run_grants().host_grants.lock().unwrap().get(&word) {
+        return host(provider, registry.grant_handle(word), kind);
+    }
     let h = registry.grant_handle(word);
     let state = cell_of(provider.state).state.lock().unwrap();
     let live = state
@@ -70,13 +103,46 @@ fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
         0 | 2..=6 | 8 | 13 => stored,
         // A Net's rules, granted or narrowed, are its source's handle.
         1 => net_rules(inner.ok_or(NET_RULES)?.handle)?,
-        _ => return Err(KIND),
+        _ => return Err(UNGRANTED),
     };
     Ok(Grant {
         kind,
         stored,
         inner,
         exec: live.exec_rules.get(&o).cloned(),
+        cred: None,
+    })
+}
+
+/// An `Env` or `Cred` grant, whose registry handle is the run's own grant.
+/// An `Env` is read where it is used, so it needs no tape object behind
+/// it; a `Cred`'s fetches reach the source behind its grant's tape handle.
+fn host(provider: &Provider, h: u64, kind: u8) -> Result<Grant, &'static str> {
+    if kind == crate::entry::ENV {
+        // SAFETY: an Env word's handle is an Env the run pins.
+        let env = unsafe { crate::env::from_handle(h) }.record();
+        return Ok(Grant {
+            kind,
+            stored: format::env_snapshot(&env).map_err(|_| HOST_SIZE)?,
+            inner: None,
+            exec: None,
+            cred: None,
+        });
+    }
+    // SAFETY: a Cred word's handle is a `cred::Granted` the run pins.
+    let granted = unsafe { &*(h as *const crate::cred::Granted) };
+    let state = cell_of(provider.state).state.lock().unwrap();
+    let live = state
+        .live
+        .as_ref()
+        .filter(|_| state.generation == generation_of(granted.handle))
+        .ok_or(UNGRANTED)?;
+    Ok(Grant {
+        kind,
+        stored: format::cred_snapshot(&granted.record).map_err(|_| HOST_SIZE)?,
+        inner: live.objects[ordinal_of(granted.handle) - 1].inner,
+        exec: None,
+        cred: Some(granted.record.clone()),
     })
 }
 
@@ -124,7 +190,7 @@ pub(in crate::tape) fn arrived(
     generation: u32,
     grants: &[Granted],
     word: u64,
-    designations: &mut Vec<(u64, u64)>,
+    designations: &mut Vec<Designation>,
 ) -> Result<Vec<u8>, &'static str> {
     let g = find(grants, word)?;
     live.objects.push(Object {
@@ -136,7 +202,15 @@ pub(in crate::tape) fn arrived(
         live.exec_rules.insert(ordinal, rules.clone());
     }
     live.grants.insert(ordinal, (g.kind, g.stored.clone()));
-    designations.push((word, handle(generation, ordinal)));
+    // An Env is read through the run's own grant wherever it is used, so its
+    // word keeps the run's designation.
+    if g.kind != crate::entry::ENV {
+        designations.push(Designation {
+            word,
+            handle: handle(generation, ordinal),
+            cred: g.cred.clone(),
+        });
+    }
     Ok(snapshot(ordinal as u64, g))
 }
 
@@ -146,9 +220,9 @@ pub(in crate::tape) fn arrived(
 pub(in crate::tape) fn designate(
     group: Group,
     registry: &mut Registry,
-    designations: &[(u64, u64)],
+    designations: &[Designation],
 ) {
-    for &(word, h) in designations {
-        registry.designate_in_unit(word, &group.cell.provider, h);
+    for d in designations {
+        d.apply(&group.cell.provider, registry);
     }
 }

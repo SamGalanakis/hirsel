@@ -594,7 +594,7 @@ unsafe extern "C" fn invoke(
                             let granted = Box::new(granted);
                             let pointer = &*granted as *const crate::cred::Granted as u64;
                             run.creds.push(granted);
-                            (*files).registry.grant(p, pointer)
+                            (*files).registry.host_grant(p, pointer, entry::CRED)
                         } else if req.kind == entry::ENV {
                             let handle = if run.launch.is_describe() || run.mode == 0 {
                                 handle
@@ -604,7 +604,7 @@ unsafe extern "C" fn invoke(
                                 };
                                 env.handle()
                             };
-                            (*files).registry.grant(p, handle)
+                            (*files).registry.host_grant(p, handle, entry::ENV)
                         } else {
                             (*files).registry.grant_with_terminal(p, h, terminal)
                         }

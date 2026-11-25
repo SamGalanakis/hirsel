@@ -165,6 +165,14 @@ pub(crate) struct RunGrants {
     pub(crate) not_public: Mutex<BTreeMap<usize, u64>>,
     /// NET-18's `own_address` refusals per provider, counted from deliveries.
     pub(crate) own_address: Mutex<BTreeMap<usize, u64>>,
+    /// The kind of each `Env` and `Cred` word, whose registry handle is the
+    /// run's own grant (an `Env` or a `cred::Granted`), not a tape handle.
+    #[cfg(feature = "record")]
+    pub(crate) host_grants: Mutex<BTreeMap<u64, u8>>,
+    /// Each `Cred` grant a receiving unit bound to its own ordinal when the
+    /// capability crossed into it, pinned for the run.
+    #[cfg(feature = "record")]
+    pub(crate) unit_creds: Mutex<Vec<Box<crate::cred::Granted>>>,
 }
 
 impl RunGrants {
@@ -295,6 +303,14 @@ impl Registry {
     }
     pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
         self.grant_with_terminal(provider, handle, false)
+    }
+    /// Grant an `Env` or `Cred` word whose handle is the run's own grant,
+    /// noting its kind so a value that carries it can snapshot it.
+    pub(crate) fn host_grant(&self, provider: Provider, handle: u64, _kind: u8) -> u64 {
+        let word = self.grant(provider, handle);
+        #[cfg(feature = "record")]
+        self.run.host_grants.lock().unwrap().insert(word, _kind);
+        word
     }
     pub(crate) fn grant_with_terminal(
         &self,

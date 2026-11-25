@@ -62,8 +62,7 @@ impl Env {
         EnvSnapshot {
             patterns: self.patterns.clone(),
             entries: self
-                .entries
-                .iter()
+                .covered()
                 .map(|row| (row.name.clone(), row._value.clone()))
                 .collect(),
         }
@@ -214,7 +213,7 @@ pub unsafe extern "C" fn hirsel_core_env_narrow(
                 charge: charge.unwrap(),
             });
         Outcome {
-            value: files.registry.grant(provider, handle),
+            value: files.registry.host_grant(provider, handle, entry::ENV),
             ..Outcome::default()
         }
     }

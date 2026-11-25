@@ -35,7 +35,7 @@ pub(crate) struct Granted {
     pub(crate) record: CredGrant,
     source: CredSource,
     policy: SecretPolicy,
-    handle: u64,
+    pub(crate) handle: u64,
 }
 
 impl Granted {

@@ -1,8 +1,8 @@
 //! Linux AF_UNIX operations. Bind uses a private cwd. Connect and send-to
 //! retain an O_PATH descriptor to the endpoint until the operation settles.
 use crate::{
-    net::DENIED,
     host::path::{DIRECTORY_HANDLE, LEAF_HANDLE, Refuse},
+    net::DENIED,
     os::{OsProvider, open_beneath},
     os_net::{Due, adopt_socket, deadline, error, retry, signal},
     provider::*,

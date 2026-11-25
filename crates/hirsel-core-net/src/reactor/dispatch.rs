@@ -100,11 +100,11 @@ impl Sockets {
         events: PollEvents<'_>,
         mut ready: impl FnMut(u64),
     ) -> usize {
-        for event in events.0.iter() {
+        for event in &events.0[..events.1] {
             if event.token() != WAKE {
                 Self::dispatch_edge(slots, waiting, event.token(), event.ready(), &mut ready);
             }
         }
-        events.0.len()
+        events.1
     }
 }

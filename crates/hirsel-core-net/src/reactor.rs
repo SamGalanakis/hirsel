@@ -234,8 +234,9 @@ impl Drop for Poller {
 /// The driver token: one thread at a time submits, polls and dispatches.
 type Turn<'a> = MutexGuard<'a, Vec<Event>>;
 
-/// The initialized prefix of one kernel turn, held until registry dispatch.
-pub struct PollEvents<'a>(Turn<'a>);
+/// One kernel turn's events, the first `.1` of the turn buffer, held until
+/// registry dispatch.
+pub struct PollEvents<'a>(Turn<'a>, usize);
 fn checked(rc: i32) -> io::Result<i32> {
     if rc < 0 {
         Err(io::Error::last_os_error())

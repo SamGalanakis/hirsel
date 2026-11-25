@@ -192,7 +192,10 @@ impl OsProvider {
                     3 => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                     4 => libc::O_RDWR | libc::O_CREAT,
                     MODE_DURABLE | MODE_DIRECT => {
-                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | crate::host::sync::DURABLE_WRITE
+                        libc::O_WRONLY
+                            | libc::O_CREAT
+                            | libc::O_TRUNC
+                            | crate::host::sync::DURABLE_WRITE
                     }
                     _ => unreachable!(),
                 };
@@ -477,7 +480,9 @@ unsafe fn read_clock(state: *mut u8, operation: u8) -> Option<Outcome> {
         clock::wall_ms()?
     } else {
         // SAFETY: forwarded.
-        clock::monotonic_ns().ok()?.saturating_sub(unsafe { epoch(state) })
+        clock::monotonic_ns()
+            .ok()?
+            .saturating_sub(unsafe { epoch(state) })
     };
     Some(Outcome {
         value,

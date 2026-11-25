@@ -235,8 +235,7 @@ impl Poller {
         // SAFETY: epoll_wait initialized exactly this prefix of the buffer.
         unsafe { events.set_len(len) };
         let visible = self.dispatch_udp_slot(&mut events);
-        events.truncate(visible);
-        Ok(Some(PollEvents(events)))
+        Ok(Some(PollEvents(events, visible)))
     }
 
     /// The wake eventfd, registered edge-triggered under `WAKE`.

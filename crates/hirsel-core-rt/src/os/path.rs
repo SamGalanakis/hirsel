@@ -27,7 +27,12 @@ pub(super) fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
     open_beneath(fd, path, flags, Refuse::MagicLinks)
 }
 
-pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, refuse: Refuse) -> io::Result<OwnedFd> {
+pub(crate) fn open_beneath(
+    fd: i32,
+    path: &[u8],
+    flags: i32,
+    refuse: Refuse,
+) -> io::Result<OwnedFd> {
     let mut short = [0; 64];
     let long;
     let path: &CStr = if path.len() < short.len() {

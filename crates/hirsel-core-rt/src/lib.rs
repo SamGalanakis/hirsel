@@ -34,6 +34,7 @@ mod fiber;
 pub mod flow;
 pub mod foreign;
 mod growth;
+pub mod host;
 pub mod host_file;
 pub mod host_ops;
 #[cfg(target_arch = "x86_64")]
@@ -50,7 +51,6 @@ mod mem_prof;
 mod mem_sampler;
 pub mod net;
 pub mod os;
-pub mod host;
 mod os_net;
 mod os_resolve;
 mod os_sync;

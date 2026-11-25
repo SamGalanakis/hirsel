@@ -40,15 +40,7 @@ pub(crate) fn how(flags: i32, refuse: Refuse) -> How {
 /// Open `path` beneath the directory `fd` as `how` describes.
 pub(crate) fn open_beneath(fd: RawFd, path: &CStr, how: &How) -> io::Result<OwnedFd> {
     // SAFETY: openat2 reads the pinned path and open_how for the call only.
-    let raw = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            fd,
-            path.as_ptr(),
-            how,
-            size_of::<How>(),
-        )
-    };
+    let raw = unsafe { libc::syscall(libc::SYS_openat2, fd, path.as_ptr(), how, size_of::<How>()) };
     if raw < 0 {
         return Err(io::Error::last_os_error());
     }

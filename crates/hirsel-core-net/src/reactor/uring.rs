@@ -373,13 +373,13 @@ impl Poller {
         let Backend::Uring(ring) = &self.backend else {
             unreachable!()
         };
-        events.clear();
         crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Filled once: a turn reports the prefix it wrote, so the buffer
+        // keeps its length rather than being refilled every turn.
         events.resize(2 * POLL_BATCH as usize, Event::EMPTY);
         let len = ring.wait(&mut events, timeout_ns)?;
         let len = self.dispatch_udp_slot(&mut events[..len]);
-        events.truncate(len);
-        Ok(Some(PollEvents(events)))
+        Ok(Some(PollEvents(events, len)))
     }
 
     /// A unit pool slot's turn on its own io_uring ring: submit its mailbox

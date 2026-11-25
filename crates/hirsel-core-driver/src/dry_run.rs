@@ -1,10 +1,13 @@
 //! Run a candidate on an isolated Store image and print the Runner's migration report.
 
+#[path = "dry_run/host/mod.rs"]
+mod host;
+
 use crate::cli::{Invocation, OptionId};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -82,12 +85,7 @@ fn copy_store(source: &Path, image: &Path) -> Result<(), Error> {
             );
         }
         let mut from = open_file(&entry.path())?;
-        let mut to = File::create_new(image.join(entry.file_name()))?;
-        // SAFETY: FICLONE borrows both descriptors for the call. A filesystem
-        // without reflinks uses a byte copy into the same private inode.
-        if unsafe { libc::ioctl(to.as_raw_fd(), libc::FICLONE, from.as_raw_fd()) } != 0 {
-            io::copy(&mut from, &mut to)?;
-        }
+        host::clone_file(&mut from, &image.join(entry.file_name()))?;
     }
     Ok(())
 }

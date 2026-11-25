@@ -61,9 +61,8 @@ pub fn probe() -> io::Result<()> {
     fn requires(operation: &str, error: io::Error) -> io::Error {
         io::Error::other(format!("Net Unix requires {operation}: {error}"))
     }
-    let private = tempfile::tempdir().map_err(|e| requires("a private probe directory", e))?;
-    let root =
-        File::open(private.path()).map_err(|e| requires("opening the probe directory", e))?;
+    let private = PrivateDir::new().map_err(|e| requires("a private probe directory", e))?;
+    let root = File::open(&private.0).map_err(|e| requires("opening the probe directory", e))?;
     let parent = open_beneath(root.as_fd(), c".", libc::O_PATH | libc::O_DIRECTORY)
         .map_err(|e| requires("openat2", e))?;
     let binding = std::thread::Builder::new()
@@ -86,4 +85,31 @@ pub fn probe() -> io::Result<()> {
         .map_err(|e| requires("connect through /proc/self/fd", e))?;
     drop(listener);
     Ok(())
+}
+
+/// A fresh mode-0700 directory under the temporary directory, removed with
+/// its contents when dropped.
+struct PrivateDir(std::path::PathBuf);
+
+impl PrivateDir {
+    fn new() -> io::Result<Self> {
+        use std::os::unix::ffi::OsStringExt;
+        let mut template = std::env::temp_dir()
+            .join("hirsel-unix-probe-XXXXXX")
+            .into_os_string()
+            .into_vec();
+        template.push(0);
+        // SAFETY: template is a writable NUL-terminated path ending in XXXXXX.
+        if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        template.pop();
+        Ok(Self(std::ffi::OsString::from_vec(template).into()))
+    }
+}
+
+impl Drop for PrivateDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }

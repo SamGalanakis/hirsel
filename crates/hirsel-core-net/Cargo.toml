@@ -7,7 +7,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tempfile = "3"
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 libc = { version = "0.2", default-features = false }
 io-uring = { version = "=0.7.16", default-features = false }

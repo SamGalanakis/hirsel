@@ -743,7 +743,6 @@ dependencies = [
  "serde",
  "stringprep",
  "subtle",
- "tempfile",
  "toml",
  "unicode-normalization",
  "x25519-dalek",

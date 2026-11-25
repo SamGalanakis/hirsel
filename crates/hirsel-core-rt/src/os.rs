@@ -6,14 +6,13 @@ use crate::{
 };
 
 mod listing;
-mod metadata;
+pub(crate) mod metadata;
 mod path;
 mod random;
 mod tables;
 pub(crate) mod temp;
 mod write;
 use listing::Listing;
-use metadata::{stat, zero_extension};
 pub(crate) use path::open_beneath;
 use path::{
     beneath, close_file, leaf_kind, open_directory, parent, remove, remove_tree, valid_path,
@@ -172,16 +171,13 @@ impl OsProvider {
                     3 => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                     4 => libc::O_RDWR | libc::O_CREAT,
                     MODE_DURABLE | MODE_DIRECT => {
-                        libc::O_WRONLY
-                            | libc::O_CREAT
-                            | libc::O_TRUNC
-                            | crate::host::sync::DURABLE_WRITE
+                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | host::sync::DURABLE_WRITE
                     }
                     _ => unreachable!(),
                 };
                 let fd = beneath(self.directory(request.handle), path, flags)?;
                 if request.mode == MODE_DIRECT {
-                    metadata::enable_direct(fd.as_fd(), flags)?;
+                    host::sync::enable_direct(fd.as_fd(), flags)?;
                 }
                 out.value = self.insert_file(fd);
             }
@@ -235,13 +231,13 @@ impl OsProvider {
             STAT => {
                 let root = self.directory(request.handle);
                 let fd = beneath(root, path, host::path::LEAF_HANDLE)?;
-                let result = stat(fd.as_fd());
+                let result = host::stat(fd.as_fd());
                 let _ = close_file(fd);
                 return result;
             }
             STAT_FILE => {
                 // SAFETY: the issuing unit's open handle keeps the descriptor live.
-                return stat(unsafe { BorrowedFd::borrow_raw(self.file(request.handle)) });
+                return host::stat(unsafe { BorrowedFd::borrow_raw(self.file(request.handle)) });
             }
             READ | READ_AT => {
                 let fd = self.file(request.handle);
@@ -288,7 +284,7 @@ impl OsProvider {
                     fd,
                     request.offset(),
                     request.zero_len(),
-                    request.mode == MODE_DIRECT,
+                    request.mode,
                 ));
             }
             CLOSE => {
@@ -373,18 +369,20 @@ impl OsProvider {
                 };
             }
             SYNC => {
-                // fdatasync makes file contents and the metadata required to
-                // read them back durable. A refusal is delivered as a host
-                // error; the store owns the poison/recovery policy.
+                // The host's data sync makes file contents and the metadata
+                // required to read them back durable. A refusal is delivered as
+                // a host error; the store owns the poison/recovery policy.
                 sync(self.file(request.handle), false)?;
             }
             ZERO_EXTENSION => {
                 let fd = self.directory(request.handle);
                 // SAFETY: directory descriptors stay open until the run ends.
-                out.value = u64::from(zero_extension(unsafe { BorrowedFd::borrow_raw(fd) })?);
+                out.value = u64::from(host::sync::zero_extension(unsafe {
+                    BorrowedFd::borrow_raw(fd)
+                })?);
             }
             SYNC_DIR => {
-                // fsync on a directory persists its entry updates.
+                // The host's directory sync persists its entry updates.
                 sync(self.directory(request.handle), true)?;
             }
             _ => unreachable!(),

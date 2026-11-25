@@ -25,6 +25,7 @@ CRATES = 'crates/'
 # Directories whose whole purpose is one host OS (one file or directory per host).
 HOST_SEAMS = (
     'crates/hirsel-core-rt/src/host/',
+    'crates/hirsel-core-driver/src/dry_run/host/',
     'crates/hirsel-core-net/src/reactor/',
     'crates/hirsel-core-net/src/own_address/',
     'crates/hirsel-prof/src/linux/',

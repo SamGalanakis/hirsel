@@ -7,7 +7,14 @@ const ZERO_BYTES: usize = 64 << 10;
 struct ZeroRegion([u8; ZERO_BYTES]);
 static ZEROES: ZeroRegion = ZeroRegion([0; ZERO_BYTES]);
 
-pub(super) fn zero_at(fd: i32, offset: u64, len: u64, direct: bool) -> Outcome {
+pub(super) fn zero_at(fd: i32, offset: u64, len: u64, mode: u8) -> Outcome {
+    let mut out = zero_range(fd, offset, len, mode == MODE_DIRECT);
+    // Durable or Direct zeros complete once they are durable, as a write's bytes.
+    crate::host::sync::finish_write(fd, mode, &mut out);
+    out
+}
+
+fn zero_range(fd: i32, offset: u64, len: u64, direct: bool) -> Outcome {
     let ring = crate::units::uses_file_ring();
     let len = usize::try_from(len).unwrap_or(usize::MAX);
     complete(len, Some(offset), ring, direct, |done, at| {
@@ -44,7 +51,10 @@ pub(super) fn write_request(fd: i32, request: &Request) -> Outcome {
     let offset = (request.operation == WRITE_AT).then(|| request.offset());
     let ring = crate::units::uses_file_ring();
     let part = |bytes: &[u8], at| write_part(fd, bytes, at, ring);
-    write_all_from(bytes, offset, ring, request.mode == MODE_DIRECT, part)
+    let mut out = write_all_from(bytes, offset, ring, request.mode == MODE_DIRECT, part);
+    // A Durable or Direct write completes once its bytes are durable.
+    crate::host::sync::finish_write(fd, request.mode, &mut out);
+    out
 }
 
 pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {

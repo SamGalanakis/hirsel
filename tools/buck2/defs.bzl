@@ -822,6 +822,43 @@ def hirsel_core_runtime_archives(name, library, archive_name):
         archives[triple] = ":" + configured
     _core_runtime_archives(name = name, archives = archives, archive_name = archive_name,
                            visibility = ["PUBLIC"])
+    darwin = [triple for triple in RUNTIME_TARGETS if triple.endswith("-apple-darwin")]
+    if darwin:
+        _darwin_sync_ban(
+            name = name + "-darwin-sync-ban", archives = ":" + name,
+            paths = [triple + "/" + archive_name for triple in darwin],
+            request = [str(value) for value in test_request("darwin-sync-ban")],
+            exec_compatible_with = [budget_constraint(test_budget_name("darwin-sync-ban"))],
+        )
+
+def _darwin_sync_ban_impl(ctx):
+    tree = ctx.attrs.archives[DefaultInfo].default_outputs[0]
+    command = cmd_args(
+        "python3", ctx.attrs._law, ctx.attrs._kit, ctx.attrs._llvm[DefaultInfo].default_outputs[0],
+        [cmd_args(tree, "/", path, delimiter = "") for path in ctx.attrs.paths],
+    )
+    return [DefaultInfo(), ExternalRunnerTestInfo(
+        type = "custom", command = [command], labels = ["gate"],
+        run_from_project_root = True, use_project_relative_paths = True,
+        supports_test_execution_caching = True,
+        default_executor = test_executor(int(ctx.attrs.request[0]), int(ctx.attrs.request[1]), ctx.attrs.request[2]),
+    )]
+
+# The Darwin durability ban (STORE-SPEC §3.3c): no member of a Darwin runtime
+# archive references fsync or fdatasync. It runs on Linux over the archive
+# itself, so it holds for members no Linux test links.
+_darwin_sync_ban = rule(
+    impl = _darwin_sync_ban_impl,
+    attrs = {
+        "archives": attrs.dep(),
+        "paths": attrs.list(attrs.string()),
+        "request": attrs.list(attrs.string()),
+        "_law": attrs.source(default = "//tools/buck2/native-toolchain:darwin_sync_ban.py"),
+        # The law reads its banned names from the link kit's script.
+        "_kit": attrs.source(default = "//tools/buck2/native-toolchain:link_kit.py"),
+        "_llvm": attrs.dep(default = "//tools/buck2/native-toolchain:llvm"),
+    },
+)
 
 def _core_runtime_archives_impl(ctx):
     entries = {}

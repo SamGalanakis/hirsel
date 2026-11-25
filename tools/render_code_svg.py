@@ -226,18 +226,27 @@ def tokenize_lines(
     for line in lines:
         starts.append(starts[-1] + len(line) + 1)
 
+    # One class per byte: earliest pattern in queries/highlights.scm wins, including when
+    # an outer node such as (attribute) contains inner punctuation or type captures.
     ranges: list[list[list]] = [[] for _ in lines]
-    for (start_b, end_b), (_, capture) in sorted(chosen.items()):
+    accepted: list[tuple[int, int]] = []
+    for (start_b, end_b), (_, capture) in sorted(
+        chosen.items(), key=lambda item: (item[1][0], item[0][0], -(item[0][1] - item[0][0]))
+    ):
         cls = class_map.get(capture)
         if not cls:
+            continue
+        if any(start_b < a_end and end_b > a_start for a_start, a_end in accepted):
             continue
         row = max(i for i, s in enumerate(starts) if s <= start_b)
         if end_b > starts[row] + len(lines[row]):
             errors.append(f"{label}: capture {capture} spans lines")
             continue
+        accepted.append((start_b, end_b))
         ranges[row].append([start_b - starts[row], end_b - start_b, cls])
 
     for row in ranges:
+        row.sort(key=lambda item: item[0])
         for prev, cur in zip(row, row[1:]):
             if cur[0] < prev[0] + prev[1]:
                 errors.append(f"{label}: overlapping ranges {prev} {cur}")

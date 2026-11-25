@@ -2,7 +2,7 @@ name: Site
 on:
   push:
     branches: [main]
-    paths: ["site/**", "README.md", "docs/PRIMER.md", "docs/COOKBOOK.md", "docs/assets/readme-hero-*.svg", "core/std/API-INDEX.md", "skills/hirsel/SKILL.md", "tools/site_sync.py", "tools/site_build.py", "tools/site_highlight.py", "tools/render_code_svg.py", "tools/site.wrangler.jsonc", "editors/tree-sitter-hirsel/src/**", "editors/tree-sitter-hirsel/queries/highlights.scm", ".github/workflows/pages.yml"]
+    paths: ["site/**", "README.md", "docs/PRIMER.md", "docs/COOKBOOK.md", "docs/assets/readme-hero-*.svg", "core/std/API-INDEX.md", "skills/hirsel/SKILL.md", "tools/site_sync.py", "tools/site_build.py", "tools/site_highlight.py", "tools/site_docs.py", "tools/site_docs_theme.py", "tools/render_code_svg.py", "tools/site.wrangler.jsonc", "editors/tree-sitter-hirsel/src/**", "editors/tree-sitter-hirsel/queries/highlights.scm", ".github/workflows/pages.yml"]
     tags: ["v*"]
   workflow_dispatch:
 permissions:

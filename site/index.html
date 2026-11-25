@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- For coding agents: https://hirsel.ai/llms.txt | /llms-full.txt | /primer.md | /cookbook.md | /api-index.md — or run `hirsel primer` from your installed binary -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -10,7 +11,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="canonical" href="https://hirsel.ai/">
-  <link rel="alternate" type="text/markdown" href="/primer.md">
+  <link rel="alternate" type="text/markdown" href="/llms.txt">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Hirsel">
   <meta property="og:title" content="Hirsel — Good fences make fast systems.">
@@ -417,7 +418,7 @@ fn sneak() -> u64 { host.mono_ns() } // refused: CAP-1, no Clock</code></pre>
       <p><b>Build.</b> The compiler checks and lowers each definition once and caches it by content, so an edit rechecks only that definition and callers of a changed signature.</p>
       <p><b>Run.</b> Every type declares how its values are represented, so costs follow from the declaration, not from an analysis. A region is freed at once, with no per-node walk.</p>
     </section>
-    <p class="out"><a href="/primer.md">Primer</a> &middot; <a href="/cookbook.md">Cookbook</a> &middot; <a href="/api-index.md">Std API</a> &middot; <a href="/llms.txt">llms.txt</a> &middot; <a href="/llms-full.txt">llms-full.txt</a> &middot; <a href="https://github.com/SamGalanakis/hirsel/blob/main/skills/hirsel/SKILL.md">Agent skill</a> &middot; <a href="/install.sh">Install</a> &middot; <a href="https://github.com/SamGalanakis/hirsel">Source on GitHub &rarr;</a></p>
+    <p class="out"><a href="/docs/">Walkthrough</a> &middot; <a href="/docs/cookbook/">Cookbook</a> &middot; <a href="/docs/std/">Std library</a> &middot; <a href="/docs/install/">Install</a> &middot; <a href="https://github.com/SamGalanakis/hirsel">Source on GitHub &rarr;</a></p>
   </main>
 </noscript>
 
@@ -455,9 +456,9 @@ fn sneak() -> u64 { host.mono_ns() } // refused: CAP-1, no Clock</code></pre>
   <div class="actions">
     <div class="row">
       <button class="in" id="walkIn">walk the hill <span aria-hidden="true">&rarr;</span></button>
-      <a class="sublink" href="/install.sh">Install</a>
-      <a class="sublink" href="/primer.md">Primer</a>
-      <a class="sublink" href="/cookbook.md">Cookbook</a>
+      <a class="sublink" href="/docs/">Walkthrough</a>
+      <a class="sublink" href="/docs/cookbook/">Cookbook</a>
+      <a class="sublink" href="/docs/install/">Install</a>
     </div>
     <p class="plat">Linux x86_64 &middot; glibc 2.28+ &middot; Apple Silicon macOS in progress</p>
   </div>

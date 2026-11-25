@@ -38,18 +38,19 @@ README = ROOT / "README.md"
 HTML = ROOT / "site" / "index.html"
 
 GITHUB = "https://github.com/SamGalanakis/hirsel/"
-ALTERNATE = '  <link rel="alternate" type="text/markdown" href="/primer.md">\n'
+ALTERNATE = '  <link rel="alternate" type="text/markdown" href="/llms.txt">\n'
+OLD_ALTERNATE = '  <link rel="alternate" type="text/markdown" href="/primer.md">\n'
 ANCHOR = '  <link rel="canonical" href="https://hirsel.ai/">\n'
 SITEMAP_LASTMOD = "2026-11-25"
 
 SITEMAP_ENTRIES = (
     ("https://hirsel.ai/", "weekly", "1.0"),
-    ("https://hirsel.ai/primer.md", "weekly", "0.9"),
-    ("https://hirsel.ai/cookbook.md", "weekly", "0.9"),
-    ("https://hirsel.ai/api-index.md", "weekly", "0.8"),
-    ("https://hirsel.ai/llms.txt", "weekly", "0.8"),
-    ("https://hirsel.ai/llms-full.txt", "weekly", "0.8"),
-    ("https://hirsel.ai/install.sh", "monthly", "0.7"),
+    ("https://hirsel.ai/docs/", "weekly", "0.95"),
+    ("https://hirsel.ai/docs/cookbook/", "weekly", "0.9"),
+    ("https://hirsel.ai/docs/install/", "weekly", "0.9"),
+    ("https://hirsel.ai/docs/std/", "weekly", "0.85"),
+    ("https://hirsel.ai/llms.txt", "weekly", "0.5"),
+    ("https://hirsel.ai/llms-full.txt", "weekly", "0.5"),
 )
 
 
@@ -168,6 +169,7 @@ def render_sitemap(lastmod: str = SITEMAP_LASTMOD) -> bytes:
 
 
 def html(current: str) -> str:
+    current = current.replace(OLD_ALTERNATE, "")
     if ALTERNATE in current:
         return current
     if current.count(ANCHOR) != 1:

@@ -43,6 +43,10 @@ use held::Held;
 mod crossing;
 pub use crossing::Cross;
 use crossing::{TapeHelper, tape_group};
+mod packing;
+pub(crate) mod takes;
+pub(crate) use packing::CrossSend;
+use packing::{drop_packed_owners, free_owners, pack, unpack, unpack_owners};
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
 type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
@@ -145,209 +149,6 @@ unsafe fn attach_crossing(
     }
 }
 
-/// Copy `value` and its owners' content into one buffer.
-unsafe fn pack(value: *const u8, bytes: u64, owners: &[[u64; 4]]) -> Vec<u8> {
-    // SAFETY: `value` is an initialized item of `bytes` bytes.
-    unsafe {
-        let content = |o: &[u64; 4]| {
-            let at = value.add(o[0] as usize);
-            (word(at) as *const u8, (word(at.add(8)) * o[2]) as usize)
-        };
-        let seqs = owners.iter().filter(|o| o[1] == SEQ);
-        let mut data =
-            Vec::with_capacity(bytes as usize + seqs.clone().map(|o| content(o).1).sum::<usize>());
-        data.extend_from_slice(std::slice::from_raw_parts(value, bytes as usize));
-        for o in seqs {
-            let (p, n) = content(o);
-            if n > 0 {
-                data.extend_from_slice(std::slice::from_raw_parts(p, n));
-            }
-        }
-        data
-    }
-}
-
-/// A send can wait for a slot. Its call frame pins this source and its
-/// owners until the send has published or its settlement is taken.
-pub(crate) struct CrossSend {
-    value: *const u8,
-    pub(crate) sockets: Option<CrossingSockets>,
-    #[cfg(test)]
-    pub(crate) tag: u64,
-}
-
-impl CrossSend {
-    pub(crate) fn new(value: *const u8) -> Self {
-        Self {
-            value,
-            sockets: None,
-            #[cfg(test)]
-            tag: 0,
-        }
-    }
-
-    /// The connection owns the destination slot. Only the flat bytes go
-    /// there; sequence contents occupy the connection's room, in `spare`
-    /// when it is large enough (it is then taken).
-    pub(crate) unsafe fn copy_into(
-        &self,
-        slot: *mut u8,
-        stride: usize,
-        seqs: &[[u64; 4]],
-        charge: u64,
-        spare: &mut Box<[MaybeUninit<u64>]>,
-    ) -> Box<[MaybeUninit<u64>]> {
-        // SAFETY: the reserved slot has the connection's item layout. The
-        // sender pins every source buffer through publication.
-        unsafe {
-            if stride != 0 {
-                ptr::copy_nonoverlapping(self.value, slot, stride);
-            }
-            let content = |o: &[u64; 4]| {
-                let at = self.value.add(o[0] as usize);
-                (word(at) as *const u8, (word(at.add(8)) * o[2]) as usize)
-            };
-            if seqs.is_empty() {
-                return Box::default();
-            }
-            let bytes: usize = seqs.iter().map(|o| content(o).1).sum();
-            if bytes == 0 && charge == 0 {
-                return Box::default();
-            }
-            let words = 1 + bytes.div_ceil(std::mem::size_of::<u64>());
-            let mut room = if spare.len() >= words {
-                std::mem::take(spare)
-            } else {
-                Box::new_uninit_slice(words)
-            };
-            room[0].write(charge);
-            let to = room.as_mut_ptr().add(1).cast::<u8>();
-            let mut at = 0;
-            for o in seqs {
-                let (p, n) = content(o);
-                if n != 0 {
-                    ptr::copy_nonoverlapping(p, to.add(at), n);
-                    at += n;
-                }
-            }
-            room
-        }
-    }
-}
-
-/// Free the seq buffers of a value whose content has been copied out; its
-/// clients have moved and are not touched. `context` is the running task's
-/// when the caller has it.
-unsafe fn free_owners(context: Option<&Context>, value: *const u8, owners: &[[u64; 4]]) {
-    // SAFETY: the value owns each nonempty buffer, charged at its capacity.
-    unsafe {
-        for o in owners {
-            if o[1] == SEQ {
-                let at = value.add(o[0] as usize);
-                let cap = word(at.add(16));
-                if cap != 0 {
-                    let p = word(at) as *mut u8;
-                    block::free_with(ptr::NonNull::new_unchecked(p), round8(cap * o[3]), context);
-                }
-            }
-        }
-    }
-}
-
-/// Rebuild an item from `data` into `dest`: each seq gets a fresh buffer at
-/// length capacity from `payer`, whose charge was admitted by the caller.
-unsafe fn unpack(
-    context: *mut Context,
-    payer: crate::limit::Payer,
-    data: &[u8],
-    sockets: Option<&CrossingSockets>,
-    dest: *mut u8,
-    bytes: u64,
-    owners: &[[u64; 4]],
-) {
-    // SAFETY: `data` was packed for the same layout and `dest` is writable.
-    unsafe {
-        ptr::copy_nonoverlapping(data.as_ptr(), dest, bytes as usize);
-        attach_sockets(context, dest, socket_offsets(owners), sockets);
-        unpack_owners(
-            context,
-            payer,
-            data.as_ptr().add(bytes as usize),
-            dest,
-            owners,
-        );
-    }
-}
-
-/// Rebuild the sequence owners after the item's flat bytes have been copied.
-unsafe fn unpack_owners(
-    context: *mut Context,
-    payer: crate::limit::Payer,
-    content: *const u8,
-    dest: *mut u8,
-    owners: &[[u64; 4]],
-) {
-    // SAFETY: the receiver admitted the owners and the flat bytes give their lengths.
-    unsafe {
-        let mut at = 0;
-        for o in owners {
-            if o[1] != SEQ {
-                continue;
-            }
-            let slot = dest.add(o[0] as usize);
-            let len = word(slot.add(8));
-            let n = (len * o[2]) as usize;
-            if len == 0 {
-                set_word(slot, 0);
-                set_word(slot.add(16), 0);
-                continue;
-            }
-            let p = block::allocate_admitted(
-                &*context,
-                payer,
-                n,
-                o[2].clamp(1, 16) as usize,
-                crate::abi_layout::NATIVE_PLAIN,
-            );
-            ptr::copy_nonoverlapping(content.add(at), p.as_ptr(), n);
-            at += n;
-            set_word(slot, p.as_ptr() as u64);
-            set_word(slot.add(16), len);
-        }
-    }
-}
-
-/// Drop the moved owners of an item that no one received.
-unsafe fn drop_packed_owners(
-    context: *mut Context,
-    unit: &mut LangUnit,
-    flat: *const u8,
-    owners: &[[u64; 4]],
-    sockets: Option<&CrossingSockets>,
-) {
-    if let Some(sockets) = sockets {
-        let keys = sockets.lock().unwrap().discard();
-        for key in keys {
-            // SAFETY: the item owned this socket in the current unit.
-            unsafe { crate::net::hirsel_core_socket_drop(context, key) };
-        }
-    }
-    for o in owners {
-        if o[1] == CLIENT {
-            // SAFETY: the item holds this inline handle and owns the client.
-            let h = unsafe { word(flat.add(o[0] as usize)) } as *mut ClientH;
-            if !h.is_null() {
-                unit.drop_client(unsafe { Box::from_raw(h) }.client);
-            }
-        } else if o[1] == SHARED {
-            // SAFETY: the item moved this holder here and no one received it.
-            unsafe {
-                crate::shared::release(unit, context, word(flat.add(o[0] as usize)) as *mut u8)
-            };
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The unit beside a scheduler
 // ---------------------------------------------------------------------------
@@ -388,6 +189,12 @@ pub(crate) struct LangUnit {
     /// The run's root task, cancelled by a cancel arrival (helpers).
     pub(crate) root: *mut tasks::Task,
     helper: Option<Arc<HelperShared>>,
+    /// The unit's recording: its run's, or its helper stream's.
+    #[cfg(feature = "record")]
+    tape: Option<crate::tape::schedule::Group>,
+    /// Takes now are at a scheduler pump (point kind 1).
+    #[cfg(feature = "record")]
+    pumping: bool,
 }
 
 impl LangUnit {
@@ -406,6 +213,7 @@ impl LangUnit {
     #[cold]
     #[inline(never)]
     fn on_released(&mut self, took: Vec<Released>) {
+        self.reach();
         let wake = self.waits > 0;
         for (t, id, _) in took {
             // SAFETY: a release runs in a commit that owns the unit.
@@ -431,8 +239,10 @@ impl LangUnit {
     /// # Safety
     /// The scheduler owns the unit for this commit.
     pub(crate) unsafe fn pump_ready(&mut self) {
+        self.set_pumping(true);
         // SAFETY: forwarded to the installed unit hook.
         unsafe { (self.hooks.pump)(self) }
+        self.set_pumping(false);
     }
 
     /// # Safety
@@ -456,6 +266,10 @@ impl LangUnit {
             waits: 0,
             root: ptr::null_mut(),
             helper,
+            #[cfg(feature = "record")]
+            tape: None,
+            #[cfg(feature = "record")]
+            pumping: false,
         })
     }
 }
@@ -504,6 +318,7 @@ unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
 unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
     // SAFETY: by the contract.
     unsafe {
+        takes::take(u, &took, id);
         match took {
             Took::Item | Took::Close | Took::SealAnswer => {
                 if let Some(&h) = u.inboxes.get(&id) {
@@ -678,8 +493,11 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
             charge: Some(held),
         }));
         u.inboxes.insert(key, ih);
+        let client = Box::into_raw(Box::new(ClientH { client }));
+        #[cfg(feature = "record")]
+        takes::conn_new(u, key, client, &*item, cap, b);
         ConnNew {
-            client: Box::into_raw(Box::new(ClientH { client })),
+            client,
             inbox: ih,
             available: 0,
             status: 0,
@@ -694,9 +512,12 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
 pub unsafe extern "C" fn hirsel_core_conn_client(client: *mut ClientH) -> *mut ClientH {
     // SAFETY: the borrow pins the client.
     unsafe {
-        Box::into_raw(Box::new(ClientH {
+        let client = Box::into_raw(Box::new(ClientH {
             client: (*client).client.clone_client(),
-        }))
+        }));
+        #[cfg(feature = "record")]
+        takes::client_new(unit(), client);
+        client
     }
 }
 
@@ -708,6 +529,8 @@ pub unsafe extern "C" fn hirsel_core_client_drop(_context: *mut Context, client:
     unsafe {
         let h = Box::from_raw(client);
         tasks::before_commit();
+        #[cfg(feature = "record")]
+        takes::client_drop(unit(), client);
         unit().drop_client(h.client);
     }
 }
@@ -792,6 +615,7 @@ unsafe fn conn_send<const REC: bool>(
     // SAFETY: the caller pins the client and the value; the record outlives
     // the wait and only this task's fiber touches it.
     unsafe {
+        let handle = client;
         let client = &(*client).client;
         let owners = &client.0.seqs;
         let task = tasks::current_task();
@@ -813,12 +637,15 @@ unsafe fn conn_send<const REC: bool>(
             } else {
                 detach_sockets(context, value, offsets())
             };
+            // The item as a value, read before the send moves it.
+            let mut send = takes::SendNote::new(handle, value, wait);
             let mut source = CrossSend::new(value);
             source.sockets = sockets.clone();
             let id = match UnitCtx::send_cross(client, source, charge, wait, || {
                 &mut (*tasks::lang_unit_for(task)).ctx
             }) {
                 Sent::Accepted => {
+                    send.note(Some(0), None);
                     free_owners(Some(&*context), value, owners);
                     return out(0);
                 }
@@ -828,14 +655,19 @@ unsafe fn conn_send<const REC: bool>(
                     return failed;
                 }
                 Sent::Closed(_) => {
+                    send.note(Some(if wait { 1 } else { 2 }), None);
                     attach_sockets(context, value, offsets(), sockets.as_ref());
                     return out(1);
                 }
                 Sent::Full(_) => {
+                    send.note(Some(1), None);
                     attach_sockets(context, value, offsets(), sockets.as_ref());
                     return out(2);
                 }
-                Sent::Waiting(id) => id,
+                Sent::Waiting(id) => {
+                    send.note(None, Some(id));
+                    id
+                }
             };
             if REC {
                 state = tasks::held_wait();
@@ -855,9 +687,14 @@ unsafe fn conn_send<const REC: bool>(
         }
         let unit = tasks::lang_unit_for(task);
         let st = &mut *state;
+        // A retry after spinning is the same take-point position.
+        let mut spun = false;
         loop {
             let u = &mut *unit;
             if st.frame.settled.is_none() {
+                if !std::mem::take(&mut spun) {
+                    u.reach();
+                }
                 pump(u);
             }
             let settled = st.frame.settled.take();
@@ -895,6 +732,7 @@ unsafe fn conn_send<const REC: bool>(
                     .spin_before_park(Some(client.receiver_port()))
             }) {
                 tasks::before_commit_for(task);
+                spun = true;
                 continue;
             }
             if REC {
@@ -994,6 +832,8 @@ unsafe fn conn_receive<const REC: bool>(
         }
         let unit = tasks::lang_unit_for(task);
         let mut waited = waited_before;
+        // A retry after spinning is the same take-point position.
+        let mut spun = false;
         loop {
             let u = &mut *unit;
             if wait && tasks::check_cancel_for(context, site, task) != 0 {
@@ -1002,11 +842,17 @@ unsafe fn conn_receive<const REC: bool>(
                 }
                 return out(1 << 8, 0, 0);
             }
+            let counted = !std::mem::take(&mut spun);
+            if c.side().taken.is_empty() && counted {
+                // A position whether or not anything is pending.
+                u.reach();
+            }
             if c.side().taken.is_empty() && u.ctx.port.pending() {
                 // A lone item for this inbox is all the port holds, so no
                 // other wait of this unit (a helper, another task) has
                 // anything to take from it.
                 if u.ctx.take_single_item(c) {
+                    takes::take(u, &Took::Item, Arc::as_ptr(c) as usize);
                     take_sockets(u, &*inbox);
                 } else {
                     pump_for(u, waited);
@@ -1052,6 +898,7 @@ unsafe fn conn_receive<const REC: bool>(
             }
             if tasks::park_unit_alone(task, || (*unit).ctx.port.spin_before_park(None)) {
                 tasks::before_commit_for(task);
+                spun = true;
                 continue;
             }
             if REC {
@@ -1085,15 +932,22 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
         tasks::before_commit();
         (*context).cancel_shield += 1;
         let u = unit();
+        #[cfg(feature = "record")]
+        takes::inbox_drop(u, Arc::as_ptr(&h.inbox.0) as usize);
         u.ctx.seal(&h.inbox);
         u.waits += 1;
+        let mut spun = false;
         loop {
+            if !std::mem::take(&mut spun) {
+                u.reach();
+            }
             pump(u);
             if h.inbox.0.side().seal_taken {
                 break;
             }
             if tasks::park_unit_alone(tasks::current_task(), || false) {
                 tasks::before_commit();
+                spun = true;
                 continue;
             }
             tasks::park(
@@ -1123,10 +977,13 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
         // With no client left the cleaning is the owner's own release: it
         // takes through the notice, which refunds the retained charge.
         let (_, took) = u.ctx.clean(&h.inbox);
+        #[cfg(feature = "record")]
+        crate::tape::units::retained(key, h.inbox.0.retained());
         drop(h);
         if !took.is_empty() {
             u.on_released(took);
         }
+        u.reach();
         pump(u);
         0
     }
@@ -1170,6 +1027,13 @@ struct Ended {
     /// Live charges for Secret designations and UDP pools paid by this helper.
     /// Its owner pays them from the end take on.
     charges: crate::secret::HandedOver,
+    /// Its outcome as the owner's end `TAKE` holds it, when it is recorded:
+    /// the kind and body, or why it has none.
+    #[cfg(feature = "record")]
+    tape_end: Option<Result<(u8, Vec<u8>), &'static str>>,
+    /// How many of `survivors`, at their end, are `Shared` nodes.
+    #[cfg(feature = "record")]
+    homed: usize,
 }
 
 /// A tagged task handle names a helper.
@@ -1262,6 +1126,10 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             },
         }));
         u.helpers.insert(k, h);
+        #[cfg(feature = "record")]
+        if let Some(t) = &tape {
+            crate::tape::units::spawn(tasks::current_group(), k, t.stream(), t.spawn_args());
+        }
         u.waits += 1;
         let run = (*context).run;
         let foreign = (*context).foreign;
@@ -1389,6 +1257,10 @@ fn helper_main(
         );
         drop(data);
         let mut lu = LangUnit::new(hctx, Some(shared));
+        #[cfg(feature = "record")]
+        {
+            lu.tape = tape_group(&tape);
+        }
         let mut result = vec![0u8; layout.result.bytes.max(rb as usize)];
         let provider = if run.is_null() {
             tasks::SchedulerProvider::default()
@@ -1410,6 +1282,8 @@ fn helper_main(
         // the owner holds its charge from the end take on. Its own copy here
         // goes back to this helper's limit, which ends with it.
         // So does each `Shared` node made here that another unit still holds.
+        #[cfg(feature = "record")]
+        let homed = lu.homed.len();
         let survivors = lu
             .retained
             .drain()
@@ -1429,12 +1303,14 @@ fn helper_main(
             run_grants: context.payer().run_owned()
                 + lu.run_grants.drain(..).map(|held| held.bytes).sum::<u64>(),
             charges,
+            #[cfg(feature = "record")]
+            tape_end: tape.as_ref().map(|tape| {
+                let causes: Vec<_> = context.causes.iter().collect();
+                tape.end(failed != 0, &causes, result.as_ptr(), rb, &ro)
+            }),
+            #[cfg(feature = "record")]
+            homed,
         };
-        #[cfg(feature = "record")]
-        if let Some(tape) = &tape {
-            let causes: Vec<_> = context.causes.iter().collect();
-            tape.end(failed != 0, &causes, result.as_ptr(), rb, &ro);
-        }
         let mut ret = Value::empty();
         if failed == 0 {
             let data = pack(result.as_ptr(), rb, &ro);
@@ -1483,6 +1359,8 @@ unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
         .as_ref()
         .and_then(|m| m.get(&(Arc::as_ptr(&h.port) as usize)))
         .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
+    #[cfg(feature = "record")]
+    takes::end_take(u, h.k, ended);
     let held = h.charge.as_mut().unwrap();
     for &(key, bytes) in &ended.survivors {
         u.retained.insert(key, held.split(bytes));
@@ -1521,6 +1399,7 @@ unsafe fn wait_end<const REC: bool>(
             }
             let u = unit();
             if !(*h).ended {
+                u.reach();
                 pump(u);
             }
             if (*h).ended {
@@ -1634,8 +1513,17 @@ pub(crate) unsafe fn join<const REC: bool>(
     }
 }
 
-/// Ask a helper to cancel: an arrival at its port, taken in its own order.
+/// `task.cancel` on a helper's handle: its `UNIT_CANCEL`, then the request.
 pub(crate) unsafe fn cancel(task: *mut tasks::Task) {
+    #[cfg(feature = "record")]
+    // SAFETY: the owner's handle pins the helper.
+    crate::tape::units::cancel(tasks::current_group(), unsafe { (*helper_of(task)).k });
+    // SAFETY: forwarded.
+    unsafe { request_cancel(task) }
+}
+
+/// Ask a helper to cancel: an arrival at its port, taken in its own order.
+unsafe fn request_cancel(task: *mut tasks::Task) {
     let h = helper_of(task);
     // SAFETY: the owner's handle pins the helper's port.
     unsafe {
@@ -1651,7 +1539,7 @@ pub(crate) unsafe fn cancel(task: *mut tasks::Task) {
 pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u8 {
     // SAFETY: the caller transfers the handle.
     unsafe {
-        cancel(task);
+        request_cancel(task);
         wait_end::<false>(context, helper_of(task), 0, true, false);
         tasks::before_commit();
         consume(context, helper_of(task), None);

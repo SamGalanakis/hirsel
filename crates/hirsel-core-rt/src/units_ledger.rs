@@ -343,7 +343,7 @@ impl Value {
         }
     }
 
-    fn cross_parts(&self) -> (u64, *const u8) {
+    pub(crate) fn cross_parts(&self) -> (u64, *const u8) {
         let room = self.cross_room().unwrap();
         let content = if room.is_empty() {
             room.as_ptr()

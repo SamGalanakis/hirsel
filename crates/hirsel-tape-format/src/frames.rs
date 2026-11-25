@@ -32,6 +32,15 @@ impl Encoder {
     pub fn new_block(&mut self) {
         self.task = None;
     }
+    /// The position of the last frame encoded or counted, from 1.
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+    /// Count a frame its writer puts down itself (a CHOOSE, or one a REPEAT
+    /// folds), so later positions match the reader's.
+    pub fn count(&mut self) {
+        self.position += 1;
+    }
     fn task(&mut self, out: &mut Vec<u8>, head_at: usize, task: u64) {
         if self.task != Some(task) {
             out[head_at] |= T;

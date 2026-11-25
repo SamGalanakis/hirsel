@@ -30,6 +30,7 @@ mod replay_delivery;
 pub mod run;
 pub(crate) mod schedule;
 mod secret;
+pub(crate) mod units;
 mod unix;
 pub(crate) mod writer;
 pub(crate) use dispatch::{exec_rules, narrow_exec, narrow_net, net_rules, owns, source};
@@ -210,6 +211,8 @@ struct Live {
     grants: BTreeMap<usize, (u8, Vec<u8>)>,
     recorder: Option<Recorder>,
     replayer: Option<Replayer>,
+    /// Record: the unit's take-point count and unit-object ordinals.
+    takes: units::Takes,
 }
 
 /// A Record operation between issue and deliver: deliver runs the inner
@@ -969,6 +972,7 @@ impl Tape {
                     replay_abort: None,
                     objects: vec![],
                     replay_net_rules: BTreeMap::new(),
+                    takes: units::Takes::default(),
                     exec_rules: BTreeMap::new(),
                     typed_resources: BTreeMap::new(),
                     udp_retirements: BTreeMap::new(),
@@ -1018,6 +1022,7 @@ impl Tape {
                     replay_abort: None,
                     objects: vec![],
                     replay_net_rules: BTreeMap::new(),
+                    takes: units::Takes::default(),
                     exec_rules: BTreeMap::new(),
                     typed_resources: BTreeMap::new(),
                     udp_retirements: BTreeMap::new(),

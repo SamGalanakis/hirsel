@@ -403,9 +403,9 @@
     "lines": 1051
   },
   "crates/hirsel-core-rt/src/limit.rs": {
-    "lines": 1285,
-    "raise_revision": 2,
-    "reason": "ds-root-limit-msg-2523"
+    "lines": 1290,
+    "raise_revision": 3,
+    "reason": "unit-tapes-u3-2553"
   },
   "crates/hirsel-core-rt/src/net.rs": {
     "lines": 1390,
@@ -438,9 +438,9 @@
     "lines": 1018
   },
   "crates/hirsel-core-rt/src/tape/mod.rs": {
-    "lines": 1996,
-    "raise_revision": 2,
-    "reason": "coverage-c2-runner-2577"
+    "lines": 2001,
+    "raise_revision": 3,
+    "reason": "unit-tapes-u3-2553"
   },
   "crates/hirsel-core-rt/src/tape/run.rs": {
     "lines": 1104

@@ -275,6 +275,12 @@ impl ConnCore {
                 .unit_refund(n);
         }
     }
+    /// The header a cleaned connection retains, and all it retains.
+    #[cfg(feature = "record")]
+    pub(crate) fn retained(&self) -> (u64, u64) {
+        (self.h, self.slow.lock().unwrap().retained)
+    }
+
     /// The last release's take: the retained header and unused room go back
     /// to a model unit's admitting record.
     pub(super) fn retire(&self, retained: u64) {

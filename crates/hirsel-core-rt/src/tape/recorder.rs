@@ -12,6 +12,7 @@ impl Recorder {
             return Ok(());
         }
         if let Frame::Choose { gap, index } = *f {
+            self.encoder.count();
             let choose = Some((gap, index));
             if self.chooses[(self.repeat % 2) as usize] == choose {
                 self.repeat += 1;

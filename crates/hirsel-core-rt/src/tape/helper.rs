@@ -13,7 +13,7 @@ use super::schedule::Group;
 use super::*;
 use crate::causes::{CANCELLED, CAPACITY, Cause, FAIL};
 use crate::units_lang::Cross;
-use hirsel_core_layout::cross::{CAPABILITY, FUNCTION, SEQ};
+use hirsel_core_layout::cross::{CAPABILITY, CLIENT, FUNCTION, SEQ};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// Stream numbers: unique in the process, so in each recording's file.
@@ -25,6 +25,11 @@ static NEXT_STREAM: AtomicU32 = AtomicU32::new(1);
 /// recording substituted, so the helper runs as it would unrecorded.
 pub(crate) struct Helper {
     group: Option<Group>,
+    /// The stream number its parent's `UNIT_SPAWN` delivers, cut or not.
+    stream: u32,
+    /// The parts of its `UNIT_SPAWN` arguments, one after another: the code
+    /// descriptor, `n` and `x` in canonical form. None when its entry is cut.
+    spawn_args: Option<Vec<u8>>,
     grants: Vec<(u64, u64)>,
     sources: Vec<(u64, Box<Provider>, u64)>,
 }
@@ -32,6 +37,14 @@ pub(crate) struct Helper {
 impl Helper {
     pub(crate) fn group(&self) -> Option<Group> {
         self.group
+    }
+
+    pub(crate) fn stream(&self) -> u32 {
+        self.stream
+    }
+
+    pub(crate) fn spawn_args(&self) -> Option<&[u8]> {
+        self.spawn_args.as_deref()
     }
 
     /// Designate the entry's capabilities in the helper's registry: on its
@@ -48,7 +61,8 @@ impl Helper {
     }
 
     /// Write the helper's `END` as `join` delivers it: its result, or its
-    /// causes. Its scheduler has stopped, so no other frame follows.
+    /// causes. Its scheduler has stopped, so no other frame follows. Returns
+    /// the outcome kind and body for the parent's end `TAKE`, or why it has none.
     /// # Safety
     /// `result` holds an initialized `R` of `bytes` bytes, with `owners`,
     /// when `failed` is false.
@@ -59,7 +73,7 @@ impl Helper {
         result: *const u8,
         bytes: u64,
         owners: &[[u64; 4]],
-    ) {
+    ) -> Result<(u8, Vec<u8>), &'static str> {
         let body = if failed {
             let kind = if causes.first().is_some_and(|c| c.kind() == CANCELLED) {
                 2
@@ -76,39 +90,45 @@ impl Helper {
                 len: bytes,
             };
             // SAFETY: forwarded.
-            unsafe { value(result, &r, &mut |_| Err(RESULT_HANDLE)) }.map(|v| (0, v))
+            unsafe { value(result, &r, None, &mut |_, _| Err(RESULT_HANDLE)) }.map(|v| (0, v))
         };
+        let body = body.and_then(|(kind, body)| {
+            HelperEnding::decode(kind, body.clone())
+                .map(|ending| (kind, body, ending))
+                .map_err(|_| NO_CAUSE)
+        });
         let Some(group) = self.group else {
-            return;
+            return body.map(|(kind, body, _)| (kind, body));
         };
         let mut state = group.cell.state.lock().unwrap();
         if state.generation != group.generation {
-            return;
+            return body.map(|(kind, body, _)| (kind, body));
         }
         let Some(live) = state.live.as_mut() else {
-            return;
+            return body.map(|(kind, body, _)| (kind, body));
         };
         let rec = live.recorder.as_mut().unwrap();
-        match body {
-            Ok((kind, body)) => {
+        let out = match body {
+            Ok((kind, body, ending)) => {
                 let gap = live.schedule.events - live.schedule.last;
                 live.schedule.last = live.schedule.events;
-                match HelperEnding::decode(kind, body) {
-                    Ok(ending) => {
-                        let _ = rec.frame(&Frame::HelperEnd { gap, ending });
-                    }
-                    Err(_) => rec.cut(NO_CAUSE),
-                }
+                let _ = rec.frame(&Frame::HelperEnd { gap, ending });
+                Ok((kind, body))
             }
-            Err(why) => rec.cut(why),
-        }
+            Err(why) => {
+                rec.cut(why);
+                Err(why)
+            }
+        };
         drop(state);
         let _ = finish(group.cell, group.generation, Seal::Unsealed);
+        out
     }
 }
 
 const NO_CAUSE: &str = "the helper failed without a cause its END can carry";
-const RESULT_HANDLE: &str = "the result holds a capability, which a helper's END writes from U3";
+const RESULT_HANDLE: &str =
+    "the result holds a capability or client, whose snapshot a helper's END does not write";
 
 /// The `END` a helper's stream ends with when its unit deadlocks.
 pub(super) fn deadlock(gap: u64, events: u64) -> Frame {
@@ -122,7 +142,7 @@ pub(super) fn deadlock(gap: u64, events: u64) -> Frame {
 
 impl Recorder {
     /// End this stream at its next frame for `why`: it records nothing more.
-    fn cut(&mut self, why: &'static str) {
+    pub(super) fn cut(&mut self, why: &'static str) {
         if let Sink::Writer(stream) = &self.sink
             && !self.truncated
             && self.failed.is_none()
@@ -208,6 +228,7 @@ pub(crate) unsafe fn spawn(
         replay_abort: None,
         objects: vec![],
         replay_net_rules: BTreeMap::new(),
+        takes: units::Takes::default(),
         exec_rules: BTreeMap::new(),
         typed_resources: BTreeMap::new(),
         udp_retirements: BTreeMap::new(),
@@ -219,7 +240,12 @@ pub(crate) unsafe fn spawn(
     let mut grants = Vec::new();
     // SAFETY: forwarded; each capability word designates a grant of the run.
     let body = unsafe {
-        entry(context, n, steps, input, x, &mut |word| {
+        entry(context, n, steps, input, x, &mut |kind, word| {
+            if kind == CLIENT {
+                let ordinal = live.unit_object();
+                live.takes.clients.insert(word as usize, ordinal);
+                return units::client_snapshot(word, ordinal);
+            }
             let &(_, provider, h) = resolved.iter().find(|r| r.0 == word).unwrap();
             // A grant's provider is a copy of its cell's; the cell's state
             // pointer names the cell.
@@ -288,7 +314,15 @@ pub(crate) unsafe fn spawn(
         written_frames: 0,
         failed: None,
     };
+    let stream_number = recorder.stream;
     let entry = Entry::decode(parent_stream, index, body).expect("a well-formed entry");
+    let spawn_args = {
+        let b = entry.body();
+        let mut args = b.descriptor.to_vec();
+        args.extend_from_slice(&b.n.to_le_bytes());
+        args.extend(b.value.canonical());
+        args
+    };
     let rest = entry.encode(&mut recorder.buffer);
     let _ = recorder.close(0);
     for chunk in rest {
@@ -304,6 +338,8 @@ pub(crate) unsafe fn spawn(
     drop(fresh);
     Some(Helper {
         group: Some(Group::root(cell, generation)),
+        stream: stream_number,
+        spawn_args: Some(spawn_args),
         grants,
         sources: vec![],
     })
@@ -327,6 +363,8 @@ fn cut(cell: &'static Cell, resolved: &[(u64, *const Provider, u64)]) -> Helper 
         .collect();
     Helper {
         group: None,
+        stream: NEXT_STREAM.fetch_add(1, Relaxed),
+        spawn_args: None,
         grants: vec![],
         sources,
     }
@@ -339,7 +377,7 @@ unsafe fn entry(
     steps: Option<u64>,
     input: *const u8,
     x: &Cross,
-    capability: &mut dyn FnMut(u64) -> Result<Vec<u8>, &'static str>,
+    handle: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>, &'static str>,
 ) -> Result<Vec<u8>, &'static str> {
     let _ = context;
     let owners = x.owners();
@@ -367,22 +405,40 @@ unsafe fn entry(
         ..*x
     };
     // SAFETY: forwarded.
-    body.extend(unsafe { value(input, &x, capability) }?);
+    body.extend(unsafe { value(input, &x, None, handle) }?);
     Ok(body)
 }
 
+const HANDLE: &str =
+    "the value holds a socket or Shared handle, whose snapshot this build does not write";
 const NO_IDENTITY: &str = "the entry's function has no code identity (a closure)";
 
 /// A value that crosses units: its plain bytes with each owner word zeroed,
-/// then a part per owner in ascending offset order.
-unsafe fn value(
+/// then a part per owner in ascending offset order. A packed value (an item
+/// in a connection) passes `content`, its sequences' elements one after
+/// another in owner-row order; otherwise each sequence word points at them.
+pub(super) unsafe fn value(
     base: *const u8,
     x: &Cross,
-    capability: &mut dyn FnMut(u64) -> Result<Vec<u8>, &'static str>,
+    content: Option<*const u8>,
+    handle: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>, &'static str>,
 ) -> Result<Vec<u8>, &'static str> {
     // SAFETY: the value holds `x.len` initialized bytes at `x.at`.
     let mut plain =
         unsafe { std::slice::from_raw_parts(base.add(x.at as usize), x.len as usize) }.to_vec();
+    let mut packed = BTreeMap::new();
+    if let Some(content) = content {
+        let mut at = 0usize;
+        for &[offset, kind, element, _] in x.owners() {
+            if kind == SEQ {
+                // SAFETY: a sequence carrier's length word is initialized.
+                let len = unsafe { base.add(offset as usize + 8).cast::<u64>().read_unaligned() };
+                // SAFETY: the packed content holds each sequence's elements in row order.
+                packed.insert(offset, unsafe { content.add(at) });
+                at += (len * element) as usize;
+            }
+        }
+    }
     let mut owners = x.owners().to_vec();
     owners.sort_by_key(|o| o[0]);
     let mut parts = Vec::new();
@@ -404,15 +460,16 @@ unsafe fn value(
                 parts.push(0);
                 put_varint(&mut parts, bytes as u64);
                 if bytes > 0 {
-                    // SAFETY: a sequence carrier names its initialized elements.
-                    let elements =
-                        unsafe { std::slice::from_raw_parts(word(0) as *const u8, bytes) };
+                    let from = packed.get(&at).copied().unwrap_or(word(0) as *const u8);
+                    // SAFETY: a sequence carrier, or the packed content, names
+                    // its initialized elements.
+                    let elements = unsafe { std::slice::from_raw_parts(from, bytes) };
                     parts.extend_from_slice(elements);
                 }
             }
-            CAPABILITY => {
+            CAPABILITY | CLIENT => {
                 parts.push(1);
-                parts.extend(capability(word(0))?);
+                parts.extend(handle(kind, word(0))?);
             }
             FUNCTION => {
                 let identity = run::identities::identity_of(word(0)).ok_or(NO_IDENTITY)?;
@@ -420,7 +477,7 @@ unsafe fn value(
                 put_varint(&mut parts, identity.len() as u64);
                 parts.extend_from_slice(identity);
             }
-            _ => return Err("the value holds a handle whose snapshot is written from U3"),
+            _ => return Err(HANDLE),
         }
     }
     let mut out = Vec::with_capacity(plain.len() + parts.len() + 20);

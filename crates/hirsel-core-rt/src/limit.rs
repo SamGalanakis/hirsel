@@ -932,6 +932,9 @@ impl Funding {
         if owner == crate::tasks::current_id() {
             self.merge_with_parent();
         } else {
+            // A mailbox drain inside an operation: a take-point position.
+            #[cfg(feature = "record")]
+            crate::tape::units::reach(crate::tasks::current_group());
             self.drain_notified();
             self.transfer();
         }
@@ -946,6 +949,8 @@ impl Funding {
         if owner != active || creator != active {
             crate::tasks::before_commit();
         }
+        #[cfg(feature = "record")]
+        crate::tape::units::reach(crate::tasks::current_group());
         self.drain();
         let child = self.payer.get();
         let live = child.forest().record(child).live;

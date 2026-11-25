@@ -78,7 +78,7 @@ pub fn dev_fixture(d: Dir, n: Net, c: Clock, random: Random, tasks: Tasks, a: Ar
     let reg = code.describe(dev_fixture_registration)
     let schema = code.describe(dev_fixture_schema)
     main(a, process, errors, tasks, c, reg, schema, scoped fn(take stop: Receiver[()]) -> Result[Ended, MainError] waits {
-        let configured: PlaceConfig[(), DevFixtureTable, (), ()] = PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: launch_selection(a) ?=> Usage, place: reg, n_place: 1048576u64, on_migrate: Some(code.describe(dev_fixture_migrate)), schema: schema, session: wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), grants: None, triggers: None, idle: None)
+        let configured: PlaceConfig[(), DevFixtureTable, ()] = PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: launch_selection(a) ?=> Usage, place: reg, n_place: 1048576u64, on_migrate: Some(code.describe(dev_fixture_migrate)), schema: schema, session: wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), grants: None, triggers: None, idle: None)
         Ok(operate_report(take configured, take stop, result.unwrap(status_root()), None, errors) ?=> Start)
     })
 }

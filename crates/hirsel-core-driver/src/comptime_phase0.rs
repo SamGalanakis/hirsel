@@ -112,7 +112,11 @@ fn comptime_g1_probe() {
     let counter = InstructionCounter::open().unwrap();
     let all = Inherited::open();
     let mut rows = vec![];
+    let only = std::env::var("COMPTIME_G1_ONLY").ok();
     for name in ["empty_probe", "crc_probe", "regex_probe"] {
+        if only.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
         let identity =
             hirsel_core_ir::Identity::plain(DefPath::from_full(&format!("p@1/p/{name}")).unwrap());
         // Check-only product: the callees' checked IR is read from the product
@@ -126,12 +130,32 @@ fn comptime_g1_probe() {
         let mut result = None;
         for _ in 0..5 {
             let (before, before_all) = (counter.read().unwrap(), all.read());
-            let (report, checked) =
+            let (_, checked) =
                 eval::run_nans(&module, entry, &[], u64::MAX, eval::Nans::Canonical);
             let caller = counter.read().unwrap() - before;
             let host = all.read() - before_all;
             samples.push((host, caller, checked.instructions, checked.steps));
-            result = Some(format!("{:?}", report.outcome));
+        }
+        // The pure core on one thread with the root's stack, counted on that thread.
+        let mut pure = vec![];
+        for _ in 0..pure_runs() {
+            let (module, entry) = (&module, entry);
+            let row = std::thread::scope(|s| {
+                std::thread::Builder::new()
+                    .stack_size(128 << 20)
+                    .spawn_scoped(s, move || {
+                        let c = InstructionCounter::open().unwrap();
+                        let before = c.read().unwrap();
+                        let (report, checked) = eval::run_pure(module, entry, u64::MAX, None);
+                        let host = c.read().unwrap() - before;
+                        (host, checked.instructions, checked.steps, format!("{:?}", report.outcome))
+                    })
+                    .unwrap()
+                    .join()
+                    .unwrap()
+            });
+            result = Some(row.3.clone());
+            pure.push((row.0, row.1, row.2));
         }
         rows.push(serde_json::json!({
             "name": name,
@@ -139,7 +163,96 @@ fn comptime_g1_probe() {
             "address": address,
             "outcome": result,
             "samples": samples,
+            "pure": pure,
         }));
+    }
+    std::fs::write(out, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+}
+
+fn pure_runs() -> usize {
+    std::env::var("COMPTIME_G1_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(5)
+}
+
+/// G7: COMPTIME-DIRECTION §3.3's three `constant_call_absent` edits on one
+/// resident driver. Run with `COMPTIME_G7=<out.json>`.
+#[test]
+fn comptime_g7_sequence() {
+    let Ok(out) = std::env::var("COMPTIME_G7") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = "pub fn main() -> Result[(), Exit] { Error(Exit(status: b.read() + 10u8)) }";
+    let reader = "pub fn read() -> u8 { a.X }\npub fn other() -> u8 { 7u8 }";
+    let steps: [(&str, &str, &str); 4] = [
+        ("base", "pub fn f()->u8{1u8}\npub const X:u8=f()", reader),
+        ("f returns 2u8", "pub fn f()->u8{2u8}\npub const X:u8=f()", reader),
+        ("f returns 0u8+1u8", "pub fn f()->u8{0u8 + 1u8}\npub const X:u8=f()", reader),
+        (
+            "unrelated body",
+            "pub fn f()->u8{0u8 + 1u8}\npub const X:u8=f()",
+            "pub fn read() -> u8 { a.X }\npub fn other() -> u8 { 8u8 }",
+        ),
+    ];
+    let mut resident = Driver::default();
+    let options = crate::native::tests::native_options(Backend::Cranelift, dir.path());
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut rows = vec![];
+    for (name, a, b) in steps {
+        for (file, text) in [("a.hirsel", a), ("b.hirsel", b), ("main.hirsel", main)] {
+            std::fs::write(dir.path().join(file), text).unwrap();
+        }
+        let mut request =
+            CheckRequest::libraries(&root.join("core"), &dir.path().join("store")).unwrap();
+        request.inputs.packages.retain(|p| p.package == crate::package("core"));
+        let source = |file: &str, module: &str| hirsel_core_resolve::ModuleSource {
+            foreign: false,
+            captured: None,
+            file: dir.path().join(file),
+            modules: vec![module.into()],
+            signatures: false,
+        };
+        request.inputs.packages.push(hirsel_core_resolve::PackageManifest {
+            namespace: None,
+            package: crate::package("app"),
+            sources: vec![
+                source("a.hirsel", "a"),
+                source("b.hirsel", "b"),
+                source("main.hirsel", "main"),
+            ],
+            dependencies: vec![crate::package("core")],
+        });
+        request.entry = Some(entry.clone());
+        resident.layers.law = true;
+        let meter = &mut Meter::new(false);
+        let before = crate::comptime::evaluations();
+        let product = resident.check(request, meter).unwrap();
+        let checked_evals = crate::comptime::evaluations() - before;
+        let class = format!("{:?}", meter.result.layer_class);
+        let accepted = product.accepted();
+        let built = product.build(&entry, &options);
+        let evaluations = crate::comptime::evaluations() - before;
+        let row = match built {
+            Ok(built) => {
+                let status = std::process::Command::new(&built.executable)
+                    .status()
+                    .unwrap()
+                    .code();
+                serde_json::json!({
+                    "step": name, "accepted": accepted, "gate": class,
+                    "evaluations_check": checked_evals, "evaluations": evaluations,
+                    "compiled": built.compiled, "exit": status,
+                    "output": status.map(|s| s - 10),
+                })
+            }
+            Err(stop) => serde_json::json!({
+                "step": name, "accepted": accepted, "gate": class,
+                "evaluations": evaluations, "stop": format!("{stop:?}"),
+                "diagnostics": format!("{:?}", product.diagnostics),
+            }),
+        };
+        eprintln!("{row}");
+        rows.push(row);
     }
     std::fs::write(out, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
 }

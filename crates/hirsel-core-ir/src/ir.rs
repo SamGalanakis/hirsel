@@ -1583,6 +1583,9 @@ pub struct Function {
 pub enum Static {
     Bytes { align: u32, bytes: Vec<u8> },
     Aggregate { ty: TypeId, value: StaticValue },
+    /// Phase 0: a computed constant's slot, named by its initializer. The
+    /// driver replaces it with the value's bytes before emission.
+    Computed { init: DefPath },
 }
 
 /// A plain constant in declaration order. The enclosing type supplies each

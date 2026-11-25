@@ -7,7 +7,7 @@ impl Static {
     pub fn literal_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Bytes { bytes, .. } => Some(bytes),
-            Self::Aggregate { .. } => None,
+            Self::Aggregate { .. } | Self::Computed { .. } => None,
         }
     }
 
@@ -28,6 +28,9 @@ impl Static {
                     recipes,
                 );
                 (layout.align as u32, Cow::Owned(bytes))
+            }
+            Self::Computed { init } => {
+                unreachable!("computed constant {init} reached emission unsubstituted")
             }
         }
     }

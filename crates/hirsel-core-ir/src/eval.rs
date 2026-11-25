@@ -1502,6 +1502,10 @@ struct WorldInput<'a> {
     copy_size: Option<u64>,
     events: bool,
     process_entry: bool,
+    /// Phase 0 pure core: run the root on the calling thread, no scheduler.
+    pure: bool,
+    /// Phase 0: the returned aggregate's bytes, when the entry has a destination.
+    capture: Option<&'a mut Vec<u8>>,
     sites: &'a [u64],
     /// PROG-3: render `main`'s `Error(e)` with this program, before the run's
     /// memory is released, into the slot.
@@ -1530,6 +1534,8 @@ impl Default for WorldInput<'_> {
             copy_size: None,
             events: false,
             process_entry: false,
+            pure: false,
+            capture: None,
             sites: &[],
             error_text: None,
         }
@@ -1695,7 +1701,11 @@ fn run_world(
         notices: VecDeque::new(),
     });
     mach.sched.ready.push_back(0);
-    let (mut mach, outcome, chain) = drive(mach, input.process_entry);
+    let (mut mach, outcome, chain) = if input.pure {
+        pure_root(mach)
+    } else {
+        drive(mach, input.process_entry)
+    };
     if let (Some((show, text)), Some(at), Outcome::Returned(_)) =
         (input.error_text.take(), destination, &outcome)
         && let Some(dest) = signature.dest
@@ -1713,6 +1723,9 @@ fn run_world(
     }
     if let Some(bytes) = input.destination.as_mut() {
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
+    }
+    if let (Some(out), Some(at)) = (input.capture.take(), destination) {
+        *out = mach.mem[split(at).0].bytes.to_vec();
     }
     for (l, n) in std::mem::take(&mut mach.world.grant_charges) {
         l.find().subtract(n);
@@ -1873,6 +1886,80 @@ fn drive(mach: Machine<'_>, process_entry: bool) -> (Box<Machine<'_>>, Outcome, 
             }
         }
     })
+}
+
+/// Phase 0 pure core: the root on the calling thread. A task operation finds no
+/// link and stops the run; the world stays empty.
+fn pure_root(mut mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
+    let (mut t, f, args) = mach.sched.tasks[0].start.take().expect("the root");
+    mach.sched.ready.clear();
+    mach.sched.current = 0;
+    mach.sched.tasks[0].state = State::Running;
+    let origin = 0u8;
+    let saved = TASK_STACK_ROOM.with(|room| room.replace((&origin as *const u8 as usize, usize::MAX)));
+    let mut mach = Box::new(mach);
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mach.call(&mut t, f, &args)));
+    TASK_STACK_ROOM.with(|room| room.set(saved));
+    match run {
+        Ok(Ok(r)) => (mach, Outcome::Returned(r), Vec::new()),
+        Ok(Err(_)) => {
+            let chain = std::mem::take(&mut t.chain);
+            let failed = chain.iter().map(|c| c.kind.into()).collect();
+            (mach, Outcome::Failed(failed), chain)
+        }
+        Err(payload) if payload.is::<RunStop>() => {
+            let reason = payload.downcast::<RunStop>().unwrap().0;
+            (mach, Outcome::Stopped(reason), Vec::new())
+        }
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// Phase 0 pure core: an initializer's run with no world, on the calling thread.
+pub fn run_pure(
+    m: &Module,
+    f: FuncId,
+    limit: u64,
+    destination: Option<&mut [u8]>,
+) -> (Report, Checked) {
+    run_world(
+        m,
+        f,
+        &[],
+        limit,
+        WorldInput {
+            destination,
+            pure: true,
+            ..WorldInput::default()
+        },
+    )
+}
+
+/// Phase 0: evaluate a constant's initializer `f` (no parameters) on the pure
+/// core, on this thread. The value's bytes: the destination's for an
+/// aggregate, else the first returned word, little-endian.
+pub fn run_constant(m: &Module, f: FuncId, limit: u64) -> Result<(Vec<u8>, Checked), String> {
+    let mut bytes = Vec::new();
+    let (report, checked) = run_world(
+        m,
+        f,
+        &[],
+        limit,
+        WorldInput {
+            pure: true,
+            capture: Some(&mut bytes),
+            ..WorldInput::default()
+        },
+    );
+    match report.outcome {
+        Outcome::Returned(words) => {
+            if m.signatures[m.functions[f.index()].signature.index()].dest.is_none() {
+                bytes = words.first().copied().unwrap_or(0).to_le_bytes().to_vec();
+            }
+            Ok((bytes, checked))
+        }
+        other => Err(format!("{other:?}")),
+    }
 }
 
 /// A task thread: wait for the baton, run the task's body, hand the baton back.
@@ -2073,6 +2160,13 @@ impl<'m> Machine<'m> {
     }
     fn park_turn(&mut self, wait: Option<Wait>, poll: bool) {
         let k = self.sched.current;
+        if self.links[k].is_none() {
+            // Phase 0 pure core: the only task yields to itself; it cannot wait.
+            if wait.is_some() {
+                std::panic::panic_any(RunStop("a constant's evaluation cannot wait"));
+            }
+            return;
+        }
         match wait {
             Some(Wait::Sleep(deadline)) | Some(Wait::Network(Some(deadline))) => {
                 self.sched.tasks[k].state = State::Provider;

@@ -16,6 +16,11 @@ pub struct Constant {
     pub ty: TyId,
     pub value: Option<ConstValue>,
     pub(crate) expr: NodeId,
+    /// Phase 0 (LANG-20 lifted): `const X: T = f()` for a plain zero-parameter
+    /// `f` returning `T`. Its value is computed by the driver, keyed by `f`'s
+    /// code address; no check-time judgment reads it.
+    #[serde(default)]
+    pub computed: Option<DefPath>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ConstValue {
@@ -63,6 +68,7 @@ impl Program<'_> {
                     ty,
                     value: None,
                     expr,
+                    computed: None,
                 });
             }
         }
@@ -119,6 +125,9 @@ impl Program<'_> {
             let c = &self.constants[i];
             let (at, expr, ty) = (c.at, c.expr, c.ty);
             let value = if ty == ERROR {
+                None
+            } else if let Some(init) = self.computed_initializer(at, expr, ty) {
+                self.constants[i].computed = Some(init);
                 None
             } else {
                 let mut cx = ConstCx {
@@ -180,6 +189,32 @@ impl Program<'_> {
                 active[i - base] = false;
             }
         }
+    }
+    /// Phase 0: the initializer `f()` of a computed constant, when `expr` is a call
+    /// of a plain function with no parameters, no generics and no waits, whose
+    /// result is the constant's type (not String).
+    fn computed_initializer(&self, at: ItemRef, expr: NodeId, ty: TyId) -> Option<DefPath> {
+        let item = self.item(at);
+        let mut n = expr;
+        while item.tree.node(n).kind == NodeKind::Group {
+            n = item.tree.children(n)[0];
+        }
+        if item.tree.node(n).kind != NodeKind::Call {
+            return None;
+        }
+        let kids = item.tree.children(n);
+        if kids.len() != 1 {
+            return None;
+        }
+        let Target::Definition(id) = self.target(at, kids[0])?.clone() else {
+            return None;
+        };
+        let Some(Def::Fn(f)) = self.by_definition[id.0 as usize] else {
+            return None;
+        };
+        let f = &self.fns[f as usize];
+        (f.params.is_empty() && f.generics.is_empty() && !f.waits && !f.is_test && f.result == ty)
+            .then(|| f.path.clone())
     }
     /// LANG-7 constant heads and explicit projections read the published field.
     pub(crate) fn constant_field(

@@ -50,6 +50,41 @@ impl Cx<'_, '_, '_> {
             }
         }
     }
+    /// Phase 0: a computed constant's slot. The body names the initializer; the
+    /// value's bytes enter at emission (COMPTIME-DIRECTION section 3.3 rule 1).
+    pub(super) fn computed_value(
+        &mut self,
+        init: hirsel_core_ids::DefPath,
+        ty: crate::TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let rep = self.rep_at(ty, n)?;
+        if matches!(rep, Rep::None) {
+            return None;
+        }
+        if !self.out.computed.contains(&init) {
+            self.out.computed.push(init.clone());
+        }
+        let data = hirsel_core_ir::StaticId(self.e.module.statics.len() as u32);
+        self.e.module.statics.push(hirsel_core_ir::Static::Computed { init });
+        let pointer = self.value(Ty::Ptr);
+        self.inst(Inst::ReadStatic { result: pointer, data }, n);
+        match rep {
+            Rep::Scalar(t) => {
+                let address = self.address(
+                    hirsel_core_ir::AddressBase::Value(pointer),
+                    &[],
+                    hirsel_core_ir::PlaceTy::Value(t),
+                    n,
+                );
+                Some(self.read_bits(address, t, n))
+            }
+            _ => Some(pointer),
+        }
+    }
     fn static_value(&self, value: crate::ConstValue) -> hirsel_core_ir::StaticValue {
         use hirsel_core_ir::StaticValue;
         match value.data {

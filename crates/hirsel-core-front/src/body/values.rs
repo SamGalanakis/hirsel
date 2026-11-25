@@ -580,6 +580,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let p = self.p;
                 let constant = p.constant_ids[id.0 as usize].unwrap();
                 let Some(value) = p.constants[constant as usize].value else {
+                    let c = &p.constants[constant as usize];
+                    if let Some(init) = c.computed.clone()
+                        && u.projections.is_empty()
+                    {
+                        let ty = c.ty;
+                        return (ty, self.computed_value(init, ty, n));
+                    }
                     self.halt();
                     return (ERROR, None);
                 };

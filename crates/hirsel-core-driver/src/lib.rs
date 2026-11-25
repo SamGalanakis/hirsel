@@ -36,6 +36,7 @@ mod callable_variants;
 #[cfg(test)]
 mod carried_law;
 mod check_index;
+pub mod comptime;
 mod executable;
 mod flow;
 mod instances;
@@ -404,6 +405,7 @@ mod body {
                     flow: disk.flow,
                     constructor_types: disk.constructor_types,
                     constructor_candidates: disk.constructor_candidates,
+                    computed: disk.computed,
                     counts: hirsel_core_front::Counts {
                         nodes,
                         uses,
@@ -580,6 +582,7 @@ struct DiskCheckRef<'a> {
     function: Option<u32>,
     constructor_types: &'a std::collections::BTreeSet<DefPath>,
     constructor_candidates: bool,
+    computed: &'a Vec<DefPath>,
 }
 impl<'a> DiskCheckRef<'a> {
     /// A site is a byte offset from its item's start and the key covers only
@@ -629,6 +632,7 @@ impl<'a> DiskCheckRef<'a> {
             function: d.check.function.map(|f| f.0),
             constructor_types: &d.check.constructor_types,
             constructor_candidates: d.check.constructor_candidates,
+            computed: &d.check.computed,
         })
     }
 }
@@ -646,6 +650,8 @@ struct DiskCheck {
     function: Option<u32>,
     constructor_types: std::collections::BTreeSet<DefPath>,
     constructor_candidates: bool,
+    #[serde(default)]
+    computed: Vec<DefPath>,
 }
 impl Driver {
     pub fn check(

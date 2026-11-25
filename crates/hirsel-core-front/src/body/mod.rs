@@ -140,6 +140,8 @@ pub struct CoreCheck {
     /// A contextual constructor resolved by searching its whole candidate set
     /// (no expected type), so every candidate of that name took part.
     pub constructor_candidates: bool,
+    /// Phase 0: the initializers of the computed constants this body reads.
+    pub computed: Vec<DefPath>,
 }
 
 /// Source conventions survive physical sealing. Generated fixed-ABI glue has the

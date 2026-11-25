@@ -673,7 +673,7 @@ fn live(product: &CheckProduct, base: usize, path: &DefPath) -> Row {
     let id = product.headers.id(path);
     Row {
         id: id.map(|id| id.0),
-        own: product.definitions.get(path).map(|d| d.record),
+        own: crate::comptime::effective_own(product, path),
         header: id
             .filter(|id| id.0 as usize >= base)
             .and_then(|id| product.headers.row(id).cloned()),
@@ -687,7 +687,7 @@ fn current(product: &CheckProduct, base: usize, path: &DefPath, row: &Row) -> bo
         None => product.headers.id(path),
     };
     id.map(|id| id.0) == row.id
-        && product.definitions.get(path).map(|d| d.record) == row.own
+        && crate::comptime::effective_own(product, path) == row.own
         && match id.filter(|id| id.0 as usize >= base) {
             Some(id) => product.headers.row(id) == row.header.as_ref(),
             None => row.header.is_none(),

@@ -736,7 +736,9 @@ impl CheckProduct {
                 }
                 Some(product)
             };
-            let own = product.as_ref().map(|p| p.record);
+            let own = product
+                .as_ref()
+                .map(|p| crate::comptime::fold(self, p.record, &p.check.computed));
             if let Some((records, expand)) = records {
                 let location = if glue || self.definitions.contains_key(&key.definition) {
                     Location::Request
@@ -774,6 +776,7 @@ impl CheckProduct {
             let memo_key = (own != Some(ContentHash::default())).then(|| (key.clone(), own));
             let made = crate::resident::MATERIALISED.get_or(memo_key, || {
                 materialise(
+                    self,
                     key,
                     product.as_deref(),
                     &arguments,
@@ -885,6 +888,7 @@ pub(crate) struct Materialised {
     described: Vec<Identity>,
 }
 fn materialise(
+    check: &CheckProduct,
     key: &Identity,
     product: Option<&DefinitionProduct>,
     arguments: &[&hirsel_core_ir::Closure],
@@ -901,8 +905,17 @@ fn materialise(
             hirsel_core_materialize::materialize_glue(key, arguments).map_err(input)?
         }
         Some(product) => {
+            let mut substituted = None;
+            if !product.check.computed.is_empty() {
+                let mut module = product.ir().map_err(|e| input(e.to_string()))?.clone();
+                crate::comptime::substitute(check, &mut module).map_err(input)?;
+                substituted = Some(module);
+            }
             let own = Published {
-                module: product.ir().map_err(|e| input(e.to_string()))?,
+                module: match &substituted {
+                    Some(module) => module,
+                    None => product.ir().map_err(|e| input(e.to_string()))?,
+                },
                 function: product.check.function.unwrap(),
                 template: product.check.template.as_ref(),
             };

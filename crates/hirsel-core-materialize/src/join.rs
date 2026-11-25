@@ -245,6 +245,7 @@ pub fn join_units(
                         })
                     })
                 }
+                Static::Computed { .. } => append(data.clone()),
             };
             map.statics.push(id);
         }

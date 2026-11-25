@@ -320,6 +320,9 @@ impl Printer {
                         static_value(value)
                     ));
                 }
+                Static::Computed { init } => {
+                    self.line(&format!("static d{i} = computed {init}"));
+                }
             }
         }
         for (i, s) in m.signatures.iter().enumerate() {

@@ -1,0 +1,111 @@
+// The set model is a no-duplicate list: insert only absent indexes and remove
+// one membership at a time. It is independent of the bitset and free-list code.
+fn model_contains(xs: List[u32], x: u32) -> bool {
+    for y in xs {
+        if y == x {
+            return true
+        }
+    }
+    false
+}
+
+fn model_remove(mut xs: List[u32], x: u32) -> bool {
+    for i in 0u64 .. list.len(xs) {
+        if xs[i] == x {
+            let _ = list.swap_remove(mut xs, i)
+            return true
+        }
+    }
+    false
+}
+
+fn take_trial(ops: List[u64]) -> Result[(), String] {
+    let mut a = ids.new()
+    let mut live: List[u32] = list.new()
+    for op in ops {
+        if op % 3 == 0 || list.len(live) == 0 {
+            let i = ids.take_index(mut a)
+            if model_contains(live, i) {
+                return Error(string.from("take returned a live index"))
+            }
+            list.push(mut live, i)
+        } else {
+            let at = op % list.len(live)
+            let i = live[at]
+            ids.give(mut a, i)
+            if !model_remove(mut live, i) {
+                return Error(string.from("the set model lost a live index"))
+            }
+        }
+    }
+    Ok(())
+}
+
+// Catches reusing a live index or losing free-list membership across a seeded
+// mix of takes and gives; the oracle is the independent set model above.
+// expect: run take_never_returns_live_property() = true
+fn take_never_returns_live_property() -> bool {
+    let mut config = prop.config()
+    config.cases = 128
+    let ops = prop.list_of(prop.u64_in(0, 99), 0, 96)
+    if let Ok(()) = prop.check(config, take ops, take_trial) {
+        true
+    } else {
+        false
+    }
+}
+
+fn fail_text(take run: Result[Result[(), Causes], Capacity], expected: String) -> bool {
+    if let Ok(Error(causes)) = take run {
+        for cause in causes {
+            if let Fail(text) = cause.kind {
+                return text == expected
+            }
+            return false
+        }
+    }
+    false
+}
+
+// Catches a missing or stuck liveness bit: without one the second give succeeds
+// and the index enters the free list twice.
+// expect: run give_free_index_fails() = true
+fn give_free_index_fails() -> bool {
+    let again = isolate(fn() {
+        let mut a = ids.new()
+        let i = ids.take_index(mut a)
+        ids.give(mut a, i)
+        ids.give(mut a, i)
+    })
+    fail_text(take again, "ids.give: index is not live")
+}
+
+// Fresh 0 and 1, give 0, then place must overwrite row 0 rather than append row 2.
+// expect: run place_overwrites_recycled_index() = true
+fn place_overwrites_recycled_index() -> bool {
+    let mut a = ids.new()
+    let mut rows: List[u64] = list.new()
+    let zero = ids.place(mut a, mut rows, 10)
+    let one = ids.place(mut a, mut rows, 20)
+    ids.give(mut a, zero)
+    let again = ids.place(mut a, mut rows, 30)
+    zero == 0 && one == 1 && again == zero && ids.limit(a) == 2 && list.len(rows) == 2 && rows[0] == 30 && rows[1] == 20
+}
+
+// Catches issuing the index or pushing the row before a refused admission: with
+// no room the refusal must leave both the allocator limit and the storage length unchanged.
+// expect: run try_place_refusal_unchanged() = true
+fn try_place_refusal_unchanged() -> bool {
+    let answer = bound bytes 32 {
+        let mut a = ids.new()
+        let mut rows: List[u64] = list.with_capacity(4)
+        match ids.try_place(mut a, mut rows, 7) {
+            Error(_) => ids.limit(a) == 0 && list.len(rows) == 0,
+            Ok(_) => false,
+        }
+    }
+    match answer {
+        Ok(ok) => ok,
+        Error(_) => false,
+    }
+}

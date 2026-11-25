@@ -1,27 +1,31 @@
 // kostya/LangArena 3c9f84d benchmarks/cache_simulation.rs:5-207.
-// Indexed doubly linked nodes and a LIFO free list, as in the upstream Rust.
+// Indexed doubly linked nodes; std.ids owns index reuse and double-free checking.
 type Node {
     key: String,
     value: String,
-    prev: Option[u64],
-    next: Option[u64]
+    prev: Option[u32],
+    next: Option[u32]
 }
 
 type Cache {
     capacity: u64,
-    entries: Map[String, u64],
+    entries: Map[String, u32],
     nodes: List[Node],
-    free: List[u64],
-    head: Option[u64],
-    tail: Option[u64],
+    ids: std.ids.Ids,
+    head: Option[u32],
+    tail: Option[u32],
     size: u64
 }
 
-fn front(mut c: Cache, node: u64) {
-    c.nodes[node].prev = None
-    c.nodes[node].next = c.head
+fn node_at(i: u32) -> u64 {
+    (int.widen(i) : u64)
+}
+
+fn front(mut c: Cache, node: u32) {
+    c.nodes[node_at(node)].prev = None
+    c.nodes[node_at(node)].next = c.head
     if let Some(h) = c.head {
-        c.nodes[h].prev = Some(node)
+        c.nodes[node_at(h)].prev = Some(node)
     }
     c.head = Some(node)
     if c.tail == None {
@@ -29,17 +33,17 @@ fn front(mut c: Cache, node: u64) {
     }
 }
 
-fn touch(mut c: Cache, node: u64) {
+fn touch(mut c: Cache, node: u32) {
     if c.head == Some(node) {
         return
     }
-    let prev = c.nodes[node].prev
-    let next = c.nodes[node].next
+    let prev = c.nodes[node_at(node)].prev
+    let next = c.nodes[node_at(node)].next
     if let Some(p) = prev {
-        c.nodes[p].next = next
+        c.nodes[node_at(p)].next = next
     }
     if let Some(n) = next {
-        c.nodes[n].prev = prev
+        c.nodes[node_at(n)].prev = prev
     }
     if c.tail == Some(node) {
         c.tail = prev
@@ -48,43 +52,34 @@ fn touch(mut c: Cache, node: u64) {
 }
 
 fn put(mut c: Cache, take key: String, take value: String) -> Result[(), helper.Error] {
-    let found: Option[u64] = match map.get(c.entries, key) {
+    let found: Option[u32] = match map.get(c.entries, key) {
         Some(n) => Some(n),
         None => None
     }
     if let Some(node) = found {
-        c.nodes[node].value = take value
+        c.nodes[node_at(node)].value = take value
         touch(mut c, node)
         return Ok(())
     }
     if c.size >= c.capacity {
         if let Some(old) = c.tail {
-            let _ = map.remove(mut c.entries, c.nodes[old].key)
-            let prev = c.nodes[old].prev
+            let _ = map.remove(mut c.entries, c.nodes[node_at(old)].key)
+            let prev = c.nodes[node_at(old)].prev
             if let Some(p) = prev {
-                c.nodes[p].next = None
+                c.nodes[node_at(p)].next = None
             }
             c.tail = prev
             if c.head == Some(old) {
                 c.head = None
             }
-            list.push(mut c.free, old)
+            let _ = replace(mut c.nodes[node_at(old)], Node(key: string.new(), value: string.new(), prev: None, next: None))
+            std.ids.give(mut c.ids, old)
             c.size -= 1
         }
     }
     let node_key = string.from(key)
     let entry = Node(key: take node_key, value: take value, prev: None, next: None)
-    let node = match list.pop(mut c.free) {
-        Some(slot) => {
-            let _ = list.set(mut c.nodes, slot, take entry);
-            slot
-        },
-        None => {
-            let slot = list.len(c.nodes)
-            list.push(mut c.nodes, take entry)
-            slot
-        },
-    }
+    let node = std.ids.place(mut c.ids, mut c.nodes, take entry)
     map.insert(mut c.entries, take key, node)
     front(mut c, node)
     c.size += 1
@@ -95,7 +90,7 @@ fn step(mut c: Cache, mut g: helper.Lcg, iteration: u64, values: i32, mut hits: 
     for _ in 0u64 .. 1000u64 {
         let mut key = string.from("item_")
         string.push_i64(mut key, int.widen(helper.next_int(mut g, values)))
-        let found: Option[u64] = match map.get(c.entries, key) {
+        let found: Option[u32] = match map.get(c.entries, key) {
             Some(n) => Some(n),
             None => None
         }
@@ -123,7 +118,7 @@ pub fn dispatch(config: helper.Settings, name: String, warmup: u64, iterations: 
     if values <= 0 || values > 2147483647 || capacity < 0 {
         return Error(Config)
     }
-    let mut c = Cache(capacity: int.narrow(capacity), entries: map.new(), nodes: list.new(), free: list.new(), head: None, tail: None, size: 0)
+    let mut c = Cache(capacity: int.narrow(capacity), entries: map.new(), nodes: list.new(), ids: std.ids.new(), head: None, tail: None, size: 0)
     let mut g = helper.lcg()
     let mut hits: u32 = 0
     let mut misses: u32 = 0

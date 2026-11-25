@@ -287,17 +287,17 @@ fn state_account(s: State) -> Result[u64, Capacity] {
     Ok(page_row_account(state_roots(s)?))
 }
 
-fn memory_cut_accounts(state: State) -> Result[(u64, u64), Error] {
-    disk_allocation(scoped fn() -> Result[(u64, u64), Error] {
-        let roots = capacity(state_roots(state))?
-        Ok((page_row_account(roots), resident_images(roots, None)))
+// A Memory cut counts row versions only. The page-image figure walks every
+// page, so `accounts` computes it when asked (§13.8).
+fn memory_cut_account(state: State) -> Result[u64, Error] {
+    disk_allocation(scoped fn() -> Result[u64, Error] {
+        Ok(page_row_account(capacity(state_roots(state))?))
     })
 }
 
-fn record_memory_cut(mut db: Db, live_bytes: u64, pages: u64) -> Ticket {
+fn record_memory_cut(mut db: Db, live_bytes: u64) -> Ticket {
     db.checkpointed += 1
     db.resident = live_bytes
-    db.page_resident = pages
     db.settled = db.changes
     Ticket(store: db.store, open: 0, mark: Cut(db.checkpointed))
 }
@@ -704,11 +704,11 @@ fn cut_install(mut db: Db, take delta: HolderDelta) -> Result[Ticket, Error] wai
         ReplacePin(_, _) => true,
         _ => false
     }
-    let (live_bytes, pages) = memory_cut_accounts(proposed)?
+    let live_bytes = memory_cut_account(proposed)?
     if admission {
         over_ceiling(live_bytes, available_resident(db))?
     }
-    let commit_ticket = record_memory_cut(mut db, live_bytes, pages)
+    let commit_ticket = record_memory_cut(mut db, live_bytes)
     install_holder_delta(mut db, take delta)
     Ok(commit_ticket)
 }

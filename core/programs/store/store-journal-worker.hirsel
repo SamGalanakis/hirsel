@@ -157,6 +157,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
     let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding) = take scratch
     let mut buffer = take reserved
     list.append(mut buffer, first_header)
+    drop(take first_header)
     let mut end_bytes = take initial_end
     let mut schema_binding = take initial_binding
     let group_limit: u64 = int.widen(max_bytes)

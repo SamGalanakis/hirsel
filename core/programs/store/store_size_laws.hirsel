@@ -65,18 +65,18 @@ fn group_override(group: u64) -> Overrides {
 
 // §1.1: a Directory grant covers the journal worker's own grant. A 64 MiB
 // group used to size inside a 39,839,262 B share. At the resident floor:
-//   journal worker: 67,108,864 + 65,536 + 288 + 64 = 67,174,752
-//   journal timer: 4,096 + 288 = 4,384
-//   journal channels for 64 commits: 416 × 64 + 640 = 27,264
+//   journal worker: (67,108,864 + 4,096) + 32,768 + 288 + 64 = 67,146,080
+//   segment creation block: 4,096
+//   journal channels for 64 commits: 416 × 64 + 576 = 27,200
 //   writer state: 1,968
 //   resident: 1,048,576
 //   cut phase: 16,777,640 + 65,536 + 2 × 95,326 + (4,096 + 16,711,680)
 //            = 33,749,604, above the write peak of 2 × 16,777,296
-//   total: 102,006,548
+//   total: 101,977,524
 @test
 fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let o = group_override(67108864)
-    let need = 102006548u64
+    let need = 101977524u64
     match planned(Directory, 39839262, o) {
         Error(short) if short.need == need && short.have == 39839262 => (),
         _ => fail("§1.1: a 64 MiB group sized inside a share its journal worker exceeds"),

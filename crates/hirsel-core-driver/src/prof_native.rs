@@ -644,9 +644,21 @@ pub fn main() -> Result[(), Exit] {
     // Charged: root startup (256 + 32) plus the full 160-byte scope.
     // Retained at the region allocation: startup slot, cause cell, inputs,
     // main result, root Task, Region header and one 4 KiB backing request.
-    // The root Task is 672 bytes plus 16 for its warm-list links, 48 for its
-    // owned Context's grouped-Map keys, and 24 for its tail-transfer fields.
-    let task = 672 + 16 + 48 + 24;
+    // The root Task is one `tasks::Task`, repr(C) in declared order, as the record
+    // runtimes build it: release, so a FrameRecord is its base pointer alone.
+    // Its owned Context, also repr(C): current, events, steps, run; the hash key,
+    // fast salt and strong key; two flags padded to a word; cancel_shield,
+    // finalizing, bound_depth, primary; causes; task_record; active_resource,
+    // host_files; the isolates and step_bounds Vecs; step_slice_tail, regions,
+    // heap, frame_lists, spare_isolate_cell, foreign, root_limit, root_refusal.
+    let context = 4 * 8 + (32 + 16 + 32) + 8 + 4 * 8 + 16 + 16 + 2 * 8 + 2 * 24 + 8 * 8;
+    // The Task: four flags and polls_left; context; the owned Context; run, ready;
+    // waiters; waiting_on and the two wait links; timer; operation and the all
+    // and warm links; warm and state padded; id; the record group; stack; sp,
+    // body; input and result; layout; failed padded; record; frame; stackless
+    // padded; moved; transfer; holder; cursor.
+    let task = 8 + 8 + context + 16 + 16 + 24 + 40 + 5 * 8 + 8 + 8 + 24 + 24 + 16 + 2 * 24
+        + 64 + 8 + 16 + 8 + 8 + 24 + 24 + 16 + 8;
     let retained = 16 + 56 + 16 + 24 + task + 272 + 4096;
     // The Stamp takes one 24-byte native slot in the first chunk.
     let runtime_peaks = [

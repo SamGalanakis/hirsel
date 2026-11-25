@@ -119,6 +119,10 @@ pub(super) struct Remote {
     queued: usize,
     #[cfg(feature = "record")]
     retirements: HashMap<NonNull<Slot>, Vec<crate::tape::Retirement>>,
+    /// Folded posts from other recorded units, in posting order: each one's
+    /// payer, bytes and poster, for their refund `TAKE`s.
+    #[cfg(feature = "record")]
+    taken: Vec<(Payer, u64, usize)>,
 }
 impl Remote {
     pub(super) fn new() -> Self {
@@ -128,6 +132,8 @@ impl Remote {
             queued: 0,
             #[cfg(feature = "record")]
             retirements: HashMap::default(),
+            #[cfg(feature = "record")]
+            taken: Vec::new(),
         }
     }
     pub(super) fn inbox(&mut self, owner: u64) -> NonNull<Inbox> {
@@ -465,6 +471,9 @@ pub(super) struct Post {
     next: *mut Post,
     #[cfg(feature = "record")]
     retirement: Option<crate::tape::Retirement>,
+    /// The posting unit's recording, if it records.
+    #[cfg(feature = "record")]
+    from: Option<usize>,
 }
 /// The mailbox head after retirement. Never a node address (Post is 8-aligned).
 pub(super) fn closed() -> *mut Post {
@@ -511,6 +520,9 @@ impl Domain {
                     .entry(post.payer.0)
                     .or_default()
                     .push(retirement);
+            } else if let Some(from) = post.from {
+                // A UDP retirement is its `RETIRED` frame, not a refund take.
+                remote.taken.push((post.payer, post.bytes, from));
             }
         }
     }
@@ -574,6 +586,8 @@ impl Payer {
             next: std::ptr::null_mut(),
             #[cfg(feature = "record")]
             retirement,
+            #[cfg(feature = "record")]
+            from: crate::tape::units::poster(),
         }));
         let mut head = d.mail.load(Ordering::Acquire);
         loop {
@@ -628,6 +642,19 @@ impl Funding {
             self.replay_retirements();
         }
     }
+    /// The drain of a task's bind before it resumes: a scheduler pump.
+    pub(crate) fn drain_at_bind(&self) {
+        #[cfg(feature = "record")]
+        crate::tape::units::at_bind(|| self.drain());
+        #[cfg(not(feature = "record"))]
+        self.drain();
+    }
+    /// A mailbox drain inside an operation: a take-point position.
+    pub(crate) fn drain_in_operation(&self) {
+        #[cfg(feature = "record")]
+        crate::tape::units::reach(crate::tasks::current_group());
+        self.drain();
+    }
     /// Owner-event delivery only. Routing and folding share the domain mutex.
     /// A union may move the current representative.
     #[cold]
@@ -662,6 +689,16 @@ impl Funding {
         remote.reap(domain);
     }
     pub(super) fn drain_locked(&self, remote: &mut Remote, retired: bool) {
+        // A live drain takes each folded post from another unit, by its limit
+        // ordinal; the last handle's drop folds after the unit's `END`.
+        #[cfg(feature = "record")]
+        for (payer, bytes, from) in std::mem::take(&mut remote.taken) {
+            if !retired {
+                // SAFETY: the unapplied post pins its slot; the owner reads it.
+                let ordinal = unsafe { (*payer.links()).ordinal };
+                crate::tape::units::refund(from, ordinal, bytes);
+            }
+        }
         remote.route_unassigned();
         let owner = (!retired).then(crate::tasks::current_id);
         let f = self.payer.get().forest();

@@ -482,11 +482,12 @@ The native runtime drains the mailbox at these sites, each with its kind:
 |---|---|
 | the commit of every event the unit records (`record_event` in `tasks.rs`), before the event, so a take there is in the gap before that event | 0 |
 | a limit's end and a limit's hand-over (`Funding::end` and `Funding::handover` in `limit.rs`) | 0 |
-| the scheduler binding a task to a worker before it resumes (`hirsel_core_task_bind` in `abi.rs`) | 1, a scheduler pump |
+| a binding of a task to a worker that drains before the task resumes (`hirsel_core_task_bind` in `abi.rs`, exported, called by no emitted code; the scheduler rebinds a task through `task_resume`, which does not drain, [MEM-20](spec/budgets.md#mem-20-limit-records-and-hand-over)) | 1, a scheduler pump |
 | the drop of the unit's last limit handle (`Drop for Funding`) | none: it runs after the unit's `END` is written, no admission follows it, and its folds are not takes |
 
 Any other drain an operation makes, such as `hirsel_core_refunds_drain` (exported, emitted
-by no code today), is kind 0 by the same rule. A drain inside an operation is a take-point
+by no code today), is kind 0 by the same rule. A refund take names the limit the poster refunded by its limit ordinal, with
+the bytes of that one post; posts a drain folds are taken in posting order. A drain inside an operation is a take-point
 position whether or not mail was pending, so the count does not depend on when other units
 posted. Only a post from another unit is taken; a refund one task of the unit posts to
 another task's limit in the same unit is recomputed. Several take points can

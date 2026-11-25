@@ -845,7 +845,7 @@ pub unsafe extern "C" fn hirsel_core_limit_exit(context: *mut Context) {
 pub unsafe extern "C" fn hirsel_core_refunds_drain(context: *const Context) {
     // SAFETY: the scheduler gives this task exclusive local execution custody.
     unsafe {
-        (*context).current.drain();
+        (*context).current.drain_in_operation();
     }
 }
 
@@ -1010,7 +1010,7 @@ pub unsafe extern "C" fn hirsel_core_task_bind(context: *const Context) {
         // SAFETY: exclusive scheduler custody permits this worker to run the task.
         unsafe {
             (*context).current.bind();
-            (*context).current.drain();
+            (*context).current.drain_at_bind();
         }
     }
 }

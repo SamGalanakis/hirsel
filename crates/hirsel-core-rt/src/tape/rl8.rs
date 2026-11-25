@@ -343,3 +343,77 @@ fn rl8_one_receiver_at_kinds_0_and_1() {
     rl9(&at_op, 1, &[9]);
     rl9(&at_pump, 1, &[9]);
 }
+
+/// A block whose charge the root's limit paid, moved to another unit's thread.
+struct Foreign(crate::block::Block);
+// SAFETY: sole custody moves to the other unit, whose only operation is the
+// drop, which posts the refund to the paying unit's mailbox.
+unsafe impl Send for Foreign {}
+
+/// A refund another unit posts to this unit's mailbox is taken at the unit's
+/// next drain (arrival tag 9), here the commit of its next event: gap 0 (no
+/// event since the tape began), kind 0, count 1 (the event commit's drain is
+/// the one position reached). The limit ordinals are hand-counted: the run's
+/// root limit is 0 and the root task runs on it, so the first `reserve` makes
+/// 1; dropping it vacates its slot, and the second `reserve` reuses that slot
+/// but is the unit's third record, ordinal 2 ("none is reused"). The amount is
+/// the block's 16-byte charge. The other unit records too, so the post is from
+/// another unit and not recomputed.
+#[test]
+fn rl8_refund_from_another_unit() {
+    let mut store = Store::default();
+    let mut h = header(REVISION);
+    h.kind = KIND_RUN;
+    in_task(true, &mut |context| {
+        // SAFETY: the root task pins the store, its context and its limits.
+        unsafe {
+            let (tape, _) =
+                Tape::open(REVISION, store.dir(), b"t", Mode::Record, &h, &expect()).unwrap();
+            drop((*context).current.reserve(64).unwrap());
+            let child = (*context).current.reserve(64).unwrap();
+            let block = crate::block::Block::paid(
+                &*context,
+                child.payer.get(),
+                Some(16),
+                16,
+                8,
+                crate::block::PLAIN,
+            )
+            .unwrap();
+            let foreign = Foreign(block);
+            std::thread::spawn(move || {
+                let mut other = Store::default();
+                let mut h = header(REVISION);
+                h.kind = KIND_RUN;
+                let mut foreign = Some(foreign);
+                in_task(true, &mut |_| {
+                    let (tape, _) =
+                        Tape::open(REVISION, other.dir(), b"t", Mode::Record, &h, &expect())
+                            .unwrap();
+                    drop(foreign.take());
+                    tape.end(&Ending::returned(&0u32.to_le_bytes())).unwrap();
+                });
+            })
+            .join()
+            .unwrap();
+            crate::tasks::event(crate::tasks::CHECK_CANCEL, 0, 0);
+            drop(child);
+            tape.end(&Ending::returned(&0u32.to_le_bytes())).unwrap();
+        }
+    });
+    let mut body = vec![9, 2];
+    body.extend_from_slice(&16u64.to_le_bytes());
+    let taken: Vec<_> = tape_frames(store.file())
+        .into_iter()
+        .filter_map(|f| match f {
+            Frame::Take {
+                gap,
+                point,
+                count,
+                body,
+            } => Some((gap, point, count, body.bytes().to_vec())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(taken, [(0, Operation, 1, body)]);
+}

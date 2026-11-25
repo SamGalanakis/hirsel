@@ -403,9 +403,9 @@
     "lines": 1051
   },
   "crates/hirsel-core-rt/src/limit.rs": {
-    "lines": 1290,
-    "raise_revision": 3,
-    "reason": "unit-tapes-u3-2553"
+    "lines": 1306,
+    "raise_revision": 4,
+    "reason": "unit-tapes-u3c-2638"
   },
   "crates/hirsel-core-rt/src/net.rs": {
     "lines": 1390,

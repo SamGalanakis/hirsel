@@ -53,6 +53,9 @@ struct Links {
     next_free: Option<NonNull<Slot>>,
     #[cfg(any(test, feature = "testing"))]
     occupied: bool,
+    /// The record's limit ordinal in its unit's recording (recording.md).
+    #[cfg(feature = "record")]
+    ordinal: u64,
 }
 #[repr(C, align(32))]
 pub(crate) struct Slot {
@@ -89,6 +92,8 @@ impl Slot {
                 next_free: None,
                 #[cfg(any(test, feature = "testing"))]
                 occupied: false,
+                #[cfg(feature = "record")]
+                ordinal: 0,
             }),
             pending: AtomicU64::new(0),
             pending_zeros: AtomicUsize::new(0),
@@ -305,6 +310,12 @@ impl Forest {
         {
             r.occupied = true;
         }
+        #[cfg(feature = "record")]
+        {
+            // SAFETY: the domain is set before any slot is initialized.
+            let made = unsafe { &slot.as_ref().domain.as_ref().made };
+            r.ordinal = made.replace(made.get() + 1);
+        }
         Payer(slot)
     }
     fn root(&self, mut payer: Payer) -> Payer {
@@ -432,6 +443,9 @@ struct Domain {
     /// Admitted bytes whose backing storage stays until run teardown.
     run_owned: AtomicU64,
     first: UnsafeCell<Slot>,
+    /// Limit records made so far: the next one's limit ordinal.
+    #[cfg(feature = "record")]
+    made: Cell<u64>,
 }
 #[derive(Clone, Copy)]
 struct Binding {
@@ -754,6 +768,8 @@ impl Funding {
             reap_inboxes: Cell::new(None),
             run_owned: AtomicU64::new(0),
             first: UnsafeCell::new(Slot::vacant(NonNull::dangling(), 0)),
+            #[cfg(feature = "record")]
+            made: Cell::new(0),
         });
         let domain = NonNull::from(Box::leak(domain));
         // SAFETY: nothing refers to this fresh domain yet. The slot and its

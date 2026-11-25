@@ -140,6 +140,40 @@ pub(crate) fn reach(group: Option<Group>) {
     });
 }
 
+thread_local! {
+    /// Set while the scheduler binds a task: its drain is a pump's (kind 1).
+    static BINDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run the scheduler's drain at a task's bind, whose takes are kind 1.
+pub(crate) fn at_bind(drain: impl FnOnce()) {
+    BINDING.set(true);
+    drain();
+    BINDING.set(false);
+}
+
+/// The unit posting a refund now: its recording cell, if it has one.
+pub(crate) fn poster() -> Option<usize> {
+    crate::tasks::current_group().map(|g| ptr::from_ref(g.cell) as usize)
+}
+
+/// A refund another unit posted, taken at this unit's drain: the drained
+/// limit's ordinal and the amount (tag 9). Kind 0 at an in-operation drain,
+/// whose position the drain site reached; kind 1 at a task's bind.
+pub(crate) fn refund(from: usize, ordinal: u64, bytes: u64) {
+    let group = crate::tasks::current_group();
+    if group.is_some_and(|g| ptr::from_ref(g.cell) as usize == from) {
+        // Another task's post in this unit: the replay recomputes it.
+        return;
+    }
+    recording(group, |live| {
+        let mut body = vec![9];
+        put_varint(&mut body, ordinal);
+        body.extend_from_slice(&bytes.to_le_bytes());
+        live.take(point(BINDING.get()), body);
+    });
+}
+
 fn point(pump: bool) -> TakePoint {
     if pump {
         TakePoint::Pump

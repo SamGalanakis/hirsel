@@ -2864,9 +2864,9 @@ fn granted(f: Foreign[laws.Laws]) -> Result[(), ()] {
     let ld = cc.with_file_name("ld.lld");
     let ar = cc.with_file_name("llvm-ar");
     let called = law.path("linker-called");
-    // Clang's dry run still describes the real link, but it selects this
-    // wrapper, so link execution leaves a marker and recipe capture does not.
-    law.write("clang-wrapper", format!("#!/bin/sh\nexec '{}' --ld-path='{}' \"$@\"\n", cc.display(), law.path("ld.lld").display()));
+    // Only link execution leaves a marker; aarch64 takes startup files and libc from the pinned Arm toolchain, not the host.
+    let arm = PathBuf::from(std::env::var_os("HIRSEL_AARCH64_SYSROOT").expect("the pinned AArch64 sysroot"));
+    law.write("clang-wrapper", format!("#!/bin/sh\ncase \"$*\" in *--target={ARM}*) set -- --gcc-toolchain='{}' --sysroot='{}' \"$@\";; esac\nexec '{}' --ld-path='{}' \"$@\"\n", arm.parent().and_then(Path::parent).unwrap().display(), arm.display(), cc.display(), law.path("ld.lld").display()));
     law.write("ld.lld", format!("#!/bin/sh\n: > '{}'\nexec '{}' \"$@\"\n", called.display(), ld.display()));
     for script in ["clang-wrapper", "ld.lld"] {
         fs::set_permissions(law.path(script), fs::Permissions::from_mode(0o755)).unwrap();

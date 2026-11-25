@@ -1,0 +1,110 @@
+; CoreIR sample, family: integer widths (Binary and Compare below 64 bits and at
+; their bounds, SEM-1).
+;
+; Source (package samples@0, module widths), one item per line:
+;   i0  fn shifts(x: i8, n: i8) -> (i8, i8) { (x << n, x >> n) }
+;   i1  fn div8(x: i8, y: i8) -> i8 { x / y }
+;   i2  fn rem8(x: i8, y: i8) -> i8 { x % y }
+;   i3  fn mul32(x: u32, y: u32) -> u32 { x * y }
+;   i4  fn sub32(x: u32, y: u32) -> u32 { x - y }
+;   i5  fn lt8(x: i8, y: i8) -> bool { x < y }
+;   i6  fn shr64(x: u64, n: u64) -> u64 { x >> n }
+;   i7  fn add16(x: i16, y: i16) -> i16 { x + y }
+;   i8  fn min8(x: i8, y: i8) -> i8 { int.min(x, y) }
+;
+; Behaviour, derived by hand (BinaryOp: Overflow on an out-of-range result, on
+; signed MIN / -1 and on a shift count outside 0..width; Division on a zero
+; divisor; MIN rem -1 is 0):
+; run: f0(-64, 1) -> -128, -32       ; 0xc0 << 1 is 0x80 at i8; >> keeps the sign
+; run: f0(1, 7) -> -128, 0
+; run: f0(1, 8) -> fail Overflow     ; a count of the width
+; run: f0(1, -1) -> fail Overflow    ; the count is -1, not 255
+; run: f1(-128, -1) -> fail Overflow ; 128 is no i8, though it is an i64
+; run: f1(-128, 2) -> -64
+; run: f1(-7, 2) -> -3               ; toward zero
+; run: f2(-128, -1) -> 0
+; run: f2(-7, 2) -> -1               ; the dividend's sign
+; run: f2(1, 0) -> fail Division
+; run: f3(65536, 65535) -> 4294901760
+; run: f3(65536, 65536) -> fail Overflow ; 2^32 is no u32, though it is a u64
+; run: f4(2, 1) -> 1
+; run: f4(1, 2) -> fail Overflow
+; run: f5(-1, 0) -> true             ; as i8 values, not as the bytes 0xff and 0
+; run: f5(127, -128) -> false
+; run: f6(18446744073709551615, 63) -> 1
+; run: f6(1, 64) -> fail Overflow
+; run: f7(32767, 1) -> fail Overflow
+; run: f7(-32768, -1) -> fail Overflow
+; run: f7(-1, -1) -> -2
+; run: f8(-1, 1) -> -1               ; signed: the byte 0xff is the lesser
+core v1
+item i0 = samples@0/widths/shifts
+item i1 = samples@0/widths/div8
+item i2 = samples@0/widths/rem8
+item i3 = samples@0/widths/mul32
+item i4 = samples@0/widths/sub32
+item i5 = samples@0/widths/lt8
+item i6 = samples@0/widths/shr64
+item i7 = samples@0/widths/add16
+item i8 = samples@0/widths/min8
+sig g0 = (i8, i8) -> (i8, i8)
+sig g1 = (i8, i8) -> (i8)
+sig g2 = (u32, u32) -> (u32)
+sig g3 = (i8, i8) -> (bool)
+sig g4 = (u64, u64) -> (u64)
+sig g5 = (i16, i16) -> (i16)
+inst n0 = samples@0/widths/shifts [] []
+inst n1 = samples@0/widths/div8 [] []
+inst n2 = samples@0/widths/rem8 [] []
+inst n3 = samples@0/widths/mul32 [] []
+inst n4 = samples@0/widths/sub32 [] []
+inst n5 = samples@0/widths/lt8 [] []
+inst n6 = samples@0/widths/shr64 [] []
+inst n7 = samples@0/widths/add16 [] []
+inst n8 = samples@0/widths/min8 [] []
+fn f0 = n0 g0 {
+b0(v0: i8, v1: i8):
+  v2: i8 = shl v0, v1
+  v3: i8 = shr v0, v1
+  return v2, v3
+}
+fn f1 = n1 g1 {
+b0(v0: i8, v1: i8):
+  v2: i8 = div v0, v1
+  return v2
+}
+fn f2 = n2 g1 {
+b0(v0: i8, v1: i8):
+  v2: i8 = rem v0, v1
+  return v2
+}
+fn f3 = n3 g2 {
+b0(v0: u32, v1: u32):
+  v2: u32 = mul v0, v1
+  return v2
+}
+fn f4 = n4 g2 {
+b0(v0: u32, v1: u32):
+  v2: u32 = sub v0, v1
+  return v2
+}
+fn f5 = n5 g3 {
+b0(v0: i8, v1: i8):
+  v2: bool = lt v0, v1
+  return v2
+}
+fn f6 = n6 g4 {
+b0(v0: u64, v1: u64):
+  v2: u64 = shr v0, v1
+  return v2
+}
+fn f7 = n7 g5 {
+b0(v0: i16, v1: i16):
+  v2: i16 = add v0, v1
+  return v2
+}
+fn f8 = n8 g1 {
+b0(v0: i8, v1: i8):
+  v2: i8 = min v0, v1
+  return v2
+}

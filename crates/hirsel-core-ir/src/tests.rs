@@ -56,6 +56,8 @@ const SAMPLES: &[(&str, &str)] = &[
     ("kernel", include_str!("../samples/kernel.core")),
     ("isolate", include_str!("../samples/isolate.core")),
     ("log", include_str!("../samples/log.core")),
+    ("steps", include_str!("../samples/steps.core")),
+    ("int-widths", include_str!("../samples/int-widths.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {

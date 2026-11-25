@@ -22,6 +22,7 @@ mod blocks;
 mod chan;
 mod conn;
 mod crc;
+mod field_steps;
 mod flat;
 mod footprint;
 mod frame;
@@ -57,7 +58,7 @@ mod net;
 mod net_tests;
 #[cfg(test)]
 mod tests;
-pub use pure::{Engine, PureInput, PureRun, run_pure};
+pub use pure::{Engine, PureInput, PureModule, PureRun, run_pure};
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -854,7 +855,8 @@ enum At {
 
 struct Machine<'m, H = WorldHost<'m>> {
     m: &'m Module,
-    recipes: Vec<RecipeRow>,
+    /// The module's layouts; a pure run borrows its [`PureModule`]'s.
+    recipes: std::borrow::Cow<'m, [RecipeRow]>,
     mem: Blocks,
     root: Option<Limit>,
     next_step_bound: u64,
@@ -1860,7 +1862,7 @@ fn cause(r: RaiseCause) -> &'static str {
 impl<'m, H: Host<'m>> Machine<'m, H> {
     fn with_host(
         m: &'m Module,
-        recipes: Vec<RecipeRow>,
+        recipes: std::borrow::Cow<'m, [RecipeRow]>,
         limit: u64,
         input: &Core<'_>,
         host: H,
@@ -2065,7 +2067,7 @@ impl<'m> Machine<'m> {
             task_stack_peak: 0,
             task_call_depth: 0,
         };
-        Machine::with_host(m, recipes, limit, &input.core, host)
+        Machine::with_host(m, recipes.into(), limit, &input.core, host)
     }
 
     /// What a parked task's slot holds while its baton runs elsewhere.
@@ -2073,7 +2075,7 @@ impl<'m> Machine<'m> {
         Machine {
             next_step_bound: 1,
             m: self.m,
-            recipes: Vec::new(),
+            recipes: std::borrow::Cow::Borrowed(&[]),
             mem: Blocks::default(),
             root: None,
             peak_reserved: 0,
@@ -4309,8 +4311,12 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     }
 
     fn load(&self, p: u64, n: usize) -> u64 {
+        let bytes = self.get(p, n);
+        if n == 8 {
+            return u64::from_le_bytes(bytes.try_into().unwrap());
+        }
         let mut x = [0u8; 8];
-        x[..n].copy_from_slice(self.get(p, n));
+        x[..n].copy_from_slice(bytes);
         u64::from_le_bytes(x)
     }
     fn put(&mut self, p: u64, bytes: &[u8]) {
@@ -4335,7 +4341,17 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         (b, o)
     }
     fn store(&mut self, p: u64, n: usize, v: u64) {
-        self.put(p, &v.to_le_bytes()[..n]);
+        if !matches!(n, 1 | 2 | 4 | 8) {
+            return self.put(p, &v.to_le_bytes()[..n]);
+        }
+        let (b, o) = self.check_write(p, n);
+        let bytes = &mut self.mem[b].bytes[o..o + n];
+        match n {
+            8 => bytes.copy_from_slice(&v.to_le_bytes()),
+            4 => bytes.copy_from_slice(&(v as u32).to_le_bytes()),
+            2 => bytes.copy_from_slice(&(v as u16).to_le_bytes()),
+            _ => bytes[0] = v as u8,
+        }
     }
     /// A producer's read of `n` bytes at `p` (`read`, or `copy` from `p`) must not
     /// touch a slot marked empty. Marked slots do not overlap, so walking back from
@@ -4364,9 +4380,18 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             self.read_marked(p, n);
         }
         assert!(blk.live, "use of a freed block");
-        let mut x = [0u8; 8];
-        x[..n].copy_from_slice(&blk.bytes[o..o + n]);
-        u64::from_le_bytes(x)
+        let bytes = &blk.bytes[o..o + n];
+        match n {
+            8 => u64::from_le_bytes(bytes.try_into().unwrap()),
+            4 => u64::from(u32::from_le_bytes(bytes.try_into().unwrap())),
+            2 => u64::from(u16::from_le_bytes(bytes.try_into().unwrap())),
+            1 => u64::from(bytes[0]),
+            _ => {
+                let mut x = [0u8; 8];
+                x[..n].copy_from_slice(bytes);
+                u64::from_le_bytes(x)
+            }
+        }
     }
     /// `mark`: a put (`live`) needs a slot not marked live, a take (`empty`) one not
     /// marked empty. An unmarked slot may be either (storage a `List` handed over).
@@ -5655,36 +5680,6 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             p += off;
         }
         Ok((p, at))
-    }
-
-    /// The offset of field `field` of `t` (of its case `case`, for a variant) and
-    /// what the field holds.
-    fn field_step(&self, t: TypeRef, case: Option<u32>, field: u32) -> (u64, At) {
-        let (variant, cases) = self.field_steps[t.index()].get_or_init(|| {
-            let (shape, fixed) = (self.shape(t), self.fixed(t));
-            let cases: Vec<Option<u32>> = match &shape.body {
-                Shaped::Record(_) => vec![None],
-                Shaped::Variant(c) => (0..c.len() as u32).map(Some).collect(),
-            };
-            let steps = cases
-                .iter()
-                .enumerate()
-                .map(|(k, &case)| {
-                    let fields = shape.fields(case).unwrap().iter();
-                    fields
-                        .enumerate()
-                        .map(|(i, f)| (fixed.offsets[k][i], self.at_field(&f.ty)))
-                        .collect()
-                })
-                .collect();
-            (matches!(shape.body, Shaped::Variant(_)), steps)
-        });
-        assert_eq!(
-            *variant,
-            case.is_some(),
-            "a field step names no case of its type"
-        );
-        cases[case.unwrap_or(0) as usize][field as usize]
     }
 
     fn load_vector(&self, ptr: u64, len: usize) -> [u8; 32] {

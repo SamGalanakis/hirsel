@@ -57,14 +57,37 @@ impl Default for PureInput {
     }
 }
 
+/// A module ready for pure runs: its layouts, its layout constants resolved to
+/// them (`native_layout::resolve`) and its items' sites. A compiler evaluating
+/// constants prepares its module once and runs each initializer against it.
+pub struct PureModule<'a> {
+    module: std::borrow::Cow<'a, Module>,
+    recipes: Vec<RecipeRow>,
+    sites: Vec<u64>,
+}
+
+impl<'a> PureModule<'a> {
+    pub fn new(m: &'a Module) -> Self {
+        let recipes = compute(&m.types).expect("layouts");
+        let module = hirsel_core_ir::native_layout::resolve(m, &recipes);
+        let sites = hirsel_core_ir::source::module_sites(&module);
+        Self {
+            module,
+            recipes,
+            sites,
+        }
+    }
+}
+
 /// Run `f` on the pure core alone: no scheduler, threads, network or provider,
 /// so a world operation or handle stops the run.
-pub fn run_pure(m: &Module, f: FuncId, args: &[u64], input: PureInput) -> PureRun {
+pub fn run_pure(m: &PureModule<'_>, f: FuncId, args: &[u64], input: PureInput) -> PureRun {
     let core = Core {
         checks: input.checks,
         activations: input.activations,
         flat: input.engine == Engine::Flat,
         map_hash_key: input.map_hash_key,
+        sites: &m.sites,
         ..Core::default()
     };
     let limit = input.limit;
@@ -78,10 +101,15 @@ pub fn run_pure(m: &Module, f: FuncId, args: &[u64], input: PureInput) -> PureRu
     })
 }
 
-fn pure_root(m: &Module, f: FuncId, args: &[u64], limit: u64, core: &Core<'_>) -> PureRun {
-    let recipes = compute(&m.types).expect("layouts");
-    let native = hirsel_core_ir::native_layout::resolve(m, &recipes);
-    let m = native.as_ref();
+fn pure_root(
+    prepared: &PureModule<'_>,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    core: &Core<'_>,
+) -> PureRun {
+    let m = prepared.module.as_ref();
+    let recipes = std::borrow::Cow::Borrowed(prepared.recipes.as_slice());
     let mut mach = Machine::with_host(m, recipes, limit, core, Pure);
     mach.install_statics();
     mach.install_descriptors(None);

@@ -114,6 +114,14 @@ const SAMPLES: &[(&str, &str)] = &[
         include_str!("../../hirsel-core-ir/samples/isolate.core"),
     ),
     ("log", include_str!("../../hirsel-core-ir/samples/log.core")),
+    (
+        "steps",
+        include_str!("../../hirsel-core-ir/samples/steps.core"),
+    ),
+    (
+        "int-widths",
+        include_str!("../../hirsel-core-ir/samples/int-widths.core"),
+    ),
 ];
 
 fn load(name: &str, text: &str) -> Module {
@@ -295,6 +303,7 @@ fn samples_behave_as_derived_by_hand() {
             // and the flat engine runs it exactly as the tree walker does, with
             // the test-mode checks off and on.
             if injection.is_none() && argv.is_empty() {
+                let prepared = eval::PureModule::new(&m);
                 let pure = |checks, engine| {
                     let input = eval::PureInput {
                         limit,
@@ -303,7 +312,7 @@ fn samples_behave_as_derived_by_hand() {
                         map_hash_key: Some([0x5a; 16]),
                         ..eval::PureInput::default()
                     };
-                    eval::run_pure(&m, f, &args, input)
+                    eval::run_pure(&prepared, f, &args, input)
                 };
                 let tree = pure(false, eval::Engine::Tree);
                 if !matches!(

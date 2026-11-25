@@ -11,7 +11,7 @@ use hirsel_core_ir::{FuncId, Module};
 type Facts = (u64, u64, u64, u64, Vec<String>, Option<Vec<u8>>);
 
 fn run(
-    module: &Module,
+    module: &eval::PureModule<'_>,
     f: FuncId,
     args: &[u64],
     engine: eval::Engine,
@@ -42,8 +42,9 @@ fn run(
 }
 
 pub(super) fn agree(module: &Module, f: FuncId, args: &[u64], call: &str) -> Option<String> {
-    let tree = run(module, f, args, eval::Engine::Tree);
-    let flat = run(module, f, args, eval::Engine::Flat);
+    let module = eval::PureModule::new(module);
+    let tree = run(&module, f, args, eval::Engine::Tree);
+    let flat = run(&module, f, args, eval::Engine::Flat);
     (flat != tree)
         .then(|| format!("run {call}: the flat engine gave {flat:?}, the tree walker {tree:?}"))
 }

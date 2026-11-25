@@ -13,7 +13,12 @@
 // two rotations, and the second cut used to delete it), 'w' one commit that
 // swaps two rows' values (a Unique key changes owner within the tail), 'b' a
 // rewrite of every row, a tail far over a hundredth of the store, which renews
-// the export, and the child ships a fresh PREPARED that replaces the kept one.
+// the export, and the child ships a fresh PREPARED that replaces the kept one,
+// 'u' (with OLD's by_v left Backfilling near its end at the export) two build
+// chunks of OLD's upkeep under the lease with a write between them to a row
+// the first chunk indexed: the round ships the chunks as STEPS, the third
+// 'u' finishes OLD's build, and after every round the child's copy of OLD is
+// OLD at the cut, catalog and by_v's entries alike.
 //
 // AP21 at the install reads only the packs the install cut writes (C-7's
 // settled packs), and every cut under the export lease reads back the packs it
@@ -249,7 +254,34 @@ fn lcu_import_leaf(db: Db) -> Result[std.page.PagePtr, DeployError] {
     }
 }
 
+// Row 3992 + 4 * n is the first row the n-th 'u' round's first chunk builds:
+// the case built 3992 rows before the first round (3990 before the export,
+// two while the child prepares), and each round builds four.
+fn lcu_build_round(mut db: Db, t: Table[u64, u64], n: u64, mut next_value: u64, mut model: List[Option[u64]]) -> Result[(), Error] waits {
+    let _ = index_build_step(mut db, 2)?
+    next_value += 1
+    let k = 3992 + 4 * n
+    lix_write(mut db, t, k, Some(next_value))?
+    model[k] = Some(next_value)
+    let _ = index_build_step(mut db, 2)?
+    Ok(())
+}
+
+// The child's copy of OLD after a round is OLD at the round's cut.
+fn lcu_mirrors(db: Db, source: Preparation, by_v: u32) -> Result[(), DeployError] {
+    if list.len(deploy_result(catalog_changes(source.db.heads[0].roots, db.heads[0].roots))?) != 0 {
+        fail("L-IX catch-up: the child's catalog is not OLD's at the cut")
+    }
+    if deploy_result(lix_entries(source.db, by_v))? != deploy_result(lix_entries(db, by_v))? {
+        fail("L-IX catch-up: the child's by_v entries are not OLD's at the cut")
+    }
+    Ok(())
+}
+
 fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String, unique: bool, backfilling: bool, duplicate: bool, damage: LcuDamage) -> Result[(), DeployError] waits {
+    let building = std.list.any(string.as_bytes(rounds), fn(b: u8) -> bool {
+        b == 117u8
+    })
     let directory = disk_test_directory(d)
     let scratch = disk_test_directory(d)
     let options = disk_crash_options("install")
@@ -289,20 +321,37 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
         let _ = deploy_result(seal(mut db, take declaration))?
         deploy_result(rebuild_index(mut db, ix))?
         let _ = deploy_result(index_build_step(mut db, 1000))?
+        if building {
+            let _ = deploy_result(index_build_step(mut db, 2990))?
+        }
     }
     let _ = deploy_result(checkpoint(mut db))?
     let attempt = install_fixture_bytes(16u64, 7u8)
     let first = begin_export_copy(mut db, scratch, deploy_result(copied(attempt))?, 1u64)?
     let mut exported = export_copy(take first)?
+    if building {
+        // A chunk while the child prepares, before PREPARED is kept: the
+        // first round ships it and rebases the kept delta past it.
+        let _ = deploy_result(index_build_step(mut db, 2))?
+    }
     let mut source = open_export(exported.dir, c, attempt, options)?
     let (take initial_staged, by_v, by_id) = deploy_result(lcu_stage(source, tasks, unique))?
     let mut staged = take initial_staged
     let mut digest = lcu_ship(mut db, mut source, staged, exported.dir)?
     let mut state = seed
     let mut next_value = 1000000u64
+    let mut built = 0u64
     for code_byte in string.as_bytes(rounds) {
         state = lix_next(state)
-        deploy_result(lcu_round(mut db, t, code_byte, state, mut next_value, mut model))?
+        if code_byte == 117u8 {
+            deploy_result(lcu_build_round(mut db, t, built, mut next_value, mut model))?
+            built += 1
+            if built == 3 && !deploy_result(lcu_public(db, by_v))? {
+                fail("L-IX catch-up: the third build round finishes OLD's by_v")
+            }
+        } else {
+            deploy_result(lcu_round(mut db, t, code_byte, state, mut next_value, mut model))?
+        }
         match advance_export(mut db, scratch, attempt)? {
             Tail(take tail) => {
                 if code_byte == 98u8 {
@@ -315,6 +364,9 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
                 // 'c' round's tail spans segments.
                 if code_byte == 99u8 && source.stamp.terminal <= from_segment {
                     fail("L-IX catch-up: a checkpointed round crosses a rotation")
+                }
+                if building {
+                    lcu_mirrors(db, source, by_v)?
                 }
                 let checked = validate_round(exported.dir)?
                 let _ = apply_round(mut db, take checked)?
@@ -420,6 +472,7 @@ fn test_index_catch_up_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
         lcu_case(d, c, r, tasks, seed * 7919 + 3, "swbs", true, false, false, Undamaged)?
         lcu_case(d, c, r, tasks, seed * 7919 + 4, "cs", false, true, false, Undamaged)?
     }
+    lcu_case(d, c, r, tasks, 7, "uuus", false, true, false, Undamaged)?
     lcu_case(d, c, r, tasks, 5, "s", true, false, true, Undamaged)?
     lcu_case(d, c, r, tasks, 6, "sc", false, false, false, SettledLeaf)?
     lcu_case(d, c, r, tasks, 7, "s", true, false, false, CheckpointPack)

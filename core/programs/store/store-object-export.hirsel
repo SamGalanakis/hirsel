@@ -38,7 +38,9 @@ fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: HistoryR
     let (outlet, incoming): (Sender[Result[Bytes, Error]], Receiver[Result[Bytes, Error]]) = channel.new(1)
     let request = ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet)
     if let Ok(()) = channel.send(plan.journal, ObjectExportRead(take request)) {
-        if let Ok(take observed) = channel.receive(incoming) { return take observed }
+        if let Ok(take observed) = channel.receive(incoming) {
+            return take observed
+        }
     }
     health_result(latest.read(plan.health))?
     Error(Io(Closed))
@@ -66,6 +68,7 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
     write_disk(mut db.disk, (take lifetime, take held), scoped fn(mut state: DiskState, take grant: (Sender[()], Arc[ExportLease])) {
         let (take sending, take lease) = take grant
         state.lease = Some(take lease)
+        state.steps = list.new()
         if let Some(mut object_writer) = state.object {
             object_writer.export_lifetime = Some(take sending)
         }
@@ -76,8 +79,13 @@ fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Byt
 fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: ExportInto, take attempt: Bytes, wanted: Option[u64], take stop: Receiver[()]) -> Result[ExportCopy, DeployError] waits {
     let head = lane.register.head
     // A backup (no activation) takes the activation the head has.
-    let activation = match wanted { Some(given) => given, None => head.activation }
-    if activation != head.activation { return Error(Drift) }
+    let activation = match wanted {
+        Some(given) => given,
+        None => head.activation
+    }
+    if activation != head.activation {
+        return Error(Drift)
+    }
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
     deploy_result(history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due))?
     let (take mark, _) = deploy_result(history_checkpoint(mut lane.client, head, due))?
@@ -89,7 +97,9 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
         let mut names: Map[String, ()] = map.new()
         live_reclaim_name(mut names, "m-", mark.manifest)?
         live_reclaim_name(mut names, "e-", head.checkpoint)?
-        for chunk in locator.chunks { live_reclaim_name(mut names, "l-", chunk)? }
+        for chunk in locator.chunks {
+            live_reclaim_name(mut names, "l-", chunk)?
+        }
         for (_, item) in locator.rows {
             list.push(mut packs, item)
             live_reclaim_name(mut names, "p-", item)?
@@ -104,11 +114,15 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
     let mut journal_end = 72u64
     for item in history_entries {
         let key = history_key("e-", item)
-        if item.len < 128 { return Error(Store(disk_fault(key, 112, Truncated))) }
+        if item.len < 128 {
+            return Error(Store(disk_fault(key, 112, Truncated)))
+        }
         deploy_result(history_range(mut lane.client, key, item, 112, 128, mut lane.buffers.compare, due))?
         let frame = deploy_result(disk_read_frame_head(key, lane.buffers.compare, 112))?
         if frame.kind != 0x0040 {
-            let Some(total) = int.checked_add(journal_end, item.len - 112) else { return Error(Store(Limit(Value))) }
+            let Some(total) = int.checked_add(journal_end, item.len - 112) else {
+                return Error(Store(Limit(Value)))
+            }
             journal_end = total
         }
     }
@@ -133,7 +147,9 @@ fn object_export_file(plan: ObjectExportCopy, to: Dir, id: StoreId, lead: String
     let ctx = deploy_result(history_object_context(key, id, role, reference, raw))?
     deploy_result(history_object_digest(key, reference, raw))?
     let header = deploy_result(capacity(disk_header_bytes(ctx, 0, 0)))?
-    for i in 0u64 .. 72 { raw[i] = header[i] }
+    for i in 0u64 .. 72 {
+        raw[i] = header[i]
+    }
     scratch_result(disk_write_synced(to, local, raw))
 }
 
@@ -173,7 +189,9 @@ fn object_export_copy(plan: ObjectExportCopy, to: Dir, stamp: ExportStamp) -> Re
         }
         export_write(mut output, list.slice(raw, 112, item.len))?
     }
-    if offset != stamp.end { return Error(ExportMismatch) }
+    if offset != stamp.end {
+        return Error(ExportMismatch)
+    }
     scratch_result(disk_io(host.sync(mut output)))?
     scratch_result(disk_io(host.close(take output)))
 }

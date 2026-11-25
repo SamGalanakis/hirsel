@@ -24,6 +24,211 @@ type ExportLease: shareable + send {
     activation: u64
 }
 
+// A schema commit main published under the lease (§3.5a "Catch-up"): an
+// index build chunk or a verify demotion. A schema commit writes no journal
+// frame, so the round ships it as a step the child replays between the
+// tail's commits.
+type LeaseStep {
+    version: u64,
+    before: Roots,
+    after: Roots
+}
+
+// A step as the round ships it: the catalog records and collection rows the
+// commit changed, each with the prior its journal op would carry.
+type ExportStep: codec + send {
+    version: u64,
+    catalog: List[StepOp],
+    rows: List[StepOp]
+}
+
+type StepOp: codec + send {
+    key: Bytes,
+    value: Option[Bytes],
+    prior: u32
+}
+
+// STEPS's first frame: the round it belongs to and how many steps follow.
+type StepsMeta: codec + send {
+    head: u64,
+    terminal: u64,
+    end: u64,
+    steps: u64
+}
+
+// A step as the child's replay applies it.
+type ReplayStep {
+    version: u64,
+    catalog: List[JournalOp],
+    rows: List[JournalOp]
+}
+
+const STEPS_ROLE: u8 = 10
+
+// Main's roots before a cut that moves main's head under the lease.
+fn leased_step_base(db: Db, delta: HolderDelta) -> Option[Roots] {
+    if !export_leased(db) {
+        return None
+    }
+    if let ReplaceMain(main, _) = delta {
+        if main.head != db.heads[0u64].head {
+            return Some(share_roots(db.heads[0u64].roots))
+        }
+    }
+    None
+}
+
+fn record_leased_step(mut db: Db, take base: Option[Roots]) {
+    let Some(take before) = take base else {
+        return ()
+    }
+    let step = LeaseStep(version: db.heads[0u64].head, before: take before, after: share_roots(db.heads[0u64].roots))
+    write_disk(mut db.disk, take step, scoped fn(mut state: DiskState, take published: LeaseStep) {
+        list.push(mut state.steps, take published)
+    })
+}
+
+// A step the child can replay changes only the build state of index records
+// and the entries of those indexes. Anything else (a merge into main, a
+// stream or keyed change) is Drift: the deploy needs a fresh preparation.
+fn export_step(step: LeaseStep) -> Result[ExportStep, DeployError] {
+    if tree_stamp(step.before.streams) != tree_stamp(step.after.streams) || list.len(step.before.keyed) != list.len(step.after.keyed) {
+        return Error(Drift)
+    }
+    for slot in 0u64 .. list.len(step.before.keyed) {
+        if tree_stamp(step.before.keyed[slot]) != tree_stamp(step.after.keyed[slot]) {
+            return Error(Drift)
+        }
+    }
+    let moved = deploy_result(catalog_changes(step.before, step.after))?
+    let mut ids: List[u32] = list.new()
+    let mut catalog: List[StepOp] = list.with_capacity(list.len(moved))
+    for take change in take moved {
+        let CatalogChange(key: take key, before: take was, after: take now) = take change
+        let (Some(take prior_raw), Some(take raw)) = (take was, take now) else {
+            return Error(Drift)
+        }
+        let moved_id = deploy_result(state_move(prior_raw, raw))?
+        let Some(id) = moved_id else {
+            return Error(Drift)
+        }
+        list.push(mut ids, id)
+        list.push(mut catalog, StepOp(key: take key, value: Some(take raw), prior: stored_prior(Some(view prior_raw))))
+    }
+    let changed = deploy_result(compare_page_collections(step.before.collections, step.after.collections))?
+    if list.len(changed.trimmed) != 0 || list.len(changed.bounds) != 0 {
+        return Error(Drift)
+    }
+    let mut rows: List[StepOp] = list.with_capacity(list.len(changed.rows))
+    for row in changed.rows {
+        if list.len(row.tree_key) < 4 {
+            return Error(Drift)
+        }
+        let owner: u32 = list.word_be(row.tree_key, 0)
+        let mut moved_owner = false
+        for id in ids {
+            if id == owner {
+                moved_owner = true
+            }
+        }
+        if !moved_owner {
+            return Error(Drift)
+        }
+        let value: Option[Bytes] = match row.value {
+            Some(raw) => Some(deploy_result(copied(raw))?),
+            None => None,
+        }
+        let prior = stored_prior(get_page_row(step.before.collections, row.tree_key))
+        list.push(mut rows, StepOp(key: deploy_result(copied(row.tree_key))?, value: take value, prior: prior))
+    }
+    Ok(ExportStep(version: step.version, catalog: take catalog, rows: take rows))
+}
+
+// The index id when `before` and `after` are the same index record in
+// different build states, else None.
+fn state_move(before: Bytes, after: Bytes) -> Result[Option[u32], Error] {
+    let mut was = decode_catalog(before)?
+    let mut now = decode_catalog(after)?
+    if was.kind != 2u8 || now.kind != 2u8 {
+        return Ok(None)
+    }
+    let id = now.id
+    was.state = Public
+    now.state = Public
+    if encode_catalog(was)? != encode_catalog(now)? {
+        return Ok(None)
+    }
+    Ok(Some(id))
+}
+
+fn step_bytes(steps: List[ExportStep]) -> u64 {
+    let mut total = 0u64
+    for step in steps {
+        for op in step.catalog {
+            total = int.saturating_add(total, op_bytes(op))
+        }
+        for op in step.rows {
+            total = int.saturating_add(total, op_bytes(op))
+        }
+    }
+    total
+}
+
+fn op_bytes(op: StepOp) -> u64 {
+    let value = match op.value {
+        Some(raw) => list.len(raw),
+        None => 0u64,
+    }
+    16u64 + list.len(op.key) + value
+}
+
+// Writes STEPS: the meta frame, then one frame per step.
+fn write_steps(to: Dir, id: StoreId, stamp: ExportStamp, steps: List[ExportStep]) -> Result[(), Error] waits {
+    let ctx = DiskContext(store: id, role: STEPS_ROLE, seq: stamp.head)
+    let mut file = open_frames(to, "STEPS", ctx)?
+    let meta_codec: std.codec.Codec[StepsMeta] = std.codec.of()
+    write_prepared_frame(mut file, 0x0088, meta_codec, StepsMeta(head: stamp.head, terminal: stamp.terminal, end: stamp.end, steps: list.len(steps)))?
+    let step_codec: std.codec.Codec[ExportStep] = std.codec.of()
+    for step in steps {
+        write_prepared_frame(mut file, 0x0089, step_codec, step)?
+    }
+    finish_frames(take file)
+}
+
+// Reads the round's STEPS, which OLD wrote for `stamp` before EXPORT.
+fn read_steps(d: Dir, stamp: ExportStamp) -> Result[List[ReplayStep], DeployError] waits {
+    let mut file = scratch_result(disk_io(host.open(d, "STEPS", Read)))?
+    let header = scratch_result(prepared_read(mut file, 72u64))?
+    let head = deploy_result(disk_read_header("STEPS", header, STEPS_ROLE, None, None))?
+    if head.context.store.hi != stamp.store_hi || head.context.store.lo != stamp.store_lo || head.context.seq != stamp.head {
+        return Error(ExportMismatch)
+    }
+    let mut input = PreparedInput(file: take file, ctx: head.context, offset: 72u64, digest: std.sha256.start())
+    let meta_codec: std.codec.Codec[StepsMeta] = std.codec.of()
+    let meta = prepared_frame(mut input, 0x0088, meta_codec)?
+    if meta.head != stamp.head || meta.terminal != stamp.terminal || meta.end != stamp.end {
+        return Error(ExportMismatch)
+    }
+    let step_codec: std.codec.Codec[ExportStep] = std.codec.of()
+    let mut steps: List[ReplayStep] = list.with_capacity(order.min(meta.steps, 65536u64))
+    for _ in 0u64 .. meta.steps {
+        let ExportStep(version: at, catalog: take catalog, rows: take rows) = prepared_frame(mut input, 0x0089, step_codec)?
+        list.push(mut steps, ReplayStep(version: at, catalog: replay_ops(take catalog), rows: replay_ops(take rows)))
+    }
+    let PreparedInput(file: take done, ..) = take input
+    scratch_result(disk_io(host.close(take done)))?
+    Ok(take steps)
+}
+
+fn replay_ops(take ops: List[StepOp]) -> List[JournalOp] {
+    let mut out: List[JournalOp] = list.with_capacity(list.len(ops))
+    for take op in take ops {
+        let StepOp(key: take key, value: take value, prior: prior) = take op
+        list.push(mut out, JournalOp(key: take key, value: take value, prior: prior, trim: None))
+    }
+    take out
+}
+
 pub type Exported: send {
     dir: Dir,
     name: String,
@@ -216,6 +421,7 @@ fn begin_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation
     let job = ExportCopy(source: ExportLog(from, take raw), into: take into, stamp: take stamp, lease: arc.share(lease))
     write_disk(mut db.disk, take lease, scoped fn(mut state: DiskState, take held: Arc[ExportLease]) {
         state.lease = Some(take held)
+        state.steps = list.new()
     })
     Ok(take job)
 }
@@ -246,7 +452,8 @@ pub opaque type ExportTail: send {
     from: Dir,
     stamp: ExportStamp,
     terminal: u64,
-    end: u64
+    end: u64,
+    steps: List[ExportStep]
 }
 
 pub type ExportRound: send = Tail(ExportTail) | Full(ExportCopy)
@@ -255,7 +462,8 @@ pub type ExportRound: send = Tail(ExportTail) | Full(ExportCopy)
 // durable barrier; the lease moves to the new head under the same attempt.
 // A tail over a hundredth of the resident bytes would touch more than about
 // N/100 leaves, where a fresh full export is cheaper than the replay (M5),
-// so the round releases the lease and begins a full copy instead.
+// so the round releases the lease and begins a full copy instead. The schema
+// commits main published since the lease last moved count with the tail.
 pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[ExportRound, DeployError] waits {
     deploy_result(healthy(db))?
     if !is_disk(db) || object_writer_open(db) {
@@ -274,7 +482,15 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
         return Error(Drift)
     }
     let from = deploy_result(log_directory(db))?
-    let tail = deploy_result(tail_bytes(from, db.store, lease.terminal, lease.end, db.file_seq, db.file_end))?
+    let leased_steps = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> List[LeaseStep] {
+        replace(mut state.steps, list.new())
+    })
+    let mut steps: List[ExportStep] = list.with_capacity(list.len(leased_steps))
+    for step in leased_steps {
+        list.push(mut steps, export_step(step)?)
+    }
+    let journaled = deploy_result(tail_bytes(from, db.store, lease.terminal, lease.end, db.file_seq, db.file_end))?
+    let tail = int.saturating_add(journaled, step_bytes(steps))
     if tail > db.resident / 100 {
         release_export(mut db, attempt)
         let renewed = begin_copy(mut db, Scratch(scratch), deploy_result(copied(attempt))?, Some(lease.activation))?
@@ -285,8 +501,11 @@ pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[Export
     let kept = ExportLease(attempt: deploy_result(copied(attempt))?, packs: take packs, collections: share_page_tree(db.heads[0].roots.collections), first: lease.first, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
     write_disk(mut db.disk, arc.new(take kept), scoped fn(mut state: DiskState, take advanced: Arc[ExportLease]) {
         state.lease = Some(take advanced)
+        if let Some(mut kept_import) = state.imported {
+            rebase_kept_delta(mut kept_import, steps)
+        }
     })
-    Ok(Tail(ExportTail(from: from, stamp: take stamp, terminal: lease.terminal, end: lease.end)))
+    Ok(Tail(ExportTail(from: from, stamp: take stamp, terminal: lease.terminal, end: lease.end, steps: take steps)))
 }
 
 // The journal bytes from `end` of segment `terminal` through `final_end` of
@@ -319,11 +538,12 @@ fn segment_boundary(from: Dir, id: StoreId, seq: u64, final_seq: u64, final_end:
     }
 }
 
-// Appends the tail to the export directory, then rewrites EXPORT with the
-// round's stamp: the rest of the previous terminal segment, every segment a
-// rotation started, and the new terminal segment through its end.
+// Appends the tail to the export directory, writes the round's STEPS, then
+// rewrites EXPORT with the round's stamp: the rest of the previous terminal
+// segment, every segment a rotation started, and the new terminal segment
+// through its end.
 pub fn copy_export_tail(take tail: ExportTail, to: Dir) -> Result[u64, DeployError] waits {
-    let ExportTail(from: from, stamp: take stamp, terminal: terminal, end: end) = take tail
+    let ExportTail(from: from, stamp: take stamp, terminal: terminal, end: end, steps: take steps) = take tail
     let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     let mut total = 0u64
     let mut seq = terminal
@@ -342,6 +562,7 @@ pub fn copy_export_tail(take tail: ExportTail, to: Dir) -> Result[u64, DeployErr
         }
         seq += 1
     }
+    scratch_result(write_steps(to, id, stamp, steps))?
     let raw_stamp = scratch_result(export_bytes(stamp))?
     scratch_result(disk_write_synced(to, "EXPORT", raw_stamp))?
     scratch_result(disk_io(host.sync_dir(to)))?
@@ -408,7 +629,7 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     let initial = deploy_result(capacity(manifest_state(decoded_packs.manifest, decoded_packs.all)))?
     list.clear(mut decoded_packs.all)
     let replay = deploy_result(journal_replay(take initial, decoded_packs.manifest.next_stamp - 1))?
-    let replayed = deploy_result(replay_export(d, id, decoded_packs.manifest.first_live, 72, stamp.terminal, stamp.end, take replay))?
+    let replayed = deploy_result(replay_export(d, id, decoded_packs.manifest.first_live, 72, stamp.terminal, stamp.end, list.new(), take replay))?
     if replayed.state.tips[0].head != stamp.head {
         return Error(ExportMismatch)
     }
@@ -480,4 +701,71 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
     scratch_result(disk_io(host.remove(to, "EXPORT")))?
     scratch_result(disk_io(host.sync_dir(to)))?
     Ok(take stamp)
+}
+
+// Replays the copied journal from offset `from` of segment `first` through
+// `limit` of `terminal`. A full open starts at 72; a catch-up round starts
+// where the previous round ended (STORE-SPEC §3.5a "Catch-up"), and applies
+// the round's STEPS where main's versions fall: each before the first main
+// commit or fork of main that follows it, the rest at the end.
+fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limit: u64, steps: List[ReplayStep], take initial: JournalReplay) -> Result[JournalReplay, Error] waits {
+    let mut replay = take initial
+    let mut seq = first
+    let mut start = from
+    let mut stepped = 0u64
+    loop {
+        let path = capacity(disk_path("j-", seq, ""))?
+        let boundary = if seq == terminal {
+            limit
+        } else {
+            let following = journal_header(d, id, seq + 1u64, None)?
+            match following {
+                Some(head) => head.prev_end,
+                None => return Error(disk_fault(path, 0u64, Header))
+            }
+        }
+        let mut source = journal_input(disk_io(host.open(d, path, Read))?, false)?
+        if seq == terminal && source.size > boundary {
+            return Error(disk_fault(path, boundary, Malformed))
+        }
+        let _ = journal_scan(mut source, path, id, seq, start, Some(boundary), false, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+            let through = match event {
+                Commit(commit) => if commit.branch == 0u32 {
+                    int.saturating_sub(commit.version, 1u64)
+                } else {
+                    0u64
+                },
+                Fork(started) => if started.parent == 0u32 {
+                    started.forked_at
+                } else {
+                    0u64
+                },
+            }
+            apply_steps(path, mut recovered_state, steps, mut stepped, through)?
+            journal_apply(path, mut recovered_state, take event)
+        })?
+        let JournalInput(file: take file, ..) = take source
+        disk_io(host.close(take file))?
+        if seq == terminal {
+            apply_steps(path, mut replay, steps, mut stepped, 18446744073709551615u64)?
+            return Ok(take replay)
+        }
+        seq += 1
+        start = 72
+    }
+}
+
+// Applies the steps through version `through` to main, each at main's head + 1.
+fn apply_steps(file: String, mut replay: JournalReplay, steps: List[ReplayStep], mut stepped: u64, through: u64) -> Result[(), Error] {
+    while stepped < list.len(steps) && steps[stepped].version <= through {
+        let step = view steps[stepped]
+        if replay.state.tips[0u64].id != 0u32 || int.checked_add(replay.state.tips[0u64].head, 1) != Some(step.version) {
+            return Error(disk_fault(file, 0, Gap(step.version)))
+        }
+        journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[0u64].roots.catalog, step.catalog, mut replay.tiered)?
+        journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[0u64].roots.collections, step.rows, mut replay.tiered)?
+        replay.state.tips[0u64].head = step.version
+        stepped += 1
+    }
+    Ok(())
 }

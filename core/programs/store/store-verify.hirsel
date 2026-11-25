@@ -119,9 +119,8 @@ fn walk_index(db: Db, mut walk: IndexWalk) -> Result[Option[(Bytes, Catalog)], E
 
 // One slice of at most `limit` rows or entries of the index the walk is on.
 // In a Repair walk a slice that finds the index wrong demotes it in one
-// schema commit, except while an export lease is held: catch-up refuses a
-// catalog change on OLD as Drift (§3.5a), so the next walk finds it again.
-// A Report walk never commits.
+// schema commit; under an export lease catch-up ships that commit as a step
+// (§3.5a). A Report walk never commits.
 pub fn verify_step(mut db: Db, mut walk: IndexWalk, limit: u64) -> Result[WalkReport, Error] waits {
     healthy(db)?
     if limit == 0 {
@@ -146,11 +145,9 @@ pub fn verify_step(mut db: Db, mut walk: IndexWalk, limit: u64) -> Result[WalkRe
         false
     }
     if repair && list.len(findings) != 0 {
-        if !export_leased(db) {
-            let mut seen: List[(u32, u32)] = list.new()
-            list.push(mut seen, (record.owner, record.id))
-            trip_drift(mut db, 0, seen)?
-        }
+        let mut seen: List[(u32, u32)] = list.new()
+        list.push(mut seen, (record.owner, record.id))
+        trip_drift(mut db, 0, seen)?
         // The index is no longer Public; the walk moves past it.
         walk_past(mut walk)?
     }

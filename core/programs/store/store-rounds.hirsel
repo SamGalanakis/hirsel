@@ -157,6 +157,21 @@ fn shipped_ranges(ranges: List[RangeChange]) -> Result[List[KeptRange], Error] {
     Ok(take out)
 }
 
+// The schema commits a round ships moved OLD's records under the kept
+// delta: each change's `before` follows them, so the install still finds
+// the catalog the delta expects.
+fn rebase_kept_delta(mut kept: KeptImport, steps: List[ExportStep]) {
+    for step in steps {
+        for op in step.catalog {
+            for i in 0u64 .. list.len(kept.delta) {
+                if kept.delta[i].key == op.key {
+                    kept.delta[i].before = clone(op.value)
+                }
+            }
+        }
+    }
+}
+
 // The install's ranges, from the kept trees.
 fn kept_ranges(kept: KeptImport) -> Result[List[ImportedRange], DeployError] {
     let mut out: List[ImportedRange] = list.with_capacity(list.len(kept.ranges))

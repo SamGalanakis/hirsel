@@ -14,10 +14,10 @@
 //
 // Slices run only on idle turns: a build chunk after every 16th group under
 // load raised user-commit p99 from 31 us to 19.5 ms (Store 1.3's kill rule,
-// RUNNER-SPEC §12.5). Build chunks and a walker's
-// demotion are catalog changes, so neither runs while an export lease is
-// held: catch-up (STORE-SPEC §3.5a) refuses a catalog change on OLD as Drift.
-// A projector step moves its pins, so it waits for the lease too. A job whose
+// RUNNER-SPEC §12.5). Build chunks and a walker's demotion run while an
+// export lease is held: each is a schema commit that catch-up (STORE-SPEC
+// §3.5a) ships to the preparation as a step. A projector step moves its
+// pins, so it waits for the lease. A job whose
 // slice is refused stops for this open of the place, a projector alone of its
 // kind; only Poisoned ends the head.
 // Rows per build chunk, per walker slice and per retention sweep. Each build
@@ -84,7 +84,7 @@ fn advance_maintenance[G: send, H: shareable + inert + send](mut hd: Head[G, H])
 }
 
 fn upkeep_build[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Result[bool, store.Error] waits {
-    if !hd.upkeep.building || store.export_leased(hd.db) {
+    if !hd.upkeep.building {
         return Ok(false)
     }
     match store.index_build_step(mut hd.db, UPKEEP_ROWS) {

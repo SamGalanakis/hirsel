@@ -142,13 +142,8 @@ pub type RepairOutcome: send {
 }
 
 /// Walks every bound index in Repair mode, demoting each one proven wrong,
-/// then builds every Backfilling index to the end. None when an export lease
-/// is held: a deploy is preparing from this store, and its catch-up refuses
-/// a catalog change, so neither runs.
-pub fn repair_indexes(mut db: Db) -> Result[Option[RepairOutcome], Error] waits {
-    if export_leased(db) {
-        return Ok(None)
-    }
+/// then builds every Backfilling index to the end.
+pub fn repair_indexes(mut db: Db) -> Result[RepairOutcome, Error] waits {
     let mut walk = begin_verify(Repair)
     let mut findings: List[WalkFinding] = list.new()
     loop {
@@ -176,5 +171,5 @@ pub fn repair_indexes(mut db: Db) -> Result[Option[RepairOutcome], Error] waits 
             list.push(mut failed, named(seen.index)?)
         }
     }
-    Ok(Some(RepairOutcome(findings: take findings, built: take built, failed: take failed)))
+    Ok(RepairOutcome(findings: take findings, built: take built, failed: take failed))
 }

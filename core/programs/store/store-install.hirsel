@@ -119,6 +119,7 @@ fn forget_import(mut db: Db) {
         state.imported = None
         state.reserving = None
         state.lease = None
+        state.steps = list.new()
         if let Some(mut object_writer) = state.object {
             object_writer.export_lifetime = None
         }

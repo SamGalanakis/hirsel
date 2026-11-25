@@ -32,7 +32,7 @@ fn run_store_op[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G,
 
 // Why `hirsel store verify` or `repair` ends nonzero: problems found, or
 // (repair only) an export lease held by a deploy preparing from the store.
-pub type OperatorRefusal: send = Unverified(u64) | ExportLeased
+pub type OperatorRefusal: send = Unverified(u64)
 
 fn push_operator_refusal(mut line: String, refusal: OperatorRefusal) {
     match refusal {
@@ -41,7 +41,6 @@ fn push_operator_refusal(mut line: String, refusal: OperatorRefusal) {
             string.push_u64(mut line, problems)
             string.push(mut line, " problems")
         },
-        ExportLeased => string.push(mut line, "an export lease is held (a deploy is preparing from this store); repair after it ends"),
     }
 }
 
@@ -214,15 +213,11 @@ fn operate_store_verify[G: send, H: shareable + inert + send, S: send](p: PlaceC
 
 // `hirsel store repair DIR --release EXE`: the release opens DIR in place
 // (Open; a changed revision refuses), walks every index it binds in Repair
-// mode and builds every Backfilling index to the end. It refuses while an
-// export lease is held.
+// mode and builds every Backfilling index to the end.
 fn operate_store_repair[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
     let mut db = open_operator_store(p, take options, n_place)?
     let _ = store.bind_declaration(mut db, Open, code.callable(p.schema)) ?=> |problem| Open(Store(problem))
-    let Some(done) = store.repair_indexes(mut db) ?=> |problem| Open(Store(problem)) else {
-        let _ = store.close(take db)
-        return Error(Open(Operator(ExportLeased)))
-    }
+    let done = store.repair_indexes(mut db) ?=> |problem| Open(Store(problem))
     let mut text = string.new()
     for finding in done.findings {
         string.push(mut text, "demoted ")

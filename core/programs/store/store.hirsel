@@ -2786,6 +2786,8 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0085 => Some(16715784),
         0x0086 => Some(1048832),
         0x0087 => Some(16715784),
+        0x0088 => Some(1048832),
+        0x0089 => Some(16715784),
         _ => None
     }
 }
@@ -3046,41 +3048,6 @@ fn disk_publish_manifest(d: Dir, id: StoreId, m: PageManifest) -> Result[(), Err
     disk_write_synced(d, "MANIFEST.tmp", raw)?
     disk_io(host.rename(d, "MANIFEST.tmp", "MANIFEST"))?
     disk_io(host.sync_dir(d))
-}
-
-// Replays the copied journal from offset `from` of segment `first` through
-// `limit` of `terminal`. A full open starts at 72; a catch-up round starts
-// where the previous round ended (STORE-SPEC §3.5a "Catch-up").
-fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limit: u64, take initial: JournalReplay) -> Result[JournalReplay, Error] waits {
-    let mut replay = take initial
-    let mut seq = first
-    let mut start = from
-    loop {
-        let path = capacity(disk_path("j-", seq, ""))?
-        let boundary = if seq == terminal {
-            limit
-        } else {
-            let following = journal_header(d, id, seq + 1u64, None)?
-            match following {
-                Some(head) => head.prev_end,
-                None => return Error(disk_fault(path, 0u64, Header))
-            }
-        }
-        let mut source = journal_input(disk_io(host.open(d, path, Read))?, false)?
-        if seq == terminal && source.size > boundary {
-            return Error(disk_fault(path, boundary, Malformed))
-        }
-        let _ = journal_scan(mut source, path, id, seq, start, Some(boundary), false, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
-            journal_apply(path, mut recovered_state, take event)
-        })?
-        let JournalInput(file: take file, ..) = take source
-        disk_io(host.close(take file))?
-        if seq == terminal {
-            return Ok(take replay)
-        }
-        seq += 1
-        start = 72
-    }
 }
 
 pub fn stage_export_migration(source: Preparation, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
@@ -3924,6 +3891,9 @@ type DiskState {
     open: u64,
     options: Options,
     lease: Option[Arc[ExportLease]],
+    // The schema commits main published since the lease last moved
+    // (§3.5a "Catch-up"): they reach the child as the round's STEPS.
+    steps: List[LeaseStep],
     scrubs: List[Arc[ScrubLease]],
     imported: Option[KeptImport],
     reserving: Option[Inline[u8, 32]],
@@ -4162,7 +4132,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     capacity(result.unwrap(channel.receive(waiting)))?
-    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: None, creation: take creation, pager_task: take pager_task, tasks, restamp: None, unload: None))
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, steps: list.new(), scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: None, creation: take creation, pager_task: take pager_task, tasks, restamp: None, unload: None))
     Ok(take db)
 }
 
@@ -4343,8 +4313,10 @@ fn disk_cut_with_limit(mut db: Db, take requested: HolderDelta, write_seal: scop
     db.tiered = settled_tiered
     db.page_resident = resident_pages
     db.settled = db.changes
+    let step_before = leased_step_base(db, delta)
     let held_delta = install_tiered_holders(mut db, take delta, take staged)
     install_holder_delta(mut db, take held_delta)
+    record_leased_step(mut db, take step_before)
     let installed = if observe {
         host.mono_ns(db.clock)
     } else {

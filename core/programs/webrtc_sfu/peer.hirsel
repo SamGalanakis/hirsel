@@ -26,7 +26,10 @@ pub type PeerLimits {
     sections: u8,
     down_tracks: u16,
     rtx_bytes: u64,
-    pacer_packets: u32
+    pacer_packets: u32,
+    // RTC-6: the estimate a session starts from before any feedback, in bit/s
+    // (libwebrtc's and LiveKit's default is 300,000).
+    start_bps: u64
 }
 
 pub type PeerError = Sdp(sdp.SdpError) | Fenced | Closed | Ice(stun_ice.IceError) | Dtls(dtls.DtlsError) | Srtp(srtp.SrtpError) | Rtp(rtp.header.WriteError) | Capacity(Capacity)
@@ -510,7 +513,7 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
         list.push(mut slab, take b)
         list.push(mut free, int.narrow(n - 1 - i))
     }
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, numbered: 0, probe_from: 0, probe_next: 0, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: limits.start_bps, min_bps: 30000, max_bps: 20000000)), rtt: None, numbered: 0, probe_from: 0, probe_next: 0, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.red, SLOT) ?=> |c| Capacity(c)
     list.try_reserve(mut p.word, 2) ?=> |c| Capacity(c)

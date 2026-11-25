@@ -55,13 +55,18 @@ type Probed {
 }
 
 fn probe_room(seed: u64, limits: router.RoomLimits, rtx: Bytes) -> Probed {
+    probe_room_from(seed, limits, rtx, 300000)
+}
+
+// The same, with the subscriber's session starting its estimate at `start_bps`.
+fn probe_room_from(seed: u64, limits: router.RoomLimits, rtx: Bytes, start_bps: u64) -> Probed {
     let mut r = router.router(provide.random(seed))
     result.unwrap(router.open_room(mut r, room_id(), limits))
     let out = result.unwrap(peer.outbox(262144, 256))
     let p = admit(mut r, seed + 1, simulcast_offer(), 1)
     let mut offer = minimal_head(b" d")
     recv_section(mut offer, b"d", b"96", rtx, b"1", b"3")
-    let s = admit(mut r, seed + 2, offer, 2)
+    let s = admit_limits(mut r, seed + 2, offer, 2, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: start_bps))
     let mut seqs: List[u16] = list.new()
     for k in 0u16 .. 3u16 {
         list.push(mut seqs, 100 * k)
@@ -384,6 +389,45 @@ fn probe_pads_media_without_rtx() -> Result[(), router.RouterError] {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+// The encodings the subscriber heard media of, as a mask: bit 0 q, 1 h, 2 f.
+fn heard_mask(w: Probed) -> u64 {
+    let mut mask = 0u64
+    for x in w.heard {
+        if x.fill == FILL_Q {
+            mask = mask | 1
+        } else if x.fill == FILL_H {
+            mask = mask | 2
+        } else if x.fill == FILL_F {
+            mask = mask | 4
+        }
+    }
+    mask
+}
+
+/// bug: start every session's estimate at a hard-coded 300,000 bit/s whatever its `PeerLimits.start_bps` says, so a deployment that knows its links are fast still opens every leg on its lowest layer and waits for probing.
+/// oracle: RTC-6's allocation by hand from the start estimate, with no feedback so the estimate never moves. The rates of `shape_ramp` are q 120,000, h 500,000 and f 1,000,000 bit/s, so the steps cost 120,000, 380,000 and 500,000. From 1,200,000: q leaves 1,080,000, h 700,000 and f 200,000, so the down-track is given f at subscribe and, f being all keyframes, hears its first f packet within f's 10 ms and never q or h. From 600,000: q leaves 480,000 and h 100,000, under f's 500,000, so the down-track is given h and hears only h. With the start hard-coded at 300,000 both legs hear only q.
+@test
+fn start_estimate_is_the_sessions() -> Result[(), router.RouterError] {
+    let sub = SUBSCRIBE_AT * MS
+    let mut fast = probe_room_from(2740, room_limits(), b"97", 1200000)
+    run(mut fast, shape_ramp(), top_f(), false, SUBSCRIBE_AT + 500)
+    if heard_mask(fast) != 4 {
+        fail("from a 1,200,000 start the down-track did not hear f alone")
+    }
+    let Some(f_at) = first_of(fast, FILL_F) else {
+        fail("from a 1,200,000 start the down-track heard no f")
+    }
+    if f_at > sub + 10 * MS {
+        fail("from a 1,200,000 start f came later than its first keyframe after subscribe")
+    }
+    let mut middle = probe_room_from(2750, room_limits(), b"97", 600000)
+    run(mut middle, shape_ramp(), top_f(), false, SUBSCRIBE_AT + 500)
+    if heard_mask(middle) != 2 {
+        fail("from a 600,000 start the down-track did not hear h alone")
     }
     Ok(())
 }

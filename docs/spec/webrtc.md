@@ -401,7 +401,7 @@ through the writer is never the oracle.
 
 ```hirsel unbuilt
 pub opaque type PeerSession
-pub type PeerLimits = PeerLimits(sections: u8, down_tracks: u16, rtx_bytes: u64, pacer_packets: u32)
+pub type PeerLimits = PeerLimits(sections: u8, down_tracks: u16, rtx_bytes: u64, pacer_packets: u32, start_bps: u64)
 pub type PeerError = Sdp(SdpError) | Fenced | Closed | Ice(stun_ice.IceError) | Dtls(DtlsError) | Srtp(SrtpError) | Rtp(RtpError) | Capacity(Capacity)
 pub type Class = Stun | Dtls | Rtp | Rtcp | Drop
 pub type Input = Nothing | Replied | Media(MediaIn) | Repair(MediaIn) | Control(ControlIn)
@@ -419,7 +419,10 @@ pub fn close(take p: PeerSession, mut out: Outbox)
 ```
 
 A PeerSession is a sans-IO state machine over `(now, datagram)`. It never calls the network
-or reads a clock. The home unit (RTC-5) owns it, receives into `slot`, and passes `out` to
+or reads a clock. Its estimate (RTP-9) starts at `PeerLimits.start_bps` before any feedback
+moves it, between a floor of 30 kbps and a ceiling of 20 Mbps; the service starts at
+300 kbps, libwebrtc's and LiveKit's default. A deployment whose subscribers' links are known
+to be fast raises it, so RTC-6's first allocation already reaches a higher encoding. The home unit (RTC-5) owns it, receives into `slot`, and passes `out` to
 `udp_send` as one batch. `out.data` is a TX staging buffer and each `UdpTx` names a span of
 it, so one `udp_send` sends every packet a turn produced.
 
@@ -1650,6 +1653,10 @@ unless named otherwise.
   rate), `probe_resumes_paused_leg` (without `pause` the base flows at once; with it the leg
   waits for one probe round) and `probe_pads_media_without_rtx` (padding on the media SSRC
   only after a frame end, its numbers gapless with the media's, no media frame lost).
+  `start_estimate_is_the_sessions` covers the start estimate in W24's room with no
+  feedback: from a 1.2 Mbps `start_bps` the down-track hears f alone from its first
+  keyframe, and from 600 kbps h alone. It was red on main, which started every session at
+  300 kbps.
 - **W25 `e2ee_routes_on_clear_bytes`.** *Harness:* `core/programs/webrtc_sfu/e2ee_laws.hirsel`,
   W9's VP8 three-encoding simulcast with temporal layers, H.264 simulcast, VP9 L3T3 and AV1
   L3T3 scenes with their target changes (AV1's at the 20th packet), and an Opus publication

@@ -62,7 +62,7 @@ pub(super) fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
 /// The file type (`S_IFMT` bits) of `name` in `parent`, not following a final link;
 /// `None` when nothing has that name.
 pub(super) fn leaf_kind(parent: &OwnedFd, name: &CString) -> io::Result<Option<libc::mode_t>> {
-    Ok(leaf_stat(parent.as_raw_fd(), name)?.map(|st| st.st_mode & libc::S_IFMT))
+    host::leaf_mode(parent.as_raw_fd(), name)
 }
 
 pub(super) fn leaf_stat(parent: i32, name: &CStr) -> io::Result<Option<libc::stat>> {
@@ -85,18 +85,13 @@ pub(super) fn leaf_stat(parent: i32, name: &CStr) -> io::Result<Option<libc::sta
 }
 
 pub(super) fn remove(fd: i32, name: &CString) -> io::Result<()> {
-    // SAFETY: unlinkat never follows the final symlink; directory removal is retried explicitly.
-    let rc = unsafe { libc::unlinkat(fd, name.as_ptr(), 0) };
-    if rc == 0 {
-        return Ok(());
+    // unlinkat never follows the final symlink; directory removal is retried explicitly.
+    match host::unlink_at(fd, name, 0) {
+        Err(error) if error.raw_os_error() == Some(libc::EISDIR) => {
+            host::unlink_at(fd, name, libc::AT_REMOVEDIR)
+        }
+        done => done,
     }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() != Some(libc::EISDIR) {
-        return Err(error);
-    }
-    // SAFETY: same pinned parent and fixed leaf, directory-only removal.
-    syscall(unsafe { libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR) } as isize)?;
-    Ok(())
 }
 pub(super) fn remove_tree(fd: i32, name: &CString) -> io::Result<()> {
     // Descriptor-based walk; never follow a leaf link. std's read_dir owns the

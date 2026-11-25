@@ -257,10 +257,28 @@ fn disk_bench_say(out: Stdout, word: String, value: u64) waits {
     result.unwrap(stdout.write(out, line))
 }
 
+// A BL15 phase line: its value, then the phase's first and last mono_ns. Both are
+// read inside the phase, after the gate read and before this write, so the
+// driver's perf window holds the phase's own host calls and not the gate or
+// this line's stdout handoff.
+fn disk_bench_phase(out: Stdout, word: String, value: u64, started: u64, ended: u64) waits {
+    let mut line = string.new()
+    string.push(mut line, word)
+    string.push(mut line, " ")
+    string.push_u64(mut line, value)
+    string.push(mut line, " ")
+    string.push_u64(mut line, started)
+    string.push(mut line, " ")
+    string.push_u64(mut line, ended)
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+}
+
 // BL15 (STORE-SPEC §3.3b): R8's row shape, one Store open, n commits each run then
 // durable (each latency printed after the phases), then a read of every row. The
 // driver gates each phase, so it can split the helper handoffs by phase and start a
-// follower (BL15F) between OPENED and the commits.
+// follower (BL15F) between OPENED and the commits. Each phase line carries the
+// phase's own mono_ns bounds (disk_bench_phase).
 fn disk_bench_bl15(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: u64) -> Result[(), Exit] waits {
     let mut name = string.with_capacity(64)
     string.push(mut name, "store-law-")
@@ -273,13 +291,15 @@ fn disk_bench_bl15(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: u6
     string.push(mut said, "\n")
     result.unwrap(stdout.write(out, said))
     disk_bench_wait(mut gate, mut byte)?
+    let opening_at = host.mono_ns(c)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut db = result.unwrap(open(tasks, child, c, r, options))
     let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
     result.unwrap(law_table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
-    disk_bench_say(out, "OPENED", version(snapshot(db)) + n)
+    disk_bench_phase(out, "OPENED", version(snapshot(db)) + n, opening_at, host.mono_ns(c))
     disk_bench_wait(mut gate, mut byte)?
+    let committing_at = host.mono_ns(c)
     let mut latencies: List[u64] = list.with_capacity(n)
     for k in 0u64 .. n {
         let started = host.mono_ns(c)
@@ -293,8 +313,9 @@ fn disk_bench_bl15(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: u6
         result.unwrap(durable(mut db, committed.ticket))
         list.push(mut latencies, host.mono_ns(c) - started)
     }
-    disk_bench_say(out, "COMMITTED", n)
+    disk_bench_phase(out, "COMMITTED", n, committing_at, host.mono_ns(c))
     disk_bench_wait(mut gate, mut byte)?
+    let reading_at = host.mono_ns(c)
     let s = snapshot(db)
     let read = result.unwrap(reader(db, 0u64))
     let mut rows = result.unwrap(scan(read, s, t, Unbounded, Unbounded))
@@ -307,7 +328,7 @@ fn disk_bench_bl15(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: u6
     if let Some(_) = result.unwrap(next(read, mut rows)) {
         fail("BL15 extra row")
     }
-    disk_bench_say(out, "READ", n)
+    disk_bench_phase(out, "READ", n, reading_at, host.mono_ns(c))
     disk_bench_wait(mut gate, mut byte)?
     let mut report = string.with_capacity(n * 12 + 8)
     string.push(mut report, "LAT")
@@ -343,7 +364,8 @@ fn disk_bench_bl15_follower(d: Dir, c: Clock, tasks: Tasks, out: Stdout, name: S
         let _ = result.unwrap(at_least(mut replica, wanted, forever))
         polls += 1
     }
-    disk_bench_say(out, "FOLLOWED", polls)
+    let followed = host.mono_ns(c)
+    disk_bench_phase(out, "FOLLOWED", polls, followed, followed)
     result.unwrap(close_follower_service(take service))
     Ok(())
 }

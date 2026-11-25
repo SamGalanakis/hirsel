@@ -191,6 +191,9 @@ impl Uring {
             opcode::OpenAt2::CODE,
             opcode::Statx::CODE,
             opcode::Close::CODE,
+            opcode::RenameAt::CODE,
+            opcode::UnlinkAt::CODE,
+            opcode::MkDirAt::CODE,
         ])? {
             return Err(unsupported());
         }

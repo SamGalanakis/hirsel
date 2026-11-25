@@ -338,25 +338,18 @@ impl OsProvider {
                 if leaf_kind(&to_parent, &to_name)?.is_some_and(|kind| kind != libc::S_IFREG) {
                     return Err(io::Error::from_raw_os_error(libc::EACCES));
                 }
-                // SAFETY: pinned parents and single NUL-terminated leaves.
-                syscall(unsafe {
-                    libc::renameat(
-                        from_parent.as_raw_fd(),
-                        from_name.as_ptr(),
-                        to_parent.as_raw_fd(),
-                        to_name.as_ptr(),
-                    )
-                } as isize)?;
+                crate::host::path::rename_at(
+                    from_parent.as_raw_fd(),
+                    &from_name,
+                    to_parent.as_raw_fd(),
+                    &to_name,
+                )?;
             }
             MKDIR | REMOVE | REMOVE_TREE => {
                 let (parent, name) = parent(self.directory(request.handle), path)?;
                 match request.operation {
                     MKDIR => {
-                        // SAFETY: pinned parent and single NUL-terminated leaf.
-                        syscall(
-                            unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) }
-                                as isize,
-                        )?;
+                        crate::host::path::mkdir_at(parent.as_raw_fd(), &name, 0o700)?;
                     }
                     REMOVE => remove(parent.as_raw_fd(), &name)?,
                     REMOVE_TREE => remove_tree(parent.as_raw_fd(), &name)?,
@@ -753,7 +746,7 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
             return unsafe { issue_now(state, request) };
         }
         OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE | READ | READ_AT | WRITE | WRITE_AT
-        | ZERO_AT | SYNC | SYNC_DIR
+        | ZERO_AT | SYNC | SYNC_DIR | RENAME | MKDIR | REMOVE
             if crate::units::uses_file_ring() =>
         {
             // SAFETY: the request is pinned until the CQE completes.

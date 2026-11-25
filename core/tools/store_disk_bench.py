@@ -125,33 +125,40 @@ def bl15_sample(binary, host, out, env, follower):
     def launch(cpu, name, *argv):
         command_line = [ROOT / 'tools/capped', 'taskset', '-c', cpu, 'perf', 'record', '-q', '-N', *HANDOFF,
                         '-o', work / f'{name}.perf', '--', binary, *argv]
-        return subprocess.Popen(list(map(str, command_line)), env=env | {'HIRSEL_JOBS': '1'}, stdout=subprocess.PIPE,
+        # HIRSEL_UDP_MEASURE_CLOCK prints the provider's mono_ns epoch, which turns the phase
+        # stamps the program prints into perf's CLOCK_MONOTONIC.
+        return subprocess.Popen(list(map(str, command_line)), env=env | {'HIRSEL_JOBS': '1', 'HIRSEL_UDP_MEASURE_CLOCK': '1'},
+                                stdout=subprocess.PIPE,
                                 stderr=(work / f'{name}.stderr').open('w'), text=True, bufsize=1)
 
-    def step(process, word, mark=None):
+    def step(process, word, phase=None):
         line = process.stdout.readline().split()
         if not line or line[0] != word:
             raise ValueError(f'{tag}: expected {word}, got {line}; see {work}')
-        time.sleep(0.05)  # a stdout write's helper finishes before the phase mark
-        if mark:
-            marks[mark] = time.monotonic_ns()
+        if phase:
+            # The program's own mono_ns bounds: after its gate read, before this line's write.
+            marks[phase] = (int(line[2]), int(line[3]))
         return line[1]
+
+    def go():
+        # The helper that wrote the last line goes idle before the next phase's first stamp.
+        time.sleep(0.05)
+        os.write(gate, b's')
 
     writer = launch(BL15_CPUS[0], 'writer', 'BL15', BL15_COMMITS)
     reader = None
     try:
-        name = step(writer, 'DIR', 'open')
-        os.write(gate, b's')
-        target = step(writer, 'OPENED', 'opened')
+        name = step(writer, 'DIR')
+        go()
+        target = step(writer, 'OPENED', 'open')
         if follower:
             reader = launch(BL15_CPUS[1], 'follower', 'BL15F', name, target)
             step(reader, 'FOLLOWING')
-        marks['commit'] = time.monotonic_ns()
-        os.write(gate, b's')
-        step(writer, 'COMMITTED', 'committed')
-        os.write(gate, b's')
+        go()
+        step(writer, 'COMMITTED', 'commit')
+        go()
         step(writer, 'READ', 'read')
-        os.write(gate, b's')
+        go()
         lat = writer.stdout.readline().split()
         polls = reader.stdout.readline().split() if reader else None
         writer.communicate()
@@ -163,14 +170,20 @@ def bl15_sample(binary, host, out, env, follower):
     if writer.returncode or (reader and reader.returncode) or lat[:1] != ['LAT'] or len(lat) != BL15_COMMITS + 1:
         raise ValueError(f'{tag} did not finish; see {work}')
     latencies = sorted(int(v) for v in lat[1:])
-    windows = {'open': (marks['open'], marks['opened']), 'commit': (marks['commit'], marks['committed']),
-               'read': (marks['committed'], marks['read'])}
+    def epoch(name):
+        at, = {int(m) for m in re.findall(r'^UDP_CLOCK_EPOCH (\d+)$', (work / f'{name}.stderr').read_text(), re.M)}
+        return at
+
+    windows = {phase: (epoch('writer') + lo, epoch('writer') + hi) for phase, (lo, hi) in marks.items()}
     row = dict(tag=tag, complete=True, workload='BL15', follower=follower, commits=BL15_COMMITS,
                sync_p50_ns=latencies[len(latencies) // 2], sync_p99_ns=latencies[ceil(len(latencies) * 0.99) - 1],
                **dict(zip(('handoffs', 'ring_enters'), handoffs(work / 'writer.perf', windows))))
     if reader:
+        # The follower's windows end where its FOLLOWED line's write begins.
+        done = epoch('follower') + int(polls[2])
+        clipped = {phase: (lo, min(hi, done)) for phase, (lo, hi) in windows.items()}
         row.update(follower_polls=int(polls[1]),
-                   **dict(zip(('follower_handoffs', 'follower_ring_enters'), handoffs(work / 'follower.perf', windows))))
+                   **dict(zip(('follower_handoffs', 'follower_ring_enters'), handoffs(work / 'follower.perf', clipped))))
     return row
 
 

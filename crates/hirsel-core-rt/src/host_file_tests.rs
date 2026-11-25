@@ -412,6 +412,58 @@ fn slot_ring_open_stat_and_close_need_no_helper() {
     check_file_backend();
 }
 
+/// §3.3b: RENAME, MKDIR and REMOVE run on the slot ring (a confined parent
+/// open, then RENAMEAT/MKDIRAT/UNLINKAT on that fd), with no helper thread,
+/// and keep core.md's rules there: a rename moves only a regular file and
+/// replaces only one, never following a final link, and REMOVE takes an
+/// empty directory as well as a file.
+#[test]
+fn slot_ring_rename_mkdir_and_remove_need_no_helper() {
+    if !slot_file_child("host_file_tests::slot_ring_rename_mkdir_and_remove_need_no_helper") {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    std::fs::write(r.join("a"), b"1").unwrap();
+    std::fs::write(r.join("b"), b"2").unwrap();
+    std::fs::create_dir(r.join("d")).unwrap();
+    std::os::unix::fs::symlink("a", r.join("l")).unwrap();
+    let directory = File::open(r).unwrap();
+    let tags = slot_file_fixture(directory, |f| {
+        [
+            f.simple(RENAME, f.dir, b"a\0b", 0),
+            f.simple(RENAME, f.dir, b"d\0c", 0),
+            f.simple(RENAME, f.dir, b"l\0c", 0),
+            f.simple(RENAME, f.dir, b"b\0d", 0),
+            f.simple(RENAME, f.dir, b"gone\0c", 0),
+            f.simple(MKDIR, f.dir, b"m", 0),
+            f.simple(MKDIR, f.dir, b"m", 0),
+            f.simple(REMOVE, f.dir, b"m", 0),
+            f.simple(REMOVE, f.dir, b"l", 0),
+        ]
+        .map(|outcome| outcome.error)
+    });
+    let denied = IoError::from_errno(libc::EACCES);
+    assert_eq!(
+        tags,
+        [
+            IoError::OK,
+            denied,
+            denied,
+            denied,
+            IoError::from_errno(libc::ENOENT),
+            IoError::OK,
+            IoError::from_errno(libc::EEXIST),
+            IoError::OK,
+            IoError::OK,
+        ]
+    );
+    assert_eq!(std::fs::read(r.join("b")).unwrap(), b"1");
+    assert!(!r.join("a").exists() && !r.join("m").exists() && !r.join("c").exists());
+    assert!(r.join("d").is_dir() && std::fs::symlink_metadata(r.join("l")).is_err());
+    check_file_backend();
+}
+
 #[test]
 fn slot_ring_writes_report_progress_and_preserve_positioned_cursor() {
     if !slot_file_child(

@@ -24,6 +24,7 @@ ___assert_rtn
 ___error
 ___stack_chk_fail
 ___stack_chk_guard
+___stderrp
 __dyld_get_image_header
 __dyld_get_image_name
 __dyld_get_image_vmaddr_slide
@@ -56,6 +57,7 @@ _fclonefileat
 _fcntl
 _fdopendir
 _flock
+_fputs
 _free
 _freeaddrinfo
 _freeifaddrs

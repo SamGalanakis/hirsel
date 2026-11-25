@@ -359,8 +359,14 @@ pub(super) fn define_release(
 }
 
 fn absolute(object: &mut object::write::Object<'_>, name: String, value: u64) {
+    // `object` prefixes only text, data and TLS names, so a Mach-O absolute
+    // symbol takes its leading `_` here, as the code referring to it does.
+    let mut name = name.into_bytes();
+    if let Some(prefix) = object.mangling().global_prefix() {
+        name.insert(0, prefix);
+    }
     object.add_symbol(object::write::Symbol {
-        name: name.into_bytes(),
+        name,
         value,
         size: 0,
         kind: object::SymbolKind::Unknown,
@@ -476,5 +482,42 @@ mod tests {
                     .contains("is not absolute")
             );
         }
+    }
+
+    /// A Mach-O C name `x` is the symbol `_x`, which is what the code naming a
+    /// site refers to; an unprefixed definition leaves every site undefined at
+    /// the link.
+    #[test]
+    fn macho_site_symbols_take_the_global_prefix() {
+        let mut object = object::write::Object::new(
+            object::BinaryFormat::MachO,
+            object::Architecture::Aarch64,
+            object::Endianness::Little,
+        );
+        let path = hirsel_core_ids::DefPath::core("site_binding");
+        let sources = SourceMap {
+            points: Default::default(),
+            files: vec![hirsel_core_ir::source::SourceFile {
+                path: "site.hirsel".into(),
+                text: String::new(),
+            }],
+            items: std::collections::BTreeMap::from([(
+                path.clone(),
+                hirsel_core_ir::source::ItemSource {
+                    file: 0,
+                    file_offset: 0,
+                },
+            )]),
+        };
+        define(&mut object, &sources).unwrap();
+        let bytes = object.write().unwrap();
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        let name = format!("_{}", hirsel_core_ir::source::site_symbol(&path));
+        let symbol = file.symbols().find(|s| s.name() == Ok(name.as_str()));
+        assert_eq!(
+            symbol.map(|s| s.section()),
+            Some(object::SymbolSection::Absolute),
+            "{name}"
+        );
     }
 }

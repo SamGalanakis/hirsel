@@ -209,6 +209,8 @@ def https_fixture(root):
                      + b'&client_secret=a+b%2Bc%26d%3De%25f%FF', ok)
             exchange(stream, b'POST /chunk HTTP/1.1\r\nHost: alpha.test\r\nTransfer-Encoding: chunked\r\n\r\n'
                      b'18\r\nv=a+b%2Bc%26d%3De%25f%FF\r\n0\r\n\r\n', ok)
+            exchange(stream, b'POST /json HTTP/1.1\r\nHost: alpha.test\r\nAuthorization: Bearer ' + token
+                     + b'\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{"ok":true}', ok)
             exchange(stream, b'GET /reject HTTP/1.1\r\nHost: alpha.test\r\nAuthorization: Bearer ' + token
                      + b'\r\nX-Trace: enabled\r\nX-Second: ' + token + b'\r\nContent-Length: 0\r\n\r\n',
                      b'HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n')

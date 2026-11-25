@@ -187,13 +187,13 @@ impl Cx<'_, '_, '_> {
             return self.targeted_switch(taken, yes, no, at);
         }
         let (yes, no) = (self.edge(yes, &[]), self.edge(no, &[]));
-        self.end(
+        self.decide(
             Terminator::Branch {
                 condition: cv,
                 yes,
                 no,
             },
-            Some(at),
+            at,
         );
     }
 

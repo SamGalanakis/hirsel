@@ -851,7 +851,8 @@ impl Printer {
                 Terminator::Propagate => "propagate".into(),
                 Terminator::Unreachable => "unreachable".into(),
             };
-            self.line(&format!("  {term}{}", anchor(block.anchor)));
+            let decision = if block.decision { " decision" } else { "" };
+            self.line(&format!("  {term}{}{decision}", anchor(block.anchor)));
         }
     }
 }
@@ -2351,6 +2352,7 @@ impl Parser {
                         params,
                         insts: PoolRange::new(start, 0),
                         anchor: None,
+                        decision: false,
                     });
                     open = Some(b.body.blocks.len() - 1);
                 }
@@ -2360,8 +2362,10 @@ impl Parser {
                     };
                     if let Some(t) = b.terminator(&mut l)? {
                         let anchor = l.anchor()?;
+                        let decision = anchor.is_some() && l.eat("decision");
                         l.end()?;
                         b.body.blocks[block].anchor = anchor;
+                        b.body.blocks[block].decision = decision;
                         b.body.terminators.push(t);
                         open = None;
                     } else {

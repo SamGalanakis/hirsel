@@ -29,6 +29,10 @@ the Cranelift flag stores, the raw file and the map fragments. It amended "Sites
 the store sample showed (the site rule is not yet accepted), the header's section offset,
 the id framing, the outcome, the entry's padding record, fragment naming, and "Caching".
 
+Version note (2026-11-25, coverage-gen-anchors-2579): the front marks source decisions, and
+only they are sites. The terminators it generates inside an expression keep their anchors
+but no longer count. "Sites" states the final rule. Site keys keep their format.
+
 These are out of scope:
 
 - hit counts, and any reading of coverage by the program it observes;
@@ -106,13 +110,32 @@ or `--replay` also asks for one. Both switches may be on together.
 A **site** is one place whose flag a run can set. A body has two kinds of site.
 
 - **Entry.** One site per in-scope function body, set when the body starts.
-- **Arm.** One site per outgoing edge of a source decision. A source decision is a block
-  whose terminator carries a source anchor. A two-way branch has the arms `yes` and `no`.
-  A switch has one arm per case, numbered from 0 in terminator order, and `otherwise`.
+- **Arm.** One site per outgoing edge of a source decision. A two-way branch has the arms
+  `yes` and `no`. A switch has one arm per case, numbered from 0 in terminator order, and
+  `otherwise`.
+
+**Source decisions.** The front marks a block's terminator as a source decision
+(`Block::decision` in CoreIR) only when the source wrote it:
+
+- the test of an `if`, `else if` or `while` condition, at the condition;
+- a `for` loop's head test, at the whole loop, and for an inclusive range `a..=b` also its
+  end test, which is the only way out of a loop that ran; it is the loop's decision `.1`;
+- a `?`, at the `?` expression;
+- each test of a refutable pattern in a `match`, `if let`, `while let` or `let ... else`,
+  at the pattern, and a `match` guard, at the guard;
+- the left side of `&&` and `||`, whose arms are short-circuit and evaluate the right side.
+  The construct that reads the result decides again at the whole expression.
+
+A decision is always an anchored branch or switch. No source construct lowers to a switch
+today, so every arm is `yes` or `no`.
 
 **Not sites:**
 
-- blocks with no source anchor, which are code the compiler generated;
+- terminators the compiler generated: glue with no anchor, and the branches the front
+  generates inside a source expression, for example in built-in calls (`list.push`,
+  `list.try_reserve`, `int.checked_add`, `int.narrow`), indexing and field reads, `==` on
+  non-scalar values, and capacity and limit admissions. These keep their expression's
+  anchor for debug lines and law rows, but are not decisions;
 - failure edges of steps, address checks, drops, SIMD, arithmetic and calls.
 
 A failure the source handles appears as an arm of the `match` or `?` that handles it. A
@@ -147,40 +170,21 @@ and every code variant of a body (the step-free and returnable copies) writes th
 sites. Offsets are relative to the item, so an edit elsewhere in the file leaves the keys
 unchanged.
 
-**The rule is not yet accepted.** Which decisions carry an anchor is a fact of the lowering.
-Slice C1 dumped the site table of the `store` package, over the bodies its `tiered` tests
-reach: 1,556 bodies with 12,807 decisions, all two-way branches. C1 read a sample against the
-source. The rule was to be accepted when:
+**The rule holds on `store`.** The site table of the `store` package, over the bodies its
+`tiered` tests reach, had 13,215 decisions in 1,571 bodies while the front gave each generated terminator its
+expression's anchor and every anchored branch was a decision. With the decision mark it has
+7,222 decisions in the same 1,571 bodies, and every one of them is also a decision of the
+earlier table, at the same anchor, arm and target. The 5,993 dropped decisions are generated:
+scope cleanup on whole blocks, `list.try_reserve`, `list.push` and other builtin calls,
+indexing, host calls, the error path of `?` and the inner tests of `for` and of `==` on
+lists. In a random sample of the decisions that remain, each is an `if` or `while`
+condition, a `for` head, a `?` or `?=>`, a `match` or `if let` pattern, or `&&`/`||`. In
+322 keys the ordinal now names the source decision rather than a generated test that
+shared its anchor (for example `if key_schema != c.key` and its list compare).
 
-1. every `if`, `else if`, `match` arm, `?`, `&&` and `||` in the sample has its arms in the
-   table;
-2. no site in the sample points at code the source did not write.
-
-Condition 1 holds:
-
-- An `if` or `while` condition, and `for`, are decisions at the condition's or loop's range.
-- A `?` is a decision at the `?` expression.
-- A `match` and `if let` lower to one two-way decision per refutable pattern, at the
-  pattern. No source construct lowers to a switch; only generated clone and key glue does,
-  and it carries no anchor.
-- `a && b` and `a || b` are a decision at `a`, whose arms are short-circuit and evaluate
-  `b`, and the construct that reads the result decides again at the whole expression.
-
-Condition 2 fails. The front gives the terminators it generates inside a source expression
-that expression's anchor. About 4,400 decisions sit at a built-in call (`list.push`,
-`list.try_reserve`, `list.put_word_le`, `int.checked_add`, `int.narrow` and the like), about
-900 more at indexing and field reads, and more at `==` on non-scalar values. Neither the
-cold mark on an edge nor where an arm's target lies tells them apart from source decisions.
-`?`, for one, has every target inside its own range. No rule over the IR as it is accepts
-condition 2.
-
-The fix is in the front: a generated terminator must not take its expression's anchor as a
-decision anchor, while keeping a place for debug lines and law rows. Block anchors are part
-of the body hash, so that change moves every body hash and revision once. It is its own
-slice, and it lands before C4 publishes keys. Until it lands, a report counts generated arms.
-The key format does not change. One key can name decisions in more than one code variant of
-a body. Their sites are equal, and only the first anchored place of an arm's target can
-differ.
+One key can name decisions in more than one code variant of a body (the step-free and
+returnable copies). Their sites are equal, and only the first anchored place of an arm's
+target can differ.
 
 **Scope.** Only items of packages given as source in the request have sites: the workspace
 members, plus `core` and `std` when they are given as source (`--source-core`,

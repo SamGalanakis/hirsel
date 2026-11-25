@@ -28,6 +28,7 @@ pub fn prepare_retained_assembly(
         body.inst_anchors.fill(None);
         for block in &mut body.blocks {
             block.anchor = None;
+            block.decision = false;
         }
         for call in &mut body.calls {
             call.cold = false;
@@ -70,6 +71,7 @@ pub struct RetainedSites {
 struct SourceRows {
     instructions: Vec<Option<Anchor>>,
     terminators: Vec<Option<Anchor>>,
+    decisions: Vec<bool>,
     cold_calls: Vec<bool>,
     cold_edges: Vec<bool>,
     callable_parameters: Vec<ValueId>,
@@ -86,6 +88,7 @@ impl RetainedSites {
                 Some(SourceRows {
                     instructions: body.inst_anchors,
                     terminators: body.blocks.iter().map(|block| block.anchor).collect(),
+                    decisions: body.blocks.iter().map(|block| block.decision).collect(),
                     cold_calls: body.calls.iter().map(|call| call.cold).collect(),
                     cold_edges: body.edges.iter().map(|edge| edge.cold).collect(),
                     callable_parameters: body.callable_parameters,
@@ -121,6 +124,7 @@ impl RetainedSites {
                 Some(FunctionAnnex {
                     instructions: rows.instructions.iter().map(site).collect(),
                     terminators: rows.terminators.iter().map(site).collect(),
+                    decisions: rows.decisions.clone(),
                     cold_calls: rows.cold_calls.clone(),
                     cold_edges: rows.cold_edges.clone(),
                     callable_parameters: rows
@@ -143,8 +147,14 @@ impl RetainedSites {
                 continue;
             };
             body.inst_anchors.clone_from(&rows.instructions);
-            for (block, &anchor) in body.blocks.iter_mut().zip(&rows.terminators) {
+            for ((block, &anchor), &decision) in body
+                .blocks
+                .iter_mut()
+                .zip(&rows.terminators)
+                .zip(&rows.decisions)
+            {
                 block.anchor = anchor;
+                block.decision = decision;
             }
             for (call, &cold) in body.calls.iter_mut().zip(&rows.cold_calls) {
                 call.cold = cold;
@@ -182,6 +192,7 @@ pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
         for (block, &old) in body.blocks.iter_mut().zip(&order.blocks.order) {
             let old = &original.blocks[old];
             block.anchor = old.anchor;
+            block.decision = old.decision;
             let source = PoolRange::new(old.insts.start, old.insts.len);
             let target = block.insts.start as usize;
             let source = source.get(&original.inst_anchors).unwrap();

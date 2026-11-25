@@ -1033,6 +1033,7 @@ impl Build<'_> {
             params: PoolRange::EMPTY,
             insts: PoolRange::EMPTY,
             anchor: None,
+            decision: false,
         });
         self.n.terminators.push(Terminator::Unreachable);
         BlockId(self.n.blocks.len() as u32 - 1)
@@ -1737,6 +1738,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
             t @ (Terminator::Propagate | Terminator::Unreachable) => t.clone(),
         };
         b.close(current, terminator, old.blocks[bi].anchor);
+        b.n.blocks[current.index()].decision = old.blocks[bi].decision;
     }
     b.finish()
 }

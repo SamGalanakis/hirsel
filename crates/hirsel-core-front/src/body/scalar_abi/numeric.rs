@@ -88,6 +88,7 @@ fn block(body: &mut Body, anchor: Option<Anchor>) -> BlockId {
         params: PoolRange::EMPTY,
         insts: PoolRange::EMPTY,
         anchor,
+        decision: false,
     });
     body.terminators.push(Terminator::Unreachable);
     b
@@ -230,6 +231,10 @@ pub(super) fn inline(module: &Module, body: &mut Body, sites: &[Site]) {
                     yes: yes_edge,
                     no: no_edge,
                 };
+                // The generated check ends this block; the source terminator
+                // and its anchor move on with the continuation.
+                body.blocks[current.index()].anchor = anchors[i];
+                body.blocks[current.index()].decision = false;
                 if let Some(dest) = dest {
                     tape.emit(
                         yes,
@@ -312,6 +317,8 @@ pub(super) fn inline(module: &Module, body: &mut Body, sites: &[Site]) {
             inserted[call.index()] = Some((start, body.blocks.len() as u32));
         }
         body.terminators[current.index()] = original_terms[bi].clone();
+        body.blocks[current.index()].anchor = source_block.anchor;
+        body.blocks[current.index()].decision = source_block.decision;
     }
     let mut first: Vec<Option<usize>> = vec![None; original_blocks.len() + 1];
     let mut last = first.clone();

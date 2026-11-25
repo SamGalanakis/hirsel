@@ -1346,6 +1346,12 @@ pub struct Block {
     pub insts: PoolRange<Inst>,
     /// The terminator's source, None for generated code.
     pub anchor: Option<Anchor>,
+    /// The terminator is a source decision (`docs/coverage.md`, "Sites"): an
+    /// `if`, `while` or `for` test, a `?`, a pattern test, a guard, or the
+    /// left side of `&&` or `||`. A terminator the front generates inside an
+    /// expression keeps its anchor for debug lines and law rows but is not a
+    /// decision. Only an anchored branch or switch decides.
+    pub decision: bool,
 }
 
 /// Where code came from: a byte range relative to the start of an item, so an

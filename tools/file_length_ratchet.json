@@ -229,9 +229,9 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 3140,
-    "raise_revision": 13,
-    "reason": "macos-s9-target-consts-2508"
+    "lines": 3159,
+    "raise_revision": 14,
+    "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 4108,
@@ -260,9 +260,9 @@
     "reason": "net18-s2-2481"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
-    "lines": 2848,
-    "raise_revision": 2,
-    "reason": "ds-cold-fn-2520"
+    "lines": 2849,
+    "raise_revision": 3,
+    "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-front/src/body/lists.rs": {
     "lines": 2361,
@@ -273,9 +273,9 @@
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3062,
-    "raise_revision": 6,
-    "reason": "dod-columns-soa-2533"
+    "lines": 3071,
+    "raise_revision": 7,
+    "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
     "lines": 2531,
@@ -330,9 +330,9 @@
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 1948,
-    "raise_revision": 12,
-    "reason": "macos-s9-target-consts-2508"
+    "lines": 1954,
+    "raise_revision": 13,
+    "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1145,
@@ -340,27 +340,27 @@
     "reason": "macos-s9-target-consts-2508"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
-    "lines": 1281,
-    "raise_revision": 1,
-    "reason": "ds-cold-fn-2520"
+    "lines": 1303,
+    "raise_revision": 2,
+    "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-ir/src/returnable.rs": {
-    "lines": 2416,
-    "raise_revision": 1,
-    "reason": "ds-cold-fn-2520"
+    "lines": 2418,
+    "raise_revision": 2,
+    "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-ir/src/tests.rs": {
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2397,
-    "raise_revision": 10,
-    "reason": "macos-s9-target-consts-2508"
+    "lines": 2401,
+    "raise_revision": 11,
+    "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
-    "lines": 1852,
-    "raise_revision": 2,
-    "reason": "dod-columns-soa-2533"
+    "lines": 1860,
+    "raise_revision": 3,
+    "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-layout/src/recipe.rs": {
     "lines": 1965,

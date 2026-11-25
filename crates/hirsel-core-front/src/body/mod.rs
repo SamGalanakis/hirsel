@@ -2236,6 +2236,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             params,
             insts: PoolRange::EMPTY,
             anchor: None,
+            decision: false,
         });
         // Replaced when the block ends; every block made is started and ended.
         self.b.terminators.push(Terminator::Propagate);
@@ -2248,6 +2249,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
     }
     fn end(&mut self, term: Terminator, n: Option<NodeId>) {
+        self.end_block(term, n, false);
+    }
+    /// End the block with a source decision at `n` (`Block::decision`).
+    pub(super) fn decide(&mut self, term: Terminator, n: NodeId) {
+        self.end_block(term, Some(n), true);
+    }
+    fn end_block(&mut self, term: Terminator, n: Option<NodeId>, decision: bool) {
         crate::cost_scope!("phase", "CoreIR emission");
         let Some(c) = self.cur.take() else { return };
         let insts = PoolRange::new(self.b.insts.len() as u32, self.open.len() as u32);
@@ -2256,6 +2264,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let anchor = n.and_then(|n| self.anchor(n));
         let blk = &mut self.b.blocks[c.index()];
         blk.insts = insts;
+        blk.decision = decision && anchor.is_some();
         blk.anchor = anchor;
         self.b.terminators[c.index()] = term;
     }

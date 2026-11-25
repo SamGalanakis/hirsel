@@ -289,6 +289,7 @@ fn expand(
         params: call.results,
         insts: PoolRange::new(at as u32 + 1, range.len - offset as u32 - 1),
         anchor: body.blocks[block].anchor,
+        decision: body.blocks[block].decision,
     });
     body.terminators.push(body.terminators[block].clone());
     if body.parked_returns.remove(&BlockId(block as u32)) {
@@ -373,6 +374,7 @@ fn expand(
             },
             insts: PoolRange::new(start, body.insts.len() as u32 - start),
             anchor: anchor(row.anchor),
+            decision: row.decision,
         });
         let term = match callee.terminators[b] {
             Terminator::Jump(e) => Terminator::Jump(rename.e(e)),
@@ -434,6 +436,7 @@ fn expand(
     }
     body.blocks[block].insts = PoolRange::new(start, body.insts.len() as u32 - start);
     body.terminators[block] = Terminator::Jump(edge(body, BlockId(rename.block), PoolRange::EMPTY));
+    body.blocks[block].decision = false;
     (continuation.index()..body.blocks.len()).collect()
 }
 
@@ -476,11 +479,13 @@ fn merge_blocks(body: &mut Body) {
             }
             body.blocks[block].insts = PoolRange::new(start, body.insts.len() as u32 - start);
             body.blocks[block].anchor = body.blocks[target].anchor;
+            body.blocks[block].decision = body.blocks[target].decision;
             body.terminators[block] = body.terminators[target].clone();
             if body.parked_returns.remove(&BlockId(target as u32)) {
                 body.parked_returns.insert(BlockId(block as u32));
             }
             body.blocks[target].insts = PoolRange::EMPTY;
+            body.blocks[target].decision = false;
             body.terminators[target] = Terminator::Unreachable;
             incoming[target] = 0;
         }

@@ -427,6 +427,14 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
             "bad anchor".into()
         })?;
     }
+    for (i, (k, t)) in b.blocks.iter().zip(&b.terminators).enumerate() {
+        need(
+            !k.decision
+                || (k.anchor.is_some()
+                    && matches!(t, Terminator::Branch { .. } | Terminator::Switch { .. })),
+            || format!("b{i}: a decision without an anchored branch or switch"),
+        )?;
+    }
     for t in &b.slots {
         if let PlaceTy::Declared(t) = t {
             need(t.index() < m.types.len(), || "slot of unknown type".into())?;

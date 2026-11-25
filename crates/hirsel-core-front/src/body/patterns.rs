@@ -824,13 +824,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let yes = self.new_block(&[]);
             let ye = self.edge(yes, &[]);
             let ne = self.edge(no, &[]);
-            self.end(
+            self.decide(
                 Terminator::Branch {
                     condition: result,
                     yes: ye,
                     no: ne,
                 },
-                Some(n),
+                n,
             );
             self.start(yes);
         }
@@ -1366,13 +1366,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let yes = self.new_block(&[]);
                     let ye = self.edge(yes, &[]);
                     let ne = self.edge(no, &[]);
-                    self.end(
+                    self.decide(
                         Terminator::Branch {
                             condition: cv,
                             yes: ye,
                             no: ne,
                         },
-                        Some(a[1]),
+                        a[1],
                     );
                     self.start(yes);
                 }

@@ -530,13 +530,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.joins[join].block = Some(jb);
             let (to_r, to_j) = (self.edge(rb, &[]), self.edge(jb, &[short]));
             let (yes, no) = if and { (to_r, to_j) } else { (to_j, to_r) };
-            self.end(
+            self.decide(
                 Terminator::Branch {
                     condition: lv,
                     yes,
                     no,
                 },
-                Some(c[0]),
+                c[0],
             );
             self.start(rb);
             right = Some(rb);

@@ -158,6 +158,7 @@ fn runtime_probes() -> Module {
             params,
             insts: PoolRange::new(0, body.insts.len() as u32),
             anchor: None,
+            decision: false,
         });
         body.terminators.push(Terminator::Return(results));
         function.signature = signature;

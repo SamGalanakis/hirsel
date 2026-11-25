@@ -124,7 +124,7 @@ pub fn sites(module: &Module, function: FuncId) -> Option<Sites> {
     let mut shared = std::collections::HashMap::<(u32, u32, u32), u32>::new();
     let mut decisions = vec![None; body.blocks.len()];
     for (index, block) in body.blocks.iter().enumerate() {
-        let Some(anchor) = block.anchor else {
+        let Some(anchor) = block.anchor.filter(|_| block.decision) else {
             continue;
         };
         let arms: Vec<Arm> = match &body.terminators[index] {

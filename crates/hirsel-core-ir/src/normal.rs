@@ -55,7 +55,7 @@ pub(crate) fn decoded_closure_hash(
 pub const VERSION: u16 = 4;
 const BODY_MAGIC: &[u8] = b"HIRBODY\0\x04\x00";
 pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v4";
-const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x01\x00";
+const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x02\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
 mod results;
@@ -503,6 +503,8 @@ pub struct Site {
 pub struct FunctionAnnex {
     pub instructions: Vec<Option<Site>>,
     pub terminators: Vec<Option<Site>>,
+    /// By block, whether its terminator is a source decision (`Block::decision`).
+    pub decisions: Vec<bool>,
     pub cold_calls: Vec<bool>,
     pub cold_edges: Vec<bool>,
     pub callable_parameters: Vec<u32>,
@@ -531,6 +533,7 @@ impl Annex {
             }
         }
         for function in self.0.iter().flatten() {
+            function.decisions.write(&mut out);
             function.cold_calls.write(&mut out);
             function.cold_edges.write(&mut out);
             out.count(function.callable_parameters.len());
@@ -555,6 +558,7 @@ impl Annex {
                     Ok(FunctionAnnex {
                         instructions: Wire::read(input)?,
                         terminators: Wire::read(input)?,
+                        decisions: vec![],
                         cold_calls: vec![],
                         cold_edges: vec![],
                         callable_parameters: vec![],
@@ -563,6 +567,7 @@ impl Annex {
                 .transpose()
         })?;
         for function in functions.iter_mut().flatten() {
+            function.decisions = Wire::read(&mut input)?;
             function.cold_calls = Wire::read(&mut input)?;
             function.cold_edges = Wire::read(&mut input)?;
             let len = input.count()?;
@@ -586,6 +591,21 @@ impl Annex {
                         let params = body.blocks[0].params.get(&body.pools.values).unwrap();
                         annex.instructions.len() == body.insts.len()
                             && annex.terminators.len() == body.terminators.len()
+                            && annex.decisions.len() == body.terminators.len()
+                            && annex
+                                .decisions
+                                .iter()
+                                .zip(&annex.terminators)
+                                .zip(&body.terminators)
+                                .all(|((&decision, site), terminator)| {
+                                    !decision
+                                        || (site.is_some()
+                                            && matches!(
+                                                terminator,
+                                                Terminator::Branch { .. }
+                                                    | Terminator::Switch { .. }
+                                            ))
+                                })
                             && annex.cold_calls.len() == body.calls.len()
                             && annex.cold_edges.len() == body.edges.len()
                             && annex.callable_parameters.windows(2).all(|v| v[0] < v[1])
@@ -608,7 +628,7 @@ impl Annex {
     }
 
     pub fn hash(&self) -> ContentHash {
-        ContentHash::of_parts("hirsel.code-annex.v1", [&self.encode()[..]])
+        ContentHash::of_parts("hirsel.code-annex.v2", [&self.encode()[..]])
     }
 }
 
@@ -946,7 +966,8 @@ fn annex_in_order(
                     .map(site)
             })
             .collect(),
-        terminators: blocks.map(|block| site(block.anchor)).collect(),
+        terminators: blocks.clone().map(|block| site(block.anchor)).collect(),
+        decisions: blocks.map(|block| block.decision).collect(),
         cold_calls: calls.map(|row| body.calls[row].cold).collect(),
         cold_edges: edges.map(|row| body.edges[row].cold).collect(),
         callable_parameters,
@@ -1259,6 +1280,7 @@ fn read_body(input: &mut Read<'_, '_>) -> DecodeResult<Body> {
             params,
             insts,
             anchor: None,
+            decision: false,
         });
         body.terminators.push(Wire::read(input)?);
     }

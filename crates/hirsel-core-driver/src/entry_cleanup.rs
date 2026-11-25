@@ -54,11 +54,13 @@ pub(super) fn result_cleanup(source: &Module, result: TypeId, entry: &DefPath) -
                     params: PoolRange::new(0, 1),
                     insts: PoolRange::new(0, 2),
                     anchor: None,
+                    decision: false,
                 },
                 Block {
                     params: PoolRange::EMPTY,
                     insts: PoolRange::new(2, 0),
                     anchor: None,
+                    decision: false,
                 },
             ],
             terminators: vec![Terminator::Return(PoolRange::EMPTY), Terminator::Propagate],

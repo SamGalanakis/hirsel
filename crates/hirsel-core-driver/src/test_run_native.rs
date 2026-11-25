@@ -362,8 +362,20 @@ fn known(n: u64, p: Pick) -> u64 {
     }
     if n < 5u64 && n > 0u64 { out + base } else { out + base + 1u64 }
 }
+type Spot: key { x: u64, y: u64 }
+fn generated(n: u64) -> u64 {
+    let mut out = 0u64
+    if n > 1u64 {
+        let mut xs: List[u64] = list.new()
+        list.push(mut xs, n)
+        let _ = int.checked_add(xs[0u64], n)
+        let _ = Spot(x: n, y: 1u64) == Spot(x: n, y: 2u64)
+        out = n
+    }
+    out
+}
 @test
-fn arms() -> Result[(), ()] { if known(0u64, PickA) + known(2u64, PickB) == 31u64 { Ok(()) } else { Error(()) } }
+fn arms() -> Result[(), ()] { if known(0u64, PickA) + known(2u64, PickB) + generated(2u64) == 33u64 { Ok(()) } else { Error(()) } }
 "#;
 
 /// Coverage "Off is off" and "Known arms" (`docs/coverage.md`, "Laws"), on
@@ -371,7 +383,9 @@ fn arms() -> Result[(), ()] { if known(0u64, PickA) + known(2u64, PickB) == 31u6
 /// `hirsel_cov` section (oracle: the section's absence), and the coverage
 /// build's raw file reports `known`'s arms as derived by hand from its
 /// source: an `if` without `else` taken only `no`, a `match` whose third arm
-/// no input reaches, and `&&` whose right side always runs.
+/// no input reaches, and `&&` whose right side always runs. `generated`'s only
+/// decision is its `if`: the branches the front makes for `list.push`, the
+/// index read, `int.checked_add` and record `==` are not sites.
 fn coverage_off_and_known_arms() {
     use object::{Object, ObjectSection};
     let dir = tempfile::tempdir().unwrap();
@@ -418,32 +432,37 @@ fn coverage_off_and_known_arms() {
         records.insert(id, section[at + 40..at + 40 + n].to_vec());
         at += (40 + n).next_multiple_of(8);
     }
-    let identity = Identity::plain(DefPath::from_full("app@1/main/known").unwrap());
-    let units = product.units([identity.clone()], 4096).unwrap();
-    let modules = units.modules().unwrap();
-    let (mut module, function) = hirsel_core_materialize::join(&modules, &identity).unwrap();
-    module.coverage = Some(scope);
-    let sites = hirsel_core_ir::coverage::sites(&module, function).unwrap();
-    let flags = &records[&sites.id.0];
-    let reached: BTreeMap<_, _> = sites.sites.iter().zip(flags).map(|(s, f)| (s.key.clone(), *f == 1)).collect();
-    // Keys by hand: offsets within `known` of each decision's source text.
-    let item = &KNOWN_ARMS[KNOWN_ARMS.find("fn known").unwrap()..];
-    let key = |text: &str, arm: &str| {
-        let start = item.find(text).unwrap();
-        format!("app@1/main/known@{start}-{}.0:{arm}", start + text.len())
+    let reached = |name: &str| {
+        let identity = Identity::plain(DefPath::from_full(&format!("app@1/main/{name}")).unwrap());
+        let units = product.units([identity.clone()], 4096).unwrap();
+        let modules = units.modules().unwrap();
+        let (mut module, function) = hirsel_core_materialize::join(&modules, &identity).unwrap();
+        module.coverage = Some(scope.clone());
+        let sites = hirsel_core_ir::coverage::sites(&module, function).unwrap();
+        let flags = &records[&sites.id.0];
+        sites.sites.iter().zip(flags).map(|(s, f)| (s.key.clone(), *f == 1)).collect::<BTreeMap<_, _>>()
     };
-    let mut expected = BTreeMap::from([("app@1/main/known#e".to_owned(), true)]);
-    for (text, yes, no) in [
+    // Keys by hand: offsets within the item of each decision's source text.
+    let expected = |name: &str, arms: &[(&str, bool, bool)]| {
+        let item = &KNOWN_ARMS[KNOWN_ARMS.find(&format!("fn {name}(")).unwrap()..];
+        let mut expected = BTreeMap::from([(format!("app@1/main/{name}#e"), true)]);
+        for &(text, yes, no) in arms {
+            let start = item.find(text).unwrap();
+            let key = format!("app@1/main/{name}@{start}-{}.0:", start + text.len());
+            expected.insert(format!("{key}yes"), yes);
+            expected.insert(format!("{key}no"), no);
+        }
+        expected
+    };
+    let known = [
         ("n == 9u64", false, true),
         ("PickA", true, true),
         ("PickB", true, false),
         ("n < 5u64", true, false),
         ("n < 5u64 && n > 0u64", true, true),
-    ] {
-        expected.insert(key(text, "yes"), yes);
-        expected.insert(key(text, "no"), no);
-    }
-    assert_eq!(reached, expected);
+    ];
+    assert_eq!(reached("known"), expected("known", &known));
+    assert_eq!(reached("generated"), expected("generated", &[("n > 1u64", true, false)]));
 }
 
 #[test]

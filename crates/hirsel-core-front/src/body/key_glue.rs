@@ -2033,6 +2033,7 @@ impl Code {
             params,
             insts: PoolRange::EMPTY,
             anchor: None,
+            decision: false,
         });
         self.body.terminators.push(Terminator::Unreachable);
         id

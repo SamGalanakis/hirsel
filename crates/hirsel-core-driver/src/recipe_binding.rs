@@ -224,7 +224,13 @@ pub(super) fn bind_module<'a>(
                 site.as_ref(),
             );
         }
-        for (block, site) in body.blocks.iter_mut().zip(&hints.terminators) {
+        for ((block, site), &decision) in body
+            .blocks
+            .iter_mut()
+            .zip(&hints.terminators)
+            .zip(&hints.decisions)
+        {
+            block.decision = decision;
             block.anchor = anchor(
                 &mut items,
                 &mut added,

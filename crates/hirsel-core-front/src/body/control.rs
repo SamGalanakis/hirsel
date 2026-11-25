@@ -603,13 +603,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let out = self.new_block(&[]);
             self.joins[exit].block = Some(out);
             let (ye, ne) = (self.edge(body, &[]), self.edge(out, &[]));
-            self.end(
+            self.decide(
                 Terminator::Branch {
                     condition: cv,
                     yes: ye,
                     no: ne,
                 },
-                Some(c[0]),
+                c[0],
             );
             self.start(body);
         }
@@ -878,7 +878,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             let yes = self.edge(body, &[]);
             let no = self.edge(out, &[]);
-            self.end(Terminator::Branch { condition, yes, no }, Some(n));
+            self.decide(Terminator::Branch { condition, yes, no }, n);
             self.start(body);
             flow = Some((head, advance, out, index, limit, index_ir, index_slot));
         }
@@ -1029,13 +1029,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
                 let yes = self.edge(out, &[]);
                 let no = self.edge(increment, &[]);
-                self.end(
+                self.decide(
                     Terminator::Branch {
                         condition: finished,
                         yes,
                         no,
                     },
-                    Some(n),
+                    n,
                 );
                 self.start(increment);
             }

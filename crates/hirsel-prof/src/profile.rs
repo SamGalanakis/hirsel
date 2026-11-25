@@ -398,7 +398,7 @@ mod tests {
         let error = Profile::open(&v1).err().unwrap();
         assert_eq!(
             error.to_string(),
-            "unsupported .hprof version 1, expected 3"
+            format!("unsupported .hprof version 1, expected {HPROF_VERSION}")
         );
     }
 }

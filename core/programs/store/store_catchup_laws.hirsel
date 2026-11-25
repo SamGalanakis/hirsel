@@ -14,6 +14,13 @@
 // swaps two rows' values (a Unique key changes owner within the tail), 'b' a
 // rewrite of every row, a tail far over a hundredth of the store, which renews
 // the export, and the child ships a fresh PREPARED that replaces the kept one.
+//
+// AP21 at the install reads only the packs the install cut writes (C-7's
+// settled packs). The damaged case flips the last payload byte of a leaf the
+// kept import reaches in a pack written before the install: the install still
+// publishes, and the reopen's full AP21 refuses the store at that frame with
+// Checksum (check_page_pointer: the page's xxh3 no longer matches its parent's
+// pointer).
 const LCU_ROWS: u64 = 4000
 
 fn lcu_unique_expected(id: u32, model: List[Option[u64]]) -> Result[List[(Bytes, u64)], Error] {
@@ -200,7 +207,40 @@ fn lcu_check(db: Db, model: List[Option[u64]], by_v: u32, by_id: u32, unique: bo
     Ok(())
 }
 
-fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String, unique: bool, backfilling: bool, duplicate: bool) -> Result[(), DeployError] waits {
+// A leaf the import pin reaches, by the published record map: from the pin's
+// collection-map root, follow each page's last page child until a page has
+// none.
+fn lcu_import_leaf(db: Db) -> Result[std.page.PagePtr, DeployError] {
+    let mut stamp = 0u64
+    for held in db.pins {
+        if held.owner == ImportPin {
+            stamp = tree_stamp(held.roots.collections)
+        }
+    }
+    if stamp == 0 {
+        fail("L-IX catch-up: the kept import holds a pin")
+    }
+    let frames = disk_state(db).pages.locations.frames
+    loop {
+        let Some(record) = disk_index_get(frames, stamp) else {
+            fail("L-IX catch-up: the import pin's pages are located")
+        }
+        let mut deeper = 0u64
+        for child in record.outgoing {
+            if let Some(kid) = disk_index_get(frames, child) {
+                if kid.class == 0 {
+                    deeper = child
+                }
+            }
+        }
+        if deeper == 0 {
+            return Ok(record.place)
+        }
+        stamp = deeper
+    }
+}
+
+fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String, unique: bool, backfilling: bool, duplicate: bool, damaged: bool) -> Result[(), DeployError] waits {
     let directory = disk_test_directory(d)
     let scratch = disk_test_directory(d)
     let options = disk_crash_options("install")
@@ -314,6 +354,27 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
         }
         return deploy_result(close(take reopened))
     }
+    if damaged {
+        let leaf = lcu_import_leaf(db)?
+        let name = deploy_result(paged_pack_path(leaf.pack))?
+        let mut raw = deploy_result(disk_read_paged_file(directory, name, 67108864))?
+        let flipped = leaf.offset + 16 + int.widen(leaf.len) - 1
+        raw[flipped] = raw[flipped] ^ 1u8
+        deploy_result(disk_write_synced(directory, name, raw))?
+        let _ = crash_apply(mut db, attempt, digest)?
+        let in_place = match disk_index_get(disk_state(db).pages.locations.frames, leaf.stamp) {
+            Some(kept) => kept.place == leaf,
+            None => false,
+        }
+        if !in_place {
+            fail("L-IX catch-up: the install keeps the damaged leaf in place")
+        }
+        deploy_result(close(take db))?
+        match open(tasks, directory, c, r, options) {
+            Error(Corrupt(Fault(file: file, offset: at, why: Checksum))) if file == name && at == leaf.offset => return Ok(()),
+            _ => fail("L-IX catch-up: open's AP21 finds the damaged settled pack"),
+        }
+    }
     let _ = crash_apply(mut db, attempt, digest)?
     lcu_check(db, model, by_v, by_id, unique)?
     deploy_result(close(take db))?
@@ -325,12 +386,13 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
 @test
 fn test_index_catch_up_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
     for seed in 0u64 .. 3 {
-        lcu_case(d, c, r, tasks, seed * 7919 + 1, "ss", false, false, false)?
-        lcu_case(d, c, r, tasks, seed * 7919 + 2, "scs", true, false, false)?
-        lcu_case(d, c, r, tasks, seed * 7919 + 3, "swbs", true, false, false)?
-        lcu_case(d, c, r, tasks, seed * 7919 + 4, "cs", false, true, false)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 1, "ss", false, false, false, false)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 2, "scs", true, false, false, false)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 3, "swbs", true, false, false, false)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 4, "cs", false, true, false, false)?
     }
-    lcu_case(d, c, r, tasks, 5, "s", true, false, true)
+    lcu_case(d, c, r, tasks, 5, "s", true, false, true, false)?
+    lcu_case(d, c, r, tasks, 6, "sc", false, false, false, true)
 }
 
 // The "catch-up" crash scenario (store_crash_tests.py). The write phase keeps

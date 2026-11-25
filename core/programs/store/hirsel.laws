@@ -75,7 +75,7 @@ store@1/store/disk_test_migrate src=3fa83549f8736e91 sig=e797d346bcdf3be4 run=ea
 store@1/store/disk_test_opening src=be16cf1a5e2d3b3b sig=76957f36342a1722 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_page_emission src=89c60e6135c90187 sig=afff20917c112905 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/disk_test_page_location_closure src=6a4a89744a851879 sig=23d704b14f7dd06d run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/disk_test_paged_generation src=4f56ce717d1a3800 sig=f43f5f046d75ebc9 run=c44758d978325bd3 bug=- oracle=- rows=pending
+store@1/store/disk_test_paged_generation src=dc7ff07b2815c6dd sig=3a8c0d63167cdfed run=c44758d978325bd3 bug=- oracle=- rows=pending
 store@1/store/disk_test_paged_inventory src=12558f6fd247ca0f sig=9b62ac087b02a59b run=c44758d978325bd3 bug=- oracle=- rows=pending
 store@1/store/disk_test_paged_manifest src=394d8c71a32e785b sig=eb0f93434bb8cf94 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/disk_test_publish_refusal src=501e4f915f20c766 sig=d7c0d5fda721517f run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -195,7 +195,7 @@ store@1/store/test_fork_shared_head src=6ec999ebf833b1e2 sig=9e07ff9e3a3d7d5b ru
 store@1/store/test_frame_size src=b88fd42eacf70c23 sig=0595b0ee84e6694c run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frames src=e2a03facf79d4eb1 sig=67a87acd7c807068 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_build_law src=8e5a5ca8791ed210 sig=2dc86a359cc73a46 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_index_catch_up_law src=bd998d3d8d6e6261 sig=4c72c82e16d26660 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/test_index_catch_up_law src=f9de5c254bccb3b7 sig=e339f83b6d3b2e6b run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_index_declaration_laws src=b35eb152d2afd356 sig=f3eab4b7ff60cc16 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_drift_counted src=5c32a907f7eb0e39 sig=93a200464e84b955 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_refusal src=36fd8913bd0d171f sig=ddfe64a54bd0d1a9 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

@@ -4322,9 +4322,7 @@ fn disk_cut_with_limit(mut db: Db, take requested: HolderDelta, write_seal: scop
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
     let resident_pages = resident_location_charge(pages.locations)
-    if let Some(wanted) = target {
-        validate_new_page_manifest(d, id, manifest, wanted)?
-    }
+    validate_cut_pages(d, id, manifest, target, delta, disk_state(db).pages)?
     if let Error(take problem) = publish_page_manifest_bytes(d, manifest) {
         return Error(cut_io_error(mut db, take problem))
     }

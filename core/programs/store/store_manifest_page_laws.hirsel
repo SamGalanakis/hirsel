@@ -8,7 +8,8 @@ fn read_selected_page_manifest(d: Dir) -> Result[(StoreId, ValidatedPageManifest
 fn publish_page_manifest(d: Dir, id: StoreId, m: PageManifest, target: Option[TargetLimits], mut scratch: Bytes) -> Result[(), Error] waits {
     fill_page_manifest_file(mut scratch, id, m)?
     if let Some(wanted) = target {
-        validate_new_page_manifest(d, id, scratch, wanted)?
+        let none = new_page_locations()
+        validate_new_page_manifest(d, id, scratch, wanted, SettledPacks(below: 0, locations: view none))?
     }
     publish_page_manifest_bytes(d, scratch)
 }

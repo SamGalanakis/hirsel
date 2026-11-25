@@ -6,6 +6,17 @@ with `media_bits@1` ([building](../building.md#the-installation)). `remove_gener
 `false` for a generation of `2^(64 − bits)` or more, as `install_ratcheted` refuses one, instead
 of removing the installed generation it aliases after the shift (SFRAME-8, law K2).
 
+Version note (2026-11-25, sframe-import-build-2702 v6): v6 applies the import attack
+(sframe-import-attack-2699) to SFRAME-14 before E1 builds it. `sender` and `Follow` take `at`,
+the step of the imported bytes, so a granted key resumes at a stored step in one core call
+(M3). `install` takes the schedule and issues its own opener, `install_from` replaces
+`opener` (S2), and a generation keeps its last forward candidate (S3). Intermediate openers
+are all or nothing (S1), and a `Capacity` from a packet operation is the caller's
+`Capacity` with nothing advanced (M4). The one-sender claim is narrowed to what TLS-8's new
+send-key registry gives (M1), the erasure claims to what survives a ratchet (M2, S5), and a
+granted send key is a resumed key (S6). A core key-seal operation to replace `ratchet_key`
+is an open item (S7).
+
 Version note (2026-11-25, sframe-import-spec-2696 v5): v5 specifies the keying end state, which
 slice E1 builds. Base keys enter only as TLS-8 SFrame schedules
 ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement), SFrame schedules), and core allows one
@@ -101,8 +112,11 @@ what it removes.
   - base keys stop being program bytes, so a granted base key can be used;
   - the salt and the ratchet are computed inside core;
   - the salt, not only the AEAD key, stays behind the boundary;
-  - core enforces one sender per key within a run;
-  - base keys are zeroed at each ratchet step and at drop;
+  - core refuses a second sender of equal bytes within a run, by any route (TLS-8's send-key
+    registry), though not bytes one ratchet step apart or another run;
+  - base keys, their PRKs and the imported bytes are zeroed at each ratchet step, at import
+    and at drop; per-KID keys of retained steps live as long as their openers, and ring AEAD
+    keys are not erased (TLS-8);
   - derived keys are confidential, not only use-marked.
 - The last two shrink without going:
   - a base key that reaches a member as program bytes, over `runner.room` or TLS, is still on
@@ -953,9 +967,9 @@ reservations, its volume limit and its framing.
   // module schedule
   pub type SframeSuite = Aes128GcmSha256_128()
   pub fn import_sframe(suite: SframeSuite, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
-  pub fn sframe_sealer(mut s: Schedule, steps: u8, kid: u64, floor: u64) -> Result[Sealer, ScheduleError]
-  pub fn sframe_opener(s: Schedule, ahead: u8, kid: u64) -> Result[Opener, ScheduleError]
-  pub fn sframe_ratchet(mut s: Schedule, steps: u8) -> Result[(), ScheduleError]
+  pub fn sframe_sealer(mut s: Schedule, steps: u64, kid: u64, floor: u64) -> Result[Sealer, ScheduleError]
+  pub fn sframe_opener(s: Schedule, ahead: u64, kid: u64) -> Result[Opener, ScheduleError]
+  pub fn sframe_ratchet(mut s: Schedule, steps: u64) -> Result[(), ScheduleError]
   ```
 
 - **The byte-keyed API goes.** No sender or receiver takes a `Bytes` base key.
@@ -966,9 +980,19 @@ reservations, its volume limit and its framing.
     and a key distribution sends bytes. On a join it must hand the joiner the current step's
     key, never step 0's (SFRAME-8). A sender resumed after a crash is imported at its stored
     step, because `sender` issues at the schedule's current step. Both need `base_key[step]`
-    as bytes, and no schedule returns bytes. A granted key has no such copy, and its issuer
-    does this outside the run. A core operation that seals the current step's key for a
-    recipient would remove this helper. It is not specified here (keying cost, above).
+    as bytes, and no schedule returns bytes. A sender or receiver that resumes does not need
+    it: `sender` and `Follow` take `at`, the step its imported bytes are, and core ratchets
+    from there (sending and following, below). So the helper is for keys the program made
+    or received as bytes, and never a route for a granted key, which cannot be handed to a
+    joiner from inside the run at all.
+  - **Open: a core key-seal operation** (attack 2699 S7, not built in E1). The end state is
+    `sframe_seal_key(s: Schedule, kek: Secret, nonce, aad) -> Bytes`, an AEAD seal of the
+    schedule's current base key under a `wrap`-use KEK, computed in core and authorised by
+    the import's own policy (for instance `sframe_import(send,<kid>,<bits>,distribute)`, so a
+    holder of a send schedule cannot seal the key under a KEK it made and read it back). A
+    recipient unwraps it into `sframe_import(receive)` under an opaque KEK, or opens it with
+    its own AEAD in a browser. That slice deletes `ratchet_key`, which has no other use once
+    `at` exists.
   - No test or interop surface keeps them. A test vector, or a key that arrives as bytes (a
     browser peer's key over `runner.room`), becomes a schedule through
     `secret.seal(bytes, "sframe_import(..)")` and `import_sframe`. That path is two calls, and
@@ -982,21 +1006,34 @@ reservations, its volume limit and its framing.
 
   ```hirsel unbuilt
   // module sframe, at E1
-  pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take keys: schedule.Schedule, from: Mark, l: Limits) -> Result[Sender, (SframeError, schedule.Schedule)]
-  pub fn opener(s: Sender, kid: u64) -> Result[schedule.Opener, SframeError]
-  pub fn install(mut r: Receiver, kid: u64, take o: schedule.Opener, floor: u64) -> Result[(), (SframeError, schedule.Opener)]
+  pub type Follow { generation: u64, bits: u8, step: u64, at: u64, forward: u8, keep: u8, floor: u64 }
+  pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take keys: schedule.Schedule, at: u64, from: Mark, l: Limits) -> Result[Sender, (SframeError, schedule.Schedule)]
+  pub fn install(mut r: Receiver, kid: u64, keys: schedule.Schedule, floor: u64) -> Result[(), SframeError]
+  pub fn install_from(mut r: Receiver, kid: u64, s: Sender, floor: u64) -> Result[(), SframeError]
   pub fn install_ratcheted(mut r: Receiver, f: Follow, take keys: schedule.Schedule) -> Result[(), (SframeError, schedule.Schedule)]
-  pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take keys: schedule.Schedule, floor: u64) -> Result[(), (SframeError, schedule.Schedule)]
+  pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take keys: schedule.Schedule, at: u64, floor: u64) -> Result[(), (SframeError, schedule.Schedule)]
   ```
+
+  `sframe.opener` is not built: the library never holds an opener it did not issue, so an
+  opener of another KID, step or profile cannot be installed (attack 2699 S2).
 
   Every refusal returns what the call took, as TLS-8's constructors return a share. The
   library's own `Invalid` and `Keys` checks come first. A schedule refusal is
   `Schedule(e)`, and TLS-8 makes each one before issue and with no effect.
 - **Sending.**
-  - `sender` issues `sframe_sealer(keys, 0, kid, from.ctr)`, where `kid` is the scheme's
-    current KID. The sender then owns the schedule and the sealer. A KID outside the import's
-    block is `Schedule(Invalid)`. A second sender of one step and KID in the run cannot be
-    made: one schedule is owned by one `Sender`, and a second import of its bytes is `Spent`.
+  - `at` is the ratchet step of the imported bytes: 0 for a grant, a fresh key or a key
+    received at step 0, and the step a distributor named for a key it handed on. `sender` is
+    `Invalid` when `at` is past the scheme's step (a `Fixed` scheme is step 0), or when the
+    distance is over `2^16`. It then issues `sframe_sealer(keys, step − at, kid, from.ctr)`,
+    where `kid` is the scheme's current KID, so a sender resumed at a stored step from a
+    granted key reaches that step's key in the one call that issues its sealer, and a
+    refusal leaves the schedule where it was (attack 2699 M3). The sender then owns the
+    schedule and the sealer. A KID outside the import's block is `Schedule(Invalid)`.
+  - Within the run, one schedule is owned by one `Sender`, a second import of the same
+    designation is `Spent`, and a second `send` import of equal bytes by any route is
+    `Spent` from the send-key registry (TLS-8, sender ownership). Equal bytes in another
+    run, and bytes one ratchet step apart, stay the issuer's (what stays the caller's,
+    below).
   - The sealer's floor is the resumed ceiling's CTR. Core therefore refuses a CTR below a
     stored ceiling even if the library has a bug. Reservations, `Mark` and the `2^34`
     volume limit stay library state (SFRAME-5), because TLS-8 leaves lifetime limits to
@@ -1007,33 +1044,59 @@ reservations, its volume limit and its framing.
     block, the sender is unchanged and still seals under the old step (law I1).
   - `seal` passes the header and metadata to `packet.seal_into` as TLS-8's SFrame row says.
     `seal_ranged` builds SFRAME-9's whole AAD at the front of its scratch output, with `extra`
-    empty, then scatters as before. Every `PacketError` is ruled out by the library's checks,
-    so one is a failure of the library, as the AEAD sink's refusal is today.
-  - `opener(s, kid)` is `sframe_opener(keys, 0, kid)` on the sender's schedule. A member that
-    holds a shared group key as `send,<own kid>,0` uses it to open the other members' KIDs. It
-    is `Schedule(Invalid)` for a KID inside the block.
+    empty, then scatters as before.
+  - `seal_into` admits the AAD scratch, `len(header) + len(metadata)`, under the RFC framing
+    with metadata (TLS-8's AAD scratch), and that admission can be refused. A
+    `PacketError.Capacity(c)` from `seal_into` is `Capacity(c)` from `seal`, and from
+    `open_into` or `open` it is `OpenError.Capacity(c)`. The library advances its CTR,
+    volume and window only after the core call succeeds, so such a refusal changes nothing
+    and the next seal uses the same CTR (law S1, attack 2699 M4). `Reused`, `Range` and
+    `TooLong` are ruled out by the library's checks, so one of them is a failure of the
+    library, as the AEAD sink's refusal is today.
+  - `install_from(r, kid, s, floor)` installs `sframe_opener(keys, 0, kid)` on the sender's
+    schedule. A member that holds a shared group key as `send,<own kid>,0` uses it to open
+    the other members' KIDs. It is `Schedule(Invalid)` for a KID inside the block.
 - **Receiving fixed KIDs.**
-  - `install` takes an opener from `sframe_opener(keys, 0, kid)` on a `receive` import, or
-    from `opener` on a sender, and keeps it with the KID's window.
-  - The caller may drop the schedule once it has issued its openers, which erases the base
+  - `install` issues `sframe_opener(keys, 0, kid)` on the schedule it is lent, a `receive`
+    import or any other SFrame schedule, and keeps the opener with the KID's window. A
+    schedule of another kind is `Schedule(Invalid)` (TLS-8's kind table), so the KID and the
+    profile cannot disagree with the opener.
+  - The caller drops the schedule once it has installed its KIDs, which erases the base
     key.
-  - An opener installed under a KID other than its own opens nothing: every frame is
-    `Discarded(Tampered)`. The library cannot see an opener's KID, so this is the caller's
-    mistake to avoid, and it is never unsafe.
 - **Following a ratchet.**
-  - `install_ratcheted` keeps the schedule at the generation's current step `s`, with an opener
-    for `s` from `sframe_opener(keys, 0, kid(s))`.
-  - A forward candidate at distance `d` is `sframe_opener(keys, d, kid(s + d))`.
-  - **When the candidate authenticates**, the library first issues openers for the
-    intermediate steps that the new current step retains, `max(1, d − keep) ≤ j < d`. A
-    `Capacity` refusal leaves that step unretained, and its frames are `NoKey`. Then
-    `sframe_ratchet(keys, d)` commits, which cannot fail.
-  - **When the candidate fails**, it is dropped, the schedule never moved, and its 1024
-    bytes are refunded.
-  - Retained steps hold only openers, so their base keys are erased once the schedule passes
-    them, which is RFC 9605 §5.1's "deleted promptly".
-  - `advance` replaces the held schedule with a new import and keeps the retained openers in
-    `[step − keep, step)`. Dropping the old schedule erases its base key.
+  - `Follow.at` is the step of the imported bytes, as for `sender`; `Invalid` when it is
+    past `f.step` or `f.step − at` is over `2^16`. `install_ratcheted` issues the opener for
+    `s = f.step` as `sframe_opener(keys, s − at, kid(s))`, which does not move the schedule,
+    and only then commits with `sframe_ratchet(keys, s − at)` when that is not 0, which
+    cannot fail. A refusal returns the schedule unmoved.
+  - A forward candidate at distance `d` is `sframe_opener(keys, d, kid(s + d))`. The
+    generation keeps its last candidate, `(d, opener)`, until a commit or `advance` and
+    reuses it for the next frame at that `d`, so a stream of forged frames at one `d` costs
+    one ratchet run and one key expansion, then one AEAD open a frame (attack 2699 S3). The
+    candidate is admitted from the current limit, 1024 bytes, and is not counted in
+    `l.keys`.
+  - **When the candidate authenticates**, the library issues openers for the intermediate
+    steps that the new current step retains, `max(1, d − keep) ≤ j < d`, all or nothing: if
+    one is refused with `Capacity(c)`, the ones issued are dropped, the schedule does not
+    move, the frame's window is not marked, and `open` answers `Capacity(c)`. The caller
+    frees memory and offers the frame again (attack 2699 S1). Then `sframe_ratchet(keys, d)`
+    commits, which cannot fail, and the candidate becomes the step's opener.
+  - **When the candidate fails**, it is kept for the next frame at that `d`, the schedule
+    never moved, and its 1024 bytes stay admitted until a commit, `advance` or removal.
+  - **What survives a ratchet** (RFC 9605 §5.1, "deleted promptly"; attack 2699 S5). Once
+    the schedule passes a step, that step's base key and PRKs are gone, and so are the
+    imported bytes, which the import zeroed (TLS-8, imports). What remains is the
+    `sframe_key` and `sframe_salt` of each retained step and KID, in its opener, for up to
+    `keep` steps, and for an old generation until `remove_generation`. They open that step's
+    frames for that KID and derive no other step or KID. On a CPU without VAES, ring's AEAD
+    key of each dropped sealer and opener stays wherever its slot is not reused (TLS-8,
+    erasure).
+  - `advance` takes `at` as `Follow` does. It issues the new step's opener from the new
+    schedule, ratcheted on a copy, before it drops anything; on a refusal it returns the new
+    schedule and the generation is unchanged. Then it commits the new schedule's ratchet,
+    keeps the retained openers in `[step − keep, step)`, and drops the old schedule, which
+    erases its base key. `Keys` is decided on the count after the retained set is trimmed,
+    before any issue.
 - **Directions and deployments.** The policy, not the call, decides each KID's direction
   (TLS-8, SFrame schedules):
   - **Sender keys** (RFC 9605 §5.1). A sender's own key is `sframe_import(send,<g·2^R>,<R>)`
@@ -1052,20 +1115,29 @@ reservations, its volume limit and its framing.
   specifies that operation, with a ledger of SSRCs on a send parent (TLS-8, SFrame
   schedules). `ssrc_key` is never built.
 - **What stays the caller's** (SFRAME-13 at E1):
-  - KID assignment, and issuing each sender its current step's key once. Core cannot connect
+  - KID assignment, and issuing each sender its key once, to one run. Core cannot connect
     `base_key[i]` with `base_key[i + 1]`, or a key with the same key in another run.
-  - The volume, the reservation store and the framing per key.
-  - A key that reaches a member as program bytes is sealed into a schedule at once and its
-    bytes dropped. They are not zeroed, and a recording of the `aead_open` that delivered them
-    still holds them, so such a tape is still key-bearing. Only a granted key leaves no copy in
-    the run.
+  - A step for each key: `at` for the bytes, and the stored step for the sender (SFRAME-5).
+  - The volume, the reservation store and the framing per key. A granted send key is a
+    resumed key unless its issuer states it is fresh for this run: a `file:` or `env:` grant
+    is the same bytes in every run. A sender on a granted key takes `from` from the
+    reservation store, and `Mark(0, 0)` is for a key the run made or was just handed (attack
+    2699 S6).
+  - A key that reaches a member as program bytes is sealed into a schedule at once. Sealing
+    copies the bytes and zeroes the program's source buffer (TLS-5), and the import zeroes
+    the sealed copy. What stays is any other copy the program made, and the recording of
+    the `aead_open` that delivered them, so such a tape is still key-bearing. Only a granted
+    key leaves no copy in the run.
 - **Cost.** Each installed key or retained step holds an `Opener` (1024 bytes) instead of
   48 bytes of `Secret` admission and a salt. A ratcheted generation also holds its schedule
   (512 bytes) instead of a 32-byte base key, and each sender holds its schedule and its sealer
   (1536 bytes and a 16-byte ledger entry). With `l.keys` at its maximum of 256 that is
-  256 KiB per receiver, admitted from the current limit as each opener is issued. Frame steps are
-  unchanged: a seal or open is one core call that takes one step. A ratchet or candidate is
-  one call of at most 16 ratchet steps, where the library HKDF ran one call per step.
+  256 KiB per receiver, plus one 1024-byte candidate per ratcheted generation, admitted from
+  the current limit as each opener is issued. A `send` import admits 48 more for its
+  send-key registry entry, held to the run's end. Frame steps are unchanged: a seal or open
+  is one core call that takes one step. A ratchet or candidate is one call of at most 16
+  ratchet steps (`forward` is at most 16), and a resume is one call of at most `2^16`, where
+  the library HKDF ran one call per step.
 - **Laws at E1.** These are in the same harness, beside TLS-8's PC12 to PC14, and repeat none
   of them.
   - **V2** becomes C.3 through the import. `00..0f` is sealed as `sframe_import(send,291,0)`,
@@ -1080,6 +1152,22 @@ reservations, its volume limit and its framing.
   - **K2** gains a case. After a forged candidate at `s + forward` fails, a genuine frame at
     `s + 1` commits and opens, so the schedule did not move. Red when the library ratchets
     the schedule before the tag check.
+  - **S1** gains a case. RFC framing with 40 bytes of metadata under
+    `bound bytes n { seal(..) }` one byte short of the AAD scratch gives `Capacity`, and the
+    next seal outside the bound uses the same CTR. Red when the library advances the CTR
+    before `seal_into`.
+  - **K1** gains a resume case. A sender over `00..0f` sealed as `sframe_import(send,4,2)`,
+    `Ratcheted(Ratchet(1, 2, 3))` and `at = 0`, seals `hirsel` at CTR 0 with KID 7 to Python's
+    step-3 frame `70bc317de7760a88b1039fee32a291b1b8933de0c10a30`; a receiver `Follow { step: 3, at: 0, .. }` over a `receive` import of the
+    same bytes opens it. `at` past the step is `Invalid`. Red when `sender` ignores `at` (the
+    frame is step 0's, under KID 7).
+  - **K2** gains the candidate cases. After a forged frame at `s + 2`, a second forged frame
+    at `s + 2` is `Tampered` with no new admission (the candidate is reused), and a genuine
+    frame at `s + 2` commits. With `keep = 2` and a limit that admits the candidate but not
+    the intermediate opener for `s + 1`, the genuine frame at `s + 2` is `Capacity`, the
+    schedule did not move (a frame at `s` still opens), and after the limit is raised the
+    same frame opens and a frame at `s + 1` opens. Red when an intermediate refusal is
+    skipped (the `s + 1` frame is `NoKey`).
   - **I1, ratchet atomicity.** The sender is `Ratcheted(Ratchet(1, 2, 0))` over `00..0f`
     sealed as `sframe_import(send,4,2)`, so its KID is 4. Under
     `bound bytes 1039 { ratchet(s) }` it gives `Schedule(Capacity(..))` with 1040 requested.
@@ -1149,7 +1237,10 @@ Each decision gives its reason and how hard it is to reverse.
 | D15 | The ranged AAD binds the NAL start codes as `enc(starts)` (v4) | The working form does not say where NALs begin, so without it an on-path party merges or splits NALs and the frame opens (recheck 2678 B1). Refusing clear `00 00 00 01` instead stops only the split and refuses real SPSs | Wire format: fine before the first deployed client, hard after |
 | D16 | Senders and receivers take keys only from TLS-8 SFrame schedules. `take base: Bytes`, `salt_of` and the library key derivation are deleted, and `ssrc_key` is withdrawn, with no byte-keyed test or interop surface left. `ratchet_key` stays as a distribution helper (SFRAME-14) | One key path with one set of guarantees. Bytes become a schedule in one `secret.seal`, and the vectors then check the schedule's derivation, not a library copy of it. A distributor that holds a sender key as bytes still has to hand out the current step's key | S before deployment, since the API is the library's. A byte path back would reopen every v4 keying cost. `ratchet_key` goes when core can seal a schedule's current key for a recipient |
 | D17 | The policy fixes direction per KID: `sframe_import(receive)` opens every KID, and `sframe_import(send,<kid>,<bits>)` seals its block and opens the rest | RFC 9605 §4.4.1 marks each stored (KID, base key) entry. A shared group key needs both directions from one grant, because the spent mark cannot connect two grants of one source | Policy text is recorded and granted, so a new spelling is a format change; adding a use is S |
-| D18 | A receiver commits a candidate step by `sframe_ratchet` after authentication. Intermediate steps are retained only when the issue of their openers succeeds | The commit then cannot fail, and a forgery costs what it did in v4 | Trivial |
+| D18 | A receiver commits a candidate step by `sframe_ratchet` after authentication. Intermediate openers are issued all or nothing, and a refusal is the frame's `Capacity` with nothing moved (v6) | The commit then cannot fail, and a step is never lost to a transient limit: best-effort retention made reordered frames of a skipped step `NoKey` for good, with the caller told nothing (attack 2699 S1) | Trivial |
+| D19 | `sender`, `Follow` and `advance` take `at`, the step of the imported bytes, and core ratchets `step − at` in the call that issues the sealer or opener, up to `2^16` | A granted key is step 0's in every run, and a resumed sender at step `n` must reach `base_key[n]`; two calls could leave a moved schedule on a refusal, and a library that cannot see the bytes' step would seal step 0's key under step `n`'s KID (attack 2699 M3) | A parameter; the cap is a constant |
+| D20 | One-sender-per-key in a run is a core registry of send-key fingerprints (TLS-8), not only the spent mark | Equal bytes sealed twice are two designations to the mark, and SFRAME-14 makes `seal` of program bytes the normal path for non-granted keys; the registry treats like bytes alike whatever their route (/wholehog), for 48 bytes and one hash per send import (attack 2699 M1) | Removing it reopens the in-run route; the charge is a constant |
+| D21 | `install` takes the schedule and issues the opener; there is no `opener` | The library never holds an opener it did not issue, so a wrong KID or profile cannot be installed (attack 2699 S2) | Trivial before deployment |
 
 ## Build laws
 

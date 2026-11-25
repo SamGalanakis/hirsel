@@ -357,8 +357,9 @@ the policy's shape is final.
   `Secret:<parameter>` names the `main` parameter. The launcher reads the environment
   variable or the file once, before the run starts. If the source is missing or empty,
   the run does not start (exit 103). The bytes are kept in run-owned host memory. They
-  are zeroed when the run ends and are never charged to a limit, and releasing a holder
-  of a granted secret never releases them. The program receives a
+  are zeroed when the run ends, or earlier by the import that spends them (TLS-8,
+  imports), and are never charged to a limit. Releasing a holder of a granted secret
+  never releases them. The program receives a
   designation, never the bytes. The text after the source is the grant's policy.
   `to <patterns>`, with no space in `<patterns>`, is the command line's spelling of
   `tls_send(<patterns>)`, and other uses may follow it, so the first grant above is
@@ -1145,6 +1146,14 @@ senders are owned.*
 [sframe](sframe.md#keying-end-state) its keys, one sealer per ratchet step and KID, and a direction per
 KID. Not yet built: slice T16.*
 
+*Amended by sframe-import-build-2702 (2026-11-25), from the attack sframe-import-attack-2699, and built
+as slice T16. A `send` SFrame import enters a run-wide registry of base-key fingerprints, so equal
+bytes cannot be imported to send twice in a run (M1). Every import zeroes the run-owned bytes it
+spends in the transition that sets the spent mark (M2). `sframe_sealer`, `sframe_opener` and
+`sframe_ratchet` take up to `2^16` steps in one call, so a sender or receiver whose key is step 0's
+resumes at a later step without a second call (M3). SFrame's HKDF runs over storage Hirsel owns and
+erases (S8). The steps arguments are `u64`.*
+
 Datagram security protocols seal every packet under a long-lived key. QUIC
 ([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001)), DTLS 1.2
 ([RFC 6347](https://www.rfc-editor.org/rfc/rfc6347)) and 1.3
@@ -1219,9 +1228,9 @@ pub fn sealer_pair(mut s: Schedule, first: Space, second: Space, domain: u64, fi
 pub fn inspect(s: Schedule, space: Space) -> Result[SpaceInfo, ScheduleError]
 pub fn opener(s: Schedule, space: Space) -> Result[Opener, ScheduleError]
 pub fn header_mask(s: Schedule, space: Space, local: bool) -> Result[HeaderMask, ScheduleError]
-pub fn sframe_sealer(mut s: Schedule, steps: u8, kid: u64, floor: u64) -> Result[Sealer, ScheduleError]
-pub fn sframe_opener(s: Schedule, ahead: u8, kid: u64) -> Result[Opener, ScheduleError]
-pub fn sframe_ratchet(mut s: Schedule, steps: u8) -> Result[(), ScheduleError]
+pub fn sframe_sealer(mut s: Schedule, steps: u64, kid: u64, floor: u64) -> Result[Sealer, ScheduleError]
+pub fn sframe_opener(s: Schedule, ahead: u64, kid: u64) -> Result[Opener, ScheduleError]
+pub fn sframe_ratchet(mut s: Schedule, steps: u64) -> Result[(), ScheduleError]
 
 // module packet
 pub fn seal(mut c: Sealer, seq: u64, mut buf: Bytes, aad_at: u64, at: u64, extra: Bytes) -> Result[u64, PacketError]
@@ -1536,8 +1545,11 @@ set, so no derivation makes an import key. `wrap` of a secret holding an import 
 use. The canonical text writes the three uses after `wrap` and before `mtls_client_id`, in
 the order of the table above.
 
-An import **spends the bytes**. It consumes the designation it is given. On success, and on
-an `Invalid` length, it marks the run-owned bytes behind that designation as spent. The
+An import **spends the bytes**. It consumes the designation it is given. On success, on
+an `Invalid` length and on a registry `Spent` (below), it marks the run-owned bytes behind
+that designation as spent, and in the same transition it takes them for the import, which
+zeroes them before it returns: no later operation can read spent bytes, so nothing keeps
+them. That holds for a grant, a seal and an unwrap, and for every import kind. The
 mark covers every designation of those bytes, the ones `share` and `narrow` made included,
 in every unit. A later import of spent bytes is `Spent`. The mark is run-wide state that
 another unit can change, so an import issues before it reads the mark, and `Spent` is a
@@ -1552,15 +1564,22 @@ takes precedence over the general order above:
   `import_sframe`). A spent SRTP designation given
   to `import_traffic` is therefore `Denied`. Then the import issues.
 - As a delivery, in this order: `Spent`: its bytes are spent. `Invalid`: the profile does
-  not fit the import kind. `Capacity(c)`: the schedule's 512 bytes are refused. Each of
-  these returns the secret, with its holder unchanged, and marks nothing. A spent
-  designation with an unsupported profile is `Spent`. This is the one admission TLS-8 makes
-  after issue: it waits on the mark, which no unit-local state decides.
+  not fit the import kind. `SframeSuite` has one case today, so `import_sframe` cannot meet
+  this refusal yet; it keeps its place in the order. `Capacity(c)`: the schedule's 512
+  bytes are refused, or for an `sframe_import(send,..)` import its 560, the schedule's 512
+  and a registry entry's 48 (below). Each of these returns the secret, with its holder
+  unchanged, and marks nothing. A spent designation with an unsupported profile is
+  `Spent`. This is the one admission TLS-8 makes after issue: it waits on the mark, which
+  no unit-local state decides.
 - `Invalid` as a delivery, with the bytes spent and the secret consumed. For `import_srtp`
   the length is not the profile's master key length (16, 16 or 32) plus 14, or plus 12 for
   the AEAD profiles. For `import_traffic` it is not the suite's HashLen. For `import_sframe`
   it is under 16 or over 64 bytes: RFC 9605 fixes no length, a sender key or ratchet output
   is 32 and an MLS exporter's is 16, and 16 is TLS-5's HKDF floor.
+- For an `sframe_import(send,..)` import only, `Spent` as a delivery, with the bytes spent
+  and the secret consumed: the run's **send-key registry** already holds the bytes'
+  fingerprint (sender ownership, below). Its 560 bytes are refunded. Bytes of an `Invalid`
+  length are never registered, so the length refusal comes first.
 - The schedule, which holds the one direction the policy names. A `send` import is the
   sending secret, of the `Rtp` and `Rtcp` spaces or of `Application`, and issues sealers and
   sending masks only. A `receive` import issues openers and receiving masks only. The other
@@ -1573,8 +1592,9 @@ takes precedence over the general order above:
 The mark covers the bytes of one grant, seal or unwrap within one run. It cannot see equal
 bytes that came in by another route: two grants of one source, the same source in a later
 run, a peer that imported the same master, or a program that sealed bytes it also uses
-otherwise. Keeping such bytes to one purpose and one sender is the job of whoever issues
-them. A program that resumes sending under an imported key must pass a `floor` above every
+otherwise. For SFrame send keys the send-key registry closes the in-run case (below). For
+every other key, keeping such bytes to one purpose and one sender is the job of whoever
+issues them, and for every key the job across runs is. A program that resumes sending under an imported key must pass a `floor` above every
 counter it sent before (sender ownership, below), or obtain a fresh key. For SFrame the mark
 also cannot see bytes one ratchet step apart: `base_key[i]` and `base_key[i + 1]` are
 different bytes, so granting both to one run as send keys is the issuer's error (SFrame
@@ -1629,6 +1649,20 @@ only within one cipher. A schedule enforces this for every key it holds:
   later virtual share can reach it when the program knows the agreed value, which is the
   next case. The registry holds
   fingerprints only. It never passes the replay point itself (replay, below).
+- **SFrame send keys.** Two `send` imports of equal bytes would be two schedules sealing
+  under one base key, whatever their routes: two grants of one source, a key message
+  handled twice, or a sealed copy of a granted key's bytes. The run keeps one **send-key
+  registry**. An `sframe_import(send,..)` import whose length is valid computes
+  `SHA-256("hirsel sframe 1" ‖ 0x00 ‖ base)` and looks it up. When the registry holds it,
+  the import is `Spent` (imports, above). Otherwise the fingerprint is added and the
+  schedule is made. The look-up and the addition are one transition of the run, atomic
+  across units, so two imports racing in two units give one schedule and one `Spent`. An
+  entry lasts for the run, its 48 bytes charged to the limit that admitted the import and
+  refunded only when the run ends: an entry that retired with its schedule would let the
+  same bytes be imported and sealed again from CTR 0 once the first sender is dropped.
+  `receive` imports register nothing. The registry holds fingerprints only and never
+  passes the replay point (replay, below). It closes equal bytes within one run. It does
+  not reach bytes one ratchet step apart (SFrame schedules, below) or another run.
 - **Keys the program can compute.** An agreed value the program can compute is outside
   this guarantee. That covers one made from a virtual share, from `provide.random` or
   `provide.random_tape`. It also covers a host share against a peer key whose scalar the
@@ -1664,8 +1698,11 @@ already protected. It never seals them again.
 **SFrame schedules.** An `import_sframe` schedule holds one
 [RFC 9605](https://www.rfc-editor.org/rfc/rfc9605) base key and derives the per-KID key and salt
 of suite 0x0004, `AES_128_GCM_SHA256_128`, inside the run. So a base key, its `sframe_secret`,
-its salts and its ratchet outputs never become program bytes, and one sender per key is a
-schedule's guarantee. The replay window, the policy for following a sender's ratchet, CTR
+its salts and its ratchet outputs never become program bytes. Within one import a schedule
+issues one sealer per step and KID, and within one run the send-key registry refuses a
+second `send` import of equal bytes (sender ownership, above). So within a run no two
+sealers share a base key, step and KID, except through the routes listed under "what core
+does not see", below. The replay window, the policy for following a sender's ratchet, CTR
 reservations and the framing are the `sframe` library's
 ([SFRAME-14](sframe.md#sframe-14-keys-from-a-tls-8-schedule)), as SRTP's window is `srtp`'s.
 
@@ -1680,7 +1717,9 @@ reservations and the framing are the `sframe` library's
 
   Both over HMAC-SHA256, with RFC 5869's 32 zero bytes for the empty salt. The schedule holds
   only the current step's base key; each `sframe_secret` is erased inside the operation that
-  computes it. RFC 9605 C.3: base `00..0f` and KID `0x123` give key
+  computes it. Core computes this HMAC itself, over SHA-256 with the padded key blocks, the
+  inner digest and the PRK held in arrays the operation owns and zeroes before it returns,
+  so no keyed HMAC state outlives the call in a value Hirsel cannot erase (erasure, below). RFC 9605 C.3: base `00..0f` and KID `0x123` give key
   `d34f547f4ca4f9a7447006fe7fcbf768` and salt `75234edefe07819026751816` (law PC12).
 - **Directions.** RFC 9605 §4.4.1 stores one base key per KID and marks each "usable for
   encryption or decryption, never both". A schedule therefore fixes the direction per KID,
@@ -1707,14 +1746,20 @@ reservations and the framing are the `sframe` library's
   `(base_key, KID, CTR)` stays unique across steps as RFC 9605 §9.1 requires: the same KID at
   a later step is a new key. The schedule does not count steps or know a KID scheme; which
   KID a step sends under is the library's (SFRAME-8).
+- **Step counts.** `steps` and `ahead` below are `u64` and at most `2^16`, a constant that
+  bounds each call's work (charge and steps, below). A caller needs more than 16 in one
+  call only to resume: a sender or receiver whose bytes are step 0's, such as a grant,
+  reaches a stored step `n` in one call, never by `n` calls of which a later one could
+  fail (sframe's `at`, SFRAME-14). Past `2^16` it is `Invalid`, and such a key must be
+  issued at its current step.
 - **`sframe_ratchet(mut s, steps)`** replaces the base key `steps` times with RFC 9605 §5.1's
   `HKDF-Expand(HKDF-Extract("", base), "SFrame 1.0 Ratchet", 32)`, erases each superseded
   base key, and retires the ledger, refunding its entries. `Invalid` before issue when
-  `steps` is 0 or over 16. It admits nothing and has no other refusal.
-- **`sframe_sealer(mut s, steps, kid, floor)`** ratchets `steps` times, 0 to 16, and issues a
-  sealer for `kid` at the step it reaches, as one transition. Its results, in this order, each
-  refusal before issue and with no effect:
-  - `Invalid`: `steps` over 16, a `receive` import, or `kid` outside the block;
+  `steps` is 0 or over `2^16`. It admits nothing and has no other refusal.
+- **`sframe_sealer(mut s, steps, kid, floor)`** ratchets `steps` times, 0 to `2^16`, and
+  issues a sealer for `kid` at the step it reaches, as one transition. Its results, in this
+  order, each refusal before issue and with no effect:
+  - `Invalid`: `steps` over `2^16`, a `receive` import, or `kid` outside the block;
   - `Issued`: `steps` is 0 and the current ledger holds `kid`, whether or not that sealer has
     since been dropped;
   - `Capacity(c)`: the sealer's 1024 bytes and the 16-byte ledger entry are refused;
@@ -1724,8 +1769,9 @@ reservations and the framing are the `sframe` library's
   A sender that ratchets uses this one call, so no refusal can leave it with a moved schedule
   and no sealer for the new step (law PC14).
 - **`sframe_opener(s, ahead, kid)`** issues an opener for `kid` under the base key `ahead`
-  steps past the current one, 0 to 16, ratcheted on a copy that is then erased. The schedule
-  does not move. `Invalid` for `ahead` over 16 or a `kid` inside a send import's block;
+  steps past the current one, 0 to `2^16`, ratcheted on a copy that is then erased. The
+  schedule does not move. `Invalid` for `ahead` over `2^16` or a `kid` inside a send
+  import's block;
   `Capacity(c)` for its 1024 bytes. Any number may be issued. A receiver tries a candidate
   step with `ahead = d`, and commits it with `sframe_ratchet(s, d)` only after a frame
   authenticates (SFRAME-8, law K2).
@@ -1738,11 +1784,12 @@ reservations and the framing are the `sframe` library's
   for a resumed one (SFRAME-5). An opener's `domain` is 0, and `Range` otherwise. Lifetime
   limits are the library's, as for the other protocols (above): the volume limit of
   SFRAME-5, the CTR's last value and the replay window.
-- **What core does not see.** Within the spent mark's reach, a base key gives one sealer per
-  step and KID in the run. Bytes one ratchet step apart are two keys to the mark: grants of
+- **What core does not see.** Within one run, the spent mark and the send-key registry give
+  a base key one sealer per step and KID, whether the bytes arrive as one grant, two grants
+  or a `seal`. Bytes one ratchet step apart are two keys to the registry: grants of
   `base_key[i]` and `base_key[i + 1]` as send keys to one run make two schedules whose steps
-  overlap. Issuing a sender its current step's key once is the issuer's duty, as for SRTP
-  masters (imports, above). A key that reaches the run as program bytes, from a key
+  overlap, and two runs never see each other's registry. Issuing a sender its current
+  step's key once, to one run, is the issuer's duty, as for SRTP masters (imports, above). A key that reaches the run as program bytes, from a key
   distribution opened with `aead_open`, becomes a schedule only through `seal`. Its bytes
   stay where the program held them, and a recording of the `aead_open` holds them; `unwrap`
   cannot make an import use (replay, below).
@@ -1891,6 +1938,12 @@ volatile writes of zeros before it releases or reuses that storage. That covers:
   schedule is dropped, and every `sframe_secret`, ratchet PRK and ratcheted copy, erased
   inside the operation that computes it;
 - each sealer's and opener's IV and base;
+- an import's spent bytes: the run-owned bytes of a granted or sealed secret, taken by the
+  import that spends them (imports, above) and erased before it returns, on success and on
+  every delivered refusal;
+- the SFrame HMAC state: the padded key blocks, inner digests and PRKs of each HKDF step,
+  held in arrays the operation owns. Core does not key ring's `hmac` for SFrame, because a
+  ring key is a typed value it cannot erase (below);
 - on the VAES path, the AES key schedule and GHASH table that `os_tls/gcm.rs` builds. T11
   changes `GcmKey::new` to build them in place in the sealer's or opener's run-owned slot,
   through a pointer to that slot, never into a local that is then returned.
@@ -1919,6 +1972,7 @@ construction refunds everything it admitted before it returns.
 | `KeyShare` | 64 | at drop, or when a constructor consumes it: after the schedule's 512 are admitted, at the same point. A constructor refused before issue returns the share with its 64 still held |
 | `Schedule` (each constructor and `srtp`) | 512 | at drop |
 | an agreement registry entry (`tls13`, `dtls12`) | 48, admitted together with the schedule's 512 | when the entry retires (agreements, above), which may be after the schedule's drop; a refused construction refunds it at once |
+| a send-key registry entry (`import_sframe` of a `send` use) | 48, admitted together with the schedule's 512 | when the run ends; a refused import refunds it at once |
 | a ledger entry (each issued sealer) | 16 | when its ledger retires |
 | `Sealer`, `Opener` | 1024 | at drop |
 | `HeaderMask` | 512 | at drop |
@@ -1926,8 +1980,10 @@ construction refunds everything it admitted before it returns.
 | the AAD scratch | `len(buf span) + len(extra)` | at the call's return |
 
 Every operation in this section takes one step, whatever its lengths. `sframe_sealer`,
-`sframe_opener` and `sframe_ratchet` run at most 16 ratchet steps, so a constant bounds their
-work. The work of a seal,
+`sframe_opener` and `sframe_ratchet` run at most `2^16` ratchet steps, each four SHA-256
+compressions of HKDF-Extract and four of HKDF-Expand, so a constant (`2^19` compressions)
+bounds their work. A program that ratchets one step per call pays one ratchet; only a
+resume pays more, once. The work of a seal,
 open or mask is bounded by bytes that a limit already bounds, which is the AEAD sink's rule.
 Charges are logical. No measured per-byte step charge is added. No operation here waits.
 
@@ -1989,7 +2045,7 @@ as follows. A ledger changes only in the rows that say so.
 | `p256_key`, host | `Random`, policy, spare | public point and designation origin | as above; the designation has no bytes |
 | `sign` | key designation, algorithm, `Random` identity, `msg` by the canonical-arguments rule, `out`'s spare | the signature or a refusal | `out` gains the signature |
 | `tls13`, `dtls12` | share origin, profile, suite, side, epoch, `peer`, randoms and hashes | the schedule's origin, or `Invalid` or `Issued` | the share is consumed and its 64 refunded. On success the registry gains an entry with the live share count, and the schedule has no secrets when opaque; a virtual one computes its secrets as live, after the recorded verdict. A refusal refunds as live |
-| `import_srtp`, `import_traffic`, `import_sframe` | designation, profile or suite | schedule origin, or `Spent`, `Invalid` or `Capacity` | the mark is never read. After a delivery other than `Spent` or a profile `Invalid`, the 512 bytes are admitted against the replay's own limit, as live, and a delivered `Capacity` is that admission's result; the bytes are marked spent where live marked them; the schedule's direction comes from the designation's policy |
+| `import_srtp`, `import_traffic`, `import_sframe` | designation, profile or suite | schedule origin, or `Spent`, `Invalid` or `Capacity` | the mark is never read. After a delivery other than `Spent` or a profile `Invalid`, the 512 bytes are admitted against the replay's own limit, as live, and a delivered `Capacity` is that admission's result; the bytes are marked spent where live marked them; the schedule's direction comes from the designation's policy. The send-key registry is never consulted: a registry `Spent` is a delivery, and after an `import_sframe` success of a `send` use the entry's 48 bytes are admitted with the 512, as live |
 | `application` | schedule origin, `finished_hash` | done or a refusal | the stage changes as live |
 | `key_update` | schedule origin, `local` | done or a refusal | the generation of that direction changes and its old ledger retires, refunding its entries, as live |
 | `retire` | schedule origin, space | done or a refusal | the space is spent and its ledgers retire, refunding their entries, as live |
@@ -2063,12 +2119,12 @@ second spelling is added.
 | **PC6** purpose separation | a key, IV or header key used for another purpose, or an import retyped | Each gives a refusal before issue, and the counting provider sees no call. `header_mask` on a `Dtls12`, `Tls13` or SRTP schedule (`Invalid`). `seal` with an `Opener` and `open` with a `Sealer` are type errors (PC6's refused fence). `seal` of policies `srtp_import(send) mac`, `traffic_import(send) kdf`, `srtp_import(send) traffic_import(send)` and `srtp_import(send) srtp_import(receive)` (`Invalid`). `derive_hkdf_sha256` with child `uses` `srtp_import(send)` (`Invalid`). `wrap` of an import secret (`Denied`). `narrow` of `srtp_import(send)` by `mac`, and by `srtp_import(receive)` (`Invalid`). `aead_seal` with an import secret (`Denied`). With RFC 9001 A.2's Initial secret, the mask key's AES output differs from the payload key's on the same sample. |
 | **PC7** key agreement | a missing small-order check, an off-curve peer accepted, or a scalar decoded wrongly | Wycheproof `x25519_test.json` and `ecdh_secp256r1_ecpoint_test.json` at the pinned commit. Each case's private key goes through `provide.random_tape`: X25519's 32 bytes, and P-256's unsigned big-endian scalar decoded to exactly 32 bytes first (215 valid cases have a 33-byte encoding with a leading zero). A `valid` case: `tls13(Tls13(Aes128GcmSha256), ..)` with the case's public key and a fixed `hello_hash`, then seal one record. It equals Python `cryptography` computing the same schedule from the case's `shared`. An `invalid` case, and an `acceptable` X25519 case flagged `ZeroSharedSecret`, gives `Invalid`, with the share consumed and its 64 bytes refunded. Every other `acceptable` X25519 case (flagged `Twist`, `NonCanonicalPublic`, `EdgeCase*`, `SpecialPublicKey` or `SmallPublicKey` with a nonzero `shared`; RFC 7748 §5 masks the top bit and accepts twist points) succeeds as a `valid` one does. The one `acceptable` P-256 case, tcId 2, a compressed point, gives `Invalid`, because TLS-8 takes only the 65-byte uncompressed form; the adapter checks the length and leading `04` before the library's parser, which would accept it. A second use of a moved share is refused by OWN rules. |
 | **PC8** simulation determinism and backends | a virtual key read from host entropy, a draw skipped or doubled, a rejected candidate mishandled, or the two backends disagreeing | `provide.random_tape` holding the 32 bytes `ff..ff` (out of range), then a valid scalar, then 8 bytes: `p256_key` gives the valid scalar's public point, which Python `cryptography` derives independently. A following `host.random` of 8 bytes reads exactly the last 8. Two runs with `provide.random(7)` doing `key_share(X25519)`, `p256_key` and `sign(P256)` give byte-identical public keys and signatures, and the signature verifies with `p256.verify`. Separately, `p256_key` from a `random_tape` holding RFC 6979 A.2.5's private key, then `sign(P256)` of `sample`, gives A.2.5's SHA-256 `r ‖ s`. The same program on the evaluator, Cranelift and LLVM gives the same bytes. Recorded and replayed, a `host.random` draw on the same virtual cell after these operations reads the same bytes on both, so the replay advanced the stream exactly as live did. A host `sign(P256)` signature need not equal the virtual one, but it verifies with `p256.verify`. A simulated `key_share` and a host `key_share`, on opposite sides, agree through two `tls13` schedules for each group: the host side's sealed record opens on the virtual side and the virtual side's on the host side. `sign(P256)` with a granted key and `provide.random(7)` gives `Denied`. |
-| **PC9** no key on a tape; replay effects | key material in a frame, or replay state that differs from live | A run with a host `Random` makes an X25519 share and runs `tls13` against a fixed peer. It issues a sealer and mask, seals and masks one packet, opens one valid and one tampered packet into a non-empty `buf`, and seals again. The key share comes from a host-provider fixture whose private key is a known sentinel. The tape holds the public key and the packets, and holds none of the sentinel, the shared value, the traffic secrets, the key, IV or header key, raw, hex or base64. Those values come from Python over the sentinel. On replay, the same bytes are written, the tampered `buf` has the same zeroed range, the same charges are admitted, the second seal's high-water mark refuses a repeat, a `provide.random(7)` draw after it reads the same bytes as live, and the run ends `Sealed`. |
+| **PC9** no key on a tape; replay effects | key material in a frame, or replay state that differs from live | A run with a host `Random` makes an X25519 share and runs `tls13` against a fixed peer. It issues a sealer and mask, seals and masks one packet, opens one valid and one tampered packet into a non-empty `buf`, and seals again. The key share comes from a host-provider fixture whose private key is a known sentinel. The tape holds the public key and the packets, and holds none of the sentinel, the shared value, the traffic secrets, the key, IV or header key, raw, hex or base64. Those values come from Python over the sentinel. On replay, the same bytes are written, the tampered `buf` has the same zeroed range, the same charges are admitted, the second seal's high-water mark refuses a repeat, a `provide.random(7)` draw after it reads the same bytes as live, and the run ends `Sealed`. SFrame: a run seals `00..0f` as `sframe_import(send,4,2)`, imports it, seals PC12's step-1 frame through `sframe_sealer(s, 1, 5, 0)`, and imports the same bytes sealed again, which gives `Spent` from the registry. The tape holds the frame and neither the base key, `base_key[1]`, nor KID 5's key or salt; replay writes the same frame, admits the same 560 and 1040, gives the same `Spent` without a registry, and ends `Sealed`. |
 | **PC10** DTLS 1.2 schedule | a PRF split off by one, randoms in the wrong order, EMS ignored, or the exporter cut wrongly | The oracle is a Python TLS 1.2 PRF, checked first against the 100-byte SHA-256 and 148-byte SHA-384 PRF fixtures of rustls `rustls-ring/src/tls12.rs` at `a40acf9d`: its first 32 bytes, the bytes at 32..100, and the whole output. With a tape X25519 share and a fixed peer, `dtls12` with and without `session_hash`, for each suite, seals one record whose bytes equal Python AES-GCM or ChaCha20-Poly1305 under the Python key block. For each GCM suite, a peer-direction record produced by Python alone, with explicit nonce `0x0000000000001234` under record number 1 in its AAD and its own tag, opens to its plaintext through the opener: a local sealer always writes the record number as the explicit nonce, so it cannot make this case. ChaCha20 has no explicit nonce and no such case. `srtp` then `sealer(Rtp, ssrc)` seals one RTP packet equal to Python over the exporter's cut. Interop: against `openssl s_server -dtls1_2 -use_srtp SRTP_AEAD_AES_128_GCM -keymatexport EXTRACTOR-dtls_srtp -keymatexportlen 56`, the printed exporter bytes give, through Python, the SRTP packet the Hirsel client seals. |
-| **PC11** charge and erasure | state not admitted, admitted twice, not refunded on failure, a ledger that grows without charge, or a slot left with key bytes | Under the reference count: `bound bytes 1023 { sealer(..) }` gives `Capacity` with `requested` 1040 (1024 plus the 16-byte entry), and 1040 succeeds. `bound bytes 63 { key_share(..) }` gives `Capacity` with 64 requested. A `tls13` refused before issue returns the share with the limit unchanged. One refused for an invalid peer leaves the limit where it was before `key_share`. After `key_update`, the old ledger's entries are refunded. `bound bytes 511 { header_mask(..) }` gives `Capacity` with 512 requested. `bound bytes 175 { p256_key(..) }` gives `Capacity` with 176 requested and `public` unchanged, and 176 succeeds. `bound bytes 559 { tls13(..) }` gives `Capacity` with 560 (the schedule's 512 and the registry entry's 48) and returns the share. A sealer moved to another unit and dropped there refunds its 1024 to the limit that admitted it, after the first unit has ended. `p256_key` from a `random_tape` holding `ff..ff` then 16 bytes faults the task with `Bounds`; the limit is back where it was before the call, `public` is unchanged, and a surviving holder of the same `Random` draws next from the 16 bytes. After every drop the limit is back where it was. In the native runtime's unit tests, the live raw storage of a sealer's owned fields (IV, base, and on VAES the key schedule and GHASH table), and of a schedule's secret arrays, reads all zeros after erasure and before release; ring and dalek values are outside the check (erasure, above). An SFrame schedule's base key slot reads all zeros after `sframe_ratchet` and after drop. Those tests run on the VAES path, and on a successful consume, a refused construction and an ordinary drop. |
-| **PC12** SFrame vectors | a wrong label (the KID in its header form, the suite id or the space before `kid8` left out), the salt XORed at the little end, metadata outside the AAD, a wrong ratchet label or length, or an opener ahead that moves the schedule | RFC 9605 C.3: `00..0f` sealed as `sframe_import(send,291,0)` (291 is `0x123`), `import_sframe`, `sframe_sealer(s, 0, 0x123, 0x4567)`. `seal_into` of C.3's `pt` at CTR `0x4567`, with the header `9901234567` at `aad_at` in `dst` and C.3's `metadata` as `extra`, gives C.3's `ct`. The same bytes sealed separately as `sframe_import(receive)`, through `sframe_opener(r, 0, 0x123)`, open `ct` to `pt`, and give `Tampered` with one metadata byte changed. Ratchet, with Python `hmac` and `cryptography` over RFC 9605 §§4.4.2 and 5.1 as the oracle (`base_key[1]` of `00..0f` is `fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87`): under `sframe_import(send,4,2)` of `00..0f`, `sframe_sealer(s, 1, 5, 0)` seals `hirsel` at CTR 0 with header `50` and empty metadata to `501779b9607a5841322c5952a56cb455d5803b545e1d1b`. A `receive` import of `00..0f`: `sframe_opener(r, 1, 5)` opens that frame, then `sframe_opener(r, 0, 4)` still opens the step-0 frame `40bc3483bd855c43d811deeb3085fc86274cff324394b9` (KID 4, CTR 0, the same plaintext). After `sframe_ratchet(r, 1)`, `sframe_opener(r, 0, 5)` opens the step-1 frame |
-| **PC13** SFrame ownership and directions | two sealers for one step and KID, a ledger keyed on the KID alone across steps, a block bound off by one, an opener inside the block, a sealer on a receive import, or a non-canonical policy spelling accepted | `00..0f` as `sframe_import(send,4,2)`. `sframe_sealer(s, 0, 4, 0)` twice gives `Issued`, after the first sealer is dropped too. `sframe_sealer(s, 0, 7, 0)` succeeds; KIDs 3 and 8 give `Invalid`. `sframe_opener(s, 0, 8)` and `(s, 0, 3)` succeed; KIDs 4 and 7 give `Invalid`. `sframe_sealer(s, 1, 4, 0)` succeeds (a new step), and `sframe_sealer(s, 0, 4, 0)` after it gives `Issued`. On a `sframe_import(receive)` import every `sframe_sealer` gives `Invalid`. `seal` with the policies `sframe_import(send,5,2)`, `sframe_import(send,0,17)`, `sframe_import(send,04,2)`, `sframe_import(send, 4,2)`, `sframe_import(receive) sframe_import(send,4,2)` and `sframe_import(send,4,2) aead(aes128-gcm)` gives `Invalid`. `narrow` of `sframe_import(send,4,2)` by `sframe_import(send,4,1)` and by `sframe_import(receive)` gives `Invalid`. `sframe_sealer` with `steps` 17, `sframe_opener` with `ahead` 17 and `sframe_ratchet` with 0 or 17 give `Invalid`. After each refusal no ledger entry is admitted and the counting provider saw no call |
-| **PC14** SFrame import and ratchet atomicity | a base-key length bound off by one, a length refusal that leaves the bytes unspent, a ratchet applied before the sealer's admission, or another import's use accepted | `import_sframe` of 15 and of 65 bytes gives `Invalid` as a delivery with the secret consumed, and a `share` of either taken before the import then gives `Spent`. 16 and 64 bytes import. An `srtp_import(send)` secret gives `Denied` from `import_sframe`, and an `sframe_import(receive)` secret gives `Denied` from `import_srtp`. On a fresh import of `00..0f` as `sframe_import(send,4,2)`: `bound bytes 1039 { sframe_sealer(s, 1, 5, 0) }` gives `Capacity` with 1040 requested; then `sframe_sealer(s, 0, 4, 0)` seals PC12's step-0 frame, so the schedule did not move, and `sframe_sealer(s, 1, 5, 0)` with 1040 available seals PC12's step-1 frame |
+| **PC11** charge and erasure | state not admitted, admitted twice, not refunded on failure, a ledger that grows without charge, or a slot left with key bytes | Under the reference count: `bound bytes 1023 { sealer(..) }` gives `Capacity` with `requested` 1040 (1024 plus the 16-byte entry), and 1040 succeeds. `bound bytes 63 { key_share(..) }` gives `Capacity` with 64 requested. A `tls13` refused before issue returns the share with the limit unchanged. One refused for an invalid peer leaves the limit where it was before `key_share`. After `key_update`, the old ledger's entries are refunded. `bound bytes 511 { header_mask(..) }` gives `Capacity` with 512 requested. `bound bytes 175 { p256_key(..) }` gives `Capacity` with 176 requested and `public` unchanged, and 176 succeeds. `bound bytes 559 { tls13(..) }` gives `Capacity` with 560 (the schedule's 512 and the registry entry's 48) and returns the share. A sealer moved to another unit and dropped there refunds its 1024 to the limit that admitted it, after the first unit has ended. `p256_key` from a `random_tape` holding `ff..ff` then 16 bytes faults the task with `Bounds`; the limit is back where it was before the call, `public` is unchanged, and a surviving holder of the same `Random` draws next from the 16 bytes. After every drop the limit is back where it was. In the native runtime's unit tests, the live raw storage of a sealer's owned fields (IV, base, and on VAES the key schedule and GHASH table), and of a schedule's secret arrays, reads all zeros after erasure and before release; ring and dalek values are outside the check (erasure, above). An SFrame schedule's base key slot reads all zeros after `sframe_ratchet` and after drop. A granted import secret's run-owned bytes read all zeros after an import that spends them, on success, on a length `Invalid` and on a registry `Spent`, while a `share` of it is still held. The SFrame HKDF's PRK and pad arrays read all zeros after the derivation returns. Those tests run on the VAES path, and on a successful consume, a refused construction and an ordinary drop. |
+| **PC12** SFrame vectors | a wrong label (the KID in its header form, the suite id or the space before `kid8` left out), the salt XORed at the little end, metadata outside the AAD, a wrong ratchet label or length, or an opener ahead that moves the schedule | RFC 9605 C.3: `00..0f` sealed as `sframe_import(send,291,0)` (291 is `0x123`), `import_sframe`, `sframe_sealer(s, 0, 0x123, 0x4567)`. `seal_into` of C.3's `pt` at CTR `0x4567`, with the header `9901234567` at `aad_at` in `dst` and C.3's `metadata` as `extra`, gives C.3's `ct`. The same bytes sealed separately as `sframe_import(receive)`, through `sframe_opener(r, 0, 0x123)`, open `ct` to `pt`, and give `Tampered` with one metadata byte changed. Ratchet, with Python `hmac` and `cryptography` over RFC 9605 §§4.4.2 and 5.1 as the oracle (`base_key[1]` of `00..0f` is `fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87`): under `sframe_import(send,4,2)` of `00..0f`, `sframe_sealer(s, 1, 5, 0)` seals `hirsel` at CTR 0 with header `50` and empty metadata to `501779b9607a5841322c5952a56cb455d5803b545e1d1b`. A `receive` import of `00..0f`: `sframe_opener(r, 1, 5)` opens that frame, then `sframe_opener(r, 0, 4)` still opens the step-0 frame `40bc3483bd855c43d811deeb3085fc86274cff324394b9` (KID 4, CTR 0, the same plaintext). After `sframe_ratchet(r, 1)`, `sframe_opener(r, 0, 5)` opens the step-1 frame. Resume, from the same oracle: under `sframe_import(send,4,2)` of `00..0f`, `sframe_sealer(s, 16, 6, 0)` seals `hirsel` at CTR 0 to `60bb96161ef36e11d27732010215f5e1ad43216999e373`, and a `receive` import's `sframe_opener(r, 65536, 8)` opens `8008e0bbf345adb828e154604cca5da2c33300c8e0eea5dd` (KID 8 at step `2^16`), so the cap is inclusive and the count is not reduced modulo anything |
+| **PC13** SFrame ownership and directions | two sealers for one step and KID, a ledger keyed on the KID alone across steps, a block bound off by one, an opener inside the block, a sealer on a receive import, or a non-canonical policy spelling accepted | `00..0f` as `sframe_import(send,4,2)`. `sframe_sealer(s, 0, 4, 0)` twice gives `Issued`, after the first sealer is dropped too. `sframe_sealer(s, 0, 7, 0)` succeeds; KIDs 3 and 8 give `Invalid`. `sframe_opener(s, 0, 8)` and `(s, 0, 3)` succeed; KIDs 4 and 7 give `Invalid`. `sframe_sealer(s, 1, 4, 0)` succeeds (a new step), and `sframe_sealer(s, 0, 4, 0)` after it gives `Issued`. On a `sframe_import(receive)` import every `sframe_sealer` gives `Invalid`. `seal` with the policies `sframe_import(send,5,2)`, `sframe_import(send,0,17)`, `sframe_import(send,04,2)`, `sframe_import(send, 4,2)`, `sframe_import(receive) sframe_import(send,4,2)`, `sframe_import(send,4,2) aead(aes128-gcm)`, `sframe_import(send,18446744073709551616,0)` and `sframe_import(send,0,16) sframe_import(send,0,16)` gives `Invalid`, and `sframe_import(send,18446744073709486080,16)` (the last block) and `sframe_import(send,0,0)` are accepted. `narrow` of `sframe_import(send,4,2)` by `sframe_import(send,4,1)` and by `sframe_import(receive)` gives `Invalid`, and by itself gives an equal policy. In the last block, `sframe_sealer(s, 0, 18446744073709551615, 0)` succeeds. `sframe_sealer` with `steps` 65537, `sframe_opener` with `ahead` 65537 and `sframe_ratchet` with 0 or 65537 give `Invalid`. After `sframe_sealer(s, 0, 5, 0)` and `sframe_ratchet(s, 1)` the limit is back by the step-0 ledger's 16, and `sframe_sealer(s, 0, 5, 0)` succeeds. After each refusal no ledger entry is admitted and the counting provider saw no call |
+| **PC14** SFrame import and ratchet atomicity | a base-key length bound off by one, a length refusal that leaves the bytes unspent, a ratchet applied before the sealer's admission, or another import's use accepted | `import_sframe` of 15 and of 65 bytes gives `Invalid` as a delivery with the secret consumed, and a `share` of either taken before the import then gives `Spent`. 16 and 64 bytes import. An `srtp_import(send)` secret gives `Denied` from `import_sframe`, and an `sframe_import(receive)` secret gives `Denied` from `import_srtp`. On a fresh import of `00..0f` as `sframe_import(send,4,2)`: `bound bytes 1039 { sframe_sealer(s, 1, 5, 0) }` gives `Capacity` with 1040 requested; then `sframe_sealer(s, 0, 4, 0)` seals PC12's step-0 frame, so the schedule did not move, and `sframe_sealer(s, 1, 5, 0)` with 1040 available seals PC12's step-1 frame. Registry: `00..0f` sealed twice as `sframe_import(send,4,2)`, from two `seal` calls; the first imports, and the second gives `Spent` as a delivery with the secret consumed, a `share` taken before it then gives `Spent`, and the limit is where it was before the second import. The same bytes as `sframe_import(send,8,2)` give `Spent` too, as the registry keys the bytes, not the block. `bound bytes 559 { import_sframe(..) }` of a `send` use gives `Capacity` with 560 requested and returns the secret, and `receive` imports of the same bytes, before and after, succeed and admit 512. When the first schedule is dropped the 48 stay admitted until the run ends |
 
 `provide.random_tape(take b: Bytes) -> Random` is a virtual `Random`, like `provide.random`,
 that answers each draw with the next bytes of `b` in order. A draw longer than what is left
@@ -2565,7 +2621,7 @@ and L (more than three).
 | **T13** key agreement and signing keys | M | T4, T10 | `KeyShare`, `Group`; `key_share`, `p256_key` over ring's `agreement` and `EcdsaKeyPair::generate_pkcs8` with `SystemRandom` for host draws, and over RustCrypto `p256` 0.14.0 and `x25519-dalek` 3.0.0 fed by the provider for virtual draws; `sign` gains its `Random` (all callers cut over, deterministic RFC 6979 signing for virtual keys, PKCS#8 decoding with ring's checks); `provide.random_tape` with its fault cleanup; opacity and bytes on replay; terminal provider failures for host draws, in the native adapter and the signing wrapper; std `x509_build` self-signed P-256 certificate with DER `ECDSA-Sig-Value` | PC7, PC8, PC9; build laws `dark_key_sign_replays`, `host_random_failure_ends_run` |
 | **T14** key schedules | M | T10, T13 | `schedule` module: `Schedule`, `Side`, `Suite13`, `Suite12`, `Profile13`, `SrtpProfile`, `ScheduleError`; `tls13`, `quic_initial`, `dtls12`, `application`, `key_update`, `srtp`, `finished`, `verify_finished`; the SRTP KDF; `import_srtp`, `import_traffic` and the `srtp_import(<dir>)` and `traffic_import(<dir>)` uses with the atomic spent mark and `wrap`'s refusal; the agreement registry with its share-count retirement and recorded root verdicts, in the OS, scripted and virtual paths. Helper verdicts follow the same rule when [unit recordings](../recording.md#unit-recordings) are built (slice U5) | PC1's Finished case, PC6's use cases, PC10's PRF fixtures; build laws `tls13_prehashed_context`, `same_agreement_same_side_refused`, `import_direction_from_policy` |
 | **T15** server handshake | M | T1, T3, T4, T13 | `Hello`, `tls.hello`, `tls.server_name`, `tls.accept` and the `TlsFailure` cases `Chain` and `Key` in core; `TLS_HELLO` and `TLS_ACCEPT` in `os.rs` and `os_net.rs` over rustls's `server::Acceptor`, TLS 1.3 only, with no tickets, no early data and no client authentication, no session cache, the key parsed in place by ring's own loaders behind a provider `SigningKey`, RSA of 2048 to 4096 bits, the chain's 65,535-byte cap, host randomness failures terminal; the `Hello` drop alert; the `tls_serve` use in policy parsing, `narrow`, the canonical text, the grant summary, and `p256_key`'s second policy; the server half's missing verified name in the `send_secret` and SCRAM checks; the C entries, and the LLVM and Cranelift lowering; the evaluator's call form and the scripted server script; the two operations' frames in a recording; std `tls` API page section | TL18–TL24, and the server cases of TL3 and TL7 and the `tls_serve` case of KD4 |
-| **T16** SFrame schedules | M | T11, T14 | `SframeSuite`; `import_sframe`, `sframe_sealer`, `sframe_opener` and `sframe_ratchet` with their KID ledgers; the `sframe_import(<dir>)` uses in policy parsing, `narrow` and the canonical text; the SFrame profile row in `seal_into` and `open_into`, in the OS provider and the virtual path | PC12, PC13, PC14, PC11's SFrame case |
+| **T16** SFrame schedules | M | T11, T14 | `SframeSuite`; `import_sframe`, `sframe_sealer`, `sframe_opener` and `sframe_ratchet` with their KID ledgers; the run's send-key registry; the import's taking and zeroing of spent bytes for every import kind; the `sframe_import(<dir>)` uses in policy parsing, `narrow` and the canonical text; the SFrame profile row in `seal_into` and `open_into`, in the OS provider and the virtual path | PC12, PC13, PC14, PC11's SFrame case |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
 recording is part of its contract. T5, T6 and T7 run in any order once their dependencies land.

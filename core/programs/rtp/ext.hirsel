@@ -1,4 +1,4 @@
-pub type Kind: key = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq
+pub type Kind: key = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq | DependencyDescriptor
 
 pub type Form: key = OneOnly | TwoOnly | Mixed
 
@@ -14,7 +14,7 @@ pub type Element {
 
 pub opaque type ExtMap {
     form: Form,
-    ids: Inline[u8, 6],
+    ids: Inline[u8, 7],
     voice: bool
 }
 
@@ -34,7 +34,7 @@ pub opaque type ExtWriter {
 }
 
 pub fn map(form: Form) -> ExtMap {
-    ExtMap(form: form, ids:[0u8; 6], voice: false)
+    ExtMap(form: form, ids:[0u8; 7], voice: false)
 }
 
 fn slot(k: Kind) -> u64 {
@@ -45,6 +45,7 @@ fn slot(k: Kind) -> u64 {
         AudioLevel => 3,
         AbsSendTime => 4,
         TransportSeq => 5,
+        DependencyDescriptor => 6,
     }
 }
 
@@ -136,16 +137,16 @@ pub fn next(pkt: Bytes, h: header.Header, mut at: u64) -> Result[Option[Element]
 // value always follows at least its element's first byte.
 pub opaque type Found {
     start: u64,
-    ids: Inline[u8, 6],
-    at: Inline[u32, 6],
-    len: Inline[u8, 6]
+    ids: Inline[u8, 7],
+    at: Inline[u32, 7],
+    len: Inline[u8, 7]
 }
 
 pub fn scan(m: ExtMap, pkt: Bytes, h: header.Header) -> Result[Found, Error] {
     if list.len(pkt) != h.len {
         return Error(Buffer)
     }
-    let mut f = Found(start: 0, ids: m.ids, at:[0u32; 6], len:[0u8; 6])
+    let mut f = Found(start: 0, ids: m.ids, at:[0u32; 7], len:[0u8; 7])
     let (start, len, one_byte) = match h.block {
         OneByte(at: start, len: len) => (start, len, true),
         TwoByte(at: start, len: len) => (start, len, false),
@@ -182,7 +183,7 @@ pub fn scan(m: ExtMap, pkt: Bytes, h: header.Header) -> Result[Found, Error] {
         }
         // Bound ids are distinct and nonzero, and an element's id is never 0.
         let mut s = 0u64
-        while s < 6 {
+        while s < 7 {
             if m.ids[s] == id {
                 if f.at[s] == 0 {
                     f.at[s] = int.narrow(pos)
@@ -237,6 +238,9 @@ fn valid_value(value: Bytes, from: u64, len: u64, k: Kind) -> bool {
         AudioLevel => return len == 1,
         AbsSendTime => return len == 3,
         TransportSeq => return len == 2,
+        // AV1 RTP section A.8: three mandatory octets, then the extended fields.
+        // The value is opaque here; `media_bits.dependency` reads it.
+        DependencyDescriptor => return len >= 3 && len <= 255,
         _ => {},
     }
     if len == 0 || len > 255 {

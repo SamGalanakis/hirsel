@@ -69,7 +69,11 @@ pub type MediaIn {
     payload_len: u64,
     audio_level: Option[u8],
     voice: Option[bool],
-    layer: Option[media_bits.unit.Unit]
+    layer: Option[media_bits.unit.Unit],
+    // The AV1 dependency descriptor's value in the packet, as offset and length (0
+    // when absent). Every unit parses it from the plaintext with its own structure.
+    dd_at: u64,
+    dd_len: u64
 }
 
 /// A NACK hit on a down-track's egress history. The home unit resolves the
@@ -331,7 +335,7 @@ fn ext_kind(e: sdp.Ext) -> Option[rtp.ext.Kind] {
         AudioLevel => Some(AudioLevel),
         AbsSendTime => Some(AbsSendTime),
         TransportCc => Some(TransportSeq),
-        DependencyDescriptor => None,
+        DependencyDescriptor => Some(DependencyDescriptor),
     }
 }
 

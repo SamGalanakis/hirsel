@@ -347,7 +347,12 @@ fn point(mut r: Router, d: u64, now: u64, mut out: peer.Outbox) -> Result[(), Ro
         r.downs[d].effective
     }
     let track = r.downs[d].track
-    if let Error(_) = peer.set_target(mut r.members[mi].session, track, rewrite_target(r.publications[pi], t)) {
+    // An AV1 layer the structure cannot represent keeps the rewrite where it is (RTC-6).
+    let Some(to) = rewrite_target(r.publications[pi], t) else {
+        r.counts.refused += 1
+        return Ok(())
+    }
+    if let Error(_) = peer.set_target(mut r.members[mi].session, track, to) {
         return Error(Limit(32))
     }
     if r.publications[pi].codec == Opus {

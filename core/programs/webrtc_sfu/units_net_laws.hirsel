@@ -382,6 +382,7 @@ fn ok_or_say(a: Result[router.Answer, router.RouterError], take what: String) ->
                 Suspended => ": Suspended",
                 Exists => ": Exists",
                 Limit(_) => ": Limit",
+                Unrepresentable => ": Unrepresentable",
                 Peer(_) => ": Peer",
                 Capacity(_) => ": Capacity",
             })

@@ -253,7 +253,7 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
         },
     }
     if is_rtx {
-        return repair_in(mut p, now, sec, encoding, format, h, opened.index, slot, known)
+        return repair_in(mut p, now, sec, encoding, format, h, opened.index, slot, known, found)
     }
     let level = level_in(map, found, slot, h)
     let i = match known {
@@ -287,7 +287,19 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
         None
     }
     let (voice, audio_level) = level
-    Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: h.pt, ts: h.ts, wide: wide, reset: reset, marker: h.marker, payload_at: payload_at, payload_len: payload_len, audio_level: audio_level, voice: voice, layer: layer)))
+    let (dd_at, dd_len) = dependency_in(found)
+    Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: h.pt, ts: h.ts, wide: wide, reset: reset, marker: h.marker, payload_at: payload_at, payload_len: payload_len, audio_level: audio_level, voice: voice, layer: layer, dd_at: dd_at, dd_len: dd_len)))
+}
+
+// Where the dependency descriptor's value is, if the section binds it (RTC-6, AV1).
+fn dependency_in(f: Option[rtp.ext.Found]) -> (u64, u64) {
+    let Some(found) = f else {
+        return (0, 0)
+    }
+    match rtp.ext.found(found, DependencyDescriptor) {
+        Some(e) => (e.at, e.len),
+        None => (0, 0),
+    }
 }
 
 fn level_in(map: rtp.ext.ExtMap, f: Option[rtp.ext.Found], pkt: Bytes, h: rtp.header.Header) -> (Option[bool], Option[u8]) {
@@ -338,7 +350,7 @@ fn media_of_rtx(p: PeerSession, sec: u8, encoding: u8, rtx_ssrc: u32) -> Option[
     None
 }
 
-fn repair_in(mut p: PeerSession, now: u64, sec: u8, encoding: u8, format: sdp.Format, h: rtp.header.Header, index: u64, slot: Bytes, known: Option[u64]) -> Result[Input, PeerError] {
+fn repair_in(mut p: PeerSession, now: u64, sec: u8, encoding: u8, format: sdp.Format, h: rtp.header.Header, index: u64, slot: Bytes, known: Option[u64], found: Option[rtp.ext.Found]) -> Result[Input, PeerError] {
     let Some(apt) = format.apt else {
         p.drops.format += 1
         return Ok(Nothing)
@@ -400,7 +412,9 @@ fn repair_in(mut p: PeerSession, now: u64, sec: u8, encoding: u8, format: sdp.Fo
     } else {
         None
     }
-    Ok(Repair(MediaIn(section: sec, encoding: enc, ssrc: ssrc, index: original, pt: apt, ts: h.ts, wide: wide, reset: false, marker: h.marker, payload_at: at, payload_len: payload_len, audio_level: None, voice: None, layer: layer)))
+    // An RTX packet carries the original's header extensions (RFC 4588 section 4).
+    let (dd_at, dd_len) = dependency_in(found)
+    Ok(Repair(MediaIn(section: sec, encoding: enc, ssrc: ssrc, index: original, pt: apt, ts: h.ts, wide: wide, reset: false, marker: h.marker, payload_at: at, payload_len: payload_len, audio_level: None, voice: None, layer: layer, dd_at: dd_at, dd_len: dd_len)))
 }
 
 fn rtcp_mode(p: PeerSession) -> rtp.rtcp.Mode {

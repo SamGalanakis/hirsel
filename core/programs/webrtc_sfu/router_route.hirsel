@@ -105,6 +105,8 @@ fn restart(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, track: u16
             media_bits.unit.clear_parameter_sets(mut r.downs[d].next_sets)
             r.downs[d].after_end = true
             r.downs[d].next_after_end = true
+            r.downs[d].chains = media_bits.unit.av1_chains()
+            r.downs[d].next_chains = media_bits.unit.av1_chains()
             let p = r.downs[d].publication
             let target = r.downs[d].target
             return set_target(mut r, room, who, p, target, now, mut out)
@@ -244,6 +246,49 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
             rtp.loss.keyframe_seen(mut r.publications[pi].encodings[e].keyframes)
         }
     }
+    // AV1: the dependency descriptor is parsed once per packet against the encoding's
+    // structure (AV1 RTP section A.8). One that brings a new structure maps the
+    // encoding's targets again before its keyframe reaches any leg (RTC-6).
+    let av1 = if codec == Av1 {
+        if m.dd_len == 0 || m.dd_at + m.dd_len > list.len(packet) {
+            r.counts.unparsed += 1
+            return Ok(())
+        }
+        let value = list.slice(packet, m.dd_at, m.dd_at + m.dd_len)
+        let brings = m.dd_len > 3 && (value[3] & 128) != 0
+        let hi: u16 = int.widen(value[1])
+        let lo: u16 = int.widen(value[2])
+        let number: u16 = (hi << 8) | lo
+        // A structure older than the one in use (a repair or a reordered packet of an
+        // earlier keyframe) is dropped: the frames it describes are gone from every map.
+        if brings {
+            if let Some(last) = r.publications[pi].encodings[e].structure_frame {
+                let behind = int.wrapping_sub(last, number)
+                if behind != 0 && behind < 32768 {
+                    r.counts.unparsed += 1
+                    return Ok(())
+                }
+            }
+        }
+        let Ok(f) = media_bits.dependency.parse(value, mut r.publications[pi].encodings[e].structure) else {
+            r.counts.unparsed += 1
+            return Ok(())
+        }
+        if brings {
+            r.publications[pi].encodings[e].structure_frame = Some(number)
+            remap(mut r, pi, m.encoding)
+        }
+        if f.first {
+            if let Ok(a) = media_bits.av1.parse_rtp(payload) {
+                if a.starts_sequence {
+                    rtp.loss.keyframe_seen(mut r.publications[pi].encodings[e].keyframes)
+                }
+            }
+        }
+        Some(f)
+    } else {
+        None
+    }
     let src = source(id, m.encoding)
     // RTC-6's `V` toward a leg with `vad` on: the publisher's own `V` when its leg
     // negotiated it, and otherwise whether the publication is speaking.
@@ -288,22 +333,44 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
                         },
                     }
                 },
-                None => {
-                    if codec != H264 {
-                        continue
-                    }
-                    let judged = if fresh {
-                        media_bits.unit.h264(payload, m.marker, r.downs[d].next_after_end, r.downs[d].next_sets)
-                    } else {
-                        media_bits.unit.h264(payload, m.marker, r.downs[d].after_end, r.downs[d].sets)
-                    }
-                    match judged {
-                        Ok(u) => rewrite_unit(u),
-                        Error(_) => {
-                            r.counts.unparsed += 1
+                None => match av1 {
+                    Some(f) => {
+                        let chains = if fresh {
+                            r.downs[d].next_chains
+                        } else {
+                            r.downs[d].chains
+                        }
+                        match media_bits.unit.av1(payload, f, view r.publications[pi].encodings[e].structure, chains) {
+                            // A picture's layer frames share its timestamp: the frame
+                            // number tells them apart (rtp RTP-11).
+                            Ok(u) => {
+                                let mut w = rewrite_unit(u)
+                                w.frame = f.number
+                                w
+                            },
+                            Error(_) => {
+                                r.counts.unparsed += 1
+                                continue
+                            },
+                        }
+                    },
+                    None => {
+                        if codec != H264 {
                             continue
-                        },
-                    }
+                        }
+                        let judged = if fresh {
+                            media_bits.unit.h264(payload, m.marker, r.downs[d].next_after_end, r.downs[d].next_sets)
+                        } else {
+                            media_bits.unit.h264(payload, m.marker, r.downs[d].after_end, r.downs[d].sets)
+                        }
+                        match judged {
+                            Ok(u) => rewrite_unit(u),
+                            Error(_) => {
+                                r.counts.unparsed += 1
+                                continue
+                            },
+                        }
+                    },
                 },
             },
         }
@@ -317,6 +384,15 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
             } else {
                 let _ = media_bits.unit.h264_sent(mut r.downs[d].sets, payload)
                 r.downs[d].after_end = unit.end
+            }
+        }
+        if sent == OnMedia {
+            if let Some(f) = av1 {
+                if fresh {
+                    media_bits.unit.av1_forwarded(mut r.downs[d].next_chains, f, view r.publications[pi].encodings[e].structure)
+                } else {
+                    media_bits.unit.av1_forwarded(mut r.downs[d].chains, f, view r.publications[pi].encodings[e].structure)
+                }
             }
         }
         let pending = peer.pending(r.members[si].session, track)

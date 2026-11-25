@@ -105,11 +105,110 @@ fn check_dependency() {
     }
 }
 
+fn indication(frame: dependency.Frame, target: u64) -> u8 {
+    match dependency.decode_target(frame, target) {
+        Some(Absent) => 0,
+        Some(Discardable) => 1,
+        Some(Switch) => 2,
+        Some(Required) => 3,
+        None => 4
+    }
+}
+
+// Every decode target's indication, two bits each, target 0 lowest, as A.8.3 sends them.
+fn indications(frame: dependency.Frame) -> u64 {
+    let mut packed: u64 = 0
+    for target in 0u64 .. frame.decode_target_count {
+        let value: u64 = int.widen(indication(frame, target))
+        packed |= value << (2 * target)
+    }
+    packed
+}
+
+// Pack "-DSR" letters (ASCII 68, 83, 82), target 0 first, the way the structure is usually printed.
+fn letters(text: Bytes) -> u64 {
+    let mut packed: u64 = 0
+    for i in 0u64 .. list.len(text) {
+        let c = text[i]
+        let value: u64 = if c == 68 {
+            1
+        } else if c == 83 {
+            2
+        } else if c == 82 {
+            3
+        } else {
+            0
+        }
+        packed |= value << (2 * i)
+    }
+    packed
+}
+
+fn check_l3t3() {
+    // LiveKit pkg/sfu/rtpextension/dependencydescriptor/dependencydescriptorextension_test.go
+    // (d210b4d4), "hex bytes from traffic capture": a Chromium AV1 L3T3 keyframe
+    // descriptor with its structure, then per-frame descriptors.
+    let key = b"\xc1\x01\x72\x80\x08\x14\x85\x21\x4e\xaf\xff\xaa\xaa\x86\x3c\xf0\x43\x0c\x10\xc3\x02\xaf\xc0\xaa\xa0\x06\x3c\x00\x43\x00\x10\xc0\x02\xa0\x00\xa8\x00\x06\x00\x00\x40\x00\x1d\x95\x49\x26\xe0\x82\xb0\x4a\x09\x41\xb8\x20\xac\x12\x82\x50\x31\x57\xf9\x74\x00\x0c\xa8\x64\x33\x0e\x22\x22\x22\xec\xa8\x65\x53\x04\x22\x42\x30\xec\xa8\x77\x53\x00\x77\x00\x42\x00\xef\x00\x86\x01\xdf\x01\x0d"
+    let mut structure = dependency.empty()
+    let frame = result.unwrap(dependency.parse(key, mut structure))
+    let resolution = option.unwrap(frame.resolution)
+    if !frame.first || !frame.last || frame.number != 370 || frame.template_id != 1 || frame.spatial != 0 || frame.temporal != 0 || frame.decode_target_count != 9 || frame.active_targets != 511 || resolution.width != 120 || resolution.height != 67 || indications(frame) != letters(b"SSSSSSSSS") {
+        fail("captured L3T3 keyframe descriptor")
+    }
+    // A.8.2: nine decode targets, d = 3 * spatial + temporal; three chains, one per
+    // spatial layer.
+    for target in 0u64 .. 9u64 {
+        let spatial: u8 = int.narrow(target / 3)
+        let temporal: u8 = int.narrow(target % 3)
+        let (s, t) = option.unwrap(dependency.target_layers(view structure, target))
+        if s != spatial || t != temporal || option.unwrap(dependency.protecting_chain(view structure, target)) != spatial {
+            fail("captured L3T3 decode target layers or chains")
+        }
+    }
+    if let Some(_) = dependency.target_layers(view structure, 9) {
+        fail("a tenth decode target in an L3T3 structure")
+    }
+    // Template 6: S1T0, one reference one frame back.
+    let upper = b"\x86\x01\x73\x40\xfc"
+    let s1 = result.unwrap(dependency.parse(upper, mut structure))
+    let mut refs = s1.references
+    if !s1.first || s1.last || s1.number != 371 || s1.spatial != 1 || s1.temporal != 0 || s1.active_targets != 63 || indications(s1) != letters(b"---SSSSSS") || option.unwrap(dependency.chain_difference(s1, 1)) != 1 || option.unwrap(result.unwrap(dependency.next_reference(upper, view structure, mut refs))) != 1 {
+        fail("captured S1T0 descriptor")
+    }
+    if let Some(_) = result.unwrap(dependency.next_reference(upper, view structure, mut refs)) {
+        fail("extra S1T0 reference")
+    }
+    let t2 = result.unwrap(dependency.parse(b"\xc3\x01\x75\x40\xfc", mut structure))
+    if t2.number != 373 || t2.spatial != 0 || t2.temporal != 2 || indications(t2) != letters(b"--D--R--R") {
+        fail("captured S0T2 descriptor")
+    }
+    let both = b"\x88\x01\x76\x40\xfc"
+    let s1t2 = result.unwrap(dependency.parse(both, mut structure))
+    let mut two = s1t2.references
+    let first = option.unwrap(result.unwrap(dependency.next_reference(both, view structure, mut two)))
+    let second = option.unwrap(result.unwrap(dependency.next_reference(both, view structure, mut two)))
+    if s1t2.number != 374 || s1t2.spatial != 1 || s1t2.temporal != 2 || indications(s1t2) != letters(b"-----D--R") || first != 3 || second != 1 {
+        fail("captured S1T2 descriptor")
+    }
+    let t1 = result.unwrap(dependency.parse(b"\xc2\x01\x78\x40\xfc", mut structure))
+    if t1.number != 376 || t1.spatial != 0 || t1.temporal != 1 || indications(t1) != letters(b"-DS-RR-RR") {
+        fail("captured S0T1 descriptor")
+    }
+    // The second capture: a new structure restores every target, then mandatory-only
+    // descriptors reuse it.
+    let _ = result.unwrap(dependency.parse(key, mut structure))
+    let s2 = result.unwrap(dependency.parse(b"\x8b\x01\x74", mut structure))
+    if !s2.first || s2.last || s2.number != 372 || s2.spatial != 2 || s2.temporal != 0 || s2.active_targets != 511 || indications(s2) != letters(b"------SSS") {
+        fail("captured mandatory-only S2T0 descriptor")
+    }
+}
+
 /// bug: Lose an OBU boundary or layer field, or apply the wrong Dependency Descriptor template after wrap or a failed update.
-/// oracle: AV1 bitstream section 5.3, AV1 RTP sections 4.4–4.5 and Appendix A, FFmpeg on str0m av1.pcap, and str0m Dependency Descriptor wire vectors.
+/// oracle: AV1 bitstream section 5.3, AV1 RTP sections 4.4–4.5 and Appendix A, FFmpeg on str0m av1.pcap, str0m Dependency Descriptor wire vectors, and LiveKit's captured Chromium L3T3 descriptors (d210b4d4), decoded by hand from AV1 RTP section A.8 and by LiveKit's own parser.
 @test
 fn av1_rtp_dependencies() -> Result[(), ()] {
     check_aggregation()
     check_dependency()
+    check_l3t3()
     Ok(())
 }

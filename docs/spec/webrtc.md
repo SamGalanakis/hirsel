@@ -547,7 +547,7 @@ pub type Participant = Participant(room: RoomId, id: u64, epoch: u64)
 pub type PublicationId = PublicationId(u64)
 pub type Target = Off | Layer(encoding: u8, spatial: u8, temporal: u8)
 pub type RoomLimits = RoomLimits(participants: u16, ids: u16, publications: u16, down_tracks: u32, audio_forward: u8, pause_delay_ms: u32)
-pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Peer(PeerError) | Capacity(Capacity)
+pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Unrepresentable | Peer(PeerError) | Capacity(Capacity)
 pub type Event = Answer(Participant, Bytes) | Offer(Participant, u64, Bytes) | Glare(Participant, u64) | Published(PublicationId, Participant, Media, u8) | Unpublished(PublicationId) | Layers(PublicationId, u8) | Speakers(RoomId, Inline[u64, 8], u8) | Fenced(Participant)
 
 pub fn router(units: u16, unit: u16, mut inbox: Inbox[RouterIn], peers: List[Sender[RouterIn]]) -> Result[Router, RouterError]
@@ -1380,8 +1380,10 @@ W19, blocks, because those are soundness reds.
   target map is `i = 4s + t` with `s` and `t` clamped to 3 each. A layer frame whose `SID`
   or `TID` passes 3 is closed up on every leg and counted `unmapped` once per packet (RTC-6).
 - **Counters.** `Counts` holds `unrequested` (a keyframe ask the publisher did not
-  negotiate for), `ring_misses`, `unparsed` (a VP8, VP9 or H.264 payload whose descriptor does
-  not parse, which is dropped) and `unmapped`. An ask counts as `unrequested` only once the
+  negotiate for), `ring_misses`, `unparsed` (a VP8, VP9, H.264 or AV1 packet whose descriptor
+  does not parse, or an AV1 packet with no dependency descriptor, which is dropped),
+  `unmapped`, and `refused` (an AV1 target the structure cannot represent: `set_target`
+  answers `Unrepresentable`, and a remap at a new structure keeps the leg's target). An ask counts as `unrequested` only once the
   encoding's SSRC is known: before its first packet there is nothing to ask about.
 - **Rebind.** `rebind(who, from, to, target)` moves `who`'s down-track for `from` onto `to`.
   The track keeps its section, SSRCs, sealers, history and `Rewrite`, so `to` is one more
@@ -1421,8 +1423,16 @@ W19, blocks, because those are soundness reds.
   and counted `capacity`, and the drain goes on. `unpace` takes a down-track's entries out when the router ends
   the track and at a collision. An entry whose SSRC a collision has retired is dropped
   when it is let out. S4 does not probe and sends no padding.
-- **Not closed in S4.** AV1 routing needs a dependency-descriptor kind in `rtp.ext` (an rtp
-  amend). W9 waits for captured or reference simulcast and SVC packets. The re-offer after an
+- **Not closed in S4.** W9's law over the Chromium captures in `vectors/chromium_rtp.hirsel`
+  is not written yet. The AV1 decode-target map itself is built (2595): `rtp.ext` binds `DependencyDescriptor`,
+  every unit parses it with its encoding's structure, `Layer(e, s, t)` maps through RTC-6's
+  `(S_d, T_d)` and is rebuilt at a structure-carrying keyframe, and the decision unit is the
+  descriptor's frame number. `router_maps_av1_targets` checks it over LiveKit's captured
+  Chromium L3T3 descriptors. Egress does not yet write the descriptor to subscribers, so a
+  subscriber's decoder gets AV1 frames without one, and a leg whose last layer frame of a
+  picture is not the picture's last gets no marker bit. A structure-carrying descriptor
+  older than the structure in use (a repair or a reordered packet of an earlier keyframe)
+  is dropped and counted `unparsed`. The re-offer after an
   SSRC collision (RTC-4) waits for the renegotiation path. Each is an open red on S4's ticket.
 
 **S5 decisions.** Gaps the spec left open, decided while S5 was built

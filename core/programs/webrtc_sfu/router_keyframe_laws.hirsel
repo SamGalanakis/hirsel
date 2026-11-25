@@ -465,3 +465,196 @@ fn svc_high(picture: u8) -> Bytes {
     list.append(mut b, b"\x86\x00\x40")
     b
 }
+
+// ---- RTC-6 AV1 target map ----
+const AV1_SSRC: u32 = 0x25000000
+
+fn av1_offer(mid: Bytes, dir: Bytes) -> Bytes {
+    let mut bundle: Bytes = b" "
+    list.append(mut bundle, mid)
+    let mut b = minimal_head(bundle)
+    list.append(mut b, minimal_video(b"45", mid, true))
+    list.append(mut b, dir)
+    list.append(mut b, b"\na=extmap-allow-mixed\na=extmap:3 https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension\na=rtpmap:45 AV1/90000\na=rtcp-fb:45 nack\na=rtcp-fb:45 nack pli\n")
+    take b
+}
+
+// LiveKit's captured Chromium L3T3 descriptors (dependencydescriptorextension_test.go,
+// d210b4d4): the keyframe with its structure, then frames of the first two pictures.
+// Templates 7, 11, 12 and 13 are mandatory-only descriptors over the same structure.
+// Packet 11 is the same structure with its decode targets reversed (d' = 8 - d), as a
+// new keyframe at frame 379, re-encoded field by field from the captured one.
+fn av1_descriptor(k: u64) -> Bytes {
+    if k == 0 {
+        b"\xc1\x01\x72\x80\x08\x14\x85\x21\x4e\xaf\xff\xaa\xaa\x86\x3c\xf0\x43\x0c\x10\xc3\x02\xaf\xc0\xaa\xa0\x06\x3c\x00\x43\x00\x10\xc0\x02\xa0\x00\xa8\x00\x06\x00\x00\x40\x00\x1d\x95\x49\x26\xe0\x82\xb0\x4a\x09\x41\xb8\x20\xac\x12\x82\x50\x31\x57\xf9\x74\x00\x0c\xa8\x64\x33\x0e\x22\x22\x22\xec\xa8\x65\x53\x04\x22\x42\x30\xec\xa8\x77\x53\x00\x77\x00\x42\x00\xef\x00\x86\x01\xdf\x01\x0d"
+    } else if k == 1 {
+        b"\x86\x01\x73\x40\xfc"
+    } else if k == 2 {
+        b"\x46\x01\x73\x40\xfc"
+    } else if k == 3 {
+        b"\xcb\x01\x74"
+    } else if k == 4 {
+        b"\xc3\x01\x75\x40\xfc"
+    } else if k == 5 {
+        b"\x88\x01\x76\x40\xfc"
+    } else if k == 6 {
+        b"\x48\x01\x76\x40\xfc"
+    } else if k == 7 {
+        b"\xcd\x01\x77"
+    } else if k == 8 {
+        b"\xc2\x01\x78\x40\xfc"
+    } else if k == 9 {
+        b"\xc7\x01\x79"
+    } else if k == 10 {
+        b"\xcc\x01\x7a"
+    } else if k == 11 {
+        b"\xc1\x01\x7b\x80\x08\x14\x85\x21\x4f\xff\xea\xaa\xaa\xbc\xf2\x4c\x30\x43\x0c\x10\xfe\xa0\x2a\xa8\x0f\x24\x03\x04\x00\xc1\x00\x2a\x00\x0a\x80\x02\x40\x00\x40\x00\x10\x00\x0d\x95\x49\x26\xe0\x82\xb0\x4a\x09\x41\xb8\x20\xac\x12\x82\x50\x3f\xea\x19\x74\x00\x0c\xa8\x64\x33\x0e\x22\x22\x22\xec\xa8\x65\x53\x04\x22\x42\x30\xec\xa8\x77\x53\x00\x77\x00\x42\x00\xef\x00\x86\x01\xdf\x01\x0d"
+    } else if k == 12 {
+        b"\xc6\x01\x7c"
+    } else {
+        b"\xcb\x01\x7d"
+    }
+}
+
+// AV1 RTP section 4.4 aggregation header Z|Y|W|N with W = 1: N on the two keyframes,
+// Y then Z across the two-packet frames 371 and 374. Then one OBU byte and a tag.
+fn av1_payload(k: u64) -> Bytes {
+    let head: u8 = if k == 0 || k == 11 {
+        0x18
+    } else if k == 1 || k == 5 {
+        0x50
+    } else if k == 2 || k == 6 {
+        0x90
+    } else {
+        0x10
+    }
+    let mut b: Bytes = list.new()
+    list.push(mut b, head)
+    list.push(mut b, 0x30)
+    let tag: u8 = int.narrow(k)
+    list.push(mut b, 0xa0 + tag)
+    b
+}
+
+// Packets 0-3 are picture 1, 4-7 picture 2, 8-10 picture 3, 11-13 picture 4.
+fn av1_ts(k: u64) -> u32 {
+    if k < 4 {
+        3000
+    } else if k < 8 {
+        6000
+    } else if k < 11 {
+        9000
+    } else {
+        12000
+    }
+}
+
+fn av1_send(mut r: router.Router, now: u64, mut p: Client, seq: u16, k: u64, mut out: peer.Outbox) {
+    let mut m = rtp.ext.map(Mixed)
+    result.unwrap(rtp.ext.bind(mut m, 1, Mid))
+    result.unwrap(rtp.ext.bind(mut m, 3, DependencyDescriptor))
+    let mut w = rtp.ext.writer()
+    result.unwrap(rtp.ext.put(mut w, m, Mid, b"x", 0, 1))
+    let dd = av1_descriptor(k)
+    result.unwrap(rtp.ext.put(mut w, m, DependencyDescriptor, dd, 0, list.len(dd)))
+    let marker = k == 3 || k == 7 || k == 10 || k == 13
+    let f = rtp.header.Fields(marker: marker, pt: 45, seq: seq, ts: av1_ts(k), ssrc: AV1_SSRC)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, av1_payload(k))
+    let _ = result.unwrap(srtp.protect_rtp(mut p.cs, mut b))
+    feed(mut r, now, p.who, p.at, b, mut out)
+}
+
+// The leg got exactly the packets in `want`, in order, numbered without gaps and
+// timed from the source timestamps.
+fn av1_leg(seen: List[Got], want: Bytes) -> bool {
+    if list.len(seen) != list.len(want) {
+        return false
+    }
+    let first = seen[0].h
+    for j in 0u64 .. list.len(want) {
+        let k: u64 = int.widen(want[j])
+        let h = seen[j].h
+        let step: u16 = int.narrow(j)
+        if h.seq != plus(first.seq, step) || h.ts != later(first.ts, av1_ts(k) - 3000) || !same(payload_of(seen[j]), av1_payload(k)) {
+            return false
+        }
+    }
+    true
+}
+
+/// bug: map an AV1 `Layer(e, s, t)` to decode target `3s + t` or any other index
+/// rule instead of the structure's (S_d, T_d), or keep the map across a keyframe
+/// that brings a new structure, so a leg gets another layer's frames; or decide by
+/// RTP timestamp rather than by the descriptor's frame number, so a leg takes or
+/// drops every layer frame of a picture together.
+/// oracle: RTC-6 and AV1 RTP section A.8 by hand over LiveKit's captured Chromium
+/// L3T3 descriptors (d210b4d4): its structure gives decode target d the pair
+/// (d / 3, d % 3), and a frame is needed by d when its template's indication for d
+/// is not Absent. Layer(0, 0, 0) is d0 and gets only keyframe 370; (1, 1) is d4;
+/// (2, 2) is d8 and gets every frame; (1, 255) is the greatest pair at or below,
+/// d5. The reversed structure at keyframe 379 moves (0, 0) to d'8, (1, 2) to d'3 and
+/// (2, 2) to d'0: every leg takes the keyframe, then frame 380 (S1T0) goes to all but
+/// (0, 0) and frame 381 (S2T0) only to (2, 2).
+/// The AV1 payloads are hand-built aggregation headers, not captured.
+@test
+fn router_maps_av1_targets() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(120))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let room = room_id()
+    let mut p = admit(mut r, 121, av1_offer(b"x", b"a=sendonly"), 1)
+    let mut a = admit(mut r, 123, av1_offer(b"y", b"a=recvonly"), 2)
+    let mut b = admit(mut r, 125, av1_offer(b"y", b"a=recvonly"), 3)
+    let mut c = admit(mut r, 127, av1_offer(b"y", b"a=recvonly"), 4)
+    let mut d = admit(mut r, 129, av1_offer(b"y", b"a=recvonly"), 5)
+    let pv = result.unwrap(router.publish(mut r, room, p.who, 0))
+    let mut now = 10 * MS
+    result.unwrap(router.subscribe(mut r, room, a.who, pv, 0, Layer(encoding: 0, spatial: 0, temporal: 0), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, b.who, pv, 0, Layer(encoding: 0, spatial: 1, temporal: 1), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, c.who, pv, 0, Layer(encoding: 0, spatial: 2, temporal: 2), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, d.who, pv, 0, Layer(encoding: 0, spatial: 1, temporal: 255), now, mut out))
+    peer.clear_outbox(mut out)
+    let mut seen_a: List[Got] = list.new()
+    let mut seen_b: List[Got] = list.new()
+    let mut seen_c: List[Got] = list.new()
+    let mut seen_d: List[Got] = list.new()
+    // One packet per millisecond, so each has left the legs' pacers before the next (RTP-10).
+    for k in 0u64 .. 14u64 {
+        let step: u16 = int.narrow(k)
+        let seq: u16 = 700 + step
+        av1_send(mut r, now, mut p, seq, k, mut out)
+        now += MS
+        for g in received(mut a, out) {
+            let kept: Got = clone(g)
+            list.push(mut seen_a, take kept)
+        }
+        for g in received(mut b, out) {
+            let kept: Got = clone(g)
+            list.push(mut seen_b, take kept)
+        }
+        for g in received(mut c, out) {
+            let kept: Got = clone(g)
+            list.push(mut seen_c, take kept)
+        }
+        for g in received(mut d, out) {
+            let kept: Got = clone(g)
+            list.push(mut seen_d, take kept)
+        }
+        peer.clear_outbox(mut out)
+    }
+    if !av1_leg(seen_a, b"\x00\x0b") {
+        fail("the S0T0 leg got another frame than the base keyframes")
+    }
+    if !av1_leg(seen_b, b"\x00\x01\x02\x08\x09\x0b\x0c") {
+        fail("the S1T1 leg got another set of frames than decode target 4 needs")
+    }
+    if !av1_leg(seen_c, b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d") {
+        fail("the S2T2 leg lost a frame")
+    }
+    if !av1_leg(seen_d, b"\x00\x01\x02\x04\x05\x06\x08\x09\x0b\x0c") {
+        fail("Layer(0, 1, 255) is not the greatest decode target at or below it")
+    }
+    Ok(())
+}

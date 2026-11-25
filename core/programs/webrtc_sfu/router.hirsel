@@ -13,7 +13,7 @@ pub type RoomLimits {
     pause_delay_ms: u32
 }
 
-pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Peer(peer.PeerError) | Capacity(Capacity)
+pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Unrepresentable | Peer(peer.PeerError) | Capacity(Capacity)
 
 pub type PublicationId: key = PublicationId(u64)
 
@@ -29,6 +29,9 @@ pub type Counts: key {
     unparsed: u64,
     // Leg packets a stream's layer ids put outside the stable map (RTC-6).
     unmapped: u64,
+    // AV1 targets an unrepresentable structure refused (RTC-6): the down-track kept
+    // its current target.
+    refused: u64,
     // Datagrams from a 5-tuple outside the table that no local session's ICE
     // credentials named (RTC-3), dropped.
     unknown: u64,
@@ -59,7 +62,13 @@ type Encoding {
     // this encoding, whether its bit is published, and since when the union is empty.
     wanting: u64,
     on: bool,
-    since: Option[u64]
+    since: Option[u64],
+    // AV1's template structure of this source (AV1 RTP section A.8), from its last
+    // descriptor that carried one. The target map is derived from it.
+    structure: media_bits.dependency.Structure,
+    // The frame number of the keyframe that brought `structure`. A retransmitted or
+    // late keyframe older than it must not bring back its older structure.
+    structure_frame: Option[u16]
 }
 
 // RTC-6's speaker score of an audio publication, in Q16, and its open window, in
@@ -116,7 +125,11 @@ type Down {
     // still forwards until then, and the new source's own sets (RTP-11).
     previous: Option[PublicationId],
     next_sets: media_bits.unit.ParameterSets,
-    next_after_end: bool
+    next_after_end: bool,
+    // AV1: the frame numbers this leg last forwarded per chain (AV1 RTP section A.5),
+    // of its current source and of a rebind's new source.
+    chains: media_bits.unit.Av1Chains,
+    next_chains: media_bits.unit.Av1Chains
 }
 
 // A participant every unit knows of (RTC-5, Units): its home unit, which holds its
@@ -265,7 +278,7 @@ pub fn router(r: Random) -> Router {
 
 /// The router of media unit `unit` (RTC-5, at most 64 units).
 pub fn on_unit(r: Random, unit: u16) -> Router {
-    Router(random: r, unit: unit, rooms: list.new(), roster: list.new(), members: list.new(), publications: list.new(), downs: list.new(), rows: list.new(), next_publication: 1, next_handle: int.widen(unit), counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0, unknown: 0, stale: 0), posts: list.new(), parked: list.new(), empty: shared.new(list.new()), notices: list.new(), moved: false)
+    Router(random: r, unit: unit, rooms: list.new(), roster: list.new(), members: list.new(), publications: list.new(), downs: list.new(), rows: list.new(), next_publication: 1, next_handle: int.widen(unit), counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0, refused: 0, unknown: 0, stale: 0), posts: list.new(), parked: list.new(), empty: shared.new(list.new()), notices: list.new(), moved: false)
 }
 
 pub fn counts(r: Router) -> Counts {
@@ -618,7 +631,7 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     for _ in 0u8 .. shape.encodings {
         // Every encoding starts published: the publisher sends all of them until a
         // mask says otherwise (RTC-6).
-        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, wanting: 0, on: true, since: None))
+        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, wanting: 0, on: true, since: None, structure: media_bits.dependency.empty(), structure_frame: None))
     }
     list.try_reserve(mut r.publications, 1) ?=> |c| Capacity(c)
     list.push(mut r.publications, Publication(id: id, owner: who, home: home, room: room, section: section, codec: shape.codec, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held, local: 0, clock: clock, window: None, voice: quiet()))
@@ -634,12 +647,18 @@ fn source(p: PublicationId, e: u8) -> u32 {
 }
 
 /// RTC-6's stable target map: `i = t` clamped to 3 for VP8, `i = 4s + t` with each
-/// clamped to 3 for VP9, and 0 for H.264 without SVC and for audio. It never depends
-/// on the layers seen.
-fn rewrite_target(p: Publication, t: Target) -> rtp.rewrite.Target {
+/// clamped to 3 for VP9, 0 for H.264 without SVC and for audio, and for AV1 the
+/// decode target of encoding `e`'s structure that `av1_target` picks. VP8's and VP9's
+/// never depend on the layers seen. None is an AV1 target the structure cannot represent.
+fn rewrite_target(p: Publication, t: Target) -> Option[rtp.rewrite.Target] {
     match t {
-        Off => Off,
+        Off => Some(Off),
         Layer(encoding: e, spatial: sid, temporal: tid) => {
+            if p.codec == Av1 {
+                let n: u64 = int.widen(e)
+                let i = av1_target(view p.encodings[n].structure, sid, tid)?
+                return Some(Layer(source: source(p.id, e), target: i))
+            }
             let top_t = if tid > 3 {
                 3u8
             } else {
@@ -655,9 +674,56 @@ fn rewrite_target(p: Publication, t: Target) -> rtp.rewrite.Target {
                 Vp9 => 4 * top_s + top_t,
                 _ => 0u8,
             }
-            Layer(source: source(p.id, e), target: i)
+            Some(Layer(source: source(p.id, e), target: i))
         },
     }
+}
+
+/// RTC-6's AV1 map: the decode target `d` whose `(S_d, T_d)` (the highest spatial and
+/// temporal ids over the templates that do not mark `d` Not Present) is `(s, t)`, or
+/// else the one whose pair is the greatest at or below `(s, t)` in both coordinates.
+/// None when two decode targets share a pair or no single greatest pair exists. Before
+/// the source's first structure there is no map yet: the target is 0, and the router
+/// maps it again at the keyframe that brings the structure.
+fn av1_target(structure: View[media_bits.dependency.Structure], s: u8, t: u8) -> Option[u8] {
+    let mut spatial: Inline[u8, 32] =[0; 32]
+    let mut temporal: Inline[u8, 32] =[0; 32]
+    let mut n = 0u64
+    while n < 32 {
+        let Some((sd, td)) = media_bits.dependency.target_layers(structure, n) else {
+            break
+        }
+        for d in 0u64 .. n {
+            if spatial[d] == sd && temporal[d] == td {
+                return None
+            }
+        }
+        spatial[n] = sd
+        temporal[n] = td
+        n += 1
+    }
+    if n == 0 {
+        return Some(0)
+    }
+    let mut any = false
+    let mut top_s: u8 = 0
+    let mut top_t: u8 = 0
+    for d in 0u64 .. n {
+        if spatial[d] <= s && temporal[d] <= t {
+            any = true
+            top_s = order.max(top_s, spatial[d])
+            top_t = order.max(top_t, temporal[d])
+        }
+    }
+    if !any {
+        return None
+    }
+    for d in 0u64 .. n {
+        if spatial[d] == top_s && temporal[d] == top_t {
+            return Some(int.narrow(d))
+        }
+    }
+    None
 }
 
 fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
@@ -694,7 +760,7 @@ fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, s
         0u16
     }
     list.try_reserve(mut r.downs, 1) ?=> |c| Capacity(c)
-    list.push(mut r.downs, Down(sub: who, home: home, room: room, publication: p, section: section, track: track, target: Off, effective: Off, held: false, sets: media_bits.unit.parameter_sets(), after_end: true, previous: None, next_sets: media_bits.unit.parameter_sets(), next_after_end: true))
+    list.push(mut r.downs, Down(sub: who, home: home, room: room, publication: p, section: section, track: track, target: Off, effective: Off, held: false, sets: media_bits.unit.parameter_sets(), after_end: true, previous: None, next_sets: media_bits.unit.parameter_sets(), next_after_end: true, chains: media_bits.unit.av1_chains(), next_chains: media_bits.unit.av1_chains()))
     r.roster[si].downs += 1
     retarget(mut r, room, who, p, target, now, mut out)
 }
@@ -715,6 +781,14 @@ fn retarget(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, t
             return Error(Limit(int.narrow(list.len(r.publications[pi].encodings))))
         }
     }
+    // An AV1 target the encoding's structure cannot represent is refused, and the
+    // down-track keeps its target (RTC-6).
+    if r.downs[di].home == r.unit {
+        if let None = rewrite_target(r.publications[pi], target) {
+            r.counts.refused += 1
+            return Error(Unrepresentable)
+        }
+    }
     let old = r.downs[di].target
     r.downs[di].target = target
     if r.downs[di].home != r.unit {
@@ -730,6 +804,37 @@ fn retarget(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, t
         return Error(e)
     }
     Ok(())
+}
+
+// RTC-6: a new AV1 structure maps again the target of each local down-track on encoding
+// `encoding` of publication `pi`. A target the structure cannot represent is refused
+// and counted, and the down-track keeps its current target.
+fn remap(mut r: Router, pi: u64, encoding: u8) {
+    let room = r.publications[pi].room
+    let id = r.publications[pi].id
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].room != room || r.downs[d].publication != id || r.downs[d].home != r.unit {
+            continue
+        }
+        if r.downs[d].held {
+            continue
+        }
+        if let Layer(encoding: e, spatial: _, temporal: _) = r.downs[d].effective {
+            if e != encoding {
+                continue
+            }
+            let Some(si) = member_at(r, room, r.downs[d].sub) else {
+                continue
+            }
+            let Some(t) = rewrite_target(r.publications[pi], r.downs[d].effective) else {
+                r.counts.refused += 1
+                continue
+            }
+            if let Error(_) = peer.set_target(mut r.members[si].session, r.downs[d].track, t) {
+                r.counts.refused += 1
+            }
+        }
+    }
 }
 
 fn move_down(mut r: Router, room: peer.RoomId, who: peer.Gen, from: PublicationId, to: PublicationId, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
@@ -774,6 +879,7 @@ fn move_down(mut r: Router, room: peer.RoomId, who: peer.Gen, from: PublicationI
     r.downs[di].publication = to
     media_bits.unit.clear_parameter_sets(mut r.downs[di].next_sets)
     r.downs[di].next_after_end = true
+    r.downs[di].next_chains = media_bits.unit.av1_chains()
     retarget(mut r, room, who, to, target, now, mut out)
 }
 
@@ -788,6 +894,8 @@ fn settle(mut r: Router, d: u64) {
     media_bits.unit.clear_parameter_sets(mut r.downs[d].next_sets)
     r.downs[d].after_end = r.downs[d].next_after_end
     r.downs[d].next_after_end = true
+    r.downs[d].chains = r.downs[d].next_chains
+    r.downs[d].next_chains = media_bits.unit.av1_chains()
 }
 
 // Take down-track `d` out: its track ends on its home unit (`end_track`), and its

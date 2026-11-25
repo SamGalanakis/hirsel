@@ -220,7 +220,7 @@ the only ordering any stateful operation uses.
 
 ```hirsel unbuilt
 // module ext
-pub type Kind = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq
+pub type Kind = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq | DependencyDescriptor
 pub type Form = OneOnly | TwoOnly | Mixed
 pub type Error = Overrun | Value(Kind) | Buffer
 pub type Element = Element(id: u8, at: u64, len: u64)
@@ -263,7 +263,7 @@ and an id or kind already bound (`IdTaken`, `KindTaken`). `vad(m, on)` records t
 negotiated RFC 6464 `vad` attribute ([RFC 6464 §4](https://www.rfc-editor.org/rfc/rfc6464#section-4));
 the session resolves the attribute's default before calling it. A kind `rtp` does not name
 stays unbound: the caller reads it with `next` and the raw element, and writes it with
-`put_other`. The dependency descriptor goes that way to `media_bits.dependency`.
+`put_other`.
 
 **Reading.** `ext.next(pkt, h, mut at)` walks the block's elements in order, from `at = 0`,
 whatever the map's form, because the block's profile says which form it is. It first checks
@@ -302,6 +302,7 @@ block, and checks its value's length. It answers `Buffer` or `Value(k)` otherwis
 | `AudioLevel` | `urn:ietf:params:rtp-hdrext:ssrc-audio-level` | exactly 1 byte `V ‖ level` ([RFC 6464 §3](https://www.rfc-editor.org/rfc/rfc6464#section-3); libwebrtc `AudioLevelExtension::Parse` reads one octet) | `(voice, level)`, level 0 to 127 in −dBov; `voice` is `None` when the map's `vad` is off, because `V` then means nothing |
 | `AbsSendTime` | `http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time` | exactly 3 bytes, 6.18 fixed-point seconds | the 24-bit value |
 | `TransportSeq` | `http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01` | exactly 2 bytes | the 16-bit transport sequence number |
+| `DependencyDescriptor` | `https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension` | 3 to 255 bytes: the three mandatory octets of [AV1 RTP §A.8](https://aomediacodec.github.io/av1-rtp-spec/#a8-dependency-descriptor-rtp-header-extension), then its extended fields | the element's range, unchanged; `media_bits.dependency` reads it with the stream's structure |
 | `Mid` | RFC 9143 §15 | 1 to 255 bytes, each an SDP `token-char` ([RFC 8866 §9](https://www.rfc-editor.org/rfc/rfc8866#section-9)), the grammar of the negotiated `a=mid` identification-tag; so `audio-1` is legal | the element's range, unchanged |
 | `Rid`, `RepairedRid` | RFC 8852 §3 | 1 to 255 bytes, each ASCII `A-Z a-z 0-9`; the wire `RtpStreamId` grammar is narrower than SDP's `rid-id`, so `a_b` is refused | the element's range, unchanged |
 

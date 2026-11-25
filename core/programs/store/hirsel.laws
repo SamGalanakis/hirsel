@@ -144,7 +144,9 @@ store@1/store/journal_test_worker src=a85d5d34d054d8e4 sig=bc93cb67810f9b07 run=
 store@1/store/journal_window_prefix src=71c8802406ee816a sig=02c367e0e976d49f run=aea7d2502fa22260 bug=- oracle=- rows=pending
 store@1/store/log_changes_and_tail_window src=17ed4efb7b796d0f sig=e77a204562e95d49 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/log_dense_and_append_fill src=f87123bd2e998fbe sig=1a0505b8458c7988 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/log_follower_behind_torn_tail src=ceb27809ddcfce4d sig=dcecac89821adc08 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_follower_dropped_candidate src=4ad6aa74640a6492 sig=eaee4e1a620ebaff run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/log_follower_end_bound src=7459867039c3ccb7 sig=8679a140781c7a30 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_follower_refuses_expired_catch_up src=79ee902d999f1751 sig=4d1a7b85871b7316 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_follower_unreadable_end src=789405aeae1768c6 sig=c618e8b2755b1950 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_level_uses_host_barrier src=01bebd20fb174a03 sig=04062be97fee22c6 run=ea720f3846592392 bug=- oracle=- rows=pending

@@ -43,9 +43,10 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
-#include <llvm/IR/ModuleSlotTracker.h>
+#include <llvm/IR/AssemblyAnnotationWriter.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/CBindingWrapping.h>
+#include <llvm/Support/FormattedStream.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/xxhash.h>
@@ -139,6 +140,22 @@ void hex(std::string &out, uint64_t v) {
     for (int s = 60; s >= 0; s -= 4) out += digits[(v >> s) & 15];
 }
 
+// Where Module::print writes each definition: a function from its
+// annotation to the end of its last block, a global variable up to its info
+// comment (the end of its line).
+struct Spans : AssemblyAnnotationWriter {
+    DenseMap<const Value *, std::pair<size_t, size_t>> at;
+    void emitFunctionAnnot(const Function *f, formatted_raw_ostream &os) override {
+        at[f].first = os.tell();
+    }
+    void emitBasicBlockEndAnnot(const BasicBlock *b, formatted_raw_ostream &os) override {
+        at[b->getParent()].second = os.tell();
+    }
+    void printInfoComment(const Value &v, formatted_raw_ostream &os) override {
+        if (isa<GlobalVariable>(v)) at[&v].second = os.tell();
+    }
+};
+
 // Rename every program-named definition from its content.
 void name_from_content(Module &m) {
     std::vector<GlobalObject *> named;
@@ -146,14 +163,31 @@ void name_from_content(Module &m) {
     for (GlobalObject &g : m.global_objects())
         if (program_named(g)) { index[g.getName()] = named.size(); named.push_back(&g); }
     if (named.empty()) return;
-    ModuleSlotTracker slots(&m);
+    // Print the module once and take each definition's text from it: a
+    // GlobalValue::print builds an AssemblyWriter, which walks every global
+    // object, so one print per definition is quadratic in the module.
     std::vector<Text> texts;
     texts.reserve(named.size());
-    for (GlobalObject *g : named) {
-        std::string s;
-        raw_string_ostream os(s);
-        g->print(os, slots);
-        texts.push_back(cut(s, index));
+    std::string printed;
+    {
+        raw_string_ostream os(printed);
+        Spans spans;
+        m.print(os, &spans);
+        for (GlobalObject *g : named) {
+            auto at = spans.at.find(g);
+            if (at == spans.at.end()) report_fatal_error("a definition's printed span is missing");
+            auto [start, end] = at->second;
+            if (isa<Function>(g)) {
+                // The last block ends with the body's closing "}\n".
+                if (printed.compare(end, 2, "}\n") != 0) report_fatal_error("a printed body does not close");
+                end += 2;
+            } else {
+                // A global variable prints on one line, ending at its info comment.
+                size_t line = printed.rfind('\n', end ? end - 1 : 0);
+                start = line == std::string::npos ? 0 : line + 1;
+            }
+            texts.push_back(cut(printed.substr(start, end - start), index));
+        }
     }
     // Refine until the partition stops splitting: each round hashes a
     // definition's text, its referents' previous classes and its own.

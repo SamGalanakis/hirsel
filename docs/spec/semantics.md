@@ -196,11 +196,15 @@ Equality is structural. Order is numeric for integers and `char`, `false` before
 bytewise for text, lexicographic for tuples, sequences and records (fields in declaration
 order, a proper prefix first), and by declaration ordinal then payload for variants. A
 counted value and a view compare by payload. Floats, maps, callables, capabilities, resources and
-scoped types have neither bound. Comparison never allocates.
+scoped types have neither bound. Comparison never allocates. So an order on two keys is one
+tuple comparison, not an `if` on the first key.
 
 ```hirsel
 type P: key + ordered { x: i64, y: i64 }
 fn first(a: P, b: P) -> bool { a < b }
+fn pair_before(k1: u64, v1: u64, k2: u64, v2: u64) -> bool {
+  (k1, v1) < (k2, v2)                       // k1 < k2, or k1 == k2 and v1 < v2
+}
 ```
 ```hirsel
 type Q: key { w: f64 }                                     // refused: OWN-4, f64 is not key

@@ -106,6 +106,20 @@ fn g() -> u64 { list.len(list.new()) }                    // refused: LANG-12, T
 Type arguments are never written at a call. To fix them, write the binding's type
 (`let xs: List[u64] = list.new()`) or ascribe `(e : T)`. An ascription is not a cast.
 
+Tuples, records and sequences compare lexicographically (SEM-7), so order by two keys
+with one comparison rather than an `if` on the first key:
+
+```hirsel
+fn sorted_pairs(ks: List[u64], vs: List[u64]) -> bool {
+  let mut i: u64 = 1
+  while i < list.len(ks) {
+    if (ks[i], vs[i]) < (ks[i - 1], vs[i - 1]) { return false }
+    i += 1
+  }
+  true
+}
+```
+
 ## 4. Kinds: the type decides who frees
 
 A declaration fixes its values' representation once, and every use inherits it (OWN-1,
@@ -406,6 +420,7 @@ hirsel run --grant Stdout -- a b   # build and run; grants are explicit
 hirsel replay . --tape run.tape    # replay a recording with no host grants
 hirsel build --release -o program  # a native executable
 hirsel prof run --release .        # sample CPU or replay memory into .hprof
+hirsel prof top FILE.hprof         # hottest functions and source lines; profile before tuning
 hirsel inspect --core --interface  # public core declarations
 hirsel inspect --std --interface   # public std declarations
 hirsel fmt .                       # canonical formatting

@@ -512,3 +512,22 @@ fn simd_and_step_budget() -> Result[(), ()] {
   }
 }
 ```
+
+### Find the hot spot with `hirsel prof`
+
+Profile before tuning, and never tune from `objdump` output. `prof run` builds the package,
+runs it with the same grants, flags and `--` arguments that `hirsel run` takes, and samples
+it into a `.hprof` file:
+
+```sh
+hirsel prof run . --release --grant Stdout --pmu cycles,branch-misses --out run1.hprof -- ARGS
+hirsel prof top run1.hprof --limit 10            # hottest functions, per event
+hirsel prof annotate run1.hprof main.hirsel:42   # periods and compiler remarks for one line
+hirsel prof callers run1.hprof app@1/main/work   # who calls one definition (package@major/module/fn)
+hirsel prof diff run1.hprof run2.hprof           # what a change moved
+```
+
+`top` names each row by its definition path, or by `file:line` for inlined code, and ranks by
+`self_total`, the sampled event periods. Read `verdict` and `warnings` first: `degraded` means
+samples were lost or stacks failed to unwind, so trust the ranking but not small differences.
+`--out` refuses an existing file, so give each run a new name.

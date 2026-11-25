@@ -199,6 +199,20 @@ fn g() -> u64 { list.len(list.new()) }                    // refused: LANG-12, T
 Type arguments are never written at a call. To fix them, write the binding's type
 (`let xs: List[u64] = list.new()`) or ascribe `(e : T)`. An ascription is not a cast.
 
+Tuples, records and sequences compare lexicographically (SEM-7), so order by two keys
+with one comparison rather than an `if` on the first key:
+
+```hirsel
+fn sorted_pairs(ks: List[u64], vs: List[u64]) -> bool {
+  let mut i: u64 = 1
+  while i < list.len(ks) {
+    if (ks[i], vs[i]) < (ks[i - 1], vs[i - 1]) { return false }
+    i += 1
+  }
+  true
+}
+```
+
 ## 4. Kinds: the type decides who frees
 
 A declaration fixes its values' representation once, and every use inherits it (OWN-1,
@@ -499,6 +513,7 @@ hirsel run --grant Stdout -- a b   # build and run; grants are explicit
 hirsel replay . --tape run.tape    # replay a recording with no host grants
 hirsel build --release -o program  # a native executable
 hirsel prof run --release .        # sample CPU or replay memory into .hprof
+hirsel prof top FILE.hprof         # hottest functions and source lines; profile before tuning
 hirsel inspect --core --interface  # public core declarations
 hirsel inspect --std --interface   # public std declarations
 hirsel fmt .                       # canonical formatting
@@ -1175,6 +1190,25 @@ fn simd_and_step_budget() -> Result[(), ()] {
 }
 ```
 
+### Find the hot spot with `hirsel prof`
+
+Profile before tuning, and never tune from `objdump` output. `prof run` builds the package,
+runs it with the same grants, flags and `--` arguments that `hirsel run` takes, and samples
+it into a `.hprof` file:
+
+```sh
+hirsel prof run . --release --grant Stdout --pmu cycles,branch-misses --out run1.hprof -- ARGS
+hirsel prof top run1.hprof --limit 10            # hottest functions, per event
+hirsel prof annotate run1.hprof main.hirsel:42   # periods and compiler remarks for one line
+hirsel prof callers run1.hprof app@1/main/work   # who calls one definition (package@major/module/fn)
+hirsel prof diff run1.hprof run2.hprof           # what a change moved
+```
+
+`top` names each row by its definition path, or by `file:line` for inlined code, and ranks by
+`self_total`, the sampled event periods. Read `verdict` and `warnings` first: `degraded` means
+samples were lost or stacks failed to unwind, so trust the ranking but not small differences.
+`--out` refuses an existing file, so give each run a new name.
+
 ---
 
 # Standard library operation index
@@ -1346,6 +1380,19 @@ Never guess a function name. Inspect your installed toolchain directly:
 
 Read every parameter mode in a signature: unmarked is a read-only view, `mut` is lent,
 and `take` is moved.
+
+## Making it fast
+
+Measure before tuning, and never tune from `objdump` output:
+
+```sh
+hirsel prof run . --release --grant Stdout --out run1.hprof -- ARGS
+hirsel prof top run1.hprof                       # hottest functions and source lines
+hirsel prof annotate run1.hprof main.hirsel:42   # one line's samples and compiler remarks
+```
+
+Order by two keys with one tuple comparison, `(k1, v1) < (k2, v2)`, not an `if` on the
+first key: tuples compare lexicographically.
 
 ## Habits that avoid refusals
 

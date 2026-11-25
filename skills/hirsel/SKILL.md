@@ -50,6 +50,19 @@ Never guess a function name. Inspect your installed toolchain directly:
 Read every parameter mode in a signature: unmarked is a read-only view, `mut` is lent,
 and `take` is moved.
 
+## Making it fast
+
+Measure before tuning, and never tune from `objdump` output:
+
+```sh
+hirsel prof run . --release --grant Stdout --out run1.hprof -- ARGS
+hirsel prof top run1.hprof                       # hottest functions and source lines
+hirsel prof annotate run1.hprof main.hirsel:42   # one line's samples and compiler remarks
+```
+
+Order by two keys with one tuple comparison, `(k1, v1) < (k2, v2)`, not an `if` on the
+first key: tuples compare lexicographically.
+
 ## Habits that avoid refusals
 
 - Give every `let` of a literal or a generic call an explicit type: `let n: u64 = 0`,

@@ -28,6 +28,15 @@
   <sub>Status: <b>v0.1.0-pre</b> · Linux x86_64 (glibc 2.28+) · Apple Silicon macOS in progress</sub>
 </p>
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-hero-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/readme-hero-light.svg">
+  <img alt="Hirsel hello world example showing explicit Stdout capability, mutable List and String, and waits effect" src="docs/assets/readme-hero-dark.svg" width="100%">
+</picture>
+
+<details>
+<summary>View / copy source (<code>main.hirsel</code>)</summary>
+
 ```hirsel
 pub fn main(out: Stdout) -> Result[(), WriteError] waits {
   let mut names: List[String] = list.new()
@@ -43,6 +52,8 @@ pub fn main(out: Stdout) -> Result[(), WriteError] waits {
   stdout.write(out, line)
 }
 ```
+
+</details>
 
 Every outside effect enters as a parameter (`Stdout`, `Dir`, `Clock`, `Net`, `Tasks`),
 every allocation is charged against an explicit byte limit, and every function checks

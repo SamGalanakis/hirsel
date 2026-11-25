@@ -22,7 +22,7 @@ reversible defaults of the same day:
 
 D3 to D6 are reversible until slice C4 publishes the profile format.
 
-Slices C1 to C5 build this in order, and each section below says which slice owns it.
+Slices C1 to C5 build this in order, C7 extends it, and each section below says which slice owns it.
 
 Version note (2026-11-25, coverage-c1-cranelift-2551): slice C1 built the sites, the switch,
 the Cranelift flag stores, the raw file and the map fragments. It amended "Sites" with what
@@ -52,6 +52,17 @@ offline tool is two subcommands, `hirsel coverage merge` and `hirsel coverage di
 place of one `hirsel coverage` form. The diff text counts sites. Merge also refuses one site
 placed two ways, and "same run" means the same test, seed and build. D3 to D6 are now
 published: changing any of them changes a format version.
+
+Version note (2026-11-25, coverage-c7-grain-2765): slice C7 adds four things and no IR,
+annex or site change. Per-seed grain: a profile's run rows name each site's runs, as
+`reached_by`, and `hirsel coverage merge` keeps one run row per raw file. Fixed denominator:
+an unreferenced function counts in the function total. Per-test query: `hirsel coverage
+diff PROFILE --test DEFINITION` lists the sites only the other tests reached. Shapes: an arm
+that is a `?`'s error arm, runs straight into a failure, or tests a `match` guard is tagged
+`error`, `fail` or `guard`, and the report counts them apart ("Shapes"). The profile is format 3 and the site map format 2,
+because a site row gains `shape`; earlier formats are refused. Branch values (the operands
+a decision saw) are not captured: a site stays one flag (D3), and the seeds in `reached_by`
+replay to the run that saw them.
 
 These are out of scope:
 
@@ -216,7 +227,8 @@ no sites. To cover `std.sim`, run std's own tests with std given as source.
 **The denominator.** The total is the sites of every in-scope body that the selected tests
 reach in the build. A function no selected test references is never lowered and has no
 sites. It is listed by name as **unreferenced**, from the checked product's item list, so it
-stays visible. Sites are retained against section garbage collection and the LLVM global
+stays visible, and it counts in the function total, so that total is fixed by the selected
+sources and not by which tests ran. Sites are retained against section garbage collection and the LLVM global
 optimiser, so a function inlined everywhere, or deleted as dead, still counts in the total.
 
 **Foreign code is unobserved.** A foreign function has no CoreIR body and no sites. A test
@@ -257,6 +269,7 @@ build. A profile counts how many runs reached each site.
 | `--seed-base K` | with `--seeds N`, runs seeds K to K+N-1 | C4 |
 | `hirsel coverage merge FILE|DIR|@LIST... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]` | merges profiles and raw files, and reports | C4, C5 |
 | `hirsel coverage diff BASE NEW [--json]` | lists the sites reached in one profile and not the other | C4 |
+| `hirsel coverage diff PROFILE --test DEFINITION [--json]` | lists the sites only the other tests reached, and only DEFINITION reached | C7 |
 
 **`--coverage`** composes with `--release`, `--backend`, `--target`, `--sim`, `--seed`,
 `--seeds`, `--filter`, `--exact`, `--laws`, `--laws-baseline`, `--replay`,
@@ -301,6 +314,13 @@ campaign's thousands of raw files need not each be an argument. Name a file that
 text line, then one line per key, `  + KEY` for gained and `  - KEY` for lost, then
 `  changed FUNCTION` for each changed function. With `--json` it prints the `diff` object.
 
+**`hirsel coverage diff PROFILE --test DEFINITION`** compares one test with every other test
+of one profile ("Others"), over every build: its text line, `others against DEFINITION  +O
+sites, -T`, then `  + KEY` for each site only the other tests reached and `  - KEY` for each
+site only DEFINITION reached, each followed by its shape when it has one. With `--json` it
+prints `{"test", "others_only", "test_only"}`. A profile with no run of DEFINITION is
+refused.
+
 **`hirsel laws`** keeps only `check` and `write`. It runs no test and has no coverage
 option.
 
@@ -328,7 +348,7 @@ the test goes on.
 A map is one JSON document:
 
 ```json
-{"hirsel_covmap": 1,
+{"hirsel_covmap": 2,
  "test": "store@1/tiered_random_laws/law_tiers",
  "build": {"engine": "llvm", "optimize": true, "target": "x86_64-unknown-linux-gnu"},
  "scope": ["store@1"],
@@ -343,7 +363,8 @@ A map is one JSON document:
  "unreferenced": [{"definition": "store@1/tiered/debug_dump", "file": "tiered.hirsel", "line": 12}]}
 ```
 
-- `hirsel_covmap` is the format version. A reader refuses a version it does not read.
+- `hirsel_covmap` is the format version, 2. A reader refuses a version it does not read.
+- `shape` is `error`, `fail` or `guard` on an arm of that shape ("Shapes"), and absent otherwise.
 - An arm row's `definition` is the item that holds its decision, and `function` is the
   function whose body holds it. They differ for an arm inlined from another item. An entry
   row has no `function`: its function is its `definition`.
@@ -436,7 +457,7 @@ offline the same way, and counts outcome 0 as failed.
 `--coverage-out` and `hirsel coverage merge -o` write a profile, one JSON document:
 
 ```json
-{"hirsel_coverage": 2,
+{"hirsel_coverage": 3,
  "builds": [{"engine": "llvm", "optimize": true, "target": "x86_64-unknown-linux-gnu"}],
  "scope": ["store@1"],
  "selection": {"tests": 147, "runs": 4704, "digest": "<16 hex>"},
@@ -453,7 +474,7 @@ offline the same way, and counts outcome 0 as failed.
                "passed": true, "reached": "<base64>"}]}
 ```
 
-- **`hirsel_coverage`** is the format version, 2. A reader refuses a version it does not
+- **`hirsel_coverage`** is the format version, 3. A reader refuses a version it does not
   read, and a document without it.
 - **`tests`** has one row for each test and build, sorted by definition and then build.
   `build` is the row's index in `builds`, which is sorted. `run_rows` index it the same way.
@@ -466,9 +487,10 @@ offline the same way, and counts outcome 0 as failed.
   with padding.
 - **`seeds`** lists the seeds of a test's runs as sorted, merged, inclusive ranges, after a
   `null` that stands for the run of a test without `--sim`.
-- **`run_rows`** is present only with `--coverage-runs`, and holds only observed runs.
-  Without it, runs are folded by test. A merge keeps run rows only when every input has
-  them.
+- **`run_rows`** is present with `--coverage-runs`, and from `hirsel coverage merge` of raw
+  files, which are one run each; it holds only observed runs. Without it, runs are folded
+  by test. A merge keeps run rows only when every input has them.
+- **`unreferenced`** rows carry `file` and `line`, so they count in that file's total.
 - **`selection.digest`** is the first 8 bytes, in hex, of SHA-256 over the sorted
   `definition`/seed pairs of every run, each framed by its length. A seed is its eight
   little-endian bytes, and the absent seed of a run without `--sim` is empty.
@@ -493,7 +515,8 @@ then lists each build. A merge of two inputs that share a function with the same
 as two profiles of one build, is not refused.
 
 **One document.** A report adds fields derived from the profile: `totals`, `files`,
-`uncovered`, `diff`, and `entered_runs` and `arms` on each function row. A reader ignores
+`uncovered`, `diff`, `entered_runs` and `arms` on each function row, and `reached_by` on
+each site row when the profile has run rows. A reader ignores
 them, so a report written by `--coverage-out`, the `coverage` object of `--json`, and the
 output of `hirsel coverage merge --json` each read back as the profile they report.
 
@@ -501,10 +524,19 @@ output of `hirsel coverage merge --json` each read back as the profile they repo
 
 ### Fields
 
-Every report field derives from the folded profile. None needs `run_rows`.
+Every report field derives from the folded profile, except `reached_by`, which needs
+`run_rows`.
 
-- **Reached / total.** For functions, a function is reached when its entry site is. For
-  arms, the count is of arm sites. `unreferenced` is the length of that list.
+- **Reached / total.** For functions, a function is reached when its entry site is, and the
+  total is every in-scope source function with a body, reached or not: the entry sites plus
+  the unreferenced list. For arms, the count is of arm sites, so it covers only the bodies
+  the build lowered; an unreferenced function's arms are unknown until it is lowered, and
+  an uninstantiated generic is never lowered. `unreferenced` is the length of that list.
+- **`shapes`** in `totals` counts the arm sites of each shape, `error`, `fail` and `guard`, as
+  `{"reached", "total"}`. They are also in `arms`.
+- **`reached_by`** on a site row lists the runs that reached it, one entry per test and
+  build: `{"definition", "build", "seeds"}`, `seeds` as in `tests`. A seed in it replays to a
+  run that took the site (`--replay`).
 - **`entered_runs`** of a function is its entry site's `passed_runs + failed_runs`.
 - **Uncovered states.** Each site that no run reached is in exactly one state:
 
@@ -520,11 +552,29 @@ Every report field derives from the folded profile. None needs `run_rows`.
   bug it alone catches" as coverage.
 - **`target`** is true on a site that `--coverage-targets` selected, and absent otherwise.
 
+### Shapes
+
+An arm's shape separates the arms that handle a failure, and guard tests, from ordinary
+arms, so a report can say whether a suite reaches its error paths. It is read from the source at placing, and
+never changes a key or the site set.
+
+- **`error`**: the `yes` arm of a `?`'s own decision, the error case. The `?` is the first
+  decision at its range (`.0`); a construct that reads its value, such as `if f(x)? {`, tests
+  again at the same range (`.1`), and that test is an ordinary decision.
+- **`fail`**: an arm whose first anchored position is inside a call of `fail` or a `return`
+  of an `Error(...)` call, which does not also hold the decision.
+- **`guard`**: an arm of a `match` guard's test, the decision at the guard (`p if g =>`).
+  The `&&` and `||` decisions inside a guard are ordinary.
+
+When more than one applies, `error` wins, then `guard`, then `fail`. Any other arm has no
+shape.
+
 ### Text
 
 ```text
 coverage  store@1  llvm release  147 tests, 4704 runs
   functions 801/933   arms 5120/7410   12 unreferenced
+  of the arms: error 40/77   fail 12/31   guard 9/14
   tiered.hirsel            functions 41/44   arms 310/402
   bucket.hirsel            functions 63/63   arms 502/611
 never entered (3 of 132; --json lists all)
@@ -532,11 +582,13 @@ never entered (3 of 132; --json lists all)
 entered, arm not reached (most-entered first)
   store@1/tiered/compact   tiered.hirsel:244:9   no    other arm taken        entered by 96 runs
   store@1/tiered/plan      tiered.hirsel:301:5   2     decision not reached   entered by 40 runs
+  store@1/tiered/load      tiered.hirsel:330:21   yes   error   other arm taken   entered by 31 runs
 since base  +119 sites, -0   2 functions changed
 ```
 
 The text report lists at most 20 rows in each section, then the count left. Rows sort by
-`entered_runs`, largest first, then by key. A test row of `hirsel test --coverage` gains its
+`entered_runs`, largest first, then by key. An arm row with a shape shows it after the
+arm. A test row of `hirsel test --coverage` gains its
 counts after the outcome: `coverage 212 fn, 1490 arms`, the sites that run reached. `only`
 needs every run, so the report ends with one line per test: `TEST  coverage 212 fn,
 1490 arms, 7 only`, its counts over all its runs.
@@ -553,13 +605,16 @@ Each row of `tests` gains a `coverage` object, and the document gains a top-leve
      "coverage": {"functions": 212, "arms": 1490, "only": 7}}
   ],
   "coverage": {
-    "hirsel_coverage": 2,
+    "hirsel_coverage": 3,
     "builds": [{"engine": "llvm", "optimize": true, "target": "x86_64-unknown-linux-gnu"}],
     "scope": ["store@1"],
     "selection": {"tests": 147, "runs": 4704, "digest": "<16 hex>"},
     "runs": 4704, "failed_runs": 3, "unobserved_runs": 0,
     "totals": {"functions": {"reached": 801, "total": 933},
-               "arms": {"reached": 5120, "total": 7410}, "unreferenced": 12},
+               "arms": {"reached": 5120, "total": 7410},
+               "shapes": {"error": {"reached": 40, "total": 77}, "fail": {"reached": 12, "total": 31},
+                          "guard": {"reached": 9, "total": 14}},
+               "unreferenced": 12},
     "files": [
       {"file": "tiered.hirsel",
        "functions": {"reached": 41, "total": 44}, "arms": {"reached": 310, "total": 402}}
@@ -741,10 +796,14 @@ named existing harnesses. None adds a new harness.
 | **Engines agree** | a missed block copy on LLVM, or the engines ordering sites differently | the Known arms package in `crates/hirsel-core-driver/src/test_run_native.rs`, and `core/tools/std_native.py --engines-agree` over the contract corpus: for each determined case, the sites reached on LLVM debug and LLVM release equal those reached on Cranelift | the other engine |
 | **Known arms** | an arm index off by one, or an `if` without `else` reported from its join block | one package in `crates/hirsel-core-driver/src/test_run_native.rs` with an `if` and no `else`, a three-arm `match` with one arm unreachable, and `&&` | keys derived by hand |
 | **Killed run** | a profile lost when the runner kills a test | the timeout case in `crates/hirsel-core-driver/src/test_run_native.rs` | the site before the hang is reached, and the run counts as failed |
-| **Round trip** | a profile field lost or misread between writer and reader | `coverage_profiles_merge_read_back_and_refuse_conflicts` in `crates/hirsel-core-driver/src/test_run_native.rs`: two profiles merged, and the report read back; `coverage_tool_diffs_merges_and_reads_raw_files`: one profile through `hirsel coverage merge` | counts and bitsets worked by hand |
-| **Refusal** | profiles of different sources or of another format merged | the same two laws: a run twice, a function's `src` changed, a site placed differently, format versions 1 and 2, and two sources through the tool | the conflict, by hand |
+| **Round trip** | a profile field lost or misread between writer and reader | `coverage_profiles_merge_read_back_and_refuse_conflicts` in `crates/hirsel-core-driver/src/test_run_coverage_tool.rs`: two profiles merged, and the report read back; `coverage_tool_diffs_merges_and_reads_raw_files`: one profile through `hirsel coverage merge` | counts and bitsets worked by hand |
+| **Refusal** | profiles of different sources or of another format merged | the same two laws: a run twice, a function's `src` changed, a site placed differently, an earlier profile and site map format, and two sources through the tool | the conflict, by hand |
 | **Diff** | gained and lost swapped, or a changed function's sites counted | `coverage_tool_diffs_merges_and_reads_raw_files`: two sources whose covered arms differ by one arm each way | the arms, by hand |
 | **Raw file offline** | a raw file read against the wrong map, or its header misread | the same law: a raw file written by hand, read against the build's `.covmap` | the run it records |
+| **Reached by** | a run row lost from a raw-file merge, or a site credited to the wrong seed | `coverage_tool_diffs_merges_and_reads_raw_files` in `crates/hirsel-core-driver/src/test_run_coverage_tool.rs`: two raw runs, seed 7 flagging `yes` and seed 8 `no` | the seeds, by hand |
+| **Denominator** | an unreferenced function left out of the function total | the same law: six functions, of which one test reaches two and both reach five | the source's functions, by hand |
+| **Others** | `+` and `-` swapped, or one test's own sites counted as the others' | `coverage_profiles_merge_read_back_and_refuse_conflicts`: t1 against t2 | the keys, by hand |
+| **Shapes** | a `?`'s `if` test tagged as its error arm, or a `fail` arm missed | `coverage_tool_diffs_merges_and_reads_raw_files`: `return Error`, `small(s)?` read by an `if` with a `fail` arm, a `?` under `==`, and a `match` guard | the shapes, by hand |
 | **Off is off** | a coverage object reused by a plain build | `crates/hirsel-core-driver/src/test_run_native.rs`: after a `--coverage` run, the plain executable has no `hirsel_cov` section, and a plain pass is not served as a coverage pass | the section's absence |
 
 Slice C3 runs "Same observations" and "Tape crosses" on Cranelift, LLVM debug and LLVM

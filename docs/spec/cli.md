@@ -146,6 +146,7 @@ flag (R28).
 | `--seed-base K` | with `--seeds N`, runs seeds K to K+N-1 |
 | `hirsel coverage merge FILE|DIR|@LIST... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]` | merges profiles, and raw files read against their site maps, and reports; runs nothing |
 | `hirsel coverage diff BASE NEW [--json]` | lists the sites reached in one profile and not the other |
+| `hirsel coverage diff PROFILE --test DEFINITION [--json]` | lists the sites only the profile's other tests reached, and only that test reached |
 
 Each coverage option implies `--coverage`. A narrowed run is allowed. Each coverage test
 build writes its site map beside its executable as `HEX.covmap`. Coverage never changes an

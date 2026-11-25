@@ -4,7 +4,9 @@
 //! source once, when the request reports; and the `.covmap` a coverage build
 //! writes beside each test executable.
 use crate::CheckProduct;
-use crate::coverage::{Build, Function, Place, Profile, Report, RunCounts, Site, SiteMap, Targets};
+use crate::coverage::{
+    Build, Function, Place, Profile, Report, RunCounts, Shape, Site, SiteMap, Targets,
+};
 use crate::request::hex;
 use hirsel_core_ids::{ContentHash, DefPath};
 use hirsel_core_ir::coverage::{Fragment, RECORD_HEADER, RECORD_MAGIC, Record, Scope, SiteRow};
@@ -164,6 +166,7 @@ fn bare(row: &SiteRow, function: &DefPath) -> Site {
             .to_string(),
         function: function.to_string(),
         place: Place::default(),
+        shape: None,
         passed_runs: 0,
         failed_runs: 0,
     }
@@ -191,7 +194,7 @@ fn place(product: &CheckProduct, scope: &Scope, records: &[&Record]) -> io::Resu
         .filter(|path| product.headers.get(path).is_some())
         .collect();
     let sources = product.native_sources(&items)?;
-    let places = Places(sources.positions());
+    let places = Places(sources.positions(), product);
     Ok(Placed {
         records: records
             .iter()
@@ -217,7 +220,7 @@ fn place(product: &CheckProduct, scope: &Scope, records: &[&Record]) -> io::Resu
         unreferenced: unreferenced
             .iter()
             .map(|f| {
-                let mut place = places.point(f, 0, false);
+                let mut place = places.point(f, 0, true);
                 place.col = None;
                 (f.to_string(), place)
             })
@@ -363,6 +366,7 @@ impl Session {
         for (key, site) in placed.records.into_iter().flat_map(|(_, sites)| sites) {
             if let Some(held) = profile.sites.get_mut(&key) {
                 held.place = site.place;
+                held.shape = site.shape;
             }
         }
         profile.functions = placed.functions;
@@ -433,10 +437,10 @@ fn relative(path: &str, item: &DefPath) -> String {
     path.strip_prefix(&prefix).unwrap_or(path).to_owned()
 }
 
-/// Sites placed in the request's source.
-struct Places<'a>(SourcePositions<'a>);
+/// Sites placed in the request's source, and shaped from its syntax.
+struct Places<'a>(SourcePositions<'a>, &'a CheckProduct);
 
-impl Places<'_> {
+impl<'a> Places<'a> {
     /// The line and column of `offset` in `item`, with its file when `file`.
     fn point(&self, item: &DefPath, offset: u32, file: bool) -> Place {
         let mut place = Place::default();
@@ -464,7 +468,78 @@ impl Places<'_> {
                 place
             }
         };
+        site.shape = self.shape(row);
         site
+    }
+
+    /// An arm's shape ("Shapes"), read from the syntax of the items that
+    /// hold its decision and its target.
+    fn shape(&self, row: &SiteRow) -> Option<Shape> {
+        use hirsel_core_syntax::{Item, NodeId, NodeKind};
+        let nodes = |item: Item<'a>| item.range.nodes.clone().map(NodeId);
+        let decision = row.decision.as_ref()?;
+        let item = self.item(&decision.definition)?;
+        // The first decision at a `?`'s range is the `?`'s own: its operand
+        // runs first, and the construct that reads its value tests after it.
+        let ordinal = row
+            .key
+            .rsplit_once(':')
+            .and_then(|(head, _)| head.rsplit_once('.'))
+            .and_then(|(_, n)| n.parse::<u32>().ok());
+        let tried = nodes(item).any(|n| {
+            let node = item.tree.node(n);
+            node.kind == NodeKind::Try
+                && (node.origin.span.start, node.origin.span.end) == (decision.start, decision.end)
+        });
+        if tried && ordinal == Some(0) && row.arm.as_deref() == Some("yes") {
+            return Some(Shape::Error);
+        }
+        // A guard is the middle child of a `pattern if guard => value` arm.
+        let guard = nodes(item).any(|n| {
+            let kids = item.tree.children(n);
+            item.tree.node(n).kind == NodeKind::Arm && kids.len() == 3 && {
+                let s = item.tree.node(kids[1]).origin.span;
+                (s.start, s.end) == (decision.start, decision.end)
+            }
+        });
+        if guard {
+            return Some(Shape::Guard);
+        }
+        // The arm runs straight into a failure: its first source code is
+        // inside a `fail(...)` or a `return Error(...)` that does not also
+        // hold the decision.
+        let target = row.target.as_ref()?;
+        let item = self.item(&target.definition)?;
+        let same = target.definition == decision.definition;
+        let calls = |n: NodeId, name: &str| {
+            item.tree.node(n).kind == NodeKind::Call
+                && item.tree.children(n).first().is_some_and(|&callee| {
+                    let s = item.tree.node(callee).origin.span;
+                    item.tree.node(callee).kind == NodeKind::Path
+                        && item.source_text().get(s.start as usize..s.end as usize) == Some(name)
+                })
+        };
+        nodes(item)
+            .any(|n| {
+                let node = item.tree.node(n);
+                let s = node.origin.span;
+                let holds_decision = same && s.start <= decision.start && decision.end <= s.end;
+                s.start <= target.start
+                    && target.start < s.end
+                    && !holds_decision
+                    && (calls(n, "fail")
+                        || node.kind == NodeKind::Return
+                            && (item.tree.children(n).first())
+                                .is_some_and(|&value| calls(value, "Error")))
+            })
+            .then_some(Shape::Fail)
+    }
+
+    /// The syntax of a source item of the request.
+    fn item(&self, path: &DefPath) -> Option<hirsel_core_syntax::Item<'a>> {
+        let (_, source, item) = self.1.headers.get(path)?.anchor;
+        let file = self.1.files.iter().find(|file| file.file == source)?;
+        Some(file.syntax.item(item as usize))
     }
 }
 

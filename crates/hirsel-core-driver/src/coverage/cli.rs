@@ -1,7 +1,10 @@
 //! `hirsel coverage merge` and `hirsel coverage diff` (`docs/coverage.md`,
 //! "The coverage tool"): saved profiles, and raw files read against the site
 //! maps their builds wrote, merged and reported with no compiler state.
-use super::{Profile, Refusal, SiteMap, Targets, report::Diff};
+use super::{
+    Profile, Refusal, SiteMap, Targets,
+    report::{Diff, Others},
+};
 use crate::cli::{Invocation, OptionId};
 use crate::request::{Outcome, hex};
 use serde_json::Value;
@@ -16,26 +19,27 @@ pub(crate) fn run(invocation: Invocation) -> Result<Outcome, Error> {
     let command = invocation.command.name;
     let mut inputs: Vec<String> = invocation.positional.iter().cloned().collect();
     inputs.extend(invocation.arguments.iter().cloned());
-    let (mut maps, mut base, mut targets, mut json, mut output) =
-        (Vec::new(), None, None, false, None);
-    for (id, value) in invocation.options {
-        let value = || PathBuf::from(value.clone().expect("coverage option takes a value"));
+    let (mut maps, mut base, mut targets, mut json, mut output, mut test) =
+        (Vec::new(), None, None, false, None, None);
+    for (id, given) in invocation.options {
+        let value = || PathBuf::from(given.clone().expect("coverage option takes a value"));
         match id {
             OptionId::Json => json = true,
             OptionId::CoverageMap => maps.push(value()),
             OptionId::CoverageBase => base = Some(value()),
             OptionId::CoverageTargets => targets = Some(value()),
             OptionId::Output => output = Some(value()),
+            OptionId::TestExact => test = given.clone(),
             _ => return Err(format!("{command} does not take that option").into()),
         }
     }
     let done = match command {
-        "coverage diff" => {
-            let [base, new] = inputs.as_slice() else {
-                return Err("coverage diff requires BASE and NEW profiles".into());
-            };
-            diff(Path::new(base), Path::new(new), json)
-        }
+        "coverage diff" => match (inputs.as_slice(), test.as_deref()) {
+            ([profile], Some(test)) => others(Path::new(profile), test, json),
+            (_, Some(_)) => return Err("coverage diff --test requires one PROFILE".into()),
+            ([base, new], None) => diff(Path::new(base), Path::new(new), json),
+            _ => return Err("coverage diff requires BASE and NEW profiles".into()),
+        },
         "coverage merge" => {
             if inputs.is_empty() {
                 return Err("coverage merge requires a profile or raw file".into());
@@ -75,6 +79,29 @@ fn diff(base: &Path, new: &Path, json: bool) -> super::Result<()> {
         for function in &diff.changed_functions {
             println!("  changed {function}");
         }
+    }
+    Ok(())
+}
+
+/// `coverage diff PROFILE --test TEST`: the sites only the profile's other
+/// tests reached (`+`), and only TEST reached (`-`), each with its shape.
+fn others(path: &Path, test: &str, json: bool) -> super::Result<()> {
+    let profile = profile(path)?;
+    let others = Others::of(&profile, test)
+        .ok_or_else(|| at(path, Refusal(format!("the profile holds no run of {test}"))))?;
+    if json {
+        println!("{}", others.json());
+    } else {
+        println!("{}", others.line());
+        let row = |sign: char, key: &String| {
+            let shape = profile.sites[key].shape;
+            match shape {
+                Some(shape) => println!("  {sign} {key}  {}", shape.name()),
+                None => println!("  {sign} {key}"),
+            }
+        };
+        others.others_only.iter().for_each(|key| row('+', key));
+        others.test_only.iter().for_each(|key| row('-', key));
     }
     Ok(())
 }
@@ -204,8 +231,10 @@ fn raw(path: &Path, bytes: &[u8], maps: &[(PathBuf, SiteMap)]) -> super::Result<
         .into_iter()
         .map(|(id, flags)| (hex(id), flags))
         .collect();
+    // A raw file is one run, so it keeps its run row: the seeds that reached
+    // a site come from those rows ("Reached by").
     Ok(map
-        .run(flags, seed, passed, false)
+        .run(flags, seed, passed, true)
         .map_err(|r| at(path, r))?
         .0)
 }

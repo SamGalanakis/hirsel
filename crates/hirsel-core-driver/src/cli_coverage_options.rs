@@ -52,6 +52,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Read raw coverage files against the site map in FILE. Repeat for more maps."
     ),
     option!(
+        TestExact,
+        ["--test"],
+        Some("DEFINITION"),
+        ["coverage diff"],
+        "Compare one test with every other test of one profile: the sites only the others reached, and only it reached."
+    ),
+    option!(
         CoverageBase,
         ["--base"],
         Some("FILE"),

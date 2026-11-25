@@ -1,7 +1,7 @@
 //! The report of a profile (`docs/coverage.md`, "Report"): the fields it
 //! derives from the profile, the text, the diff against a base and the
 //! targets that narrow the uncovered list.
-use super::{Profile, Site};
+use super::{Profile, Shape, Site};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -135,6 +135,51 @@ impl Diff {
     }
 }
 
+/// One test against the rest of its profile ("Reached only by other
+/// tests"): the sites every other test together reached and it did not, and
+/// those it alone reached.
+pub(crate) struct Others {
+    pub test: String,
+    pub others_only: Vec<String>,
+    pub test_only: Vec<String>,
+}
+
+impl Others {
+    /// `test` against every other test of `profile`, over every build; none
+    /// when the profile holds no run of `test`.
+    pub(crate) fn of(profile: &Profile, test: &str) -> Option<Self> {
+        let tests = profile.reached_by_test();
+        let own = tests.get(test)?;
+        let others: BTreeSet<&str> = tests
+            .iter()
+            .filter(|(t, _)| **t != test)
+            .flat_map(|(_, reached)| reached.iter().copied())
+            .collect();
+        let owned = |keys: std::collections::btree_set::Difference<'_, &str>| {
+            keys.map(|key| (*key).to_owned()).collect()
+        };
+        Some(Self {
+            test: test.to_owned(),
+            others_only: owned(others.difference(own)),
+            test_only: owned(own.difference(&others)),
+        })
+    }
+
+    pub(crate) fn json(&self) -> Value {
+        json!({"test": self.test, "others_only": self.others_only, "test_only": self.test_only})
+    }
+
+    /// `others against TEST  +O sites, -T`.
+    pub(crate) fn line(&self) -> String {
+        format!(
+            "others against {}  +{} sites, -{}",
+            self.test,
+            self.others_only.len(),
+            self.test_only.len()
+        )
+    }
+}
+
 impl Profile {
     /// The report: the document with its derived fields, and its text.
     /// `targets` narrows and marks the uncovered list; `base` adds a diff.
@@ -144,15 +189,25 @@ impl Profile {
                 .get(&format!("{function}#e"))
                 .map_or(0, Site::reached)
         };
-        let count = |entry: bool, filter: &dyn Fn(&Site) -> bool| {
+        // Functions count whether or not a selected test referenced them
+        // ("The denominator"): an unreferenced function is a function total
+        // and not reached.
+        let count = |entry: bool, file: Option<&str>, filter: &dyn Fn(&Site) -> bool| {
             let (mut reached, mut total) = (0u64, 0u64);
-            for site in self
-                .sites
-                .values()
-                .filter(|s| s.entry() == entry && filter(s))
-            {
+            for site in self.sites.values().filter(|s| {
+                s.entry() == entry
+                    && file.is_none_or(|f| s.place.file.as_deref() == Some(f))
+                    && filter(s)
+            }) {
                 total += 1;
                 reached += u64::from(site.reached() > 0);
+            }
+            if entry {
+                total += self
+                    .unreferenced
+                    .values()
+                    .filter(|place| file.is_none_or(|f| place.file.as_deref() == Some(f)))
+                    .count() as u64;
             }
             json!({"reached": reached, "total": total})
         };
@@ -170,19 +225,43 @@ impl Profile {
                 held.1 += 1;
             }
         }
-        let files: BTreeSet<&str> = self
-            .sites
-            .values()
-            .filter_map(|s| s.place.file.as_deref())
+        let files: BTreeSet<&str> = (self.sites.values().map(|s| &s.place))
+            .chain(self.unreferenced.values())
+            .filter_map(|place| place.file.as_deref())
             .collect();
+        let all = |_: &Site| true;
         let files: Vec<Value> = files
             .iter()
             .map(|name| {
-                let here = |s: &Site| s.place.file.as_deref() == Some(*name);
-                json!({"file": name, "functions": count(true, &here), "arms": count(false, &here)})
+                let (functions, arms) = (
+                    count(true, Some(name), &all),
+                    count(false, Some(name), &all),
+                );
+                json!({"file": name, "functions": functions, "arms": arms})
             })
             .collect();
         let mut document = self.json();
+        if let Some(runs) = &self.run_rows {
+            // Reached by: each site's runs, by test and build, as seeds.
+            let builds: Vec<&super::Build> = self.builds().into_iter().collect();
+            let mut by = BTreeMap::<&str, BTreeMap<(&str, usize), BTreeSet<Option<u64>>>>::new();
+            for ((test, seed, build), row) in runs {
+                let index = builds.iter().position(|b| *b == build).unwrap();
+                for key in &row.reached {
+                    let seeds = by.entry(key).or_default().entry((test, index)).or_default();
+                    seeds.insert(*seed);
+                }
+            }
+            for row in document["sites"].as_array_mut().unwrap() {
+                let tests = by.get(row["site"].as_str().unwrap());
+                row["reached_by"] = (tests.into_iter().flatten())
+                    .map(|((test, build), seeds)| {
+                        json!({"definition": test, "build": build, "seeds": super::seeds(seeds)})
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+            }
+        }
         for row in document["functions"].as_array_mut().unwrap() {
             let definition = row["definition"].as_str().unwrap().to_owned();
             row["entered_runs"] = entered(&definition).into();
@@ -228,9 +307,19 @@ impl Profile {
             uncovered.push((entered_runs, key, row));
         }
         uncovered.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+        let shapes: serde_json::Map<String, Value> = Shape::ALL
+            .into_iter()
+            .map(|shape| {
+                (
+                    shape.name().to_owned(),
+                    count(false, None, &|s| s.shape == Some(shape)),
+                )
+            })
+            .collect();
         let totals = json!({
-            "functions": count(true, &|_| true),
-            "arms": count(false, &|_| true),
+            "functions": count(true, None, &all),
+            "arms": count(false, None, &all),
+            "shapes": shapes,
             "unreferenced": self.unreferenced.len(),
         });
         let diff = base.map(|base| Diff::of(base, self));
@@ -284,6 +373,14 @@ impl Profile {
             totals["unreferenced"]
         )
         .unwrap();
+        writeln!(
+            text,
+            "  of the arms: error {}   fail {}   guard {}",
+            fraction(&totals["shapes"]["error"]),
+            fraction(&totals["shapes"]["fail"]),
+            fraction(&totals["shapes"]["guard"])
+        )
+        .unwrap();
         if self.unobserved_runs > 0 {
             writeln!(text, "  {} runs unobserved", self.unobserved_runs).unwrap();
         }
@@ -329,9 +426,12 @@ impl Profile {
         if !arms.is_empty() {
             writeln!(text, "entered, arm not reached (most-entered first)").unwrap();
             for (entered, _, row) in arms.iter().take(TEXT_ROWS) {
+                let shape = row["shape"]
+                    .as_str()
+                    .map_or_else(String::new, |s| format!("   {s}"));
                 writeln!(
                     text,
-                    "  {}   {}   {}   {}   entered by {entered} runs",
+                    "  {}   {}   {}{shape}   {}   entered by {entered} runs",
                     row["definition"].as_str().unwrap(),
                     at(row, true),
                     row["arm"].as_str().unwrap(),

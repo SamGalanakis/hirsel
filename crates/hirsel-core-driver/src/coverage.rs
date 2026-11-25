@@ -12,9 +12,9 @@ pub(crate) mod report;
 pub(crate) use report::{Report, Targets};
 
 /// The profile format this hirsel writes and reads ("The profile").
-pub(crate) const PROFILE_VERSION: u64 = 2;
+pub(crate) const PROFILE_VERSION: u64 = 3;
 /// The site map format this hirsel writes and reads ("The site map").
-pub(crate) const MAP_VERSION: u64 = 1;
+pub(crate) const MAP_VERSION: u64 = 2;
 
 /// An input `hirsel coverage` or a merge refuses: unreadable, of another
 /// format version, or in conflict with another input. It names the conflict.
@@ -123,15 +123,46 @@ impl Place {
     }
 }
 
+/// The shape of an arm ("Shapes"): what its source does, so the report can
+/// tell fault paths from logic no input has driven yet. An ordinary arm has
+/// none.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum Shape {
+    /// The error arm of a `?` or `?=>`.
+    Error,
+    /// An arm whose first source code is inside a `fail(...)` call or a
+    /// `return Error(...)`: it leaves the function with a failure at once.
+    Fail,
+    /// An arm of a `match` guard's test.
+    Guard,
+}
+
+impl Shape {
+    pub(crate) const ALL: [Self; 3] = [Self::Error, Self::Fail, Self::Guard];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Fail => "fail",
+            Self::Guard => "guard",
+        }
+    }
+
+    fn read(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|shape| shape.name() == name)
+    }
+}
+
 /// One site ("Sites"): its arm (none for an entry), the definition that
-/// names it, the function whose body holds it, its place, and the observed
-/// runs that reached it.
+/// names it, the function whose body holds it, its place, its shape, and the
+/// observed runs that reached it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Site {
     pub arm: Option<String>,
     pub definition: String,
     pub function: String,
     pub place: Place,
+    pub shape: Option<Shape>,
     pub passed_runs: u64,
     pub failed_runs: u64,
 }
@@ -156,6 +187,9 @@ impl Site {
             row["function"] = self.function.clone().into();
         }
         self.place.write(&mut row);
+        if let Some(shape) = self.shape {
+            row["shape"] = shape.name().into();
+        }
         row
     }
 
@@ -172,6 +206,13 @@ impl Site {
             definition,
             function,
             place: Place::read(row)?,
+            shape: match optional(row, "shape", |v| v.as_str().map(str::to_owned))? {
+                None => None,
+                Some(name) => Some(
+                    Shape::read(&name)
+                        .ok_or_else(|| Refusal(format!("site {key} has shape {name}")))?,
+                ),
+            },
             passed_runs: optional(row, "passed_runs", Value::as_u64)?.unwrap_or(0),
             failed_runs: optional(row, "failed_runs", Value::as_u64)?.unwrap_or(0),
         };
@@ -181,7 +222,8 @@ impl Site {
     /// The same site at the same place, whatever its counts and whichever
     /// body holds it: one decision inlined into two functions is one site.
     fn same_place(&self, other: &Self) -> bool {
-        (&self.arm, &self.definition, &self.place) == (&other.arm, &other.definition, &other.place)
+        (&self.arm, &self.definition, &self.place, self.shape)
+            == (&other.arm, &other.definition, &other.place, other.shape)
     }
 }
 

@@ -124,7 +124,13 @@ pub type Leg {
     level: Option[u8],
     voice: bool,
     from: u64,
-    len: u64
+    len: u64,
+    // The targets whose picture this packet closes (RTC-6 marker): bit `i` is set when
+    // it is the last packet of a layer frame of target `i`'s highest spatial layer.
+    closes: u32,
+    // The AV1 dependency descriptor's value in the packet, `dd_len` 0 when it has none.
+    dd_at: u64,
+    dd_len: u64
 }
 
 pub type Sent: key = OnMedia | AsRepair | Dropped | Held
@@ -146,12 +152,22 @@ type Record {
     marker: bool,
     pt: u8,
     picture: Option[u16],
-    tl0: Option[u8]
+    tl0: Option[u8],
+    dd: Option[Dd]
+}
+
+// The leg's dependency descriptor: the source's value at `at` for `len` bytes, sent
+// with the leg's own frame number (RTP-11 Translate counter).
+type Dd {
+    at: u64,
+    len: u64,
+    frame: u16
 }
 
 // One packet waiting in the session's pacer (RTP-10's `Q`): its slab slot holds the
-// payload as the leg sends it (an RTX repair's begins with its OSN), and the header is
-// written at send, when the transport number is taken (RTP-8).
+// payload as the leg sends it (an RTX repair's begins with its OSN), followed by its
+// `dd` bytes of dependency descriptor, and the header is written at send, when the
+// transport number is taken (RTP-8).
 type Paced {
     slot: u32,
     track: u16,
@@ -159,7 +175,8 @@ type Paced {
     fields: rtp.header.Fields,
     level: Option[u8],
     voice: bool,
-    src: Gen
+    src: Gen,
+    dd: u64
 }
 
 type Inbound {
@@ -194,7 +211,11 @@ type Track {
     // VP8 picture ID and TL0PICIDX, keyed by the source frame's extended timestamp.
     pictures: rtp.counter.Counter,
     tl0s: rtp.counter.Counter,
-    tl0: u8
+    tl0: u8,
+    // AV1 frame numbers, keyed by the source frame (timestamp and frame number), and
+    // the source they are translated from.
+    frames: rtp.counter.Counter,
+    frames_source: Option[u32]
 }
 
 type Section {
@@ -232,10 +253,12 @@ pub opaque type PeerSession {
     next_feedback: u64,
     // Down-tracks a collision found on the RTP path, for the next `Control`.
     collided: List[u16],
-    // Egress scratch, reused for every packet: the packet, the descriptor and a TWCC
-    // value, and the extension writer `ext.reset` empties per packet.
+    // Egress scratch, reused for every packet: the packet, the descriptor, a TWCC
+    // value and a dependency descriptor, and the extension writer `ext.reset` empties
+    // per packet.
     pkt: Bytes,
     word: Bytes,
+    dd: Bytes,
     ext: rtp.ext.ExtWriter,
     // The pacer, its `pacer_packets` payload slots reserved at `open`, the free ones,
     // and the entries `unpace` takes out.
@@ -274,6 +297,9 @@ const COUNTER_SLOTS: u32 = 64
 const MAX_NACK_PAIRS: u32 = 16
 
 const SLOT: u64 = 1500
+
+// A two-byte header element's longest value (RFC 8285 section 4.3).
+const DD_LIMIT: u64 = 255
 
 // RTP-10: the pacing rate is 2.5 times the estimate, and the rate rises so a queue
 // drains within 2 s (libwebrtc's kDefaultPaceMultiplier and kMaxExpectedQueueLength).
@@ -419,9 +445,10 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
         list.push(mut slab, take b)
         list.push(mut free, int.narrow(n - 1 - i))
     }
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.word, 2) ?=> |c| Capacity(c)
+    list.try_reserve(mut p.dd, DD_LIMIT) ?=> |c| Capacity(c)
     let fresh = draw(mut p)
     p.control = fresh
     Ok(take p)

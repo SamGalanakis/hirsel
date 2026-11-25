@@ -228,9 +228,30 @@ fn complement(d: Direction) -> Direction {
     directions(has_recv(d), has_send(d))
 }
 
-fn put_extmaps(policy: Policy, offered: Section, dir: Direction, mut out: List[Extmap]) -> Result[(), SdpError] {
+// RTC-2: the Dependency Descriptor is bound only where it describes AV1. On a section
+// the router receives on, the browser sends the first agreed codec, so the descriptor
+// needs that codec to be AV1: Chromium, given it with VP8, sends VP8 without TID. On a
+// section the router only sends on, AV1 must be among the agreed codecs. Either way the
+// section needs the two-byte form, since a descriptor carrying its structure passes the
+// one-byte form's 16 bytes (RFC 8285 section 4.2).
+fn describes_av1(s: Section, mixed: bool) -> bool {
+    if !mixed && !s.mixed_extmaps {
+        return false
+    }
+    for f in s.formats {
+        if f.codec == Av1 {
+            return true
+        }
+        if has_recv(s.dir) && f.codec != Rtx && f.codec != Red && f.codec != Ulpfec {
+            return false
+        }
+    }
+    false
+}
+
+fn put_extmaps(policy: Policy, offered: Section, dir: Direction, av1: bool, mut out: List[Extmap]) -> Result[(), SdpError] {
     for orig in offered.extmaps {
-        if !list_has(policy.exts, orig.ext) && orig.ext != Mid {
+        if (!list_has(policy.exts, orig.ext) && orig.ext != Mid) || (orig.ext == DependencyDescriptor && !av1) {
             continue
         }
         let mut e: Extmap = clone(orig)
@@ -439,7 +460,7 @@ pub fn answer(policy: Policy, current: Option[Negotiated], remote: Description, 
         } else {
             s.rtcp_mux = true
             s.mixed_extmaps = orig.mixed_extmaps
-            put_extmaps(policy, orig, s.dir, mut s.extmaps)?
+            put_extmaps(policy, orig, s.dir, describes_av1(s, d.mixed_extmaps), mut s.extmaps)?
             if !has_mid(s) {
                 return Error(NoMid(int.narrow(i)))
             }
@@ -483,7 +504,7 @@ fn next_mid(sections: List[Section]) -> Id {
     }
 }
 
-fn track_section(policy: Policy, source: TrackSource, s: Section, index: u8, port: u16) -> Result[Section, SdpError] {
+fn track_section(policy: Policy, source: TrackSource, s: Section, index: u8, port: u16, mixed: bool) -> Result[Section, SdpError] {
     let mut out = empty_section(source.media, Port(port), clone(s.protocol))
     out.mid = s.mid
     out.mid_len = s.mid_len
@@ -503,6 +524,15 @@ fn track_section(policy: Policy, source: TrackSource, s: Section, index: u8, por
     let Some(base) = pt else {
         return Error(AnswerMismatch(index))
     }
+    if !describes_av1(out, mixed) {
+        let mut kept: List[Extmap] = list.new()
+        for e in out.extmaps {
+            if e.ext != DependencyDescriptor {
+                add(mut kept, clone(e))?
+            }
+        }
+        out.extmaps = take kept
+    }
     for f in source.formats {
         if f.codec == Rtx && f.apt == Some(base) {
             add(mut out.formats, clone(f))?
@@ -520,7 +550,7 @@ fn track_section(policy: Policy, source: TrackSource, s: Section, index: u8, por
 fn append_track(policy: Policy, current: Negotiated, source: TrackSource, local: LocalEnd, mut d: Description) -> Result[(), SdpError] {
     for i in 0 .. list.len(current.sections) {
         if current.sections[i].down_track && d.sections[i].media == source.media && d.sections[i].port != Rejected && d.sections[i].dir == Inactive {
-            let replacement = track_section(policy, source, d.sections[i], int.narrow(i), local.port)?
+            let replacement = track_section(policy, source, d.sections[i], int.narrow(i), local.port, d.mixed_extmaps)?
             let _ = list.set(mut d.sections, i, take replacement)
             return Ok(())
         }
@@ -568,7 +598,7 @@ fn append_track(policy: Policy, current: Negotiated, source: TrackSource, local:
     if !has_mid(s) {
         add(mut s.extmaps, Extmap(id: 1, ext: Mid, dir: None, vad: None))?
     }
-    let section = track_section(policy, source, s, index, local.port)?
+    let section = track_section(policy, source, s, index, local.port, d.mixed_extmaps)?
     add(mut d.sections, take section)
 }
 

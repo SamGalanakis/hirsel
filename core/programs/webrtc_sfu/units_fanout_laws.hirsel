@@ -259,6 +259,128 @@ fn fanout_across_units(tasks: Tasks) -> Result[(), router.RouterError] waits {
     Ok(())
 }
 
+// ---- RTC-6 AV1 legs across units over sim.udp ----
+// An AV1 subscriber that binds the descriptor on 3 and transport numbers on 5, so
+// its leg is paced.
+fn av1_paced_offer() -> Bytes {
+    let mut b = av1_offer(b"y", b"a=recvonly")
+    list.append(mut b, b"a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n")
+    take b
+}
+
+// What browser `i` got on `ssrc` since `start` of the captured AV1 `packets`.
+fn av1_taken(h: Hall, i: u64, ssrc: u32, start: u64, packets: List[Bytes]) -> Taken {
+    let mut t = nothing_taken()
+    for s in list.slice(h.seen, start, list.len(h.seen)) {
+        if s.to != h.peers[i].c.at || s.kind != KIND_RTP || s.ssrc != ssrc {
+            continue
+        }
+        let g = got_of(s)
+        let body = payload_of(g)
+        let mut k = 999u64
+        for j in 0u64 .. list.len(packets) {
+            if same(body, body_of(packets[j])) {
+                k = j
+            }
+        }
+        if ext_value(g, 5, TransportSeq) == None {
+            fail("an AV1 leg's packet carries no transport number, so it was not paced")
+        }
+        list.push(mut t.got, k)
+        list.push(mut t.heads, g.h)
+        list.push(mut t.dds, match ext_value(g, 3, DependencyDescriptor) {
+            Some(v) => v,
+            None => list.new(),
+        })
+    }
+    t
+}
+
+fn av1_units_run(net: Net, clock: Clock) waits {
+    let mut h = hall(net, clock, 7800)
+    let room = room_id()
+    let _ = ok_or_say(call(mut h, Open(room: room, limits: room_limits())), "open")
+    let (bp, a) = join_unit(mut h, 0, 7810, vectors.av1_l3t3_offer(), gen_of(1), addr_of(1), b"ufragpub", 0)
+    let _ = ok_or_say(a, "the publisher was not admitted")
+    // S1T1 on the publisher's unit and on unit 1, and S2T2 on unit 1.
+    let mut subs: List[(u64, u32)] = list.new()
+    let pa = published(ok_or_say(call(mut h, Publish(room: room, who: gen_of(1), section: 0, id: PublicationId(0), shape: None)), "publish"))
+    for (id, unit, s, t) in[(2u64, 0u16, 1u8, 1u8), (3u64, 1u16, 1u8, 1u8), (4u64, 1u16, 2u8, 2u8)] {
+        let mut ufrag: Bytes = b"ufragav"
+        list.append(mut ufrag, decimal(int.narrow(id)))
+        let (i, joined) = join_unit(mut h, unit, 7820 + 10 * id, av1_paced_offer(), gen_of(id), addr_of(int.narrow(id)), ufrag, 0)
+        let _ = ok_or_say(joined, "a subscriber was not admitted")
+        let who = h.peers[i].c.who
+        let _ = ok_or_say(call(mut h, Subscribe(room: room, who: who, p: pa, section: 0, target: Layer(encoding: 0, spatial: s, temporal: t))), "subscribe")
+        let tracks = if unit == 0 {
+            router.track_ssrcs(units.router_of(h.w.u0), room, who, pa)
+        } else {
+            router.track_ssrcs(units.router_of(h.w.u1), room, who, pa)
+        }
+        let (m, _) = option.unwrap(tracks)
+        list.push(mut subs, (i, m))
+    }
+    let mut packets = vectors.av1_l3t3()
+    for k in 0u64 .. list.len(packets) {
+        packets[k] = renumbered(packets[k], 65529)
+    }
+    // One packet each 10 ms: the capture (about 350 kbit/s at 20 ms) is through
+    // before the encoding's measured rate, above these legs' starting estimate,
+    // turns them off (RTC-6 allocation).
+    let start = list.len(h.seen)
+    for k in 0u64 .. list.len(packets) {
+        let mut b: Bytes = list.with_capacity(1500)
+        list.append(mut b, packets[k])
+        let _ = result.unwrap(srtp.protect_rtp(mut h.peers[bp].c.cs, mut b))
+        send_from(mut h, bp, b)
+        for _ in 0u64 .. 2 {
+            tick(mut h)
+        }
+    }
+    for _ in 0u64 .. 40 {
+        tick(mut h)
+    }
+    let s1 = b"\x00\x01\x09\x0a\x11\x12\x13\x14\x21\x22\x29\x2a\x2b\x2c"
+    let mut all: Bytes = list.new()
+    for k in 0u8 .. 57u8 {
+        list.push(mut all, k)
+    }
+    let (i0, m0) = subs[0]
+    let (i1, m1) = subs[1]
+    let (i2, m2) = subs[2]
+    let home = av1_taken(h, i0, m0, start, packets)
+    let near = av1_taken(h, i1, m1, start, packets)
+    let full = av1_taken(h, i2, m2, start, packets)
+    expect_taken(home, false, s1, packets, false, 0, "AV1 S1T1 on the home unit")
+    expect_taken(near, false, s1, packets, false, 0, "AV1 S1T1 on unit 1")
+    expect_taken(full, false, all, packets, false, 0, "AV1 S2T2 on unit 1")
+    expect_marks(home, b"\x01\x0a\x14\x22\x2c", "AV1 S1T1 markers on the home unit")
+    expect_marks(near, b"\x01\x0a\x14\x22\x2c", "AV1 S1T1 markers on unit 1")
+    expect_marks(full, b"\x04\x08\x0c\x10\x1b\x20\x24\x28\x34\x38", "AV1 S2T2 markers on unit 1")
+    expect_dd(home, packets, "AV1 S1T1 on the home unit")
+    expect_dd(near, packets, "AV1 S1T1 on unit 1")
+    expect_dd(full, packets, "AV1 S2T2 on unit 1")
+    close_hall(take h)
+}
+
+/// bug: a unit that does not hold the publication reads the descriptor at the
+/// publisher's offsets in another buffer, keeps no structure of its own (so maps no
+/// AV1 target, or closes no picture), or a paced leg sends the descriptor's bytes
+/// as payload, without the descriptor, or with the source's frame numbers.
+/// oracle: the Chromium 156 L3T3 capture (vectors/chromium_rtp.hirsel) as in
+/// `router_fills_units`, its frame numbers moved to start at 65530: the frames
+/// decode target (1, 1) and (2, 2) need, decoded by hand from AV1 RTP section A.8,
+/// with the markers LiveKit's dependency-descriptor selector sets on the same legs
+/// (videolayerselector, run over the capture outside the repository, 2635), and each
+/// descriptor the source's with its frame number translated to start at 1.
+@test
+fn av1_across_units(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 7800)
+    av1_units_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}
+
 // ---- RTC-5 the unit loop on real sockets ----
 const LOOPBACK: Addr = Addr(ip: V4(0x7f000001), port: 0)
 

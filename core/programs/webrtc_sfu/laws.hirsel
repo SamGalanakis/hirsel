@@ -58,6 +58,88 @@ fn sdp_browser_offers() -> Result[(), sdp.SdpError] {
     Ok(())
 }
 
+fn binds_dd(s: sdp.Section) -> bool {
+    for e in s.extmaps {
+        if e.ext == DependencyDescriptor {
+            return true
+        }
+    }
+    false
+}
+
+// The router's answer to a captured Chromium offer binds the descriptor on its one
+// section exactly when str0m's captured answer to the same offer does.
+fn dd_like_str0m(offer: Bytes, theirs: Bytes, what: String) -> Result[(), sdp.SdpError] {
+    let mut d = sdp.description()
+    sdp.parse(offer, mut d)?
+    let mut want = sdp.description()
+    sdp.parse(theirs, mut want)?
+    let local = local_end(1)
+    let mut answer = sdp.description()
+    let mut agreed = sdp.negotiated(local)
+    sdp.answer(sdp.default_policy(), None, d, local, mut answer, mut agreed)?
+    if binds_dd(answer.sections[0]) != binds_dd(want.sections[0]) || binds_dd(agreed.sections[0].local) != binds_dd(want.sections[0]) {
+        fail(string.from(what))
+    }
+    Ok(())
+}
+
+/// bug: answer the Dependency Descriptor where the browser sends VP8 (Chromium then sends
+/// VP8 without TID), or drop it from an AV1 section the router receives or sends on.
+/// oracle: str0m's captured answers to Chromium's VP8, VP9, H.264 and AV1 offers, and
+/// RTC-2's rule applied by hand to the Chromium browser offer.
+@test
+fn sdp_descriptor_on_av1_only() -> Result[(), sdp.SdpError] {
+    dd_like_str0m(vectors.vp8_simulcast_offer(), vectors.vp8_simulcast_answer(), "VP8 publisher")?
+    dd_like_str0m(vectors.vp9_l3t3_offer(), vectors.vp9_l3t3_answer(), "VP9 publisher")?
+    dd_like_str0m(vectors.h264_simulcast_offer(), vectors.h264_simulcast_answer(), "H.264 publisher")?
+    dd_like_str0m(vectors.av1_l3t3_offer(), vectors.av1_l3t3_answer(), "AV1 publisher")?
+    // Chromium's browser offer: section 1 sends VP8 first, section 2 receives any of
+    // VP8, H.264, AV1 and VP9 and keeps the descriptor (ID 12). A down-track the router
+    // adds takes ID 12 when it sends AV1 and leaves it unbound when it sends VP8.
+    let mut d = sdp.description()
+    sdp.parse(vectors.chromium(), mut d)?
+    let mut local = local_end(1)
+    let mut running = sdp.negotiated(local)
+    let mut answer = sdp.description()
+    let policy = sdp.default_policy()
+    sdp.answer(policy, None, d, local, mut answer, mut running)?
+    if binds_dd(answer.sections[1]) || !binds_dd(answer.sections[2]) {
+        fail("browser publisher and receiver sections")
+    }
+    let mut av1: List[sdp.Format] = list.new()
+    let mut vp8: List[sdp.Format] = list.new()
+    for f in d.sections[2].formats {
+        if f.codec == Av1 || f.apt == Some(45) {
+            list.push(mut av1, clone(f))
+        }
+        if f.codec == Vp8 || f.apt == Some(96) {
+            list.push(mut vp8, clone(f))
+        }
+    }
+    let mut adds: List[sdp.SendSection] = list.new()
+    list.push(mut adds, Add(sdp.TrackSource(media: Video, formats: take av1, ssrc: 101, rtx_ssrc: 102, msid: b"stream av1")))
+    list.push(mut adds, Add(sdp.TrackSource(media: Video, formats: take vp8, ssrc: 103, rtx_ssrc: 104, msid: b"stream vp8")))
+    local.origin_version = 2
+    let mut outbound = sdp.description()
+    sdp.offer(policy, running, local, adds, mut outbound)?
+    let a = outbound.sections[4]
+    let v = outbound.sections[5]
+    if a.formats[0].codec != Av1 || v.formats[0].codec != Vp8 || binds_dd(v) {
+        fail("added down-tracks")
+    }
+    let mut twelve = false
+    for e in a.extmaps {
+        if e.ext == DependencyDescriptor && e.id == 12 {
+            twelve = true
+        }
+    }
+    if !twelve {
+        fail("AV1 down-track keeps the transport's descriptor ID")
+    }
+    Ok(())
+}
+
 fn jsep(raw: Bytes, port: u16, second: sdp.Port, kind: sdp.Media, audio_dir: sdp.Direction, video_dir: sdp.Direction, count: u64, is_offer: bool) -> Result[(), sdp.SdpError] {
     let mut d = sdp.description()
     sdp.parse(raw, mut d)?
@@ -850,7 +932,7 @@ fn egress(mut r: Rig, payload: Bytes) {
     for i in 0u64 .. 5 {
         let ts: i64 = int.narrow(3000 * i)
         let u = rtp.rewrite.Unit(start: true, end: true, keyframe: i == 0, needs: 1, switches: 0xffffffff, frame: 0)
-        let leg = peer.Leg(src: Gen(id: 9, epoch: 1), handle: i, source: 9, index: 100 + i, ts: ts, marker: true, codec: Vp8, padding_only: false, unit: u, level: None, voice: false, from: 0, len: list.len(payload))
+        let leg = peer.Leg(src: Gen(id: 9, epoch: 1), handle: i, source: 9, index: 100 + i, ts: ts, marker: true, codec: Vp8, padding_only: false, unit: u, level: None, voice: false, from: 0, len: list.len(payload), closes: 0, dd_at: 0, dd_len: 0)
         if result.unwrap(peer.forward(mut r.p, 6 * MS + i * MS, track, leg, payload, mut r.out)) != OnMedia {
             fail("an on-time packet was not sent on the media SSRC")
         }

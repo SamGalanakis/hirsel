@@ -1,16 +1,35 @@
 // ---- RTC-6 W9 router_fills_units over the Chromium captures ----
-/// One subscriber: its browser, and the capture index, header and (VP8) output
-/// picture ID of each packet it got.
+/// One subscriber: its browser, and the capture index, header, (VP8) output picture
+/// ID and (with `dd`, the extension ID its offer binds) dependency descriptor of each
+/// packet it got.
 type Watched {
     c: Client,
     vp8: bool,
+    dd: u8,
+    t: Taken
+}
+
+/// What one leg got, in order: the capture index, header, VP8 picture ID and
+/// dependency descriptor of each packet.
+type Taken {
     got: List[u64],
     heads: List[rtp.header.Header],
-    pictures: List[u64]
+    pictures: List[u64],
+    dds: List[Bytes]
+}
+
+fn nothing_taken() -> Taken {
+    Taken(got: list.new(), heads: list.new(), pictures: list.new(), dds: list.new())
 }
 
 fn leg_of(mut r: router.Router, seed: u64, offer: Bytes, id: u64, vp8: bool) -> Watched {
-    Watched(c: admit(mut r, seed, offer, id), vp8: vp8, got: list.new(), heads: list.new(), pictures: list.new())
+    Watched(c: admit(mut r, seed, offer, id), vp8: vp8, dd: 0, t: nothing_taken())
+}
+
+fn av1_watched(mut r: router.Router, seed: u64, id: u64) -> Watched {
+    let mut l = leg_of(mut r, seed, av1_offer(b"y", b"a=recvonly"), id, false)
+    l.dd = 3
+    l
 }
 
 // The payloads match, except that a VP8 leg writes its own picture ID and TL0PICIDX
@@ -44,16 +63,22 @@ fn give(mut r: router.Router, now: u64, mut p: Client, plain: Bytes, mut out: pe
 fn gather(mut l: Watched, out: peer.Outbox, k: u64, body: Bytes) {
     for g in received(mut l.c, out) {
         let got = payload_of(g)
-        list.push(mut l.got, if same_body(l.vp8, got, body) {
+        list.push(mut l.t.got, if same_body(l.vp8, got, body) {
             k
         } else {
             999
         })
-        list.push(mut l.heads, g.h)
+        list.push(mut l.t.heads, g.h)
+        if l.dd != 0 {
+            list.push(mut l.t.dds, match ext_value(g, l.dd, DependencyDescriptor) {
+                Some(v) => v,
+                None => list.new(),
+            })
+        }
         if l.vp8 {
             let high: u64 = int.widen(got[2] & 0x7f)
             let low: u64 = int.widen(got[3])
-            list.push(mut l.pictures, (high << 8) | low)
+            list.push(mut l.t.pictures, (high << 8) | low)
         }
     }
 }
@@ -64,6 +89,10 @@ fn gather(mut l: Watched, out: peer.Outbox, k: u64, body: Bytes) {
 // A VP8 leg's picture IDs step by one at each new frame, with no gap at a switch or
 // for a frame the leg drops (RTP-11's Compact counters).
 fn expect_leg(l: Watched, want: Bytes, packets: List[Bytes], markers: bool, gap_at: u64, what: String) {
+    expect_taken(l.t, l.vp8, want, packets, markers, gap_at, what)
+}
+
+fn expect_taken(l: Taken, vp8: bool, want: Bytes, packets: List[Bytes], markers: bool, gap_at: u64, what: String) {
     let mut ok = list.len(l.got) == list.len(want)
     if ok {
         for j in 0u64 .. list.len(want) {
@@ -103,7 +132,7 @@ fn expect_leg(l: Watched, want: Bytes, packets: List[Bytes], markers: bool, gap_
         if h.seq != plus(prev.seq, step) || (a.ssrc == b.ssrc && h.ts != later(prev.ts, int.wrapping_sub(b.ts, a.ts))) {
             fail(string.from(what))
         }
-        if l.vp8 {
+        if vp8 {
             let next = if h.ts == prev.ts {
                 l.pictures[j - 1]
             } else {
@@ -116,21 +145,100 @@ fn expect_leg(l: Watched, want: Bytes, packets: List[Bytes], markers: bool, gap_
     }
 }
 
+// The leg's markers are exactly on the capture indices `ends` (RTC-6: the source's
+// marker, or the end of a frame of the forwarded target's highest spatial layer).
+fn expect_marks(l: Taken, ends: Bytes, what: String) {
+    for j in 0u64 .. list.len(l.got) {
+        let mut want = false
+        for k in ends {
+            let at: u64 = int.widen(k)
+            if at == l.got[j] {
+                want = true
+            }
+        }
+        if l.heads[j].marker != want {
+            let mut msg = string.from(what)
+            string.push(mut msg, ": marker at capture packet ")
+            string.push_u64(mut msg, l.got[j])
+            fail(take msg)
+        }
+    }
+}
+
+fn source_dd(plain: Bytes) -> Bytes {
+    let h = result.unwrap(rtp.header.parse(plain))
+    let mut m = rtp.ext.map(Mixed)
+    result.unwrap(rtp.ext.bind(mut m, 13, DependencyDescriptor))
+    match rtp.ext.find(m, plain, h, DependencyDescriptor) {
+        Ok(Some(e)) => copy_of(list.slice(plain, e.at, e.at + e.len)),
+        _ => fail("a captured AV1 packet without its descriptor"),
+    }
+}
+
+// The captured packet with its descriptor's frame number moved by `by` (mod 2^16), so
+// a publisher's numbering starts elsewhere than at 1 and wraps.
+fn renumbered(plain: Bytes, by: u16) -> Bytes {
+    let h = result.unwrap(rtp.header.parse(plain))
+    let mut m = rtp.ext.map(Mixed)
+    result.unwrap(rtp.ext.bind(mut m, 13, DependencyDescriptor))
+    let Ok(Some(e)) = rtp.ext.find(m, plain, h, DependencyDescriptor) else {
+        fail("a captured AV1 packet without its descriptor")
+    }
+    let mut b = copy_of(plain)
+    let hi: u16 = int.widen(b[e.at + 1])
+    let lo: u16 = int.widen(b[e.at + 2])
+    let n = int.wrapping_add((hi << 8) | lo, by)
+    b[e.at + 1] = int.truncate(n >> 8)
+    b[e.at + 2] = int.truncate(n)
+    b
+}
+
+// Every packet the AV1 leg got carries the source's descriptor with the leg's own frame
+// number: AV1 RTP section A.8.1's 16-bit frame_number, translated so that the leg's
+// first frame is 1 (RTP-11 Translate; LiveKit's selector numbers the same frames).
+fn expect_dd(l: Taken, packets: List[Bytes], what: String) {
+    let first = source_dd(packets[l.got[0]])
+    let hi: u16 = int.widen(first[1])
+    let lo: u16 = int.widen(first[2])
+    let base = (hi << 8) | lo
+    for j in 0u64 .. list.len(l.got) {
+        let src = source_dd(packets[l.got[j]])
+        let got = l.dds[j]
+        let shi: u16 = int.widen(src[1])
+        let slo: u16 = int.widen(src[2])
+        let want = int.wrapping_add(int.wrapping_sub((shi << 8) | slo, base), 1u16)
+        let mut ok = list.len(got) == list.len(src)
+        if ok {
+            for i in 0u64 .. list.len(src) {
+                if i != 1 && i != 2 && got[i] != src[i] {
+                    ok = false
+                }
+            }
+            let ghi: u16 = int.widen(got[1])
+            let glo: u16 = int.widen(got[2])
+            ok = ok && ((ghi << 8) | glo) == want
+        }
+        if !ok {
+            let mut msg = string.from(what)
+            string.push(mut msg, ": descriptor at capture packet ")
+            string.push_u64(mut msg, l.got[j])
+            fail(take msg)
+        }
+    }
+}
+
 fn mid_d() -> List[Bytes] {
     let mut mids: List[Bytes] = list.new()
     list.push(mut mids, b"d")
     mids
 }
 
-// A hand-built packet on rid h (SSRC 3525936532) of the VP8 capture, carrying a
-// Dependency Descriptor (extension 13, which Chromium's offer binds and the router
-// answers) besides the VP8 descriptor `body` with its TID.
+// A hand-built packet on rid h (SSRC 3525936532) of the VP8 capture, with the VP8
+// descriptor `body` and its TID. Chromium sent this capture without TID, because the
+// router then answered the Dependency Descriptor on VP8; it now answers it on AV1 only
+// (RTC-2), and Chromium's VP8 packets carry TID, as these do.
 fn vp8_hand(seq: u16, ts: u32, marker: bool, body: Bytes) -> Bytes {
-    let mut m = rtp.ext.map(OneOnly)
-    result.unwrap(rtp.ext.bind(mut m, 13, DependencyDescriptor))
-    let mut w = rtp.ext.writer()
-    let dd = b"\xc0\x00\x01"
-    result.unwrap(rtp.ext.put(mut w, m, DependencyDescriptor, dd, 0, 3))
+    let w = rtp.ext.writer()
     let f = rtp.header.Fields(marker: marker, pt: 96, seq: seq, ts: ts, ssrc: 3525936532)
     let mut b: Bytes = list.with_capacity(1500)
     let _ = result.unwrap(rtp.header.write(f, view w, mut b))
@@ -265,6 +373,11 @@ fn vp9_legs() {
     // though RFC 9628 would allow it. The next is packet 26, after picture 2444.
     expect_leg(fast, b"\x00\x13\x1a\x1e\x22\x26\x2c", packets, false, 0, "VP9 S0T0 to S0T2: the switch waits for the first TID above 0 after the next U = 1 TID 0 picture")
     expect_leg(two, b"\x00\x01\x02\x13\x14\x15\x26\x27\x28", packets, false, 0, "VP9 S1T0: both lower spatial layer frames of each TID 0 picture")
+    // RFC 9628 section 4.2's E bit, decoded independently from the capture: each leg's
+    // picture ends at its own spatial layer's frame (wide stays at S0).
+    expect_marks(wide.t, b"\x00\x13\x26", "VP9 S0 markers")
+    expect_marks(fast.t, b"\x00\x13\x1a\x1e\x22\x26\x2c", "VP9 S0T2 markers")
+    expect_marks(two.t, b"\x02\x15\x28", "VP9 S1 markers: the S1 frame's last packet")
 }
 
 // AV1 RTP section A.8 by hand over this capture's structure (15 templates, 9 decode
@@ -288,10 +401,10 @@ fn av1_legs(reversed: bool) {
     let mut out = result.unwrap(peer.outbox(65536, 64))
     let room = room_id()
     let mut p = admit(mut r, 171, vectors.av1_l3t3_offer(), 1)
-    let mut a = leg_of(mut r, 173, av1_offer(b"y", b"a=recvonly"), 2, false)
-    let mut b = leg_of(mut r, 175, av1_offer(b"y", b"a=recvonly"), 3, false)
-    let mut c = leg_of(mut r, 177, av1_offer(b"y", b"a=recvonly"), 4, false)
-    let mut d = leg_of(mut r, 179, av1_offer(b"y", b"a=recvonly"), 5, false)
+    let mut a = av1_watched(mut r, 173, 2)
+    let mut b = av1_watched(mut r, 175, 3)
+    let mut c = av1_watched(mut r, 177, 4)
+    let mut d = av1_watched(mut r, 179, 5)
     let pv = result.unwrap(router.publish(mut r, room, p.who, 0))
     let now0 = 10 * MS
     let mut now = now0
@@ -303,6 +416,10 @@ fn av1_legs(reversed: bool) {
     let mut packets = vectors.av1_l3t3()
     if reversed {
         packets[0] = av1_reversed(packets[0])
+    }
+    // The capture numbers its frames from 1; from 65530 here, so they wrap at frame 7.
+    for k in 0u64 .. list.len(packets) {
+        packets[k] = renumbered(packets[k], 65529)
     }
     for k in 0u64 .. list.len(packets) {
         peer.clear_outbox(mut out)
@@ -323,21 +440,34 @@ fn av1_legs(reversed: bool) {
     expect_leg(b, b"\x00\x01\x09\x0a\x11\x12\x13\x14\x21\x22\x29\x2a\x2b\x2c", packets, false, 0, "AV1 S1T1: the frames decode target (1, 1) needs")
     expect_leg(c, all, packets, false, 0, "AV1 S2T2: every frame")
     expect_leg(d, b"\x00\x01\x05\x06\x09\x0a\x0d\x0e\x11\x12\x13\x14\x1c\x1d\x21\x22\x25\x26\x29\x2a\x2b\x2c\x35\x36", packets, false, 0, "AV1 S1T255: decode target (1, 2), the greatest at or below")
+    // The markers LiveKit's dependency-descriptor selector sets on the same legs
+    // (videolayerselector, run over this capture outside the repository, 2635).
+    expect_marks(a.t, b"\x00\x11\x29", "AV1 S0T0 markers")
+    expect_marks(b.t, b"\x01\x0a\x14\x22\x2c", "AV1 S1T1 markers")
+    expect_marks(c.t, b"\x04\x08\x0c\x10\x1b\x20\x24\x28\x34\x38", "AV1 S2T2 markers")
+    expect_marks(d.t, b"\x01\x06\x0a\x0e\x14\x1d\x22\x26\x2c\x36", "AV1 S1T255 markers")
+    expect_dd(a.t, packets, "AV1 S0T0")
+    expect_dd(b.t, packets, "AV1 S1T1")
+    expect_dd(c.t, packets, "AV1 S2T2")
+    expect_dd(d.t, packets, "AV1 S1T255")
 }
 
 /// bug: build the H.264 `after_end` or parameter sets of a pending source from the
 /// current one, so a switch waits past the new source's first access unit; refuse
 /// Chromium's SPS with a trailing zero byte; treat a VP8 packet with `S = 1` and a
 /// nonzero partition index as a frame start, or raise a VP8 temporal target at a
-/// frame without `Y`; read VP8 layers from a Dependency Descriptor instead of TID;
-/// switch VP9 spatially at an inter-picture frame, or temporally anywhere but after a
-/// `U` picture; map an AV1 layer by decode-target index instead of by the structure's
-/// (S_d, T_d), so the reversed table sends other frames.
+/// frame without `Y`; switch VP9 spatially at an inter-picture frame, or temporally
+/// anywhere but after a `U` picture; map an AV1 layer by decode-target index instead of
+/// by the structure's (S_d, T_d), so the reversed table sends other frames; leave a
+/// sub-layer VP9 or AV1 leg without the marker at its picture's end, or mark another
+/// packet; send an AV1 leg no descriptor, or the source's frame numbers.
 /// oracle: Chromium 156 captures (vectors/chromium_rtp.hirsel), decoded by hand from
 /// RFC 7741 section 4.2, RFC 6184 sections 5.6 to 5.8, RFC 9628 section 4.2 and AV1 RTP
 /// section A.8 by independent decoders, with RTC-6 and RTP-11's switch rules. Arrival
 /// order across SSRCs is the law's. Three VP8 packets and the reversed AV1 structure
 /// (re-encoded from the captured one, checked by decoding it back) are built by hand.
+/// VP9 markers are the last packet of each leg's top spatial frame by hand; AV1 markers
+/// and frame numbers are LiveKit's dependency-descriptor selector's over the capture.
 @test
 fn router_fills_units() -> Result[(), router.RouterError] {
     vp8_legs()

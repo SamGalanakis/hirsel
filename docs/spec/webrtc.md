@@ -252,7 +252,13 @@ server adds (RTC-5).
    whose direction does not overlap the section's answered direction is not kept (RFC 8285
    §7). For `AudioLevel` the answer repeats the offer's `vad` value, so each leg's `V` bit
    has the meaning that leg negotiated (RTC-6). `Mid` is required, and a section without it
-   was refused at parse.
+   was refused at parse. `DependencyDescriptor` is kept only on a section that describes
+   AV1 and allows mixed extmaps (session or section `extmap-allow-mixed`), since a
+   descriptor carrying its structure passes the one-byte form's 16 bytes (RFC 8285 §4.2).
+   On a section the server receives on, the first agreed media format must be AV1, since
+   the browser sends that codec: Chromium, answered the descriptor on VP8, sends VP8
+   without `TID`. On a section the server only sends on, AV1 must be among the agreed
+   formats. `offer` applies the same rule to the sections it creates.
 5. **RIDs and simulcast, one direction at a time** (RFC 8853 §5.3.2). The server receives
    simulcast and never sends it. So the offer's `send` list is processed and its `recv`
    list is declined: the answer carries no `send` list, and every `RidRecv` RID is left out.
@@ -736,6 +742,22 @@ renumbers a target that is in use. `Off` is `rewrite.target(Off)`.
   for `Switch` and at every keyframe (RTP-11). The map is rebuilt only when the structure
   changes, which happens only at a keyframe.
 
+**Marker bit and descriptor on egress.** A forwarded packet carries the marker bit when its
+source packet does, or when it is the last packet of a layer frame whose spatial id is the
+highest of the down-track's current target: VP9's `E = 1` at `SID = s` for target
+`4 · s + t`, AV1's last packet in frame at `S_d`. So a sub-layer leg's decoder sees each
+picture end. The current target is the rewrite's after this packet's decision. Every unit
+computes this from its own copy of the encoding's state, so a leg on a unit other than the
+publication's home gets the same markers. An AV1 down-track writes each packet's
+Dependency Descriptor on the ID the subscriber negotiated, with the source's bytes except
+`frame_number`, which goes through an RTP-11 `Translate` counter per down-track: 16 bits,
+restarted at 1 when the down-track's source changes, so the leg's first frame is 1 and a
+frame keeps its number across its packets. A paced packet keeps its descriptor in its slab
+slot and writes it when the pacer lets it out. A packet whose descriptor cannot be written
+(no ID negotiated, longer than 255 bytes, or a frame number the counter refuses) is sent
+without one rather than dropped. The active-decode-targets bitmask is passed through as
+the source wrote it, not narrowed to the leg's target.
+
 **Presenting packets.** Each packet of the down-track's **current** source and of its
 **pending** source (the source of a target that has not yet taken effect) goes to
 `Rewrite.on_packet` (RTC-5 step 2). A filter that passed only the current layer would never
@@ -1214,8 +1236,10 @@ unless named otherwise.
   AV1 RTP §A.8 against the captured bytes, and the egress packets a subscriber receives. The
   switch commits at the first decodable frame start, the whole frame follows, the old source
   forwards until then, and the permuted AV1 table maps by layer, not by index. For AV1, the
-  decode-target indexes are cross-checked against LiveKit's dependency-descriptor selector
-  (pkg/sfu/videolayerselector in /tmp/ref-livekit) on the same packets.
+  decode-target indexes, each AV1 leg's markers and its descriptors' frame numbers (from
+  a source numbered to wrap) are cross-checked against LiveKit's dependency-descriptor
+  selector (pkg/sfu/videolayerselector in /tmp/ref-livekit) on the same packets. The VP9
+  legs' markers are written by hand from RFC 9628 §4.2's `E` bit.
 - **W10 `keyframe_request_coalesces_across_subscribers`.** Three subscribers switch from
   encoding 0 to encoding 2 in the same 20 ms, and a fourth subscriber's `Losses` answers
   `Reset`. *Oracle:* by hand from RTC-6. Exactly one PLI reaches the publisher before the
@@ -1441,20 +1465,22 @@ W19, blocks, because those are soundness reds.
   access unit late (2595).
 - **Not closed in S4.** W9 `router_fills_units` runs over the Chromium captures in
   `vectors/chromium_rtp.hirsel` (2595), with the three cases Chromium cannot emit built by
-  hand: VP8 `S = 1` with a nonzero partition index, VP8 TID with a descriptor negotiated,
-  and a permuted AV1 decode-target table. `default_policy` answers the Dependency
-  Descriptor on every video section, and Chromium, offered it on VP8, then sends VP8
-  without TID, so a VP8 leg cannot switch temporal layers. The fix is to answer the
-  descriptor on AV1 sections only. A VP9 leg whose last forwarded layer frame is not the
-  picture's last gets no marker bit. The AV1 decode-target map itself is built (2595): `rtp.ext` binds `DependencyDescriptor`,
+  hand: VP8 `S = 1` with a nonzero partition index, VP8 with TID (the capture had none: its answer bound the descriptor on VP8),
+  and a permuted AV1 decode-target table. The AV1 decode-target map is built (2595): `rtp.ext` binds `DependencyDescriptor`,
   every unit parses it with its encoding's structure, `Layer(e, s, t)` maps through RTC-6's
   `(S_d, T_d)` and is rebuilt at a structure-carrying keyframe, and the decision unit is the
   descriptor's frame number. `router_maps_av1_targets` checks it over LiveKit's captured
-  Chromium L3T3 descriptors. Egress does not yet write the descriptor to subscribers, so a
-  subscriber's decoder gets AV1 frames without one, and a leg whose last layer frame of a
-  picture is not the picture's last gets no marker bit. A structure-carrying descriptor
-  older than the structure in use (a repair or a reordered packet of an earlier keyframe)
-  is dropped and counted `unparsed`. Each is an open red on S4's ticket. The re-offer
+  Chromium L3T3 descriptors. 2635 closed three of 2595's reds: the descriptor is answered on
+  AV1 sections only (RTC-2 step 4, `sdp_descriptor_on_av1_only` against str0m's answers),
+  egress writes it per down-track, and sub-layer VP9 and AV1 legs get the marker bit (RTC-6,
+  W9 against LiveKit's selector, and `av1_across_units` on a unit other than the home and
+  through the pacer). Our egress for both unit-1 legs decodes under LiveKit's own descriptor
+  parser, and a LiveKit selector downstream at the same target takes every packet with the
+  same markers. Still open: a section the browser sends VP8 on and receives AV1 on drops the
+  descriptor for both directions; a track `offer` appends on a transport that negotiated no
+  descriptor ID gets none; the active-decode-targets bitmask is not narrowed per leg. A
+  structure-carrying descriptor older than the structure in use (a repair or a reordered
+  packet of an earlier keyframe) is dropped and counted `unparsed`. Each is an open red on S4's ticket. The re-offer
   after an SSRC collision (RTC-4) is built in S7 (S7 decisions, Re-offer).
 
 **S5 decisions.** Gaps the spec left open, decided while S5 was built

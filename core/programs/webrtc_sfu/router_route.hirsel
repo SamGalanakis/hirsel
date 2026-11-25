@@ -278,6 +278,35 @@ fn ended(mut enc: Encoding, m: peer.MediaIn) -> bool {
 // RTC-5 fan-out steps 2 and 3 for one packet of publication `pi`: each local
 // down-track takes it through its `Rewrite`, and on the home unit each other unit
 // with a down-track of it gets one `Media` message.
+// The targets whose picture a packet closes (RTC-6, the marker bit): the last packet of
+// a layer frame closes it for each target whose highest spatial layer is the frame's.
+// VP9's target `i` is `4s + t`; an AV1 target's layers are its structure's `(S_d, T_d)`.
+fn picture_ends(vp9: Option[media_bits.unit.Vp9Frame], av1: Option[media_bits.dependency.Frame], structure: View[media_bits.dependency.Structure]) -> u32 {
+    if let Some(f) = vp9 {
+        if !f.end || f.spatial > 7 {
+            return 0
+        }
+        let shift: u32 = 4u32 * int.widen(f.spatial)
+        return 15u32 << shift
+    }
+    let Some(f) = av1 else {
+        return 0
+    }
+    let mut closes = 0u32
+    if !f.last {
+        return closes
+    }
+    for d in 0u64 .. order.min(f.decode_target_count, 32u64) {
+        if let Some((s, _)) = media_bits.dependency.target_layers(structure, d) {
+            if s == f.spatial {
+                let bit: u32 = int.narrow(d)
+                closes = closes | (1u32 << bit)
+            }
+        }
+    }
+    closes
+}
+
 fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talking: bool, packet: Bytes, mut out: peer.Outbox) -> Result[(), RouterError] {
     let room = r.publications[pi].room
     let owner = r.publications[pi].owner
@@ -375,6 +404,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
     } else {
         None
     }
+    let closes = picture_ends(vp9, av1, view r.publications[pi].encodings[e].structure)
     let src = source(id, m.encoding)
     // RTC-6's `V` toward a leg with `vad` on: the publisher's own `V` when its leg
     // negotiated it, and otherwise whether the publication is speaking.
@@ -462,7 +492,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
                 },
             },
         }
-        let leg = peer.Leg(src: owner, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: voice, from: m.payload_at, len: m.payload_len)
+        let leg = peer.Leg(src: owner, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: voice, from: m.payload_at, len: m.payload_len, closes: closes, dd_at: m.dd_at, dd_len: m.dd_len)
         let track = r.downs[d].track
         let sent = peer.forward(mut r.members[si].session, now, track, leg, packet, mut out) ?=> |take x| Peer(x)
         if sent == OnMedia && codec == H264 {

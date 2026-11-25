@@ -101,7 +101,7 @@ pub fn explain(
         return Ok(());
     }
     if rule == Some("debug-lines") && !list {
-        let statement = "--debug-lines on|off controls native line tables for build, run and test. Line tables default to off on every profile and both engines; pass --debug-lines on to opt in. It changes native object and link cache identities. Failure-site symbols, current source tables and file:line:column failure reports are always enabled. A line-only edit recompiles no existing native object; with rows on, the link-time writer rebinds current debug coordinates.";
+        let statement = "--debug-lines on|off controls native line tables for build, run and test. Line tables default to off on every profile and both engines; pass --debug-lines on to opt in. Object emission is the same with either setting; the choice changes the executable link cache identity. Failure-site symbols, current source tables and file:line:column failure reports are always enabled. A line-only edit recompiles no existing native object; with rows on, the link-time writer rebinds current debug coordinates.";
         if json {
             println!(
                 "{}",

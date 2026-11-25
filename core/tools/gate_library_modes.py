@@ -99,7 +99,8 @@ def main():
                             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                             native = json.loads(result.stdout)['native']
                             self.assertEqual(native['debug_lines'], expected)
-                            self.assertEqual(native['compiled'] == 0, expected in seen)
+                            self.assertEqual(native['compiled'] == 0, bool(seen))
+                            self.assertEqual(native['linked'], expected not in seen)
                             seen.add(expected)
                 refused = self.progress.run([str(compiler), 'build', str(app), '--debug-lines', 'maybe'],
                                          cwd=ROOT, capture_output=True, text=True)
@@ -356,7 +357,8 @@ def main():
             rules = json.loads(listed.stdout)
             ids = [r['id'] for r in rules]
             self.assertEqual(ids, sorted(set(ids)))
-            self.assertIn(rule, rules)
+            catalogue = {key: rule[key] for key in ['id', 'title', 'spec_file', 'anchor', 'statement']}
+            self.assertIn(catalogue, rules)
             text = explain('LANG-7')
             self.assertEqual(text.returncode, 0, text.stderr)
             self.assertIn(rule['statement'], text.stdout)
@@ -519,8 +521,12 @@ def main():
                     (nested / 'no_header.hirsel').write_text('deliberately malformed test fixture\n')
                 core_id, std_id, app_id = [dict(name=name, version='1') for name in ['core', 'std', 'app']]
                 def sources(package):
-                    return [dict(file=str(p), modules=[p.stem], signatures=True)
-                            for p in sorted((ROOT / 'core' / package).glob('*.hirsel'))]
+                    root = ROOT / 'core' / package
+                    def source(p):
+                        relative = p.relative_to(root).with_suffix('')
+                        return dict(file=str(p), modules=list(relative.parts), signatures=True)
+                    return [source(p) for p in sorted(root.rglob('*.hirsel'))
+                            if p.relative_to(root).parts[0] != 'tests']
                 inputs = work / 'inputs.json'
                 inputs.write_text(json.dumps(dict(core=core_id, packages=[
                     dict(package=core_id, sources=sources('core'), dependencies=[]),

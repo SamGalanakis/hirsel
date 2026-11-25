@@ -204,9 +204,9 @@ separate objects (`ld -r` renumbers local and section symbols).
 the executable for build, run and test. Native builds always emit debug rows and write
 a detached DWARF debug file beside the executable; `--debug-lines on` additionally
 embeds DWARF in the executable itself (see `docs/spec/cli.md`).
-`explain debug-lines` describes the same choice. Native object and link keys
-include the choice; failure-site symbols, source tables and exact failure reports stay
-enabled either way.
+`explain debug-lines` describes the same choice. Native link keys include it;
+object emission and object keys are the same either way. Failure-site symbols,
+source tables and exact failure reports stay enabled either way.
 Native body products contain clean ELF code and a separate
 record of machine ranges, item-relative byte offsets and inline scopes. The
 object keys contain no absolute source position. One shared link-time writer

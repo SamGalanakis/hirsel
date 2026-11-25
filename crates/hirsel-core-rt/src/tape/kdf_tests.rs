@@ -1,6 +1,6 @@
 use super::*;
 use crate::secret::{
-    Granted, MAC_PROVIDER, MacTape, Origin, Secret, hirsel_core_secret_drop,
+    Granted, MAC_PROVIDER, MacTape, Made, Origin, Secret, hirsel_core_secret_drop,
     hirsel_core_secret_hmac_sha256, hirsel_core_secret_seal,
     kdf::{
         hirsel_core_secret_derive_argon2id, hirsel_core_secret_derive_hkdf_sha256,
@@ -82,7 +82,7 @@ fn kdf_grants_charge_before_issue_and_replay_without_keys() {
                     let ordinal = ordinal_of(handle) as u64;
                     let secret = if mode == Mode::Record {
                         let mut secret = Granted::read(grant.clone(), 0).unwrap().secret;
-                        secret.origin = Origin::Granted(ordinal);
+                        secret.origin = Origin::root(Made::Granted(ordinal));
                         secret
                     } else {
                         let policy = &startup
@@ -92,7 +92,7 @@ fn kdf_grants_charge_before_issue_and_replay_without_keys() {
                             .unwrap()
                             .policy;
                         Secret::new(
-                            Origin::Granted(ordinal),
+                            Origin::root(Made::Granted(ordinal)),
                             SecretPolicy::parse(policy).unwrap(),
                             None,
                             None,
@@ -323,7 +323,7 @@ fn no_key_in_recording() {
                 let (_, handle) = tape
                     .on_tape(crate::entry::SECRET, (MAC_PROVIDER, 0))
                     .unwrap();
-                let origin = Origin::Granted(ordinal_of(handle) as u64);
+                let origin = Origin::root(Made::Granted(ordinal_of(handle) as u64));
                 let master = if mode == Mode::Record {
                     let mut master = Granted::read(grant.clone(), 0).unwrap().secret;
                     master.origin = origin;

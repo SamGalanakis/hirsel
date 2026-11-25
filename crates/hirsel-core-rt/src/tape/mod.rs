@@ -803,9 +803,7 @@ unsafe fn socket_args(request: &Request) -> Args {
         if request.operation == SCRAM {
             let scram = &*request.path.cast::<crate::scram::ScramRequest<'_>>();
             let (origin, patterns) = &scram.send.designations[0];
-            let (kind, ordinal) = origin.wire();
-            args.push(kind);
-            put_varint(&mut args, ordinal);
+            origin.put(&mut args);
             let patterns = hirsel_core_net::Pattern::list_text(patterns);
             let pieces = [
                 patterns.as_bytes(),
@@ -826,9 +824,7 @@ unsafe fn socket_args(request: &Request) -> Args {
                 let send = &*request.path.cast::<crate::secret::SendRequest>();
                 put_varint(&mut args, send.designations.len() as u64);
                 for (origin, patterns) in &send.designations {
-                    let (kind, ordinal) = origin.wire();
-                    args.push(kind);
-                    put_varint(&mut args, ordinal);
+                    origin.put(&mut args);
                     let patterns = hirsel_core_net::Pattern::list_text(patterns);
                     put_varint(&mut args, patterns.len() as u64);
                     args.extend_from_slice(patterns.as_bytes());

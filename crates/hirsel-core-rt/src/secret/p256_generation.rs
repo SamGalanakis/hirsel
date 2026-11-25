@@ -117,7 +117,7 @@ pub unsafe extern "C" fn hirsel_core_secret_p256_key(
             policy,
             call.document.map(secret_bytes),
             charge,
-            Some(Origin::GeneratedP256(answer.value)),
+            Some(Origin::here(Made::GeneratedP256(answer.value))),
         );
         (*public).len = request.buffer.len;
         result

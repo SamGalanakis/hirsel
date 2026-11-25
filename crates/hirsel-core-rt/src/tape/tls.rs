@@ -34,9 +34,7 @@ pub(super) unsafe fn args(request: &Request, args: &mut Vec<u8>) {
                 args.extend_from_slice(entry);
             }
             let key = &(*tls.state.cast::<crate::tls_server::AcceptState>()).key;
-            let (kind, ordinal) = key.origin.wire();
-            args.push(kind);
-            put_varint(args, ordinal);
+            key.origin.put(args);
             let policy = key.policy.text();
             put_varint(args, policy.len() as u64);
             args.extend_from_slice(policy.as_bytes());

@@ -34,9 +34,7 @@ pub(super) unsafe fn key_args(r: &Request) -> Args {
     let mut head = vec![r.mode];
     let mut texts = Vec::new();
     let mut secret = |head: &mut Vec<u8>, s: &crate::secret::Secret| {
-        let (kind, ordinal) = s.origin.wire();
-        head.push(kind);
-        put_varint(head, ordinal);
+        s.origin.put(head);
         texts.push(s.policy.text().into_bytes());
     };
     secret(&mut head, key.key);
@@ -81,7 +79,6 @@ pub(super) unsafe fn key_args(r: &Request) -> Args {
 pub(super) unsafe fn kdf_args(r: &Request) -> Args {
     // SAFETY: the derivation adapter pins its request for issue.
     let kdf = unsafe { &*r.path.cast::<crate::secret::kdf::KdfRequest<'_>>() };
-    let (kind, ordinal) = kdf.secret.origin.wire();
     let policy = kdf.secret.policy.text();
     let child = kdf.child.text();
     use hirsel_core_net::secret_kdf::Derivation;
@@ -91,8 +88,7 @@ pub(super) unsafe fn kdf_args(r: &Request) -> Args {
     if r.mode != 0 {
         head.push(r.mode);
     }
-    head.push(kind);
-    put_varint(&mut head, ordinal);
+    kdf.secret.origin.put(&mut head);
     put_varint(&mut head, policy.len() as u64);
     put_varint(&mut head, child.len() as u64);
     put_varint(&mut head, kdf.salt_or_prefix.len() as u64);

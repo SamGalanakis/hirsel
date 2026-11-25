@@ -30,9 +30,19 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+/// A designation (recording.md, "Designations across units"): what made it,
+/// numbered in the order of the unit that made it, and that unit's stream.
 #[derive(Clone, Copy)]
-pub(crate) enum Origin {
+pub(crate) struct Origin {
+    pub(crate) made: Made,
+    pub(crate) stream: u32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Made {
+    /// The run's grant: the root's.
     Granted(u64),
+    /// The `ordinal`th seal of its unit.
     Sealed(u64),
     /// Designated by its `SECRET_KDF` delivery position under a tape (0
     /// otherwise); opaque when its parent was.
@@ -40,7 +50,7 @@ pub(crate) enum Origin {
         ordinal: u64,
         opaque: bool,
     },
-    /// The `ordinal`th `secret.unwrap` of the run; opaque when its KEK was.
+    /// The `ordinal`th `secret.unwrap` of its unit; opaque when its KEK was.
     Unwrapped {
         ordinal: u64,
         opaque: bool,
@@ -52,27 +62,66 @@ pub(crate) enum Origin {
 }
 
 impl Origin {
+    /// A designation of the root's stream: a grant, or one made outside a
+    /// unit's recording.
+    pub(crate) fn root(made: Made) -> Self {
+        Self { made, stream: 0 }
+    }
+
+    /// A designation the running unit makes: its stream, or the root's
+    /// outside a recording.
+    pub(crate) fn here(made: Made) -> Self {
+        #[cfg(feature = "record")]
+        let stream = crate::tape::units::current_stream();
+        #[cfg(not(feature = "record"))]
+        let stream = 0;
+        Self { made, stream }
+    }
+
     /// Whether the program never held these bytes: a grant, or a secret
     /// derived or unwrapped from one (TLS-5).
     pub(crate) fn opaque(self) -> bool {
-        match self {
-            Self::Granted(_) | Self::Fetched(_) | Self::GeneratedP256(_) => true,
-            Self::Sealed(_) => false,
-            Self::Derived { opaque, .. } | Self::Unwrapped { opaque, .. } => opaque,
+        match self.made {
+            Made::Granted(_) | Made::Fetched(_) | Made::GeneratedP256(_) => true,
+            Made::Sealed(_) => false,
+            Made::Derived { opaque, .. } | Made::Unwrapped { opaque, .. } => opaque,
         }
     }
 
     /// The tape's origin kind and ordinal (recording.md, Credentials).
     #[cfg(feature = "record")]
     pub(crate) fn wire(self) -> (u8, u64) {
-        match self {
-            Self::Granted(ordinal) => (0, ordinal),
-            Self::Sealed(ordinal) => (1, ordinal),
-            Self::Derived { ordinal, .. } => (2, ordinal),
-            Self::Unwrapped { ordinal, .. } => (3, ordinal),
-            Self::Fetched(ordinal) => (4, ordinal),
-            Self::GeneratedP256(ordinal) => (5, ordinal),
+        match self.made {
+            Made::Granted(ordinal) => (0, ordinal),
+            Made::Sealed(ordinal) => (1, ordinal),
+            Made::Derived { ordinal, .. } => (2, ordinal),
+            Made::Unwrapped { ordinal, .. } => (3, ordinal),
+            Made::Fetched(ordinal) => (4, ordinal),
+            Made::GeneratedP256(ordinal) => (5, ordinal),
         }
+    }
+
+    /// The designation as every tape field writes it: origin kind `u8`,
+    /// stream `u32`, ordinal `varint`.
+    #[cfg(feature = "record")]
+    pub(crate) fn put(self, out: &mut Vec<u8>) {
+        let (kind, ordinal) = self.wire();
+        out.push(kind);
+        out.extend_from_slice(&self.stream.to_le_bytes());
+        hirsel_tape_format::put_varint(out, ordinal);
+    }
+}
+
+/// The running unit's stream and its next seal (or unwrap) ordinal, in
+/// that unit's own order. Taken before the Secrets table is locked: a
+/// unit's recording cell is never locked under it.
+fn next_in_unit(unwrap: bool) -> (u32, u64) {
+    #[cfg(feature = "record")]
+    return crate::tape::units::next_designation(unwrap);
+    #[cfg(not(feature = "record"))]
+    {
+        let _ = unwrap;
+        (0, 0)
     }
 }
 
@@ -114,7 +163,7 @@ impl Granted {
         }
         Some(Self {
             secret: Secret::new(
-                Origin::Granted(index),
+                Origin::root(Made::Granted(index)),
                 SecretPolicy::parse(&record.policy)?,
                 Some(Arc::new(SecretBytes::new(bytes))),
                 None,
@@ -313,8 +362,6 @@ struct Entry {
 pub(crate) struct Secrets {
     entries: Vec<Option<Entry>>,
     free: Vec<usize>,
-    seals: u64,
-    unwraps: u64,
 }
 
 impl Secrets {
@@ -510,6 +557,13 @@ unsafe fn store_sealed(
     charge: Charge,
     origin: Option<Origin>,
 ) -> Outcome {
+    let origin = origin.unwrap_or_else(|| {
+        let (stream, ordinal) = next_in_unit(false);
+        Origin {
+            made: Made::Sealed(ordinal),
+            stream,
+        }
+    });
     let mut secrets = unsafe {
         (*(*context).host_files)
             .registry
@@ -518,11 +572,6 @@ unsafe fn store_sealed(
             .lock()
             .unwrap()
     };
-    let origin = origin.unwrap_or_else(|| {
-        let ordinal = secrets.seals;
-        secrets.seals += 1;
-        Origin::Sealed(ordinal)
-    });
     let value = secrets.push(
         Secret::new(origin, policy, bytes, Some(ChargeCell::new(charge))),
         None,

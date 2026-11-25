@@ -1,5 +1,5 @@
 use super::*;
-use crate::secret::{Granted, Origin, Secret, key::*};
+use crate::secret::{Granted, Made, Origin, Secret, key::*};
 use hirsel_core_net::{SecretGrant, SecretPolicy};
 
 // RFC 8439 section 2.8.2.
@@ -55,13 +55,13 @@ fn aead_grant_uses_and_refusals_record_and_replay() {
                 } else {
                     assert!(!key_path.exists());
                     Secret::new(
-                        Origin::Granted(0),
+                        Origin::root(Made::Granted(0)),
                         SecretPolicy::parse(&startup.secret_grants[0].policy).unwrap(),
                         None,
                         None,
                     )
                 };
-                key.origin = Origin::Granted(ordinal_of(handle) as u64);
+                key.origin = Origin::root(Made::Granted(ordinal_of(handle) as u64));
                 let mut registry = files.registry.run_grants().secrets.lock().unwrap();
                 let allowed = registry.register(key.clone());
                 let denied = registry.register(Secret {
@@ -73,7 +73,7 @@ fn aead_grant_uses_and_refusals_record_and_replay() {
                     ..key
                 });
                 let wrong_len = registry.register(Secret::new(
-                    Origin::Sealed(0),
+                    Origin::root(Made::Sealed(0)),
                     SecretPolicy::parse(policy).unwrap(),
                     (mode == Mode::Record).then(|| {
                         std::sync::Arc::new(hirsel_core_net::secret_aead::SecretBytes::new(

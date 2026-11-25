@@ -80,10 +80,9 @@ unsafe fn operands(r: &Request) -> Args {
         }
         if r.operation == SECRET_MAC {
             let mac = &*r.path.cast::<crate::secret::MacRequest<'_>>();
-            let (kind, ordinal) = mac.secret.origin.wire();
             let policy = mac.secret.policy.text();
-            let mut head = vec![r.mode, kind];
-            put_varint(&mut head, ordinal);
+            let mut head = vec![r.mode];
+            mac.secret.origin.put(&mut head);
             put_varint(&mut head, policy.len() as u64);
             put_varint(&mut head, mac.data.len() as u64);
             return Args::of_parts(&[

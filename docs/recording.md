@@ -209,9 +209,10 @@ hold any SCRAM value computed from a password: the normalized password, `SaltedP
 ordinal in the order of the run's grants, like every other grant. The header's grant
 snapshot keeps the parameter name, the canonical policy text, and the source label
 (`env:OPENAI_API_KEY`), but not the bytes. A sealed secret is designated by the order of its
-seal among the run's seals, an unwrapped one by the order of its unwrap among the run's
+seal among its unit's seals, an unwrapped one by the order of its unwrap among its unit's
 unwraps. A derived or host-generated P-256 key is designated by the position of its
-`SECRET_KDF` or `MEDIA_P256_KEY` delivery. The tape binds each designation together
+`SECRET_KDF` or `MEDIA_P256_KEY` delivery. Each designation also names the stream of the
+unit that made it ([designations across units](#unit-recordings)). The tape binds each designation together
 with its policy. The canonical arguments of
 `SEND_SECRET`, `SECRET_MAC` and `SECRET_KDF` hold the designation, never the bytes or any function of them, because an
 unkeyed digest of a short secret could be reversed by trying candidate values.
@@ -564,7 +565,9 @@ ordinal of the unit that dropped it.
 that made it, and that kind's number in that unit's own order: a grant ordinal, the order
 of a seal among that unit's seals or of an unwrap among its unwraps, or the position of the
 `SECRET_KDF`, credential or `MEDIA_P256_KEY` delivery. No count is run-wide. A designation that arrives keeps its origin. The canonical arguments
-of `SEND_SECRET`, `SECRET_MAC` and `SECRET_KDF` bind the full designation.
+of `SEND_SECRET`, `SECRET_MAC` and `SECRET_KDF` bind the full designation. Every field that
+holds a designation, in these arguments, `SCRAM`, `TLS_ACCEPT`, a schedule import and a
+`Secret` snapshot (tag 7), writes it as origin kind `u8`, stream `u32`, ordinal `varint`.
 
 **Unit operations.** These are frames of the unit that performs them. They are checked on
 replay like a provider issue, and each outcome that depends on another unit's state is

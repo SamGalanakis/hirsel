@@ -13,7 +13,7 @@ use super::schedule::Group;
 use super::*;
 use crate::causes::{CANCELLED, CAPACITY, Cause, FAIL};
 use crate::units_lang::Cross;
-use hirsel_core_layout::cross::{CAPABILITY, CLIENT, FUNCTION, SEQ, SHARED};
+use hirsel_core_layout::cross::{CAPABILITY, CLIENT, FUNCTION, SECRET, SEQ, SHARED};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// Stream numbers: unique in the process, so in each recording's file.
@@ -63,10 +63,11 @@ impl Helper {
     /// Write the helper's `END` as `join` delivers it: its result, or its
     /// causes. Its scheduler has stopped, so no other frame follows. Returns
     /// the outcome for the parent's end `TAKE`, or why it has none. The
-    /// result's capabilities resolve through `registry`, the helper's.
+    /// result's capabilities and `Secret` words resolve through `context`, the
+    /// helper's, and its registry.
     /// # Safety
     /// `result` holds an initialized `R` of `bytes` bytes, with `owners`,
-    /// when `failed` is false.
+    /// when `failed` is false; `context` and its host files are live.
     pub(crate) unsafe fn end(
         &self,
         failed: bool,
@@ -74,7 +75,7 @@ impl Helper {
         result: *const u8,
         bytes: u64,
         owners: &[[u64; 4]],
-        registry: &crate::host_file::Registry,
+        context: *const crate::Context,
     ) -> Result<EndTake, &'static str> {
         let mut handles = Vec::new();
         let mut grants = Vec::new();
@@ -96,7 +97,10 @@ impl Helper {
             // SAFETY: forwarded.
             let words = unsafe { capability_words(result, &r, None) };
             if !words.is_empty() {
-                grants = units::item_grants::resolve(registry, &words);
+                // SAFETY: by the contract.
+                grants = unsafe {
+                    units::item_grants::resolve(context, &(*(*context).host_files).registry, &words)
+                };
             }
             // Each handle is written as sent, ordinal 0; the owner's take
             // gives each its ordinal there.
@@ -105,7 +109,7 @@ impl Helper {
                 match kind {
                     CLIENT => units::client_snapshot(word, 0),
                     SHARED => units::shared_snapshot(word, 0),
-                    _ => units::item_grants::sent(&grants, word),
+                    _ => units::item_grants::sent(&grants, kind, word),
                 }
             };
             // SAFETY: forwarded.
@@ -223,7 +227,8 @@ pub(crate) unsafe fn spawn(
     let words = unsafe { capability_words(input, &held, None) };
     let resolved: Vec<_> = words
         .iter()
-        .map(|&word| {
+        .filter(|&&(kind, _)| kind == CAPABILITY)
+        .map(|&(_, word)| {
             // SAFETY: the spawner's context resolves its own capability words.
             unsafe {
                 (
@@ -240,7 +245,8 @@ pub(crate) unsafe fn spawn(
         Vec::new()
     } else {
         // SAFETY: as above.
-        units::item_grants::resolve(unsafe { &(*files).registry }, &words)
+        // SAFETY: as above.
+        unsafe { units::item_grants::resolve(context, &(*files).registry, &words) }
     };
     let cell = cell();
     let mut fresh = cell.state.lock().unwrap();
@@ -423,19 +429,20 @@ unsafe fn entry(
 
 const HANDLE: &str = "the value holds a socket handle, whose snapshot this build does not write";
 
-/// The capability words of a value, in the order it holds them, nested ones
-/// included: what `item_grants::resolve` reads before any cell is locked.
+/// The capability and `Secret` words of a value by row kind, in the order it
+/// holds them, nested ones included: what `item_grants::resolve` reads
+/// before any cell is locked.
 /// # Safety
 /// As for `value`.
 pub(super) unsafe fn capability_words(
     base: *const u8,
     x: &Cross,
     content: Option<*const u8>,
-) -> Vec<u64> {
+) -> Vec<(u64, u64)> {
     let mut words = Vec::new();
     let mut collect = |kind, word| {
-        if kind == CAPABILITY {
-            words.push(word);
+        if matches!(kind, CAPABILITY | SECRET) {
+            words.push((kind, word));
         }
         Ok(Vec::new())
     };
@@ -500,7 +507,7 @@ pub(super) unsafe fn value(
                     parts.extend_from_slice(elements);
                 }
             }
-            CAPABILITY | CLIENT => {
+            CAPABILITY | CLIENT | SECRET => {
                 parts.push(1);
                 parts.extend(handle(kind, word(0))?);
             }

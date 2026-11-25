@@ -139,14 +139,14 @@ unsafe fn import(
                     ImportKind::Srtp => 16,
                     ImportKind::Sframe => 20,
                 };
-                let (kind, id) = import.origin.wire();
+                let mut designation = Vec::new();
+                import.origin.put(&mut designation);
                 let policy = import.policy.text();
                 let args = capture::arguments(
                     operation,
                     0,
                     &[
-                        &[kind],
-                        &id.to_le_bytes(),
+                        &designation,
                         &profile.to_le_bytes(),
                         &suite.to_le_bytes(),
                         policy.as_bytes(),

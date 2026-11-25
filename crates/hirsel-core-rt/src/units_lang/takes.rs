@@ -81,7 +81,14 @@ pub(super) unsafe fn take(u: &mut LangUnit, took: &Took, id: usize) {
             grants = if words.is_empty() || registry.is_null() {
                 Vec::new()
             } else {
-                unsafe { crate::tape::units::item_grants::resolve(&*registry, &words) }
+                // SAFETY: this unit's running task's context is the run's.
+                unsafe {
+                    crate::tape::units::item_grants::resolve(
+                        tasks::current_context(),
+                        &*registry,
+                        &words,
+                    )
+                }
             };
             Arrival::Item {
                 conn: id,
@@ -186,7 +193,7 @@ impl SendNote {
             let grants = if words.is_empty() || files.is_null() {
                 Vec::new()
             } else {
-                crate::tape::units::item_grants::resolve(&(*files).registry, &words)
+                crate::tape::units::item_grants::resolve(context, &(*files).registry, &words)
             };
             tape::send_item(group, client as usize, conn, value, &grants)
         };

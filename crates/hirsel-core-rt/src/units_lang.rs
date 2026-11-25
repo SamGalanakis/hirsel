@@ -1321,7 +1321,7 @@ fn helper_main(
                     result.as_ptr(),
                     rb,
                     &ro,
-                    &files.registry,
+                    &raw const context,
                 )
             }),
         };

@@ -537,3 +537,108 @@ fn rl9_array_elements_cross() {
         assert_eq!(draws, [u64::from(g + 4)], "{backend:?}: draw");
     }
 }
+
+/// A sealed `Secret` crosses in an item and in an entry, and a helper's own
+/// seal is numbered in the helper's order: the root seals, sends the secret
+/// to itself and moves it into a helper's entry; the helper seals its own,
+/// sends it to itself and drops both before its end.
+const RL9_SECRET: &str = r#"
+fn sealer(take k: Secret) -> u64 {
+    let mut b: Bytes = list.with_capacity(1)
+    list.push(mut b, 7)
+    let own = result.unwrap(secret.seal(take b, "mac"))
+    let (c, i): (Client[Secret], Inbox[Secret]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(c, take own))
+    let back = result.unwrap(conn.try_receive(i))
+    9
+}
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let mut b: Bytes = list.with_capacity(1)
+    list.push(mut b, 5)
+    let s = result.unwrap(secret.seal(take b, "mac"))
+    let (c, i): (Client[Secret], Inbox[Secret]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(c, take s))
+    let k = result.unwrap(conn.try_receive(i))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, take k, sealer))
+    if result.unwrap(task.join(take h)) != 9 { return Error(Exit(status: 3)) }
+    result.unwrap(stdout.write(out, "secret"))
+    Ok(())
+}
+"#;
+
+/// A `Secret` crosses as its tag 7 snapshot, numbered where it arrives, and
+/// its designation is its origin kind, the stream of the unit that made it
+/// and that unit's own count (recording.md, "Snapshots" and "Designations
+/// across units"), hand-derived before the first run.
+/// - A `Secret` value is 8 plain bytes, its word zeroed, and one part: a
+///   handle (1), tag 7, its ordinal, then the designation (origin kind
+///   `Sealed` 1, stream `u32`, ordinal) and the policy text "mac".
+/// - A seal takes no object ordinal. The root's connection is g+1 and its
+///   client g+2; its secret, the root's first seal, arrives as g+3 with
+///   designation (1, stream 0, 0).
+/// - The helper's entry holds it as the helper's ordinal 1, designation
+///   unchanged.
+/// - The helper is the run's first, stream 1. Its connection is 2 and its
+///   client 3; its own secret is its first seal, designation (1, stream 1,
+///   0), though it is the run's second, and arrives as 4.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_secret_crosses_with_its_designation() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame};
+
+    let value = |ordinal: u8, stream: u8| -> Vec<u8> {
+        [
+            vec![8],
+            vec![0; 8],
+            vec![1, 1, 7, ordinal, 1, stream, 0, 0, 0, 0, 3],
+            b"mac".to_vec(),
+        ]
+        .concat()
+    };
+    let items = |frames: &[Frame]| -> Vec<Vec<u8>> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)) => {
+                    Some(body.bytes().to_vec())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_with(
+            RL9_SECRET,
+            dir.path(),
+            "secret",
+            backend,
+            "secret",
+            &["Tasks", "Stdout"],
+        );
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
+        let root = &streams[0].1;
+        let g = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        assert_eq!(
+            items(root),
+            [[vec![0, g + 1], value(g + 3, 0)].concat()],
+            "{backend:?}: root item"
+        );
+        let entry = streams[1].0.as_ref().expect("a helper entry");
+        assert_eq!(
+            entry.body().value.bytes(),
+            value(1, 0).as_slice(),
+            "{backend:?}: entry"
+        );
+        assert_eq!(
+            items(&streams[1].1),
+            [[vec![0, 2], value(4, 1)].concat()],
+            "{backend:?}: helper item"
+        );
+    }
+}

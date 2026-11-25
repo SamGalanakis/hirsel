@@ -8,7 +8,7 @@ use crate::{
     net::{Address, NetworkRequest, deadline},
     os_net::{Due, Operations, deadline as due},
     provider::*,
-    secret::{Origin, Secret},
+    secret::{Made, Origin, Secret},
     tasks::Outside,
 };
 use hirsel_core_net::{CredGrant, CredSource, SecretPolicy, StsSource, secret_aead::SecretBytes};
@@ -903,7 +903,7 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
         }
         // A tape designates the key by its delivery position, so concurrent
         // fetches keep their origins on replay; without one it is 0.
-        let origin = Origin::Fetched(outcome.value);
+        let origin = Origin::here(Made::Fetched(outcome.value));
         let designated = crate::secret::designate(
             context,
             Secret::new(origin, grant.policy.clone(), fetched.secret, None),

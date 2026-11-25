@@ -5,7 +5,7 @@ use crate::media::{
     hirsel_core_media_drop, hirsel_core_packet_seal_into, hirsel_core_schedule_import_sframe,
     hirsel_core_schedule_sframe_sealer,
 };
-use crate::secret::{Granted, MAC_PROVIDER, Origin, Secret};
+use crate::secret::{Granted, MAC_PROVIDER, Made, Origin, Secret};
 use hirsel_core_net::{SecretGrant, SecretPolicy};
 
 const BASE: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
@@ -71,7 +71,7 @@ fn sframe_send_import_replays_without_its_key() {
                     let ordinal = ordinal_of(handle) as u64;
                     let secret = if mode == Mode::Record {
                         let mut secret = Granted::read(grant.clone(), 0).unwrap().secret;
-                        secret.origin = Origin::Granted(ordinal);
+                        secret.origin = Origin::root(Made::Granted(ordinal));
                         secret
                     } else {
                         let saved = startup
@@ -80,7 +80,7 @@ fn sframe_send_import_replays_without_its_key() {
                             .find(|saved| saved.parameter == grant.parameter)
                             .unwrap();
                         Secret::new(
-                            Origin::Granted(ordinal),
+                            Origin::root(Made::Granted(ordinal)),
                             SecretPolicy::parse(&saved.policy).unwrap(),
                             None,
                             None,

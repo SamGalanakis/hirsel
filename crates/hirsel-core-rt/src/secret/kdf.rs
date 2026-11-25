@@ -210,10 +210,10 @@ unsafe fn derive(
         let ordinal = 0;
         // A key derived from a grant is as unknown to the program as the
         // grant, so `wrap` and served streams treat it alike.
-        let origin = Origin::Derived {
+        let origin = Origin::here(Made::Derived {
             ordinal,
             opaque: secret.origin.opaque(),
-        };
+        });
         // A replay leaves bytes absent. The sinks that can read this key
         // are themselves replay deliveries.
         let bytes = args.output;

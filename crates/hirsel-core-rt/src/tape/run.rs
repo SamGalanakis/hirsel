@@ -543,7 +543,7 @@ unsafe extern "C" fn invoke(
                         if req.kind == entry::SECRET {
                             let mut secret = if run.launch.is_describe() {
                                 crate::secret::Secret::new(
-                                    crate::secret::Origin::Granted(0),
+                                    crate::secret::Origin::root(crate::secret::Made::Granted(0)),
                                     hirsel_core_net::SecretPolicy::default(),
                                     None,
                                     None,
@@ -559,13 +559,15 @@ unsafe extern "C" fn invoke(
                                     return stopped(run, Fault::Corrupt);
                                 }
                                 crate::secret::Secret::new(
-                                    crate::secret::Origin::Granted(0),
+                                    crate::secret::Origin::root(crate::secret::Made::Granted(0)),
                                     hirsel_core_net::SecretPolicy::parse(&record.policy).unwrap(),
                                     None,
                                     None,
                                 )
                             };
-                            secret.origin = crate::secret::Origin::Granted(ordinal_of(h) as u64);
+                            secret.origin = crate::secret::Origin::root(
+                                crate::secret::Made::Granted(ordinal_of(h) as u64),
+                            );
                             (*files)
                                 .registry
                                 .run_grants()

@@ -5,7 +5,7 @@ use super::schedule::Group;
 use super::*;
 use crate::units_lang::Cross;
 use format::{TakeBody, TakePoint};
-use hirsel_core_layout::cross::{CAPABILITY, CLIENT, SHARED};
+use hirsel_core_layout::cross::{CAPABILITY, CLIENT, SECRET, SHARED};
 use item_grants::Granted;
 use std::collections::HashMap;
 
@@ -28,6 +28,10 @@ pub(super) struct Takes {
     helpers: HashMap<usize, u64>,
     /// Each waiting send: its `ISSUE` position and the item as a value.
     sends: HashMap<u32, (u64, Vec<u8>)>,
+    /// The unit's seals and unwraps so far: each designation's ordinal in
+    /// the unit's own order (recording.md, "Designations across units").
+    seals: u64,
+    unwraps: u64,
 }
 
 /// What every unit of the run knows of a connection made while recording: the
@@ -193,6 +197,33 @@ fn stream(live: &Live) -> u32 {
     live.recorder.as_ref().map_or(0, |r| r.stream)
 }
 
+/// The running unit's stream: 0 for the root, a replay, or no tape.
+pub(crate) fn current_stream() -> u32 {
+    crate::tasks::current_group()
+        .and_then(|group| group.with(|live| stream(live)))
+        .unwrap_or(0)
+}
+
+/// The running unit's stream and its next seal (or unwrap) ordinal, counted
+/// in record and replay alike, so a replay designates as its recording did.
+pub(crate) fn next_designation(unwrap: bool) -> (u32, u64) {
+    let group = crate::tasks::current_group();
+    group
+        .and_then(|group| {
+            group.with(|live| {
+                let stream = stream(live);
+                let count = if unwrap {
+                    &mut live.takes.unwraps
+                } else {
+                    &mut live.takes.seals
+                };
+                *count += 1;
+                (stream, *count - 1)
+            })
+        })
+        .unwrap_or((0, 0))
+}
+
 /// The unit's code reached an in-operation take point.
 pub(crate) fn reach(group: Option<Group>) {
     recording(group, |live| {
@@ -320,15 +351,16 @@ pub(crate) fn retained(conn: usize, (header, retained): (u64, u64)) {
     });
 }
 
-/// The capability words of an item, in the order its value holds them: what
-/// `item_grants::resolve` reads before any cell is locked.
+/// The capability and `Secret` words of an item, by row kind, in the order
+/// its value holds them: what `item_grants::resolve` reads before any cell
+/// is locked.
 /// # Safety
 /// `item` holds the connection's flat item; `content` its packed sequences.
 pub(crate) unsafe fn item_words(
     conn: usize,
     item: *const u8,
     content: Option<*const u8>,
-) -> Vec<u64> {
+) -> Vec<(u64, u64)> {
     let Some((bytes, owners)) = layout(conn) else {
         return Vec::new();
     };
@@ -375,7 +407,7 @@ pub(crate) unsafe fn send_item(
                 word,
                 live.takes.nodes.get(&(word as usize)).copied().unwrap_or(0),
             ),
-            CAPABILITY => item_grants::sent(grants, word),
+            CAPABILITY | SECRET => item_grants::sent(grants, kind, word),
             _ => Err(CAPABILITY_ITEM),
         };
         // SAFETY: by the contract.
@@ -429,8 +461,9 @@ const CAPABILITY_ITEM: &str = "an item holds a handle whose snapshot this build 
 
 /// A handle that arrives in a value, an item, a helper's entry or its result,
 /// as the receiving unit's snapshot: a client or `Shared` holder takes a new
-/// ordinal at its take, and a capability its grant's, designated in
-/// `designations` once the value is written.
+/// ordinal at its take, a capability its grant's, designated in
+/// `designations` once the value is written, and a `Secret` a new ordinal
+/// with its designation unchanged.
 pub(super) fn arrive(
     live: &mut Live,
     generation: u32,
@@ -450,7 +483,9 @@ pub(super) fn arrive(
             live.takes.nodes.insert(word as usize, o);
             shared_snapshot(word, o)
         }
-        CAPABILITY => item_grants::arrived(live, generation, grants, word, designations),
+        CAPABILITY | SECRET => {
+            item_grants::arrived(live, generation, grants, kind, word, designations)
+        }
         _ => Err(CAPABILITY_ITEM),
     }
 }

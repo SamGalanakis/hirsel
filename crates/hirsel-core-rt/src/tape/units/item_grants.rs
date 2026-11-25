@@ -1,6 +1,6 @@
-//! A granted or narrowed capability that crosses units inside a value: an
-//! item, a helper's entry or its result (docs/recording.md, "Handle
-//! snapshots", unit tapes U3). Its grant is read from the cell that
+//! A granted or narrowed capability, or a `Secret` designation, that crosses
+//! units inside a value: an item, a helper's entry or its result
+//! (docs/recording.md, "Handle snapshots", unit tapes U3). Its grant is read from the cell that
 //! recorded it before any cell is locked, since the sending or receiving
 //! unit's own cell is locked while the item's value is written. Where it
 //! arrives it takes a new object ordinal and the receiving unit's registry
@@ -9,13 +9,22 @@
 use super::super::schedule::Group;
 use super::super::*;
 use crate::host_file::{DYNAMIC_GRANT, Registry};
+use hirsel_core_layout::cross;
 use hirsel_core_net::{CredGrant, exec::ExecRules};
 use std::sync::Arc;
 
-/// One capability word's grant as the cell that recorded it holds it.
+/// One capability word's grant as the cell that recorded it holds it, or a
+/// `Secret` word's designation.
 pub(crate) struct Granted {
+    kind: u64,
     word: u64,
-    grant: Result<Grant, &'static str>,
+    grant: Result<Held, &'static str>,
+}
+
+enum Held {
+    Capability(Grant),
+    /// A `Secret`'s tag 7 body: its designation and canonical policy text.
+    Secret(Vec<u8>),
 }
 
 struct Grant {
@@ -65,16 +74,42 @@ const HOST_SIZE: &str = "a value holds an Env or Cred capability whose snapshot 
 const NET_RULES: &str = "a value holds a Net capability whose rules a snapshot cannot hold";
 const UNRESOLVED: &str = "a value holds a capability the recording did not resolve";
 
-/// Each of `words`, resolved through `registry`: the unit's own designation,
-/// or the run's.
-pub(crate) fn resolve(registry: &Registry, words: &[u64]) -> Vec<Granted> {
+/// Each of `words`, by row kind: a capability resolved through `registry`,
+/// the unit's own designation or the run's; a `Secret` through `context`, a
+/// context of the run, whose secrets lock is never held with a cell's.
+/// # Safety
+/// `context` is live, and each `Secret` word holds a live designation.
+pub(crate) unsafe fn resolve(
+    context: *const crate::Context,
+    registry: &Registry,
+    words: &[(u64, u64)],
+) -> Vec<Granted> {
     words
         .iter()
-        .map(|&word| Granted {
+        .map(|&(kind, word)| Granted {
+            kind,
             word,
-            grant: grant(registry, word),
+            grant: if kind == cross::SECRET {
+                // SAFETY: by the contract.
+                Ok(Held::Secret(unsafe { secret(context, word) }))
+            } else {
+                grant(registry, word).map(Held::Capability)
+            },
         })
         .collect()
+}
+
+/// A `Secret` word's designation and policy. Its word is the run's, so any
+/// unit's context resolves it.
+unsafe fn secret(context: *const crate::Context, word: u64) -> Vec<u8> {
+    // SAFETY: by the caller's contract.
+    let secret = unsafe { crate::secret::resolve(context, word) };
+    let mut body = Vec::new();
+    secret.origin.put(&mut body);
+    let policy = secret.policy.text();
+    put_varint(&mut body, policy.len() as u64);
+    body.extend_from_slice(policy.as_bytes());
+    body
 }
 
 fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
@@ -162,37 +197,62 @@ fn net_rules(rules: u64) -> Result<Vec<u8>, &'static str> {
 }
 
 /// A capability snapshot: tag 5, `ordinal`, then the kind and its stored
-/// bytes as the grant snapshot encodes them.
-fn snapshot(ordinal: u64, g: &Grant) -> Vec<u8> {
-    let mut out = vec![5];
-    put_varint(&mut out, ordinal);
-    out.push(g.kind);
-    put_varint(&mut out, g.stored.len() as u64);
-    out.extend_from_slice(&g.stored);
+/// bytes as the grant snapshot encodes them; a `Secret`'s: tag 7, `ordinal`,
+/// then its designation and policy.
+fn snapshot(ordinal: u64, held: &Held) -> Vec<u8> {
+    let mut out = vec![];
+    match held {
+        Held::Capability(g) => {
+            out.push(5);
+            put_varint(&mut out, ordinal);
+            out.push(g.kind);
+            put_varint(&mut out, g.stored.len() as u64);
+            out.extend_from_slice(&g.stored);
+        }
+        Held::Secret(body) => {
+            out.push(7);
+            put_varint(&mut out, ordinal);
+            out.extend_from_slice(body);
+        }
+    }
     out
 }
 
-fn find(grants: &[Granted], word: u64) -> Result<&Grant, &'static str> {
-    let g = grants.iter().find(|g| g.word == word).ok_or(UNRESOLVED)?;
+fn find(grants: &[Granted], kind: u64, word: u64) -> Result<&Held, &'static str> {
+    let g = grants
+        .iter()
+        .find(|g| g.kind == kind && g.word == word)
+        .ok_or(UNRESOLVED)?;
     g.grant.as_ref().map_err(|why| *why)
 }
 
-/// A sent capability's snapshot; the canonical form leaves its ordinal out.
-pub(in crate::tape) fn sent(grants: &[Granted], word: u64) -> Result<Vec<u8>, &'static str> {
-    find(grants, word).map(|g| snapshot(0, g))
+/// A sent capability's or `Secret`'s snapshot; the canonical form leaves its
+/// ordinal out.
+pub(in crate::tape) fn sent(
+    grants: &[Granted],
+    kind: u64,
+    word: u64,
+) -> Result<Vec<u8>, &'static str> {
+    find(grants, kind, word).map(|held| snapshot(0, held))
 }
 
 /// An arriving capability: a new object ordinal in the receiving unit, its
 /// snapshot, and its word's designation there, applied once the whole item
-/// is written.
+/// is written. An arriving `Secret` takes a new ordinal and keeps its
+/// designation and its word, which are the run's.
 pub(in crate::tape) fn arrived(
     live: &mut Live,
     generation: u32,
     grants: &[Granted],
+    kind: u64,
     word: u64,
     designations: &mut Vec<Designation>,
 ) -> Result<Vec<u8>, &'static str> {
-    let g = find(grants, word)?;
+    let held = find(grants, kind, word)?;
+    let Held::Capability(g) = held else {
+        let ordinal = live.unit_object();
+        return Ok(snapshot(ordinal, held));
+    };
     live.objects.push(Object {
         inner: g.inner,
         open_resource: false,
@@ -211,7 +271,7 @@ pub(in crate::tape) fn arrived(
             cred: g.cred.clone(),
         });
     }
-    Ok(snapshot(ordinal as u64, g))
+    Ok(snapshot(ordinal as u64, held))
 }
 
 /// Designate each arrived word on the receiving unit's cell. A word that

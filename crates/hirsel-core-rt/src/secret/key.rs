@@ -159,7 +159,7 @@ unsafe fn key_op(
             .secret_mac_tape
             .filter(|_| match args.op {
                 KeyOp::Sign { alg, source, .. } => {
-                    !matches!(args.key.origin, Origin::Sealed(_))
+                    !matches!(args.key.origin.made, Made::Sealed(_))
                         || (alg == SignAlg::P256 && source == SigningRandom::Host)
                 }
                 _ => true,
@@ -270,17 +270,20 @@ pub unsafe extern "C" fn hirsel_core_secret_unwrap(
         let KeyOp::Unwrap { plain, .. } = args.op else {
             unreachable!()
         };
+        let (stream, ordinal) = super::next_in_unit(true);
+        let origin = Origin {
+            made: Made::Unwrapped {
+                ordinal,
+                opaque: kek.origin.opaque(),
+            },
+            stream,
+        };
         let mut secrets = (*(*context).host_files)
             .registry
             .run_grants()
             .secrets
             .lock()
             .unwrap();
-        let origin = Origin::Unwrapped {
-            ordinal: secrets.unwraps,
-            opaque: kek.origin.opaque(),
-        };
-        secrets.unwraps += 1;
         let value = secrets.push(
             Secret::new(
                 origin,

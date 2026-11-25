@@ -2,8 +2,8 @@
 //! sequence buffer, client, socket, listener and `Shared` holder, by byte offset
 //! in the value. The runtime copies sequence contents and moves client handles
 //! and `Shared` holders. Sockets and listeners move with their host state,
-//! detached from the poller until taken. Capability and function words are
-//! plain and copy as bytes; their rows let a recorder write each one as its
+//! detached from the poller until taken. Capability, function and `Secret`
+//! words copy as bytes; their rows let a recorder write each one as its
 //! snapshot or identity (docs/recording.md, "Values").
 use crate::{Body, FieldTy, Handle, Layout, RecipeRow, Row, TypeRef, field_size};
 
@@ -19,6 +19,9 @@ pub const SHARED: u64 = 3;
 pub const CAPABILITY: u64 = 4;
 /// A plain `fn` code word: plain, copied with the value's bytes.
 pub const FUNCTION: u64 = 5;
+/// A `Secret` holder word: it moves with the value's bytes, the holder
+/// staying in the run's table; a recorder writes its designation.
+pub const SECRET: u64 = 6;
 
 /// Each owner of a value of row `ty`, as `[offset, kind, element bytes, element
 /// logical size]`, in field order.
@@ -50,6 +53,7 @@ fn held(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64, out: &mut 
         FieldTy::Handle(Handle::Client) => out.push([at, CLIENT, 0, 0]),
         FieldTy::Handle(Handle::Socket) => out.push([at, SOCKET, 0, 0]),
         FieldTy::Handle(Handle::Capability) => out.push([at, CAPABILITY, 0, 0]),
+        FieldTy::Handle(Handle::Secret) => out.push([at, SECRET, 0, 0]),
         FieldTy::Fn => out.push([at, FUNCTION, 0, 0]),
         FieldTy::Shared(_) => out.push([at, SHARED, 0, 0]),
         FieldTy::Array(e, n) => {

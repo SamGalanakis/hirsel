@@ -4,13 +4,13 @@ use hirsel_core_net::{ImportKind, ImportRefusal, ImportUse};
 #[test]
 fn media_import_marks_follow_secret_aliases() {
     let stored = Secret::new(
-        Origin::Sealed(0),
+        Origin::root(Made::Sealed(0)),
         SecretPolicy::parse("traffic_import(send)").unwrap(),
         Some(Arc::new(SecretBytes::new(Zeroizing::new(vec![7; 32])))),
         None,
     );
     let opaque = Secret::new(
-        Origin::Granted(1),
+        Origin::root(Made::Granted(1)),
         SecretPolicy::parse("srtp_import(receive)").unwrap(),
         None,
         None,

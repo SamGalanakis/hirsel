@@ -1,0 +1,536 @@
+// The command-line scan (README.md, "Parsing"): words are read left to right against the
+// flags of the current command and the global flags above it.
+/// Why a command line was refused. Flags are named in their long form with their value name,
+/// as `--out <FILE>`; positionals as `<NAME>` or `[NAME]`.
+pub type Problem = Unknown(String, Option[String]) | Unexpected(String) | NoValue(String) | NotAttached(String, String) | SwitchValue(String, String) | Repeated(String) | Invalid(String, String, String) | NotChoice(String, String, List[String], Option[String]) | Missing(String) | UnknownCommand(String, List[String]) | More(u64)
+
+/// A refused command line: the command reached and what was wrong, at most max_errors
+/// problems and then More(n) for the n left out.
+pub type Failure {
+    at: Cmd,
+    problems: List[Problem]
+}
+
+/// What a command line asks for.
+pub type Outcome = Run(Matches) | Help(Cmd) | Version | Failed(Failure)
+
+/// The values a command line gave.
+pub opaque type Matches {
+    kinds: Bytes,
+    states: List[u64],
+    texts: List[List[String]],
+    ints: List[i64],
+    path: List[u64],
+    commands: u64
+}
+
+// What a flag's environment variable held when parse began.
+type EnvRead = Unset | Set(String) | Unreadable
+
+type Scan {
+    cmd: u64,
+    pos: u64,
+    given: Bytes,
+    states: List[u64],
+    texts: List[List[String]],
+    ints: List[i64],
+    path: List[u64],
+    problems: List[Problem],
+    max_errors: u64,
+    more: u64,
+    help: bool,
+    version: bool,
+    stopped: bool
+}
+
+const NOT_GIVEN: u8 = 0
+
+const FROM_LINE: u8 = 1
+
+/// Reads the command line `a` against `s`. A flag bound with `env` reads its variable from
+/// `source` when the line does not give it; an unset, empty or denied variable counts as
+/// unset. At most max_errors (at least 1) problems are kept.
+pub fn parse(s: Spec, a: Args, source: Option[Env], max_errors: u64) -> Outcome {
+    let mut words: List[String] = list.with_capacity(args.len(a))
+    for i in 0 .. args.len(a) {
+        if let Some(w) = args.get(a, i) {
+            list.push(mut words, string.from(w))
+        }
+    }
+    let mut reads: List[EnvRead] = list.with_capacity(list.len(s.slots))
+    for slot in s.slots {
+        let read = match (source, slot.env) {
+            (Some(e), Some(variable)) => match env.get(e, variable) {
+                Ok(Some(v)) => Set(string.from(v)),
+                Ok(None) => Unset,
+                Error(Denied) => Unset,
+                Error(NotUtf8) => Unreadable,
+            },
+            _ => Unset,
+        }
+        list.push(mut reads, take read)
+    }
+    scan(s, words, reads, max_errors)
+}
+
+fn scan(s: Spec, words: List[String], reads: List[EnvRead], max_errors: u64) -> Outcome {
+    if max_errors == 0 {
+        fail("max_errors is 0")
+    }
+    let n = list.len(s.slots)
+    let mut texts: List[List[String]] = list.with_capacity(n)
+    for _ in 0 .. n {
+        list.push(mut texts, list.new())
+    }
+    let mut given: Bytes = list.new()
+    list.fill(mut given, n, NOT_GIVEN)
+    let mut states: List[u64] = list.new()
+    list.fill(mut states, n, 0)
+    let mut ints: List[i64] = list.new()
+    list.fill(mut ints, n, 0)
+    let mut path: List[u64] = list.new()
+    list.push(mut path, 0)
+    let mut sc = Scan(cmd: 0, pos: 0, given: take given, states: take states, texts: take texts, ints: take ints, path: take path, problems: list.new(), max_errors, more: 0, help: false, version: false, stopped: false)
+    let mut i: u64 = 0
+    let mut flags = true
+    while i < list.len(words) && !sc.stopped {
+        let t = words[i]
+        i += 1
+        if !flags || t == "-" {
+            read_word(mut sc, s, t, !flags)
+        } else if t == "--" {
+            flags = false
+        } else if string.starts_with(t, "--") {
+            i = read_long(mut sc, s, words, i, t)
+        } else if string.starts_with(t, "-") {
+            i = read_shorts(mut sc, s, words, i, t)
+        } else {
+            read_word(mut sc, s, t, false)
+        }
+    }
+    if sc.help {
+        return Help(Cmd(at: sc.cmd))
+    }
+    if sc.version {
+        return Version
+    }
+    if !sc.stopped {
+        settle(mut sc, s, reads)
+    }
+    if sc.more > 0 {
+        list.push(mut sc.problems, More(sc.more))
+    }
+    if list.len(sc.problems) > 0 {
+        return Failed(Failure(at: Cmd(at: sc.cmd), problems: replace(mut sc.problems, list.new())))
+    }
+    let mut kinds: Bytes = list.with_capacity(n)
+    for slot in s.slots {
+        list.push(mut kinds, slot.kind)
+    }
+    let Scan(cmd: _, pos: _, given: _, states: got_states, texts: got_texts, ints: got_ints, path: got_path, problems: _, max_errors: _, more: _, help: _, version: _, stopped: _) = sc
+    Run(Matches(kinds: take kinds, states: take got_states, texts: take got_texts, ints: take got_ints, path: take got_path, commands: list.len(s.commands)))
+}
+
+fn note(mut sc: Scan, take p: Problem) {
+    if list.len(sc.problems) < sc.max_errors {
+        list.push(mut sc.problems, take p)
+    } else {
+        sc.more += 1
+    }
+}
+
+fn joined(a: String, b: String) -> String {
+    let mut t = string.from(a)
+    string.push(mut t, b)
+    t
+}
+
+// A flag as errors and help name it: `--long`, or `--long <VALUE>` when it takes a value.
+fn shown(s: Spec, slot: u64) -> String {
+    let f = s.slots[slot]
+    if f.kind >= ARG {
+        let mut t = string.from(if f.required {
+            "<"
+        } else {
+            "["
+        })
+        string.push(mut t, f.long)
+        string.push(mut t, if f.required {
+            ">"
+        } else {
+            "]"
+        })
+        if f.kind == REST {
+            string.push(mut t, "...")
+        }
+        return t
+    }
+    let mut t = joined("--", f.long)
+    if f.kind != SWITCH && f.kind != COUNT {
+        string.push(mut t, " <")
+        string.push(mut t, f.value_name)
+        string.push(mut t, ">")
+    }
+    t
+}
+
+// Whether flag `slot` may be given while `cmd` is the current command.
+fn active(s: Spec, cmd: u64, slot: u64) -> bool {
+    let f = s.slots[slot]
+    f.kind < ARG && (f.cmd == cmd || (f.global && below(s, cmd, f.cmd)))
+}
+
+// The flag named `--name` (or its negation `--no-name`) on `cmd`, and whether it was negated.
+fn find_long(s: Spec, cmd: u64, name: String) -> Option[(u64, bool)] {
+    for j in 0 .. list.len(s.slots) {
+        if active(s, cmd, j) {
+            if s.slots[j].long == name {
+                return Some((j, false))
+            }
+            if s.slots[j].negatable && negation(s.slots[j].long) == name {
+                return Some((j, true))
+            }
+        }
+    }
+    None
+}
+
+fn find_short(s: Spec, cmd: u64, c: char) -> Option[u64] {
+    for j in 0 .. list.len(s.slots) {
+        if active(s, cmd, j) && s.slots[j].short == Some(c) {
+            return Some(j)
+        }
+    }
+    None
+}
+
+// Whether `w` (starting with `-`) names a flag of `cmd`, so it is not taken as a value.
+fn names_flag(s: Spec, cmd: u64, w: String) -> bool {
+    if string.starts_with(w, "--") {
+        let body = string.slice(w, 2, string.byte_len(w))
+        let end = match string.find(body, 0, "=") {
+            Some(k) => k,
+            None => string.byte_len(body),
+        }
+        let name = string.slice(body, 0, end)
+        if name == "help" || (name == "version" && cmd == 0 && has(s.version)) {
+            return true
+        }
+        return has(find_long(s, cmd, name))
+    }
+    match string.next_scalar(w, 1) {
+        Some((c, _)) => c == 'h' || (c == 'V' && cmd == 0 && has(s.version)) || has(find_short(s, cmd, c)),
+        None => false,
+    }
+}
+
+// clap_lex's is_number: digits, at most one `.` after the first byte and before an
+// exponent, and at most one `e` or `E` after the first byte and not last.
+fn is_number(t: String) -> bool {
+    let b = string.as_bytes(t)
+    let mut dot = false
+    let mut e: Option[u64] = None
+    for i in 0 .. list.len(b) {
+        let c = b[i]
+        if c < b'0' || c > b'9' {
+            if c == b'.' && !dot && !has(e) && i > 0 {
+                dot = true
+            } else if (c == b'e' || c == b'E') && !has(e) && i > 0 {
+                e = Some(i)
+            } else {
+                return false
+            }
+        }
+    }
+    match e {
+        Some(i) => i != list.len(b) - 1,
+        None => true,
+    }
+}
+
+fn read_long(mut sc: Scan, s: Spec, words: List[String], i: u64, t: String) -> u64 {
+    let body = string.slice(t, 2, string.byte_len(t))
+    let eq = string.find(body, 0, "=")
+    let end = match eq {
+        Some(k) => k,
+        None => string.byte_len(body),
+    }
+    let name = string.slice(body, 0, end)
+    if !has(eq) && name == "help" {
+        sc.help = true
+        sc.stopped = true
+        return i
+    }
+    if !has(eq) && name == "version" && sc.cmd == 0 && has(s.version) {
+        sc.version = true
+        sc.stopped = true
+        return i
+    }
+    let Some((slot, negated)) = find_long(s, sc.cmd, name) else {
+        note(mut sc, Unknown(joined("--", name), None))
+        return i
+    }
+    let kind = s.slots[slot].kind
+    if kind == SWITCH || kind == COUNT {
+        if let Some(k) = eq {
+            note(mut sc, SwitchValue(joined("--", name), string.from(string.slice(body, k + 1, string.byte_len(body)))))
+        } else if kind == SWITCH {
+            set_switch(mut sc, s, slot, !negated)
+        } else {
+            bump(mut sc, slot)
+        }
+        return i
+    }
+    match eq {
+        Some(k) => {
+            set_value(mut sc, s, slot, string.slice(body, k + 1, string.byte_len(body)))
+            i
+        }
+        None => next_value(mut sc, s, words, i, slot),
+    }
+}
+
+fn read_shorts(mut sc: Scan, s: Spec, words: List[String], i: u64, t: String) -> u64 {
+    let mut at: u64 = 1
+    while let Some((c, next)) = string.next_scalar(t, at) {
+        at = next
+        if c == 'h' {
+            sc.help = true
+            sc.stopped = true
+            return i
+        }
+        if c == 'V' && sc.cmd == 0 && has(s.version) {
+            sc.version = true
+            sc.stopped = true
+            return i
+        }
+        let mut flag_text = string.from("-")
+        string.push_char(mut flag_text, c)
+        let Some(slot) = find_short(s, sc.cmd, c) else {
+            note(mut sc, Unknown(take flag_text, None))
+            return i
+        }
+        let kind = s.slots[slot].kind
+        let tail = string.slice(t, at, string.byte_len(t))
+        if kind == SWITCH || kind == COUNT {
+            if string.starts_with(tail, "=") {
+                note(mut sc, SwitchValue(take flag_text, string.from(string.slice(tail, 1, string.byte_len(tail)))))
+                return i
+            }
+            if kind == SWITCH {
+                set_switch(mut sc, s, slot, true)
+            } else {
+                bump(mut sc, slot)
+            }
+        } else if string.byte_len(tail) == 0 {
+            return next_value(mut sc, s, words, i, slot)
+        } else if string.starts_with(tail, "=") {
+            set_value(mut sc, s, slot, string.slice(tail, 1, string.byte_len(tail)))
+            return i
+        } else {
+            set_value(mut sc, s, slot, tail)
+            return i
+        }
+    }
+    i
+}
+
+// The value of flag `slot` is the next word. A word starting with `-` is a value only when
+// it is `-` itself or a number for an integer flag; another flag is left to be read, and
+// anything else is refused with the advice to attach it.
+fn next_value(mut sc: Scan, s: Spec, words: List[String], i: u64, slot: u64) -> u64 {
+    if i >= list.len(words) {
+        note(mut sc, NoValue(shown(s, slot)))
+        return i
+    }
+    let w = words[i]
+    if string.starts_with(w, "-") && w != "-" {
+        if s.slots[slot].kind == INT && is_number(string.slice(w, 1, string.byte_len(w))) {
+            set_value(mut sc, s, slot, w)
+            return i + 1
+        }
+        if w == "--" || names_flag(s, sc.cmd, w) {
+            note(mut sc, NoValue(shown(s, slot)))
+            return i
+        }
+        note(mut sc, NotAttached(shown(s, slot), string.from(w)))
+        return i + 1
+    }
+    set_value(mut sc, s, slot, w)
+    i + 1
+}
+
+fn set_switch(mut sc: Scan, s: Spec, slot: u64, on: bool) {
+    if sc.given[slot] != NOT_GIVEN {
+        note(mut sc, Repeated(shown(s, slot)))
+        return
+    }
+    sc.given[slot] = FROM_LINE
+    sc.states[slot] = if on {
+        1
+    } else {
+        2
+    }
+}
+
+fn bump(mut sc: Scan, slot: u64) {
+    sc.given[slot] = FROM_LINE
+    if sc.states[slot] < 255 {
+        sc.states[slot] += 1
+    }
+}
+
+fn set_value(mut sc: Scan, s: Spec, slot: u64, text: String) {
+    let kind = s.slots[slot].kind
+    if kind != MANY && sc.given[slot] != NOT_GIVEN {
+        note(mut sc, Repeated(shown(s, slot)))
+        return
+    }
+    sc.given[slot] = FROM_LINE
+    store(mut sc, s, slot, text, text)
+}
+
+// Stores `text` as flag `slot`'s value, or notes why it is not one; `quoted` is the value
+// as the problem shows it.
+fn store(mut sc: Scan, s: Spec, slot: u64, text: String, quoted: String) {
+    let kind = s.slots[slot].kind
+    if kind == INT {
+        match (int.parse(text) : Result[i64, ParseError]) {
+            Ok(v) => {
+                sc.ints[slot] = v
+                sc.states[slot] = 1
+            }
+            Error(_) => note(mut sc, Invalid(shown(s, slot), string.from(quoted), string.from("expected an integer"))),
+        }
+        return
+    }
+    if kind == CHOICE && !listed(s.slots[slot].choices, text) {
+        let mut choices: List[String] = list.new()
+        for c in s.slots[slot].choices {
+            list.push(mut choices, string.from(c))
+        }
+        note(mut sc, NotChoice(shown(s, slot), string.from(quoted), take choices, None))
+        return
+    }
+    list.push(mut sc.texts[slot], string.from(text))
+}
+
+// The `pos`-th positional of `cmd`, or the rest positional it ends with.
+fn nth_positional(s: Spec, cmd: u64, pos: u64) -> Option[u64] {
+    let mut k: u64 = 0
+    for j in 0 .. list.len(s.slots) {
+        if s.slots[j].cmd == cmd && s.slots[j].kind >= ARG {
+            if k == pos || s.slots[j].kind == REST {
+                return Some(j)
+            }
+            k += 1
+        }
+    }
+    None
+}
+
+fn read_word(mut sc: Scan, s: Spec, t: String, literal: bool) {
+    if !literal && sc.pos == 0 && s.commands[sc.cmd].subs > 0 {
+        for c in 1 .. list.len(s.commands) {
+            if s.commands[c].parent == sc.cmd && s.commands[c].name == t {
+                sc.cmd = c
+                list.push(mut sc.path, c)
+                return
+            }
+        }
+    }
+    match nth_positional(s, sc.cmd, sc.pos) {
+        Some(slot) => {
+            sc.given[slot] = FROM_LINE
+            list.push(mut sc.texts[slot], string.from(t))
+            if s.slots[slot].kind == ARG {
+                sc.pos += 1
+            }
+        }
+        None => {
+            if !literal && sc.pos == 0 && s.commands[sc.cmd].subs > 0 {
+                note(mut sc, UnknownCommand(string.from(t), list.new()))
+                sc.stopped = true
+            } else {
+                note(mut sc, Unexpected(string.from(t)))
+            }
+        }
+    }
+}
+
+// The flags and positionals not given on the line take their environment variable, then
+// their default; a required one still missing is a problem.
+fn settle(mut sc: Scan, s: Spec, reads: List[EnvRead]) {
+    for slot in 0 .. list.len(s.slots) {
+        let f = s.slots[slot]
+        if sc.given[slot] == NOT_GIVEN && listed_command(sc.path, f.cmd) {
+            if let Some(variable) = f.env {
+                match reads[slot] {
+                    Set(v) => {
+                        if string.byte_len(v) > 0 {
+                            sc.given[slot] = 2
+                            let mut quoted = joined("$", variable)
+                            string.push(mut quoted, "=")
+                            string.push(mut quoted, v)
+                            if f.kind == SWITCH {
+                                match boolish(v) {
+                                    Some(on) => {
+                                        sc.states[slot] = if on {
+                                            1
+                                        } else {
+                                            2
+                                        }
+                                    }
+                                    None => note(mut sc, Invalid(shown(s, slot), take quoted, string.from("expected one of y, yes, t, true, on, 1, n, no, f, false, off, 0"))),
+                                }
+                            } else {
+                                store(mut sc, s, slot, v, quoted)
+                            }
+                        }
+                    }
+                    Unreadable => {
+                        sc.given[slot] = 2
+                        note(mut sc, Invalid(shown(s, slot), joined("$", variable), string.from("the variable is not valid UTF-8")))
+                    }
+                    Unset => {}
+                }
+            }
+        }
+        if sc.given[slot] == NOT_GIVEN && listed_command(sc.path, f.cmd) {
+            if let Some(d) = f.fallback {
+                sc.given[slot] = 3
+                store(mut sc, s, slot, d, d)
+            } else if f.required {
+                note(mut sc, Missing(shown(s, slot)))
+            }
+        }
+    }
+}
+
+fn has[T](x: Option[T]) -> bool {
+    match x {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn listed_command(path: List[u64], cmd: u64) -> bool {
+    for c in path {
+        if c == cmd {
+            return true
+        }
+    }
+    false
+}
+
+// clap's BoolishValueParser.
+fn boolish(v: String) -> Option[bool] {
+    let t = string.to_lower(v)
+    if t == "y" || t == "yes" || t == "t" || t == "true" || t == "on" || t == "1" {
+        Some(true)
+    } else if t == "n" || t == "no" || t == "f" || t == "false" || t == "off" || t == "0" {
+        Some(false)
+    } else {
+        None
+    }
+}

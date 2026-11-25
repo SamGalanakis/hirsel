@@ -1,0 +1,389 @@
+// Laws for the spec, the scan and matches (README.md, "Spec", "Parsing" and "Values"). The expected
+// rows are written by hand from BRIEF-PARSING's token table and clap's lexer rules, not
+// produced by the code under test.
+fn split_words(line: String) -> List[String] {
+    let mut out: List[String] = list.new()
+    let mut at: u64 = 0
+    while let Some((part, next)) = string.next_split(line, at, " ") {
+        if string.byte_len(part) > 0 {
+            list.push(mut out, string.from(part))
+        }
+        at = next
+    }
+    out
+}
+
+fn mismatch(row: String, got: String, want: String) {
+    let mut m = string.from("row `")
+    string.push(mut m, row)
+    string.push(mut m, "`: got `")
+    string.push(mut m, got)
+    string.push(mut m, "`, want `")
+    string.push(mut m, want)
+    string.push(mut m, "`")
+    fail(take m)
+}
+
+fn push_option(mut out: String, x: Option[View[String]]) {
+    match x {
+        Some(t) => {
+            string.push(mut out, "'")
+            string.push(mut out, t)
+            string.push(mut out, "'")
+        }
+        None => string.push(mut out, "-"),
+    }
+}
+
+fn problem_text(mut out: String, p: Problem) {
+    match p {
+        Unknown(t, hint) => {
+            string.push(mut out, "Unknown(")
+            string.push(mut out, t)
+            string.push(mut out, ",")
+            match hint {
+                Some(h) => string.push(mut out, h),
+                None => string.push(mut out, "-"),
+            }
+            string.push(mut out, ")")
+        }
+        Unexpected(t) => {
+            string.push(mut out, "Unexpected(")
+            string.push(mut out, t)
+            string.push(mut out, ")")
+        }
+        NoValue(t) => {
+            string.push(mut out, "NoValue(")
+            string.push(mut out, t)
+            string.push(mut out, ")")
+        }
+        NotAttached(f, v) => {
+            string.push(mut out, "NotAttached(")
+            string.push(mut out, f)
+            string.push(mut out, ",")
+            string.push(mut out, v)
+            string.push(mut out, ")")
+        }
+        SwitchValue(f, v) => {
+            string.push(mut out, "SwitchValue(")
+            string.push(mut out, f)
+            string.push(mut out, ",")
+            string.push(mut out, v)
+            string.push(mut out, ")")
+        }
+        Repeated(f) => {
+            string.push(mut out, "Repeated(")
+            string.push(mut out, f)
+            string.push(mut out, ")")
+        }
+        Invalid(f, v, _) => {
+            string.push(mut out, "Invalid(")
+            string.push(mut out, f)
+            string.push(mut out, ",")
+            string.push(mut out, v)
+            string.push(mut out, ")")
+        }
+        NotChoice(f, v, _, _) => {
+            string.push(mut out, "NotChoice(")
+            string.push(mut out, f)
+            string.push(mut out, ",")
+            string.push(mut out, v)
+            string.push(mut out, ")")
+        }
+        Missing(f) => {
+            string.push(mut out, "Missing(")
+            string.push(mut out, f)
+            string.push(mut out, ")")
+        }
+        UnknownCommand(t, _) => {
+            string.push(mut out, "UnknownCommand(")
+            string.push(mut out, t)
+            string.push(mut out, ")")
+        }
+        More(k) => {
+            string.push(mut out, "More(")
+            string.push_u64(mut out, k)
+            string.push(mut out, ")")
+        }
+    }
+}
+
+fn failure_text(f: Failure) -> String {
+    let mut out = string.new()
+    for p in f.problems {
+        if string.byte_len(out) > 0 {
+            string.push(mut out, " ")
+        }
+        problem_text(mut out, p)
+    }
+    out
+}
+
+/// bug: clustering, `-ofile`, `-o=file`, an attached `--x=`, `--`, a lone `-`, a value
+/// starting with `-`, a negative integer, a switch given a value, a repeat, `--no-x`, or the
+/// flag-then-environment-then-default order read wrongly.
+/// oracle: BRIEF-PARSING §1.3's token table and clap_lex's is_number, written out by hand;
+/// the environment rows follow the ruling's flag, then variable, then default order.
+@test
+fn token_table() -> Result[(), ()] {
+    let mut s = spec("app", "an app")
+    let top = root(s)
+    let verbose = count(mut s, top, "verbose", Some('v'), "more output")
+    let quiet = switch(mut s, top, "quiet", Some('q'), "less output")
+    let out = value(mut s, top, "out", Some('o'), "OUT", "the output")
+    let color = negatable(mut s, top, "color", None, "colour the output")
+    let level = integer(mut s, top, "level", None, "N", "the level")
+    bind_env(mut s, "APP_LEVEL")
+    default_to(mut s, "1")
+    let files = rest(mut s, top, "FILE", "inputs", false)
+    // (argument line, APP_LEVEL or "-" for unset, the outcome)
+    let mut rows: List[(String, String, String)] = list.new()
+    list.push(mut rows, ("-vvq", "-", "v=2 q=on o=- color=- level=1 files="))
+    list.push(mut rows, ("-ofile", "-", "v=0 q=- o='file' color=- level=1 files="))
+    list.push(mut rows, ("-o=file", "-", "v=0 q=- o='file' color=- level=1 files="))
+    list.push(mut rows, ("-o file", "-", "v=0 q=- o='file' color=- level=1 files="))
+    list.push(mut rows, ("-qofile", "-", "v=0 q=on o='file' color=- level=1 files="))
+    list.push(mut rows, ("-oq", "-", "v=0 q=- o='q' color=- level=1 files="))
+    list.push(mut rows, ("--out=x", "-", "v=0 q=- o='x' color=- level=1 files="))
+    list.push(mut rows, ("--out x", "-", "v=0 q=- o='x' color=- level=1 files="))
+    list.push(mut rows, ("--out=", "-", "v=0 q=- o='' color=- level=1 files="))
+    list.push(mut rows, ("--out=a=b", "-", "v=0 q=- o='a=b' color=- level=1 files="))
+    list.push(mut rows, ("-o==x", "-", "v=0 q=- o='=x' color=- level=1 files="))
+    list.push(mut rows, ("--out -", "-", "v=0 q=- o='-' color=- level=1 files="))
+    list.push(mut rows, ("--out -x", "-", "NotAttached(--out <OUT>,-x)"))
+    list.push(mut rows, ("--out -q", "-", "NoValue(--out <OUT>)"))
+    list.push(mut rows, ("--out --level 3 a", "-", "NoValue(--out <OUT>)"))
+    list.push(mut rows, ("-o", "-", "NoValue(--out <OUT>)"))
+    list.push(mut rows, ("--level -5", "-", "v=0 q=- o=- color=- level=-5 files="))
+    list.push(mut rows, ("--level -5e", "-", "NotAttached(--level <N>,-5e)"))
+    list.push(mut rows, ("--level x", "-", "Invalid(--level <N>,x)"))
+    list.push(mut rows, ("-q=1", "-", "SwitchValue(-q,1)"))
+    list.push(mut rows, ("--quiet=1", "-", "SwitchValue(--quiet,1)"))
+    list.push(mut rows, ("--color", "-", "v=0 q=- o=- color=on level=1 files="))
+    list.push(mut rows, ("--no-color", "-", "v=0 q=- o=- color=off level=1 files="))
+    list.push(mut rows, ("--color --no-color", "-", "Repeated(--color)"))
+    list.push(mut rows, ("-x", "-", "Unknown(-x,-)"))
+    list.push(mut rows, ("-qx", "-", "Unknown(-x,-)"))
+    list.push(mut rows, ("-5", "-", "Unknown(-5,-)"))
+    list.push(mut rows, ("a -- -q", "-", "v=0 q=- o=- color=- level=1 files=a,-q"))
+    list.push(mut rows, ("-- --", "-", "v=0 q=- o=- color=- level=1 files=--"))
+    list.push(mut rows, ("-", "-", "v=0 q=- o=- color=- level=1 files=-"))
+    list.push(mut rows, ("-q -q", "-", "Repeated(--quiet)"))
+    list.push(mut rows, ("-o a -o b", "-", "Repeated(--out <OUT>)"))
+    list.push(mut rows, ("-vvvv -v", "-", "v=5 q=- o=- color=- level=1 files="))
+    list.push(mut rows, ("", "7", "v=0 q=- o=- color=- level=7 files="))
+    list.push(mut rows, ("--level 2", "7", "v=0 q=- o=- color=- level=2 files="))
+    list.push(mut rows, ("", "", "v=0 q=- o=- color=- level=1 files="))
+    list.push(mut rows, ("", "seven", "Invalid(--level <N>,$APP_LEVEL=seven)"))
+    for row in rows {
+        let mut reads: List[EnvRead] = list.new()
+        for j in 0u64 .. 6 {
+            if j == 4 && row.1 != "-" {
+                list.push(mut reads, Set(string.from(row.1)))
+            } else {
+                list.push(mut reads, Unset)
+            }
+        }
+        let got = match scan(s, split_words(row.0), reads, 8) {
+            Run(m) => {
+                let mut t = string.from("v=")
+                string.push_u64(mut t, int.widen(count_of(m, verbose)))
+                string.push(mut t, match switch_of(m, quiet) {
+                    Some(true) => " q=on",
+                    Some(false) => " q=off",
+                    None => " q=-",
+                })
+                string.push(mut t, " o=")
+                push_option(mut t, value_of(m, out))
+                string.push(mut t, match switch_of(m, color) {
+                    Some(true) => " color=on",
+                    Some(false) => " color=off",
+                    None => " color=-",
+                })
+                string.push(mut t, " level=")
+                match int_of(m, level) {
+                    Some(v) => string.push_i64(mut t, v),
+                    None => string.push(mut t, "-"),
+                }
+                string.push(mut t, " files=")
+                string.push(mut t, string.join(rest_of(m, files), ","))
+                t
+            }
+            Failed(f) => failure_text(f),
+            Help(_) => string.from("help"),
+            Version => string.from("version"),
+        }
+        if got != row.2 {
+            mismatch(row.0, got, row.2)
+        }
+    }
+    Ok(())
+}
+
+/// bug: help, subcommand selection, a global given after its subcommand, an extra positional,
+/// a missing required positional or an unknown subcommand read wrongly, or errors past
+/// max_errors kept instead of counted.
+/// oracle: clap's rules as the ruling states them, written out by hand.
+@test
+fn commands_and_limits() -> Result[(), ()] {
+    let mut s = spec("git", "a vcs")
+    let top = root(s)
+    let verbose = switch(mut s, top, "verbose", Some('v'), "talk")
+    global(mut s)
+    let add = sub(mut s, top, "add", "add files")
+    let paths = rest(mut s, add, "PATH", "paths", true)
+    let commit = sub(mut s, top, "commit", "record")
+    let message = value(mut s, commit, "message", Some('m'), "MSG", "the message")
+    require(mut s)
+    let mut rows: List[(String, String)] = list.new()
+    list.push(mut rows, ("add a b -v", "add v=on paths=a,b"))
+    list.push(mut rows, ("-v add a", "add v=on paths=a"))
+    list.push(mut rows, ("add", "Missing(<PATH>...)"))
+    list.push(mut rows, ("commit", "Missing(--message <MSG>)"))
+    list.push(mut rows, ("commit -m hi", "commit v=- msg=hi"))
+    list.push(mut rows, ("commit -m hi extra", "Unexpected(extra)"))
+    list.push(mut rows, ("comit -x", "UnknownCommand(comit)"))
+    list.push(mut rows, ("-m commit", "Unknown(-m,-) Missing(--message <MSG>)"))
+    list.push(mut rows, ("commit -x -y -z -w", "Unknown(-x,-) Unknown(-y,-) More(3)"))
+    list.push(mut rows, ("add --help", "help add"))
+    list.push(mut rows, ("-x -h", "help top"))
+    list.push(mut rows, ("", "none v=-"))
+    for row in rows {
+        let mut reads: List[EnvRead] = list.new()
+        for _ in 0u64 .. 3 {
+            list.push(mut reads, Unset)
+        }
+        let got = match scan(s, split_words(row.0), reads, 2) {
+            Run(m) => {
+                let mut t = string.new()
+                match command_of(m, top) {
+                    Some(c) => {
+                        if c == add {
+                            string.push(mut t, "add")
+                        } else if c == commit {
+                            string.push(mut t, "commit")
+                        } else {
+                            string.push(mut t, "?")
+                        }
+                    }
+                    None => string.push(mut t, "none"),
+                }
+                string.push(mut t, if is_on(m, verbose) {
+                    " v=on"
+                } else {
+                    " v=-"
+                })
+                if command_of(m, top) == Some(add) {
+                    string.push(mut t, " paths=")
+                    string.push(mut t, string.join(rest_of(m, paths), ","))
+                }
+                if command_of(m, top) == Some(commit) {
+                    string.push(mut t, " msg=")
+                    if let Some(v) = value_of(m, message) {
+                        string.push(mut t, v)
+                    }
+                }
+                t
+            }
+            Failed(f) => failure_text(f),
+            Help(c) => string.from(if c == add {
+                "help add"
+            } else if c == top {
+                "help top"
+            } else {
+                "help ?"
+            }),
+            Version => string.from("version"),
+        }
+        if got != row.1 {
+            mismatch(row.0, got, row.1)
+        }
+    }
+    Ok(())
+}
+
+fn digit_spec(c: char) -> u64 {
+    let mut s = spec("app", "")
+    let top = root(s)
+    let f = switch(mut s, top, "five", Some(c), "")
+    f.slot
+}
+
+/// bug: a digit short name accepted, so `-5` would read as a flag and not as a negative number.
+/// oracle: the ruling (R6): a digit short name is refused when the spec is built; a letter is not.
+@test
+fn digit_short_refused() -> Result[(), ()] {
+    match isolate(fn() -> u64 {
+        digit_spec('5')
+    }) {
+        Ok(Ok(_)) => fail("a digit short name was accepted"),
+        _ => {}
+    }
+    match isolate(fn() -> u64 {
+        digit_spec('f')
+    }) {
+        Ok(Ok(0)) => {}
+        _ => fail("a letter short name was refused"),
+    }
+    Ok(())
+}
+
+fn cross_kind() -> u64 {
+    let mut a = spec("a", "")
+    let ra = root(a)
+    let wrong = value(mut a, ra, "name", None, "N", "")
+    let mut b = spec("b", "")
+    let rb = root(b)
+    let _ = switch(mut b, rb, "flag", None, "")
+    let mut reads: List[EnvRead] = list.new()
+    list.push(mut reads, Unset)
+    match scan(b, list.new(), reads, 1) {
+        Run(m) => match value_of(m, wrong) {
+            Some(_) => 1,
+            None => 0,
+        },
+        _ => 2,
+    }
+}
+
+fn same_kind() -> u64 {
+    let mut a = spec("a", "")
+    let ra = root(a)
+    let other = switch(mut a, ra, "x", None, "")
+    let mut b = spec("b", "")
+    let rb = root(b)
+    let _ = switch(mut b, rb, "flag", None, "")
+    let mut reads: List[EnvRead] = list.new()
+    list.push(mut reads, Unset)
+    let mut words: List[String] = list.new()
+    list.push(mut words, string.from("--flag"))
+    match scan(b, words, reads, 1) {
+        Run(m) => if is_on(m, other) {
+            1
+        } else {
+            0
+        },
+        _ => 2,
+    }
+}
+
+/// bug: a handle read against matches whose slot has another kind returns that slot's data
+/// instead of failing.
+/// oracle: the ruling (R6): a wrong-kind handle is a run failure; a same-kind handle from
+/// another spec is not detectable and reads its slot.
+@test
+fn cross_kind_handle_fails() -> Result[(), ()] {
+    match isolate(fn() -> u64 {
+        cross_kind()
+    }) {
+        Ok(Ok(_)) => fail("a value handle read a switch slot"),
+        _ => {}
+    }
+    match isolate(fn() -> u64 {
+        same_kind()
+    }) {
+        Ok(Ok(1)) => {}
+        _ => fail("a same-kind handle did not read its slot"),
+    }
+    Ok(())
+}

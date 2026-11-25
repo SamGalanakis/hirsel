@@ -1,0 +1,5 @@
+hirsel.laws 1
+cli@1/cli/commands_and_limits src=5e856e2185b0d3a7 sig=05fcb8ef4445734b run=c2c0c6612d4cbb79 bug=020c5fcdf7a163c4 oracle=84089a1309391935 rows=pending
+cli@1/cli/cross_kind_handle_fails src=fa4f8b1bcab9a908 sig=ebf5ba5c14139839 run=c2c0c6612d4cbb79 bug=56cdcc0c62963292 oracle=26b88a67795ba387 rows=pending
+cli@1/cli/digit_short_refused src=ef07c0c79fb7457b sig=2809e7728d00f0f8 run=c2c0c6612d4cbb79 bug=35640269142ef700 oracle=758572a41ed98fc6 rows=pending
+cli@1/cli/token_table src=3dd0a65b1015027d sig=de02a0209a0e81bc run=c2c0c6612d4cbb79 bug=b559e5acfa6a6228 oracle=b6766624555da682 rows=pending

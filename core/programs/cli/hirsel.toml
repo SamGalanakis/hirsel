@@ -1,0 +1,18 @@
+[package]
+name = "cli"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"spec.hirsel" = "cli"
+"scan.hirsel" = "cli"
+"matches.hirsel" = "cli"
+
+[tests]
+limit = 67108864
+
+[tests.sources]
+"tests/parse.hirsel" = "cli"

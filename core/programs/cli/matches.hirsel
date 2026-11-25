@@ -1,0 +1,86 @@
+// Reading parsed values (README.md, "Values"). An accessor fails when its handle's slot
+// is out of range or of another kind; a handle of the same kind from another spec cannot be
+// told apart and reads that slot.
+fn checked(m: Matches, slot: u64, kind: u8) {
+    if slot >= list.len(m.kinds) || m.kinds[slot] != kind {
+        fail("a handle is not of the spec these matches were parsed with")
+    }
+}
+
+/// Some(true) when the switch was given (or its variable was true), Some(false) when its
+/// negation was given (or its variable was false), else None.
+pub fn switch_of(m: Matches, h: Switch) -> Option[bool] {
+    checked(m, h.slot, SWITCH)
+    match m.states[h.slot] {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether the switch is on.
+pub fn is_on(m: Matches, h: Switch) -> bool {
+    switch_of(m, h) == Some(true)
+}
+
+/// How many times the counted switch was given, at most 255.
+pub fn count_of(m: Matches, h: Count) -> u8 {
+    checked(m, h.slot, COUNT)
+    int.narrow(m.states[h.slot])
+}
+
+fn first(m: Matches, slot: u64) -> Option[View[String]] in m {
+    list.get(m.texts[slot], 0)
+}
+
+/// The flag's value, from the line, its variable or its default.
+pub fn value_of(m: Matches, h: Value) -> Option[View[String]] in m {
+    checked(m, h.slot, VALUE)
+    first(m, h.slot)
+}
+
+/// The integer flag's value, from the line, its variable or its default.
+pub fn int_of(m: Matches, h: Int) -> Option[i64] {
+    checked(m, h.slot, INT)
+    if m.states[h.slot] == 0 {
+        return None
+    }
+    Some(m.ints[h.slot])
+}
+
+/// The choice flag's value, one of its choices.
+pub fn choice_of(m: Matches, h: Choice) -> Option[View[String]] in m {
+    checked(m, h.slot, CHOICE)
+    first(m, h.slot)
+}
+
+/// Every value given to the flag, in order.
+pub fn many_of(m: Matches, h: Many) -> View[List[String]] in m {
+    checked(m, h.slot, MANY)
+    m.texts[h.slot]
+}
+
+/// The positional's word.
+pub fn arg_of(m: Matches, h: Arg) -> Option[View[String]] in m {
+    checked(m, h.slot, ARG)
+    first(m, h.slot)
+}
+
+/// Every word the rest positional took, in order.
+pub fn rest_of(m: Matches, h: Rest) -> View[List[String]] in m {
+    checked(m, h.slot, REST)
+    m.texts[h.slot]
+}
+
+/// The subcommand of `at` the line chose, if `at` was reached and one was.
+pub fn command_of(m: Matches, at: Cmd) -> Option[Cmd] {
+    if at.at >= m.commands {
+        fail("a command handle is not of the spec these matches were parsed with")
+    }
+    for k in 0 .. list.len(m.path) {
+        if m.path[k] == at.at && k + 1 < list.len(m.path) {
+            return Some(Cmd(at: m.path[k + 1]))
+        }
+    }
+    None
+}

@@ -1,0 +1,381 @@
+// The command-line spec (README.md, "Spec"): an arena of commands and slots that the
+// declarers fill and parse reads. A handle is the index of its command or slot.
+/// A command of a spec: the root or a subcommand.
+pub type Cmd: key {
+    at: u64
+}
+
+/// A switch: `--name`, and with `negatable` also `--no-name`.
+pub type Switch: key {
+    slot: u64
+}
+
+/// A counted switch: each `-v` adds one, up to 255.
+pub type Count: key {
+    slot: u64
+}
+
+/// A flag taking one text value.
+pub type Value: key {
+    slot: u64
+}
+
+/// A flag taking one signed integer value.
+pub type Int: key {
+    slot: u64
+}
+
+/// A flag taking one value from a fixed list.
+pub type Choice: key {
+    slot: u64
+}
+
+/// A flag taking a value each time it is given.
+pub type Many: key {
+    slot: u64
+}
+
+/// A positional argument taking one word.
+pub type Arg: key {
+    slot: u64
+}
+
+/// A positional argument taking every remaining word.
+pub type Rest: key {
+    slot: u64
+}
+
+type Command {
+    parent: u64,
+    name: String,
+    about: String,
+    subs: u64
+}
+
+type Slot {
+    cmd: u64,
+    kind: u8,
+    long: String,
+    short: Option[char],
+    value_name: String,
+    help: String,
+    choices: List[String],
+    env: Option[String],
+    fallback: Option[String],
+    negatable: bool,
+    required: bool,
+    global: bool
+}
+
+/// A program's commands and their flags and positionals.
+pub opaque type Spec {
+    version: Option[String],
+    commands: List[Command],
+    slots: List[Slot]
+}
+
+const SWITCH: u8 = 0
+
+const COUNT: u8 = 1
+
+const VALUE: u8 = 2
+
+const INT: u8 = 3
+
+const CHOICE: u8 = 4
+
+const MANY: u8 = 5
+
+const ARG: u8 = 6
+
+const REST: u8 = 7
+
+/// A spec whose root command is the program `name`, described by `about`.
+pub fn spec(name: String, about: String) -> Spec {
+    let mut commands: List[Command] = list.new()
+    list.push(mut commands, Command(parent: 0, name: checked_word(name, "a program name"), about: string.from(about), subs: 0))
+    Spec(version: None, commands: take commands, slots: list.new())
+}
+
+/// The root command of `s`.
+pub fn root(s: Spec) -> Cmd {
+    Cmd(at: 0)
+}
+
+/// Gives the root command `--version` (and `-V`), which prints `name version`.
+pub fn version(mut s: Spec, version_text: String) {
+    s.version = Some(string.from(version_text))
+}
+
+/// Declares the subcommand `name` of `at`.
+pub fn sub(mut s: Spec, at: Cmd, name: String, about: String) -> Cmd {
+    command(s, at)
+    let named = checked_word(name, "a subcommand name")
+    for i in 1 .. list.len(s.commands) {
+        if s.commands[i].parent == at.at && s.commands[i].name == named {
+            fail("a subcommand name is declared twice")
+        }
+    }
+    s.commands[at.at].subs += 1
+    list.push(mut s.commands, Command(parent: at.at, name: take named, about: string.from(about), subs: 0))
+    Cmd(at: list.len(s.commands) - 1)
+}
+
+/// Declares the switch `--long` (and `-short`) of `at`.
+pub fn switch(mut s: Spec, at: Cmd, long: String, short: Option[char], help: String) -> Switch {
+    Switch(slot: flag(mut s, at, SWITCH, long, short, "", help, list.new(), false))
+}
+
+/// Declares the switch `--long` with its negation `--no-long`; the later of the two decides.
+pub fn negatable(mut s: Spec, at: Cmd, long: String, short: Option[char], help: String) -> Switch {
+    Switch(slot: flag(mut s, at, SWITCH, long, short, "", help, list.new(), true))
+}
+
+/// Declares the counted switch `--long` (and `-short`) of `at`.
+pub fn count(mut s: Spec, at: Cmd, long: String, short: Option[char], help: String) -> Count {
+    Count(slot: flag(mut s, at, COUNT, long, short, "", help, list.new(), false))
+}
+
+/// Declares the flag `--long <value_name>` taking one text value.
+pub fn value(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, help: String) -> Value {
+    Value(slot: flag(mut s, at, VALUE, long, short, value_name, help, list.new(), false))
+}
+
+/// Declares the flag `--long <value_name>` taking one signed 64-bit integer.
+pub fn integer(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, help: String) -> Int {
+    Int(slot: flag(mut s, at, INT, long, short, value_name, help, list.new(), false))
+}
+
+/// Declares the flag `--long <value_name>` taking one of `choices`.
+pub fn choice(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, choices: List[String], help: String) -> Choice {
+    if list.len(choices) == 0 {
+        fail("a choice flag needs at least one choice")
+    }
+    let mut kept: List[String] = list.with_capacity(list.len(choices))
+    for c in choices {
+        if string.byte_len(c) == 0 {
+            fail("a choice is empty")
+        }
+        for k in kept {
+            if k == c {
+                fail("a choice is listed twice")
+            }
+        }
+        list.push(mut kept, string.from(c))
+    }
+    Choice(slot: flag(mut s, at, CHOICE, long, short, value_name, help, take kept, false))
+}
+
+/// Declares the flag `--long <value_name>`, which may be given many times.
+pub fn many(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, help: String) -> Many {
+    Many(slot: flag(mut s, at, MANY, long, short, value_name, help, list.new(), false))
+}
+
+/// Declares the next positional of `at`, taking one word.
+pub fn arg(mut s: Spec, at: Cmd, name: String, help: String, required: bool) -> Arg {
+    Arg(slot: positional(mut s, at, ARG, name, help, required))
+}
+
+/// Declares the last positional of `at`, taking every remaining word.
+pub fn rest(mut s: Spec, at: Cmd, name: String, help: String, required: bool) -> Rest {
+    Rest(slot: positional(mut s, at, REST, name, help, required))
+}
+
+/// Reads the last declared flag from the environment variable `variable` when the command
+/// line does not give it (a switch, value, integer or choice flag).
+pub fn bind_env(mut s: Spec, variable: String) {
+    let at = last_slot(s)
+    let kind = s.slots[at].kind
+    if kind == COUNT || kind == MANY || kind >= ARG {
+        fail("only a switch, value, integer or choice flag reads the environment")
+    }
+    if string.byte_len(variable) == 0 {
+        fail("an environment variable name is empty")
+    }
+    s.slots[at].env = Some(string.from(variable))
+}
+
+/// Gives the last declared value, integer or choice flag the value `text` when neither the
+/// command line nor its environment variable gives one.
+pub fn default_to(mut s: Spec, text: String) {
+    let at = last_slot(s)
+    let kind = s.slots[at].kind
+    if kind != VALUE && kind != INT && kind != CHOICE {
+        fail("only a value, integer or choice flag has a default")
+    }
+    if s.slots[at].required {
+        fail("a required flag has no default")
+    }
+    if kind == INT {
+        if let Error(_) = (int.parse(text) : Result[i64, ParseError]) {
+            fail("an integer flag's default is not an integer")
+        }
+    }
+    if kind == CHOICE && !listed(s.slots[at].choices, text) {
+        fail("a choice flag's default is not one of its choices")
+    }
+    s.slots[at].fallback = Some(string.from(text))
+}
+
+/// Makes the last declared value, integer or choice flag required.
+pub fn require(mut s: Spec) {
+    let at = last_slot(s)
+    let kind = s.slots[at].kind
+    if kind != VALUE && kind != INT && kind != CHOICE {
+        fail("only a value, integer or choice flag is required")
+    }
+    if let Some(_) = s.slots[at].fallback {
+        fail("a required flag has no default")
+    }
+    s.slots[at].required = true
+}
+
+/// Makes the last declared flag global: it may also be given after any subcommand of its
+/// command, and it still has one value.
+pub fn global(mut s: Spec) {
+    let at = last_slot(s)
+    if s.slots[at].kind >= ARG {
+        fail("a positional is not global")
+    }
+    let cmd = s.slots[at].cmd
+    for j in 0 .. list.len(s.slots) {
+        if j != at && s.slots[j].kind < ARG && s.slots[j].cmd != cmd && below(s, s.slots[j].cmd, cmd) && clashes(s.slots[j], s.slots[at]) {
+            fail("a global flag's name is declared again on a subcommand")
+        }
+    }
+    s.slots[at].global = true
+}
+
+fn last_slot(s: Spec) -> u64 {
+    if list.len(s.slots) == 0 {
+        fail("no flag is declared yet")
+    }
+    list.len(s.slots) - 1
+}
+
+fn command(s: Spec, at: Cmd) {
+    if at.at >= list.len(s.commands) {
+        fail("a command handle is not of this spec")
+    }
+}
+
+fn listed(xs: List[String], x: String) -> bool {
+    for y in xs {
+        if y == x {
+            return true
+        }
+    }
+    false
+}
+
+// A name: ASCII letters, digits, `_` and `-`, not starting with `-`.
+fn checked_word(name: String, what: String) -> String {
+    let b = string.as_bytes(name)
+    if list.len(b) == 0 || b[0] == b'-' {
+        let mut m = string.from(what)
+        string.push(mut m, " is empty or starts with '-'")
+        fail(take m)
+    }
+    for c in b {
+        if !word_byte(c) {
+            let mut m = string.from(what)
+            string.push(mut m, " has a byte other than A-Z, a-z, 0-9, '_' and '-'")
+            fail(take m)
+        }
+    }
+    string.from(name)
+}
+
+fn word_byte(c: u8) -> bool {
+    (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || (c >= b'0' && c <= b'9') || c == b'_' || c == b'-'
+}
+
+// Whether `cmd` is `top` or below it.
+fn below(s: Spec, cmd: u64, top: u64) -> bool {
+    let mut c = cmd
+    loop {
+        if c == top {
+            return true
+        }
+        if c == 0 {
+            return false
+        }
+        c = s.commands[c].parent
+    }
+}
+
+fn negation(long: String) -> String {
+    let mut n = string.from("no-")
+    string.push(mut n, long)
+    n
+}
+
+// Whether two flags share a long name, a negation or a short name.
+fn clashes(a: Slot, b: Slot) -> bool {
+    if a.long == b.long {
+        return true
+    }
+    if a.negatable && negation(a.long) == b.long {
+        return true
+    }
+    if b.negatable && negation(b.long) == a.long {
+        return true
+    }
+    if a.negatable && b.negatable {
+        return false
+    }
+    match (a.short, b.short) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn flag(mut s: Spec, at: Cmd, kind: u8, long: String, short: Option[char], value_name: String, help: String, take choices: List[String], negates: bool) -> u64 {
+    command(s, at)
+    let name = checked_word(long, "a long flag name")
+    if name == "help" || name == "version" {
+        fail("the flags --help and --version are built in")
+    }
+    if let Some(c) = short {
+        if char.is_ascii_digit(c) {
+            fail("a short flag name is a digit, which reads as a negative number")
+        }
+        if !char.is_ascii_alpha(c) {
+            fail("a short flag name is not an ASCII letter")
+        }
+        if c == 'h' || c == 'V' {
+            fail("the flags -h and -V are built in")
+        }
+    }
+    if kind != SWITCH && kind != COUNT {
+        let _ = checked_word(value_name, "a value name")
+    }
+    let made = Slot(cmd: at.at, kind, long: take name, short, value_name: string.from(value_name), help: string.from(help), choices: take choices, env: None, fallback: None, negatable: negates, required: false, global: false)
+    if negates && string.starts_with(made.long, "no-") {
+        fail("a negatable flag's name starts with no-")
+    }
+    for other in s.slots {
+        if other.kind < ARG && clashes(other, made) && (other.cmd == at.at || (other.global && below(s, at.at, other.cmd))) {
+            fail("a flag name is declared twice")
+        }
+    }
+    list.push(mut s.slots, take made)
+    list.len(s.slots) - 1
+}
+
+fn positional(mut s: Spec, at: Cmd, kind: u8, name: String, help: String, required: bool) -> u64 {
+    command(s, at)
+    let named = checked_word(name, "a positional name")
+    for other in s.slots {
+        if other.cmd == at.at && other.kind >= ARG {
+            if other.kind == REST {
+                fail("a positional follows a rest positional")
+            }
+            if required && !other.required {
+                fail("a required positional follows an optional one")
+            }
+        }
+    }
+    list.push(mut s.slots, Slot(cmd: at.at, kind, long: take named, short: None, value_name: string.new(), help: string.from(help), choices: list.new(), env: None, fallback: None, negatable: false, required, global: false))
+    list.len(s.slots) - 1
+}

@@ -1,6 +1,8 @@
 //! Runs on each build target's retained code (PROG-6, PROG-10): every `run` line also runs
 //! on the targets other than the default one, and `// expect: on <triple> run f(args) = R` states
-//! what one target computes.
+//! what one target computes. `// expect: on <triple> refuses <line>` states that the build
+//! for that target is refused with exactly that line (PROG-6 `target.unsupported`); its runs
+//! are not made there.
 use hirsel_core_driver::CheckProduct;
 use hirsel_core_ir::{Anchor, FuncId, Identity, ItemId, Module};
 use hirsel_core_layout::Target;
@@ -13,15 +15,53 @@ pub(super) struct OnTargets<'a> {
     product: &'a CheckProduct,
     roots: &'a [Identity],
     built: RefCell<HashMap<Target, std::rc::Rc<Built>>>,
+    refused: Vec<(Target, String)>,
 }
 
 impl<'a> OnTargets<'a> {
-    pub(super) fn new(product: &'a CheckProduct, roots: &'a [Identity]) -> Self {
+    pub(super) fn new(product: &'a CheckProduct, roots: &'a [Identity], source: &str) -> Self {
+        let refused = source
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("// expect: on ")?.split_once(' '))
+            .filter_map(|(triple, rest)| {
+                let target = Target::from_triple(triple).expect("a refusal names a target");
+                Some((target, rest.strip_prefix("refuses ")?.to_owned()))
+            })
+            .collect();
         Self {
             product,
             roots,
             built: RefCell::default(),
+            refused,
         }
+    }
+
+    /// Whether the build for `target` is expected to be refused.
+    pub(super) fn refuses(&self, target: Target) -> bool {
+        self.refused.iter().any(|(t, _)| *t == target)
+    }
+
+    /// Each expected refusal that its target's build does not make, exactly.
+    pub(super) fn refusals(&self) -> Vec<String> {
+        self.refused
+            .iter()
+            .filter_map(|(target, want)| {
+                let got = match &*self.built(*target) {
+                    Ok(_) => "a build".to_owned(),
+                    Err(e) if e == want => return None,
+                    Err(e) => e.clone(),
+                };
+                Some(format!("on {}: want `{want}`, got {got}", target.triple()))
+            })
+            .collect()
+    }
+
+    fn built(&self, target: Target) -> std::rc::Rc<Built> {
+        self.built
+            .borrow_mut()
+            .entry(target)
+            .or_insert_with(|| self.build(target).into())
+            .clone()
     }
 
     /// `call` on every target but the default one, whose run the caller makes; a site is
@@ -35,7 +75,7 @@ impl<'a> OnTargets<'a> {
     ) -> Vec<String> {
         Target::ALL
             .into_iter()
-            .filter(|t| *t != hirsel_core_driver::default_target())
+            .filter(|t| *t != hirsel_core_driver::default_target() && !self.refuses(*t))
             .filter_map(|t| self.run_with(t.triple(), call, want, Some((host, site))))
             .collect()
     }
@@ -54,12 +94,7 @@ impl<'a> OnTargets<'a> {
         let Some(target) = Target::from_triple(triple) else {
             return Some(format!("on {triple}: no such target"));
         };
-        let built = self
-            .built
-            .borrow_mut()
-            .entry(target)
-            .or_insert_with(|| self.build(target).into())
-            .clone();
+        let built = self.built(target);
         let (module, functions) = match &*built {
             Ok(built) => built,
             Err(e) => return Some(format!("on {triple}: {e}")),
@@ -84,7 +119,7 @@ impl<'a> OnTargets<'a> {
         let units = self
             .product
             .units_for(self.roots.iter().cloned(), 65_536, target)
-            .map_err(|e| format!("units: {e:?}"))?;
+            .map_err(|e| e.to_string())?;
         let unit_modules = units.modules().unwrap();
         let module = match self.roots.first() {
             Some(entry) => {

@@ -18,6 +18,7 @@ mod net_error;
 mod provide;
 mod secret_kdf;
 mod secret_key;
+mod target_unsupported;
 mod udp_runtime;
 use binding::OPERATIONS;
 pub(crate) use binding::binding;
@@ -228,6 +229,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 Some(None)
             }
+            ("target", "unsupported") => self.target_unsupported(n),
             _ => None,
         }
     }

@@ -2764,6 +2764,10 @@ pub fn kept(f: Foreign[laws.Laws]) -> Result[(), Exit] {
     let _ = match a { X86_64 => 0u64, Aarch64 => native.made(f) }
     Ok(())
 }
+pub fn refused() -> Result[(), Exit] {
+    let _ = match target.arch { X86_64 => target.unsupported("needs aarch64"), Aarch64 => 0u64 }
+    Ok(())
+}
 "#);
     law.write("ffi_laws/tests.hirsel", r#"
 @test
@@ -2866,6 +2870,12 @@ __attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
         let _ = (fs::remove_file(&called), fs::remove_file(law.path("image")));
         let kept = entry("ffi_laws@1/main/kept");
         assert!(kept.lines().any(|line| line == made) && !called.exists(), "{kept}");
+        // PROG-6: reaching `target.unsupported` refuses the build, warm store or not.
+        let unsupported = format!("PROG-6: main.refused reaches target.unsupported(\"needs aarch64\") for target {TARGET}");
+        for _ in 0..2 {
+            let refused = entry("ffi_laws@1/main/refused");
+            assert!(refused.lines().any(|line| line == unsupported), "{refused}");
+        }
         pin_bytes(initializer.clone());
         let refusal = format!("{PREFIX}: member laws.o has section .init_array of type SHT_INIT_ARRAY, which is not an admitted object feature");
         fail_build(engine, TARGET, &refusal);

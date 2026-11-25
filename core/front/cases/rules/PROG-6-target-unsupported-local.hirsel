@@ -1,0 +1,12 @@
+// expect: on x86_64-unknown-linux-gnu refuses PROG-6: main.pick reaches target.unsupported("needs Linux") for target x86_64-unknown-linux-gnu
+// expect: on aarch64-unknown-linux-gnu refuses PROG-6: main.pick reaches target.unsupported("needs Linux") for target aarch64-unknown-linux-gnu
+// expect: on aarch64-apple-darwin refuses PROG-6: main.pick reaches target.unsupported("needs Linux") for target aarch64-apple-darwin
+// PROG-6: a scrutinee read through a local is not a constant expression, so both arms are
+// retained and every build reaching `pick` reaches `target.unsupported`.
+fn pick() -> u64 {
+    let o = target.os
+    match o {
+        Linux => 1,
+        Macos => target.unsupported("needs Linux")
+    }
+}

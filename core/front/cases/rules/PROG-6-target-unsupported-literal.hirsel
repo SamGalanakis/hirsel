@@ -1,0 +1,8 @@
+// expect: refuse PROG-6 at 5:37
+// PROG-6: `target.unsupported` takes its reason as a string literal.
+fn gate(why: String) -> u64 {
+    match target.os {
+        Linux => target.unsupported(why),
+        Macos => 2
+    }
+}

@@ -61,3 +61,41 @@ pub fn select(
     }
     std::borrow::Cow::Owned(module)
 }
+
+/// The reason of the first `target.unsupported(why)` call `function`'s body makes (PROG-6),
+/// read from the static the front puts just before the call, at the call's anchor.
+pub fn unsupported(module: &crate::Module, function: crate::FuncId) -> Option<String> {
+    use crate::{Callee, Inst, Static};
+    let body = module.functions[function.index()].body.as_ref()?;
+    for block in &body.blocks {
+        let start = block.insts.start as usize;
+        let insts = block.insts.get(&body.insts)?;
+        for (i, inst) in insts.iter().enumerate() {
+            let Inst::Call { call } = *inst else { continue };
+            let Callee::Direct(f) = body.calls[call.index()].callee else {
+                continue;
+            };
+            let instance = &module.instances[module.functions[f.index()].instance.index()];
+            if !instance.definition.is_core("target.unsupported") {
+                continue;
+            }
+            let anchor = body.inst_anchors[start + i];
+            let why = insts[..i]
+                .iter()
+                .zip(&body.inst_anchors[start..start + i])
+                .rev()
+                .find_map(|(inst, at)| match (inst, *at == anchor) {
+                    (Inst::ReadStatic { data, .. }, true) => Some(*data),
+                    _ => None,
+                })
+                .and_then(|data| match &module.statics[data.index()] {
+                    Static::Bytes { bytes, .. } => {
+                        Some(String::from_utf8_lossy(bytes).into_owned())
+                    }
+                    Static::Aggregate { .. } => None,
+                });
+            return Some(why.unwrap_or_default());
+        }
+    }
+    None
+}

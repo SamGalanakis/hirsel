@@ -120,7 +120,7 @@ impl Snapshot {
                     .iter()
                     .enumerate()
                     .filter_map(|(index, instruction)| match instruction {
-                        Inst::LayoutConst { query, .. } => {
+                        Inst::LayoutConst { query, .. } if *query != crate::LayoutQuery::Target => {
                             Some((index, query.native(&module.types, &layout.recipes)))
                         }
                         _ => None,

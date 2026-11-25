@@ -1733,7 +1733,11 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 .as_ref()
                 .and_then(|r| r.instances.as_ref().err())
                 .filter(|e| !matches!(e, crate::InstanceStop::Resource { .. }))
-                .map(|e| format!("instances: {e}"))
+                .map(|e| match e {
+                    // A PROG-6 refusal is its own line (`target.unsupported`).
+                    crate::InstanceStop::Unsupported(_) => e.to_string(),
+                    _ => format!("instances: {e}"),
+                })
         }),
         reachable: reach.as_ref().map(|r| ReachableOutput {
             bodies: r.bodies,

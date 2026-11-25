@@ -871,6 +871,9 @@ impl CheckProduct {
                     definition,
                     message,
                 } => (definition, message.clone()),
+                InstanceStop::Unsupported(stop) => {
+                    (stop.chain.last().expect("a chain"), stop.to_string())
+                }
                 InstanceStop::Resource { .. } => unreachable!("a resource refusal, above"),
             };
             if let Some(h) = self.headers.get(path)

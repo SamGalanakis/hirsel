@@ -61,6 +61,7 @@ pub enum InstanceStop {
         definition: DefPath,
         message: String,
     },
+    Unsupported(Box<crate::unsupported_reach::Unsupported>),
 }
 impl std::fmt::Display for InstanceStop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -80,37 +81,11 @@ impl std::fmt::Display for InstanceStop {
                 definition,
                 message,
             } => write!(f, "{definition}: {message}"),
+            Self::Unsupported(unsupported) => unsupported.fmt(f),
         }
     }
 }
-/// The emitter supplies mechanical instance dependencies. In particular, a growing
-/// f[T] -> f[List[T]] family stops as a compiler resource outcome, not a language rule.
-pub fn collect_instances(
-    roots: impl IntoIterator<Item = Identity>,
-    limit: usize,
-    mut dependencies: impl FnMut(&Identity) -> Result<Vec<Identity>, InstanceStop>,
-) -> Result<Vec<Identity>, InstanceStop> {
-    let mut pending: BTreeSet<_> = roots.into_iter().collect();
-    let mut reached = BTreeSet::new();
-    while let Some(key) = pending.pop_first() {
-        if reached.contains(&key) {
-            continue;
-        }
-        if reached.len() == limit {
-            return Err(InstanceStop::Resource { limit, next: key });
-        }
-        hirsel_guard::with_memory_context(
-            format!("instantiating function {}", key.definition.0.name),
-            || {
-                let reads = dependencies(&key)?;
-                reached.insert(key);
-                pending.extend(reads);
-                Ok(())
-            },
-        )?;
-    }
-    Ok(reached.into_iter().collect())
-}
+pub use crate::instance_walk::collect_instances;
 /// Per-build instances retain their materialized modules for native emission.
 /// Nongeneric bodies keep the already-published module by reference. A walk
 /// over instance records (`Records`) materialises only its misses: a hit keeps
@@ -799,7 +774,16 @@ impl CheckProduct {
                 signatures,
                 adapters,
                 described,
+                unsupported,
             } = made;
+            if let Some(why) = unsupported {
+                let stop = crate::unsupported_reach::Unsupported {
+                    why,
+                    target,
+                    chain: Vec::new(),
+                };
+                return Err(InstanceStop::Unsupported(Box::new(stop)));
+            }
             resolver.add(&children);
             if records.is_some() {
                 let mut closures = std::collections::BTreeMap::new();
@@ -891,6 +875,8 @@ pub(crate) struct Materialised {
     signatures: CodeSignatures,
     adapters: Vec<Adapter>,
     described: Vec<Identity>,
+    /// The reason of a `target.unsupported` call the retained code makes (PROG-6).
+    unsupported: Option<String>,
 }
 fn materialise(
     key: &Identity,
@@ -977,6 +963,10 @@ fn materialise(
     };
     let body = built.code.hash();
     let described = built.code.described;
+    let unsupported = built
+        .module
+        .as_ref()
+        .and_then(|module| hirsel_core_ir::unsupported_reason(module, built.function));
     Ok(Materialised {
         module: built.module.map(|module| {
             Arc::new(if compact_recipe {
@@ -996,5 +986,6 @@ fn materialise(
         signatures,
         adapters,
         described,
+        unsupported,
     })
 }

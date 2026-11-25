@@ -9,6 +9,11 @@ pub(super) fn scalar_copies(module: &Module, recipes: &[RecipeRow], body: &mut B
         .iter()
         .filter_map(|i| match i {
             Inst::Const { result, bits } => Some((*result, *bits)),
+            // A target read stays one until the build's target is selected (PROG-10).
+            Inst::LayoutConst {
+                query: hirsel_core_ir::LayoutQuery::Target,
+                ..
+            } => None,
             Inst::LayoutConst { result, query } => {
                 Some((*result, query.native(&module.types, recipes)))
             }

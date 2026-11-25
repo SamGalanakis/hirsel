@@ -606,7 +606,7 @@ package by the toolchain, so `--locked` and `--frozen` decide only whether a com
 proceeds.
 
 Version note (2026-11-25, macos-s0-spec-2495; macOS decision D1; built by
-macos-s9-target-consts-2508 except `target.unsupported`): the target
+macos-s9-target-consts-2508): the target
 becomes a named input through core module `target`, whose contract is
 [target](../../core/std/api/target.md). Nothing is conditionally compiled out of checking,
 and the host stays invisible.
@@ -637,9 +637,14 @@ which the toolchain supplies (LANG-20). These rules hold:
 - **Reaching `target.unsupported(why)` refuses the build for that target.** It is never a
   run-time failure and is not a meaning of the program. The refusal names the target and
   the reach chain from the entry:
-  `PROG-6: main reaches target.unsupported("batched submit needs io_uring") for target aarch64-apple-darwin, through app.run → queue.submit`.
+  `PROG-6: main.main reaches target.unsupported("batched submit needs io_uring") for target aarch64-apple-darwin, through app.run → queue.submit`.
+  Each function is named by its module path and name. The chain is the path by which the
+  build's walk first reached the call, entry first, which need not be the shortest; an entry
+  that makes the call itself has no `, through` part. A build whose walk stops at another
+  refusal first reports that one. `why` must be a string literal, or the call is refused
+  (PROG-6) on every target.
 
-```hirsel unbuilt
+```hirsel
 fn batched(n: u64) -> u64 { n + 1 }
 fn submit(n: u64) -> u64 {
     match target.os {
@@ -654,12 +659,12 @@ Built for `x86_64-unknown-linux-gnu`, `submit` retains the `Linux` arm only. Bui
 line above, naming the chain. Both arms are typed for both targets: an arm that fails to type
 is refused on every target, with the build's target playing no part.
 
-```hirsel unbuilt
+```hirsel
 fn pick() -> u64 {
     let o = target.os
     match o {
         Linux => 1,
-        Macos => target.unsupported("needs Linux"),          // refused: PROG-6, on every target
+        Macos => target.unsupported("needs Linux"),          // reached on every target
     }
 }
 ```

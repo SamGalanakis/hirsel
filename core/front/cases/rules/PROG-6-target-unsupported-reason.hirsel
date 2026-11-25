@@ -1,0 +1,10 @@
+// expect: on x86_64-unknown-linux-gnu refuses PROG-6: main.either reaches target.unsupported("no x86_64 path") for target x86_64-unknown-linux-gnu
+// expect: on aarch64-unknown-linux-gnu refuses PROG-6: main.either reaches target.unsupported("no aarch64 path") for target aarch64-unknown-linux-gnu
+// expect: on aarch64-apple-darwin refuses PROG-6: main.either reaches target.unsupported("no aarch64 path") for target aarch64-apple-darwin
+// PROG-6: the refusal names the reason of the call the target's retained code keeps.
+fn either() -> u64 {
+    match target.arch {
+        X86_64 => target.unsupported("no x86_64 path"),
+        Aarch64 => target.unsupported("no aarch64 path")
+    }
+}

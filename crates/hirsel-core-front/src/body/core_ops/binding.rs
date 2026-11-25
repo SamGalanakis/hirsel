@@ -31,6 +31,7 @@ operations! {
     ("flow", "next", Lane::Runtime(Kernel::Flow(FlowOp::Next)), "B", "mc-f1-1180", false),
     ("flow", "finish", Lane::Runtime(Kernel::Flow(FlowOp::Finish)), "B", "mc-f1-1180", false),
     ("core", "isolate", Lane::PendingCode, "A", "core-check-callables-913", false),
+    ("target", "unsupported", Lane::PendingCode, "A", "macos-s9-target-consts-2508", false),
     ("latest", "new", Lane::Runtime(Kernel::LatestNew), "A", "core-ops-914", false),
     ("latest", "handle", Lane::Runtime(Kernel::LatestHandle), "A", "core-ops-914", false),
     ("latest", "publish", Lane::Runtime(Kernel::LatestPublish), "A", "core-ops-914", false),

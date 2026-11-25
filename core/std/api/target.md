@@ -2,7 +2,7 @@
 
 [API overview](../API.md). [One meaning](../../../docs/spec/programs.md#prog-6-one-meaning).
 
-Built except `unsupported` (macOS decision D1, 2026-11-25). Core module `target` names the target a build
+Built (macOS decision D1, 2026-11-25). Core module `target` names the target a build
 is for, so a program can branch on it at compile time:
 
 ```
@@ -42,7 +42,7 @@ target in the table above, and a failure on any one refuses it everywhere.
 **`unsupported`.** `target.unsupported(why)` has type `Never`, so it fits any arm. `why` must
 be a string literal. A build whose retained code reaches it is refused for that target,
 with `why`, the target and the reach chain:
-`PROG-6: main reaches target.unsupported("batched submit needs io_uring") for target aarch64-apple-darwin, through app.run → queue.submit`.
+`PROG-6: main.main reaches target.unsupported("batched submit needs io_uring") for target aarch64-apple-darwin, through app.run → queue.submit`.
 It never runs: a binary never holds a reached call to it. This is how a library refuses a
 target loudly, and its caller answers by branching higher up.
 

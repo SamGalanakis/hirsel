@@ -8,3 +8,7 @@ pub const os: Os
 
 /// Supplied by the toolchain from the build's target (LANG-20).
 pub const arch: Arch
+
+/// Refuses a build whose retained code reaches it, naming `why`, the target and the reach
+/// chain (PROG-6). It never runs. `why` is a string literal.
+pub fn unsupported(why: String) -> Never

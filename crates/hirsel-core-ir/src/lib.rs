@@ -1137,7 +1137,7 @@ pub mod wf;
 pub use address::{CodeRow, builtin_address, code_addresses, code_revision, is_versioned_builtin};
 pub use hirsel_core_layout::{FuncRef, TypeRef, intern_shape};
 pub use ir::*;
-pub use target::select as select_target;
+pub use target::{select as select_target, unsupported as unsupported_reason};
 
 #[cfg(test)]
 mod net_tests;

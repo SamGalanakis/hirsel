@@ -237,10 +237,13 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         })
         .map(|d| Identity::plain(d.definition.clone()))
         .collect();
+    let on = targets::OnTargets::new(product, &roots, &source);
+    if on.refuses(hirsel_core_driver::default_target()) {
+        return on.refusals();
+    }
     let units = product
         .units(roots.clone(), 65_536)
         .unwrap_or_else(|e| panic!("{}: units: {e:?}", path.display()));
-    let on = targets::OnTargets::new(product, &roots);
     let unit_modules = units.modules().unwrap();
     let joined = match roots.first() {
         Some(entry) => {
@@ -773,12 +776,14 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                 );
             }
             ["on", t, "run", call, "=", want @ ..] => failures.extend(on.run(t, call, want)),
+            ["on", _, "refuses", ..] => {}
             _ => failures.push(format!("unreadable expectation `{e}`")),
         }
     }
     if expects == 0 {
         failures.push("no expectations".into());
     }
+    failures.extend(on.refusals());
     let mut got_refusals: Vec<String> = refusals
         .iter()
         .map(|r| format!("{} at {}", r.rule, line_col(&modules, &r.primary)))

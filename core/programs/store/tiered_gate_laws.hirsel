@@ -59,7 +59,10 @@ fn gate_head(db: Db, name: String) -> Option[Branch] {
 //   cut publishes nothing of the refused holder.
 // - BeforeRename: the process dies with MANIFEST.tmp written.
 // - AfterRename: it dies with MANIFEST renamed, before RAM install.
-type GateCrash = NoCrash | SealRefused | BeforeRename | AfterRename
+// - RetryAfterRename: the cut's first attempt is refused with relocation in
+//   its candidate, so AP16 restores the retry base and redoes the plan once;
+//   the process dies with the redo's MANIFEST renamed.
+type GateCrash = NoCrash | SealRefused | BeforeRename | AfterRename | RetryAfterRename
 
 // Ends the refused cut's open as `crash` says, and returns the store that
 // carries on. A crash lands the sealed bytes and reopens, and open removes
@@ -69,6 +72,7 @@ fn gate_crash_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options
     let renamed = match crash {
         BeforeRename => false,
         AfterRename => true,
+        RetryAfterRename => true,
         _ => {
             let mut carried = take db
             let _ = checkpoint(mut carried)?
@@ -94,6 +98,7 @@ fn gate_crash_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options
 fn gate_published(crash: GateCrash) -> bool {
     match crash {
         AfterRename => true,
+        RetryAfterRename => true,
         _ => false,
     }
 }
@@ -489,7 +494,12 @@ fn gate_crash_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, t
         return Ok(take carried)
     }
     let first_output = disk_state(carried).pages.next_pack
-    let sealed = refused_cut_bytes(mut carried, NoHolderChange)?
+    let (take sealed, attempts) = refused_cut_seals(mut carried, NoHolderChange)?
+    if let RetryAfterRename = crash {
+        if attempts != 2 {
+            fail("L87: the retry arm's cut redoes its plan once without relocation")
+        }
+    }
     gate_crash_reopen(d, c, r, tasks, options, take carried, sealed, first_output, crash)
 }
 
@@ -517,6 +527,29 @@ fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     let floor = 182375272u64
     let width = 1100u64
     let events = l87_cold_log(d, c, r, tasks, floor, 300, width)?
+    // The retry arm also keeps a Memory table, so that deleting most of its
+    // rows before the compaction cut leaves a sparse Memory pack: relocation
+    // enters the cut's candidate, and AP16 redoes the refused attempt.
+    let padding = if let RetryAfterRename = crash {
+        let mut padded = open(tasks, d, c, r, l70_open_options(floor)?)?
+        let _ = create_table(mut padded, spec("padding", std.codec.key_u64(), std.codec.of_bytes()))?
+        let fixture = table(mut padded, "padding", std.codec.key_u64(), std.codec.of_bytes())?
+        let Committed(_) = run(mut padded, Some(100000000), copy_env(fixture), fn(mut tx: Tx, env: Table[u64, Bytes]) -> Result[(), Error] {
+            for key in 0u64 .. 64 {
+                let mut body: Bytes = list.with_capacity(2000)
+                list.fill(mut body, 2000, int.truncate(key))
+                put(mut tx, env, key, body)?
+            }
+            Ok(())
+        })? else {
+            fail("L87 (c): the padding rows commit")
+        }
+        let _ = checkpoint(mut padded)?
+        close(take padded)?
+        Some(())
+    } else {
+        None
+    }
     let mut db = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let (_, part) = l87_first_leaf(d, db, events.binding.id)?
     let partial: Log[Bytes] = clone(events)
@@ -545,7 +578,7 @@ fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     let mut options = l87_options(floor, 0)?
     options.probe_budget = 4096
     options.compact_permille = 1001
-    let probing = open(tasks, d, c, r, options)?
+    let mut probing = open(tasks, d, c, r, options)?
     let before = l87_queue(probing)?
     let mut pages = 0u64
     let mut blobs = 0u64
@@ -573,6 +606,17 @@ fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     let mut cut_options = l87_options(floor, 0)?
     cut_options.probe_budget = 4096
     cut_options.compact_permille = 1001
+    if let Some(_) = padding {
+        let rows = table(mut probing, "padding", std.codec.key_u64(), std.codec.of_bytes())?
+        let Committed(_) = run(mut probing, Some(100000000), copy_env(rows), fn(mut tx: Tx, env: Table[u64, Bytes]) -> Result[(), Error] {
+            for key in 1u64 .. 64 {
+                let _ = delete(mut tx, env, key)?
+            }
+            Ok(())
+        })? else {
+            fail("L87 (c): the padding deletes commit")
+        }
+    }
     let mut cutting = gate_crash_cut(d, c, r, tasks, cut_options, take probing, crash)?
     // A crash loses the probe cursors, so the cuts after it restart them
     // (§13.6 "Progress"); each probe covers its pack within these cuts.
@@ -686,4 +730,12 @@ fn test_l87_queue_rows_move_as_roots_crash_before_rename(d: Dir, c: Clock, r: Ra
 @test
 fn test_l87_queue_rows_move_as_roots_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     gate_queue_rows(d, c, r, tasks, AfterRename)
+}
+
+// AP16's redo after a refusal with relocation in the candidate keeps the
+// staged Tiered steps (§13.6a T8, v2.114): the queue rows' rewrites ride with
+// the retirements, so the published queue reaches only listed packs.
+@test
+fn test_l87_queue_rows_move_as_roots_retry_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_queue_rows(d, c, r, tasks, RetryAfterRename)
 }

@@ -127,7 +127,7 @@ fn collection_mode(tree: PageTree, key: Bytes) -> Option[(u8, u8)] {
 // §13.8 "Residency changes": a schema commit on main, published by its own
 // cut. Tables and Logs only; a Cell is `Missing("residency")`, and an index
 // follows its table's Memory tree (open_lookup and entries read it there).
-fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] waits {
+pub fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] waits {
     if !is_disk(db) {
         return Error(Tiered(Memory))
     }

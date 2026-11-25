@@ -13,9 +13,9 @@
 // and the row takes the new location (T8 step 3).
 //
 // Not built yet: recount probes (`repair_cuts`); moving deadlist cells with their frames, so a cell on a retiring pack is
-// deleted with it and its holder's later kill is not filed (an over-count);
-// and the mandatory-only retry still carries this cut's moves, the queue
-// rows' rewrites included (T8 step 3 has it write each row's own value).
+// deleted with it and its holder's later kill is not filed (an over-count).
+// AP16's redo keeps this cut's staged moves, queue rewrites included
+// (§13.6a T8, v2.114); only a refused compaction step drops them.
 type TieredCompaction: send {
     probes: Map[u64, TieredProbeCursor],
     // One share of each generation's read inventory. A Snapshot reads its

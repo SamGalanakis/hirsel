@@ -170,6 +170,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("int", "checked_mul", 1),
     ("int", "checked_sub", 1),
     ("int", "count_ones", 1),
+    ("int", "ilog2", 1),
     ("int", "leading_zeros", 1),
     ("int", "mul_wide", 1),
     ("int", "narrow", 1),

@@ -253,7 +253,7 @@ fn drift[T](mut g: Hole[T], lo: u64, hi: u64, eager: bool, before: scoped fn(T, 
 
 // 2^ceil(log2(n) / 2) refined by one Newton step (drift.rs `sqrt_approx`).
 fn sqrt_approx(n: u64) -> u64 {
-    let log: u64 = int.widen(63 - int.leading_zeros(n | 1))
+    let log: u64 = int.widen(option.unwrap(int.ilog2(n | 1)))
     let shift = (log + 1) / 2
     ((1u64 << shift) + (n >> shift)) / 2
 }
@@ -616,7 +616,7 @@ fn merge_both[T](mut st: Active, xs: View[List[T]], s: View[List[T]], before: sc
 
 fn stable_quicksort[T](mut g: Hole[T], lo: u64, hi: u64, before: scoped fn(T, T) -> Order) {
     // At most 2 floor(log2(size)) unbalanced partitions before the eager merge fallback.
-    let log: u64 = int.widen(63 - int.leading_zeros((hi - lo) | 1))
+    let log: u64 = int.widen(option.unwrap(int.ilog2((hi - lo) | 1)))
     quicksort(mut g, lo, hi, 2 * log, before)
 }
 

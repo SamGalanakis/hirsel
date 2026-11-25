@@ -10,3 +10,9 @@ digits. The std parsers report the first invalid or overflowing digit. Core
 The parsers take O(input length) time and skip per-digit overflow checks when
 the decimal digit count guarantees that the value fits. They and the ASCII
 helpers allocate nothing.
+
+Core `int.ilog2(x)` is floor(log2(x)) for an unsigned `x`, as a `u32`; a signed
+`T` is refused. It returns `Option[u32]`, `None` for 0. The unprefixed partial
+operations (`int.narrow`, `int.abs`) fail with `Overflow`, but 0 overflows
+nothing, so a fault would misname the cause; `None` leaves the zero case to the
+caller. It allocates nothing.

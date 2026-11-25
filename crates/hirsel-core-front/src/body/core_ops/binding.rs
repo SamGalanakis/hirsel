@@ -143,6 +143,7 @@ operations! {
     ("int", "leading_zeros", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "trailing_zeros", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "count_ones", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "ilog2", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "rotate_left", Lane::Numeric, "A", "core-perf-primitives-1606", false),
     ("int", "rotate_right", Lane::Numeric, "A", "core-perf-primitives-1606", false),
     ("int", "swap_bytes", Lane::Numeric, "A", "core-perf-primitives-1606", false),

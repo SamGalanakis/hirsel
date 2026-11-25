@@ -425,7 +425,8 @@ operations it names; nothing else about them may be inferred from an implementat
   ([MEM-30](budgets.md#mem-30-step-bounds)), whatever the count. `int.abs(a)` is `a` on an unsigned type; on a signed type it is `-a` for
   a negative `a` and `a` otherwise, so `int.abs(MIN)` fails with `Overflow` at the call, as `-MIN` does. `checked_div` returns `None` for a zero divisor and for `MIN /
   -1`. `int.mul_wide(a, b)` returns the high and low halves of the exact 128-bit product.
-  `int.parse` reads ASCII decimal digits, with one leading `-` for a signed `T` and no other
+  `int.ilog2(x)` accepts only an unsigned `T` and returns `None` for 0, otherwise `Some` of
+  floor(log2(x)) as a `u32`; it neither fails nor admits bytes and takes one Step. `int.parse` reads ASCII decimal digits, with one leading `-` for a signed `T` and no other
   sign, space or underscore. It checks the whole grammar before the range: it returns
   `Empty` for an empty string, `Invalid(0)` for a lone `-`, `Invalid(i)` at the byte
   position `i` of the first byte that is not allowed, and `OutOfRange` only for a valid

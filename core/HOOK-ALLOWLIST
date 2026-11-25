@@ -257,6 +257,7 @@ core@1/int/checked_div
 core@1/int/checked_mul
 core@1/int/checked_sub
 core@1/int/count_ones
+core@1/int/ilog2
 core@1/int/leading_zeros
 core@1/int/mul_wide
 core@1/int/narrow

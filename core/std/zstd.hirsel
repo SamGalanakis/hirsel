@@ -72,14 +72,9 @@ type Reverse {
     valid: u64,
 }
 
+// Every caller passes a positive value.
 fn log2(value: u64) -> u64 {
-    let mut v = value
-    let mut n: u64 = 0
-    while v > 1 {
-        v = v >> 1
-        n += 1
-    }
-    n
+    int.widen(option.unwrap(int.ilog2(value)))
 }
 
 fn word(data: Bytes, mut c: Cursor, n: u64) -> Result[u64, ZstdError] {

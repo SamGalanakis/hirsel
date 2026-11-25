@@ -1,4 +1,5 @@
 use super::*;
+mod numeric;
 
 #[derive(Clone, Copy)]
 pub(super) enum DiagnosticCallee {
@@ -2013,6 +2014,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let count = self.numeric_convert(ty, mode, count, n)?;
             return self.numeric_binary(ty, BinaryOp::Rotl, vals[0]?, count, n);
         }
+        if name == "ilog2" {
+            let result_ty = subst(&mut self.t, g.result, tys);
+            return self.ilog2(input, (signed, width, ty), result_ty, vals[0], n);
+        }
         if name == "swap_bytes" {
             let operand = vals[0]?;
             if !self.live() {
@@ -2252,23 +2257,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn numeric_branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId, n: NodeId) {
         let (yes, no) = (self.edge(yes, &[]), self.edge(no, &[]));
         self.end(Terminator::Branch { condition, yes, no }, Some(n));
-    }
-    fn require_numeric(&mut self, ok: ValueId, n: NodeId) {
-        if !self.live() {
-            return;
-        }
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        self.numeric_branch(ok, yes, no, n);
-        self.start(no);
-        // FORM records Overflow on scalar arithmetic. This failing arithmetic is
-        // the narrow operation's failure edge, with the narrow call's source anchor.
-        let ty = Ty::Scalar(Scalar::U8);
-        let max = self.konst(ty, 255, n).unwrap();
-        let one = self.konst(ty, 1, n).unwrap();
-        let _ = self.numeric_binary(ty, BinaryOp::Add, max, one, n);
-        self.end(Terminator::Propagate, Some(n));
-        self.start(yes);
     }
     /// The overflow flag decides which ordinary Option variant is constructed.
     pub(super) fn numeric_option(

@@ -32,3 +32,51 @@ fn swap_bytes_reverses() -> bool {
     let e: i64 = 1
     int.swap_bytes(a) == 67305985 && int.swap_bytes(b) == 513 && int.swap_bytes(c) == 171 && int.swap_bytes(d) == -256 && int.swap_bytes(e) == 72057594037927936
 }
+
+// int.ilog2 (SEM-1) against a reference that counts right shifts until one bit is left.
+fn shifts(x: u64) -> u32 {
+    let mut v = x
+    let mut n: u32 = 0
+    while v > 1 {
+        v = v >> 1
+        n += 1
+    }
+    n
+}
+
+// Some(log) with 2^log <= x < 2^(log+1) and log equal to the shift count; at the top bit
+// the upper bound is 2^width, which every x of that width is below.
+fn ilog2_holds(got: Option[u32], x: u64, width: u32) -> bool {
+    let Some(log) = got else {
+        return false
+    }
+    let shift: u64 = int.widen(log)
+    log == shifts(x) && (1u64 << shift) <= x && (log + 1 == width || x < (1u64 << (shift + 1)))
+}
+
+// Each width at every power of two p (1 included), p - 1, and p | (p - 1), which at the top
+// bit is MAX. Zero is None.
+// expect: run ilog2_boundaries() = true
+fn ilog2_boundaries() -> bool {
+    let mut bit: u64 = 0
+    while bit < 64 {
+        let p = 1u64 << bit
+        if !ilog2_all(p, bit) || (bit > 0 && !ilog2_all(p - 1, bit)) || !ilog2_all(p | (p - 1), bit) {
+            return false
+        }
+        bit += 1
+    }
+    let none = match (int.ilog2(0u8), int.ilog2(0u16), int.ilog2(0u32), int.ilog2(0u64)) {
+        (None, None, None, None) => true,
+        _ => false,
+    }
+    none
+}
+
+// x at each width it fits, given its top bit is at most `bit`.
+fn ilog2_all(x: u64, bit: u64) -> bool {
+    let a: u8 = int.truncate(x)
+    let b: u16 = int.truncate(x)
+    let c: u32 = int.truncate(x)
+    (bit >= 8 || ilog2_holds(int.ilog2(a), x, 8)) && (bit >= 16 || ilog2_holds(int.ilog2(b), x, 16)) && (bit >= 32 || ilog2_holds(int.ilog2(c), x, 32)) && ilog2_holds(int.ilog2(x), x, 64)
+}

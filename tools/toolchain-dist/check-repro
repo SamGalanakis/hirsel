@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Build HEAD twice in fresh checkouts and compare the bundles, then build the
-release std at several job counts with the first bundle and compare those."""
+release std at several job counts with the first bundle and compare those.
+
+With --pgo both builds use one pinned profile: the given one, or one trained
+once in the first checkout. Training is not reproducible, so a release takes a
+profile as an input instead of training it."""
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -18,12 +22,13 @@ STD_JOBS = (1, 2, 8)
 STD_TARGET = 'x86_64-unknown-linux-gnu'
 
 
-def build(revision, checkout, output, threads, flags):
-    subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', ROOT, checkout], check=True)
-    subprocess.run(['git', 'checkout', '--quiet', '--detach', revision], cwd=checkout, check=True)
+def build(revision, checkout, threads, arguments):
+    if not checkout.exists():
+        subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', ROOT, checkout], check=True)
+        subprocess.run(['git', 'checkout', '--quiet', '--detach', revision], cwd=checkout, check=True)
     try:
         subprocess.run([checkout / 'tools/toolchain-dist/build', '--local',
-                        '--num-threads', str(threads), '--output', output, *flags],
+                        '--num-threads', str(threads), *arguments],
                        cwd=checkout, check=True)
     finally:
         buck = checkout / '.buck2/bin/buck2'
@@ -97,7 +102,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='fresh directory for the outputs')
     parser.add_argument('--num-threads', type=int, default=2, help='Buck2 execution threads per build')
-    parser.add_argument('--pgo', action='store_true', help='build both compilers with PGO')
+    parser.add_argument('--pgo', nargs='?', const=True, type=Path, metavar='PROFILE',
+                        help='build both compilers with one pinned profile (<sha256>.profdata); '
+                             'without PROFILE, train it once first')
     parser.add_argument('--bolt', action='store_true', help='rewrite both compilers with BOLT')
     parser.add_argument('--std-jobs', type=Path, metavar='PREFIX',
                         help='only build the release std of this installed bundle at each job count')
@@ -111,13 +118,19 @@ def main():
     if args.std_jobs is not None:
         return 0 if check_std_jobs(args.std_jobs.resolve(), output) else 1
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    flags = ['--pgo'] * args.pgo + ['--bolt'] * args.bolt
-    print(f'check-repro: building {revision} twice {" ".join(flags) or "without PGO"}', flush=True)
     left, right = output / 'first', output / 'second'
     with tempfile.TemporaryDirectory(prefix='hirsel-repro-', dir=output) as scratch:
         # The second checkout's path differs in length too, so an embedded path shows.
-        build(revision, Path(scratch) / 'checkout', left, args.num_threads, flags)
-        build(revision, Path(scratch) / 'second-checkout', right, args.num_threads, flags)
+        first, second = Path(scratch) / 'checkout', Path(scratch) / 'second-checkout'
+        profile = args.pgo.resolve() if isinstance(args.pgo, Path) else None
+        if args.pgo is True:
+            print(f'check-repro: training one profile at {revision}', flush=True)
+            build(revision, first, args.num_threads, ['--train-profile', output / 'profile'])
+            (profile,) = (output / 'profile').glob('*.profdata')
+        flags = ['--pgo', profile] * bool(profile) + ['--bolt'] * args.bolt
+        print(f'check-repro: building {revision} twice {" ".join(map(str, flags)) or "without PGO"}', flush=True)
+        build(revision, first, args.num_threads, ['--output', left, *flags])
+        build(revision, second, args.num_threads, ['--output', right, *flags])
     equal = compare(left, right)
     with tempfile.TemporaryDirectory(prefix='hirsel-std-jobs-', dir=output) as scratch:
         equal &= check_std_jobs(left, Path(scratch))

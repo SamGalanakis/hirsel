@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Build an isolated distribution bundle, optionally with reproducible PGO.
+"""Build an isolated distribution bundle, optionally with a pinned PGO profile.
 
-    tools/toolchain-dist/build --output /tmp/dist [--bolt] [--pgo --profdata /path/to/llvm-profdata]
+    tools/toolchain-dist/build --train-profile DIR [--llvm-profdata /path/to/llvm-profdata]
+    tools/toolchain-dist/build --output /tmp/dist [--bolt] [--pgo DIR/<sha256>.profdata]
 
-Uses Buck2's remote pool. Training uses one tools/capped command at a time.
-Keep output and work outside the repository; generated profiles are never committed.
+Training counts differ from run to run, so a release never trains: it takes a
+profile trained once and named by its SHA-256, and refuses one whose bytes do
+not match its name. Uses Buck2's remote pool. Training uses one tools/capped
+command at a time. Keep output and work outside the repository; profiles are
+never committed.
 """
 import argparse
 from contextlib import contextmanager
@@ -87,15 +91,21 @@ def build_targets(mode, options, *targets, bolt='off'):
     return [ROOT / outputs['root' + target] for target in targets]
 
 
-def build(mode, output, options, *, bolt=False):
+def build(mode, output, options, work, *, bolt=False):
     if bolt:
         compiler, runtimes = build_targets(mode, options, COMPILER_TARGET, RUNTIME_TARGET, bolt='link')
         runtime = runtimes / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
+        # Keep BOLT's input binary, its merged profile and its output, so two
+        # builds that differ can be compared stage by stage.
+        kept = work / 'bolt'
+        kept.mkdir(parents=True)
+        shutil.copyfile(compiler, kept / 'hirsel')
         try:
             jobs = min(4, len(os.sched_getaffinity(0)))
             subprocess.run([ROOT / 'tools/capped', sys.executable, ROOT / 'tools/native-toolchain/bolt.py',
-                            'compiler', compiler, runtime, BOLT_COMPILER], cwd=ROOT, check=True,
+                            'compiler', compiler, runtime, BOLT_COMPILER, '--keep', kept], cwd=ROOT, check=True,
                            env=dict(os.environ, HIRSEL_JOBS=str(jobs), HIRSEL_MEMORY_LIMIT='8G'))
+            shutil.copyfile(BOLT_COMPILER, kept / 'hirsel.bolt')
             (bundle,) = build_targets(mode, options, '//:hirsel-toolchain', bolt='use')
         finally:
             BOLT_COMPILER.unlink(missing_ok=True)
@@ -192,6 +202,45 @@ def fresh_witness(prefix):
     print('dist: fresh-root acceptance passed', flush=True)
 
 
+def pinned_profile(path):
+    """The profile's bytes must hash to its name, `<sha256>.profdata`."""
+    stem = path.name.removesuffix('.profdata')
+    if not re.fullmatch(r'[0-9a-f]{64}', stem) or path.suffix != '.profdata':
+        raise SystemExit(f'{path}: a pinned profile is named <sha256>.profdata')
+    with path.open('rb') as stream:
+        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+    if actual != stem:
+        raise SystemExit(f'{path}: bytes hash to {actual}, not the pinned {stem}')
+    return path
+
+
+def train(output, work, options, cpu, profdata):
+    """Instrument, train and merge once; write `output/<sha256>.profdata`."""
+    if profdata is None:
+        profdata = subprocess.check_output([str(ROOT / 'tools/toolchain-dist/profile-tools')], text=True).strip()
+    work.mkdir(parents=True, exist_ok=True)
+    instrumented = work / 'instrumented'
+    raw = work / 'raw'
+    if raw.exists():
+        raise SystemExit(f'{raw} exists: use a fresh work directory to avoid stale profiles')
+    build('generate', instrumented, options, work)
+    subprocess.run([str(ROOT / 'tools/toolchain-dist/train'), '--toolchain', str(instrumented),
+                    '--work', str(work / 'corpus'), '--raw', str(raw), '--cpu', str(cpu)], cwd=ROOT, check=True)
+    profiles = sorted(raw.glob('*.profraw'))
+    if not profiles or any(p.stat().st_size == 0 for p in profiles):
+        raise SystemExit('training left an empty or missing raw profile')
+    merged = work / 'merged.profdata'
+    subprocess.run([str(ROOT / 'tools/capped'), profdata, 'merge',
+                    '-o', str(merged), *map(str, profiles)],
+                   env=dict(os.environ, HIRSEL_JOBS='1'), check=True)
+    subprocess.run([profdata, 'show', str(merged)], check=True)
+    output.mkdir(parents=True, exist_ok=True)
+    with merged.open('rb') as stream:
+        pinned = output / (hashlib.file_digest(stream, 'sha256').hexdigest() + '.profdata')
+    shutil.copyfile(merged, pinned)
+    print(pinned, flush=True)
+
+
 def manifest(output, mode, bolt):
     try:
         notices.collect(output, mode)
@@ -228,20 +277,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--output', type=Path)
+    action.add_argument('--train-profile', type=Path, metavar='DIR',
+                        help='train once and write DIR/<sha256>.profdata for --pgo')
     action.add_argument('--check-fresh', type=Path, metavar='PREFIX',
                         help='check the glibc floor and fresh-machine behavior (requires readelf and bwrap)')
     action.add_argument('--check-glibc', type=Path, metavar='PREFIX',
                         help='check the glibc floor on an existing bundle (requires readelf)')
     parser.add_argument('--work', type=Path)
-    parser.add_argument('--pgo', action='store_true')
+    parser.add_argument('--pgo', type=Path, metavar='PROFILE',
+                        help='use this pinned profile, named <sha256>.profdata (from --train-profile)')
     parser.add_argument('--bolt', action='store_true', help='optimize the compiler with llvm-bolt and merge-fdata')
     parser.add_argument('--cpu', type=int, default=8)
     parser.add_argument('--local', action='store_true', help='build locally without the remote action cache')
     parser.add_argument('--num-threads', type=int, help='Buck2 execution threads')
-    parser.add_argument('--profdata', help='LLVM tools matching the pinned rustc')
+    parser.add_argument('--llvm-profdata', help='llvm-profdata matching the pinned rustc, for --train-profile')
     args = parser.parse_args()
-    if args.bolt and args.output is None:
-        parser.error('--bolt requires --output')
+    if (args.bolt or args.pgo) and args.output is None:
+        parser.error('--bolt and --pgo require --output')
+    if args.llvm_profdata and args.train_profile is None:
+        parser.error('--llvm-profdata requires --train-profile')
     if args.check_glibc is not None:
         check_glibc(args.check_glibc.resolve())
         return
@@ -249,8 +303,9 @@ def main():
         check_glibc(args.check_fresh.resolve())
         fresh_witness(args.check_fresh.resolve())
         return
-    output = args.output.resolve()
-    if output.exists():
+    profile = pinned_profile(args.pgo.resolve()) if args.pgo else None
+    output = (args.output or args.train_profile).resolve()
+    if args.output is not None and output.exists():
         parser.error('output already exists; use a fresh directory')
     if output.is_relative_to(ROOT):
         parser.error('output must be outside the checkout')
@@ -263,37 +318,23 @@ def main():
     if args.num_threads is not None:
         options.extend(['--num-threads', str(args.num_threads)])
     subprocess.run(prepare, cwd=ROOT, check=True)
-    if not args.pgo:
+    if args.train_profile is not None:
+        with profile_lock():
+            train(output, work, options, args.cpu, args.llvm_profdata)
+        return
+    if profile is None:
         if args.bolt:
             with profile_lock():
-                build('off', output, options, bolt=True)
+                build('off', output, options, work, bolt=True)
         else:
-            build('off', output, options)
+            build('off', output, options, work)
         manifest(output, 'off', args.bolt)
         witness(output)
         return
     with profile_lock():
-        if args.profdata is None:
-            args.profdata = subprocess.check_output([str(ROOT / 'tools/toolchain-dist/profile-tools')], text=True).strip()
-        work.mkdir(parents=True, exist_ok=True)
-        instrumented = work / 'instrumented'
-        raw = work / 'raw'
-        if raw.exists():
-            raise SystemExit(f'{raw} exists: use a fresh work directory to avoid stale profiles')
-        build('generate', instrumented, options)
-        subprocess.run([str(ROOT / 'tools/toolchain-dist/train'), '--toolchain', str(instrumented),
-                        '--work', str(work / 'corpus'), '--raw', str(raw), '--cpu', str(args.cpu)], cwd=ROOT, check=True)
-        profiles = sorted(raw.glob('*.profraw'))
-        if not profiles or any(p.stat().st_size == 0 for p in profiles):
-            raise SystemExit('training left an empty or missing raw profile')
-        merged = work / 'merged.profdata'
-        subprocess.run([str(ROOT / 'tools/capped'), args.profdata, 'merge',
-                        '-o', str(merged), *map(str, profiles)],
-                       env=dict(os.environ, HIRSEL_JOBS='1'), check=True)
-        subprocess.run([args.profdata, 'show', str(merged)], check=True)
-        shutil.copyfile(merged, PROFILE)
-        build('use', output, options, bolt=args.bolt)
-        shutil.copyfile(merged, output / 'hirsel.profdata')
+        shutil.copyfile(profile, PROFILE)
+        build('use', output, options, work, bolt=args.bolt)
+        shutil.copyfile(profile, output / 'hirsel.profdata')
         manifest(output, 'use', args.bolt)
         witness(output)
 

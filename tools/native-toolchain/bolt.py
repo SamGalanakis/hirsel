@@ -101,7 +101,7 @@ def engine_shards(source, work):
         yield batch, [f'-funcs-file-no-regex={selection}']
 
 
-def optimize(kind, compiler, library, runtime, output):
+def optimize(kind, compiler, library, runtime, output, keep=None):
     # LangArena opens more files than Docker's default soft descriptor limit.
     _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
@@ -141,6 +141,8 @@ def optimize(kind, compiler, library, runtime, output):
             raise RuntimeError('merge-fdata produced an empty profile')
         for path in raw:
             path.unlink()
+        if keep is not None:
+            shutil.copyfile(profile, keep / 'merged.fdata')
         with tempfile.TemporaryDirectory(prefix='.bolt-', dir=output.parent) as staging:
             candidate = Path(staging) / output.name
             run([*tool, source, '-data', profile, *OPTIMIZE, '-o', candidate], work)
@@ -160,13 +162,15 @@ def main():
     compiler.add_argument('compiler', type=Path)
     compiler.add_argument('runtime', type=Path)
     compiler.add_argument('output', type=Path)
+    compiler.add_argument('--keep', type=Path, help='copy the merged BOLT profile into this directory')
     args = parser.parse_args()
     if args.command == 'engine':
         artifacts = json.loads(args.artifacts.read_text())
         optimize('engine', Path(artifacts['compiler']).resolve(), args.library.resolve(),
                  Path(artifacts['runtime']).resolve(), args.output.absolute())
     else:
-        optimize('compiler', args.compiler.resolve(), LLVM, args.runtime.resolve(), args.output.absolute())
+        optimize('compiler', args.compiler.resolve(), LLVM, args.runtime.resolve(), args.output.absolute(),
+                 args.keep.resolve() if args.keep else None)
 
 
 if __name__ == '__main__':

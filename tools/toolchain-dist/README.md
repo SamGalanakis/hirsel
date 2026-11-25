@@ -14,7 +14,15 @@ flags and inputs, not that platform. `profile.profdata` is a declared, ignored
 Buck2 source, so its content participates in remote action keys. A checkout lock
 serializes profile writers. Do not edit the tree between PGO passes.
 
-Training checks the retained native hello source and builds it with Cranelift and LLVM. Each command uses tools/capped and must return zero with a nonempty `.profraw`. The default CPU is 8; timing cores 12-15 and 28-31 are refused. The program cache is disabled. The matching profile tools come from the pinned Rust llvm-tools archive. `--profdata` can select an installed matching tool.
+Training counts differ from run to run (about 0.02%, from the compiler's own
+scheduling), so two builds that each train produce different compilers. A
+release therefore never trains. `build --train-profile DIR` instruments, trains
+and merges once and writes `DIR/<sha256>.profdata`; `build --pgo
+DIR/<sha256>.profdata` takes that file as a pinned input and refuses one whose
+bytes do not hash to its name. `--pgo` without a profile is refused: a build
+that trains cannot be reproduced, so it is not offered.
+
+Training checks the retained native hello source and builds it with Cranelift and LLVM. Each command uses tools/capped and must return zero with a nonempty `.profraw`. The default CPU is 8; timing cores 12-15 and 28-31 are refused. The program cache is disabled. The matching profile tools come from the pinned Rust llvm-tools archive. `--llvm-profdata` can select an installed matching tool.
 
 The PGO pipeline retains the existing tsrs training structure: instrument, run ordinary source commands, require nonempty profiles, merge, and rebuild with matching symbol metadata.
 
@@ -25,7 +33,9 @@ put `DIR/bin` on PATH. The bundle builds its installed package products
 after the rewrite, using the resulting compiler and its build ID. The
 compiler's DWARF is decompressed for the rewrite and compressed again for
 the distribution. When
-combined with `--pgo`, BOLT runs after the PGO-use link.
+combined with `--pgo`, BOLT runs after the PGO-use link. The work directory
+(`--work`, default `OUTPUT-work`) keeps `bolt/hirsel` (BOLT's input),
+`bolt/merged.fdata` (its profile) and `bolt/hirsel.bolt` (its output).
 
 `NOTICES.md` at the repository root is the distribution's notice inventory. It is
 generated, never edited: `tools/toolchain-dist/notices.py --write [--bundle DIR]`
@@ -101,6 +111,8 @@ On Rust toolchain or LLVM bumps, run
 to qualify. It builds that commit without PGO (or with `--pgo` and `--bolt`,
 as a release is built) in two fresh local checkouts at different paths, with
 separate Buck2 state, and keeps both bundles in the output directory.
+`--pgo PROFILE` builds both from that pinned profile; bare `--pgo` first
+trains one in the first checkout and keeps it under `OUTPUT/profile/`.
 It compares every file and reports the first differing byte offset in each
 changed file, starting at zero. It then builds the x86_64 release std with the
 first bundle at 1, 2 and 8 jobs and compares the three stores the same way,

@@ -1,12 +1,77 @@
 use super::*;
 
-/// LANG-12 for a call whose type parameter nothing fixed, with the two rewrites
+/// LANG-12 for a call whose type parameter nothing fixed, with the rewrites
 /// that fix it.
 pub(super) const OPEN_TYPE_PARAMETER: &str = "a type parameter of the callee is still open; give the \
                                    result a type: `let j: u64 = …`, or suffix the literal: \
                                    `8u64`";
+pub(super) const OPEN_TYPE_PARAMETER_IN_ARITHMETIC: &str = "a type parameter of the callee is still \
+                                   open; suffix the literal: `8u64`";
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn open_type_parameter_message(&self, call: NodeId) -> &'static str {
+        if self.arithmetic_literal_operand(call) {
+            OPEN_TYPE_PARAMETER_IN_ARITHMETIC
+        } else {
+            OPEN_TYPE_PARAMETER
+        }
+    }
+
+    fn arithmetic_literal_operand(&self, call: NodeId) -> bool {
+        let tree = self.item.tree;
+        let nodes = self.item.range.nodes.clone();
+        let start = nodes.start;
+        let mut parent = vec![u32::MAX; (nodes.end - start) as usize];
+        for id in nodes {
+            let n = NodeId(id);
+            for &child in tree.children(n) {
+                if let Some(p) = parent.get_mut(child.0.wrapping_sub(start) as usize) {
+                    *p = id;
+                }
+            }
+        }
+        let up = |n: NodeId| {
+            parent
+                .get(n.0.wrapping_sub(start) as usize)
+                .filter(|&&p| p != u32::MAX)
+                .map(|&p| NodeId(p))
+        };
+        let mut at = call;
+        while let Some(p) = up(at) {
+            match self.kind(p) {
+                NodeKind::Group => at = p,
+                NodeKind::Binary
+                    if matches!(
+                        self.token_text(p),
+                        "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^"
+                    ) =>
+                {
+                    if self
+                        .kids(p)
+                        .iter()
+                        .any(|&child| child != at && self.has_untyped_literal(child))
+                    {
+                        return true;
+                    }
+                    at = p;
+                }
+                _ => break,
+            }
+        }
+        false
+    }
+
+    fn has_untyped_literal(&self, n: NodeId) -> bool {
+        match self.kind(n) {
+            NodeKind::Literal => self.unsuffixed_number(n),
+            NodeKind::Unary | NodeKind::Group | NodeKind::Binary => self
+                .kids(n)
+                .iter()
+                .any(|&child| self.has_untyped_literal(child)),
+            _ => false,
+        }
+    }
+
     /// MEM-29: an element outside core's element modules meets LANG-14's capture mask,
     /// with rigid parameters read from their bounds. Refuses at `at` when it does not.
     pub(super) fn element_refused(&mut self, at: NodeId, t: TyId) -> bool {

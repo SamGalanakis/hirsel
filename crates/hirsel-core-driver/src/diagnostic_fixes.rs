@@ -581,8 +581,8 @@ fn lang11_untyped_literal_fixes_apply_and_compile_cleanly() {
 
 #[test]
 fn ds_learnings_refusals_name_their_fix_and_the_fix_compiles() {
-    // LANG-12: in arithmetic the literal operand types the call; alone, the `let` does.
-    let (fixed, rendered) = assert_fix_compiles(
+    // LANG-12: in arithmetic only the literal operand types the call; alone, the `let` does.
+    let (fixed, nested_rendered) = assert_fix_compiles(
         "fn f(i: u32) -> u64 { let j = 8 + int.widen(i); j }\n",
         "LANG-12",
         "maybe",
@@ -591,7 +591,17 @@ fn ds_learnings_refusals_name_their_fix_and_the_fix_compiles() {
         fixed,
         "fn f(i: u32) -> u64 { let j = 8u64 + int.widen(i); j }\n"
     );
-    let (fixed, _) = assert_fix_compiles(
+    assert!(
+        nested_rendered
+            .contains("a type parameter of the callee is still open; suffix the literal: `8u64`"),
+        "got:\n{nested_rendered}"
+    );
+    assert!(
+        !nested_rendered.contains("give the result a type")
+            && !nested_rendered.contains("let j: u64"),
+        "got:\n{nested_rendered}"
+    );
+    let (fixed, whole_rendered) = assert_fix_compiles(
         "fn f(i: u32) -> u64 { let j = int.widen(i); j }\n",
         "LANG-12",
         "maybe",
@@ -601,9 +611,9 @@ fn ds_learnings_refusals_name_their_fix_and_the_fix_compiles() {
         "fn f(i: u32) -> u64 { let j: u64 = int.widen(i); j }\n"
     );
     assert!(
-        rendered
+        whole_rendered
             .contains("give the result a type: `let j: u64 = …`, or suffix the literal: `8u64`"),
-        "got:\n{rendered}"
+        "got:\n{whole_rendered}"
     );
 
     // LANG-21: a shift count has the shifted value's type.

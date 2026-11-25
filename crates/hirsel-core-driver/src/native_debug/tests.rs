@@ -505,7 +505,7 @@ fn llvm_unwind_covers_live_whole_split_and_reused_code() {
         .map(|object| object.bytes.into())
         .collect();
     let image = dir.path().join("darwin");
-    link_macho(&linker, objects, "_hirsel_entry", &image);
+    link_macho(&linker, objects, "_hirsel_entry", &image, true);
     let bytes = std::fs::read(&image).unwrap();
     macho_structure(&bytes);
     let macho = object::File::parse(bytes.as_slice()).unwrap();
@@ -748,6 +748,7 @@ fn cranelift_unwind_links_into_pie_from_whole_and_cached_objects() {
                             .collect(),
                         &live_name,
                         &executable,
+                        true,
                     ),
                 }
                 let bytes = std::fs::read(&executable).unwrap();
@@ -887,12 +888,13 @@ fn compact_unwind(
 }
 
 /// Link `objects` into `executable` with the driver's Mach-O link of its
-/// bundle, with no libSystem, entering at `entry`.
+/// bundle, with no libSystem, entering at `entry`; a dev link unless `optimize`.
 fn link_macho(
     linker: &std::path::Path,
     objects: Vec<std::sync::Arc<[u8]>>,
     entry: &str,
     executable: &std::path::Path,
+    optimize: bool,
 ) {
     use hirsel_core_layout::{ObjectFormat, Target};
     let held = crate::native::link_input::Bundle::of(&objects, ObjectFormat::MachO).unwrap();
@@ -917,7 +919,7 @@ fn link_macho(
         std::slice::from_ref(&bundle),
         Some(&bundle),
         executable,
-        true,
+        optimize,
         false,
         false,
     )
@@ -926,8 +928,8 @@ fn link_macho(
 
 /// The §8.1 structure laws of a Mach-O arm64 executable, from Apple's
 /// <mach-o/loader.h>: a 64-bit arm64 MH_EXECUTE header, a macOS
-/// LC_BUILD_VERSION whose minimum is the 26.0 floor, an LC_UUID (a release
-/// link's), an ad hoc LC_CODE_SIGNATURE, and no library but the system's; and its dSYM ([`super::dsym`]) is an MH_DSYM of the
+/// LC_BUILD_VERSION whose minimum is the 26.0 floor, an LC_UUID (dyld's
+/// "missing LC_UUID load command" otherwise), an ad hoc LC_CODE_SIGNATURE, and no library but the system's; and its dSYM ([`super::dsym`]) is an MH_DSYM of the
 /// same arm64 CPU carrying the image's UUID.
 fn macho_structure(bytes: &[u8]) {
     use object::{Object as _, ObjectSection as _};

@@ -57,8 +57,8 @@ equivalents:
 |---|---|---|
 | release link identity | GNU build ID | `LC_UUID`, which the linker derives from the image's content |
 | release link detached file | `.build-id/XX/REST.debug` | `NAME.dSYM/Contents/Resources/DWARF/NAME`, a Mach-O file with a `__DWARF` segment and the same UUID, where `lldb` looks with no configuration |
-| dev link identity | none, so the image digest | none: dev links pass `-no_uuid`, because the resident link patches them in place and a UUID is a digest of the whole image |
-| dev link detached file | `.hirsel-debug/DIGEST.debug` | the same |
+| dev link identity | none, so the image digest | `LC_UUID`, as a release link's: dyld refuses an arm64 executable without one, so a resident link that patches a dev image in place writes the patched image's UUID |
+| dev link detached file | `.hirsel-debug/DIGEST.debug` | `NAME.dSYM`, as a release link's |
 
 The driver writes the Mach-O debug file itself, as it writes the ELF one, so no `dsymutil`
 and no debug map are involved. In a `.hprof`, the `build_id` column and key hold the

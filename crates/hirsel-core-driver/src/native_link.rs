@@ -145,9 +145,10 @@ pub(crate) fn direct_link(
 /// list, the bundle with `-force_load`, and dead-strips per atom. It writes no
 /// debug map (`-S`): the detached debug file holds the image's DWARF. The
 /// fixed name "program" is also the code signature's identifier, so a cross
-/// and a native link sign alike. A dev link has no `LC_UUID`, a digest of
-/// the whole image, so the resident link may patch it and its debug file is
-/// keyed by the image digest, as an ELF dev link without a build ID is.
+/// and a native link sign alike. Every link keeps ld64's `LC_UUID`, a digest
+/// of the image: dyld refuses an arm64 executable without one ("missing
+/// LC_UUID load command", macOS 26), so a dev link's debug file is its dSYM,
+/// as a release link's is.
 fn macho_link(
     mut process: std::process::Command,
     directory: tempfile::TempDir,
@@ -190,8 +191,6 @@ fn macho_link(
     }
     if optimize {
         process.arg("-dead_strip");
-    } else {
-        process.arg("-no_uuid");
     }
     process.arg("-S");
     process.arg("-o").arg("program");

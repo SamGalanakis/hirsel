@@ -2,7 +2,7 @@
 //! part keeps its ARM64_RELOC_ADDEND / PAGE21 / PAGEOFF12 pairs, its
 //! `__compact_unwind` entry and its `__eh_frame` FDE, and is a function of
 //! its own definition only.
-use super::{compact_unwind, link_macho};
+use super::{compact_unwind, link_macho, macho_structure};
 use hirsel_core_ids::ContentHash;
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 use std::path::{Path, PathBuf};
@@ -133,7 +133,7 @@ fn macho_parts_keep_their_page_pairs_and_unwind() {
     let parts = cut(&object, &["first", "second", "odd"]);
     let image = dir.path().join("image");
     let objects = parts.into_iter().map(Into::into).collect();
-    link_macho(&bin().join("ld.lld"), objects, "_second", &image);
+    link_macho(&bin().join("ld.lld"), objects, "_second", &image, true);
     let bytes = std::fs::read(&image).unwrap();
     let macho = object::File::parse(bytes.as_slice()).unwrap();
     let address = |name: &str| macho.symbol_by_name(name).unwrap().address();
@@ -465,6 +465,21 @@ fn macho_llvm_release_parts_cut_link_and_stand_alone() {
     assert_eq!(section.data().unwrap()[at..at + 61], [0; 61]);
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("image");
-    let objects = beside.into_values().map(Into::into).collect();
-    link_macho(&bin().join("ld.lld"), objects, "_hirsel_entry", &image);
+    let objects: Vec<_> = beside.into_values().map(Into::into).collect();
+    link_macho(
+        &bin().join("ld.lld"),
+        objects.clone(),
+        "_hirsel_entry",
+        &image,
+        true,
+    );
+    // dyld refuses an executable without LC_UUID, so a dev link keeps one too.
+    link_macho(
+        &bin().join("ld.lld"),
+        objects,
+        "_hirsel_entry",
+        &image,
+        false,
+    );
+    macho_structure(&std::fs::read(&image).unwrap());
 }

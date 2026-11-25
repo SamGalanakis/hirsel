@@ -439,3 +439,15 @@ limit = 536870912
 
 [tests.runs."store@1/store/test_fetch_many_blob_values_rerun_once"]
 limit = 536870912
+
+[tests.runs."store@1/store/test_l87_queue_rows_move_as_roots"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l87_queue_rows_move_as_roots_refused_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l87_queue_rows_move_as_roots_crash_before_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l87_queue_rows_move_as_roots_crash_after_rename"]
+limit = 536870912

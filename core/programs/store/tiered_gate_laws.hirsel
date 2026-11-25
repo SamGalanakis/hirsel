@@ -476,3 +476,184 @@ fn test_l87_merge_across_a_fork_crash_before_rename(d: Dir, c: Clock, r: Random,
 fn test_l87_merge_across_a_fork_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     gate_merge_fork(d, c, r, tasks, AfterRename)
 }
+
+// The store's next cut, crashed at `crash`'s row of the §13.6 table.
+fn gate_crash_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, take db: Db, crash: GateCrash) -> Result[Db, Error] waits {
+    let mut carried = take db
+    if let NoCrash = crash {
+        let _ = checkpoint(mut carried)?
+        return Ok(take carried)
+    }
+    let first_output = disk_state(carried).pages.next_pack
+    let sealed = refused_cut_bytes(mut carried, NoHolderChange)?
+    gate_crash_reopen(d, c, r, tasks, options, take carried, sealed, first_output, crash)
+}
+
+// L87 (c), queue rows as roots (§13.6 "Queue rows are their own roots",
+// astra 2207 #3). A Cold Tiered Log of 1,100-byte entries keeps its values
+// as BLOBs in class-4 packs and its leaves and root in class-3 packs. A
+// served trim one entry into the second leaf queues the first leaf (a Page
+// row) and the second leaf's first BLOB (a Blob row), and the cut rewrites
+// the second leaf and the root. A journaled whole-Log trim then folds at
+// reopen, and queues the new root Q, whose leaf children Y stay in the
+// older class-3 pack. `free_budget` is 0, so no row drains. The next cuts
+// compact every Tiered pack (`compact_permille` 1001): only queue rows reach
+// their frames, so each match moves, and each row takes its frame's new
+// location. Expected: every Tiered pack listed before the compaction cut
+// retires; the queue keeps its rows in order, each of the same kind; the
+// walker from the rows reaches exactly the stamps it reached before, each
+// at one location in a pack the compaction wrote; and once `free_budget`
+// lets the drain run, it consumes every row and files every moved frame
+// dead, so no listed Tiered pack keeps live bytes. Seeded bugs
+// `blob_in_leaf_only` (the Blob row is never matched, so its pack retires
+// under it) and `queue_row_by_map` (Y is not reached from Q).
+fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let width = 1100u64
+    let events = l87_cold_log(d, c, r, tasks, floor, 300, width)?
+    let mut db = open(tasks, d, c, r, l87_options(floor, 0)?)?
+    let (_, part) = l87_first_leaf(d, db, events.binding.id)?
+    let partial: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut db, Some(100000), copy_env((partial, part)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+        trim_before(mut tx, env.0, env.1)
+    })? else {
+        fail("L87 (c): the served trim commits")
+    }
+    let _ = checkpoint(mut db)?
+    let whole: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut db, Some(100000), copy_env(whole), fn(mut tx: Tx, env: Log[Bytes]) -> Result[(), Error] {
+        trim_before(mut tx, env, 300)
+    })? else {
+        fail("L87 (c): the whole-Log trim commits")
+    }
+    close(take db)?
+    let mut folding = open(tasks, d, c, r, l87_options(floor, 0)?)?
+    let _ = checkpoint(mut folding)?
+    close(take folding)?
+
+    let mut options = l87_options(floor, 0)?
+    options.probe_budget = 4096
+    options.compact_permille = 1001
+    let probing = open(tasks, d, c, r, options)?
+    let before = l87_queue(probing)?
+    let mut pages = 0u64
+    let mut blobs = 0u64
+    for (_, row) in before {
+        match row.target {
+            TieredPage(_) => { pages += 1 },
+            TieredBlob(_) => { blobs += 1 },
+        }
+    }
+    if pages < 2 || blobs < 1 {
+        fail("L87 (c): the fixture queues Page rows and a Blob row")
+    }
+    let reached = gate_walk_queue(d, probing)?
+    let mut old: List[u64] = list.new()
+    let mut inventory = std.omap.range(disk_state(probing).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut inventory) {
+        if pack.class == 3 || pack.class == 4 {
+            list.push(mut old, seq)
+        }
+    }
+    let mut cut_options = l87_options(floor, 0)?
+    cut_options.probe_budget = 4096
+    cut_options.compact_permille = 1001
+    let mut cutting = gate_crash_cut(d, c, r, tasks, cut_options, take probing, crash)?
+    // A crash loses the probe cursors, so the cuts after it restart them
+    // (§13.6 "Progress"); each probe covers its pack within these cuts.
+    for _ in 0u64 .. 8 {
+        let _ = checkpoint(mut cutting)?
+    }
+    for seq in old {
+        if compact_listed(cutting, seq) {
+            fail("L87 (c): a pack that only queue rows reach retires once its frames move")
+        }
+    }
+    let after = l87_queue(cutting)?
+    if list.len(after) != list.len(before) {
+        fail("L87 (c): compaction keeps every queue row")
+    }
+    for k in 0u64 .. list.len(after) {
+        let (seq_before, row_before) = before[k]
+        let (seq_after, row_after) = after[k]
+        let same_kind = match (row_before.target, row_after.target) {
+            (TieredPage(_), TieredPage(_)) => true,
+            (TieredBlob(_), TieredBlob(_)) => true,
+            _ => false,
+        }
+        if seq_before != seq_after || row_before.branch_id != row_after.branch_id || !same_kind {
+            fail("L87 (c): each row keeps its place, owner and kind, and takes the new location")
+        }
+    }
+    let moved = gate_walk_queue(d, cutting)?
+    if map.len(moved.places) != map.len(reached.places) {
+        fail("L87 (c): the rows reach the same frames after the move")
+    }
+    for (stamp, place) in moved.places {
+        if !map.contains(reached.places, stamp) || list.contains(old, place.0) {
+            fail("L87 (c): every frame the rows reach moved to a pack the compaction wrote")
+        }
+    }
+    close(take cutting)?
+
+    let mut draining = l87_options(floor, 65536)?
+    draining.probe_budget = 4096
+    draining.compact_permille = 1001
+    let mut db_drained = open(tasks, d, c, r, draining)?
+    let mut rounds = 0u64
+    while std.page.count(std.page.image_of(disk_state(db_drained).pages.lists.deferred)) != 0 {
+        if rounds == 16 {
+            fail("L87 (c): the drain consumes every moved row")
+        }
+        let _ = checkpoint(mut db_drained)?
+        rounds += 1
+    }
+    let _ = checkpoint(mut db_drained)?
+    let mut left = std.omap.range(disk_state(db_drained).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((_, pack)) = std.omap.next(mut left) {
+        if (pack.class == 3 || pack.class == 4) && pack.live != 0 {
+            fail("L87 (c): the drain files every moved frame dead")
+        }
+    }
+    close(take db_drained)
+}
+
+// The walker over the queue rows alone: each Page row's tree and each Blob
+// row, every stamp at one location in a listed pack on disk.
+fn gate_walk_queue(d: Dir, db: Db) -> Result[CompactWalk, Error] waits {
+    let mut walk = CompactWalk(live: map.new(), places: map.new())
+    let queued = l87_queue(db)?
+    for k in 0u64 .. list.len(queued) {
+        let (_, row) = queued[k]
+        match row.target {
+            TieredPage(ptr) => compact_walk_frame(d, db, ptr, mut walk)?,
+            TieredBlob(body) => compact_walk_blob(d, db, body, mut walk)?,
+        }
+    }
+    for (seq, _) in walk.live {
+        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+            fail("L87 (c): every queue row reaches its frames in listed packs on disk")
+        }
+    }
+    Ok(take walk)
+}
+
+@test
+fn test_l87_queue_rows_move_as_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_queue_rows(d, c, r, tasks, NoCrash)
+}
+
+@test
+fn test_l87_queue_rows_move_as_roots_refused_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_queue_rows(d, c, r, tasks, SealRefused)
+}
+
+@test
+fn test_l87_queue_rows_move_as_roots_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_queue_rows(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l87_queue_rows_move_as_roots_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    gate_queue_rows(d, c, r, tasks, AfterRename)
+}

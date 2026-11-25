@@ -1,0 +1,18 @@
+[package]
+name = "spatial"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+store = { major = 1, path = "../store" }
+
+[sources]
+"spatial.hirsel" = "spatial"
+
+[tests]
+limit = 268435456
+grants = ["Clock", "Random"]
+
+[tests.sources]
+"tests.hirsel" = "tests"

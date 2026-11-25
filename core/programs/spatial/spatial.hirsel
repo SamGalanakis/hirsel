@@ -1,0 +1,218 @@
+// Spatial form A: an entry index on the Hilbert key of a point in the u32
+// square. A box query reads a small set of key ranges and filters exactly.
+const MAX: u64 = 18446744073709551615u64
+
+const LOW_32: u64 = 4294967295u64
+
+// The ranges a query reads at most.
+pub const RANGES: u64 = 64
+
+pub type Point: codec + key {
+    x: u32,
+    y: u32
+}
+
+// The inclusive box [x_lo, x_hi] x [y_lo, y_hi].
+pub opaque type Box {
+    x_lo: u32,
+    y_lo: u32,
+    x_hi: u32,
+    y_hi: u32
+}
+
+// The inclusive key range [lo, hi].
+pub type Range {
+    lo: u64,
+    hi: u64
+}
+
+// None when a low edge is above its high edge.
+pub fn box(x_lo: u32, y_lo: u32, x_hi: u32, y_hi: u32) -> Option[Box] {
+    if x_lo > x_hi || y_lo > y_hi {
+        return None
+    }
+    Some(Box(x_lo: x_lo, y_lo: y_lo, x_hi: x_hi, y_hi: y_hi))
+}
+
+pub fn contains(b: Box, p: Point) -> bool {
+    p.x >= b.x_lo && p.x <= b.x_hi && p.y >= b.y_lo && p.y <= b.y_hi
+}
+
+// The point's position on the order-32 Hilbert curve.
+pub fn hilbert(p: Point) -> u64 {
+    let mut x: u64 = int.widen(p.x)
+    let mut y: u64 = int.widen(p.y)
+    let mut d: u64 = 0
+    for step in 0u64 .. 32 {
+        let shift = 31 - step
+        let rx = (x >> shift) & 1
+        let ry = (y >> shift) & 1
+        d = (d << 2) | ((3 * rx) ^ ry)
+        if ry == 0 {
+            if rx == 1 {
+                x = x ^ LOW_32
+                y = y ^ LOW_32
+            }
+            let t = x
+            x = y
+            y = t
+        }
+    }
+    d
+}
+
+// The point at position d on the order-32 Hilbert curve; the inverse of hilbert.
+pub fn point_at(d: u64) -> Point {
+    let mut x: u64 = 0
+    let mut y: u64 = 0
+    for level in 0u64 .. 32 {
+        let quad = (d >> (2 * level)) & 3
+        let rx = (quad >> 1) & 1
+        let ry = (quad ^ rx) & 1
+        if ry == 0 {
+            if rx == 1 {
+                let mask = (1u64 << level) - 1
+                x = mask - x
+                y = mask - y
+            }
+            let t = x
+            x = y
+            y = t
+        }
+        x |= rx << level
+        y |= ry << level
+    }
+    Point(x: int.narrow(x), y: int.narrow(y))
+}
+
+fn encode_point(p: Point, mut out: Bytes) {
+    std.codec.put_key_u64(hilbert(p), mut out)
+}
+
+fn decode_point(raw: Bytes, mut at: u64) -> Result[Point, std.codec.DecodeError] {
+    Ok(point_at(std.codec.take_key_u64(raw, mut at)?))
+}
+
+fn point_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
+    std.codec.schema_u64(mut s)
+    Ok(())
+}
+
+// Points ordered by their Hilbert position: 8 big-endian bytes.
+pub fn key() -> std.codec.Key[Point] {
+    std.codec.key_make(code.describe(encode_point), code.describe(decode_point), code.describe(point_schema))
+}
+
+// A Many index of table t on the points `by` gives for each row.
+pub fn index[K, V](mut d: store.Declare, mut t: store.TableDecl[K, V], name: String, by: StaticFn[fn(K, V) -> Result[List[Point], Capacity]]) -> Result[store.Index[Point, K, V, ()], store.Error] {
+    store.index(mut d, mut t, name, Many, by, key())
+}
+
+// An aligned cell: corner (x, y), side 2^level.
+type Cell {
+    x: u64,
+    y: u64,
+    level: u64
+}
+
+type Cover = Outside | Inside | Partial
+
+fn cover(b: Box, c: Cell) -> Cover {
+    let last = (1u64 << c.level) - 1
+    let (x_lo, y_lo): (u64, u64) = (int.widen(b.x_lo), int.widen(b.y_lo))
+    let (x_hi, y_hi): (u64, u64) = (int.widen(b.x_hi), int.widen(b.y_hi))
+    if c.x > x_hi || c.x + last < x_lo || c.y > y_hi || c.y + last < y_lo {
+        Outside
+    } else if c.x >= x_lo && c.x + last <= x_hi && c.y >= y_lo && c.y + last <= y_hi {
+        Inside
+    } else {
+        Partial
+    }
+}
+
+// An aligned cell of side 2^k is the one key range of length 4^k that shares
+// the high 64 - 2k bits of its corner's position.
+fn cell_range(c: Cell) -> Range {
+    if c.level == 32 {
+        return Range(lo: 0, hi: MAX)
+    }
+    let low = (1u64 << (2 * c.level)) - 1
+    let lo = hilbert(Point(x: int.narrow(c.x), y: int.narrow(c.y))) & (MAX ^ low)
+    Range(lo: lo, hi: lo | low)
+}
+
+fn range_order(left: Range, right: Range) -> Order {
+    if left.lo < right.lo {
+        Less
+    } else if left.lo > right.lo {
+        Greater
+    } else {
+        Equal
+    }
+}
+
+// The key ranges that cover b, ascending and disjoint, at most max(budget, 1)
+// of them. Cells refine level by level while the cover stays within budget;
+// the cells left partial at the cut are read whole and filtered.
+pub fn ranges(b: Box, budget: u64) -> List[Range] {
+    let mut out: List[Range] = list.new()
+    let mut frontier: List[Cell] = list.new()
+    let root = Cell(x: 0, y: 0, level: 32)
+    match cover(b, root) {
+        Inside => list.push(mut out, cell_range(root)),
+        _ => list.push(mut frontier, root),
+    }
+    while list.len(frontier) != 0 {
+        let mut inside: List[Cell] = list.new()
+        let mut partial: List[Cell] = list.new()
+        for cell in frontier {
+            let level = cell.level - 1
+            let half = 1u64 << level
+            for (dx, dy) in[(0u64, 0u64), (0u64, half), (half, 0u64), (half, half)] {
+                let child = Cell(x: cell.x + dx, y: cell.y + dy, level: level)
+                match cover(b, child) {
+                    Inside => list.push(mut inside, child),
+                    Partial => list.push(mut partial, child),
+                    Outside => (),
+                }
+            }
+        }
+        if list.len(out) + list.len(inside) + list.len(partial) > budget {
+            break
+        }
+        for cell in inside {
+            list.push(mut out, cell_range(cell))
+        }
+        frontier = take partial
+    }
+    for cell in frontier {
+        list.push(mut out, cell_range(cell))
+    }
+    std.list.sort(mut out, range_order)
+    let mut merged: List[Range] = list.with_capacity(list.len(out))
+    for r in out {
+        let n = list.len(merged)
+        if n != 0 && merged[n - 1].hi + 1 == r.lo {
+            let lo = merged[n - 1].lo
+            let _ = list.set(mut merged, n - 1, Range(lo: lo, hi: r.hi))
+        } else {
+            list.push(mut merged, r)
+        }
+    }
+    take merged
+}
+
+// Every entry of ix whose point lies in b, as (point, row key), in key order.
+// A row with several points in b appears once for each of them.
+pub fn within[K, V, P](tx: store.Tx, ix: store.Index[Point, K, V, P], b: Box) -> Result[List[(Point, K)], store.Error] {
+    let mut found: List[(Point, K)] = list.new()
+    for r in ranges(b, RANGES) {
+        let mut entries = store.entries(tx, ix, Included(point_at(r.lo)), Included(point_at(r.hi)))?
+        while let Some((take p, take k, _)) = store.next_entry(mut entries)? {
+            if contains(b, p) {
+                list.push(mut found, (p, take k))
+            }
+        }
+    }
+    Ok(take found)
+}

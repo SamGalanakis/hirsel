@@ -117,6 +117,11 @@ source = "member:search"
 edges = ["std@1", "store@1"]
 
 [[package]]
+id = "spatial@1"
+source = "member:spatial"
+edges = ["std@1", "store@1"]
+
+[[package]]
 id = "sqlite@1"
 source = "member:sqlite"
 edges = []

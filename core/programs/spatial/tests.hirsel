@@ -1,0 +1,329 @@
+const TOP: u32 = 4294967295u32
+
+const POINTS: u64 = 256
+
+const BOXES: u64 = 96
+
+const SEEDS: u64 = 6
+
+// A coordinate drawn mostly from cell edges: m * 2^k - 1, m * 2^k and
+// m * 2^k + 1 for every level k, clamped to the domain, so points sit one
+// step inside and outside of box edges and cell boundaries. One draw in eight
+// is uniform.
+fn coordinate(r: u64) -> u32 {
+    if r % 8 == 0 {
+        return int.truncate(r >> 32)
+    }
+    let k = (r >> 3) % 33
+    let m = (r >> 9) % 4
+    let off = (r >> 11) % 3
+    let base = if k == 32 && m != 0 {
+        4294967296u64
+    } else {
+        m << k
+    }
+    let v = base + off
+    if v == 0 {
+        0
+    } else if v - 1 > 4294967295u64 {
+        TOP
+    } else {
+        int.narrow(v - 1)
+    }
+}
+
+// Row i of seed s. Rows 0 to 3 are the corners of the domain.
+fn model_point(seed: u64, i: u64) -> spatial.Point {
+    if i == 0 {
+        return spatial.Point(x: 0, y: 0)
+    }
+    if i == 1 {
+        return spatial.Point(x: TOP, y: 0)
+    }
+    if i == 2 {
+        return spatial.Point(x: 0, y: TOP)
+    }
+    if i == 3 {
+        return spatial.Point(x: TOP, y: TOP)
+    }
+    let r = store.splitmix64(store.splitmix64(seed) ^ i)
+    spatial.Point(x: coordinate(store.splitmix64(r)), y: coordinate(store.splitmix64(r ^ 0x5555)))
+}
+
+type Edges {
+    x_lo: u32,
+    y_lo: u32,
+    x_hi: u32,
+    y_hi: u32
+}
+
+fn ordered(a: u32, b: u32) -> (u32, u32) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+// Box j of seed s: fixed cases first, then edges from the coordinate pool.
+fn model_box(seed: u64, j: u64) -> Edges {
+    if j == 0 {
+        return Edges(x_lo: 0, y_lo: 0, x_hi: TOP, y_hi: TOP)
+    }
+    if j == 1 {
+        return Edges(x_lo: 0, y_lo: 0, x_hi: 0, y_hi: 0)
+    }
+    if j == 2 {
+        return Edges(x_lo: TOP, y_lo: TOP, x_hi: TOP, y_hi: TOP)
+    }
+    if j == 3 {
+        return Edges(x_lo: TOP, y_lo: 0, x_hi: TOP, y_hi: 0)
+    }
+    if j == 4 {
+        return Edges(x_lo: 0, y_lo: TOP, x_hi: 0, y_hi: TOP)
+    }
+    // The four top quadrants' shared boundary, one step either side.
+    if j == 5 {
+        return Edges(x_lo: 2147483647, y_lo: 2147483647, x_hi: 2147483648, y_hi: 2147483648)
+    }
+    // One aligned top quadrant, and the same box one step larger.
+    if j == 6 {
+        return Edges(x_lo: 2147483648, y_lo: 0, x_hi: TOP, y_hi: 2147483647)
+    }
+    if j == 7 {
+        return Edges(x_lo: 2147483647, y_lo: 0, x_hi: TOP, y_hi: 2147483648)
+    }
+    // A full-width strip one row high, and a full-height strip one column wide.
+    if j == 8 {
+        return Edges(x_lo: 0, y_lo: 2147483648, x_hi: TOP, y_hi: 2147483648)
+    }
+    if j == 9 {
+        return Edges(x_lo: 1, y_lo: 0, x_hi: 1, y_hi: TOP)
+    }
+    let r = store.splitmix64(store.splitmix64(seed + 7777) ^ j)
+    let (x_lo, x_hi) = ordered(coordinate(store.splitmix64(r)), coordinate(store.splitmix64(r ^ 1)))
+    let (y_lo, y_hi) = ordered(coordinate(store.splitmix64(r ^ 2)), coordinate(store.splitmix64(r ^ 3)))
+    if r % 5 == 0 {
+        return Edges(x_lo: x_lo, y_lo: y_lo, x_hi: x_lo, y_hi: y_hi)
+    }
+    if r % 7 == 0 {
+        return Edges(x_lo: x_lo, y_lo: y_hi, x_hi: x_hi, y_hi: y_hi)
+    }
+    Edges(x_lo: x_lo, y_lo: y_lo, x_hi: x_hi, y_hi: y_hi)
+}
+
+// The model's own containment test, written from the edges alone.
+fn model_inside(e: Edges, p: spatial.Point) -> bool {
+    e.x_lo <= p.x && p.x <= e.x_hi && e.y_lo <= p.y && p.y <= e.y_hi
+}
+
+fn row_point(_id: u64, p: spatial.Point) -> Result[List[spatial.Point], Capacity] {
+    let mut keys: List[spatial.Point] = list.new()
+    list.push(mut keys, p)
+    Ok(take keys)
+}
+
+fn id_order(left: u64, right: u64) -> Order {
+    if left < right {
+        Less
+    } else if left > right {
+        Greater
+    } else {
+        Equal
+    }
+}
+
+fn covered(rs: List[spatial.Range], h: u64) -> bool {
+    for r in rs {
+        if r.lo <= h && h <= r.hi {
+            return true
+        }
+    }
+    false
+}
+
+// Gate 4.2: a box query equals a brute-force filter over the model, on
+// generated points and boxes, boxes on cell boundaries, degenerate boxes and
+// the corners of the domain.
+@test
+fn box_query_matches_model(clock: Clock, random: Random) -> Result[(), ()] waits {
+    let mut nonempty = 0u64
+    let mut overscanned = 0u64
+    for seed in 0u64 .. SEEDS {
+        let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 134217728u64)))
+        let mut d = result.unwrap(store.declare(db, Migrate))
+        let rows: std.codec.Codec[spatial.Point] = std.codec.of()
+        let mut declared = result.unwrap(store.declare_table(mut d, "points", std.codec.key_u64(), rows))
+        let ix = result.unwrap(spatial.index(mut d, mut declared, "at", code.describe(row_point)))
+        let points = result.unwrap(store.finish(mut d, take declared))
+        let _ = result.unwrap(store.seal(mut db, take d))
+        let loaded = result.unwrap(store.run(mut db, None, (points, seed), fn(mut tx, env) -> Result[(), store.Error] {
+            for i in 0u64 .. POINTS {
+                store.put(mut tx, env.0, i, model_point(env.1, i))?
+            }
+            Ok(())
+        }))
+        if let Committed(_) = loaded {} else {
+            fail("loading the points")
+        }
+        let read_handle = result.unwrap(store.reader(db, 0u64))
+        let at = store.snapshot(db)
+        for j in 0u64 .. BOXES {
+            let e = model_box(seed, j)
+            let b = option.unwrap(spatial.box(e.x_lo, e.y_lo, e.x_hi, e.y_hi))
+            let query_ix: store.Index[spatial.Point, u64, spatial.Point, ()] = clone(ix)
+            let looked = result.unwrap(store.look(read_handle, at, None, (query_ix, b), fn(tx, env) -> Result[List[(spatial.Point, u64)], store.Error] {
+                spatial.within(tx, env.0, env.1)
+            }))
+            let found = match take looked {
+                Seen(take seen) => {
+                    let store.Seen(value: take value, ..) = take seen
+                    result.unwrap(take value)
+                },
+                _ => fail("box query did not complete"),
+            }
+            let mut got: List[u64] = list.new()
+            for (p, id) in found {
+                if p != model_point(seed, id) {
+                    fail("an entry's point differs from its row")
+                }
+                list.push(mut got, id)
+            }
+            std.list.sort(mut got, id_order)
+            let mut want: List[u64] = list.new()
+            let rs = spatial.ranges(b, spatial.RANGES)
+            for i in 0u64 .. POINTS {
+                let p = model_point(seed, i)
+                if model_inside(e, p) {
+                    list.push(mut want, i)
+                } else if covered(rs, spatial.hilbert(p)) {
+                    overscanned += 1
+                }
+            }
+            if got != want {
+                fail("box query differs from the brute-force filter")
+            }
+            if list.len(want) != 0 {
+                nonempty += 1
+            }
+        }
+        result.unwrap(store.close(take db))
+    }
+    // Without these the equality above could hold vacuously, or with a filter
+    // that never removes anything.
+    if nonempty < SEEDS * BOXES / 4 {
+        fail("too few boxes hold a point")
+    }
+    if overscanned == 0 {
+        fail("no range read a point outside its box")
+    }
+    if let Some(_) = spatial.box(1, 0, 0, 0) {
+        fail("an inverted box is refused")
+    }
+    if let Some(_) = spatial.box(0, 1, 0, 0) {
+        fail("an inverted box is refused")
+    }
+    Ok(())
+}
+
+fn neighbours(a: spatial.Point, b: spatial.Point) -> bool {
+    let dx = if a.x > b.x {
+        a.x - b.x
+    } else {
+        b.x - a.x
+    }
+    let dy = if a.y > b.y {
+        a.y - b.y
+    } else {
+        b.y - a.y
+    }
+    (dx == 1 && dy == 0) || (dx == 0 && dy == 1)
+}
+
+fn one_range(rs: List[spatial.Range], lo: u64, hi: u64) -> bool {
+    list.len(rs) == 1 && rs[0].lo == lo && rs[0].hi == hi
+}
+
+// The curve is a bijection along which each step moves to a grid neighbour,
+// from (0, 0) to (2^32 - 1, 0); an aligned cell of side 2^k is one key range
+// of 4^k keys; a box never needs more ranges than the budget.
+@test
+fn hilbert_ranges() -> Result[(), ()] {
+    if spatial.hilbert(spatial.Point(x: 0, y: 0)) != 0 || spatial.point_at(18446744073709551615u64) != spatial.Point(x: TOP, y: 0) {
+        fail("the curve's ends")
+    }
+    for i in 0u64 .. 4096 {
+        let d = if i < 2048 {
+            store.splitmix64(i)
+        } else {
+            // Steps across the end of every aligned run of 4^k keys.
+            let k = (i - 2048) % 32
+            let m = store.splitmix64(i) >> 2
+            let edge = ((m >> (2 * k)) << (2 * k)) | ((1u64 << (2 * k)) - 1)
+            if edge == 18446744073709551615u64 {
+                edge - 1
+            } else {
+                edge
+            }
+        }
+        let p = spatial.point_at(d)
+        if spatial.hilbert(p) != d {
+            fail("point_at is not the inverse of hilbert")
+        }
+        if d != 18446744073709551615u64 && !neighbours(p, spatial.point_at(d + 1)) {
+            fail("consecutive keys are not grid neighbours")
+        }
+    }
+    let k_cases: Inline[u64, 7] =[0u64, 1, 2, 5, 16, 31, 32]
+    for k in k_cases {
+        let side = 1u64 << k
+        for m in 0u64 .. 3 {
+            let x0 = (m * side) % 4294967296u64
+            let y0 = ((m + 1) % 2 * side) % 4294967296u64
+            let x1: u32 = int.narrow(x0 + side - 1)
+            let y1: u32 = int.narrow(y0 + side - 1)
+            let b = option.unwrap(spatial.box(int.narrow(x0), int.narrow(y0), x1, y1))
+            let rs = spatial.ranges(b, 1)
+            if k == 32 {
+                if !one_range(rs, 0, 18446744073709551615u64) {
+                    fail("the whole domain is one range")
+                }
+            } else {
+                let h = spatial.hilbert(spatial.Point(x: int.narrow(x0), y: int.narrow(y0)))
+                if list.len(rs) != 1 || rs[0].hi - rs[0].lo != (1u64 << (2 * k)) - 1 || h < rs[0].lo || h > rs[0].hi {
+                    fail("an aligned cell is one range of 4^k keys")
+                }
+            }
+        }
+    }
+    for i in 0u64 .. 64 {
+        let p = model_point(i, 4 + i)
+        let h = spatial.hilbert(p)
+        if !one_range(spatial.ranges(option.unwrap(spatial.box(p.x, p.y, p.x, p.y)), 1), h, h) {
+            fail("a point is one range of one key")
+        }
+    }
+    let budgets: Inline[u64, 4] =[1u64, 4, 13, 64]
+    for j in 0u64 .. 256 {
+        let e = model_box(j, j)
+        let b = option.unwrap(spatial.box(e.x_lo, e.y_lo, e.x_hi, e.y_hi))
+        for budget in budgets {
+            let rs = spatial.ranges(b, budget)
+            if list.len(rs) > budget || list.len(rs) == 0 {
+                fail("more ranges than the budget")
+            }
+            for n in 1u64 .. list.len(rs) {
+                if rs[n].lo <= rs[n - 1].hi + 1 {
+                    fail("ranges overlap, touch or are out of order")
+                }
+            }
+            for i in 0u64 .. 64 {
+                let p = model_point(j, i)
+                if model_inside(e, p) && !covered(rs, spatial.hilbert(p)) {
+                    fail("a point in the box lies outside every range")
+                }
+            }
+        }
+    }
+    Ok(())
+}

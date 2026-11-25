@@ -267,7 +267,8 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
 Grants and the root limit are part of the executable's build key, so a manifest
 describes exactly one executable. Limits the place sets in its own code (`q`,
 `n_session`, `budget` and the others) are covered by the digest.
-`hirsel manifest show PATH` prints a manifest as text.
+`hirsel manifest show PATH` prints a manifest as text. The manifest is the file `--manifest`
+wrote. An executable carries none, and `show` refuses an ELF or Mach-O file as an executable.
 
 ## Release recipe and host assembly
 

@@ -74,11 +74,31 @@ pub(crate) fn write(
 }
 
 pub(crate) fn show(path: &Path) -> Result<(), Error> {
-    let bytes = std::fs::read(path)?;
-    let mut wire = Reader {
-        bytes: &bytes,
-        at: 0,
-    };
+    print!("{}", render(&std::fs::read(path)?)?);
+    Ok(())
+}
+
+/// The object format whose magic `bytes` begin with, if any. An executable
+/// carries no manifest, and its magic read as a manifest's first length
+/// would only say "truncated".
+fn executable_format(bytes: &[u8]) -> Option<&'static str> {
+    match bytes.get(..4)? {
+        b"\x7fELF" => Some("ELF"),
+        [0xcf | 0xce, 0xfa, 0xed, 0xfe] | [0xca, 0xfe, 0xba, 0xbe] => Some("Mach-O"),
+        _ => None,
+    }
+}
+
+fn render(bytes: &[u8]) -> Result<String, Error> {
+    use std::fmt::Write;
+    if let Some(format) = executable_format(bytes) {
+        return Err(format!(
+            "this is an {format} executable, not a manifest; \
+             `hirsel build --manifest PATH` writes the manifest to PATH"
+        )
+        .into());
+    }
+    let mut wire = Reader { bytes, at: 0 };
     let description = Describe::read_from(&mut wire)?;
     let release = hash(wire.bytes()?)?;
     let mut grants = Vec::new();
@@ -92,18 +112,19 @@ pub(crate) fn show(path: &Path) -> Result<(), Error> {
     let recipe = hash(wire.bytes()?)?;
     wire.done()?;
 
-    println!("recipe {}", selection(recipe));
-    println!("release {}", selection(release));
+    let mut out = String::new();
+    writeln!(out, "recipe {}", selection(recipe))?;
+    writeln!(out, "release {}", selection(release))?;
     if description.digest.is_empty() {
-        println!("digest unavailable");
+        writeln!(out, "digest unavailable")?;
     } else {
-        println!("digest {}", selection(hash(description.digest)?));
+        writeln!(out, "digest {}", selection(hash(description.digest)?))?;
     }
-    println!("target {}", description.target);
-    println!("n_place {}", description.n_place);
-    println!("root_limit {limit}");
+    writeln!(out, "target {}", description.target)?;
+    writeln!(out, "n_place {}", description.n_place)?;
+    writeln!(out, "root_limit {limit}")?;
     for grant in grants {
-        println!("grant {grant}");
+        writeln!(out, "grant {grant}")?;
     }
     for entry in description.exported {
         let identity = entry
@@ -116,10 +137,34 @@ pub(crate) fn show(path: &Path) -> Result<(), Error> {
         } else {
             selection(hash(entry.revision)?)
         };
-        println!(
+        writeln!(
+            out,
             "entry {} {name} {:x} {:x} {revision}",
             entry.kind, entry.args_fp, entry.result_fp
-        );
+        )?;
     }
-    Ok(())
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    /// An executable, of any size, is refused as one by name. Its magic read
+    /// as a manifest's first length (`\x7fELF` is 1.18 GB) said "truncated".
+    #[test]
+    fn executable_is_named_not_truncated() {
+        for (magic, format) in [
+            (&b"\x7fELF"[..], "ELF"),
+            (&[0xcf, 0xfa, 0xed, 0xfe], "Mach-O"),
+            (&[0xca, 0xfe, 0xba, 0xbe], "Mach-O"),
+        ] {
+            let mut binary = magic.to_vec();
+            binary.resize(4096, 0);
+            let error = super::render(&binary).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("{format} executable"))
+                    && error.contains("build --manifest"),
+                "{error}"
+            );
+        }
+    }
 }

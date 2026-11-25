@@ -45,9 +45,11 @@ def run_cuts(executable, engine, env=None, scenarios=SCENARIOS, receipts=False):
             raise RuntimeError(f'{scenario}: trace names {len(steps)} of {count} steps')
         for cut in range(count + 1):
             result = checked([str(executable), scenario, str(cut)], env, engine=engine)
+            if not receipts:
+                continue
             got = re.findall(r'^w2-receipt ([0-9]+) (.+)$', result.stderr, re.M)
             want = [(str(cut + 1), steps[str(cut + 1)])] if cut < count else []
-            if receipts and got != want:
+            if got != want:
                 raise RuntimeError(f'{scenario} cut {cut}: receipt {got}, uncut trace {want}')
         if receipts:
             beyond = [str(executable), scenario, str(count + 1)]

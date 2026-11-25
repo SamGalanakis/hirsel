@@ -13,9 +13,9 @@ fn split_words(line: String) -> List[String] {
     out
 }
 
-fn mismatch(row: String, got: String, want: String) {
-    let mut m = string.from("row `")
-    string.push(mut m, row)
+fn mismatch(line: String, got: String, want: String) {
+    let mut m = string.from("line `")
+    string.push(mut m, line)
     string.push(mut m, "`: got `")
     string.push(mut m, got)
     string.push(mut m, "`, want `")
@@ -131,60 +131,60 @@ fn token_table() -> Result[(), ()] {
     let verbose = count(mut s, top, "verbose", Some('v'), "more output")
     let quiet = switch(mut s, top, "quiet", Some('q'), "less output")
     let out = value(mut s, top, "out", Some('o'), "OUT", "the output")
-    let color = negatable(mut s, top, "color", None, "colour the output")
+    let colour = negatable(mut s, top, "colour", None, "colour the output")
     let level = integer(mut s, top, "level", None, "N", "the level")
     bind_env(mut s, "APP_LEVEL")
     default_to(mut s, "1")
     let files = rest(mut s, top, "FILE", "inputs", false)
     // (argument line, APP_LEVEL or "-" for unset, the outcome)
     let mut rows: List[(String, String, String)] = list.new()
-    list.push(mut rows, ("-vvq", "-", "v=2 q=on o=- color=- level=1 files="))
-    list.push(mut rows, ("-ofile", "-", "v=0 q=- o='file' color=- level=1 files="))
-    list.push(mut rows, ("-o=file", "-", "v=0 q=- o='file' color=- level=1 files="))
-    list.push(mut rows, ("-o file", "-", "v=0 q=- o='file' color=- level=1 files="))
-    list.push(mut rows, ("-qofile", "-", "v=0 q=on o='file' color=- level=1 files="))
-    list.push(mut rows, ("-oq", "-", "v=0 q=- o='q' color=- level=1 files="))
-    list.push(mut rows, ("--out=x", "-", "v=0 q=- o='x' color=- level=1 files="))
-    list.push(mut rows, ("--out x", "-", "v=0 q=- o='x' color=- level=1 files="))
-    list.push(mut rows, ("--out=", "-", "v=0 q=- o='' color=- level=1 files="))
-    list.push(mut rows, ("--out=a=b", "-", "v=0 q=- o='a=b' color=- level=1 files="))
-    list.push(mut rows, ("-o==x", "-", "v=0 q=- o='=x' color=- level=1 files="))
-    list.push(mut rows, ("--out -", "-", "v=0 q=- o='-' color=- level=1 files="))
+    list.push(mut rows, ("-vvq", "-", "v=2 q=on o=- colour=- level=1 files="))
+    list.push(mut rows, ("-ofile", "-", "v=0 q=- o='file' colour=- level=1 files="))
+    list.push(mut rows, ("-o=file", "-", "v=0 q=- o='file' colour=- level=1 files="))
+    list.push(mut rows, ("-o file", "-", "v=0 q=- o='file' colour=- level=1 files="))
+    list.push(mut rows, ("-qofile", "-", "v=0 q=on o='file' colour=- level=1 files="))
+    list.push(mut rows, ("-oq", "-", "v=0 q=- o='q' colour=- level=1 files="))
+    list.push(mut rows, ("--out=x", "-", "v=0 q=- o='x' colour=- level=1 files="))
+    list.push(mut rows, ("--out x", "-", "v=0 q=- o='x' colour=- level=1 files="))
+    list.push(mut rows, ("--out=", "-", "v=0 q=- o='' colour=- level=1 files="))
+    list.push(mut rows, ("--out=a=b", "-", "v=0 q=- o='a=b' colour=- level=1 files="))
+    list.push(mut rows, ("-o==x", "-", "v=0 q=- o='=x' colour=- level=1 files="))
+    list.push(mut rows, ("--out -", "-", "v=0 q=- o='-' colour=- level=1 files="))
     list.push(mut rows, ("--out -x", "-", "NotAttached(--out <OUT>,-x)"))
     list.push(mut rows, ("--out -q", "-", "NoValue(--out <OUT>)"))
     list.push(mut rows, ("--out --level 3 a", "-", "NoValue(--out <OUT>)"))
     list.push(mut rows, ("-o", "-", "NoValue(--out <OUT>)"))
-    list.push(mut rows, ("--level -5", "-", "v=0 q=- o=- color=- level=-5 files="))
+    list.push(mut rows, ("--level -5", "-", "v=0 q=- o=- colour=- level=-5 files="))
     list.push(mut rows, ("--level -5e", "-", "NotAttached(--level <N>,-5e)"))
     list.push(mut rows, ("--level x", "-", "Invalid(--level <N>,x)"))
     list.push(mut rows, ("-q=1", "-", "SwitchValue(-q,1)"))
     list.push(mut rows, ("--quiet=1", "-", "SwitchValue(--quiet,1)"))
-    list.push(mut rows, ("--color", "-", "v=0 q=- o=- color=on level=1 files="))
-    list.push(mut rows, ("--no-color", "-", "v=0 q=- o=- color=off level=1 files="))
-    list.push(mut rows, ("--color --no-color", "-", "Repeated(--color)"))
+    list.push(mut rows, ("--colour", "-", "v=0 q=- o=- colour=on level=1 files="))
+    list.push(mut rows, ("--no-colour", "-", "v=0 q=- o=- colour=off level=1 files="))
+    list.push(mut rows, ("--colour --no-colour", "-", "Repeated(--colour)"))
     list.push(mut rows, ("-x", "-", "Unknown(-x,-)"))
     list.push(mut rows, ("-qx", "-", "Unknown(-x,-)"))
     list.push(mut rows, ("-5", "-", "Unknown(-5,-)"))
-    list.push(mut rows, ("a -- -q", "-", "v=0 q=- o=- color=- level=1 files=a,-q"))
-    list.push(mut rows, ("-- --", "-", "v=0 q=- o=- color=- level=1 files=--"))
-    list.push(mut rows, ("-", "-", "v=0 q=- o=- color=- level=1 files=-"))
+    list.push(mut rows, ("a -- -q", "-", "v=0 q=- o=- colour=- level=1 files=a,-q"))
+    list.push(mut rows, ("-- --", "-", "v=0 q=- o=- colour=- level=1 files=--"))
+    list.push(mut rows, ("-", "-", "v=0 q=- o=- colour=- level=1 files=-"))
     list.push(mut rows, ("-q -q", "-", "Repeated(--quiet)"))
     list.push(mut rows, ("-o a -o b", "-", "Repeated(--out <OUT>)"))
-    list.push(mut rows, ("-vvvv -v", "-", "v=5 q=- o=- color=- level=1 files="))
-    list.push(mut rows, ("", "7", "v=0 q=- o=- color=- level=7 files="))
-    list.push(mut rows, ("--level 2", "7", "v=0 q=- o=- color=- level=2 files="))
-    list.push(mut rows, ("", "", "v=0 q=- o=- color=- level=1 files="))
+    list.push(mut rows, ("-vvvv -v", "-", "v=5 q=- o=- colour=- level=1 files="))
+    list.push(mut rows, ("", "7", "v=0 q=- o=- colour=- level=7 files="))
+    list.push(mut rows, ("--level 2", "7", "v=0 q=- o=- colour=- level=2 files="))
+    list.push(mut rows, ("", "", "v=0 q=- o=- colour=- level=1 files="))
     list.push(mut rows, ("", "seven", "Invalid(--level <N>,$APP_LEVEL=seven)"))
-    for row in rows {
+    for line in rows {
         let mut reads: List[EnvRead] = list.new()
         for j in 0u64 .. 6 {
-            if j == 4 && row.1 != "-" {
-                list.push(mut reads, Set(string.from(row.1)))
+            if j == 4 && line.1 != "-" {
+                list.push(mut reads, Set(string.from(line.1)))
             } else {
                 list.push(mut reads, Unset)
             }
         }
-        let got = match scan(s, split_words(row.0), reads, 8) {
+        let got = match scan(s, split_words(line.0), reads, 8) {
             Run(m) => {
                 let mut t = string.from("v=")
                 string.push_u64(mut t, int.widen(count_of(m, verbose)))
@@ -195,10 +195,10 @@ fn token_table() -> Result[(), ()] {
                 })
                 string.push(mut t, " o=")
                 push_option(mut t, value_of(m, out))
-                string.push(mut t, match switch_of(m, color) {
-                    Some(true) => " color=on",
-                    Some(false) => " color=off",
-                    None => " color=-",
+                string.push(mut t, match switch_of(m, colour) {
+                    Some(true) => " colour=on",
+                    Some(false) => " colour=off",
+                    None => " colour=-",
                 })
                 string.push(mut t, " level=")
                 match int_of(m, level) {
@@ -213,8 +213,8 @@ fn token_table() -> Result[(), ()] {
             Help(_) => string.from("help"),
             Version => string.from("version"),
         }
-        if got != row.2 {
-            mismatch(row.0, got, row.2)
+        if got != line.2 {
+            mismatch(line.0, got, line.2)
         }
     }
     Ok(())
@@ -233,27 +233,27 @@ fn commands_and_limits() -> Result[(), ()] {
     let add = sub(mut s, top, "add", "add files")
     let paths = rest(mut s, add, "PATH", "paths", true)
     let commit = sub(mut s, top, "commit", "record")
-    let message = value(mut s, commit, "message", Some('m'), "MSG", "the message")
+    let msg = value(mut s, commit, "msg", Some('m'), "MSG", "the msg")
     require(mut s)
     let mut rows: List[(String, String)] = list.new()
     list.push(mut rows, ("add a b -v", "add v=on paths=a,b"))
     list.push(mut rows, ("-v add a", "add v=on paths=a"))
     list.push(mut rows, ("add", "Missing(<PATH>...)"))
-    list.push(mut rows, ("commit", "Missing(--message <MSG>)"))
+    list.push(mut rows, ("commit", "Missing(--msg <MSG>)"))
     list.push(mut rows, ("commit -m hi", "commit v=- msg=hi"))
     list.push(mut rows, ("commit -m hi extra", "Unexpected(extra)"))
     list.push(mut rows, ("comit -x", "UnknownCommand(comit)"))
-    list.push(mut rows, ("-m commit", "Unknown(-m,-) Missing(--message <MSG>)"))
+    list.push(mut rows, ("-m commit", "Unknown(-m,-) Missing(--msg <MSG>)"))
     list.push(mut rows, ("commit -x -y -z -w", "Unknown(-x,-) Unknown(-y,-) More(3)"))
     list.push(mut rows, ("add --help", "help add"))
     list.push(mut rows, ("-x -h", "help top"))
     list.push(mut rows, ("", "none v=-"))
-    for row in rows {
+    for line in rows {
         let mut reads: List[EnvRead] = list.new()
         for _ in 0u64 .. 3 {
             list.push(mut reads, Unset)
         }
-        let got = match scan(s, split_words(row.0), reads, 2) {
+        let got = match scan(s, split_words(line.0), reads, 2) {
             Run(m) => {
                 let mut t = string.new()
                 match command_of(m, top) {
@@ -279,7 +279,7 @@ fn commands_and_limits() -> Result[(), ()] {
                 }
                 if command_of(m, top) == Some(commit) {
                     string.push(mut t, " msg=")
-                    if let Some(v) = value_of(m, message) {
+                    if let Some(v) = value_of(m, msg) {
                         string.push(mut t, v)
                     }
                 }
@@ -295,8 +295,8 @@ fn commands_and_limits() -> Result[(), ()] {
             }),
             Version => string.from("version"),
         }
-        if got != row.1 {
-            mismatch(row.0, got, row.1)
+        if got != line.1 {
+            mismatch(line.0, got, line.1)
         }
     }
     Ok(())

@@ -267,7 +267,8 @@ fn read_long(mut sc: Scan, s: Spec, words: List[String], i: u64, t: String) -> u
         return i
     }
     let Some((slot, negated)) = find_long(s, sc.cmd, name) else {
-        note(mut sc, Unknown(joined("--", name), None))
+        let hint = best(name, long_names(s, sc.cmd))
+        note(mut sc, Unknown(joined("--", name), hint))
         return i
     }
     let kind = s.slots[slot].kind
@@ -390,9 +391,9 @@ fn set_value(mut sc: Scan, s: Spec, slot: u64, text: String) {
     store(mut sc, s, slot, text, text)
 }
 
-// Stores `text` as flag `slot`'s value, or notes why it is not one; `quoted` is the value
+// Stores `text` as flag `slot`'s value, or notes why it is not one; `as_given` is the value
 // as the problem shows it.
-fn store(mut sc: Scan, s: Spec, slot: u64, text: String, quoted: String) {
+fn store(mut sc: Scan, s: Spec, slot: u64, text: String, as_given: String) {
     let kind = s.slots[slot].kind
     if kind == INT {
         match (int.parse(text) : Result[i64, ParseError]) {
@@ -400,7 +401,7 @@ fn store(mut sc: Scan, s: Spec, slot: u64, text: String, quoted: String) {
                 sc.ints[slot] = v
                 sc.states[slot] = 1
             }
-            Error(_) => note(mut sc, Invalid(shown(s, slot), string.from(quoted), string.from("expected an integer"))),
+            Error(_) => note(mut sc, Invalid(shown(s, slot), string.from(as_given), string.from("expected an integer"))),
         }
         return
     }
@@ -409,7 +410,8 @@ fn store(mut sc: Scan, s: Spec, slot: u64, text: String, quoted: String) {
         for c in s.slots[slot].choices {
             list.push(mut choices, string.from(c))
         }
-        note(mut sc, NotChoice(shown(s, slot), string.from(quoted), take choices, None))
+        let hint = best(text, choices)
+        note(mut sc, NotChoice(shown(s, slot), string.from(as_given), take choices, take hint))
         return
     }
     list.push(mut sc.texts[slot], string.from(text))
@@ -437,6 +439,12 @@ fn read_word(mut sc: Scan, s: Spec, t: String, literal: bool) {
                 list.push(mut sc.path, c)
                 return
             }
+        }
+        let near = similar(t, sub_names(s, sc.cmd))
+        if list.len(near) > 0 {
+            note(mut sc, UnknownCommand(string.from(t), take near))
+            sc.stopped = true
+            return
         }
     }
     match nth_positional(s, sc.cmd, sc.pos) {
@@ -469,9 +477,9 @@ fn settle(mut sc: Scan, s: Spec, reads: List[EnvRead]) {
                     Set(v) => {
                         if string.byte_len(v) > 0 {
                             sc.given[slot] = 2
-                            let mut quoted = joined("$", variable)
-                            string.push(mut quoted, "=")
-                            string.push(mut quoted, v)
+                            let mut from_env = joined("$", variable)
+                            string.push(mut from_env, "=")
+                            string.push(mut from_env, v)
                             if f.kind == SWITCH {
                                 match boolish(v) {
                                     Some(on) => {
@@ -481,10 +489,10 @@ fn settle(mut sc: Scan, s: Spec, reads: List[EnvRead]) {
                                             2
                                         }
                                     }
-                                    None => note(mut sc, Invalid(shown(s, slot), take quoted, string.from("expected one of y, yes, t, true, on, 1, n, no, f, false, off, 0"))),
+                                    None => note(mut sc, Invalid(shown(s, slot), take from_env, string.from("expected one of y, yes, t, true, on, 1, n, no, f, false, off, 0"))),
                                 }
                             } else {
-                                store(mut sc, s, slot, v, quoted)
+                                store(mut sc, s, slot, v, from_env)
                             }
                         }
                     }

@@ -1,0 +1,312 @@
+// Errors and suggestions (README.md, "Errors"): clap's messages, and its Jaro suggestions
+// above 0.7 (strsim 0.11.1's `jaro`, as clap 4 uses it since GH #4660).
+fn scalars(t: String) -> List[char] {
+    let mut out: List[char] = list.with_capacity(string.byte_len(t))
+    let mut at: u64 = 0
+    while let Some((c, next)) = string.next_scalar(t, at) {
+        list.push(mut out, c)
+        at = next
+    }
+    out
+}
+
+// strsim 0.11.1 `generic_jaro` over the scalars of `a` and `b`.
+fn jaro(a: String, b: String) -> f64 {
+    let x = scalars(a)
+    let y = scalars(b)
+    let n = list.len(x)
+    let m = list.len(y)
+    if n == 0 && m == 0 {
+        return 1.0
+    }
+    if n == 0 || m == 0 {
+        return 0.0
+    }
+    let mut range = if n > m {
+        n / 2
+    } else {
+        m / 2
+    }
+    range = int.saturating_sub(range, 1)
+    let mut x_hit: List[bool] = list.new()
+    list.fill(mut x_hit, n, false)
+    let mut y_hit: List[bool] = list.new()
+    list.fill(mut y_hit, m, false)
+    let mut matches: u64 = 0
+    for i in 0 .. n {
+        let low = if i > range {
+            i - range
+        } else {
+            0
+        }
+        let high = if i + range + 1 < m {
+            i + range + 1
+        } else {
+            m
+        }
+        for j in low .. high {
+            if x[i] == y[j] && !y_hit[j] {
+                x_hit[i] = true
+                y_hit[j] = true
+                matches += 1
+                break
+            }
+        }
+    }
+    if matches == 0 {
+        return 0.0
+    }
+    let mut swapped: u64 = 0
+    let mut k: u64 = 0
+    for i in 0 .. n {
+        if x_hit[i] {
+            while !y_hit[k] {
+                k += 1
+            }
+            if x[i] != y[k] {
+                swapped += 1
+            }
+            k += 1
+        }
+    }
+    swapped = swapped / 2
+    let hits: f64 = float.from_int(matches)
+    let nf: f64 = float.from_int(n)
+    let mf: f64 = float.from_int(m)
+    let kept: f64 = float.from_int(matches - swapped)
+    (hits / nf + hits / mf + kept / hits) / 3.0
+}
+
+// clap's did_you_mean: the candidates scoring above 0.7, from lowest to highest score, a
+// later candidate after an earlier one of the same score.
+fn similar(word: String, candidates: List[String]) -> List[String] {
+    let mut scored: List[(f64, u64)] = list.new()
+    for i in 0 .. list.len(candidates) {
+        let score = jaro(word, candidates[i])
+        if float.gt(score, 0.7) {
+            let mut at = list.len(scored)
+            while at > 0 && float.gt(scored[at - 1].0, score) {
+                at -= 1
+            }
+            list.push(mut scored, (score, i))
+            let mut j = list.len(scored) - 1
+            while j > at {
+                list.swap(mut scored, j, j - 1)
+                j -= 1
+            }
+        }
+    }
+    let mut out: List[String] = list.with_capacity(list.len(scored))
+    for p in scored {
+        list.push(mut out, string.from(candidates[p.1]))
+    }
+    out
+}
+
+// The single best candidate, as clap takes it for a flag or a value.
+fn best(word: String, candidates: List[String]) -> Option[String] {
+    let mut all = similar(word, candidates)
+    list.pop(mut all)
+}
+
+// The long names `--name` could have meant on `cmd`, in clap's order: declared flags and
+// their negations, then the built-in help and version.
+fn long_names(s: Spec, cmd: u64) -> List[String] {
+    let mut out: List[String] = list.new()
+    for j in 0 .. list.len(s.slots) {
+        if active(s, cmd, j) {
+            list.push(mut out, string.from(s.slots[j].long))
+            if s.slots[j].negatable {
+                list.push(mut out, negation(s.slots[j].long))
+            }
+        }
+    }
+    list.push(mut out, string.from("help"))
+    if cmd == 0 && has(s.version) {
+        list.push(mut out, string.from("version"))
+    }
+    out
+}
+
+fn sub_names(s: Spec, cmd: u64) -> List[String] {
+    let mut out: List[String] = list.new()
+    for c in 1 .. list.len(s.commands) {
+        if s.commands[c].parent == cmd {
+            list.push(mut out, string.from(s.commands[c].name))
+        }
+    }
+    out
+}
+
+fn has_positionals(s: Spec, cmd: u64) -> bool {
+    has(nth_positional(s, cmd, 0))
+}
+
+fn quoted(mut out: String, t: String) {
+    string.push(mut out, "'")
+    string.push(mut out, sanitize(t))
+    string.push(mut out, "'")
+}
+
+fn tip(mut out: String) {
+    string.push(mut out, "\n\n  tip: ")
+}
+
+// A flag's name without its value name: `--out` for `--out <OUT>`.
+fn flag_name(shown_flag: String) -> View[String] in shown_flag {
+    match string.find(shown_flag, 0, " ") {
+        Some(k) => string.slice(shown_flag, 0, k),
+        None => string.slice(shown_flag, 0, string.byte_len(shown_flag)),
+    }
+}
+
+fn message(mut out: String, s: Spec, cmd: u64, p: Problem) {
+    match p {
+        Unknown(t, hint) => {
+            string.push(mut out, "unexpected argument ")
+            quoted(mut out, t)
+            string.push(mut out, " found")
+            match hint {
+                Some(h) => {
+                    tip(mut out)
+                    string.push(mut out, "a similar argument exists: ")
+                    quoted(mut out, joined("--", h))
+                }
+                None => {
+                    if has_positionals(s, cmd) {
+                        tip(mut out)
+                        string.push(mut out, "to pass ")
+                        quoted(mut out, t)
+                        string.push(mut out, " as a value, use ")
+                        quoted(mut out, joined("-- ", t))
+                    }
+                }
+            }
+        }
+        Unexpected(t) => {
+            string.push(mut out, "unexpected argument ")
+            quoted(mut out, t)
+            string.push(mut out, " found")
+        }
+        NoValue(f) => {
+            string.push(mut out, "a value is required for ")
+            quoted(mut out, f)
+            string.push(mut out, " but none was supplied")
+        }
+        NotAttached(f, w) => {
+            string.push(mut out, "a value is required for ")
+            quoted(mut out, f)
+            string.push(mut out, " but none was supplied")
+            tip(mut out)
+            string.push(mut out, "to pass ")
+            quoted(mut out, w)
+            string.push(mut out, " as the value, attach it: ")
+            let mut attached = string.from(flag_name(f))
+            string.push(mut attached, "=")
+            string.push(mut attached, w)
+            quoted(mut out, attached)
+        }
+        SwitchValue(f, v) => {
+            string.push(mut out, "unexpected value ")
+            quoted(mut out, v)
+            string.push(mut out, " for ")
+            quoted(mut out, f)
+            string.push(mut out, " found; no more were expected")
+        }
+        Repeated(f) => {
+            string.push(mut out, "the argument ")
+            quoted(mut out, f)
+            string.push(mut out, " cannot be used multiple times")
+        }
+        Invalid(f, v, why) => {
+            string.push(mut out, "invalid value ")
+            quoted(mut out, v)
+            string.push(mut out, " for ")
+            quoted(mut out, f)
+            string.push(mut out, ": ")
+            string.push(mut out, why)
+        }
+        NotChoice(f, v, choices, hint) => {
+            string.push(mut out, "invalid value ")
+            quoted(mut out, v)
+            string.push(mut out, " for ")
+            quoted(mut out, f)
+            string.push(mut out, "\n  [possible values: ")
+            string.push(mut out, string.join(choices, ", "))
+            string.push(mut out, "]")
+            if let Some(h) = hint {
+                tip(mut out)
+                string.push(mut out, "a similar value exists: ")
+                quoted(mut out, h)
+            }
+        }
+        Missing(f) => {
+            string.push(mut out, "the following required arguments were not provided:\n  ")
+            string.push(mut out, f)
+        }
+        UnknownCommand(t, near) => {
+            string.push(mut out, "unrecognized subcommand ")
+            quoted(mut out, t)
+            if list.len(near) > 0 {
+                tip(mut out)
+                string.push(mut out, if list.len(near) == 1 {
+                    "a similar subcommand exists: "
+                } else {
+                    "some similar subcommands exist: "
+                })
+                for i in 0 .. list.len(near) {
+                    if i > 0 {
+                        string.push(mut out, ", ")
+                    }
+                    quoted(mut out, near[i])
+                }
+            }
+        }
+        More(k) => {
+            string.push_u64(mut out, k)
+            string.push(mut out, if k == 1 {
+                " more error was left out"
+            } else {
+                " more errors were left out"
+            })
+        }
+    }
+}
+
+/// The message for a refused command line, as clap writes it: each problem after `error: `,
+/// the usage of the command reached, and where to look for more. Text from the command line
+/// is sanitized. Missing positionals and flags share one list.
+pub fn report(s: Spec, f: Failure) -> String {
+    command(s, f.at)
+    let mut out = string.new()
+    let mut listed_missing = false
+    for p in f.problems {
+        match p {
+            Missing(m) => {
+                if listed_missing {
+                    string.push(mut out, "\n  ")
+                    string.push(mut out, m)
+                } else {
+                    if string.byte_len(out) > 0 {
+                        string.push(mut out, "\n")
+                    }
+                    string.push(mut out, "error: ")
+                    message(mut out, s, f.at.at, p)
+                    listed_missing = true
+                }
+            }
+            _ => {
+                if string.byte_len(out) > 0 {
+                    string.push(mut out, "\n")
+                }
+                string.push(mut out, "error: ")
+                message(mut out, s, f.at.at, p)
+                listed_missing = false
+            }
+        }
+    }
+    string.push(mut out, "\n\n")
+    string.push(mut out, usage(s, f.at))
+    string.push(mut out, "\n\nFor more information, try '--help'.\n")
+    out
+}

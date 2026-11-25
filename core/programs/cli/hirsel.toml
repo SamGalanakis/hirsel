@@ -10,9 +10,15 @@ std = { major = 1 }
 "spec.hirsel" = "cli"
 "scan.hirsel" = "cli"
 "matches.hirsel" = "cli"
+"report.hirsel" = "cli"
+"help.hirsel" = "cli"
+"style.hirsel" = "cli"
+"width.hirsel" = "cli"
+"complete.hirsel" = "cli"
 
 [tests]
 limit = 67108864
 
 [tests.sources]
 "tests/parse.hirsel" = "cli"
+"tests/output.hirsel" = "cli"

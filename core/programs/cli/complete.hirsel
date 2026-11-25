@@ -1,0 +1,154 @@
+// Bash completion (README.md, "Completion"): a static script in clap_complete's shape. Bash
+// expands `compgen -W`'s word list, `$(...)` included, so every word the script carries must
+// be inert: names are spec words already, and a choice with another byte fails here instead
+// of reaching a shell.
+// Whether `c` may appear in a word of the script: letters, digits and `_-.:+=@%/,`.
+fn inert(c: u8) -> bool {
+    word_byte(c) || c == b'.' || c == b':' || c == b'+' || c == b'=' || c == b'@' || c == b'%' || c == b'/' || c == b','
+}
+
+fn safe_word(t: String, what: String) {
+    let b = string.as_bytes(t)
+    if string.byte_len(t) == 0 {
+        fail(joined(what, " is empty, so it cannot be completed"))
+    }
+    for i in 0 .. string.byte_len(t) {
+        if !inert(b[i]) {
+            let mut m = string.from(what)
+            string.push(mut m, " `")
+            string.push(mut m, sanitize(t))
+            string.push(mut m, "` has a byte a shell would expand, so it cannot be completed")
+            fail(take m)
+        }
+    }
+}
+
+// The case label of `cmd` in the script: `tidy`, `tidy__check`.
+fn cmd_label(s: Spec, cmd: u64) -> String {
+    let mut chain: List[u64] = list.new()
+    let mut c = cmd
+    while c != 0 {
+        list.push(mut chain, c)
+        c = s.commands[c].parent
+    }
+    let mut out = string.from(s.commands[0].name)
+    let mut k = list.len(chain)
+    while k > 0 {
+        k -= 1
+        string.push(mut out, "__")
+        string.push(mut out, s.commands[chain[k]].name)
+    }
+    out
+}
+
+// The flags completed for `cmd` after a `-`: short names first, then long names and
+// negations, with help and version.
+fn flags_of(s: Spec, cmd: u64) -> String {
+    let mut out: List[String] = list.new()
+    for j in 0 .. list.len(s.slots) {
+        if active(s, cmd, j) {
+            if let Some(c) = s.slots[j].short {
+                let mut t = string.from("-")
+                string.push_char(mut t, c)
+                list.push(mut out, take t)
+            }
+        }
+    }
+    list.push(mut out, string.from("-h"))
+    if cmd == 0 && has(s.version) {
+        list.push(mut out, string.from("-V"))
+    }
+    for j in 0 .. list.len(s.slots) {
+        if active(s, cmd, j) {
+            list.push(mut out, joined("--", s.slots[j].long))
+            if s.slots[j].negatable {
+                list.push(mut out, joined("--", negation(s.slots[j].long)))
+            }
+        }
+    }
+    list.push(mut out, string.from("--help"))
+    if cmd == 0 && has(s.version) {
+        list.push(mut out, string.from("--version"))
+    }
+    string.join(out, " ")
+}
+
+// The `case "${prev}"` arms of `cmd`: a choice flag completes its choices, another flag
+// taking a value completes file names.
+fn value_arms(mut out: String, s: Spec, cmd: u64) {
+    for j in 0 .. list.len(s.slots) {
+        let f = s.slots[j]
+        if active(s, cmd, j) && f.kind != SWITCH && f.kind != COUNT {
+            string.push(mut out, "                --")
+            string.push(mut out, f.long)
+            if let Some(c) = f.short {
+                string.push(mut out, "|-")
+                string.push_char(mut out, c)
+            }
+            string.push(mut out, ")\n                    COMPREPLY=($(compgen ")
+            if list.len(f.choices) > 0 {
+                string.push(mut out, "-W \"")
+                string.push(mut out, string.join(f.choices, " "))
+                string.push(mut out, "\"")
+            } else {
+                string.push(mut out, "-f")
+            }
+            string.push(mut out, " -- \"${cur}\"))\n                    return 0\n                    ;;\n")
+        }
+    }
+}
+
+/// A bash script completing the program of spec `s`: `source <(app completion bash)`. It
+/// completes a command's flags after `-`, a choice flag's choices, file names after another
+/// value flag, and otherwise the command's subcommands, or file names when it has none. It fails when a choice is empty or has a byte other than a
+/// letter, a digit or `_-.:+=@%/,`, since bash expands the words it completes.
+pub fn bash_completion(s: Spec) -> String {
+    let name = s.commands[0].name
+    for j in 0 .. list.len(s.slots) {
+        for c in s.slots[j].choices {
+            safe_word(c, "a choice")
+        }
+    }
+    let mut out = string.from("_")
+    string.push(mut out, name)
+    string.push(mut out, "() {\n    local i cur prev opts cmd\n    COMPREPLY=()\n    cur=\"${COMP_WORDS[COMP_CWORD]}\"\n    prev=\"${COMP_WORDS[COMP_CWORD-1]}\"\n    cmd=\"\"\n    for i in \"${COMP_WORDS[@]:0:COMP_CWORD}\"; do\n        case \"${cmd},${i}\" in\n            \",$1\")\n                cmd=\"")
+    string.push(mut out, name)
+    string.push(mut out, "\"\n                ;;\n")
+    for c in 1 .. list.len(s.commands) {
+        string.push(mut out, "            ")
+        string.push(mut out, cmd_label(s, s.commands[c].parent))
+        string.push(mut out, ",")
+        string.push(mut out, s.commands[c].name)
+        string.push(mut out, ")\n                cmd=\"")
+        string.push(mut out, cmd_label(s, c))
+        string.push(mut out, "\"\n                ;;\n")
+    }
+    string.push(mut out, "            *)\n                ;;\n        esac\n    done\n    case \"${cmd}\" in\n")
+    for c in 0 .. list.len(s.commands) {
+        string.push(mut out, "        ")
+        string.push(mut out, cmd_label(s, c))
+        string.push(mut out, ")\n            opts=\"")
+        string.push(mut out, flags_of(s, c))
+        string.push(mut out, "\"\n            if [[ ${cur} == -* ]]; then\n                COMPREPLY=($(compgen -W \"${opts}\" -- \"${cur}\"))\n                return 0\n            fi\n            case \"${prev}\" in\n")
+        value_arms(mut out, s, c)
+        string.push(mut out, "                *)\n                    ;;\n            esac\n")
+        if s.commands[c].subs > 0 {
+            let mut names: List[String] = list.new()
+            for k in 1 .. list.len(s.commands) {
+                if s.commands[k].parent == c {
+                    list.push(mut names, string.from(s.commands[k].name))
+                }
+            }
+            string.push(mut out, "            COMPREPLY=($(compgen -W \"")
+            string.push(mut out, string.join(names, " "))
+            string.push(mut out, "\" -- \"${cur}\"))\n")
+        }
+        string.push(mut out, "            return 0\n            ;;\n")
+    }
+    string.push(mut out, "    esac\n}\n\ncomplete -F _")
+    string.push(mut out, name)
+    string.push(mut out, " -o bashdefault -o default ")
+    string.push(mut out, name)
+    string.push(mut out, "\n")
+    out
+}

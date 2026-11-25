@@ -32,10 +32,12 @@ and `runner@1`, and the WebRTC stack, `webrtc_sfu@1` with `turn@1`, `dtls@1`, `s
 `rtp@1`, `stun_ice@1`, `media_bits@1` and `rtp_jitter@1`; the media packages `sframe@1`
 (end-to-end media encryption, [SFrame](spec/sframe.md)), `media_container@1` (Ogg, WebM and
 MP4 framing) and `media_record@1` (the [room recorder](spec/webrtc.md#rtc-9-recording)); and
-`platform@1`, `search@1` and `mcp@1`. A program binds one by major alone, for example `webrtc_sfu = { major = 1 }` in its
-`[dependencies]`. The toolchain supplies it with every toolchain package it binds, so a program
-outside the repository builds against the WebRTC SFU, TURN, SFrame, the recorder, the
-platform, search and MCP from the installed prefix and nothing else
+`platform@1`, `search@1`, `mcp@1` and `cli@1` (command-line parsing, help, errors and bash
+completion, [its README](../core/programs/cli/README.md)). A program binds one by major alone,
+for example `webrtc_sfu = { major = 1 }` in its `[dependencies]`. The toolchain supplies it with
+every toolchain package it binds, so a program outside the repository builds against the WebRTC
+SFU, TURN, SFrame, the recorder, the platform, search, MCP and cli from the installed prefix and
+nothing else
 ([Packages](spec/packages.md), section 2). `buck2 build //:hirsel-toolchain` packs each one
 from its directory under `core/programs/`, binding its dependencies by major.
 

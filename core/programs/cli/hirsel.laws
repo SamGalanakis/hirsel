@@ -1,5 +1,12 @@
 hirsel.laws 1
-cli@1/cli/commands_and_limits src=5e856e2185b0d3a7 sig=05fcb8ef4445734b run=c2c0c6612d4cbb79 bug=020c5fcdf7a163c4 oracle=84089a1309391935 rows=pending
+cli@1/cli/colour_decision src=0e28eea20fea7628 sig=cdbaf978f6ac0595 run=c2c0c6612d4cbb79 bug=9e99daa1521e2675 oracle=dad6f7bc7f087fad rows=pending
+cli@1/cli/commands_and_limits src=dd139e0089174c06 sig=05fcb8ef4445734b run=c2c0c6612d4cbb79 bug=020c5fcdf7a163c4 oracle=84089a1309391935 rows=pending
+cli@1/cli/completion_refuses_expansion src=fd83b8ca27aed18b sig=4effb5543641bbfc run=c2c0c6612d4cbb79 bug=432e6676fa853bdd oracle=9cc392c0c17eaef8 rows=pending
 cli@1/cli/cross_kind_handle_fails src=fa4f8b1bcab9a908 sig=ebf5ba5c14139839 run=c2c0c6612d4cbb79 bug=56cdcc0c62963292 oracle=26b88a67795ba387 rows=pending
 cli@1/cli/digit_short_refused src=ef07c0c79fb7457b sig=2809e7728d00f0f8 run=c2c0c6612d4cbb79 bug=35640269142ef700 oracle=758572a41ed98fc6 rows=pending
-cli@1/cli/token_table src=3dd0a65b1015027d sig=de02a0209a0e81bc run=c2c0c6612d4cbb79 bug=b559e5acfa6a6228 oracle=b6766624555da682 rows=pending
+cli@1/cli/display_width src=761c2aa09608bea6 sig=0f92409eaa1fa0df run=c2c0c6612d4cbb79 bug=98e95bffaa67f636 oracle=d7fb0e9f0cca76df rows=pending
+cli@1/cli/error_reports src=8704ae6f9b19fe72 sig=7abfff46da9bd55b run=c2c0c6612d4cbb79 bug=fdeed749f2c8fa3e oracle=088e78422d031de0 rows=pending
+cli@1/cli/help_pages src=22e50b6b9d9f26e5 sig=084c7619bf0f564e run=c2c0c6612d4cbb79 bug=ecf9aa8d14c878a3 oracle=d20361588776c2da rows=pending
+cli@1/cli/jaro_values src=8c1f6ec736ef6046 sig=20b5163da2adfae5 run=c2c0c6612d4cbb79 bug=c2d73aefe1f2d0b9 oracle=2c15246f16deeaec rows=pending
+cli@1/cli/sanitize_controls src=dad61c5e73d53792 sig=52bfdf5d11016bbc run=c2c0c6612d4cbb79 bug=a6eeac0baf523d96 oracle=b5a63ae94446cd33 rows=pending
+cli@1/cli/token_table src=c2fda25b45fdfbc5 sig=de02a0209a0e81bc run=c2c0c6612d4cbb79 bug=b559e5acfa6a6228 oracle=b6766624555da682 rows=pending

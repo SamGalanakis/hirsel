@@ -122,32 +122,32 @@ pub fn sub(mut s: Spec, at: Cmd, name: String, about: String) -> Cmd {
 }
 
 /// Declares the switch `--long` (and `-short`) of `at`.
-pub fn switch(mut s: Spec, at: Cmd, long: String, short: Option[char], help: String) -> Switch {
-    Switch(slot: flag(mut s, at, SWITCH, long, short, "", help, list.new(), false))
+pub fn switch(mut s: Spec, at: Cmd, long: String, short: Option[char], help_text: String) -> Switch {
+    Switch(slot: flag(mut s, at, SWITCH, long, short, "", help_text, list.new(), false))
 }
 
 /// Declares the switch `--long` with its negation `--no-long`; the later of the two decides.
-pub fn negatable(mut s: Spec, at: Cmd, long: String, short: Option[char], help: String) -> Switch {
-    Switch(slot: flag(mut s, at, SWITCH, long, short, "", help, list.new(), true))
+pub fn negatable(mut s: Spec, at: Cmd, long: String, short: Option[char], help_text: String) -> Switch {
+    Switch(slot: flag(mut s, at, SWITCH, long, short, "", help_text, list.new(), true))
 }
 
 /// Declares the counted switch `--long` (and `-short`) of `at`.
-pub fn count(mut s: Spec, at: Cmd, long: String, short: Option[char], help: String) -> Count {
-    Count(slot: flag(mut s, at, COUNT, long, short, "", help, list.new(), false))
+pub fn count(mut s: Spec, at: Cmd, long: String, short: Option[char], help_text: String) -> Count {
+    Count(slot: flag(mut s, at, COUNT, long, short, "", help_text, list.new(), false))
 }
 
 /// Declares the flag `--long <value_name>` taking one text value.
-pub fn value(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, help: String) -> Value {
-    Value(slot: flag(mut s, at, VALUE, long, short, value_name, help, list.new(), false))
+pub fn value(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, help_text: String) -> Value {
+    Value(slot: flag(mut s, at, VALUE, long, short, value_name, help_text, list.new(), false))
 }
 
 /// Declares the flag `--long <value_name>` taking one signed 64-bit integer.
-pub fn integer(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, help: String) -> Int {
-    Int(slot: flag(mut s, at, INT, long, short, value_name, help, list.new(), false))
+pub fn integer(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, help_text: String) -> Int {
+    Int(slot: flag(mut s, at, INT, long, short, value_name, help_text, list.new(), false))
 }
 
 /// Declares the flag `--long <value_name>` taking one of `choices`.
-pub fn choice(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, choices: List[String], help: String) -> Choice {
+pub fn choice(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, choices: List[String], help_text: String) -> Choice {
     if list.len(choices) == 0 {
         fail("a choice flag needs at least one choice")
     }
@@ -163,22 +163,22 @@ pub fn choice(mut s: Spec, at: Cmd, long: String, short: Option[char], value_nam
         }
         list.push(mut kept, string.from(c))
     }
-    Choice(slot: flag(mut s, at, CHOICE, long, short, value_name, help, take kept, false))
+    Choice(slot: flag(mut s, at, CHOICE, long, short, value_name, help_text, take kept, false))
 }
 
 /// Declares the flag `--long <value_name>`, which may be given many times.
-pub fn many(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, help: String) -> Many {
-    Many(slot: flag(mut s, at, MANY, long, short, value_name, help, list.new(), false))
+pub fn many(mut s: Spec, at: Cmd, long: String, short: Option[char], value_name: String, help_text: String) -> Many {
+    Many(slot: flag(mut s, at, MANY, long, short, value_name, help_text, list.new(), false))
 }
 
 /// Declares the next positional of `at`, taking one word.
-pub fn arg(mut s: Spec, at: Cmd, name: String, help: String, required: bool) -> Arg {
-    Arg(slot: positional(mut s, at, ARG, name, help, required))
+pub fn arg(mut s: Spec, at: Cmd, name: String, help_text: String, required: bool) -> Arg {
+    Arg(slot: positional(mut s, at, ARG, name, help_text, required))
 }
 
 /// Declares the last positional of `at`, taking every remaining word.
-pub fn rest(mut s: Spec, at: Cmd, name: String, help: String, required: bool) -> Rest {
-    Rest(slot: positional(mut s, at, REST, name, help, required))
+pub fn rest(mut s: Spec, at: Cmd, name: String, help_text: String, required: bool) -> Rest {
+    Rest(slot: positional(mut s, at, REST, name, help_text, required))
 }
 
 /// Reads the last declared flag from the environment variable `variable` when the command
@@ -330,7 +330,7 @@ fn clashes(a: Slot, b: Slot) -> bool {
     }
 }
 
-fn flag(mut s: Spec, at: Cmd, kind: u8, long: String, short: Option[char], value_name: String, help: String, take choices: List[String], negates: bool) -> u64 {
+fn flag(mut s: Spec, at: Cmd, kind: u8, long: String, short: Option[char], value_name: String, help_text: String, take choices: List[String], negates: bool) -> u64 {
     command(s, at)
     let name = checked_word(long, "a long flag name")
     if name == "help" || name == "version" {
@@ -350,7 +350,7 @@ fn flag(mut s: Spec, at: Cmd, kind: u8, long: String, short: Option[char], value
     if kind != SWITCH && kind != COUNT {
         let _ = checked_word(value_name, "a value name")
     }
-    let made = Slot(cmd: at.at, kind, long: take name, short, value_name: string.from(value_name), help: string.from(help), choices: take choices, env: None, fallback: None, negatable: negates, required: false, global: false)
+    let made = Slot(cmd: at.at, kind, long: take name, short, value_name: string.from(value_name), help: string.from(help_text), choices: take choices, env: None, fallback: None, negatable: negates, required: false, global: false)
     if negates && string.starts_with(made.long, "no-") {
         fail("a negatable flag's name starts with no-")
     }
@@ -363,7 +363,7 @@ fn flag(mut s: Spec, at: Cmd, kind: u8, long: String, short: Option[char], value
     list.len(s.slots) - 1
 }
 
-fn positional(mut s: Spec, at: Cmd, kind: u8, name: String, help: String, required: bool) -> u64 {
+fn positional(mut s: Spec, at: Cmd, kind: u8, name: String, help_text: String, required: bool) -> u64 {
     command(s, at)
     let named = checked_word(name, "a positional name")
     for other in s.slots {
@@ -376,6 +376,6 @@ fn positional(mut s: Spec, at: Cmd, kind: u8, name: String, help: String, requir
             }
         }
     }
-    list.push(mut s.slots, Slot(cmd: at.at, kind, long: take named, short: None, value_name: string.new(), help: string.from(help), choices: list.new(), env: None, fallback: None, negatable: false, required, global: false))
+    list.push(mut s.slots, Slot(cmd: at.at, kind, long: take named, short: None, value_name: string.new(), help: string.from(help_text), choices: list.new(), env: None, fallback: None, negatable: false, required, global: false))
     list.len(s.slots) - 1
 }

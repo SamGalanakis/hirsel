@@ -14,7 +14,8 @@
 //! ROOT/core-packages/               core and std images
 //! ROOT/core-packages/<name>-1.hpkg  toolchain package sources: store, runner, the
 //!                                   WebRTC stack, sframe, media_container,
-//!                                   media_record, platform, search and mcp
+//!                                   media_record, platform, search, mcp
+//!                                   and cli
 //!                                   (package_content::TOOLCHAIN)
 //! ROOT/hirsel-core-toolchain.json   this selection
 //! ```

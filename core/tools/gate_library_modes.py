@@ -315,10 +315,9 @@ def main():
 
         def test_a_copied_bundle_supplies_the_toolchain_packages_to_a_program_outside_the_repo(self):
             # The shipped toolchain supplies webrtc_sfu@1, turn@1, sframe@1, media_record@1,
-            # platform@1, search@1 and mcp@1, with every package they bind, from core-packages/:
-            # a program bound to them by toolchain major builds
-            # natively from a copied prefix with no checkout, no environment variable and no
-            # tool on PATH.
+            # platform@1, search@1, mcp@1 and cli@1, with every package they bind, from
+            # core-packages/: a program bound to them by toolchain major builds natively from a
+            # copied prefix with no checkout, no environment variable and no tool on PATH.
             bundle = Path(os.environ['HIRSEL_TOOLCHAIN_BUNDLE']).resolve()
             with tempfile.TemporaryDirectory(prefix='hirsel-bundle-') as temporary:
                 work = Path(temporary)
@@ -343,7 +342,7 @@ def main():
                     '[package]\nname = "call"\nmajor = 1\ncharge = "charge-v1"\n\n'
                     '[dependencies]\nstd = { major = 1 }\nwebrtc_sfu = { major = 1 }\nturn = { major = 1 }\n'
                     'platform = { major = 1 }\nsearch = { major = 1 }\nmcp = { major = 1 }\n'
-                    'sframe = { major = 1 }\nmedia_record = { major = 1 }\n\n'
+                    'sframe = { major = 1 }\nmedia_record = { major = 1 }\ncli = { major = 1 }\n\n'
                     '[sources]\n"main.hirsel" = "main"\n')
                 (app / 'main.hirsel').write_text(
                     'pub fn main() -> Result[(), Exit] {\n'
@@ -374,6 +373,14 @@ def main():
                     '    }\n'
                     '    if media_record.files.format(w) != Mp4 {\n'
                     '        return Error(Exit(status: 7))\n'
+                    '    }\n'
+                    # cli's README, "Help": a command with a flag that is not required shows
+                    # [OPTIONS] in its usage.
+                    '    let mut s = cli.spec("call", "")\n'
+                    '    let top = cli.root(s)\n'
+                    '    let _ = cli.switch(mut s, top, "quiet", Some(\'q\'), "")\n'
+                    '    if cli.usage(s, top) != "Usage: call [OPTIONS]" {\n'
+                    '        return Error(Exit(status: 8))\n'
                     '    }\n'
                     '    Ok(())\n'
                     '}\n')

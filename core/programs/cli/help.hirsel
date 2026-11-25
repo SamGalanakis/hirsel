@@ -1,0 +1,263 @@
+// Help and usage (README.md, "Help"): clap 4's default template, with its column, wrapping
+// and next-line rules.
+// One row of a help section: the name column, its display width, the help and the
+// bracketed notes after it (`[env: X]`, `[default: x]`, `[possible values: a, b]`).
+type Row {
+    left: String,
+    left_width: u64,
+    about: String,
+    notes: String
+}
+
+// The program name and the subcommands down to `cmd`: `git add`.
+fn bin_path(s: Spec, cmd: u64) -> String {
+    let mut chain: List[u64] = list.new()
+    let mut c = cmd
+    while c != 0 {
+        list.push(mut chain, c)
+        c = s.commands[c].parent
+    }
+    let mut out = string.from(s.commands[0].name)
+    let mut k = list.len(chain)
+    while k > 0 {
+        k -= 1
+        string.push(mut out, " ")
+        string.push(mut out, s.commands[chain[k]].name)
+    }
+    out
+}
+
+/// The usage line of command `at`: `Usage: git add [OPTIONS] <PATH>...`. `[OPTIONS]` stands
+/// for the flags that are not required, the required flags follow by name, then the
+/// positionals, then `[COMMAND]` when `at` has subcommands.
+pub fn usage(s: Spec, at: Cmd) -> String {
+    command(s, at)
+    let cmd = at.at
+    let mut out = string.from("Usage: ")
+    string.push(mut out, bin_path(s, cmd))
+    let mut optional = false
+    for j in 0 .. list.len(s.slots) {
+        if active(s, cmd, j) && !s.slots[j].required {
+            optional = true
+        }
+    }
+    if optional {
+        string.push(mut out, " [OPTIONS]")
+    }
+    for j in 0 .. list.len(s.slots) {
+        if active(s, cmd, j) && s.slots[j].required {
+            string.push(mut out, " ")
+            string.push(mut out, shown(s, j))
+        }
+    }
+    for j in 0 .. list.len(s.slots) {
+        if s.slots[j].cmd == cmd && s.slots[j].kind >= ARG {
+            string.push(mut out, " ")
+            string.push(mut out, shown(s, j))
+        }
+    }
+    if s.commands[cmd].subs > 0 {
+        string.push(mut out, " [COMMAND]")
+    }
+    out
+}
+
+fn notes_of(s: Spec, slot: u64) -> String {
+    let f = s.slots[slot]
+    let mut parts: List[String] = list.new()
+    if let Some(v) = f.env {
+        list.push(mut parts, joined(joined("[env: ", v), "]"))
+    }
+    if let Some(d) = f.fallback {
+        list.push(mut parts, joined(joined("[default: ", d), "]"))
+    }
+    if list.len(f.choices) > 0 {
+        list.push(mut parts, joined(joined("[possible values: ", string.join(f.choices, ", ")), "]"))
+    }
+    string.join(parts, " ")
+}
+
+fn row(take left: String, about: String, take notes: String) -> Row {
+    let left_width = width(left)
+    Row(left, left_width, about: string.from(about), notes)
+}
+
+fn flag_row(s: Spec, slot: u64) -> Row {
+    let f = s.slots[slot]
+    let mut left = match f.short {
+        Some(c) => {
+            let mut t = string.from("-")
+            string.push_char(mut t, c)
+            string.push(mut t, ", --")
+            t
+        }
+        None => string.from("    --"),
+    }
+    if f.negatable {
+        string.push(mut left, "[no-]")
+    }
+    string.push(mut left, f.long)
+    if f.kind == COUNT {
+        string.push(mut left, "...")
+    } else if f.kind != SWITCH {
+        string.push(mut left, " <")
+        string.push(mut left, f.value_name)
+        string.push(mut left, ">")
+    }
+    row(take left, f.help, notes_of(s, slot))
+}
+
+// Pushes `text` wrapped as clap's LineWrapper wraps it: a word goes to the next line when
+// it would end past `hard` columns, except a line's first word; continuation lines start
+// with `indent` spaces.
+fn wrap_into(mut out: String, text: String, hard: u64, indent: u64) {
+    let b = string.as_bytes(text)
+    let n = string.byte_len(text)
+    let mut line_w: u64 = 0
+    let mut first_word = true
+    let mut i: u64 = 0
+    while i < n {
+        if b[i] == b'\n' {
+            trim_spaces(mut out)
+            string.push(mut out, "\n")
+            string.push(mut out, string.repeat(" ", indent))
+            line_w = 0
+            first_word = true
+            i += 1
+            continue
+        }
+        let mut j = i
+        while j < n && b[j] != b' ' && b[j] != b'\n' {
+            j += 1
+        }
+        let mut k = j
+        while k < n && b[k] == b' ' {
+            k += 1
+        }
+        let w = width(string.slice(text, i, j))
+        if first_word && w > 0 {
+            first_word = false
+        } else if hard < line_w + w {
+            trim_spaces(mut out)
+            string.push(mut out, "\n")
+            string.push(mut out, string.repeat(" ", indent))
+            line_w = 0
+        }
+        string.push(mut out, string.slice(text, i, k))
+        line_w += w + (k - j)
+        i = k
+    }
+    trim_spaces(mut out)
+}
+
+fn trim_spaces(mut out: String) {
+    let end = kept_end(out)
+    string.truncate(mut out, end)
+}
+
+// The end of `t` without its trailing spaces and tabs.
+fn kept_end(t: String) -> u64 {
+    let b = string.as_bytes(t)
+    let mut end = string.byte_len(t)
+    while end > 0 && (b[end - 1] == b' ' || b[end - 1] == b'\t') {
+        end -= 1
+    }
+    end
+}
+
+// One section: its heading and rows. The help column is two spaces past the widest name; a
+// section whose help would wrap badly beside a wide name column puts every row's help on
+// the next line, indented 10 spaces (clap's will_args_wrap).
+fn section(mut out: String, heading: String, rows: List[Row], term_w: u64) {
+    if list.len(rows) == 0 {
+        return
+    }
+    string.push(mut out, "\n\n")
+    string.push(mut out, heading)
+    let mut longest: u64 = 2
+    for r in rows {
+        if r.left_width > longest {
+            longest = r.left_width
+        }
+    }
+    let taken = longest + 4
+    let mut next_line = false
+    for r in rows {
+        let h_w = width(r.about) + width(r.notes)
+        if term_w >= taken && 5 * taken > 2 * term_w && h_w > term_w - taken {
+            next_line = true
+        }
+    }
+    for r in rows {
+        string.push(mut out, "\n  ")
+        string.push(mut out, r.left)
+        let mut text = string.from(r.about)
+        if string.byte_len(r.about) > 0 && string.byte_len(r.notes) > 0 {
+            string.push(mut text, " ")
+        }
+        string.push(mut text, r.notes)
+        if string.byte_len(text) == 0 {
+            continue
+        }
+        let spaces: u64 = if next_line {
+            10
+        } else {
+            taken
+        }
+        if next_line {
+            string.push(mut out, "\n")
+            string.push(mut out, string.repeat(" ", 10))
+        } else {
+            string.push(mut out, string.repeat(" ", longest + 2 - r.left_width))
+        }
+        wrap_into(mut out, text, int.saturating_sub(term_w, spaces), spaces)
+    }
+}
+
+/// The help page of command `at` for a terminal `term_w` columns wide: its about, its usage,
+/// then `Commands:`, `Arguments:` and `Options:` sections. Options list the command's own
+/// flags, then the global flags of the commands above it, then `-h, --help` and on the root
+/// of a spec with a version `-V, --version`.
+pub fn help(s: Spec, at: Cmd, term_w: u64) -> String {
+    command(s, at)
+    let cmd = at.at
+    let mut out = string.new()
+    if string.byte_len(s.commands[cmd].about) > 0 {
+        string.push(mut out, s.commands[cmd].about)
+        string.push(mut out, "\n\n")
+    }
+    string.push(mut out, usage(s, at))
+    let mut subs: List[Row] = list.new()
+    for c in 1 .. list.len(s.commands) {
+        if s.commands[c].parent == cmd {
+            list.push(mut subs, row(string.from(s.commands[c].name), s.commands[c].about, string.new()))
+        }
+    }
+    section(mut out, "Commands:", subs, term_w)
+    let mut positionals: List[Row] = list.new()
+    for j in 0 .. list.len(s.slots) {
+        if s.slots[j].cmd == cmd && s.slots[j].kind >= ARG {
+            list.push(mut positionals, row(shown(s, j), s.slots[j].help, notes_of(s, j)))
+        }
+    }
+    section(mut out, "Arguments:", positionals, term_w)
+    let mut options: List[Row] = list.new()
+    for j in 0 .. list.len(s.slots) {
+        if s.slots[j].cmd == cmd && s.slots[j].kind < ARG {
+            list.push(mut options, flag_row(s, j))
+        }
+    }
+    for j in 0 .. list.len(s.slots) {
+        if s.slots[j].cmd != cmd && active(s, cmd, j) {
+            list.push(mut options, flag_row(s, j))
+        }
+    }
+    list.push(mut options, row(string.from("-h, --help"), "Print help", string.new()))
+    if cmd == 0 && has(s.version) {
+        list.push(mut options, row(string.from("-V, --version"), "Print version", string.new()))
+    }
+    section(mut out, "Options:", options, term_w)
+    trim_spaces(mut out)
+    string.push(mut out, "\n")
+    out
+}

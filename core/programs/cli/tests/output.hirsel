@@ -1,0 +1,321 @@
+// Laws for errors, help, completion, colour, sanitizing and width (README.md, "Errors",
+// "Help", "Completion", "Colour", "Sanitize" and "Width"). Every expected text is written by
+// hand from clap 4's formats, strsim's published values, ECMA-48 and EastAsianWidth.txt, not
+// produced by the code under test.
+fn differs(what: String, got: String, want: String) {
+    let mut m = string.from(what)
+    string.push(mut m, ": got\n")
+    string.push(mut m, sanitize(got))
+    string.push(mut m, "\nwant\n")
+    string.push(mut m, sanitize(want))
+    fail(take m)
+}
+
+fn expect(what: String, got: String, want: String) {
+    if got != want {
+        differs(what, got, want)
+    }
+}
+
+fn close_to(x: f64, want: f64) -> bool {
+    let d = x - want
+    float.lt(d, 0.001) && float.gt(d, -0.001)
+}
+
+fn unset_reads(n: u64) -> List[EnvRead] {
+    let mut reads: List[EnvRead] = list.new()
+    for _ in 0 .. n {
+        list.push(mut reads, Unset)
+    }
+    reads
+}
+
+fn report_of(s: Spec, words: List[String], max_errors: u64) -> String {
+    match scan(s, words, unset_reads(list.len(s.slots)), max_errors) {
+        Failed(f) => report(s, f),
+        _ => string.from("(not refused)"),
+    }
+}
+
+fn some_words(a: String, b: String) -> List[String] {
+    let mut out: List[String] = list.new()
+    if string.byte_len(a) > 0 {
+        list.push(mut out, string.from(a))
+    }
+    if string.byte_len(b) > 0 {
+        list.push(mut out, string.from(b))
+    }
+    out
+}
+
+/// bug: a Jaro score computed wrongly (the window, the transpositions or the average), so
+/// clap's 0.7 threshold suggests the wrong names or none.
+/// oracle: the published Jaro values: MARTHA/MARHTA 0.944, DIXON/DICKSONX 0.767,
+/// JELLYFISH/SMELLYFISH 0.896 (Winkler 1990, as Wikipedia quotes them) and strsim 0.11.1's
+/// doc example "Friedrich Nietzsche"/"Jean-Paul Sartre" 0.392.
+@test
+fn jaro_values() -> Result[(), ()] {
+    if !close_to(jaro("MARTHA", "MARHTA"), 0.944) {
+        fail("MARTHA/MARHTA")
+    }
+    if !close_to(jaro("DIXON", "DICKSONX"), 0.767) {
+        fail("DIXON/DICKSONX")
+    }
+    if !close_to(jaro("JELLYFISH", "SMELLYFISH"), 0.896) {
+        fail("JELLYFISH/SMELLYFISH")
+    }
+    if !close_to(jaro("Friedrich Nietzsche", "Jean-Paul Sartre"), 0.392) {
+        fail("Nietzsche/Sartre")
+    }
+    if !close_to(jaro("", ""), 1.0) || !close_to(jaro("a", ""), 0.0) {
+        fail("empty strings")
+    }
+    Ok(())
+}
+
+fn tidy_like() -> Spec {
+    let mut s = spec("app", "")
+    let top = root(s)
+    let mut whens: List[String] = list.new()
+    list.push(mut whens, string.from("auto"))
+    list.push(mut whens, string.from("always"))
+    list.push(mut whens, string.from("never"))
+    let _ = choice(mut s, top, "color", None, "WHEN", take whens, "when to colour")
+    let _ = arg(mut s, top, "FILE", "the file", false)
+    s
+}
+
+/// bug: an error message, tip, suggestion, sanitizing or the usage and help lines after it
+/// differ from clap's, or several problems or missing arguments are joined wrongly.
+/// oracle: clap 4's error formats (clap_builder/src/error/format.rs) written out by hand; the
+/// suggestions follow from hand-computed Jaro scores: colr/color 0.933 and colr/help 0.5;
+/// allways/always 0.952, allways/auto 0.464, allways/never 0; co/clone 0.8, co/commit and
+/// co/config 0.778, co/add 0, listed lowest first and in declaration order for a tie.
+@test
+fn error_reports() -> Result[(), ()] {
+    let s = tidy_like()
+    let tail = "\n\nUsage: app [OPTIONS] [FILE]\n\nFor more information, try '--help'.\n"
+    expect("--colr", report_of(s, some_words("--colr", ""), 4), joined("error: unexpected argument '--colr' found\n\n  tip: a similar argument exists: '--color'", tail))
+    expect("--zzz", report_of(s, some_words("--zzz", ""), 4), joined("error: unexpected argument '--zzz' found\n\n  tip: to pass '--zzz' as a value, use '-- --zzz'", tail))
+    expect("--color allways", report_of(s, some_words("--color", "allways"), 4), joined("error: invalid value 'allways' for '--color <WHEN>'\n  [possible values: auto, always, never]\n\n  tip: a similar value exists: 'always'", tail))
+    expect("an escape sequence", report_of(s, some_words("x", "\u{1b}]0;owned\u{7}"), 4), joined("error: unexpected argument '^[]0;owned^G' found", tail))
+    let mut more = some_words("a", "b")
+    list.push(mut more, string.from("c"))
+    expect("more errors", report_of(s, more, 1), joined("error: unexpected argument 'b' found\nerror: 1 more error was left out", tail))
+    let mut g = spec("git", "")
+    let top = root(g)
+    let _ = sub(mut g, top, "add", "")
+    let _ = sub(mut g, top, "clone", "")
+    let _ = sub(mut g, top, "commit", "")
+    let _ = sub(mut g, top, "config", "")
+    expect("co", report_of(g, some_words("co", ""), 4), "error: unrecognized subcommand 'co'\n\n  tip: some similar subcommands exist: 'commit', 'config', 'clone'\n\nUsage: git [COMMAND]\n\nFor more information, try '--help'.\n")
+    let mut r = spec("app2", "")
+    let rt = root(r)
+    let _ = value(mut r, rt, "msg", None, "MSG", "")
+    require(mut r)
+    let _ = arg(mut r, rt, "NAME", "", true)
+    expect("missing", report_of(r, list.new(), 4), "error: the following required arguments were not provided:\n  --msg <MSG>\n  <NAME>\n\nUsage: app2 --msg <MSG> <NAME>\n\nFor more information, try '--help'.\n")
+    Ok(())
+}
+
+fn tidy() -> Spec {
+    let mut s = spec("tidy", "Tidy files")
+    version(mut s, "1.0")
+    let top = root(s)
+    let _ = count(mut s, top, "verbose", Some('v'), "More output")
+    global(mut s)
+    let mut whens: List[String] = list.new()
+    list.push(mut whens, string.from("auto"))
+    list.push(mut whens, string.from("always"))
+    list.push(mut whens, string.from("never"))
+    let _ = choice(mut s, top, "color", None, "WHEN", take whens, "When to colour the output")
+    let _ = value(mut s, top, "out", Some('o'), "FILE", "Where to write")
+    default_to(mut s, "-")
+    let _ = negatable(mut s, top, "cache", None, "Use the cache")
+    let _ = arg(mut s, top, "PATH", "The file to tidy", false)
+    let _ = sub(mut s, top, "check", "Check without writing")
+    s
+}
+
+/// bug: the help page's sections, name column, padding, notes, wrapping or the next-line
+/// switch differ from clap's, or a subcommand's page loses the global flags above it.
+/// oracle: clap 4's help template and LineWrapper, computed by hand. Options: the widest name
+/// is `    --color <WHEN>` at 18, so help starts at column 22. At 80 the colour help (64
+/// columns) wraps after `always,` (58 + 6 > 58). At 40, 22/40 > 0.40 and the colour help
+/// (25 + 38 > 18) moves every option's help to the next line, indented 10 and wrapped at 30.
+@test
+fn help_pages() -> Result[(), ()] {
+    let s = tidy()
+    let top = root(s)
+    let head = "Tidy files\n\nUsage: tidy [OPTIONS] [PATH] [COMMAND]\n\nCommands:\n  check  Check without writing\n\nArguments:\n  [PATH]  The file to tidy\n\nOptions:\n"
+    let wide_rows = "  -v, --verbose...    More output\n      --color <WHEN>  When to colour the output [possible values: auto, always,\n                      never]\n  -o, --out <FILE>    Where to write [default: -]\n      --[no-]cache    Use the cache\n  -h, --help          Print help\n  -V, --version       Print version\n"
+    expect("width 80", help(s, top, 80), joined(head, wide_rows))
+    let narrow_rows = "  -v, --verbose...\n          More output\n      --color <WHEN>\n          When to colour the output\n          [possible values: auto,\n          always, never]\n  -o, --out <FILE>\n          Where to write [default: -]\n      --[no-]cache\n          Use the cache\n  -h, --help\n          Print help\n  -V, --version\n          Print version\n"
+    expect("width 40", help(s, top, 40), joined(head, narrow_rows))
+    let Some(check) = sub_of(s, "check") else {
+        fail("no check")
+    }
+    expect("check", help(s, check, 80), "Check without writing\n\nUsage: tidy check [OPTIONS]\n\nOptions:\n  -v, --verbose...  More output\n  -h, --help        Print help\n")
+    Ok(())
+}
+
+fn sub_of(s: Spec, name: String) -> Option[Cmd] {
+    for c in 1 .. list.len(s.commands) {
+        if s.commands[c].name == name {
+            return Some(Cmd(at: c))
+        }
+    }
+    None
+}
+
+fn unsafe_choice() -> u64 {
+    let mut s = spec("app", "")
+    let top = root(s)
+    let mut picks: List[String] = list.new()
+    list.push(mut picks, string.from("$(touch owned)"))
+    let _ = choice(mut s, top, "mode", None, "M", take picks, "")
+    string.byte_len(bash_completion(s))
+}
+
+/// bug: a choice holding `$(...)` reaches `compgen -W`, which expands its word list, so
+/// completing the flag runs the command.
+/// oracle: bash's manual (compgen -W: the word list is expanded) and a run of
+/// `compgen -W "\$(echo owned) a" -- ""` under bash 5, which prints `owned`.
+@test
+fn completion_refuses_expansion() -> Result[(), ()] {
+    match isolate(fn() -> u64 {
+        unsafe_choice()
+    }) {
+        Ok(Ok(_)) => fail("a choice with $( was written into a completion script"),
+        _ => {}
+    }
+    let script = bash_completion(tidy())
+    if !has(string.find(script, 0, "--color)\n                    COMPREPLY=($(compgen -W \"auto always never\" -- \"${cur}\"))")) {
+        differs("tidy completion", script, string.from("a --color arm completing auto always never"))
+    }
+    Ok(())
+}
+
+fn var(t: String) -> Var {
+    if t == "-" {
+        VarUnset
+    } else if t == "!" {
+        VarDenied
+    } else {
+        VarSet(string.from(t))
+    }
+}
+
+/// bug: the colour decision takes its inputs in the wrong order (NO_COLOR under
+/// CLICOLOR_FORCE, `--color` under the environment), counts an empty variable as set, or
+/// turns colour off when TERM is not granted.
+/// oracle: no-color.org (a non-empty NO_COLOR turns colour off), bixense.com/clicolors
+/// (CLICOLOR_FORCE non-zero forces it, CLICOLOR=0 turns it off), TERM=dumb from terminfo,
+/// and the ruling's order; ECMA-48's SGR codes (1 bold, 4 underline, 31 red, 94 bright blue).
+@test
+fn colour_decision() -> Result[(), ()] {
+    let mut rows: List[(ColorChoice, String, String, String, String, bool, bool)] = list.new()
+    list.push(mut rows, (Always, "1", "-", "-", "-", false, true))
+    list.push(mut rows, (Never, "-", "-", "1", "xterm", true, false))
+    list.push(mut rows, (Auto, "1", "-", "1", "xterm", true, false))
+    list.push(mut rows, (Auto, "", "-", "-", "xterm", true, true))
+    list.push(mut rows, (Auto, "!", "-", "-", "xterm", true, true))
+    list.push(mut rows, (Auto, "-", "-", "1", "-", false, true))
+    list.push(mut rows, (Auto, "-", "-", "0", "xterm", false, false))
+    list.push(mut rows, (Auto, "-", "-", "", "-", true, false))
+    list.push(mut rows, (Auto, "-", "0", "-", "xterm", true, false))
+    list.push(mut rows, (Auto, "-", "1", "-", "xterm", false, false))
+    list.push(mut rows, (Auto, "-", "-", "-", "dumb", true, false))
+    list.push(mut rows, (Auto, "-", "-", "-", "-", true, false))
+    list.push(mut rows, (Auto, "-", "-", "-", "!", true, true))
+    list.push(mut rows, (Auto, "-", "-", "-", "xterm", true, true))
+    list.push(mut rows, (Auto, "-", "-", "-", "xterm", false, false))
+    for i in 0 .. list.len(rows) {
+        let r = rows[i]
+        if decide(r.0, var(r.1), var(r.2), var(r.3), var(r.4), r.5) != r.6 {
+            let mut m = string.from("colour row ")
+            string.push_u64(mut m, i)
+            fail(take m)
+        }
+    }
+    if !color(Auto, None, true) {
+        fail("no environment counts as TERM not granted")
+    }
+    let red = Style(fg: Some(Red), bold: true, dim: false, underline: false)
+    if paint("x", red, true) != "\u{1b}[1;31mx\u{1b}[0m" || paint("x", red, false) != "x" {
+        fail("bold red")
+    }
+    let blue = Style(fg: Some(BrightBlue), bold: false, dim: false, underline: true)
+    if paint("y", blue, true) != "\u{1b}[4;94my\u{1b}[0m" {
+        fail("underlined bright blue")
+    }
+    Ok(())
+}
+
+/// bug: a control a terminal acts on (CR, ESC, a C1 CSI, DEL, a bidirectional override)
+/// passes through, or tab, newline or ordinary text is changed.
+/// oracle: caret notation (`^` and the code plus 0x40; DEL is `^?`), the C1 map onto it
+/// (U+009B CSI is `^[`, U+0085 is `^E`) and the bidi controls of UAX #9 §2 shown as `<U+XXXX>`.
+@test
+fn sanitize_controls() -> Result[(), ()] {
+    let mut rows: List[(String, String)] = list.new()
+    list.push(mut rows, ("a\rb", "a^Mb"))
+    list.push(mut rows, ("\u{1b}[31m", "^[[31m"))
+    list.push(mut rows, ("\u{9b}31m", "^[31m"))
+    list.push(mut rows, ("\u{85}", "^E"))
+    list.push(mut rows, ("\u{0}\u{7f}", "^@^?"))
+    list.push(mut rows, ("x\u{202e}y", "x<U+202E>y"))
+    list.push(mut rows, ("\u{2066}\u{2069}", "<U+2066><U+2069>"))
+    list.push(mut rows, ("\u{2029}", "\u{2029}"))
+    list.push(mut rows, ("t\tn\né", "t\tn\né"))
+    for r in rows {
+        let got = sanitize(r.0)
+        if got != r.1 {
+            differs("sanitize", got, string.from(r.1))
+        }
+    }
+    Ok(())
+}
+
+/// bug: the wide table is stale for std's Unicode version, a range edge is off by one, or a
+/// control, mark or escape sequence is counted as a column.
+/// oracle: EastAsianWidth-18.0.0.txt read by hand: 1100..115F W, 3000 F, 303E W, 303F N,
+/// 3040 unlisted (N by @missing), 3041 W, FF01 F, 1F003 N, 1F004 W, 1F005 N, 2FA20..2FFFD W,
+/// 3FC40..3FFFD W; U+0301 is Mn and U+200B is Cf (UnicodeData.txt).
+@test
+fn display_width() -> Result[(), ()] {
+    if WIDE_VERSION != char.UNICODE_VERSION {
+        fail("the wide table is for another Unicode version: run core/tools/cli_width_table.py")
+    }
+    let mut rows: List[(char, u64)] = list.new()
+    list.push(mut rows, ('a', 1))
+    list.push(mut rows, ('\u{1100}', 2))
+    list.push(mut rows, ('\u{115f}', 2))
+    list.push(mut rows, ('\u{3000}', 2))
+    list.push(mut rows, ('\u{303e}', 2))
+    list.push(mut rows, ('\u{303f}', 1))
+    list.push(mut rows, ('\u{3040}', 1))
+    list.push(mut rows, ('\u{3041}', 2))
+    list.push(mut rows, ('\u{ff01}', 2))
+    list.push(mut rows, ('\u{1f003}', 1))
+    list.push(mut rows, ('\u{1f004}', 2))
+    list.push(mut rows, ('\u{1f005}', 1))
+    list.push(mut rows, ('\u{2fffd}', 2))
+    list.push(mut rows, ('\u{2fffe}', 1))
+    list.push(mut rows, ('\u{3fffd}', 2))
+    list.push(mut rows, ('\u{3fffe}', 1))
+    list.push(mut rows, ('\u{301}', 0))
+    list.push(mut rows, ('\u{200b}', 0))
+    list.push(mut rows, ('\u{7}', 0))
+    for r in rows {
+        if char_width(r.0) != r.1 {
+            let mut m = string.from("width of U+")
+            string.push_uint(mut m, int.widen(char.to_u32(r.0)), 16, 4, '0')
+            fail(take m)
+        }
+    }
+    if width("\u{1b}[31m日本\u{1b}[0m e\u{301}") != 6 {
+        fail("an escaped wide text")
+    }
+    Ok(())
+}

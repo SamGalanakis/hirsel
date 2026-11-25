@@ -60,6 +60,7 @@ const TOOLCHAIN: &[(&str, u32, &[&str])] = &[
     ("platform", 1, &["std", "store", "runner"]),
     ("search", 1, &["std", "store"]),
     ("mcp", 1, &["std"]),
+    ("cli", 1, &["std"]),
 ];
 
 pub(crate) fn toolchain_major(name: &str) -> Option<u32> {

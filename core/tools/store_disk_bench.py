@@ -11,6 +11,7 @@ import re
 import shutil
 from struct import error as StructError
 import subprocess
+import time
 
 from measurement_artifacts import allocation_linker, check, phase_allocations
 from omap_bench import command, measure
@@ -91,6 +92,87 @@ def burst_sample(binary, host, out, env, width, burst, stores):
                 p999_ns=latencies[ceil(0.999 * len(latencies)) - 1], max_ns=latencies[-1])
 
 
+BL15_COMMITS = 20000
+# io_uring_enter is recorded beside the handoffs so a row shows whether it ran on a ring host: a tied
+# process (one whose binary spawns no unit) runs every file op inline and records neither event.
+HANDOFF = ['-e', 'sched:sched_switch', '--filter', 'prev_comm == "hirsel-host"',
+           '-e', 'syscalls:sys_enter_io_uring_enter', '-k', 'CLOCK_MONOTONIC']
+
+
+def handoffs(perf_data, windows):
+    """Per window: helper-thread switch-outs (one per off_slot call that ends with the helper idle), and ring enters."""
+    script = subprocess.run(['perf', 'script', '-i', str(perf_data), '-F', 'time,event', '--ns'],
+                            check=True, capture_output=True, text=True).stdout
+    events = [line.split() for line in script.splitlines() if line.strip()]
+    events = [(round(float(e[0].rstrip(':')) * 1e9), e[1].rstrip(':')) for e in events]
+    count = lambda kind, lo, hi: sum(lo <= t < hi and name == kind for t, name in events)
+    return ({name: count('sched:sched_switch', lo, hi) for name, (lo, hi) in windows.items()},
+            {name: count('syscalls:sys_enter_io_uring_enter', lo, hi) for name, (lo, hi) in windows.items()})
+
+
+def bl15_sample(binary, host, out, env, follower):
+    """BL15: Store sync p50/p99 over R8-shaped durable commits, and off_slot handoffs per phase."""
+    tag = f'{binary.name}-BL15-f{int(follower)}'
+    work = out / tag
+    work.mkdir()
+    gate_path = host / 'gate'
+    gate_path.unlink(missing_ok=True)
+    os.mkfifo(gate_path)
+    gate = os.open(gate_path, os.O_RDWR)
+    marks = {}
+
+    def launch(cpu, name, *argv):
+        command_line = [ROOT / 'tools/capped', 'taskset', '-c', cpu, 'perf', 'record', '-q', '-N', *HANDOFF,
+                        '-o', work / f'{name}.perf', '--', binary, *argv]
+        return subprocess.Popen(list(map(str, command_line)), env=env | {'HIRSEL_JOBS': '1'}, stdout=subprocess.PIPE,
+                                stderr=(work / f'{name}.stderr').open('w'), text=True, bufsize=1)
+
+    def step(process, word, mark=None):
+        line = process.stdout.readline().split()
+        if not line or line[0] != word:
+            raise ValueError(f'{tag}: expected {word}, got {line}; see {work}')
+        time.sleep(0.05)  # a stdout write's helper finishes before the phase mark
+        if mark:
+            marks[mark] = time.monotonic_ns()
+        return line[1]
+
+    writer = launch('16', 'writer', 'BL15', BL15_COMMITS)
+    reader = None
+    try:
+        name = step(writer, 'DIR', 'open')
+        os.write(gate, b's')
+        target = step(writer, 'OPENED', 'opened')
+        if follower:
+            reader = launch('17', 'follower', 'BL15F', name, target)
+            step(reader, 'FOLLOWING')
+        marks['commit'] = time.monotonic_ns()
+        os.write(gate, b's')
+        step(writer, 'COMMITTED', 'committed')
+        os.write(gate, b's')
+        step(writer, 'READ', 'read')
+        os.write(gate, b's')
+        lat = writer.stdout.readline().split()
+        polls = reader.stdout.readline().split() if reader else None
+        writer.communicate()
+        if reader:
+            reader.communicate()
+    finally:
+        os.close(gate)
+        gate_path.unlink()
+    if writer.returncode or (reader and reader.returncode) or lat[:1] != ['LAT'] or len(lat) != BL15_COMMITS + 1:
+        raise ValueError(f'{tag} did not finish; see {work}')
+    latencies = sorted(int(v) for v in lat[1:])
+    windows = {'open': (marks['open'], marks['opened']), 'commit': (marks['commit'], marks['committed']),
+               'read': (marks['committed'], marks['read'])}
+    row = dict(tag=tag, complete=True, workload='BL15', follower=follower, commits=BL15_COMMITS,
+               sync_p50_ns=latencies[len(latencies) // 2], sync_p99_ns=latencies[ceil(len(latencies) * 0.99) - 1],
+               **dict(zip(('handoffs', 'ring_enters'), handoffs(work / 'writer.perf', windows))))
+    if reader:
+        row.update(follower_polls=int(polls[1]),
+                   **dict(zip(('follower_handoffs', 'follower_ring_enters'), handoffs(work / 'follower.perf', windows))))
+    return row
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--artifacts', type=Path, required=True)
@@ -100,7 +182,7 @@ def main():
     p.add_argument('--allocations', action='store_true',
                    help='prepare or sample the allocation-counting binary instead of the shipping binary')
     p.add_argument('--profile', action='append', choices=['dev', 'release'])
-    p.add_argument('--workload', action='append', choices=['R4', 'R5', 'R6', 'R7', 'R8-load', 'R8-open', 'migrate', 'RB'])
+    p.add_argument('--workload', action='append', choices=['R4', 'R5', 'R6', 'R7', 'R8-load', 'R8-open', 'migrate', 'RB', 'BL15'])
     p.add_argument('--index', action='append', type=int, choices=[0, 1])
     p.add_argument('--timing-hold', action='store_true', help='shield CPU 16 for each measured sample')
     args = p.parse_args()
@@ -161,6 +243,15 @@ def main():
             fcntl.flock(shared_lock, fcntl.LOCK_EX)
             for profile in profiles:
                 for mode in args.workload or ['R4', 'R5', 'R6', 'R7', 'R8-load', 'R8-open']:
+                    if mode == 'BL15':
+                        for follower in (False, True):
+                            with hold(REGIMES, BOARD) if args.timing_hold else nullcontext():
+                                row = bl15_sample(out / (profile + suffix), host, out, env, follower)
+                            row.update(profile=profile, artifacts=identity)
+                            rows.append(row)
+                            (out / (row['tag'] + '-sample.json')).write_text(json.dumps(row, indent=2) + '\n')
+                            print(row['tag'], json.dumps(row), flush=True)
+                        continue
                     if mode == 'RB':
                         for width in (97, 4096):
                             for burst in (1, 8, 64):

@@ -44,3 +44,4 @@ grants = ["Tasks", "Clock", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8
 "units_fanout_laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"
+"vectors/chromium_rtp.hirsel" = "vectors"

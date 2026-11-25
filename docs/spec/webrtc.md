@@ -1199,7 +1199,9 @@ unless named otherwise.
   given a `Unit`. This law covers how the router builds the `Unit` and the target, through
   actual egress. *Scenario:* captured VP8 (three encodings, two temporal layers), H.264
   (three encodings), VP9 SVC, and an AV1 L3T3 stream with Dependency Descriptors from
-  Chromium. Cases: a target change followed by a keyframe fragmented over several packets,
+  Chromium, committed with their offers, answers and capture recipe in
+  `vectors/chromium_rtp.hirsel`. libwebrtc's VP8 packetizer always writes partition index 0,
+  so the nonzero-index packet below is built by hand from RFC 7741 §4.2. Cases: a target change followed by a keyframe fragmented over several packets,
   a VP8 packet with `S = 1` and a nonzero partition index, a VP9 `U` picture whose spatial
   dependency is not yet met, and an AV1 structure whose decode-target table is permuted.
   *Oracle:* for each packet, the `(start, end, keyframe, needs, switches)` and the

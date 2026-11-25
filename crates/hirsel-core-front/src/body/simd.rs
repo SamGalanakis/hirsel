@@ -62,15 +62,9 @@ impl Cx<'_, '_, '_> {
             let call = self.call_seq;
             let held = self.freezes.len();
             let mut header = None;
-            self.argument(
-                Mode::Mut,
-                g.params[0].ty,
-                call,
-                0,
-                args[0],
-                &mut [],
-                &mut header,
-            );
+            let mut found = vec![None; g.generics.len()];
+            let (param, result) = (g.params[0].ty, g.result);
+            self.argument(Mode::Mut, param, call, 0, args[0], &mut found, &mut header);
             let (value_arg, value, other, shape, label) = match op {
                 SimdCall::PutLanes => {
                     let (ty, value) = self.expr(args[1], None);
@@ -95,20 +89,19 @@ impl Cx<'_, '_, '_> {
             let Some(shape) = shape else {
                 return (ERROR, None);
             };
-            if shape.lane() != Scalar::U8 {
+            let Some(item) = self.lane_element(found.first().copied().flatten(), shape) else {
                 self.refuse(
                     "SEM-11",
                     value_arg,
-                    format!("{label} takes a vector of u8 lanes"),
+                    format!("{label} takes a vector whose lanes are the List's element type"),
                 );
                 return (ERROR, None);
-            }
+            };
             self.builtin_use(f, n);
             self.source_step(n);
-            let result = g.result;
             let value = match op {
-                SimdCall::PutLanes => self.put_lanes(header, value, other, shape, n),
-                SimdCall::SetLanes => self.set_lanes(header, other, value, shape, n),
+                SimdCall::PutLanes => self.put_lanes(item, header, value, other, shape, n),
+                SimdCall::SetLanes => self.set_lanes(item, header, other, value, shape, n),
                 SimdCall::Value(_) | SimdCall::InlineLanes | SimdCall::InlineSetLanes => {
                     unreachable!()
                 }
@@ -164,35 +157,34 @@ impl Cx<'_, '_, '_> {
                 let Some(shape) = expected else {
                     return self.simd_expected(n);
                 };
-                if shape.lane() != Scalar::U8 {
-                    self.refuse("SEM-11", n, "list.lanes reads a vector of u8 lanes");
-                    return (ERROR, None);
-                }
                 self.call_seq += 1;
                 let call = self.call_seq;
                 let held = self.freezes.len();
                 let input = g.params[0].ty;
+                let mut found = vec![None; g.generics.len()];
                 let mut header = None;
-                if !self.argument(Mode::View, input, call, 0, a, &mut [], &mut header) {
-                    header = self
-                        .expr(
-                            a,
-                            Some(Want {
-                                ty: input,
-                                view: true,
-                                payload: 0,
-                            }),
-                        )
-                        .1;
+                if !self.argument(Mode::View, input, call, 0, a, &mut found, &mut header) {
+                    let (ty, value) = self.expr(a, None);
+                    let ty = self.bare(ty);
+                    self.arg_ty_rooted(input, ty, a, &mut found, &[]);
+                    header = value;
                 }
                 let (_, offset) = self.expr(args[1], expect(scalar(Scalar::U64)));
                 self.unfreeze(held, |h| match h {
                     Hold::CallView(c, _) if c == call => None,
                     _ => Some(h),
                 });
+                let Some(item) = self.lane_element(found.first().copied().flatten(), shape) else {
+                    self.refuse(
+                        "SEM-11",
+                        n,
+                        "list.lanes reads a vector whose lanes are the List's element type",
+                    );
+                    return (ERROR, None);
+                };
                 self.builtin_use(f, n);
                 self.source_step(n);
-                let address = self.lanes_address(header, offset, shape, n);
+                let address = self.lanes_address(item, header, offset, shape, n);
                 let ty = self.vector_type(shape);
                 return (ty, self.emit_simd(op, ty, address, None, n));
             }
@@ -345,30 +337,69 @@ impl Cx<'_, '_, '_> {
         self.start(ok);
     }
 
-    fn lanes_address(
-        &mut self,
-        header: Option<ValueId>,
-        at: Option<ValueId>,
-        shape: Vector,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let (header, at) = (header?, at?);
-        let u64_ty = Ty::Scalar(Scalar::U64);
-        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
-        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let width = self.konst(u64_ty, shape.lanes(), n)?;
+    /// The element type of a lane access whose array or List holds `item`:
+    /// `item` itself when it is the vector's lane type (SEM-11), `None` otherwise.
+    fn lane_element(&self, item: Option<TyId>, shape: Vector) -> Option<TyId> {
+        let item = self.bare(item?);
+        (*self.t.kind(item) == TyKind::Scalar(shape.lane())).then_some(item)
+    }
+
+    /// The byte offset of element `at` of a lane access over `shape`'s lanes.
+    /// Its caller has checked `at + lanes <= len`, so the product does not wrap.
+    fn lane_bytes(&mut self, at: ValueId, shape: Vector, n: NodeId) -> Option<ValueId> {
+        let size = shape.lane().size();
+        if size == 1 {
+            return Some(at);
+        }
+        let size = self.konst(Ty::Scalar(Scalar::U64), size, n)?;
+        Some(
+            self.list_arith(ArithOp::Mul, ArithMode::Wrapping, at, size, n)
+                .0,
+        )
+    }
+
+    /// Bounds unless `at + lanes <= len` without overflow, checked before the access.
+    fn lanes_within(&mut self, at: ValueId, len: ValueId, shape: Vector, n: NodeId) -> Option<()> {
+        let width = self.konst(Ty::Scalar(Scalar::U64), shape.lanes(), n)?;
         let (end, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, at, width, n);
         let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
         let within = self.list_compare(CompareOp::Le, end, len, n);
         let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, within, n);
         self.simd_bounds(valid, n);
+        Some(())
+    }
+
+    /// The address of element `at` of a List of `item`, after the bounds check.
+    fn list_lanes_at(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        at: ValueId,
+        shape: Vector,
+        n: NodeId,
+    ) -> Option<AddressId> {
+        let carrier = self.list_carrier(item, n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        self.lanes_within(at, len, shape, n)?;
         let data = self.carrier_word(header, carrier, SeqWord::Data, n);
-        let from = self.address(
+        let offset = self.lane_bytes(at, shape, n)?;
+        Some(self.address(
             AddressBase::Value(data),
-            &[Step::Byte(at)],
+            &[Step::Byte(offset)],
             PlaceTy::Value(Ty::Scalar(Scalar::U8)),
             n,
-        );
+        ))
+    }
+
+    fn lanes_address(
+        &mut self,
+        item: TyId,
+        header: Option<ValueId>,
+        at: Option<ValueId>,
+        shape: Vector,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let from = self.list_lanes_at(item, header?, at?, shape, n)?;
         Some(self.pointer(from, n))
     }
 
@@ -420,7 +451,7 @@ impl Cx<'_, '_, '_> {
             self.refuse(
                 "SEM-11",
                 args[0],
-                "an Inline lane access takes an Inline array of u8",
+                "an Inline lane access takes an Inline array of integer lanes",
             );
             return (ERROR, None);
         };
@@ -434,8 +465,8 @@ impl Cx<'_, '_, '_> {
         (if write { result } else { vector }, value)
     }
 
-    /// `inline.lanes` and `inline.set_lanes`: one vector of u8 lanes read from or
-    /// written to an `Inline[u8, N]` at a byte offset. Bounds unless
+    /// `inline.lanes` and `inline.set_lanes`: one vector read from or written to an
+    /// `Inline[T, N]` of its lane type at element `at`. Bounds unless
     /// `at + lanes <= N` without overflow, checked before the access.
     #[allow(clippy::too_many_arguments)]
     fn inline_lanes(
@@ -448,45 +479,35 @@ impl Cx<'_, '_, '_> {
         write: bool,
         n: NodeId,
     ) -> Option<ValueId> {
+        let shape = self.vector_shape(vector)?;
         let len = match *self.t.kind(array) {
-            TyKind::Array(item, len) if item == scalar(Scalar::U8) => len,
+            TyKind::Array(item, len) if self.lane_element(Some(item), shape).is_some() => len,
             _ => {
                 self.refuse(
                     "SEM-11",
                     n,
-                    "an Inline lane access takes an Inline array of u8",
+                    "an Inline lane access takes an Inline array of the vector's lane type",
                 );
                 return None;
             }
         };
-        let Some(shape) = self.vector_shape(vector).filter(|v| v.lane() == Scalar::U8) else {
-            self.refuse(
-                "SEM-11",
-                n,
-                "an Inline lane access takes a vector of u8 lanes",
-            );
-            return None;
-        };
         let u64_ty = Ty::Scalar(Scalar::U64);
         let bound = self.konst(u64_ty, len, n)?;
-        let width = self.konst(u64_ty, shape.lanes(), n)?;
-        let (end, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, at, width, n);
-        let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
-        let within = self.list_compare(CompareOp::Le, end, bound, n);
-        let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, within, n);
-        self.simd_bounds(valid, n);
+        self.lanes_within(at, bound, shape, n)?;
+        let offset = self.lane_bytes(at, shape, n)?;
         let address = self.address(
             AddressBase::Value(data?),
-            &[Step::Byte(at)],
+            &[Step::Byte(offset)],
             PlaceTy::Value(Ty::Scalar(Scalar::U8)),
             n,
         );
         if write {
+            let count = self.konst(u64_ty, shape.size(), n)?;
             self.inst(
                 Inst::PutLanes {
                     to: address,
                     vector: value?,
-                    count: width,
+                    count,
                 },
                 n,
             );
@@ -496,8 +517,11 @@ impl Cx<'_, '_, '_> {
         self.emit_simd(SimdOp::Lanes, vector, Some(pointer), None, n)
     }
 
+    /// `list.put_lanes(mut xs, v, k)`: appends lanes 0 to `k - 1` of `v` to a List of
+    /// its lane type. Bounds when `k > lanes`, before the growth.
     fn put_lanes(
         &mut self,
+        item: TyId,
         header: Option<ValueId>,
         vector: Option<ValueId>,
         count: Option<ValueId>,
@@ -513,25 +537,36 @@ impl Cx<'_, '_, '_> {
         let valid = self.list_compare(CompareOp::Le, count, width, n);
         self.simd_bounds(valid, n);
 
-        let byte_ty = scalar(Scalar::U8);
-        let carrier = self.list_carrier(byte_ty, n)?;
+        let carrier = self.list_carrier(item, n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        self.list_reserve(byte_ty, header, count, lists::Ask::Bounded, n)?;
+        self.list_reserve(item, header, count, lists::Ask::Bounded, n)?;
         let data = self.carrier_word(header, carrier, SeqWord::Data, n);
+        let offset = self.lane_bytes(len, shape, n)?;
         let to = self.address(
             AddressBase::Value(data),
-            &[Step::Byte(len)],
+            &[Step::Byte(offset)],
             PlaceTy::Value(Ty::Scalar(Scalar::U8)),
             n,
         );
-        self.inst(Inst::PutLanes { to, vector, count }, n);
+        let bytes = self.lane_bytes(count, shape, n)?;
+        self.inst(
+            Inst::PutLanes {
+                to,
+                vector,
+                count: bytes,
+            },
+            n,
+        );
         let (len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, count, n);
         self.set_carrier_word(header, carrier, SeqWord::Len, len, n);
         None
     }
 
+    /// `list.set_lanes(mut xs, at, v)`: overwrites elements `at` to `at + lanes - 1`
+    /// with the lanes of `v`, keeping the length.
     fn set_lanes(
         &mut self,
+        item: TyId,
         header: Option<ValueId>,
         at: Option<ValueId>,
         vector: Option<ValueId>,
@@ -542,30 +577,9 @@ impl Cx<'_, '_, '_> {
             return None;
         }
         let (header, at, vector) = (header?, at?, vector?);
-        let u64_ty = Ty::Scalar(Scalar::U64);
-        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
-        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let width = self.konst(u64_ty, shape.lanes(), n)?;
-        let (end, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, at, width, n);
-        let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
-        let within = self.list_compare(CompareOp::Le, end, len, n);
-        let valid = self.list_bool(BinaryOp::BitAnd, no_overflow, within, n);
-        self.simd_bounds(valid, n);
-        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
-        let to = self.address(
-            AddressBase::Value(data),
-            &[Step::Byte(at)],
-            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
-            n,
-        );
-        self.inst(
-            Inst::PutLanes {
-                to,
-                vector,
-                count: width,
-            },
-            n,
-        );
+        let to = self.list_lanes_at(item, header, at, shape, n)?;
+        let count = self.konst(Ty::Scalar(Scalar::U64), shape.size(), n)?;
+        self.inst(Inst::PutLanes { to, vector, count }, n);
         None
     }
 }

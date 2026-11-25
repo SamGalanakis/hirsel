@@ -29,14 +29,16 @@ pub fn word_le[T: integer](b: Bytes, at: u64) -> T
 // Like word_le, in big-endian byte order.
 pub fn word_be[T: integer](b: Bytes, at: u64) -> T
 
-// The expected type fixes the number of bytes read (SEM-11).
-pub fn lanes(b: Bytes, at: u64) -> Simd[u8, 16]
+// Reads elements at to at + n - 1 as the expected vector type, whose lanes are
+// T and whose lane count is n. Fails with Bounds unless at + n <= len(xs) (SEM-11).
+pub fn lanes[T: integer](xs: List[T], at: u64) -> Simd[u8, 16]
 
-// Appends exactly k lanes. A refusal leaves the buffer unchanged (SEM-11).
-pub fn put_lanes(mut b: Bytes, v: Simd[u8, 16], k: u64)
+// Appends lanes 0 to k - 1 of v, whose lanes are T. A refusal leaves xs unchanged (SEM-11).
+pub fn put_lanes[T: integer](mut xs: List[T], v: Simd[u8, 16], k: u64)
 
-// Overwrites the lanes of v starting at at. Fails with Bounds unless at + len(v) <= len(b).
-pub fn set_lanes(mut b: Bytes, at: u64, v: Simd[u8, 16])
+// Overwrites elements at to at + n - 1 with the n lanes of v, whose lanes are T.
+// Fails with Bounds unless at + n <= len(xs), before any write.
+pub fn set_lanes[T: integer](mut xs: List[T], at: u64, v: Simd[u8, 16])
 
 // Append the little-endian bytes of a u16, u32 or u64 atomically.
 // A refusal leaves the buffer unchanged.

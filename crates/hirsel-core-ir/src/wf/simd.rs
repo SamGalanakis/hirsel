@@ -43,7 +43,7 @@ pub(super) fn simd(
         Shl | Shr => vector(to).is_some_and(|v| second == Some(Ty::Scalar(v.lane()))) && from == to,
         Splat => vector(to).is_some_and(|v| from == Ty::Scalar(v.lane())),
         From => from == Ty::Ptr && vector(to).is_some(),
-        Lanes => from == Ty::Ptr && vector(to).is_some_and(|v| v.lane() == Scalar::U8),
+        Lanes => from == Ty::Ptr && vector(to).is_some(),
         Cast => vector(from)
             .zip(vector(to))
             .is_some_and(|(a, b)| a.size() == b.size()),

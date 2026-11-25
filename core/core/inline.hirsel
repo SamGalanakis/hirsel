@@ -20,10 +20,12 @@ pub fn set_word_le[A: plain, T: integer](mut a: A, at: u64, x: T)
 // Like set_word_le, in big-endian byte order.
 pub fn set_word_be[A: plain, T: integer](mut a: A, at: u64, x: T)
 
-// Read the u8 lanes of the expected vector type, Simd[u8, 16] or Simd[u8, 32],
-// from a starting at byte at. Fails with Bounds unless at + lanes <= len(a).
+// Read the n lanes of the expected vector type from the Inline array a, whose
+// elements are its lane type, starting at element at. Fails with Bounds unless
+// at + n <= len(a).
 pub fn lanes[A: plain](a: A, at: u64) -> Simd[u8, 16]
 
-// Overwrite the bytes of a starting at at with the lanes of v. Fails with Bounds
-// unless at + lanes <= len(a), before any write.
+// Overwrite the n elements of a starting at element at with the lanes of v, whose
+// lane type is a's element type. Fails with Bounds unless at + n <= len(a),
+// before any write.
 pub fn set_lanes[A: plain](mut a: A, at: u64, v: Simd[u8, 16])

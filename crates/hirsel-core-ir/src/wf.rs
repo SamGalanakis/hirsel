@@ -820,7 +820,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(count, Ty::Scalar(Scalar::U64))?;
             need(
                 c.place(to)? == PlaceTy::Value(Ty::Scalar(Scalar::U8))
-                    && matches!(c.ty(vector)?, Ty::Vector(Vector::U8x16 | Vector::U8x32)),
+                    && matches!(c.ty(vector)?, Ty::Vector(_)),
                 || "put_lanes operand types".into(),
             )
         }

@@ -343,3 +343,581 @@ fn pack32_law(seed: i32) -> bool {
         && simd.bitmask(simd.eq(got_signed_8, simd.from(signed_8))) == 255
         && simd.bitmask(simd.eq(got_unsigned_8, simd.from(unsigned_8))) == 255
 }
+
+// expect: run lanes_u8(0) = true
+// expect: run lanes_u8(1) = true
+// expect: run lanes_u8(3) = true
+// expect: run lanes_u8(4) = fail Bounds
+// expect: run lanes_u8(18446744073709551615) = fail Bounds
+// expect: run lanes_i8(0) = true
+// expect: run lanes_i8(1) = true
+// expect: run lanes_i8(3) = true
+// expect: run lanes_i8(4) = fail Bounds
+// expect: run lanes_i8(18446744073709551615) = fail Bounds
+// expect: run lanes_u16(0) = true
+// expect: run lanes_u16(1) = true
+// expect: run lanes_u16(3) = true
+// expect: run lanes_u16(4) = fail Bounds
+// expect: run lanes_u16(18446744073709551615) = fail Bounds
+// expect: run lanes_i16(0) = true
+// expect: run lanes_i16(1) = true
+// expect: run lanes_i16(3) = true
+// expect: run lanes_i16(4) = fail Bounds
+// expect: run lanes_i16(18446744073709551615) = fail Bounds
+// expect: run ilanes_i16(0) = true
+// expect: run ilanes_i16(1) = true
+// expect: run ilanes_i16(3) = true
+// expect: run ilanes_i16(4) = fail Bounds
+// expect: run ilanes_i16(18446744073709551615) = fail Bounds
+// expect: run set_i16(0) = true
+// expect: run set_i16(1) = true
+// expect: run set_i16(3) = true
+// expect: run set_i16(4) = fail Bounds
+// expect: run set_i16(18446744073709551615) = fail Bounds
+// expect: run iset_i16(0) = true
+// expect: run iset_i16(1) = true
+// expect: run iset_i16(3) = true
+// expect: run iset_i16(4) = fail Bounds
+// expect: run iset_i16(18446744073709551615) = fail Bounds
+// expect: run put_i16(0) = true
+// expect: run put_i16(1) = true
+// expect: run put_i16(16) = true
+// expect: run put_i16(17) = fail Bounds
+// expect: run lanes_u32(0) = true
+// expect: run lanes_u32(1) = true
+// expect: run lanes_u32(3) = true
+// expect: run lanes_u32(4) = fail Bounds
+// expect: run lanes_u32(18446744073709551615) = fail Bounds
+// expect: run ilanes_u32(0) = true
+// expect: run ilanes_u32(1) = true
+// expect: run ilanes_u32(3) = true
+// expect: run ilanes_u32(4) = fail Bounds
+// expect: run ilanes_u32(18446744073709551615) = fail Bounds
+// expect: run set_u32(0) = true
+// expect: run set_u32(1) = true
+// expect: run set_u32(3) = true
+// expect: run set_u32(4) = fail Bounds
+// expect: run set_u32(18446744073709551615) = fail Bounds
+// expect: run iset_u32(0) = true
+// expect: run iset_u32(1) = true
+// expect: run iset_u32(3) = true
+// expect: run iset_u32(4) = fail Bounds
+// expect: run iset_u32(18446744073709551615) = fail Bounds
+// expect: run put_u32(0) = true
+// expect: run put_u32(1) = true
+// expect: run put_u32(8) = true
+// expect: run put_u32(9) = fail Bounds
+// expect: run lanes_i32(0) = true
+// expect: run lanes_i32(1) = true
+// expect: run lanes_i32(3) = true
+// expect: run lanes_i32(4) = fail Bounds
+// expect: run lanes_i32(18446744073709551615) = fail Bounds
+// expect: run lanes_u64(0) = true
+// expect: run lanes_u64(1) = true
+// expect: run lanes_u64(3) = true
+// expect: run lanes_u64(4) = fail Bounds
+// expect: run lanes_u64(18446744073709551615) = fail Bounds
+// expect: run ilanes_u64(0) = true
+// expect: run ilanes_u64(1) = true
+// expect: run ilanes_u64(3) = true
+// expect: run ilanes_u64(4) = fail Bounds
+// expect: run ilanes_u64(18446744073709551615) = fail Bounds
+// expect: run set_u64(0) = true
+// expect: run set_u64(1) = true
+// expect: run set_u64(3) = true
+// expect: run set_u64(4) = fail Bounds
+// expect: run set_u64(18446744073709551615) = fail Bounds
+// expect: run iset_u64(0) = true
+// expect: run iset_u64(1) = true
+// expect: run iset_u64(3) = true
+// expect: run iset_u64(4) = fail Bounds
+// expect: run iset_u64(18446744073709551615) = fail Bounds
+// expect: run put_u64(0) = true
+// expect: run put_u64(1) = true
+// expect: run put_u64(2) = true
+// expect: run put_u64(3) = fail Bounds
+// expect: run lanes_i64(0) = true
+// expect: run lanes_i64(1) = true
+// expect: run lanes_i64(3) = true
+// expect: run lanes_i64(4) = fail Bounds
+// expect: run lanes_i64(18446744073709551615) = fail Bounds
+
+// 35 elements of u8 by a multiply-add over its width, so high and sign bits vary.
+fn seq_u8() -> List[u8] {
+    let mut xs: List[u8] = list.with_capacity(35)
+    let mut x: u8 = 200
+    for i in 0u64 .. 35u64 {
+        list.push(mut xs, x)
+        x = int.wrapping_add(int.wrapping_mul(x, 101), 37)
+    }
+    xs
+}
+
+// SEM-11: lane i of list.lanes(xs, at) is xs[at + i], and the read fails with Bounds
+// exactly when at + 32 > len. Reaching the scalar reads out of range breaks the law.
+fn lanes_u8(at: u64) -> bool {
+    let xs = seq_u8()
+    let v: Simd[u8, 32] = list.lanes(xs, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[u8, 32] = [0; 32]
+    for i in 0u64 .. 32u64 {
+        want[i] = xs[at + i]
+    }
+    let w: Simd[u8, 32] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 4294967295
+}
+
+// 19 elements of i8 by a multiply-add over its width, so high and sign bits vary.
+fn seq_i8() -> List[i8] {
+    let mut xs: List[i8] = list.with_capacity(19)
+    let mut x: i8 = -128
+    for i in 0u64 .. 19u64 {
+        list.push(mut xs, x)
+        x = int.wrapping_add(int.wrapping_mul(x, 101), 37)
+    }
+    xs
+}
+
+// SEM-11: lane i of list.lanes(xs, at) is xs[at + i], and the read fails with Bounds
+// exactly when at + 16 > len. Reaching the scalar reads out of range breaks the law.
+fn lanes_i8(at: u64) -> bool {
+    let xs = seq_i8()
+    let v: Simd[i8, 16] = list.lanes(xs, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[i8, 16] = [0; 16]
+    for i in 0u64 .. 16u64 {
+        want[i] = xs[at + i]
+    }
+    let w: Simd[i8, 16] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 65535
+}
+
+// 11 elements of u16 by a multiply-add over its width, so high and sign bits vary.
+fn seq_u16() -> List[u16] {
+    let mut xs: List[u16] = list.with_capacity(11)
+    let mut x: u16 = 200
+    for i in 0u64 .. 11u64 {
+        list.push(mut xs, x)
+        x = int.wrapping_add(int.wrapping_mul(x, 101), 37)
+    }
+    xs
+}
+
+// SEM-11: lane i of list.lanes(xs, at) is xs[at + i], and the read fails with Bounds
+// exactly when at + 8 > len. Reaching the scalar reads out of range breaks the law.
+fn lanes_u16(at: u64) -> bool {
+    let xs = seq_u16()
+    let v: Simd[u16, 8] = list.lanes(xs, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[u16, 8] = [0; 8]
+    for i in 0u64 .. 8u64 {
+        want[i] = xs[at + i]
+    }
+    let w: Simd[u16, 8] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 255
+}
+
+// 19 elements of i16 by a multiply-add over its width, so high and sign bits vary.
+fn seq_i16() -> List[i16] {
+    let mut xs: List[i16] = list.with_capacity(19)
+    let mut x: i16 = -128
+    for i in 0u64 .. 19u64 {
+        list.push(mut xs, x)
+        x = int.wrapping_add(int.wrapping_mul(x, 101), 37)
+    }
+    xs
+}
+
+// SEM-11: lane i of list.lanes(xs, at) is xs[at + i], and the read fails with Bounds
+// exactly when at + 16 > len. Reaching the scalar reads out of range breaks the law.
+fn lanes_i16(at: u64) -> bool {
+    let xs = seq_i16()
+    let v: Simd[i16, 16] = list.lanes(xs, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[i16, 16] = [0; 16]
+    for i in 0u64 .. 16u64 {
+        want[i] = xs[at + i]
+    }
+    let w: Simd[i16, 16] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 65535
+}
+
+fn inline_i16(s: List[i16]) -> Inline[i16, 19] {
+    let mut a: Inline[i16, 19] = [0; 19]
+    for i in 0u64 .. 19u64 {
+        a[i] = s[i]
+    }
+    a
+}
+
+// Lanes that differ from every element they replace: s backwards.
+fn pattern_i16(s: List[i16]) -> Inline[i16, 16] {
+    let mut p: Inline[i16, 16] = [0; 16]
+    for i in 0u64 .. 16u64 {
+        p[i] = s[18u64 - i]
+    }
+    p
+}
+
+// SEM-11: inline.lanes on an Inline[i16, 19] under the list.lanes law, at an element offset.
+fn ilanes_i16(at: u64) -> bool {
+    let a = inline_i16(seq_i16())
+    let v: Simd[i16, 16] = inline.lanes(a, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[i16, 16] = [0; 16]
+    for i in 0u64 .. 16u64 {
+        want[i] = a[at + i]
+    }
+    let w: Simd[i16, 16] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 65535
+}
+
+// SEM-11: list.set_lanes writes element at + i from lane i and leaves every other element
+// and the length; it fails with Bounds exactly when at + 16 > len.
+fn set_i16(at: u64) -> bool {
+    let s = seq_i16()
+    let p = pattern_i16(s)
+    let mut xs = seq_i16()
+    let v: Simd[i16, 16] = simd.from(p)
+    list.set_lanes(mut xs, at, v)
+    if at > 3u64 || list.len(xs) != 19u64 {
+        return false
+    }
+    let mut ok = true
+    for j in 0u64 .. 19u64 {
+        let want = if j >= at && j < at + 16u64 { p[j - at] } else { s[j] }
+        ok = ok && xs[j] == want
+    }
+    ok
+}
+
+// SEM-11: inline.set_lanes on an Inline[i16, 19] under the list.set_lanes law.
+fn iset_i16(at: u64) -> bool {
+    let s = seq_i16()
+    let p = pattern_i16(s)
+    let mut a = inline_i16(s)
+    let v: Simd[i16, 16] = simd.from(p)
+    inline.set_lanes(mut a, at, v)
+    if at > 3u64 {
+        return false
+    }
+    let mut ok = true
+    for j in 0u64 .. 19u64 {
+        let want = if j >= at && j < at + 16u64 { p[j - at] } else { s[j] }
+        ok = ok && a[j] == want
+    }
+    ok
+}
+
+// SEM-11: list.put_lanes appends lanes 0 to k - 1 as elements len to len + k - 1, and
+// fails with Bounds exactly when k > 16.
+fn put_i16(k: u64) -> bool {
+    let s = seq_i16()
+    let p = pattern_i16(s)
+    let mut xs = seq_i16()
+    let v: Simd[i16, 16] = simd.from(p)
+    list.put_lanes(mut xs, v, k)
+    if k > 16u64 || list.len(xs) != 19u64 + k {
+        return false
+    }
+    let mut ok = true
+    for j in 0u64 .. 19u64 + k {
+        let want = if j < 19u64 { s[j] } else { p[j - 19u64] }
+        ok = ok && xs[j] == want
+    }
+    ok
+}
+
+// 11 elements of u32 by a multiply-add over its width, so high and sign bits vary.
+fn seq_u32() -> List[u32] {
+    let mut xs: List[u32] = list.with_capacity(11)
+    let mut x: u32 = 200
+    for i in 0u64 .. 11u64 {
+        list.push(mut xs, x)
+        x = int.wrapping_add(int.wrapping_mul(x, 101), 37)
+    }
+    xs
+}
+
+// SEM-11: lane i of list.lanes(xs, at) is xs[at + i], and the read fails with Bounds
+// exactly when at + 8 > len. Reaching the scalar reads out of range breaks the law.
+fn lanes_u32(at: u64) -> bool {
+    let xs = seq_u32()
+    let v: Simd[u32, 8] = list.lanes(xs, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[u32, 8] = [0; 8]
+    for i in 0u64 .. 8u64 {
+        want[i] = xs[at + i]
+    }
+    let w: Simd[u32, 8] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 255
+}
+
+fn inline_u32(s: List[u32]) -> Inline[u32, 11] {
+    let mut a: Inline[u32, 11] = [0; 11]
+    for i in 0u64 .. 11u64 {
+        a[i] = s[i]
+    }
+    a
+}
+
+// Lanes that differ from every element they replace: s backwards.
+fn pattern_u32(s: List[u32]) -> Inline[u32, 8] {
+    let mut p: Inline[u32, 8] = [0; 8]
+    for i in 0u64 .. 8u64 {
+        p[i] = s[10u64 - i]
+    }
+    p
+}
+
+// SEM-11: inline.lanes on an Inline[u32, 11] under the list.lanes law, at an element offset.
+fn ilanes_u32(at: u64) -> bool {
+    let a = inline_u32(seq_u32())
+    let v: Simd[u32, 8] = inline.lanes(a, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[u32, 8] = [0; 8]
+    for i in 0u64 .. 8u64 {
+        want[i] = a[at + i]
+    }
+    let w: Simd[u32, 8] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 255
+}
+
+// SEM-11: list.set_lanes writes element at + i from lane i and leaves every other element
+// and the length; it fails with Bounds exactly when at + 8 > len.
+fn set_u32(at: u64) -> bool {
+    let s = seq_u32()
+    let p = pattern_u32(s)
+    let mut xs = seq_u32()
+    let v: Simd[u32, 8] = simd.from(p)
+    list.set_lanes(mut xs, at, v)
+    if at > 3u64 || list.len(xs) != 11u64 {
+        return false
+    }
+    let mut ok = true
+    for j in 0u64 .. 11u64 {
+        let want = if j >= at && j < at + 8u64 { p[j - at] } else { s[j] }
+        ok = ok && xs[j] == want
+    }
+    ok
+}
+
+// SEM-11: inline.set_lanes on an Inline[u32, 11] under the list.set_lanes law.
+fn iset_u32(at: u64) -> bool {
+    let s = seq_u32()
+    let p = pattern_u32(s)
+    let mut a = inline_u32(s)
+    let v: Simd[u32, 8] = simd.from(p)
+    inline.set_lanes(mut a, at, v)
+    if at > 3u64 {
+        return false
+    }
+    let mut ok = true
+    for j in 0u64 .. 11u64 {
+        let want = if j >= at && j < at + 8u64 { p[j - at] } else { s[j] }
+        ok = ok && a[j] == want
+    }
+    ok
+}
+
+// SEM-11: list.put_lanes appends lanes 0 to k - 1 as elements len to len + k - 1, and
+// fails with Bounds exactly when k > 8.
+fn put_u32(k: u64) -> bool {
+    let s = seq_u32()
+    let p = pattern_u32(s)
+    let mut xs = seq_u32()
+    let v: Simd[u32, 8] = simd.from(p)
+    list.put_lanes(mut xs, v, k)
+    if k > 8u64 || list.len(xs) != 11u64 + k {
+        return false
+    }
+    let mut ok = true
+    for j in 0u64 .. 11u64 + k {
+        let want = if j < 11u64 { s[j] } else { p[j - 11u64] }
+        ok = ok && xs[j] == want
+    }
+    ok
+}
+
+// 7 elements of i32 by a multiply-add over its width, so high and sign bits vary.
+fn seq_i32() -> List[i32] {
+    let mut xs: List[i32] = list.with_capacity(7)
+    let mut x: i32 = -128
+    for i in 0u64 .. 7u64 {
+        list.push(mut xs, x)
+        x = int.wrapping_add(int.wrapping_mul(x, 101), 37)
+    }
+    xs
+}
+
+// SEM-11: lane i of list.lanes(xs, at) is xs[at + i], and the read fails with Bounds
+// exactly when at + 4 > len. Reaching the scalar reads out of range breaks the law.
+fn lanes_i32(at: u64) -> bool {
+    let xs = seq_i32()
+    let v: Simd[i32, 4] = list.lanes(xs, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[i32, 4] = [0; 4]
+    for i in 0u64 .. 4u64 {
+        want[i] = xs[at + i]
+    }
+    let w: Simd[i32, 4] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 15
+}
+
+// 5 elements of u64 by a multiply-add over its width, so high and sign bits vary.
+fn seq_u64() -> List[u64] {
+    let mut xs: List[u64] = list.with_capacity(5)
+    let mut x: u64 = 200
+    for i in 0u64 .. 5u64 {
+        list.push(mut xs, x)
+        x = int.wrapping_add(int.wrapping_mul(x, 101), 37)
+    }
+    xs
+}
+
+// SEM-11: lane i of list.lanes(xs, at) is xs[at + i], and the read fails with Bounds
+// exactly when at + 2 > len. Reaching the scalar reads out of range breaks the law.
+fn lanes_u64(at: u64) -> bool {
+    let xs = seq_u64()
+    let v: Simd[u64, 2] = list.lanes(xs, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[u64, 2] = [0; 2]
+    for i in 0u64 .. 2u64 {
+        want[i] = xs[at + i]
+    }
+    let w: Simd[u64, 2] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 3
+}
+
+fn inline_u64(s: List[u64]) -> Inline[u64, 5] {
+    let mut a: Inline[u64, 5] = [0; 5]
+    for i in 0u64 .. 5u64 {
+        a[i] = s[i]
+    }
+    a
+}
+
+// Lanes that differ from every element they replace: s backwards.
+fn pattern_u64(s: List[u64]) -> Inline[u64, 2] {
+    let mut p: Inline[u64, 2] = [0; 2]
+    for i in 0u64 .. 2u64 {
+        p[i] = s[4u64 - i]
+    }
+    p
+}
+
+// SEM-11: inline.lanes on an Inline[u64, 5] under the list.lanes law, at an element offset.
+fn ilanes_u64(at: u64) -> bool {
+    let a = inline_u64(seq_u64())
+    let v: Simd[u64, 2] = inline.lanes(a, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[u64, 2] = [0; 2]
+    for i in 0u64 .. 2u64 {
+        want[i] = a[at + i]
+    }
+    let w: Simd[u64, 2] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 3
+}
+
+// SEM-11: list.set_lanes writes element at + i from lane i and leaves every other element
+// and the length; it fails with Bounds exactly when at + 2 > len.
+fn set_u64(at: u64) -> bool {
+    let s = seq_u64()
+    let p = pattern_u64(s)
+    let mut xs = seq_u64()
+    let v: Simd[u64, 2] = simd.from(p)
+    list.set_lanes(mut xs, at, v)
+    if at > 3u64 || list.len(xs) != 5u64 {
+        return false
+    }
+    let mut ok = true
+    for j in 0u64 .. 5u64 {
+        let want = if j >= at && j < at + 2u64 { p[j - at] } else { s[j] }
+        ok = ok && xs[j] == want
+    }
+    ok
+}
+
+// SEM-11: inline.set_lanes on an Inline[u64, 5] under the list.set_lanes law.
+fn iset_u64(at: u64) -> bool {
+    let s = seq_u64()
+    let p = pattern_u64(s)
+    let mut a = inline_u64(s)
+    let v: Simd[u64, 2] = simd.from(p)
+    inline.set_lanes(mut a, at, v)
+    if at > 3u64 {
+        return false
+    }
+    let mut ok = true
+    for j in 0u64 .. 5u64 {
+        let want = if j >= at && j < at + 2u64 { p[j - at] } else { s[j] }
+        ok = ok && a[j] == want
+    }
+    ok
+}
+
+// SEM-11: list.put_lanes appends lanes 0 to k - 1 as elements len to len + k - 1, and
+// fails with Bounds exactly when k > 2.
+fn put_u64(k: u64) -> bool {
+    let s = seq_u64()
+    let p = pattern_u64(s)
+    let mut xs = seq_u64()
+    let v: Simd[u64, 2] = simd.from(p)
+    list.put_lanes(mut xs, v, k)
+    if k > 2u64 || list.len(xs) != 5u64 + k {
+        return false
+    }
+    let mut ok = true
+    for j in 0u64 .. 5u64 + k {
+        let want = if j < 5u64 { s[j] } else { p[j - 5u64] }
+        ok = ok && xs[j] == want
+    }
+    ok
+}
+
+// 7 elements of i64 by a multiply-add over its width, so high and sign bits vary.
+fn seq_i64() -> List[i64] {
+    let mut xs: List[i64] = list.with_capacity(7)
+    let mut x: i64 = -128
+    for i in 0u64 .. 7u64 {
+        list.push(mut xs, x)
+        x = int.wrapping_add(int.wrapping_mul(x, 101), 37)
+    }
+    xs
+}
+
+// SEM-11: lane i of list.lanes(xs, at) is xs[at + i], and the read fails with Bounds
+// exactly when at + 4 > len. Reaching the scalar reads out of range breaks the law.
+fn lanes_i64(at: u64) -> bool {
+    let xs = seq_i64()
+    let v: Simd[i64, 4] = list.lanes(xs, at)
+    if at > 3u64 {
+        return false
+    }
+    let mut want: Inline[i64, 4] = [0; 4]
+    for i in 0u64 .. 4u64 {
+        want[i] = xs[at + i]
+    }
+    let w: Simd[i64, 4] = simd.from(want)
+    simd.bitmask(simd.eq(v, w)) == 15
+}

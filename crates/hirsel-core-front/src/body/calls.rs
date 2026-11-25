@@ -1083,7 +1083,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn arg_ty(&mut self, pt: TyId, at: TyId, e: NodeId, found: &mut [Option<TyId>]) {
         self.arg_ty_rooted(pt, at, e, found, &[])
     }
-    fn arg_ty_rooted(
+    pub(super) fn arg_ty_rooted(
         &mut self,
         pt: TyId,
         at: TyId,

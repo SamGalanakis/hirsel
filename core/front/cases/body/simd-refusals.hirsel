@@ -17,6 +17,8 @@ fn capture(v: Simd[u8, 16]) { let _ = scoped fn() -> bool { simd.any(v) } }
 fn mulhi_unsigned(a: Simd[u16, 8]) -> Simd[u16, 8] { simd.mulhi_i16(a, a) }
 fn madd_wide(a: Simd[i32, 4]) -> bool { simd.any(simd.madd_i16(a, a)) }
 fn pack_wide(a: Simd[i64, 2]) -> Simd[i32, 4] { simd.pack_saturating(a, a) }
+fn sign_mismatch(xs: List[u32]) -> Simd[i32, 4] { list.lanes(xs, 0) }
+fn width_mismatch(mut a: Inline[u16, 8], v: Simd[u8, 16]) { inline.set_lanes(mut a, 0, v) }
 
 // expect: refuse LANG-21 at 1:62
 // expect: refuse SEM-11 at 2:21
@@ -36,4 +38,6 @@ fn pack_wide(a: Simd[i64, 2]) -> Simd[i32, 4] { simd.pack_saturating(a, a) }
 // expect: refuse SEM-11 at 17:69
 // expect: refuse SEM-11 at 18:64
 // expect: refuse SEM-11 at 19:49
+// expect: refuse SEM-11 at 20:51
+// expect: refuse SEM-11 at 21:61
 // expect: compared LANG-21 at 1:62 | Simd[u8, 16] | an operand type of `+`

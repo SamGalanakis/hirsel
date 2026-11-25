@@ -689,8 +689,8 @@ pub enum Inst {
         second: Option<ValueId>,
         fail: Option<BlockId>,
     },
-    /// Store the first count lanes of a byte vector at to, after the source
-    /// operation's bounds check and reservation for those bytes.
+    /// Store the first count bytes of a vector at the byte place to, unaligned, after
+    /// the source operation's bounds check and reservation for those bytes.
     PutLanes {
         to: AddressId,
         vector: ValueId,

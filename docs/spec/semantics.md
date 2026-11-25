@@ -520,18 +520,21 @@ depends on the engine, the build or the CPU.
   every target.
 - **Reductions.** `simd.any(v)` is `true` when some lane is not 0. `simd.bitmask(v)` is a
   `u64` whose bit k is the top bit of lane k; the bits from `n` upward are 0.
-- **Loads and stores.** `list.lanes(b, at)`, with `b: Bytes`, reads the `n` bytes of `b`
-  from `at` as a `Simd[u8, n]`, `n` taken from the expected type, and fails with `Bounds`
-  unless `at + n ≤ len`, checked once for the whole read. `list.put_lanes(mut b, v, k)`
-  appends lanes 0 to `k − 1` of a `Simd[u8, n]`. It fails with
-  `Bounds` when `k > n`, before changing anything; otherwise it grows `b` as
-  [MEM-24](budgets.md#mem-24-logical-charges) says with `needed` = `len + k`, and a refused
-  growth leaves `b` unchanged.
-  `list.set_lanes(mut b, at, v)` overwrites the `n` bytes of `b` from `at` with the lanes
-  of a `Simd[u8, n]` under the same check, made before any write, and keeps the length.
+- **Loads and stores.** `list.lanes(xs, at)`, with `xs: List[T]` and `T` an integer type,
+  reads the `n` elements of `xs` from `at` as a `Simd[T, n]`, lane i from element `at + i`,
+  `n` taken from the expected type, and fails with `Bounds` unless `at + n ≤ len` with no
+  overflow, checked once for the whole read. `at` counts elements, so lanes are elements and
+  no byte order enters. `list.put_lanes(mut xs, v, k)` appends lanes 0 to `k − 1` of a
+  `Simd[T, n]`. It fails with `Bounds` when `k > n`, before changing anything; otherwise it
+  grows `xs` as [MEM-24](budgets.md#mem-24-logical-charges) says with `needed` = `len + k`,
+  and a refused growth leaves `xs` unchanged.
+  `list.set_lanes(mut xs, at, v)` overwrites the `n` elements of `xs` from `at` with the
+  lanes of a `Simd[T, n]` under the same check, made before any write, and keeps the length.
   `inline.lanes(a, at)` and `inline.set_lanes(mut a, at, v)` do the same on an
-  `Inline[u8, N]`, failing with `Bounds` unless `at + n ≤ N` with no overflow; any other
-  array or a vector of other lanes is refused at compile time.
+  `Inline[T, N]`, failing with `Bounds` unless `at + n ≤ N` with no overflow. A vector whose
+  lane type is not the element type, or an element type that is not an integer, is refused
+  at compile time. No load or store assumes an alignment: an engine reads and writes the
+  elements wherever the List's backing or the array lies.
 
 Each `simd` and `list` operation is a core call and takes one step, and the operators take
 none ([MEM-30](budgets.md#mem-30-step-bounds)).

@@ -10,6 +10,7 @@ media_bits = { major = 1, path = "../media_bits" }
 rtp = { major = 1, path = "../rtp" }
 srtp = { major = 1, path = "../srtp" }
 stun_ice = { major = 1, path = "../stun_ice" }
+turn = { major = 1, path = "../turn" }
 
 [sources]
 "sdp.hirsel" = "sdp"
@@ -22,6 +23,7 @@ stun_ice = { major = 1, path = "../stun_ice" }
 "router.hirsel" = "router"
 "router_route.hirsel" = "router"
 "signal.hirsel" = "signal"
+"signal_turn.hirsel" = "signal"
 
 [tests]
 limit = 67108864
@@ -32,5 +34,6 @@ limit = 67108864
 "router_laws.hirsel" = "laws"
 "router_keyframe_laws.hirsel" = "laws"
 "router_rebind_laws.hirsel" = "laws"
+"relay_laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"

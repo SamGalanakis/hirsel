@@ -1,0 +1,117 @@
+// TURN slice U8 (turn.md TURN-5, TURN-7, TURN-9 and RTC-8 "Strict firewalls"): what the
+// SFU's signaling and its sibling relay place share. One RelayPlan configures both, so the
+// credential lifetime signaling mints with is the relay's credential_max_s.
+/// The relay serves only the SFU: media holds the SFU's media addresses and port ranges,
+/// host the relay host's other addresses (TURN-7 `local`). lifetime_s is every minted
+/// credential's lifetime, from its mint.
+pub type RelayPlan {
+    realm: Bytes,
+    lifetime_s: u32,
+    media: List[turn.Allow],
+    host: List[Ip]
+}
+
+/// One admission's ICE credentials for the answer (RTC-1) and its TURN credentials for the
+/// browser's ICE servers list (TURN-11), minted together at admission.
+pub type SessionCredentials {
+    ice_ufrag: Bytes,
+    ice_pwd: Bytes,
+    turn_username: Bytes,
+    turn_password: Bytes,
+    expiry_unix_s: u64
+}
+
+/// What signaling sends the relay place when RTC-8 revokes an admission (TURN-9).
+pub type RelayRevoke: codec + send {
+    subject: Bytes,
+    until_unix_s: u64
+}
+
+/// TURN-7's relay-only policy: deny 0.0.0.0/0 and ::/0, allow only the SFU's media.
+pub fn relay_policy(plan: RelayPlan) -> turn.PeerPolicy {
+    let mut deny: List[turn.Prefix] = list.new()
+    list.push(mut deny, turn.Prefix(ip: V4(0), bits: 0))
+    list.push(mut deny, turn.Prefix(ip: V6(0, 0), bits: 0))
+    let mut allow: List[turn.Allow] = list.new()
+    list.append(mut allow, plan.media)
+    let mut local: List[Ip] = list.new()
+    list.append(mut local, plan.host)
+    turn.PeerPolicy(deny: take deny, allow: take allow, local: take local)
+}
+
+/// The relay place's config: relay_defaults with the plan's realm and policy, and
+/// credential_max_s equal to the plan's lifetime_s. Config for an empty media list (a
+/// relay that could relay to nothing) or a zero lifetime.
+pub fn relay_config(plan: RelayPlan) -> Result[turn.RelayConfig, turn.TurnError] {
+    if plan.lifetime_s == 0 || list.len(plan.media) == 0 {
+        return Error(Config)
+    }
+    let mut c = turn.relay_defaults(copied(plan.realm))
+    c.credential_max_s = plan.lifetime_s
+    c.policy = relay_policy(plan)
+    Ok(c)
+}
+
+/// The TURN subject of the admission (incarnation, peer) (RTC-8): the incarnation in
+/// lowercase hex, `-`, the peer number in decimal. 34 to 53 bytes, no `:`.
+pub fn admission_subject(incarnation: Inline[u8, 16], peer: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(53)
+    for i in 0u64 .. 16 {
+        let (hi, lo) = std.hex.encode_byte(incarnation[i], false)
+        list.push(mut out, hi)
+        list.push(mut out, lo)
+    }
+    list.push(mut out, b'-')
+    put_decimal(mut out, peer)
+    out
+}
+
+/// Mint an admission's credentials at now_unix_s. The master needs `mac`. The ICE ufrag
+/// (8 bytes) and password (24 bytes) are base64 of fresh random bytes, which is ice-char
+/// (RFC 8839 section 5.4) with no padding.
+pub fn mint_session(master: Secret, r: Random, subject: Bytes, now_unix_s: u64, plan: RelayPlan) -> Result[SessionCredentials, turn.TurnError] {
+    let lifetime: u64 = int.widen(plan.lifetime_s)
+    if plan.lifetime_s == 0 {
+        return Error(Config)
+    }
+    let expiry = now_unix_s + lifetime
+    let mut username: Bytes = list.new()
+    let mut password: Bytes = list.new()
+    turn.mint(master, expiry, subject, mut username, mut password)?
+    let mut raw: Bytes = list.with_capacity(24)
+    host.random(r, mut raw)
+    let mut ufrag: Bytes = list.with_capacity(8)
+    std.base64.encode(list.slice(raw, 0, 6), mut ufrag)
+    let mut pwd: Bytes = list.with_capacity(24)
+    std.base64.encode(list.slice(raw, 6, 24), mut pwd)
+    Ok(SessionCredentials(ice_ufrag: take ufrag, ice_pwd: take pwd, turn_username: take username, turn_password: take password, expiry_unix_s: expiry))
+}
+
+/// The revoke signaling sends at now_unix_s. Every credential for subject was minted at
+/// or before now_unix_s with plan.lifetime_s, so until covers its expiry (TURN-9).
+pub fn relay_revoke(subject: Bytes, now_unix_s: u64, plan: RelayPlan) -> RelayRevoke {
+    let lifetime: u64 = int.widen(plan.lifetime_s)
+    RelayRevoke(subject: copied(subject), until_unix_s: now_unix_s + lifetime)
+}
+
+/// The relay place's side: apply a forwarded revoke. Answers the allocations deleted.
+pub fn apply_revoke(mut r: turn.Relay, m: RelayRevoke, now: turn.Now) -> Result[u64, turn.TurnError] {
+    turn.revoke(mut r, m.subject, m.until_unix_s, now)
+}
+
+fn copied(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    out
+}
+
+fn put_decimal(mut out: Bytes, v: u64) {
+    let mut p = 1u64
+    while v / p >= 10 {
+        p = p * 10
+    }
+    while p > 0 {
+        list.push(mut out, b'0' + int.truncate((v / p) % 10))
+        p = p / 10
+    }
+}

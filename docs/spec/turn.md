@@ -449,6 +449,8 @@ CreatePermission or ChannelBind drops that permission or channel and is counted;
 caller sees `Unpermitted` on its next `send_to`. Channel numbers are chosen as the lowest
 free number from 0x4000, so runs are deterministic; a number whose binding lapsed is not
 reused for 300 s (RFC 8656 §12).
+The client's CreatePermission names the peer's whole address, port included: the relay
+judges its policy on IP and port (TURN-7), and the permission it installs covers the IP.
 
 ### TURN-7: The relay server
 
@@ -691,6 +693,47 @@ answered.
   each allocation through `end_lease` at `now`, so a `Stream` origin's idle timer restarts
   from the revoke.
 
+**Decisions made building U8.** Each is reversible; the wiring is webrtc_sfu's `signal`
+module (`signal_turn.hirsel`), and the turn package names no application.
+
+- **One plan configures both places.** `RelayPlan { realm, lifetime_s, media, host }`.
+  `relay_config(plan)` is `relay_defaults(realm)` with `credential_max_s = lifetime_s` and
+  the policy `deny = [0.0.0.0/0, ::/0]`, `allow = media`, `local = host`. Signaling mints
+  every credential with `expiry = now + lifetime_s`, so step 4 accepts each credential it
+  mints and nothing longer. An empty `media` or a zero `lifetime_s` is `Config`: a
+  relay-only relay with no `allow` relays to nothing.
+- **The subject names one admission.** It is RTC-8's admission identity
+  `(incarnation, peer)`, written as the 16 incarnation bytes in lowercase hex, `-`, and the
+  peer number in decimal: 34 to 53 bytes, no `:`. Signaling derives it at mint and at revoke
+  with no table. The incarnation never repeats across rooms, empty periods or room relay
+  restarts, so a subject the relay still holds revoked is never handed to a new admission.
+- **Credentials are minted at admission, before any offer.** A relay-only browser gathers
+  no candidate until it has its TURN credentials, so `mint_session` mints the ICE ufrag
+  (base64 of 6 random bytes, 8 characters) and password (base64 of 18, 24 characters),
+  which are ice-char with no padding, together with the TURN username and password.
+- **The forwarded revoke is `RelayRevoke { subject, until_unix_s }`,** a `codec + send`
+  value, and the relay place calls `revoke(r, subject, until_unix_s, now)` with its own
+  `now`. `until_unix_s` is the revoke's time plus `lifetime_s`, which covers the latest
+  expiry minted for the subject without a table, since every mint for it happened at or
+  before the revoke.
+- **The client's CreatePermission carries the peer's port** (TURN-6). U3 sent port 0,
+  which a relay-only `allow` with a port range answered 403, so the client could reach no
+  media port; `relay_only_session` found it.
+  Open: RFC 8656 §9.1 lets a client put any port in CreatePermission's XOR-PEER-ADDRESS,
+  and the relay still judges that port, so a conforming client that sends another port is
+  answered 403 by a relay-only policy. N1's browser run shows what browsers send; if one
+  sends another port, the relay judges CreatePermission on the IP alone (any `allow` entry
+  covering it) and keeps the full-address check on Send, ChannelData and `from_peer`.
+- **Not built here.** The SFU's deployment, which binds the sockets and runs the relay as
+  a sibling place, needs webrtc S5's units and S7's adapter, and webrtc_sfu has neither yet.
+  Until then `relay_only_session` (in webrtc_sfu's laws) is the proving case: a browser end
+  (ICE, DTLS, SRTP) reaches a PeerSession only through `turn.Client` and the relay, over
+  UDP and over a stream through two `Framer`s, with the relay-only policy and a revoke sent
+  as its codec bytes. `mint_session`, `relay_revoke` and `apply_revoke` have no caller but
+  that law until S7's adapter calls them and sends `Servers`. Two gaps remain against the
+  browser case: `turn.Client` takes the SHA-256 path where browsers take MD5, and nothing
+  runs under `std.sim`.
+
 **No byte-rate limit.** Decision: the relay limits allocations (`quota`, the pool),
 permissions and channels, not relayed bytes per second, which RFC 8656 §21.1.7 and §21.3.1
 suggest per username and coturn offers as `max-bps`. Every relayed byte goes to a peer
@@ -780,7 +823,8 @@ It answers the number of allocations deleted. When an SFU revokes a participant 
 RTC-7), its signaling side also sends the participant's subject to the relay place, which
 calls `revoke`. That is not part of RTC-7's acknowledgement condition: the SFU's own fence
 already stops every packet for the epoch, whatever path it arrives on, and the relay revoke
-only reclaims the allocation and refuses new ones.
+only reclaims the allocation and refuses new ones. The SFU's `until_unix_s` is the revoke's time plus the plan's
+credential lifetime (TURN-7's U8 decisions), which covers every credential it minted for the subject.
 
 ### TURN-10: Discards and counters
 

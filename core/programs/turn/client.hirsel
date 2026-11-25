@@ -231,11 +231,12 @@ pub fn permit(mut c: Client, peer: Addr, now: Now) -> Result[(), TurnError] {
     if let Some(_) = find_perm(c, peer) {
         return Ok(())
     }
-    let ip_only = Addr(ip: peer.ip, port: 0)
+    // The request names the whole address: the relay judges its policy on IP and port
+    // (TURN-7), while the permission it installs covers the IP.
     list.try_reserve(mut c.perms, 1) ?=> Capacity
     list.try_reserve(mut c.txs, 1) ?=> Capacity
-    list.push(mut c.perms, Perm(peer: ip_only, installed: false, busy: true, refresh_ns: NEVER))
-    let tx = new_tx(c, PermitJob(ip_only))
+    list.push(mut c.perms, Perm(peer: peer, installed: false, busy: true, refresh_ns: NEVER))
+    let tx = new_tx(c, PermitJob(peer))
     list.push(mut c.txs, tx)
     Ok(())
 }

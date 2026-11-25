@@ -950,7 +950,7 @@ per peer plus addressed `Message M`. The room's types are the application's, so 
 generic over them:
 
 ```hirsel unbuilt
-pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, Target) | Target(u64, Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(Inline[u64, 8], u8) | Fenced(u64, u64) | Refused(u32)
+pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, Target) | Target(u64, Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(Inline[u64, 8], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
 pub type Incarnation = Incarnation(Inline[u8, 16])
 pub type RoomIn[M] = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32) | Left(u32) | Message(u32, M) | Lost
 pub type RoomOut[M] = ToPeer(u32, M) | ToRoom(M)
@@ -1085,9 +1085,14 @@ Until F1 lands, the adapter is driven by a test harness that feeds `RoomIn` and 
 UDP uses TURN over TCP or TLS on 443 with a UDP relay ([turn.md](turn.md) TURN-2). The relay is
 a sibling place on the same host, so a relayed browser reaches a unit as an ordinary UDP
 source, authenticated by ICE and DTLS like any other (TURN-8). Signaling mints the TURN
-username and password beside the ICE credentials (TURN-5). A revoke also reaches the relay
-(TURN-9), outside RTC-7's acknowledgement: the fence already drops the epoch's packets on
-every path. Passive ICE-TCP (RFC 6544), once slice S8, is withdrawn: TURN over TLS reaches
+username and password beside the ICE credentials (TURN-5), at admission and before any
+offer, since a relay-only browser gathers no candidate without them. The adapter sends them
+to the admitted peer alone as `Servers(username, password)` (`ToPeer`); the TURN URLs are the
+deployment's and fixed (TURN-11). The ICE ufrag and password minted with them go into the
+answer. A revoke also reaches the relay (TURN-9), outside RTC-7's acknowledgement: the fence
+already drops the epoch's packets on every path. The wiring (one `RelayPlan` for both places,
+the subject derived from the admission identity, the forwarded `RelayRevoke`) is
+turn.md's U8 decisions under TURN-7. Passive ICE-TCP (RFC 6544), once slice S8, is withdrawn: TURN over TLS reaches
 every network it reached, and networks that pass only TLS, and media units keep one transport
 and one writer kind.
 
@@ -1269,6 +1274,13 @@ unless named otherwise.
   Case (b) is red on an adapter that seeds the scratch roster from the pre-gap roster, and
   (c) on one that compares at the head.
 - **W17** withdrawn with ICE-TCP; stream framing is turn.md's `stream_framing`.
+- **W20 `relay_only_session`.** A browser end (ICE nomination, DTLS, SRTP) reaches a
+  PeerSession only through `turn.Client` and the relay, over UDP and over a stream, with
+  credentials from `mint_session` and the relay from `relay_config` (turn.md U8). *Oracle:*
+  by hand from turn.md TURN-7 to TURN-9: the relayed address is selected, DTLS connects and
+  media is taken; the SFU's IP on a port outside `allow` and an outside address are
+  refused; after the forwarded `RelayRevoke` the allocation is gone, nothing relays, and a
+  new Allocate for the subject ends `Closed(Credentials)`.
 - **W18 `forward_allocates_nothing`.** Forwarding RTP packets to 8 down-tracks on one unit,
   after warm-up, runs under a zero-byte allocation bound, as `stun_ice`'s Binding laws do.
   The measured turn must deliver eight packets, so dropping all traffic cannot pass.

@@ -1,0 +1,349 @@
+// ---- TURN slice U8: a browser that reaches the SFU only through its sibling relay ----
+const RELAY_LISTEN: Addr = Addr(ip: V4(0xc0000264), port: 3478)
+
+const RELAY_POOL_1: Addr = Addr(ip: V4(0xc0000264), port: 50000)
+
+const RELAY_POOL_2: Addr = Addr(ip: V4(0xc0000264), port: 50002)
+
+// The SFU's media address (server_addr) and the same IP on a port that is not media.
+const SFU_MEDIA: Addr = Addr(ip: V4(0xc0000201), port: 5000)
+
+const SFU_OTHER: Addr = Addr(ip: V4(0xc0000201), port: 5001)
+
+// A public address the relay-only policy must still refuse.
+const OUTSIDE: Addr = Addr(ip: V4(0x5db8d814), port: 9000)
+
+const MINT_UNIX: u64 = 1700000000
+
+fn plan() -> signal.RelayPlan {
+    let mut ranges: List[turn.Allow] = list.new()
+    list.push(mut ranges, turn.Allow(prefix: turn.Prefix(ip: V4(0xc0000201), bits: 32), ports_lo: 5000, ports_hi: 5000))
+    let mut host: List[Ip] = list.new()
+    // Co-located: the SFU's own address is one of the relay host's addresses.
+    list.push(mut host, V4(0xc0000201))
+    signal.RelayPlan(realm: b"sfu.example", lifetime_s: 3600, media: take ranges, host: take host)
+}
+
+/// The SFU's local end, with the ICE credentials minted beside the TURN ones.
+fn sfu_local(creds: signal.SessionCredentials) -> sdp.LocalEnd {
+    let mut local = rig_local()
+    local.ice_ufrag = copy_of(creds.ice_ufrag)
+    local.ice_pwd = copy_of(creds.ice_pwd)
+    local
+}
+
+fn master(uses: String) -> Secret {
+    let mut b: Bytes = list.with_capacity(32)
+    list.fill(mut b, 32, 0x3c)
+    result.unwrap(secret.seal(take b, uses))
+}
+
+fn tnow(ms: u64) -> turn.Now {
+    turn.Now(mono_ns: ms * MS, unix_s: MINT_UNIX + ms / 1000)
+}
+
+/// One browser's TURN client and the relay place, over UDP or one stream connection,
+/// with each direction's stream bytes run through a Framer.
+type Leg {
+    cl: turn.Client,
+    o: turn.Origin,
+    stream: bool,
+    up: Bytes,
+    down: Bytes,
+    fu: turn.Framer,
+    fd: turn.Framer
+}
+
+fn relay_leg(mut rl: turn.Relay, now: turn.Now, stream: bool, source: Addr, conn: u64, creds: signal.SessionCredentials) -> Leg {
+    let mut c = turn.client_defaults()
+    let o = if stream {
+        c.transport = Stream
+        result.unwrap(turn.connected(mut rl, conn, RELAY_LISTEN, source, now))
+        turn.Origin(ingress: Stream(conn), client: source)
+    } else {
+        turn.Origin(ingress: Udp(RELAY_LISTEN), client: source)
+    }
+    let password = result.unwrap(secret.seal(copy_of(creds.turn_password), "digest"))
+    let cl = result.unwrap(turn.client(c, RELAY_LISTEN, copy_of(creds.turn_username), take password))
+    Leg(cl: take cl, o: o, stream: stream, up: list.new(), down: list.new(), fu: turn.framer(), fd: turn.framer())
+}
+
+/// The messages in bytes, whole: framed when the leg is a stream, else bytes itself.
+fn messages(stream: bool, mut f: turn.Framer, mut buffer: Bytes, raw: Bytes) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    if !stream {
+        list.push(mut out, copy_of(raw))
+        return out
+    }
+    list.append(mut buffer, raw)
+    while true {
+        match result.unwrap(turn.frame_next(mut f, buffer)) {
+            Message(r) => list.push(mut out, copy_of(list.slice(buffer, r.lo, r.hi))),
+            Pending => break,
+        }
+    }
+    turn.frame_consumed(mut f, mut buffer)
+    out
+}
+
+/// Relay to browser: the payloads of the Data the client takes from bytes.
+fn to_browser(mut l: Leg, now: turn.Now, rnd: Random, raw: Bytes) -> List[(Addr, Bytes)] {
+    let mut taken: List[(Addr, Bytes)] = list.new()
+    for m in messages(l.stream, mut l.fd, mut l.down, raw) {
+        let mut packet = copy_of(m)
+        // A client that closes on a response answers Closed, and client_state keeps it.
+        let got = match turn.receive(mut l.cl, now, rnd, mut packet) {
+            Ok(x) => x,
+            Error(Closed(_)) => return taken,
+            Error(_) => fail("the browser's TURN client failed on the relay's message"),
+        }
+        if let Data(from, d) = got {
+            list.push(mut taken, (from, copy_of(list.slice(packet, d.lo, d.hi))))
+        }
+    }
+    taken
+}
+
+/// Browser to relay: answers the datagrams the relay sends to peers; replies go back down.
+fn to_relay(mut rl: turn.Relay, mut l: Leg, now: turn.Now, rnd: Random, raw: Bytes) -> List[(Addr, Addr, Bytes)] {
+    let mut sent: List[(Addr, Addr, Bytes)] = list.new()
+    for m in messages(l.stream, mut l.fu, mut l.up, raw) {
+        let mut packet = copy_of(m)
+        let mut out: Bytes = list.with_capacity(1500)
+        list.fill(mut out, 1500, 0)
+        match result.unwrap(turn.from_client(mut rl, now, rnd, l.o, mut packet, mut out)) {
+            Reply(_, n) => {
+                let _ = to_browser(mut l, now, rnd, list.slice(out, 0, n))
+            },
+            ToPeer(relayed, to, r) => list.push(mut sent, (relayed, to, copy_of(list.slice(packet, r.lo, r.hi)))),
+            _ => (),
+        }
+    }
+    sent
+}
+
+/// Run the client's queued requests through the relay until it has nothing to send.
+fn pump(mut rl: turn.Relay, mut l: Leg, now: turn.Now, rnd: Random) {
+    for _ in 0u64 .. 16 {
+        let mut out: Bytes = list.with_capacity(1500)
+        list.fill(mut out, 1500, 0)
+        let Ok(Send(n)) = turn.poll(mut l.cl, now, rnd, mut out) else {
+            return
+        }
+        let _ = to_relay(mut rl, mut l, now, rnd, list.slice(out, 0, n))
+    }
+}
+
+fn relayed_of(l: Leg) -> Addr {
+    let Allocated(a) = turn.client_state(l.cl) else {
+        fail("the browser holds no allocation")
+    }
+    a.relayed
+}
+
+/// The browser sends payload to peer through its allocation; answers what reached a peer.
+fn browser_send(mut rl: turn.Relay, mut l: Leg, now: turn.Now, rnd: Random, peer_at: Addr, payload: Bytes) -> List[(Addr, Addr, Bytes)] {
+    let n = list.len(payload)
+    let mut slot: Bytes = list.with_capacity(turn.HEADROOM + n + 3)
+    list.fill(mut slot, turn.HEADROOM, 0)
+    list.append(mut slot, payload)
+    list.fill(mut slot, turn.HEADROOM + n + 3, 0)
+    let range = result.unwrap(turn.send_to(mut l.cl, peer_at, mut slot, turn.HEADROOM, turn.HEADROOM + n))
+    to_relay(mut rl, mut l, now, rnd, list.slice(slot, range.lo, range.hi))
+}
+
+/// A datagram from peer_at to the relayed address; answers what the browser took.
+fn peer_send(mut rl: turn.Relay, mut l: Leg, now: turn.Now, rnd: Random, relayed: Addr, peer_at: Addr, payload: Bytes) -> List[(Addr, Bytes)] {
+    let n = list.len(payload)
+    let mut slot: Bytes = list.with_capacity(turn.HEADROOM + n + 3)
+    list.fill(mut slot, turn.HEADROOM, 0)
+    list.append(mut slot, payload)
+    list.fill(mut slot, turn.HEADROOM + n + 3, 0)
+    match result.unwrap(turn.from_peer(mut rl, now, relayed, peer_at, mut slot, turn.HEADROOM, turn.HEADROOM + n)) {
+        ToClient(_, r) => to_browser(mut l, now, rnd, list.slice(slot, r.lo, r.hi)),
+        _ => list.new(),
+    }
+}
+
+/// The SFU's datagrams in out, each sent from SFU_MEDIA to the relayed address.
+fn sfu_out(mut rl: turn.Relay, mut l: Leg, now: turn.Now, rnd: Random, relayed: Addr, out: peer.Outbox) -> List[(Addr, Bytes)] {
+    let mut got: List[(Addr, Bytes)] = list.new()
+    for tx in out.pkts {
+        let UdpTx(to, at, len, ecn: _) = tx
+        if to != relayed {
+            fail("the SFU answered other than the relayed address")
+        }
+        for (from, payload) in peer_send(mut rl, mut l, now, rnd, relayed, SFU_MEDIA, list.slice(out.data, at, at + len)) {
+            list.push(mut got, (from, copy_of(payload)))
+        }
+    }
+    got
+}
+
+/// What reached the SFU: one datagram, from the relayed address, to SFU_MEDIA.
+fn at_sfu(sent: List[(Addr, Addr, Bytes)], relayed: Addr, take what: String) -> Bytes {
+    if list.len(sent) != 1 {
+        fail(take what)
+    }
+    for (from, to, payload) in sent {
+        if from == relayed && to == SFU_MEDIA {
+            return copy_of(payload)
+        }
+    }
+    fail(take what)
+}
+
+/// bug: a relay-only browser cannot reach the SFU (the ICE credentials minted beside the
+/// TURN ones fail, or the policy refuses the SFU's media port), the relay reaches more than
+/// the SFU's media address and ports, or a revoke signaling forwards leaves the browser's
+/// allocation relaying or lets the subject allocate again.
+/// oracle: turn.md TURN-7 (deny 0.0.0.0/0 and ::/0, allow only media), TURN-8 (the relayed
+/// address is an ordinary UDP source, selected by ICE and pinned by DTLS) and TURN-9
+/// (revoke deletes every allocation of the subject and step 4 refuses it), by hand.
+@test
+fn relay_only_session() -> Result[(), turn.TurnError] {
+    relay_only_over(false, 81)
+    relay_only_over(true, 85)
+    Ok(())
+}
+
+fn relay_only_over(stream: bool, seed: u64) {
+    let rnd = provide.random(seed)
+    let mut inc: Inline[u8, 16] =[0u8; 16]
+    inc[0] = 0xa5
+    inc[15] = 0x01
+    let subject = signal.admission_subject(inc, 3)
+    if !same(subject, b"a5000000000000000000000000000001-3") {
+        fail("the subject is not hex(incarnation) - peer")
+    }
+    // Signaling holds the master with mac, the relay place the same master with kdf.
+    let creds = result.unwrap(signal.mint_session(master("mac"), provide.random(seed + 10), subject, MINT_UNIX, plan()))
+    let c = result.unwrap(signal.relay_config(plan()))
+    let mut pool: List[Addr] = list.new()
+    list.push(mut pool, RELAY_POOL_1)
+    list.push(mut pool, RELAY_POOL_2)
+    let mut rl = result.unwrap(turn.relay(take c, rnd, master("kdf"), master("mac"), take pool))
+    let browser = Addr(ip: V4(0xc6336401), port: 50000)
+    let mut l = relay_leg(mut rl, tnow(1000), stream, browser, 1, creds)
+    let now = tnow(1000)
+    pump(mut rl, mut l, now, rnd)
+    let relayed = relayed_of(l)
+    let _ = result.unwrap(turn.bind(mut l.cl, SFU_MEDIA, now))
+    pump(mut rl, mut l, now, rnd)
+    // The SFU's session uses the ICE credentials minted with the TURN ones.
+    let Party(id: take server_id, certificate: server_certificate) = party(seed)
+    let Party(id: take client_id, certificate: client_certificate) = party(seed + 1)
+    let mut offer = sdp.description()
+    result.unwrap(sdp.parse(session_offer(), mut offer))
+    let mut reply = sdp.description()
+    let mut n = sdp.negotiated(sfu_local(creds))
+    result.unwrap(sdp.answer(sdp.default_policy(), None, offer, sfu_local(creds), mut reply, mut n))
+    let d = std.sha256.hash(client_certificate)
+    for i in 0u64 .. 32 {
+        n.remote_fingerprint[i] = d[i]
+    }
+    let limits = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64)
+    let who = peer.Participant(gen: Gen(id: 1, epoch: 1), room: RoomId(7))
+    let mut p = result.unwrap(peer.open(sfu_local(creds), take server_id, provide.random(seed + 2), SFU_MEDIA, limits, n, who))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    // ICE: the browser's nomination arrives from the relayed address and selects it.
+    let mut pkt: Bytes = list.with_capacity(576)
+    list.fill(mut pkt, 576, 0)
+    let mut scratch: Bytes = list.with_capacity(576)
+    list.fill(mut scratch, 576, 0)
+    let mut ice_user = copy_of(creds.ice_ufrag)
+    list.append(mut ice_user, b":remote")
+    let check = stun_ice.Check(role: stun_ice.IceRole(role: Controlling, tie: 7), priority: 0x6e0001ff, nominate: true)
+    let k = result.unwrap(stun_ice.binding_request(stun_ice.Transaction(high: 1, low: 2), ice_user, Some(check), Sha1, true, creds.ice_pwd, mut pkt, mut scratch))
+    let mut slot = at_sfu(browser_send(mut rl, mut l, now, rnd, SFU_MEDIA, list.slice(pkt, 0, k)), relayed, "the nomination did not reach the SFU from the relayed address")
+    if let Ok(Replied) = peer.receive(mut p, 0, relayed, mut slot, mut out) {} else {
+        fail("the relayed nomination was not answered")
+    }
+    if peer.selected(p) != Some(relayed) {
+        fail("the relayed nomination did not select the relayed path")
+    }
+    let answer = sfu_out(mut rl, mut l, now, rnd, relayed, out)
+    peer.clear_outbox(mut out)
+    let mut answered = 0u64
+    for (from, payload) in answer {
+        if from == SFU_MEDIA && list.len(payload) >= 20 && payload[0] == 0x01 && payload[1] == 0x01 {
+            answered += 1
+        }
+    }
+    if answered != 1 || list.len(answer) != 1 {
+        fail("the Binding success did not reach the browser from the SFU")
+    }
+    // DTLS both ways through the relay, pinned by fingerprint.
+    let rc = provide.random(seed + 3)
+    let mut dc = result.unwrap(dtls.client(take client_id, dtls.defaults(), SFU_MEDIA))
+    result.unwrap(dtls.expect(mut dc, pin_list(server_certificate)))
+    for _ in 0u64 .. 8 {
+        while true {
+            let mut f: Bytes = list.with_capacity(1500)
+            match dtls.poll(mut dc, 0, rc, mut f) {
+                Ok(Send(_)) => {
+                    for (_, _, payload) in browser_send(mut rl, mut l, now, rnd, SFU_MEDIA, f) {
+                        let mut s = copy_of(payload)
+                        let _ = result.unwrap(peer.receive(mut p, 0, relayed, mut s, mut out))
+                    }
+                },
+                _ => break,
+            }
+        }
+        let _ = peer.poll(mut p, 0, mut out)
+        for (_, flight) in sfu_out(mut rl, mut l, now, rnd, relayed, out) {
+            let mut data: Bytes = list.new()
+            let _ = dtls.receive(mut dc, 0, rc, flight, mut data)
+        }
+        peer.clear_outbox(mut out)
+    }
+    if !peer.connected(p) {
+        fail("DTLS did not connect over the relay")
+    }
+    let profile = option.unwrap(dtls.srtp_profile(dc))
+    let keys = result.unwrap(dtls.take_srtp(mut dc))
+    let mut cs = result.unwrap(srtp.session(take keys, profile, srtp.Limits(send_streams: 8, receive_streams: 8, ended_streams: 8)))
+    let mut m = at_sfu(browser_send(mut rl, mut l, now, rnd, SFU_MEDIA, media(mut cs, MEDIA_SSRC, 1, b"a", 96)), relayed, "media did not reach the SFU")
+    let Ok(Media(_)) = peer.receive(mut p, MS, relayed, mut m, mut out) else {
+        fail("the relayed media was not taken")
+    }
+    // TURN-7: only the media address and ports are reachable, even on the SFU's own IP.
+    let before = turn.relay_discards(rl).policy
+    if list.len(browser_send(mut rl, mut l, now, rnd, SFU_OTHER, b"x")) != 0 {
+        fail("the relay sent to the SFU's IP on a port that is not media")
+    }
+    if list.len(peer_send(mut rl, mut l, now, rnd, relayed, SFU_OTHER, b"y")) != 0 {
+        fail("the relay took a datagram from the SFU's IP on a port that is not media")
+    }
+    if turn.relay_discards(rl).policy != before + 2 {
+        fail("the policy did not count both refused datagrams")
+    }
+    let _ = turn.permit(mut l.cl, OUTSIDE, now)
+    pump(mut rl, mut l, now, rnd)
+    let mut probe: Bytes = list.with_capacity(turn.HEADROOM + 4)
+    list.fill(mut probe, turn.HEADROOM + 4, 0)
+    let Error(Unpermitted(_)) = turn.send_to(mut l.cl, OUTSIDE, mut probe, turn.HEADROOM, turn.HEADROOM + 1) else {
+        fail("a relay-only policy permitted an address outside the SFU")
+    }
+    // TURN-9: signaling forwards the revoke to the relay place as a codec value.
+    let revoked_at = tnow(2000)
+    let rv = signal.relay_revoke(subject, revoked_at.unix_s, plan())
+    if rv.until_unix_s < creds.expiry_unix_s {
+        fail("the revoke ends before the credential it refuses")
+    }
+    let co: std.codec.Codec[signal.RelayRevoke] = std.codec.of()
+    let mut wire: Bytes = list.new()
+    result.unwrap(std.codec.encode(co, rv, mut wire))
+    let arrived = result.unwrap(std.codec.decode(co, wire))
+    if result.unwrap(signal.apply_revoke(mut rl, arrived, revoked_at)) != 1 || turn.relay_counts(rl).allocations != 0 {
+        fail("the revoke did not delete the subject's one allocation")
+    }
+    if list.len(browser_send(mut rl, mut l, revoked_at, rnd, SFU_MEDIA, b"after")) != 0 || list.len(peer_send(mut rl, mut l, revoked_at, rnd, relayed, SFU_MEDIA, b"after")) != 0 {
+        fail("a revoked allocation still relays")
+    }
+    let mut again = relay_leg(mut rl, revoked_at, stream, Addr(ip: V4(0xc6336401), port: 50004), 2, creds)
+    pump(mut rl, mut again, revoked_at, rnd)
+    let Closed(Credentials) = turn.client_state(again.cl) else {
+        fail("a revoked subject allocated again")
+    }
+}

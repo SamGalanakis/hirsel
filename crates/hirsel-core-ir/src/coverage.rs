@@ -29,6 +29,13 @@ pub type UnitDecisions = std::collections::BTreeMap<String, Decisions>;
 /// ([`Mismatch`]).
 pub type Rebound = std::collections::BTreeMap<String, UnitDecisions>;
 
+/// The bodies a pass after binding rebuilt with blocks of their own, by
+/// function: for each block of the body it was built from, the block that
+/// ends it, with that block's terminator and anchor. A rebound body found
+/// here takes its source's decisions through this map; any other keeps its
+/// source's blocks, and a body that does not refuses ([`Mismatch`]).
+pub type Moved = std::collections::BTreeMap<FuncId, Vec<BlockId>>;
+
 /// The domain tag of a record id.
 pub const ID_TAG: &str = "hirsel.coverage.sites.v1";
 /// The first word of every record in the `hirsel_cov` section.
@@ -274,17 +281,27 @@ fn sites_of(module: &Module, function: FuncId, scope: &Scope) -> Result<Option<S
         let unit = (module.coverage_rebound.as_deref())
             .and_then(|rebound| rebound.get(symbol)?.get(&definition))
             .ok_or_else(|| mismatch("has no decisions".into()))?;
-        if unit.len() != body.blocks.len() {
+        // The block that ends each source block: itself, unless a declared
+        // rebuild moved it.
+        let moved = module.coverage_moved.get(&function);
+        let blocks = moved.map_or(body.blocks.len(), Vec::len);
+        if unit.len() != blocks {
             return Err(mismatch(format!(
-                "has {} blocks and its source {}",
-                body.blocks.len(),
+                "has {blocks} blocks and its source {}",
                 unit.len()
             )));
         }
-        for (index, rows) in unit.iter().enumerate() {
+        for (source, rows) in unit.iter().enumerate() {
             let Some(rows) = rows else {
                 continue;
             };
+            let index = moved.map_or(source, |moved| moved[source].index());
+            if index >= body.blocks.len() {
+                return Err(mismatch(format!(
+                    "moves block {source} to {index}, past its {} blocks",
+                    body.blocks.len()
+                )));
+            }
             let arms = arms(&body.terminators[index]).filter(|arms| arms.len() == rows.len());
             let arms = arms.ok_or_else(|| {
                 mismatch(format!(

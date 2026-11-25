@@ -669,10 +669,9 @@ was. A run killed after its header reads as failed. Coverage never changes the c
 exit status. The recording builds have no coverage, so tapes record and replay as before.
 `tools/nightly-vopr.sh` merges each group's batch profiles into the night's `coverage/`.
 When a law's coverage build fails, preparation prints `coverage off for LAWS: why`, builds
-the leg again without coverage, and the law runs in the campaign with no profile. Today
-this happens for laws whose LLVM release unit holds a body that does not have its source's
-blocks (`sites_of`, for example `runner@1/runner/bound_caller` and
-`dtls@1/laws/vopr_pair$task_entry0`). The fallback goes when that is fixed.
+the leg again without coverage, and the law runs in the campaign with no profile. Since the
+returnable rewrite declares its block moves, postgres, contracts, turn, platform and dtls
+prepare with coverage; the fallback goes once harness, runner and store are shown to as well.
 Seed 0 runs at preparation under `hirsel test` and is not in the campaign's profiles.
 
 ## Caching
@@ -701,13 +700,18 @@ Seed 0 runs at preparation under `hirsel test` and is not in the campaign's prof
   unit too), before binding, and carries them beside the unit by symbol and definition.
   Binding keeps the canonical block order but drops the anchor of a decision whose place has
   no source position, so a rebound body takes its decisions by block, not from its anchors.
-  If a pass changes a rebound body so that its block count or a decision's arms differ from the
-  source's, the build stops with a coverage error naming the unit and the definition
-  (`coverage::Mismatch`, `NativeStop::Coverage`), since a mismatch would misattribute flags. A
-  reorder that keeps every decision's arm count at its index is not detected. Release builds of
-  the runner, dtls and postgres packages stop here today: a release pass rewrites some of their
-  bodies' blocks (open; the returnable rewrite is the lead). The carried decisions join the
-  unit's object key only when coverage is on. Unit memos are off under coverage.
+  The returnable rewrite (`returnable::apply`) runs after binding and rebuilds each variant
+  and root it makes with blocks of its own: a new block 0 for the dispatch, the source entry
+  moved, and the block that holds a wait split into call, resume, check, park and continuation
+  blocks. It declares, for each body it builds, the block that ends each source block, with that
+  block's terminator and anchor (`coverage::Moved`, `Module::coverage_moved`, by function,
+  kept only in a coverage build and never serialized), and a rebound body found there takes its
+  source's decisions through that map. If any other pass changes a rebound body so that its
+  block count or a decision's arms differ from the source's, the build stops with a coverage
+  error naming the unit and the definition (`coverage::Mismatch`, `NativeStop::Coverage`),
+  since a mismatch would misattribute flags. A reorder that keeps every decision's arm count at
+  its index is not detected. The carried decisions join the unit's object key only when
+  coverage is on. Unit memos are off under coverage.
 - **Library coverage on release.** When the scope names `core` or `std`, the release std side
   is empty and the program's own release build lowers every unit, so each unit gets records.
 - **Test passes.** The pass cache schema becomes 5. A cached pass gains its raw profile. A

@@ -597,6 +597,7 @@ fn prog4_independent_runs_limits_and_outcomes_llvm() {
     assert_eq!(coverage_off_and_known_arms(Backend::Llvm, false), cranelift);
     assert_eq!(coverage_off_and_known_arms(Backend::Llvm, true), cranelift);
     reordered_blocks_refused();
+    engines_agree_across_waits();
 }
 
 #[test]

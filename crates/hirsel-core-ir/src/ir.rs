@@ -1655,6 +1655,12 @@ pub struct Module {
     /// ([`crate::coverage::Rebound`]).
     #[serde(skip)]
     pub coverage_rebound: Option<std::sync::Arc<crate::coverage::Rebound>>,
+    /// In a coverage build, each body a pass after binding rebuilt with blocks
+    /// of its own (a returnable variant or root), by function: for each block
+    /// of the body it was built from, the block that ends it
+    /// ([`crate::coverage::Moved`]).
+    #[serde(skip)]
+    pub coverage_moved: crate::coverage::Moved,
     /// Callable code variants' identities, separate from PROG-5 semantic instances:
     /// an optimiser may emit several code bodies for one instance without changing
     /// the identity of its function values.

@@ -225,9 +225,9 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 3602,
-    "raise_revision": 20,
-    "reason": "macos-s10-foreign-2615"
+    "lines": 3603,
+    "raise_revision": 21,
+    "reason": "coverage-release-reorder-2667"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 3936,
@@ -328,9 +328,9 @@
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 1965,
-    "raise_revision": 15,
-    "reason": "comptime-phase2-2693"
+    "lines": 1971,
+    "raise_revision": 16,
+    "reason": "coverage-release-reorder-2667"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1145,
@@ -343,9 +343,9 @@
     "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-ir/src/returnable.rs": {
-    "lines": 2418,
-    "raise_revision": 2,
-    "reason": "coverage-gen-anchors-2579"
+    "lines": 2450,
+    "raise_revision": 3,
+    "reason": "coverage-release-reorder-2667"
   },
   "crates/hirsel-core-ir/src/text.rs": {
     "lines": 2408,

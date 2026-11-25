@@ -1094,9 +1094,16 @@ struct Calls<'a> {
     transfer: &'a dyn Fn(FuncId) -> (FuncId, RtOp, SigId, bool),
 }
 
-/// The variant of `old` with shape `s`. A root makes its record with
-/// `FrameRecord`; any other variant takes it as a trailing parameter.
-fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) -> Body {
+/// The variant of `old` with shape `s`, and for each block of `old` the
+/// block that ends it ([`crate::coverage::Moved`]). A root makes its record
+/// with `FrameRecord`; any other variant takes it as a trailing parameter.
+fn build(
+    old: &Body,
+    s: &Shape,
+    root: bool,
+    results_ty: &[Ty],
+    calls: &Calls,
+) -> (Body, Vec<BlockId>) {
     let nb = old.blocks.len();
     let mut b = Build {
         old,
@@ -1347,6 +1354,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
         let ps = params(old, bi).to_vec();
         PoolRange::push(&mut b.n.pools.values, ps)
     };
+    let mut ends = Vec::with_capacity(nb);
     for bi in 0..nb {
         let id = map(BlockId(bi as u32));
         if bi != 0 {
@@ -1739,8 +1747,9 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
         };
         b.close(current, terminator, old.blocks[bi].anchor);
         b.n.blocks[current.index()].decision = old.blocks[bi].decision;
+        ends.push(current);
     }
-    b.finish()
+    (b.finish(), ends)
 }
 
 /// What [`apply`] did, for the driver's report.
@@ -2252,16 +2261,32 @@ pub fn apply(module: &mut Module) -> Applied {
         frame_record,
         transfer: &target,
     };
+    // Each rebuilt body's source block ends, for coverage (`coverage::Moved`).
+    let mut moved = crate::coverage::Moved::new();
+    let built = |moved: &mut crate::coverage::Moved, id: FuncId, (body, ends)| {
+        moved.insert(id, ends);
+        body
+    };
     let mut bodies = vec![];
     for (&f, &(id, _)) in &variant {
         let old = forms[f].as_ref().unwrap();
         let results = &module.signatures[module.functions[f].signature.index()].results;
-        bodies.push((id, build(old, &shapes[&f], false, results, &calls)));
+        let body = built(
+            &mut moved,
+            id,
+            build(old, &shapes[&f], false, results, &calls),
+        );
+        bodies.push((id, body));
     }
     for (&g, &(id, ..)) in &transfer_root {
         let old = forms[g].as_ref().unwrap();
         let results = &module.signatures[module.functions[g].signature.index()].results;
-        bodies.push((id, build(old, &shapes[&g], true, results, &calls)));
+        let body = built(
+            &mut moved,
+            id,
+            build(old, &shapes[&g], true, results, &calls),
+        );
+        bodies.push((id, body));
     }
     let mut entries: BTreeMap<(FuncId, FuncId), FuncId> = BTreeMap::new();
     let mut root_bodies = vec![];
@@ -2283,12 +2308,16 @@ pub fn apply(module: &mut Module) -> Applied {
                         Function {
                             instance: canonical.instance,
                             signature: canonical.signature,
-                            body: Some(build(
-                                &form.body,
-                                &form.shape,
-                                true,
-                                &module.signatures[canonical.signature.index()].results,
-                                &calls,
+                            body: Some(built(
+                                &mut moved,
+                                id,
+                                build(
+                                    &form.body,
+                                    &form.shape,
+                                    true,
+                                    &module.signatures[canonical.signature.index()].results,
+                                    &calls,
+                                ),
                             )),
                             versioned: canonical.versioned,
                             cold: canonical.cold,
@@ -2311,6 +2340,9 @@ pub fn apply(module: &mut Module) -> Applied {
     }
     for (id, body) in bodies {
         module.functions[id.index()].body = Some(body);
+    }
+    if module.coverage.is_some() {
+        module.coverage_moved.extend(moved);
     }
     for (function, hash) in root_bodies {
         let id = FuncId(module.functions.len() as u32);

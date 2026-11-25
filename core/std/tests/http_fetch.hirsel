@@ -583,11 +583,11 @@ fn fetch_endpoint_confined(n: Net, c: Clock, tasks: Tasks) -> bool waits {
         _ => false,
     }
     let mut other = take site_b
-    let untouched = match host.accept(mut other, At(c, host.mono_ns(c) + 50000000)) {
+    let other_quiet = match host.accept(mut other, At(c, host.mono_ns(c) + 50000000)) {
         Ok(_) => false,
         Error(_) => true,
     }
-    refused && untouched && result.unwrap(task.join(take peer))
+    refused && other_quiet && result.unwrap(task.join(take peer))
 }
 
 type RebindLink: send {

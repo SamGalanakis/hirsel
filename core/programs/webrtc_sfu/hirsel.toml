@@ -26,6 +26,7 @@ store = { major = 1, path = "../store" }
 "router_route.hirsel" = "router"
 "router_fence.hirsel" = "router"
 "router_dynacast.hirsel" = "router"
+"router_observe.hirsel" = "router"
 "units.hirsel" = "units"
 "signal.hirsel" = "signal"
 "signal_turn.hirsel" = "signal"

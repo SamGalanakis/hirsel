@@ -1,0 +1,65 @@
+// Records each video codec with Opus, the video starting 300 ms after the
+// audio on another RTP base with its first sender report ten frames late,
+// and writes each file and the frames' true times for validate.py: per
+// codec, <name>-video.<ext>, <name>-audio.ogg and <name>.times (a line
+// "audio|video <ns>" per sent frame: its capture less the recording's zero).
+fn named(codec: webrtc_sfu.sdp.Codec, suffix: String) -> String {
+    let mut s = string.from(match codec {
+        Vp8 => "vp8",
+        Vp9 => "vp9",
+        H264 => "h264",
+        _ => "av1",
+    })
+    string.push(mut s, suffix)
+    s
+}
+
+fn times(mut s: String, label: String, st: Stream) {
+    for f in st.frames {
+        string.push(mut s, label)
+        string.push(mut s, " ")
+        string.push_i64(mut s, f.wall - WALL0)
+        string.push(mut s, "\n")
+    }
+}
+
+/// bug: a file FFmpeg cannot open or decode (a wrong avcC, codec private
+/// data or page framing) that the readers in media_container accept.
+/// oracle: ffprobe and ffmpeg 6.1.1 (validate.py), against the sent
+/// frames' true times written here from the plan.
+@test
+fn dump(d: Dir) -> Result[(), ()] waits {
+    let codecs: Inline[webrtc_sfu.sdp.Codec, 4] =[Vp8, Vp9, Av1, H264]
+    for codec in codecs {
+        let fixtures = match codec {
+            Vp8 => vp8_frames(),
+            Vp9 => vp9_frames(),
+            H264 => h264_frames(),
+            _ => av1_frames(),
+        }
+        let audio = stream(AUDIO, Opus, opus_frames(), 12345, 100, 0)
+        let video = stream(VIDEO, codec, fixtures, 0x80000000, 4000, 300000000)
+        let mut r = setup(Some(codec), true)
+        let mut streams: List[Stream] = list.new()
+        list.push(mut streams, take audio)
+        list.push(mut streams, take video)
+        let mut reports: List[u64] = list.new()
+        list.push(mut reports, 0u64)
+        list.push(mut reports, 10u64)
+        let drops: List[(u64, u64)] = list.new()
+        send(mut r, streams, 0, 3 * NS, reports, drops)
+        finish(mut r)
+        let extension = if codec == H264 {
+            "-video.mp4"
+        } else {
+            "-video.webm"
+        }
+        result.unwrap(std.file.write(d, named(codec, extension), r.files[file_of(r, VIDEO)].data))
+        result.unwrap(std.file.write(d, named(codec, "-audio.ogg"), r.files[file_of(r, AUDIO)].data))
+        let mut s = string.new()
+        times(mut s, "audio", streams[0])
+        times(mut s, "video", streams[1])
+        result.unwrap(std.file.write(d, named(codec, ".times"), string.as_bytes(s)))
+    }
+    Ok(())
+}

@@ -1,0 +1,395 @@
+// media_record's per-track files (README §4): Ogg Opus for audio, WebM for
+// VP8, VP9 and AV1, fragmented MP4 for H.264. Frames are written as they come
+// from rtp_jitter, never transcoded. Times are nanoseconds on the recording's
+// timeline.
+pub type Format: key = Ogg | Webm | Mp4
+
+/// Why a writer refused a frame: a video key frame whose codec parameters do
+/// not parse, or a container writer's own refusal.
+pub type Error = Params | Container
+
+// A frame held until the next one gives its duration (fMP4) or until the file
+// ends (Ogg, whose last page is marked).
+type Held {
+    at: i64,
+    key: bool,
+    data: Bytes
+}
+
+pub opaque type Writer {
+    format: Format,
+    codec: webrtc_sfu.sdp.Codec,
+    started: bool,
+    held: Option[Held],
+    // The Ogg page sequence or the fMP4 fragment sequence.
+    sequence: u32,
+    // fMP4: the duration of the last fragment, in 90 kHz ticks.
+    last: u32,
+    scratch: Bytes
+}
+
+const SERIAL: u32 = 0x6d726563
+
+const NS: i64 = 1000000000
+
+/// The writer of a track of codec `codec`, or None when the codec is not
+/// recorded (RTX, RED and FEC are repair, not media).
+pub fn writer(codec: webrtc_sfu.sdp.Codec) -> Option[Writer] {
+    let kind = match codec {
+        Opus => Ogg,
+        Vp8 => Webm,
+        Vp9 => Webm,
+        Av1 => Webm,
+        H264 => Mp4,
+        _ => return None,
+    }
+    let mut scratch: Bytes = list.with_capacity(1024)
+    Some(Writer(format: kind, codec: codec, started: false, held: None, sequence: 0, last: 3000, scratch: take scratch))
+}
+
+pub fn format(w: Writer) -> Format {
+    w.format
+}
+
+/// Whether the file has its header: the first frame of audio, the first key
+/// frame of video whose parameters parsed.
+pub fn started(w: Writer) -> bool {
+    w.started
+}
+
+/// Write frame `data` at `at` ns, appending file bytes to `out`. A video file
+/// starts only at a key frame: before it, a frame is refused with Params.
+pub fn frame(mut w: Writer, at: i64, key: bool, take data: Bytes, mut out: Bytes) -> Result[(), Error] {
+    if !w.started {
+        start(mut w, key, data, mut out)?
+        w.started = true
+    }
+    match w.format {
+        Ogg => {
+            if let Some(h) = replace(mut w.held, None) {
+                ogg_packet(mut w, h.at, h.data, false, mut out)?
+            }
+            w.held = Some(Held(at: at, key: key, data: take data))
+        },
+        Webm => {
+            let ms: u64 = int.narrow(at / 1000000)
+            media_container.webm.write_frame(mut w.scratch, 1, ms, key, list.len(data)) ?=> |_| Container
+            list.append(mut out, w.scratch)
+            list.append(mut out, data)
+        },
+        Mp4 => {
+            if let Some(h) = replace(mut w.held, None) {
+                let duration = ticks(at) - ticks(h.at)
+                let d: u32 = if duration <= 0 {
+                    1
+                } else {
+                    int.narrow(duration)
+                }
+                fragment(mut w, take h, d, mut out)?
+            }
+            w.held = Some(Held(at: at, key: key, data: take data))
+        },
+    }
+    Ok(())
+}
+
+/// Write what the file holds back: Ogg's last page, marked as the stream's
+/// end, and fMP4's last fragment, with the duration of the one before it.
+pub fn close(mut w: Writer, mut out: Bytes) -> Result[(), Error] {
+    let Some(h) = replace(mut w.held, None) else {
+        return Ok(())
+    }
+    match w.format {
+        Ogg => ogg_packet(mut w, h.at, h.data, true, mut out),
+        Webm => Ok(()),
+        Mp4 => {
+            let d = w.last
+            fragment(mut w, take h, d, mut out)
+        },
+    }
+}
+
+fn start(mut w: Writer, key: bool, data: Bytes, mut out: Bytes) -> Result[(), Error] {
+    match w.format {
+        Ogg => {
+            let mut packet: Bytes = list.with_capacity(64)
+            media_container.opus.write_head(mut packet, 2, 0, 48000, 0) ?=> |_| Container
+            page(mut w, packet, 0, true, false, mut out)?
+            media_container.opus.write_tags(mut packet, b"hirsel media_record") ?=> |_| Container
+            page(mut w, packet, 0, false, false, mut out)
+        },
+        Webm => {
+            if !key {
+                return Error(Params)
+            }
+            let (codec, private_data) = webm_codec(w.codec, data)?
+            let mut tracks: List[media_container.webm.Track] = list.new()
+            list.push(mut tracks, media_container.webm.Track(number: 1, codec: codec, private_data: take private_data))
+            list.reserve(mut w.scratch, 512 + list.len(data))
+            media_container.webm.write_init(mut w.scratch, 1000000, tracks) ?=> |_| Container
+            list.append(mut out, w.scratch)
+            Ok(())
+        },
+        Mp4 => {
+            if !key {
+                return Error(Params)
+            }
+            let (entry, width, height) = avc3_entry(data)?
+            list.reserve(mut w.scratch, 1024 + list.len(entry))
+            let track = media_container.mp4.Track(id: 1, timescale: 90000, media: Video(width, height))
+            media_container.mp4.write_init(mut w.scratch, track, entry) ?=> |_| Container
+            list.append(mut out, w.scratch)
+            Ok(())
+        },
+    }
+}
+
+// ---- Ogg Opus (RFC 7845) ----
+// One packet per page. The granule is the end of the packet in 48 kHz samples
+// on the recording's timeline, so a page's start time is its granule less the
+// packet's samples, also after a loss.
+fn ogg_packet(mut w: Writer, at: i64, data: Bytes, last: bool, mut out: Bytes) -> Result[(), Error] {
+    let samples = match media_bits.opus.parse(data) {
+        Ok(p) => p.samples_per_frame * p.frames,
+        Error(_) => 960u64,
+    }
+    let begin: u64 = int.narrow(at * 6 / 125000)
+    page(mut w, data, begin + samples, false, last, mut out)
+}
+
+fn page(mut w: Writer, body: Bytes, granule: u64, first: bool, last: bool, mut out: Bytes) -> Result[(), Error] {
+    let mut laces: Bytes = list.new()
+    let mut rest = list.len(body)
+    while rest >= 255 {
+        list.push(mut laces, 255)
+        rest -= 255
+    }
+    list.push(mut laces, int.narrow(rest))
+    let header = media_container.ogg.Header(flags: media_container.ogg.Flags(continued: false, beginning: first, ending: last), granule: granule, serial: SERIAL, sequence: w.sequence)
+    let _ = media_container.ogg.write_page(mut w.scratch, header, laces, body) ?=> |_| Container
+    list.append(mut out, w.scratch)
+    list.append(mut out, body)
+    w.sequence += 1
+    Ok(())
+}
+
+// ---- WebM (Matroska codec mappings) ----
+fn webm_codec(codec: webrtc_sfu.sdp.Codec, key: Bytes) -> Result[(media_container.webm.Codec, Bytes), Error] {
+    match codec {
+        Vp8 => {
+            let (w, h) = vp8_size(key)?
+            Ok((Vp8(w, h), list.new()))
+        },
+        Vp9 => {
+            let (w, h) = vp9_size(key)?
+            Ok((Vp9(w, h), list.new()))
+        },
+        Av1 => {
+            let (w, h, config) = av1_config(key)?
+            Ok((Av1(w, h), config))
+        },
+        _ => Error(Params),
+    }
+}
+
+// RFC 6386 §9.1: a key frame's 3-byte tag, the start code 9d 01 2a, then the
+// 14-bit width and height, little-endian.
+fn vp8_size(unit: Bytes) -> Result[(u16, u16), Error] {
+    if list.len(unit) < 10 || (unit[0] & 1) != 0 || unit[3] != 0x9d || unit[4] != 0x01 || unit[5] != 0x2a {
+        return Error(Params)
+    }
+    let w: u16 = list.word_le(unit, 6)
+    let h: u16 = list.word_le(unit, 8)
+    let width = w & 0x3fff
+    let height = h & 0x3fff
+    if width == 0 || height == 0 {
+        return Error(Params)
+    }
+    Ok((width, height))
+}
+
+type Bits {
+    at: u64,
+    end: u64
+}
+
+fn read_bits(data: Bytes, mut b: Bits, n: u64) -> Result[u64, Error] {
+    let mut v = 0u64
+    for _ in 0u64 .. n {
+        if b.at >= b.end {
+            return Error(Params)
+        }
+        let shift: u8 = int.narrow(7 - b.at % 8)
+        let bit: u64 = int.widen((data[b.at / 8] >> shift) & 1)
+        v = v << 1 | bit
+        b.at += 1
+    }
+    Ok(v)
+}
+
+// VP9 bitstream §6.2 uncompressed_header of a key frame: frame marker,
+// profile, frame type, sync code, color config, then frame_size.
+fn vp9_size(unit: Bytes) -> Result[(u16, u16), Error] {
+    let mut b = Bits(at: 0, end: list.len(unit) * 8)
+    if read_bits(unit, mut b, 2)? != 2 {
+        return Error(Params)
+    }
+    let low = read_bits(unit, mut b, 1)?
+    let high = read_bits(unit, mut b, 1)?
+    let profile = high << 1 | low
+    if profile == 3 {
+        let _ = read_bits(unit, mut b, 1)?
+    }
+    // show_existing_frame, frame_type (0: key), show_frame, error_resilient_mode
+    if read_bits(unit, mut b, 1)? != 0 || read_bits(unit, mut b, 1)? != 0 {
+        return Error(Params)
+    }
+    let _ = read_bits(unit, mut b, 2)?
+    if read_bits(unit, mut b, 24)? != 0x498342 {
+        return Error(Params)
+    }
+    if profile >= 2 {
+        let _ = read_bits(unit, mut b, 1)?
+    }
+    let space = read_bits(unit, mut b, 3)?
+    if space != 7 {
+        let _ = read_bits(unit, mut b, 1)?
+        if profile == 1 || profile == 3 {
+            let _ = read_bits(unit, mut b, 3)?
+        }
+    } else if profile == 1 || profile == 3 {
+        let _ = read_bits(unit, mut b, 1)?
+    }
+    let w = read_bits(unit, mut b, 16)? + 1
+    let h = read_bits(unit, mut b, 16)? + 1
+    Ok((int.narrow(w), int.narrow(h)))
+}
+
+// AV1-ISOBMFF §2.3 av1C, which Matroska's V_AV1 takes as CodecPrivate: the
+// four fixed bytes from the sequence header, then the sequence header OBU.
+fn av1_config(unit: Bytes) -> Result[(u16, u16, Bytes), Error] {
+    let mut at = 0u64
+    while at < list.len(unit) {
+        let obu = media_bits.av1.parse_obu(unit, at) ?=> |_| Params
+        if obu.kind == 1 {
+            let header = list.slice(unit, at, obu.end)
+            let s = media_bits.av1.sequence(header) ?=> |_| Params
+            if s.width > 0xffff || s.height > 0xffff {
+                return Error(Params)
+            }
+            let mut config: Bytes = list.with_capacity(4 + list.len(header))
+            list.push(mut config, 0x81)
+            list.push(mut config, (s.profile << 5) | (s.level & 31))
+            list.push(mut config, flag(s.tier != 0, 7) | flag(s.high_bitdepth, 6) | flag(s.twelve_bit, 5) | flag(s.monochrome, 4) | flag(s.subsampling_x, 3) | flag(s.subsampling_y, 2) | (s.sample_position & 3))
+            list.push(mut config, 0)
+            list.append(mut config, header)
+            return Ok((int.narrow(s.width), int.narrow(s.height), config))
+        }
+        at = obu.end
+    }
+    Error(Params)
+}
+
+fn flag(b: bool, shift: u8) -> u8 {
+    if b {
+        1u8 << shift
+    } else {
+        0u8
+    }
+}
+
+// ---- Fragmented MP4 for H.264 (ISO/IEC 14496-15) ----
+// An `avc3` sample entry: parameter sets stay in band (a simulcast switch
+// brings new ones), and avcC carries the first key frame's SPS and PPS.
+fn avc3_entry(unit: Bytes) -> Result[(Bytes, u16, u16), Error] {
+    let mut sps: Option[(u64, u64)] = None
+    let mut pps: Option[(u64, u64)] = None
+    let mut at = 0u64
+    while at + 4 <= list.len(unit) {
+        let n: u32 = list.word_be(unit, at)
+        let size: u64 = int.widen(n)
+        let begin = at + 4
+        if size == 0 || size > list.len(unit) - begin {
+            return Error(Params)
+        }
+        let kind = unit[begin] & 31
+        if kind == 7 && sps == None {
+            sps = Some((begin, begin + size))
+        } else if kind == 8 && pps == None {
+            pps = Some((begin, begin + size))
+        }
+        at = begin + size
+    }
+    let (Some((s0, s1)), Some((p0, p1))) = (sps, pps) else {
+        return Error(Params)
+    }
+    let set = list.slice(unit, s0, s1)
+    let parsed = media_bits.h264.parse_sps(set) ?=> |_| Params
+    let q = media_bits.h264.sequence(parsed)
+    let (_, _, plain) = media_bits.h264.coded_format(parsed)
+    let extended = q.profile == 100 || q.profile == 110 || q.profile == 122 || q.profile == 144
+    if q.width == 0 || q.height == 0 || q.width > 0xffff || q.height > 0xffff || (extended && !plain) {
+        return Error(Params)
+    }
+    let mut config: Bytes = list.new()
+    list.push(mut config, 1)
+    list.push(mut config, int.narrow(q.profile))
+    list.push(mut config, int.narrow(q.constraints))
+    list.push(mut config, int.narrow(q.level))
+    list.push(mut config, 0xff)
+    list.push(mut config, 0xe1)
+    list.put_word_be(mut config, (int.narrow(s1 - s0) : u16))
+    list.append(mut config, set)
+    list.push(mut config, 1)
+    list.put_word_be(mut config, (int.narrow(p1 - p0) : u16))
+    list.append(mut config, list.slice(unit, p0, p1))
+    if extended {
+        // 4:2:0, 8-bit luma and chroma, no SPS extensions.
+        list.append(mut config, b"\xfd\xf8\xf8\x00")
+    }
+    let width: u16 = int.narrow(q.width)
+    let height: u16 = int.narrow(q.height)
+    let mut entry: Bytes = list.new()
+    let box_at = media_container.mp4.start_box(mut entry, 0x61766333)
+    list.fill(mut entry, 6, 0)
+    list.put_word_be(mut entry, 1u16)
+    list.fill(mut entry, 16, 0)
+    list.put_word_be(mut entry, width)
+    list.put_word_be(mut entry, height)
+    list.put_word_be(mut entry, 0x00480000u32)
+    list.put_word_be(mut entry, 0x00480000u32)
+    list.put_word_be(mut entry, 0u32)
+    list.put_word_be(mut entry, 1u16)
+    list.fill(mut entry, 32, 0)
+    list.put_word_be(mut entry, 0x0018u16)
+    list.put_word_be(mut entry, 0xffffu16)
+    let avcc = media_container.mp4.start_box(mut entry, 0x61766343)
+    list.append(mut entry, config)
+    media_container.mp4.close_box(mut entry, avcc)
+    media_container.mp4.close_box(mut entry, box_at)
+    Ok((entry, width, height))
+}
+
+// 90 kHz ticks of a timeline time.
+fn ticks(at: i64) -> i64 {
+    at * 9 / 100000
+}
+
+// One fragment per frame: a key frame is a sync sample, every other frame
+// depends on others (ISO/IEC 14496-12 §8.8.3.1).
+fn fragment(mut w: Writer, take h: Held, duration: u32, mut out: Bytes) -> Result[(), Error] {
+    let flags: u32 = if h.key {
+        0x02000000
+    } else {
+        0x01010000
+    }
+    let mut samples: List[media_container.mp4.Sample] = list.new()
+    list.push(mut samples, media_container.mp4.Sample(duration: duration, size: int.narrow(list.len(h.data)), flags: flags, composition_offset: 0))
+    w.sequence += 1
+    let decode: u64 = int.narrow(ticks(h.at))
+    media_container.mp4.write_fragment(mut w.scratch, 1, w.sequence, decode, samples) ?=> |_| Container
+    list.append(mut out, w.scratch)
+    list.append(mut out, h.data)
+    w.last = duration
+    Ok(())
+}

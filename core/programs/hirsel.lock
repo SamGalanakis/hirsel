@@ -82,6 +82,11 @@ source = "member:media_container"
 edges = ["media_bits@1", "std@1"]
 
 [[package]]
+id = "media_record@1"
+source = "member:media_record"
+edges = ["media_bits@1", "media_container@1", "rtp@1", "rtp_jitter@1", "std@1", "webrtc_sfu@1"]
+
+[[package]]
 id = "notes@1"
 source = "member:notes"
 edges = ["harness@1", "runner@1", "std@1", "store@1"]

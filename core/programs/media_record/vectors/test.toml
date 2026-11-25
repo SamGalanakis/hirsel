@@ -1,0 +1,10 @@
+
+[tests]
+limit = 268435456
+grants = []
+dirs = ["out"]
+
+[tests.sources]
+"dump.hirsel" = "vectors"
+"drive.hirsel" = "vectors"
+"frames.hirsel" = "vectors"

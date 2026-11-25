@@ -11,7 +11,11 @@ fn webm_reference() -> Result[(), ()] {
             fail("track metadata differs from the FFmpeg fixture")
         }
         let head = result.unwrap(opus.read_head(private_data))
-        result.unwrap(webm.write_init(mut rebuilt, track.number, 1000000, Opus(head.channels, head.pre_skip), private_data))
+        let mut owned: Bytes = list.new()
+        list.append(mut owned, private_data)
+        let mut entries: List[webm.Track] = list.new()
+        list.push(mut entries, webm.Track(number: track.number, codec: Opus(head.channels, head.pre_skip), private_data: take owned))
+        result.unwrap(webm.write_init(mut rebuilt, 1000000, entries))
         tracks += 1
     }))
     if tracks != 1 || init.timestamp_scale != 1000000 || init.declared_end != Some(list.len(source)) {
@@ -22,6 +26,7 @@ fn webm_reference() -> Result[(), ()] {
     // ffprobe's PTS values are -7, 14, 34 and 54 after subtracting CodecDelay.
     let timestamps: Inline[i64, 4] =[0, 21, 41, 61]
     let mut count = 0u64
+    let mut sent: List[webm.Queued] = list.new()
     let mut at = init.next_element
     let first_rebuilt_cluster = list.len(rebuilt)
     while at < list.len(source) {
@@ -39,6 +44,9 @@ fn webm_reference() -> Result[(), ()] {
                 if frame.discard_padding != padding {
                     fail("padding differs from ffprobe's last 648 discarded samples")
                 }
+                let mut data: Bytes = list.new()
+                list.append(mut data, payload)
+                list.push(mut sent, webm.Queued(track: 1, timestamp: int.truncate(frame.timestamp), key: true, data: take data))
                 if padding == 0 {
                     result.unwrap(webm.write_frame(mut prefix, 1, int.truncate(frame.timestamp), true, list.len(payload)))
                     list.append(mut rebuilt, prefix)
@@ -71,6 +79,7 @@ fn webm_reference() -> Result[(), ()] {
     if count != 4 {
         fail("remuxed packet count")
     }
+    check_interleave(source, sent)
     // Matroska SimpleBlock vectors for Xiph, fixed-size, and EBML lacing.
     let variable: Inline[String, 3] =[string.from("a"), string.from("bc"), string.from("def")]
     let fixed: Inline[String, 3] =[string.from("ab"), string.from("cd"), string.from("ef")]
@@ -78,6 +87,76 @@ fn webm_reference() -> Result[(), ()] {
     check_laces(b"\x1f\x43\xb6\x75\x90\xe7\x81\x00\xa3\x8b\x81\x00\x00\x84\x02abcdef", fixed)
     check_laces(b"\x1f\x43\xb6\x75\x92\xe7\x81\x00\xa3\x8d\x81\x00\x00\x86\x02\x81\xc0abcdef", variable)
     Ok(())
+}
+
+/// bug: an Interleave releases a frame before every open track has handed in
+/// one, so a track handed in first lands ahead of earlier frames of another.
+/// oracle: the fixture's own packets on track 1 and, 10 ms later, on track 2
+/// read back from the two-track file merged by timestamp: 0 (1), 10 (2), 21
+/// (1), 31 (2) and so on, each payload unchanged.
+fn check_interleave(source: Bytes, sent: List[webm.Queued]) {
+    let mut two: Bytes = list.with_capacity(2048)
+    let mut prefix: Bytes = list.with_capacity(64)
+    let init = result.unwrap(webm.read_init(source, 0, scoped fn(track: webm.TrackInfo, codec: Bytes, private_data: Bytes) {
+        let head = result.unwrap(opus.read_head(private_data))
+        let mut entries: List[webm.Track] = list.new()
+        for number in[1u64, 2u64] {
+            let mut owned: Bytes = list.new()
+            list.append(mut owned, private_data)
+            list.push(mut entries, webm.Track(number: number, codec: Opus(head.channels, head.pre_skip), private_data: take owned))
+        }
+        result.unwrap(webm.write_init(mut two, 1000000, entries))
+    }))
+    let mut numbers: List[u64] = list.new()
+    list.push(mut numbers, 1u64)
+    list.push(mut numbers, 2u64)
+    let mut q = webm.interleave(take numbers, 16)
+    let mut order: List[webm.Queued] = list.new()
+    for track in[2u64, 1u64] {
+        for f in sent {
+            let mut data: Bytes = list.new()
+            list.append(mut data, f.data)
+            let timestamp = f.timestamp + (track - 1) * 10
+            result.unwrap(webm.queue(mut q, webm.Queued(track: track, timestamp: timestamp, key: true, data: take data)))
+            while let Some(out) = webm.next(mut q) {
+                list.push(mut order, take out)
+            }
+        }
+        webm.close(mut q, track)
+    }
+    while let Some(out) = webm.next(mut q) {
+        list.push(mut order, take out)
+    }
+    for f in order {
+        result.unwrap(webm.write_frame(mut prefix, f.track, f.timestamp, f.key, list.len(f.data)))
+        list.append(mut two, prefix)
+        list.append(mut two, f.data)
+    }
+    let mut tracks = 0u64
+    let start = result.unwrap(webm.read_init(two, 0, scoped fn(track: webm.TrackInfo, codec: Bytes, private_data: Bytes) {
+        if track.number != tracks + 1 || codec != b"A_OPUS" {
+            fail("two-track header")
+        }
+        tracks += 1
+    }))
+    if tracks != 2 || start.timestamp_scale != init.timestamp_scale {
+        fail("two-track header extent")
+    }
+    let mut count = 0u64
+    let mut at = start.next_element
+    while at < list.len(two) {
+        at = result.unwrap(webm.read_cluster(two, at, list.len(two), true, scoped fn(frame: webm.Frame, payload: Bytes) {
+            let k = count / 2
+            let track = count % 2 + 1
+            if count >= 8 || frame.track != track || frame.timestamp != int.truncate(sent[k].timestamp + (track - 1) * 10) || payload != sent[k].data {
+                fail("interleaved frame out of timestamp order")
+            }
+            count += 1
+        }))
+    }
+    if count != 8 {
+        fail("interleaved frame count")
+    }
 }
 
 fn check_laces(cluster: Bytes, expected: Inline[String, 3]) {

@@ -2,7 +2,6 @@
 // the CMAF/HLS/DASH stitch into std.object. Reaches foreign code (dav1d,
 // openh264, SVT-AV1, libyuv), so no entry here is recorded, replayed or
 // pass-cached (FFI-8).
-
 pub type Codecs: cross {
     dav: Foreign[av1.DecoderCodec],
     svt: Foreign[av1.EncoderCodec],
@@ -415,8 +414,8 @@ fn map(take job: Job) -> Out waits {
 }
 
 // --- Reduce and stitch ------------------------------------------------------
-
 const SYNC: u32 = 0x02000000
+
 const NON_SYNC: u32 = 0x01010000
 
 fn read_range(mut f: HostFile, at: u64, n: u64) -> Result[Bytes, Error] waits {
@@ -496,6 +495,7 @@ fn manifest(take outcome: Result[String, video_packager.packager.Error]) -> Resu
 }
 
 const SEGMENT_LIMIT: video_packager.packager.SegmentLimit = video_packager.packager.SegmentLimit(samples: 1048576, payload_bytes: 4294967296)
+
 const MANIFEST_LIMIT: video_packager.packager.ManifestLimit = video_packager.packager.ManifestLimit(octets: 16777216, steps: 67108864)
 
 // Ordered reduce state, one entry per video rung.
@@ -572,7 +572,7 @@ fn stitch_job(plan: split.Plan, index: u64, out: Out, mut ladder: Ladder, mut cl
             return Error(Stitch(NoSequence))
         }
         if index == 0 {
-            let s = stitch.sequence(header) ?=> |e| Stitch(e)
+            let s = media_bits.av1.sequence(header) ?=> |_| Stitch(BadSequence)
             let Video(w, h) = ladder.tracks[r].media else {
                 return Error(Rung(0))
             }

@@ -36,6 +36,8 @@ the clear range of each codec, the bytes an SFrame or DAVE sender leaves clear, 
 routes on those alone (W25). VP9's keyframe test now reads the descriptor only (`B`, `P`,
 SID), as libwebrtc's depacketizer does; it read the uncompressed header's frame marker, which
 an encrypted VP9 frame hides, so a scrambled keyframe was counted `unparsed`.
+Amended 2026-11-25 (media-record-c10b-2658): RTC-9, the recorder `media_record`, a
+virtual down-track on a unit of its own, fenced by RTC-7 like every unit.
 
 This chapter specifies three layers, each sans-IO:
 
@@ -1255,6 +1257,40 @@ the subject derived from the admission identity, the forwarded `RelayRevoke`) is
 turn.md's U8 decisions under TURN-7. Passive ICE-TCP (RFC 6544), once slice S8, is withdrawn: TURN over TLS reaches
 every network it reached, and networks that pass only TLS, and media units keep one transport
 and one writer kind.
+
+## RTC-9: Recording
+
+`media_record` (core/programs/media_record, its README is the package text)
+records a room's publications to files. It is a virtual down-track: a media
+unit with no PeerSession. Its seats are participants admitted with the
+recorder's unit as home, and it records what they subscribe to.
+
+- **A unit like the others.** The control unit sends it every `Order`, as
+  it does every unit (RTC-5). The recorder applies each order to an
+  observer Router and answers with its `Ack`. Home units post it the
+  plaintext `Media` of each publication it subscribes to (fan-out step 3),
+  and the publishers' `Sender` reports. It posts each down-track's
+  `Wanted` mask and its `Key` requests to the home unit (RTC-6). It holds
+  no ICE, DTLS or SRTP state and sends no RTP.
+- **The fence.** RTC-7 applies unchanged. Step 4 drops a `Media` or
+  `Sender` message of a fenced generation, or of a suspended room, when it
+  is taken. Step 3 removes the down-tracks. Before it acknowledges, the
+  recorder drops what those tracks buffer and closes their files. So once
+  `revoke` returns, no frame of the fenced participant lands in a file.
+  A suspension drops the room's buffered frames the same way.
+- **Frames and time.** Each recorded encoding has one `rtp_jitter` buffer.
+  Frames are placed on one timeline from the sender reports (rtp_jitter
+  `sync`), whose zero is the recording's first frame. Each file's times
+  rise.
+- **Loss.** On a gap, a video track asks the home unit for a key frame
+  (`Key(why: Loss)`, coalesced into one PLI or FIR upstream) and drops
+  non-key frames until the next key frame.
+- **Files.** One per down-track, never transcoded: Ogg Opus, WebM for VP8,
+  VP9 and AV1, and fragmented MP4 (`avc3`) for H.264.
+
+The laws are the package's: real FFmpeg frames through each codec's RTP
+packetization, against the frames sent and the sender reports. ffprobe and
+ffmpeg decode the files in `test-vectors.sh`.
 
 ## WebRTC build laws
 

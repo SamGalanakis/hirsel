@@ -453,16 +453,20 @@ fn valid_codec(codec: Codec) -> bool {
     }
 }
 
-// Emit an EBML header, unknown-size WebM Segment, Info, and a single TrackEntry.
-// The timestamp scale is in nanoseconds. Opus requires a matching OpusHead.
-// Allocate up to 256 bytes plus the codec private data in the output buffer.
-pub fn write_init(mut out: Bytes, track: u64, scale: u64, codec: Codec, private_data: Bytes) -> Result[(), Error] {
-    let length = list.len(private_data)
-    if track == 0 || track > MAX_SIZE || scale == 0 || length > MAX_SIZE - 256 || !valid_codec(codec) {
+/// One TrackEntry of a WebM header: its number, codec and CodecPrivate.
+pub type Track {
+    number: u64,
+    codec: Codec,
+    private_data: Bytes
+}
+
+fn check_track(t: Track) -> Result[(), Error] {
+    let length = list.len(t.private_data)
+    if t.number == 0 || t.number > MAX_SIZE || length > MAX_SIZE - 256 || !valid_codec(t.codec) {
         return Error(InvalidTrack)
     }
-    if let Opus(channels, delay) = codec {
-        let h = match opus.read_head(private_data) {
+    if let Opus(channels, delay) = t.codec {
+        let h = match opus.read_head(t.private_data) {
             Ok(value) => value,
             Error(_) => {
                 return Error(InvalidTrack)
@@ -472,32 +476,15 @@ pub fn write_init(mut out: Bytes, track: u64, scale: u64, codec: Codec, private_
             return Error(InvalidTrack)
         }
     }
-    if list.capacity(out) < length + 256 {
-        return Error(ShortBuffer)
-    }
-    list.clear(mut out)
-    let ebml = start_element(mut out, 0x1a45dfa3)
-    put_uint(mut out, 0x4286, 1)
-    put_uint(mut out, 0x42f7, 1)
-    put_uint(mut out, 0x42f2, 4)
-    put_uint(mut out, 0x42f3, 8)
-    put_binary(mut out, 0x4282, b"webm")
-    put_uint(mut out, 0x4287, 4)
-    put_uint(mut out, 0x4285, 2)
-    finish_element(mut out, ebml)
-    put_id(mut out, SEGMENT)
-    list.push(mut out, 0xff)
-    let info = start_element(mut out, 0x1549a966)
-    put_uint(mut out, 0x2ad7b1, scale)
-    put_binary(mut out, 0x4d80, b"Hirsel")
-    put_binary(mut out, 0x5741, b"Hirsel")
-    finish_element(mut out, info)
-    let tracks = start_element(mut out, 0x1654ae6b)
+    Ok(())
+}
+
+fn track_entry(mut out: Bytes, t: Track) {
     let entry = start_element(mut out, 0xae)
-    put_uint(mut out, 0xd7, track)
-    put_uint(mut out, 0x73c5, track)
+    put_uint(mut out, 0xd7, t.number)
+    put_uint(mut out, 0x73c5, t.number)
     put_uint(mut out, 0x9c, 0)
-    match codec {
+    match t.codec {
         Opus(channels, delay) => {
             put_uint(mut out, 0x83, 2)
             put_binary(mut out, 0x86, b"A_OPUS")
@@ -525,11 +512,56 @@ pub fn write_init(mut out: Bytes, track: u64, scale: u64, codec: Codec, private_
             video_fields(mut out, w, h)
         },
     }
-    if length != 0 {
-        put_binary(mut out, 0x63a2, private_data)
+    if list.len(t.private_data) != 0 {
+        put_binary(mut out, 0x63a2, t.private_data)
     }
     finish_element(mut out, entry)
-    finish_element(mut out, tracks)
+}
+
+// Emit an EBML header, unknown-size WebM Segment, Info, and one TrackEntry per
+// track, at most 64 tracks with distinct numbers. The timestamp scale is in
+// nanoseconds. Opus requires a matching OpusHead. Allocate 128 bytes, plus 256
+// bytes and the codec private data per track, in the output buffer.
+pub fn write_init(mut out: Bytes, scale: u64, tracks: List[Track]) -> Result[(), Error] {
+    let n = list.len(tracks)
+    if scale == 0 || n == 0 || n > 64 {
+        return Error(InvalidTrack)
+    }
+    let mut need = 128u64
+    for i in 0u64 .. n {
+        check_track(tracks[i])?
+        for k in 0u64 .. i {
+            if tracks[k].number == tracks[i].number {
+                return Error(InvalidTrack)
+            }
+        }
+        need += 256 + list.len(tracks[i].private_data)
+    }
+    if list.capacity(out) < need {
+        return Error(ShortBuffer)
+    }
+    list.clear(mut out)
+    let ebml = start_element(mut out, 0x1a45dfa3)
+    put_uint(mut out, 0x4286, 1)
+    put_uint(mut out, 0x42f7, 1)
+    put_uint(mut out, 0x42f2, 4)
+    put_uint(mut out, 0x42f3, 8)
+    put_binary(mut out, 0x4282, b"webm")
+    put_uint(mut out, 0x4287, 4)
+    put_uint(mut out, 0x4285, 2)
+    finish_element(mut out, ebml)
+    put_id(mut out, SEGMENT)
+    list.push(mut out, 0xff)
+    let info = start_element(mut out, 0x1549a966)
+    put_uint(mut out, 0x2ad7b1, scale)
+    put_binary(mut out, 0x4d80, b"Hirsel")
+    put_binary(mut out, 0x5741, b"Hirsel")
+    finish_element(mut out, info)
+    let entries = start_element(mut out, 0x1654ae6b)
+    for t in tracks {
+        track_entry(mut out, t)
+    }
+    finish_element(mut out, entries)
     Ok(())
 }
 
@@ -591,4 +623,72 @@ pub fn write_padded_frame(mut prefix: Bytes, mut suffix: Bytes, track: u64, time
     let bits: u64 = int.truncate(padding)
     list.put_word_be(mut suffix, bits)
     Ok(())
+}
+
+/// One frame waiting in an Interleave.
+pub type Queued {
+    track: u64,
+    timestamp: u64,
+    key: bool,
+    data: Bytes
+}
+
+/// Puts the frames of several tracks of one WebM file into one timestamp
+/// order. Each track hands in its frames in its own timestamp order.
+pub opaque type Interleave {
+    open: List[u64],
+    queued: List[Queued],
+    limit: u64,
+    last: u64
+}
+
+/// An Interleave over the given track numbers. Past limit waiting frames, the
+/// earliest is released without waiting for every track.
+pub fn interleave(take tracks: List[u64], limit: u64) -> Interleave {
+    Interleave(open: take tracks, queued: list.new(), limit: limit, last: 0)
+}
+
+/// Queue a frame of an open track after every queued frame with the same or
+/// an earlier timestamp.
+pub fn queue(mut q: Interleave, take frame: Queued) -> Result[(), Error] {
+    if !list.contains(q.open, frame.track) {
+        return Error(InvalidTrack)
+    }
+    let mut at = list.len(q.queued)
+    while at > 0 && q.queued[at - 1].timestamp > frame.timestamp {
+        at -= 1
+    }
+    list.insert(mut q.queued, at, take frame)
+    Ok(())
+}
+
+/// A closed track no longer holds the other tracks back.
+pub fn close(mut q: Interleave, track: u64) {
+    list.retain(mut q.open, scoped fn(t: u64) -> bool {
+        t != track
+    })
+}
+
+/// The earliest queued frame, once no open track can still hand in an earlier
+/// one: every open track has a frame queued, or more than limit frames wait.
+/// Timestamps come out never decreasing.
+pub fn next(mut q: Interleave) -> Option[Queued] {
+    if list.len(q.queued) == 0 {
+        return None
+    }
+    if list.len(q.queued) <= q.limit {
+        for t in q.open {
+            if !list.any(q.queued, scoped fn(f: Queued) -> bool {
+                f.track == t
+            }) {
+                return None
+            }
+        }
+    }
+    let mut frame = list.remove(mut q.queued, 0)
+    if frame.timestamp < q.last {
+        frame.timestamp = q.last
+    }
+    q.last = frame.timestamp
+    Some(take frame)
 }

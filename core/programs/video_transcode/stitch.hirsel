@@ -1,55 +1,5 @@
 // AV1 CMAF framing helpers for the stitch. Pure Hirsel: no foreign reach.
-
 pub type Error = NoSequence | BadSequence
-
-/// The parts of an AV1 sequence header that av1C and the RFC 6381 codec
-/// string carry.
-pub type Sequence {
-    profile: u8,
-    level: u8,
-    tier: u8,
-    high_bitdepth: bool,
-    twelve_bit: bool,
-    monochrome: bool,
-    subsampling_x: bool,
-    subsampling_y: bool,
-    sample_position: u8
-}
-
-type Bits {
-    at: u64,
-    end: u64
-}
-
-fn bit(data: Bytes, mut b: Bits) -> Result[u64, Error] {
-    if b.at >= b.end {
-        return Error(BadSequence)
-    }
-    let byte = data[b.at / 8]
-    let shift: u8 = int.narrow(7 - b.at % 8)
-    b.at += 1
-    Ok(int.widen((byte >> shift) & 1))
-}
-
-fn bits(data: Bytes, mut b: Bits, n: u64) -> Result[u64, Error] {
-    let mut v = 0u64
-    for _ in 0u64 .. n {
-        v = v << 1 | bit(data, mut b)?
-    }
-    Ok(v)
-}
-
-fn uvlc(data: Bytes, mut b: Bits) -> Result[u64, Error] {
-    let mut zeros = 0u64
-    while bit(data, mut b)? == 0 {
-        zeros += 1
-        if zeros >= 32 {
-            return Error(BadSequence)
-        }
-    }
-    let _ = bits(data, mut b, zeros)?
-    Ok(0)
-}
 
 /// Finds the first sequence-header OBU in a temporal unit and returns its
 /// whole OBU bytes.
@@ -97,147 +47,6 @@ pub fn is_key(unit: Bytes) -> bool {
     false
 }
 
-// AV1 §5.5.1 sequence_header_obu, through the first operating point and
-// color_config.
-pub fn sequence(obu: Bytes) -> Result[Sequence, Error] {
-    let Ok(o) = media_bits.av1.parse_obu(obu, 0) else {
-        return Error(BadSequence)
-    }
-    let mut b = Bits(at: o.payload_start * 8, end: o.end * 8)
-    let profile = bits(obu, mut b, 3)?
-    let _ = bit(obu, mut b)?
-    let reduced = bit(obu, mut b)? == 1
-    let mut level = 0u64
-    let mut tier = 0u64
-    if reduced {
-        level = bits(obu, mut b, 5)?
-    } else {
-        let timing = bit(obu, mut b)? == 1
-        let mut decoder_model = false
-        let mut delay_length = 0u64
-        if timing {
-            let _ = bits(obu, mut b, 64)?
-            if bit(obu, mut b)? == 1 {
-                let _ = uvlc(obu, mut b)?
-            }
-            decoder_model = bit(obu, mut b)? == 1
-            if decoder_model {
-                delay_length = bits(obu, mut b, 5)? + 1
-                let _ = bits(obu, mut b, 32 + 5 + 5)?
-            }
-        }
-        let display_delay = bit(obu, mut b)? == 1
-        let points = bits(obu, mut b, 5)? + 1
-        for i in 0u64 .. points {
-            let _ = bits(obu, mut b, 12)?
-            let l = bits(obu, mut b, 5)?
-            let t = if l > 7 {
-                bits(obu, mut b, 1)?
-            } else {
-                0u64
-            }
-            if i == 0 {
-                level = l
-                tier = t
-            }
-            if decoder_model {
-                if bit(obu, mut b)? == 1 {
-                    let _ = bits(obu, mut b, 2 * delay_length + 1)?
-                }
-            }
-            if display_delay {
-                if bit(obu, mut b)? == 1 {
-                    let _ = bits(obu, mut b, 4)?
-                }
-            }
-        }
-    }
-    let width_bits = bits(obu, mut b, 4)? + 1
-    let height_bits = bits(obu, mut b, 4)? + 1
-    let _ = bits(obu, mut b, width_bits + height_bits)?
-    let mut frame_ids = false
-    if !reduced {
-        frame_ids = bit(obu, mut b)? == 1
-    }
-    if frame_ids {
-        let _ = bits(obu, mut b, 7)?
-    }
-    // use_128x128_superblock, enable_filter_intra, enable_intra_edge_filter
-    let _ = bits(obu, mut b, 3)?
-    if !reduced {
-        // interintra, masked compound, warped motion, dual filter
-        let _ = bits(obu, mut b, 4)?
-        let order_hint = bit(obu, mut b)? == 1
-        if order_hint {
-            let _ = bits(obu, mut b, 2)?
-        }
-        let mut force_screen = 2u64
-        if bit(obu, mut b)? == 0 {
-            force_screen = bit(obu, mut b)?
-        }
-        if force_screen > 0 {
-            if bit(obu, mut b)? == 0 {
-                let _ = bit(obu, mut b)?
-            }
-        }
-        if order_hint {
-            let _ = bits(obu, mut b, 3)?
-        }
-    }
-    // enable_superres, enable_cdef, enable_restoration
-    let _ = bits(obu, mut b, 3)?
-    let high = bit(obu, mut b)? == 1
-    let mut twelve = false
-    if profile == 2 && high {
-        twelve = bit(obu, mut b)? == 1
-    }
-    let mono = if profile == 1 {
-        false
-    } else {
-        bit(obu, mut b)? == 1
-    }
-    let mut primaries = 2u64
-    let mut transfer = 2u64
-    let mut matrix = 2u64
-    if bit(obu, mut b)? == 1 {
-        primaries = bits(obu, mut b, 8)?
-        transfer = bits(obu, mut b, 8)?
-        matrix = bits(obu, mut b, 8)?
-    }
-    let mut sx = true
-    let mut sy = true
-    let mut position = 0u64
-    if mono {
-        let _ = bit(obu, mut b)?
-    } else if primaries == 1 && transfer == 13 && matrix == 0 {
-        sx = false
-        sy = false
-    } else {
-        let _ = bit(obu, mut b)?
-        if profile == 0 {
-            sx = true
-            sy = true
-        } else if profile == 1 {
-            sx = false
-            sy = false
-        } else if twelve {
-            sx = bit(obu, mut b)? == 1
-            sy = if sx {
-                bit(obu, mut b)? == 1
-            } else {
-                false
-            }
-        } else {
-            sx = true
-            sy = false
-        }
-        if sx && sy {
-            position = bits(obu, mut b, 2)?
-        }
-    }
-    Ok(Sequence(profile: int.narrow(profile), level: int.narrow(level), tier: int.narrow(tier), high_bitdepth: high, twelve_bit: twelve, monochrome: mono, subsampling_x: sx, subsampling_y: sy, sample_position: int.narrow(position)))
-}
-
 fn push_u16(mut out: Bytes, v: u64) {
     list.push(mut out, int.narrow((v >> 8) & 255))
     list.push(mut out, int.narrow(v & 255))
@@ -258,7 +67,7 @@ fn flag(b: bool, shift: u8) -> u8 {
 
 /// An `av01` visual sample entry (AV1-ISOBMFF §2.2) with its av1C and a
 /// BT.709 limited-range `colr`.
-pub fn av01_entry(width: u32, height: u32, s: Sequence, sequence_header: Bytes) -> Bytes {
+pub fn av01_entry(width: u32, height: u32, s: media_bits.av1.Sequence, sequence_header: Bytes) -> Bytes {
     let config = 12 + list.len(sequence_header)
     let size = 86 + config + 19
     let mut out: Bytes = list.with_capacity(size)
@@ -307,7 +116,7 @@ fn push_two(mut s: String, v: u64) {
 }
 
 /// RFC 6381 codec string for AV1 (AV1-ISOBMFF Annex A.3).
-pub fn codec_string(s: Sequence) -> String {
+pub fn codec_string(s: media_bits.av1.Sequence) -> String {
     let mut out = string.from("av01.")
     string.push_u64(mut out, int.widen(s.profile))
     string.push_char(mut out, '.')

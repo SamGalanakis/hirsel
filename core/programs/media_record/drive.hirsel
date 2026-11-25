@@ -1,0 +1,639 @@
+// The recorder's test rig. A publisher on unit 0 sends real FFmpeg frames
+// (frames.hirsel) as RTP payloads with each codec's packetization, on a
+// sender clock the plan states; the recorder is unit 1. Its files are read
+// back with media_container's readers. Expected values come from the plan:
+// the frames sent, their capture times and the sender reports.
+type Fixture {
+    key: bool,
+    data: Bytes
+}
+
+fn add(mut xs: List[Fixture], keys: Bytes, encoded: Bytes) {
+    let key = keys[list.len(xs)] == 49
+    let Some(take data) = std.base64.decode(encoded) else {
+        fail("invalid fixture base64")
+    }
+    list.push(mut xs, Fixture(key: key, data: take data))
+}
+
+const NS: i64 = 1000000000
+
+// The sender's wall clock at its first capture: 2024-01-01 in ns since 1900.
+const WALL0: i64 = 3913056000000000000
+
+const ROOM: webrtc_sfu.peer.RoomId = RoomId(1)
+
+const PUBLISHER: webrtc_sfu.peer.Gen = Gen(id: 1, epoch: 1)
+
+const SEAT: webrtc_sfu.peer.Gen = Gen(id: 2, epoch: 1)
+
+const AUDIO: webrtc_sfu.router.PublicationId = PublicationId(1)
+
+const VIDEO: webrtc_sfu.router.PublicationId = PublicationId(2)
+
+const MTU: u64 = 600
+
+/// One sent frame: its index, capture time on the sender's wall clock, RTP
+/// timestamp, key flag and bytes in rtp_jitter's delivered form.
+type Sent {
+    index: u64,
+    wall: i64,
+    ts: u32,
+    key: bool,
+    data: Bytes
+}
+
+/// A stream's packet, ready to carry: sequence index, RTP timestamp, marker
+/// and payload, and the frame it belongs to.
+type Packet {
+    index: u64,
+    ts: u32,
+    marker: bool,
+    payload: Bytes,
+    frame: u64
+}
+
+/// A stream of one publication: its frames, packets and RTP clock.
+type Stream {
+    publication: webrtc_sfu.router.PublicationId,
+    rate: u64,
+    rtp0: u32,
+    // The first frame's capture, in ns after WALL0.
+    start: i64,
+    // Ticks between frames.
+    step: u64,
+    frames: List[Sent],
+    packets: List[Packet]
+}
+
+fn wall_of(start: i64, ticks: u64, rate: u64) -> i64 {
+    let t: i64 = int.narrow(ticks)
+    let r: i64 = int.narrow(rate)
+    WALL0 + start + t * NS / r
+}
+
+fn stream(publication: webrtc_sfu.router.PublicationId, codec: webrtc_sfu.sdp.Codec, fixtures: List[Fixture], rtp0: u32, seq0: u64, start: i64) -> Stream {
+    let audio = codec == Opus
+    let rate = if audio {
+        48000u64
+    } else {
+        90000u64
+    }
+    let step = if audio {
+        960u64
+    } else {
+        3000u64
+    }
+    let mut s = Stream(publication: publication, rate: rate, rtp0: rtp0, start: start, step: step, frames: list.new(), packets: list.new())
+    let mut index = seq0
+    for k in 0u64 .. list.len(fixtures) {
+        let ts: u32 = int.wrapping_add(rtp0, (int.truncate(k * step) : u32))
+        let mut data: Bytes = list.new()
+        list.append(mut data, fixtures[k].data)
+        let mut payloads: List[(Bytes, bool)] = list.new()
+        match codec {
+            Opus => {
+                let mut p: Bytes = list.new()
+                list.append(mut p, data)
+                list.push(mut payloads, (take p, true))
+            },
+            Vp8 => vp8(mut payloads, data),
+            Vp9 => vp9(mut payloads, data, fixtures[k].key),
+            H264 => h264(mut payloads, data, fixtures[k].key),
+            _ => av1(mut payloads, data, fixtures[k].key),
+        }
+        for take entry in payloads {
+            let (take payload, marker) = take entry
+            list.push(mut s.packets, Packet(index: index, ts: ts, marker: marker, payload: take payload, frame: k))
+            index += 1
+        }
+        list.push(mut s.frames, Sent(index: k, wall: wall_of(start, k * step, rate), ts: ts, key: fixtures[k].key || audio, data: take data))
+    }
+    s
+}
+
+fn split(mut out: List[(Bytes, bool)], data: Bytes, room: u64, head: scoped fn(bool, bool) -> Bytes) {
+    let n = list.len(data)
+    let mut at = 0u64
+    while at < n {
+        let stop = if at + room < n {
+            at + room
+        } else {
+            n
+        }
+        let mut p = head(at == 0, stop == n)
+        list.append(mut p, list.slice(data, at, stop))
+        list.push(mut out, (take p, stop == n))
+        at = stop
+    }
+}
+
+// RFC 7741 §4.2: S on the frame's first packet, partition 0.
+fn vp8(mut out: List[(Bytes, bool)], data: Bytes) {
+    split(mut out, data, MTU, scoped fn(first: bool, _last: bool) -> Bytes {
+        let mut h: Bytes = list.new()
+        list.push(mut h, if first {
+            0x10
+        } else {
+            0
+        })
+        h
+    })
+}
+
+// RFC 9628 §4.2, non-flexible without layer indices: P on predicted frames, B
+// on the first packet, E on the last.
+fn vp9(mut out: List[(Bytes, bool)], data: Bytes, key: bool) {
+    split(mut out, data, MTU, scoped fn(first: bool, last: bool) -> Bytes {
+        let mut flags: u8 = 0
+        if !key {
+            flags |= 0x40
+        }
+        if first {
+            flags |= 0x08
+        }
+        if last {
+            flags |= 0x04
+        }
+        let mut h: Bytes = list.new()
+        list.push(mut h, flags)
+        h
+    })
+}
+
+fn word(data: Bytes, at: u64) -> u64 {
+    let mut v = 0u64
+    for i in at .. at + 4 {
+        v = (v << 8) | int.widen(data[i])
+    }
+    v
+}
+
+// RFC 6184: SPS and PPS of a key frame in one STAP-A (§5.7.1), each slice as a
+// single NAL unit (§5.6) or as FU-A fragments (§5.8).
+fn h264(mut out: List[(Bytes, bool)], data: Bytes, key: bool) {
+    let mut nals: List[Bytes] = list.new()
+    let mut at = 0u64
+    while at < list.len(data) {
+        let n = word(data, at)
+        let mut nal: Bytes = list.new()
+        list.append(mut nal, list.slice(data, at + 4, at + 4 + n))
+        list.push(mut nals, take nal)
+        at += 4 + n
+    }
+    let mut stap: Bytes = b"\x78"
+    let mut slices: List[Bytes] = list.new()
+    for take nal in nals {
+        let kind = nal[0] & 31
+        if key && (kind == 7 || kind == 8) {
+            list.put_word_be(mut stap, (int.narrow(list.len(nal)) : u16))
+            list.append(mut stap, nal)
+        } else {
+            list.push(mut slices, take nal)
+        }
+    }
+    if list.len(stap) > 1 {
+        list.push(mut out, (take stap, false))
+    }
+    let count = list.len(slices)
+    for i in 0u64 .. count {
+        let last = i + 1 == count
+        let nal = slices[i]
+        if list.len(nal) <= MTU {
+            let mut p: Bytes = list.new()
+            list.append(mut p, nal)
+            list.push(mut out, (take p, last))
+            continue
+        }
+        let header = nal[0]
+        let body = list.slice(nal, 1, list.len(nal))
+        let mut pieces: List[(Bytes, bool)] = list.new()
+        split(mut pieces, body, MTU - 2, scoped fn(first: bool, end: bool) -> Bytes {
+            let mut fu: u8 = header & 31
+            if first {
+                fu |= 0x80
+            }
+            if end {
+                fu |= 0x40
+            }
+            let mut h: Bytes = list.new()
+            list.push(mut h, (header & 0xe0) | 28)
+            list.push(mut h, fu)
+            h
+        })
+        for take piece in pieces {
+            let (take p, end) = take piece
+            list.push(mut out, (take p, end && last))
+        }
+    }
+}
+
+fn leb128(data: Bytes, from: u64) -> u64 {
+    let mut at = from
+    let mut value = 0u64
+    let mut shift = 0u64
+    loop {
+        let byte: u64 = int.widen(data[at])
+        at += 1
+        value |= (byte & 127) << shift
+        shift += 7
+        if byte < 128 {
+            return value
+        }
+    }
+}
+
+fn put_leb128(mut out: Bytes, value: u64) {
+    let mut rest = value
+    while rest >= 128 {
+        list.push(mut out, (int.narrow(rest & 127) : u8) | 128)
+        rest = rest >> 7
+    }
+    list.push(mut out, (int.narrow(rest) : u8))
+}
+
+// AV1 RTP §4.4 with W=0: each OBU without its size field as one element,
+// fragmented across packets by Z and Y; N on a key frame's first packet.
+fn av1(mut out: List[(Bytes, bool)], data: Bytes, key: bool) {
+    let mut at = 0u64
+    let mut first = true
+    while at < list.len(data) {
+        let header = data[at]
+        let ext: u64 = if (header & 4) != 0 {
+            1
+        } else {
+            0
+        }
+        let mut cursor = at + 1 + ext
+        let size = leb128(data, cursor)
+        while data[cursor] >= 128 {
+            cursor += 1
+        }
+        cursor += 1
+        let mut obu: Bytes = list.new()
+        list.push(mut obu, header & 0xfd)
+        if ext == 1 {
+            list.push(mut obu, data[at + 1])
+        }
+        list.append(mut obu, list.slice(data, cursor, cursor + size))
+        at = cursor + size
+        let ends = at == list.len(data)
+        let n = list.len(obu)
+        let mut lo = 0u64
+        while lo < n {
+            let hi = if lo + MTU - 4 < n {
+                lo + MTU - 4
+            } else {
+                n
+            }
+            let mut h: u8 = 0
+            if lo != 0 {
+                h |= 0x80
+            }
+            if hi != n {
+                h |= 0x40
+            }
+            if key && first && lo == 0 {
+                h |= 0x08
+            }
+            let mut p: Bytes = list.new()
+            list.push(mut p, h)
+            put_leb128(mut p, hi - lo)
+            list.append(mut p, list.slice(obu, lo, hi))
+            list.push(mut out, (take p, ends && hi == n))
+            lo = hi
+        }
+        first = false
+    }
+}
+
+// ---- The recorder under test ----
+type File {
+    id: u64,
+    publication: webrtc_sfu.router.PublicationId,
+    format: files.Format,
+    data: Bytes,
+    closed: bool
+}
+
+type Rig {
+    rec: record.Recorder,
+    seq: u64,
+    // The receive clock, in ns.
+    now: u64,
+    files: List[File],
+    posts: List[webrtc_sfu.router.Post]
+}
+
+fn limits() -> webrtc_sfu.router.RoomLimits {
+    webrtc_sfu.router.RoomLimits(participants: 8, ids: 8, publications: 8, down_tracks: 8, audio_forward: 0, pause_delay_ms: 5000, pause: false)
+}
+
+fn collect(mut rig: Rig) {
+    let posts = record.take_posts(mut rig.rec)
+    for take p in posts {
+        list.push(mut rig.posts, take p)
+    }
+    let output = record.take_output(mut rig.rec)
+    for take o in output {
+        match take o {
+            Opened(file: id, room: _, publication: p, owner: _, format: format) => list.push(mut rig.files, File(id: id, publication: p, format: format, data: list.new(), closed: false)),
+            Wrote(file: id, data: take chunk) => {
+                for k in 0u64 .. list.len(rig.files) {
+                    if rig.files[k].id == id {
+                        if rig.files[k].closed {
+                            fail("wrote to a closed file")
+                        }
+                        list.append(mut rig.files[k].data, chunk)
+                    }
+                }
+            },
+            Closed(file: id) => {
+                for k in 0u64 .. list.len(rig.files) {
+                    if rig.files[k].id == id {
+                        rig.files[k].closed = true
+                    }
+                }
+            },
+        }
+    }
+}
+
+fn order(mut rig: Rig, take change: webrtc_sfu.router.Change) {
+    rig.seq += 1
+    let seq = rig.seq
+    let now = rig.now
+    let Some(Ack(seq: acked, unit: unit, answer: answer)) = record.control(mut rig.rec, now, Order(seq: seq, change: take change)) else {
+        fail("an order was not acknowledged")
+    }
+    if acked != seq || unit != 1 {
+        fail("acknowledged the wrong order or unit")
+    }
+    if let Error(_) = answer {
+        fail("the recorder refused an order")
+    }
+    collect(mut rig)
+}
+
+fn shape(codec: webrtc_sfu.sdp.Codec) -> Option[webrtc_sfu.router.Shape] {
+    Some(webrtc_sfu.router.Shape(codec: codec, pli: codec != Opus, fir: false, encodings: 1))
+}
+
+/// A room where the publisher (home 0) publishes `video` (and Opus when
+/// `audio`), and the recorder's seat (home 1) subscribes to both.
+fn setup(video: Option[webrtc_sfu.sdp.Codec], audio: bool) -> Rig {
+    let config = record.Config(unit: 1, window: 512, max_wait_us: 400000, pending: 64)
+    let rec = result.unwrap(record.recorder(provide.random(7), config))
+    let mut r = Rig(rec: take rec, seq: 0, now: 1000000000, files: list.new(), posts: list.new())
+    order(mut r, Open(room: ROOM, limits: limits()))
+    order(mut r, Admit(who: webrtc_sfu.peer.Participant(gen: PUBLISHER, room: ROOM), home: 0))
+    order(mut r, Admit(who: webrtc_sfu.peer.Participant(gen: SEAT, room: ROOM), home: 1))
+    if audio {
+        order(mut r, Publish(room: ROOM, who: PUBLISHER, section: 0, id: AUDIO, shape: shape(Opus)))
+        order(mut r, Subscribe(room: ROOM, who: SEAT, p: AUDIO, section: 0, target: Layer(encoding: 0, spatial: 0, temporal: 0)))
+    }
+    if let Some(codec) = video {
+        order(mut r, Publish(room: ROOM, who: PUBLISHER, section: 1, id: VIDEO, shape: shape(codec)))
+        order(mut r, Subscribe(room: ROOM, who: SEAT, p: VIDEO, section: 1, target: Layer(encoding: 0, spatial: 0, temporal: 0)))
+    }
+    r
+}
+
+fn media(mut rig: Rig, s: Stream, k: u64) {
+    let p = s.packets[k]
+    let PublicationId(n) = s.publication
+    let m = webrtc_sfu.peer.MediaIn(section: 0, encoding: 0, ssrc: int.truncate(n * 1000), index: p.index, pt: 96, ts: p.ts, wide: 0, reset: false, marker: p.marker, payload_at: 0, payload_len: list.len(p.payload), audio_level: None, voice: None, layer: None, dd_at: 0, dd_len: 0)
+    let mut packet: Bytes = list.new()
+    list.append(mut packet, p.payload)
+    let carry: webrtc_sfu.router.Carry = Media(room: ROOM, publication: s.publication, src: PUBLISHER, m: m, handle: 0, speaking: false, rate: s.rate)
+    let now = rig.now
+    record.carried(mut rig.rec, now, webrtc_sfu.router.Carried(carry: carry, packet: shared.new(take packet)))
+    collect(mut rig)
+}
+
+/// NTP time (RFC 3550 §4) of a wall clock in ns since 1900.
+fn ntp(wall: i64) -> u64 {
+    let w: u64 = int.narrow(wall)
+    let secs = w / 1000000000
+    let part = w % 1000000000
+    (secs << 32) | ((part << 32) / 1000000000)
+}
+
+/// The sender report of stream `s` at its frame `k`'s capture.
+fn report(mut rig: Rig, s: Stream, k: u64) {
+    let f = s.frames[k]
+    let PublicationId(n) = s.publication
+    let info = rtp.rtcp.SenderInfo(ssrc: int.truncate(n * 1000), ntp: ntp(f.wall), rtp: f.ts, packets: 0, octets: 0)
+    let carry: webrtc_sfu.router.Carry = Sender(room: ROOM, publication: s.publication, owner: PUBLISHER, source: int.truncate(n * 4), info: info)
+    let empty: Bytes = list.new()
+    record.carried(mut rig.rec, rig.now, webrtc_sfu.router.Carried(carry: carry, packet: shared.new(take empty)))
+    collect(mut rig)
+}
+
+fn advance(mut rig: Rig, ns: u64) {
+    rig.now += ns
+    let now = rig.now
+    record.poll(mut rig.rec, now)
+    collect(mut rig)
+}
+
+fn file_of(rig: Rig, p: webrtc_sfu.router.PublicationId) -> u64 {
+    for k in 0u64 .. list.len(rig.files) {
+        if rig.files[k].publication == p {
+            return k
+        }
+    }
+    fail("no file for the publication")
+}
+
+// ---- Reading the files back ----
+/// A frame as its file states it: time in ns on the recording's timeline (to
+/// the container's precision), key flag and bytes.
+type Read {
+    at: i64,
+    key: bool,
+    data: Bytes
+}
+
+fn read_back(f: File) -> List[Read] {
+    let mut out: List[Read] = list.new()
+    match f.format {
+        Ogg => {
+            let mut logical = media_container.ogg.open_stream(0x6d726563)
+            let mut at = 0u64
+            let mut pages = 0u64
+            while at < list.len(f.data) {
+                let mut got: Bytes = list.new()
+                let page = result.unwrap(media_container.ogg.demux(mut logical, f.data, at, scoped fn(p: Bytes, _starts: bool, _ends: bool) {
+                    list.append(mut got, p)
+                }))
+                if pages == 0 {
+                    let head = result.unwrap(media_container.opus.read_head(got))
+                    if head.pre_skip != 0 {
+                        fail("OpusHead pre-skip")
+                    }
+                } else if pages > 1 {
+                    let granule: i64 = int.narrow(media_container.ogg.header(page).granule)
+                    let samples: i64 = int.narrow(960u64)
+                    list.push(mut out, Read(at: (granule - samples) * 125000 / 6, key: true, data: take got))
+                }
+                pages += 1
+                at = media_container.ogg.next(page)
+            }
+        },
+        Webm => {
+            let init = result.unwrap(media_container.webm.read_init(f.data, 0, scoped fn(_t: media_container.webm.TrackInfo, _c: Bytes, _p: Bytes) {}))
+            let scale: i64 = int.narrow(init.timestamp_scale)
+            let mut at = init.next_element
+            while at < list.len(f.data) {
+                at = result.unwrap(media_container.webm.read_cluster(f.data, at, list.len(f.data), true, scoped fn(frame: media_container.webm.Frame, payload: Bytes) {
+                    let mut data: Bytes = list.new()
+                    list.append(mut data, payload)
+                    list.push(mut out, Read(at: frame.timestamp * scale, key: frame.key, data: take data))
+                }))
+            }
+        },
+        Mp4 => {
+            let mut defaults = media_container.mp4.Defaults(duration: 0, size: 0, flags: 0)
+            let mut at = result.unwrap(media_container.mp4.read_init(f.data, 0, true, scoped fn(_t: media_container.mp4.Track, d: media_container.mp4.Defaults, _e: Bytes) {
+                defaults = d
+            }))
+            while at < list.len(f.data) {
+                at = result.unwrap(media_container.mp4.read_fragment(f.data, at, true, defaults, scoped fn(t: media_container.mp4.Timing, payload: Bytes) {
+                    let mut data: Bytes = list.new()
+                    list.append(mut data, payload)
+                    let decode: i64 = int.narrow(t.decode_time)
+                    list.push(mut out, Read(at: decode * NS / 90000, key: (t.flags & 0x01010000) == 0, data: take data))
+                }))
+            }
+        },
+    }
+    out
+}
+
+// ---- Sending ----
+/// What the network does to a stream's packets: which it loses.
+fn lost(drops: List[(u64, u64)], s: Stream, k: u64) -> bool {
+    let PublicationId(n) = s.publication
+    list.any(drops, scoped fn(d: (u64, u64)) -> bool {
+        d.0 == n && d.1 == s.packets[k].frame
+    })
+}
+
+/// Send `streams` from frame `from` to before `to` in capture order, each
+/// packet 20 ms after its frame's capture and each stream's packets swapped
+/// in pairs. A stream's first sender report goes before its frame `report_at`.
+/// Packets of the frames in `drops` (publication, frame) are lost.
+fn send(mut rig: Rig, streams: List[Stream], from: i64, to: i64, report_at: List[u64], drops: List[(u64, u64)]) {
+    let mut next: List[u64] = list.new()
+    let mut reported: List[bool] = list.new()
+    for s in streams {
+        list.push(mut reported, false)
+        let mut k = 0u64
+        while k < list.len(s.packets) && s.frames[s.packets[k].frame].wall - WALL0 < from {
+            k += 1
+        }
+        list.push(mut next, k)
+    }
+    loop {
+        // The stream whose next packet's frame was captured first.
+        let mut best: Option[u64] = None
+        let mut best_wall = to + WALL0
+        for i in 0u64 .. list.len(streams) {
+            let k = next[i]
+            if k < list.len(streams[i].packets) {
+                let wall = streams[i].frames[streams[i].packets[k].frame].wall
+                if wall < best_wall {
+                    best = Some(i)
+                    best_wall = wall
+                }
+            }
+        }
+        let Some(i) = best else {
+            return
+        }
+        let at: u64 = int.narrow(best_wall - WALL0 + 20000000)
+        if rig.now < 1000000000 + at {
+            advance(mut rig, 1000000000 + at - rig.now)
+        }
+        let k = next[i]
+        let frame = streams[i].packets[k].frame
+        if !reported[i] && frame >= report_at[i] {
+            reported[i] = true
+            report(mut rig, streams[i], report_at[i])
+        }
+        // Pairs go swapped when both belong to the window being sent.
+        let pair = k + 1 < list.len(streams[i].packets) && streams[i].frames[streams[i].packets[k + 1].frame].wall - WALL0 < to
+        if pair {
+            if !lost(drops, streams[i], k + 1) {
+                media(mut rig, streams[i], k + 1)
+            }
+        }
+        if !lost(drops, streams[i], k) {
+            media(mut rig, streams[i], k)
+        }
+        next[i] = if pair {
+            k + 2
+        } else {
+            k + 1
+        }
+    }
+}
+
+fn finish(mut rig: Rig) {
+    record.finish(mut rig.rec)
+    collect(mut rig)
+}
+
+// ---- Expectations from the plan ----
+/// How far a file's time can be from the true time: the container's
+/// resolution (Ogg 1/48000 s, WebM 1 ms, MP4 1/90000 s) and a microsecond for
+/// the sender report's NTP fraction.
+fn tolerance(format: files.Format) -> i64 {
+    match format {
+        Ogg => 22000,
+        Webm => 1001000,
+        Mp4 => 12200,
+    }
+}
+
+/// File `f` holds exactly the frames `kept` of `s`, in order, with their bytes
+/// and key flags, each at its capture time less `origin`, so its timestamps
+/// rise and its span is the frames' span.
+fn expect(f: File, s: Stream, kept: List[u64], origin: i64, what: String) {
+    if !f.closed {
+        fail("file not closed")
+    }
+    let read = read_back(f)
+    if list.len(read) != list.len(kept) {
+        fail(clone(what))
+    }
+    let tol = tolerance(f.format)
+    for j in 0u64 .. list.len(kept) {
+        let sent = s.frames[kept[j]]
+        let want = sent.wall - origin
+        let got = read[j].at
+        if got - want > tol || want - got > tol || read[j].data != sent.data || read[j].key != sent.key {
+            fail(clone(what))
+        }
+        if j > 0 && got < read[j - 1].at {
+            fail("file timestamps go back")
+        }
+    }
+}
+
+fn range(lo: u64, hi: u64) -> List[u64] {
+    let mut xs: List[u64] = list.new()
+    for k in lo .. hi {
+        list.push(mut xs, k)
+    }
+    xs
+}
+
+fn without(take xs: List[u64], k: u64) -> List[u64] {
+    let mut ys = take xs
+    list.retain(mut ys, scoped fn(x: u64) -> bool {
+        x != k
+    })
+    ys
+}

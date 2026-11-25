@@ -1,0 +1,173 @@
+// media_record's laws (README §6). Each drives the recorder with real FFmpeg
+// frames (frames.hirsel) through drive.hirsel's rig and reads its files back.
+fn video_fixture(codec: webrtc_sfu.sdp.Codec) -> List[Fixture] {
+    match codec {
+        Vp8 => vp8_frames(),
+        Vp9 => vp9_frames(),
+        H264 => h264_frames(),
+        _ => av1_frames(),
+    }
+}
+
+/// bug: an RTP timestamp taken in 32 bits, so a file jumps back or ahead
+/// where the sender's clock wraps; frames held behind a hole that the end of
+/// the recording does not flush, so the file ends short; a frame or a key
+/// flag lost or changed between the jitter buffer and the container.
+/// oracle: the sent frames (FFmpeg's bitstreams) and their capture times on
+/// the sender's clock; both streams start at the same instant, so the
+/// recording's zero is that instant.
+@test
+fn recording_keeps_every_frame_on_the_sender_clock() -> Result[(), ()] {
+    let codecs: Inline[webrtc_sfu.sdp.Codec, 4] =[Vp8, Vp9, Av1, H264]
+    for codec in codecs {
+        let audio = stream(AUDIO, Opus, opus_frames(), 0xfffff000, 65530, 0)
+        let video = stream(VIDEO, codec, video_fixture(codec), 0xffff0000, 65000, 0)
+        let mut r = setup(Some(codec), true)
+        let PublicationId(a) = AUDIO
+        let mut drops: List[(u64, u64)] = list.new()
+        // A hole five frames before the end, which no wait gives up in time.
+        list.push(mut drops, (a, 95))
+        let mut streams: List[Stream] = list.new()
+        list.push(mut streams, take audio)
+        list.push(mut streams, take video)
+        let mut reports: List[u64] = list.new()
+        list.push(mut reports, 0u64)
+        list.push(mut reports, 0u64)
+        send(mut r, streams, 0, 3 * NS, reports, drops)
+        finish(mut r)
+        expect(r.files[file_of(r, AUDIO)], streams[0], without(range(0, 101), 95), WALL0, "audio frames differ from those sent")
+        expect(r.files[file_of(r, VIDEO)], streams[1], range(0, 60), WALL0, "video frames differ from those sent")
+    }
+    Ok(())
+}
+
+/// bug: each file timed from its own first frame, or a stream placed before
+/// its sender report by its arrival, so audio and video drift apart.
+/// oracle: the sender reports state each stream's RTP clock on one wall
+/// clock; the video starts 300 ms after the audio on a different RTP base
+/// and its first report comes ten frames late. A/V offset must stay under
+/// 40 ms; the plan's capture times give it exactly.
+@test
+fn audio_and_video_line_up_by_sender_reports() -> Result[(), ()] {
+    let audio = stream(AUDIO, Opus, opus_frames(), 12345, 100, 0)
+    let video = stream(VIDEO, Vp8, vp8_frames(), 0x80000000, 4000, 300000000)
+    let mut r = setup(Some(Vp8), true)
+    let mut streams: List[Stream] = list.new()
+    list.push(mut streams, take audio)
+    list.push(mut streams, take video)
+    let mut reports: List[u64] = list.new()
+    list.push(mut reports, 0u64)
+    list.push(mut reports, 10u64)
+    let drops: List[(u64, u64)] = list.new()
+    send(mut r, streams, 0, 3 * NS, reports, drops)
+    finish(mut r)
+    let fa = r.files[file_of(r, AUDIO)]
+    let fv = r.files[file_of(r, VIDEO)]
+    let ra = read_back(fa)
+    let rv = read_back(fv)
+    // The same instant on both files: video frame 0 against audio frame 15.
+    let offset = (rv[0].at - ra[15].at) - (streams[1].frames[0].wall - streams[0].frames[15].wall)
+    if offset > 40000000 || offset < -40000000 {
+        fail("A/V offset over 40 ms")
+    }
+    expect(fa, streams[0], range(0, 101), WALL0, "audio frames differ from those sent")
+    expect(fv, streams[1], range(0, 60), WALL0, "video frames off the sender clock")
+    Ok(())
+}
+
+/// bug: a lost packet's frame and the frames that depend on it written
+/// anyway (a decoder shows garbage until the next key frame), or no key
+/// frame asked for, so the file waits for the sender's next periodic one.
+/// oracle: frame 10 of the H.264 stream is lost; FFmpeg's next key frame is
+/// frame 30 (GOP 30), so the file holds frames 0-9 and 30-59, and the
+/// publisher's home unit gets a Loss key request.
+@test
+fn loss_asks_a_key_frame_and_skips_to_it() -> Result[(), ()] {
+    let video = stream(VIDEO, H264, h264_frames(), 90000, 1, 0)
+    let mut r = setup(Some(H264), false)
+    let PublicationId(v) = VIDEO
+    let mut drops: List[(u64, u64)] = list.new()
+    list.push(mut drops, (v, 10))
+    let mut streams: List[Stream] = list.new()
+    list.push(mut streams, take video)
+    let mut reports: List[u64] = list.new()
+    list.push(mut reports, 0u64)
+    send(mut r, streams, 0, 3 * NS, reports, drops)
+    finish(mut r)
+    let asked = list.any(r.posts, scoped fn(p: webrtc_sfu.router.Post) -> bool {
+        match p.carried.carry {
+            Key(room: room, publication: pub_id, encoding: 0, why: Loss) => p.to == 0 && room == ROOM && pub_id == VIDEO,
+            _ => false,
+        }
+    })
+    if !asked {
+        fail("no key frame request for the loss")
+    }
+    let mut kept = range(0, 10)
+    list.append(mut kept, range(30, 60))
+    expect(r.files[file_of(r, VIDEO)], streams[0], kept, WALL0, "frames after the loss written before the key frame")
+    Ok(())
+}
+
+/// bug: a revoked publisher's buffered frames flushed into the file when its
+/// track closes, or its later packets written after the revoke's ack (RTC-7).
+/// oracle: frame 29's packet is lost, so frames 30-35 wait behind the hole
+/// when the revoke arrives; the file at the ack holds frames 0-28 and never
+/// changes after it, whatever the revoked publisher still sends.
+@test
+fn revoke_fences_buffered_media() -> Result[(), ()] {
+    let video = stream(VIDEO, Vp8, vp8_frames(), 5, 7, 0)
+    let mut r = setup(Some(Vp8), false)
+    let PublicationId(v) = VIDEO
+    let mut drops: List[(u64, u64)] = list.new()
+    list.push(mut drops, (v, 29))
+    let mut streams: List[Stream] = list.new()
+    list.push(mut streams, take video)
+    let mut reports: List[u64] = list.new()
+    list.push(mut reports, 0u64)
+    // Frames 0-35, then the revoke while 30-35 wait behind the hole.
+    send(mut r, streams, 0, 36 * NS / 30, reports, drops)
+    order(mut r, Revoke(room: ROOM, id: 1, epoch: 1))
+    let k = file_of(r, VIDEO)
+    if !r.files[k].closed {
+        fail("the revoked publisher's file is open after the ack")
+    }
+    let mut at_ack: Bytes = list.new()
+    list.append(mut at_ack, r.files[k].data)
+    let none: List[(u64, u64)] = list.new()
+    send(mut r, streams, 36 * NS / 30, 3 * NS, reports, none)
+    finish(mut r)
+    let after = r.files[file_of(r, VIDEO)]
+    if after.data != at_ack {
+        fail("the file changed after the revoke's ack")
+    }
+    expect(after, streams[0], range(0, 29), WALL0, "fenced frames landed in the file")
+    Ok(())
+}
+
+/// bug: a suspension that keeps what the room's tracks buffer, so frames
+/// taken before it (here key frame 30, behind a hole) land after it ends.
+/// oracle: frame 28's packet is lost, so frames 29-31 wait behind the hole
+/// when the room is suspended; media sent while suspended is dropped, and
+/// FFmpeg's stream has no key frame after 30, so the file holds frames 0-27.
+@test
+fn suspend_drops_buffered_media() -> Result[(), ()] {
+    let video = stream(VIDEO, Vp8, vp8_frames(), 77, 300, 0)
+    let mut r = setup(Some(Vp8), false)
+    let PublicationId(v) = VIDEO
+    let mut drops: List[(u64, u64)] = list.new()
+    list.push(mut drops, (v, 28))
+    let mut streams: List[Stream] = list.new()
+    list.push(mut streams, take video)
+    let mut reports: List[u64] = list.new()
+    list.push(mut reports, 0u64)
+    send(mut r, streams, 0, 32 * NS / 30, reports, drops)
+    order(mut r, Suspend(room: ROOM, on: true))
+    let none: List[(u64, u64)] = list.new()
+    send(mut r, streams, 32 * NS / 30, 40 * NS / 30, reports, none)
+    order(mut r, Suspend(room: ROOM, on: false))
+    send(mut r, streams, 40 * NS / 30, 3 * NS, reports, none)
+    finish(mut r)
+    expect(r.files[file_of(r, VIDEO)], streams[0], range(0, 28), WALL0, "media buffered before the suspension landed after it")
+    Ok(())
+}

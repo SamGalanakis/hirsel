@@ -46,7 +46,14 @@ frame carries the block's timestamp and its index in the lace. The caller
 can apply track defaults or codec timing to derive individual timestamps.
 BlockGroup duration is in timestamp ticks and discard padding is in nanoseconds.
 
-`webm.write_init` writes a single-track WebM header for Opus, VP8, VP9 or AV1.
+`webm.write_init` writes a WebM header with one TrackEntry per `webm.Track`
+(up to 64, numbered distinctly) for Opus, VP8, VP9 or AV1.
 `webm.write_frame` writes the Cluster and SimpleBlock prefix for one frame.
+To put audio and video in one file, queue each track's frames in its own
+timestamp order in a `webm.Interleave` and write frames in the order
+`webm.next` releases them. It releases the earliest queued frame once every
+open track has a frame queued, or once more than its limit wait; `webm.close`
+stops a finished track from holding the others back. Released timestamps never
+decrease.
 For a keyframe with discard padding, send the prefix, frame and suffix from
 `webm.write_padded_frame` in that order. The caller keeps all frame payloads.

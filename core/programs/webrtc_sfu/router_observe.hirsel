@@ -1,0 +1,41 @@
+// RTC-9 readers for a unit that holds no session: the recorder (media_record)
+// applies the control order to an observer router and reads what it records.
+/// A router that holds no session (media_record): every seat is remote to it.
+/// It applies the control order like any unit, so it knows the rooms, seats,
+/// publications, down-tracks and fences (RTC-7), and makes no post of its own.
+pub fn observer(r: Random) -> Router {
+    on_unit(r, UNITS_MAX)
+}
+
+/// A down-track as every unit knows it.
+pub type DownInfo: key {
+    room: peer.RoomId,
+    sub: peer.Gen,
+    publication: PublicationId,
+    target: Target
+}
+
+/// The down-tracks whose subscriber's home is unit `home`.
+pub fn downs_on(r: Router, home: u16) -> List[DownInfo] {
+    let mut out: List[DownInfo] = list.new()
+    for d in r.downs {
+        if d.home == home {
+            list.push(mut out, DownInfo(room: d.room, sub: d.sub, publication: d.publication, target: d.target))
+        }
+    }
+    out
+}
+
+/// A publication as every unit knows it: its owner, the owner's home unit and
+/// its shape.
+pub type PublicationInfo: key {
+    owner: peer.Gen,
+    home: u16,
+    shape: Shape
+}
+
+pub fn publication_info(r: Router, room: peer.RoomId, p: PublicationId) -> Option[PublicationInfo] {
+    let pi = publication_at(r, room, p)?
+    let x = r.publications[pi]
+    Some(PublicationInfo(owner: x.owner, home: x.home, shape: Shape(codec: x.codec, pli: x.pli, fir: x.fir, encodings: int.narrow(list.len(x.encodings)))))
+}

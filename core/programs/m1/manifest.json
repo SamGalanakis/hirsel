@@ -25,6 +25,13 @@
           "signatures": true
         },
         {
+          "file": "core/std/bitset.hirsel",
+          "modules": [
+            "bitset"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/std/char.hirsel",
           "modules": [
             "char"

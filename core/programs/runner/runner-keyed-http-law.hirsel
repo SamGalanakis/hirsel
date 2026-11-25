@@ -123,62 +123,64 @@ fn keyed_http_law_drive(take job: KeyedHttpLawDrive) waits {
     let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
     let server_job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock, random, tasks, place: definition, previous: None, retired: take retired, stage: 0u8, stop: None)
     let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
+    // The claim reads the Idempotency-Key whole; its streams are minted at the test clock's 100.
+    let birth = host.wall_ms(clock)
     let until = Some(b"10100")
     if stage == 3u8 {
         // L20 (K-5, K-6): principal_keys_max 1 and keys_max 2 on each of two ops.
         // A full scope of live rows is 503 with nothing committed, so the
         // counter the bodies increment counts only the admitted sends.
-        keyed_http_expect(http_law_post(net, clock, address, "/first", b"alice", 0u32, 0u64, b"{}", 1000u32), 201u16, false, b"\"1\"", until, "alice's first claim did not admit")
-        let saturated = http_law_post(net, clock, address, "/first", b"alice", 1u32, 0u64, b"{}", 1000u32)
+        keyed_http_expect(http_law_post(net, clock, address, "/first", b"alice", http_law_stream(birth, 0u32), 0u64, b"{}", 1000u32), 201u16, false, b"\"1\"", until, "alice's first claim did not admit")
+        let saturated = http_law_post(net, clock, address, "/first", b"alice", http_law_stream(birth, 1u32), 0u64, b"{}", 1000u32)
         keyed_http_expect(saturated, 503u16, false, saturated.body, None, "a saturated principal was not refused with 503")
         if saturated.retry_after != Some(1u64) {
             fail("the quota 503 carried no Retry-After")
         }
-        keyed_http_expect(http_law_post(net, clock, address, "/first", b"bob", 1u32, 0u64, b"{}", 1000u32), 201u16, false, b"\"2\"", until, "another principal did not admit beside a saturated one")
-        keyed_http_expect(http_law_post(net, clock, address, "/second", b"alice", 1u32, 0u64, b"{}", 1000u32), 201u16, false, b"\"3\"", until, "a saturated principal on one op blocked another op")
-        let op_full = http_law_post(net, clock, address, "/first", b"carol", 2u32, 0u64, b"{}", 1000u32)
+        keyed_http_expect(http_law_post(net, clock, address, "/first", b"bob", http_law_stream(birth, 1u32), 0u64, b"{}", 1000u32), 201u16, false, b"\"2\"", until, "another principal did not admit beside a saturated one")
+        keyed_http_expect(http_law_post(net, clock, address, "/second", b"alice", http_law_stream(birth, 1u32), 0u64, b"{}", 1000u32), 201u16, false, b"\"3\"", until, "a saturated principal on one op blocked another op")
+        let op_full = http_law_post(net, clock, address, "/first", b"carol", http_law_stream(birth, 2u32), 0u64, b"{}", 1000u32)
         keyed_http_expect(op_full, 503u16, false, op_full.body, None, "a full op of live rows admitted a free principal")
-        keyed_http_expect(http_law_post(net, clock, address, "/first", b"alice", 0u32, 0u64, b"{}", 1000u32), 201u16, true, b"\"1\"", until, "the 503s disturbed alice's live claim")
+        keyed_http_expect(http_law_post(net, clock, address, "/first", b"alice", http_law_stream(birth, 0u32), 0u64, b"{}", 1000u32), 201u16, true, b"\"1\"", until, "the 503s disturbed alice's live claim")
     } else if stage == 1u8 {
         // The first of two deploys: the result type changed under a new op,
         // and the old op answers through its Retired binding.
-        keyed_http_expect(http_law_post(net, clock, address, "/old", b"token", 0u32, 0u64, b"{}", 1000u32), 201u16, true, b"\"1\"", until, "the retired route lost its reply across the result-type change")
-        keyed_http_expect(http_law_post(net, clock, address, "/new", b"token", 0u32, 0u64, b"{}", 1000u32), 201u16, false, b"\"n=2\"", until, "the changed entry did not run as a new op")
+        keyed_http_expect(http_law_post(net, clock, address, "/old", b"token", http_law_stream(birth, 0u32), 0u64, b"{}", 1000u32), 201u16, true, b"\"1\"", until, "the retired route lost its reply across the result-type change")
+        keyed_http_expect(http_law_post(net, clock, address, "/new", b"token", http_law_stream(birth, 0u32), 0u64, b"{}", 1000u32), 201u16, false, b"\"n=2\"", until, "the changed entry did not run as a new op")
     } else {
         let reopening = stage == 2u8
-        let rejected = http_law_post(net, clock, address, "/old", b"bad", 0u32, 0u64, b"{}", 1000u32)
+        let rejected = http_law_post(net, clock, address, "/old", b"bad", http_law_stream(birth, 0u32), 0u64, b"{}", 1000u32)
         if rejected.status != 401u16 || rejected.committed || !none(rejected.dedup_until) {
             fail("claim refusal was presented as a committed reply")
         }
-        let first = http_law_post(net, clock, address, "/old", b"token", 0u32, 0u64, b"{}", 1000u32)
+        let first = http_law_post(net, clock, address, "/old", b"token", http_law_stream(birth, 0u32), 0u64, b"{}", 1000u32)
         if first.status != 201u16 || !first.committed || first.replayed != reopening || first.body != b"\"1\"" || first.dedup_until != Some(b"10100") {
             fail("keyed route did not commit one effect")
         }
-        let duplicate = http_law_post(net, clock, address, "/.hirsel/op/increment", b"token", 1u32, 0u64, b"{\"name\":\"saved\"}", 1000u32)
+        let duplicate = http_law_post(net, clock, address, "/.hirsel/op/increment", b"token", http_law_stream(birth, 1u32), 0u64, b"{\"name\":\"saved\"}", 1000u32)
         if duplicate.status != 201u16 || !duplicate.committed || !duplicate.replayed || duplicate.body != first.body || duplicate.dedup_until != first.dedup_until {
             fail("alias did not return the original claim's saved reply")
         }
-        let mismatch = http_law_post(net, clock, address, "/old", b"token", 2u32, 0u64, b"{\"name\":\"wrong\"}", 1000u32)
+        let mismatch = http_law_post(net, clock, address, "/old", b"token", http_law_stream(birth, 2u32), 0u64, b"{\"name\":\"wrong\"}", 1000u32)
         if mismatch.status != 422u16 || mismatch.committed || !none(mismatch.dedup_until) || mismatch.body != b"{\"refused\":\"request_mismatch\"}" {
             fail("different arguments reached the body of a live claim")
         }
         if reopening {
-            let absent = http_law_post(net, clock, address, "/.hirsel/op/increment", b"other", 3u32, 0u64, b"{}", 1000u32)
+            let absent = http_law_post(net, clock, address, "/.hirsel/op/increment", b"other", http_law_stream(birth, 3u32), 0u64, b"{}", 1000u32)
             if absent.status != 500u16 || absent.committed || !none(absent.dedup_until) || absent.body != b"{\"fault\":\"gone\"}" {
                 fail("absent retired claim was presented as a committed reply")
             }
             // The Admitted half of the pair on the same retired route: a changed
             // argument is 422, an equal one is recovered as gone (K-9) and
             // commits that reply, which a retry then replays.
-            let held_mismatch = http_law_post(net, clock, address, "/old", b"held", 4u32, 0u64, b"{\"name\":\"wrong\"}", 1000u32)
+            let held_mismatch = http_law_post(net, clock, address, "/old", b"held", http_law_stream(birth, 4u32), 0u64, b"{\"name\":\"wrong\"}", 1000u32)
             if held_mismatch.status != 422u16 || held_mismatch.committed || held_mismatch.body != b"{\"refused\":\"request_mismatch\"}" {
                 fail("an Admitted retired claim took changed arguments")
             }
-            let held = http_law_post(net, clock, address, "/old", b"held", 5u32, 0u64, b"{}", 1000u32)
+            let held = http_law_post(net, clock, address, "/old", b"held", http_law_stream(birth, 5u32), 0u64, b"{}", 1000u32)
             if held.status != 500u16 || !held.committed || held.body != b"{\"fault\":\"gone\"}" || held.dedup_until != until {
                 fail("an Admitted retired claim was not recovered as gone")
             }
-            keyed_http_expect(http_law_post(net, clock, address, "/.hirsel/op/increment", b"held", 6u32, 0u64, b"{}", 1000u32), 500u16, true, b"{\"fault\":\"gone\"}", until, "the recovered gone reply was not replayed")
+            keyed_http_expect(http_law_post(net, clock, address, "/.hirsel/op/increment", b"held", http_law_stream(birth, 6u32), 0u64, b"{}", 1000u32), 500u16, true, b"{\"fault\":\"gone\"}", until, "the recovered gone reply was not replayed")
         }
     }
     let _ = std.task.cancel_join(take server)
@@ -282,7 +284,7 @@ type KeyedHorizonPost: send {
     net: Net,
     clock: Clock,
     address: Addr,
-    stream: u32,
+    stream: store.StreamId,
     replayed: bool,
     body: Bytes,
     dedup_until: Bytes
@@ -309,6 +311,7 @@ type KeyedHorizonDrive: send {
 fn keyed_horizon_drive(take job: KeyedHorizonDrive) waits {
     let KeyedHorizonDrive(head: take head, publisher: take pub_to, clock: time, hand: take clock_hand, random, tasks, net) = take job
     let mut wall = take clock_hand
+    let birth = host.wall_ms(time)
     let definition: HttpOpPlace = code.describe(keyed_http_place)
     let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
     let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
@@ -317,7 +320,7 @@ fn keyed_horizon_drive(take job: KeyedHorizonDrive) waits {
     let server_job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock: time, random, tasks, place: definition, previous: None, retired: None, stage: 0u8, stop: None)
     let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
     // The first reply commits at 100, so retention 10000 ends it at 10100.
-    let first = task.spawn(tasks, bytes 1048576u64, KeyedHorizonPost(net, clock: time, address, stream: 0u32, replayed: false, body: b"\"1\"", dedup_until: b"10100"), keyed_horizon_post)
+    let first = task.spawn(tasks, bytes 1048576u64, KeyedHorizonPost(net, clock: time, address, stream: http_law_stream(birth, 0u32), replayed: false, body: b"\"1\"", dedup_until: b"10100"), keyed_horizon_post)
     result.unwrap(channel.send(head, l15_head_request(waiting)))
     if let Error(_) = task.join(take first) {
         fail("first keyed post failed")
@@ -325,7 +328,7 @@ fn keyed_horizon_drive(take job: KeyedHorizonDrive) waits {
     // A retry the relay accepts at 10099 reaches the head at 10100: the
     // deciding admission reads 10100, so it is a new operation, not a replay.
     clock.set_wall(mut wall, 10099u64)
-    let retry = task.spawn(tasks, bytes 1048576u64, KeyedHorizonPost(net, clock: time, address, stream: 1u32, replayed: false, body: b"\"2\"", dedup_until: b"20100"), keyed_horizon_post)
+    let retry = task.spawn(tasks, bytes 1048576u64, KeyedHorizonPost(net, clock: time, address, stream: http_law_stream(birth, 1u32), replayed: false, body: b"\"2\"", dedup_until: b"20100"), keyed_horizon_post)
     let held = l15_head_request(waiting)
     clock.set_wall(mut wall, 10100u64)
     result.unwrap(channel.send(head, take held))
@@ -370,7 +373,7 @@ type KeyedHeldPost: send {
     net: Net,
     clock: Clock,
     address: Addr,
-    stream: u32,
+    stream: store.StreamId,
     data: Bytes,
     status: u16,
     body: Bytes,
@@ -386,6 +389,7 @@ fn keyed_held_post(take job: KeyedHeldPost) waits {
 fn keyed_held_drive(take job: KeyedHorizonDrive) waits {
     let KeyedHorizonDrive(head: take head, publisher: take pub_to, clock: time, hand: take clock_hand, random, tasks, net) = take job
     let mut wall = take clock_hand
+    let birth = host.wall_ms(time)
     let definition: HttpOpPlace = code.describe(keyed_http_place)
     let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
     let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
@@ -395,14 +399,14 @@ fn keyed_held_drive(take job: KeyedHorizonDrive) waits {
     let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
     // A commits "1" at 100, expiring at 10100. Its Told is held after the
     // commit, so A's delivery is still owed when the claim expires.
-    let first = task.spawn(tasks, bytes 1048576u64, KeyedHeldPost(net, clock: time, address, stream: 0u32, data: b"{}", status: 201u16, body: b"\"1\"", dedup_until: b"10100"), keyed_held_post)
+    let first = task.spawn(tasks, bytes 1048576u64, KeyedHeldPost(net, clock: time, address, stream: http_law_stream(birth, 0u32), data: b"{}", status: 201u16, body: b"\"1\"", dedup_until: b"10100"), keyed_held_post)
     let (during, held_from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(1u64)
     let answer_to = l15_forward(head, during, l15_head_request(waiting))
     let told = result.unwrap(channel.receive(held_from))
     // At 10100 the same key with other arguments is a new claim: the entry
     // refuses the name, a committed 422 under error_status, expiring at 20100.
     clock.set_wall(mut wall, 10100u64)
-    let second = task.spawn(tasks, bytes 1048576u64, KeyedHeldPost(net, clock: time, address, stream: 1u32, data: b"{\"name\":\"other\"}", status: 422u16, body: b"null", dedup_until: b"20100"), keyed_held_post)
+    let second = task.spawn(tasks, bytes 1048576u64, KeyedHeldPost(net, clock: time, address, stream: http_law_stream(birth, 1u32), data: b"{\"name\":\"other\"}", status: 422u16, body: b"null", dedup_until: b"20100"), keyed_held_post)
     result.unwrap(channel.send(head, l15_head_request(waiting)))
     if let Error(_) = task.join(take second) {
         fail("the new claim after expiry did not get its own outcome")

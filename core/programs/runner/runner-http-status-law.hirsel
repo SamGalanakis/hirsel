@@ -58,6 +58,8 @@ fn test_l14(c: Clock, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     }
     let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
     let server = task.spawn(tasks, bytes 4194304u64, HttpStatusListener(listener: take listener, clock: c, tasks: tasks), http_status_serve)
+    // The status route reads only the position; the stream is the law's minted one.
+    let stream = http_law_stream(host.wall_ms(c), 0u32)
     let mut position = 0u64
     for (status, body, retry, committed) in[
         (404u16, b"", false, false),
@@ -77,7 +79,7 @@ fn test_l14(c: Clock, tasks: Tasks, n: Net) -> Result[(), ()] waits {
         (200u16, b"\"9\"", false, true),
         (422u16, b"{\"refused\":\"request_mismatch\"}", false, true),
     ] {
-        let got = http_law_post(n, c, addr, "/status", b"", 0u32, position, b"", 1000u32)
+        let got = http_law_post(n, c, addr, "/status", b"", stream, position, b"", 1000u32)
         if got.status != status || got.body != body || (got.retry_after == Some(1u64)) != retry || got.committed != committed || got.replayed != (position == 14u64) {
             fail("L14 status, response JSON or header differs from B-7")
         }

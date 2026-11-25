@@ -1095,12 +1095,12 @@ pub fn bind[G, H](mut r: Registry[G, H], take b: HttpBinding) -> Result[(), Bind
 ### B-6: Retry identity under `Stream`
 
 **The header.** A `Stream` binding requires `Idempotency-Key: "<stream>.<position>"`, an RFC 8941 sf-string.
-- `stream` is canonical decimal and at most 2^32−1. `position` is canonical decimal and at most 2^64−1.
+- `stream` is 32 lowercase hexadecimal digits: the StreamId `t ‖ n`, each a big-endian u64, where `t` is the keyed time the client minted it at, from Welcome (STORE-SPEC §1.8 S7), and `n` its nonce. `position` is canonical decimal and at most 2^64−1.
 - A missing header gives 400. Any other spelling gives 400.
 
 **The Caller.** The runner authenticates nothing (RUNNER-SPEC v2.24 rule 13). The request's `Authorization` value goes, unread, to the application's binding.
 - A binding's `BindRefusal.Rejected` gives 401. `BindRefusal.Unavailable` gives 503 with `Retry-After: 5` (RUNNER-SPEC §15.1). With no binding, the request is its own anonymous session with a fresh Caller, so a `Stream` binding's dedup across requests needs an application binding. There is no `POST /.hirsel/principal`.
-- The stream key is the WebSocket one: `caller_key ‖ u32-BE(stream)` (RUNNER-SPEC v2.15). A credential the binding maps to one Caller gives the same streams over both transports (RUNNER-SPEC law L29).
+- The stream key is the WebSocket one: `caller_key ‖ t ‖ n` (RUNNER-SPEC v2.15, STORE-SPEC §1.8). A credential the binding maps to one Caller gives the same streams over both transports (RUNNER-SPEC law L29).
 - The generated client sends `Hirsel-Expected-Caller` (decision 56). Its value is padded RFC 4648 base64 of the Caller that Welcome bound: one issuer byte, one subject length byte, and that many subject bytes (maximum 64). Runner compares it to the Caller returned by its HTTP binding before preparing or forwarding. A malformed or repeated header gives 400. A changed Caller gives 403 `{"refused":"fenced"}` and the client treats the pending answer as locally unknown, as F6 does. A raw request may omit the header. It then uses whatever Caller the credential maps to at the time of the request. If that Caller has changed, an old key addresses the new Caller's stream.
 
 Each anonymous Stream request retires its Caller after its response or transport failure. The connection records its subject before the first Ask. After the write, or after the supervisor joins a failed or cancelled owner, it fences the relay with `RelayEnd`. The relay acknowledges after taking the request's Asks. The task sends `RetireCaller` only after this acknowledgement, and holds the connection slot until retirement has been sent. A relay or head that has already ended lets cleanup finish. The next open reclaims unreachable anonymous rows.

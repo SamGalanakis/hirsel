@@ -77,6 +77,8 @@ fn http_op_bind_value(credential: Bytes, subject: Bytes) -> Result[BoundCaller, 
 
 type HttpOpPlace = StaticFn[fn(mut Registry[(), HttpLawHandles]) -> Result[(), RegisterError]]
 
+const HTTP_OP_FAULT_STAGE: u8 = 4u8
+
 type HttpOpListener: send {
     relay: Relay,
     listener: Listener,
@@ -100,7 +102,8 @@ fn http_op_serve(take job: HttpOpListener) waits {
         Some(take rules) => result.unwrap(http_router_with_retirements(reg, previous, rules, take builder)),
         None => result.unwrap(http_router(reg, previous, take builder)),
     }
-    let routes = if stage == 2u8 {
+    // Stage 4 is the L15 retire law's listener (fault routes, no binding); 0-2 are L-op's deploys.
+    let routes = if stage == HTTP_OP_FAULT_STAGE {
         let mut fault_routes: std.router.Builder[HttpConnection[(), HttpLawHandles]] = std.router.builder()
         result.unwrap(std.router.add_tagged(mut fault_routes, "POST", "/old", 1u64, std.router.raw(http_generated_handler)))
         result.unwrap(std.router.add_tagged(mut fault_routes, "POST", "/fail", 1u64, std.router.raw(l15_fail_after_call)))
@@ -113,7 +116,7 @@ fn http_op_serve(take job: HttpOpListener) waits {
         let registry_copy = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
         let supplied: Option[BindGrant[()]] = match stage {
             1u8 => grant_binds_of(binds, wire(code.describe(http_op_bind_changed), 8192u64, DEFAULT_STEPS)),
-            2u8 => None,
+            4u8 => None, // HTTP_OP_FAULT_STAGE
             _ => grant_binds_of(binds, wire(code.describe(http_op_bind_original), 8192u64, DEFAULT_STEPS)),
         }
         let mut client_state = http_connection(take registry_copy, arc.share(plans), take supplied, relay_endpoint(endpoint), random, clock, tasks, 65536u64)
@@ -138,6 +141,9 @@ type HttpOpDrive: send {
     place: HttpOpPlace,
     previous: Option[Describe],
     stage: u8,
+    // Every stage names stream 0 minted at the test's start, so a restart's retry addresses
+    // the stream the first stage committed on.
+    birth: u64,
 }
 
 fn http_op_drive(take d: HttpOpDrive) waits {
@@ -147,52 +153,53 @@ fn http_op_drive(take d: HttpOpDrive) waits {
     }
     let (take relay, take relay_task) = result.unwrap(start_relay(registry_copy, d.actions, d.publisher, d.clock, d.tasks, RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 1u64, arg_max: 1024u64)))
     let (take listener, address) = result.unwrap(host.listen(d.net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
-    let HttpOpDrive(actions: take actions, publisher: take pub_to, net, clock, random, tasks, place: definition, previous: take prior, stage) = take d
+    let HttpOpDrive(actions: take actions, publisher: take pub_to, net, clock, random, tasks, place: definition, previous: take prior, stage, birth) = take d
+    let stream = http_law_stream(birth, 0u32)
     let job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock, random, tasks, place: definition, previous: take prior, retired: None, stage, stop: None)
     let server = task.spawn(tasks, bytes 4194304u64, take job, http_op_serve)
     match stage {
         0u8 => {
-            let read = http_law_request("GET", net, clock, address, "/read", b"token", 0u32, 0u64, b"", 1000u32, None)
+            let read = http_law_request("GET", net, clock, address, "/read", b"token", stream, 0u64, b"", 1000u32, None)
             let body = b"{\"version\":\"1\",\"complete\":[0],\"groups\":[{\"sub\":0,\"value\":\"7\",\"rows\":[]}],\"outcomes\":[]}"
             if read.status != 200u16 || read.body != body {
                 fail("L-op the one-shot read lost its completing Batch")
             }
-            let api = http_law_request("GET", net, clock, address, "/.hirsel/openapi.json", b"", 0u32, 0u64, b"", 1000u32, None)
+            let api = http_law_request("GET", net, clock, address, "/.hirsel/openapi.json", b"", stream, 0u64, b"", 1000u32, None)
             let document = result.unwrap(string.from_utf8(std.http.copy_bytes(api.body)))
             if api.status != 200u16 {
                 fail("L-op OpenAPI route did not serve the registry")
             }
             let _ = result.unwrap(std.json.size(document))
-            let first = http_law_post(net, clock, address, "/old", b"token", 0u32, 0u64, b"{}", 1000u32)
-            let second = http_law_post(net, clock, address, "/.hirsel/op/remove", b"token", 0u32, 0u64, b"{\"name\":\"saved\"}", 1000u32)
+            let first = http_law_post(net, clock, address, "/old", b"token", stream, 0u64, b"{}", 1000u32)
+            let second = http_law_post(net, clock, address, "/.hirsel/op/remove", b"token", stream, 0u64, b"{\"name\":\"saved\"}", 1000u32)
             if first.status != 201u16 || first.body != b"\"1\"" || first.replayed || second.status != 201u16 || second.body != first.body || !second.replayed {
                 fail("L-op two operations changed a single store identity")
             }
         },
         1u8 => {
-            let fenced = http_law_post_with_caller(net, clock, address, "/.hirsel/op/keep", b"token", 0u32, 0u64, b"{}", 1000u32, Some("BwFB"))
+            let fenced = http_law_post_with_caller(net, clock, address, "/.hirsel/op/keep", b"token", stream, 0u64, b"{}", 1000u32, Some("BwFB"))
             if fenced.status != 403u16 || fenced.body != b"{\"refused\":\"fenced\"}" || fenced.committed {
                 fail("L-op a changed Caller was not fenced after restart")
             }
-            let retried = http_law_post(net, clock, address, "/.hirsel/op/keep", b"original-token", 0u32, 0u64, b"{}", 1000u32)
+            let retried = http_law_post(net, clock, address, "/.hirsel/op/keep", b"original-token", stream, 0u64, b"{}", 1000u32)
             if retried.status != 201u16 || !retried.replayed || retried.body != b"\"1\"" {
                 fail("L-op moving the live route changed its alias identity")
             }
-            let stopped = http_law_post(net, clock, address, "/.hirsel/op/remove", b"token", 0u32, 0u64, b"{}", 1000u32)
+            let stopped = http_law_post(net, clock, address, "/.hirsel/op/remove", b"token", stream, 0u64, b"{}", 1000u32)
             if stopped.status != 404u16 {
                 fail("L-op a removed alias still routed for a live entry")
             }
-            let current = http_law_post(net, clock, address, "/new", b"token", 0u32, 0u64, b"{}", 1000u32)
+            let current = http_law_post(net, clock, address, "/new", b"token", stream, 0u64, b"{}", 1000u32)
             if current.status != 201u16 || current.replayed || current.body != b"\"2\"" {
                 fail("L-op the Caller fence or removed alias consumed the new Caller's position")
             }
         },
         _ => {
-            let retry = http_law_post(net, clock, address, "/.hirsel/op/keep", b"token", 0u32, 0u64, b"{}", 1000u32)
+            let retry = http_law_post(net, clock, address, "/.hirsel/op/keep", b"token", stream, 0u64, b"{}", 1000u32)
             if retry.status != 201u16 || retry.body != b"\"1\"" || !retry.replayed {
                 fail("L-op the gone alias did not replay with its previous status and default")
             }
-            let fresh = http_law_post(net, clock, address, "/.hirsel/op/keep", b"token", 0u32, 1u64, b"{}", 1000u32)
+            let fresh = http_law_post(net, clock, address, "/.hirsel/op/keep", b"token", stream, 1u64, b"{}", 1000u32)
             if fresh.status != 500u16 || fresh.body != b"{\"fault\":\"gone\"}" || !fresh.committed || fresh.replayed {
                 fail("L-op a fresh identity through a gone alias did not record Gone")
             }
@@ -203,7 +210,7 @@ fn http_op_drive(take d: HttpOpDrive) waits {
     let _ = take actions
 }
 
-fn http_op_cycle(directory: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, place: HttpOpPlace, stage: u8) waits {
+fn http_op_cycle(directory: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, place: HttpOpPlace, stage: u8, birth: u64) waits {
     let options = result.unwrap(store.sized(Directory, 2147483648u64))
     let mut db = result.unwrap(store.open(tasks, directory, c, r, options))
     let prepared = head_prepare(mut db, Install(fate.none()), false, place, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks)
@@ -218,7 +225,7 @@ fn http_op_cycle(directory: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, plac
     }
     let (to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(32u64)
     let mail = result.unwrap(mailbox(16u64))
-    let drive = HttpOpDrive(actions: take to, publisher: post(mail), net: n, clock: c, random: r, tasks: tasks, place: place, previous: take previous, stage: stage)
+    let drive = HttpOpDrive(actions: take to, publisher: post(mail), net: n, clock: c, random: r, tasks: tasks, place: place, previous: take previous, stage: stage, birth: birth)
     let work = task.spawn(tasks, bytes 16777216u64, take drive, http_op_drive)
     result.unwrap(run_head(take db, take registry_copy, take identity, take handles, place, HTTP_LAW_PLACE_BYTES, take inbox, take mail, tasks, 1048576u64, None, None))
     match task.join(take work) {
@@ -255,9 +262,10 @@ fn test_l_op(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(
     }
     let mut name = string.with_capacity(32u64)
     let directory = result.unwrap(host.mkdtemp(parent, mut name))
-    http_op_cycle(directory, c, r, tasks, n, code.describe(http_op_original), 0u8)
-    http_op_cycle(directory, c, r, tasks, n, code.describe(http_op_moved), 1u8)
-    http_op_cycle(directory, c, r, tasks, n, code.describe(http_op_gone), 2u8)
+    let birth = host.wall_ms(c)
+    http_op_cycle(directory, c, r, tasks, n, code.describe(http_op_original), 0u8, birth)
+    http_op_cycle(directory, c, r, tasks, n, code.describe(http_op_moved), 1u8, birth)
+    http_op_cycle(directory, c, r, tasks, n, code.describe(http_op_gone), 2u8, birth)
     result.unwrap(std.dir.remove_all(parent, name))
     Ok(())
 }

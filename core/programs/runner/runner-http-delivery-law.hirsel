@@ -648,7 +648,7 @@ fn l15_retire_drive(take seed: L15RetireDrive) waits {
     let (take endpoint, take relay_task, _joined) = l15_start_relay(reg, intercept, pub_to, clock, tasks, cfg)
     let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
     let (stop, stop_from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
-    let job = HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks, place: code.describe(l15_place), previous: None, retired: None, stage: 2u8, stop: Some(take stop_from))
+    let job = HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks, place: code.describe(l15_place), previous: None, retired: None, stage: HTTP_OP_FAULT_STAGE, stop: Some(take stop_from))
     let server = task.spawn(tasks, bytes 4194304u64, take job, http_op_serve)
     let until = std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64)
     let mut client = result.unwrap(std.http_client.open(net, address, "a", clock, until))
@@ -771,11 +771,13 @@ type DeliveryCarryDrive: send {
     random: Random,
     tasks: Tasks,
     net: Net,
-    stage: u8
+    stage: u8,
+    birth: u64
 }
 
 fn delivery_carry_drive(take job: DeliveryCarryDrive) waits {
-    let DeliveryCarryDrive(head: take head, publisher: take pub_to, clock, random, tasks, net, stage) = take job
+    let DeliveryCarryDrive(head: take head, publisher: take pub_to, clock, random, tasks, net, stage, birth) = take job
+    let stream = http_law_stream(birth, 6u32)
     let definition: HttpOpPlace = code.describe(http_op_original)
     let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
     let (take relay, take relay_task) = result.unwrap(start_relay(reg, head, pub_to, clock, tasks, RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 2u64, arg_max: 1024u64)))
@@ -785,27 +787,27 @@ fn delivery_carry_drive(take job: DeliveryCarryDrive) waits {
     if stage == 0u8 {
         // The binding refuses the credential before any head: 401 with no
         // attempt marker, no committed marker and nothing recorded.
-        let refused = http_law_post(net, clock, address, "/old", b"expired", 6u32, 0u64, b"{}", 1000u32)
+        let refused = http_law_post(net, clock, address, "/old", b"expired", stream, 0u64, b"{}", 1000u32)
         if refused.status != 401u16 || refused.committed || refused.replayed || !none(refused.refused) || list.len(refused.body) != 0u64 {
             fail("a binding 401 carried a marker or a body")
         }
         // The same identity with a credential the binding accepts runs once.
-        let accepted = http_law_post(net, clock, address, "/old", b"token", 6u32, 0u64, b"{}", 1000u32)
+        let accepted = http_law_post(net, clock, address, "/old", b"token", stream, 0u64, b"{}", 1000u32)
         if accepted.status != 201u16 || !accepted.committed || accepted.replayed || accepted.body != b"\"1\"" {
             fail("the refused identity was recorded by the binding 401")
         }
-        let again = http_law_post(net, clock, address, "/old", b"token", 6u32, 0u64, b"{}", 1000u32)
+        let again = http_law_post(net, clock, address, "/old", b"token", stream, 0u64, b"{}", 1000u32)
         if again.status != 201u16 || !again.committed || !again.replayed || again.body != b"\"1\"" {
             fail("the identity after a binding 401 ran twice")
         }
     } else if stage == 1u8 {
-        let first = http_law_post(net, clock, address, "/old", b"token", 6u32, 0u64, b"{}", 1000u32)
+        let first = http_law_post(net, clock, address, "/old", b"token", stream, 0u64, b"{}", 1000u32)
         if first.status != 201u16 || !first.committed || first.replayed || first.body != b"\"1\"" {
             fail("the stream's first send did not commit")
         }
     } else {
-        let aged = http_law_post(net, clock, address, "/old", b"token", 6u32, 0u64, b"{}", 1000u32)
-        if aged.status != 410u16 || aged.committed || aged.replayed || aged.refused != Some(b"history_unavailable;key=\"00000000000000000000000000000006.0\"") {
+        let aged = http_law_post(net, clock, address, "/old", b"token", stream, 0u64, b"{}", 1000u32)
+        if aged.status != 410u16 || aged.committed || aged.replayed || aged.refused != Some(b"history_unavailable;key=\"00000000000000640000000000000006.0\"") {
             fail("an aged stream's retry was not a marked 410")
         }
     }
@@ -813,7 +815,7 @@ fn delivery_carry_drive(take job: DeliveryCarryDrive) waits {
     let _ = std.task.cancel_join(take relay_task)
 }
 
-fn delivery_carry_cycle(dir: Dir, time: Clock, random: Random, tasks: Tasks, net: Net, retention_ms: u64, stage: u8) waits {
+fn delivery_carry_cycle(dir: Dir, time: Clock, random: Random, tasks: Tasks, net: Net, retention_ms: u64, stage: u8, birth: u64) waits {
     let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
     options.stream_retention_ms = retention_ms
     let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
@@ -821,7 +823,7 @@ fn delivery_carry_cycle(dir: Dir, time: Clock, random: Random, tasks: Tasks, net
     let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
-    let seed = DeliveryCarryDrive(head: take head, publisher: post(mail), clock: time, random, tasks, net, stage)
+    let seed = DeliveryCarryDrive(head: take head, publisher: post(mail), clock: time, random, tasks, net, stage, birth)
     let work = task.spawn(tasks, bytes 16777216u64, take seed, delivery_carry_drive)
     let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
     if let Error(take problem) = started {
@@ -842,13 +844,13 @@ fn http_binding_401_unmarked_records_nothing(d: Dir, random: Random, tasks: Task
     let (time, take wall) = provide.clock(0u64, 100u64)
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(d, mut name))
-    delivery_carry_cycle(dir, time, random, tasks, net, 3600000u64, 0u8)
+    delivery_carry_cycle(dir, time, random, tasks, net, 3600000u64, 0u8, host.wall_ms(time))
     result.unwrap(std.dir.remove_all(d, name))
     let _ = take wall
     Ok(())
 }
 
-// Carry 8, HTTP half: stream t = 0 commits at wall 100 under retention
+// Carry 8, HTTP half: stream t = 100, minted at wall 100, commits there under retention
 // 3600000. At wall 3600100 its age floor is 100, so the same identity is a
 // marked 410. Reopened with retention 10800000 the floor would be absent, but
 // the recorded cutoff keeps the marked 410 instead of a replayed 201.
@@ -858,10 +860,11 @@ fn http_age_refusal_survives_longer_retention(d: Dir, random: Random, tasks: Tas
     let mut wall_hand = take wall
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(d, mut name))
-    delivery_carry_cycle(dir, time, random, tasks, net, 3600000u64, 1u8)
+    let birth = host.wall_ms(time)
+    delivery_carry_cycle(dir, time, random, tasks, net, 3600000u64, 1u8, birth)
     clock.set_wall(mut wall_hand, 3600100u64)
-    delivery_carry_cycle(dir, time, random, tasks, net, 3600000u64, 2u8)
-    delivery_carry_cycle(dir, time, random, tasks, net, 10800000u64, 2u8)
+    delivery_carry_cycle(dir, time, random, tasks, net, 3600000u64, 2u8, birth)
+    delivery_carry_cycle(dir, time, random, tasks, net, 10800000u64, 2u8, birth)
     result.unwrap(std.dir.remove_all(d, name))
     let _ = take wall_hand
     Ok(())
@@ -870,12 +873,13 @@ fn http_age_refusal_survives_longer_retention(d: Dir, random: Random, tasks: Tas
 type InvisiblePost: send {
     net: Net,
     clock: Clock,
-    address: Addr
+    address: Addr,
+    stream: store.StreamId
 }
 
 fn invisible_post(take job: InvisiblePost) waits {
-    let InvisiblePost(net, clock, address) = take job
-    let lost = http_law_post(net, clock, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32)
+    let InvisiblePost(net, clock, address, stream) = take job
+    let lost = http_law_post(net, clock, address, "/old", b"token", stream, 0u64, b"{}", 1000u32)
     if lost.status != 409u16 || lost.committed || lost.replayed || lost.retry_after != Some(1u64) || !none(lost.refused) {
         fail("an owed send past its deadline was not an unmarked 409")
     }
@@ -884,6 +888,8 @@ fn invisible_post(take job: InvisiblePost) waits {
 fn invisible_retry_drive(take job: KeyedHorizonDrive) waits {
     let KeyedHorizonDrive(head: take head, publisher: take pub_to, clock: time, hand: take clock_hand, random, tasks, net) = take job
     let mut hand_of = take clock_hand
+    // X, Y and the new stream are minted at wall 100, so Y (n 8) is newer than X (n 7).
+    let birth = host.wall_ms(time)
     let definition: HttpOpPlace = code.describe(http_op_original)
     let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
     let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
@@ -893,7 +899,7 @@ fn invisible_retry_drive(take job: KeyedHorizonDrive) waits {
     let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
     // X's first delivery is held before the head until its 1000 ms send
     // deadline passes, so its client sees only the unmarked 409.
-    let first = task.spawn(tasks, bytes 1048576u64, InvisiblePost(net, clock: time, address), invisible_post)
+    let first = task.spawn(tasks, bytes 1048576u64, InvisiblePost(net, clock: time, address, stream: http_law_stream(birth, 7u32)), invisible_post)
     let held = l15_head_request(waiting)
     clock.advance_to(mut hand_of, 1001000000u64)
     if let Error(_) = task.join(take first) {
@@ -907,15 +913,15 @@ fn invisible_retry_drive(take job: KeyedHorizonDrive) waits {
     let answer_to = l15_forward(head, during, take held)
     result.unwrap(channel.try_send(answer_to, result.unwrap(channel.receive(held_from))))
     let pump = task.spawn(tasks, bytes 65536u64, InvisiblePump(from: take waiting, to: take head), invisible_pump)
-    invisible_expect(http_law_post(net, time, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32), true, b"\"1\"")
+    invisible_expect(http_law_post(net, time, address, "/old", b"token", http_law_stream(birth, 7u32), 0u64, b"{}", 1000u32), true, b"\"1\"")
     // Y on a newer stream evicts X at one stream per Caller.
-    invisible_expect(http_law_post(net, time, address, "/old", b"token", 8u32, 0u64, b"{}", 1000u32), false, b"\"2\"")
-    let aged = http_law_post(net, time, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32)
-    if aged.status != 410u16 || aged.committed || aged.replayed || aged.refused != Some(b"history_unavailable;key=\"00000000000000000000000000000007.0\"") {
+    invisible_expect(http_law_post(net, time, address, "/old", b"token", http_law_stream(birth, 8u32), 0u64, b"{}", 1000u32), false, b"\"2\"")
+    let aged = http_law_post(net, time, address, "/old", b"token", http_law_stream(birth, 7u32), 0u64, b"{}", 1000u32)
+    if aged.status != 410u16 || aged.committed || aged.replayed || aged.refused != Some(b"history_unavailable;key=\"00000000000000640000000000000007.0\"") {
         fail("X's retry after eviction was not a marked 410")
     }
     // The 410 ran no body: the next new stream's effect is the third.
-    invisible_expect(http_law_post(net, time, address, "/old", b"token", 9u32, 0u64, b"{}", 1000u32), false, b"\"3\"")
+    invisible_expect(http_law_post(net, time, address, "/old", b"token", http_law_stream(birth, 9u32), 0u64, b"{}", 1000u32), false, b"\"3\"")
     let _ = std.task.cancel_join(take pump)
     let _ = std.task.cancel_join(take server)
     let _ = std.task.cancel_join(take relay_task)

@@ -141,24 +141,6 @@ fn http_law_decimal(b: Bytes) -> Option[u64] {
     Some(n)
 }
 
-fn http_law_identity(b: Bytes) -> Option[(u32, u64)] {
-    let size = list.len(b)
-    if size < 5u64 || b[0u64] != b'"' || b[size - 1u64] != b'"' {
-        return None
-    }
-    for i in 2u64 .. size - 2u64 {
-        if b[i] == b'.' {
-            let stream = http_law_decimal(list.slice(b, 1u64, i))?
-            if stream > 4294967295u64 {
-                return None
-            }
-            let position = http_law_decimal(list.slice(b, i + 1u64, size - 1u64))?
-            return Some((int.narrow(stream), position))
-        }
-    }
-    None
-}
-
 fn http_law_refused(why: Refusal) -> u16 {
     match why {
         NoEntry => 404u16,
@@ -187,7 +169,7 @@ fn http_law_reply(status: u16, take body: Bytes, replayed: bool) -> Result[std.h
 // decode a typed argument, make a Req, or build a digest.
 fn http_law_raw(req: std.http.Request, _scratch: Region, mut resp: std.http.Responder, state: HttpLawRoute) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     let id = match std.http.field(req, b"idempotency-key") {
-        Some(value) => http_law_identity(value),
+        Some(value) => http_identity(value),
         None => None,
     }
     let Some((stream, p)) = id else {
@@ -235,7 +217,7 @@ fn http_law_raw(req: std.http.Request, _scratch: Region, mut resp: std.http.Resp
         clone(state.reads)
     } else {
         clone(state.writes)
-    }, stream: store.StreamId(t: 0u64, n: int.widen(stream)), p: p, arg: take input, deadline_ms: ms)
+    }, stream: stream, p: p, arg: take input, deadline_ms: ms)
     let send = match prepare(state.reg, admit, take want) {
         Ok(take sent) => take sent,
         Error(take why) => return http_law_reply(http_law_refused(why), list.new(), false),
@@ -314,15 +296,15 @@ type HttpLawReply {
     refused: Option[Bytes]
 }
 
-fn http_law_post(n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: u32, p: u64, data: Bytes, deadline_ms: u32) -> HttpLawReply waits {
+fn http_law_post(n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: store.StreamId, p: u64, data: Bytes, deadline_ms: u32) -> HttpLawReply waits {
     http_law_post_with_caller(n, clock, addr, path, credential, stream, p, data, deadline_ms, None)
 }
 
-fn http_law_post_with_caller(n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: u32, p: u64, data: Bytes, deadline_ms: u32, expected: Option[String]) -> HttpLawReply waits {
+fn http_law_post_with_caller(n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: store.StreamId, p: u64, data: Bytes, deadline_ms: u32, expected: Option[String]) -> HttpLawReply waits {
     http_law_request("POST", n, clock, addr, path, credential, stream, p, data, deadline_ms, expected)
 }
 
-fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: u32, p: u64, data: Bytes, deadline_ms: u32, expected: Option[String]) -> HttpLawReply waits {
+fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: String, credential: Bytes, stream: store.StreamId, p: u64, data: Bytes, deadline_ms: u32, expected: Option[String]) -> HttpLawReply waits {
     let until = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64))
     let (take read_half, take write_half) = net.split(result.unwrap(host.connect(n, addr, until)))
     let mut input = take read_half
@@ -331,7 +313,8 @@ fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: Stri
     string.push(mut head, " ")
     string.push(mut head, path)
     string.push(mut head, " HTTP/1.1\r\nHost: a\r\nConnection: close\r\nIdempotency-Key: \"")
-    string.push_uint(mut head, int.widen(stream), 16u32, 32u64, '0')
+    string.push_uint(mut head, stream.t, 16u32, 16u64, '0')
+    string.push_uint(mut head, stream.n, 16u32, 16u64, '0')
     string.push(mut head, ".")
     string.push_u64(mut head, p)
     string.push(mut head, "\"\r\nX-Law-Deadline: ")
@@ -405,6 +388,7 @@ type HttpLawDrive: send {
     random: Random,
     tasks: Tasks,
     case: HttpLawCase,
+    birth: u64
 }
 
 fn http_law_drive(take d: HttpLawDrive) waits {
@@ -443,13 +427,13 @@ fn http_law_socket(d: HttpLawDrive, keys: List[Bytes], take credential: Bytes) -
     paired
 }
 
-fn http_law_wire(s: wire_client.Conn, stream: u32, p: u64, index: u32, deadline_ms: u32, data: Bytes) -> Outcome waits {
-    wire_client.send_frame(s, Call(store.StreamId(t: 0u64, n: int.widen(stream)), p, index, deadline_ms, clone(data)))
+fn http_law_wire(s: wire_client.Conn, stream: store.StreamId, p: u64, index: u32, deadline_ms: u32, data: Bytes) -> Outcome waits {
+    wire_client.send_frame(s, Call(stream, p, index, deadline_ms, clone(data)))
     loop {
         match result.unwrap(wire_client.next(s)) {
             Batch(_, _, _, take outcomes) => {
                 for row in outcomes {
-                    if row.stream == store.StreamId(t: 0u64, n: int.widen(stream)) && row.p == p {
+                    if row.stream == stream && row.p == p {
                         return clone(row.outcome)
                     }
                 }
@@ -457,6 +441,13 @@ fn http_law_wire(s: wire_client.Conn, stream: u32, p: u64, index: u32, deadline_
             _ => fail("HTTP law did not get a wire Outcome"),
         }
     }
+}
+
+// The law's stream n, minted at `birth`: the keyed time its clock read when the law's
+// clients started, as a client mints from Welcome (STORE-SPEC §1.8 S7, SDK §Transport).
+// The HTTP form is `Idempotency-Key: "<16 hex t><16 hex n>.<p>"` (http.md B-6).
+fn http_law_stream(birth: u64, n: u32) -> store.StreamId {
+    store.StreamId(t: birth, n: int.widen(n))
 }
 
 fn http_law_key(row: Exported) -> Bytes {
@@ -495,13 +486,13 @@ fn http_law_parity(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn) waits 
     ] {
         let expected = p + 1u64
         if p % 2u64 == 0u64 {
-            let first = http_law_post(d.net, d.clock, addr, "/run", credential, 7u32, p, payload, 1000u32)
-            if first.status != 200u16 || first.replayed || http_law_reply_count(first) != expected || http_law_count(http_law_wire(socket, 7u32, p, 0u32, 1000u32, payload)) != expected {
+            let first = http_law_post(d.net, d.clock, addr, "/run", credential, http_law_stream(d.birth, 7u32), p, payload, 1000u32)
+            if first.status != 200u16 || first.replayed || http_law_reply_count(first) != expected || http_law_count(http_law_wire(socket, http_law_stream(d.birth, 7u32), p, 0u32, 1000u32, payload)) != expected {
                 fail("L10 HTTP-first pair disagreed with the single counter increment")
             }
         } else {
-            let first = http_law_wire(socket, 7u32, p, 0u32, 1000u32, payload)
-            let second = http_law_post(d.net, d.clock, addr, "/run", credential, 7u32, p, payload, 1000u32)
+            let first = http_law_wire(socket, http_law_stream(d.birth, 7u32), p, 0u32, 1000u32, payload)
+            let second = http_law_post(d.net, d.clock, addr, "/run", credential, http_law_stream(d.birth, 7u32), p, payload, 1000u32)
             if http_law_count(first) != expected || second.status != 200u16 || !second.replayed || http_law_reply_count(second) != expected {
                 fail("L10 wire-first pair disagreed with the single counter increment")
             }
@@ -521,12 +512,12 @@ fn http_law_binding_codes(d: HttpLawDrive, address: Addr, keys: List[Bytes]) wai
             Error(Protocol(code)) if code == close_code => (),
             _ => fail("L67 the Hello got the wrong binding close code"),
         }
-        let reply = http_law_post(d.net, d.clock, address, "/generated", credential, 7u32, 0u64, b"{\"request\":\"Unit\"}", 1000u32)
+        let reply = http_law_post(d.net, d.clock, address, "/generated", credential, http_law_stream(d.birth, 7u32), 0u64, b"{\"request\":\"Unit\"}", 1000u32)
         if reply.status != status || reply.retry_after != retry_after || reply.committed || reply.replayed {
             fail("L67 the HTTP bind refusal got the wrong status or headers")
         }
     }
-    let accepted = http_law_post(d.net, d.clock, address, "/generated", http_law_credential(), 7u32, 0u64, b"{\"request\":\"Unit\"}", 1000u32)
+    let accepted = http_law_post(d.net, d.clock, address, "/generated", http_law_credential(), http_law_stream(d.birth, 7u32), 0u64, b"{\"request\":\"Unit\"}", 1000u32)
     if accepted.status != 200u16 || !accepted.committed || accepted.replayed || accepted.body != b"\"1\"" {
         fail("L67 a refused bind consumed the call's position")
     }
@@ -553,27 +544,27 @@ fn http_law_lexical(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn) waits
         } else {
             "/.hirsel/op/increment"
         }
-        let response = http_law_post(d.net, d.clock, addr, route, credential, 7u32, position, text, 1000u32)
+        let response = http_law_post(d.net, d.clock, addr, route, credential, http_law_stream(d.birth, 7u32), position, text, 1000u32)
         let mut expected_body = string.from("\"")
         string.push_u64(mut expected_body, expect)
         string.push(mut expected_body, "\"")
-        if response.status != 200u16 || !response.committed || response.replayed || response.body != string.as_bytes(expected_body) || http_law_count(http_law_wire(socket, 7u32, position, 0u32, 1000u32, binary)) != expect {
+        if response.status != 200u16 || !response.committed || response.replayed || response.body != string.as_bytes(expected_body) || http_law_count(http_law_wire(socket, http_law_stream(d.birth, 7u32), position, 0u32, 1000u32, binary)) != expect {
             fail("L10j JSON and WebSocket bytes disagree")
         }
         position += 1u64
     }
     let body = b"{\"request\":\"RejectSame\"}"
-    let committed_error = http_law_post(d.net, d.clock, addr, "/.hirsel/op/increment", credential, 8u32, 0u64, body, 1000u32)
-    let refusal = http_law_post(d.net, d.clock, addr, "/.hirsel/op/increment", credential, 8u32, 0u64, b"{\"request\":\"Unit\"}", 1000u32)
+    let committed_error = http_law_post(d.net, d.clock, addr, "/.hirsel/op/increment", credential, http_law_stream(d.birth, 8u32), 0u64, body, 1000u32)
+    let refusal = http_law_post(d.net, d.clock, addr, "/.hirsel/op/increment", credential, http_law_stream(d.birth, 8u32), 0u64, b"{\"request\":\"Unit\"}", 1000u32)
     if committed_error.status != 422u16 || !committed_error.committed || refusal.status != 422u16 || refusal.committed || committed_error.body != b"{\"refused\":\"request_mismatch\"}" || refusal.body != committed_error.body {
         fail("L10j the committed 422 and protocol 422 lacked distinct authoritative markers")
     }
     let duplicate = b"{\"request\":{\"Normalized\":[[\"A\",null],[\"a\",null]]}}"
-    let response = http_law_post(d.net, d.clock, addr, "/generated", credential, 7u32, position, duplicate, 1000u32)
+    let response = http_law_post(d.net, d.clock, addr, "/generated", credential, http_law_stream(d.birth, 7u32), position, duplicate, 1000u32)
     if response.status != 400u16 || response.committed || response.body != b"{\"refused\":\"malformed\",\"kind\":3}" {
         fail("L10j the live codec accepted keys equal after via decoding")
     }
-    if http_law_count(http_law_wire(socket, 7u32, position, 0u32, 1000u32, b"\x00\x00\x00\x00")) != position + 1u64 {
+    if http_law_count(http_law_wire(socket, http_law_stream(d.birth, 7u32), position, 0u32, 1000u32, b"\x00\x00\x00\x00")) != position + 1u64 {
         fail("L10j a duplicate key consumed a position")
     }
 }
@@ -584,27 +575,32 @@ fn http_law_refusals(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn, keys
         fail("L11 the wire binding did not refuse the credential")
     }
     let unit_arg = b"\x00\x00\x00\x00"
-    if http_law_post(d.net, d.clock, addr, "/run", b"bad", 4u32, 0u64, unit_arg, 1000u32).status != 401u16 || http_law_post(d.net, d.clock, addr, "/denied", credential, 4u32, 0u64, unit_arg, 1000u32).status != 403u16 || http_law_post(d.net, d.clock, addr, "/run", credential, 4u32, 0u64, b"\xff", 1000u32).status != 400u16 || http_law_post(d.net, d.clock, addr, "/run", credential, 4u32, 0u64, unit_arg, 0u32).status != 504u16 {
+    if http_law_post(d.net, d.clock, addr, "/run", b"bad", http_law_stream(d.birth, 4u32), 0u64, unit_arg, 1000u32).status != 401u16 || http_law_post(d.net, d.clock, addr, "/denied", credential, http_law_stream(d.birth, 4u32), 0u64, unit_arg, 1000u32).status != 403u16 || http_law_post(d.net, d.clock, addr, "/run", credential, http_law_stream(d.birth, 4u32), 0u64, b"\xff", 1000u32).status != 400u16 || http_law_post(d.net, d.clock, addr, "/run", credential, http_law_stream(d.birth, 4u32), 0u64, unit_arg, 0u32).status != 504u16 {
         fail("L11 an HTTP refusal had the wrong status")
     }
-    if let Refused(NotAllowed) = http_law_wire(socket, 4u32, 0u64, 1u32, 1000u32, unit_arg) {} else {
+    if let Refused(NotAllowed) = http_law_wire(socket, http_law_stream(d.birth, 4u32), 0u64, 1u32, 1000u32, unit_arg) {} else {
         fail("L11 wire allowed a query as Call")
     }
-    if let Refused(Malformed(_)) = http_law_wire(socket, 4u32, 0u64, 0u32, 1000u32, b"\xff") {} else {
+    if let Refused(Malformed(_)) = http_law_wire(socket, http_law_stream(d.birth, 4u32), 0u64, 0u32, 1000u32, b"\xff") {} else {
         fail("L11 wire allowed malformed arguments")
     }
-    if let Refused(Deadline) = http_law_wire(socket, 4u32, 0u64, 0u32, 0u32, unit_arg) {} else {
+    if let Refused(Deadline) = http_law_wire(socket, http_law_stream(d.birth, 4u32), 0u64, 0u32, 0u32, unit_arg) {} else {
         fail("L11 wire allowed a zero send deadline")
     }
-    if http_law_count(http_law_wire(socket, 4u32, 0u64, 0u32, 1000u32, unit_arg)) != 1u64 {
+    if http_law_count(http_law_wire(socket, http_law_stream(d.birth, 4u32), 0u64, 0u32, 1000u32, unit_arg)) != 1u64 {
         fail("L11 a refusal ran the body or closed the position")
     }
-    // With position zero missing, the head waits on position one. The send
-    // can expire, but release of its one position must wait for the head.
-    if http_law_post(d.net, d.clock, addr, "/run", credential, 9u32, 1u64, unit_arg, 100u32).status != 409u16 || http_law_post(d.net, d.clock, addr, "/run", credential, 10u32, 0u64, unit_arg, 1000u32).status != 503u16 {
+    // Stream 9 commits p0 as the counter's second increment. Its p2, sent before p1, waits
+    // in the head's FIFO (S7: Rejected(0)). The send can expire (409), but release of its
+    // one relay position must wait for the head, so stream 10's p0 finds none (503). A new
+    // stream admits only p0 (STORE-SPEC §1.8), so the held successor follows a committed p0.
+    if http_law_reply_count(http_law_post(d.net, d.clock, addr, "/run", credential, http_law_stream(d.birth, 9u32), 0u64, unit_arg, 1000u32)) != 2u64 {
+        fail("L11 stream 9's p0 was not the second increment")
+    }
+    if http_law_post(d.net, d.clock, addr, "/run", credential, http_law_stream(d.birth, 9u32), 2u64, unit_arg, 100u32).status != 409u16 || http_law_post(d.net, d.clock, addr, "/run", credential, http_law_stream(d.birth, 10u32), 0u64, unit_arg, 1000u32).status != 503u16 {
         fail("L11 the expired send released the held position")
     }
-    if http_law_count(http_law_wire(socket, 10u32, 0u64, 0u32, 1000u32, unit_arg)) != 2u64 {
+    if http_law_count(http_law_wire(socket, http_law_stream(d.birth, 10u32), 0u64, 0u32, 1000u32, unit_arg)) != 3u64 {
         fail("L11 the relay capacity refusal forwarded the request")
     }
 }
@@ -614,7 +610,7 @@ fn http_law_run(c: Clock, r: Random, tasks: Tasks, n: Net, case: HttpLawCase) ->
     let db = store.memory(c, r, info)
     let (head, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(32u64)
     let mail = result.unwrap(mailbox(16u64))
-    let drive = HttpLawDrive(head: take head, publisher_out: post(mail), net: n, clock: c, random: r, tasks: tasks, case: case)
+    let drive = HttpLawDrive(head: take head, publisher_out: post(mail), net: n, clock: c, random: r, tasks: tasks, case: case, birth: host.wall_ms(c))
     let work = task.spawn(tasks, bytes 16777216u64, take drive, http_law_drive)
     result.unwrap(place_head(take db, code.describe(http_law_place), HTTP_LAW_PLACE_BYTES, None, code.describe(http_law_schema), take inbox, take mail, tasks, 1048576u64))
     match task.join(take work) {

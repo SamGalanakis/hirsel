@@ -297,10 +297,16 @@ fn front_drive(take job: KeyedHorizonDrive) waits {
     if status != 503u16 || committed || replayed {
         let mut text = string.from("a client retry of the refused front was not an uncommitted 503: ")
         string.push_uint(mut text, int.widen(status), 10u32, 0u64, '0')
-        if committed { string.push(mut text, " committed") }
-        if replayed { string.push(mut text, " replayed") }
+        if committed {
+            string.push(mut text, " committed")
+        }
+        if replayed {
+            string.push(mut text, " replayed")
+        }
         string.push(mut text, " ")
-        if let Ok(shown) = string.from_utf8(take body) { string.push(mut text, shown) }
+        if let Ok(shown) = string.from_utf8(take body) {
+            string.push(mut text, shown)
+        }
         fail(take text)
     }
     let _ = std.task.cancel_join(take server)

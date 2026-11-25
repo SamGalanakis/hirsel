@@ -207,9 +207,18 @@ impl<'context> Module<'context> {
         // the duration of the bridge calls.
         unsafe {
             let hint = LLVMGetEnumAttributeKindForName(b"inlinehint".as_ptr().cast(), 10);
+            let never = LLVMGetEnumAttributeKindForName(b"noinline".as_ptr().cast(), 8);
             let mut function = LLVMGetFirstFunction(self.raw);
             while !function.is_null() {
-                if LLVMCountBasicBlocks(function) != 0 {
+                // A `noinline` definition (a `cold fn`, LANG-8) takes no hint.
+                if LLVMCountBasicBlocks(function) != 0
+                    && LLVMGetEnumAttributeAtIndex(
+                        function,
+                        llvm_sys::LLVMAttributeFunctionIndex,
+                        never,
+                    )
+                    .is_null()
+                {
                     LLVMAddAttributeAtIndex(
                         function,
                         llvm_sys::LLVMAttributeFunctionIndex,
@@ -376,7 +385,7 @@ impl<'context> Module<'context> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg_attr(hirsel_lazy_core, allow(dead_code))]
     pub(crate) fn text(&self) -> String {
         // SAFETY: LLVM returns an owned message for this live module.
         unsafe { take_message(LLVMPrintModuleToString(self.raw)) }

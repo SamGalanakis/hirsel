@@ -493,6 +493,7 @@ impl Emitter {
             signature,
             body: None,
             versioned: false,
+            cold: false,
         });
         self.source_signatures.remember(f, signature);
         self.funcs.insert(key, f);
@@ -518,6 +519,7 @@ impl Emitter {
             signature,
             body: None,
             versioned,
+            cold: false,
         });
         self.source_signatures.remember(f, signature);
         self.funcs.insert(key, f);
@@ -2499,6 +2501,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             }
             let function = &mut self.e.module.functions[f.index()];
             function.versioned |= self.versioned;
+            function.cold = self.fd.cold;
             function.body = Some(std::mem::take(&mut self.b));
             if let Some(sig) = self.emitted {
                 self.e.install_source_signature(f, sig);

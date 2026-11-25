@@ -1643,7 +1643,7 @@ pub fn push_fixed64(mut s: String, x: f64, digits: u64) {
     push_fixed_decimal64(mut s, m, e, digits)
 }
 
-fn push_fixed_decimal64(mut s: String, m: u64, e: i64, digits: u64) {
+cold fn push_fixed_decimal64(mut s: String, m: u64, e: i64, digits: u64) {
     let d = exact(m, e)
     let whole: u64 = if d.count != 0 && d.point > 0 {
         int.narrow(d.point)
@@ -3103,7 +3103,7 @@ fn trig_near(x: f64, negative: bool, magnitude: i32) -> (i32, f64, f64) {
     (n, y0, (r - y0) - tail)
 }
 
-fn trig_reduce(x: f64) -> (i32, f64, f64) {
+cold fn trig_reduce(x: f64) -> (i32, f64, f64) {
     let bits = float.to_bits64(x)
     let negative = bits >> 63 != 0
     let ix = trig_high(x)
@@ -3160,7 +3160,7 @@ fn trig_scale(x: f64, shift_exponent: i32) -> f64 {
 
 // libm's binary64 precision branch. Form the needed 24-bit chunks of
 // x * (2/pi), discarding multiples of eight before multiplying by pi/2.
-fn trig_reduce_large(input: Inline[f64, 3], input_last: u64, exponent: i32) -> (i32, f64, f64) {
+cold fn trig_reduce_large(input: Inline[f64, 3], input_last: u64, exponent: i32) -> (i32, f64, f64) {
     let chunk = 16777216.0f64
     let inverse_chunk = float.from_bits64(0x3e70000000000000)
     let terms: u64 = 4

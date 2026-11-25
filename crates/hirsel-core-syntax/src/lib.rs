@@ -189,6 +189,8 @@ pub enum NodeKind {
     StepsArgument,
     Ascription,
     BytesOf,
+    /// `cold` before `fn` in a function item (LANG-8).
+    Cold,
 }
 /// `token` is the defining name, operator, literal or projection token, according to kind.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -1,0 +1,30 @@
+// LANG-8: `cold` before `fn` marks a cold function; it changes no result.
+// `cold` is an ordinary name everywhere else.
+// expect: accept
+// expect: run fast(5) = 5
+// expect: run fast(3000) = 1000
+// expect: run named() = 7
+cold fn slow(x: u64) -> u64 {
+    x / 3
+}
+
+pub cold fn rare[T](xs: List[T]) -> u64 {
+    list.len(xs)
+}
+
+type Path {
+    cold: u64
+}
+
+fn named() -> u64 {
+    let cold = Path(cold: 7)
+    cold.cold
+}
+
+fn fast(x: u64) -> u64 {
+    if x > 1000 {
+        slow(x)
+    } else {
+        x
+    }
+}

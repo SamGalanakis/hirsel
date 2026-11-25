@@ -13,6 +13,7 @@ pub(super) fn result_cleanup(source: &Module, result: TypeId, entry: &DefPath) -
             .iter()
             .map(|f| Function {
                 versioned: f.versioned,
+                cold: f.cold,
                 instance: f.instance,
                 signature: f.signature,
                 body: None,
@@ -38,6 +39,7 @@ pub(super) fn result_cleanup(source: &Module, result: TypeId, entry: &DefPath) -
         .push(Signature::new(vec![taken], vec![], None));
     module.functions.push(Function {
         versioned: false,
+        cold: false,
         instance,
         signature,
         body: Some(Body {

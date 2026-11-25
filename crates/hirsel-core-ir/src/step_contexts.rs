@@ -551,6 +551,7 @@ fn split(
             signature: canonical.signature,
             body: None,
             versioned: canonical.versioned,
+            cold: canonical.cold,
         };
         let identity = module.code_identity(FuncId(f as u32));
         module.functions.push(function);

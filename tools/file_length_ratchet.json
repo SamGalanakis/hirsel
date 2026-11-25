@@ -147,7 +147,9 @@
     "lines": 1415
   },
   "crates/hirsel-core-driver/src/callable_variants.rs": {
-    "lines": 1076
+    "lines": 1077,
+    "raise_revision": 1,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-driver/src/cli.rs": {
     "lines": 1412,
@@ -242,9 +244,9 @@
     "reason": "run-decode-raii-2112"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
-    "lines": 2606,
-    "raise_revision": 3,
-    "reason": "ds-prefetch-2519"
+    "lines": 2596,
+    "raise_revision": 4,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-front/src/body/closures.rs": {
     "lines": 2983
@@ -258,9 +260,9 @@
     "reason": "net18-s2-2481"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
-    "lines": 2866,
-    "raise_revision": 1,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 2848,
+    "raise_revision": 2,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-front/src/body/lists.rs": {
     "lines": 2361,
@@ -271,9 +273,9 @@
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3051,
-    "raise_revision": 4,
-    "reason": "ds-prefetch-2519"
+    "lines": 3054,
+    "raise_revision": 5,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
     "lines": 2531,
@@ -286,9 +288,9 @@
     "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-front/src/body/templates.rs": {
-    "lines": 1437,
-    "raise_revision": 2,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 1355,
+    "raise_revision": 3,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-front/src/body/values.rs": {
     "lines": 1211,
@@ -301,9 +303,9 @@
     "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-front/src/decls.rs": {
-    "lines": 3821,
-    "raise_revision": 3,
-    "reason": "cell-2140"
+    "lines": 3685,
+    "raise_revision": 4,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-front/src/layout.rs": {
     "lines": 1047,
@@ -328,9 +330,9 @@
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 1937,
-    "raise_revision": 9,
-    "reason": "ds-prefetch-2519"
+    "lines": 1940,
+    "raise_revision": 10,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1151,
@@ -338,18 +340,22 @@
     "reason": "crypto-sha512-2121"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
-    "lines": 2181
+    "lines": 1281,
+    "raise_revision": 1,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-ir/src/returnable.rs": {
-    "lines": 2690
+    "lines": 2416,
+    "raise_revision": 1,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-ir/src/tests.rs": {
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2388,
-    "raise_revision": 7,
-    "reason": "ds-prefetch-2519"
+    "lines": 2393,
+    "raise_revision": 8,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1846,
@@ -479,7 +485,9 @@
     "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-syntax/src/parser.rs": {
-    "lines": 1694
+    "lines": 1635,
+    "raise_revision": 2,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-syntax/src/tests.rs": {
     "lines": 1094
@@ -505,12 +513,14 @@
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-llvm/src/core/mod.rs": {
-    "lines": 2557,
-    "raise_revision": 2,
-    "reason": "ds-prefetch-2519"
+    "lines": 2560,
+    "raise_revision": 3,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-llvm/src/core/sink.rs": {
-    "lines": 1222
+    "lines": 1161,
+    "raise_revision": 1,
+    "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-llvm/src/core/split.rs": {
     "lines": 1082

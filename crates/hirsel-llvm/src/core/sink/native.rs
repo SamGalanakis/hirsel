@@ -396,6 +396,9 @@ impl<'a> NativeSink<'a> {
             Inline::Always => self.attribute(f, FUNCTION, ALWAYS_INLINE, None, 0),
             Inline::Never => self.attribute(f, FUNCTION, NO_INLINE, None, 0),
         }
+        if attrs.cold {
+            self.attribute(f, FUNCTION, COLD, None, 0);
+        }
         if attrs.nounwind {
             self.attribute(f, FUNCTION, NOUNWIND, None, 0);
         }

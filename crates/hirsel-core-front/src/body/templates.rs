@@ -115,6 +115,7 @@ pub fn materialize(
             module.instances.push(key);
             module.functions.push(Function {
                 versioned: false,
+                cold: false,
                 instance,
                 signature,
                 body: None,
@@ -313,6 +314,7 @@ fn import_hook(module: &mut Module, rows: &[TypeId], hook: &ClosureHook) -> Func
     module.instances.push(key);
     module.functions.push(Function {
         versioned: false,
+        cold: false,
         instance,
         signature,
         body: None,
@@ -365,6 +367,7 @@ pub(super) fn codec_maker_row(
     module.instances.push(key);
     module.functions.push(Function {
         versioned: false,
+        cold: false,
         instance,
         signature,
         body: None,
@@ -547,6 +550,7 @@ impl Substitution<'_> {
                 let f = FuncId(self.module.functions.len() as u32);
                 self.module.functions.push(Function {
                     versioned: false,
+                    cold: false,
                     instance,
                     signature,
                     body: None,
@@ -700,6 +704,7 @@ impl Substitution<'_> {
             let row = FuncId(self.module.functions.len() as u32);
             self.module.functions.push(Function {
                 versioned: function.versioned,
+                cold: function.cold,
                 instance,
                 signature: function.signature,
                 body: None,
@@ -760,6 +765,7 @@ impl Substitution<'_> {
         let id = FuncId(self.module.functions.len() as u32);
         self.module.functions.push(Function {
             versioned: false,
+            cold: false,
             instance,
             signature,
             body: None,
@@ -1025,6 +1031,7 @@ fn fill(
         &template.numeric_sites,
     );
     s.module.functions[target.index()].versioned = s.module.functions[source.index()].versioned;
+    s.module.functions[target.index()].cold = s.module.functions[source.index()].cold;
     s.module.functions[target.index()].body = Some(body);
     Ok(())
 }

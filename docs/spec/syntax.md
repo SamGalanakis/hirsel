@@ -38,7 +38,7 @@ pub opaque const where true false bytes
 A keyword cannot be declared or used as a name anywhere, after a `.` included. These names
 are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `cross`, `key`, `ordered`, `integer`, `float`, `packed`,
 `streamable`, `codec` and `inert` in a bound list; `via` after a bound list, and `to` and `from` in
-its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header; `steps` after `bound`, as a parameter mark and as an argument mark; `clone` at the start of an item; `grant` after a type's bounds. Library types and functions, including `Region`,
+its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header; `steps` after `bound`, as a parameter mark and as an argument mark; `clone` at the start of an item; `cold` before `fn` at the start of a function item; `grant` after a type's bounds. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
 
 ```hirsel
@@ -214,7 +214,7 @@ fn first(a: u64) -> u64 {
 ```ebnf
 (* files and items *)
 file        = { NL | item, ( END | EOF ) }, EOF ;
-item        = { attribute }, [ "pub", [ "opaque" ] ], ( function | type-def | const-def )
+item        = { attribute }, [ "pub", [ "opaque" ] ], ( [ "cold" ], function | type-def | const-def )
             | "clone", fn-header, block ;
 attribute   = "@", ( "test" | "compact", "(", ( "u16" | "u32" | "u64" ), ")" ) ;
 const-def   = "const", name, ":", type, "=", expression ;
@@ -358,6 +358,12 @@ more specific rule is LANG-5.
 
 ```hirsel
 fn f(xs: List[u64]) -> u64 { if list.len(xs) > 0 { xs[0] } else { 0 } }
+```
+```hirsel
+cold fn grow(x: u64) -> u64 { x * 2 }                     // a cold function (LANG-8)
+```
+```hirsel
+cold type T { x: u64 }                                    // refused: LANG-5, cold stands only before fn
 ```
 ```hirsel
 fn f(a: u64, b: u64, c: u64) -> bool { a < b < c }        // refused: LANG-5, comparisons do not chain

@@ -182,11 +182,24 @@ runs no user code.
 A body that does not have its declared result type is refused by LANG-11, at the
 expression that has the wrong type.
 
+`cold` before `fn` declares a cold function: one the author expects to run rarely, such
+as a slow path or a failure report. It changes no result, charge or failure, and it is not
+part of the callable type, so a cold function's value fits the same callable types as an
+ordinary one. An engine never inlines a cold function, weights each branch whose arm calls it
+directly as unlikely, and places its body with the failure paths; an engine may ignore all
+three. `cold` stands only before `fn` in a function item, after any `pub`
+([LANG-5](syntax.md#lang-5-grammar)): a type, constant, closure, finalizer or clone body
+cannot be cold. Core and std mark their own slow paths the same way.
+
 ```hirsel
 fn twice(x: u64) -> u64 { x * 2 }
 ```
 ```hirsel
 fn twice(x: u64) -> u64 waits { x * 2 }                   // refused: LANG-8, waits with no waiting call
+```
+```hirsel
+cold fn report(x: u64) -> u64 { x + 1 }
+fn step(x: u64) -> u64 { if x > 1000 { report(x) } else { x } }
 ```
 
 ### LANG-9: Nominal types

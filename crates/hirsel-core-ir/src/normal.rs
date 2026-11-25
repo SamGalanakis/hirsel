@@ -821,7 +821,9 @@ fn write_function<'m>(
     let mut out = Write::module(order);
     function.instance.write(&mut out);
     function.signature.write(&mut out);
-    (out.module.live_functions[row] && function.versioned).write(&mut out);
+    // Bit 0 marks a live versioned row, bit 1 a cold one (LANG-8).
+    (u8::from(out.module.live_functions[row] && function.versioned) | u8::from(function.cold) << 1)
+        .write(&mut out);
     body_order.is_some().write(&mut out);
     let Some(body_order) = body_order else {
         return (out.bytes, None);
@@ -1222,12 +1224,16 @@ fn decode_payload(
 fn read_function(input: &mut Read<'_, '_>) -> DecodeResult<Function> {
     let instance = Wire::read(input)?;
     let signature = Wire::read(input)?;
-    let versioned = Wire::read(input)?;
+    let flags = u8::read(input)?;
+    if flags > 3 {
+        return Err(wire::invalid("invalid function flags"));
+    }
     let body = bool::read(input)?.then(|| read_body(input)).transpose()?;
     Ok(Function {
         instance,
         signature,
-        versioned,
+        versioned: flags & 1 != 0,
+        cold: flags & 2 != 0,
         body,
     })
 }

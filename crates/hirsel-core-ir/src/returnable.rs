@@ -2180,6 +2180,7 @@ pub fn apply(module: &mut Module) -> Applied {
         sig.params.push(Param::Value(Ty::Ptr));
         let instance = canonical.instance;
         let versioned = canonical.versioned;
+        let cold = canonical.cold;
         let identity = module.code_identity(FuncId(f as u32));
         let sig = sig_id(module, sig);
         let id = FuncId(module.functions.len() as u32);
@@ -2188,6 +2189,7 @@ pub fn apply(module: &mut Module) -> Applied {
             signature: sig,
             body: None,
             versioned,
+            cold,
         });
         module.code_variants.insert(
             id,
@@ -2216,8 +2218,12 @@ pub fn apply(module: &mut Module) -> Applied {
                 .dest
                 .expect("a transfer target returns through its place"),
         };
-        let (instance, signature, versioned) =
-            (canonical.instance, canonical.signature, canonical.versioned);
+        let (instance, signature, versioned, cold) = (
+            canonical.instance,
+            canonical.signature,
+            canonical.versioned,
+            canonical.cold,
+        );
         let identity = module.code_identity(FuncId(g as u32));
         let id = FuncId(module.functions.len() as u32);
         module.functions.push(Function {
@@ -2225,6 +2231,7 @@ pub fn apply(module: &mut Module) -> Applied {
             signature,
             body: None,
             versioned,
+            cold,
         });
         module.code_variants.insert(
             id,
@@ -2282,6 +2289,7 @@ pub fn apply(module: &mut Module) -> Applied {
                                 &calls,
                             )),
                             versioned: canonical.versioned,
+                            cold: canonical.cold,
                         },
                         ContentHash::of_parts(
                             "hirsel.returnable.root.v1",

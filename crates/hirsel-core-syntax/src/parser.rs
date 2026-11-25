@@ -516,7 +516,7 @@ impl Parser<'_> {
         }
     }
     fn item_start(&self) -> bool {
-        ITEM_START.contains(&self.word(0))
+        (ITEM_START.contains(&self.word(0)) || (self.at(sym::COLD) && self.word(1) == sym::FN))
             && !(self.at(sym::FN) && self.word(1) == sym::LPAREN)
             && !(self.at(sym::SCOPED) && self.word(1) == sym::FN)
     }
@@ -599,6 +599,17 @@ impl Parser<'_> {
             if self.eat(sym::OPAQUE) {
                 c.push(self.node(self.pos - 1, NodeKind::Opaque, None, &[]));
             }
+        }
+        // `cold` is contextual: it marks the function item that follows (LANG-8).
+        if self.at(sym::COLD) {
+            if self.word(1) != sym::FN {
+                return self.fail(
+                    "LANG-5",
+                    "`cold` stands only before `fn` in a function item",
+                );
+            }
+            self.bump();
+            c.push(self.node(self.pos - 1, NodeKind::Cold, None, &[]));
         }
         if self.eat(sym::FN) {
             let name = self.name()?;

@@ -577,8 +577,11 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         e = hirsel_llvm_optimize_large_release(module, machine);
     } else if (speed) {
         unsigned hint = LLVMGetEnumAttributeKindForName("inlinehint", 10);
+        unsigned never = LLVMGetEnumAttributeKindForName("noinline", 8);
+        // A `noinline` definition (a `cold fn`, LANG-8) takes no hint.
         for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f))
-            if (LLVMCountBasicBlocks(f))
+            if (LLVMCountBasicBlocks(f)
+                && !LLVMGetEnumAttributeAtIndex(f, LLVMAttributeFunctionIndex, never))
                 LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex,
                     LLVMCreateEnumAttribute(context, hint, 0));
         // The optimizer infers nonrecursive cleanup attributes after argument

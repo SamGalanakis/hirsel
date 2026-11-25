@@ -253,6 +253,7 @@ pub fn row(module: &mut Module, of: &DefPath, rows: &Rows, op: CodecOp) -> FuncI
     module.instances.push(key);
     module.functions.push(Function {
         versioned: false,
+        cold: false,
         instance,
         signature,
         body: None,
@@ -876,6 +877,7 @@ impl Derive<'_> {
         self.module.instances.push(key);
         self.module.functions.push(Function {
             versioned: false,
+            cold: false,
             instance,
             signature,
             body: None,

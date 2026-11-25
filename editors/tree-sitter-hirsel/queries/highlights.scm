@@ -5,6 +5,7 @@
   "const"
   "pub"
   "opaque"
+  "cold"
   "resource"
   "scoped"
   "region"

@@ -565,6 +565,7 @@ impl Work<'_, '_> {
         let function = FuncId(m.functions.len() as u32);
         m.functions.push(Function {
             versioned: false,
+            cold: false,
             instance: row,
             signature,
             body: None,

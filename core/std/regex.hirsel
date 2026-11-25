@@ -95,15 +95,15 @@ fn syntax(at: u64, kind: SyntaxKind) -> Error {
     Syntax(SyntaxError(at, kind))
 }
 
-fn read(xs: List[Node], i: u64) -> Node {
+cold fn read(xs: List[Node], i: u64) -> Node {
     xs[i]
 }
 
-fn write(mut xs: List[Node], i: u64, n: Node) {
+cold fn write(mut xs: List[Node], i: u64, n: Node) {
     xs[i] = n
 }
 
-fn insert(mut xs: List[Node], n: Node) -> Result[u64, Error] {
+cold fn insert(mut xs: List[Node], n: Node) -> Result[u64, Error] {
     let i = list.len(xs)
     list.push(mut xs, n)
     Ok(i)
@@ -174,7 +174,7 @@ fn skip(s: String, mut p: Parser) {
     p.at = advance_space(s, p.at, p.free_space)
 }
 
-fn ast(s: String) -> Result[Parser, Error] {
+cold fn ast(s: String) -> Result[Parser, Error] {
     let width = string.byte_len(s)
     let arena: List[Node] = list.with_capacity(width + 1)
     let mut p = Parser(ast: take arena, names: list.new(), at: 0, width, captures: 0, free_space: false, scope: 0, arm: 0, tail: 0)
@@ -1051,7 +1051,7 @@ fn descent(depth: u64, at: u64) -> Result[u64, Error] {
     Ok(depth + 1)
 }
 
-fn check_depth(xs: List[Node]) -> Result[(), Error] {
+cold fn check_depth(xs: List[Node]) -> Result[(), Error] {
     let mut pending: Inline[Walk, 503] =[Walk(kind: WALK_ARMS, i: 0, depth: 0); 503]
     let mut used: u64 = 1
     while used != 0 {
@@ -1346,7 +1346,7 @@ const EXIT_REPEAT: u64 = 2
 
 const ENTER_ARM: u64 = 0
 
-fn compile_hir(s: String) -> Result[Hir, Error] {
+cold fn compile_hir(s: String) -> Result[Hir, Error] {
     let parsed = ast(s)?
     check_depth(parsed.ast)?
     let mut nodes: List[Node] = list.with_capacity(parsed.width + 1)
@@ -1357,7 +1357,7 @@ fn compile_hir(s: String) -> Result[Hir, Error] {
     Ok(Hir(nodes: take nodes, ranges: take ranges, names: take names))
 }
 
-fn translate(s: String, tree: List[Node], mut nodes: List[Node], mut ranges: List[u32]) -> Result[(), Error] {
+cold fn translate(s: String, tree: List[Node], mut nodes: List[Node], mut ranges: List[u32]) -> Result[(), Error] {
     let mut active = UNICODE
     let mut pending: Inline[Translate, 753] =[Translate(i: 0, kind: ENTER_ARM, saved: 0); 753]
     let mut used: u64 = 1
@@ -1427,7 +1427,7 @@ fn translate(s: String, tree: List[Node], mut nodes: List[Node], mut ranges: Lis
     Ok(())
 }
 
-fn translate_atom(s: String, tree: List[Node], i: u64, n: Node, active: u64, mut nodes: List[Node], mut ranges: List[u32]) -> Result[Node, Error] {
+cold fn translate_atom(s: String, tree: List[Node], i: u64, n: Node, active: u64, mut nodes: List[Node], mut ranges: List[u32]) -> Result[Node, Error] {
     let mut result = n
     let unicode = (active & UNICODE) != 0
     let lo = list.len(ranges) / 2
@@ -2317,7 +2317,7 @@ fn sized_seq(mut h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
     Ok(m)
 }
 
-fn sized_alts(mut h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
+cold fn sized_alts(mut h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
     let n = read(h.nodes, i)
     let mut total = sized_seq(mut h, n.first, rev)?
     if n.more == 0 {
@@ -2750,7 +2750,7 @@ fn emit_seq(h: Hir, mut a: Assembler, first: u64, following: u64) -> u64 {
     result
 }
 
-fn emit_alts(h: Hir, mut a: Assembler, first: u64, following: u64) -> u64 {
+cold fn emit_alts(h: Hir, mut a: Assembler, first: u64, following: u64) -> u64 {
     let root = read(h.nodes, first)
     if root.more == 0 {
         return emit_seq(h, mut a, root.first, following)
@@ -2837,7 +2837,7 @@ fn names_atom(h: Hir, i: u64, mut ns: NameLayout) {
     }
 }
 
-fn names_size(h: Hir, i: u64, mut ns: NameLayout) {
+cold fn names_size(h: Hir, i: u64, mut ns: NameLayout) {
     let mut al = i
     loop {
         let arm = read(h.nodes, al)
@@ -2878,7 +2878,7 @@ fn write_name_atom(p: String, h: Hir, i: u64, mut ns: NameTable) {
     }
 }
 
-fn write_names(p: String, h: Hir, i: u64, mut ns: NameTable) {
+cold fn write_names(p: String, h: Hir, i: u64, mut ns: NameTable) {
     let mut al = i
     loop {
         let arm = read(h.nodes, al)
@@ -3370,7 +3370,7 @@ fn linear_pair(output: Inline[u8, 100], width: u64) -> (u64, u64) {
     (a, b)
 }
 
-fn choose_prefilter(h: Hir, mut needles: Needles) -> Prefilter {
+cold fn choose_prefilter(h: Hir, mut needles: Needles) -> Prefilter {
     let root = read(h.nodes, 0)
     if root.more == 0 {
         let mut width: u64 = 0
@@ -3477,7 +3477,7 @@ fn fixed_capture_offsets(h: Hir, highest_group: u64) -> Option[CaptureOffsets] {
     }
 }
 
-fn compile_new(pattern: String, take input_hir: Hir) -> Result[Regex, Error] {
+cold fn compile_new(pattern: String, take input_hir: Hir) -> Result[Regex, Error] {
     let mut hir = take input_hir
     let f = sized_alts(mut hir, 0, false)?
     let r = sized_alts(mut hir, 0, true)?
@@ -4250,7 +4250,7 @@ fn dfa_walk(
     DfaVisit(len_out, matched)
 }
 
-fn dfa_transition(
+cold fn dfa_transition(
     program: List[NfaState],
     edges: List[NfaEdge],
     mut work: List[u32],

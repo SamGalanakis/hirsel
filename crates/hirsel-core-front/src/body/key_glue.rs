@@ -559,6 +559,7 @@ impl Derive<'_> {
         let row = FuncId(module.functions.len() as u32);
         module.functions.push(Function {
             versioned: false,
+            cold: false,
             instance,
             signature,
             body: None,

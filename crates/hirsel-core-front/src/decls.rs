@@ -303,6 +303,9 @@ pub struct ParamDecl {
 pub struct FnDecl {
     /// PROG-4: only another test function may refer to this function.
     pub is_test: bool,
+    /// LANG-8: `cold fn`. Calls to it are cold sites and its body stays out of line.
+    #[serde(default)]
+    pub cold: bool,
     pub path: DefPath,
     pub site: Site,
     pub at: ItemRef,
@@ -454,6 +457,7 @@ impl Program<'_> {
                 };
                 let mut public = false;
                 let mut is_test = false;
+                let mut cold = false;
                 let mut opaque = false;
                 let mut generics = vec![];
                 let mut declared = 0;
@@ -465,6 +469,7 @@ impl Program<'_> {
                     match n.kind {
                         NodeKind::Public => public = true,
                         NodeKind::Opaque => opaque = true,
+                        NodeKind::Cold => cold = true,
                         NodeKind::Generics => generics = self.generics(at, c),
                         NodeKind::Bounds => {
                             for &b in item.tree.children(c) {
@@ -562,6 +567,7 @@ impl Program<'_> {
                             .find(|&c| item.tree.node(c).kind == NodeKind::Block);
                         self.fns.push(FnDecl {
                             is_test,
+                            cold,
                             path,
                             result_site: site,
                             site,
@@ -598,6 +604,7 @@ impl Program<'_> {
                     let body = item.tree.children(d).last().copied();
                     self.fns.push(FnDecl {
                         is_test: false,
+                        cold: false,
                         path: path.clone(),
                         result_site: site,
                         site: self.site(at, d),
@@ -751,6 +758,7 @@ impl Program<'_> {
         let generics = generics_node.map_or(vec![], |g| self.generics(at, g));
         self.fns.push(FnDecl {
             is_test: false,
+            cold: false,
             path,
             result_site: site,
             site,

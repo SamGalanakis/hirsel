@@ -27,6 +27,8 @@ mod frame;
 mod growth;
 mod inlining;
 mod law;
+mod optimized_ir;
+pub use optimized_ir::*;
 mod scalar;
 mod simd;
 mod sink;
@@ -782,12 +784,13 @@ fn emit_module(
                 inline: inlining::definition(
                     &definition,
                     module,
-                    sig,
+                    f,
                     body,
                     batch_steps,
                     called_in_loop[i],
                     inlining::specialized(module, &step_variants, FuncId(i as u32)),
                 ),
+                cold: f.cold,
                 map_probe: definition == "core@1/map/probe",
                 carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
                 subprogram: function_debug.map(|d| d.scope),

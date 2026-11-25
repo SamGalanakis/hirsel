@@ -208,6 +208,7 @@ pub fn join_units(
                 let id = FuncId(out.functions.len() as u32);
                 out.functions.push(Function {
                     versioned: function.versioned,
+                    cold: function.cold,
                     instance: instance_ids[function.instance.index()],
                     signature: map.signatures[function.signature.index()],
                     body: None,

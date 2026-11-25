@@ -287,6 +287,7 @@ impl Emitter {
                 signature: SigId(below(f.signature.0, signatures)),
                 body: None,
                 versioned: f.versioned,
+                cold: f.cold,
             });
         }
         // The maps only gain entries, each added function's under its instance: every
@@ -523,6 +524,7 @@ impl Emitter {
                 signature: sig_at[f.signature.index()],
                 body: None,
                 versioned: f.versioned,
+                cold: f.cold,
             });
             self.source_signatures
                 .remember(id, sig_at[c.source_signatures[i].index()]);
@@ -596,6 +598,7 @@ impl Emitter {
                 signature: signature(f.signature),
                 body: None,
                 versioned: f.versioned,
+                cold: f.cold,
             }));
         // The fresh build's recipes covered its first rows, each made from those rows
         // alone and resolved by row name, as an extension over them here resolves

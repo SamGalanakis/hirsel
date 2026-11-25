@@ -354,6 +354,9 @@ impl Printer {
             if f.versioned {
                 head += " versioned";
             }
+            if f.cold {
+                head += " cold";
+            }
             match &f.body {
                 None => self.line(&format!("{head} extern")),
                 Some(body) => {
@@ -2210,7 +2213,7 @@ impl Parser {
 
     fn function(&mut self) -> R<()> {
         let n = self.module.functions.len() as u32;
-        let (instance, signature, code, versioned, external) = {
+        let (instance, signature, code, versioned, cold, external) = {
             let mut l = self.line().unwrap();
             l.next()?;
             expect_index(&mut l, 'f', n)?;
@@ -2231,12 +2234,13 @@ impl Parser {
                 None
             };
             let versioned = l.eat("versioned");
+            let cold = l.eat("cold");
             let external = l.eat("extern");
             if !external {
                 l.expect("{")?;
             }
             l.end()?;
-            (instance, signature, code, versioned, external)
+            (instance, signature, code, versioned, cold, external)
         };
         let body = if external { None } else { Some(self.body()?) };
         if let Some(hash) = code {
@@ -2247,6 +2251,7 @@ impl Parser {
             signature,
             body,
             versioned,
+            cold,
         });
         Ok(())
     }

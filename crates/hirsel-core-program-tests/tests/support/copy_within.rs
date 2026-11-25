@@ -85,3 +85,71 @@ fn on_inline(src: u64, dst: u64, count: u64) -> u64 {
         }
     }
 }
+
+// LANG-8: a `cold fn` stays out of line in release IR and the branch into its
+// call is the unlikely arm; `string.push_scalar`, which core marks cold, keeps
+// its own body under an inlined `push_char`.
+#[test]
+fn cold_callee_stays_out_of_line_on_the_unlikely_branch() {
+    let source = r#"
+cold fn slow(x: u64) -> u64 {
+    x / 3u64
+}
+fn fast(x: u64) -> u64 {
+    if x > 1000u64 { slow(x) } else { x }
+}
+fn append(mut s: String, c: char) {
+    string.push_char(mut s, c)
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let slow = symbol(&program, names["slow"]);
+    let push_scalar = (0..program.functions.len())
+        .map(|f| FuncId(f as u32))
+        .find(|&f| {
+            let instance = program.functions[f.index()].instance;
+            program.instances[instance.index()].definition.to_string()
+                == "core@1/string/push_scalar"
+        })
+        .map(|f| symbol(&program, f))
+        .unwrap();
+    // The cold arm of a `!prof !0` (likely) branch in `fast` reaches the call
+    // to `slow` along its own fall-through chain (past the step check).
+    let ir =
+        emit_ir_for_test_with_facts(&program, Target::X86_64Linux, false, false, true).unwrap();
+    let body = emitted_body(&ir, &symbol(&program, names["fast"]));
+    fn calls(text: &str, callee: &str) -> bool {
+        text.contains(&format!("@{callee}(")) || text.contains(&format!("@{callee}."))
+    }
+    // The instructions of one block: indented lines up to the next label.
+    fn block<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+        let (_, rest) = body.split_once(&format!("\n{label}:\n"))?;
+        let end = rest.match_indices('\n').find(|&(i, _)| !rest[i + 1..].starts_with(' '));
+        Some(&rest[..end.map_or(rest.len(), |(i, _)| i)])
+    }
+    // Whether the chain of first successors from `label` calls `callee`.
+    fn reaches<'a>(body: &'a str, mut label: &'a str, callee: &str) -> bool {
+        for _ in 0..4 {
+            let Some(text) = block(body, label) else { return false };
+            if calls(text, callee) {
+                return true;
+            }
+            let Some(next) = text.lines().last().and_then(|l| l.split("label %").nth(1)) else {
+                return false;
+            };
+            label = next.split([',', ' ']).next().unwrap();
+        }
+        false
+    }
+    let unlikely: Vec<&str> = body
+        .lines()
+        .filter(|l| l.trim_start().starts_with("br i1") && l.ends_with("!prof !0"))
+        .filter_map(|l| l.split("label %").nth(2)?.split(',').next())
+        .collect();
+    assert!(unlikely.iter().any(|&label| reaches(body, label, &slow)), "{body}");
+    let optimized = emit_optimized_ir_for_test(&program, Target::X86_64Linux).unwrap();
+    for (caller, callee) in [("fast", &slow), ("append", &push_scalar)] {
+        let body = emitted_body(&optimized, &symbol(&program, names[caller]));
+        assert!(calls(&body, callee), "{caller}: {body}");
+    }
+}

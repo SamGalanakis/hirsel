@@ -545,6 +545,8 @@ impl Linkage {
 pub(super) struct FnAttrs {
     pub linkage: Linkage,
     pub inline: Inline,
+    /// LANG-8 `cold fn`: the definition is cold (with `inline: Never`).
+    pub cold: bool,
     pub nounwind: bool,
     pub argmem_read: bool,
     pub map_probe: bool,
@@ -560,6 +562,7 @@ impl Default for FnAttrs {
         Self {
             linkage: Linkage::External,
             inline: Inline::Default,
+            cold: false,
             nounwind: false,
             argmem_read: false,
             map_probe: false,
@@ -748,6 +751,9 @@ fn function_attrs(out: &mut String, attrs: &FnAttrs) {
         Inline::Default => {}
         Inline::Always => out.push_str(" alwaysinline"),
         Inline::Never => out.push_str(" noinline"),
+    }
+    if attrs.cold {
+        out.push_str(" cold");
     }
     if attrs.nounwind {
         out.push_str(" nounwind");

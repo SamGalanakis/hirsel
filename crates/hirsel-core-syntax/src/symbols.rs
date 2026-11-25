@@ -31,6 +31,7 @@ pub mod sym {
     pub const SIMD: Symbol = Symbol(118);
     pub const INERT: Symbol = Symbol(119);
     pub const CROSS: Symbol = Symbol(120);
+    pub const COLD: Symbol = Symbol(121);
     pub const FN: Symbol = Symbol(1);
     pub const LET: Symbol = Symbol(2);
     pub const MUT: Symbol = Symbol(3);
@@ -293,7 +294,7 @@ impl Default for Symbols {
         strings.push(Arc::from("codec"));
         strings.extend(
             [
-                "via", "to", "from", "removed", "steps", "Simd", "inert", "cross",
+                "via", "to", "from", "removed", "steps", "Simd", "inert", "cross", "cold",
             ]
             .map(Arc::from),
         );
@@ -463,6 +464,7 @@ fn fixed_symbol(text: &str) -> Option<Symbol> {
         "from" => sym::FROM,
         "removed" => sym::REMOVED,
         "cross" => sym::CROSS,
+        "cold" => sym::COLD,
         _ => return None,
     })
 }

@@ -88,11 +88,11 @@ module.exports = grammar({
     visibility: _ => seq('pub', optional('opaque')),
     attribute: _ => seq('@', choice('test', seq('compact', '(', choice('u16', 'u32', 'u64'), ')'))),
     function_definition: $ => seq(
-      repeat($.attribute), optional($.visibility), 'fn', field('name', $.identifier),
+      repeat($.attribute), optional($.visibility), optional('cold'), 'fn', field('name', $.identifier),
       $._function_header, field('body', $.block),
     ),
     function_signature: $ => prec.right(seq(
-      repeat($.attribute), optional($.visibility), 'fn', field('name', $.identifier),
+      repeat($.attribute), optional($.visibility), optional('cold'), 'fn', field('name', $.identifier),
       $._function_header,
     )),
     clone_definition: $ => seq(

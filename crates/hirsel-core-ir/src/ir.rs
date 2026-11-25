@@ -1584,6 +1584,9 @@ pub struct Function {
     pub body: Option<Body>,
     /// This definition has a vector-typed parameter, result, binding or expression.
     pub versioned: bool,
+    /// LANG-8 `cold fn`: kept out of line; calls to it are cold sites. A hint only.
+    #[serde(default)]
+    pub cold: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

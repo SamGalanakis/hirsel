@@ -1719,13 +1719,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let first = result_ty.map(|t| self.value(t));
         let results = PoolRange::push(&mut self.b.pools.values, first);
         let fail = self.fail_to(n);
+        // LANG-8: a call to a `cold fn` is a cold site.
+        let cold = self.p.fns[f].cold;
         self.b.calls.push(CallSite {
             callee: Callee::Direct(func),
             signature,
             args,
             results,
             fail,
-            cold: false,
+            cold,
         });
         let call = CallId(self.b.calls.len() as u32 - 1);
         self.inst(Inst::Call { call }, n);

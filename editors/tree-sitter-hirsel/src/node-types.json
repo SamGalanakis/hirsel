@@ -7131,6 +7131,10 @@
     "named": false
   },
   {
+    "type": "cold",
+    "named": false
+  },
+  {
     "type": "compact",
     "named": false
   },

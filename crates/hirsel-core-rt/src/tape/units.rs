@@ -1,11 +1,11 @@
 //! Unit recordings: take points and their `TAKE` frames, the unit operation
-//! frames, and the object ordinals of connections, clients and helper handles
-//! (docs/recording.md, "Unit recordings").
+//! frames, and the object ordinals of connections, clients, helper handles
+//! and `Shared` nodes (docs/recording.md, "Unit recordings").
 use super::schedule::Group;
 use super::*;
 use crate::units_lang::Cross;
 use format::{TakeBody, TakePoint};
-use hirsel_core_layout::cross::CLIENT;
+use hirsel_core_layout::cross::{CLIENT, SHARED};
 use std::collections::HashMap;
 
 /// One unit's take-point count and the ordinals of its unit objects.
@@ -18,6 +18,9 @@ pub(super) struct Takes {
     position: u64,
     /// Client ordinal by handle address.
     pub(super) clients: HashMap<usize, u64>,
+    /// `Shared` ordinal by node address: its `shared.new`, or its latest
+    /// arrival in this unit.
+    pub(super) nodes: HashMap<usize, u64>,
     /// Helper handle ordinal by the handle's key.
     helpers: HashMap<usize, u64>,
     /// Each waiting send: its `ISSUE` position and the item as a value.
@@ -40,6 +43,61 @@ struct Conn {
 }
 
 static CONNS: Mutex<Option<HashMap<usize, Conn>>> = Mutex::new(None);
+
+/// What every unit of the run knows of a `Shared` node made while recording:
+/// its home stream and its ordinal there, and its payload's layout. Keyed by
+/// the node's address; a newer node at the same address replaces the entry.
+struct Node {
+    stream: u32,
+    ordinal: u64,
+    bytes: u64,
+    owners: Vec<[u64; 4]>,
+}
+
+static NODES: Mutex<Option<HashMap<usize, Node>>> = Mutex::new(None);
+
+fn nodes<R>(f: impl FnOnce(&mut HashMap<usize, Node>) -> R) -> R {
+    f(NODES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new))
+}
+
+/// `shared.new`: the node's ordinal in its home stream, and its payload's
+/// layout for the snapshots that carry it out.
+pub(crate) fn shared_new(group: Option<Group>, node: usize, payload: &Cross) {
+    recording(group, |live| {
+        let ordinal = live.unit_object();
+        live.takes.nodes.insert(node, ordinal);
+        let entry = Node {
+            stream: stream(live),
+            ordinal,
+            bytes: payload.bytes,
+            owners: payload.owners().to_vec(),
+        };
+        nodes(|n| n.insert(node, entry));
+    });
+}
+
+/// A node's payload layout: its flat bytes and owner rows.
+pub(super) fn node_layout(node: u64) -> Option<(u64, Vec<[u64; 4]>)> {
+    nodes(|n| n.get(&(node as usize)).map(|e| (e.bytes, e.owners.clone())))
+}
+
+/// A `Shared` snapshot up to its payload, which the value writer appends:
+/// kind 1, the holder's ordinal here, the home stream and the node's ordinal
+/// there.
+pub(super) fn shared_snapshot(node: u64, ordinal: u64) -> Result<Vec<u8>, &'static str> {
+    let (stream, of) =
+        nodes(|n| n.get(&(node as usize)).map(|e| (e.stream, e.ordinal))).ok_or(UNNAMED_NODE)?;
+    let mut out = vec![1];
+    put_varint(&mut out, ordinal);
+    out.extend_from_slice(&stream.to_le_bytes());
+    put_varint(&mut out, of);
+    Ok(out)
+}
+
+pub(super) const UNNAMED_NODE: &str = "a Shared node the recording did not name";
 
 fn conns<R>(f: impl FnOnce(&mut HashMap<usize, Conn>) -> R) -> R {
     f(CONNS
@@ -285,6 +343,10 @@ pub(crate) unsafe fn send_item(
                     .copied()
                     .unwrap_or(0),
             ),
+            SHARED => shared_snapshot(
+                word,
+                live.takes.nodes.get(&(word as usize)).copied().unwrap_or(0),
+            ),
             _ => Err(CAPABILITY_ITEM),
         };
         // SAFETY: by the contract.
@@ -419,6 +481,8 @@ pub(crate) enum Arrival<'a> {
         unnamed: Option<&'static str>,
     },
     LastRelease(usize),
+    /// A `Shared` node's last release, by the node's address.
+    SharedRelease(usize),
     Cancel,
     /// What this build does not take into a recording.
     Unrecorded(&'static str),
@@ -446,6 +510,11 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                             let o = live.unit_object();
                             live.takes.clients.insert(word as usize, o);
                             client_snapshot(word, o)
+                        }
+                        SHARED => {
+                            let o = live.unit_object();
+                            live.takes.nodes.insert(word as usize, o);
+                            shared_snapshot(word, o)
                         }
                         _ => Err(CAPABILITY_ITEM),
                     };
@@ -533,6 +602,16 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 put_varint(&mut body, ordinal);
                 body.extend_from_slice(&header.to_le_bytes());
                 body.extend_from_slice(&retained.saturating_sub(header).to_le_bytes());
+            }
+            Arrival::SharedRelease(node) => {
+                let Some((stream, ordinal)) =
+                    nodes(|n| n.get(&node).map(|e| (e.stream, e.ordinal)))
+                else {
+                    return live.cut(UNNAMED_NODE);
+                };
+                body.push(7);
+                body.extend_from_slice(&stream.to_le_bytes());
+                put_varint(&mut body, ordinal);
             }
             Arrival::Cancel => body.push(8),
             Arrival::Unrecorded(why) => return live.cut(why),

@@ -20,8 +20,16 @@ impl LangUnit {
     }
 
     /// The unit's code reached an in-operation take point.
-    pub(super) fn reach(&mut self) {
+    pub(crate) fn reach(&mut self) {
         tape::reach(self.tape());
+    }
+
+    /// The home's own drop of a node's last holder: its `shared release`
+    /// take, at the position that drop reached.
+    pub(crate) fn shared_release_take(&mut self, node: usize) {
+        let group = self.tape();
+        // SAFETY: a shared release carries no item.
+        unsafe { tape::take(group, self.pumping, Arrival::SharedRelease(node)) };
     }
 
     /// Takes from now are at a scheduler pump (point kind 1), or not.
@@ -33,7 +41,7 @@ impl LangUnit {
 #[cfg(not(feature = "record"))]
 impl super::LangUnit {
     #[inline(always)]
-    pub(super) fn reach(&mut self) {}
+    pub(crate) fn reach(&mut self) {}
     #[inline(always)]
     pub(super) fn set_pumping(&mut self, _: bool) {}
 }
@@ -75,9 +83,7 @@ pub(super) unsafe fn take(u: &mut LangUnit, took: &Took, id: usize) {
         Took::Credits => {
             Arrival::Unrecorded("a credits take, whose limit ordinals this build does not write")
         }
-        Took::SharedRelease => {
-            Arrival::Unrecorded("a Shared node's release, whose ordinal this build does not write")
-        }
+        Took::SharedRelease => Arrival::SharedRelease(id),
         Took::Cancel => Arrival::Cancel,
     };
     // SAFETY: the item is the inbox's newest, still in its connection.

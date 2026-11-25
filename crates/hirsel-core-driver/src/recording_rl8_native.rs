@@ -36,6 +36,7 @@ const HOLD_REACH: u8 = 2;
 const RL8_ITEM: u8 = 0;
 const RL8_SEAL_ANSWER: u8 = 2;
 const RL8_LAST_RELEASE: u8 = 6;
+const RL8_SHARED_RELEASE: u8 = 7;
 
 fn hold_before(call: u32, step: u8) -> HoldStep {
     HoldStep {
@@ -112,16 +113,41 @@ fn got(r: Result[u64, InboxPoll]) -> u64 {
 /// One RL8 case: its program's `main` body (each `try_receive` result is
 /// checked in the program against the hand table), its hold script and the
 /// hand-counted takes before the program's `stdout.write`: (gap, point,
-/// count, arrival tag, the connection's ordinal after the grants: an item's
-/// inbox, a last release's connection).
+/// count, arrival tag, the object's ordinal after the grants: an item's
+/// inbox, a last release's connection, a shared release's node).
 struct Rl8Case {
     name: &'static str,
     body: &'static str,
     script: Vec<HoldStep>,
     takes: Vec<(u64, hirsel_tape_format::TakePoint, u64, u8, u64)>,
-    /// RL9 over the recording: the items sent, and the connection they were
-    /// taken from (ordinal after the grants).
-    sent: (Vec<u8>, u64),
+    /// RL9 over the recording: the items sent in canonical form, given the
+    /// grant count, and the connection they were taken from (ordinal after
+    /// the grants).
+    sent: (fn(u64) -> Vec<Vec<u8>>, u64),
+    /// The first item take's whole body, receiver ordinals included, given
+    /// the grant count.
+    item: Option<fn(u64) -> Vec<u8>>,
+}
+
+/// A u64 item as a value: 8 plain bytes, no parts.
+fn rl8_word(v: u8) -> Vec<u8> {
+    [vec![8, v], vec![0; 7], vec![0]].concat()
+}
+
+fn rl8_words(vs: &[u8]) -> Vec<Vec<u8>> {
+    vs.iter().map(|&v| rl8_word(v)).collect()
+}
+
+/// The `Shared[u64]` item holding 42, as a value: 8 plain bytes (the holder
+/// word zeroed), one part: a handle (1), a `Shared` snapshot (1), the
+/// receiver's ordinal when `ordinal` is given, home stream 0 and the node's
+/// ordinal there, then the payload: 8 plain bytes and no parts.
+fn rl8_shared_item(ordinal: Option<u8>, node: u8) -> Vec<u8> {
+    let mut v = vec![8, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1];
+    v.extend(ordinal);
+    v.extend([0, 0, 0, 0, node]);
+    v.extend(rl8_word(42));
+    v
 }
 
 fn rl8_cases() -> Vec<Rl8Case> {
@@ -155,7 +181,8 @@ fn rl8_cases() -> Vec<Rl8Case> {
                 (2, Operation, 2, RL8_ITEM, 1),
                 (2, Operation, 1, RL8_ITEM, 1),
             ],
-            sent: (vec![10, 11], 1),
+            sent: (|_| rl8_words(&[10, 11]), 1),
+            item: None,
         },
         // `rl8_release_takes_an_older_item_before_its_notice`: connection 1's
         // inbox is dropped (a `CLOSE`, no event), and its cleaning reaches
@@ -190,7 +217,8 @@ fn rl8_cases() -> Vec<Rl8Case> {
                 (2, Operation, 1, RL8_ITEM, 3),
                 (0, Operation, 1, RL8_LAST_RELEASE, 1),
             ],
-            sent: (vec![20], 3),
+            sent: (|_| rl8_words(&[20]), 3),
+            item: None,
         },
         // `rl8_take_single_item`, hook off: the item is all the port holds
         // while its receiver runs; gap 2 (the send), count 1.
@@ -204,7 +232,8 @@ fn rl8_cases() -> Vec<Rl8Case> {
 "#,
             script: vec![],
             takes: vec![(2, Operation, 1, RL8_ITEM, 1)],
-            sent: (vec![5], 1),
+            sent: (|_| rl8_words(&[5]), 1),
+            item: None,
         },
         // `rl8_one_receiver_at_kinds_0_and_1`, kind 0: the item reaches the
         // unit before its `try_receive`, which takes it.
@@ -222,7 +251,8 @@ fn rl8_cases() -> Vec<Rl8Case> {
                 hold_after(1, HOLD_UNHOOK),
             ],
             takes: vec![(2, Operation, 1, RL8_ITEM, 1)],
-            sent: (vec![9], 1),
+            sent: (|_| rl8_words(&[9]), 1),
+            item: None,
         },
         // Item 1, a kind-1 take with a real parked task: the root spawns a
         // waiter, whose `conn.receive` (call 0) parks with nothing to take,
@@ -253,7 +283,44 @@ fn rl8_cases() -> Vec<Rl8Case> {
                 (2, Pump, 0, RL8_ITEM, 1),
                 (0, Operation, 1, RL8_SEAL_ANSWER, 1),
             ],
-            sent: (vec![7], 1),
+            sent: (|_| rl8_words(&[7]), 1),
+            item: None,
+        },
+        // A `Shared` node crossing its own unit's connection and released at
+        // home. `shared.new` numbers the node 1; `conn.new` the connection 2
+        // and its client 3. The send (two events) carries the node's
+        // snapshot; `try_receive`'s pump is position 1 after the send and
+        // takes it (gap 2, count 1), the arriving handle numbered 4. With no
+        // event since, each drop of a holder is the next position: `t`'s is
+        // 2, and `s`'s is 3, the last holder, dropped at home, so its shared
+        // release is taken there (gap 0, kind 0, count 3), naming home stream
+        // 0 and node 1.
+        Rl8Case {
+            name: "shared_at_home",
+            body: r#"
+    let s: Shared[u64] = shared.new(42)
+    let (c, i): (Client[Shared[u64]], Inbox[Shared[u64]]) = result.unwrap(conn.new(4, bytes 0))
+    result.unwrap(conn.try_send(c, shared.share(s)))
+    let t = result.unwrap(conn.try_receive(i))
+    {
+        let gone = take t
+    }
+    {
+        let gone = take s
+    }
+"#,
+            script: vec![],
+            takes: vec![
+                (2, Operation, 1, RL8_ITEM, 2),
+                (0, Operation, 3, RL8_SHARED_RELEASE, 1),
+            ],
+            sent: (|g| vec![rl8_shared_item(None, g as u8 + 1)], 2),
+            item: Some(|g| {
+                let g = g as u8;
+                let mut body = vec![RL8_ITEM, g + 2];
+                body.extend(rl8_shared_item(Some(g + 4), g + 1));
+                body
+            }),
         },
     ]
 }
@@ -296,8 +363,6 @@ fn rl8_take_positions_natively() {
         std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE")
             .expect("scripted recording runtime archive"),
     );
-    // A u64 item: 8 plain bytes, no parts.
-    let word = |v: u8| [vec![8, v], vec![0; 7], vec![0]].concat();
     for case in rl8_cases() {
         let dir = tempfile::tempdir().unwrap();
         let source = format!(
@@ -392,6 +457,7 @@ fn rl8_take_positions_natively() {
                         let conn = match body.arrival() {
                             Arrival::Item(inbox, _) | Arrival::SealAnswer(inbox) => inbox,
                             Arrival::LastRelease(0, conn, ..) => conn,
+                            Arrival::SharedRelease(0, node) => node,
                             a => panic!("{at}: {a:?}"),
                         };
                         Some((*gap, *point, *count, body.bytes()[0], conn))
@@ -407,7 +473,7 @@ fn rl8_take_positions_natively() {
             assert_eq!(takes, want, "{at}: takes");
 
             // RL9 over the recording.
-            let want: Vec<_> = case.sent.0.iter().map(|&v| word(v)).collect();
+            let want = (case.sent.0)(grants);
             let sends: Vec<_> = frames
                 .iter()
                 .filter_map(|f| match f {
@@ -423,13 +489,21 @@ fn rl8_take_positions_natively() {
             let taken: Vec<_> = frames
                 .iter()
                 .filter_map(|f| match f {
-                    Frame::Take { body, .. } if body.bytes()[..2] == [RL8_ITEM, conn as u8] => {
-                        Some(body.bytes()[2..].to_vec())
-                    }
+                    Frame::Take { body, .. } => match body.arrival() {
+                        Arrival::Item(inbox, value) if inbox == conn => Some(value.canonical()),
+                        _ => None,
+                    },
                     _ => None,
                 })
                 .collect();
             assert_eq!(taken, want, "{at}: taken items");
+            if let Some(item) = case.item {
+                let first = frames.iter().find_map(|f| match f {
+                    Frame::Take { body, .. } if body.bytes()[0] == RL8_ITEM => Some(body.bytes()),
+                    _ => None,
+                });
+                assert_eq!(first, Some(&item(grants)[..]), "{at}: item take");
+            }
         }
     }
 }

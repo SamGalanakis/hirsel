@@ -13,7 +13,7 @@ use super::schedule::Group;
 use super::*;
 use crate::causes::{CANCELLED, CAPACITY, Cause, FAIL};
 use crate::units_lang::Cross;
-use hirsel_core_layout::cross::{CAPABILITY, CLIENT, FUNCTION, SEQ};
+use hirsel_core_layout::cross::{CAPABILITY, CLIENT, FUNCTION, SEQ, SHARED};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// Stream numbers: unique in the process, so in each recording's file.
@@ -246,6 +246,11 @@ pub(crate) unsafe fn spawn(
                 live.takes.clients.insert(word as usize, ordinal);
                 return units::client_snapshot(word, ordinal);
             }
+            if kind == SHARED {
+                let ordinal = live.unit_object();
+                live.takes.nodes.insert(word as usize, ordinal);
+                return units::shared_snapshot(word, ordinal);
+            }
             let &(_, provider, h) = resolved.iter().find(|r| r.0 == word).unwrap();
             // A grant's provider is a copy of its cell's; the cell's state
             // pointer names the cell.
@@ -409,8 +414,7 @@ unsafe fn entry(
     Ok(body)
 }
 
-const HANDLE: &str =
-    "the value holds a socket or Shared handle, whose snapshot this build does not write";
+const HANDLE: &str = "the value holds a socket handle, whose snapshot this build does not write";
 const NO_IDENTITY: &str = "the entry's function has no code identity (a closure)";
 
 /// A value that crosses units: its plain bytes with each owner word zeroed,
@@ -470,6 +474,23 @@ pub(super) unsafe fn value(
             CAPABILITY | CLIENT => {
                 parts.push(1);
                 parts.extend(handle(kind, word(0))?);
+            }
+            SHARED => {
+                // The snapshot's head, then the payload as a value: a holder
+                // points at the node's count, and the payload follows it.
+                parts.push(1);
+                parts.extend(handle(kind, word(0))?);
+                let (bytes, rows) = units::node_layout(word(0)).ok_or(units::UNNAMED_NODE)?;
+                let payload = Cross {
+                    bytes,
+                    owners: rows.as_ptr(),
+                    count: rows.len() as u64,
+                    at: 0,
+                    len: bytes,
+                };
+                // SAFETY: a live holder pins its node, whose payload is a
+                // live value laid out as its owner rows say.
+                parts.extend(unsafe { value((word(0) + 8) as *const u8, &payload, None, handle) }?);
             }
             FUNCTION => {
                 let identity = run::identities::identity_of(word(0)).ok_or(NO_IDENTITY)?;

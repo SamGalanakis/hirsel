@@ -127,6 +127,8 @@ pub unsafe extern "C" fn hirsel_core_shared_new(
                 .sum::<u64>();
         let node = header.cast::<u8>().add(COUNT);
         unit.homed.insert(node.addr(), held);
+        #[cfg(feature = "record")]
+        crate::tape::units::shared_new(tasks::current_group(), node.addr(), &*cross);
         New { node, available: 0 }
     }
 }
@@ -153,6 +155,10 @@ pub unsafe extern "C" fn hirsel_core_shared_share(node: *mut u8) -> *mut u8 {
 pub unsafe extern "C" fn hirsel_core_shared_release(context: *mut Context, node: *mut u8) {
     // SAFETY: as release; a running task pins its unit.
     unsafe {
+        // Each drop of a holder is a take point (docs/recording.md): whether
+        // it is the last follows the drops of every unit.
+        #[cfg(feature = "record")]
+        (*tasks::lang_unit()).reach();
         if last(node) {
             tasks::before_commit();
             release_last(&mut *tasks::lang_unit(), context, node);
@@ -167,6 +173,7 @@ pub unsafe extern "C" fn hirsel_core_shared_release(context: *mut Context, node:
 pub(crate) unsafe fn release(unit: &mut LangUnit, context: *mut Context, node: *mut u8) {
     // SAFETY: by the contract.
     unsafe {
+        unit.reach();
         if last(node) {
             release_last(unit, context, node);
         }
@@ -194,6 +201,8 @@ unsafe fn release_last(unit: &mut LangUnit, context: *mut Context, node: *mut u8
     unsafe {
         let home = (*header(node)).home;
         if (*home).leads_to(&unit.ctx.port) {
+            #[cfg(feature = "record")]
+            unit.shared_release_take(node.addr());
             clean(unit, context, node);
         } else {
             (*home).publish(ArrivalRef::boxed(Body::SharedRelease(node.addr())));

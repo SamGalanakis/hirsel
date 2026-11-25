@@ -1640,11 +1640,11 @@ fn cli_tls_replay(with_secret: bool) {
             .lines()
             .filter(|line| line.contains(&mac_op))
             .collect();
-        // Seven permitted MACs, then wrap, unwrap, the unwrapped MAC and
-        // sign; a Denied use issues no frame.
+        // Seven permitted MACs, then wrap, unwrap and the unwrapped MAC. A Denied
+        // use and a sealed key's Ed25519 sign (recomputed on replay) issue no frame.
         assert_eq!(
             mac.len(),
-            11,
+            10,
             "MAC operations issued without the necessary use"
         );
         assert_eq!(

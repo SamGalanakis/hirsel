@@ -559,8 +559,8 @@ fn follower_starter_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let plan = follower_law_plan(Directory, options)
     // I = 64 + (8 + max(24, 56)) = 128 for the startup reply.
-    // P = round8(330 + 24) + (64 + 8 + 378) = 810. The plan
-    // is 24 + 290 + 8 + 8, and the slot adds two 24-byte senders.
+    // P = round8(378 + 24) + (64 + 8 + 426) = 906. The plan
+    // is 24 + 338 + 8 + 8, and the slot adds two 24-byte senders.
     let provision = follower_provision_charge(plan)
     if follower_provision_bytes() != provision {
         fail("L85: the provision price differs from the box and reply charge")
@@ -571,7 +571,7 @@ fn follower_starter_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     if follower_request_bytes() != request {
         fail("L85: the request price differs from the box and reply charge")
     }
-    // The starter pays 256 + 32 + max(128, 810, 664) = 1,098.
+    // The starter pays 256 + 32 + max(128, 906, 664) = 1,194.
     if follower_starter_bytes() != follower_task_bytes(0) + provision {
         fail("L85: the starter peak differs from the task and provision charges")
     }

@@ -16,9 +16,10 @@ fn writer_law_room() -> u64 {
 // Six empty pages cost 6 × (round8(98 + 8) + 24) = 816 B. The inline
 // Page is 24 + 8 for its image, 2 × 24 for list descriptors, 2 × 8
 // for counters, and 2 for flags. The genesis branch keeps four Head
-// slots at 264 B each: 4 + 24 + 4 + 8 + 3 × 64 + 8 + 8 + 16.
-// Db is inline and HostFile opens have no separate charge. Total: 1,872 B.
-const GENESIS_WRITER_STATE: u64 = 1872
+// slots at 288 B each: 4 + 24 + 4 + 8 + 3 × 64 + 24 (the keyed tree list)
+// + 8 + 8 + 16. Db is inline and HostFile opens have no separate charge.
+// Total: 816 + 4 × 288 = 1,968 B.
+const GENESIS_WRITER_STATE: u64 = 1968
 
 fn granted_open_commit(take input: GrantedOpen) -> Result[(), Error] waits {
     let before = writer_law_room()
@@ -68,15 +69,15 @@ fn group_override(group: u64) -> Overrides {
 //   journal worker: 67,108,864 + 65,536 + 288 + 64 = 67,174,752
 //   journal timer: 4,096 + 288 = 4,384
 //   journal channels for 64 commits: 416 × 64 + 640 = 27,264
-//   writer state: 1,872
+//   writer state: 1,968
 //   resident: 1,048,576
 //   cut phase: 16,777,640 + 65,536 + 2 × 95,326 + (4,096 + 16,711,680)
 //            = 33,749,604, above the write peak of 2 × 16,777,296
-//   total: 102,006,452
+//   total: 102,006,548
 @test
 fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let o = group_override(67108864)
-    let need = 102006452u64
+    let need = 102006548u64
     match planned(Directory, 39839262, o) {
         Error(short) if short.need == need && short.have == 39839262 => (),
         _ => fail("§1.1: a 64 MiB group sized inside a share its journal worker exceeds"),
@@ -120,8 +121,8 @@ fn granted_bucket_cut(take input: GrantedBucketOpen) -> Result[(), Error] waits 
 //   lane: 1,048,576
 //   history: 2 × round8(65,536 + 112 + 33) + 2 × 65,776 + round8(60) = 262,992
 //   worker: 4 × 65,536 + 524,288 + 1,000 × (1,032 + 8 + 72) + 288 + 64 = 1,898,784
-//   timer: 4,096 + 288 = 4,384. Channels: 416 × 64 + 640 = 27,264. State: 1,872.
-//   lifetime before resident = 3,243,872. Resident adds 1,048,576.
+//   timer: 4,096 + 288 = 4,384. Channels: 416 × 64 + 640 = 27,264. State: 1,968.
+//   lifetime before resident = 3,243,968. Resident adds 1,048,576.
 // Journal holds two 16,777,296 B frames. Recovery holds an entry and
 // decoded frame (33,554,744 B), or one checkpoint entry and one pack.
 // The cut wins at 68,493,460 B:
@@ -130,15 +131,15 @@ fn granted_bucket_cut(take input: GrantedBucketOpen) -> Result[(), Error] waits 
 //     16,777,640 for the comparison buffer, 2 × 65,776 for heads and 64 for the key
 //   PUT: max(8 MiB + 24 for one multipart part, 16,777,640 for the encoded MANIFEST)
 //   cut work: 65,536 + 2 × ceil(1,048,576 / 11) + (4,096 + 16,711,680)
-// T_floor = 72,785,908. The place needs T_floor + 80 + 1,098 = 72,787,086.
+// T_floor = 72,786,004. The place needs T_floor + 80 + 1,194 = 72,787,278.
 @test
 fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let lanes = bucket_law_lanes(1)
     let kind: Kind = Bucket(lanes)
     let mut o = group_override(65536)
     o.pack_bytes = Some(65536)
-    let writer_need = 72785908u64
-    let need = 72787086u64
+    let writer_need = 72786004u64
+    let need = 72787278u64
     let place = result.unwrap(planned(kind, need, o))
     if planned_bytes(place) != need || planned_options(place).resident_limit != MIB {
         fail("§1.1: the Bucket place plan at its exact share")

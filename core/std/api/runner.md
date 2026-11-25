@@ -26,6 +26,13 @@ grant and no `Arc[G]`. Your application does both:
   `runner.wire_bind(latest_seed, bind, ..)` reads a `Latest[B]` once per bind,
   where `B: shareable + send`. The binding sees a view of that version. A
   `Wire` carries no grant: granted entries get theirs from `PlaceConfig.grants`.
+  **Planned (RUNNER-SPEC v2.70):** the seed goes. `runner.wire(bind, bind_bytes,
+  bind_steps)` takes `fn(G, Bytes)`, and each bind gets a fresh `G` from
+  `PlaceConfig.grants.bind`, as a keyed claim gets one from `claim`. A key set
+  rides in that `G` as a `latest.handle`, and a sealed key as a `secret.share`
+  holder, so HMAC-keyed bindings work. A `Wire` with no `bind` mint refuses the
+  open (`BindNoGrant`). A failed bind mint gives Close 1013, or HTTP 503 or 500,
+  and never 1008 or 401.
 - **Authorization** is your entry bodies. Transact, query and granted bodies
   receive the Caller and decide access in their own code, for example by reading
   a membership row in the same transaction.
@@ -66,13 +73,15 @@ client's credential to a Caller with a copy of a plain seed;
 `Some(runner.wire_bind(latest_seed, bind, ..))` does it from the current published
 seed.
 
-**`PlaceConfig.grants`.** The place's grant sources: `Grants(attempt, call, claim)`.
-`attempt` and `claim` are optional `Mint(seed, mint, bytes, steps)`s, and `call` is an
+**`PlaceConfig.grants`.** The place's grant sources: `Grants(attempt, call, claim)`,
+and `bind` from v2.70 (planned). `attempt` and `claim` are optional
+`Mint(seed, mint, mint_bytes, mint_steps)`s (v2.70: `bytes` is a reserved word, so the
+fields are named `mint_bytes` and `mint_steps`), and `call` is an
 optional `CallMint(mint, entries)`. Every seed has the same type `S`. Each present mint has its own
-task, which owns its seed, and its own allowance `bytes`: every live `G` it made stays
+task, which owns its seed, and its own allowance `mint_bytes`: every live `G` it made stays
 charged there, so one use cannot exhaust another's. A mint is
 `fn(S, H, I) -> Result[G, Capacity]`, with `I` by view. It never waits, and it runs as
-`isolate` around `bound steps steps`, so its error, fault or step overrun fails only its
+`isolate` around `bound steps mint_steps`, so its error, fault or step overrun fails only its
 own request (`Failed(OutOfBytes)`, `Failed(Raised)`, `Failed(OutOfTime)`) and the
 task keeps serving. A granted trigger attempt gets `attempt`'s `G`; the mint sees a view of the
 attempt's `TriggerContext` and keeps one with `share_trigger_context`. A wire call gets `call`'s `G` only for the granted entries
@@ -460,7 +469,7 @@ schema migration and setting `PlaceConfig.triggers` before calling
 Caller for triggered transactions. A granted entry's `G` for each attempt comes from
 `PlaceConfig.grants.attempt`, a `Mint` whose function
 `fn(S, H, TriggerContext) -> Result[G, Capacity]` runs in its own task under
-the mint's `bytes` and `steps`. Listing a granted entry without an `attempt` mint
+the mint's `mint_bytes` and `mint_steps`. Listing a granted entry without an `attempt` mint
 refuses the open with `TriggerNoGrant`.
 With `None` or an empty entry list a place starts no new trigger, but its head still
 settles the rows already in its store: cancels and holds run, and a row whose entry is

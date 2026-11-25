@@ -97,23 +97,107 @@ fn zeroish(mut g: Rng, n: u64) -> Bytes {
     out
 }
 
-fn sender_at(framing: ranges.Framing, id: u64, ctr: u64, take base: Bytes, l: sframe.Limits) -> sframe.Sender {
-    let mut s = result.unwrap(sframe.sender(suite(), framing, Fixed(id), take base, sframe.Mark(ctr, volume: 0), l))
+// A key as program bytes, sealed into a schedule (SFRAME-14): `secret.seal` then `import_sframe`.
+fn import(take raw: Bytes, uses: String) -> schedule.Schedule {
+    let s = result.unwrap(secret.seal(take raw, uses))
+    match schedule.import_sframe(Aes128GcmSha256_128, take s) {
+        Ok(take keys) => take keys,
+        Error(_) => fail("import_sframe refused a test key"),
+    }
+}
+
+// A send import of `base` for the KID block [first, first + 2^bits). A run imports each send key once.
+fn sending(base: Bytes, first: u64, bits: u64) -> schedule.Schedule {
+    let mut uses = string.from("sframe_import(send,")
+    string.push_u64(mut uses, first)
+    string.push(mut uses, ",")
+    string.push_u64(mut uses, bits)
+    string.push(mut uses, ")")
+    import(copy_of(base), uses)
+}
+
+fn receiving(base: Bytes) -> schedule.Schedule {
+    import(copy_of(base), "sframe_import(receive)")
+}
+
+fn made(take r: Result[sframe.Sender, (sframe.SframeError, schedule.Schedule)]) -> sframe.Sender {
+    match take r {
+        Ok(take s) => take s,
+        Error(_) => fail("sender refused"),
+    }
+}
+
+fn held(take r: Result[(), (sframe.SframeError, schedule.Schedule)]) {
+    match take r {
+        Ok(()) => {},
+        Error(_) => fail("a ratcheted install or advance refused"),
+    }
+}
+
+fn sender_at(framing: ranges.Framing, id: u64, ctr: u64, base: Bytes, l: sframe.Limits) -> sframe.Sender {
+    let mut s = made(sframe.sender(suite(), framing, Fixed(id), sending(base, id, 0), 0, sframe.Mark(ctr, volume: 0), l))
     let _ = result.unwrap(sframe.reserve(mut s, 1 << 20, 1 << 34))
     take s
 }
 
-fn ratchet_sender(generation: u64, bits: u8, step: u64, take base: Bytes, l: sframe.Limits) -> sframe.Sender {
+fn ratchet_sender(generation: u64, bits: u8, step: u64, at: u64, base: Bytes, l: sframe.Limits) -> sframe.Sender {
     let scheme: sframe.Scheme = Ratcheted(sframe.Ratchet(generation, bits, step))
-    let mut s = result.unwrap(sframe.sender(suite(), Rfc, scheme, take base, sframe.Mark(ctr: 0, volume: 0), l))
+    let keys = sending(base, generation << int.widen(bits), int.widen(bits))
+    let mut s = made(sframe.sender(suite(), Rfc, scheme, take keys, at, sframe.Mark(ctr: 0, volume: 0), l))
     let _ = result.unwrap(sframe.reserve(mut s, 1 << 20, 1 << 34))
     take s
 }
 
-fn receiver_for(framing: ranges.Framing, id: u64, take base: Bytes, floor: u64, l: sframe.Limits) -> sframe.Receiver {
+fn receiver_for(framing: ranges.Framing, id: u64, base: Bytes, floor: u64, l: sframe.Limits) -> sframe.Receiver {
     let mut r = result.unwrap(sframe.receiver(suite(), framing, l))
-    result.unwrap(sframe.install(mut r, id, take base, floor))
+    result.unwrap(sframe.install(mut r, id, receiving(base), floor))
     take r
+}
+
+fn follower(f: sframe.Follow, base: Bytes, l: sframe.Limits) -> sframe.Receiver {
+    let mut r = result.unwrap(sframe.receiver(suite(), Rfc, l))
+    held(sframe.install_ratcheted(mut r, f, receiving(base)))
+    take r
+}
+
+// RFC 9605 §4.4 written out from the RFC, so frames at any step, KID and CTR come from the spec
+// and not from the code under test, and need no send import: HKDF-SHA256 over std.hmac and
+// AES-128-GCM through a sealed `aead(aes128-gcm)` key. rfc_c3 checks it against Appendix C.3.
+fn inline32(x: Inline[u8, 32], n: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(n)
+    let _ = bytebuf.append_inline(mut out, x, 0, n)
+    out
+}
+
+fn expand1(prk: Bytes, info: Bytes, n: u64) -> Bytes {
+    let mut h = std.hmac.start(prk)
+    std.hmac.add(mut h, info, 0, list.len(info))
+    std.hmac.add_byte(mut h, 1)
+    inline32(std.hmac.finish(h), n)
+}
+
+fn kid_label(prefix: String, kid: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(40)
+    list.append(mut out, string.as_bytes(prefix))
+    list.put_word_be(mut out, kid)
+    list.put_word_be(mut out, 4u16)
+    out
+}
+
+fn forge(base: Bytes, kid: u64, ctr: u64, metadata: Bytes, plain: Bytes) -> Bytes {
+    let prk = inline32(std.hmac.sha256(b"", base), 32)
+    let key = result.unwrap(secret.seal(expand1(prk, kid_label("SFrame 1.0 Secret key ", kid), 16), "aead(aes128-gcm)"))
+    let mut iv = expand1(prk, kid_label("SFrame 1.0 Secret salt ", kid), 12)
+    for i in 0u64 .. 8 {
+        let b: u8 = int.truncate(ctr >> (8 * (7 - i)))
+        iv[4 + i] = iv[4 + i] ^ b
+    }
+    let mut out = room(17 + list.len(plain) + 16)
+    let _ = result.unwrap(sframe.encode_header(sframe.Header(kid, ctr), mut out))
+    let mut aad = copy_of(out)
+    list.append(mut aad, metadata)
+    let _ = result.unwrap(secret.aead_seal(key, Aes128Gcm, iv, aad, plain, mut out))
+    out
 }
 
 fn tampered(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
@@ -417,21 +501,21 @@ fn header_vectors() -> Result[(), ()] {
 }
 
 // ---------------------------------------------------------------- V2
-/// bug: a wrong label, the salt XORed at the little end, metadata left out of the AAD, or the sink and library HKDF disagreeing.
-/// oracle: RFC 9605 Appendix C.3 (AES_128_GCM_SHA256_128, KID 0x123, CTR 0x4567).
+/// bug: the header and metadata split wrongly between `seal_into`'s AAD and `extra`, metadata left out of the AAD, the sealer's floor or KID not the sender's, or this file's forger wrong.
+/// oracle: RFC 9605 Appendix C.3 (AES_128_GCM_SHA256_128, KID 0x123, CTR 0x4567), through `sframe_import(send,291,0)` and `sframe_import(receive)`.
 @test
 fn rfc_c3() -> Result[(), ()] {
     let base = unhex("000102030405060708090a0b0c0d0e0f")
-    check(sframe.salt_of(base, 0x123) == unhex("75234edefe07819026751816"), "sframe_salt differs from C.3")
-    let mut s = result.unwrap(sframe.sender(suite(), Rfc, Fixed(0x123), copy_of(base), sframe.Mark(ctr: 0x4567, volume: 0), sframe.limits()))
-    let _ = result.unwrap(sframe.reserve(mut s, 1, 16))
     let metadata = unhex("4945544620534672616d65205747")
     let plain = unhex("64726166742d696574662d736672616d652d656e63")
     let want = unhex("9901234567b7412c2513a1b66dbb48841bbaf17f598751176ad847681a69c6d0b091c07018ce4adb34eb")
+    check(forge(base, 0x123, 0x4567, metadata, plain) == want, "the laws' RFC 9605 forger differs from C.3")
+    let mut s = made(sframe.sender(suite(), Rfc, Fixed(0x123), sending(base, 0x123, 0), 0, sframe.Mark(ctr: 0x4567, volume: 0), sframe.limits()))
+    let _ = result.unwrap(sframe.reserve(mut s, 1, 16))
     let mut out = room(64)
     let sealed = result.unwrap(sframe.seal(mut s, metadata, plain, mut out))
     check(out == want && sealed.len == list.len(want) && sealed.ctr == 0x4567, "C.3 ciphertext differs")
-    let mut r = receiver_for(Rfc, 0x123, copy_of(base), 0, sframe.limits())
+    let mut r = receiver_for(Rfc, 0x123, base, 0, sframe.limits())
     let mut changed = copy_of(metadata)
     changed[0] = changed[0] ^ 1u8
     check(tampered(open_rfc(mut r, changed, want)), "changed metadata is not Tampered")
@@ -468,6 +552,14 @@ fn edge(mut g: Rng) -> u64 {
     } else {
         roll(mut g) >> below(mut g, 64)
     }
+}
+
+// A distinct key for each case, since a run imports each send key once.
+fn case_key(case: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(16)
+    list.put_word_be(mut out, case)
+    list.fill(mut out, 16, 0xc3u8)
+    out
 }
 
 /// bug: a framing, layout, escape or scatter bug that loses or moves bytes.
@@ -509,15 +601,15 @@ fn round_trip() -> Result[(), ()] {
         }
         let md_len = below(mut g, 12)
         let metadata = zeroish(mut g, md_len)
-        let key = byte_of(mut g)
-        let mut s = sender_at(framing, id, ctr, base_of(key), l)
+        let key = case_key(case)
+        let mut s = sender_at(framing, id, ctr, key, l)
         let most_out = ranges.wire_bound(framing, 2 * list.len(frame) + 64)
         let mut out = room(most_out + 1)
         list.push(mut out, 0xeeu8)
         let done = result.unwrap(seal_any(mut s, framing, layout, metadata, frame, mut out))
         check(done.len == list.len(out) - 1 && done.ctr == ctr && done.kid == id, "Sealed does not describe the appended bytes")
         let wire = copy_of(list.slice(out, 1, list.len(out)))
-        let mut r = receiver_for(framing, id, base_of(key), 0, l)
+        let mut r = receiver_for(framing, id, key, 0, l)
         let mut back = room(2 * list.len(frame) + 16)
         let o = open_ok(open_any(mut r, framing, metadata, wire, mut back))
         check(back == frame && o.len == list.len(frame) && o.ctr == ctr, "open of seal is not the frame")
@@ -544,7 +636,7 @@ fn round_trip() -> Result[(), ()] {
 }
 
 // ---------------------------------------------------------------- T1
-fn tamper_case(framing: ranges.Framing) {
+fn tamper_case(framing: ranges.Framing, seed: u8) {
     let mut g = Rng(s: 2649)
     let l = sframe.limits()
     let mut frame: Bytes = list.new()
@@ -569,10 +661,10 @@ fn tamper_case(framing: ranges.Framing) {
         },
     }
     let metadata = unhex("0a0b0c")
-    let mut s = sender_at(framing, 300, 70000, counting(), l)
+    let mut s = sender_at(framing, 300, 70000, base_of(seed), l)
     let mut out = room(256)
     let _ = result.unwrap(seal_any(mut s, framing, layout, metadata, frame, mut out))
-    let mut r = receiver_for(framing, 300, counting(), 0, l)
+    let mut r = receiver_for(framing, 300, base_of(seed), 0, l)
     for i in 0u64 .. 8 * list.len(out) {
         let mut bad = copy_of(out)
         let flip: u8 = int.truncate(1u64 << (i % 8))
@@ -591,9 +683,9 @@ fn tamper_case(framing: ranges.Framing) {
 /// oracle: AEAD integrity (RFC 9605 §4.4.3): only the sealed bytes open, and SFRAME-9 opening step 6: on success out is the sender's frame.
 @test
 fn tamper_rejection() -> Result[(), ()] {
-    tamper_case(Rfc)
-    tamper_case(Ranged(Bare))
-    tamper_case(Ranged(AnnexB))
+    tamper_case(Rfc, 1)
+    tamper_case(Ranged(Bare), 2)
+    tamper_case(Ranged(AnnexB), 3)
     boundary_case()
     hidden_start_case()
     Ok(())
@@ -662,13 +754,12 @@ fn model_mark(mut m: Model, ctr: u64) {
     }
 }
 
-fn frame_at(ctr: u64, l: sframe.Limits) -> Bytes {
-    let mut s = sender_at(Rfc, 5, ctr, base_of(3), l)
-    seal_rfc(mut s, b"", b"w1")
+fn frame_at(ctr: u64) -> Bytes {
+    forge(base_of(3), 5, ctr, b"", b"w1")
 }
 
-fn window_step(mut r: sframe.Receiver, mut m: Model, size: u64, jump: u64, ctr: u64, l: sframe.Limits) {
-    let frame = frame_at(ctr, l)
+fn window_step(mut r: sframe.Receiver, mut m: Model, size: u64, jump: u64, ctr: u64) {
+    let frame = frame_at(ctr)
     let mut forged = copy_of(frame)
     let n = list.len(forged)
     forged[n - 1] = forged[n - 1] ^ 0x80u8
@@ -716,25 +807,25 @@ fn replay_window() -> Result[(), ()] {
                 } else {
                     at
                 }
-                window_step(mut r, mut m, size, jump, ctr, l)
+                window_step(mut r, mut m, size, jump, ctr)
                 if let Some(t) = m.top {
                     at = t
                 }
             }
             let top = top_of(m)
             for back in[size + 1, size, size - 1] {
-                window_step(mut r, mut m, size, jump, top - back, l)
+                window_step(mut r, mut m, size, jump, top - back)
             }
             if jumping {
-                window_step(mut r, mut m, size, jump, top + jump + 1, l)
-                window_step(mut r, mut m, size, jump, top + jump, l)
+                window_step(mut r, mut m, size, jump, top + jump + 1)
+                window_step(mut r, mut m, size, jump, top + jump)
             }
             let high = top_of(m)
-            let mut forged = frame_at(high + 1000, l)
+            let mut forged = frame_at(high + 1000)
             let n = list.len(forged)
             forged[n - 1] = forged[n - 1] ^ 1u8
             check(!opened(open_rfc(mut r, b"", forged)), "a forged frame opens")
-            check(opened(open_rfc(mut r, b"", frame_at(high + 1, l))), "a forged frame moved the window")
+            check(opened(open_rfc(mut r, b"", frame_at(high + 1))), "a forged frame moved the window")
         }
     }
     floor_cases()
@@ -746,108 +837,27 @@ fn floor_cases() {
     let l = sframe.Limits(frame: 4096, window: 64, keys: 16, ranges: 4, jump: 64)
     {
         let mut r = receiver_for(Rfc, 5, base_of(3), 10, l)
-        check(too_far(open_rfc(mut r, b"", frame_at(75, l))), "a first frame more than jump above the floor is not TooFar")
-        check(opened(open_rfc(mut r, b"", frame_at(74, l))), "a first frame jump above the floor does not open")
+        check(too_far(open_rfc(mut r, b"", frame_at(75))), "a first frame more than jump above the floor is not TooFar")
+        check(opened(open_rfc(mut r, b"", frame_at(74))), "a first frame jump above the floor does not open")
     }
     let open_l = sframe.limits()
     {
-        let follow = sframe.Follow(generation: 3, bits: 4, step: 5, forward: 2, keep: 2, floor: 4)
-        let mut r = result.unwrap(sframe.receiver(suite(), Rfc, open_l))
-        result.unwrap(sframe.install_ratcheted(mut r, follow, steps(counting(), 5)))
-        check(too_old(open_rfc(mut r, b"", step_frame(5, 3, open_l))), "install_ratcheted ignores Follow.floor")
-        check(opened(open_rfc(mut r, b"", step_frame(5, 4, open_l))), "a frame at Follow.floor does not open")
-        result.unwrap(sframe.advance(mut r, 4, 3, 8, steps(counting(), 8), 7))
-        check(too_old(open_rfc(mut r, b"", step_frame(8, 6, open_l))), "advance ignores its floor")
-        check(opened(open_rfc(mut r, b"", step_frame(8, 7, open_l))), "a frame at advance's floor does not open")
+        let follow = sframe.Follow(generation: 3, bits: 4, step: 5, at: 5, forward: 2, keep: 2, floor: 4)
+        let mut r = follower(follow, steps(counting(), 5), open_l)
+        check(too_old(open_rfc(mut r, b"", step_frame(5, 3))), "install_ratcheted ignores Follow.floor")
+        check(opened(open_rfc(mut r, b"", step_frame(5, 4))), "a frame at Follow.floor does not open")
+        held(sframe.advance(mut r, 4, 3, 8, receiving(steps(counting(), 8)), 8, 7))
+        check(too_old(open_rfc(mut r, b"", step_frame(8, 6))), "advance ignores its floor")
+        check(opened(open_rfc(mut r, b"", step_frame(8, 7))), "a frame at advance's floor does not open")
     }
     let mut r = receiver_for(Rfc, 5, base_of(3), 0, open_l)
-    let first = frame_at(20, open_l)
+    let first = frame_at(20)
     check(opened(open_rfc(mut r, b"", first)), "a fresh key's frame does not open")
-    match sframe.install(mut r, 5, base_of(3), 0) {
+    match sframe.install(mut r, 5, receiving(base_of(3)), 0) {
         Error(Invalid) => {},
         _ => fail("install over an installed KID is not Invalid"),
     }
     check(replayed(open_rfc(mut r, b"", first)), "a refused reinstall reopened replay")
-}
-
-// ---------------------------------------------------------------- K1
-/// bug: step mod 2^bits computed as step mod bits, a wrong ratchet label, or base taken as step 0's key.
-/// oracle: Python hmac over RFC 9605 §5.1: base_key[1] for base 00..0f.
-@test
-fn ratchet_steps() -> Result[(), ()] {
-    let l = sframe.limits()
-    let one = unhex("fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87")
-    check(sframe.ratchet_key(counting()) == one, "base_key[1] differs from RFC 9605 §5.1")
-    let follow = sframe.Follow(generation: 5, bits: 2, step: 0, forward: 1, keep: 1, floor: 0)
-    {
-        let mut s = ratchet_sender(5, 2, 1, copy_of(one), l)
-        let mut r = result.unwrap(sframe.receiver(suite(), Rfc, l))
-        result.unwrap(sframe.install_ratcheted(mut r, follow, counting()))
-        check(sframe.current_kid(s) == 21, "step 1's KID is not 5<<2|1")
-        check(opened(open_rfc(mut r, b"", seal_rfc(mut s, b"", b"k1"))), "a step-1 sender and a step-0 receiver disagree")
-    }
-    let mut s = ratchet_sender(5, 2, 0, counting(), l)
-    let mut r = result.unwrap(sframe.receiver(suite(), Rfc, l))
-    result.unwrap(sframe.install_ratcheted(mut r, follow, counting()))
-    for want in[21u64, 22u64, 23u64, 20u64, 21u64] {
-        result.unwrap(sframe.ratchet(mut s))
-        let _ = result.unwrap(sframe.reserve(mut s, 4, 1024))
-        check(sframe.current_kid(s) == want, "a ratcheted KID has the wrong low bits")
-        let o = result.unwrap(open_rfc(mut r, b"", seal_rfc(mut s, b"", b"k1")))
-        check(o.kid == want, "a ratcheted frame opens under another KID")
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------- K2
-fn step_frame(step: u64, ctr: u64, l: sframe.Limits) -> Bytes {
-    let scheme: sframe.Scheme = Ratcheted(sframe.Ratchet(generation: 3, bits: 4, step))
-    let mut s = result.unwrap(sframe.sender(suite(), Rfc, scheme, steps(counting(), step), sframe.Mark(ctr, volume: 0), l))
-    let _ = result.unwrap(sframe.reserve(mut s, 1, 1024))
-    seal_rfc(mut s, b"", b"k2")
-}
-
-/// bug: a candidate committed before the open, a forward step past the bound, the jumped-from step evicted, advance losing retained steps, or a removal whose oversized generation aliases an installed one.
-/// oracle: SFRAME-8's bounds: 1 <= d <= forward, keep steps retained, keep >= forward, keep + 1 + forward <= 2^bits, and a generation is generation << bits with generation < 2^(64 - bits).
-@test
-fn forward_bounds() -> Result[(), ()] {
-    let l = sframe.limits()
-    let follow = sframe.Follow(generation: 3, bits: 4, step: 5, forward: 2, keep: 2, floor: 0)
-    let mut r = result.unwrap(sframe.receiver(suite(), Rfc, l))
-    result.unwrap(sframe.install_ratcheted(mut r, follow, steps(counting(), 5)))
-    let mut forged = step_frame(7, 0, l)
-    let n = list.len(forged)
-    forged[n - 1] = forged[n - 1] ^ 1u8
-    check(tampered(open_rfc(mut r, b"", forged)), "a forged d = forward frame is not Tampered")
-    check(no_key(open_rfc(mut r, b"", step_frame(8, 0, l))), "a forged frame moved the current step")
-    check(opened(open_rfc(mut r, b"", step_frame(5, 0, l))), "the current step does not open")
-    check(opened(open_rfc(mut r, b"", step_frame(7, 1, l))), "a genuine d = forward frame does not open")
-    check(opened(open_rfc(mut r, b"", step_frame(5, 1, l))), "the jumped-from step was evicted")
-    check(opened(open_rfc(mut r, b"", step_frame(6, 0, l))), "a step passed over does not open")
-    check(!sframe.remove_generation(mut r, 4, 3 | (1 << 60)), "a removal of an oversized generation answers true")
-    check(opened(open_rfc(mut r, b"", step_frame(5, 3, l))), "a removal of an oversized generation removed generation 3")
-    let unsound =[sframe.Follow(generation: 1, bits: 4, step: 0, forward: 2, keep: 1, floor: 0), sframe.Follow(generation: 9, bits: 2, step: 0, forward: 2, keep: 2, floor: 0)]
-    for bad in unsound {
-        let mut q = result.unwrap(sframe.receiver(suite(), Rfc, l))
-        match sframe.install_ratcheted(mut q, bad, counting()) {
-            Error(Invalid) => {},
-            _ => fail("an unsound Follow is accepted"),
-        }
-    }
-    result.unwrap(sframe.advance(mut r, 4, 3, 8, steps(counting(), 8), 0))
-    check(opened(open_rfc(mut r, b"", step_frame(6, 1, l))), "advance dropped a step within keep")
-    check(opened(open_rfc(mut r, b"", step_frame(7, 2, l))), "advance dropped the previous step")
-    check(no_key(open_rfc(mut r, b"", step_frame(5, 2, l))), "advance kept a step past keep")
-    check(no_key(open_rfc(mut r, b"", step_frame(13, 0, l))), "a frame forward + 3 steps ahead has a key")
-    result.unwrap(sframe.advance(mut r, 4, 3, 13, steps(counting(), 13), 0))
-    check(opened(open_rfc(mut r, b"", step_frame(13, 0, l))), "advance does not re-key a lagging receiver")
-    let jl = sframe.Limits(frame: 4096, window: 64, keys: 16, ranges: 4, jump: 64)
-    let mut j = result.unwrap(sframe.receiver(suite(), Rfc, jl))
-    result.unwrap(sframe.install_ratcheted(mut j, follow, steps(counting(), 5)))
-    check(too_far(open_rfc(mut j, b"", step_frame(7, 65, jl))), "a step's first frame more than jump above 0 is not TooFar")
-    check(no_key(open_rfc(mut j, b"", step_frame(8, 0, jl))), "a TooFar candidate moved the current step")
-    check(opened(open_rfc(mut j, b"", step_frame(7, 64, jl))), "a step's first frame at jump does not open")
-    Ok(())
 }
 
 // ---------------------------------------------------------------- S1
@@ -861,7 +871,7 @@ fn seal_result(mut s: sframe.Sender, plain: Bytes, spare: u64) -> Result[sframe.
 @test
 fn sender_counters() -> Result[(), ()] {
     let l = sframe.limits()
-    let mut s = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), sframe.Mark(ctr: 0, volume: 0), l))
+    let mut s = made(sframe.sender(suite(), Rfc, Fixed(1), sending(base_of(1), 1, 0), 0, sframe.Mark(ctr: 0, volume: 0), l))
     match seal_result(mut s, b"abc", 64) {
         Error(Unreserved) => {},
         _ => fail("a fresh sender seals"),
@@ -872,9 +882,20 @@ fn sender_counters() -> Result[(), ()] {
         Error(Capacity(c)) => check(c.requested == 20 && c.available == 19, "Capacity names the wrong sizes"),
         _ => fail("a short spare is not Capacity"),
     }
+    // KID 1 and CTR 0 make a 1-byte header, so 40 bytes of metadata need a 41-byte AAD scratch.
+    let mut metadata: Bytes = list.new()
+    list.fill(mut metadata, 40, 0x6du8)
+    let mut out = room(64)
+    let scratch = result.unwrap(bound bytes 40 {
+        match sframe.seal(mut s, metadata, b"abc", mut out) {
+            Error(Capacity(c)) => c.requested == 41,
+            _ => false,
+        }
+    })
+    check(scratch && list.len(out) == 0, "an AAD scratch one byte short is not Capacity, or out changed")
     check(result.unwrap(seal_result(mut s, b"abc", 20)).ctr == 0, "a Capacity refusal consumed a CTR")
     {
-        let mut resumed = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), mark, l))
+        let mut resumed = made(sframe.sender(suite(), Rfc, Fixed(1), sending(base_of(2), 1, 0), 0, mark, l))
         let _ = result.unwrap(sframe.reserve(mut resumed, 1, 1000))
         check(result.unwrap(seal_result(mut resumed, b"abc", 64)).ctr == 10, "a resumed sender does not start at its ceiling")
     }
@@ -886,7 +907,7 @@ fn sender_counters() -> Result[(), ()] {
         _ => fail("a seal past the reserved CTR"),
     }
     {
-        let mut last = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), sframe.Mark(ctr: 0xfffffffffffffffe, volume: 0), l))
+        let mut last = made(sframe.sender(suite(), Rfc, Fixed(1), sending(base_of(3), 1, 0), 0, sframe.Mark(ctr: 0xfffffffffffffffe, volume: 0), l))
         let _ = result.unwrap(sframe.reserve(mut last, 5, 100))
         check(result.unwrap(seal_result(mut last, b"", 64)).ctr == 0xfffffffffffffffe, "the last CTR is refused")
         match seal_result(mut last, b"", 64) {
@@ -895,7 +916,7 @@ fn sender_counters() -> Result[(), ()] {
         }
     }
     {
-        let mut full = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), sframe.Mark(ctr: 0, volume: (1 << 34) - 2), l))
+        let mut full = made(sframe.sender(suite(), Rfc, Fixed(1), sending(base_of(4), 1, 0), 0, sframe.Mark(ctr: 0, volume: (1 << 34) - 2), l))
         let _ = result.unwrap(sframe.reserve(mut full, 5, 2))
         let _ = result.unwrap(seal_result(mut full, b"", 64))
         match seal_result(mut full, b"", 64) {
@@ -904,7 +925,7 @@ fn sender_counters() -> Result[(), ()] {
         }
     }
     {
-        let mut over = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), sframe.Mark(ctr: 0, volume: (1 << 34) + 1), l))
+        let mut over = made(sframe.sender(suite(), Rfc, Fixed(1), sending(base_of(5), 1, 0), 0, sframe.Mark(ctr: 0, volume: (1 << 34) + 1), l))
         match sframe.reserve(mut over, 5, 5) {
             Error(Exhausted) => {},
             _ => fail("a sender resumed past the volume limit reserves"),
@@ -928,7 +949,8 @@ fn volume_cases() {
     for k in 0u64 .. 2 {
         let framing = framing_of(k)
         for n in[16u64, 17u64] {
-            let mut s = result.unwrap(sframe.sender(suite(), framing, Fixed(1), counting(), sframe.Mark(ctr: 0, volume: (1 << 34) - 3), l))
+            let seed: u8 = int.truncate(6 + 2 * k + n - 16)
+            let mut s = made(sframe.sender(suite(), framing, Fixed(1), sending(base_of(seed), 1, 0), 0, sframe.Mark(ctr: 0, volume: (1 << 34) - 3), l))
             let _ = result.unwrap(sframe.reserve(mut s, 5, 8))
             let mut plain: Bytes = list.new()
             list.fill(mut plain, n, 0x42u8)

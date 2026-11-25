@@ -88,6 +88,11 @@ impl SecretBytes {
         }
     }
 
+    /// The bytes, for an import that takes custody of them (TLS-8, imports).
+    pub fn into_bytes(self) -> Zeroizing<Vec<u8>> {
+        self.bytes
+    }
+
     fn key(&self, alg: AeadAlg) -> Result<&PacketCipher, KeyFailure> {
         self.aead[usize::from(alg.case())]
             .get_or_init(|| expand(alg, &self.bytes).map(Box::new))

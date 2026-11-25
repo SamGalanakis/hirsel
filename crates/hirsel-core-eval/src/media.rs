@@ -6,10 +6,12 @@ use hirsel_core_net::{
     packet_cipher::{HeaderMask, PacketCipher},
     packet_epoch::{self, Epoch, IssueError},
     packet_nonce::{ReceiverNonce, SenderCounter},
-    packet_protection::{self, Algorithm},
+    packet_protection::{self, Algorithm, Key},
     packet_schedule::{self, ImportProfile},
+    packet_sframe::Sframe,
+    secret_aead::AeadAlg,
     srtp_cipher::SrtpProfile,
-    tls_kdf::{Side, Tls13Handshake, TlsHash, dtls12::Dtls12Keys},
+    tls_kdf::{Side, Tls13Handshake, Tls13PacketKeys, TlsHash, dtls12::Dtls12Keys},
 };
 use std::mem::MaybeUninit;
 
@@ -113,9 +115,9 @@ impl Machine<'_> {
                 let state = packet_schedule::Schedule::single(0, epoch);
                 Ok(self.media_hold(payer, Payload::Schedule(state)))
             }
-            HostOp::ScheduleImportTraffic | HostOp::ScheduleImportSrtp => {
-                Ok(self.import_schedule(payer, op, a))
-            }
+            HostOp::ScheduleImportTraffic
+            | HostOp::ScheduleImportSrtp
+            | HostOp::ScheduleImportSframe => Ok(self.import_schedule(payer, op, a)),
             HostOp::ScheduleSrtp => Ok(self.srtp_child(payer, a)),
             HostOp::ScheduleSpaceInfo => {
                 let Payload::Schedule(schedule) = &self.host.world.media[a[0] as usize]
@@ -135,9 +137,13 @@ impl Machine<'_> {
             HostOp::ScheduleSealerPair => Ok(self.sealer_pair(payer, a)),
             HostOp::ScheduleTls13 => Ok(self.tls13(payer, a)),
             HostOp::ScheduleDtls12 => Ok(self.dtls12(payer, a)),
-            HostOp::ScheduleApplication | HostOp::ScheduleKeyUpdate | HostOp::ScheduleRetire => {
-                Ok(self.schedule_transition(op, a))
+            HostOp::ScheduleSframeSealer | HostOp::ScheduleSframeOpener => {
+                Ok(self.sframe_child(payer, op, a))
             }
+            HostOp::ScheduleApplication
+            | HostOp::ScheduleKeyUpdate
+            | HostOp::ScheduleRetire
+            | HostOp::ScheduleSframeRatchet => Ok(self.schedule_transition(op, a)),
             HostOp::ScheduleFinished | HostOp::ScheduleVerifyFinished => {
                 Ok(self.schedule_finished(op, a))
             }
@@ -246,6 +252,54 @@ impl Machine<'_> {
                 let b = self.media_hold(payer, second)[0];
                 vec![a, 0, 0, b]
             }
+            Err(error) => issue_error(error),
+        }
+    }
+
+    /// `sframe_sealer` and `sframe_opener` (TLS-8, SFrame schedules).
+    fn sframe_child(&mut self, payer: Limit, op: HostOp, a: &[u64]) -> Vec<u64> {
+        let slot = a[0] as usize;
+        let mut held = self.host.world.media[slot].take().unwrap();
+        let Payload::Schedule(schedule) = &mut held.payload else {
+            unreachable!()
+        };
+        let algorithm = Algorithm::Aead(AeadAlg::Aes128Gcm);
+        let cipher = |keys: Option<Tls13PacketKeys>| {
+            let keys = keys.expect("evaluator imports hold their bytes");
+            Cipher::new(algorithm, Key::Aead(keys.payload())).unwrap()
+        };
+        let mut retired = Vec::new();
+        let child = schedule.sframe_mut().and_then(|sframe| {
+            if op == HostOp::ScheduleSframeSealer {
+                sframe.check_sealer(a[1], a[2])?;
+            } else {
+                sframe.check_opener(a[1], a[2])?;
+            }
+            let requested = if op == HostOp::ScheduleSframeSealer {
+                Sframe::<Limit>::SEALER_CHARGE
+            } else {
+                packet_epoch::CIPHER_CHARGE
+            };
+            self.admit(&payer, requested)
+                .map_err(|available| IssueError::Capacity {
+                    requested,
+                    available,
+                })?;
+            Ok(if op == HostOp::ScheduleSframeSealer {
+                let issued = sframe.sealer(a[1], a[2], a[3], (payer.clone(), payer.clone()));
+                retired.extend(issued.retired.into_values());
+                Payload::Sealer(issued.counter, algorithm, cipher(issued.keys))
+            } else {
+                let issued = sframe.opener(a[1], a[2], payer.clone());
+                Payload::Opener(issued.nonce, algorithm, cipher(issued.keys))
+            })
+        });
+        self.host.world.media[slot] = Some(held);
+        for paid in retired {
+            self.refund(paid, packet_epoch::DOMAIN_CHARGE);
+        }
+        match child {
+            Ok(payload) => self.media_hold(payer, payload),
             Err(error) => issue_error(error),
         }
     }
@@ -368,6 +422,17 @@ impl Machine<'_> {
                     self.refund(payer, packet_epoch::DOMAIN_CHARGE);
                 }
             }),
+            HostOp::ScheduleSframeRatchet => schedule
+                .sframe_mut()
+                .and_then(|sframe| {
+                    Sframe::<Limit>::check_ratchet(a[1])?;
+                    Ok(sframe.advance(a[1]))
+                })
+                .map(|retired| {
+                    for payer in retired.into_values() {
+                        self.refund(payer, packet_epoch::DOMAIN_CHARGE);
+                    }
+                }),
             _ => unreachable!(),
         };
         self.host.world.media[slot] = Some(held);
@@ -408,27 +473,26 @@ impl Machine<'_> {
     }
 
     fn import_schedule(&mut self, payer: Limit, op: HostOp, args: &[u64]) -> Vec<u64> {
-        use hirsel_core_net::{ImportKind, ImportRefusal};
-        let (kind, profile, suite, key) = if op == HostOp::ScheduleImportTraffic {
-            (ImportKind::Traffic, args[0], args[1], args[2])
-        } else {
-            (ImportKind::Srtp, args[0], 0, args[1])
+        use hirsel_core_net::{ImportKind, ImportRefusal, ImportUse, SframeDirection};
+        let (kind, profile, suite, key) = match op {
+            HostOp::ScheduleImportTraffic => (ImportKind::Traffic, args[0], args[1], args[2]),
+            HostOp::ScheduleImportSrtp => (ImportKind::Srtp, args[0], 0, args[1]),
+            _ => (ImportKind::Sframe, 0, args[0], args[1]),
         };
         let secret = self.secret(key).expect("a live Secret designation");
-        if secret
-            .policy
-            .uses
-            .import()
-            .is_none_or(|use_| use_.kind() != kind)
-        {
+        let authority = secret.policy.import();
+        if authority.is_none_or(|use_| use_.kind() != kind) {
             return vec![0, 1, 1, 0];
         }
+        let entry = match authority {
+            Some(ImportUse::Sframe(SframeDirection::Send { .. })) => REGISTRY_CHARGE,
+            _ => 0,
+        };
         let mark = secret
             .import
             .clone()
             .expect("import authority carries a spent mark");
-        let bytes = secret.bytes.clone();
-        let request = packet_epoch::SCHEDULE_CHARGE;
+        let request = packet_epoch::SCHEDULE_CHARGE + entry;
         let issued = mark.issue(kind, || {
             let parsed =
                 ImportProfile::from_case(kind, profile, suite).ok_or(IssueError::Invalid)?;
@@ -439,7 +503,7 @@ impl Machine<'_> {
                 })?;
             Ok(parsed)
         });
-        let (authority, profile) = match issued {
+        let (authority, profile, spending) = match issued {
             Ok(issued) => issued,
             Err(error) => {
                 let mut row = match error {
@@ -451,14 +515,27 @@ impl Machine<'_> {
                 return row;
             }
         };
-        let schedule = profile.import(authority, Some(&bytes));
-        drop(bytes);
+        let schedule = spending.bytes(|bytes| {
+            let bytes = bytes.expect("evaluator imports hold their bytes");
+            let schedule = profile
+                .import(authority, Some(bytes))
+                .map_err(|_| IssueError::Invalid)?;
+            if entry != 0 {
+                self.host
+                    .world
+                    .send_keys
+                    .register(bytes, payer.clone())
+                    .map_err(|_| IssueError::Spent)?;
+            }
+            Ok(schedule)
+        });
+        drop(spending);
         self.secret_drop(key);
         match schedule {
             Ok(schedule) => self.media_hold(payer, Payload::Schedule(schedule)),
-            Err(_) => {
+            Err(error) => {
                 self.refund(payer, request);
-                issue_error(IssueError::Invalid)
+                issue_error(error)
             }
         }
     }
@@ -624,5 +701,18 @@ impl Machine<'_> {
             self.refund(payer.clone(), scratch);
         }
         Ok(outcome)
+    }
+}
+
+impl crate::World {
+    /// Sealed secrets and the SFrame send-key registry are held until the run ends.
+    pub(crate) fn end_run_holds(&mut self) {
+        for (_, l, n) in std::mem::take(&mut self.seals) {
+            l.find().subtract(n);
+        }
+        for l in std::mem::take(&mut self.send_keys).end() {
+            l.find()
+                .subtract(hirsel_core_net::packet_sframe::REGISTRY_CHARGE);
+        }
     }
 }

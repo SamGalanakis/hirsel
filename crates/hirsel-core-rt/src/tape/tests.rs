@@ -11,6 +11,8 @@ mod aead;
 mod kdf;
 #[path = "rl2_tests.rs"]
 mod rl2;
+#[path = "sframe_tests.rs"]
+mod sframe;
 /// Counts every callback that reaches it. `inner: None` refuses everything:
 /// the refuse-all host of the bypass law.
 struct Counted {
@@ -2504,14 +2506,12 @@ mod test_frames;
 pub(super) use test_frames::REVISION;
 use test_frames::{HAND, MODEL, XXH3, in_task, tape_frames};
 
-#[path = "registry_tests.rs"]
-mod registry_tests;
-
-#[path = "p256_tests.rs"]
-mod p256_tests;
-
 #[path = "key_share_tests.rs"]
 mod key_share_tests;
+#[path = "p256_tests.rs"]
+mod p256_tests;
+#[path = "registry_tests.rs"]
+mod registry_tests;
 
 #[path = "rl6.rs"]
 mod rl6;

@@ -323,6 +323,7 @@ pub mod packet_epoch;
 pub mod packet_nonce;
 pub mod packet_protection;
 pub mod packet_schedule;
+pub mod packet_sframe;
 pub mod random_stream;
 pub mod secret_aead;
 mod secret_grant;
@@ -331,7 +332,7 @@ pub mod srtp_cipher;
 pub mod tls_kdf;
 pub use secret_grant::{
     HmacAlgorithm, ImportKind, ImportRefusal, ImportSpend, ImportUse, SecretGrant, SecretPolicy,
-    SecretSource, SecretUse, derive_hmac_sha256,
+    SecretSource, SecretUse, SframeDirection, Spending, derive_hmac_sha256,
 };
 
 #[cfg(test)]

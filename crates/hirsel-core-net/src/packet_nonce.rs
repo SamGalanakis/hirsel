@@ -7,9 +7,13 @@ pub enum NonceFormat {
     QuicMultipath,
     Dtls13,
     Tls13,
-    Dtls12 { epoch: u16 },
+    Dtls12 {
+        epoch: u16,
+    },
     SrtpRtp,
     SrtpRtcp,
+    /// RFC 9605 §4.4.3: the salt XOR the 64-bit CTR at bytes 4..12.
+    Sframe,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

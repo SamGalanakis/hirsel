@@ -9,7 +9,7 @@ use crate::{
     Context,
     provider::{Buffer, Outcome},
 };
-use hirsel_core_net::{packet_epoch::IssueError, tls_kdf::Side};
+use hirsel_core_net::{packet_epoch::IssueError, packet_sframe::Sframe, tls_kdf::Side};
 
 #[cfg(feature = "record")]
 const APPLICATION: u8 = 11;
@@ -21,6 +21,8 @@ const RETIRE: u8 = 13;
 const FINISHED: u8 = 14;
 #[cfg(feature = "record")]
 const VERIFY: u8 = 15;
+#[cfg(feature = "record")]
+const SFRAME_RATCHET: u8 = 23;
 
 fn sender(of: u64) -> Side {
     if of == 0 { Side::Client } else { Side::Server }
@@ -107,6 +109,39 @@ pub unsafe extern "C" fn hirsel_core_schedule_key_update(
     }
     let _ = (context, site);
     drop(schedule.state.key_update(local));
+    Outcome::default()
+}
+
+/// # Safety
+/// The checked caller lends its schedule exclusively through the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_schedule_sframe_ratchet(
+    context: *mut Context,
+    handle: u64,
+    steps: u64,
+    site: u64,
+) -> Outcome {
+    // SAFETY: the caller holds the unique schedule loan.
+    let schedule = unsafe { loan_mut::<Schedule>(handle) };
+    if let Err(error) = schedule
+        .state
+        .sframe()
+        .and_then(|_| Sframe::<()>::check_ratchet(steps))
+    {
+        return refusal(error);
+    }
+    #[cfg(feature = "record")]
+    if schedule.origin != 0 {
+        let steps_wire = steps.to_le_bytes();
+        let answer = unsafe {
+            record_transition(context, schedule.origin, SFRAME_RATCHET, &steps_wire, site)
+        };
+        if answer.status != 0 || answer.error != IoError::OK {
+            return answer;
+        }
+    }
+    let _ = (context, site);
+    drop(schedule.state.sframe_mut().unwrap().advance(steps));
     Outcome::default()
 }
 

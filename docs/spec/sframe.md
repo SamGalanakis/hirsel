@@ -1,5 +1,10 @@
 # SFrame: end-to-end media encryption
 
+Version note (2026-11-25, sframe-import-build-2702, E1 built): slice E1 is built on TLS-8
+slice T16. SFRAME-2 to SFRAME-13, the keying cost, the cost targets and the build laws now
+describe the schedule build. The byte-keyed API, `salt_of` and the library's key and salt
+derivation are gone; `ratchet_key`, a distribution helper, keeps its one HKDF over `std.hmac`.
+
 Version note (2026-11-25, sframe-activate-2688): `sframe@1` ships in the toolchain bundle. A
 program outside the repository binds it as `sframe = { major = 1 }`; the toolchain supplies it
 with `media_bits@1` ([building](../building.md#the-installation)). `remove_generation` answers
@@ -59,7 +64,7 @@ This text defines the package `core/programs/sframe/`. It is a pure library impl
 
 - the SFrame header;
 - the key schedule;
-- sealing and opening through TLS-5's AEAD sink;
+- sealing and opening through TLS-8 SFrame sealers and openers;
 - a replay window;
 - the sender-key ratchet of RFC 9605 §5.1;
 - a **ranged framing**, so a frame stays parseable by its codec's RTP packetizer.
@@ -69,62 +74,26 @@ The package takes keys and frames only. It reaches no `Foreign` code and does no
 `hirsel test --sim`, recording and replay hold for every program built on it
 ([FFI-8](foreign.md)).
 
-**Keying cost, read first.** TLS-5's sinks never give a program the bytes of a `Secret`
-([TLS-5](tls.md), key operations). RFC 9605's nonce is `sframe_salt XOR CTR`, and the salt is
-an HKDF output. So a library that builds the nonce must hold the salt in program bytes. The
-salt and the base key it comes from therefore cannot come from a `Secret`. This build makes
-no change to core, and the cost is this:
+**Keying, read first.** Keys reach the library only as TLS-8 SFrame schedules
+([SFRAME-14](#sframe-14-keys-from-a-tls-8-schedule);
+[TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement), SFrame schedules). Core holds each base
+key and derives `sframe_secret`, the per-KID key and salt, and the ratchet from it. The nonce
+is built inside the sealer or opener core issues, so no key, salt or ratchet output is ever
+program bytes. What this gives and what it leaves:
 
-- The **base key is program bytes** (`Bytes`). A base key that reaches the run only as an
-  opaque `Secret`, such as an entry grant or a future MLS exporter inside a schedule, cannot
-  be used.
-- The salt, the ratchet and the per-SSRC derivation run in library HKDF over `std.hmac`.
-- Only the per-KID AEAD key lives behind the secret boundary, made with
-  `secret.derive_hkdf_sha256` and used with `secret.aead_seal` and `secret.aead_open`
-  (SFRAME-4).
-- **One sender per key is library state, not a core guarantee.** Core cannot see one base
-  key installed in two senders, or in a sender and a receiver, within a run or across runs.
-- Program-held key bytes are not zeroed when released, so a ratchet's forward secrecy
-  against a later memory read is weaker than a core schedule's. A ratcheted sender and every
-  receiver following it hold the current base key for the generation's life, because
-  `ratchet` and the forward search need it.
-- **The secret boundary gives use-marking, not confidentiality.** `sframe_secret` is computed
-  in library code, and the AEAD key is one HKDF-Expand from it. Holding that key behind
-  `secret.seal` stops it being used for the wrong purpose; it does not keep it from the
-  program.
-- **Recordings hold base keys.** A base key reaches a member over `runner.room` or TLS and is
-  opened by `aead_open`, and a recording of `aead_open` holds the plaintext it opened
-  ([TLS-5](tls.md)). So a tape of an E2EE member holds every base key it received, at rest,
-  and anyone who reads the tape can decrypt the recorded media. Treat every such tape as
-  key-bearing.
-- **RFC 9605 §4.4.1's base-key duties are the caller's.** The RFC says a base key "MUST NOT be
-  used for encryption by multiple senders" and that implementations MUST mark each base key
-  for encryption or decryption, never both. The library marks only the keys it derives. The
-  same bytes passed to `sender` in two processes, or to `sender` and `install` in one, are
-  accepted. Two senders on one base key and one KID both start at CTR 0: the same key and
-  nonce from the first frame, which gives away the XOR of the plaintexts and GCM's
-  authentication key.
-
-[Keying end state](#keying-end-state) specifies the core change, TLS-8 SFrame schedules, and
-what it removes.
-
-- The first six costs go:
-  - base keys stop being program bytes, so a granted base key can be used;
-  - the salt and the ratchet are computed inside core;
-  - the salt, not only the AEAD key, stays behind the boundary;
-  - core refuses a second sender of equal bytes within a run, by any route (TLS-8's send-key
-    registry), though not bytes one ratchet step apart or another run;
-  - base keys, their PRKs and the imported bytes are zeroed at each ratchet step, at import
-    and at drop; per-KID keys of retained steps live as long as their openers, and ring AEAD
-    keys are not erased (TLS-8);
-  - derived keys are confidential, not only use-marked.
-- The last two shrink without going:
-  - a base key that reaches a member as program bytes, over `runner.room` or TLS, is still on
-    that member's tape, and only a granted key leaves no copy;
-  - core now marks each key and KID for one direction, but duties beyond one run's spent mark
-    stay the issuer's.
-- The API changes: keys come in as schedules, not as `Bytes`
-  ([SFRAME-14](#sframe-14-keys-from-a-tls-8-schedule)).
+- **A granted base key can be used**, as any key sealed with `secret.seal` can. Derived keys
+  are confidential, not only use-marked.
+- **Core marks direction.** A policy fixes each KID's direction (`sframe_import(receive)` or
+  `sframe_import(send,<kid>,<bits>)`), so a receive key never seals, as RFC 9605 §4.4.1 asks.
+- **One sender per key within a run** is core's: a second `send` import of equal bytes, by any
+  route, is `Spent` (TLS-8's send-key registry). Equal bytes in another run, and bytes one
+  ratchet step apart, stay the issuer's (SFRAME-13).
+- **Erasure.** A base key, its PRKs and the imported bytes are zeroed at each ratchet step, at
+  import and at drop. A retained step's per-KID key and salt live as long as its opener, and
+  ring's AEAD key schedules are not erased (TLS-8, erasure).
+- **Recordings.** A base key that reaches a member as program bytes, over `runner.room` or
+  TLS, is on that member's tape in the `aead_open` that delivered it, so such a tape is
+  key-bearing. Only a granted key leaves no copy.
 
 Who uses it:
 
@@ -191,13 +160,13 @@ pub fn encode_header(h: Header, mut out: Bytes) -> Result[u64, Capacity]
 pub fn decode_header(b: Bytes, at: u64) -> Result[(Header, u64), HeaderError]
 
 pub type Scheme = Fixed(u64) | Ratcheted(Ratchet)
-pub type Ratchet { generation: u64, bits: u8, step: u64 }      // base is the key at step
-pub type Follow { generation: u64, bits: u8, step: u64, forward: u8, keep: u8, floor: u64 }
+pub type Ratchet { generation: u64, bits: u8, step: u64 }      // the step the sender seals at
+pub type Follow { generation: u64, bits: u8, step: u64, at: u64, forward: u8, keep: u8, floor: u64 }
 
 pub type Limits { frame: u64, window: u64, keys: u64, ranges: u64, jump: u64 }
 pub fn limits() -> Limits                               // 4 MiB, 128, 16, 256, 0 (off)
 
-pub type SframeError = Invalid | Framing | Unreserved | Exhausted | Keys | Secret(secret.SecretError) | Capacity(Capacity)
+pub type SframeError = Invalid | Framing | Unreserved | Exhausted | Keys | Schedule(schedule.ScheduleError) | Capacity(Capacity)
 pub type Discard: key = Malformed | Replayed | TooOld | TooFar | Tampered
 pub type OpenError = NoKey(u64) | Discarded(Discard) | Capacity(Capacity)
 pub type Sealed { kid: u64, ctr: u64, len: u64 }
@@ -205,7 +174,7 @@ pub type Opened { kid: u64, ctr: u64, len: u64 }
 pub type Mark { ctr: u64, volume: u64 }
 
 pub type Sender
-pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take base: Bytes, from: Mark, l: Limits) -> Result[Sender, SframeError]
+pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take keys: schedule.Schedule, at: u64, from: Mark, l: Limits) -> Result[Sender, (SframeError, schedule.Schedule)]
 pub fn current_kid(s: Sender) -> u64
 pub fn next_ctr(s: Sender) -> u64
 pub fn reserve(mut s: Sender, frames: u64, volume: u64) -> Result[Mark, SframeError]
@@ -215,17 +184,16 @@ pub fn seal_ranged(mut s: Sender, layout: ranges.Layout, metadata: Bytes, frame:
 
 pub type Receiver
 pub fn receiver(suite: Suite, framing: ranges.Framing, l: Limits) -> Result[Receiver, SframeError]
-pub fn install(mut r: Receiver, kid: u64, take base: Bytes, floor: u64) -> Result[(), SframeError]
-pub fn install_ratcheted(mut r: Receiver, f: Follow, take base: Bytes) -> Result[(), SframeError]
-pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take base: Bytes, floor: u64) -> Result[(), SframeError]
+pub fn install(mut r: Receiver, kid: u64, keys: schedule.Schedule, floor: u64) -> Result[(), SframeError]
+pub fn install_from(mut r: Receiver, kid: u64, s: Sender, floor: u64) -> Result[(), SframeError]
+pub fn install_ratcheted(mut r: Receiver, f: Follow, take keys: schedule.Schedule) -> Result[(), (SframeError, schedule.Schedule)]
+pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take keys: schedule.Schedule, at: u64, floor: u64) -> Result[(), (SframeError, schedule.Schedule)]
 pub fn remove(mut r: Receiver, kid: u64) -> bool
 pub fn remove_generation(mut r: Receiver, bits: u8, generation: u64) -> bool
 pub fn open(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError]
 pub fn open_ranged(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError]
 
-pub fn ratchet_key(base: Bytes) -> Bytes                // RFC 9605 §5.1's next base key
-pub fn salt_of(base: Bytes, kid: u64) -> Bytes          // sframe_salt (SFRAME-4)
-pub fn ssrc_key(base: Bytes, ssrc: u32, mut out: Bytes) -> Result[u64, Capacity]   // SFRAME-11; never built: P1 uses a TLS-8 schedule (SFRAME-14)
+pub fn ratchet_key(base: Bytes) -> Bytes                // RFC 9605 §5.1's next base key, for distribution only (SFRAME-14)
 
 // module ranges
 pub type Escape = Bare | AnnexB
@@ -259,8 +227,8 @@ pub fn normalize_h265(frame: Bytes, mut out: Bytes) -> Result[u64, RangeError]  
 4096, `keys` 1 to 256, `ranges` 0 to 1024, `jump` 0 (off) or at least `window`. Anything else
 is `Invalid`.
 
-`Sender` and `Receiver` are plain records that own `Secret` values, so they are move-only and
-neither `key` nor `codec`. Neither type can be compared, stored or encoded. A sender or
+`Sender` and `Receiver` are plain records that own TLS-8 schedules, sealers and openers, so
+they are move-only and neither `key` nor `codec`. Neither type can be compared, stored or encoded. A sender or
 receiver fixes its framing when it is made, and that framing is part of its keys' purpose
 (SFRAME-9).
 
@@ -286,9 +254,8 @@ Refusing it gives one meaning per header and drops the frame before any key work
 
 ### SFRAME-4: The key schedule
 
-For a base key and a KID, the library derives the AEAD key with
-`secret.derive_hkdf_sha256` and the 12-byte salt with library HKDF over `std.hmac`, both under
-RFC 9605 §4.4.2's labels.
+For a base key and a KID, a TLS-8 SFrame schedule derives the AEAD key and the 12-byte salt
+under RFC 9605 §4.4.2's labels, inside core. The library never sees either.
 
 With `kid8` the KID as 8 bytes big-endian and `cs` the suite's id as 2 bytes big-endian
 (`00 04`):
@@ -301,28 +268,18 @@ sframe_salt   = HKDF-Expand(sframe_secret, "SFrame 1.0 Secret salt " ‖ kid8 �
 
 Each label ends with a space before `kid8`.
 
-- **Base key.** A base key is 16 to 64 bytes; any other length is `Invalid`. RFC 9605 fixes
-  no length. Sender keys and ratchet outputs are 32 bytes, an MLS exporter's are `AEAD.Nk`
-  (16), and the floor matches TLS-5's HKDF floor.
-- **AEAD key.**
-  - The library copies the base key into `secret.seal(copy, "kdf")`.
-  - It calls `secret.derive_hkdf_sha256(parent, "", key_label, 16, uses)`. `uses` is
-    `aead(aes128-gcm)` for a sender and `open(aes128-gcm)` for a receiver.
-  - It drops the parent.
-  - TLS-5's empty `salt` is the 32 zero bytes of RFC 5869 §2.2, which gives the RFC's
-    `HKDF-Extract("", …)`.
-  - A receiver's key can only open, so the RFC's "encryption or decryption, never both" holds
-    for every key the library derives.
-- **Salt.** Library HKDF computes `sframe_secret = hmac.sha256("", base_key)` and the first
-  12 bytes of `hmac.sha256(sframe_secret, salt_label ‖ 0x01)`, held as `Inline[u8, 12]`.
-- **Both computations** read the same `sframe_secret`. The C.3 vector checks the library's
-  value directly and the sink's through the ciphertext (law V2).
-- **When derivation happens.** Once per KID:
-  - at `sender`, `ratchet` and `install`;
-  - in a receiver's forward ratchet, for a candidate step (SFRAME-8).
-- **Where the key lives.** Each sending or receiving key holds one child `Secret` (48 bytes
-  admitted, TLS-5's `round_up_8(16 + 32)`) and the salt. A `SecretError` from the seal or the
-  derivation is `Secret(e)`, and nothing is installed.
+- **Base key.** A base key is the secret of an `sframe_import(<dir>)` grant or seal, 16 to 64
+  bytes; any other length is `Invalid` from `import_sframe` (TLS-8 PC14). RFC 9605 fixes no
+  length. Sender keys and ratchet outputs are 32 bytes, and an MLS exporter's are `AEAD.Nk`
+  (16).
+- **Direction.** The import's policy fixes which KIDs the schedule may seal and which it may
+  open (SFRAME-14), so a receive key never seals, as RFC 9605 §4.4.1 asks.
+- **When derivation happens.** Once per KID and step, when core issues a sealer or an opener:
+  at `sender`, `ratchet`, `install`, `install_from`, `install_ratcheted` and `advance`, and
+  for a forward candidate (SFRAME-8). Frames do no derivation.
+- **Where the key lives.** Each sending key is one TLS-8 `Sealer` and each receiving key one
+  `Opener`, holding that KID's `sframe_key` and `sframe_salt`. A `ScheduleError` from an
+  issue is `Schedule(e)`, and nothing is installed.
 
 Check against the vector (RFC 9605 C.3, suite 0x0004, recomputed with Python `hmac` and
 `cryptography` for this text):
@@ -330,6 +287,9 @@ Check against the vector (RFC 9605 C.3, suite 0x0004, recomputed with Python `hm
 - base key `00..0f` and KID `0x123` give `sframe_secret` `d926952c…314c40c0`;
 - `sframe_key` is `d34f547f4ca4f9a7447006fe7fcbf768`;
 - `sframe_salt` is `75234edefe07819026751816`.
+
+Law V2 checks these through the ciphertext a schedule's sealer gives; TLS-8 PC12 checks the
+schedule directly.
 
 ### SFRAME-5: Sealing
 
@@ -339,12 +299,16 @@ CTR.
 
 - **Nonce.** `be96(ctr)` is the CTR as a 12-byte big-endian integer. CTR is at most 64 bits,
   so it lands in the salt's last 8 bytes.
-- **`sender(suite, framing, scheme, take base, from, l)`** makes one sending key:
-  - `Fixed(kid)` sends under `kid`.
+- **`sender(suite, framing, scheme, take keys, at, from, l)`** makes one sending key from a
+  TLS-8 SFrame schedule whose imported bytes are the key at step `at` (SFRAME-14):
+  - `Fixed(kid)` sends under `kid`, at step 0.
   - `Ratcheted(Ratchet(generation, bits, step))` sends under
-    `(generation << bits) | (step mod 2^bits)`. `base` is the key **at** `step`: the sender
-    does not ratchet when it is made (SFRAME-8). `bits` is 1 to 16, and `generation` must fit
-    in `64 − bits` bits. Anything else is `Invalid`.
+    `(generation << bits) | (step mod 2^bits)`, with step `step`'s key (SFRAME-8). `bits` is 1
+    to 16, and `generation` must fit in `64 − bits` bits.
+  - `at` past the scheme's step, or more than `2^16` below it, is `Invalid`. Otherwise core
+    issues one sealer, `sframe_sealer(keys, step − at, kid, from.ctr)`, which ratchets the
+    schedule to `step` in the same call. A refusal there is `Schedule(e)`.
+  - Every refusal returns the schedule unmoved with the error.
   - `from` is where the key's counters start: `Mark(0, 0)` for a key never used, or the last
     mark the caller stored for a key it resumes (below).
 - **Reservations.** RFC 9605 §9.1 asks a sender to store its next counter before using it.
@@ -376,9 +340,11 @@ CTR.
   - `Unreserved`: the next CTR or the volume would pass the ceiling. The caller reserves more.
   - `Capacity(c)`: the spare of `out` is shorter than the result, with the result's length as
     `requested`.
-  - Otherwise the AEAD sink seals. On success the CTR advances by one and the volume grows.
-    The sink cannot refuse after these checks: the key's length, the nonce's length and the
-    plain bound are fixed, and the spare was checked.
+  - Otherwise the sealer seals with `packet.seal_into`, the header in `out` as AAD and
+    `metadata` as `extra`. Its `Capacity(c)`, for the AAD scratch it admits, is `Capacity(c)`
+    with nothing changed. On success the CTR advances by one and the volume grows. The sealer
+    makes no other refusal after these checks: the CTR is above its floor and unused, and the
+    plain bound and spare were checked.
 - **Volume limit.** Each sending key counts `q + σ`: frames sealed, plus 16-byte blocks of
   plaintext and AAD. A seal costs `1 + blocks(plain) + blocks(aad)`, where `blocks(x)` is
   `⌈x / 16⌉` and `aad` is the whole AAD (for `seal_ranged`, with `metadata′` of SFRAME-9 and
@@ -398,7 +364,7 @@ CTR.
 ### SFRAME-6: Opening
 
 `open(mut r, metadata, frame, mut out)` decodes the header, finds the key for its KID,
-rejects replays, opens with the AEAD sink, and only then updates the window. A frame that
+rejects replays, opens with the KID's TLS-8 opener, and only then updates the window. A frame that
 fails is `NoKey(kid)`, `Capacity(c)` or `Discarded(d)`, with nothing appended and no state
 changed.
 
@@ -414,11 +380,13 @@ The steps, in this order:
    `TooFar` can refuse it.
 4. `Capacity(c)` when the spare of `out` is shorter than the plaintext, which is the frame
    length minus the header length minus 16.
-5. **The AEAD sink opens** with nonce `sframe_salt XOR be96(ctr)` and AAD
-   `header ‖ metadata`. When the tag fails the result is `Discarded(Tampered)`. TLS-5's sink
-   then appends nothing and releases no unverified plaintext.
-6. **On success:** the window marks the CTR, a forward candidate commits (SFRAME-8), and
-   `open` answers `Opened(kid, ctr, len)`.
+5. **The opener opens** with `packet.open_into`, which uses nonce `sframe_salt XOR be96(ctr)`
+   and AAD `header ‖ metadata`. When the tag fails the result is `Discarded(Tampered)`, and
+   the opener appends nothing and releases no unverified plaintext. Its `Capacity(c)`, for the
+   AAD scratch, is `Capacity(c)`.
+6. **On success:** a forward candidate commits (SFRAME-8), which can still be `Capacity(c)`
+   with nothing changed, then the window marks the CTR and `open` answers
+   `Opened(kid, ctr, len)`.
 
 The `Discard` reasons stay local. They exist so counters can report them (SFRAME-13), and a
 receiver never sends them back to a sender (RFC 9605 §7.5). Steps 1 to 3 do no AEAD work, so
@@ -476,9 +444,8 @@ gives. It accepts a CTR it has not accepted before that is at or above the floor
 
 **Openers and the window.** A TLS-8 `Opener` is immutable and holds no window ("replay windows
 are the protocols'", TLS-8). `srtp` opens through TLS-8 openers and keeps its window itself.
-`sframe` keeps its window itself too. It opens through TLS-5's AEAD sink until slice E1, and
-through TLS-8 SFrame openers after it (SFRAME-14). This settles the plan's "TLS-8
-opener-window decision": TLS-8 needs no window, and neither build is gated on one.
+`sframe` opens through TLS-8 SFrame openers and keeps its window itself too (SFRAME-14). This
+settles the plan's "TLS-8 opener-window decision": TLS-8 needs no window.
 
 ### SFRAME-8: Sender keys and the ratchet
 
@@ -490,54 +457,61 @@ authenticates under it.
 - **Who decides when.** The library supplies the mechanism and the caller decides when to
   use it. A new receiver joining is a reason to ratchet. A receiver leaving needs a new
   generation, which is a new base key sent out of band (RFC 9605 §5.1).
-- **What `base` means.** For `sender`, `install_ratcheted` and `advance`, `base` is the key
-  **at** the given `step`. Nobody ratchets at construction, so making a sender or receiver
-  costs one derivation whatever `step` is. A joiner is handed the current step's key, never
-  step 0's, so it cannot read the generation's earlier media, which is what ratcheting on a
-  join is for. A party that keeps `(base, step)` keeps the latest pair.
+- **What `at` means.** For `sender`, `install_ratcheted` (`Follow.at`) and `advance`, the
+  schedule's imported bytes are the key **at** step `at`, and the call reaches `step` in the
+  one core call that issues its sealer or opener, at most `2^16` steps (SFRAME-14). A joiner
+  is handed the current step's key with `at` equal to that step, never step 0's, so it cannot
+  read the generation's earlier media, which is what ratcheting on a join is for. A party
+  that hands keys out as bytes keeps the latest `(base, step)` pair, with `ratchet_key` for
+  the next step's key.
 - **Sending.** `ratchet(mut s)` on a `Ratcheted` sender:
-  - replaces the base key with the next one and adds 1 to `step`;
-  - derives the new KID's key and salt;
+  - issues `sframe_sealer(keys, 1, next_kid, 0)`, one core call that moves the schedule one
+    step and derives the new KID's key and salt, and adds 1 to `step`;
   - restarts the counters at `Mark(0, 0)` under the new key, with the ceiling there too, so
     the caller reserves (SFRAME-5) and stores `(step, ceiling)` before the next seal. A crash
     between `ratchet` and that write resumes the old step from its stored ceiling, which is
     still safe.
-  - The old key's `Secret` is released.
+  - The old step's sealer is dropped.
   - It is `Invalid` on a `Fixed` sender and `Exhausted` when `step` is `2^64 − 1`. A
-    `Secret(e)` or `Capacity` result leaves the sender as it was.
+    `Schedule(e)` result, `Capacity(..)` or `Invalid` for a KID past the import's block,
+    leaves the sender as it was, still sealing under the old step (law I1).
   - Within one generation the KID repeats every `2^R` steps, each time with a different base
     key, so `(base_key, KID, CTR)` stays unique (RFC 9605 §9.1).
-- **Following.** `install_ratcheted(mut r, Follow(generation, bits, step, forward, keep, floor), take base)`
+- **Following.** `install_ratcheted(mut r, Follow(generation, bits, step, at, forward, keep, floor), take keys)`
   installs a generation whose current step is `step`, with `floor` for that step's window. It
-  needs `1 ≤ forward ≤ 16`, `forward ≤ keep ≤ 16` and `keep + 1 + forward ≤ 2^bits`; anything
-  else is `Invalid`. The last bound gives every low-bit value at most one meaning. For a frame
+  needs `1 ≤ forward ≤ 16`, `forward ≤ keep ≤ 16`, `keep + 1 + forward ≤ 2^bits` and `at` as
+  for `sender`; anything else is `Invalid`, and a refusal returns the schedule. The last bound gives every low-bit value at most one meaning. For a frame
   whose KID's high bits name the generation and whose low bits are `low`, with current step
   `s`:
   - If `low` is a retained or the current step's low bits, the frame uses that step's key.
     Retained steps are the up to `keep` steps before `s` that the receiver already holds.
-  - Otherwise `d = (low − s) mod 2^bits`. When `1 ≤ d ≤ forward`, the library ratchets a copy
-    of the current base key `d` times and derives a **candidate** key. When `d` is larger,
-    the frame is `NoKey(kid)`.
-  - **Commit.** A candidate that authenticates becomes the current step `s + d`. The
-    intermediate steps join the retained set, which keeps only the `keep` steps below the new
-    current one. Released steps drop their `Secret` and window.
-  - **No commit.** A candidate that fails to authenticate is discarded and changes nothing.
+  - Otherwise `d = (low − s) mod 2^bits`. When `1 ≤ d ≤ forward`, the frame opens under a
+    **candidate**, `sframe_opener(keys, d, kid(s + d))`, which does not move the schedule. A
+    generation keeps its last candidate and reuses it for the next frame at the same `d`.
+    When `d` is larger, the frame is `NoKey(kid)`.
+  - **Commit.** A candidate that authenticates becomes the current step `s + d`. The library
+    issues openers for the intermediate steps the new step retains, all or nothing; a
+    refusal is the frame's `Capacity(c)` with nothing moved. Then `sframe_ratchet(keys, d)`
+    commits. The retained set keeps only the `keep` steps below the new current one, and
+    released steps drop their opener and window.
+  - **No commit.** A candidate that fails to authenticate is kept for its `d` and changes
+    nothing else.
   - **Why `keep ≥ forward`.** Any member can seal a genuine frame at `s + forward` (RFC 9605
     §7.2). If `keep` were smaller, that one commit would release step `s`, and the real
     sender's frames would be `NoKey` until it ratcheted past. With `keep ≥ forward` the step a
     commit jumped from is always retained. Two commits are not bounded this way: member frames
     at `s + forward` and then `s + 2·forward` release step `s` whenever `keep < 2·forward`, and
     only `advance` or a new generation brings the real sender back.
-- **Catching up.** `advance(mut r, bits, generation, step, take base, floor)` moves an
+- **Catching up.** `advance(mut r, bits, generation, step, take keys, at, floor)` moves an
   installed generation to a later step with a supplied key: the key distribution's recovery
   path for a receiver that missed more than `forward` steps, or any rekey within a generation.
   Held steps in `[step − keep, step)` stay retained with their windows; older ones are
   released. It is `Invalid` when the generation is not installed or `step` is not above the
-  current step, and it derives before it changes anything, so a `Secret(e)` leaves the
-  receiver as it was.
-- **Cost of a forgery.** An attacker who picks a KID can make one frame cost at most
-  `forward` ratchet steps, one `derive_hkdf_sha256` and one AEAD open, all refunded. It can
-  never move `s` (law K2).
+  current step, and it issues the new step's opener before it changes anything, so a
+  `Schedule(e)` leaves the receiver as it was and returns the new schedule.
+- **Cost of a forgery.** An attacker who picks a KID can make the first frame at a new `d`
+  cost one opener issue of at most `forward` ratchet steps and one AEAD open; later frames at
+  that `d` cost one AEAD open each. It can never move `s` (law K2).
 - **Generations.**
   - A ratcheted generation claims the `2^bits` KIDs `generation << bits` to
     `(generation << bits) | (2^bits − 1)`.
@@ -552,10 +526,12 @@ authenticates under it.
   - The table holds at most `l.keys` keys. A fixed key counts one, and a ratcheted generation
     counts `keep + 1` from its install, the most it can ever hold, so commits and `advance`
     never need to evict. An install that would pass `l.keys` refuses with `Keys`.
-- **Fixed KIDs.** `install(mut r, kid, take base, floor)` adds one fixed key. Its base key is
-  not kept after derivation. KID assignment across senders (RFC 9605 §9.2) is the caller's.
-- **Unchecked.** The library cannot tell whether two parties hold the same base key, which is
-  the first [keying cost](#sframe-end-to-end-media-encryption).
+- **Fixed KIDs.** `install(mut r, kid, keys, floor)` adds one fixed key: an opener issued
+  from the schedule it is lent. The caller drops the schedule once its KIDs are installed.
+  `install_from(mut r, kid, s, floor)` installs an opener from a sender's own schedule, for a
+  KID outside its send block. KID assignment across senders (RFC 9605 §9.2) is the caller's.
+- **Unchecked.** Core refuses a second sender of equal bytes in one run, but not equal bytes
+  in another run or bytes one ratchet step apart ([keying](#sframe-end-to-end-media-encryption)).
 
 ### SFRAME-9: The ranged framing
 
@@ -907,15 +883,21 @@ webrtc package's.
   - Distribute base keys over an end-to-end secure channel, such as LiveKit-style
     per-participant keys sent to members over `runner.room` under each member's key
     agreement.
-  - Give each sender its own base key or its own KIDs (RFC 9605 §9.2), and never pass one base
-    key to two senders or to a sender and a receiver (RFC 9605 §4.4.1; the library cannot
-    check it).
+  - Give each sender its own base key or its own KIDs (RFC 9605 §9.2), and issue each sender
+    key once, to one run. Core refuses a second `send` import of equal bytes within a run and
+    marks each KID's direction by policy, but cannot connect a key with the same key in
+    another run, or `base_key[i]` with `base_key[i + 1]` (SFRAME-14).
+  - Seal a key that arrives as program bytes into a schedule at once, as
+    `sframe_import(receive)` or `sframe_import(send,<kid>,<bits>)`, and name its step as `at`.
+  - Treat a granted send key as a resumed key unless its issuer states it is fresh for this
+    run, and take its `from` from the reservation store (SFRAME-5, SFRAME-14).
   - Send a new generation when a member leaves.
   - Send each key with the sender's current step and CTR, and install with that CTR as the
     floor (SFRAME-7). With `l.jump` set, the floor must be within `jump` below the sender's
     current CTR, or its frames are `TooFar`.
   - Give a sender and a receiver of one base key the same framing (SFRAME-9).
-  - Use a fresh base key per run. A resumed key needs its stored ceiling (SFRAME-5).
+  - Use a fresh base key per run. A resumed key needs its stored step and ceiling
+    (SFRAME-5).
   - Keep a receiver that missed more than `forward` steps alive with `advance` (SFRAME-8).
 - **One key per media stream.** Callers MUST give each media stream (camera, screen share,
   microphone) its own `Sender` and KID; the encodings of one simulcast stream or the layers of
@@ -930,8 +912,9 @@ webrtc package's.
   A deployment that must share a key binds a track id in `metadata`, which removes the splice,
   and sizes `l.window` for the combined rate. RFC 9605 §6.1.1 only ties a frame to its sender
   by KID.
-- **Tapes.** A recording of an E2EE member holds its base keys (keying cost). Keep such tapes
-  as secret as the media keys themselves.
+- **Tapes.** A recording of an E2EE member holds every base key it received as program bytes,
+  in the `aead_open` that delivered it ([keying](#sframe-end-to-end-media-encryption)). Keep
+  such tapes as secret as the media keys themselves. A granted key leaves no copy.
 - **Counters.** Count `Discard` reasons and `NoKey` per track. An elevated `Tampered` rate is
   a forgery signal (RFC 9605 §7.5).
 - **Metadata.** Use authenticated metadata only after `open` succeeds (RFC 9605 §9.4).
@@ -951,9 +934,8 @@ end state is a TLS-8 SFrame schedule
 ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement), SFrame schedules). Base keys,
 `sframe_secret`, salts and ratchet outputs never become program bytes, and core guarantees one
 sealer per ratchet step and KID. TLS-8 prefers schedules to generic derivation sinks for the
-same reasons: fixed labels, fixed output boundaries and one purpose per output. Until E1 lands,
-SFRAME-2 to SFRAME-13 describe the build. SFRAME-14 is what E1 makes of them, and E1 rewrites
-their text to match as it lands.
+same reasons: fixed labels, fixed output boundaries and one purpose per output. E1 is built
+(sframe-import-build-2702), and SFRAME-2 to SFRAME-13 describe it.
 
 ### SFRAME-14: Keys from a TLS-8 schedule
 
@@ -1183,7 +1165,7 @@ reservations, its volume limit and its framing.
 | Plan item (C9) | Where |
 | --- | --- |
 | RFC 9605 header encode/decode | SFRAME-3 |
-| Key schedule over `derive_hkdf_sha256` | SFRAME-4 (AEAD key), with the salt in library HKDF and the cost stated above; at E1, TLS-8 SFrame schedules (SFRAME-14) |
+| Key schedule | SFRAME-4, inside TLS-8 SFrame schedules (SFRAME-14) |
 | `AES_128_GCM_SHA256_128`; `AES_256_GCM_SHA512_128` | SFRAME-1: the first is built; the second waits on an HKDF-SHA512 sink |
 | Sender ratchet; receiver key table with bounded KIDs | SFRAME-8 |
 | `UnencryptedRanges` hook over `media_bits` | SFRAME-9, SFRAME-10 |
@@ -1245,8 +1227,11 @@ Each decision gives its reason and how hard it is to reverse.
 ## Build laws
 
 Each law names the bug it alone catches, its oracle, and a seeded bug that turns it red.
-The harness is `core/programs/sframe/laws.hirsel` and, for L1, G1, A1 and G2,
-`core/programs/sframe/codec_laws.hirsel` (module `laws`). Vectors are in
+The harness is `core/programs/sframe/laws.hirsel`, with K1, K2 and I1 in
+`core/programs/sframe/key_laws.hirsel` and L1, G1, A1 and G2 in
+`core/programs/sframe/codec_laws.hirsel` (module `laws`). Every key enters through
+`secret.seal` and `import_sframe`. A test imports a given send key once, as the send-key
+registry requires, so senders in one test use distinct base keys. Vectors are in
 `vectors.hirsel`, generated from the RFC text and the JSON at `025d568`. Ranged-framing vectors
 are generated by `oracle.py`, an independent Python reference written from SFRAME-9 over
 `cryptography`'s `AESGCM` and the stdlib `hmac`, which never imports Hirsel output.
@@ -1254,32 +1239,37 @@ are generated by `oracle.py`, an independent Python reference written from SFRAM
 | Law | Bug it catches | Oracle and case | Seeded bug that goes red |
 | --- | --- | --- | --- |
 | **V1** header vectors | a wrong length field, KID and CTR in the wrong order, or non-minimal output | All 289 C.1 cases: `encode_header` gives `header`, and `decode_header` gives `kid` and `ctr` with the full length. Hand-made non-minimal headers (`80 05`, `08 00`, `90 00 01`, `81 00 ff`, …) give `Malformed`, and each prefix of a C.1 header gives `Short`. `Short` is checked first: `88 05` announces 3 bytes and is `Short` | `K` set to the length instead of the length minus one |
-| **V2** C.3 suite 0x0004 | a wrong label (compressed KID, missing suite, missing space), the salt XORed at the little end, metadata left out of the AAD, or the sink and library HKDF disagreeing | C.3's case: library HKDF gives `sframe_secret`, `sframe_salt` and `nonce`; `seal` under `Fixed(0x123)`, from `Mark(0x4567, 0)` with a reservation, gives `ct`; `open` gives `pt`. The same `ct` with one metadata byte changed is `Tampered` | the KID put in the label in its header form |
+| **V2** C.3 suite 0x0004 | a wrong label (compressed KID, missing suite, missing space), the salt XORed at the little end, or metadata left out of the AAD | C.3's case through the import: `00..0f` sealed as `sframe_import(send,291,0)`, a `Fixed(0x123)` sender from `Mark(0x4567, 0)` with a reservation, gives `ct`; a `receive` import installed for `0x123` opens `pt`. The same `ct` with one metadata byte changed is `Tampered` | the metadata passed outside the AAD |
 | **R1** round trip | a framing, layout, escape or scatter bug that loses or moves bytes | Seeded property: random frames (0 to 64 KiB, heavy in `00` runs), canonical layouts, both framings, `Bare` and `AnnexB`, KIDs and CTRs across header-length edges (7/8, 255/256, `2^56`). `open` of `seal` is the frame, and `Sealed.len` is the bytes appended and at most the bound. Ranged frames also equal `oracle.py`'s bytes for 32 fixed cases | no `03` appended after a NAL's final `00` |
 | **T1** tamper rejection | a header, ciphertext, tag, clear byte, layout, `L` or NAL boundary not authenticated, or a start code inside a hidden range accepted | For a sealed frame of each framing with a 3-range layout, every single-bit flip of every byte is `Discarded(_)` or, for a KID bit, `NoKey(_)`, and never `Ok`. Metadata changed by one byte is `Tampered`. For a 4-NAL Annex B frame whose clear range holds a working `00 00 00 01` and whose third NAL ends in ciphertext, every insertion of one `03` at every wire position and every deletion of a wire `03` is refused or opens to exactly the sender's frame (SFRAME-9 opening step 6). A frame whose chosen ciphertext holds `00 00 00 01`, with the wire `03` deleted, is `Malformed` | the clear bytes left out of `metadata′` (a clear-range flip opens); `enc(starts)` left out (a merge opens); the open-side start-code check removed (the hidden start is `Tampered`, not `Malformed`) |
 | **T2** layout binding | a layout not in the AAD | A constructed pair: a frame `[c][x]` with layout `{(0,1)}`, sealed under successive CTRs until the ciphertext byte equals `c` (expected 256 tries, deterministic under the fixed seed). The relayout `{(1,1)}` of the same wire bytes is `Tampered` | `enc(layout)` left out of `metadata′` |
 | **W1** replay window | a window that marks before authentication, an off-by-one at `W`, a shift that drops bits on a large gap, a floor not applied by `install`, `install_ratcheted` or `advance`, a reinstall over a live key, or `jump` off by one or not applied to an empty window | Reference model, as `srtp`'s `replay_reference_model`: seeded CTR sequences with reorder, duplicates, gaps up to `2^20`, floors and `jump` on and off, and the edges `W − 1`, `W`, `W + 1`, `jump`, `jump + 1`, against a model set "accepted iff unseen, at or above the floor, `ctr > highest − W` and, with `jump`, `ctr ≤ highest + jump`, `highest` being the floor before the first frame". A forged frame at `highest + 1000` followed by a genuine `highest + 1` opens. With `jump 64` and floor 10, a first frame at 75 is `TooFar` and 74 opens. `Follow.floor 4`: CTR 3 is `TooOld`, 4 opens; after `advance` with floor 7, CTR 6 is `TooOld`, 7 opens. A second `install` of a KID is `Invalid` and a frame opened before it is still `Replayed` | the window marked before the tag check |
-| **K1** ratchet | a wrong ratchet label, length or salt, a wrong KID mask, or `base` taken as step 0's key | Python `hmac` over RFC 9605 §5.1 for base `00..0f` gives `base_key[1] = fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87`. A sender made at step 1 with that key and a receiver installed at step 0 with `00..0f` and `forward = 1` agree. A sender with `bits = 2` ratchets five times; its KIDs are `g<<2 \| 1, 2, 3, 0, 1`, and the receiver opens each frame in order | `step mod 2^bits` computed as `step mod bits` |
-| **K2** forward bounds | a candidate committed before authentication, a forward step past the bound, the jumped-from step evicted, or `advance` losing retained steps, or a removal whose oversized generation aliases an installed one | A forged frame at `d = forward` leaves `s` unchanged, and a genuine frame at the old step still opens. `d = forward + 1` is `NoKey`. A genuine member frame at `s + forward` commits and the real step `s` still opens. `remove_generation(4, 3 | 2^60)` with generation 3 installed at `bits 4` is `false` and step 5 still opens. `install_ratcheted` with `keep < forward` or `keep + 1 + forward > 2^bits` is `Invalid`. A receiver behind by `forward + 3` steps is `NoKey`, then opens after `advance`, and a frame at a step still within `keep` opens too. With `jump 64`, a step-`s + 2` frame at CTR 65 is `TooFar` and leaves `s` current; at CTR 64 it opens | the candidate committed before the open |
-| **S1** sender counters | a refusal that consumes a CTR, a reused CTR, a seal past the reservation, or exhaustion off by one | `Capacity` from a short spare, then a successful seal with the same `ctr`. A fresh sender is `Unreserved` until `reserve`. A sender resumed from a stored ceiling seals first at that ceiling's CTR, never below. A sender from `Mark(2^64 − 2, 0)` seals once, then `Exhausted`. A volume one block below the limit seals, and one over is `Exhausted`. A sender from `Mark(0, 2^34 + 1)` is `Exhausted` from `reserve` and `seal`. From volume `2^34 − 3`, a 16-byte plaintext (cost 3, counted by hand from SFRAME-5's formula) seals and a 17-byte one (cost 4) is `Exhausted`, under `seal` and under `seal_ranged` with `Bare` and no ranges | CTR advanced before the `Capacity` check |
+| **K1** ratchet | a wrong KID mask, `at` ignored, or a resumed sender sealing the wrong step's key | `ratchet_key(00..0f)` is Python `hmac`'s `base_key[1] = fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87`. A sender at step 1 over those bytes sealed as `sframe_import(send,4,2)` and a receiver over `00..0f` as `sframe_import(receive)`, installed at step 0 with `forward = 1`, agree. A sender with `bits = 2` ratchets five times; its KIDs are `g<<2 \| 1, 2, 3, 0, 1`, and the receiver opens each frame in order. Resume: `Ratcheted(Ratchet(1, 2, 3))` with `at = 0` seals `hirsel` at CTR 0 to Python's step-3 frame `70bc317de7760a88b1039fee32a291b1b8933de0c10a30`, a `Follow { step: 3, at: 0, .. }` opens it, and `at = 4` is `Invalid` for both | `sender` issuing at distance 0 whatever `at` is |
+| **K2** forward bounds | a candidate committed before authentication, a forward step past the bound, the jumped-from step evicted, `advance` losing retained steps, a removal whose oversized generation aliases an installed one, a candidate reissued per frame, or an intermediate opener's refusal skipped or reported as `Tampered` | A forged frame at `d = forward` leaves `s` unchanged, and a genuine frame at the old step still opens. `d = forward + 1` is `NoKey`. A genuine member frame at `s + forward` commits and the real step `s` still opens. `remove_generation(4, 3 \| 2^60)` with generation 3 installed at `bits 4` is `false` and step 5 still opens. `install_ratcheted` with `keep < forward` or `keep + 1 + forward > 2^bits` is `Invalid`. A receiver behind by `forward + 3` steps is `NoKey`, then opens after `advance`, and a frame at a step still within `keep` opens too. With `jump 64`, a step-`s + 2` frame at CTR 65 is `TooFar` and leaves `s` current; at CTR 64 it opens. After a forged frame at `s + 2`, a second one under `bound bytes 0` is still `Tampered` (the candidate is reused), and a genuine frame at `s + 2` commits. With `keep = 2` and `bound bytes 2047`, the genuine `s + 2` frame is `Capacity` with 1024 requested and nothing appended; then a frame at `s` opens, the `s + 2` frame opens, and a frame at `s + 1` opens | the candidate committed before the open, or the schedule ratcheted before the tag check (a step passed over does not open); a new candidate per frame; an intermediate refusal skipped (the `s + 1` frame is `NoKey`); an intermediate `Capacity` mapped to `Tampered` |
+| **S1** sender counters | a refusal that consumes a CTR, a reused CTR, a seal past the reservation, or exhaustion off by one | `Capacity` from a short spare, then a successful seal with the same `ctr`. A fresh sender is `Unreserved` until `reserve`. A sender resumed from a stored ceiling seals first at that ceiling's CTR, never below. A sender from `Mark(2^64 − 2, 0)` seals once, then `Exhausted`. A volume one block below the limit seals, and one over is `Exhausted`. A sender from `Mark(0, 2^34 + 1)` is `Exhausted` from `reserve` and `seal`. From volume `2^34 − 3`, a 16-byte plaintext (cost 3, counted by hand from SFRAME-5's formula) seals and a 17-byte one (cost 4) is `Exhausted`, under `seal` and under `seal_ranged` with `Bare` and no ranges. RFC framing with 40 bytes of metadata under `bound bytes 40 { seal(..) }`, one byte short of the 41-byte AAD scratch, gives `Capacity` with 41 requested, and the next seal outside the bound uses the same CTR | CTR advanced before the `Capacity` check; the CTR advanced before `seal_into` |
 | **L1** ranged lengths | a capacity known only after the AEAD call, an unbounded or mismatched input bound, or an underflow on a short frame | `seal_ranged` with a spare one byte under `wire_bound(AnnexB, n + trailer)` is `Capacity` with that bound as `requested`, and the next seal at the bound uses the same CTR. A frame of all-zero working bytes reaches the bound's order (`3n/2`) on the wire and opens. `open_ranged` refuses, as `Malformed` and with nothing appended, a frame one byte over `wire_bound(l.frame + T(l))`, every frame shorter than 20 bytes, and `L` values 0, 1, `n − 17` and `0xffff`. A spare one byte under the open bound is `Capacity` | the seal's spare checked against the unescaped length |
 | **G1** codec ranges | a wrong VP8 keyframe bit, a start code left out, a parameter set encrypted, a PPS id cut by a wrong `ue(v)` length, a wrong H.265 header length, or an SPS Chrome would rewrite accepted | Hand-built frames: a VP8 keyframe and an interframe (RFC 6386 §9.1) give `{(0,10)}` and `{(0,3)}`, and a 2-byte frame gives `{(0,2)}`. An H.264 access unit SPS, PPS, SEI, IDR slice (`first_mb 0`, `slice_type 7`, `pps_id 300`: 1 + 7 + 17 = 25 bits of `ue(v)`, so 4 bytes after the NAL header) gives ranges counted by hand from H.264 §7.3.3 and Exp-Golomb §9.1. The same for H.265 with 2-byte headers. libwebrtc's four `sps_vui_rewriter_unittest.cc` SPS modes (no VUI, no bitstream restriction, suboptimal restriction, optimal) give `Unstable` three times and a layout once. The expected rewrite of the three is `oracle.py`'s construction from its reading of libwebrtc; only G2's libx264 shape is checked against Chromium's own rewrite | the PPS id's `ue(v)` read as a fixed 8 bits |
 | **G2** Chromium round trip | a rule that Chrome's depacketizer breaks: an SPS rewritten, a NAL dropped or added, a start code changed, or a slice header that fails libwebrtc's parse | Vectors captured from headless Chromium 153 (loopback, `RTCRtpScriptTransform`, the capture script in the package): Chrome's own H.264 keyframe and delta frames, and `libx264` frames with B-frames, each sealed by `oracle.py` (H.265 is not captured: SFRAME-10). The receiver-side bytes of Chrome's frames and of normalized `libx264` frames equal the sent bytes, equal `seal_ranged` over `h264`'s layout, and open to their plaintext. The raw `libx264` keyframe arrives with its SPS rewritten and is `Malformed`, and `h264` refuses it as `Unstable`. `normalize_h264` of the raw frame equals Chrome's rewrite of it, start codes and trailing zeros aside | `normalize_h264` that keeps `num_reorder_frames` |
 | **A1** Annex B escaping | an emulation left in the wire, a boundary taken from the sealed bytes, a non-injective tail rule, or a non-canonical stream accepted | Exhaustive over every body of length 0 to 8 on the alphabet `00 01 02 03 41`: wire unescape of wire escape is the identity, the escaped body never contains `00 00 0x` (`x ≤ 2`) and never ends in `00`, and no two bodies share a wire form. Exhaustive over every wire string of length 0 to 8 on the same alphabet: unescape accepts it exactly when it is the escape of some body. Named cases: a body ending in a single `00`, a clear NAL ending `00 03`, and a trailer with `L = 256` round-trip. A sealed frame whose ciphertext contains `00 00 01` keeps its NAL count. 3-byte start codes and trailing zeros are refused by `seal_ranged` and rewritten by `normalize_h264` | a wire tail rule that appends `03` only after a final `00` |
 
-No law repeats TLS-5's AEAD or HKDF vectors (AE2, KD laws). V2 and R1 reach the sinks only
-through SFrame's own inputs.
+| **I1** ratchet atomicity | a ratchet that moves the schedule when the new sealer is refused | `Ratcheted(Ratchet(1, 2, 0))` over `00..0f` as `sframe_import(send,4,2)`, KID 4. Under `bound bytes 1039 { ratchet(s) }` it is `Schedule(Capacity(..))` with 1040 requested, and the KID is still 4. The next `seal` of `hirsel` at CTR 0 is TLS-8 PC12's step-0 frame `40bc3483bd855c43d811deeb3085fc86274cff324394b9`, and after a ratchet with 1040 available the next seal is PC12's step-1 frame `501779b9607a5841322c5952a56cb455d5803b545e1d1b` (KID 5), both Python `cryptography`'s | `sframe_ratchet` then `sframe_sealer(keys, 0, ..)` as two calls |
+
+No law repeats TLS-8's PC12 to PC14 schedule vectors. V2 and K1 reach the schedule only through
+SFrame's own inputs.
 
 ## Cost targets
 
 - **Copies.** One `seal` or `open` makes at most two passes over the frame besides the AEAD
   sink's: gathering the secret bytes, and scattering them, with escaping fused into the
   scatter. Each call reserves its output exactly once (`Capacity` checked before work).
-- **Steps.** One AEAD sink call takes one step whatever the length (TLS-5). Library HKDF adds
-  steps only at key derivation, which happens once per KID or ratchet step, never per frame.
-- **Memory.** A fixed key holds 48 bytes of `Secret` admission plus its salt and window
-  (`W / 8` bytes), and a ratcheted generation also holds its 32-byte base key. `l.keys`
-  bounds the table.
+- **Steps.** A seal or open is one core call that takes one step whatever the length. A
+  ratchet or candidate is one call of at most 16 ratchet steps, and a resume one call of at
+  most `2^16`; key derivation happens only there, never per frame.
+- **Memory.** Each installed key or retained step holds an `Opener` (1024 bytes) and its
+  window (`W / 8` bytes), and a ratcheted generation also holds its schedule (512 bytes) and
+  at most one 1024-byte candidate. A sender holds its schedule and its sealer (1536 bytes and
+  a 16-byte ledger entry), and a `send` import admits 48 more for its registry entry until the
+  run ends. `l.keys` bounds the table: at 256, 256 KiB per receiver.
 
 ## Build slices
 
@@ -1290,7 +1280,7 @@ through SFrame's own inputs.
 | **B3** VP9 and AV1 | S | B2, a browser capture of each codec's round trip through Encoded Transform | their range rules, or `none()` for VP9 if the capture confirms it | G1 cases |
 | **P1** rtp-sframe | S | B1, E1, a named consumer (the Hirsel native SDK) | `descriptor`; a TLS-8 child-schedule operation for per-SSRC keys, specified with P1 (SFRAME-14), in place of `ssrc_key`; reassembly in `rtp`; `a=sframe` in webrtc | draft §7 per-SSRC key by Python `hmac` through that operation, and a repeated SSRC on a send parent refused; descriptor round trip |
 | **C9b** SFU routing law | S | B2, the AV1 follow-ups | SFRAME-13's routing guarantees in `webrtc_sfu` | the W9 random-payload law |
-| **E1** keying end state | M | TLS-8 slice T16 | SFRAME-14: `sframe` takes schedules and openers; the byte-keyed API and the library HKDF are deleted; SFRAME-2 to SFRAME-13, the keying cost, the cost targets and these laws are rewritten to match | V2 and K1 as SFRAME-14 restates them, K2's added case, I1 |
+| **E1** keying end state (built, sframe-import-build-2702) | M | TLS-8 slice T16 | SFRAME-14: `sframe` takes schedules; the byte-keyed API, `salt_of` and the library key derivation are deleted; SFRAME-2 to SFRAME-13, the keying cost, the cost targets and these laws are rewritten to match | V2 and K1 as SFRAME-14 restates them, K2's and S1's added cases, I1 |
 
 B1 and B2 make up this lane's build. Some test reds may ride along when landing unblocks other
 work. Compile, lint, spec-fence and docs reds never may. The package ships in the toolchain bundle

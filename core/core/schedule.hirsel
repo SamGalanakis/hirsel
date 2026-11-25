@@ -4,6 +4,8 @@ pub type Suite12 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
 
 pub type SrtpProfile = Aes128CmHmacSha1_80 | AeadAes128Gcm | AeadAes256Gcm
 
+pub type SframeSuite = Aes128GcmSha256_128()
+
 pub type Profile13 = Quic(Suite13) | Dtls13(Suite13) | Tls13(Suite13) | QuicMultipath(Suite13)
 
 pub opaque resource type Schedule
@@ -43,6 +45,8 @@ pub fn import_traffic(p: Profile13, take s: Secret) -> Result[Schedule, (Schedul
 
 pub fn import_srtp(p: SrtpProfile, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
 
+pub fn import_sframe(suite: SframeSuite, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
+
 pub fn srtp(mut s: Schedule, p: SrtpProfile) -> Result[Schedule, ScheduleError]
 
 pub fn application(mut s: Schedule, finished_hash: Bytes) -> Result[(), ScheduleError]
@@ -62,3 +66,9 @@ pub fn sealer_pair(mut s: Schedule, first: packet.Space, second: packet.Space, d
 pub fn opener(s: Schedule, space: packet.Space) -> Result[packet.Opener, ScheduleError]
 
 pub fn header_mask(s: Schedule, space: packet.Space, local: bool) -> Result[packet.HeaderMask, ScheduleError]
+
+pub fn sframe_sealer(mut s: Schedule, steps: u64, kid: u64, floor: u64) -> Result[packet.Sealer, ScheduleError]
+
+pub fn sframe_opener(s: Schedule, ahead: u64, kid: u64) -> Result[packet.Opener, ScheduleError]
+
+pub fn sframe_ratchet(mut s: Schedule, steps: u64) -> Result[(), ScheduleError]

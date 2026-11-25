@@ -170,6 +170,10 @@ impl Machine<'_> {
             | HostOp::ScheduleSrtp
             | HostOp::ScheduleSpaceInfo
             | HostOp::ScheduleSealerPair
+            | HostOp::ScheduleImportSframe
+            | HostOp::ScheduleSframeSealer
+            | HostOp::ScheduleSframeOpener
+            | HostOp::ScheduleSframeRatchet
             | HostOp::ScheduleSealer
             | HostOp::ScheduleOpener
             | HostOp::ScheduleHeaderMask

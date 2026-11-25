@@ -7,7 +7,9 @@ pub(crate) mod capture;
 mod import;
 mod packet;
 mod schedule;
+mod sframe;
 mod transitions;
+// The tape laws drive SFrame imports and seals through the host ops (TLS-8 PC9).
 use crate::{
     limit::Payer,
     secret::{Charge, ChargeCell, HandedOver},
@@ -16,12 +18,18 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, Weak},
 };
+#[cfg(all(test, feature = "record"))]
+pub(crate) use {
+    import::hirsel_core_schedule_import_sframe, packet::hirsel_core_packet_seal_into,
+    sframe::hirsel_core_schedule_sframe_sealer,
+};
 
 /// A run's media state, built by its first media resource.
 #[derive(Default)]
 pub(crate) struct RunState {
     pub(crate) charges: Arc<Charges>,
     pub(crate) agreements: Arc<hirsel_core_net::agreement_registry::AgreementRegistry<Payment>>,
+    pub(crate) send_keys: hirsel_core_net::packet_sframe::SendKeys<Payment>,
 }
 
 impl crate::host_file::RunPart for RunState {
@@ -157,9 +165,7 @@ unsafe fn issue_child(
                 context,
                 operation,
                 capture::arguments(operation, 0, &args),
-                capture::Delivery::Child {
-                    admits_invalid: false,
-                },
+                capture::Delivery::Child { refusals: &[] },
                 &mut empty,
                 |_| Outcome::default(),
                 site,

@@ -1,0 +1,156 @@
+// Laws K1, K2 and I1 for docs/spec/sframe.md (SFRAME-14): ratcheted senders and receivers over
+// TLS-8 schedules, part of module laws; the shared helpers are in laws.hirsel.
+// ---------------------------------------------------------------- K1
+/// bug: step mod 2^bits computed as step mod bits, a wrong ratchet label, or base taken as step 0's key.
+/// oracle: Python hmac over RFC 9605 §5.1: base_key[1] for base 00..0f.
+@test
+fn ratchet_steps() -> Result[(), ()] {
+    let l = sframe.limits()
+    let one = unhex("fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87")
+    check(sframe.ratchet_key(counting()) == one, "base_key[1] differs from RFC 9605 §5.1")
+    let follow = sframe.Follow(generation: 1, bits: 2, step: 0, at: 0, forward: 1, keep: 1, floor: 0)
+    {
+        let mut s = ratchet_sender(1, 2, 1, 1, one, l)
+        let mut r = follower(follow, counting(), l)
+        check(sframe.current_kid(s) == 5, "step 1's KID is not 1<<2|1")
+        check(opened(open_rfc(mut r, b"", seal_rfc(mut s, b"", b"k1"))), "a step-1 sender and a step-0 receiver disagree")
+    }
+    let mut s = ratchet_sender(1, 2, 0, 0, counting(), l)
+    let mut r = follower(follow, counting(), l)
+    for want in[5u64, 6u64, 7u64, 4u64, 5u64] {
+        result.unwrap(sframe.ratchet(mut s))
+        let _ = result.unwrap(sframe.reserve(mut s, 4, 1024))
+        check(sframe.current_kid(s) == want, "a ratcheted KID has the wrong low bits")
+        let o = result.unwrap(open_rfc(mut r, b"", seal_rfc(mut s, b"", b"k1")))
+        check(o.kid == want, "a ratcheted frame opens under another KID")
+    }
+    Ok(())
+}
+
+/// bug: `sender` or `Follow` ignoring `at`, so a sender resumed at step 3 from step-0 bytes seals under step 0's key with KID 7, or `at` past the step accepted.
+/// oracle: oracle.py (Python hmac and cryptography over RFC 9605 §§4.4 and 5.1): "hirsel" at step 3, KID 7, CTR 0 from 00..0f.
+@test
+fn ratchet_resume() -> Result[(), ()] {
+    let l = sframe.limits()
+    let scheme: sframe.Scheme = Ratcheted(sframe.Ratchet(generation: 1, bits: 2, step: 3))
+    let back = match sframe.sender(suite(), Rfc, scheme, sending(counting(), 4, 2), 4, sframe.Mark(ctr: 0, volume: 0), l) {
+        Error((Invalid, take keys)) => take keys,
+        _ => fail("a sender with at past its step is not Invalid"),
+    }
+    let mut s = made(sframe.sender(suite(), Rfc, scheme, take back, 0, sframe.Mark(ctr: 0, volume: 0), l))
+    let _ = result.unwrap(sframe.reserve(mut s, 1, 16))
+    let wire = seal_rfc(mut s, b"", unhex("68697273656c"))
+    check(wire == unhex("70bc317de7760a88b1039fee32a291b1b8933de0c10a30"), "a sender resumed at step 3 differs from oracle.py's frame")
+    let mut q = result.unwrap(sframe.receiver(suite(), Rfc, l))
+    match sframe.install_ratcheted(mut q, sframe.Follow(generation: 1, bits: 2, step: 3, at: 4, forward: 1, keep: 1, floor: 0), receiving(counting())) {
+        Error((Invalid, _)) => {},
+        _ => fail("a Follow with at past its step is not Invalid"),
+    }
+    let mut r = follower(sframe.Follow(generation: 1, bits: 2, step: 3, at: 0, forward: 1, keep: 1, floor: 0), counting(), l)
+    let mut back_out = room(64)
+    let o = open_ok(sframe.open(mut r, b"", wire, mut back_out))
+    check(o.kid == 7 && back_out == unhex("68697273656c"), "a Follow at step 3 from step-0 bytes does not open step 3's frame")
+    Ok(())
+}
+
+/// bug: the ratchet issued as `sframe_ratchet` then `sframe_sealer(keys, 0, ..)`, so a refused attempt moves the schedule and the next ratchet seals KID 5 under step 2's key.
+/// oracle: oracle.py (TLS-8 PC12's frames): "hirsel" at CTR 0 from 00..0f is 40bc34..b9 at step 0 (KID 4) and 501779..1b at step 1 (KID 5); a sealer is 1040 bytes (TLS-8's charges).
+@test
+fn ratchet_atomic() -> Result[(), ()] {
+    let l = sframe.limits()
+    let hirsel = unhex("68697273656c")
+    let mut s = ratchet_sender(1, 2, 0, 0, counting(), l)
+    let refused = result.unwrap(bound bytes 1039 {
+        match sframe.ratchet(mut s) {
+            Error(Schedule(Capacity(c))) => c.requested == 1040,
+            _ => false,
+        }
+    })
+    check(refused && sframe.current_kid(s) == 4, "a ratchet with 1039 bytes free is not Schedule(Capacity) asking 1040")
+    check(seal_rfc(mut s, b"", hirsel) == unhex("40bc3483bd855c43d811deeb3085fc86274cff324394b9"), "a refused ratchet changed the step-0 sealer")
+    result.unwrap(sframe.ratchet(mut s))
+    let _ = result.unwrap(sframe.reserve(mut s, 1, 16))
+    check(seal_rfc(mut s, b"", hirsel) == unhex("501779b9607a5841322c5952a56cb455d5803b545e1d1b"), "the ratchet after a refused one is not step 1's frame")
+    Ok(())
+}
+
+// ---------------------------------------------------------------- K2
+// Generation 3 with 4 bits: step s is KID 48 | (s mod 16) under base_key[s] of 00..0f.
+fn step_frame(step: u64, ctr: u64) -> Bytes {
+    forge(steps(counting(), step), (3 << 4) | (step & 15), ctr, b"", b"k2")
+}
+
+/// bug: a candidate committed before the open, a forward step past the bound, the jumped-from step evicted, advance losing retained steps, or a removal whose oversized generation aliases an installed one.
+/// oracle: SFRAME-8's bounds: 1 <= d <= forward, keep steps retained, keep >= forward, keep + 1 + forward <= 2^bits, and a generation is generation << bits with generation < 2^(64 - bits).
+@test
+fn forward_bounds() -> Result[(), ()] {
+    let l = sframe.limits()
+    let follow = sframe.Follow(generation: 3, bits: 4, step: 5, at: 5, forward: 2, keep: 2, floor: 0)
+    let mut r = follower(follow, steps(counting(), 5), l)
+    let mut forged = step_frame(7, 0)
+    let n = list.len(forged)
+    forged[n - 1] = forged[n - 1] ^ 1u8
+    check(tampered(open_rfc(mut r, b"", forged)), "a forged d = forward frame is not Tampered")
+    check(no_key(open_rfc(mut r, b"", step_frame(8, 0))), "a forged frame moved the current step")
+    check(opened(open_rfc(mut r, b"", step_frame(5, 0))), "the current step does not open")
+    check(opened(open_rfc(mut r, b"", step_frame(7, 1))), "a genuine d = forward frame does not open")
+    check(opened(open_rfc(mut r, b"", step_frame(5, 1))), "the jumped-from step was evicted")
+    check(opened(open_rfc(mut r, b"", step_frame(6, 0))), "a step passed over does not open")
+    check(!sframe.remove_generation(mut r, 4, 3 | (1 << 60)), "a removal of an oversized generation answers true")
+    check(opened(open_rfc(mut r, b"", step_frame(5, 3))), "a removal of an oversized generation removed generation 3")
+    let unsound =[sframe.Follow(generation: 1, bits: 4, step: 0, at: 0, forward: 2, keep: 1, floor: 0), sframe.Follow(generation: 9, bits: 2, step: 0, at: 0, forward: 2, keep: 2, floor: 0)]
+    for bad in unsound {
+        let mut q = result.unwrap(sframe.receiver(suite(), Rfc, l))
+        match sframe.install_ratcheted(mut q, bad, receiving(counting())) {
+            Error((Invalid, _)) => {},
+            _ => fail("an unsound Follow is accepted"),
+        }
+    }
+    held(sframe.advance(mut r, 4, 3, 8, receiving(counting()), 0, 0))
+    check(opened(open_rfc(mut r, b"", step_frame(6, 1))), "advance dropped a step within keep")
+    check(opened(open_rfc(mut r, b"", step_frame(7, 2))), "advance dropped the previous step")
+    check(no_key(open_rfc(mut r, b"", step_frame(5, 2))), "advance kept a step past keep")
+    check(no_key(open_rfc(mut r, b"", step_frame(13, 0))), "a frame forward + 3 steps ahead has a key")
+    held(sframe.advance(mut r, 4, 3, 13, receiving(steps(counting(), 10)), 10, 0))
+    check(opened(open_rfc(mut r, b"", step_frame(13, 0))), "advance does not re-key a lagging receiver")
+    let jl = sframe.Limits(frame: 4096, window: 64, keys: 16, ranges: 4, jump: 64)
+    let mut j = follower(follow, steps(counting(), 5), jl)
+    check(too_far(open_rfc(mut j, b"", step_frame(7, 65))), "a step's first frame more than jump above 0 is not TooFar")
+    check(no_key(open_rfc(mut j, b"", step_frame(8, 0))), "a TooFar candidate moved the current step")
+    check(opened(open_rfc(mut j, b"", step_frame(7, 64))), "a step's first frame at jump does not open")
+    Ok(())
+}
+
+/// bug: a candidate issued again for each forged frame at one distance, an intermediate opener's refusal skipped (the step passed over then has no key), or a refused commit that moved the schedule.
+/// oracle: SFRAME-14's candidate rules: one kept candidate per generation, the openers max(1, d - keep) <= j < d issued all or nothing, and an opener is 1024 bytes (TLS-8's charges).
+@test
+fn candidate_cases() -> Result[(), ()] {
+    let l = sframe.limits()
+    let follow = sframe.Follow(generation: 3, bits: 4, step: 5, at: 5, forward: 2, keep: 2, floor: 0)
+    let mut r = follower(follow, steps(counting(), 5), l)
+    let mut forged = step_frame(7, 0)
+    let n = list.len(forged)
+    forged[n - 1] = forged[n - 1] ^ 1u8
+    check(tampered(open_rfc(mut r, b"", forged)), "a forged frame at s + 2 is not Tampered")
+    let mut out = room(64)
+    let reused = result.unwrap(bound bytes 0 {
+        tampered(sframe.open(mut r, b"", forged, mut out))
+    })
+    check(reused, "a second forged frame at s + 2 admitted a new candidate")
+    check(opened(open_rfc(mut r, b"", step_frame(7, 1))), "a genuine frame at s + 2 does not commit after forged ones")
+    // Room for the candidate and a window, not for the intermediate opener of s + 1.
+    let mut q = follower(follow, steps(counting(), 5), l)
+    let genuine = step_frame(7, 2)
+    let mut first = room(64)
+    let short = result.unwrap(bound bytes 2047 {
+        match sframe.open(mut q, b"", genuine, mut first) {
+            Error(Capacity(c)) => c.requested == 1024,
+            _ => false,
+        }
+    })
+    check(short && list.len(first) == 0, "an intermediate opener refused is not Capacity, or out changed")
+    check(opened(open_rfc(mut q, b"", step_frame(5, 0))), "a refused commit moved the schedule")
+    check(opened(open_rfc(mut q, b"", genuine)), "the refused frame does not open once memory is free")
+    check(opened(open_rfc(mut q, b"", step_frame(6, 0))), "the step passed over has no key after a refused intermediate")
+    Ok(())
+}

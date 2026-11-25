@@ -1,0 +1,353 @@
+// TLS-8 T16 SFrame schedules (docs/spec/tls.md PC12 to PC14).
+// Frames are RFC 9605 §4.4 frames of plaintext "hirsel" (68697273656c) at CTR 0
+// with empty metadata unless a case says otherwise. Each `expect: run` case is
+// its own run, so 00..0f is imported as a send key at most once per case.
+fn nibble(c: u8) -> u8 {
+    if c >= b'a' {
+        c - b'a' + 10u8
+    } else {
+        c - b'0'
+    }
+}
+
+fn unhex(s: String) -> Bytes {
+    let h = string.as_bytes(s)
+    let mut out: Bytes = list.with_capacity(list.len(h) / 2)
+    for i in 0u64 .. list.len(h) / 2 {
+        list.push(mut out, nibble(h[2 * i]) * 16u8 + nibble(h[2 * i + 1]))
+    }
+    out
+}
+
+fn base() -> String {
+    "000102030405060708090a0b0c0d0e0f"
+}
+
+fn hirsel() -> Bytes {
+    unhex("68697273656c")
+}
+
+fn import(key: String, uses: String) -> schedule.Schedule {
+    let raw = unhex(key)
+    let s = result.unwrap(secret.seal(take raw, uses))
+    result.unwrap(schedule.import_sframe(Aes128GcmSha256_128, take s))
+}
+
+// Seals `pt` after `header`, with the header as the start of the AAD and `meta` its rest.
+fn frame(mut s: packet.Sealer, ctr: u64, header: String, pt: Bytes, meta: Bytes) -> Bytes {
+    let h = unhex(header)
+    let mut out: Bytes = list.with_capacity(list.len(h) + list.len(pt) + 16)
+    for b in h {
+        list.push(mut out, b)
+    }
+    let _ = result.unwrap(packet.seal_into(mut s, ctr, pt, 0, mut out, 0, meta))
+    out
+}
+
+fn opens(o: packet.Opener, ctr: u64, wire: String, at: u64, meta: Bytes, want: Bytes) -> bool {
+    let src = unhex(wire)
+    let mut out: Bytes = list.with_capacity(list.len(src))
+    match packet.open_into(o, 0, ctr, src, 0, at, meta, mut out) {
+        Ok(n) => n == list.len(want) && out == want,
+        _ => false,
+    }
+}
+
+// bug: a wrong key or salt label (the KID in header form, the suite id or the space
+// before kid8 left out), the salt XORed at the little end, or metadata outside the AAD.
+// oracle: RFC 9605 Appendix C.3, cipher_suite 0x0004 (kid 0x123, ctr 0x4567).
+// expect: run sframe_rfc9605_c3() = true
+fn sframe_rfc9605_c3() -> bool {
+    let pt = unhex("64726166742d696574662d736672616d652d656e63")
+    let meta = unhex("4945544620534672616d65205747")
+    let ct = "9901234567b7412c2513a1b66dbb48841bbaf17f598751176ad847681a69c6d0b091c07018ce4adb34eb"
+    let mut s = import(base(), "sframe_import(send,291,0)")
+    let r = import(base(), "sframe_import(receive)")
+    let mut sealer = result.unwrap(schedule.sframe_sealer(mut s, 0, 0x123, 0x4567))
+    let wire = frame(mut sealer, 0x4567, "9901234567", pt, meta)
+    let opener = result.unwrap(schedule.sframe_opener(r, 0, 0x123))
+    let bent = unhex("4945544620534672616d65205748")
+    let mut scratch: Bytes = list.with_capacity(64)
+    let tampered = match packet.open_into(opener, 0, 0x4567, unhex(ct), 0, 5, bent, mut scratch) {
+        Error(Tampered) => true,
+        _ => false,
+    }
+    wire == unhex(ct) && opens(opener, 0x4567, ct, 5, meta, pt) && tampered
+}
+
+// bug: a wrong ratchet label or length, a ratchet that skips the Extract, or an opener
+// ahead that moves the schedule (so the step-0 KID 4 frame no longer opens).
+// oracle: Python hmac and cryptography over RFC 9605 §§4.4.2 and 5.1
+// (oracle.py in the lane brief); base_key[1] of 00..0f is fb75d8d5...2af0f87.
+// expect: run sframe_ratchet_vectors() = true
+fn sframe_ratchet_vectors() -> bool {
+    let step1 = "501779b9607a5841322c5952a56cb455d5803b545e1d1b"
+    let step0 = "40bc3483bd855c43d811deeb3085fc86274cff324394b9"
+    let mut s = import(base(), "sframe_import(send,4,2)")
+    let mut r = import(base(), "sframe_import(receive)")
+    let mut sealer = result.unwrap(schedule.sframe_sealer(mut s, 1, 5, 0))
+    let wire = frame(mut sealer, 0, "50", hirsel(), unhex(""))
+    let ahead = opens(result.unwrap(schedule.sframe_opener(r, 1, 5)), 0, step1, 1, unhex(""), hirsel())
+    let still = opens(result.unwrap(schedule.sframe_opener(r, 0, 4)), 0, step0, 1, unhex(""), hirsel())
+    result.unwrap(schedule.sframe_ratchet(mut r, 1))
+    let moved = opens(result.unwrap(schedule.sframe_opener(r, 0, 5)), 0, step1, 1, unhex(""), hirsel())
+    wire == unhex(step1) && ahead && still && moved
+}
+
+// bug: a step count reduced modulo something, a cap off by one (2^16 refused), or a
+// resume that ratchets fewer times than asked.
+// oracle: oracle.py over RFC 9605 §§4.4.2 and 5.1: KID 6 at step 16, KID 8 at step 2^16.
+// expect: run sframe_resume_counts_every_step() = true
+fn sframe_resume_counts_every_step() -> bool {
+    let mut s = import(base(), "sframe_import(send,4,2)")
+    let r = import(base(), "sframe_import(receive)")
+    let mut sealer = result.unwrap(schedule.sframe_sealer(mut s, 16, 6, 0))
+    let wire = frame(mut sealer, 0, "60", hirsel(), unhex(""))
+    let far = "8008e0bbf345adb828e154604cca5da2c33300c8e0eea5dd"
+    wire == unhex("60bb96161ef36e11d27732010215f5e1ad43216999e373") && opens(result.unwrap(schedule.sframe_opener(r, 65536, 8)), 0, far, 2, unhex(""), hirsel())
+}
+
+fn invalid_sealer(mut s: schedule.Schedule, steps: u64, kid: u64) -> bool {
+    match schedule.sframe_sealer(mut s, steps, kid, 0) {
+        Error(Invalid) => true,
+        _ => false,
+    }
+}
+
+fn issued_sealer(mut s: schedule.Schedule, steps: u64, kid: u64) -> bool {
+    match schedule.sframe_sealer(mut s, steps, kid, 0) {
+        Error(Issued) => true,
+        _ => false,
+    }
+}
+
+fn invalid_opener(s: schedule.Schedule, ahead: u64, kid: u64) -> bool {
+    match schedule.sframe_opener(s, ahead, kid) {
+        Error(Invalid) => true,
+        _ => false,
+    }
+}
+
+fn invalid_ratchet(mut s: schedule.Schedule, steps: u64) -> bool {
+    match schedule.sframe_ratchet(mut s, steps) {
+        Error(Invalid) => true,
+        _ => false,
+    }
+}
+
+// bug: two sealers for one step and KID, a ledger keyed on the KID alone across steps,
+// a block bound off by one, an opener inside the block, a sealer on a receive import,
+// a step bound off by one, or a refusal that admits a ledger entry.
+// oracle: TLS-8 SFrame ownership rules, by hand: send(4,2) owns the 2^2 KIDs 4 to 7, and
+// send(2^64-2^16,16) the last block; a sealer admits 1040, 16 of it its ledger entry.
+// expect: run sframe_ownership_and_directions() = true
+fn sframe_ownership_and_directions() -> bool {
+    let mut s = import(base(), "sframe_import(send,4,2)")
+    let first = result.unwrap(schedule.sframe_sealer(mut s, 0, 4, 0))
+    let twice = issued_sealer(mut s, 0, 4)
+    drop(take first)
+    let after_drop = issued_sealer(mut s, 0, 4)
+    let edge = result.unwrap(schedule.sframe_sealer(mut s, 0, 7, 0))
+    drop(take edge)
+    let outside = invalid_sealer(mut s, 0, 3) && invalid_sealer(mut s, 0, 8)
+    let _ = result.unwrap(schedule.sframe_opener(s, 0, 8))
+    let _ = result.unwrap(schedule.sframe_opener(s, 0, 3))
+    let inside = invalid_opener(s, 0, 4) && invalid_opener(s, 0, 7)
+    let steps = invalid_sealer(mut s, 65537, 5) && invalid_opener(s, 65537, 8) && invalid_ratchet(mut s, 0) && invalid_ratchet(mut s, 65537)
+    let next = result.unwrap(schedule.sframe_sealer(mut s, 1, 4, 0))
+    drop(take next)
+    let again = issued_sealer(mut s, 0, 4)
+    // The step-1 ledger holds KID 4. A refused call admits nothing, and the ratchet
+    // refunds the ledger's 16: the second sealer fits in 1040 only if both hold.
+    let refunds = result.unwrap(bound bytes 1040 {
+        let refused = invalid_sealer(mut s, 0, 8) && issued_sealer(mut s, 0, 4)
+        let held = result.unwrap(schedule.sframe_sealer(mut s, 0, 5, 0))
+        drop(take held)
+        result.unwrap(schedule.sframe_ratchet(mut s, 1))
+        let renewed = result.unwrap(schedule.sframe_sealer(mut s, 0, 5, 0))
+        drop(take renewed)
+        refused
+    })
+    let mut r = import(base(), "sframe_import(receive)")
+    let receive = invalid_sealer(mut r, 0, 0) && invalid_sealer(mut r, 0, 4)
+    let mut last = import("101112131415161718191a1b1c1d1e1f", "sframe_import(send,18446744073709486080,16)")
+    let top = result.unwrap(schedule.sframe_sealer(mut last, 0, 18446744073709551615, 0))
+    drop(take top)
+    twice && after_drop && outside && inside && steps && again && refunds && receive
+}
+
+// The refusal's TLS-8 tag: Denied 1, Invalid 2, Issued 3, Spent 4, Capacity 5.
+fn tag(e: schedule.ScheduleError) -> u64 {
+    match e {
+        Denied => 1,
+        Invalid => 2,
+        Issued => 3,
+        Spent => 4,
+        Capacity(_) => 5,
+    }
+}
+
+// `consumed`: refused as a delivery, so the secret is gone; otherwise returned.
+fn refused_import(key: String, uses: String, want: u64, consumed: bool) -> bool {
+    let raw = unhex(key)
+    let s = result.unwrap(secret.seal(take raw, uses))
+    match schedule.import_sframe(Aes128GcmSha256_128, take s) {
+        Error((e, None)) => consumed && tag(e) == want,
+        Error((e, Some(take back))) => {
+            drop(take back)
+            !consumed && tag(e) == want
+        },
+        Ok(take imported) => {
+            drop(take imported)
+            false
+        },
+    }
+}
+
+// A share taken before a refused import: the import spent the mark, so the share's
+// import is refused before issue and returned.
+fn shared_spent(key: String, uses: String) -> bool {
+    let raw = unhex(key)
+    let s = result.unwrap(secret.seal(take raw, uses))
+    let alias = secret.share(s)
+    let first = match schedule.import_sframe(Aes128GcmSha256_128, take s) {
+        Ok(take imported) => {
+            drop(take imported)
+            true
+        },
+        Error((_, None)) => true,
+        Error((_, Some(take back))) => {
+            drop(take back)
+            false
+        },
+    }
+    let second = match schedule.import_sframe(Aes128GcmSha256_128, take alias) {
+        Error((Spent, Some(take back))) => {
+            drop(take back)
+            true
+        },
+        _ => false,
+    }
+    first && second
+}
+
+// bug: a base-key length bound off by one, a length refusal that leaves the bytes
+// unspent, or another import's use accepted by import_sframe (or SFrame's by import_srtp).
+// oracle: TLS-8 imports: 16..=64 bytes; the use names the import operation.
+// expect: run sframe_import_lengths_and_uses() = true
+fn sframe_import_lengths_and_uses() -> bool {
+    let k15 = "000102030405060708090a0b0c0d0e"
+    let k65 = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40"
+    let k64 = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+    let lengths = refused_import(k15, "sframe_import(receive)", 2, true) && refused_import(k65, "sframe_import(receive)", 2, true) && shared_spent(k15, "sframe_import(receive)") && shared_spent(k65, "sframe_import(receive)")
+    let a = import(base(), "sframe_import(receive)")
+    let b = import(k64, "sframe_import(receive)")
+    drop(take a)
+    drop(take b)
+    let srtp_key = unhex("e1f97a0d3e018be0d64fa32c06de41390ec675ad498afeebb6960b3aabe6")
+    let srtp_secret = result.unwrap(secret.seal(take srtp_key, "srtp_import(send)"))
+    let wrong_kind = match schedule.import_sframe(Aes128GcmSha256_128, take srtp_secret) {
+        Error((Denied, Some(take back))) => {
+            drop(take back)
+            true
+        },
+        _ => false,
+    }
+    let sframe_bytes = unhex(base())
+    let sframe_secret = result.unwrap(secret.seal(take sframe_bytes, "sframe_import(receive)"))
+    let wrong_use = match schedule.import_srtp(Aes128CmHmacSha1_80, take sframe_secret) {
+        Error((Denied, Some(take back))) => {
+            drop(take back)
+            true
+        },
+        _ => false,
+    }
+    lengths && wrong_kind && wrong_use
+}
+
+// bug: a ratchet applied before the sealer's admission, so a Capacity leaves the
+// schedule a step on.
+// oracle: PC12's step-0 KID 4 and step-1 KID 5 frames (oracle.py); 1040 by hand.
+// expect: run sframe_sealer_admits_before_ratchet() = true
+fn sframe_sealer_admits_before_ratchet() -> bool {
+    let mut s = import(base(), "sframe_import(send,4,2)")
+    let short = result.unwrap(bound bytes 1039 {
+        match schedule.sframe_sealer(mut s, 1, 5, 0) {
+            Error(Capacity(c)) => c.requested == 1040 && c.available == 1039,
+            _ => false,
+        }
+    })
+    let mut zero = result.unwrap(schedule.sframe_sealer(mut s, 0, 4, 0))
+    let step0 = frame(mut zero, 0, "40", hirsel(), unhex(""))
+    let mut next = result.unwrap(bound bytes 1040 {
+        let issued = result.unwrap(schedule.sframe_sealer(mut s, 1, 5, 0))
+        take issued
+    })
+    let one = frame(mut next, 0, "50", hirsel(), unhex(""))
+    short && step0 == unhex("40bc3483bd855c43d811deeb3085fc86274cff324394b9") && one == unhex("501779b9607a5841322c5952a56cb455d5803b545e1d1b")
+}
+
+fn sealed(key: String, uses: String) -> Secret {
+    let raw = unhex(key)
+    result.unwrap(secret.seal(take raw, uses))
+}
+
+// bug: a second sender for one base key in a run (the registry unchecked, or keyed on
+// the block instead of the bytes), a registry Spent that keeps the schedule's 512 or the
+// entry's 48, or a send import whose entry is refunded when its schedule drops.
+// oracle: TLS-8 sender ownership; 512 + 48 = 560 by hand from the charge table.
+// expect: run sframe_send_registry() = true
+fn sframe_send_registry() -> bool {
+    let first = import(base(), "sframe_import(send,4,2)")
+    drop(take first)
+    let again = refused_import(base(), "sframe_import(send,4,2)", 4, true)
+    let other_block = refused_import(base(), "sframe_import(send,8,2)", 4, true)
+    let shared = shared_spent(base(), "sframe_import(send,4,2)")
+    // A registry Spent gives back the schedule's 512 and the entry's 48.
+    let dup = sealed(base(), "sframe_import(send,4,2)")
+    let fresh = sealed("202122232425262728292a2b2c2d2e2f", "sframe_import(send,4,2)")
+    let refunded = result.unwrap(bound bytes 560 {
+        let spent = match schedule.import_sframe(Aes128GcmSha256_128, take dup) {
+            Error((Spent, None)) => true,
+            _ => false,
+        }
+        let kept = result.unwrap(schedule.import_sframe(Aes128GcmSha256_128, take fresh))
+        drop(take kept)
+        spent
+    })
+    let other = "303132333435363738393a3b3c3d3e3f"
+    let low = sealed(other, "sframe_import(send,4,2)")
+    let short = result.unwrap(bound bytes 559 {
+        match schedule.import_sframe(Aes128GcmSha256_128, take low) {
+            Error((Capacity(c), Some(take back))) => {
+                drop(take back)
+                c.requested == 560 && c.available == 559
+            },
+            _ => false,
+        }
+    })
+    let before = sealed(other, "sframe_import(receive)")
+    let receive_fits = result.unwrap(bound bytes 512 {
+        let receiver = result.unwrap(schedule.import_sframe(Aes128GcmSha256_128, take before))
+        drop(take receiver)
+        true
+    })
+    // The entry outlives its schedule: after the drop only 512 of 560 come back.
+    let send = sealed(other, "sframe_import(send,4,2)")
+    let after = sealed(other, "sframe_import(receive)")
+    let last = sealed("404142434445464748494a4b4c4d4e4f", "sframe_import(send,4,2)")
+    let held = result.unwrap(bound bytes 560 {
+        let sender = result.unwrap(schedule.import_sframe(Aes128GcmSha256_128, take send))
+        drop(take sender)
+        let receiver = result.unwrap(schedule.import_sframe(Aes128GcmSha256_128, take after))
+        drop(take receiver)
+        match schedule.import_sframe(Aes128GcmSha256_128, take last) {
+            Error((Capacity(c), Some(take back))) => {
+                drop(take back)
+                c.requested == 560 && c.available == 512
+            },
+            _ => false,
+        }
+    })
+    again && other_block && shared && refunded && short && receive_fits && held
+}

@@ -111,7 +111,7 @@ fn srtp_derives_authenticates_and_encrypts() {
 #[test]
 fn srtp_import_direction_matches_libsrtp() {
     use crate::{ImportUse, SecretPolicy};
-    let direction = |policy| SecretPolicy::parse(policy).unwrap().uses.import().unwrap();
+    let direction = |policy| SecretPolicy::parse(policy).unwrap().import().unwrap();
     let send = direction("srtp_import(send)");
     let receive = direction("srtp_import(receive)");
     let master = hex::<30>("e1f97a0d3e018be0d64fa32c06de41390ec675ad498afeebb6960b3aabe6");

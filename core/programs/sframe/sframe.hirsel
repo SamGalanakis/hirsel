@@ -26,6 +26,7 @@ pub type Follow {
     generation: u64,
     bits: u8,
     step: u64,
+    at: u64,
     forward: u8,
     keep: u8,
     floor: u64
@@ -43,7 +44,7 @@ pub fn limits() -> Limits {
     Limits(frame: 4194304, window: 128, keys: 16, ranges: 256, jump: 0)
 }
 
-pub type SframeError = Invalid | Framing | Unreserved | Exhausted | Keys | Secret(SecretError) | Capacity(Capacity)
+pub type SframeError = Invalid | Framing | Unreserved | Exhausted | Keys | Schedule(schedule.ScheduleError) | Capacity(Capacity)
 
 pub type Discard: key = Malformed | Replayed | TooOld | TooFar | Tampered
 
@@ -180,7 +181,7 @@ pub fn decode_header(b: Bytes, at: u64) -> Result[(Header, u64), HeaderError] {
     Ok((Header(kid: id, ctr), 1 + k + c))
 }
 
-// ---------------------------------------------------------------- key schedule (SFRAME-4)
+// ---------------------------------------------------------------- key schedule (SFRAME-4, SFRAME-14)
 fn inline_bytes(x: Inline[u8, 32], n: u64) -> Bytes {
     let mut out: Bytes = list.with_capacity(n)
     let _ = bytebuf.append_inline(mut out, x, 0, n)
@@ -199,51 +200,15 @@ fn expand(prk: Bytes, info: Bytes, n: u64) -> Bytes {
     inline_bytes(std.hmac.finish(h), n)
 }
 
-fn label(prefix: Bytes, id: u64) -> Bytes {
-    let mut out: Bytes = list.with_capacity(list.len(prefix) + 10)
-    list.append(mut out, prefix)
-    list.put_word_be(mut out, id)
-    list.put_word_be(mut out, 4u16)
-    take out
-}
-
+/// The next step's base key, for a party that hands sender keys out as bytes (SFRAME-14).
+/// Keys are derived only inside TLS-8 schedules; this is never a route for a granted key.
 pub fn ratchet_key(base: Bytes) -> Bytes {
     expand(extract(base), b"SFrame 1.0 Ratchet", 32)
 }
 
-pub fn salt_of(base: Bytes, id: u64) -> Bytes {
-    expand(extract(base), label(b"SFrame 1.0 Secret salt ", id), 12)
-}
-
 type Slot {
-    key: Secret,
-    salt: Bytes,
+    opener: packet.Opener,
     window: Window
-}
-
-type KeyPair {
-    key: Secret,
-    salt: Bytes
-}
-
-fn derive(base: Bytes, id: u64, uses: String) -> Result[KeyPair, SframeError] {
-    let mut owned: Bytes = list.new()
-    list.try_reserve(mut owned, list.len(base)) ?=> |c| Capacity(c)
-    list.append(mut owned, base)
-    let parent = match secret.seal(take owned, "kdf") {
-        Ok(take s) => take s,
-        Error((e, _)) => return Error(Secret(e)),
-    }
-    let key = secret.derive_hkdf_sha256(parent, b"", label(b"SFrame 1.0 Secret key ", id), 16, uses) ?=> |e| Secret(e)
-    Ok(KeyPair(key: take key, salt: salt_of(base, id)))
-}
-
-fn check_base(base: Bytes) -> Result[(), SframeError] {
-    let n = list.len(base)
-    if n < 16 || n > 64 {
-        return Error(Invalid)
-    }
-    Ok(())
 }
 
 fn check_limits(l: Limits) -> Result[(), SframeError] {
@@ -253,21 +218,29 @@ fn check_limits(l: Limits) -> Result[(), SframeError] {
     Ok(())
 }
 
-fn nonce(salt: Bytes, ctr: u64) -> Bytes {
-    let mut out: Bytes = list.with_capacity(12)
-    list.append(mut out, salt)
-    for i in 0u64 .. 8 {
-        let b: u8 = int.truncate(ctr >> (8 * (7 - i)))
-        out[4 + i] = out[4 + i] ^ b
+// The most steps one call moves a schedule from the step of its imported bytes (TLS-8).
+const MAX_STEPS: u64 = 65536
+
+fn distance(at: u64, step: u64) -> Result[u64, SframeError] {
+    if at > step || step - at > MAX_STEPS {
+        return Error(Invalid)
     }
-    take out
+    Ok(step - at)
+}
+
+// A ratchet at the distance of an opener just issued; TLS-8 makes it infallible.
+fn commit_ratchet(mut keys: schedule.Schedule, steps: u64) {
+    match schedule.sframe_ratchet(mut keys, steps) {
+        Ok(()) => {},
+        Error(_) => fail("sframe: the schedule refused a ratchet after issuing its opener"),
+    }
 }
 
 fn blocks(n: u64) -> u64 {
     (n + 15) / 16
 }
 
-// ---------------------------------------------------------------- sender (SFRAME-5, SFRAME-8)
+// ---------------------------------------------------------------- sender (SFRAME-5, SFRAME-8, SFRAME-14)
 pub opaque type Sender {
     suite: Suite,
     framing: ranges.Framing,
@@ -276,10 +249,9 @@ pub opaque type Sender {
     generation: u64,
     bits: u8,
     step: u64,
-    base: Bytes,
     kid: u64,
-    key: Secret,
-    salt: Bytes,
+    keys: schedule.Schedule,
+    sealer: packet.Sealer,
     next: u64,
     volume: u64,
     ceiling: Mark
@@ -301,23 +273,39 @@ fn check_generation(generation: u64, bits: u8) -> Result[(), SframeError] {
     Ok(())
 }
 
-pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take base: Bytes, from: Mark, l: Limits) -> Result[Sender, SframeError] {
+// A scheme's ratchet state and KID, and how far its schedule moves from the imported step.
+type Start {
+    ratcheted: bool,
+    generation: u64,
+    bits: u8,
+    step: u64,
+    kid: u64,
+    ahead: u64
+}
+
+fn opening(scheme: Scheme, at: u64, l: Limits) -> Result[Start, SframeError] {
     check_limits(l)?
-    check_base(base)?
-    let (ratcheted, generation, bits, step, id) = match scheme {
-        Fixed(k) => (false, 0u64, 0u8, 0u64, k),
+    match scheme {
+        Fixed(k) => Ok(Start(ratcheted: false, generation: 0, bits: 0, step: 0, kid: k, ahead: distance(at, 0)?)),
         Ratcheted(r) => {
             check_generation(r.generation, r.bits)?
-            (true, r.generation, r.bits, r.step, ratchet_kid(r.generation, r.bits, r.step))
+            Ok(Start(ratcheted: true, generation: r.generation, bits: r.bits, step: r.step, kid: ratchet_kid(r.generation, r.bits, r.step), ahead: distance(at, r.step)?))
         },
     }
-    let KeyPair(key: take key, salt: take salt) = derive(base, id, "aead(aes128-gcm)")?
-    let kept = if ratcheted {
-        take base
-    } else {
-        list.new()
+}
+
+pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take keys: schedule.Schedule, at: u64, from: Mark, l: Limits) -> Result[Sender, (SframeError, schedule.Schedule)] {
+    let st = match opening(scheme, at, l) {
+        Ok(x) => x,
+        Error(e) => return Error((e, take keys)),
     }
-    Ok(Sender(suite, framing, limits: l, ratcheted, generation, bits, step, base: take kept, kid: id, key: take key, salt: take salt, next: from.ctr, volume: from.volume, ceiling: from))
+    let mut owned = take keys
+    let issued = schedule.sframe_sealer(mut owned, st.ahead, st.kid, from.ctr)
+    let sealer = match take issued {
+        Ok(take x) => take x,
+        Error(e) => return Error((Schedule(e), take owned)),
+    }
+    Ok(Sender(suite, framing, limits: l, ratcheted: st.ratcheted, generation: st.generation, bits: st.bits, step: st.step, kid: st.kid, keys: take owned, sealer: take sealer, next: from.ctr, volume: from.volume, ceiling: from))
 }
 
 pub fn current_kid(s: Sender) -> u64 {
@@ -353,6 +341,7 @@ pub fn reserve(mut s: Sender, frames: u64, volume: u64) -> Result[Mark, SframeEr
     Ok(s.ceiling)
 }
 
+// One `sframe_sealer(keys, 1, ..)`: a refusal leaves the sender sealing under its old step.
 pub fn ratchet(mut s: Sender) -> Result[(), SframeError] {
     if !s.ratcheted {
         return Error(Invalid)
@@ -360,14 +349,14 @@ pub fn ratchet(mut s: Sender) -> Result[(), SframeError] {
     if s.step == CTR_LIMIT {
         return Error(Exhausted)
     }
-    let next_base = ratchet_key(s.base)
     let id = ratchet_kid(s.generation, s.bits, s.step + 1)
-    let KeyPair(key: take key, salt: take salt) = derive(next_base, id, "aead(aes128-gcm)")?
-    s.base = take next_base
+    let issued = schedule.sframe_sealer(mut s.keys, 1, id, 0)
+    s.sealer = match take issued {
+        Ok(take x) => take x,
+        Error(e) => return Error(Schedule(e)),
+    }
     s.step += 1
     s.kid = id
-    s.key = take key
-    s.salt = take salt
     s.next = 0
     s.volume = 0
     s.ceiling = Mark(ctr: 0, volume: 0)
@@ -397,6 +386,16 @@ fn is_rfc(f: ranges.Framing) -> bool {
     }
 }
 
+// Seals `src` onto `dst`, authenticating dst[aad_at..] and `extra`. A Capacity refusal changes
+// nothing; Reused, Range and TooLong are ruled out by the library's own checks.
+fn seal_frame(mut s: Sender, ctr: u64, src: Bytes, mut dst: Bytes, aad_at: u64, extra: Bytes) -> Result[(), SframeError] {
+    match packet.seal_into(mut s.sealer, ctr, src, 0, mut dst, aad_at, extra) {
+        Ok(_) => Ok(()),
+        Error(Capacity(c)) => Error(Capacity(c)),
+        Error(_) => fail("sframe: the sealer refused a frame the library admitted"),
+    }
+}
+
 pub fn seal(mut s: Sender, metadata: Bytes, plain: Bytes, mut out: Bytes) -> Result[Sealed, SframeError] {
     if !is_rfc(s.framing) {
         return Error(Framing)
@@ -408,20 +407,14 @@ pub fn seal(mut s: Sender, metadata: Bytes, plain: Bytes, mut out: Bytes) -> Res
     let hlen = header_len(h)
     let cost = 1 + blocks(list.len(plain)) + blocks(hlen + list.len(metadata))
     admit(s, cost)?
-    let total = hlen + list.len(plain) + TAG
-    short_of(out, total) ?=> |c| Capacity(c)
-    let mut aad: Bytes = list.new()
-    list.try_reserve(mut aad, hlen + list.len(metadata)) ?=> |c| Capacity(c)
-    let _ = encode_header(h, mut aad) ?=> |c| Capacity(c)
-    list.append(mut aad, metadata)
-    let iv = nonce(s.salt, h.ctr)
+    short_of(out, hlen + list.len(plain) + TAG) ?=> |c| Capacity(c)
     let start = list.len(out)
-    list.append(mut out, list.slice(aad, 0, hlen))
-    match secret.aead_seal(s.key, Aes128Gcm, iv, aad, plain, mut out) {
-        Ok(_) => {},
-        Error(_) => {
+    let _ = encode_header(h, mut out) ?=> |c| Capacity(c)
+    match seal_frame(mut s, h.ctr, plain, mut out, start, metadata) {
+        Ok(()) => {},
+        Error(e) => {
             list.truncate(mut out, start)
-            fail("sframe: the AEAD sink refused after admission")
+            return Error(e)
         },
     }
     spend(mut s, cost)
@@ -515,14 +508,21 @@ fn mark(mut w: Window, ctr: u64) {
     w.bits[behind / 64] = w.bits[behind / 64] | (1u64 << (behind % 64))
 }
 
-// ---------------------------------------------------------------- receiver (SFRAME-6, SFRAME-8)
+// ---------------------------------------------------------------- receiver (SFRAME-6, SFRAME-8, SFRAME-14)
 type Generation {
     first: u64,
     bits: u8,
     forward: u8,
     keep: u8,
     step: u64,
-    base: Bytes
+    keys: schedule.Schedule
+}
+
+// A generation's last forward candidate, `d` steps past its current step, kept until a commit,
+// an advance or its removal so forged frames at one distance issue it once.
+type Pending {
+    d: u64,
+    opener: packet.Opener
 }
 
 type Claim {
@@ -536,13 +536,14 @@ pub opaque type Receiver {
     limits: Limits,
     slots: Map[u64, Slot],
     generations: Map[u64, Generation],
+    pending: Map[u64, Pending],
     claims: List[Claim],
     used: u64
 }
 
 pub fn receiver(suite: Suite, framing: ranges.Framing, l: Limits) -> Result[Receiver, SframeError] {
     check_limits(l)?
-    Ok(Receiver(suite, framing, limits: l, slots: map.new(), generations: map.new(), claims: list.new(), used: 0))
+    Ok(Receiver(suite, framing, limits: l, slots: map.new(), generations: map.new(), pending: map.new(), claims: list.new(), used: 0))
 }
 
 fn claimed(r: Receiver, id: u64) -> Option[Claim] {
@@ -555,10 +556,10 @@ fn claimed(r: Receiver, id: u64) -> Option[Claim] {
     None
 }
 
-fn new_slot(base: Bytes, id: u64, size: u64, floor: u64) -> Result[Slot, SframeError] {
-    let KeyPair(key: take key, salt: take salt) = derive(base, id, "open(aes128-gcm)")?
+fn new_slot(keys: schedule.Schedule, ahead: u64, id: u64, size: u64, floor: u64) -> Result[Slot, SframeError] {
+    let opener = schedule.sframe_opener(keys, ahead, id) ?=> |take e| Schedule(e)
     let w = window(size, floor) ?=> |c| Capacity(c)
-    Ok(Slot(key: take key, salt: take salt, window: take w))
+    Ok(Slot(opener: take opener, window: take w))
 }
 
 fn put_slot(mut r: Receiver, id: u64, take slot: Slot) -> Result[(), SframeError] {
@@ -567,8 +568,7 @@ fn put_slot(mut r: Receiver, id: u64, take slot: Slot) -> Result[(), SframeError
     Ok(())
 }
 
-pub fn install(mut r: Receiver, id: u64, take base: Bytes, floor: u64) -> Result[(), SframeError] {
-    check_base(base)?
+pub fn install(mut r: Receiver, id: u64, keys: schedule.Schedule, floor: u64) -> Result[(), SframeError] {
     if let Some(_) = map.get(r.slots, id) {
         return Error(Invalid)
     }
@@ -578,14 +578,19 @@ pub fn install(mut r: Receiver, id: u64, take base: Bytes, floor: u64) -> Result
     if r.used + 1 > r.limits.keys {
         return Error(Keys)
     }
-    let slot = new_slot(base, id, r.limits.window, floor)?
+    let slot = new_slot(keys, 0, id, r.limits.window, floor)?
     put_slot(mut r, id, take slot)?
     r.used += 1
     Ok(())
 }
 
-pub fn install_ratcheted(mut r: Receiver, f: Follow, take base: Bytes) -> Result[(), SframeError] {
-    check_base(base)?
+// A member holding a shared group key as `send,<own kid>,0` opens the other members' KIDs with it.
+pub fn install_from(mut r: Receiver, id: u64, s: Sender, floor: u64) -> Result[(), SframeError] {
+    install(mut r, id, s.keys, floor)
+}
+
+// The library's checks for a new generation; the distance its schedule moves from `f.at`.
+fn follow_check(r: Receiver, f: Follow) -> Result[u64, SframeError] {
     check_generation(f.generation, f.bits)?
     let span: u64 = 1 << w8(f.bits)
     let forward: u64 = w8(f.forward)
@@ -593,8 +598,8 @@ pub fn install_ratcheted(mut r: Receiver, f: Follow, take base: Bytes) -> Result
     if forward < 1 || forward > 16 || keep < forward || keep > 16 || keep + 1 + forward > span {
         return Error(Invalid)
     }
+    let ahead = distance(f.at, f.step)?
     let first = f.generation << w8(f.bits)
-    let mut overlap = false
     for c in r.claims {
         let b: u64 = if c.bits > f.bits {
             w8(c.bits)
@@ -602,13 +607,9 @@ pub fn install_ratcheted(mut r: Receiver, f: Follow, take base: Bytes) -> Result
             w8(f.bits)
         }
         if c.first >> b == first >> b {
-            overlap = true
+            return Error(Invalid)
         }
     }
-    if overlap {
-        return Error(Invalid)
-    }
-    let last = first | (span - 1)
     // A fixed key inside the claimed range: refuse. The table is small, so probe the claim.
     if span <= 65536 {
         for low in 0u64 .. span {
@@ -617,18 +618,44 @@ pub fn install_ratcheted(mut r: Receiver, f: Follow, take base: Bytes) -> Result
             }
         }
     }
-    let _ = last
     if r.used + keep + 1 > r.limits.keys {
         return Error(Keys)
     }
+    Ok(ahead)
+}
+
+fn room_for_generation(mut r: Receiver) -> Result[(), Capacity] {
+    list.try_reserve(mut r.claims, 1)?
+    map.try_reserve(mut r.generations, 1)?
+    map.try_reserve(mut r.slots, 1)?
+    map.try_reserve(mut r.pending, 1)?
+    Ok(())
+}
+
+pub fn install_ratcheted(mut r: Receiver, f: Follow, take keys: schedule.Schedule) -> Result[(), (SframeError, schedule.Schedule)] {
+    let ahead = match follow_check(r, f) {
+        Ok(a) => a,
+        Error(e) => return Error((e, take keys)),
+    }
     let id = ratchet_kid(f.generation, f.bits, f.step)
-    let slot = new_slot(base, id, r.limits.window, f.floor)?
-    list.try_reserve(mut r.claims, 1) ?=> |c| Capacity(c)
-    map.try_reserve(mut r.generations, 1) ?=> |c| Capacity(c)
-    put_slot(mut r, id, take slot)?
+    let made = new_slot(keys, ahead, id, r.limits.window, f.floor)
+    let slot = match take made {
+        Ok(take x) => take x,
+        Error(e) => return Error((e, take keys)),
+    }
+    match room_for_generation(mut r) {
+        Ok(()) => {},
+        Error(c) => return Error((Capacity(c), take keys)),
+    }
+    let mut owned = take keys
+    if ahead != 0 {
+        commit_ratchet(mut owned, ahead)
+    }
+    let first = f.generation << w8(f.bits)
+    map.insert(mut r.slots, id, take slot)
     list.push(mut r.claims, Claim(first, bits: f.bits))
-    map.insert(mut r.generations, first, Generation(first, bits: f.bits, forward: f.forward, keep: f.keep, step: f.step, base: take base))
-    r.used += keep + 1
+    map.insert(mut r.generations, first, Generation(first, bits: f.bits, forward: f.forward, keep: f.keep, step: f.step, keys: take owned))
+    r.used += w8(f.keep) + 1
     Ok(())
 }
 
@@ -655,8 +682,15 @@ fn held_low(step: u64, keep: u8) -> u64 {
     }
 }
 
-pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take base: Bytes, floor: u64) -> Result[(), SframeError] {
-    check_base(base)?
+// The generation `advance` moves: its first KID, current step and `keep`, and the new schedule's distance.
+type Advance {
+    first: u64,
+    current: u64,
+    keep: u8,
+    ahead: u64
+}
+
+fn advance_check(r: Receiver, bits: u8, generation: u64, step: u64, at: u64) -> Result[Advance, SframeError] {
     check_generation(generation, bits)?
     let first = generation << w8(bits)
     let (current, keep) = match map.get(r.generations, first) {
@@ -670,21 +704,38 @@ pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take base:
     if step <= current {
         return Error(Invalid)
     }
-    let id = ratchet_kid(generation, bits, step)
-    let slot = new_slot(base, id, r.limits.window, floor)?
-    let low = held_low(step, keep)
-    release_steps(mut r, first, bits, held_low(current, keep), current, low, step - 1)
-    map.insert(mut r.slots, id, take slot)
-    set_base(mut r, first, step, take base)
-    Ok(())
+    let ahead = distance(at, step)?
+    Ok(Advance(first, current, keep, ahead))
 }
 
-fn set_base(mut r: Receiver, first: u64, step: u64, take base: Bytes) {
-    let Some(take g) = map.remove(mut r.generations, first) else {
-        return
+pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take keys: schedule.Schedule, at: u64, floor: u64) -> Result[(), (SframeError, schedule.Schedule)] {
+    let a = match advance_check(r, bits, generation, step, at) {
+        Ok(x) => x,
+        Error(e) => return Error((e, take keys)),
     }
-    let Generation(first: at, bits, forward, keep, step: _, base: _) = take g
-    map.insert(mut r.generations, first, Generation(first: at, bits, forward, keep, step, base: take base))
+    let id = ratchet_kid(generation, bits, step)
+    let made = new_slot(keys, a.ahead, id, r.limits.window, floor)
+    let slot = match take made {
+        Ok(take x) => take x,
+        Error(e) => return Error((e, take keys)),
+    }
+    match map.try_reserve(mut r.slots, 1) {
+        Ok(()) => {},
+        Error(c) => return Error((Capacity(c), take keys)),
+    }
+    let mut owned = take keys
+    if a.ahead != 0 {
+        commit_ratchet(mut owned, a.ahead)
+    }
+    release_steps(mut r, a.first, bits, held_low(a.current, a.keep), a.current, held_low(step, a.keep), step - 1)
+    let _ = map.remove(mut r.pending, a.first)
+    map.insert(mut r.slots, id, take slot)
+    let Some(take old) = map.remove(mut r.generations, a.first) else {
+        fail("sframe: a checked generation is gone")
+    }
+    let Generation(first: _, bits: _, forward, keep, step: _, keys: _) = take old
+    map.insert(mut r.generations, a.first, Generation(first: a.first, bits, forward, keep, step, keys: take owned))
+    Ok(())
 }
 
 pub fn remove(mut r: Receiver, id: u64) -> bool {
@@ -705,14 +756,17 @@ pub fn remove_generation(mut r: Receiver, bits: u8, generation: u64) -> bool {
         return false
     }
     let first = generation << w8(bits)
-    let Some(g) = map.remove(mut r.generations, first) else {
-        return false
+    let (step, keep) = match map.get(r.generations, first) {
+        Some(g) => if g.bits == bits {
+            (g.step, g.keep)
+        } else {
+            return false
+        },
+        None => return false,
     }
-    if g.bits != bits {
-        map.insert(mut r.generations, first, take g)
-        return false
-    }
-    release_steps(mut r, first, bits, held_low(g.step, g.keep), g.step, 1, 0)
+    let _ = map.remove(mut r.generations, first)
+    let _ = map.remove(mut r.pending, first)
+    release_steps(mut r, first, bits, held_low(step, keep), step, 1, 0)
     let mut kept: List[Claim] = list.new()
     for c in r.claims {
         if c.first != first {
@@ -720,7 +774,7 @@ pub fn remove_generation(mut r: Receiver, bits: u8, generation: u64) -> bool {
         }
     }
     r.claims = take kept
-    r.used -= w8(g.keep) + 1
+    r.used -= w8(keep) + 1
     true
 }
 
@@ -747,23 +801,105 @@ fn locate(r: Receiver, id: u64) -> Result[Found, OpenError] {
     Error(NoKey(id))
 }
 
-fn candidate_base(g: Generation, d: u64) -> Bytes {
-    let mut base = ratchet_key(g.base)
-    let mut i: u64 = 1
-    while i < d {
-        base = ratchet_key(base)
-        i += 1
+fn opened(e: packet.PacketError) -> OpenError {
+    match e {
+        Tampered => Discarded(Tampered),
+        Capacity(c) => Capacity(c),
+        _ => fail("sframe: the opener refused a frame the library checked"),
     }
-    take base
 }
 
-// The authenticated open shared by both framings: the window, capacity, AEAD and commit steps of SFRAME-6.
-// `header` is the header bytes, `aad` the whole AAD, `sealed` the ciphertext and tag.
-fn open_core(mut r: Receiver, h: Header, aad: Bytes, sealed: Bytes, room: u64, mut plain: Bytes) -> Result[(), OpenError] {
+fn issue_refused(e: schedule.ScheduleError) -> OpenError {
+    match e {
+        Capacity(c) => Capacity(c),
+        _ => Discarded(Tampered),
+    }
+}
+
+// The generation's candidate for `d`: the kept one, or a new one that replaces it.
+fn candidate(mut r: Receiver, first: u64, d: u64, id: u64) -> Result[(), OpenError] {
+    if let Some(p) = map.get(r.pending, first) {
+        if p.d == d {
+            return Ok(())
+        }
+    }
+    let _ = map.remove(mut r.pending, first)
+    map.try_reserve(mut r.pending, 1) ?=> |c| Capacity(c)
+    let opener = {
+        let g = option.unwrap(map.get(r.generations, first))
+        schedule.sframe_opener(g.keys, d, id) ?=> |take e| issue_refused(e)
+    }
+    map.insert(mut r.pending, first, Pending(d, opener: take opener))
+    Ok(())
+}
+
+// The openers a commit to `d` steps on retains, `max(1, d - keep) <= j < d`, all or nothing:
+// on a refusal the ones issued are removed again and the receiver is as it was.
+fn intermediates(mut r: Receiver, first: u64, d: u64) -> Result[(), OpenError] {
+    let (generation, bits, step, keep) = {
+        let g = option.unwrap(map.get(r.generations, first))
+        (first >> w8(g.bits), g.bits, g.step, w8(g.keep))
+    }
+    let low = if d > keep {
+        d - keep
+    } else {
+        1
+    }
+    map.try_reserve(mut r.slots, d - low + 1) ?=> |c| Capacity(c)
+    let mut j = low
+    while j < d {
+        let id = ratchet_kid(generation, bits, step + j)
+        let made = {
+            let g = option.unwrap(map.get(r.generations, first))
+            new_slot(g.keys, j, id, r.limits.window, 0)
+        }
+        match take made {
+            Ok(take slot) => map.insert(mut r.slots, id, take slot),
+            Error(e) => {
+                let mut i = low
+                while i < j {
+                    let _ = map.remove(mut r.slots, ratchet_kid(generation, bits, step + i))
+                    i += 1
+                }
+                return Error(match e {
+                    Capacity(c) => Capacity(c),
+                    Schedule(s) => issue_refused(s),
+                    _ => Discarded(Tampered),
+                })
+            },
+        }
+        j += 1
+    }
+    Ok(())
+}
+
+// After the candidate authenticated and its intermediates are held: move the schedule `d` steps,
+// release the steps the new window drops, and make the candidate the step's opener.
+fn commit(mut r: Receiver, first: u64, d: u64, id: u64, take w: Window) {
+    let (bits, step, keep) = {
+        let g = option.unwrap(map.get(r.generations, first))
+        (g.bits, g.step, g.keep)
+    }
+    let to = step + d
+    release_steps(mut r, first, bits, held_low(step, keep), step, held_low(to, keep), to - 1)
+    let _ = map.update(mut r.generations, first, scoped fn(mut g: Generation) -> () {
+        commit_ratchet(mut g.keys, d)
+        g.step = to
+    })
+    let Some(take p) = map.remove(mut r.pending, first) else {
+        fail("sframe: a committed candidate is gone")
+    }
+    let Pending(d: _, opener: take opener) = take p
+    map.insert(mut r.slots, id, Slot(opener: take opener, window: take w))
+}
+
+// The authenticated open shared by both framings: the window, capacity, AEAD and commit steps of
+// SFRAME-6. `src[aad_at..at]` and `extra` are the AAD, `src[at..]` the ciphertext and tag.
+fn open_core(mut r: Receiver, h: Header, src: Bytes, aad_at: u64, at: u64, extra: Bytes, room: u64, mut plain: Bytes) -> Result[(), OpenError] {
     let found = locate(r, h.kid)?
     let size = r.limits.window
     let jump = r.limits.jump
-    let need = list.len(sealed) - TAG
+    let need = list.len(src) - at - TAG
     match found {
         Held => {
             {
@@ -776,8 +912,7 @@ fn open_core(mut r: Receiver, h: Header, aad: Bytes, sealed: Bytes, room: u64, m
             list.try_reserve(mut plain, need) ?=> |c| Capacity(c)
             {
                 let slot = option.unwrap(map.get(r.slots, h.kid))
-                let iv = nonce(slot.salt, h.ctr)
-                let _ = secret.aead_open(slot.key, Aes128Gcm, iv, aad, sealed, mut plain) ?=> |_| Discarded(Tampered)
+                let _ = packet.open_into(slot.opener, 0, h.ctr, src, aad_at, at, extra, mut plain) ?=> |take e| opened(e)
             }
             let _ = map.update(mut r.slots, h.kid, scoped fn(mut slot: Slot) -> () {
                 mark(mut slot.window, h.ctr)
@@ -789,50 +924,35 @@ fn open_core(mut r: Receiver, h: Header, aad: Bytes, sealed: Bytes, room: u64, m
                 return Error(Capacity(Capacity(requested: need, available: room)))
             }
             list.try_reserve(mut plain, need) ?=> |c| Capacity(c)
-            let (base, bits, step, keep) = {
-                let g = option.unwrap(map.get(r.generations, first))
-                (candidate_base(g, d), g.bits, g.step, g.keep)
+            // A new step's window is empty with floor 0: only the jump bound applies.
+            if jump != 0 && h.ctr > jump {
+                return Error(Discarded(TooFar))
             }
-            let mut slot = match new_slot(base, h.kid, size, 0) {
-                Ok(take s) => take s,
-                Error(Capacity(c)) => return Error(Capacity(c)),
-                Error(_) => return Error(Discarded(Tampered)),
-            }
-            check_window(slot.window, size, jump, h.ctr) ?=> |e| Discarded(e)
+            candidate(mut r, first, d, h.kid)?
+            let before = list.len(plain)
             {
-                let iv = nonce(slot.salt, h.ctr)
-                let _ = secret.aead_open(slot.key, Aes128Gcm, iv, aad, sealed, mut plain) ?=> |_| Discarded(Tampered)
+                let p = option.unwrap(map.get(r.pending, first))
+                let _ = packet.open_into(p.opener, 0, h.ctr, src, aad_at, at, extra, mut plain) ?=> |take e| opened(e)
             }
-            mark(mut slot.window, h.ctr)
-            commit(mut r, first, bits, step, keep, d, take base, take slot)
+            let mut w = match window(size, 0) {
+                Ok(x) => x,
+                Error(c) => {
+                    list.truncate(mut plain, before)
+                    return Error(Capacity(c))
+                },
+            }
+            match intermediates(mut r, first, d) {
+                Ok(()) => {},
+                Error(e) => {
+                    list.truncate(mut plain, before)
+                    return Error(e)
+                },
+            }
+            mark(mut w, h.ctr)
+            commit(mut r, first, d, h.kid, take w)
             Ok(())
         },
     }
-}
-
-fn commit(mut r: Receiver, first: u64, bits: u8, step: u64, keep: u8, d: u64, take base: Bytes, take slot: Slot) {
-    let to = step + d
-    let low = held_low(to, keep)
-    release_steps(mut r, first, bits, held_low(step, keep), step, low, to - 1)
-    // Intermediate steps the retained set now covers get their keys from the old base.
-    let mut walk = {
-        let g = option.unwrap(map.get(r.generations, first))
-        ratchet_key(g.base)
-    }
-    let generation = first >> w8(bits)
-    let mut i = step + 1
-    while i < to {
-        if i >= low {
-            match new_slot(walk, ratchet_kid(generation, bits, i), r.limits.window, 0) {
-                Ok(take s) => map.insert(mut r.slots, ratchet_kid(generation, bits, i), take s),
-                Error(_) => {},
-            }
-        }
-        walk = ratchet_key(walk)
-        i += 1
-    }
-    map.insert(mut r.slots, ratchet_kid(generation, bits, to), take slot)
-    set_base(mut r, first, to, take base)
 }
 
 pub fn open(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError] {
@@ -847,14 +967,8 @@ pub fn open(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> R
     if n - hlen < TAG {
         return Error(Discarded(Malformed))
     }
-    let mut aad: Bytes = list.new()
-    list.try_reserve(mut aad, hlen + list.len(metadata)) ?=> |c| Capacity(c)
-    list.append(mut aad, list.slice(frame, 0, hlen))
-    list.append(mut aad, metadata)
     let start = list.len(out)
     let room = spare(out)
-    let mut plain: Bytes = list.new()
-    open_core(mut r, h, aad, list.slice(frame, hlen, n), room, mut plain)?
-    list.append(mut out, plain)
+    open_core(mut r, h, frame, 0, hlen, metadata, room, mut out)?
     Ok(Opened(kid: h.kid, ctr: h.ctr, len: list.len(out) - start))
 }

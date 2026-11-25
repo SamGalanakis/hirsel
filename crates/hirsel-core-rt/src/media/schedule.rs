@@ -29,7 +29,7 @@ pub(super) struct Sealer {
     pub(super) origin: u64,
     #[cfg(feature = "record")]
     pub(super) origin_member: u8,
-    _charge: Paid,
+    pub(super) _charge: Paid,
 }
 
 pub(super) struct Opener {
@@ -37,7 +37,7 @@ pub(super) struct Opener {
     pub(super) algorithm: Algorithm,
     pub(super) cipher: Option<Cipher>,
     pub(super) origin: u64,
-    _charge: Paid,
+    pub(super) _charge: Paid,
 }
 
 pub(super) struct Mask {

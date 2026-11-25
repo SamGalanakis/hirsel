@@ -8,7 +8,9 @@ use hirsel_tape_format::{Args, ERROR, OK, Out, put_varint};
 #[derive(Clone, Copy)]
 pub(crate) enum Delivery {
     Child {
-        admits_invalid: bool,
+        // The refusals, as (tag, code), that are deliveries: a length `Invalid`, and for a
+        // send SFrame import the registry's `Spent`. Each consumes the secret.
+        refusals: &'static [(u8, u64)],
     },
     Scalar {
         max: u64,
@@ -112,12 +114,9 @@ pub(crate) unsafe fn valid(request: &Request, answer: &Out, event: u64) -> bool 
     match (call.delivery, answer.status) {
         (Delivery::Child { .. }, OK) => answer.value == event && answer.payload.is_empty(),
         (Delivery::Scalar { max }, OK) => answer.value <= max && answer.payload.is_empty(),
-        (
-            Delivery::Child {
-                admits_invalid: true,
-            },
-            ERROR,
-        ) => answer.value == 0 && answer.error == (2, 0) && answer.payload.is_empty(),
+        (Delivery::Child { refusals }, ERROR) => {
+            answer.value == 0 && refusals.contains(&answer.error) && answer.payload.is_empty()
+        }
         (
             Delivery::Packet {
                 value,

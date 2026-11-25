@@ -196,6 +196,7 @@ struct World {
     media: Vec<Option<media::Media>>,
     agreements: Arc<hirsel_core_net::agreement_registry::AgreementRegistry<media::RegistryCharge>>,
     agreement_refunds: Arc<Mutex<Vec<Limit>>>,
+    send_keys: hirsel_core_net::packet_sframe::SendKeys<Limit>,
     /// Each sealed secret's charge, refunded once no designation holds its token.
     seals: Vec<(std::sync::Weak<()>, Limit, u64)>,
     /// Each TLS write half: its verified name (none on a server half, TLS-9),
@@ -1621,9 +1622,7 @@ fn run_world(
     {
         slot.charge.0.find().subtract(slot.charge.1);
     }
-    for (_, l, n) in std::mem::take(&mut mach.host.world.seals) {
-        l.find().subtract(n);
-    }
+    mach.host.world.end_run_holds();
     // Refunds still pending when the run ends count toward its final use.
     for k in 0..mach.host.sched.tasks.len() {
         for (l, n) in std::mem::take(&mut mach.host.sched.tasks[k].refunds) {

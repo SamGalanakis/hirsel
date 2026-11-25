@@ -96,28 +96,24 @@ pub fn seal_ranged(mut s: Sender, layout: ranges.Layout, metadata: Bytes, frame:
     admit(s, cost)?
     let trailer = TAG + hlen + elen + 2
     short_of(out, ranges.wire_bound(s.framing, n + trailer)) ?=> |c| Capacity(c)
-    let mut aad: Bytes = list.new()
-    list.try_reserve(mut aad, hlen + elen + slen + shown + list.len(metadata)) ?=> |c| Capacity(c)
+    // SFRAME-9's whole AAD at the front of the scratch; the ciphertext and tag follow it.
+    let alen = hlen + elen + slen + shown + list.len(metadata)
+    let mut scratch: Bytes = list.new()
+    list.try_reserve(mut scratch, alen + hidden_len + TAG) ?=> |c| Capacity(c)
     let mut hidden: Bytes = list.new()
     list.try_reserve(mut hidden, hidden_len) ?=> |c| Capacity(c)
-    let mut sealed: Bytes = list.new()
-    list.try_reserve(mut sealed, hidden_len + TAG) ?=> |c| Capacity(c)
     let mut body: Bytes = list.new()
     list.try_reserve(mut body, n + trailer) ?=> |c| Capacity(c)
-    let _ = encode_header(h, mut aad) ?=> |c| Capacity(c)
-    ranges.encode_layout(layout, mut aad)
-    ranges.encode_starts(nals, mut aad)
-    gather(nals.work, n, layout, mut aad, mut hidden)
-    list.append(mut aad, metadata)
-    let iv = nonce(s.salt, h.ctr)
-    match secret.aead_seal(s.key, Aes128Gcm, iv, aad, hidden, mut sealed) {
-        Ok(_) => {},
-        Error(_) => fail("sframe: the AEAD sink refused after admission"),
-    }
+    let _ = encode_header(h, mut scratch) ?=> |c| Capacity(c)
+    ranges.encode_layout(layout, mut scratch)
+    ranges.encode_starts(nals, mut scratch)
+    gather(nals.work, n, layout, mut scratch, mut hidden)
+    list.append(mut scratch, metadata)
+    seal_frame(mut s, h.ctr, hidden, mut scratch, 0, b"")?
     list.append(mut body, nals.work)
-    scatter(mut body, n, layout, sealed)
-    list.append(mut body, list.slice(sealed, hidden_len, hidden_len + TAG))
-    list.append(mut body, list.slice(aad, 0, hlen + elen))
+    scatter(mut body, n, layout, list.slice(scratch, alen, alen + hidden_len))
+    list.append(mut body, list.slice(scratch, alen + hidden_len, alen + hidden_len + TAG))
+    list.append(mut body, list.slice(scratch, 0, hlen + elen))
     let l16: u16 = int.narrow(hlen + elen)
     list.put_word_be(mut body, l16)
     let start = list.len(out)
@@ -172,17 +168,20 @@ pub fn open_ranged(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Byte
         return Error(Capacity(Capacity(requested: need, available: room)))
     }
     let shown = clear_len(layout)
-    let mut aad: Bytes = list.new()
-    list.try_reserve(mut aad, tail + ranges.starts_len(nals) + shown + list.len(metadata)) ?=> |c| Capacity(c)
+    // The AAD, then the ciphertext and tag, in one buffer for the opener.
+    let alen = tail + ranges.starts_len(nals) + shown + list.len(metadata)
+    let mut src: Bytes = list.new()
+    list.try_reserve(mut src, alen + body_len - shown + TAG) ?=> |c| Capacity(c)
     let mut sealed: Bytes = list.new()
     list.try_reserve(mut sealed, body_len - shown + TAG) ?=> |c| Capacity(c)
-    list.append(mut aad, list.slice(nals.work, hstart, n - 2))
-    ranges.encode_starts(nals, mut aad)
-    gather(nals.work, body_len, layout, mut aad, mut sealed)
-    list.append(mut aad, metadata)
-    list.append(mut sealed, list.slice(nals.work, body_len, hstart))
+    list.append(mut src, list.slice(nals.work, hstart, n - 2))
+    ranges.encode_starts(nals, mut src)
+    gather(nals.work, body_len, layout, mut src, mut sealed)
+    list.append(mut src, metadata)
+    list.append(mut src, sealed)
+    list.append(mut src, list.slice(nals.work, body_len, hstart))
     let mut plain: Bytes = list.new()
-    open_core(mut r, h, aad, sealed, room, mut plain)?
+    open_core(mut r, h, src, 0, alen, b"", room, mut plain)?
     let mut body: Bytes = list.new()
     list.try_reserve(mut body, body_len) ?=> |c| Capacity(c)
     list.append(mut body, list.slice(nals.work, 0, body_len))

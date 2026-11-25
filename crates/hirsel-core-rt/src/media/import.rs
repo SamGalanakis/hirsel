@@ -1,4 +1,4 @@
-//! Import a single TLS 1.3 family traffic direction from Secret storage.
+//! Import a traffic direction, an SRTP master or an SFrame base key from Secret storage.
 use super::schedule::{Schedule, admit, owned, refusal, track};
 use crate::{
     Context,
@@ -6,9 +6,10 @@ use crate::{
     secret,
 };
 use hirsel_core_net::{
-    ImportKind, ImportRefusal,
+    ImportKind, ImportRefusal, ImportUse, SframeDirection,
     packet_epoch::{IssueError, SCHEDULE_CHARGE},
     packet_schedule::ImportProfile,
+    packet_sframe::REGISTRY_CHARGE,
     srtp_cipher::SrtpProfile,
 };
 
@@ -40,6 +41,19 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_srtp(
     unsafe { import(context, ImportKind::Srtp, profile, 0, key, site) }
 }
 
+/// # Safety
+/// The running context takes custody of a checked Secret designation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_schedule_import_sframe(
+    context: *mut Context,
+    suite: u64,
+    key: u64,
+    site: u64,
+) -> Outcome {
+    // SAFETY: forwarded from the checked Secret move.
+    unsafe { import(context, ImportKind::Sframe, 0, suite, key, site) }
+}
+
 unsafe fn import(
     context: *mut Context,
     kind: ImportKind,
@@ -51,18 +65,26 @@ unsafe fn import(
     // SAFETY: the source owns one live holder and passes it exclusively.
     unsafe { crate::process::deny_describe_capability(context) };
     let import = unsafe { secret::resolve(context, key) };
+    // A send SFrame import admits its registry entry with the schedule.
+    let entry = match import.policy.import() {
+        Some(ImportUse::Sframe(SframeDirection::Send { .. })) if kind == ImportKind::Sframe => {
+            REGISTRY_CHARGE
+        }
+        _ => 0,
+    };
     let prepared = import.begin_import(kind, || {
         let shape = ImportProfile::from_case(kind, profile, suite).ok_or(IssueError::Invalid)?;
+        let requested = SCHEDULE_CHARGE + entry;
         // SAFETY: the context is running during pre-admission.
-        let charge = admit(unsafe { &*context }, SCHEDULE_CHARGE).map_err(|available| {
-            IssueError::Capacity {
-                requested: SCHEDULE_CHARGE,
+        let mut charge =
+            admit(unsafe { &*context }, requested).map_err(|available| IssueError::Capacity {
+                requested,
                 available,
-            }
-        })?;
-        Ok((shape, charge))
+            })?;
+        let entry = (entry != 0).then(|| charge.partition(entry));
+        Ok((shape, charge, entry))
     });
-    let (authority, (shape, charge)) = match prepared {
+    let (authority, (shape, charge, mut entry), spending) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             let mut outcome = match error {
@@ -79,17 +101,30 @@ unsafe fn import(
     };
     // SAFETY: the spent mark committed and this consumes the guest holder.
     unsafe { secret::hirsel_core_secret_drop(context, key) };
+    #[cfg(feature = "record")]
+    let send_key = entry.is_some();
     let mut state = None;
     let mut derive = || {
-        let Some(bytes) = import.bytes.as_ref() else {
-            unreachable!("a replay must supply the opaque delivery")
-        };
-        state = shape.import(authority, Some(bytes)).ok();
-        if state.is_some() {
+        spending.bytes(|bytes| {
+            let Some(bytes) = bytes else {
+                unreachable!("a replay must supply the opaque delivery")
+            };
+            let Ok(schedule) = shape.import(authority, Some(bytes)) else {
+                return refusal(IssueError::Invalid);
+            };
+            if let Some(charge) = entry.take() {
+                // SAFETY: the context is running; the entry lasts for the run.
+                let paid = track(unsafe { &*context }, charge);
+                let registry = unsafe {
+                    &super::run_state((*(*context).host_files).registry.run_grants()).send_keys
+                };
+                if registry.register(bytes, paid).is_err() {
+                    return refusal(IssueError::Spent);
+                }
+            }
+            state = Some(schedule);
             Outcome::default()
-        } else {
-            refusal(IssueError::Invalid)
-        }
+        })
     };
     let origin = {
         #[cfg(feature = "record")]
@@ -102,6 +137,7 @@ unsafe fn import(
                 let operation = match kind {
                     ImportKind::Traffic => 2,
                     ImportKind::Srtp => 16,
+                    ImportKind::Sframe => 20,
                 };
                 let (kind, id) = import.origin.wire();
                 let policy = import.policy.text();
@@ -128,7 +164,11 @@ unsafe fn import(
                         operation,
                         args,
                         Delivery::Child {
-                            admits_invalid: true,
+                            refusals: if send_key {
+                                &[(2, 0), (4, 0)]
+                            } else {
+                                &[(2, 0)]
+                            },
                         },
                         &mut empty,
                         |_| derive(),
@@ -157,6 +197,15 @@ unsafe fn import(
             0
         }
     };
+    drop(spending);
+    if let Some(charge) = entry {
+        // A replayed send import: its entry is held as live, never looked up.
+        // SAFETY: the context is running; the entry lasts for the run.
+        let paid = track(unsafe { &*context }, charge);
+        unsafe { super::run_state((*(*context).host_files).registry.run_grants()) }
+            .send_keys
+            .replayed(paid);
+    }
     let state = state.unwrap_or_else(|| shape.import(authority, None).unwrap());
     // SAFETY: this call still owns the admitted charge, tied to its running context.
     let charge = track(unsafe { &*context }, charge);

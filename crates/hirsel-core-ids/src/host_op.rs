@@ -160,6 +160,14 @@ host_ops! {
     TLS_HELLO = 174,
     /// TLS-9: complete a server handshake with a chain and a `tls_serve` key.
     TLS_ACCEPT = 175,
+    /// TLS-8 T16: import SFrame base-key bytes into a schedule.
+    SCHEDULE_IMPORT_SFRAME = 177,
+    /// TLS-8 T16: a sealer for one KID at a schedule's step.
+    SCHEDULE_SFRAME_SEALER = 178,
+    /// TLS-8 T16: an opener for one KID at a schedule's step.
+    SCHEDULE_SFRAME_OPENER = 179,
+    /// TLS-8 T16: advance a schedule one ratchet step.
+    SCHEDULE_SFRAME_RATCHET = 180,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

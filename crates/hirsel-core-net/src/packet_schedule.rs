@@ -5,6 +5,7 @@ use crate::{
         DirectionKeys, Epoch, ImportError, IssueError, Sealer, tls13_labels, traffic_profile,
     },
     packet_nonce::NonceFormat,
+    packet_sframe::Sframe,
     secret_aead::AeadAlg,
     srtp_cipher::{SrtpKeys, SrtpProfile},
     tls_kdf::{
@@ -20,6 +21,8 @@ const APPLICATION: usize = 2;
 pub enum ImportProfile {
     Traffic(NonceFormat, AeadAlg),
     Srtp(SrtpProfile),
+    /// `AES_128_GCM_SHA256_128`, `SframeSuite`'s one case.
+    Sframe,
 }
 
 impl ImportProfile {
@@ -28,6 +31,7 @@ impl ImportProfile {
             ImportKind::Traffic => traffic_profile(profile, suite)
                 .map(|(format, algorithm)| Self::Traffic(format, algorithm)),
             ImportKind::Srtp => SrtpProfile::from_case(profile).map(Self::Srtp),
+            ImportKind::Sframe => (profile == 0 && suite == 0).then_some(Self::Sframe),
         }
     }
 
@@ -41,16 +45,26 @@ impl ImportProfile {
                 Schedule::import_traffic(format, algorithm, authority, bytes)
             }
             Self::Srtp(profile) => Schedule::import_srtp(profile, authority, bytes),
+            Self::Sframe => {
+                let ImportUse::Sframe(direction) = authority else {
+                    return Err(ImportError::Denied);
+                };
+                let sframe = Sframe::import(direction, bytes).ok_or(ImportError::Invalid)?;
+                Ok(Schedule {
+                    spaces: std::array::from_fn(|_| None),
+                    kind: Kind::Sframe(Box::new(sframe)),
+                })
+            }
         }
     }
 }
 
 pub struct Schedule<C> {
     spaces: [Option<Box<Epoch<C>>>; 5],
-    kind: Kind,
+    kind: Kind<C>,
 }
 
-enum Kind {
+enum Kind<C> {
     Fixed,
     Tls13 {
         format: NonceFormat,
@@ -69,6 +83,7 @@ enum Kind {
         local: bool,
         traffic: Option<Tls13Direction>,
     },
+    Sframe(Box<Sframe<C>>),
 }
 
 pub struct SealerPair<'a, C> {
@@ -305,10 +320,30 @@ impl<C> Schedule<C> {
     }
 
     pub fn into_ledger(self) -> impl Iterator<Item = C> {
+        let sframe = match self.kind {
+            Kind::Sframe(sframe) => Some(sframe.into_ledger()),
+            _ => None,
+        };
         self.spaces
             .into_iter()
             .flatten()
             .flat_map(|epoch| epoch.into_ledger())
+            .chain(sframe.into_iter().flatten())
+    }
+
+    /// The SFrame state of an `import_sframe` schedule; `Invalid` for any other.
+    pub fn sframe(&self) -> Result<&Sframe<C>, IssueError> {
+        match &self.kind {
+            Kind::Sframe(sframe) => Ok(sframe),
+            _ => Err(IssueError::Invalid),
+        }
+    }
+
+    pub fn sframe_mut(&mut self) -> Result<&mut Sframe<C>, IssueError> {
+        match &mut self.kind {
+            Kind::Sframe(sframe) => Ok(sframe),
+            _ => Err(IssueError::Invalid),
+        }
     }
 
     pub fn check_application(&self, hash: &[u8]) -> Result<(), IssueError> {
@@ -367,7 +402,9 @@ impl<C> Schedule<C> {
                 traffic.update_packet_keys(sending, *algorithm)
             }),
             Kind::TrafficImport { traffic, .. } => traffic.as_mut().map(Tls13Direction::key_update),
-            Kind::Fixed | Kind::Dtls12 { .. } => unreachable!("checked key update"),
+            Kind::Fixed | Kind::Dtls12 { .. } | Kind::Sframe(_) => {
+                unreachable!("checked key update")
+            }
         };
         self.spaces[APPLICATION]
             .as_mut()

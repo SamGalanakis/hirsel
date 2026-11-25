@@ -86,10 +86,17 @@ impl Machine<'_> {
             .world
             .seals
             .push((Arc::downgrade(&seal), payer.clone(), charge));
+        // An import secret's bytes live in its spent mark, which the import zeroes.
+        let (bytes, import) = if policy.import().is_some() {
+            let import = hirsel_core_net::ImportSpend::new(&policy, Some(bytes));
+            (Zeroizing::new(Vec::new()), import.map(Arc::new))
+        } else {
+            (bytes, None)
+        };
         self.designate(
             EvalSecret {
                 opaque,
-                import: hirsel_core_net::ImportSpend::new(policy.uses).map(Arc::new),
+                import,
                 policy,
                 bytes: Arc::new(SecretBytes::new(bytes)),
                 seal,
@@ -180,7 +187,7 @@ impl Machine<'_> {
         let (produced, out) = match op {
             HostOp::SecretWrap => {
                 let s = self.secret(a[1]).unwrap();
-                if s.policy.uses.import().is_some() || (s.opaque && !key.opaque) {
+                if s.policy.uses.imports() || (s.opaque && !key.opaque) {
                     return fail(KeyFailure::Denied);
                 }
                 let blob = key_wrap::wrap_with_salt(
@@ -210,7 +217,7 @@ impl Machine<'_> {
                 let Some(requested) = std::str::from_utf8(self.carrier_bytes(a[2]))
                     .ok()
                     .and_then(SecretPolicy::parse)
-                    .filter(|policy| policy.uses.import().is_none())
+                    .filter(|policy| !policy.uses.imports())
                 else {
                     return fail(KeyFailure::Invalid);
                 };

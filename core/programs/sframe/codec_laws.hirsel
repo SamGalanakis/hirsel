@@ -33,8 +33,8 @@ fn ranged_lengths() -> Result[(), ()] {
     // Bare, l.frame 64 and 4 ranges: the open bound is 64 + 80 = 144; a frame f bytes long seals to f + 20.
     let small = sframe.Limits(frame: 64, window: 64, keys: 4, ranges: 4, jump: 0)
     let wide = sframe.Limits(frame: 400, window: 64, keys: 4, ranges: 4, jump: 0)
-    let mut b = sender_at(Ranged(Bare), 2, 0, counting(), wide)
-    let mut rb = receiver_for(Ranged(Bare), 2, counting(), 0, small)
+    let mut b = sender_at(Ranged(Bare), 2, 0, base_of(2), wide)
+    let mut rb = receiver_for(Ranged(Bare), 2, base_of(2), 0, small)
     for f in[124u64, 125u64] {
         let mut plain: Bytes = list.new()
         list.fill(mut plain, f, 0x55u8)
@@ -93,7 +93,7 @@ fn delete_at(b: Bytes, at: u64) -> Bytes {
 
 // One edited wire frame on a fresh receiver: refused, or opened to exactly the sender's frame.
 fn edit_holds(edited: Bytes, frame: Bytes, l: sframe.Limits) {
-    let mut r = receiver_for(Ranged(AnnexB), 4, counting(), 0, l)
+    let mut r = receiver_for(Ranged(AnnexB), 4, base_of(4), 0, l)
     let mut back = room(512)
     match sframe.open_ranged(mut r, b"", edited, mut back) {
         Ok(_) => check(back == frame, "a wire edit moved a NAL boundary and the frame still opens"),
@@ -111,7 +111,7 @@ fn boundary_case() {
     // SC 68 00 00 00 01 42 80 (0..11), SC 67 41 42 80 (11..19), SC 65 88 + 6 hidden (19..31), SC 65 88 + 6 hidden (31..43).
     let frame = annexb(nals4(unhex("68000000014280"), unhex("67414280"), unhex("658880a1a2a3a4a5a6"), unhex("658840b1b2b3b4b5b6")))
     let layout = layout4(0, 25, 31, 6)
-    let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+    let mut s = sender_at(Ranged(AnnexB), 4, 0, base_of(4), l)
     let mut out = room(256)
     let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", frame, mut out))
     for at in 0u64 .. list.len(out) + 1 {
@@ -125,32 +125,29 @@ fn boundary_case() {
 }
 
 // A start code made inside a hidden range by deleting a wire 03 is Malformed (SFRAME-9 opening
-// step 3), before any key work. The ciphertext is chosen: seal sixteen 11s to learn the
-// keystream at CTR 0, then seal the plaintext whose ciphertext is aa bb 00 00 00 01 cc dd ...
+// step 3), before any key work, so the tag need not hold: a sealed frame's ciphertext is
+// replaced by aa bb 00 00 00 01 cc dd ... and wire-escaped again.
 fn hidden_start_case() {
     let l = sframe.limits()
     let layout = layout2(0, 6)
     let mut probe_body = unhex("6588")
     list.fill(mut probe_body, 18, 0x11u8)
     let probe = annexb(nals1(copy_of(probe_body)))
-    let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+    let mut s = sender_at(Ranged(AnnexB), 4, 0, base_of(5), l)
     let mut sealed = room(256)
     let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", probe, mut sealed))
     let Some(probe_work) = ranges.unwire(sealed) else {
         fail("a sealed frame does not unwire")
     }
+    let mut work = copy_of(probe_work.work)
     let want = unhex("aabb00000001ccddeeff5152535455aa")
-    let mut body = unhex("6588")
     for i in 0u64 .. 16 {
-        list.push(mut body, want[i] ^ probe_work.work[6 + i] ^ 0x11u8)
+        work[6 + i] = want[i]
     }
-    check(body[17] != 0u8, "the chosen plaintext ends in 00")
-    let frame = annexb(nals1(copy_of(body)))
-    let mut again = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
-    let mut out = room(256)
-    let _ = result.unwrap(sframe.seal_ranged(mut again, layout, b"", frame, mut out))
+    let mut out = unhex("00000001")
+    ranges.wire_escape(work, 4, list.len(work), mut out)
     check(list.slice(out, 6, 13) == unhex("aabb0000030001"), "the chosen ciphertext is not on the wire")
-    let mut r = receiver_for(Ranged(AnnexB), 4, counting(), 0, l)
+    let mut r = receiver_for(Ranged(AnnexB), 4, base_of(5), 0, l)
     let mut back = room(256)
     check(malformed(sframe.open_ranged(mut r, b"", delete_at(out, 10), mut back)), "a start code in a hidden range is not Malformed")
 }
@@ -299,10 +296,10 @@ fn annexb_escaping() -> Result[(), ()] {
     // A clear NAL ending 00 03, then a secret one.
     {
         let frame = annexb(nals2(unhex("410003"), unhex("4243")))
-        let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+        let mut s = sender_at(Ranged(AnnexB), 4, 0, base_of(1), l)
         let mut out = room(256)
         let _ = result.unwrap(sframe.seal_ranged(mut s, layout2(0, 12), b"", frame, mut out))
-        let mut r = receiver_for(Ranged(AnnexB), 4, counting(), 0, l)
+        let mut r = receiver_for(Ranged(AnnexB), 4, base_of(1), 0, l)
         let mut back = room(256)
         let _ = open_ok(sframe.open_ranged(mut r, b"", out, mut back))
         check(back == frame, "a clear NAL ending 00 03 does not round-trip")
@@ -320,12 +317,12 @@ fn annexb_escaping() -> Result[(), ()] {
         check(ranges.layout_len(layout) == 255, "the 127-range layout is not 255 bytes")
         let mut frame: Bytes = list.new()
         list.fill(mut frame, 300, 0x41u8)
-        let mut s = sender_at(Ranged(Bare), 4, 0, counting(), l)
+        let mut s = sender_at(Ranged(Bare), 4, 0, base_of(2), l)
         let mut out = room(1024)
         let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", frame, mut out))
         let n = list.len(out)
         check(out[n - 2] == 1u8 && out[n - 1] == 0u8, "L is not 256")
-        let mut r = receiver_for(Ranged(Bare), 4, counting(), 0, l)
+        let mut r = receiver_for(Ranged(Bare), 4, base_of(2), 0, l)
         let mut back = room(1024)
         let _ = result.unwrap(sframe.open_ranged(mut r, b"", out, mut back))
         check(back == frame, "an L = 256 frame does not round-trip")
@@ -341,8 +338,8 @@ fn annexb_escaping() -> Result[(), ()] {
         }
         let frame = annexb(nals2(copy_of(a), copy_of(b)))
         let layout = layout4(0, 4, 32772, 4)
-        let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
-        let mut r = receiver_for(Ranged(AnnexB), 4, counting(), 0, l)
+        let mut s = sender_at(Ranged(AnnexB), 4, 0, base_of(3), l)
+        let mut r = receiver_for(Ranged(AnnexB), 4, base_of(3), 0, l)
         let mut found = false
         let mut tries: u64 = 0
         while !found {
@@ -369,7 +366,7 @@ fn annexb_escaping() -> Result[(), ()] {
     // 3-byte start codes and trailing zeros: refused by seal_ranged, rewritten by normalize_h264.
     {
         let raw = unhex("000001414200000000014300")
-        let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+        let mut s = sender_at(Ranged(AnnexB), 4, 0, base_of(4), l)
         let mut out = room(256)
         match sframe.seal_ranged(mut s, layout2(0, 4), b"", raw, mut out) {
             Error(Invalid) => {},
@@ -404,6 +401,8 @@ fn chromium_round_trip() -> Result[(), ()] {
     let framing: ranges.Framing = Ranged(AnnexB)
     let target = g2_normalized_key()
     check(list.len(target) > 0, "the capture holds no normalized keyframe")
+    // One sender for the run: the cases' CTRs ascend from 0 and only the raw case, last, is not sealed.
+    let mut s = sender_at(framing, 1, 0, g2_base(), l)
     for c in g2_cases() {
         let plain = unhex(c.plain)
         let sent = unhex(c.sent)
@@ -424,7 +423,7 @@ fn chromium_round_trip() -> Result[(), ()] {
         } else {
             check(received == sent, "Chromium changed a sealed frame")
             let layout = result.unwrap(ranges.h264(plain, l))
-            let mut s = sender_at(framing, 1, c.ctr, g2_base(), l)
+            check(sframe.next_ctr(s) == c.ctr, "the cases' CTRs do not ascend from 0")
             let mut ours = room(ranges.wire_bound(framing, list.len(plain) + 64))
             let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", plain, mut ours))
             check(ours == sent, "the seal differs from oracle.py's")

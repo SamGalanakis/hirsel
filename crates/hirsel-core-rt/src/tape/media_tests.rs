@@ -53,9 +53,7 @@ fn recorded_srtp_child_supplies_packet_on_replay() {
                     context,
                     0,
                     arguments(0, 0, &[b"dtls12-srtp fixture", &[0]]),
-                    Delivery::Child {
-                        admits_invalid: false,
-                    },
+                    Delivery::Child { refusals: &[] },
                     &mut no_output,
                     |_| {
                         assert_eq!(mode, Mode::Record);

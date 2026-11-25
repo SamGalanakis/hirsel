@@ -240,7 +240,7 @@
     "reason": "macos-s5-macho-2582"
   },
   "crates/hirsel-core-eval/src/lib.rs": {
-    "lines": 6594,
+    "lines": 6593,
     "raise_revision": 11,
     "reason": "tls-accept-followups-2762"
   },

@@ -18,5 +18,6 @@ limit = 67108864
 [tests.sources]
 "laws.hirsel" = "laws"
 "codec_laws.hirsel" = "laws"
+"key_laws.hirsel" = "laws"
 "vectors.hirsel" = "laws"
 "g2_vectors.hirsel" = "laws"

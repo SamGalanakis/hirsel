@@ -569,6 +569,10 @@ tags!(HostOp {
     178 => TlsHello,
     179 => TlsAccept,
     180 => TlsServerName,
+    181 => ScheduleImportSframe,
+    182 => ScheduleSframeSealer,
+    183 => ScheduleSframeOpener,
+    184 => ScheduleSframeRatchet,
 });
 
 tags!(RaiseCause {

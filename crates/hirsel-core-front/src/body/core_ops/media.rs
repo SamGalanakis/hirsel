@@ -15,6 +15,7 @@ impl Cx<'_, '_, '_> {
                 | HostOp::ScheduleDtls12
                 | HostOp::ScheduleImportTraffic
                 | HostOp::ScheduleImportSrtp
+                | HostOp::ScheduleImportSframe
         ) {
             return self.runtime_media_constructor(op, f, values, result, n);
         }
@@ -179,7 +180,9 @@ impl Cx<'_, '_, '_> {
         }
         let owned_index = if matches!(
             op,
-            HostOp::ScheduleImportTraffic | HostOp::ScheduleImportSrtp
+            HostOp::ScheduleImportTraffic
+                | HostOp::ScheduleImportSrtp
+                | HostOp::ScheduleImportSframe
         ) {
             1
         } else {

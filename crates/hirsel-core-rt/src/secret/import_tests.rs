@@ -26,14 +26,15 @@ fn media_import_marks_follow_secret_aliases() {
         let issued = slots
             .entry(second)
             .secret
-            .begin_import(kind, || Ok::<_, ()>(()));
-        assert_eq!(issued, Ok((want, ())));
-        assert_eq!(
+            .begin_import(kind, || Ok::<_, ()>(()))
+            .map(|(authority, (), _)| authority);
+        assert_eq!(issued, Ok(want));
+        assert!(matches!(
             slots
                 .entry(first)
                 .secret
                 .begin_import::<(), ()>(kind, || panic!("spent before prepare")),
-            Err(ImportRefusal::Spent),
-        );
+            Err(ImportRefusal::Spent)
+        ));
     }
 }

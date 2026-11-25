@@ -1,4 +1,4 @@
-pub type Kind: key = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq | DependencyDescriptor
+pub type Kind: key = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq | DependencyDescriptor | VideoLayersAllocation | PlayoutDelay | VideoOrientation | AbsCaptureTime
 
 pub type Form: key = OneOnly | TwoOnly | Mixed
 
@@ -14,7 +14,7 @@ pub type Element {
 
 pub opaque type ExtMap {
     form: Form,
-    ids: Inline[u8, 7],
+    ids: Inline[u8, 11],
     voice: bool
 }
 
@@ -34,7 +34,7 @@ pub opaque type ExtWriter {
 }
 
 pub fn map(form: Form) -> ExtMap {
-    ExtMap(form: form, ids:[0u8; 7], voice: false)
+    ExtMap(form: form, ids:[0u8; 11], voice: false)
 }
 
 fn slot(k: Kind) -> u64 {
@@ -46,6 +46,10 @@ fn slot(k: Kind) -> u64 {
         AbsSendTime => 4,
         TransportSeq => 5,
         DependencyDescriptor => 6,
+        VideoLayersAllocation => 7,
+        PlayoutDelay => 8,
+        VideoOrientation => 9,
+        AbsCaptureTime => 10,
     }
 }
 
@@ -137,16 +141,16 @@ pub fn next(pkt: Bytes, h: header.Header, mut at: u64) -> Result[Option[Element]
 // value always follows at least its element's first byte.
 pub opaque type Found {
     start: u64,
-    ids: Inline[u8, 7],
-    at: Inline[u32, 7],
-    len: Inline[u8, 7]
+    ids: Inline[u8, 11],
+    at: Inline[u32, 11],
+    len: Inline[u8, 11]
 }
 
 pub fn scan(m: ExtMap, pkt: Bytes, h: header.Header) -> Result[Found, Error] {
     if list.len(pkt) != h.len {
         return Error(Buffer)
     }
-    let mut f = Found(start: 0, ids: m.ids, at:[0u32; 7], len:[0u8; 7])
+    let mut f = Found(start: 0, ids: m.ids, at:[0u32; 11], len:[0u8; 11])
     let (start, len, one_byte) = match h.block {
         OneByte(at: start, len: len) => (start, len, true),
         TwoByte(at: start, len: len) => (start, len, false),
@@ -183,7 +187,7 @@ pub fn scan(m: ExtMap, pkt: Bytes, h: header.Header) -> Result[Found, Error] {
         }
         // Bound ids are distinct and nonzero, and an element's id is never 0.
         let mut s = 0u64
-        while s < 7 {
+        while s < 11 {
             if m.ids[s] == id {
                 if f.at[s] == 0 {
                     f.at[s] = int.narrow(pos)
@@ -241,6 +245,12 @@ fn valid_value(value: Bytes, from: u64, len: u64, k: Kind) -> bool {
         // AV1 RTP section A.8: three mandatory octets, then the extended fields.
         // The value is opaque here; `media_bits.dependency` reads it.
         DependencyDescriptor => return len >= 3 && len <= 255,
+        // libwebrtc RtpVideoLayersAllocationExtension: a single 0 byte is the
+        // empty allocation; `allocation` reads the rest of the grammar.
+        VideoLayersAllocation => return len >= 1 && len <= 255,
+        PlayoutDelay => return len == 3,
+        VideoOrientation => return len == 1,
+        AbsCaptureTime => return len == 8 || len == 16,
         _ => {},
     }
     if len == 0 || len > 255 {
@@ -298,6 +308,256 @@ pub fn token(pkt: Bytes, h: header.Header, k: Kind, e: Element) -> Result[Elemen
     }
     check_value(pkt, h, e, k)?
     Ok(e)
+}
+
+// The CVO byte `0 0 0 0 C F R1 R0` (3GPP TS 26.114 section 7.4.5), unchanged:
+// the forwarder carries it, it does not rotate.
+pub fn orientation(pkt: Bytes, h: header.Header, e: Element) -> Result[u8, Error] {
+    check_value(pkt, h, e, VideoOrientation)?
+    Ok(pkt[e.at])
+}
+
+// 12-bit MIN then 12-bit MAX, in 10 ms units. libwebrtc's VideoPlayoutDelay
+// refuses MIN above MAX, so the reader does too.
+pub fn playout_delay(pkt: Bytes, h: header.Header, e: Element) -> Result[(u16, u16), Error] {
+    check_value(pkt, h, e, PlayoutDelay)?
+    let a: u16 = int.widen(pkt[e.at])
+    let b: u16 = int.widen(pkt[e.at + 1])
+    let c: u16 = int.widen(pkt[e.at + 2])
+    let min = (a << 4) | (b >> 4)
+    let max = ((b & 15) << 8) | c
+    if min > max {
+        return Error(Value(PlayoutDelay))
+    }
+    Ok((min, max))
+}
+
+// The UQ32.32 NTP capture timestamp, and the Q32.32 estimated capture clock
+// offset when the value is 16 bytes.
+pub fn abs_capture_time(pkt: Bytes, h: header.Header, e: Element) -> Result[(u64, Option[i64]), Error] {
+    check_value(pkt, h, e, AbsCaptureTime)?
+    let ts: u64 = list.word_be(pkt, e.at)
+    if e.len == 8 {
+        return Ok((ts, None))
+    }
+    let raw: u64 = list.word_be(pkt, e.at + 8)
+    Ok((ts, Some(signed(raw))))
+}
+
+// Two's complement between a Q32.32 offset and its 64 wire bits.
+fn signed(raw: u64) -> i64 {
+    if raw < 0x8000000000000000 {
+        return int.narrow(raw)
+    }
+    let below: i64 = int.narrow(~raw)
+    -below - 1
+}
+
+fn unsigned(v: i64) -> u64 {
+    if v >= 0 {
+        return int.narrow(v)
+    }
+    let below: u64 = int.narrow(-(v + 1))
+    ~below
+}
+
+// A video layers allocation (libwebrtc video-layers-allocation00). Layer
+// (stream, sid) is active when bit sid of masks[stream] is set; its fields are
+// at stream * 4 + sid, and its cumulative target for temporal layer tid at
+// stream * 16 + sid * 4 + tid. All masks clear is the empty allocation, the
+// single 0 byte. Widths, heights and rates are meaningful only when sized.
+pub type Allocation {
+    stream: u8,
+    masks: Inline[u8, 4],
+    temporal: Inline[u8, 16],
+    kbps: Inline[u32, 64],
+    sized: bool,
+    width: Inline[u16, 16],
+    height: Inline[u16, 16],
+    fps: Inline[u8, 16]
+}
+
+pub fn empty_allocation() -> Allocation {
+    Allocation(stream: 0, masks:[0u8; 4], temporal:[0u8; 16], kbps:[0u32; 64], sized: false, width:[0u16; 16], height:[0u16; 16], fps:[0u8; 16])
+}
+
+// The highest stream index with an active layer, or None when the allocation
+// is empty.
+pub fn last_stream(a: Allocation) -> Option[u64] {
+    let mut s = 4u64
+    while s > 0 {
+        s -= 1
+        if a.masks[s] != 0 {
+            return Some(s)
+        }
+    }
+    None
+}
+
+// The cumulative target of stream s's top layer, its highest active spatial
+// layer at its highest temporal layer: all the stream sends, in kbps. None
+// when the stream has no active layer.
+pub fn stream_kbps(a: Allocation, s: u64) -> Option[u32] {
+    if s >= 4 || a.masks[s] == 0 {
+        return None
+    }
+    let mut sid = 4u64
+    while sid > 0 {
+        sid -= 1
+        if (a.masks[s] & (1u8 << int.narrow(sid))) != 0 {
+            let tl: u64 = int.widen(a.temporal[s * 4 + sid])
+            return Some(a.kbps[s * 16 + sid * 4 + tl - 1])
+        }
+    }
+    None
+}
+
+const MAX_KBPS: u64 = 1000000
+
+pub fn allocation(pkt: Bytes, h: header.Header, e: Element) -> Result[Allocation, Error] {
+    check_value(pkt, h, e, VideoLayersAllocation)?
+    let Some(a) = parse_allocation(pkt, e.at, e.at + e.len) else {
+        return Error(Value(VideoLayersAllocation))
+    }
+    Ok(a)
+}
+
+fn parse_allocation(pkt: Bytes, from: u64, end: u64) -> Option[Allocation] {
+    let mut a = empty_allocation()
+    let mut at = from
+    let first = pkt[at]
+    if end - from == 1 && first == 0 {
+        return Some(a)
+    }
+    a.stream = first >> 6
+    let streams: u64 = int.widen(((first >> 4) & 3) + 1)
+    let shared = first & 15
+    if shared != 0 {
+        let mut i = 0u64
+        while i < streams {
+            a.masks[i] = shared
+            i += 1
+        }
+    } else {
+        at += 1
+        if at == end {
+            return None
+        }
+        a.masks[0] = pkt[at] >> 4
+        a.masks[1] = pkt[at] & 15
+        if streams > 2 {
+            at += 1
+            if at == end {
+                return None
+            }
+            a.masks[2] = pkt[at] >> 4
+            a.masks[3] = pkt[at] & 15
+        }
+    }
+    at += 1
+    if at == end {
+        return None
+    }
+    // Two bits of (temporal layers - 1) per active layer, from the high bits.
+    let mut shift = 8u8
+    let mut layers = 0u64
+    let mut s = 0u64
+    while s < streams {
+        let mut sid = 0u64
+        while sid < 4 {
+            if (a.masks[s] & (1u8 << int.narrow(sid))) != 0 {
+                if shift == 0 {
+                    shift = 6
+                    at += 1
+                    if at == end {
+                        return None
+                    }
+                } else {
+                    shift -= 2
+                }
+                a.temporal[s * 4 + sid] = ((pkt[at] >> shift) & 3) + 1
+                layers += 1
+            }
+            sid += 1
+        }
+        s += 1
+    }
+    at += 1
+    if at == end {
+        return None
+    }
+    // leb128 kbps per temporal layer, in (stream, sid, tid) order.
+    s = 0
+    while s < streams {
+        let mut sid = 0u64
+        while sid < 4 {
+            let tl: u64 = int.widen(a.temporal[s * 4 + sid])
+            let mut tid = 0u64
+            while tid < tl {
+                let mut value = 0u64
+                let mut bits = 0u64
+                let mut more = true
+                while more {
+                    if at == end {
+                        return None
+                    }
+                    let b = pkt[at]
+                    at += 1
+                    let low: u64 = int.widen(b & 127)
+                    if low != 0 {
+                        if bits > 20 {
+                            return None
+                        }
+                        value |= low << bits
+                        if value > MAX_KBPS {
+                            return None
+                        }
+                    }
+                    bits += 7
+                    more = (b & 128) != 0
+                }
+                a.kbps[s * 16 + sid * 4 + tid] = int.narrow(value)
+                tid += 1
+            }
+            sid += 1
+        }
+        s += 1
+    }
+    if at != end {
+        if end - at != 5 * layers {
+            return None
+        }
+        a.sized = true
+        s = 0
+        while s < streams {
+            let mut sid = 0u64
+            while sid < 4 {
+                if a.temporal[s * 4 + sid] != 0 {
+                    let w: u16 = list.word_be(pkt, at)
+                    let hh: u16 = list.word_be(pkt, at + 2)
+                    if w == 0xffff || hh == 0xffff {
+                        return None
+                    }
+                    a.width[s * 4 + sid] = w + 1
+                    a.height[s * 4 + sid] = hh + 1
+                    a.fps[s * 4 + sid] = pkt[at + 4]
+                    at += 5
+                }
+                sid += 1
+            }
+            s += 1
+        }
+    }
+    // libwebrtc AllocationIsValid: the sending stream has an active layer
+    // at or above its index.
+    let Some(last) = last_stream(a) else {
+        return None
+    }
+    let index: u64 = int.widen(a.stream)
+    if index > last {
+        return None
+    }
+    Some(a)
 }
 
 pub fn writer() -> ExtWriter {
@@ -382,6 +642,228 @@ pub fn put_other(mut w: ExtWriter, m: ExtMap, id: u8, value: Bytes, from: u64, l
         return Error(Full)
     }
     copy_element(mut w, m.form, id, value, from, len)
+}
+
+pub fn put_orientation(mut w: ExtWriter, m: ExtMap, cvo: u8) -> Result[(), MapError] {
+    let id = m.ids[slot(VideoOrientation)]
+    if id == 0 {
+        return Ok(())
+    }
+    let start = reserve_element(mut w, m.form, id, 1)?
+    w.data[start] = cvo
+    Ok(())
+}
+
+// MIN and MAX in 10 ms units, each at most 4095, MIN at most MAX.
+pub fn put_playout_delay(mut w: ExtWriter, m: ExtMap, min: u16, max: u16) -> Result[(), MapError] {
+    let id = m.ids[slot(PlayoutDelay)]
+    if id == 0 {
+        return Ok(())
+    }
+    if max > 4095 || min > max {
+        return Error(Value(PlayoutDelay))
+    }
+    let start = reserve_element(mut w, m.form, id, 3)?
+    w.data[start] = int.narrow(min >> 4)
+    w.data[start + 1] = int.narrow(((min & 15) << 4) | (max >> 8))
+    w.data[start + 2] = int.narrow(max & 255)
+    Ok(())
+}
+
+pub fn put_abs_capture_time(mut w: ExtWriter, m: ExtMap, ts: u64, offset: Option[i64]) -> Result[(), MapError] {
+    let id = m.ids[slot(AbsCaptureTime)]
+    if id == 0 {
+        return Ok(())
+    }
+    let len = match offset {
+        Some(_) => 16u64,
+        None => 8u64,
+    }
+    let start = reserve_element(mut w, m.form, id, len)?
+    inline.set_word_be(mut w.data, start, ts)
+    if let Some(o) = offset {
+        inline.set_word_be(mut w.data, start + 8, unsigned(o))
+    }
+    Ok(())
+}
+
+fn leb128_size(v: u32) -> u64 {
+    let mut n = 1u64
+    let mut x = v >> 7
+    while x != 0 {
+        n += 1
+        x = x >> 7
+    }
+    n
+}
+
+// The value size of a valid allocation, or None for one the reader would
+// refuse: a temporal count outside 1 to 4 on an active layer, a rate above
+// 1,000,000 kbps, a zero width or height when sized, or a sending stream
+// index above the last active stream.
+fn allocation_size(a: Allocation) -> Option[u64] {
+    let Some(last) = last_stream(a) else {
+        return if a.stream == 0 {
+            Some(1)
+        } else {
+            None
+        }
+    }
+    let index: u64 = int.widen(a.stream)
+    if index > last {
+        return None
+    }
+    let mut same = true
+    let mut i = 1u64
+    while i <= last {
+        same = same && a.masks[i] == a.masks[0]
+        i += 1
+    }
+    let mut size = if same {
+        1u64
+    } else if last >= 2 {
+        3u64
+    } else {
+        2u64
+    }
+    let mut layers = 0u64
+    let mut s = 0u64
+    while s <= last {
+        let mut sid = 0u64
+        while sid < 4 {
+            if (a.masks[s] & (1u8 << int.narrow(sid))) != 0 {
+                let tl: u64 = int.widen(a.temporal[s * 4 + sid])
+                if tl == 0 || tl > 4 {
+                    return None
+                }
+                let mut tid = 0u64
+                while tid < tl {
+                    let k = a.kbps[s * 16 + sid * 4 + tid]
+                    let wide: u64 = int.widen(k)
+                    if wide > MAX_KBPS {
+                        return None
+                    }
+                    size += leb128_size(k)
+                    tid += 1
+                }
+                if a.sized && (a.width[s * 4 + sid] == 0 || a.height[s * 4 + sid] == 0) {
+                    return None
+                }
+                layers += 1
+            }
+            sid += 1
+        }
+        s += 1
+    }
+    size += (layers + 3) / 4
+    if a.sized {
+        size += 5 * layers
+    }
+    Some(size)
+}
+
+// Writes `a` as libwebrtc's RtpVideoLayersAllocationExtension::Write does:
+// one shared mask when every stream up to the last active one has the same
+// mask, else the per-stream masks.
+pub fn put_allocation(mut w: ExtWriter, m: ExtMap, a: Allocation) -> Result[(), MapError] {
+    let id = m.ids[slot(VideoLayersAllocation)]
+    if id == 0 {
+        return Ok(())
+    }
+    let Some(size) = allocation_size(a) else {
+        return Error(Value(VideoLayersAllocation))
+    }
+    if size > 255 {
+        return Error(Value(VideoLayersAllocation))
+    }
+    let start = reserve_element(mut w, m.form, id, size)?
+    let Some(last) = last_stream(a) else {
+        w.data[start] = 0
+        return Ok(())
+    }
+    let mut at = start
+    let ns: u8 = int.narrow(last)
+    let mut same = true
+    let mut i = 1u64
+    while i <= last {
+        same = same && a.masks[i] == a.masks[0]
+        i += 1
+    }
+    w.data[at] = (a.stream << 6) | (ns << 4) | if same {
+        a.masks[0]
+    } else {
+        0u8
+    }
+    if !same {
+        at += 1
+        w.data[at] = (a.masks[0] << 4) | a.masks[1]
+        if last >= 2 {
+            at += 1
+            w.data[at] = (a.masks[2] << 4) | a.masks[3]
+        }
+    }
+    at += 1
+    w.data[at] = 0
+    let mut shift = 8u8
+    let mut s = 0u64
+    while s <= last {
+        let mut sid = 0u64
+        while sid < 4 {
+            if (a.masks[s] & (1u8 << int.narrow(sid))) != 0 {
+                if shift == 0 {
+                    shift = 6
+                    at += 1
+                    w.data[at] = 0
+                } else {
+                    shift -= 2
+                }
+                w.data[at] = w.data[at] | ((a.temporal[s * 4 + sid] - 1) << shift)
+            }
+            sid += 1
+        }
+        s += 1
+    }
+    at += 1
+    s = 0
+    while s <= last {
+        let mut sid = 0u64
+        while sid < 4 {
+            if (a.masks[s] & (1u8 << int.narrow(sid))) != 0 {
+                let tl: u64 = int.widen(a.temporal[s * 4 + sid])
+                let mut tid = 0u64
+                while tid < tl {
+                    let mut x = a.kbps[s * 16 + sid * 4 + tid]
+                    while x >= 128 {
+                        w.data[at] = int.narrow((x & 127) | 128)
+                        at += 1
+                        x = x >> 7
+                    }
+                    w.data[at] = int.narrow(x)
+                    at += 1
+                    tid += 1
+                }
+            }
+            sid += 1
+        }
+        s += 1
+    }
+    if a.sized {
+        s = 0
+        while s <= last {
+            let mut sid = 0u64
+            while sid < 4 {
+                if (a.masks[s] & (1u8 << int.narrow(sid))) != 0 {
+                    inline.set_word_be(mut w.data, at, a.width[s * 4 + sid] - 1)
+                    inline.set_word_be(mut w.data, at + 2, a.height[s * 4 + sid] - 1)
+                    w.data[at + 4] = a.fps[s * 4 + sid]
+                    at += 5
+                }
+                sid += 1
+            }
+            s += 1
+        }
+    }
+    Ok(())
 }
 
 // Keep the writer's representation private across the header.write boundary.

@@ -282,7 +282,7 @@ fn parse_extmap(b: Bytes, at: u64, mut out: List[Extmap]) -> Result[(), SdpError
         }
         dir = Some(d)
     }
-    for ext in[Mid, RidExtension, RepairedRid, AudioLevel, AbsSendTime, TransportCc, DependencyDescriptor] {
+    for ext in[Mid, RidExtension, RepairedRid, AudioLevel, AbsSendTime, TransportCc, DependencyDescriptor, VideoLayersAllocation, PlayoutDelay, VideoOrientation, AbsCaptureTime] {
         if same(fields[1], ext_uri(ext)) {
             let mut vad: Option[Vad] = None
             if ext == AudioLevel {

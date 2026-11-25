@@ -9,7 +9,11 @@ redundant audio: the `red` module, its ring and the redundancy policy, the RTP-1
 ring of depth 0, and the matching line of *Not taken in Wave 1*.
 Amended 2026-11-25 by webrtc-bwe-probe-2669: RTP-9 counts the media a pacer lets out during a
 cluster as members and allows probing on a media stream through RTP-11's new `pad`; RTP-10
-gains `cluster`. Not yet built; the fences are `unbuilt`. The
+gains `cluster`. Amended 2026-11-25 by webrtc-hdrext-pack-2682 for plan item C4:
+[RTP-3](#rtp-3-header-extensions) adds the kinds `VideoLayersAllocation`, `PlayoutDelay`,
+`VideoOrientation` and `AbsCaptureTime`, each with a reader and a writer, and the typed
+`Allocation` view of a layers allocation; the build law `video_extension_values` and four
+`bounded_views` cases. Not yet built; the fences are `unbuilt`. The
 section ends with the [build laws](#build-laws) and the [build slices](#build-slices).
 
 `rtp` is a pure Hirsel package at `core/programs/rtp/` <!-- doc-ref: planned -->. It holds the parts of a real-time
@@ -230,6 +234,7 @@ the only ordering any stateful operation uses.
 ```hirsel unbuilt
 // module ext
 pub type Kind = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq | DependencyDescriptor
+    | VideoLayersAllocation | PlayoutDelay | VideoOrientation | AbsCaptureTime
 pub type Form = OneOnly | TwoOnly | Mixed
 pub type Error = Overrun | Value(Kind) | Buffer
 pub type Element = Element(id: u8, at: u64, len: u64)
@@ -249,11 +254,36 @@ pub fn audio_level(m: ExtMap, pkt: Bytes, h: Header, e: Element) -> Result[(Opti
 pub fn abs_send_time(pkt: Bytes, h: Header, e: Element) -> Result[u32, Error]
 pub fn transport_seq(pkt: Bytes, h: Header, e: Element) -> Result[u16, Error]
 pub fn token(pkt: Bytes, h: Header, k: Kind, e: Element) -> Result[Element, Error]
+pub fn orientation(pkt: Bytes, h: Header, e: Element) -> Result[u8, Error]
+pub fn playout_delay(pkt: Bytes, h: Header, e: Element) -> Result[(u16, u16), Error]
+pub fn abs_capture_time(pkt: Bytes, h: Header, e: Element) -> Result[(u64, Option[i64]), Error]
+pub fn allocation(pkt: Bytes, h: Header, e: Element) -> Result[Allocation, Error]
+pub fn empty_allocation() -> Allocation
+pub fn last_stream(a: Allocation) -> Option[u64]
+pub fn stream_kbps(a: Allocation, s: u64) -> Option[u32]
 pub fn writer() -> ExtWriter
 pub fn reset(mut w: ExtWriter)
 pub fn put(mut w: ExtWriter, m: ExtMap, k: Kind, value: Bytes, from: u64, len: u64) -> Result[(), MapError]
 pub fn put_level(mut w: ExtWriter, m: ExtMap, voice: bool, level: u8) -> Result[(), MapError]
 pub fn put_other(mut w: ExtWriter, m: ExtMap, id: u8, value: Bytes, from: u64, len: u64) -> Result[(), MapError]
+pub fn put_orientation(mut w: ExtWriter, m: ExtMap, cvo: u8) -> Result[(), MapError]
+pub fn put_playout_delay(mut w: ExtWriter, m: ExtMap, min: u16, max: u16) -> Result[(), MapError]
+pub fn put_abs_capture_time(mut w: ExtWriter, m: ExtMap, ts: u64, offset: Option[i64]) -> Result[(), MapError]
+pub fn put_allocation(mut w: ExtWriter, m: ExtMap, a: Allocation) -> Result[(), MapError]
+
+// A video layers allocation. Layer (stream, sid) is active when bit sid of masks[stream]
+// is set; its fields sit at stream * 4 + sid, and its cumulative target for temporal layer
+// tid at stream * 16 + sid * 4 + tid. All masks clear is the empty allocation.
+pub type Allocation {
+    stream: u8,
+    masks: Inline[u8, 4],
+    temporal: Inline[u8, 16],
+    kbps: Inline[u32, 64],
+    sized: bool,
+    width: Inline[u16, 16],
+    height: Inline[u16, 16],
+    fps: Inline[u8, 16]
+}
 ```
 
 An **extension map** binds local ids to kinds, as an SDP `a=extmap` line negotiates them
@@ -313,6 +343,10 @@ block, and checks its value's length. It answers `Buffer` or `Value(k)` otherwis
 | `TransportSeq` | `http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01` | exactly 2 bytes | the 16-bit transport sequence number |
 | `DependencyDescriptor` | `https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension` | 3 to 255 bytes: the three mandatory octets of [AV1 RTP §A.8](https://aomediacodec.github.io/av1-rtp-spec/#a8-dependency-descriptor-rtp-header-extension), then its extended fields | the element's range, unchanged; `media_bits.dependency` reads it with the stream's structure |
 | `Mid` | RFC 9143 §15 | 1 to 255 bytes, each an SDP `token-char` ([RFC 8866 §9](https://www.rfc-editor.org/rfc/rfc8866#section-9)), the grammar of the negotiated `a=mid` identification-tag; so `audio-1` is legal | the element's range, unchanged |
+| `VideoOrientation` | `urn:3gpp:video-orientation` | exactly 1 byte `0 0 0 0 C F R1 R0` ([3GPP TS 26.114 §7.4.5](https://www.3gpp.org/ftp/Specs/archive/26_series/26.114/)): camera, flip, rotation in 90° steps | the byte, unchanged; a forwarder carries it and never rotates |
+| `PlayoutDelay` | `http://www.webrtc.org/experiments/rtp-hdrext/playout-delay` | exactly 3 bytes: 12-bit MIN then 12-bit MAX, in 10 ms units (libwebrtc's [playout-delay README](https://webrtc.googlesource.com/src/+/b2946b39/docs/native-code/rtp-hdrext/playout-delay/README.md)); MIN above MAX is `Value`, as libwebrtc's `VideoPlayoutDelay` refuses it | `(min, max)` |
+| `AbsCaptureTime` | `http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time` | exactly 8 or 16 bytes: a UQ32.32 NTP capture time, then optionally a Q32.32 estimated capture clock offset (libwebrtc's [abs-capture-time README](https://webrtc.googlesource.com/src/+/b2946b39/docs/native-code/rtp-hdrext/abs-capture-time/README.md)) | `(ts, offset)`, the offset two's complement |
+| `VideoLayersAllocation` | `http://www.webrtc.org/experiments/rtp-hdrext/video-layers-allocation00` | 1 to 255 bytes in the grammar of libwebrtc's [video-layers-allocation00 README](https://webrtc.googlesource.com/src/+/b2946b39/docs/native-code/rtp-hdrext/video-layers-allocation00/README.md): the stream index, the stream count and shared mask, per-stream spatial masks, two-bit temporal counts, a leb128 cumulative target per temporal layer, then optional width, height and fps per active layer; the single byte 0 is the empty allocation | an `Allocation`; a value that ends inside a field, whose size trailer is not exactly 5 bytes per active layer, with a rate above 1 000 000 kbps, or whose stream index is past its last active stream (libwebrtc `AllocationIsValid`) is `Value` |
 | `Rid`, `RepairedRid` | RFC 8852 §3 | 1 to 255 bytes, each ASCII `A-Z a-z 0-9`; the wire `RtpStreamId` grammar is narrower than SDP's `rid-id`, so `a_b` is refused | the element's range, unchanged |
 
 A token reader answers a range in the packet, not a `String`. The caller compares it with
@@ -327,7 +361,12 @@ filling a new one. `put` looks up the subscriber map's id for
 it. `put` checks the value against the kind's wire grammar above and answers `Value(k)`
 otherwise, so a forwarder never writes a RID the receiver would refuse. `put_level` writes
 exactly one audio-level octet, with `V` clear when the map's `vad` is off. `put_other`
-refuses an id outside the map's form range. Past 16 elements or 256 bytes, a put is `Full`.
+refuses an id outside the map's form range. `put_orientation`, `put_playout_delay`,
+`put_abs_capture_time` and `put_allocation` write the value forms of the table above; each
+skips an unbound kind, `put_playout_delay` refuses MAX above 4095 or MIN above MAX with
+`Value(PlayoutDelay)`, and `put_allocation` writes the shortest form the README allows (a
+shared spatial mask when every stream up to the last active one has the same mask, and the single byte 0 for the empty
+allocation). Past 16 elements or 256 bytes, a put is `Full`.
 The form is chosen once per header from the map's `Form`:
 
 - `OneOnly`: one-byte. A value of 0 or more than 16 bytes is refused with `Form` at
@@ -1572,6 +1611,8 @@ Goose (`/tmp/ref-goose` at `d5ae5bb`) is the language peer. `str0m` (`/tmp/ref-s
 | LiveKit `pkg/sfu/codecmunger/vp8.go:130-145,238-290` | VP8 picture ID and TL0PICIDX munging that closes up dropped pictures | ADAPTED | `Counter`'s `Compact` mode, keyed per picture so every fragment maps alike; `Translate` for codecs whose references are picture differences |
 | mediasoup `RtpStreamSend.cpp:575-599`, `SimulcastProducerStreamManager.cpp:533` at `90ca2ae` | restore each consumer's fields before RTX; add the saved offset at a simulcast switch | ADOPTED | the per-leg send contract (RTP-7) and the switch anchor minus A's offset (RTP-11) |
 | LiveKit `pkg/sfu/forwarder.go` | codec-aware layer selection | REPLACED | `rtp` takes `needs` and `switches` masks and knows no codec; `media_bits` computes them |
+| libwebrtc's [rtp-hdrext READMEs](https://webrtc.googlesource.com/src/+/b2946b39/docs/native-code/rtp-hdrext/) (video-layers-allocation00, playout-delay, abs-capture-time, video-orientation) and `rtp_video_layers_allocation_extension.cc` at `b2946b39` | the four value grammars and libwebrtc's refusals | ADOPTED | RTP-3's four readers and writers; `video_extension_values` decodes each README value by hand |
+| Janus `src/rtp.c:464-527` `janus_rtp_header_extension_parse_video_layers_allocation` at `2f1e1ca` | a VLA parse that reconstructs only the spatial and temporal layer counts, ignores rates and sizes, and answers an error for a value under 2 bytes | ADAPTED | `Allocation` keeps the per-layer targets and sizes, because RTC-6 allocates on the planned rate, and accepts the single byte 0 as the empty allocation, which is how a publisher says it stopped every layer |
 | str0m `src/rtp/rtcp/remb.rs`, `xr.rs` | REMB and XR | NOT TAKEN | TWCC replaces REMB, and no Wave 1 consumer reads XR |
 
 ## Build laws
@@ -1618,6 +1659,13 @@ written here and repeated in the law's comment.
   `(Some(true), 42)` with `vad` on and `(None, 42)` with `vad` off; a 2-byte audio-level
   element is `Value(AudioLevel)`. *Oracle:* RFC 8285 §§4.2, 4.3 and 6, RFC 8852 §3, RFC 9143
   §15, RFC 6464 §§3–4, by hand.
+- **`video_extension_values` (RTP-3).** *Input:* one hand-built header with CVO `0x0b`,
+  playout delay `00 a0 64` and a 16-byte abs-capture-time; README layers allocations
+  (single stream, three simulcast streams, per-stream masks, sizes, the empty allocation)
+  and two VLA values Chromium 156 sent in 2682's capture. *Expected:* each value decoded by
+  hand from the README or TS 26.114 in the test comment; every writer's bytes equal the
+  vector; each malformed value is `Value(k)`. *Catches:* a misread field of any of the four
+  kinds, a writer that disagrees with its reader, or a value libwebrtc refuses taken as valid.
 - **`egress_form` (RTP-3).** A `Mixed` subscriber map with audio level on id 1, transport
   sequence on id 2 and RID on 3: writing audio level `(true, 42)` and transport sequence
   0x1234 gives the one-byte block `BE DE 00 02 | 10 AA 21 12 34 00 00 00`. Adding a 17-byte

@@ -73,7 +73,35 @@ pub type MediaIn {
     // The AV1 dependency descriptor's value in the packet, as offset and length (0
     // when absent). Every unit parses it from the plaintext with its own structure.
     dd_at: u64,
-    dd_len: u64
+    dd_len: u64,
+    // RTC-5's header extensions the router carries on: the CVO byte (never on a
+    // repair, which is not the publisher's current orientation), abs-capture-time,
+    // and RTC-6's summary of a video layers allocation (never on a repair).
+    orientation: Option[u8],
+    capture: Option[Capture],
+    plan: Option[Plan]
+}
+
+/// An abs-capture-time value as it arrived: the UQ32.32 NTP capture time and the
+/// Q32.32 capture clock offset when the sender included one.
+pub type Capture {
+    ts: u64,
+    offset: Option[i64]
+}
+
+/// A video layers allocation as RTC-6 reads it: the index of the stream that
+/// carried it, bit `e` of `active` set when stream `e` has an active layer, and
+/// stream `e`'s planned rate in kbps (its top layer at its top temporal layer).
+pub type Plan {
+    stream: u8,
+    active: u8,
+    kbps: Inline[u32, 4]
+}
+
+/// A static playout delay (RTC-5) in 10 ms units, each at most 4095, `min` at most `max`.
+pub type Delay {
+    min: u16,
+    max: u16
 }
 
 /// A NACK hit on a down-track's egress history. The home unit resolves the
@@ -130,7 +158,11 @@ pub type Leg {
     closes: u32,
     // The AV1 dependency descriptor's value in the packet, `dd_len` 0 when it has none.
     dd_at: u64,
-    dd_len: u64
+    dd_len: u64,
+    // The publication's current CVO byte, written on the leg's last packet of each
+    // frame, and the packet's abs-capture-time, passed on unchanged (RTC-5).
+    orientation: Option[u8],
+    capture: Option[Capture]
 }
 
 pub type Sent: key = OnMedia | AsRepair | Dropped | Held
@@ -153,7 +185,9 @@ type Record {
     pt: u8,
     picture: Option[u16],
     tl0: Option[u8],
-    dd: Option[Dd]
+    dd: Option[Dd],
+    cvo: Option[u8],
+    capture: Option[Capture]
 }
 
 // The leg's dependency descriptor: the source's value at `at` for `len` bytes, sent
@@ -176,7 +210,9 @@ type Paced {
     level: Option[u8],
     voice: bool,
     src: Gen,
-    dd: u64
+    dd: u64,
+    cvo: Option[u8],
+    capture: Option[Capture]
 }
 
 type Inbound {
@@ -226,7 +262,9 @@ type Track {
     // type of its last media packet sent, which its padding carries (RTC-6 probing).
     ended: bool,
     last_ts: u32,
-    last_pt: u8
+    last_pt: u8,
+    // The subscription's static playout delay, written on every media packet (RTC-5).
+    playout: Option[Delay]
 }
 
 type Section {
@@ -388,6 +426,10 @@ fn ext_kind(e: sdp.Ext) -> Option[rtp.ext.Kind] {
         AbsSendTime => Some(AbsSendTime),
         TransportCc => Some(TransportSeq),
         DependencyDescriptor => Some(DependencyDescriptor),
+        VideoLayersAllocation => Some(VideoLayersAllocation),
+        PlayoutDelay => Some(PlayoutDelay),
+        VideoOrientation => Some(VideoOrientation),
+        AbsCaptureTime => Some(AbsCaptureTime),
     }
 }
 

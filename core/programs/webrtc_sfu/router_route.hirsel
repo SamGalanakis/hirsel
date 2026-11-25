@@ -239,6 +239,9 @@ fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, fresh: bool, slot: B
     if fresh {
         measure(mut r, pi, e, end, now, mut out)?
         observe(mut r, pi, m, now, mut out)?
+        if let Some(plan) = m.plan {
+            planned(mut r, pi, m.encoding, plan, now, mut out)?
+        }
     }
     let _ = published(mut r, pi, now)
     if !r.publications[pi].encodings[e].on {
@@ -406,6 +409,10 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
     }
     let closes = picture_ends(vp9, av1, view r.publications[pi].encodings[e].structure)
     let src = source(id, m.encoding)
+    if let Some(o) = m.orientation {
+        r.publications[pi].orientation = Some(o)
+    }
+    let orientation = r.publications[pi].orientation
     // RTC-6's `V` toward a leg with `vad` on: the publisher's own `V` when its leg
     // negotiated it, and otherwise whether the publication is speaking.
     let voice = match m.voice {
@@ -492,7 +499,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
                 },
             },
         }
-        let leg = peer.Leg(src: owner, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: voice, from: m.payload_at, len: m.payload_len, closes: closes, dd_at: m.dd_at, dd_len: m.dd_len)
+        let leg = peer.Leg(src: owner, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: voice, from: m.payload_at, len: m.payload_len, closes: closes, dd_at: m.dd_at, dd_len: m.dd_len, orientation: orientation, capture: m.capture)
         let track = r.downs[d].track
         let sent = peer.forward(mut r.members[si].session, now, track, leg, packet, r.publications[pi].red, mut out) ?=> |take x| Peer(x)
         if sent == OnMedia && codec == H264 {
@@ -534,10 +541,11 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
         list.try_reserve(mut plain, end) ?=> |c| Capacity(c)
         list.append(mut plain, list.slice(packet, 0, end))
         let held = shared.new(take plain)
+        let rate: u64 = int.narrow(rate_of(r, pi, e))
+        let dropped = r.publications[pi].dropped
         for u in 0u64 .. 64 {
             if (remote >> u) & 1 == 1 {
-                let rate = r.publications[pi].encodings[e].rate
-                post(mut r, int.narrow(u), Media(room: room, publication: id, src: owner, m: m, handle: handle, speaking: talking, rate: rate), shared.share(held))
+                post(mut r, int.narrow(u), Media(room: room, publication: id, src: owner, m: m, handle: handle, speaking: talking, rate: rate, dropped: dropped), shared.share(held))
             }
         }
     }
@@ -560,7 +568,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
 pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) -> Result[(), RouterError] {
     let Carried(carry: carry, packet: packet) = take msg
     match carry {
-        Media(room: room, publication: publication, src: src, m: m, handle: handle, speaking: talking, rate: rate) => {
+        Media(room: room, publication: publication, src: src, m: m, handle: handle, speaking: talking, rate: rate, dropped: dropped) => {
             if fenced(r, room, src) || suspended(r, room) {
                 r.counts.stale += 1
                 return Ok(())
@@ -578,6 +586,11 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
             if r.publications[pi].encodings[e].rate != rate {
                 r.publications[pi].encodings[e].rate = rate
                 reallocate(mut r, pi, now, mut out)?
+            }
+            let before = r.publications[pi].dropped
+            if dropped != before {
+                r.publications[pi].dropped = dropped
+                repoint(mut r, pi, before | dropped, now, mut out)?
             }
             spread(mut r, now, pi, m, handle, talking, packet, mut out)
         },

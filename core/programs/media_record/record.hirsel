@@ -154,7 +154,7 @@ pub fn control(mut rec: Recorder, now: u64, take c: webrtc_sfu.router.Control) -
 pub fn carried(mut rec: Recorder, now: u64, take msg: webrtc_sfu.router.Carried) {
     let webrtc_sfu.router.Carried(carry: carry, packet: packet) = take msg
     match carry {
-        Media(room: room, publication: p, src: src, m: m, handle: _, speaking: _, rate: _) => media(mut rec, now, room, p, src, m, packet),
+        Media(room: room, publication: p, src: src, m: m, handle: _, speaking: _, rate: _, dropped: _) => media(mut rec, now, room, p, src, m, packet),
         Sender(room: room, publication: p, owner: owner, source: source, info: info) => sender(mut rec, room, p, owner, source, info),
         _ => {
             rec.counts.unwanted += 1

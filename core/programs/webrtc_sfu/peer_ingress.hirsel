@@ -310,7 +310,55 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
     }
     let (voice, audio_level) = level
     let (dd_at, dd_len) = dependency_in(found)
-    Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: pt, ts: h.ts, wide: wide, reset: reset, marker: h.marker, payload_at: media_at, payload_len: media_len, audio_level: audio_level, voice: voice, layer: layer, dd_at: dd_at, dd_len: dd_len)))
+    let (orientation, capture, plan) = extras_in(found, slot, h)
+    Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: pt, ts: h.ts, wide: wide, reset: reset, marker: h.marker, payload_at: media_at, payload_len: media_len, audio_level: audio_level, voice: voice, layer: layer, dd_at: dd_at, dd_len: dd_len, orientation: orientation, capture: capture, plan: plan)))
+}
+
+// RTC-5's CVO and abs-capture-time and RTC-6's video layers allocation, where the
+// section binds them. A value that does not parse reads as absent.
+fn extras_in(f: Option[rtp.ext.Found], pkt: Bytes, h: rtp.header.Header) -> (Option[u8], Option[Capture], Option[Plan]) {
+    let Some(found) = f else {
+        return (None, None, None)
+    }
+    let orientation = match rtp.ext.found(found, VideoOrientation) {
+        Some(e) => match rtp.ext.orientation(pkt, h, e) {
+            Ok(b) => Some(b),
+            Error(_) => None,
+        },
+        None => None,
+    }
+    let capture = match rtp.ext.found(found, AbsCaptureTime) {
+        Some(e) => match rtp.ext.abs_capture_time(pkt, h, e) {
+            Ok((ts, offset)) => Some(Capture(ts: ts, offset: offset)),
+            Error(_) => None,
+        },
+        None => None,
+    }
+    let plan = match rtp.ext.found(found, VideoLayersAllocation) {
+        Some(e) => match rtp.ext.allocation(pkt, h, e) {
+            Ok(a) => Some(plan_of(a)),
+            Error(_) => None,
+        },
+        None => None,
+    }
+    (orientation, capture, plan)
+}
+
+// Stream `s` is active when it has an active spatial layer; its planned rate is
+// its top layer's at its top temporal layer.
+fn plan_of(a: rtp.ext.Allocation) -> Plan {
+    let mut p = Plan(stream: a.stream, active: 0, kbps:[0u32; 4])
+    for s in 0u64 .. 4 {
+        if a.masks[s] == 0 {
+            continue
+        }
+        p.active = p.active | (1u8 << int.narrow(s))
+        p.kbps[s] = match rtp.ext.stream_kbps(a, s) {
+            Some(k) => k,
+            None => 0,
+        }
+    }
+    p
 }
 
 // Where the dependency descriptor's value is, if the section binds it (RTC-6, AV1).
@@ -436,7 +484,8 @@ fn repair_in(mut p: PeerSession, now: u64, sec: u8, encoding: u8, format: Facts,
     }
     // An RTX packet carries the original's header extensions (RFC 4588 section 4).
     let (dd_at, dd_len) = dependency_in(found)
-    Ok(Repair(MediaIn(section: sec, encoding: enc, ssrc: ssrc, index: original, pt: apt, ts: h.ts, wide: wide, reset: false, marker: h.marker, payload_at: at, payload_len: payload_len, audio_level: None, voice: None, layer: layer, dd_at: dd_at, dd_len: dd_len)))
+    let (_, capture, _) = extras_in(found, slot, h)
+    Ok(Repair(MediaIn(section: sec, encoding: enc, ssrc: ssrc, index: original, pt: apt, ts: h.ts, wide: wide, reset: false, marker: h.marker, payload_at: at, payload_len: payload_len, audio_level: None, voice: None, layer: layer, dd_at: dd_at, dd_len: dd_len, orientation: None, capture: capture, plan: None)))
 }
 
 fn rtcp_mode(p: PeerSession) -> rtp.rtcp.Mode {

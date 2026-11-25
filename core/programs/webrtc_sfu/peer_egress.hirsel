@@ -107,7 +107,7 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let frames = rtp.counter.counter(16, Translate, COUNTER_SLOTS) ?=> |c| Capacity(c)
     list.try_reserve(mut p.tracks, 1) ?=> |c| Capacity(c)
-    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0))
+    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None))
     Ok(int.narrow(list.len(p.tracks) - 1))
 }
 
@@ -173,27 +173,6 @@ fn rtx_pt(a: sdp.Agreed, pt: u8) -> Option[u8] {
         }
     }
     None
-}
-
-// The subscriber leg's extensions, written into the session's one reused writer
-// (RTP-12): its MID value and, at send, the next number of its own transport
-// (RTP-8). The publisher's MID, RID and transport number never pass.
-fn leg_ext(mut p: PeerSession, now: u64, si: u64, size: u32, level: Option[u8], voice: bool) -> Result[(), PeerError] {
-    let map = p.sections[si].map
-    rtp.ext.reset(mut p.ext)
-    let n = list.len(p.sections[si].mid)
-    rtp.ext.put(mut p.ext, map, Mid, p.sections[si].mid, 0, n) ?=> |_| Rtp(Form)
-    if let Some(l) = level {
-        rtp.ext.put_level(mut p.ext, map, voice, l) ?=> |_| Rtp(Form)
-    }
-    if p.sections[si].twcc {
-        let number = rtp.twcc.assign(mut p.send_log, now, size)
-        p.numbered += 1
-        list.clear(mut p.word)
-        list.put_word_be(mut p.word, number)
-        rtp.ext.put(mut p.ext, map, TransportSeq, p.word, 0, 2) ?=> |_| Rtp(Form)
-    }
-    Ok(())
 }
 
 // Seal the scratch packet in place and copy it into the subscriber's span of `out`.
@@ -333,7 +312,7 @@ fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, rec: Rec
     }
     let f = rtp.header.Fields(marker: rec.marker, pt: rpt, seq: p.tracks[t].rtx_seq, ts: ts, ssrc: p.tracks[t].rtx_ssrc)
     let osn: u16 = int.truncate(index)
-    let q = Paced(slot: 0, track: int.narrow(t), media: false, fields: f, level: None, voice: false, src: rec.src, dd: 0)
+    let q = Paced(slot: 0, track: int.narrow(t), media: false, fields: f, level: None, voice: false, src: rec.src, dd: 0, cvo: rec.cvo, capture: rec.capture)
     if stage(mut p, now, mut out, q, Retransmit, Some(osn), payload, rec.from, rec.len, rec.picture, rec.tl0, rec.dd)? {
         p.tracks[t].rtx_seq = int.wrapping_add(p.tracks[t].rtx_seq, 1u16)
     }
@@ -354,7 +333,7 @@ fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pac
         } else {
             2
         }
-        leg_ext(mut p, now, si, int.narrow(12 + extra + len), q.level, q.voice)?
+        leg_ext(mut p, now, si, int.narrow(12 + extra + len), q)?
         if let Some(d) = dd {
             list.clear(mut p.dd)
             copy_dd(mut p.dd, payload, d)
@@ -410,7 +389,7 @@ fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pac
         list.push(mut p.free, slot)
         return Error(take e)
     }
-    let entry = Paced(slot: slot, track: q.track, media: q.media, fields: q.fields, level: q.level, voice: q.voice, src: q.src, dd: tail)
+    let entry = Paced(slot: slot, track: q.track, media: q.media, fields: q.fields, level: q.level, voice: q.voice, src: q.src, dd: tail, cvo: q.cvo, capture: q.capture)
     if let Error(_) = rtp.pacer.push(mut p.pacer, int.widen(q.track), class, RTP_HEADER + size, now, entry) {
         list.push(mut p.free, slot)
         p.drops.paced += 1
@@ -518,7 +497,8 @@ fn pad_out(mut p: PeerSession, now: u64, pad: u8, mut out: Outbox) -> Result[(),
         }
         let si: u64 = int.widen(p.tracks[t].section)
         let wide: u32 = int.widen(pad)
-        leg_ext(mut p, now, si, RTP_HEADER + wide, None, false)?
+        let q = Paced(slot: 0, track: int.narrow(t), media: false, fields: f, level: None, voice: false, src: p.who.gen, dd: 0, cvo: None, capture: None)
+        leg_ext(mut p, now, si, RTP_HEADER + wide, q)?
         let _ = rtp.rtx.write_probe(f, view p.ext, pad, mut p.pkt) ?=> |take x| Rtp(x)
         let tag = own_tag(p)
         let mut b = replace(mut p.pkt, list.new())
@@ -577,7 +557,7 @@ fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), P
     let si: u64 = int.widen(p.tracks[t].section)
     let len = list.len(p.slab[at]) - q.dd
     let size: u32 = int.narrow(12 + len)
-    leg_ext(mut p, now, si, size, q.level, q.voice)?
+    leg_ext(mut p, now, si, size, q)?
     if q.dd != 0 {
         let map = p.sections[si].map
         let _ = rtp.ext.put(mut p.ext, map, DependencyDescriptor, p.slab[at], len, q.dd)
@@ -660,7 +640,14 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
     let (picture, tl0) = descriptor(mut p, t, leg, payload)
     let dd = dependency(mut p, t, leg, payload)
     let marker = leg.marker || closes(p.tracks[t].rewrite, leg)
-    let rec = Record(src: leg.src, handle: leg.handle, from: leg.from, len: leg.len, ts: ts, marker: marker, pt: pt, picture: picture, tl0: tl0, dd: dd)
+    // The receiver takes a frame's rotation from its last packet, and 0 when that packet
+    // has none, so every last packet the leg sends carries the current CVO (RTC-5).
+    let cvo = if marker {
+        leg.orientation
+    } else {
+        None
+    }
+    let rec = Record(src: leg.src, handle: leg.handle, from: leg.from, len: leg.len, ts: ts, marker: marker, pt: pt, picture: picture, tl0: tl0, dd: dd, cvo: cvo, capture: leg.capture)
     if late {
         if !write_rtx(mut p, now, t, index, ts, rec, payload, mut out)? {
             p.drops.late += 1
@@ -672,7 +659,7 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
         return Ok(AsRepair)
     }
     let f = rtp.header.Fields(marker: marker, pt: pt, seq: int.truncate(index), ts: ts, ssrc: p.tracks[t].ssrc)
-    let q = Paced(slot: 0, track: track, media: true, fields: f, level: leg.level, voice: leg.voice, src: leg.src, dd: 0)
+    let q = Paced(slot: 0, track: track, media: true, fields: f, level: leg.level, voice: leg.voice, src: leg.src, dd: 0, cvo: cvo, capture: leg.capture)
     let class: rtp.pacer.Class = if p.tracks[t].video {
         Video
     } else {

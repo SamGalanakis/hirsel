@@ -303,7 +303,7 @@ pub fn take_media(mut u: Unit, now: u64) -> Result[(), router.RouterError] {
         match conn.try_receive(u.media) {
             Ok(take m) => {
                 match m.carry {
-                    Media(room: _, publication: _, src: _, m: _, handle: _, speaking: _, rate: _) => {
+                    Media(room: _, publication: _, src: _, m: _, handle: _, speaking: _, rate: _, dropped: _) => {
                         u.counts.media += 1
                     },
                     Ask(room: _, publication: _, src: _, dst: _, ask: _) => {

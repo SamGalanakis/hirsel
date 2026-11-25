@@ -260,3 +260,206 @@ fn dynacast_mask() -> Result[(), router.RouterError] {
     }
     Ok(())
 }
+
+// ---- RTC-6 video layers allocation across units (W11) ----
+// The simulcast publisher of `simulcast_offer` that also offers the video layers
+// allocation on extension 3.
+fn allocating_offer() -> Bytes {
+    let mut b = minimal_head(b" s")
+    list.append(mut b, minimal_video(b"96", b"s", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\na=rtcp-fb:96 nack pli\na=extmap:2 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\na=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/video-layers-allocation00\na=rid:q send\na=rid:h send\na=rid:f send\na=simulcast:send q;h;f\n")
+    take b
+}
+
+// The allocation libwebrtc writes on stream `e` while streams `sending` (bit per
+// stream) send one spatial and one temporal layer each at q 40, h 80 and f 120 kbps,
+// by hand from the video-layers-allocation00 README: the first octet is the stream
+// index (2 bits), the stream count less one (2 bits, up to the highest active
+// stream) and the shared layer mask, 0 when the streams' masks differ, which then
+// follow as one nibble per stream; then one 2-bit temporal count less one per active
+// layer, padded to an octet; then each layer's rate in LEB128.
+fn allocation_for(e: u8, sending: u8) -> Bytes {
+    let mut b: Bytes = list.new()
+    let rid: u8 = e << 6
+    if sending == 7 {
+        list.push(mut b, rid | 0x21)
+        list.append(mut b, b"\x00\x28\x50\x78")
+    } else if sending == 5 {
+        list.push(mut b, rid | 0x20)
+        list.append(mut b, b"\x10\x10\x00\x28\x78")
+    } else {
+        list.push(mut b, rid | 0x01)
+        list.append(mut b, b"\x00\x28")
+    }
+    b
+}
+
+fn allocated_media(mut cs: srtp.Session, ssrc: u32, seq: u16, ts: u32, rid: Bytes, allocation: Bytes, body: Bytes) -> Bytes {
+    let mut m = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut m, 1, Mid))
+    result.unwrap(rtp.ext.bind(mut m, 2, Rid))
+    result.unwrap(rtp.ext.bind(mut m, 3, VideoLayersAllocation))
+    let mut w = rtp.ext.writer()
+    result.unwrap(rtp.ext.put(mut w, m, Mid, b"s", 0, 1))
+    result.unwrap(rtp.ext.put(mut w, m, Rid, rid, 0, list.len(rid)))
+    if list.len(allocation) != 0 {
+        result.unwrap(rtp.ext.put(mut w, m, VideoLayersAllocation, allocation, 0, list.len(allocation)))
+    }
+    let f = rtp.header.Fields(marker: true, pt: 96, seq: seq, ts: ts, ssrc: ssrc)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, body)
+    let _ = result.unwrap(srtp.protect_rtp(mut cs, mut b))
+    b
+}
+
+// What B (`s` 0, on unit 2, targeting h from the start), C (`s` 1, on unit 3,
+// subscribing to h at step 30 and retargeting f at step 120) and D (`s` 2, on the
+// publisher's unit, targeting q from the start and f from step 120) hear in step `k`, by
+// hand from RTC-6 and the schedule of `allocation_drops_a_stream`. Each step's
+// packets arrive in the order q, h, f; q and h key at step 0 and at every step
+// 10j + 5, and a stream that starts again opens with a keyframe.
+fn vla_heard(s: u64, k: u64) -> List[u8] {
+    let none: List[u8] = list.new()
+    if s == 0 {
+        if k < 20 {
+            return heard_one(LAYER_H)
+        }
+        // h stops at 1,000 ms: B is pointed at q at once and switches at q's keyframe.
+        if k < 25 {
+            return none
+        }
+        if k < 140 {
+            return heard_one(LAYER_Q)
+        }
+        // h's return reaches B on q's packet, before h's keyframe switches it back.
+        if k == 140 {
+            return heard_two(LAYER_Q, LAYER_H)
+        }
+        return heard_one(LAYER_H)
+    }
+    if s == 2 {
+        if k < 121 {
+            return heard_one(LAYER_Q)
+        }
+        if k == 121 {
+            return heard_two(LAYER_Q, LAYER_F)
+        }
+        return heard_one(LAYER_F)
+    }
+    // C's unit learns of the stopped h from the first packet it is sent.
+    if k < 35 {
+        return none
+    }
+    if k < 121 {
+        return heard_one(LAYER_Q)
+    }
+    if k == 121 {
+        return heard_two(LAYER_Q, LAYER_F)
+    }
+    heard_one(LAYER_F)
+}
+
+/// bug: wait on a stopped encoding for a keyframe that never comes (the freeze), leave the subscriber on it until a timeout, learn of the stop only on the home unit or only from a packet sent after a unit's down-track opened, take a stream the router paused itself (its published bit off, so the publisher's allocation marks it inactive) for one the publisher stopped and divert a subscriber retargeted to it, turn the stopped encoding's published bit off while a target remains on it, or keep a subscriber off an encoding after the publisher resumes it.
+/// oracle: RTC-6 by hand, with allocations from the video-layers-allocation00 README by hand (`allocation_for`). h stops at step 20, and q's and f's packets carry the q-and-f allocation: B is pointed at q and switches at q's keyframe at step 25. C subscribes to h at step 30; unit 3 learns of the stop from the first `Media` it takes and C switches at q's keyframe at step 35. D hears q throughout. f has no target, so its bit turns off at 5,000 ms (step 100, mask 3) and the publisher stops it; the q-only allocation marks f inactive, which is a pause, not a stop. C's and D's retargets at step 120 point them at f, whose bit turns on (mask 7); f starts again at step 121 with a keyframe. h returns at step 140 and B goes back to it. h's bit never turns off, since B's and C's targets stay on it.
+@test
+fn allocation_drops_a_stream() -> Result[(), router.RouterError] {
+    let mut log: List[Wire] = list.new()
+    let mut f = four_units(160)
+    let room = room_id()
+    let _ = settle_four(mut f, 0, Open(room: room, limits: room_limits()), mut log)
+    let mut p = browser_with(mut f.u1, 161, 1, allocating_offer())
+    let mut subs: List[Client] = list.new()
+    list.push(mut subs, browser_with(mut f.u2, 162, 2, receiving(sections_of(b"b1", b""))))
+    list.push(mut subs, browser_with(mut f.u3, 163, 3, receiving(sections_of(b"c1", b""))))
+    list.push(mut subs, browser_with(mut f.u1, 164, 4, receiving(sections_of(b"d1", b""))))
+    admit_four(mut f, p, 1, mut log)
+    admit_four(mut f, subs[0], 2, mut log)
+    admit_four(mut f, subs[1], 3, mut log)
+    admit_four(mut f, subs[2], 1, mut log)
+    let base_ns = 10 * MS
+    let pa = published(settle_four(mut f, base_ns, Publish(room: room, who: p.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let at_q: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let at_h: router.Target = Layer(encoding: 1, spatial: 0, temporal: 0)
+    let at_f: router.Target = Layer(encoding: 2, spatial: 0, temporal: 0)
+    let _ = settle_four(mut f, base_ns, Subscribe(room: room, who: subs[0].who, p: pa, section: 0, target: at_h), mut log)
+    let _ = settle_four(mut f, base_ns, Subscribe(room: room, who: subs[2].who, p: pa, section: 0, target: at_q), mut log)
+    list.clear(mut log)
+    let _ = units.take_events(mut f.u0)
+    let rids: Inline[Bytes, 3] =[b"q", b"h", b"f"]
+    let mut seqs: Inline[u16, 3] =[0u16; 3]
+    // The streams the publisher sends, and those whose next packet carries the
+    // allocation because it changed since that stream last sent one.
+    let mut sending = 7u8
+    let mut due = 7u8
+    let mut restart = 0u8
+    let mut seen: List[(u64, router.PublicationId, u8)] = list.new()
+    for k in 0u64 .. 150u64 {
+        let now = base_ns + k * 50 * MS
+        if k == 20 {
+            sending = 5
+            due = 5
+        }
+        if k == 30 {
+            let _ = settle_four(mut f, now, Subscribe(room: room, who: subs[1].who, p: pa, section: 0, target: at_h), mut log)
+        }
+        if k == 120 {
+            let _ = settle_four(mut f, now, Retarget(room: room, who: subs[2].who, p: pa, target: at_f), mut log)
+            let _ = settle_four(mut f, now, Retarget(room: room, who: subs[1].who, p: pa, target: at_f), mut log)
+        }
+        if k == 140 {
+            sending = sending | 2
+            due = sending
+            restart = restart | 2
+        }
+        let ts: u32 = int.truncate(k)
+        for e in 0u64 .. 3u64 {
+            let bit = 1u8 << int.narrow(e)
+            if sending & bit == 0 {
+                continue
+            }
+            let key = k == 0 || k % 10 == 5 || restart & bit != 0
+            restart = restart & ~bit
+            let allocation = if due & bit != 0 {
+                allocation_for(int.narrow(e), sending)
+            } else {
+                list.new()
+            }
+            due = due & ~bit
+            let packet = allocated_media(mut p.cs, E0 + int.truncate(e), seqs[e], 4500 * ts, rids[e], allocation, filled(key, LAYER_Q + int.truncate(e), 100 + 10 * e))
+            seqs[e] = int.wrapping_add(seqs[e], 1u16)
+            result.unwrap(units.take_datagram(mut f.u1, now, p.at, packet))
+        }
+        turn_four(mut f, now, 4, mut log)
+        turn_four(mut f, now + 40 * MS, 2, mut log)
+        for s in 0u64 .. 3u64 {
+            if marks(mut subs[s], log) != vla_heard(s, k) {
+                fail("a subscriber hears another encoding than the publisher's allocation and its target allow")
+            }
+        }
+        list.clear(mut log)
+        for event in units.take_events(mut f.u0) {
+            match event {
+                Layers(publication: id, mask: bits) => {
+                    list.push(mut seen, (k, id, bits))
+                    // The publisher follows the published mask (RTC-6): a stream it
+                    // stops or starts again changes its allocation.
+                    let before = sending
+                    sending = (sending & ~4u8) | (bits & 4)
+                    if sending != before {
+                        due = sending
+                        restart = restart | (sending & ~before)
+                    }
+                },
+                _ => fail("only Layers events are raised"),
+            }
+        }
+    }
+    let mut want: List[(u64, router.PublicationId, u8)] = list.new()
+    list.push(mut want, (100u64, pa, 3u8))
+    list.push(mut want, (120u64, pa, 7u8))
+    if seen != want {
+        fail("Layers events: f off at 5,000 ms and on with C's and D's targets at 6,000 ms, h never off")
+    }
+    Ok(())
+}

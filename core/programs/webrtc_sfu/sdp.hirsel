@@ -6,7 +6,7 @@ pub type Setup: key = Active | Passive | ActPass
 
 pub type Codec: key = Opus | Vp8 | Vp9 | H264 | Av1 | Rtx | Red | Ulpfec
 
-pub type Ext: key = Mid | RidExtension | RepairedRid | AudioLevel | AbsSendTime | TransportCc | DependencyDescriptor
+pub type Ext: key = Mid | RidExtension | RepairedRid | AudioLevel | AbsSendTime | TransportCc | DependencyDescriptor | VideoLayersAllocation | PlayoutDelay | VideoOrientation | AbsCaptureTime
 
 pub type Vad: key = VadOn | VadOff
 
@@ -417,6 +417,10 @@ fn ext_uri(ext: Ext) -> Bytes {
         AbsSendTime => b"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
         TransportCc => b"http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
         DependencyDescriptor => b"https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension",
+        VideoLayersAllocation => b"http://www.webrtc.org/experiments/rtp-hdrext/video-layers-allocation00",
+        PlayoutDelay => b"http://www.webrtc.org/experiments/rtp-hdrext/playout-delay",
+        VideoOrientation => b"urn:3gpp:video-orientation",
+        AbsCaptureTime => b"http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time",
     }
 }
 

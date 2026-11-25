@@ -77,6 +77,7 @@ pub fn first(r: Router, c: Change) -> u16 {
         Rebind(room: room, who: w, ..) => (room, w),
         Unsubscribe(room: room, who: w, ..) => (room, w),
         Leave(room: room, who: w) => (room, w),
+        Playout(room: room, who: w, ..) => (room, w),
         _ => return r.unit,
     }
     match seat_at(r, room, who) {
@@ -145,6 +146,10 @@ fn change(mut r: Router, now: u64, take c: Change, mut out: peer.Outbox) -> Resu
         },
         Suspend(room: room, on: on) => {
             hold(mut r, room, on, mut out)?
+            Ok(Done)
+        },
+        Playout(room: room, who: who, p: p, delay: delay) => {
+            playout(mut r, room, who, p, delay)?
             Ok(Done)
         },
     }
@@ -257,4 +262,25 @@ fn drop_seat(mut r: Router, si: u64, notify: bool, mut out: peer.Outbox) {
         let Member(who: _, session: take session, estimate: _, want: _) = take m
         peer.close(take session, notify, mut out)
     }
+}
+
+// RTC-5: a subscription's static playout delay, written by the down-track's home.
+fn playout(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, delay: Option[peer.Delay]) -> Result[(), RouterError] {
+    if let Some(d) = delay {
+        if d.max > 4095 || d.min > d.max {
+            return Error(Limit(4095))
+        }
+    }
+    let Some(di) = down_at(r, room, who, p) else {
+        return Error(NoPublication)
+    }
+    if r.downs[di].home != r.unit {
+        return Ok(())
+    }
+    let Some(mi) = member_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    let track = r.downs[di].track
+    let _ = peer.set_playout(mut r.members[mi].session, track, delay)
+    Ok(())
 }

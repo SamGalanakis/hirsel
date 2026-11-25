@@ -19,7 +19,7 @@ fn check_browser(raw: Bytes, expected: Bytes, audio: u8, video: u8, rtx: u8, fir
         fail("browser media, RTX, or RID ordering")
     }
     if firefox {
-        if v.port != BundleOnly || d.sections[2].port != BundleOnly || app.port != BundleOnly || v.extmaps[3].dir != Some(SendOnly) || !same(d.ice_ufrag, b"a9421375") || d.fingerprint[0] != 0xc4 {
+        if v.port != BundleOnly || d.sections[2].port != BundleOnly || app.port != BundleOnly || v.extmaps[2].dir != Some(RecvOnly) || v.extmaps[4].dir != Some(SendOnly) || !same(d.ice_ufrag, b"a9421375") || d.fingerprint[0] != 0xc4 {
             fail("Firefox BUNDLE, fingerprint, or extension direction")
         }
     } else if v.port != Port(9) || d.sections[2].port != Port(9) || app.port != Port(9) || d.fingerprint[0] != 0xad {
@@ -933,7 +933,7 @@ fn egress(mut r: Rig, payload: Bytes) {
     for i in 0u64 .. 5 {
         let ts: i64 = int.narrow(3000 * i)
         let u = rtp.rewrite.Unit(start: true, end: true, keyframe: i == 0, needs: 1, switches: 0xffffffff, frame: 0)
-        let leg = peer.Leg(src: Gen(id: 9, epoch: 1), handle: i, source: 9, index: 100 + i, ts: ts, marker: true, codec: Vp8, padding_only: false, unit: u, level: None, voice: false, from: 0, len: list.len(payload), closes: 0, dd_at: 0, dd_len: 0)
+        let leg = peer.Leg(src: Gen(id: 9, epoch: 1), handle: i, source: 9, index: 100 + i, ts: ts, marker: true, codec: Vp8, padding_only: false, unit: u, level: None, voice: false, from: 0, len: list.len(payload), closes: 0, dd_at: 0, dd_len: 0, orientation: None, capture: None)
         if result.unwrap(peer.forward(mut r.p, 6 * MS + i * MS, track, leg, payload, none, mut r.out)) != OnMedia {
             fail("an on-time packet was not sent on the media SSRC")
         }

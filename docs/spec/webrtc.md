@@ -38,6 +38,13 @@ SID), as libwebrtc's depacketizer does; it read the uncompressed header's frame 
 an encrypted VP9 frame hides, so a scrambled keyframe was counted `unparsed`.
 Amended 2026-11-25 (media-record-c10b-2658): RTC-9, the recorder `media_record`, a
 virtual down-track on a unit of its own, fenced by RTC-7 like every unit.
+Amended 2026-11-25 (webrtc-hdrext-pack-2682) for plan item C4, the header-extension pack:
+RTC-1 answers `video-layers-allocation00`, `playout-delay`, `urn:3gpp:video-orientation` and
+`abs-capture-time`; RTC-5 forwards CVO on every frame end with the publication's current
+value, writes a static per-subscription playout delay (`set_playout`) and passes
+abs-capture-time through; RTC-6 reads the publisher's layers allocation, so planned rates
+replace measured ones and a stream the publisher stops moves its down-tracks at the next
+switch point. Laws W11b and W26.
 
 This chapter specifies three layers, each sans-IO:
 
@@ -180,7 +187,10 @@ negotiated behaviour.
 `rtx/90000`, `red/48000/2` and `ulpfec/90000`, compared ASCII case-insensitively
 (RFC 8866 §6.6). The extension URIs are those of RFC 8843 (`mid`), RFC 8852 (`rtp-stream-id`,
 `repaired-rtp-stream-id`), RFC 6464 (`ssrc-audio-level`), `abs-send-time`,
-`transport-wide-cc-extensions-01` and the AV1 RTP specification's `dependency-descriptor`.
+`transport-wide-cc-extensions-01`, the AV1 RTP specification's `dependency-descriptor`, and
+the four of RTP-3's C4 kinds: libwebrtc's `video-layers-allocation00`, `playout-delay` and
+`abs-capture-time` (`http://www.webrtc.org/experiments/rtp-hdrext/…`) and 3GPP TS 26.114's
+`urn:3gpp:video-orientation`.
 For `ssrc-audio-level`, the extension attribute `vad=on` or `vad=off` is kept in
 `Extmap.vad`, `None` when absent ([RFC 6464](https://www.rfc-editor.org/rfc/rfc6464) §4).
 An absent `vad` means `vad=on`, the RFC's default, everywhere this spec reads it.
@@ -294,6 +304,10 @@ server adds (RTC-5).
    the browser sends that codec: Chromium, answered the descriptor on VP8, sends VP8
    without `TID`. On a section the server only sends on, AV1 must be among the agreed
    formats. `offer` applies the same rule to the sections it creates.
+   `VideoLayersAllocation`, `PlayoutDelay`, `VideoOrientation` and `AbsCaptureTime` follow
+   the general rule: kept with the offer's ID and the complementary direction. Chromium
+   offers `playout-delay` without a direction and Firefox as `recvonly`, so a
+   recvonly section's answer carries it `sendonly` (W1's vectors).
 5. **RIDs and simulcast, one direction at a time** (RFC 8853 §5.3.2). The server receives
    simulcast and never sends it. So the offer's `send` list is processed and its `recv`
    list is declined: the answer carries no `send` list, and every `RidRecv` RID is left out.
@@ -608,6 +622,7 @@ pub fn join(mut r: Router, who: Participant, publish: bool, offer: Bytes) -> Res
 pub fn signal(mut r: Router, who: Participant, kind: SignalIn) -> Result[(), RouterError] waits
 pub fn subscribe(mut r: Router, who: Participant, p: PublicationId, target: Target) -> Result[(), RouterError] waits
 pub fn set_target(mut r: Router, who: Participant, p: PublicationId, target: Target) -> Result[(), RouterError] waits
+pub fn set_playout(mut r: Router, who: Participant, p: PublicationId, delay: Option[Delay]) -> Result[(), RouterError] waits
 pub fn rebind(mut r: Router, who: Participant, from: PublicationId, to: PublicationId, target: Target) -> Result[(), RouterError] waits
 pub fn unsubscribe(mut r: Router, who: Participant, p: PublicationId) -> Result[(), RouterError] waits
 pub fn leave(mut r: Router, who: Participant) -> Result[(), RouterError] waits
@@ -817,6 +832,31 @@ renumbers a target that is in use. `Off` is `rewrite.target(Off)`.
   for `Switch` and at every keyframe (RTP-11). The map is rebuilt only when the structure
   changes, which happens only at a keyframe.
 
+**Video header extensions on egress (C4).** Each leg writes, with its own negotiated IDs
+(RTP-3), three values the publisher's header carried or the subscription set:
+
+- **CVO.** The home unit keeps the publication's current orientation: the last CVO byte any
+  fresh media packet of any encoding carried. Every packet a leg forwards with the marker
+  bit set (the frame's last packet, or a sub-layer leg's frame end above) carries that byte,
+  whether or not its own source packet had it. libwebrtc's receiver
+  (`rtp_video_stream_receiver2.cc`) takes a frame's rotation from its last packet and reads
+  a packet without CVO as 0°, while a sender is only required to send CVO on keyframes and
+  on a change (3GPP TS 26.114 §7.4.5; libwebrtc's sender adds it on every frame end while
+  the rotation is nonzero). Forwarding only the source's byte would render every delta
+  frame after a switch, and after a minimal sender's change, unrotated. Repairs carry the
+  byte their original packet was sent with (RTC-4's per-leg send record).
+- **Playout delay.** `set_playout(who, p, Some(Delay(min, max)))`, both in 10 ms units,
+  sets a static delay on that down-track: every media packet of the leg carries it, so a
+  viewer-class subscriber can buffer more and an interactive one can pin a low delay.
+  `None` stops writing it. `max` above 4095 or `min` above `max` is `Limit(4095)`. The
+  router does not adapt it; LiveKit's jitter-driven controller is a follow-up.
+- **Abs-capture-time.** Passed through unchanged: the leg writes the value the source
+  packet carried, 8 or 16 bytes, and estimates nothing. A cascade keeps lip-sync across
+  hops only when the original capture time survives each one.
+
+A leg whose section did not negotiate a kind skips it (RTP-3), and an extension that does
+not fit costs the packet only that extension.
+
 **Marker bit and descriptor on egress.** A forwarded packet carries the marker bit when its
 source packet does, or when it is the last packet of a layer frame whose spatial id is the
 highest of the down-track's current target: VP9's `E = 1` at `SID = s` for target
@@ -885,8 +925,9 @@ for that subscriber:
 3. Every other video down-track starts at `Off`.
 4. In ascending publication ID, round after round, each down-track is raised one step if
    the step fits in the remaining budget. A step is the next encoding at or below its
-   target, lowest first, starting from `Off`, and costs that encoding's measured ingress
-   rate minus the rate of the level it leaves. The first step, from `Off` to the lowest
+   target, lowest first, starting from `Off`, and costs that encoding's ingress rate (its
+   planned rate from the publisher's layers allocation where known, else its measured
+   rate) minus the rate of the level it leaves. The first step, from `Off` to the lowest
    encoding, is always taken unless the room declares `pause`; when it does not fit, the
    remaining budget becomes 0. With `pause`, a first step that does not fit is not taken,
    and the down-track stays `Off`. A
@@ -927,6 +968,34 @@ number, and the session reports it with `bwe.probe_sent(id, index)`. A media pac
 pacer lets out while the cluster runs is reported as a member too, as libwebrtc's
 `PacingController` tags it, since it goes at the cluster's rate. A result that raises the
 estimate moves it, and the next poll's allocation takes the next step.
+
+**The publisher's layers allocation.** When the publication negotiated
+`video-layers-allocation00`, its home unit reads the allocation on each fresh media packet
+(RTP-3 `Allocation`). Chromium sends the same allocation on every simulcast stream, each
+with that stream's index; one whose index is not the encoding it arrived on does not follow
+the section's encoding order and is ignored. The empty allocation is always read.
+
+- **Planned rates.** An active stream's cumulative target at its top layer (RTP-3
+  `stream_kbps`) becomes the encoding's **planned rate**, and allocation (below) costs a
+  step at the planned rate where one is known, else at the measured rate (step 4 of the
+selection below). A stream the
+  publisher stops keeps its last planned rate, so un-pausing it is priced before any packet
+  is measured. A changed planned rate reallocates the publication's down-tracks.
+- **Dropped streams.** An encoding is **dropped** when the publication's published mask
+  has it on and the newest allocation leaves it inactive: the publisher stopped it on its
+  own. An encoding the mask turned off is paused by the router, not dropped. Turning an
+  encoding on again clears its drop until the next allocation says otherwise.
+- **Moving away.** A down-track whose effective encoding is dropped forwards the highest
+  live encoding below it, else the lowest live one above it, at its own spatial and
+  temporal layers; with none live it stays. When the dropped set changes, the home unit
+  points each affected local down-track again at once, which asks for the new encoding's
+  keyframe, so it switches at the next switch point with no freeze or pause-delay wait.
+  Each `Media` message carries the dropped set and the planned-or-measured rate to the
+  remote units, which repoint their own down-tracks when the set changes.
+- **Demand is unchanged.** The wanted mask and the budget still count the effective target,
+  not the encoding a dropped one forwards. So a stopped encoding stays wanted, and the
+  publisher can resume it, and while it is dropped the budget counts its last planned rate,
+  an overcount that lasts only until the publisher resumes it or the target changes.
 
 `current` moves to the effective target only at a switch point, by the rules of the map
 above, and only through `Rewrite`. A simulcast change (another encoding) happens at the
@@ -1418,6 +1487,18 @@ unless named otherwise.
   stays on while the other still wants it. The below-base down-track and the
   unaffordable second base still forward their base layers (2651), and the held encoding
   keeps its bit until the switch. Packets outside the mask are never forwarded.
+- **W11b `allocation_drops_a_stream`.** *Harness:* `dynacast_laws.hirsel`, four units. A
+  simulcast publisher on unit 1 that negotiated `video-layers-allocation00` sends hand-built
+  allocations. B on unit 2 targets `h`; C on unit 3 subscribes to `h` after the drop and
+  retargets `f`; D on unit 1 targets `q`, then `f`. At step 20 the publisher's allocation
+  drops `h` (streams `q` and `f` only), and at 140 restores it; the publisher follows the
+  `f` bit of `Event.Layers`, so the `q`-only allocation while `f` is unwanted is a pause,
+  not a stop. *Oracle:* the allocation bytes are written by hand from libwebrtc's README;
+  the switches, `Layers` events and their steps by hand from RTC-6. B and C forward `q`
+  from the first `q` keyframe after they learn of the drop, with no wait; the retargets to
+  `f` turn its bit on; B returns to `h` at the first `h` keyframe after the restore. Red on
+  main (VLA ignored), on a dropped set that ignores the published mask, on a remote unit that
+  never applies the set, and on one that never resumes.
 - **W12 `active_speaker_scores`.** Audio-level traces of four publications, 20 ms packets,
   with a reordered packet, an 800 ms expiry, and two scores that tie after Q16 quantization.
   *Oracle:* the Q16 formula of RTC-6, computed by hand for each 400 ms window, and the
@@ -1543,6 +1624,18 @@ unless named otherwise.
   forwarding it; red on an AV1 keyframe test
   that also reads `seq_profile` from the first OBU's payload.
 
+- **W26 `rotation_survives_a_layer_switch`.** *Harness:* `router_hdrext_laws.hirsel`, one
+  unit. A VP8 simulcast publisher sends CVO only on keyframes and on the frame where the
+  rotation changes (TS 26.114's minimum) and abs-capture-time on every packet; one
+  subscriber negotiated CVO, playout delay and abs-capture-time on IDs other than the
+  publisher's. It switches from `q` to `h`, the rotation changes from 90° to 0°, and
+  `set_playout(10, 100)` is set and later cleared. *Oracle:* the CVO byte from TS 26.114
+  (`R1 R0 = 01` is 90°), the playout bytes `00 a0 64` from libwebrtc's README (12-bit MIN
+  `0x00a`, 12-bit MAX `0x064`), and the capture bytes as sent. Every forwarded frame end
+  carries the current rotation, the delay only while set, and the capture time unchanged.
+  Red on a router that forwards CVO only when the source packet has it, on a leg that drops
+  the playout delay, and on one that drops the capture time.
+
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.
 
@@ -1593,6 +1686,7 @@ W19, blocks, because those are soundness reds.
 | **S8** withdrawn | ICE-TCP is replaced by TURN over a stream (turn.md TURN-2, slice U8) | — | — |
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7 | the cost targets |
 | **C1** Opus RED | RTP-13 and its use here: RTC-2's `Red` answer, RTC-5's ring, policy and RED legs | S6 | W21, W22, W23 |
+| **C4** Header-extension pack | RTP-3's VLA, playout-delay, CVO and abs-capture-time; RTC-1's answers, RTC-5's egress extensions and `set_playout`, RTC-6's planned rates and dropped streams | S6 | W11b, W26 |
 | **C9b** E2EE routing | RTC-6's clear ranges; VP9's keyframe from the descriptor alone | S6, C1 | W25 |
 | **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 
@@ -1747,7 +1841,8 @@ W12 and W13 in `speaker_laws.hirsel`):
   publication's first packet: the plaintext bytes up to the payload end of each fresh media
   packet (not repairs), times 8. A window that closes sets the rate of each encoding that had
   packets in it, so a paused encoding keeps its last rate. Each `Media` message carries its
-  encoding's rate to the remote units; there is no separate rate message. An unmeasured
+  encoding's rate (planned where known, else measured) and the publication's dropped set
+  to the remote units; there is no separate rate or allocation message. An unmeasured
   encoding costs 0, so a down-track is lowered only once its rates are known.
 - **Effective target.** A lowered video target is `Layer(e', s, t)` with the target's own
   `s` and `t`. Audio's effective target is its target. A held audio down-track keeps its mask
@@ -1943,5 +2038,8 @@ switching and timelines.
 | LiveKit | NACK answered from a sequencer by resending on the media SSRC or RTX | **REPLACED** by RTX only (RTC-4). TLS-8 never seals twice and never seals below the highest index, so a media-SSRC resend would need sealed copies per subscriber. |
 | LiveKit | Single UDP port with a mux across the node, sessions found by ufrag then 5-tuple | **REPLACED** by one port per unit, so the home unit is a signaling choice and the kernel needs no steering. |
 | LiveKit | Kick through its room service: remove participant, close its PeerConnection | **REPLACED** by RTC-7's fence. LiveKit's removal is asynchronous and gives no point after which no packet is forwarded. |
+| libwebrtc (`/tmp/ref-libwebrtc-hdrext`, `b2946b39`) | The receiver takes a frame's rotation from its last packet and resets it to 0° on a packet without CVO (`rtp_video_stream_receiver2.cc`, `frame_object.cc`); the sender writes CVO on a keyframe, a change, or while nonzero (`rtp_sender_video.cc:398-405`); the sender's layers allocation carries each stream's index (`rtp_video_layers_allocation_extension.cc`) | **ADOPTED.** RTC-5 writes the publication's current CVO on every forwarded frame end, so any conforming sender's rotation survives a switch; RTC-6 reads only the allocation whose index matches the stream it came on. |
+| LiveKit | `PlayoutDelayController` (pkg/sfu/playoutdelay.go:86): per down-track min and max, raised and lowered from jitter and NACK statistics, written into the playout-delay extension until acked | **ADAPTED** to a static per-subscription value (`set_playout`). The adaptive controller is a follow-up; a static value is what C4 asked for and is deterministic for the laws. |
+| Janus | Parses `video-layers-allocation00` for the publisher's spatial and temporal layer counts only, ignoring rates (src/rtp.c:464-527, used from src/ice.c) | **ADAPTED.** RTC-6 uses the per-stream rates and the active set as well: planned rates for allocation and a dropped stream as a switch trigger. |
 | str0m | Sans-IO `Rtc` with `handle_input` and `poll_output`, one per peer | **ADOPTED** as `receive` and `poll` |
 | str0m and LiveKit | SCTP data channels | **NOT TAKEN** for Wave 1. Application data goes over `runner.room` or WebTransport (Wave 2). |

@@ -29,6 +29,7 @@ grants = ["Tasks"]
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"ext_laws.hirsel" = "laws"
 "bwe_laws.hirsel" = "bwe"
 "stats_laws.hirsel" = "laws"
 "pacer_laws.hirsel" = "laws"

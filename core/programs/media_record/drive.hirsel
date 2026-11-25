@@ -402,10 +402,10 @@ fn setup(video: Option[webrtc_sfu.sdp.Codec], audio: bool) -> Rig {
 fn media(mut rig: Rig, s: Stream, k: u64) {
     let p = s.packets[k]
     let PublicationId(n) = s.publication
-    let m = webrtc_sfu.peer.MediaIn(section: 0, encoding: 0, ssrc: int.truncate(n * 1000), index: p.index, pt: 96, ts: p.ts, wide: 0, reset: false, marker: p.marker, payload_at: 0, payload_len: list.len(p.payload), audio_level: None, voice: None, layer: None, dd_at: 0, dd_len: 0)
+    let m = webrtc_sfu.peer.MediaIn(section: 0, encoding: 0, ssrc: int.truncate(n * 1000), index: p.index, pt: 96, ts: p.ts, wide: 0, reset: false, marker: p.marker, payload_at: 0, payload_len: list.len(p.payload), audio_level: None, voice: None, layer: None, dd_at: 0, dd_len: 0, orientation: None, capture: None, plan: None)
     let mut packet: Bytes = list.new()
     list.append(mut packet, p.payload)
-    let carry: webrtc_sfu.router.Carry = Media(room: ROOM, publication: s.publication, src: PUBLISHER, m: m, handle: 0, speaking: false, rate: s.rate)
+    let carry: webrtc_sfu.router.Carry = Media(room: ROOM, publication: s.publication, src: PUBLISHER, m: m, handle: 0, speaking: false, rate: s.rate, dropped: 0)
     let now = rig.now
     record.carried(mut rig.rec, now, webrtc_sfu.router.Carried(carry: carry, packet: shared.new(take packet)))
     collect(mut rig)

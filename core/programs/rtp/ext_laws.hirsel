@@ -1,0 +1,174 @@
+fn video_map() -> ext.ExtMap {
+    let mut m = ext.map(Mixed)
+    result.unwrap(ext.bind(mut m, 2, AbsSendTime))
+    result.unwrap(ext.bind(mut m, 3, VideoOrientation))
+    result.unwrap(ext.bind(mut m, 4, TransportSeq))
+    result.unwrap(ext.bind(mut m, 5, PlayoutDelay))
+    result.unwrap(ext.bind(mut m, 6, AbsCaptureTime))
+    result.unwrap(ext.bind(mut m, 14, VideoLayersAllocation))
+    m
+}
+
+fn layers_of(pkt: Bytes) -> Result[ext.Allocation, ext.Error] {
+    let h = result.unwrap(header.parse(pkt))
+    ext.allocation(pkt, h, found(video_map(), pkt, h, VideoLayersAllocation))
+}
+
+// Writes `a` alone through the map's VLA id and answers the element's value.
+fn allocation_bytes(a: ext.Allocation) -> Bytes {
+    let mut w = ext.writer()
+    result.unwrap(ext.put_allocation(mut w, video_map(), a))
+    let mut out: Bytes = list.with_capacity(300)
+    result.unwrap(header.write(fields(), view w, mut out))
+    let h = result.unwrap(header.parse(out))
+    let e = found(video_map(), out, h, VideoLayersAllocation)
+    clone(list.slice(out, e.at, e.at + e.len))
+}
+
+fn refused_layers(value: Bytes) {
+    let mut pkt: Bytes = list.with_capacity(64)
+    list.append(mut pkt, b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00")
+    let len: u8 = int.narrow(list.len(value))
+    list.push(mut pkt, 14)
+    list.push(mut pkt, len)
+    list.append(mut pkt, value)
+    while list.len(pkt) % 4 != 0 {
+        list.push(mut pkt, 0)
+    }
+    let words: u16 = int.narrow((list.len(pkt) - 16) / 4)
+    list.set_word_be(mut pkt, 14, words)
+    let Error(Value(VideoLayersAllocation)) = layers_of(pkt) else {
+        fail("malformed allocation accepted")
+    }
+}
+
+/// bug: Misread or miswrite the CVO byte, the playout-delay MIN and MAX, the abs-capture-time timestamp or its signed clock offset, or any field of a layers allocation: its stream index, per-stream masks, temporal counts, leb128 rates, sizes, or the empty allocation; or accept a value libwebrtc refuses.
+/// oracle: libwebrtc docs/native-code/rtp-hdrext/{video-layers-allocation00,playout-delay,abs-capture-time}/README.md at b2946b39 and 3GPP TS 26.114 section 7.4.5, each value decoded by hand below; and two VLA packets Chromium 156 sent (2682's capture, rig/vla_scan.py), decoded by hand from the same README.
+@test
+fn video_extension_values() -> Result[(), ()] {
+    let m = video_map()
+    // CVO 0 0 0 0 C F R1 R0: back camera (C = 1), not flipped, R = 3 (270 degrees).
+    // Playout delay 00 a0 64: MIN 0x00a = 10 (100 ms), MAX 0x064 = 100 (1 s).
+    // Abs-capture-time: UQ32.32 0x0123456789abcdef, then the offset -1.5 s in
+    // Q32.32, -(3 << 31) = 0xfffffffe80000000.
+    let pkt = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbe\xde\x00\x06\x30\x0b\x52\x00\xa0\x64\x6f\x01\x23\x45\x67\x89\xab\xcd\xef\xff\xff\xff\xfe\x80\x00\x00\x00\x00"
+    let h = result.unwrap(header.parse(pkt))
+    let f = result.unwrap(ext.scan(m, pkt, h))
+    let Some(cvo) = ext.found(f, VideoOrientation) else {
+        fail("CVO missing")
+    }
+    let Some(delay) = ext.found(f, PlayoutDelay) else {
+        fail("playout delay missing")
+    }
+    let Some(capture) = ext.found(f, AbsCaptureTime) else {
+        fail("abs-capture-time missing")
+    }
+    if result.unwrap(ext.orientation(pkt, h, cvo)) != 0x0b || result.unwrap(ext.playout_delay(pkt, h, delay)) != (10u16, 100u16) {
+        fail("CVO or playout delay value")
+    }
+    if result.unwrap(ext.abs_capture_time(pkt, h, capture)) != (0x0123456789abcdefu64, Some(-6442450944i64)) {
+        fail("abs-capture-time with offset")
+    }
+    let Error(Value(VideoOrientation)) = ext.orientation(pkt, h, ext.Element(id: 3, at: 17, len: 2)) else {
+        fail("two-byte CVO accepted")
+    }
+    // MIN 0x064 above MAX 0x00a: VideoPlayoutDelay::Set refuses it.
+    let swapped = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbe\xde\x00\x01\x52\x06\x40\x0a"
+    let Error(Value(PlayoutDelay)) = ext.playout_delay(swapped, result.unwrap(header.parse(swapped)), ext.Element(id: 5, at: 17, len: 3)) else {
+        fail("playout MIN above MAX accepted")
+    }
+    let short_capture = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbe\xde\x00\x04\x6b\x01\x23\x45\x67\x89\xab\xcd\xef\x00\x00\x00\x00\x00\x00\x00"
+    let sh = result.unwrap(header.parse(short_capture))
+    if result.unwrap(ext.abs_capture_time(short_capture, sh, ext.Element(id: 6, at: 17, len: 8))) != (0x0123456789abcdefu64, None) {
+        fail("abs-capture-time without offset")
+    }
+    let Error(Value(AbsCaptureTime)) = ext.abs_capture_time(short_capture, sh, ext.Element(id: 6, at: 17, len: 12)) else {
+        fail("12-byte abs-capture-time accepted")
+    }
+    // The writers lay out the same values in put order.
+    let mut w = ext.writer()
+    result.unwrap(ext.put_orientation(mut w, m, 0x0b))
+    result.unwrap(ext.put_playout_delay(mut w, m, 10, 100))
+    result.unwrap(ext.put_abs_capture_time(mut w, m, 0x0123456789abcdef, Some(-6442450944)))
+    let mut out: Bytes = list.with_capacity(64)
+    result.unwrap(header.write(header.Fields(marker: false, pt: 0, seq: 0, ts: 0, ssrc: 0), view w, mut out))
+    if out != pkt {
+        fail("CVO, playout delay and abs-capture-time egress bytes")
+    }
+    let Error(Value(PlayoutDelay)) = ext.put_playout_delay(mut w, m, 0, 4096) else {
+        fail("playout MAX past 12 bits written")
+    }
+    let Error(Value(PlayoutDelay)) = ext.put_playout_delay(mut w, m, 11, 10) else {
+        fail("playout MIN above MAX written")
+    }
+    // One stream (RID 0, NS 0) with two spatial layers, sl_bm 0b0011, two
+    // temporal layers each (#tl 01 01 00 00 = 0x50). Cumulative kbps, lower
+    // spatial layers included: 100 = 64, 160 = a0 01, 400 = 90 03, 600 = d8 04.
+    // Sizes: 640x360 at 15 = 027f 0167 0f, 1280x720 at 30 = 04ff 02cf 1e. The
+    // 19 bytes need the two-byte form: 0e 13, then 3 zero bytes to the word.
+    let svc = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x06\x0e\x13\x03\x50\x64\xa0\x01\x90\x03\xd8\x04\x02\x7f\x01\x67\x0f\x04\xff\x02\xcf\x1e\x00\x00\x00"
+    let a = result.unwrap(layers_of(svc))
+    if a.stream != 0 || a.masks !=[3u8, 0, 0, 0] || a.temporal[0] != 2 || a.temporal[1] != 2 || a.temporal[2] != 0 || a.kbps[0] != 100 || a.kbps[1] != 160 || a.kbps[4] != 400 || a.kbps[5] != 600 {
+        fail("SVC allocation layers and rates")
+    }
+    if !a.sized || a.width[0] != 640 || a.height[0] != 360 || a.fps[0] != 15 || a.width[1] != 1280 || a.height[1] != 720 || a.fps[1] != 30 {
+        fail("SVC allocation sizes")
+    }
+    if ext.stream_kbps(a, 0) != Some(600u32) || ext.stream_kbps(a, 1) != None {
+        fail("stream total is the top layer's cumulative rate")
+    }
+    if allocation_bytes(a) != list.slice(svc, 18, 37) {
+        fail("SVC allocation egress bytes")
+    }
+    // The empty allocation is the single 0 byte, both ways.
+    let none = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbe\xde\x00\x01\xe0\x00\x00\x00"
+    let e = result.unwrap(layers_of(none))
+    if ext.last_stream(e) != None || e.stream != 0 || allocation_bytes(ext.empty_allocation()) != b"\x00" {
+        fail("empty allocation")
+    }
+    // 1,000,000 = 0xf4240 is leb128 c0 84 3d and is the largest rate kept;
+    // 1,000,001 is c1 84 3d.
+    let most = b"\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbe\xde\x00\x02\xe4\x01\x00\xc0\x84\x3d\x00\x00"
+    if result.unwrap(layers_of(most)).kbps[0] != 1000000 {
+        fail("largest rate")
+    }
+    refused_layers(b"\x01\x00\xc1\x84\x3d")
+    // The last rate's leb128 is cut, the sizes are one byte short, the
+    // sending stream index 1 is above the last active stream 0, and a
+    // per-stream mask byte or the temporal byte is missing.
+    refused_layers(b"\x03\x50\x64\xa0\x01\x90\x03\xd8")
+    refused_layers(list.slice(svc, 18, 36))
+    refused_layers(b"\x41\x00\x64")
+    refused_layers(b"\x20\x10")
+    refused_layers(b"\x01")
+    // Chromium's q stream (index 0 of three, sendEncodings q, h, f) before h
+    // was stopped: a1/61/21 headers on f, h, q. 21 = RID 0, NS 2, sl_bm 1,
+    // so every stream has spatial layer 0; #tl 54 = 2, 2, 2. Rates 5a = 90,
+    // 96 01 = 150, ac 02 = 300, f4 03 = 500, 82 17 = 2946, ae 26 = 4910.
+    let before = b"\x90\x60\x53\x45\xf4\x76\x45\xdc\xc3\xad\xad\xd4\xbe\xde\x00\x06\x22\x06\xb3\x7e\x41\x03\xbd\xec\x21\x54\x5a\x96\x01\xac\x02\xf4\x03\x82\x17\xae\x26\x00\x00\x00\x90\xe0\x87\x93\xa8\x00\xd1\x2e\x00\xe3\x83\x6f\x85\x4f\x7f\xaf"
+    let b = result.unwrap(layers_of(before))
+    if b.stream != 0 || b.masks !=[1u8, 1, 1, 0] || b.temporal[0] != 2 || b.temporal[4] != 2 || b.temporal[8] != 2 || b.sized {
+        fail("Chromium simulcast allocation layers")
+    }
+    if b.kbps[0] != 90 || b.kbps[1] != 150 || b.kbps[16] != 300 || b.kbps[17] != 500 || b.kbps[32] != 2946 || b.kbps[33] != 4910 || ext.stream_kbps(b, 1) != Some(500u32) {
+        fail("Chromium simulcast allocation rates")
+    }
+    if allocation_bytes(b) != list.slice(before, 24, 37) {
+        fail("Chromium shared-mask allocation egress bytes")
+    }
+    // After h was set inactive: 20 = RID 0, NS 2, sl_bm 0, so per-stream masks
+    // follow: 10 = q 1, h 0; 10 = f 1, stream 3 0. #tl 50 = 2, 2. Rates 90,
+    // 150, 8a 19 = 3210, e6 29 = 5350.
+    let after = b"\x90\x60\x53\x4e\xf4\x81\x42\x5c\xc3\xad\xad\xd4\xbe\xde\x00\x05\x22\x24\xfb\xcb\x41\x07\x98\xea\x20\x10\x10\x50\x5a\x96\x01\x8a\x19\xe6\x29\x00\x90\xe0\x87\x9b\xac\x00\x91\x39\x00\xe3\x5b\xbf\x85\x3f\x9f\xaf"
+    let c = result.unwrap(layers_of(after))
+    if c.stream != 0 || c.masks !=[1u8, 0, 1, 0] || c.temporal[0] != 2 || c.temporal[4] != 0 || c.temporal[8] != 2 || c.kbps[0] != 90 || c.kbps[1] != 150 || c.kbps[32] != 3210 || c.kbps[33] != 5350 {
+        fail("Chromium allocation after h stopped")
+    }
+    if ext.stream_kbps(c, 1) != None || ext.stream_kbps(c, 2) != Some(5350u32) || ext.last_stream(c) != Some(2u64) {
+        fail("stopped stream still has a rate")
+    }
+    if allocation_bytes(c) != list.slice(after, 24, 35) {
+        fail("Chromium per-stream-mask allocation egress bytes")
+    }
+    Ok(())
+}

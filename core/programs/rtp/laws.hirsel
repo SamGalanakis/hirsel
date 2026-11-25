@@ -303,6 +303,18 @@ fn bounded_views() -> Result[(), ()] {
     let Error(Buffer) = ext.token(short, h, Mid, e) else {
         fail("token accepted a mismatched buffer")
     }
+    let Error(Buffer) = ext.orientation(short, h, e) else {
+        fail("CVO accepted a mismatched buffer")
+    }
+    let Error(Buffer) = ext.playout_delay(short, h, e) else {
+        fail("playout delay accepted a mismatched buffer")
+    }
+    let Error(Buffer) = ext.abs_capture_time(short, h, e) else {
+        fail("abs-capture-time accepted a mismatched buffer")
+    }
+    let Error(Buffer) = ext.allocation(short, h, e) else {
+        fail("allocation accepted a mismatched buffer")
+    }
     if at != 0 {
         fail("buffer refusal advanced the cursor")
     }

@@ -1,0 +1,192 @@
+// ---- RTC-5 header extension laws (W26) ----
+// The publisher's simulcast section of `simulcast_offer`, plus 3GPP TS 26.114 CVO on
+// extension 3 and abs-capture-time on extension 4.
+fn oriented_offer() -> Bytes {
+    let mut b = minimal_head(b" s")
+    list.append(mut b, minimal_video(b"96", b"s", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\na=rtcp-fb:96 nack pli\na=extmap:2 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\na=extmap:3 urn:3gpp:video-orientation\na=extmap:4 http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time\na=rid:q send\na=rid:h send\na=rid:f send\na=simulcast:send q;h;f\n")
+    take b
+}
+
+// A subscriber's one receiving section `d`, binding playout delay on 5, CVO on 6 and
+// abs-capture-time on 7: ids other than the publisher's, so a forwarded value is
+// written by the leg, never copied from the source header.
+fn oriented_viewer() -> Bytes {
+    let mut b = minimal_head(b" d")
+    recv_section(mut b, b"d", b"96", b"", b"1", b"")
+    list.append(mut b, b"a=extmap:5 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay\na=extmap:6 urn:3gpp:video-orientation\na=extmap:7 http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time\n")
+    take b
+}
+
+// Frame k's capture time: an NTP UQ32.32 value unique per frame.
+fn capture_ts(k: u64) -> u64 {
+    0xe1a2b3c4d5e6f700u64 + k
+}
+
+// The abs-capture-time value of frame k as the README lays it out: the 64-bit
+// capture time big-endian, then the 64-bit clock offset big-endian (here 3).
+fn capture_bytes(k: u64) -> Bytes {
+    let ts = capture_ts(k)
+    let mut b: Bytes = list.new()
+    for i in 0u64 .. 8u64 {
+        list.push(mut b, int.narrow((ts >> (56 - 8 * i)) & 255))
+    }
+    list.append(mut b, b"\x00\x00\x00\x00\x00\x00\x00\x03")
+    b
+}
+
+// One frame of encoding e, sent as one marked packet with the frame's capture time
+// and, when `cvo` is given, the CVO byte.
+fn send_oriented(mut r: router.Router, now: u64, mut p: Client, k: u64, e: u32, body: Bytes, cvo: Option[u8], mut out: peer.Outbox) {
+    let rid = if e == 0 {
+        b"q"
+    } else if e == 1 {
+        b"h"
+    } else {
+        b"f"
+    }
+    let mut m = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut m, 1, Mid))
+    result.unwrap(rtp.ext.bind(mut m, 2, Rid))
+    result.unwrap(rtp.ext.bind(mut m, 3, VideoOrientation))
+    result.unwrap(rtp.ext.bind(mut m, 4, AbsCaptureTime))
+    let mut w = rtp.ext.writer()
+    result.unwrap(rtp.ext.put(mut w, m, Mid, b"s", 0, 1))
+    result.unwrap(rtp.ext.put(mut w, m, Rid, rid, 0, list.len(rid)))
+    if let Some(c) = cvo {
+        result.unwrap(rtp.ext.put_orientation(mut w, m, c))
+    }
+    result.unwrap(rtp.ext.put_abs_capture_time(mut w, m, capture_ts(k), Some(3)))
+    let seq: u16 = int.narrow(1000 + k)
+    let ts: u32 = int.narrow(90000 + 3000 * k)
+    let f = rtp.header.Fields(marker: true, pt: 96, seq: seq, ts: ts, ssrc: E0 + e)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, body)
+    // A trailing byte naming the encoding, so the subscriber can tell which it forwards.
+    list.push(mut b, int.narrow(e))
+    let _ = result.unwrap(srtp.protect_rtp(mut p.cs, mut b))
+    feed(mut r, now, p.who, p.at, b, mut out)
+}
+
+// Frame k on all three encodings, as a simulcast encoder sends one capture; each
+// payload ends with its encoding's index.
+fn capture(mut r: router.Router, now: u64, mut p: Client, k: u64, key: bool, cvo: Option[u8], mut out: peer.Outbox) {
+    for e in 0u32 .. 3u32 {
+        let body = if key {
+            vp8_key()
+        } else {
+            vp8_delta()
+        }
+        send_oriented(mut r, now, mut p, k, e, body, cvo, mut out)
+    }
+}
+
+// The subscriber's forwarded copies of frame k (one per encoding the leg still takes
+// in a switch): one comes from encoding `from`, and every one does when `only`; each
+// ends the frame, so each carries CVO `cvo` (libwebrtc's receiver
+// takes a frame's rotation from its last packet and reads a packet without CVO as 0
+// degrees), the playout delay bytes `delay` when set, and the publisher's
+// abs-capture-time unchanged.
+fn expect_frame(mut s: Client, out: peer.Outbox, k: u64, from: u8, only: bool, cvo: u8, delay: Option[Bytes], take what: String) {
+    let got = received(mut s, out)
+    let mut byte: Bytes = list.new()
+    list.push(mut byte, cvo)
+    let mut rotated = list.len(got) != 0
+    let mut seen = false
+    for g in got {
+        let tag = g.pkt[list.len(g.pkt) - 1]
+        if tag == from {
+            seen = true
+        } else if only {
+            fail("the leg forwarded an encoding it should have left")
+        }
+        if !g.h.marker {
+            fail("a forwarded frame end lost its marker")
+        }
+        if ext_value(g, 6, VideoOrientation) != Some(clone(byte)) {
+            rotated = false
+        }
+        if ext_value(g, 5, PlayoutDelay) != delay {
+            fail("a leg's playout delay is not the subscription's")
+        }
+        if ext_value(g, 7, AbsCaptureTime) != Some(capture_bytes(k)) {
+            fail("abs-capture-time did not pass through unchanged")
+        }
+    }
+    if !seen {
+        fail("the leg did not forward the encoding its target names")
+    }
+    if !rotated {
+        fail(take what)
+    }
+}
+
+// W26. The publisher follows 3GPP TS 26.114's minimum: CVO only on keyframes and on
+// the frame where the rotation changes. Every frame the subscriber gets ends with the
+// rotation in force, across a switch from q to h and across a rotation change, and
+// carries the publisher's capture time; after `set_playout` (min 100 ms, max 1 s)
+// every media packet carries the playout delay, 12-bit MIN 0x00a then 12-bit MAX
+// 0x064: 00 a0 64.
+/// bug: forward CVO only on packets whose source carried it, so a delta frame after a switch or after a minimal sender's change renders unrotated; drop the playout delay or write it after it is cleared; drop or rewrite abs-capture-time.
+/// oracle: 3GPP TS 26.114 section 7.4.5 for the CVO byte (R1 R0 = 01 is 90 degrees), libwebrtc's receiver (rtp_video_stream_receiver2.cc: a frame's rotation is its last packet's, 0 without CVO), and libwebrtc's playout-delay and abs-capture-time READMEs at b2946b39, each value written by hand above.
+@test
+fn rotation_survives_a_layer_switch() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(120))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let room = room_id()
+    let mut p = admit(mut r, 121, oriented_offer(), 1)
+    let mut s = admit(mut r, 123, oriented_viewer(), 2)
+    let pa = result.unwrap(router.publish(mut r, room, p.who, 0))
+    let low: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let mid: router.Target = Layer(encoding: 1, spatial: 0, temporal: 0)
+    let mut now = 10 * MS
+    result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, low, now, mut out))
+    peer.clear_outbox(mut out)
+    // CVO byte 0b0000_0001: C = 0, F = 0, R1 R0 = 01, 90 degrees.
+    capture(mut r, now, mut p, 0, true, Some(1), mut out)
+    expect_frame(mut s, out, 0, 0, true, 1, None, "a keyframe lost its rotation")
+    peer.clear_outbox(mut out)
+    result.unwrap(router.set_playout(mut r, room, s.who, pa, Some(peer.Delay(min: 10, max: 100))))
+    let delay: Option[Bytes] = Some(b"\x00\xa0\x64")
+    now = 20 * MS
+    capture(mut r, now, mut p, 1, false, None, mut out)
+    expect_frame(mut s, out, 1, 0, true, 1, delay, "a delta frame without CVO was forwarded unrotated")
+    peer.clear_outbox(mut out)
+    now = 30 * MS
+    result.unwrap(router.set_target(mut r, room, s.who, pa, mid, now, mut out))
+    peer.clear_outbox(mut out)
+    // A delta on h does not start the switch; whatever the leg still forwards before
+    // h's keyframe ends a frame and carries the rotation.
+    now = 35 * MS
+    capture(mut r, now, mut p, 2, false, None, mut out)
+    for g in received(mut s, out) {
+        if ext_value(g, 6, VideoOrientation) != Some(b"\x01") {
+            fail("a frame forwarded during the switch was unrotated")
+        }
+    }
+    peer.clear_outbox(mut out)
+    now = 40 * MS
+    capture(mut r, now, mut p, 3, true, Some(1), mut out)
+    expect_frame(mut s, out, 3, 1, false, 1, delay, "the switch keyframe lost its rotation")
+    peer.clear_outbox(mut out)
+    now = 50 * MS
+    capture(mut r, now, mut p, 4, false, None, mut out)
+    expect_frame(mut s, out, 4, 1, true, 1, delay, "a delta after the switch was forwarded unrotated")
+    peer.clear_outbox(mut out)
+    // The rotation changes to 0 degrees on a delta frame, then holds.
+    now = 60 * MS
+    capture(mut r, now, mut p, 5, false, Some(0), mut out)
+    expect_frame(mut s, out, 5, 1, true, 0, delay, "the rotation change did not reach the leg")
+    peer.clear_outbox(mut out)
+    now = 70 * MS
+    capture(mut r, now, mut p, 6, false, None, mut out)
+    expect_frame(mut s, out, 6, 1, true, 0, delay, "a delta after the change kept the old rotation")
+    peer.clear_outbox(mut out)
+    result.unwrap(router.set_playout(mut r, room, s.who, pa, None))
+    now = 80 * MS
+    capture(mut r, now, mut p, 7, false, None, mut out)
+    expect_frame(mut s, out, 7, 1, true, 0, None, "a cleared playout delay was still written")
+    Ok(())
+}

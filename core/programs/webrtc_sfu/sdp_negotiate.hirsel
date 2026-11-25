@@ -80,7 +80,7 @@ pub fn default_policy() -> Policy {
     for codec in[Vp8, Vp9, H264, Av1] {
         list.push(mut video, codec)
     }
-    for ext in[Mid, RidExtension, RepairedRid, AudioLevel, AbsSendTime, TransportCc, DependencyDescriptor] {
+    for ext in[Mid, RidExtension, RepairedRid, AudioLevel, AbsSendTime, TransportCc, DependencyDescriptor, VideoLayersAllocation, PlayoutDelay, VideoOrientation, AbsCaptureTime] {
         list.push(mut exts, ext)
     }
     Policy(audio: take audio, video: take video, exts: take exts, max_sections: 64, simulcast: true)

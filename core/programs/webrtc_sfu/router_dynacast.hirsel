@@ -166,6 +166,8 @@ fn published(mut r: Router, pi: u64, now: u64) -> Option[u64] {
             r.publications[pi].encodings[e].since = None
             if !r.publications[pi].encodings[e].on {
                 r.publications[pi].encodings[e].on = true
+                // The publisher's next allocation tells whether it resumed the stream.
+                r.publications[pi].encodings[e].idle = false
                 changed = true
             }
             continue
@@ -190,6 +192,17 @@ fn published(mut r: Router, pi: u64, now: u64) -> Option[u64] {
     }
     if changed {
         layers(mut r, pi)
+        // A stream the published mask turned off or on again is paused or resumed by
+        // the router, not stopped by the publisher: it leaves the dropped mask, and
+        // no target was on it (its bit was unwanted), so none moves.
+        let mut on = 0u64
+        for e in 0u64 .. list.len(r.publications[pi].encodings) {
+            if r.publications[pi].encodings[e].on && r.publications[pi].encodings[e].idle {
+                on = on | (1u64 << e)
+            }
+        }
+        let wide: u64 = int.widen(r.publications[pi].dropped)
+        r.publications[pi].dropped = int.narrow(wide & on)
     }
     next
 }
@@ -213,9 +226,13 @@ fn layers(mut r: Router, pi: u64) {
 }
 
 // ---- The effective target ----
+// The planned rate where the publisher's allocation gave one, else the measured.
 fn rate_of(r: Router, pi: u64, e: u64) -> i64 {
     if e >= list.len(r.publications[pi].encodings) {
         return 0
+    }
+    if r.publications[pi].encodings[e].planned != 0 {
+        return int.narrow(r.publications[pi].encodings[e].planned)
     }
     int.narrow(r.publications[pi].encodings[e].rate)
 }
@@ -375,7 +392,7 @@ fn point(mut r: Router, d: u64, now: u64, mut out: peer.Outbox) -> Result[(), Ro
     let t = if r.downs[d].held {
         Off
     } else {
-        r.downs[d].effective
+        forwardable(r.publications[pi], r.downs[d].effective)
     }
     let track = r.downs[d].track
     // An AV1 layer the structure cannot represent keeps the rewrite where it is (RTC-6).
@@ -394,6 +411,95 @@ fn point(mut r: Router, d: u64, now: u64, mut out: peer.Outbox) -> Result[(), Ro
             keyframe(mut r, now, pi, e, Switch, mut out)?
         }
     }
+    Ok(())
+}
+
+// RTC-6: a target on an encoding the publisher dropped forwards the highest live
+// encoding below it, else the lowest live one above it, keeping its spatial and
+// temporal layers; with none live it stays.
+fn forwardable(p: Publication, t: Target) -> Target {
+    let Layer(encoding: e, spatial: s, temporal: tl) = t else {
+        return t
+    }
+    let mask: u64 = int.widen(p.dropped)
+    let at: u64 = int.widen(e)
+    if (mask >> at) & 1 == 0 {
+        return t
+    }
+    let mut k = at
+    while k > 0 {
+        k -= 1
+        if (mask >> k) & 1 == 0 {
+            return Layer(encoding: int.narrow(k), spatial: s, temporal: tl)
+        }
+    }
+    for j in at + 1 .. list.len(p.encodings) {
+        if (mask >> j) & 1 == 0 {
+            return Layer(encoding: int.narrow(j), spatial: s, temporal: tl)
+        }
+    }
+    t
+}
+
+// RTC-6: the home unit reads the publisher's video layers allocation. Chromium sends
+// the same allocation on every stream, each with that stream's index, so one whose
+// index is not the encoding it came on is not this section's stream order and is
+// left alone; the empty allocation names no stream. An active stream's planned rate
+// replaces its measured one; a published stream it leaves inactive is dropped.
+fn planned(mut r: Router, pi: u64, encoding: u8, plan: peer.Plan, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    if plan.active != 0 && plan.stream != encoding {
+        return Ok(())
+    }
+    let n = order.min(list.len(r.publications[pi].encodings), 4u64)
+    let wide: u64 = int.widen(plan.active)
+    let mut moved = false
+    for e in 0u64 .. n {
+        let active = (wide >> e) & 1 == 1
+        r.publications[pi].encodings[e].idle = !active
+        if active {
+            let bps: u64 = int.widen(plan.kbps[e])
+            if bps * 1000 != r.publications[pi].encodings[e].planned {
+                r.publications[pi].encodings[e].planned = bps * 1000
+                moved = true
+            }
+        }
+    }
+    let mut mask = 0u64
+    for e in 0u64 .. list.len(r.publications[pi].encodings) {
+        if r.publications[pi].encodings[e].idle && r.publications[pi].encodings[e].on {
+            mask = mask | (1u64 << e)
+        }
+    }
+    let before = r.publications[pi].dropped
+    let after: u8 = int.narrow(mask)
+    if moved {
+        reallocate(mut r, pi, now, mut out)?
+    }
+    if after != before {
+        r.publications[pi].dropped = after
+        repoint(mut r, pi, before | after, now, mut out)?
+    }
+    Ok(())
+}
+
+// Point again each local down-track of publication `pi` whose effective encoding is
+// in `bits`, which the dropped mask moved: it switches at the next switch point of
+// the encoding it now forwards, whose keyframe `point` asks for. The local mask follows.
+fn repoint(mut r: Router, pi: u64, bits: u8, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let room = r.publications[pi].room
+    let id = r.publications[pi].id
+    let wide: u64 = int.widen(bits)
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].room != room || r.downs[d].publication != id || r.downs[d].home != r.unit {
+            continue
+        }
+        if let Layer(encoding: e, spatial: _, temporal: _) = r.downs[d].effective {
+            if (wide >> int.widen(e)) & 1 == 1 {
+                point(mut r, d, now, mut out)?
+            }
+        }
+    }
+    want(mut r, pi, now)
     Ok(())
 }
 

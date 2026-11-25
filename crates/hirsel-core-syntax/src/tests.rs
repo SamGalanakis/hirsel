@@ -407,7 +407,7 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
         ("fn f() {}\n + a", "+", "LANG-4"),
         ("fn f() { a;\n + b }", "+", "LANG-4"),
         ("fn f() { a < b\n < c }", "< c", "LANG-5"),
-        ("fn f() { match a\n + {} {} }", "{} {}", "LANG-5"),
+        ("fn f() { match a\n + {} {} }", "a\n +", "LANG-5"),
         ("fn f() { match x { a\n .b => c } }", ".", "LANG-4"),
         ("fn f() { a ?=> m(b) }", "(b)", "LANG-5"),
         ("fn f() { a ?=> m?}", "?}", "LANG-5"),

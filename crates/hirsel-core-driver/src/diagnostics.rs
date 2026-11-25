@@ -347,6 +347,26 @@ impl CheckProduct {
         let span_text =
             |span: Span| source.get((base + span.start) as usize..(base + span.end) as usize);
 
+        if r.rule == "LANG-5"
+            && r.message
+                .starts_with("subject cannot end in an unparenthesized block")
+        {
+            // A syntax refusal's span is the whole subject, in file bytes.
+            let module = source_name(file.name.as_deref(), &self.index.module_path(file.module));
+            let at = |offset: u32, text: &str| Edit {
+                module: module.clone(),
+                span: Span {
+                    start: base + offset,
+                    end: base + offset,
+                },
+                text: text.to_owned(),
+            };
+            return Ok(vec![Fix {
+                applicability: Applicability::Safe,
+                signature: None,
+                edits: vec![at(r.primary.span.start, "("), at(r.primary.span.end, ")")],
+            }]);
+        }
         let edit = if r.rule == "LANG-8"
             && r.declared.as_deref() == Some("waits")
             && r.required.as_deref() == Some("not waits")

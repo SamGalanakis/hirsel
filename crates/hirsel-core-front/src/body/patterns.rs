@@ -654,11 +654,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return false;
         };
         if !arm {
-            self.refuse(
-                "LANG-17",
-                site,
-                "a `mut` binding is written in a `match` arm, `if let` or `while let`",
-            );
+            let only = "only in a `match` arm, `if let` or `while let`";
+            let message =
+                format!("`mut` in a pattern names a place, not a mutable binding: {only}");
+            self.refuse("LANG-17", site, message);
             self.refuse_marks(id, false);
             return false;
         }

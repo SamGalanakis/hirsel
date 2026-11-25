@@ -875,7 +875,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let Some(ty) = found[0].filter(|&t| t != ERROR) else {
             if !self.broken {
-                self.refuse("LANG-12", n, "a type parameter of the callee is still open");
+                self.refuse("LANG-12", n, types::OPEN_TYPE_PARAMETER);
             }
             return (ERROR, None);
         };
@@ -1568,7 +1568,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let Some(t) = found[0].filter(|&t| t != ERROR) else {
             let _ = self.expr(args[1], None);
             if !self.broken {
-                self.refuse("LANG-12", n, "a type parameter of the callee is still open");
+                self.refuse("LANG-12", n, types::OPEN_TYPE_PARAMETER);
             }
             return (ERROR, None);
         };

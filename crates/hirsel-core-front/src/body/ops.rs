@@ -438,7 +438,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (rt, rv) = self.operand(r, (t != ERROR).then(|| expect(t)).flatten());
         if rt != t && ![NEVER, ERROR].contains(&rt) && t != ERROR {
             let (op, a, b) = (self.token_text(n), self.shown(t), self.shown(rt));
-            let message = format!("`{a}` {op} `{b}`");
+            let message = if matches!(op, "<<" | ">>" | "<<=" | ">>=") {
+                format!("`{a}` {op} `{b}`; a shift count has the shifted value's type")
+            } else {
+                format!("`{a}` {op} `{b}`")
+            };
             self.refuse_compared_at("LANG-21", self.op_span(n), b, a, message);
             return None;
         }

@@ -26,6 +26,9 @@ impl CheckProduct {
             "OWN-10" => cx.own10_fixes(),
             "CAP-1" => cx.cap1_fixes(),
             "LANG-11" => cx.lang11_fixes(),
+            "LANG-12" => cx.lang12_fixes(),
+            "LANG-17" => cx.lang17_fixes(),
+            "LANG-21" => cx.lang21_fixes(),
             _ => Vec::new(),
         }
     }
@@ -715,6 +718,215 @@ impl<'a> FixContext<'a> {
         };
         (self.node_kind(tail) == NodeKind::Path && self.slice(self.node_span(tail)) == Some(name))
             .then_some(ty_text)
+    }
+
+    // ---- LANG-12: an open type parameter of the callee ----
+
+    /// `let j = 8 + int.widen(i)`: give the result a type, or suffix the literal.
+    fn lang12_fixes(&self) -> Vec<Fix> {
+        if !self
+            .refusal
+            .message
+            .starts_with("a type parameter of the callee is still open")
+        {
+            return Vec::new();
+        }
+        let Some(path) = self.path_to_span(self.refusal.primary.span) else {
+            return Vec::new();
+        };
+        let call = *path.last().unwrap();
+        if self.node_kind(call) != NodeKind::Call {
+            return Vec::new();
+        }
+        // The literal operand of the arithmetic the call sits in, if any.
+        let mut idx = path.len() - 1;
+        let mut literal = None;
+        while idx > 0 {
+            let parent = path[idx - 1];
+            match self.node_kind(parent) {
+                NodeKind::Group => {}
+                NodeKind::Binary
+                    if matches!(
+                        self.node_token_text(parent),
+                        Some("+" | "-" | "*" | "/" | "%" | "&" | "|" | "^")
+                    ) =>
+                {
+                    literal = literal.or_else(|| {
+                        self.item
+                            .tree
+                            .children(parent)
+                            .iter()
+                            .filter(|&&c| c != path[idx])
+                            .find_map(|&c| self.find_untyped_literal(c, false))
+                    });
+                }
+                _ => break,
+            }
+            idx -= 1;
+        }
+        let is_int_call = self
+            .item
+            .tree
+            .children(call)
+            .first()
+            .and_then(|&callee| self.slice(self.node_span(callee)))
+            .is_some_and(|callee| callee.starts_with("int."));
+        let flavor = match literal {
+            Some((_, flavor)) => flavor,
+            None if is_int_call => LiteralFlavor::Integer { signed_only: false },
+            None => return Vec::new(),
+        };
+        // The type a `let` binding returned as the function's tail asks for.
+        let hint = self
+            .enclosing_untyped_let(&path)
+            .and_then(|(_, name)| name)
+            .and_then(|name| self.tail_return_scalar_hint(name, flavor));
+        let ty = literal_type_candidates(flavor, hint)[0];
+        // An expected type reaches the call only when it is the whole initializer:
+        // in `8 + int.widen(i)` the literal operand gives the call its type (LANG-21).
+        if let Some((lit, _)) = literal {
+            let at = self.node_span(lit).end;
+            return vec![self.single_fix(Applicability::Maybe, Span { start: at, end: at }, ty)];
+        }
+        let mut idx = path.len() - 1;
+        while idx > 0 && self.node_kind(path[idx - 1]) == NodeKind::Group {
+            idx -= 1;
+        }
+        let Some(&stmt) = idx.checked_sub(1).and_then(|i| path.get(i)) else {
+            return Vec::new();
+        };
+        let kids = self.item.tree.children(stmt);
+        if !matches!(self.node_kind(stmt), NodeKind::Let | NodeKind::LetMut)
+            || kids.get(1) != Some(&path[idx])
+            || !matches!(
+                kids.first().map(|&p| self.node_kind(p)),
+                Some(NodeKind::BindPattern | NodeKind::Wildcard)
+            )
+        {
+            return Vec::new();
+        }
+        let at = self.node_span(kids[0]).end;
+        vec![self.single_fix(
+            Applicability::Maybe,
+            Span { start: at, end: at },
+            format!(": {ty}"),
+        )]
+    }
+
+    // ---- LANG-21: a shift count of another width ----
+
+    /// `x >> s` with `x: u64, s: u32`: the count takes the shifted value's type.
+    fn lang21_fixes(&self) -> Vec<Fix> {
+        let (Some(count), Some(value)) = (
+            self.refusal.declared.as_deref(),
+            self.refusal.required.as_deref(),
+        ) else {
+            return Vec::new();
+        };
+        let width = |ty: &str| -> Option<(bool, u32)> {
+            let signed = ty.starts_with('i');
+            let bits = ty.strip_prefix(['u', 'i'])?.parse().ok()?;
+            matches!(bits, 8 | 16 | 32 | 64).then_some((signed, bits))
+        };
+        let (Some((cs, cb)), Some((vs, vb))) = (width(count), width(value)) else {
+            return Vec::new();
+        };
+        if cs != vs || cb >= vb {
+            return Vec::new();
+        }
+        let path = self.enclosing_path(self.refusal.primary.span);
+        let Some(&shift) = path.last() else {
+            return Vec::new();
+        };
+        if !matches!(self.node_kind(shift), NodeKind::Binary | NodeKind::Assign)
+            || !matches!(
+                self.node_token_text(shift),
+                Some("<<" | ">>" | "<<=" | ">>=")
+            )
+        {
+            return Vec::new();
+        }
+        let Some(&rhs) = self.item.tree.children(shift).get(1) else {
+            return Vec::new();
+        };
+        let span = self.node_span(rhs);
+        vec![self.fix(
+            Applicability::Safe,
+            vec![
+                self.insert(span.start, "int.widen("),
+                self.insert(span.end, ")"),
+            ],
+        )]
+    }
+
+    // ---- LANG-17: `mut` in a `let` pattern ----
+
+    /// `let (mut a, mut b) = pair()`: bind fresh names, then declare `let mut a = a0`.
+    fn lang17_fixes(&self) -> Vec<Fix> {
+        if !self
+            .refusal
+            .message
+            .starts_with("`mut` in a pattern names a place")
+        {
+            return Vec::new();
+        }
+        let path = self.enclosing_path(self.refusal.primary.span);
+        let Some(&stmt) = path
+            .iter()
+            .rev()
+            .find(|&&n| self.node_kind(n) == NodeKind::Let)
+        else {
+            return Vec::new();
+        };
+        let Some(&pat) = self.item.tree.children(stmt).first() else {
+            return Vec::new();
+        };
+        // The refused `mut` is in this `let`'s own pattern, not in a `for` or `?=>`
+        // pattern inside its initializer.
+        let (site, pat_span) = (self.refusal.primary.span, self.node_span(pat));
+        if site.start < pat_span.start || site.end > pat_span.end {
+            return Vec::new();
+        }
+        let mut muts = Vec::new();
+        self.collect_mut_patterns(pat, &mut muts);
+        if muts.is_empty() {
+            return Vec::new();
+        }
+        let mut taken = BTreeSet::new();
+        self.collect_all_binders(self.item.root, &mut taken);
+        let mut fresh_names = Vec::new();
+        let mut edits = Vec::new();
+        let mut declarations = String::new();
+        for &m in &muts {
+            let Some(name) = self.node_token_text(m) else {
+                return Vec::new();
+            };
+            let Some(fresh) = (0..100)
+                .map(|k| format!("{name}{k}"))
+                .find(|c| !fresh_names.contains(c) && self.is_fresh_param_name(c, &taken))
+            else {
+                return Vec::new();
+            };
+            edits.push(self.edit(self.node_span(m), fresh.clone()));
+            declarations.push_str(&format!("; let mut {name} = {fresh}"));
+            fresh_names.push(fresh);
+        }
+        // After the initializer, so a written `;` still ends the last declaration.
+        let Some(&init) = self.item.tree.children(stmt).last() else {
+            return Vec::new();
+        };
+        edits.push(self.insert(self.node_span(init).end, declarations));
+        // A scrutinee that is an existing place is copied or moved by the rewrite.
+        vec![self.fix(Applicability::Maybe, edits)]
+    }
+
+    fn collect_mut_patterns(&self, node: NodeId, out: &mut Vec<NodeId>) {
+        if self.node_kind(node) == NodeKind::MutPattern {
+            out.push(node);
+        }
+        for &child in self.item.tree.children(node) {
+            self.collect_mut_patterns(child, out);
+        }
     }
 }
 

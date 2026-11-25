@@ -580,6 +580,81 @@ fn lang11_untyped_literal_fixes_apply_and_compile_cleanly() {
 }
 
 #[test]
+fn ds_learnings_refusals_name_their_fix_and_the_fix_compiles() {
+    // LANG-12: in arithmetic the literal operand types the call; alone, the `let` does.
+    let (fixed, rendered) = assert_fix_compiles(
+        "fn f(i: u32) -> u64 { let j = 8 + int.widen(i); j }\n",
+        "LANG-12",
+        "maybe",
+    );
+    assert_eq!(
+        fixed,
+        "fn f(i: u32) -> u64 { let j = 8u64 + int.widen(i); j }\n"
+    );
+    let (fixed, _) = assert_fix_compiles(
+        "fn f(i: u32) -> u64 { let j = int.widen(i); j }\n",
+        "LANG-12",
+        "maybe",
+    );
+    assert_eq!(
+        fixed,
+        "fn f(i: u32) -> u64 { let j: u64 = int.widen(i); j }\n"
+    );
+    assert!(
+        rendered
+            .contains("give the result a type: `let j: u64 = …`, or suffix the literal: `8u64`"),
+        "got:\n{rendered}"
+    );
+
+    // LANG-21: a shift count has the shifted value's type.
+    let (fixed, rendered) = assert_fix_compiles(
+        "fn f(x: u64, s: u32) -> u64 { x >> s }\n",
+        "LANG-21",
+        "safe",
+    );
+    assert_eq!(fixed, "fn f(x: u64, s: u32) -> u64 { x >> int.widen(s) }\n");
+    assert!(
+        rendered.contains("a shift count has the shifted value's type"),
+        "got:\n{rendered}"
+    );
+
+    // LANG-17: `mut` in a `let` pattern is not a mutable binding.
+    let (fixed, rendered) = assert_fix_compiles(
+        "fn pair() -> (u64, u64) { (1u64, 2u64) }\n\
+         fn f() -> u64 { let (mut a, b) = pair(); a += b; a }\n",
+        "LANG-17",
+        "maybe",
+    );
+    assert_eq!(
+        fixed,
+        "fn pair() -> (u64, u64) { (1u64, 2u64) }\n\
+         fn f() -> u64 { let (a0, b) = pair(); let mut a = a0; a += b; a }\n"
+    );
+    assert!(
+        rendered.contains("`mut` in a pattern names a place, not a mutable binding"),
+        "got:\n{rendered}"
+    );
+
+    // LANG-5: a two-key order as a block-ending `if` subject.
+    let (fixed, rendered) = assert_fix_compiles(
+        "fn f(a: u64, b: u64, c: u64, d: u64) -> u64 {\n\
+         \x20 if if a != b { a < b } else { c < d } { 1u64 } else { 2u64 }\n}\n",
+        "LANG-5",
+        "safe",
+    );
+    assert_eq!(
+        fixed,
+        "fn f(a: u64, b: u64, c: u64, d: u64) -> u64 {\n\
+         \x20 if (if a != b { a < b } else { c < d }) { 1u64 } else { 2u64 }\n}\n"
+    );
+    assert!(
+        rendered
+            .contains("wrap the subject in parentheses, or compare tuples: `(k1, v1) < (k2, v2)`"),
+        "got:\n{rendered}"
+    );
+}
+
+#[test]
 fn report_probe_program_emits_fixes_for_all_refusal_classes_and_caches_identically() {
     let source = "\
 type Inbox { items: List[String] }

@@ -711,7 +711,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .enumerate()
             .any(|(i, t)| t.is_none() && !g.generics[i].region);
         if undetermined && !self.broken {
-            self.refuse("LANG-12", n, "a type parameter of the callee is still open");
+            self.refuse("LANG-12", n, types::OPEN_TYPE_PARAMETER);
         }
         // The call completes: its arguments' holds end, except an argument the scoped
         // result is anchored to. A view argument stays frozen, and a `mut` argument's

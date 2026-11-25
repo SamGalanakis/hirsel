@@ -1,5 +1,11 @@
 use super::*;
 
+/// LANG-12 for a call whose type parameter nothing fixed, with the two rewrites
+/// that fix it.
+pub(super) const OPEN_TYPE_PARAMETER: &str = "a type parameter of the callee is still open; give the \
+                                   result a type: `let j: u64 = …`, or suffix the literal: \
+                                   `8u64`";
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// MEM-29: an element outside core's element modules meets LANG-14's capture mask,
     /// with rigid parameters read from their bounds. Refuses at `at` when it does not.

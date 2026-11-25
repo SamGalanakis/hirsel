@@ -1,6 +1,7 @@
 //! Recovery, significant-token cursor, precedence climbing and item-local arena/origin
 //! mechanics adapted from hirsel-parser. Every grammar visitor is for the new language.
 mod budget;
+mod subject;
 
 use crate::{grammar::*, *};
 type Nodes = smallvec::SmallVec<[NodeId; 24]>;
@@ -1534,42 +1535,6 @@ impl Parser<'_> {
             let n = self.expr(0)?;
             self.subject(n)?;
             Ok(n)
-        }
-    }
-    fn subject(&mut self, mut n: NodeId) -> Parsed<()> {
-        loop {
-            let node = self.tree.node(n);
-            match node.kind {
-                NodeKind::Unary | NodeKind::Binary | NodeKind::Return | NodeKind::Break
-                    if !self.tree.children(n).is_empty() =>
-                {
-                    n = *self.tree.children(n).last().unwrap()
-                }
-                NodeKind::Block
-                | NodeKind::If
-                | NodeKind::Match
-                | NodeKind::Loop
-                | NodeKind::While
-                | NodeKind::For
-                | NodeKind::ForTake
-                | NodeKind::Region
-                | NodeKind::Bound
-                | NodeKind::Closure
-                | NodeKind::ScopedClosure
-                | NodeKind::Labelled => {
-                    let span = node.origin.span;
-                    self.diagnostics.push(Diagnostic::error(
-                        "LANG-5",
-                        Span {
-                            start: self.base + span.start,
-                            end: self.base + span.end,
-                        },
-                        "subject cannot end in an unparenthesized block",
-                    ));
-                    return Err(());
-                }
-                _ => return Ok(()),
-            }
         }
     }
     fn pattern(&mut self) -> Parsed<NodeId> {

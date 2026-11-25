@@ -61,7 +61,7 @@ commands! {
     "prof sql", "prof sql <FILE.hprof> \"<SQL>\" [--limit 500] [--timeout-ms 5000] [--json]", "Query the profile with one read-only SQL statement.";
     "prof export", "prof export <FILE.hprof> --format pprof --out <PATH>", "Export a pprof profile.";
     "coverage", "coverage <merge|diff>", "Merge, report and diff saved coverage profiles without running anything.";
-    "coverage merge", "coverage merge FILE... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]", "Merge coverage profiles, and raw files read against their site maps, then report.";
+    "coverage merge", "coverage merge FILE|DIR|@LIST... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]", "Merge coverage profiles, and raw files read against their site maps, then report.";
     "coverage diff", "coverage diff BASE NEW [--json]", "Report the sites one coverage profile reached and the other did not.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";

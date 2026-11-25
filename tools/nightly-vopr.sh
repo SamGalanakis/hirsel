@@ -35,5 +35,18 @@ taskset -c 8-11 python3 tools/sim-campaign reds-first "$scratch/prepared/manifes
 cd "$scratch"
 taskset -c 8-11 python3 "$briefs/vopr-campaign-2092/sweep2.py" "$checkout/tools/sim-campaign" \
   1 24 --nightly "$run" || status=$?
+# Each batch merged one coverage profile per law group; fold them into the night's.
+# Coverage never changes the night's status.
+shopt -s nullglob
+declare -A groups=()
+for profile in "$scratch"/*.coverage/*.json; do
+  groups[$(basename "$profile")]+=" $profile"
+done
+mkdir -p "$run/coverage"
+for name in "${!groups[@]}"; do
+  # shellcheck disable=SC2086 # one word per batch profile
+  "${paths[0]}" coverage merge ${groups[$name]} -o "$run/coverage/$name" >/dev/null \
+    || echo "coverage ${name%.json}: merge failed" >&2
+done
 taskset -c 8-11 python3 "$checkout/core/tools/vopr_failure_groups.py" "$run"
 exit "$status"

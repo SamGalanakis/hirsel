@@ -14,8 +14,8 @@ type Error = Box<dyn std::error::Error>;
 /// 2); an input the tool refuses prints the refusal and exits 1.
 pub(crate) fn run(invocation: Invocation) -> Result<Outcome, Error> {
     let command = invocation.command.name;
-    let mut inputs: Vec<PathBuf> = invocation.positional.iter().map(PathBuf::from).collect();
-    inputs.extend(invocation.arguments.iter().map(PathBuf::from));
+    let mut inputs: Vec<String> = invocation.positional.iter().cloned().collect();
+    inputs.extend(invocation.arguments.iter().cloned());
     let (mut maps, mut base, mut targets, mut json, mut output) =
         (Vec::new(), None, None, false, None);
     for (id, value) in invocation.options {
@@ -34,7 +34,7 @@ pub(crate) fn run(invocation: Invocation) -> Result<Outcome, Error> {
             let [base, new] = inputs.as_slice() else {
                 return Err("coverage diff requires BASE and NEW profiles".into());
             };
-            diff(base, new, json)
+            diff(Path::new(base), Path::new(new), json)
         }
         "coverage merge" => {
             if inputs.is_empty() {
@@ -79,8 +79,43 @@ fn diff(base: &Path, new: &Path, json: bool) -> super::Result<()> {
     Ok(())
 }
 
+/// The files `coverage merge` reads: a directory stands for every file in it,
+/// in name order, and `@LIST` for the paths LIST holds, one per line, so a
+/// campaign's thousands of raw files need not each be an argument.
+fn expand(inputs: &[String]) -> super::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for input in inputs {
+        if let Some(list) = input.strip_prefix('@') {
+            let list = Path::new(list);
+            let text = String::from_utf8(read(list)?)
+                .map_err(|e| Refusal(format!("{}: {e}", list.display())))?;
+            files.extend(
+                text.lines()
+                    .filter(|line| !line.is_empty())
+                    .map(PathBuf::from),
+            );
+        } else if Path::new(input).is_dir() {
+            let mut entries = std::fs::read_dir(input)
+                .and_then(|dir| {
+                    dir.map(|entry| Ok(entry?.path()))
+                        .collect::<std::io::Result<Vec<_>>>()
+                })
+                .map_err(|e| Refusal(format!("{input}: {e}")))?;
+            entries.retain(|path| !path.is_dir());
+            entries.sort();
+            files.extend(entries);
+        } else {
+            files.push(PathBuf::from(input));
+        }
+    }
+    if files.is_empty() {
+        return Err(Refusal(format!("{} names no input file", inputs.join(" "))));
+    }
+    Ok(files)
+}
+
 fn merge(
-    inputs: &[PathBuf],
+    inputs: &[String],
     maps: &[PathBuf],
     base: Option<&Path>,
     targets: Option<&Path>,
@@ -97,7 +132,7 @@ fn merge(
         })
         .collect::<super::Result<Vec<_>>>()?;
     let mut merged: Option<Profile> = None;
-    for path in inputs {
+    for path in &expand(inputs)? {
         let bytes = read(path)?;
         let profile = if bytes.starts_with(b"HIRSELCV") {
             raw(path, &bytes, &maps)?

@@ -370,9 +370,11 @@ def execute(invoke, vm, jobs, archives, log):
         if ran:
             print(f"Boat {vm}: {job.lane} exited {ran}", file=sys.stderr)
         status = status or ran
-        for remote, local in job.fetch:
+        for fetch, (remote, local) in enumerate(job.fetch, 1):
             local.mkdir(parents=True, exist_ok=True)
-            fetched = invoke("scp", "-r", f"{vm}:{work}/{remote}", str(local)).returncode
+            # stdout carries only the job's rows, so scp's progress goes to a log.
+            fetched = write_log(invoke, log / f"fetch-{index}-{fetch}.log", "scp", "-r", f"{vm}:{work}/{remote}",
+                                str(local))
             status = status or fetched
         previous = work
     return status

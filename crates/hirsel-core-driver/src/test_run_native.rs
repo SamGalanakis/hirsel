@@ -3258,21 +3258,8 @@ fn coverage_tool_diffs_merges_and_reads_raw_files() {
     // A raw file ("The raw file") with classify's record flagged entry and
     // `yes`, seed 7 and a pass; picks's record is absent, so none of its
     // sites is reached.
-    let mut raw = Vec::new();
-    raw.extend_from_slice(b"HIRSELCV");
-    raw.extend_from_slice(&1u32.to_le_bytes());
-    raw.extend_from_slice(&[0; 4]);
-    raw.extend_from_slice(&56u64.to_le_bytes());
-    raw.extend_from_slice(&48u64.to_le_bytes());
-    raw.extend_from_slice(&1u32.to_le_bytes());
-    raw.extend_from_slice(&1u32.to_le_bytes());
-    raw.extend_from_slice(&7u64.to_le_bytes());
-    raw.extend_from_slice(&0x4544_4F4Eu32.to_le_bytes());
-    raw.extend_from_slice(&[0; 4]);
-    raw.extend_from_slice(&0x5643_4948u32.to_le_bytes());
-    raw.extend_from_slice(&3u32.to_le_bytes());
-    raw.extend((0..32).map(|i| u8::from_str_radix(&id[2 * i..2 * i + 2], 16).unwrap()));
-    raw.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0, 0]);
+    let header: [&[u8]; 10] = [b"HIRSELCV", &1u32.to_le_bytes(), &[0; 4], &56u64.to_le_bytes(), &48u64.to_le_bytes(), &1u32.to_le_bytes(), &1u32.to_le_bytes(), &7u64.to_le_bytes(), &0x4544_4F4Eu32.to_le_bytes(), &[0; 4]];
+    let mut raw = [&header.concat()[..], &0x5643_4948u32.to_le_bytes(), &3u32.to_le_bytes(), &(0..32).map(|i| u8::from_str_radix(&id[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<u8>>(), &[1, 0, 1, 0, 0, 0, 0, 0]].concat();
     let raw_path = law.path("run.raw");
     std::fs::write(&raw_path, &raw).unwrap();
     let (status, stdout, stderr) =
@@ -3293,6 +3280,19 @@ fn coverage_tool_diffs_merges_and_reads_raw_files() {
     assert_eq!(passed, BTreeMap::from([("app@1/main/classify#e", 1), (no.as_str(), 0), (yes.as_str(), 1)]));
     let (status, _, stderr) = law.tool(&["coverage", "merge", raw_path.to_str().unwrap()]);
     assert_eq!((status, stderr.ends_with("a raw file needs --map\n")), (Some(1), true), "{stderr}");
+
+    // As a directory or an `@LIST`: beside seed 7's pass, seed 8 killed before its outcome (0) reads as failed.
+    let (runs, list) = (law.path("runs"), law.path("runs.list"));
+    std::fs::create_dir(&runs).unwrap();
+    std::fs::write(runs.join("a.7.raw"), &raw).unwrap();
+    raw[36..48].copy_from_slice(&[[0; 4], [8, 0, 0, 0], [0; 4]].concat());
+    std::fs::write(runs.join("a.8.raw"), &raw).unwrap();
+    std::fs::write(&list, format!("{}\n{}\n", runs.join("a.7.raw").display(), runs.join("a.8.raw").display())).unwrap();
+    for input in [runs.to_str().unwrap().to_owned(), format!("@{}", list.display())] {
+        let (status, stdout, stderr) = law.tool(&["coverage", "merge", &input, "--map", map_path.to_str().unwrap(), "--json"]);
+        let profile: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("{status:?}\n{stderr}"));
+        assert_eq!((&profile["tests"][0]["seeds"], &profile["runs"], &profile["failed_runs"]), (&serde_json::json!([[7, 8]]), &2.into(), &1.into()), "{input}");
+    }
 }
 
 #[test]

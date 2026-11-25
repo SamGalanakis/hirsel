@@ -26,6 +26,9 @@ import time
 
 TRACE = re.compile(r"^trace (\S+)$", re.MULTILINE)
 REPLAY_VERDICT = re.compile(r"^replay: (\S+)", re.MULTILINE)
+# A raw coverage file's header is finished once its end mark is written
+# (docs/coverage.md, "The raw file"); a run killed before then is unobserved.
+RAW_MAGIC, RAW_END_MARK = b"HIRSELCV", 0x45444F4E
 # Every run of a law executable, fresh seed or replayed earlier red, gets this bound;
 # a run past it is a timeout red, and the night moves on.
 SEED_TIMEOUT_SECONDS = 300
@@ -45,6 +48,9 @@ class Law:
     digest: str | None = None
     # The law's recording build, for the record->replay leg (SEM-8).
     recording: Path | None = None
+    # The law group, the normal build's site map and the hirsel that merges
+    # the group's raw coverage files against its maps.
+    coverage: tuple[str, Path, Path] | None = None
 
 
 def allocate(db, campaign, shards, count):
@@ -201,7 +207,10 @@ def record_and_replay(row, recording, seed, root, directory, live, timeout):
     row["record_replay_seconds"] = time.monotonic() - started
 
 
-def run_seed(executable, seed, diagnose_red=False, recording=None, seed_timeout=SEED_TIMEOUT_SECONDS):
+def run_seed(executable, seed, diagnose_red=False, recording=None, seed_timeout=SEED_TIMEOUT_SECONDS,
+             coverage=None):
+    """`coverage` is the absolute raw file the seed's normal run writes; no
+    other run of the seed names one, since the runtime opens it create_new."""
     with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as root:
         root = Path(root)
         directory = root / "run"
@@ -209,7 +218,8 @@ def run_seed(executable, seed, diagnose_red=False, recording=None, seed_timeout=
         observation = root / "laws"
         inputs = {"cwd": directory, "stdin": subprocess.DEVNULL,
                   "env": {"HIRSEL_TEST_SIM_SEED": str(seed), "HIRSEL_LAWS": str(observation)}}
-        ran, timed_out = run_timed([executable], seed_timeout, **inputs)
+        covered = {**inputs, "env": {**inputs["env"], "HIRSEL_COVERAGE": str(coverage)}} if coverage else inputs
+        ran, timed_out = run_timed([executable], seed_timeout, **covered)
         verdict = outcome(ran, observation)
         row = {"seed": seed, **verdict}
         if timed_out:
@@ -231,9 +241,16 @@ def run_seed(executable, seed, diagnose_red=False, recording=None, seed_timeout=
     return row
 
 
-def run_shard(executable, start, stop, diagnose_red=False, recording=None):
+def raw_file(prefix, seed):
+    """A seed's raw coverage file: the map's stem (the law's HEX) begins the
+    name, which is how `hirsel coverage merge` pairs it with its map."""
+    return Path(f"{prefix}.{seed}.raw")
+
+
+def run_shard(executable, start, stop, diagnose_red=False, recording=None, coverage=None):
     for seed in range(start, stop):
-        row = run_seed(executable, seed, diagnose_red, recording)
+        row = run_seed(executable, seed, diagnose_red, recording,
+                       coverage=coverage and raw_file(coverage, seed).resolve())
         command = [sys.argv[0], "run", str(executable), str(seed), str(seed + 1)]
         if recording is not None:
             command += ["--recording", str(recording)]
@@ -353,6 +370,55 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
     return complete, sum(status != 0 for status in observed.values()) + len(law_reds)
 
 
+def finished_raw(path):
+    try:
+        with path.open("rb") as raw:
+            header = raw.read(52)
+    except FileNotFoundError:
+        return False
+    return len(header) == 52 and header[:8] == RAW_MAGIC and int.from_bytes(header[48:], "little") == RAW_END_MARK
+
+
+def merge_coverage(laws, ranges, raws, output):
+    """Merge each law group's raw files into `output/<group>.json`.
+
+    Every seed of every law has its own raw file. One the run never finished
+    (no end mark, or absent) is left out and counted as unobserved here, since
+    the offline merge cannot tell which seed it was; a run killed after its
+    header (outcome 0) reads as failed. Coverage never changes the campaign's
+    verdict: a merge that fails is reported and the campaign goes on."""
+    if not raws.is_dir():
+        return
+    groups = defaultdict(list)
+    for law, (start, stop) in zip(laws, ranges, strict=True):
+        if law.coverage is not None:
+            groups[law.coverage[0]].append((law, start, stop))
+    for group, members in groups.items():
+        files, unobserved = [], []
+        for law, start, stop in members:
+            for seed in range(start, stop):
+                path = raw_file(raws / law.coverage[1].name.removesuffix(".covmap"), seed)
+                if finished_raw(path):
+                    files.append(path)
+                else:
+                    unobserved.append(f"{law.name} seed {seed}")
+        if unobserved:
+            print(f"sim-campaign: coverage {group}: {len(unobserved)} unobserved runs: "
+                  + ", ".join(unobserved[:10]) + (", ..." if len(unobserved) > 10 else ""), file=sys.stderr)
+        if not files:
+            continue
+        output.mkdir(exist_ok=True)
+        listing = raws / f"{group}.list"
+        listing.write_text("".join(f"{path}\n" for path in files))
+        maps = [argument for law, _, _ in members for argument in ("--map", str(law.coverage[1]))]
+        merged = subprocess.run([str(members[0][0].coverage[2]), "coverage", "merge", f"@{listing}", *maps,
+                                 "-o", str(output / f"{group}.json")],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if merged.returncode:
+            print(f"sim-campaign: coverage {group}: merge exited {merged.returncode}: {merged.stderr.strip()}",
+                  file=sys.stderr)
+
+
 def dispatch(args):
     executable = local_executable(args.executable)
     return dispatch_campaign(args, executable)
@@ -401,16 +467,21 @@ def dispatch_campaign(args, executable=None, laws=None):
                 if law.recording is not None:
                     recording = f"{name}-recording"
                     shutil.copy2(law.recording, bundle / recording)
-                remote.append((name, start, stop, recording))
+                coverage = law.coverage and f"coverage/{law.coverage[1].name.removesuffix('.covmap')}"
+                remote.append((name, start, stop, recording, coverage))
             (bundle / "ranges.json").write_text(json.dumps(remote))
             jobs = [{"lane": f"vopr-{args.campaign}", "bundle": "bundle", "seconds": 900,
                      "command": "./sim-campaign run-batch ranges.json"}]
+            if any(law.coverage for law in laws):
+                jobs[0]["fetch"] = ["coverage:fetched"]
         manifest = root / "shards.json"
         manifest.write_text(json.dumps(jobs))
         command = [args.dispatcher, "--job-class", "vopr", "--manifest", manifest]
         with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as boat:
             complete, failed = record(db, args.campaign, ranges, boat.stdout, results, executable, laws)
             status = boat.wait()
+        if laws is not None:
+            merge_coverage(laws, ranges, root / "fetched/coverage", args.results.with_suffix(".coverage"))
     if laws is not None and status == os.EX_TEMPFAIL:
         return status
     if status:
@@ -460,7 +531,15 @@ def read_laws(path):
             if not isinstance(recording, str):
                 raise ValueError(f"invalid recording build for {law}")
             recording = local_executable(path.parent / recording)
-        laws.append(Law(law, binary, count, seed_zero, minimum, build, tuple(required), digest, recording))
+        coverage = entry.get("coverage")
+        if coverage is not None:
+            if not isinstance(coverage, dict) or not all(
+                    isinstance(coverage.get(key), str) and coverage[key] for key in ("group", "map", "tool")):
+                raise ValueError(f"invalid coverage build for {law}")
+            coverage = (coverage["group"], (path.parent / coverage["map"]).resolve(strict=True),
+                        local_executable(path.parent / coverage["tool"]))
+        laws.append(Law(law, binary, count, seed_zero, minimum, build, tuple(required), digest, recording,
+                        coverage))
         names.add(law)
     return laws
 
@@ -543,6 +622,8 @@ def main():
     run.add_argument("--diagnose-red", action="store_true", help=argparse.SUPPRESS)
     run.add_argument("--recording", type=Path,
                      help="the law's recording build: also record each seed on it and replay the tape")
+    run.add_argument("--coverage", type=Path, metavar="PREFIX",
+                     help="each seed's normal run writes raw coverage to PREFIX.SEED.raw")
     remote = commands.add_parser("run-batch", help="run prepared ranges inside one VM")
     remote.add_argument("ranges", type=Path)
     campaign = commands.add_parser("dispatch", help="reserve ranges and dispatch a campaign")
@@ -566,12 +647,15 @@ def main():
             if not 0 <= args.start < args.stop <= 2**64:
                 parser.error("expected a nonempty u64 seed range")
             run_shard(args.executable.resolve(strict=True), args.start, args.stop, args.diagnose_red,
-                      args.recording and args.recording.resolve(strict=True))
+                      args.recording and args.recording.resolve(strict=True), args.coverage)
             return 0
         if args.command == "run-batch":
-            for executable, start, stop, recording in json.loads(args.ranges.read_text()):
+            # The directory exists before any seed runs, so it is there to fetch.
+            (args.ranges.parent / "coverage").mkdir(exist_ok=True)
+            for executable, start, stop, recording, coverage in json.loads(args.ranges.read_text()):
                 run_shard(local_executable(args.ranges.parent / executable), start, stop, diagnose_red=True,
-                          recording=recording and local_executable(args.ranges.parent / recording))
+                          recording=recording and local_executable(args.ranges.parent / recording),
+                          coverage=coverage and args.ranges.parent / coverage)
             return 0
         if args.command == "batch":
             return dispatch_campaign(args, laws=read_laws(args.manifest))

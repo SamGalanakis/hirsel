@@ -255,7 +255,7 @@ build. A profile counts how many runs reached each site.
 | `--coverage-targets FILE` | restricts the uncovered list to source ranges | C4 |
 | `--coverage-runs` | keeps one row per run in the profile | C4 |
 | `--seed-base K` | with `--seeds N`, runs seeds K to K+N-1 | C4 |
-| `hirsel coverage merge FILE... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]` | merges profiles and raw files, and reports | C4 |
+| `hirsel coverage merge FILE|DIR|@LIST... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]` | merges profiles and raw files, and reports | C4, C5 |
 | `hirsel coverage diff BASE NEW [--json]` | lists the sites reached in one profile and not the other | C4 |
 
 **`--coverage`** composes with `--release`, `--backend`, `--target`, `--sim`, `--seed`,
@@ -292,6 +292,10 @@ read against a site map given by `--map`. With one map, every raw file pairs wit
 With several, a raw file pairs with the one map whose file name, less `.covmap`, begins the
 raw file's name, so `HEX.covmap` pairs with `HEX.0.raw`, `HEX-seed-7.raw` and so on. A raw
 file that pairs with no map or with two is refused. It needs no compiler, store or source.
+An input that is a directory stands for every file in it, in name order, and `@LIST` for
+the paths the file LIST holds, one per line (relative paths from the working directory), so a
+campaign's thousands of raw files need not each be an argument. Name a file that begins with
+`@` as `./@NAME`.
 
 **`hirsel coverage diff BASE NEW`** prints the diff of `NEW` against `BASE` ("Diff"): its
 text line, then one line per key, `  + KEY` for gained and `  - KEY` for lost, then
@@ -647,6 +651,29 @@ hirsel test PKG --sim --seeds 32 --seed-base 1000000 --coverage-base before-fres
 Keep the edit when both diffs show `reached` rising and no function in `changed_functions`
 other than the generator's own. One process is one run, so all of a property's cases count
 together.
+
+## Seed campaigns
+
+`core/tools/sim_campaign.py` builds each law's normal executable with `--coverage`, and the
+manifest gives each law its group, its `.covmap` and the `hirsel` that built it. Coverage is
+on for every campaign: it is a build option, and it costs about 1.015× run time. Each seed's
+normal run, and no other run of it (the diagnostic rerun, the recording leg, the tape replay,
+seed 0 and an earlier night's red), sets `HIRSEL_COVERAGE` to `<HEX>.<SEED>.raw`, with `HEX`
+the map's stem, so every run has its own file and its map's stem begins its name. On Boat the
+files land in the job's `coverage/`, which `run-batch` creates before any seed and the
+dispatcher fetches back. After the batch, `tools/sim-campaign batch` merges one profile for
+each law group with `hirsel coverage merge @LIST --map ...` into `RESULTS.coverage/GROUP.json`,
+beside the `--results` file. A raw file with no `end` mark, or none at all, is left out of the
+merge and counted on stderr as an unobserved run, since the merge cannot tell which seed it
+was. A run killed after its header reads as failed. Coverage never changes the campaign's
+exit status. The recording builds have no coverage, so tapes record and replay as before.
+`tools/nightly-vopr.sh` merges each group's batch profiles into the night's `coverage/`.
+When a law's coverage build fails, preparation prints `coverage off for LAWS: why`, builds
+the leg again without coverage, and the law runs in the campaign with no profile. Today
+this happens for laws whose LLVM release unit holds a body that does not have its source's
+blocks (`sites_of`, for example `runner@1/runner/bound_caller` and
+`dtls@1/laws/vopr_pair$task_entry0`). The fallback goes when that is fixed.
+Seed 0 runs at preparation under `hirsel test` and is not in the campaign's profiles.
 
 ## Caching
 

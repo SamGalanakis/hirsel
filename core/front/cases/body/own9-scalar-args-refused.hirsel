@@ -1,0 +1,16 @@
+type Leaf {
+    n: u64
+}
+type Tree {
+    root: u32,
+    items: List[u64],
+    leaf: Leaf
+}
+fn grow(mut t: Tree, items: List[u64]) {}
+fn reset(mut t: Tree, leaf: Leaf) {}
+fn by_list(mut t: Tree) { grow(mut t, t.items) }
+fn by_record(mut t: Tree) { reset(mut t, t.leaf) }
+// expect: refuse OWN-9 at 11:39
+// expect: refuse OWN-9 at 12:42
+// expect: cause OWN-9 at 11:39 from 11:32
+// expect: cause OWN-9 at 12:42 from 12:35

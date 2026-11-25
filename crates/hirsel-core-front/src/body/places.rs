@@ -286,7 +286,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.check_holds_at(p, act, self.span(n))
     }
     pub(super) fn check_holds_at(&mut self, p: Place, act: Act, site: Span) -> bool {
-        self.check_holds_skipping(p, act, site, 0..0)
+        self.check_holds_skipping(p, act, site, |_, _| false)
     }
     /// As `check_holds`, ignoring the records in `skip`: the selection views a `mut`
     /// pattern binding's loan subsumes (OWN-15).
@@ -297,14 +297,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
         skip: std::ops::Range<usize>,
     ) -> bool {
-        self.check_holds_skipping(p, act, self.span(n), skip)
+        self.check_holds_skipping(p, act, self.span(n), |i, _| skip.contains(&i))
     }
-    fn check_holds_skipping(
+    pub(super) fn check_holds_skipping(
         &mut self,
         p: Place,
         act: Act,
         site: Span,
-        skip: std::ops::Range<usize>,
+        skip: impl Fn(usize, Hold) -> bool,
     ) -> bool {
         crate::cost_scope!("phase", "ownership state");
         if matches!(act, Act::Write) {
@@ -314,10 +314,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return true;
         }
         for i in (0..self.freezes.len()).rev() {
-            if skip.contains(&i) {
+            let f = self.freezes[i];
+            if skip(i, f.hold) {
                 continue;
             }
-            let f = self.freezes[i];
             if overlap(&self.steps, f.place, p)
                 && let Some(rule) = breaks(f.hold, act)
             {

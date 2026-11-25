@@ -1012,9 +1012,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.emit_place(at, e)
                     };
                 } else if self.copies(ty) {
-                    // A copyable value is copied (OWN-7), unless the call reads
-                    // its place directly (`direct_call`).
-                    self.use_place(at, Use::Value, e);
+                    // A copyable value is copied (OWN-7), unless the call reads its place
+                    // directly (`direct_call`); a scalar is read first (OWN-9).
+                    self.copy_argument(at, call, e);
                     *val = match self.rep(ty) {
                         Ok(Rep::Place(id))
                             if self.lend_direct_argument(call, at)

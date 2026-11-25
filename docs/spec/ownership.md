@@ -425,7 +425,11 @@ Two places overlap when one is a prefix of the other, when they differ first at 
 indexes of the same sequence, or when they differ first at the payloads of two different
 variants of the same value. Two different fields of one record, or of one variant, do not
 overlap. Index operands are
-evaluated left to right into temporaries before the places are compared. This one
+evaluated left to right into temporaries before the places are compared, and so is an
+argument that is a place of scalar type passed by value: `f(mut t, t.root)` reads
+`t.root` before the call, as `let r = t.root` on the line before would. A by-value
+argument of any other type, such as a `List` or a record, is compared as a place, and so is
+any argument against a `mut` capture that a callable argument of the call reserves. This one
 relation governs views, reservations, `mut` loans, moves, assignments, replacements,
 arguments of one call and captures.
 
@@ -624,9 +628,9 @@ and lends is refused here, at the later binding.
 While the arm lasts, `x` is held as a `mut` parameter is (OWN-11): through it the arm reads,
 assigns, replaces and lends `mut`, and `take` of `x` or of a place under it is refused there.
 Every other read, view, loan, move, assignment, replacement or drop of a place that
-overlaps the lent one (OWN-9) is refused at OWN-9, as a `mut` argument's later siblings
-are: assigning a new variant to the scrutinee or to a place above it, or pushing to the
-`List` that holds it. A place that does not overlap it, such as another field of the record
+overlaps the lent one (OWN-9) is refused at OWN-9, a scalar read included: assigning a
+new variant to the scrutinee or to a place above it, or pushing to the `List` that holds
+it. A place that does not overlap it, such as another field of the record
 that holds the scrutinee, stays usable. A view or loan of `x` is a view or loan of the
 lent place, so a scoped result anchored to `mut x` freezes that place, which stays frozen
 after the arm while the result lives (OWN-20).

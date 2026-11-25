@@ -1,5 +1,6 @@
 //! Temporary owners carried by scoped block values (LANG-6). Uses the source
-//! provenance arena and the existing flagged cleanup machinery.
+//! provenance arena and the existing flagged cleanup machinery. Also the temporary a
+//! by-value scalar argument is read into before places are compared (OWN-9).
 use super::*;
 
 #[derive(Clone, Copy, Default)]
@@ -9,6 +10,25 @@ pub(super) struct Reached {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// Copy argument `at` of open call `call`. A scalar, not a view, is read into a
+    /// temporary before the call, so it shares no storage with the call's `mut`
+    /// arguments and crosses their loans (OWN-9). Every other hold still stops it,
+    /// a `mut` capture its callable argument reserves (index `u32::MAX`) included.
+    pub(super) fn copy_argument(&mut self, at: At, call: u32, n: NodeId) {
+        if self.is_view(at.ty) || !matches!(self.rep(at.ty), Ok(Rep::Scalar(_))) {
+            return self.use_place(at, Use::Value, n);
+        }
+        if self.capture_move(at.place.slot, Use::Value, at.ty, n) {
+            self.need_live(at.place.slot, n);
+            let site = self.span(n);
+            self.check_holds_skipping(
+                at.place,
+                Act::Read,
+                site,
+                |_, hold| matches!(hold, Hold::CallMut(c, i) if c == call && i != u32::MAX),
+            );
+        }
+    }
     #[inline(always)]
     pub(super) fn temporary_storage(&self, t: cleanup::Temp) -> Option<AddressId> {
         if t.reached == 0 {

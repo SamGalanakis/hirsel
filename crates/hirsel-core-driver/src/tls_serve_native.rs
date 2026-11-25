@@ -86,11 +86,8 @@ mod tls_serve_laws {
         include_str!("../../hirsel-core-rt/testdata/tls/server/alpha-rsa2048.sha256");
     const LIMIT: Duration = Duration::from_secs(60);
 
-    struct Built {
-        _dir: tempfile::TempDir,
-        program: PathBuf,
-        files: PathBuf,
-    }
+    /// Both native engines: every law runs on each.
+    const BACKENDS: [Backend; 2] = [Backend::Cranelift, Backend::Llvm];
 
     fn file(name: &str) -> &'static [u8] {
         FILES.iter().find(|(n, _)| *n == name).unwrap().1
@@ -108,13 +105,27 @@ mod tls_serve_laws {
             [file("alpha.der"), b"\0"].concat(),
         )
         .unwrap();
+        // s_server's -cert_chain reads PEM only.
+        let base64 = crate::call::base64(file("pad-over.der"));
+        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        for line in base64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(line).unwrap());
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+        std::fs::write(files.join("pad-over.pem"), pem).unwrap();
         std::fs::write(files.join("send"), "pencil").unwrap();
         std::fs::create_dir(files.join("sock")).unwrap();
     }
 
     /// The server program for `files`, with each key granted from a `file:`
     /// source; `tweak` adjusts the options (TL24's recording and replay).
-    fn program(dir: &Path, files: &Path, tweak: impl FnOnce(&mut NativeOptions)) -> PathBuf {
+    fn program(
+        dir: &Path,
+        files: &Path,
+        backend: Backend,
+        tweak: impl FnOnce(&mut NativeOptions),
+    ) -> PathBuf {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
         let source = include_str!("../../../core/front/fixtures/recording/tls-serve.hirsel");
         let mut request = source_request(source, dir);
@@ -129,7 +140,7 @@ mod tls_serve_laws {
             product.diagnostics,
             product.incomplete
         );
-        let mut options = native_options(Backend::Cranelift, dir);
+        let mut options = native_options(backend, dir);
         options.grant_mask = ["Net", "Dir", "Stdin", "Stdout"]
             .iter()
             .map(|name| 1 << grant_kind(name).unwrap())
@@ -170,20 +181,30 @@ mod tls_serve_laws {
         product.build(&entry, &options).unwrap().executable
     }
 
-    /// Builds the server once per test process.
-    fn built() -> &'static Built {
-        static BUILT: OnceLock<Built> = OnceLock::new();
-        BUILT.get_or_init(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let files = dir.path().join("files");
-            write_files(&files);
-            let program = program(dir.path(), &files, |_| ());
-            Built {
-                _dir: dir,
-                program,
-                files,
-            }
-        })
+    /// The fixtures, written once per test process.
+    fn files() -> &'static Path {
+        static FILES: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
+        &FILES
+            .get_or_init(|| {
+                let dir = tempfile::tempdir().unwrap();
+                let files = dir.path().join("files");
+                write_files(&files);
+                (dir, files)
+            })
+            .1
+    }
+
+    /// The server built by `backend`, once per test process.
+    fn built(backend: Backend) -> &'static Path {
+        static BUILT: [OnceLock<(tempfile::TempDir, PathBuf)>; 2] = [OnceLock::new(), OnceLock::new()];
+        let slot = &BUILT[usize::from(backend == Backend::Llvm)];
+        &slot
+            .get_or_init(|| {
+                let dir = tempfile::tempdir().unwrap();
+                let program = program(dir.path(), files(), backend, |_| ());
+                (dir, program)
+            })
+            .1
     }
 
     /// A running server: its port, its stdout lines and its stdin.
@@ -195,8 +216,8 @@ mod tls_serve_laws {
     }
 
     impl Server {
-        fn start(args: &[&str]) -> Server {
-            Server::run(&built().program, args, |_| ())
+        fn start(backend: Backend, args: &[&str]) -> Server {
+            Server::run(built(backend), args, |_| ())
         }
 
         fn run(program: &Path, args: &[&str], env: impl FnOnce(&mut Command)) -> Server {
@@ -313,7 +334,7 @@ mod tls_serve_laws {
     /// line and waits for the server's echo before it closes its input, so a
     /// NewSessionTicket the server sent after its Finished has arrived.
     fn client(port: u16, args: &[&str], send: Option<&str>) -> String {
-        let files = &built().files;
+        let files = files();
         let out = tempfile::NamedTempFile::new().unwrap();
         // One open file for both streams, so they share an offset and
         // neither overwrites the other.
@@ -397,16 +418,54 @@ mod tls_serve_laws {
     }
 
     /// `tls.connect` from a second run of the program, with the test CA.
-    fn connect(port: u16, name: &str) -> String {
-        let built = built();
-        let output = Command::new(&built.program)
+    fn connect(backend: Backend, port: u16, name: &str) -> String {
+        let output = Command::new(built(backend))
             .args(["client", &port.to_string(), name])
-            .current_dir(&built.files)
+            .current_dir(files())
             .stdin(Stdio::null())
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// An `openssl s_server` that serves one connection with alpha's key and
+    /// the chain [alpha, pad-over], a Certificate body of 65,536 bytes: the
+    /// child, which is killed on drop, and its port.
+    struct OverCap(Child, u16);
+
+    impl Drop for OverCap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn over_cap_server() -> OverCap {
+        let files = files();
+        let mut child = Command::new("openssl")
+            .args(["s_server", "-accept", "127.0.0.1:0", "-naccept", "1", "-tls1_3"])
+            .args(["-certform", "DER", "-keyform", "DER", "-cert"])
+            .arg(files.join("alpha.der"))
+            .arg("-key")
+            .arg(files.join("alpha.p8"))
+            .arg("-cert_chain")
+            .arg(files.join("pad-over.pem"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.starts_with("ACCEPT ") {
+            line.clear();
+            assert_ne!(stdout.read_line(&mut line).unwrap(), 0, "s_server ended");
+        }
+        let port = line.trim().rsplit(':').next().unwrap().parse().unwrap();
+        // Keep draining, so s_server never blocks on a full pipe.
+        std::thread::spawn(move || std::io::copy(&mut stdout, &mut std::io::sink()));
+        OverCap(child, port)
     }
 
     /// TLS-9's `peer`: the leaf's SHA-256 as four big-endian words (TL1).
@@ -420,8 +479,8 @@ mod tls_serve_laws {
     }
 
     /// One `sni` connection: the name the server read, the client's output.
-    fn sni(args: &[&str]) -> (String, String) {
-        let mut server = Server::start(&["sni", "alpha", "--"]);
+    fn sni(backend: Backend, args: &[&str]) -> (String, String) {
+        let mut server = Server::start(backend, &["sni", "alpha", "--"]);
         let output = client(server.port, args, Some("tls-echo-18"));
         let name = server.until("name ");
         server.until("echo ");
@@ -431,6 +490,13 @@ mod tls_serve_laws {
 
     #[test]
     fn tl18_sni_selects_the_chain() {
+        for backend in BACKENDS {
+            eprintln!("tl18_sni_selects_the_chain on {backend:?}");
+            tl18_sni_selects_the_chain_on(backend);
+        }
+    }
+
+    fn tl18_sni_selects_the_chain_on(backend: Backend) {
         for (args, name, sha256) in [
             (
                 &["-servername", "beta.test"][..],
@@ -451,15 +517,23 @@ mod tls_serve_laws {
             (&["-noservername"], "name ", ALPHA_SHA256),
             // RFC 6066 §3: a literal IP address is not a HostName.
             (&["-servername", "10.0.0.1"], "name ", ALPHA_SHA256),
+            // RFC 8446 §4.1.4: a key share for P-521, which ring has no
+            // exchange for, is answered with a HelloRetryRequest for X25519,
+            // and the second ClientHello resolves the same key.
+            (
+                &["-servername", "alpha.test", "-groups", "P-521:X25519"],
+                "name alpha.test",
+                ALPHA_SHA256,
+            ),
         ] {
-            let (read, output) = sni(args);
+            let (read, output) = sni(backend, args);
             assert_eq!(read, name, "{args:?}");
             assert_eq!(digest(&leaf(&output)), sha256.trim(), "{args:?}: {output}");
             verified(&output);
         }
 
         // The Certificate message of [alpha, pad] is exactly 65,535 bytes.
-        let mut server = Server::start(&["fixed", "alpha", "--", "alpha.der", "pad.der"]);
+        let mut server = Server::start(backend, &["fixed", "alpha", "--", "alpha.der", "pad.der"]);
         let output = client(
             server.port,
             &["-servername", "alpha.test"],
@@ -469,11 +543,25 @@ mod tls_serve_laws {
         verified(&output);
         server.finish();
 
+        // F4: tls.connect reads the same 65,535-byte Certificate body. rustls
+        // joins a handshake message body of at most 0xffff bytes
+        // (msgs/deframer/handshake.rs MAX_HANDSHAKE_SIZE), which is RFC 8446's
+        // 4 + sum(DER + 5) for [alpha, pad].
+        let server = Server::start(backend, &["fixed", "alpha", "--", "alpha.der", "pad.der"]);
+        assert_eq!(connect(backend, server.port, "alpha.test"), peer(ALPHA_SHA256));
+        server.finish();
+        // One byte more, sent by openssl since this server refuses it before
+        // issue: the client refuses the message.
+        let over = over_cap_server();
+        let refused = connect(backend, over.1, "alpha.test");
+        assert!(refused.starts_with("connect protocol "), "{refused}");
+        drop(over);
+
         for (key, chain, sha256, signature) in [
             ("ed", "alpha-ed25519.der", ED25519_SHA256, "Ed25519"),
             ("rsa", "alpha-rsa2048.der", RSA2048_SHA256, "RSA-PSS"),
         ] {
-            let mut server = Server::start(&["fixed", key, "--", chain]);
+            let mut server = Server::start(backend, &["fixed", key, "--", chain]);
             let output = client(
                 server.port,
                 &["-servername", "alpha.test"],
@@ -490,8 +578,8 @@ mod tls_serve_laws {
         }
 
         for (name, sha256) in [("alpha.test", ALPHA_SHA256), ("beta.test", BETA_SHA256)] {
-            let mut server = Server::start(&["sni", "alpha", "--"]);
-            assert_eq!(connect(server.port, name), peer(sha256));
+            let mut server = Server::start(backend, &["sni", "alpha", "--"]);
+            assert_eq!(connect(backend, server.port, name), peer(sha256));
             server.until("accept ");
             server.finish();
         }
@@ -499,6 +587,13 @@ mod tls_serve_laws {
 
     #[test]
     fn tl19_wrong_key_or_chain_refused() {
+        for backend in BACKENDS {
+            eprintln!("tl19_wrong_key_or_chain_refused on {backend:?}");
+            tl19_wrong_key_or_chain_refused_on(backend);
+        }
+    }
+
+    fn tl19_wrong_key_or_chain_refused_on(backend: Backend) {
         for (key, chain, verdict) in [
             // Beta's public key is not alpha's SPKI.
             ("beta", &["alpha.der"][..], "accept key"),
@@ -516,7 +611,7 @@ mod tls_serve_laws {
         ] {
             let mut args = vec!["fixed", key, "--"];
             args.extend(chain);
-            let mut server = Server::start(&args);
+            let mut server = Server::start(backend, &args);
             let output = client(server.port, &["-servername", "alpha.test", "-msg"], None);
             assert_eq!(server.until("accept "), verdict, "{key} {chain:?}");
             assert!(!output.contains("ServerHello"), "{key} {chain:?}: {output}");
@@ -530,8 +625,15 @@ mod tls_serve_laws {
 
     #[test]
     fn tl21_a_server_half_authorizes_no_secret() {
+        for backend in BACKENDS {
+            eprintln!("tl21_a_server_half_authorizes_no_secret on {backend:?}");
+            tl21_a_server_half_authorizes_no_secret_on(backend);
+        }
+    }
+
+    fn tl21_a_server_half_authorizes_no_secret_on(backend: Backend) {
         for args in [&["-servername", "alpha.test"][..], &["-noservername"]] {
-            let mut server = Server::start(&["half", "alpha", "--", "alpha.der"]);
+            let mut server = Server::start(backend, &["half", "alpha", "--", "alpha.der"]);
             let output = client(server.port, args, None);
             assert_eq!(
                 server.until("half "),
@@ -546,6 +648,13 @@ mod tls_serve_laws {
 
     #[test]
     fn tl22_server_alpn() {
+        for backend in BACKENDS {
+            eprintln!("tl22_server_alpn on {backend:?}");
+            tl22_server_alpn_on(backend);
+        }
+    }
+
+    fn tl22_server_alpn_on(backend: Backend) {
         // RFC 7301 §3.2: the server's preference decides.
         for (alpn, args, verdict, seen) in [
             (
@@ -571,7 +680,7 @@ mod tls_serve_laws {
             let mut command = vec!["fixed", "alpha"];
             command.extend(alpn);
             command.extend(["--", "alpha.der"]);
-            let mut server = Server::start(&command);
+            let mut server = Server::start(backend, &command);
             let mut client_args = vec!["-servername", "alpha.test"];
             client_args.extend(args);
             let output = client(server.port, &client_args, None);
@@ -583,9 +692,16 @@ mod tls_serve_laws {
 
     #[test]
     fn tl23_decline_and_version() {
+        for backend in BACKENDS {
+            eprintln!("tl23_decline_and_version on {backend:?}");
+            tl23_decline_and_version_on(backend);
+        }
+    }
+
+    fn tl23_decline_and_version_on(backend: Backend) {
         // RFC 6066 §3: an unknown name gets unrecognized_name, and the
         // declined socket is released.
-        let mut server = Server::start(&["sni", "alpha", "--"]);
+        let mut server = Server::start(backend, &["sni", "alpha", "--"]);
         let before = server.descriptors();
         let output = client(server.port, &["-servername", "gamma.test"], None);
         assert_eq!(server.until("name "), "name gamma.test");
@@ -599,12 +715,12 @@ mod tls_serve_laws {
         alert(&output, 112);
         server.finish();
 
-        let server = Server::start(&["sni", "alpha", "--"]);
-        assert_eq!(connect(server.port, "gamma.test"), "connect protocol 112");
+        let server = Server::start(backend, &["sni", "alpha", "--"]);
+        assert_eq!(connect(backend, server.port, "gamma.test"), "connect protocol 112");
         server.finish();
 
         // RFC 8446 §6: TLS 1.2 gets protocol_version.
-        let mut server = Server::start(&["sni", "alpha", "--"]);
+        let mut server = Server::start(backend, &["sni", "alpha", "--"]);
         let output = client(server.port, &["-tls1_2", "-servername", "alpha.test"], None);
         assert_eq!(server.until("name "), "name alpha.test");
         assert_eq!(server.line(), "accept protocol 0");
@@ -612,13 +728,13 @@ mod tls_serve_laws {
         server.finish();
 
         // RFC 6066 §3: a HostName of letters, digits and hyphens only.
-        let mut server = Server::start(&["sni", "alpha", "--"]);
+        let mut server = Server::start(backend, &["sni", "alpha", "--"]);
         let output = client(server.port, &["-servername", "bad_name!.test"], None);
         assert_eq!(server.line(), "hello protocol 0");
         alert(&output, 47);
         server.finish();
 
-        let mut server = Server::start(&["sni", "alpha", "--"]);
+        let mut server = Server::start(backend, &["sni", "alpha", "--"]);
         let mut plain = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
         plain
             .write_all(b"GET / HTTP/1.1\r\nHost: alpha.test\r\n\r\n")
@@ -628,7 +744,7 @@ mod tls_serve_laws {
 
         // The server side of TL15: SSLRequest and a plaintext query in one
         // segment; the query is not a ClientHello.
-        let mut server = Server::start(&["join", "alpha", "--"]);
+        let mut server = Server::start(backend, &["join", "alpha", "--"]);
         let mut plain = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
         let query = b"Q\x00\x00\x00\x0dSELECT 1\x00";
         plain
@@ -640,7 +756,7 @@ mod tls_serve_laws {
         // TLS-9: no tickets, so nothing to resume from.
         let session = tempfile::tempdir().unwrap();
         let f = session.path().join("f");
-        let mut server = Server::start(&["sni", "alpha", "--"]);
+        let mut server = Server::start(backend, &["sni", "alpha", "--"]);
         let output = client(
             server.port,
             &[
@@ -663,7 +779,7 @@ mod tls_serve_laws {
     fn scalar(p8: &str) -> Vec<u8> {
         let text = Command::new("openssl")
             .args(["pkey", "-inform", "DER", "-noout", "-text", "-in"])
-            .arg(built().files.join(p8))
+            .arg(files().join(p8))
             .output()
             .unwrap();
         let text = String::from_utf8(text.stdout).unwrap();
@@ -714,12 +830,19 @@ mod tls_serve_laws {
 
     #[test]
     fn tl20_the_key_never_leaves_the_provider() {
+        for backend in BACKENDS {
+            eprintln!("tl20_the_key_never_leaves_the_provider on {backend:?}");
+            tl20_the_key_never_leaves_the_provider_on(backend);
+        }
+    }
+
+    fn tl20_the_key_never_leaves_the_provider_on(backend: Backend) {
         // beta.p8 has one grant; alpha.p8 has two (alpha and signer), so
         // two sealed stores.
         let document = file("beta.p8");
         let scalar = scalar("beta.p8");
         for (mode, expected) in [("sni", Some(1)), ("control", None)] {
-            let mut server = Server::start(&[mode, "beta", "--"]);
+            let mut server = Server::start(backend, &[mode, "beta", "--"]);
             let port = server.port;
             let client = std::thread::spawn(move || {
                 client(port, &["-servername", "beta.test"], Some("tls-echo-20"))
@@ -747,11 +870,18 @@ mod tls_serve_laws {
 
     #[test]
     fn tl24_no_server_key_in_a_recording() {
+        for backend in BACKENDS {
+            eprintln!("tl24_no_server_key_in_a_recording on {backend:?}");
+            tl24_no_server_key_in_a_recording_on(backend);
+        }
+    }
+
+    fn tl24_no_server_key_in_a_recording_on(backend: Backend) {
         let dir = tempfile::tempdir().unwrap();
         let files = dir.path().join("files");
         write_files(&files);
         let tape = dir.path().join("serve.tape");
-        let record = program(dir.path(), &files, |options| {
+        let record = program(dir.path(), &files, backend, |options| {
             options.runtime = env_record_runtime();
             options.recording = true;
             options.output = dir.path().join("record");
@@ -794,7 +924,7 @@ mod tls_serve_laws {
         for p8 in ["alpha.p8", "beta.p8"] {
             std::fs::remove_file(files.join(p8)).unwrap();
         }
-        let replay = program(dir.path(), &files, |options| {
+        let replay = program(dir.path(), &files, backend, |options| {
             options.runtime = env_record_runtime();
             options.recording = true;
             options.replay = Some(crate::ReplayPlan {
@@ -825,20 +955,30 @@ mod tls_serve_laws {
     /// no ServerHello.
     #[test]
     fn tl3_server_authority_before_effect() {
-        let mut server = Server::start(&["connect", "alpha", "--"]);
+        for backend in BACKENDS {
+            eprintln!("tl3_server_authority_before_effect on {backend:?}");
+            tl3_server_authority_before_effect_on(backend);
+        }
+    }
+
+    fn tl3_server_authority_before_effect_on(backend: Backend) {
+        let mut server = Server::start(backend, &["connect", "alpha", "--"]);
         assert_eq!(server.line(), "hello denied");
         server.finish();
 
-        let mut server = Server::start(&["unix", "alpha", "--"]);
-        let path = built().files.join("sock/s.sock");
+        // The files are shared by both engines' runs: bind afresh.
+        let path = files().join("sock/s.sock");
+        let _ = std::fs::remove_file(&path);
+        let mut server = Server::start(backend, &["unix", "alpha", "--"]);
         let mut unix = std::os::unix::net::UnixStream::connect(&path).unwrap();
-        // A ClientHello's record header: hello never reads it.
-        unix.write_all(b"\x16\x03\x01\x00\x00").unwrap();
+        // A ClientHello's record header: hello never reads it, and may
+        // already have released the socket, so the write may meet EPIPE.
+        let _ = unix.write_all(b"\x16\x03\x01\x00\x00");
         assert_eq!(server.line(), "hello denied");
         server.finish();
         drop(unix);
 
-        let mut server = Server::start(&["fixed", "signer", "--", "alpha.der"]);
+        let mut server = Server::start(backend, &["fixed", "signer", "--", "alpha.der"]);
         let output = client(server.port, &["-servername", "alpha.test", "-msg"], None);
         assert_eq!(server.until("accept "), "accept denied");
         assert!(!output.contains("ServerHello"), "{output}");

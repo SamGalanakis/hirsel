@@ -3,7 +3,7 @@
 //! handshake the program resumed with its chain and key.
 use super::*;
 use crate::{
-    os_tls::server::{self, Handshake},
+    os_tls::server,
     tls_server::{AcceptState, HelloRequest, HelloState, TlsAcceptRequest},
 };
 
@@ -131,10 +131,10 @@ unsafe fn accept_step(request: *mut Request, token: u64, first: bool) -> Step {
         } else {
             sockets.disarm(key, state.pending_write);
         }
-        let Handshake { stream } = state.handshake.as_mut().unwrap();
+        let stream = &mut state.handshake.as_mut().unwrap().stream;
         match stream.handshake(fd) {
             Ok(Ok(())) => {
-                let Handshake { stream } = state.handshake.take().unwrap();
+                let stream = state.handshake.take().unwrap().finish();
                 *tls.protocol_out = stream
                     .connection
                     .alpn_protocol()

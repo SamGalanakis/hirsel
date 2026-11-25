@@ -235,15 +235,17 @@ impl Signer for ServerSigner {
     }
 }
 
-/// Hands its key to the one handshake it was built for, and keeps nothing:
-/// the parsed key drops with the connection's handshake state, never with a
-/// configuration a connection may keep after it (TLS-9).
+/// Holds the key for the one handshake it was built for. rustls asks once
+/// per ClientHello, twice after a HelloRetryRequest, so every call answers
+/// the same key; `Handshake::finish` clears it, so the parsed key drops when
+/// the handshake ends, never with the configuration the connection keeps
+/// after it (TLS-9).
 #[derive(Debug)]
-struct Single(std::sync::Mutex<Option<Arc<CertifiedKey>>>);
+pub(crate) struct Single(std::sync::Mutex<Option<Arc<CertifiedKey>>>);
 
 impl ResolvesServerCert for Single {
     fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        self.0.lock().unwrap().take()
+        self.0.lock().unwrap().clone()
     }
 }
 
@@ -261,7 +263,7 @@ pub(crate) fn certified(
 /// TLS 1.3 only, no session cache, no tickets, no early data, no client
 /// authentication, no key log and no secret extraction (TLS-9).
 pub(crate) fn config(
-    certified: Arc<CertifiedKey>,
+    single: Arc<Single>,
     alpn: Vec<Vec<u8>>,
 ) -> Result<Arc<ServerConfig>, Outcome> {
     let mut config =
@@ -269,7 +271,7 @@ pub(crate) fn config(
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(server_error)?
             .with_no_client_auth()
-            .with_cert_resolver(Arc::new(Single(std::sync::Mutex::new(Some(certified)))));
+            .with_cert_resolver(single);
     config.session_storage = Arc::new(NoServerSessionStorage {});
     config.send_tls13_tickets = 0;
     config.alpn_protocols = alpn;
@@ -438,6 +440,15 @@ impl SecureStream for ServerStream {
 /// The server's work between issue and delivery of `TLS_ACCEPT`.
 pub(crate) struct Handshake {
     pub(crate) stream: ServerStream,
+    key: Arc<Single>,
+}
+
+impl Handshake {
+    /// The finished stream; the key is gone from the configuration it keeps.
+    pub(crate) fn finish(self) -> ServerStream {
+        drop(self.key.0.lock().unwrap().take());
+        self.stream
+    }
 }
 
 /// Load, check and start: `Err` is the delivered failure, after its alert.
@@ -462,10 +473,12 @@ pub(crate) fn start(
     let Some(certified) = certified(chain, key) else {
         return Err(refuse_key());
     };
-    let config = config(certified, alpn)?;
+    let key = Arc::new(Single(std::sync::Mutex::new(Some(certified))));
+    let config = config(key.clone(), alpn)?;
     match accepted.into_connection(config) {
         Ok(connection) => Ok(Handshake {
             stream: ServerStream::new(connection),
+            key,
         }),
         Err((error, alert)) => {
             write_alert(fd, alert);

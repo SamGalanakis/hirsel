@@ -78,6 +78,31 @@ fn has_hostfile_field(shape: &hirsel_core_layout::Shape) -> bool {
         })
     })
 }
+fn uses_hostfile(module: &Module) -> bool {
+    module
+        .functions
+        .iter()
+        .filter_map(|f| f.body.as_ref())
+        .flat_map(|body| &body.calls)
+        .any(|call| {
+            let Callee::Runtime(RtOp::Host(op)) = call.callee else {
+                return false;
+            };
+            matches!(
+                op,
+                HostOp::Read
+                    | HostOp::Write
+                    | HostOp::Close
+                    | HostOp::TryLock
+                    | HostOp::Unlock
+                    | HostOp::Sync
+                    | HostOp::ReadAt
+                    | HostOp::WriteAt
+                    | HostOp::StatFile
+                    | HostOp::ZeroExtension
+            )
+        })
+}
 fn execute(input: &impl NativeInput, cases: &[Case]) -> Vec<NativeReport> {
     execute_with_bindings(input, cases, "")
 }
@@ -314,17 +339,18 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             .injection
             .map(|(n, later)| format!("hirsel_core_test_inject(ctx,{n},{});", u8::from(later)))
             .unwrap_or_default();
-        let hostfile = module.functions[f.index()]
-            .body
-            .as_ref()
-            .is_some_and(|body| {
-                body.slots.iter().any(|slot| {
-                    let PlaceTy::Declared(t) = slot else {
-                        return false;
-                    };
-                    has_hostfile_field(&module.types[t.index()])
-                })
-            });
+        let hostfile = uses_hostfile(module)
+            && module.functions[f.index()]
+                .body
+                .as_ref()
+                .is_some_and(|body| {
+                    body.slots.iter().any(|slot| {
+                        let PlaceTy::Declared(t) = slot else {
+                            return false;
+                        };
+                        has_hostfile_field(&module.types[t.index()])
+                    })
+                });
         let files = if hostfile {
             format!("prepare_files(ctx,UINT64_C({}));", case.args[0])
         } else {

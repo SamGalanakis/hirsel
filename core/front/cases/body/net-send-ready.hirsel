@@ -1,0 +1,94 @@
+// A spawned task sends a request on its owned socket and waits for the peer's
+// response to be readable. The run itself serves the virtual Net provider.
+// expect: run host_io_ready(1) = 5
+fn net_answer(mut s: Served[NetOp], take c: Call[NetOp], r: NetReply) -> bool {
+    match provide.reply(mut s, take c, provide.net_reply(r)) {
+        Ok(_) => true,
+        _ => false
+    }
+}
+
+fn loopback(a: Addr, port: u16) -> bool {
+    a.port == port && match a.ip {
+        V4(x) => x == 2130706433u32,
+        _ => false
+    }
+}
+
+fn net_exchange(take n: Net) -> u64 waits {
+    let at = Addr(ip: V4(2130706433u32), port: 80u16)
+    let socket = result.unwrap(host.connect(n, at, Never))
+    let (rh, wh) = net.split(take socket)
+    let mut r = take rh
+    let mut w = take wh
+    let sent = result.unwrap(host.send_pair(mut w, string.as_bytes("he"), string.as_bytes("llo"), Never))
+    result.unwrap(host.recv_ready(mut r, Never))
+    let _ = take r
+    let _ = take w
+    sent
+}
+
+fn net_connect(mut s: Served[NetOp], id: u64, port: u16) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Connect(addr: addr, ..) => loopback(addr, port),
+                _ => false
+            }
+            op && net_answer(mut s, take call, Socket(id, Addr(ip: V4(2130706433u32), port: port)))
+        },
+        None => false
+    }
+}
+
+fn net_released(mut s: Served[NetOp], id: u64, part: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Released(id: h, part: p) => h == id && match p {
+                    Whole => part == 0u64,
+                    Read => part == 1u64,
+                    Write => part == 2u64,
+                },
+                _ => false
+            }
+            op && net_answer(mut s, take call, Done)
+        },
+        None => false
+    }
+}
+
+fn host_io_ready(tasks: Tasks) -> u64 waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, net_exchange)
+    let connected = net_connect(mut served, 8u64, 80u16)
+    let sent = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Send(socket, prefix, tail) => socket == 8u64 && prefix == 2u64 && tail == 3u64,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Count(5u64))
+        },
+        None => false
+    }
+    let ready = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Ready(socket) => socket == 8u64,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Done)
+        },
+        None => false
+    }
+    let read_released = net_released(mut served, 8u64, 1u64)
+    let write_released = net_released(mut served, 8u64, 2u64)
+    let result = result.unwrap(task.join(take child))
+    if connected && sent && ready && read_released && write_released {
+        result
+    } else {
+        0u64
+    }
+}

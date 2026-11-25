@@ -1,0 +1,28 @@
+// A spawned unit opens its own connection, hands its client back, then waits
+// for the parent's request and answers on the parent's connection.
+// expect: run unit_connection_round_trip(1) = 4142
+type ConnJob: cross {
+    ready: Client[Client[u64]],
+    done: Client[u64]
+}
+
+fn conn_peer(take job: ConnJob) -> u64 waits {
+    let ConnJob(ready: ready, done: done) = take job
+    let (requests, inbox): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(ready, take requests))
+    let n = result.unwrap(conn.receive(inbox))
+    result.unwrap(conn.send(done, n + 1u64))
+    n + 2u64
+}
+
+fn unit_connection_round_trip(tasks: Tasks) -> u64 waits {
+    let (ready, ready_in): (Client[Client[u64]], Inbox[Client[u64]]) = result.unwrap(conn.new(1, bytes 0))
+    let (done, done_in): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    let job = ConnJob(ready: take ready, done: take done)
+    let peer = result.unwrap(task.spawn_unit(tasks, bytes 4096, take job, conn_peer))
+    let ask = result.unwrap(conn.receive(ready_in))
+    result.unwrap(conn.send(ask, 40u64))
+    let answer = result.unwrap(conn.receive(done_in))
+    let finished = result.unwrap(task.join(take peer))
+    answer * 100u64 + finished
+}

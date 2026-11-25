@@ -1,0 +1,21 @@
+// A spawned task spawns and joins its own child, so the outer task parks at a join.
+// expect: run nested_join(1) = 42
+type NestedInput: send {
+    tasks: Tasks,
+    n: u64
+}
+
+fn nested_child(take n: u64) -> u64 {
+    n + 1u64
+}
+
+fn nested_outer(take input: NestedInput) -> u64 waits {
+    let NestedInput(tasks: tasks, n: n) = take input
+    let child = task.spawn(tasks, bytes 4096, n, nested_child)
+    result.unwrap(task.join(take child))
+}
+
+fn nested_join(tasks: Tasks) -> u64 waits {
+    let outer = task.spawn(tasks, bytes 4096, NestedInput(tasks: tasks, n: 41u64), nested_outer)
+    result.unwrap(task.join(take outer))
+}

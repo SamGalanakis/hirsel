@@ -31,6 +31,11 @@ FFI-8 ([foreign](foreign.md)) replay and `hirsel test --sim` cover it end to end
 Amended 2026-11-25 (webrtc-opus-red-c1-2652) for Opus RED: RTC-2 answers `red/48000/2` with
 its primary mapping, RTC-4 says how a RED leg would be repaired, and RTC-5 rebuilds RED per
 down-track from a per-publication ring under a loss-driven policy ([RTP-13](rtp.md#rtp-13-redundant-audio-red)).
+Amended 2026-11-25 (webrtc-e2ee-routing-law-2684) for end-to-end encrypted media: RTC-6 names
+the clear range of each codec, the bytes an SFrame or DAVE sender leaves clear, and the router
+routes on those alone (W25). VP9's keyframe test now reads the descriptor only (`B`, `P`,
+SID), as libwebrtc's depacketizer does; it read the uncompressed header's frame marker, which
+an encrypted VP9 frame hides, so a scrambled keyframe was counted `unparsed`.
 
 This chapter specifies three layers, each sans-IO:
 
@@ -832,8 +837,24 @@ the source wrote it, not narrowed to the leg's target.
 show `Rewrite` the pending layer's keyframe. The router fills rtp's `Unit` per packet from
 `media_bits`: `start` and `end` from the descriptor or the marker bit (a VP8 packet with
 `S = 1` and partition index 0 starts a frame; a nonzero partition with `S = 1` does not),
-and `keyframe` from the codec's keyframe test. The RTP S9 unit adapter fills the 32-bit
-`needs` and `switches` masks from the map above.
+and `keyframe` from the codec's keyframe test, which reads only the bytes an end-to-end
+encrypted sender leaves clear (W25): VP8's `P` bit in the first frame byte (RFC 7741 §4.3),
+VP9's descriptor alone (`B = 1`, `P = 0`, SID 0 or no `L`; RFC 9628 §4.2, as libwebrtc's
+depacketizer, never the uncompressed header), an H.264 IDR slice or SPS by NAL type, with
+the slice's `pic_parameter_set_id` and the SPS and PPS it names, and AV1's `N` bit with the dependency descriptor. The
+RTP S9 unit adapter fills the 32-bit `needs` and `switches` masks from the map above.
+
+**End-to-end encrypted media.** A publisher using an encoded transform (SFrame, DAVE)
+encrypts every frame byte past a codec's clear range, and the router routes on that range
+alone. The ranges, the bytes libdave's `codec_utils.cpp` and the sframe package both keep
+clear: the RTP header, extensions and padding; VP8's payload descriptor, then 10 frame bytes
+of a keyframe and 1 of an interframe on the packet that starts the frame; VP9's payload
+descriptor with its scalability structure; H.264's STAP-A and FU-A headers and sizes, SPS and
+PPS whole, a slice's NAL header through `pic_parameter_set_id` (three `ue(v)`, read through
+emulation prevention), and any other NAL's header; AV1's aggregation header, element
+lengths, and each OBU's header, extension and size; RFC 2198's block headers. Opus frames
+and RED block bodies are opaque. LiveKit's client turns RED off under E2EE
+(`LocalParticipant.ts`, `disableRed: isE2EEEnabled`); the router does not depend on it.
 `Rewrite` commits a switch only at a decodable frame start. It forwards the rest of that
 frame under the same decision, and it keeps forwarding the old source until then.
 `Rewrite` answers `Wait` while it has no current layer, and the router then asks for a
@@ -1470,6 +1491,21 @@ unless named otherwise.
   rate), `probe_resumes_paused_leg` (without `pause` the base flows at once; with it the leg
   waits for one probe round) and `probe_pads_media_without_rtx` (padding on the media SSRC
   only after a frame end, its numbers gapless with the media's, no media frame lost).
+- **W25 `e2ee_routes_on_clear_bytes`.** *Harness:* `core/programs/webrtc_sfu/e2ee_laws.hirsel`,
+  W9's VP8 three-encoding simulcast with temporal layers, H.264 simulcast, VP9 L3T3 and AV1
+  L3T3 scenes with their target changes (AV1's at the 20th packet), and an Opus publication
+  sent as RED to a RED leg and a plain leg, its RED raised by a 26/256 report. Each scene runs
+  in the clear, then with every byte outside RTC-6's clear ranges XORed with seeded nonzero
+  bytes (seeds 2684 and 2685) and with every bit flipped. *Oracle:* the clear ranges written
+  by hand from RFC 7741 §4.2, RFC 9628 §4.2, RFC 6184 §5.6–5.8 with H.264 §7.3.3 and §7.4.1,
+  the AV1 RTP payload §4.4 with AV1 §5.3, and RFC 2198 §3, independent of `media_bits` and
+  `sframe`; and the clear run of the same scene. Every datagram (to whom, RTCP bytes, each
+  forwarded packet with its encrypted bytes zeroed and its source capture), every published
+  layer mask and the router's counts equal the clear run's. Red on main before this law,
+  where VP9's keyframe test read the uncompressed header's frame marker, so every scrambled
+  VP9 keyframe was `unparsed` and the router asked the publisher for one instead of
+  forwarding it; red on an AV1 keyframe test
+  that also reads `seq_profile` from the first OBU's payload.
 
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.
@@ -1521,6 +1557,7 @@ W19, blocks, because those are soundness reds.
 | **S8** withdrawn | ICE-TCP is replaced by TURN over a stream (turn.md TURN-2, slice U8) | — | — |
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7 | the cost targets |
 | **C1** Opus RED | RTP-13 and its use here: RTC-2's `Red` answer, RTC-5's ring, policy and RED legs | S6 | W21, W22, W23 |
+| **C9b** E2EE routing | RTC-6's clear ranges; VP9's keyframe from the descriptor alone | S6, C1 | W25 |
 | **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 
 **S4 decisions.** Gaps the spec left open, decided while S4 was built:

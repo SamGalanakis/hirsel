@@ -83,13 +83,10 @@ pub fn vp9_frame(payload: Bytes, marker: bool) -> Result[Vp9Frame, Error] {
     if spatial > 3 || temporal > 3 {
         return Error(Unmappable)
     }
-    let mut keyframe = false
-    if descriptor.first && spatial == 0 && !descriptor.predicted {
-        keyframe = match vp9.is_keyframe(list.slice(payload, descriptor.payload_start, list.len(payload))) {
-            Ok(value) => value,
-            Error(e) => return Error(Vp9(e))
-        }
-    }
+    // RFC 9628 §4.2: a keyframe's first packet has B = 1, P = 0 and SID = 0 (or no L);
+    // parse refuses D = 1 at SID 0, as libwebrtc's depacketizer keys on P and D alone.
+    // The descriptor is the only part an E2EE sender leaves clear (RTC-6, W25).
+    let keyframe = descriptor.first && spatial == 0 && !descriptor.predicted
     Ok(Vp9Frame(begin: descriptor.first, end: descriptor.last || marker, keyframe: keyframe, spatial: spatial, temporal: temporal, predicted: descriptor.predicted, switching_up: switching_up, inter_layer: inter_layer))
 }
 

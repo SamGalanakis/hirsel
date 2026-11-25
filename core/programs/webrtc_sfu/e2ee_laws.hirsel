@@ -1,0 +1,904 @@
+// ---- RTC-6 W25 e2ee_routes_on_clear_bytes ----
+// An end-to-end encrypted publisher (SFrame or DAVE through Encoded Transform) encrypts
+// each frame except the bytes its packetizer and the forwarder must read. The router
+// must route on those bytes alone. This law writes every clear range by hand, from the
+// RFCs and libdave's codec_utils.cpp (/tmp/ref-libdave b5463c4), never from media_bits.
+// Where libdave and the sframe package's ranges (sframe/ranges.hirsel) differ, the clear
+// range is the bytes both keep clear.
+type E2Kind: key = E2Vp8 | E2Vp9 | E2H264 | E2Av1 | E2Audio
+
+// How a run treats the bytes outside the clear range: as captured, XORed with seeded
+// nonzero bytes (one stream per packet or Opus frame), or with every bit flipped.
+type E2Mode: key = E2Plain | E2Seeded(seed: u64) | E2Ones
+
+// splitmix64, so every scrambled byte is fixed by the seed and the packet.
+type E2Rng {
+    s: u64
+}
+
+fn e2_roll(mut g: E2Rng) -> u64 {
+    g.s = int.wrapping_add(g.s, 0x9e3779b97f4a7c15)
+    let mut z = g.s
+    z = int.wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9)
+    z = int.wrapping_mul(z ^ (z >> 27), 0x94d049bb133111eb)
+    z ^ (z >> 31)
+}
+
+// The byte at `at`, or 0 past the end: a descriptor cut short ends the clear range at
+// the payload's end, where the bounds below clamp it.
+fn e2_at(p: Bytes, at: u64) -> u64 {
+    if at >= list.len(p) {
+        return 0
+    }
+    int.widen(p[at])
+}
+
+fn e2_min(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn e2_mark(mut m: Bytes, from: u64, to: u64) {
+    let end = e2_min(to, list.len(m))
+    let mut i = from
+    while i < end {
+        m[i] = 1
+        i += 1
+    }
+}
+
+// RFC 7741 section 4.2: X|R|N|S|R|PID, then I|L|T|K|RSV when X, a 7- or 15-bit
+// PictureID when I, TL0PICIDX when L, and TID|Y|KEYIDX when T or K. A packet that
+// starts a frame (S = 1, PID = 0) also carries the frame's first bytes, of which an
+// E2EE sender keeps 10 clear on a keyframe (P = 0: the tag, start code and size) and 1
+// on an interframe (libdave ProcessFrameVp8; sframe keeps 3, so 1 is the common part).
+// The VP8 payload descriptor's length.
+fn e2_vp8_descriptor(p: Bytes) -> u64 {
+    let b0 = e2_at(p, 0)
+    let mut at: u64 = 1
+    if (b0 & 128) != 0 {
+        let x = e2_at(p, 1)
+        at = 2
+        if (x & 128) != 0 {
+            at += if (e2_at(p, at) & 128) != 0 {
+                2
+            } else {
+                1
+            }
+        }
+        if (x & 64) != 0 {
+            at += 1
+        }
+        if (x & 32) != 0 || (x & 16) != 0 {
+            at += 1
+        }
+    }
+    e2_min(at, list.len(p))
+}
+
+fn e2_vp8(p: Bytes) -> u64 {
+    let n = list.len(p)
+    let b0 = e2_at(p, 0)
+    let at = e2_vp8_descriptor(p)
+    if at >= n {
+        return n
+    }
+    if (b0 & 16) != 0 && (b0 & 7) == 0 {
+        let keep: u64 = if (p[at] & 1) == 0 {
+            10
+        } else {
+            1
+        }
+        return e2_min(n, at + keep)
+    }
+    at
+}
+
+// RFC 9628 section 4.2: I|P|L|F|B|E|V|Z; a 7- or 15-bit picture ID when I; TID|U|SID|D
+// when L, followed by TL0PICIDX in non-flexible mode (F = 0); P_DIFF|N octets while N
+// when P and F; and the scalability structure when V (section 4.2.1): N_S|Y|G, then
+// 4 octets per spatial layer when Y, then N_G and per group TID|U|R and R P_DIFFs when
+// G. libdave encrypts the whole VP9 frame (ProcessFrameVp9), so the descriptor is all
+// that stays clear.
+fn e2_vp9(p: Bytes) -> u64 {
+    let n = list.len(p)
+    let b0 = e2_at(p, 0)
+    let mut at: u64 = 1
+    if (b0 & 128) != 0 {
+        at += if (e2_at(p, at) & 128) != 0 {
+            2
+        } else {
+            1
+        }
+    }
+    if (b0 & 32) != 0 {
+        at += if (b0 & 16) == 0 {
+            2
+        } else {
+            1
+        }
+    }
+    if (b0 & 64) != 0 && (b0 & 16) != 0 {
+        let mut more = true
+        while more && at < n {
+            more = (p[at] & 1) != 0
+            at += 1
+        }
+    }
+    if (b0 & 2) != 0 {
+        let ss = e2_at(p, at)
+        at += 1
+        if (ss & 16) != 0 {
+            at += 4 * ((ss >> 5) + 1)
+        }
+        if (ss & 8) != 0 {
+            let groups = e2_at(p, at)
+            at += 1
+            for _ in 0u64 .. groups {
+                let g = e2_at(p, at)
+                at += 1 + ((g >> 2) & 3)
+            }
+        }
+    }
+    e2_min(at, n)
+}
+
+// H.264 section 7.3.3 by hand: the raw bytes from `lo` that hold first_mb_in_slice,
+// slice_type and pic_parameter_set_id, three ue(v), reading through the emulation
+// prevention bytes of section 7.4.1 (an 03 after 00 00 is skipped). libdave
+// (BytesCoveringH264PPS) and sframe both keep these clear; the count stops at the byte
+// that holds pic_parameter_set_id's last bit.
+fn e2_slice_prefix(p: Bytes, lo: u64, hi: u64) -> u64 {
+    let mut at = lo
+    let mut bit: u64 = 0
+    let mut zeros: u64 = 0
+    let mut leading: u64 = 0
+    let mut values: u64 = 0
+    let mut skip: u64 = 0
+    while at < hi {
+        if bit == 0 && zeros >= 2 && p[at] == 3 {
+            zeros = 0
+            at += 1
+            continue
+        }
+        let set = ((p[at] >> int.truncate(7 - bit)) & 1) == 1
+        if skip > 0 {
+            skip -= 1
+        } else if set {
+            values += 1
+            skip = leading
+            leading = 0
+        } else {
+            leading += 1
+        }
+        if values == 3 && skip == 0 {
+            return at + 1 - lo
+        }
+        bit += 1
+        if bit == 8 {
+            zeros = if p[at] == 0 {
+                zeros + 1
+            } else {
+                0
+            }
+            bit = 0
+            at += 1
+        }
+    }
+    hi - lo
+}
+
+// One NAL unit at [lo, hi): SPS (7) and PPS (8) stay clear whole, as both libdave and
+// sframe keep them; a slice (1, 5) keeps its header and slice prefix; any other kind
+// its one-byte header (sframe; libdave keeps more).
+fn e2_nal(mut m: Bytes, p: Bytes, lo: u64, hi: u64) {
+    if lo >= hi {
+        return
+    }
+    let kind = p[lo] & 31
+    if kind == 7 || kind == 8 {
+        e2_mark(mut m, lo, hi)
+    } else if kind == 1 || kind == 5 {
+        e2_mark(mut m, lo, lo + 1 + e2_slice_prefix(p, lo + 1, hi))
+    } else {
+        e2_mark(mut m, lo, lo + 1)
+    }
+}
+
+// RFC 6184 sections 5.6 to 5.8: a single NAL unit (1 to 23), a STAP-A (24: its
+// header, then 16-bit sizes, which the packetizer writes, and NAL units), or an FU-A
+// (28: indicator and header, which the packetizer writes from the NAL header; the
+// first fragment, S = 1, starts at the NAL's second byte).
+fn e2_h264(mut m: Bytes, p: Bytes) {
+    let n = list.len(p)
+    if n == 0 {
+        return
+    }
+    let kind = p[0] & 31
+    if kind >= 1 && kind <= 23 {
+        e2_nal(mut m, p, 0, n)
+    } else if kind == 24 {
+        e2_mark(mut m, 0, 1)
+        let mut at: u64 = 1
+        while at + 2 <= n {
+            let size: u64 = int.widen(list.word_be(p, at))
+            e2_mark(mut m, at, at + 2)
+            e2_nal(mut m, p, at + 2, e2_min(at + 2 + size, n))
+            at += 2 + size
+        }
+    } else if kind == 28 {
+        e2_mark(mut m, 0, 2)
+        let inner = e2_at(p, 1) & 31
+        if inner == 7 || inner == 8 {
+            e2_mark(mut m, 2, n)
+        } else if (e2_at(p, 1) & 128) != 0 && (inner == 1 || inner == 5) {
+            e2_mark(mut m, 2, 2 + e2_slice_prefix(p, 2, n))
+        }
+    } else {
+        e2_mark(mut m, 0, n)
+    }
+}
+
+// LEB128 at `at` (AV1 section 4.10.5), marked clear; answers the value.
+fn e2_leb(mut m: Bytes, p: Bytes, mut at: u64) -> u64 {
+    let mut value: u64 = 0
+    let mut shift: u64 = 0
+    while at < list.len(p) && shift < 56 {
+        let x: u64 = int.widen(p[at])
+        m[at] = 1
+        at += 1
+        value = value | ((x & 127) << shift)
+        if (x & 128) == 0 {
+            return value
+        }
+        shift += 7
+    }
+    value
+}
+
+// AV1 RTP section 4.4: the aggregation header Z|Y|W|N, then elements, each with a
+// LEB128 length except the last when W counts them. Both are the packetizer's. An
+// element that begins an OBU (not element 0 when Z = 1) starts with the OBU header,
+// type|X|S (AV1 section 5.3.2), its extension octet when X, and its LEB128 size when S,
+// all of which libdave keeps clear (ProcessFrameAv1); every other OBU byte is encrypted.
+fn e2_av1(mut m: Bytes, p: Bytes) {
+    let n = list.len(p)
+    if n == 0 {
+        return
+    }
+    m[0] = 1
+    let w: u64 = int.widen((p[0] >> 4) & 3)
+    let continues = (p[0] & 128) != 0
+    let mut at: u64 = 1
+    let mut index: u64 = 0
+    while at < n {
+        let size = if w != 0 && index == w - 1 {
+            n - at
+        } else {
+            e2_leb(mut m, p, mut at)
+        }
+        let end = e2_min(at + size, n)
+        if !(index == 0 && continues) && at < end {
+            let h = p[at]
+            m[at] = 1
+            let mut o = at + 1
+            if (h & 4) != 0 && o < end {
+                m[o] = 1
+                o += 1
+            }
+            if (h & 2) != 0 {
+                let _ = e2_leb(mut m, p, mut o)
+            }
+        }
+        at = end
+        index += 1
+    }
+}
+
+// RFC 2198 section 3: four-octet headers while F = 1, then the one-octet primary header;
+// the packetizer writes them, so they are clear. Every Opus byte is encrypted (libdave
+// ProcessFrameOpus). Answers each block's [from, to).
+fn e2_red_blocks(p: Bytes) -> List[(u64, u64)] {
+    let n = list.len(p)
+    let mut lengths: List[u64] = list.new()
+    let mut at: u64 = 0
+    while at < n && (p[at] & 128) != 0 {
+        let len: u64 = ((e2_at(p, at + 2) & 3) << 8) | e2_at(p, at + 3)
+        list.push(mut lengths, len)
+        at += 4
+    }
+    at += 1
+    let mut blocks: List[(u64, u64)] = list.new()
+    for len in lengths {
+        list.push(mut blocks, (e2_min(at, n), e2_min(at + len, n)))
+        at += len
+    }
+    list.push(mut blocks, (e2_min(at, n), n))
+    blocks
+}
+
+// The audio legs here: the publisher's RED on 63, the RED leg's RED on 120, Opus on
+// any other payload type.
+fn e2_is_red(pt: u8) -> bool {
+    pt == 63 || pt == 120
+}
+
+// The clear map of an RTP payload: 1 for each byte an E2EE sender leaves clear.
+fn e2_clear(kind: E2Kind, pt: u8, p: Bytes) -> Bytes {
+    let n = list.len(p)
+    let mut m: Bytes = list.with_capacity(n)
+    for _ in 0u64 .. n {
+        list.push(mut m, 0u8)
+    }
+    match kind {
+        E2Vp8 => e2_mark(mut m, 0, e2_vp8(p)),
+        E2Vp9 => e2_mark(mut m, 0, e2_vp9(p)),
+        E2H264 => e2_h264(mut m, p),
+        E2Av1 => e2_av1(mut m, p),
+        E2Audio => {
+            if e2_is_red(pt) {
+                e2_mark(mut m, 0, n)
+                for (from, to) in e2_red_blocks(p) {
+                    let mut i = from
+                    while i < to {
+                        m[i] = 0
+                        i += 1
+                    }
+                }
+            }
+        },
+    }
+    m
+}
+
+// `p` with every byte outside the clear map `m` replaced as `mode` says, from a stream
+// keyed by `key` (a capture index or an Opus frame number).
+fn e2_scramble(mode: E2Mode, key: u64, mut p: Bytes, m: Bytes) -> u64 {
+    let mut g = E2Rng(s: 0)
+    if let E2Seeded(seed: seed) = mode {
+        g.s = int.wrapping_add(int.wrapping_mul(seed, 1000003), key)
+    }
+    let mut count: u64 = 0
+    for i in 0u64 .. list.len(p) {
+        if m[i] != 0 {
+            continue
+        }
+        let x: u8 = match mode {
+            E2Plain => 0u8,
+            E2Ones => 255u8,
+            E2Seeded(seed: _) => {
+                let r: u8 = int.truncate(e2_roll(mut g))
+                if r == 0 {
+                    0x5au8
+                } else {
+                    r
+                }
+            },
+        }
+        p[i] = p[i] ^ x
+        count += 1
+    }
+    count
+}
+
+// A captured video packet with its payload's encrypted bytes scrambled (the RTP
+// header, extensions and padding are clear).
+fn e2_scrambled(kind: E2Kind, mode: E2Mode, k: u64, plain: Bytes) -> (Bytes, u64) {
+    let h = result.unwrap(rtp.header.parse(plain))
+    let (at, len) = result.unwrap(rtp.header.payload(h, plain))
+    let mut b = copy_of(plain)
+    let mut body = copy_of(list.slice(plain, at, at + len))
+    let m = e2_clear(kind, h.pt, body)
+    let count = e2_scramble(mode, k, mut body, m)
+    for i in 0u64 .. len {
+        b[at + i] = body[i]
+    }
+    (b, count)
+}
+
+// ---- The trace a run leaves: every datagram, and the router's own decisions ----
+// One event per datagram, in order: whom it went to; for RTCP, its SRTCP bytes; for
+// RTP, the source of each block it carries (a capture index, or an Opus frame) and the
+// plaintext with every encrypted byte zeroed, so what the router chose and wrote
+// (headers, extensions, sequence numbers, timestamps, picture IDs, descriptors) is
+// compared while the encrypted bytes, which only travel through, are matched to their
+// source instead.
+type E2Trace {
+    events: List[Bytes],
+    // RTP packets that carried at least one encrypted byte.
+    sealed: u64,
+    // Feedback datagrams to the publisher (keyframe requests among them).
+    upstream: u64
+}
+
+fn e2_trace() -> E2Trace {
+    E2Trace(events: list.new(), sealed: 0, upstream: 0)
+}
+
+fn e2_push_u64(mut b: Bytes, x: u64) {
+    for i in 0u64 .. 8 {
+        list.push(mut b, int.truncate(x >> (56 - 8 * i)))
+    }
+}
+
+// Where a payload's frame bytes start: past the descriptor a leg may rewrite (VP8's
+// picture ID and TL0PICIDX, RFC 7741 section 4.2; VP9's, RFC 9628 section 4.2).
+fn e2_frame_start(kind: E2Kind, p: Bytes) -> u64 {
+    match kind {
+        E2Vp8 => e2_vp8_descriptor(p),
+        E2Vp9 => e2_vp9(p),
+        _ => 0,
+    }
+}
+
+fn e2_frames_equal(kind: E2Kind, a: Bytes, b: Bytes) -> bool {
+    let at = e2_frame_start(kind, a)
+    let bt = e2_frame_start(kind, b)
+    if list.len(a) - at != list.len(b) - bt {
+        return false
+    }
+    for i in 0u64 .. list.len(a) - at {
+        if a[at + i] != b[bt + i] {
+            return false
+        }
+    }
+    true
+}
+
+// The source of the block [from, to) of `p`: the capture whose frame bytes, clear and
+// encrypted, as sent, it carries (a router forwards frame bytes unchanged), named by
+// the first capture whose cleartext frame bytes equal that one's, so captures that
+// differ only in their descriptors name one source in every run; 999 when none.
+fn e2_source(kind: E2Kind, p: Bytes, from: u64, to: u64, sources: List[Bytes], plain: List[Bytes]) -> u64 {
+    let block = list.slice(p, from, to)
+    for k in 0u64 .. list.len(sources) {
+        if e2_frames_equal(kind, block, sources[k]) {
+            for first in 0u64 .. k + 1 {
+                if e2_frames_equal(kind, plain[first], plain[k]) {
+                    return first
+                }
+            }
+        }
+    }
+    999
+}
+
+// Record what `out` sent: to the publisher (`up`), to each leg, or elsewhere. A video
+// payload is one block, an Opus frame or each RED block another.
+fn e2_record(mut t: E2Trace, kind: E2Kind, out: peer.Outbox, up: Addr, mut legs: List[Client], sources: List[Bytes], plain: List[Bytes]) {
+    for tx in out.pkts {
+        let UdpTx(to, at, len, ecn: _) = tx
+        let raw = copy_of(list.slice(out.data, at, at + len))
+        let mut e: Bytes = list.new()
+        let mut who: Option[u64] = None
+        for i in 0u64 .. list.len(legs) {
+            if legs[i].at == to {
+                who = Some(i)
+            }
+        }
+        let rtcp = len >= 2 && raw[1] >= 192 && raw[1] <= 223
+        if to == up {
+            list.push(mut e, 255u8)
+            t.upstream += 1
+        } else if let Some(i) = who {
+            list.push(mut e, int.truncate(i))
+        } else {
+            list.push(mut e, 254u8)
+        }
+        let Some(i) = who else {
+            list.append(mut e, raw)
+            list.push(mut t.events, take e)
+            continue
+        }
+        if rtcp {
+            list.append(mut e, raw)
+            list.push(mut t.events, take e)
+            continue
+        }
+        let mut b = raw
+        let opened = match srtp.unprotect_rtp(mut legs[i].cs, mut b) {
+            Ok(o) => o,
+            Error(_) => fail("a harness SRTP receiver could not open a forwarded packet"),
+        }
+        list.truncate(mut b, opened.length)
+        let h = result.unwrap(rtp.header.parse(b))
+        let (pat, plen) = result.unwrap(rtp.header.payload(h, b))
+        let body = copy_of(list.slice(b, pat, pat + plen))
+        let m = e2_clear(kind, h.pt, body)
+        let blocks: List[(u64, u64)] = match kind {
+            E2Audio => {
+                if e2_is_red(h.pt) {
+                    e2_red_blocks(body)
+                } else {
+                    let mut single: List[(u64, u64)] = list.new()
+                    list.push(mut single, (0u64, plen))
+                    single
+                }
+            },
+            _ => {
+                let mut single: List[(u64, u64)] = list.new()
+                list.push(mut single, (0u64, plen))
+                single
+            },
+        }
+        for (from, until) in blocks {
+            e2_push_u64(mut e, e2_source(kind, body, from, until, sources, plain))
+        }
+        let mut hidden = false
+        for q in 0u64 .. plen {
+            if m[q] == 0 {
+                b[pat + q] = 0
+                hidden = true
+            }
+        }
+        if hidden {
+            t.sealed += 1
+        }
+        list.append(mut e, b)
+        list.push(mut t.events, take e)
+    }
+}
+
+// The router's own outputs after a step: published masks and speakers.
+fn e2_notices(mut t: E2Trace, mut r: router.Router) {
+    for n in router.take_notices(mut r) {
+        let mut e: Bytes = list.new()
+        list.push(mut e, 253u8)
+        match n {
+            Layers(publication: _, mask: mask) => {
+                list.push(mut e, 1u8)
+                list.push(mut e, mask)
+            },
+            Speakers(room: _, top: top, count: count) => {
+                list.push(mut e, 2u8)
+                list.push(mut e, count)
+                for i in 0u64 .. 8 {
+                    e2_push_u64(mut e, top[i])
+                }
+            },
+            Offer(who: _, version: version, text: _) => {
+                list.push(mut e, 3u8)
+                e2_push_u64(mut e, version)
+            },
+            Shut(who: _) => list.push(mut e, 4u8),
+        }
+        list.push(mut t.events, take e)
+    }
+}
+
+fn e2_counts(mut t: E2Trace, r: router.Router) {
+    let c = router.counts(r)
+    let mut e: Bytes = list.new()
+    list.push(mut e, 252u8)
+    e2_push_u64(mut e, c.unrequested)
+    e2_push_u64(mut e, c.ring_misses)
+    e2_push_u64(mut e, c.unparsed)
+    e2_push_u64(mut e, c.unmapped)
+    e2_push_u64(mut e, c.refused)
+    e2_push_u64(mut e, c.unknown)
+    e2_push_u64(mut e, c.stale)
+    list.push(mut t.events, take e)
+}
+
+// ---- Video: the W9 captures and target changes, with a leg per target ----
+type E2Change {
+    at: u64,
+    leg: u64,
+    target: router.Target
+}
+
+type E2Video {
+    kind: E2Kind,
+    seed: u64,
+    publisher: Bytes,
+    legs: List[Bytes],
+    first: List[router.Target],
+    changes: List[E2Change],
+    packets: List[Bytes],
+    order: Bytes
+}
+
+fn e2_layer(e: u8, s: u8, t: u8) -> router.Target {
+    Layer(encoding: e, spatial: s, temporal: t)
+}
+
+fn e2_ascending(n: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    for k in 0u64 .. n {
+        list.push(mut b, int.truncate(k))
+    }
+    b
+}
+
+fn e2_vp8_scene() -> E2Video {
+    let mut legs: List[Bytes] = list.new()
+    let mut first: List[router.Target] = list.new()
+    for _ in 0u64 .. 3 {
+        list.push(mut legs, receiving(mid_d()))
+    }
+    list.push(mut first, e2_layer(0, 0, 255))
+    list.push(mut first, e2_layer(2, 0, 0))
+    list.push(mut first, e2_layer(1, 0, 0))
+    let mut changes: List[E2Change] = list.new()
+    list.push(mut changes, E2Change(at: 3, leg: 0, target: e2_layer(2, 0, 255)))
+    list.push(mut changes, E2Change(at: 20, leg: 1, target: e2_layer(2, 0, 1)))
+    list.push(mut changes, E2Change(at: 39, leg: 2, target: e2_layer(1, 0, 1)))
+    let mut packets = vectors.vp8_simulcast()
+    list.push(mut packets, vp8_hand(3249, 3004469738, true, b"\x91\xe0\xeb\x64\x97\x60\x9b\x01\x00\x00"))
+    list.push(mut packets, vp8_hand(3250, 3004474238, false, b"\x90\xe0\xeb\x65\x97\x60\x31\x01\x00\x00"))
+    list.push(mut packets, vp8_hand(3251, 3004474238, true, b"\x80\xe0\xeb\x65\x97\x60\x9b\x01\x00\x00"))
+    let order = b"\x04\x03\x06\x0b\x00\x01\x02\x05\x07\x08\x09\x0a\x13\x0c\x0d\x0e\x0f\x10\x11\x12\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29"
+    E2Video(kind: E2Vp8, seed: 140, publisher: vectors.vp8_simulcast_offer(), legs: take legs, first: take first, changes: take changes, packets: take packets, order: order)
+}
+
+fn e2_h264_scene() -> E2Video {
+    let mut legs: List[Bytes] = list.new()
+    let mut first: List[router.Target] = list.new()
+    list.push(mut legs, h264_receiving())
+    list.push(mut legs, h264_receiving())
+    list.push(mut first, e2_layer(0, 0, 0))
+    list.push(mut first, e2_layer(2, 0, 0))
+    let mut changes: List[E2Change] = list.new()
+    list.push(mut changes, E2Change(at: 1, leg: 0, target: e2_layer(2, 0, 0)))
+    list.push(mut changes, E2Change(at: 4, leg: 1, target: e2_layer(1, 0, 0)))
+    let order = b"\x0a\x00\x01\x02\x07\x03\x04\x05\x06\x08\x09\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e"
+    E2Video(kind: E2H264, seed: 150, publisher: vectors.h264_simulcast_offer(), legs: take legs, first: take first, changes: take changes, packets: vectors.h264_simulcast(), order: order)
+}
+
+fn e2_vp9_scene() -> E2Video {
+    let mut legs: List[Bytes] = list.new()
+    let mut first: List[router.Target] = list.new()
+    for _ in 0u64 .. 3 {
+        list.push(mut legs, vp9_offer(b"y", b"a=recvonly"))
+    }
+    list.push(mut first, e2_layer(0, 0, 0))
+    list.push(mut first, e2_layer(0, 0, 0))
+    list.push(mut first, e2_layer(0, 1, 0))
+    let mut changes: List[E2Change] = list.new()
+    list.push(mut changes, E2Change(at: 11, leg: 0, target: e2_layer(0, 2, 2)))
+    list.push(mut changes, E2Change(at: 11, leg: 1, target: e2_layer(0, 0, 2)))
+    let packets = vectors.vp9_l3t3()
+    let order = e2_ascending(list.len(packets))
+    E2Video(kind: E2Vp9, seed: 160, publisher: vectors.vp9_l3t3_offer(), legs: take legs, first: take first, changes: take changes, packets: packets, order: order)
+}
+
+fn e2_av1_scene() -> E2Video {
+    let mut legs: List[Bytes] = list.new()
+    let mut first: List[router.Target] = list.new()
+    for _ in 0u64 .. 4 {
+        list.push(mut legs, av1_offer(b"y", b"a=recvonly"))
+    }
+    list.push(mut first, e2_layer(0, 0, 0))
+    list.push(mut first, e2_layer(0, 1, 1))
+    list.push(mut first, e2_layer(0, 2, 2))
+    list.push(mut first, e2_layer(0, 1, 255))
+    let mut changes: List[E2Change] = list.new()
+    list.push(mut changes, E2Change(at: 20, leg: 0, target: e2_layer(0, 2, 2)))
+    list.push(mut changes, E2Change(at: 20, leg: 2, target: e2_layer(0, 0, 1)))
+    let packets = vectors.av1_l3t3()
+    let order = e2_ascending(list.len(packets))
+    E2Video(kind: E2Av1, seed: 170, publisher: vectors.av1_l3t3_offer(), legs: take legs, first: take first, changes: take changes, packets: packets, order: order)
+}
+
+// One run of a scene: the publisher sends the captures in the scene's order, each
+// packet's encrypted bytes scrambled by `mode`, while the legs' targets change.
+fn e2_run_video(s: E2Video, mode: E2Mode) -> E2Trace {
+    let mut r = router.router(provide.random(s.seed))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let room = room_id()
+    let mut p = admit(mut r, s.seed + 1, s.publisher, 1)
+    let mut legs: List[Client] = list.new()
+    for i in 0u64 .. list.len(s.legs) {
+        list.push(mut legs, admit(mut r, s.seed + 3 + 2 * i, s.legs[i], 2 + i))
+    }
+    let pa = result.unwrap(router.publish(mut r, room, p.who, 0))
+    let mut now = 10 * MS
+    let mut t = e2_trace()
+    for i in 0u64 .. list.len(legs) {
+        result.unwrap(router.subscribe(mut r, room, legs[i].who, pa, 0, s.first[i], now, mut out))
+    }
+    e2_record(mut t, s.kind, out, p.at, mut legs, list.new(), list.new())
+    peer.clear_outbox(mut out)
+    // The sources a leg's payloads are matched against: each capture as sent.
+    let mut sent: List[Bytes] = list.new()
+    let mut scrambled: u64 = 0
+    for k in 0u64 .. list.len(s.packets) {
+        let (b, count) = e2_scrambled(s.kind, mode, k, s.packets[k])
+        scrambled += count
+        list.push(mut sent, take b)
+    }
+    let mut bodies: List[Bytes] = list.new()
+    for b in sent {
+        list.push(mut bodies, body_of(b))
+    }
+    let mut plain: List[Bytes] = list.new()
+    for b in s.packets {
+        list.push(mut plain, body_of(b))
+    }
+    if mode != E2Plain && scrambled == 0 {
+        fail("a scene scrambled no byte")
+    }
+    for j in 0u64 .. list.len(s.order) {
+        for c in s.changes {
+            if c.at == j {
+                result.unwrap(router.set_target(mut r, room, legs[c.leg].who, pa, c.target, now, mut out))
+            }
+        }
+        let k: u64 = int.widen(s.order[j])
+        give(mut r, now, mut p, sent[k], mut out)
+        now += MS
+        e2_record(mut t, s.kind, out, p.at, mut legs, bodies, plain)
+        e2_notices(mut t, mut r)
+        peer.clear_outbox(mut out)
+    }
+    // Then 3 s of turns: retried keyframe requests, reports and the pause delay.
+    for _ in 0u64 .. 30 {
+        now += 100 * MS
+        let _ = router.poll(mut r, now, mut out)
+        e2_record(mut t, s.kind, out, p.at, mut legs, bodies, plain)
+        e2_notices(mut t, mut r)
+        peer.clear_outbox(mut out)
+    }
+    e2_counts(mut t, r)
+    t
+}
+
+// ---- Audio: an Opus publication sent as RED, to a RED leg and a plain leg ----
+const E2_FRAMES: u64 = 120
+
+fn e2_red_of(pt: u8, frames: List[Bytes], k: u64, n: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    let mut back = n
+    while back > 0 {
+        let len = list.len(frames[k - back])
+        list.push(mut b, 128u8 | pt)
+        list.push(mut b, int.truncate(15 * back))
+        list.push(mut b, int.truncate(len >> 8))
+        list.push(mut b, int.truncate(len))
+        back -= 1
+    }
+    list.push(mut b, pt)
+    back = n
+    while back > 0 {
+        list.append(mut b, frames[k - back])
+        back -= 1
+    }
+    list.append(mut b, frames[k])
+    b
+}
+
+fn e2_run_audio(mode: E2Mode) -> E2Trace {
+    let RedRoom(r: take routed, publisher: take publisher, red: take red, plain: take plain, ssrc: ssrc) = red_room(2684)
+    let mut r = take routed
+    let mut sender = take publisher
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut frames: List[Bytes] = list.new()
+    let mut cleartext: List[Bytes] = list.new()
+    for k in 0u64 .. E2_FRAMES {
+        let mut f = red_frame_of(k)
+        let mut none: Bytes = list.new()
+        for _ in 0u64 .. list.len(f) {
+            list.push(mut none, 0u8)
+        }
+        let _ = e2_scramble(mode, 100000 + k, mut f, none)
+        list.push(mut frames, take f)
+        list.push(mut cleartext, red_frame_of(k))
+    }
+    let mut legs: List[Client] = list.new()
+    list.push(mut legs, take red)
+    list.push(mut legs, take plain)
+    let up = sender.at
+    let mut t = e2_trace()
+    for k in 0u64 .. E2_FRAMES {
+        let now = red_tick(k)
+        if k != 0 && k % 40 == 0 {
+            // A lossy report raises the RED leg to distance 2; a clean one starts its dwell.
+            let fraction: u8 = if k == 40 {
+                26
+            } else {
+                0
+            }
+            let rr = red_report(mut legs[0].cs, ssrc, fraction)
+            feed(mut r, now, legs[0].who, legs[0].at, rr, mut out)
+            e2_record(mut t, E2Audio, out, up, mut legs, frames, cleartext)
+            peer.clear_outbox(mut out)
+        }
+        let n: u64 = if k == 0 {
+            0
+        } else {
+            1
+        }
+        let packet = media_carrying(mut sender.cs, MEDIA_SSRC, int.truncate(k), int.truncate(960 * k), b"a", 63, e2_red_of(111, frames, k, n))
+        feed(mut r, now, sender.who, sender.at, packet, mut out)
+        e2_record(mut t, E2Audio, out, up, mut legs, frames, cleartext)
+        e2_notices(mut t, mut r)
+        peer.clear_outbox(mut out)
+    }
+    e2_counts(mut t, r)
+    t
+}
+
+// ---- The law ----
+fn e2_hex(mut msg: String, b: Bytes) {
+    string.push(mut msg, "\n ")
+    for i in 0u64 .. e2_min(list.len(b), 96) {
+        string.push(mut msg, " ")
+        string.push_u64(mut msg, int.widen(b[i]))
+    }
+}
+
+fn e2_same(a: E2Trace, b: E2Trace, what: String) {
+    let n = e2_min(list.len(a.events), list.len(b.events))
+    for i in 0u64 .. n {
+        if a.events[i] != b.events[i] {
+            let mut msg = string.from(what)
+            string.push(mut msg, ": event ")
+            string.push_u64(mut msg, i)
+            string.push(mut msg, " differs (to ")
+            string.push_u64(mut msg, int.widen(a.events[i][0]))
+            string.push(mut msg, ")")
+            e2_hex(mut msg, a.events[i])
+            e2_hex(mut msg, b.events[i])
+            fail(take msg)
+        }
+    }
+    if list.len(a.events) != list.len(b.events) {
+        let mut msg = string.from(what)
+        string.push(mut msg, ": ")
+        string.push_u64(mut msg, list.len(a.events))
+        string.push(mut msg, " events in the clear, ")
+        string.push_u64(mut msg, list.len(b.events))
+        string.push(mut msg, " scrambled")
+        fail(take msg)
+    }
+}
+
+fn e2_modes() -> List[E2Mode] {
+    let mut modes: List[E2Mode] = list.new()
+    list.push(mut modes, E2Seeded(seed: 2684))
+    list.push(mut modes, E2Seeded(seed: 2685))
+    list.push(mut modes, E2Ones)
+    modes
+}
+
+fn e2_video(s: E2Video, what: String) {
+    let clear = e2_run_video(s, E2Plain)
+    // Not vacuous: the legs got packets with encrypted bytes, and the target changes
+    // sent the publisher feedback.
+    if clear.sealed == 0 || clear.upstream == 0 {
+        fail(string.from(what))
+    }
+    for mode in e2_modes() {
+        e2_same(clear, e2_run_video(s, mode), clone(what))
+    }
+}
+
+/// bug: read a routing fact from a byte an E2EE sender encrypts: a keyframe from the
+/// VP9 uncompressed header or from an AV1 OBU's payload, a VP8 frame start or layer from
+/// past the descriptor's first frame byte, an H.264 access-unit start from past the
+/// slice's pic_parameter_set_id, or anything from an Opus or RED block body.
+/// oracle: the clear ranges written by hand from RFC 7741 section 4.2, RFC 9628 section
+/// 4.2, RFC 6184 sections 5.6 to 5.8 with H.264 sections 7.3.3 and 7.4.1, AV1 RTP section
+/// 4.4 with AV1 section 5.3, and RFC 2198 section 3, cut to what libdave's codec_utils.cpp
+/// and sframe both keep clear; the clear run of the same scene. Every datagram, published
+/// mask and count of the scrambled runs (two seeds, and every bit flipped) must equal the
+/// clear run's, with each encrypted byte matched to its source instead of compared.
+@test
+fn e2ee_routes_on_clear_bytes() -> Result[(), ()] {
+    e2_video(e2_vp8_scene(), "VP8 simulcast with temporal layers")
+    e2_video(e2_h264_scene(), "H.264 simulcast")
+    e2_video(e2_vp9_scene(), "VP9 L3T3 SVC")
+    e2_video(e2_av1_scene(), "AV1 L3T3 with dependency descriptors")
+    let clear = e2_run_audio(E2Plain)
+    if clear.sealed == 0 {
+        fail("the audio legs got no Opus bytes")
+    }
+    for mode in e2_modes() {
+        e2_same(clear, e2_run_audio(mode), "Opus as RED, to a RED leg and a plain leg")
+    }
+    Ok(())
+}

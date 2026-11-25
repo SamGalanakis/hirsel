@@ -5,6 +5,7 @@ webrtc_sfu@1/laws/av1_across_units src=434cafadd220e2aa sig=b6ba703249ca494f run
 webrtc_sfu@1/laws/browser_feedback_reaches_bwe src=68030d63b7f1bc98 sig=410d44eec7ff13e4 run=c2c0c6612d4cbb79 bug=1f3cc0edfb8f41ce oracle=c749db7ddbeb5971 rows=pending
 webrtc_sfu@1/laws/demux_prefix src=53e426639f6adbb0 sig=3a6c2751a5917df6 run=c2c0c6612d4cbb79 bug=274d143e0a1ab832 oracle=5aa9732b60953b5a rows=pending
 webrtc_sfu@1/laws/dynacast_mask src=bfa1f0190ac6f339 sig=126f0d71a02978be run=c2c0c6612d4cbb79 bug=23d87c9b4cec5755 oracle=6889ad59b37e63b4 rows=pending
+webrtc_sfu@1/laws/e2ee_routes_on_clear_bytes src=f94b7ec1f53c5020 sig=7d70cd83c9398205 run=c2c0c6612d4cbb79 bug=87cc12e48d0e1724 oracle=1e45161cf1030126 rows=pending
 webrtc_sfu@1/laws/fanout_across_units src=e8664d6067555ff1 sig=f234c1b07e46d137 run=c7b2a52baff70a63 bug=c998b5664139cd3a oracle=e7efc77afeb879ea rows=pending
 webrtc_sfu@1/laws/forward_allocates_nothing src=84c336ed88e883f5 sig=76c71a46c3f5176f run=c2c0c6612d4cbb79 bug=e98263cf14d24b42 oracle=f3ed3a7cbf0bfdf1 rows=pending
 webrtc_sfu@1/laws/glare_settles_in_one_round src=110aaa2076c0fece sig=35f36e5aede5eff7 run=c2c0c6612d4cbb79 bug=5bb9015e28ddca38 oracle=4c240daa0eae4636 rows=pending

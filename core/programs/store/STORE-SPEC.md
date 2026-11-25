@@ -2022,7 +2022,7 @@ For a missing row at p = 0, apply the Caller's floor before considering admissio
 | `Duplicate(r)`, `Rejected(l)`, `RequestMismatch`, `HistoryUnavailable`, `Abandoned(t)` within this open, `Error(Full(c))` (AE3) | is left as it was; no digest is bound |
 | a refusal before admission (the runner's V1 refusals; RUNNER-SPEC §2 V1 owns their list; `admit` is never called) | is left as it was, and nothing is recorded |
 
-- **P1.** A client advances `p` only after a reply for `p` (`Returned`, or a reply-only `Failed`).
+- **P1.** A client advances `p` only after a reply the store holds for `p`: the `Returned` or reply-only `Failed` of a call the runner admitted. An answer the runner gives without calling `admit` (its V1 refusals, and every Outcome of a compute or granted call, a `Returned` included) does not consume `p`.
   - A refusal before admission does not consume `p`.
   - The client gives that `p` to its next request only when no admitted attempt of the refused request can remain, which means the refusal answered the request's only send. Otherwise it keeps the request and sends it again.
   - `Abandoned` and the runner's retryable refusals (RUNNER-SPEC owns their list) keep the request and `p`.

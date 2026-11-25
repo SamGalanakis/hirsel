@@ -148,7 +148,7 @@ export async function laws(codec, only, mutant, entries, http) {
   const clients=[];
   async function setup(storage=new Memory(),options={}) {
     const time=new Time(),server=new Server(codec,storage),events=[],diagnostics=[];
-    const opts={url:'ws://scripted',storage,frame:codec,wants:[want],socket:server.socket,clock:time,
+    const opts={url:'ws://scripted',storage,frame:codec,wants:[want],kinds:['transact'],socket:server.socket,clock:time,
       credential:async()=>credential,onRecovered:o=>events.push(o),onDiagnostic:d=>diagnostics.push(d),...options};
     options.prepare?.(server);
     const client=await runtime.Client.open(opts);clients.push(client);await settle();
@@ -263,7 +263,7 @@ export async function laws(codec, only, mutant, entries, http) {
       assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(7));
       if(cut==='commit')assert.equal(h.server.calls.length,0);else assert.equal(h.server.calls.length,1);
       h.storage.afterWrite=undefined;h.storage.beforeWrite=undefined;await h.client.close();await settle();
-      const recovered=await setup(h.storage,{wants:[other,want],prepare:server=>{server.onCall=(f,s)=>server.answer(s,0,0n,store.attempt(s.principal,f));}});
+      const recovered=await setup(h.storage,{wants:[other,want],kinds:['transact','transact'],prepare:server=>{server.onCall=(f,s)=>server.answer(s,0,0n,store.attempt(s.principal,f));}});
       await ready(recovered);
       assert.deepEqual(recovered.server.calls[0].frame,call(savedStream(h.storage.raw).id,0n,7,1));
       assert.equal(store.effects,1);assert.equal(savedStream(h.storage.raw).next,1n);

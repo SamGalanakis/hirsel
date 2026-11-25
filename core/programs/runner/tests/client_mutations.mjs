@@ -139,7 +139,7 @@ export function optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,re
       assert.equal(changes.length,0);
       assert.strictEqual(sub.rows(0).value,visible);
 
-      const h=await setup(undefined,{wants:entries.want});
+      const h=await setup(undefined,{wants:entries.want,kinds:entries.kind});
       await ready(h);
       const api=entries.bind(h.client), decodedChanges=[];
       const decoded=api.subscribeDecoded.main.rows(3,(_,change)=>decodedChanges.push(change));

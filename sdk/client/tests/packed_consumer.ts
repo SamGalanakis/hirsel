@@ -4,7 +4,7 @@ import {Client, type Socket, type Subscription} from '@hirsel/client';
 import {NodeStorage} from '@hirsel/client/node';
 import {Frame} from './generated/frame.js';
 import * as codec from './generated/codec.js';
-import {bind, identity, tables, want} from './generated/entries.js';
+import {bind, identity, kind, tables, want} from './generated/entries.js';
 import {reopenWhileCalling, watchItem} from './subscription-cache.ts';
 
 const produced = await readFile(new URL('./payload.bin', import.meta.url));
@@ -52,7 +52,7 @@ function openSocket(): Socket {
 }
 
 const client = await Client.open({
-  url: 'ws://scripted', frame: Frame, wants: want, identity, socket: openSocket,
+  url: 'ws://scripted', frame: Frame, wants: want, kinds: kind, identity, socket: openSocket,
   storage: new NodeStorage('state'), onDiagnostic: message => diagnostic(new Error(message)),
 });
 try {
@@ -147,7 +147,7 @@ const deliver = async (frame: Frame) => {
   await new Promise(resolve => setTimeout(resolve, 0));
 };
 const roomClient = await Client.open({
-  url: 'ws://scripted', frame: Frame, wants: want, identity, socket: roomSocket, storage: new NodeStorage('room-state'),
+  url: 'ws://scripted', frame: Frame, wants: want, kinds: kind, identity, socket: roomSocket, storage: new NodeStorage('room-state'),
   clock: {now: () => performance.now(), random: () => 0, set: (fn, ms) => setTimeout(fn, ms), clear: id => clearTimeout(id as never)},
 });
 try {

@@ -3,10 +3,12 @@
 // and a page can load it once its types are stripped.
 //
 // The browser is the session's Caller. It sends `Authorization: Bearer <base64 credential>`
-// on every request and `Hirsel-Position` on each POST. Positions are sequential per Caller
-// across connections, so the client sends one POST at a time, resends an unanswered one
-// with the same bytes at the same position, and moves on only after an answer. Keep
-// `position` with the credential (for example in localStorage) to continue after a reload.
+// on every request and `Idempotency-Key: "<stream>.<position>"` on each POST. The client
+// mints its stream (16 hex of the minting wall-clock milliseconds, then 16 random hex) and
+// numbers its POSTs from 0 on it. Positions are sequential per stream across connections,
+// so the client sends one POST at a time, resends an unanswered one with the same bytes at
+// the same position, and moves on only after an answer. Keep `stream` and `position` with
+// the credential (for example in localStorage) to continue after a reload.
 
 export type View = { Status: string } | { Line: [string, string] };
 export type Shown = { at: number; line: View };
@@ -31,13 +33,19 @@ export type State = {
   live: boolean; older: boolean; // whether the first image has arrived; whether earlier rows remain
 };
 export type Options = {
-  base: string; session: number; credential: string; position?: number;
+  base: string; session: number; credential: string; stream?: string; position?: number;
   tail?: number; page?: number; staleMs?: number; onChange: (s: State) => void;
 };
 
 const bytes = (s: string) => new TextEncoder().encode(s).length;
 
+const mint = () => {
+  const n = crypto.getRandomValues(new Uint8Array(8));
+  return Date.now().toString(16).padStart(16, "0") + Array.from(n, (b) => b.toString(16).padStart(2, "0")).join("");
+};
+
 export class Client {
+  stream: string;
   position: number;
   private o: Options;
   private rows = new Map<number, View>();
@@ -50,7 +58,7 @@ export class Client {
   private queue: Promise<unknown> = Promise.resolve();
   private stopped = false;
 
-  constructor(o: Options) { this.o = o; this.position = o.position ?? 0; }
+  constructor(o: Options) { this.o = o; this.stream = o.stream ?? mint(); this.position = o.position ?? 0; }
 
   private headers(): Record<string, string> { return { Authorization: `Bearer ${this.o.credential}` }; }
   private url(path: string) { return `${this.o.base}/sessions/${this.o.session}${path}`; }
@@ -112,7 +120,7 @@ export class Client {
         try {
           r = await fetch(this.url(path), {
             method: "POST", body,
-            headers: { ...this.headers(), "Hirsel-Position": String(this.position), "Content-Type": "application/json" },
+            headers: { ...this.headers(), "Idempotency-Key": `"${this.stream}.${this.position}"`, "Content-Type": "application/json" },
           });
         } catch { /* no answer: resend the same bytes at the same position */ }
         if (r && r.status !== 503) {

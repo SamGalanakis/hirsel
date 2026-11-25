@@ -5,7 +5,7 @@ fn browser(net: Net, clock: Clock, port: u16, credential: Bytes) -> Result[std.h
 }
 
 fn browser_at(net: Net, clock: Clock, port: u16, credential: Bytes, target: String) -> Result[std.http_client.Connection, u64] waits {
-    let request = std.http_client.Request(method: "GET", target: string.from(target), headers: person(credential, 0u64), body: Fixed(0u64))
+    let request = std.http_client.Request(method: "GET", target: string.from(target), headers: person(credential), body: Fixed(0u64))
     let until = std.clock.deadline_after_ms(host.mono_ns(clock), WITHIN_MS)
     let Ok(take c) = std.http_client.dial(net, local(port), "127.0.0.1", clock, request, until) else {
         return Error(1u64)
@@ -158,13 +158,14 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let served = harness.gateway_http.serve(door, take front, take listener)
     let port = at.port
     let me = runner.ingress.credential(random)
-    let (created, _) = http(net, clock, port, "POST", "/sessions", person(me, 0u64), string.into_bytes("preview"))
+    let s = law_stream(clock, 1u64)
+    let (created, _) = http(net, clock, port, "POST", "/sessions", person(me), string.into_bytes("preview"))
     if created != 201u16 {
         return Error(11u64)
     }
     let dir = result.unwrap(std.dir.narrow(root, "s0"))
     let before = committed_version(dir)
-    let (posted, _) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 0u64), json(harness.Submit(client_key: "p1", text: "preview it")))
+    let (posted, _) = http(net, clock, port, "POST", "/sessions/0/messages", posting(me, s, 0u64), json(harness.Submit(client_key: "p1", text: "preview it")))
     if posted != 202u16 {
         return Error(12u64)
     }
@@ -190,11 +191,11 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     }
     if revoke {
         let outsider = runner.ingress.credential(random)
-        let (stranger, _) = http(net, clock, port, "GET", "/sessions/0/events", person(outsider, 0u64), list.new())
+        let (stranger, _) = http(net, clock, port, "GET", "/sessions/0/events", person(outsider), list.new())
         if stranger != 403u16 || !denied_history(net, clock, port, outsider) {
             return Error(40u64)
         }
-        let (status, take body) = http(net, clock, port, "GET", "/sessions/0/history?before=2&lines=1", person(me, 0u64), list.new())
+        let (status, take body) = http(net, clock, port, "GET", "/sessions/0/history?before=2&lines=1", person(me), list.new())
         let page_format: std.json.Format[harness.gateway_http.Page] = result.unwrap(std.json.interop())
         let Ok(page) = std.json.decode_typed(page_format, take body, 65536u64) else {
             return Error(41u64)
@@ -204,7 +205,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         }
         let mut other = idle_preview_tab(net, clock, port, me, reads)?
         let change = runner.fixture.transact_entry(code.describe(revoke_reader))
-        let Ok(Ok(())) = call_routed(door, 0u64, me, 1u64, change, (), tasks, clock, random, net) else {
+        let Ok((Ok(()), _)) = call_routed(door, 0u64, me, None, change, (), tasks, clock, random, net) else {
             return Error(42u64)
         }
         let revoked_at = host.mono_ns(clock)
@@ -221,7 +222,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         if !denied_history(net, clock, port, me) {
             return Error(47u64)
         }
-        let (returned, _) = http(net, clock, port, "GET", "/sessions/0/events", person(me, 0u64), list.new())
+        let (returned, _) = http(net, clock, port, "GET", "/sessions/0/events", person(me), list.new())
         if returned != 403u16 {
             return Error(44u64)
         }
@@ -272,7 +273,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
             }
             let d = harness.preview.door(hub)
             let owner = result.unwrap(runner.ingress.caller((), me)).caller
-            let (posted_next, _) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 1u64), json(harness.Submit(client_key: "p2", text: "preview it")))
+            let (posted_next, _) = http(net, clock, port, "POST", "/sessions/0/messages", posting(me, s, 1u64), json(harness.Submit(client_key: "p2", text: "preview it")))
             if posted_next != 202u16 {
                 return Error(2200u64 + int.widen(posted_next))
             }
@@ -345,7 +346,7 @@ fn ended_without_rows(mut c: std.http_client.Connection) -> bool waits {
 }
 
 fn denied_history(net: Net, clock: Clock, port: u16, who: Bytes) -> bool waits {
-    let (status, page) = http(net, clock, port, "GET", "/sessions/0/history?before=2&lines=1", person(who, 0u64), list.new())
+    let (status, page) = http(net, clock, port, "GET", "/sessions/0/history?before=2&lines=1", person(who), list.new())
     status == 403u16 && list.len(page) == 0u64
 }
 

@@ -31,15 +31,33 @@ fn http(net: Net, clock: Clock, port: u16, method: String, target: String, take 
     (status, got)
 }
 
-// A browser's headers: its credential and the position of this request.
-fn person(credential: Bytes, p: u64) -> List[std.http_client.Header] {
+// A browser's headers: its credential.
+fn person(credential: Bytes) -> List[std.http_client.Header] {
     let mut auth = string.from("Bearer ")
     string.push(mut auth, std.base64.encode_string(credential))
-    let mut at = string.new()
-    string.push_u64(mut at, p)
     let mut out: List[std.http_client.Header] = list.new()
     list.push(mut out, std.http_client.Header(name: "Authorization", value: Public(string.into_bytes(take auth))))
-    list.push(mut out, std.http_client.Header(name: "Hirsel-Position", value: Public(string.into_bytes(take at))))
+    out
+}
+
+// A browser's stream, minted as a client mints one: its keyed time is now (SDK §Transport).
+fn law_stream(clock: Clock, n: u64) -> store.StreamId {
+    store.StreamId(t: host.wall_ms(clock), n: n)
+}
+
+// A stored request's headers: the credential, and its stream and position in the runner's
+// HTTP `Idempotency-Key` form, `"<32 hex: t ‖ n>.<p>"`.
+fn posting(credential: Bytes, s: store.StreamId, p: u64) -> List[std.http_client.Header] {
+    let mut key = string.from("\"")
+    let mut name: Bytes = list.new()
+    std.codec.put_key_u64(s.t, mut name)
+    std.codec.put_key_u64(s.n, mut name)
+    string.push(mut key, std.hex.encode(name))
+    string.push(mut key, ".")
+    string.push_u64(mut key, p)
+    string.push(mut key, "\"")
+    let mut out = person(credential)
+    list.push(mut out, std.http_client.Header(name: "Idempotency-Key", value: Public(string.into_bytes(take key))))
     out
 }
 
@@ -195,14 +213,15 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let served = harness.gateway_http.serve(door, take front, take listener)
     let port = at.port
     let me = runner.ingress.credential(random)
-    let (created, made) = http(net, clock, port, "POST", "/sessions", person(me, 0u64), string.into_bytes("first"))
+    let s = law_stream(clock, 1u64)
+    let (created, made) = http(net, clock, port, "POST", "/sessions", person(me), string.into_bytes("first"))
     if created != 201u16 {
         return 1u64
     }
     if made != b"0" {
         return 2u64
     }
-    let events = std.http_client.Request(method: "GET", target: "/sessions/0/events", headers: person(me, 0u64), body: Fixed(0u64))
+    let events = std.http_client.Request(method: "GET", target: "/sessions/0/events", headers: person(me), body: Fixed(0u64))
     let Ok(take opened) = std.http_client.dial(net, local(port), "127.0.0.1", clock, events, std.clock.deadline_after_ms(host.mono_ns(clock), 30000u64)) else {
         return 3u64
     }
@@ -215,7 +234,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     }
     let mut decoder = std.sse.decoder(65536u64)
     let mut rows: List[(u64, Bytes)] = list.new()
-    let (posted, _) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 0u64), json(harness.Submit(client_key: "k1", text: "bump it")))
+    let (posted, _) = http(net, clock, port, "POST", "/sessions/0/messages", posting(me, s, 0u64), json(harness.Submit(client_key: "k1", text: "bump it")))
     if posted != 202u16 {
         return 6u64
     }
@@ -235,7 +254,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         return 10u64
     }
     let key = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}")))
-    let (ruled, ruling) = http(net, clock, port, "POST", "/sessions/0/decisions", person(me, 1u64), json(harness.Decision(run: 0u64, round: 0u64, ordinal: 0u64, key: take key, allow: true)))
+    let (ruled, ruling) = http(net, clock, port, "POST", "/sessions/0/decisions", posting(me, s, 1u64), json(harness.Decision(run: 0u64, round: 0u64, ordinal: 0u64, key: take key, allow: true)))
     if ruled != 200u16 {
         return 11u64
     }
@@ -254,13 +273,13 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         }
         // A read during the run: the open stream holds one of the place's wire sessions,
         // so the page needs another, and it must not wait for the held tool.
-        let (mid_run, _) = http(net, clock, port, "GET", "/sessions/0/history?before=4&lines=2", person(me, 0u64), list.new())
+        let (mid_run, _) = http(net, clock, port, "GET", "/sessions/0/history?before=4&lines=2", person(me), list.new())
         if mid_run != 200u16 {
             return 19u64
         }
         // A message during the run is answered at once: it is queued in the session's
         // ingress (Queued at seq 1) and becomes the next turn when this one ends.
-        let (busy, said) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 2u64), json(harness.Submit(client_key: "k2", text: "again")))
+        let (busy, said) = http(net, clock, port, "POST", "/sessions/0/messages", posting(me, s, 2u64), json(harness.Submit(client_key: "k2", text: "again")))
         if busy != 202u16 || said != json((Queued(1u64) : harness.Disposition)) {
             return 20u64
         }
@@ -316,18 +335,19 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
 // source is deleted. Only its two new entries precede the first cut; paging
 // from the cut yields the source rows.
 fn fork_history(door: harness.gateway.Door, net: Net, clock: Clock, port: u16, me: Bytes) -> u64 waits {
-    let (forked, fork_id) = http(net, clock, port, "POST", "/sessions/0/forks", person(me, 0u64), json(harness.gateway_http.ForkAsk(key: "fork", cut: 5u64)))
+    let (forked, fork_id) = http(net, clock, port, "POST", "/sessions/0/forks", person(me), json(harness.gateway_http.ForkAsk(key: "fork", cut: 5u64)))
     if forked != 201u16 || fork_id != b"1" {
         return 2u64
     }
-    let (inside, _) = http(net, clock, port, "POST", "/sessions/0/forks", person(me, 0u64), json(harness.gateway_http.ForkAsk(key: "inside", cut: 3u64)))
+    let (inside, _) = http(net, clock, port, "POST", "/sessions/0/forks", person(me), json(harness.gateway_http.ForkAsk(key: "inside", cut: 3u64)))
     if inside != 422u16 {
         return 16u64
     }
     if let Error(_) = harness.gateway.delete(door, 0u64) {
         return 3u64
     }
-    let (posted, _) = http(net, clock, port, "POST", "/sessions/1/messages", person(me, 0u64), json(harness.Submit(client_key: "f1", text: "fork only")))
+    let s = law_stream(clock, 2u64)
+    let (posted, _) = http(net, clock, port, "POST", "/sessions/1/messages", posting(me, s, 0u64), json(harness.Submit(client_key: "f1", text: "fork only")))
     if posted != 202u16 {
         return 4u64
     }
@@ -345,7 +365,7 @@ fn fork_history(door: harness.gateway.Door, net: Net, clock: Clock, port: u16, m
     }
     let _ = take stream
     let format: std.json.Format[harness.gateway_http.Page] = result.unwrap(std.json.interop())
-    let (newer, data) = http(net, clock, port, "GET", "/sessions/1/history?before=8&lines=7", person(me, 0u64), list.new())
+    let (newer, data) = http(net, clock, port, "GET", "/sessions/1/history?before=8&lines=7", person(me), list.new())
     if newer != 200u16 {
         return 7u64
     }
@@ -356,7 +376,7 @@ fn fork_history(door: harness.gateway.Door, net: Net, clock: Clock, port: u16, m
         return 9u64
     }
     list.push(mut rows, (6u64, bytes_of(page.rows[0].line)))
-    let (older, prior_data) = http(net, clock, port, "GET", "/sessions/1/history?before=6&lines=7", person(me, 0u64), list.new())
+    let (older, prior_data) = http(net, clock, port, "GET", "/sessions/1/history?before=6&lines=7", person(me), list.new())
     if older != 200u16 {
         return 10u64
     }

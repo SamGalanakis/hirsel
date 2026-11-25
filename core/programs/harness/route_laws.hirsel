@@ -12,8 +12,12 @@ fn test_gateway_route_acl(parent: Dir, clock: Clock, random: Random, tasks: Task
 fn idle_preview_tab(net: Net, clock: Clock, port: u16, me: Bytes, reads: Receiver[()]) -> Result[std.http_client.Connection, u64] waits {
     let mut other = browser(net, clock, port, me)?
     let mut decoder = std.sse.decoder(65536u64)
-    let Some(_) = first_draft(mut other, mut decoder) else { return Error(49u64) }
-    let Ok(()) = channel.try_receive(reads) else { return Error(49u64) }
+    let Some(_) = first_draft(mut other, mut decoder) else {
+        return Error(49u64)
+    }
+    let Ok(()) = channel.try_receive(reads) else {
+        return Error(49u64)
+    }
     std.clock.sleep_ns(clock, 1000000000u64)
     match channel.try_receive(reads) {
         Error(Empty) => Ok(take other),
@@ -52,25 +56,32 @@ fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let front = harness.gateway_http.Front(bind: code.describe(runner.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: runner.client.transact_entry(code.describe(submit_entry)), decide: runner.client.transact_entry(code.describe(decide_entry)), settle: Some(runner.client.transact_entry(code.describe(settle_release_entry))), keys: result.unwrap(runner.client.entry_keys(code.describe(routes_entries))), socket: wire().socket, agent: "scripted", narrow: All, preview: None, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(door, take front, take listener)
     let me = runner.ingress.credential(random)
-    let (created, _) = http(net, clock, at.port, "POST", "/sessions", person(me, 0u64), string.into_bytes("acl"))
+    let s = law_stream(clock, 1u64)
+    let (created, _) = http(net, clock, at.port, "POST", "/sessions", person(me), string.into_bytes("acl"))
     if created != 201u16 {
         return Error(1u64)
     }
-    let (listed, ids) = http(net, clock, at.port, "GET", "/sessions", person(me, 0u64), list.new())
+    let (listed, ids) = http(net, clock, at.port, "GET", "/sessions", person(me), list.new())
     if listed != 200u16 || ids != b"[0]" {
         return Error(2u64)
     }
     if harness.gateway.marks(door, 0u64).ups != 0u64 {
         return Error(3u64)
     }
-    let (waits, take body) = http(net, clock, at.port, "GET", "/sessions/0/waits", person(me, 0u64), list.new())
+    let (waits, take body) = http(net, clock, at.port, "GET", "/sessions/0/waits", person(me), list.new())
     let format: std.json.Format[List[harness.PendingWait]] = result.unwrap(std.json.interop())
-    let Ok(rows) = std.json.decode_typed(format, take body, 65536u64) else { return Error(6u64) }
-    if waits != 200u16 || list.len(rows) != 0u64 { return Error(6u64) }
-    let (releases, proposals) = http(net, clock, at.port, "GET", "/sessions/0/releases", person(me, 0u64), list.new())
-    if releases != 200u16 || proposals != b"[]" { return Error(7u64) }
+    let Ok(rows) = std.json.decode_typed(format, take body, 65536u64) else {
+        return Error(6u64)
+    }
+    if waits != 200u16 || list.len(rows) != 0u64 {
+        return Error(6u64)
+    }
+    let (releases, proposals) = http(net, clock, at.port, "GET", "/sessions/0/releases", person(me), list.new())
+    if releases != 200u16 || proposals != b"[]" {
+        return Error(7u64)
+    }
     let change = runner.fixture.transact_entry(code.describe(revoke_reader))
-    let Ok(Ok(())) = call_routed(door, 0u64, me, 0u64, change, (), tasks, clock, random, net) else {
+    let Ok((Ok(()), _)) = call_routed(door, 0u64, me, None, change, (), tasks, clock, random, net) else {
         return Error(4u64)
     }
     let Some(cold) = down_within(door, 0u64, clock) else {
@@ -97,7 +108,7 @@ fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
             // other memberships and admits a bearer to create its own session.
             if mode == 2u64 && i < 2u64 {
                 if i == 0u64 {
-                    let (status, listed_body) = http(net, clock, at.port, method, path, person(me, 1u64), list.new())
+                    let (status, listed_body) = http(net, clock, at.port, method, path, person(me), list.new())
                     if status != 200u16 || listed_body != b"[]" {
                         failures = failures | (1u64 << 2u64)
                     }
@@ -106,9 +117,13 @@ fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
             }
             let mut headers: List[std.http_client.Header] = list.new()
             if mode == 1u64 {
-                headers = person(b"short", 1u64)
+                headers = posting(b"short", s, 1u64)
             } else if mode == 2u64 {
-                headers = person(if path == "/sessions/0/releases" { clone(stranger) } else { clone(me) }, 1u64)
+                headers = posting(if path == "/sessions/0/releases" {
+                    clone(stranger)
+                } else {
+                    clone(me)
+                }, s, 1u64)
             }
             let (status, _) = http(net, clock, at.port, method, path, take headers, clone(payload))
             if (status != 401u16 && status != 403u16) || (path == "/sessions/0/releases" && mode == 2u64 && status != 403u16) {
@@ -123,5 +138,9 @@ fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     harness.gateway_http.halt(take served)
     let _ = harness.gateway.stop(take g)
     result.unwrap(std.dir.remove_all(parent, name))
-    if failures == 0u64 { Ok(()) } else { Error(failures) }
+    if failures == 0u64 {
+        Ok(())
+    } else {
+        Error(failures)
+    }
 }

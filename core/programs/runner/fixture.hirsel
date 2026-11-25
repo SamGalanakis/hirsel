@@ -74,28 +74,29 @@ pub opaque type Client {
 // A typed entry: the key registration computes, so a Callee cannot name another key.
 pub opaque type Callee[A, R]: shareable + send {
     key: Bytes,
+    kind: runner.Kind,
     args: std.codec.Codec[A],
     reply: std.codec.Codec[R]
 }
 
-fn callee[F, A, R](f: StaticFn[F], args: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Callee[A, R] {
+fn callee[F, A, R](f: StaticFn[F], kind: runner.Kind, args: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Callee[A, R] {
     let key = match runner.attempt_key(f, args, reply) {
         Ok(take k) => take k,
         Error(_) => fail("fixture: entry schema has no fingerprint")
     }
-    Callee(key: take key, args: args, reply: reply)
+    Callee(key: take key, kind: kind, args: args, reply: reply)
 }
 
 pub fn compute_entry[A: codec, R: codec](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Callee[A, R] {
-    callee(f, std.codec.of(), std.codec.of())
+    callee(f, Compute, std.codec.of(), std.codec.of())
 }
 
 pub fn transact_entry[H, A: codec, R: codec, E: codec](f: StaticFn[fn(mut store.Tx, H, runner.Caller, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]] {
-    callee(f, std.codec.of(), std.codec.of())
+    callee(f, Transact, std.codec.of(), std.codec.of())
 }
 
 pub fn granted_entry[G, A: codec, R: codec](f: StaticFn[fn(G, runner.Caller, take A) -> Result[R, Capacity] waits]) -> Callee[A, R] {
-    callee(f, std.codec.of(), std.codec.of())
+    callee(f, Granted, std.codec.of(), std.codec.of())
 }
 
 fn query_callee[F, H: send, A: codec, R: codec](f: StaticFn[F], declared: runner.Slots[H]) -> Callee[A, R] {
@@ -104,7 +105,7 @@ fn query_callee[F, H: send, A: codec, R: codec](f: StaticFn[F], declared: runner
     let schema = result.unwrap(runner.query_result_schema(reply, declared))
     let identity = code.identity(f)
     let key = runner.entry_key(identity, result.unwrap(std.codec.fingerprint(args)), std.codec.fingerprint_of(schema))
-    Callee(key: take key, args: args, reply: reply)
+    Callee(key: take key, kind: Query, args: args, reply: reply)
 }
 
 pub fn query_entry[H: send, A: codec, R: codec](f: StaticFn[fn(store.Tx, H, take A) -> Result[runner.Answer[R], Capacity]], declared: runner.Slots[H]) -> Callee[A, R] {
@@ -285,7 +286,7 @@ pub fn client(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[C
         Some(a) => a,
         None => return Error(Closed)
     }
-    client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, take token, 0u64, within_ms)
+    client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, take token, None, within_ms)
 }
 
 // The entry keys a client of a place registered by `place` may call.
@@ -294,11 +295,11 @@ pub fn entry_keys[G: send, H: shareable + inert + send](place: StaticFn[fn(mut r
 }
 
 // A client of a place this fixture did not start, such as a directory's (§13), found by its address.
-// A bound Caller's request positions continue across its connections, so a reconnect
-// starts at the position after its last request (§3 Admission).
-pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, address: Addr, take token: Option[Bytes], first_p: u64, within_ms: u64) -> Result[Client, CallError] waits {
+// It calls on a fresh stream, or with `resume` (from `resume_at`) continues the stream an
+// earlier connection of the same Caller called on, at that stream's next position.
+pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, address: Addr, take token: Option[Bytes], resume: Option[wire_client.Resume], within_ms: u64) -> Result[Client, CallError] waits {
     let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), within_ms)
-    let conn = match wire_client.connect_for(tasks, net, address, clock, random, keys, take token, socket, within_ms, IDLE_MS) {
+    let mut conn = match wire_client.connect_for(tasks, net, address, clock, random, keys, take token, socket, within_ms, IDLE_MS) {
         Ok(take c) => take c,
         Error(_) => return if host.mono_ns(clock) >= deadline {
             Error(Deadline(within_ms))
@@ -307,7 +308,12 @@ pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: Lis
         },
     }
     let held: List[Bytes] = clone(keys)
-    Ok(Client(conn: take conn, keys: take held, next_p: first_p, next_sub: 0u32, subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock))
+    let mut next_p = 0u64
+    if let Some(r) = resume {
+        conn.stream = r.stream;
+        next_p = r.next
+    }
+    Ok(Client(conn: take conn, keys: take held, next_p: next_p, next_sub: 0u32, subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock))
 }
 
 // Identity returned by the place in Welcome after binding the credential.
@@ -428,13 +434,15 @@ pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadl
     }
     let arg = encoded(e.args, a)?
     let p = c.next_p
-    c.next_p += 1u64
     if let Error(_) = channel.send(c.conn.to, Send(Call(c.conn.stream, p, slot, deadline_ms, take arg))) {
         return Error(Closed)
     }
     loop {
         match step(mut c, Some(p)) {
             Answered(take outcome, version) => {
+                if wire_client.consumed(e.kind, outcome) {
+                    c.next_p = p + 1u64
+                }
                 let answer = match take outcome {
                     Returned(take b) => match std.codec.decode(e.reply, b) {
                         Ok(take r) => Returned(take r),
@@ -536,6 +544,11 @@ pub fn unsubscribe(mut c: Client, sub: u32) -> () waits {
 }
 
 // Closes the client's connection and joins its reader and writer.
+// Where a later connection of this Caller continues this client's stream.
+pub fn resume_at(c: Client) -> wire_client.Resume {
+    wire_client.Resume(stream: c.conn.stream, next: c.next_p)
+}
+
 pub fn close(take c: Client) -> () waits {
     let Client(conn: take conn, ..) = take c
     let _ = wire_client.close(take conn)

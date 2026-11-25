@@ -26,8 +26,22 @@ fn recovery_bump(mut tx: store.Tx, h: RecoveryTables, caller: Caller, take input
     Ok(input.value)
 }
 
+// A compute and a granted entry store nothing, so neither consumes a stream position.
+fn recovery_double(take input: RecoveryInput) -> Result[u32, Capacity] {
+    Ok(input.value * 2u32)
+}
+
+// The granted entry hands its argument through a channel, so it waits as a granted entry must.
+fn recovery_echo(_g: (), _caller: Caller, take input: RecoveryInput) -> Result[u32, Capacity] waits {
+    let (to, from): (Sender[u32], Receiver[u32]) = channel.new(1u64)
+    result.unwrap(channel.send(to, input.value))
+    Ok(result.unwrap(channel.receive(from)))
+}
+
 fn recovery_place(mut entries: Registry[(), RecoveryTables]) -> Result[(), RegisterError] {
     transact(mut entries, code.describe(recovery_bump), 65536u64, DEFAULT_STEPS)?
+    compute(mut entries, code.describe(recovery_double), 65536u64, DEFAULT_STEPS)?
+    granted(mut entries, code.describe(recovery_echo), 65536u64, DEFAULT_STEPS)?
     let entry = {
         let row = view entries.exported[0u64]
         entry_key(view row.described.identity, row.args_fp, row.result_fp)
@@ -49,6 +63,20 @@ fn recovery_wire(running: PlaceGrants[()]) -> Option[BindGrant[()]] {
     grant_binds_of(running, wire(code.describe(recovery_binding), 8192u64, DEFAULT_STEPS))
 }
 
+fn recovery_unit_call(_seed: (), _handles: (), _call: ()) -> Result[(), Capacity] {
+    Ok(())
+}
+
+// The WebSocket front's mints: the unit bind mint, and a unit call mint that lets the
+// session call the granted entry.
+fn recovery_ws_grants(tasks: Tasks) -> PlaceGrants[()] {
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, result.unwrap(triggers.granted(code.describe(recovery_echo)))))
+    let calls = Mint(seed: (), mint: recovery_unit_call, mint_bytes: 65536u64, mint_steps: DEFAULT_STEPS)
+    let given: Grants[(), (), ()] = Grants(attempt: None, call: Some(CallMint(mint: take calls, entries: take entries)), claim: None, bind: Some(ingress.bind_mint()))
+    grant_task(tasks, (), take given)
+}
+
 type RecoveryWs: send {
     listener: Listener,
     head: Sender[HeadInput],
@@ -60,12 +88,13 @@ type RecoveryWs: send {
 
 fn recovery_ws(take job: RecoveryWs) waits {
     let RecoveryWs(listener: take listener, head: take head, publisher: take post_to, clock, random, tasks) = take job
-    let binds = ingress.bind_task(tasks)
+    let binds = recovery_ws_grants(tasks)
     let mut config = wire_defaults(65536u64)
     config.n_pool = 4194304u64
+    config.n_granted = 131072u64
     config.socket.max_frame = 65536u64
     let make: scoped[view] fn() -> Service[WireSession[()]] = fn() -> Service[WireSession[()]] {
-        wire_target_service(random, recovery_wire(binds), None, head, clock, tasks, config, owned_launch_target(launch_env().target))
+        wire_target_service(random, recovery_wire(binds), grant_calls_of(binds), head, clock, tasks, config, owned_launch_target(launch_env().target))
     }
     let allocate: own[send] fn(mut WireSession[()], take ServiceAllocation) -> Result[ServicePlan, u16] = result.unwrap(wire_place_allocator(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
     result.unwrap(serve_wire(take listener, tasks, clock, post_to, config, 4u64, list.new(), bind_owner_bytes(recovery_wire(binds)), make, take allocate))

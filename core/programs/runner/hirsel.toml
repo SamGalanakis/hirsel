@@ -147,6 +147,9 @@ limit = 1342177280
 [tests.runs."runner@1/runner_calls/test_client_live_stream"]
 limit = 1342177280
 
+[tests.runs."runner@1/runner_calls/test_client_positions_stored"]
+limit = 1342177280
+
 [tests.runs."runner@1/runner_calls/test_bind_granted"]
 limit = 1342177280
 

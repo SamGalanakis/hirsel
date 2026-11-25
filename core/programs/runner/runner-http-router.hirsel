@@ -242,6 +242,12 @@ fn http_request_identity(req: std.http.Request) -> Option[(StreamId, u64)] {
     let Some(raw) = std.http.field(req, b"idempotency-key") else {
         return None
     }
+    http_identity(raw)
+}
+
+// An `Idempotency-Key` value, `"<32 lowercase hex: t ‖ n>.<decimal p>"`: the stream and position
+// of a stored HTTP call (SDK §HTTP transport).
+pub fn http_identity(raw: Bytes) -> Option[(StreamId, u64)] {
     let n = list.len(raw)
     if n < 36u64 || n > 55u64 || raw[0] != b'"' || raw[33] != b'.' || raw[n - 1u64] != b'"' {
         return None

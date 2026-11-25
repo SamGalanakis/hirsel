@@ -8,8 +8,12 @@ import {promisify} from 'node:util';
 
 const exec = promisify(execFile);
 const returned = value => ({tag: 'Returned', value: {tag: 'Ok', value}});
+const answered = value => ({tag: 'Returned', value});
 const historyUnavailable = {tag: 'Refused', value: {tag: 'HistoryUnavailable'}};
 const unknown = {tag: 'LocallyUnknown'};
+const within = (answer, what) => Promise.race([answer, new Promise((_, fail) => {
+  setTimeout(() => fail(new Error(`${what}: no answer in 15 s`)), 15000).unref();
+})]);
 async function committedKey(fault) {
   const response = await fault.committed;
   assert.equal(response.status, 201);
@@ -110,8 +114,48 @@ function faultAfterCommit(mode) {
 
 export async function realRecoveryLaws(runtime, compiler, executable, sdk) {
   const {Frame} = await import(pathToFileURL(join(sdk, 'frame.js')));
-  const {bind, want, identity} = await import(pathToFileURL(join(sdk, 'entries.js')));
+  const {bind, want, kind, identity} = await import(pathToFileURL(join(sdk, 'entries.js')));
   const tests = {
+    // Only a stored (transact) call consumes its position: the compute and granted calls
+    // after the first bump go at p1 and leave it for the second bump (STORE-SPEC §1.8 P1).
+    async positions_move_only_on_stored_calls(h) {
+      const calls = [];
+      const a = await h.client('mixed', {
+        socket: observedSocket(Frame, frame => { if (frame.tag === 'Call') calls.push([frame.values[1], frame.values[2]]); }),
+      });
+      assert.deepEqual(await a.bump(21), returned(21));
+      assert.deepEqual(await within(a.double(5), 'compute'), answered(10));
+      assert.deepEqual(await within(a.echo(7), 'granted'), answered(7));
+      assert.deepEqual(await within(a.bump(22), 'second stored call'), returned(22));
+      assert.deepEqual(calls, [[0n, 0], [1n, 1], [1n, 2], [1n, 0]]);
+      await h.checkEffects([1, 1, 0]);
+    },
+    // A granted body may have run once its Call was delivered, and nothing is stored to
+    // dedup a re-send, so a lost attempt ends LocallyUnknown and is never sent again.
+    async granted_lost_attempt_is_not_resent(h) {
+      const calls = [];
+      let dropped = false;
+      const back = Promise.withResolvers();
+      const a = await h.client('granted', {
+        onState: state => { if (dropped && state === 'Ready') back.resolve(); },
+        socket: (url, protocol) => {
+          const socket = observedSocket(Frame, frame => {
+            if (frame.tag === 'Call') calls.push([frame.values[1], frame.values[2]]);
+          }, (frame, deliver) => {
+            if (!dropped && outcomes(frame).some(row => row.p === 1n)) { dropped = true; socket.close(); }
+            else deliver();
+          })(url, protocol);
+          return socket;
+        },
+      });
+      assert.deepEqual(await a.bump(21), returned(21));
+      assert.deepEqual(await within(a.echo(7), 'granted'), unknown);
+      assert(dropped);
+      await within(back.promise, 'reconnect');
+      assert.deepEqual(await within(a.bump(22), 'stored call after the loss'), returned(22));
+      assert.deepEqual(calls, [[0n, 0], [1n, 2], [1n, 0]]);
+      await h.checkEffects([1, 1, 0]);
+    },
     async fresh_installations_share_caller(h) {
       const a = await h.client('first');
       const b = await h.client('second');
@@ -257,12 +301,16 @@ export async function realRecoveryLaws(runtime, compiler, executable, sdk) {
         } : {http: {url: place.http, fetch}};
         const storage = new runtime.NodeStorage(join(name, label));
         const client = await runtime.Client.open({
-          url: place.ws, frame: Frame, wants: want, identity, storage, ...callbacks,
+          url: place.ws, frame: Frame, wants: want, kinds: kind, identity, storage, ...callbacks,
           ...transport,
         });
         clients.push(client);
         if (ready) await client.whenReady();
-        return {client, storage, bump: value => bind(client).call.runner.recovery_bump({value})};
+        const {call} = bind(client);
+        return {
+          client, storage, bump: value => call.runner.recovery_bump({value}),
+          double: value => call.runner.recovery_double({value}), echo: value => call.runner.recovery_echo({value}),
+        };
       },
       cli: async (value, stream) => {
         const {stdout} = await exec(compiler, [

@@ -318,12 +318,13 @@ needs no runtime npm dependencies.
 import {Client} from './generated/client.js';
 import {BrowserStorage} from './generated/browser.js';
 import {Frame} from './generated/frame.js';
-import {bind, identity, want} from './generated/entries.js';
+import {bind, identity, kind, want} from './generated/entries.js';
 
 const client = await Client.open({
   url: 'wss://example.test/hirsel',
   frame: Frame,
   wants: want,
+  kinds: kind,
   identity,
   storage: new BrowserStorage(),
 });
@@ -336,7 +337,7 @@ a private state directory to its constructor. The Node adapter uses `flock`
 and needs Node type declarations when you type-check it.
 
 `Client.open` requires the ingress WebSocket `url`, the generated `frame`
-codec and `wants`, and a `storage` adapter. Pass the generated `identity` to
+codec, `wants` and their `kinds`, and a `storage` adapter. Pass the generated `identity` to
 check the launch digest, target and `n_place`. The optional `credential` is an
 async source, `() => Promise<Uint8Array | undefined>`, whose bytes go in Hello.
 The client calls it before its first Hello and once per credential recovery
@@ -355,9 +356,15 @@ The client keeps one call in flight per stream. Calls submitted while ready
 wait in memory in submission order, including behind a recovered call. The
 first call mints a stream ID from the keyed time in Welcome and a cryptographic
 64-bit nonce. The client persists the stream ID, position, argument bytes and
-in-flight flag before sending. Returned and Failed outcomes commit together
-with the next position. A lost attempt retries the original identity after
-backoff. A decisive refusal reuses the position only when every attempt received
+in-flight flag before sending. A stream position belongs to a stored call: a
+call to a transact entry. Returned and Failed outcomes of a stored call commit
+together with the next position. A compute or granted call is sent at the
+stream's next position, which only labels its Outcome row, and its outcome
+leaves the position unchanged. Nothing is stored for it, so a re-send runs it
+again, and a granted call whose delivery is uncertain is reported
+LocallyUnknown and never re-sent. The client reads each call's kind from the
+generated `kind`, one per `want`. A lost attempt of a stored or compute call
+retries the original identity after backoff. A decisive refusal reuses the position only when every attempt received
 a no-commit answer.
 
 On WebSocket, HistoryUnavailable allows one remint when the installation

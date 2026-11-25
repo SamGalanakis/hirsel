@@ -129,14 +129,14 @@ fn turned(why: harness.gateway.Refused) -> u16 {
 // Checks a cold ACL before waking a place. If the place is already running,
 // authorize on its live query. A disconnect retries the check as well as the
 // connection, since the place may have unloaded in between.
-fn reach(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, first_p: u64, wake: bool) -> Result[Option[runner.client.Client], u16] waits {
+fn reach(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, resume: Option[runner.wire_client.Resume], wake: bool) -> Result[Option[runner.client.Client], u16] waits {
     let until = deadline_ms(f.clock, f.within_ms)
     loop {
         match harness.gateway.access(d, id, identity.caller, wake) {
             Ok(None) => return Ok(None),
             Ok(Some(take lease)) => {
                 if let Some(address) = latest.read(platform.local.status(lease)).addr {
-                    let opened = runner.client.client_at(f.net, f.clock, f.random, f.keys, f.socket, address, f.authority, Some(clone(identity.credential)), first_p, f.within_ms)
+                    let opened = runner.client.client_at(f.net, f.clock, f.random, f.keys, f.socket, address, f.authority, Some(clone(identity.credential)), resume, f.within_ms)
                     if let Ok(take c) = take opened {
                         let mut client = take c
                         let who = runner.client.bound_caller(client)
@@ -166,18 +166,23 @@ fn reach(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, first_p
 }
 
 // The browser is the Caller. It names itself with `Authorization: Bearer <base64 credential>`
-// and gives its next request position in `Hirsel-Position`, which it keeps by WIRE's client
-// rules (P1, P2), so a repeated request at one position with the same bytes runs once.
+// and gives the stream and next position of each stored request in `Idempotency-Key`, in the
+// runner's HTTP form `"<32 hex>.<p>"`. It mints the stream and keeps both by WIRE's client
+// rules (P1, P2), so a repeated request at one position with the same bytes runs once, from
+// any connection and across a gateway restart.
 type Identity {
     credential: Bytes,
     caller: store.Caller,
 }
 
-fn request_position(req: Request) -> Result[u64, u16] {
-    let Some(at) = field(req, "hirsel-position") else {
+fn request_position(req: Request) -> Result[runner.wire_client.Resume, u16] {
+    let Some(at) = field(req, "idempotency-key") else {
         return Error(400u16)
     }
-    Ok(std.int.parse_uint(text_of(take at), 10) ?=> |_| 400u16)
+    let Some((stream, p)) = runner.http_identity(at) else {
+        return Error(400u16)
+    }
+    Ok(runner.wire_client.Resume(stream: stream, next: p))
 }
 
 fn bearer(f: Front, req: Request) -> Result[Identity, runner.BindRefusal] waits {
@@ -194,8 +199,8 @@ fn bearer(f: Front, req: Request) -> Result[Identity, runner.BindRefusal] waits 
     Ok(Identity(credential: take credential, caller: take caller))
 }
 
-fn call_place[A: codec, R: codec](d: harness.gateway.Door, f: Front, id: u64, identity: Identity, p: u64, e: runner.client.Callee[A, Result[R, harness.Refused]], take a: A) -> Result[R, u16] waits {
-    let mut client = option.unwrap(reach(d, f, id, identity, p, true)?)
+fn call_place[A: codec, R: codec](d: harness.gateway.Door, f: Front, id: u64, identity: Identity, at: runner.wire_client.Resume, e: runner.client.Callee[A, Result[R, harness.Refused]], take a: A) -> Result[R, u16] waits {
+    let mut client = option.unwrap(reach(d, f, id, identity, Some(at), true)?)
     let replied = runner.client.call(mut client, e, take a, int.truncate(f.within_ms))
     runner.client.close(take client)
     match take replied {
@@ -229,7 +234,7 @@ type Following {
 // beat even if the session looks quiet, so a change whose run has not yet written its
 // busy status is not missed.
 fn follow_from(d: harness.gateway.Door, f: Front, id: u64, wake: bool, nudged: bool, identity: Identity, tail: u64, mut first: Option[u64]) -> Result[Option[Following], u16] waits {
-    let Some(take opened) = reach(d, f, id, identity, 0u64, wake)? else {
+    let Some(take opened) = reach(d, f, id, identity, None, wake)? else {
         return Ok(None)
     }
     let mut client = take opened
@@ -756,7 +761,7 @@ fn serve_one(d: harness.gateway.Door, f: Front, mut read: ReadHalf, mut write: W
         }
     }
     if path[2] == "waits" && method == b"GET" {
-        let mut client = match reach(d, f, id, identity, 0u64, true) {
+        let mut client = match reach(d, f, id, identity, None, true) {
             Ok(take opened) => option.unwrap(take opened),
             Error(code) => return reply(mut write, f, code, list.new()),
         }

@@ -298,7 +298,7 @@ fn look(d: Door, id: u64, c: Child, credential: Bytes, take submit: Option[harne
     let Some(address) = latest.read(platform.local.status(lease)).addr else {
         return Error(Unavailable)
     }
-    let Ok(take opened) = runner.client.client_at(c.net, c.clock, c.random, c.keys, c.socket, address, c.authority, Some(clone(credential)), 0u64, c.within_ms) else {
+    let Ok(take opened) = runner.client.client_at(c.net, c.clock, c.random, c.keys, c.socket, address, c.authority, Some(clone(credential)), None, c.within_ms) else {
         return Error(Unavailable)
     }
     let _ = take lease

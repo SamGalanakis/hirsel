@@ -42,7 +42,7 @@ fn projected(take f: runner.Frame) -> runner.Down {
 
 fn down(cn: Conn) -> runner.Down waits {
     let got: Result[runner.Down, ReceiveError] = match cn {
-        Socket(wire, _) => match wire_client.next(wire) {
+        Socket(wire, _, _) => match wire_client.next(wire) {
             Ok(take f) => Ok(projected(take f)),
             Error(e) => Error(e)
         },
@@ -56,7 +56,7 @@ fn down(cn: Conn) -> runner.Down waits {
 
 fn try_down(cn: Conn) -> Result[runner.Down, ReceiveError] waits {
     match cn {
-        Socket(wire, _) => match wire_client.try_next(wire) {
+        Socket(wire, _, _) => match wire_client.try_next(wire) {
             Ok(take f) => Ok(projected(take f)),
             Error(e) => Error(e)
         },
@@ -69,14 +69,14 @@ fn subscribe(cn: Conn, sub: u32, take key: Bytes) -> () waits {
     let mut arg: Bytes = list.new()
     result.unwrap(std.codec.encode(ca, 0u32, mut arg))
     match cn {
-        Socket(wire, _) => wire_client.send_frame(wire, Subscribe(sub, wire_client.slot(client_keys(), key), take arg, None)),
+        Socket(wire, _, _) => wire_client.send_frame(wire, Subscribe(sub, wire_client.slot(client_keys(), key), take arg, None)),
         Held(owner) => runner.fixture_subscribe(owner, sub, take key, take arg),
     }
 }
 
 fn unsubscribe(cn: Conn, sub: u32) -> () waits {
     match cn {
-        Socket(wire, _) => wire_client.send_frame(wire, Unsubscribe(sub)),
+        Socket(wire, _, _) => wire_client.send_frame(wire, Unsubscribe(sub)),
         Held(owner) => runner.fixture_unsubscribe(owner, sub),
     }
 }

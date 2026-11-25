@@ -31,9 +31,9 @@ fn revision_is[F](got: Option[Bytes], s: StaticFn[F]) -> bool {
     }
 }
 
-fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, token: Bytes) -> bool {
+fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, token: Bytes, from: u64, to: u64) -> bool {
     match got {
-        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && result.unwrap(store.stream_key_bytes(c.record.stream)) == wire_client.stream(result.unwrap(ingress.caller((), token)).caller, 0u32) && if entry == 0u64 {
+        Some(c) => c.record.key == key && c.record.args == u64_arg(arg) && c.record.stream.id.t >= from && c.record.stream.id.t <= to && result.unwrap(store.stream_key_bytes(c.record.stream)) == wire_client.stream(result.unwrap(ingress.caller((), token)).caller, c.record.stream.id.t, 0u32) && if entry == 0u64 {
             revision_is(c.record.revision, code.describe(write))
         } else if entry == 1u64 {
             revision_is(c.record.revision, code.describe(refuse))
@@ -147,7 +147,8 @@ fn probe_ready(network: Net, address: Addr, clock: Clock) -> () waits {
 
 fn fixture_place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
-    runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
+    runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)?
+    runner.compute(mut r, code.describe(answer), 65536u64, runner.DEFAULT_STEPS)
 }
 
 fn unit_call(seed: (), unused_handles: Hd, _call: ()) -> Result[(), Capacity] {
@@ -232,7 +233,7 @@ pub fn law_client_live_stream(clock: Clock, random: Random, tasks: Tasks, net: N
         fail("client_live_stream: the place has no address")
     }
     let live_keys = result.unwrap(client.entry_keys(code.describe(fixture_place)))
-    let mut c = result.unwrap(client.client_at(net, clock, random, live_keys, runner.wire_defaults(65536u64).socket, address, b"127.0.0.1", Some(ingress.credential(random)), 0u64, 5000u64))
+    let mut c = result.unwrap(client.client_at(net, clock, random, live_keys, runner.wire_defaults(65536u64).socket, address, b"127.0.0.1", Some(ingress.credential(random)), None, 5000u64))
     let first = match result.unwrap(client.call(mut c, put_entry, 5u64, 2000u32)).answer {
         Returned(Ok(at)) => at >= 1u64,
         Refused(HistoryUnavailable) => fail("client_live_stream: the client's stream was refused HistoryUnavailable"),
@@ -253,6 +254,86 @@ pub fn law_client_live_stream(clock: Clock, random: Random, tasks: Tasks, net: N
 @test
 fn test_client_live_stream(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
     if law_client_live_stream(clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// STORE-SPEC §1.8 P1 and RUNNER-SPEC §1.3 Positions: a stream position is a call the head
+// admits. Bug law: a client that moves its position on an answer the store did not record
+// strands the stream's next stored call. On one connection, in order: stored, compute,
+// granted, stored. The compute and granted answers record nothing, so the second stored
+// call goes out at the position the first one left, is admitted, and reports a later commit.
+// Mutant: advance_on_unrecorded (the second stored call goes out at p = 3, the store answers
+// Rejected(0), and the call ends Abandoned).
+fn stored_after_unrecorded(first: Option[u64], computed: bool, granted: bool, second: Option[u64]) -> bool {
+    match (first, second) {
+        (Some(a), Some(b)) => computed && granted && a >= 1u64 && b > a,
+        _ => false,
+    }
+}
+
+fn committed_fixture(a: fixture.Answer[Result[u64, u32]]) -> Option[u64] {
+    match a {
+        Returned(Ok(at)) => Some(at),
+        _ => None,
+    }
+}
+
+fn committed_client(a: client.Answer[Result[u64, u32]]) -> Option[u64] {
+    match a {
+        Returned(Ok(at)) => Some(at),
+        _ => None,
+    }
+}
+
+pub fn law_client_positions_stored(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let f = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, true, true), 5000u64))
+    let mut c = result.unwrap(fixture.client(f, Some(ingress.credential(random)), 5000u64))
+    let put = fixture.transact_entry(code.describe(write))
+    let first = committed_fixture(result.unwrap(fixture.call(mut c, put, 5u64, 2000u32)).answer)
+    let computed = match result.unwrap(fixture.call(mut c, fixture.compute_entry(code.describe(answer)), 7u64, 2000u32)).answer {
+        Returned(7u64) => true,
+        _ => false
+    }
+    let granted = match result.unwrap(fixture.call(mut c, fixture.granted_entry(code.describe(ping)), 9u64, 2000u32)).answer {
+        Returned(9u64) => true,
+        _ => false
+    }
+    let second = committed_fixture(result.unwrap(fixture.call(mut c, put, 6u64, 2000u32)).answer)
+    fixture.close(take c)
+    let through_fixture = stored_after_unrecorded(first, computed, granted, second)
+    let Some(address) = fixture.status(f).addr else {
+        fail("positions_stored: the place has no address")
+    }
+    let placed_keys = result.unwrap(client.entry_keys(code.describe(fixture_place)))
+    let mut d = result.unwrap(client.client_at(net, clock, random, placed_keys, runner.wire_defaults(65536u64).socket, address, b"127.0.0.1", Some(ingress.credential(random)), None, 5000u64))
+    let stored = client.transact_entry(code.describe(write))
+    let third = committed_client(result.unwrap(client.call(mut d, stored, 15u64, 2000u32)).answer)
+    let computed_again = match result.unwrap(client.call(mut d, client.compute_entry(code.describe(answer)), 17u64, 2000u32)).answer {
+        Returned(17u64) => true,
+        _ => false
+    }
+    let granted_again = match result.unwrap(client.call(mut d, client.granted_entry(code.describe(ping)), 19u64, 2000u32)).answer {
+        Returned(19u64) => true,
+        _ => false
+    }
+    let fourth = committed_client(result.unwrap(client.call(mut d, stored, 16u64, 2000u32)).answer)
+    client.close(take d)
+    let through_client = stored_after_unrecorded(third, computed_again, granted_again, fourth)
+    let stopped = match fixture.end(take f, 5000u64) {
+        Ok(_) => true,
+        Error(_) => false
+    }
+    through_fixture && through_client && stopped
+}
+
+/// bug: a client moves its stream position on a compute or granted answer the store did not record, so the next stored call is held and Abandoned (study 2555).
+/// oracle: STORE-SPEC §1.8 P1 and RUNNER-SPEC §1.3 Positions: only a reply the head commits consumes a position.
+@test
+fn test_client_positions_stored(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_client_positions_stored(clock, random, tasks, net) {
         Ok(())
     } else {
         Error(())

@@ -57,6 +57,7 @@ pub opaque type Client {
 // A typed entry: the key registration computes, so a Callee cannot name another key.
 pub opaque type Callee[A, R]: shareable + send {
     key: Bytes,
+    kind: runner.Kind,
     args: std.codec.Codec[A],
     reply: std.codec.Codec[R]
 }
@@ -65,16 +66,24 @@ pub fn entry_key[A, R](e: Callee[A, R]) -> Bytes {
     clone(e.key)
 }
 
-fn callee[F, A, R](f: StaticFn[F], args: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Callee[A, R] {
+fn callee[F, A, R](f: StaticFn[F], kind: runner.Kind, args: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Callee[A, R] {
     let key = match runner.attempt_key(f, args, reply) {
         Ok(take k) => take k,
         Error(_) => fail("client: entry schema has no fingerprint")
     }
-    Callee(key: take key, args: args, reply: reply)
+    Callee(key: take key, kind: kind, args: args, reply: reply)
+}
+
+pub fn compute_entry[A: codec, R: codec](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Callee[A, R] {
+    callee(f, Compute, std.codec.of(), std.codec.of())
+}
+
+pub fn granted_entry[G, A: codec, R: codec](f: StaticFn[fn(G, runner.Caller, take A) -> Result[R, Capacity] waits]) -> Callee[A, R] {
+    callee(f, Granted, std.codec.of(), std.codec.of())
 }
 
 pub fn transact_entry[H, A: codec, R: codec, E: codec](f: StaticFn[fn(mut store.Tx, H, runner.Caller, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]] {
-    callee(f, std.codec.of(), std.codec.of())
+    callee(f, Transact, std.codec.of(), std.codec.of())
 }
 
 fn query_callee[F, H: send, A: codec, R: codec](f: StaticFn[F], declared: runner.Slots[H]) -> Callee[A, R] {
@@ -83,7 +92,7 @@ fn query_callee[F, H: send, A: codec, R: codec](f: StaticFn[F], declared: runner
     let schema = result.unwrap(runner.query_result_schema(reply, declared))
     let identity = code.identity(f)
     let key = runner.entry_key(identity, result.unwrap(std.codec.fingerprint(args)), std.codec.fingerprint_of(schema))
-    Callee(key: take key, args: args, reply: reply)
+    Callee(key: take key, kind: Query, args: args, reply: reply)
 }
 
 pub fn query_entry[H: send, A: codec, R: codec](f: StaticFn[fn(store.Tx, H, take A) -> Result[runner.Answer[R], Capacity]], declared: runner.Slots[H]) -> Callee[A, R] {
@@ -117,12 +126,25 @@ pub fn entry_keys[G: send, H: shareable + inert + send](place: StaticFn[fn(mut r
     Ok(take keys)
 }
 
-pub fn client_at(net: Net, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, address: Addr, authority: Bytes, take token: Option[Bytes], first_p: u64, within_ms: u64) -> Result[Client, CallError] waits {
+// A client on a fresh stream, or with `resume` (from `resume_at`) on the stream an earlier
+// connection of the same Caller called on, at that stream's next position.
+pub fn client_at(net: Net, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, address: Addr, authority: Bytes, take token: Option[Bytes], resume: Option[wire_client.Resume], within_ms: u64) -> Result[Client, CallError] waits {
     let (take input, take output, take outgoing, take caller, minted) = match wire_client.open(net, address, authority, clock, random, keys, take token, socket, within_ms) {
         Ok(take connected) => take connected,
         Error(_) => return Error(Closed),
     }
-    Ok(Client(input: Some(take input), output: take output, outgoing: take outgoing, following: None, caller: take caller, keys: clone(keys), stream: minted, next_p: first_p, next_sub: 0u32, subs: map.new(), version: 0u64, clock: clock))
+    Ok(Client(input: Some(take input), output: take output, outgoing: take outgoing, following: None, caller: take caller, keys: clone(keys), stream: match resume {
+        Some(r) => r.stream,
+        None => minted,
+    }, next_p: match resume {
+        Some(r) => r.next,
+        None => 0u64,
+    }, next_sub: 0u32, subs: map.new(), version: 0u64, clock: clock))
+}
+
+// Where a later connection of this Caller continues this client's stream.
+pub fn resume_at(c: Client) -> wire_client.Resume {
+    wire_client.Resume(stream: c.stream, next: c.next_p)
 }
 
 pub fn bound_caller(c: Client) -> store.Caller {
@@ -344,7 +366,6 @@ pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadl
     }
     let arg = encoded(e.args, a)?
     let p = c.next_p
-    c.next_p += 1u64
     let on_stream = c.stream
     write(mut c, Call(on_stream, p, slot, deadline_ms, take arg))?
     let ms: u64 = int.widen(deadline_ms)
@@ -352,6 +373,9 @@ pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadl
     loop {
         let f = direct(mut c, until, ms)?
         if let Some(r) = step(mut c, take f, Some(p))? {
+            if wire_client.consumed(e.kind, r.outcome) {
+                c.next_p = p + 1u64
+            }
             let answer = match r.outcome {
                 Returned(b) => match std.codec.decode(e.reply, b) {
                     Ok(take value) => Returned(take value),

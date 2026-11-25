@@ -262,7 +262,7 @@ type CallJob: send {
 
 fn mn_call_job(take j: CallJob) -> () waits {
     let CallJob(tasks: tasks, net: net, clock: clock, random: random, keys: take mn_keys, address: address, out: take out) = take j
-    let got_code = match fixture.client_at(tasks, net, clock, random, mn_keys, runner.wire_defaults(65536u64).socket, address, Some(b"\x03"), 0u64, 5000u64) {
+    let got_code = match fixture.client_at(tasks, net, clock, random, mn_keys, runner.wire_defaults(65536u64).socket, address, Some(b"\x03"), None, 5000u64) {
         Ok(take c) => {
             let mut held = take c
             let got = mn_ask(mut held, 1u64)

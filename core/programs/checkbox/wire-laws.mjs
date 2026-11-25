@@ -15,7 +15,7 @@ url.protocol = 'ws:';
 const imported = file => import(pathToFileURL(resolve(generated, file)).href);
 const {Frame, subprotocol} = await imported('frame.js');
 const {values, keys} = await imported('codec.js');
-const {want, identity, bind} = await imported('entries.js');
+const {want, kind, identity, bind} = await imported('entries.js');
 const sockets = new Set();
 
 const some = value => ({tag: 'Some', value});
@@ -91,7 +91,7 @@ async function toggle_smoke() {
   const state = await mkdtemp(join(tmpdir(), 'checkbox-client-'));
   let client;
   try {
-    client = await runtime.Client.open({url: url.href, frame: Frame, wants: want, identity, credential: randomBytes(16),
+    client = await runtime.Client.open({url: url.href, frame: Frame, wants: want, kinds: kind, identity, credential: randomBytes(16),
       storage: new runtime.NodeStorage(state)});
     await client.whenReady();
     const {toggle} = bind(client).call.main;

@@ -427,7 +427,19 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             entry.result_fp
         ));
     }
-    entries.push_str("];\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null), subscribeDecoded = Object.create(null), room = Object.create(null);\nconst ns = (root, path) => path.reduce((o, k) => o[k] ??= Object.create(null), root);\n");
+    entries.push_str("];\nexport const kind = Object.freeze([");
+    for entry in &describe.exported {
+        let kind = match entry.kind {
+            0 => "compute",
+            1 => "transact",
+            2 => "query",
+            3 => "granted",
+            4 => "room",
+            _ => return Err("Malformed: exported entry kind".into()),
+        };
+        entries.push_str(&format!("{},", json!(kind)));
+    }
+    entries.push_str("]);\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null), subscribeDecoded = Object.create(null), room = Object.create(null);\nconst ns = (root, path) => path.reduce((o, k) => o[k] ??= Object.create(null), root);\n");
     let mut calls = StubTypes::default();
     let mut subscriptions = StubTypes::default();
     let mut decoded = StubTypes::default();
@@ -554,7 +566,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
 "#);
     }
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{CallOptions, Change, Option, Outcome, LiveRoom, RoomHandlers, SlotRow, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {}; room: {} }};\n",
+        "import type * as codec from './codec.js';\nimport type {{CallOptions, Change, Option, Outcome, LiveRoom, RoomHandlers, SlotRow, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const kind: ReadonlyArray<'compute' | 'transact' | 'query' | 'granted' | 'room'>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {}; room: {} }};\n",
         calls.render(),
         subscriptions.render(),
         decoded.render(),

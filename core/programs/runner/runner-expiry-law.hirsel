@@ -41,7 +41,7 @@ fn drive_expiry_at_bind(take job: Expiring) -> () waits {
     }
     let (take wire, take session) = paired(expiring_pair(d, 11u8))
     want(wire.caller.subject == subject_caller(2u8).subject, "bind_expiry: an unexpired binding names its Caller")
-    hang(Socket(take wire, take session))
+    hang(Socket(take wire, take session, d.birth))
 }
 
 // The session's end: no data frame after the expiry may reach the client, and the
@@ -126,7 +126,7 @@ fn served_expiring(r: Random, tasks: Tasks, n: Net, f: fn(take Expiring) -> () w
     let (head, inbox) = calls_inbox()
     let mail = result.unwrap(runner.mailbox(4u64))
     let credential = ingress.credential(r)
-    let d = Drive(head: take head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: take credential, accepted: None)
+    let d = Drive(head: take head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: take credential, accepted: None, birth: host.wall_ms(c))
     let driving = task.spawn(tasks, bytes 33554432u64, Expiring(d: take d, hand: take hand), f)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)

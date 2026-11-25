@@ -22,10 +22,10 @@
 <form id="send"><input id="text" autocomplete="off" placeholder="Message"><button>Send</button></form>
 <script type="module">
   import { Client } from "./client.js";
-  // The browser's credential and its next request position live together.
+  // The browser's credential, its stream and its next request position live together.
   const saved = (() => { try { return JSON.parse(localStorage.getItem("harness") || "null"); } catch { return null; } })();
   const credential = saved?.credential ?? btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
-  const remember = (c) => { try { localStorage.setItem("harness", JSON.stringify({ credential, position: c.position })); } catch {} };
+  const remember = (c) => { try { localStorage.setItem("harness", JSON.stringify({ credential, stream: c.stream, position: c.position })); } catch {} };
   const $ = (id) => document.getElementById(id);
   const requested = new URLSearchParams(location.search).get("session");
   let session = Number(requested);
@@ -41,7 +41,7 @@
   }
   const client = new Client({
     base: location.origin, session,
-    credential, position: saved?.position ?? 0,
+    credential, stream: saved?.stream, position: saved?.position ?? 0,
     onChange(s) {
       $("status").textContent = s.live ? s.status || "idle" : "reconnecting…";
       $("older").hidden = !s.live || !s.older;

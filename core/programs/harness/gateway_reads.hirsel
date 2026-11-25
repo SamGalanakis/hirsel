@@ -1,7 +1,6 @@
 // Authorized reads for the HTTP front.
-
 fn allowed(d: harness.gateway.Door, f: Front, id: u64, identity: Identity) -> Result[(), u16] waits {
-    if let Some(take client) = reach(d, f, id, identity, 0u64, false)? {
+    if let Some(take client) = reach(d, f, id, identity, None, false)? {
         runner.client.close(take client)
     }
     Ok(())
@@ -16,7 +15,9 @@ fn checked_status(mut client: runner.client.Client, f: Front) -> Result[String, 
 }
 
 fn read_cover[A: codec](mut client: runner.client.Client, f: Front, entry: runner.client.Callee[A, ()], take arg: A) -> Result[runner.client.Seen, u16] waits {
-    let Ok(sub) = runner.client.subscribe(mut client, entry, take arg, f.within_ms) else { return Error(503u16) }
+    let Ok(sub) = runner.client.subscribe(mut client, entry, take arg, f.within_ms) else {
+        return Error(503u16)
+    }
     let seen = runner.client.seen_at(mut client, sub, 0u64, f.within_ms)
     runner.client.unsubscribe(mut client, sub)
     Ok(seen ?=> |_| 503u16)
@@ -29,7 +30,9 @@ fn history_page(mut client: runner.client.Client, f: Front, before: u64, lines: 
     for r in cut_image.rows {
         if let Some(raw) = view r.value {
             if let Ok(cut) = std.codec.decode(std.codec.of_u64(), raw) {
-                if cut > from { from = cut }
+                if cut > from {
+                    from = cut
+                }
             }
         }
     }
@@ -59,13 +62,21 @@ fn waits_page(mut client: runner.client.Client, f: Front) -> Result[List[harness
     let _ = checked_status(mut client, f)?
     let mut waits: List[harness.PendingWait] = list.new()
     for row in image.rows {
-        let Some(raw) = view row.value else { continue }
-        let Ok(take wait) = std.codec.decode(codec, raw) else { return Error(503u16) }
+        let Some(raw) = view row.value else {
+            continue
+        }
+        let Ok(take wait) = std.codec.decode(codec, raw) else {
+            return Error(503u16)
+        }
         // The store's table prefix precedes the fixed 25-byte WaitKey.
         let width = list.len(row.key)
-        if width < 25u64 { return Error(503u16) }
+        if width < 25u64 {
+            return Error(503u16)
+        }
         let mut at = width - 25u64
-        let Ok(key) = harness.take_wait_key(row.key, mut at) else { return Error(503u16) }
+        let Ok(key) = harness.take_wait_key(row.key, mut at) else {
+            return Error(503u16)
+        }
         if let Some(take open) = harness.open_wait(key, take wait) {
             list.push(mut waits, take open)
         }
@@ -78,7 +89,9 @@ fn visible_sessions(d: harness.gateway.Door, f: Front, identity: Identity) -> Re
     for id in harness.gateway.listing(d) {
         match allowed(d, f, id, identity) {
             Ok(()) => list.push(mut visible, id),
-            Error(code) => if code != 403u16 && code != 404u16 { return Error(code) },
+            Error(code) => if code != 403u16 && code != 404u16 {
+                return Error(code)
+            },
         }
     }
     Ok(take visible)
@@ -91,7 +104,9 @@ fn releases_page(mut client: runner.client.Client, f: Front) -> Result[List[rele
     let _ = checked_status(mut client, f)?
     let mut filed: List[release.FiledProposal] = list.new()
     for row in image.rows {
-        let Some(raw) = view row.value else { continue }
+        let Some(raw) = view row.value else {
+            continue
+        }
         let p = std.codec.decode(codec, raw) ?=> |_| 503u16
         if let Filed = p.state {
             let mut at = 4u64 // WIRE keys start with the table prefix
@@ -103,9 +118,11 @@ fn releases_page(mut client: runner.client.Client, f: Front) -> Result[List[rele
 }
 
 fn release_route(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, method: Bytes, req: Request, mut write: WriteHalf) -> () waits {
-    let Some(entry) = view f.settle else { return reply(mut write, f, 404u16, list.new()) }
+    let Some(entry) = view f.settle else {
+        return reply(mut write, f, 404u16, list.new())
+    }
     if method == b"GET" {
-        let mut client = match reach(d, f, id, identity, 0u64, true) {
+        let mut client = match reach(d, f, id, identity, None, true) {
             Ok(take opened) => option.unwrap(take opened),
             Error(code) => return reply(mut write, f, code, list.new()),
         }
@@ -118,7 +135,7 @@ fn release_route(d: harness.gateway.Door, f: Front, id: u64, identity: Identity,
     }
     if method == b"POST" {
         let p = match request_position(req) {
-            Ok(n) => n,
+            Ok(take n) => take n,
             Error(code) => return reply(mut write, f, code, list.new()),
         }
         let Some(take ask) = (json_body(req, f) : Option[release.DevSettlement]) else {
@@ -134,4 +151,3 @@ fn release_route(d: harness.gateway.Door, f: Front, id: u64, identity: Identity,
     }
     reply(mut write, f, 405u16, list.new())
 }
-

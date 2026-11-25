@@ -164,7 +164,7 @@ export async function converge(origin, generated, {
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   const imported = file => import(pathToFileURL(resolve(generated, file)).href);
   const {Frame} = await imported('frame.js');
-  const {want, identity, bind} = await imported('entries.js');
+  const {want, kind, identity, bind} = await imported('entries.js');
   const runtime = await loadRuntime(mutant && ((file, text) => mutate(mutant, file, text)));
   const state = await mkdtemp(join(tmpdir(), 'checkbox-converge-'));
   const failure = {};
@@ -176,7 +176,7 @@ export async function converge(origin, generated, {
     const wire = transport(Frame, failure, options);
     const storage = new runtime.NodeStorage(join(state, String(id)));
     const sdk = await runtime.Client.open({
-      url: url.href, frame: Frame, wants: want, identity, storage, credential: crypto.getRandomValues(new Uint8Array(16)), socket: wire.connect,
+      url: url.href, frame: Frame, wants: want, kinds: kind, identity, storage, credential: crypto.getRandomValues(new Uint8Array(16)), socket: wire.connect,
       onBatch: version => { board.version = version; wire.onBatch(); },
       onState: state => {
         if (['StorageUnavailable', 'Retired', 'Incompatible', 'Fenced'].includes(state)) {

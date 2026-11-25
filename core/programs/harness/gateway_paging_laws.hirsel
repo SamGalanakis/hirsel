@@ -1,5 +1,4 @@
 // The gateway paging law: the tail and history pages of a finished session.
-
 // With `again`, the message queued during the run became a second turn:
 // its user line at 6 and the scripted "done" at 7 (a tool result is already in
 // the request, so the script answers at once).
@@ -10,7 +9,11 @@ fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes, again: bool) -
     let mut fresh = take opened
     let mut decoder = std.sse.decoder(65536u64)
     let mut rows: List[(u64, Bytes)] = list.new()
-    let last = if again { 7u64 } else { 5u64 }
+    let last = if again {
+        7u64
+    } else {
+        5u64
+    }
     if !read_until_row(mut fresh, mut decoder, mut rows, "answered", last) {
         return 2u64
     }
@@ -34,7 +37,7 @@ fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes, again: bool) -
         let mut target = string.from("/sessions/0/history?before=")
         string.push_u64(mut target, before)
         string.push(mut target, "&lines=2")
-        let (status, body) = http(net, clock, port, "GET", target, person(me, 0u64), list.new())
+        let (status, body) = http(net, clock, port, "GET", target, person(me), list.new())
         if status != 200u16 {
             return 4u64
         }
@@ -53,14 +56,18 @@ fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes, again: bool) -
         before = page.from
         pages += 1u64
     }
-    let paged_want = if again { 3u64 } else { 2u64 }
+    let paged_want = if again {
+        3u64
+    } else {
+        2u64
+    }
     if pages != paged_want {
         return 8u64
     }
     if !same_rows(rows, tool_finished_rows(again)) {
         return 9u64
     }
-    let (refused, _) = http(net, clock, port, "GET", "/sessions/0/history?before=4&lines=0", person(me, 0u64), list.new())
+    let (refused, _) = http(net, clock, port, "GET", "/sessions/0/history?before=4&lines=0", person(me), list.new())
     if refused != 400u16 {
         return 10u64
     }

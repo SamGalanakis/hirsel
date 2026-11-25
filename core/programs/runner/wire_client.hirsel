@@ -188,6 +188,24 @@ pub fn connect(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, ke
 // A fresh call stream (SDK §Transport): t is the keyed time the place sent in Welcome,
 // so the store's retention admits it (STORE-SPEC AH2), and n is a random 64-bit nonce,
 // so two clients minting in the same millisecond name different streams.
+// Where a client continues a stream it called on before: the stream and its next position.
+// A bound Caller names the same stream from any connection (STORE-SPEC §1.8 S7).
+pub type Resume: send {
+    stream: store.StreamId,
+    next: u64
+}
+
+// Whether an answer consumed its position (RUNNER-SPEC §1.3 Positions, STORE-SPEC §1.8 P1): the
+// head committed it, as a transact entry's Returned or Failed, or a gone slot's Failed(Gone).
+pub fn consumed(kind: runner.Kind, o: runner.Outcome) -> bool {
+    match o {
+        Failed(Gone) => true,
+        Returned(_) => kind == Transact,
+        Failed(_) => kind == Transact,
+        _ => false,
+    }
+}
+
 pub fn mint_stream(random: Random, keyed_ms: u64) -> store.StreamId {
     let mut raw: Bytes = list.with_capacity(16)
     host.random(random, mut raw)
@@ -376,8 +394,8 @@ pub fn slot(keys: List[Bytes], key: Bytes) -> u32 {
     4294967295u32
 }
 
-pub fn stream(caller: runner.Caller, s: u32) -> Bytes {
-    result.unwrap(runner.stream_key(caller, store.StreamId(t: 0u64, n: int.widen(s))))
+pub fn stream(caller: runner.Caller, t: u64, s: u32) -> Bytes {
+    result.unwrap(runner.stream_key(caller, store.StreamId(t: t, n: int.widen(s))))
 }
 
 // Reads are demand-driven, so an intentionally unread client holds its bytes

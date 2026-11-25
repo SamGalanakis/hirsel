@@ -237,7 +237,6 @@ fn bound_caller(_g: Grants, credential: Bytes) -> Result[runner.BoundCaller, run
     runner.ingress.caller((), credential)
 }
 
-
 fn wire() -> runner.WireConfig {
     let mut w = runner.wire_defaults(65536u64)
     w.n_pool = 4194304u64
@@ -266,7 +265,7 @@ fn bytes_of[A: codec](a: A) -> Bytes {
 }
 
 // Routes to a session (waking it), makes one wire call and lets go of the session.
-fn call_routed[A: codec, R: codec](door: harness.gateway.Door, id: u64, credential: Bytes, first_p: u64, e: runner.fixture.Callee[A, R], take a: A, tasks: Tasks, clock: Clock, random: Random, net: Net) -> Result[R, u64] waits {
+fn call_routed[A: codec, R: codec](door: harness.gateway.Door, id: u64, credential: Bytes, resume: Option[runner.wire_client.Resume], e: runner.fixture.Callee[A, R], take a: A, tasks: Tasks, clock: Clock, random: Random, net: Net) -> Result[(R, runner.wire_client.Resume), u64] waits {
     let lease = match harness.gateway.route(door, id) {
         Ok(take l) => take l,
         Error(Place(_)) => return Error(101u64),
@@ -278,15 +277,16 @@ fn call_routed[A: codec, R: codec](door: harness.gateway.Door, id: u64, credenti
     let Ok(keys) = runner.fixture.entry_keys(code.describe(place)) else {
         return Error(103u64)
     }
-    let Ok(take c) = runner.fixture.client_at(tasks, net, clock, random, keys, wire().socket, address, Some(clone(credential)), first_p, WITHIN_MS) else {
+    let Ok(take c) = runner.fixture.client_at(tasks, net, clock, random, keys, wire().socket, address, Some(clone(credential)), resume, WITHIN_MS) else {
         return Error(104u64)
     }
     let mut client = take c
     let replied = runner.fixture.call(mut client, e, take a, 5000u32)
+    let next = runner.fixture.resume_at(client)
     runner.fixture.close(take client)
     let _ = take lease
     match take replied {
-        Ok(runner.fixture.Replied(answer: Returned(take r), ..)) => Ok(take r),
+        Ok(runner.fixture.Replied(answer: Returned(take r), ..)) => Ok((take r, next)),
         Ok(runner.fixture.Replied(answer: Failed(_), ..)) => Error(105u64),
         Ok(runner.fixture.Replied(answer: Refused(_), ..)) => Error(106u64),
         Ok(_) => Error(107u64),
@@ -375,13 +375,11 @@ pub fn law_wake_resumes_transcript(parent: Dir, clock: Clock, random: Random, ta
     }
     let submit = runner.fixture.transact_entry(code.describe(submit_entry))
     let credential = runner.ingress.credential(random)
-    let placed = match call_routed(door, id, credential, 0u64, submit, harness.Submit(client_key: "k1", text: "bump it"), tasks, clock, random, net) {
-        Ok(Ok(Placed(_))) => true,
+    // The decision continues the submission's stream on a new connection after the unload.
+    let resume = match call_routed(door, id, credential, None, submit, harness.Submit(client_key: "k1", text: "bump it"), tasks, clock, random, net) {
+        Ok((Ok(Placed(_)), take next)) => take next,
         Error(n) => return n,
-        _ => false,
-    }
-    if !placed {
-        return 3u64
+        _ => return 3u64,
     }
     if !stopped(changes) {
         return 4u64
@@ -400,8 +398,8 @@ pub fn law_wake_resumes_transcript(parent: Dir, clock: Clock, random: Random, ta
     let key = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}")))
     let decide = runner.fixture.transact_entry(code.describe(decide_entry))
     let d = harness.Decision(run: 0u64, round: 0u64, ordinal: 0u64, key: take key, allow: true)
-    match call_routed(door, id, credential, 1u64, decide, take d, tasks, clock, random, net) {
-        Ok(Ok(Approved)) => (),
+    match call_routed(door, id, credential, Some(resume), decide, take d, tasks, clock, random, net) {
+        Ok((Ok(Approved), _)) => (),
         Ok(_) => return 7u64,
         Error(n) => return n + 100u64,
     }
@@ -500,8 +498,8 @@ pub fn law_subagent_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     }
     let submit = runner.fixture.transact_entry(code.describe(submit_entry))
     let credential = runner.ingress.credential(random)
-    match call_routed(door, id, credential, 0u64, submit, harness.Submit(client_key: "k1", text: "delegate it"), tasks, clock, random, net) {
-        Ok(Ok(Placed(_))) => (),
+    match call_routed(door, id, credential, None, submit, harness.Submit(client_key: "k1", text: "delegate it"), tasks, clock, random, net) {
+        Ok((Ok(Placed(_)), _)) => (),
         Error(n) => return n,
         _ => return 3u64,
     }
@@ -535,7 +533,7 @@ pub fn law_subagent_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     let Ok(keys) = runner.fixture.entry_keys(code.describe(place)) else {
         return 16u64
     }
-    let Ok(take lingering) = runner.fixture.client_at(tasks, net, clock, random, keys, wire().socket, address, Some(runner.ingress.credential(random)), 0u64, WITHIN_MS) else {
+    let Ok(take lingering) = runner.fixture.client_at(tasks, net, clock, random, keys, wire().socket, address, Some(runner.ingress.credential(random)), None, WITHIN_MS) else {
         return 17u64
     }
     let _ = take lease

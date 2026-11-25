@@ -194,9 +194,9 @@ const close = () => {
   for (const s of streams) s.destroy();
   gateway.stdin.end();
 };
-const command = (action: string, at: number): Promise<number> => new Promise((ok, fail) => {
+const command = (action: string): Promise<number> => new Promise((ok, fail) => {
   controlReply = { ok, fail };
-  gateway.stdin.write(JSON.stringify({ action, at, credential: me }) + "\n");
+  gateway.stdin.write(JSON.stringify({ action, credential: me }) + "\n");
 });
 
 try {
@@ -304,7 +304,7 @@ try {
   drafts.length = 0;
   check("a final send", (await client.send("This draft will lose its reader.", "k4")).status === 202);
   await until("a draft before revocation", () => drafts.some((d) => d.text.length > 0));
-  await command("revoke", client.position);
+  await command("revoke");
   await until("revocation clears the client", () => state?.live === false && state.rows.length === 0 && state.draft === null && state.status === "");
   const refused = await fetch(`${base}/sessions/0/history?before=3&lines=2`, { headers: { Authorization: `Bearer ${me}` } });
   check("revoked history and client stay empty", refused.status === 403 && !(await client.loadOlder()));

@@ -8,10 +8,10 @@ Build outputs stay untracked. There are no runtime npm dependencies.
 import {Client} from '@hirsel/client';
 import {BrowserStorage} from '@hirsel/client/browser';
 import {Frame} from './generated/frame.js';
-import {want, identity, bind} from './generated/entries.js';
+import {want, kind, identity, bind} from './generated/entries.js';
 
 const client = await Client.open({
-  url: 'wss://example.test/runner', frame: Frame, wants: want, identity,
+  url: 'wss://example.test/runner', frame: Frame, wants: want, kinds: kind, identity,
   storage: new BrowserStorage(),
   onDiagnostic: console.warn,
   onRecovered: outcome => console.log('Recovered request', outcome),

@@ -122,7 +122,7 @@ fn query_uint(target: Bytes, name: String) -> Option[u64] {
 
 // The fresh status query follows the data queries and applies the same ACL.
 fn history(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, before: u64, lines: u64) -> Result[Page, u16] waits {
-    let mut client = option.unwrap(reach(d, f, id, identity, 0u64, true)?)
+    let mut client = option.unwrap(reach(d, f, id, identity, None, true)?)
     let page = history_page(mut client, f, before, lines)
     runner.client.close(take client)
     take page

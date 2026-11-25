@@ -426,8 +426,9 @@ session's place can unload while its page stays open.
   `POST /sessions/:id/decisions` (a JSON `Decision`, answers the `Ruling`)
   route to the place, waking it, and call its entry. The browser is the
   Caller: it sends `Authorization: Bearer <base64 credential>` and
-  `Hirsel-Position: <p>`, its next request position by WIRE's client rules,
-  so a retried request at one position runs once. An entry's refusal is 422,
+  `Idempotency-Key: "<stream>.<p>"`, the stream it minted (32 hex) and its
+  next request position on it by WIRE's client rules, so a retried request at
+  one position runs once. An entry's refusal is 422,
   a stranger 403, a position bound to other bytes 409.
 - `GET /sessions/:id/events` is a server-sent event stream of the session's
   transcript rows (`Shown { at, line }`). A `batch` event with the store
@@ -452,7 +453,7 @@ session's place can unload while its page stays open.
 - A development front enables `GET /sessions/:id/releases` to list filed
   proposals and `POST /sessions/:id/releases` to settle one. The POST takes
   `{id, decision}` with `"Publish"` or `{Reject: reason}`, and uses the same
-  `Hirsel-Position` rules as a message. Both routes require the session's reader.
+  `Idempotency-Key` rules as a message. Both routes require the session's reader.
 
 A session ACL denial returns 403 before the front sends any event stream or
 history headers. Denied requests leave a cold place asleep.

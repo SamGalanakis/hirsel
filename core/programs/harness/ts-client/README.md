@@ -8,10 +8,12 @@ types are stripped (`node:module`'s `stripTypeScriptTypes`, as `test.ts` does).
 What the client does:
 
 - **Caller.** Every request sends `Authorization: Bearer <base64 credential>`.
-  Messages, approvals and release settlements send `Hirsel-Position`.
-  Positions are sequential per Caller, so the client
-  sends one POST at a time. It resends a POST that got no answer, or a 503, with the
-  same bytes at the same position, and advances only once answered. Keep `position`
+  Messages, approvals and release settlements send
+  `Idempotency-Key: "<stream>.<position>"`. The client mints its stream (16 hex of
+  the minting wall-clock milliseconds, then 16 random hex) and numbers its POSTs
+  from 0. Positions are sequential per stream, so the client sends one POST at a
+  time. It resends a POST that got no answer, or a 503, with the same bytes at the
+  same position, and advances only once answered. Keep `stream` and `position`
   beside the credential to continue after a reload.
 - **Image.** Rows are buffered until the `batch` event and then applied together. On
   each connection the first batch is the complete image and replaces everything held.
@@ -24,7 +26,7 @@ What the client does:
 - **Approvals.** `pendingWaits()` returns the active run’s open approvals. Pass the
   returned position and key to `decide()`.
 - **Forks.** `fork(cut, key)` returns the new session ID. Give the fork its own
-  `Client` with the same credential and a fresh request position.
+  `Client` with the same credential and a fresh stream.
 - **Releases.** `releases()` lists filed proposals on a development gateway.
   Pass a proposal ID to `settle(id, "Publish")` or
   `settle(id, { Reject: "reason" })`. A Publish decision gives the parked tool

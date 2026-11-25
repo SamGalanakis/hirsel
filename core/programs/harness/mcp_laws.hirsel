@@ -249,7 +249,7 @@ fn test_mcp_legacy_session_discovery(network: Net, clock: Clock, tasks: Tasks) -
 
 fn mcp_status(at: Addr, credential: Bytes, clock: Clock, random: Random, tasks: Tasks, net: Net, socket: std.wsock.Config) -> bool waits {
     let keys = result.unwrap(runner.fixture.entry_keys(code.describe(mcp_blob_place)))
-    let mut client = result.unwrap(runner.fixture.client_at(tasks, net, clock, random, keys, socket, at, Some(clone(credential)), 0u64, 3000u64))
+    let mut client = result.unwrap(runner.fixture.client_at(tasks, net, clock, random, keys, socket, at, Some(clone(credential)), None, 3000u64))
     let codec: std.codec.Codec[harness.View] = std.codec.of()
     let entry = runner.fixture.query_as_entry(code.describe(harness.window), result.unwrap(harness.window_slots()))
     let sub = result.unwrap(runner.fixture.subscribe(mut client, entry, Status, 3000u64))

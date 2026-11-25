@@ -316,7 +316,8 @@ const NEVER: u64 = 18446744073709551615u64
 
 // Each fixture gives its connections the same credential, so two
 // connections naming one stream still address the same durable position.
-type Conn = Socket(wire_client.Conn, Task[Result[(), std.wsock.Error]]) | Held(runner.FixtureOwner)
+// A socket carries its Drive's birth: every stream it names is minted at that keyed time (S7).
+type Conn = Socket(wire_client.Conn, Task[Result[(), std.wsock.Error]], u64) | Held(runner.FixtureOwner)
 
 type Drive: send {
     head: Sender[runner.HeadInput],
@@ -326,7 +327,8 @@ type Drive: send {
     net: Net,
     random: Random,
     token: Bytes,
-    accepted: Option[Receiver[()]]
+    accepted: Option[Receiver[()]],
+    birth: u64
 }
 
 fn client_keys() -> List[Bytes] {
@@ -339,14 +341,14 @@ fn client_keys() -> List[Bytes] {
 
 fn try_conn(d: Drive, q: u64, n_session: u64) -> Option[Conn] waits {
     match wire_client.pair_ingress(d.tasks, d.net, d.clock, d.random, d.head, d.post, code.describe(place), client_keys(), Some(clone(d.token)), q, n_session) {
-        Ok((take cn, take h)) => Some(Socket(take cn, take h)),
+        Ok((take cn, take h)) => Some(Socket(take cn, take h, d.birth)),
         Error(_) => None,
     }
 }
 
 fn conn(d: Drive, q: u64) -> Conn waits {
     let (take cn, take h) = paired(wire_client.pair_ingress(d.tasks, d.net, d.clock, d.random, d.head, d.post, code.describe(place), client_keys(), Some(clone(d.token)), q, 2097152u64))
-    Socket(take cn, take h)
+    Socket(take cn, take h, d.birth)
 }
 
 // A fixture connection, or the law's failure naming why it could not be made.
@@ -384,9 +386,8 @@ fn wsock_text(take prefix: String, e: std.wsock.Error) -> String {
 fn ask(cn: Conn, clock: Clock, s: u64, p: u64, take key: Bytes, take arg: Bytes, after: u64) -> () waits {
     let stream: u32 = int.narrow(s)
     let ms: u32 = int.narrow(after / 1000000u64)
-    let request: runner.Frame = Call(store.StreamId(t: 0u64, n: int.widen(stream)), p, wire_client.slot(client_keys(), key), ms, take arg)
     match cn {
-        Socket(wire, _) => wire_client.send_frame(wire, take request),
+        Socket(wire, _, birth) => wire_client.send_frame(wire, Call(store.StreamId(t: birth, n: int.widen(stream)), p, wire_client.slot(client_keys(), key), ms, take arg)),
         _ => fail("calls: synthetic owner cannot call")
     }
 }
@@ -417,7 +418,7 @@ fn frame(cn: Conn) -> Got waits {
 
 fn hang(take cn: Conn) -> () waits {
     match take cn {
-        Socket(take wire, take s) => {
+        Socket(take wire, take s, _) => {
             let _ = wire_client.close(take wire);
             let _ = task.join(take s)
         },
@@ -469,7 +470,7 @@ fn served_on_with_place(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r:
     } else {
         (take head, None)
     }
-    let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: take grouped_ack)
+    let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: take grouped_ack, birth: host.wall_ms(c))
     let driving = task.spawn(tasks, bytes driving_bytes, take d, f)
     let opened = runner.place_head(take db, register, N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
@@ -523,9 +524,16 @@ type Group: send {
 
 fn group(take g: Group) -> () waits {
     let mut initial: List[runner.HeadInput] = list.new()
-    for _ in 0u64 .. g.initial {
-        list.push(mut initial, result.unwrap(channel.receive(g.from)))
-        let _ = channel.send(g.accepted, ())
+    // A session's Hello reads the head's stream time before any call (S7's mint); it is
+    // answered at once and is not one of the requests the group holds.
+    while list.len(initial) < g.initial {
+        match result.unwrap(channel.receive(g.from)) {
+            ReadStreamTime(take to) => result.unwrap(channel.try_send(g.head, ReadStreamTime(take to))),
+            take request => {
+                list.push(mut initial, take request);
+                let _ = channel.send(g.accepted, ())
+            },
+        }
     }
     for take request in take initial {
         result.unwrap(channel.try_send(g.head, take request))
@@ -637,7 +645,7 @@ fn survives(d: Drive, n: u64, frames: u64) -> bool waits {
         i += 1u64
     }
     match take cn {
-        Socket(take wire, take s) => {
+        Socket(take wire, take s, _) => {
             let _ = wire_client.close(take wire);
             match task.join(take s) {
                 Ok(Ok(())) => all,
@@ -734,7 +742,7 @@ fn drive_session_mismatch(take d: Drive) -> () waits {
 // The session ended by itself (Close 1008 on the wire): its task has returned.
 fn session_closed(take cn: Conn) -> bool waits {
     match take cn {
-        Socket(take wire, take s) => {
+        Socket(take wire, take s, _) => {
             let _ = wire_client.close(take wire);
             match task.join(take s) {
                 Ok(Ok(())) => true,

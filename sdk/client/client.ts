@@ -30,8 +30,11 @@ export interface HttpReply { status: number; body: string; committed: boolean; r
 interface HttpAttempt extends HttpReply { refusal?: string; at?: bigint; retention?: bigint }
 export type State = 'Connecting' | 'Ready' | 'Backoff' | 'Incompatible' | 'Unbound' | 'CredentialNeeded' | 'Fenced' | 'Retired' | 'StorageUnavailable' | 'Closed';
 export interface Identity {digest: Uint8Array; target: string; n_place: bigint}
+// The generated bindings' `kind`, one per `want`. Only a transact call is stored, so only its
+// reply moves the stream position; a granted call's body is never re-sent once it may have run.
+export type EntryKind = 'compute' | 'transact' | 'query' | 'granted' | 'room';
 export interface Options {
-  url: string; storage: Storage; frame: Codec; wants: Want[]; identity?: Identity;
+  url: string; storage: Storage; frame: Codec; wants: Want[]; kinds: readonly EntryKind[]; identity?: Identity;
   // Called for the first Hello and once per credential recovery, outside the client's
   // serialized work and storage lock. Undefined bytes mean none can be had.
   credential?: () => Promise<Uint8Array | undefined>;
@@ -46,6 +49,7 @@ export interface Options {
 const sameCaller = (a: Caller | null, b: Caller | null) =>
   a === null || b === null ? a === b : a.issuer === b.issuer && equal(a.subject, b.subject);
 const sameWant = (a: Want, b: Want) => equal(a.identity, b.identity) && a.args_fp === b.args_fp && a.result_fp === b.result_fp;
+const kindOf = (options: Options, want: Want): EntryKind | undefined => options.kinds[options.wants.findIndex(w => sameWant(w, want))];
 const copyWant = (w: Want): Want => ({identity: w.identity.slice(), args_fp: w.args_fp, result_fp: w.result_fp});
 const futureSlackMs = 300000n;
 const credentialUsable = (state: State) => state === 'Ready' || state === 'Connecting' || state === 'Backoff';
@@ -113,8 +117,6 @@ export class Client implements Transport {
     this.generation = state.generation; this.installationId = state.installation; this.streamLease = lease;
     this.record = structuredClone(state.streams[stream]);
     this.wants = options.wants.map(copyWant);
-    const pending = this.record.pending;
-    if (pending && !pending.http && !this.wants.some(w => sameWant(w, pending.want))) this.wants.push(copyWant(pending.want));
     this.clock = options.clock ?? defaultClock;
     this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
     void this.ready.catch(() => {});
@@ -128,6 +130,7 @@ export class Client implements Transport {
   }
 
   static async open(options: Options): Promise<Client> {
+    if (options.kinds.length !== options.wants.length) throw new ClientError('InvalidBindings');
     const lock = await options.storage.lock('install', true);
     if (!lock) throw new ClientError('StorageUnavailable');
     let lease: Lease | null = null;
@@ -160,7 +163,12 @@ export class Client implements Transport {
       const record = state.streams[stream];
       const imported = record.id !== undefined && record.minter !== state.installation;
       if (record.pending?.inflight || imported) {
-        if (record.pending) {
+        // A granted body runs once per delivery and nothing is stored for it, so an attempt
+        // that may have been delivered is reported LocallyUnknown and never re-sent.
+        if (record.pending?.inflight && !record.pending.http && kindOf(options, record.pending.want) === 'granted') {
+          delete record.pending;
+          options.onRecovered?.({tag: 'LocallyUnknown'});
+        } else if (record.pending) {
           record.pending.inflight = false;
           record.pending.untouched = false;
         }
@@ -473,6 +481,12 @@ export class Client implements Transport {
     this.stableTimer = this.clock.set(() => {
       if (this.state === 'Ready' && this.clock.now() - this.welcomedAt >= 30000) this.backoff = 100;
     }, Math.max(0, 30000 - (this.clock.now() - this.welcomedAt)));
+    // A recovered call whose entry the loaded bindings no longer name has no known kind, so
+    // neither its re-send nor its position can be decided: report it unknown on a fresh stream.
+    const pending = this.record.pending;
+    if (pending && !pending.http && kindOf(this.options, pending.want) === undefined) {
+      await this.retire('LocallyUnknown'); return;
+    }
     if (this.remintOnWelcome) {
       this.remintOnWelcome = false;
       await this.remint(this.keyedAt);
@@ -603,8 +617,24 @@ export class Client implements Transport {
     this.watchLease(lease);
     await previous.release();
   }
+  private granted(): boolean {
+    const pending = this.record.pending;
+    return !!pending && !pending.http && kindOf(this.options, pending.want) === 'granted';
+  }
+  // A granted call's attempt may have run its body, and nothing is stored to dedup a
+  // re-send, so the call ends LocallyUnknown and the position stays where it was.
+  private async loseGranted(): Promise<void> {
+    await this.installation(async state => {
+      const record = state.streams[this.stream];
+      delete record.pending;
+      await this.options.storage.write(state);
+      this.record = structuredClone(record);
+      this.finish({tag: 'LocallyUnknown'});
+    });
+  }
   private async noteLostAttempt(): Promise<void> {
     if (!this.record.pending?.inflight) return;
+    if (this.granted()) { await this.loseGranted(); return; }
     await this.installation(async state => {
       const record = state.streams[this.stream], pending = record.pending!;
       pending.inflight = false;
@@ -785,9 +815,12 @@ export class Client implements Transport {
       if (!pending?.inflight || pending.http || row.stream.t !== id?.t || row.stream.n !== id.n || row.p !== pending.p) continue;
       const outcome = row.outcome;
       if (outcome.tag === 'Returned' || outcome.tag === 'Failed') {
-        await this.completeCall(outcome, true, false);
+        // Only a transact call's reply is stored at p (STORE-SPEC §1.8 P1); a compute or
+        // granted answer leaves the position for the next stored call.
+        await this.completeCall(outcome, kindOf(this.options, pending.want) === 'transact', false);
       } else if (outcome.tag === 'Abandoned') {
-        await this.retryPending(false);
+        if (this.granted()) await this.loseGranted();
+        else await this.retryPending(false);
       } else if (outcome.tag === 'Refused') {
         const refusal = outcome.value;
         const future = refusal.tag === 'Malformed' && refusal.value.kind === 7;

@@ -46,6 +46,9 @@ pub(crate) mod conn;
 #[cfg(test)]
 #[path = "units_ledger_law.rs"]
 mod law;
+#[cfg(test)]
+#[path = "units_ledger_hold.rs"]
+mod hold;
 
 use super::sync::{AtomicPtr, AtomicU64};
 use crate::limit::{Funding, Payer};

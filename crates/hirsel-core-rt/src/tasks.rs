@@ -2824,6 +2824,9 @@ unsafe fn event_for(task_pointer: *mut Task, kind: u8, object: u64, value: u64) 
 unsafe fn record_event(task_pointer: *mut Task, kind: u8, object: u64, value: u64) {
     // SAFETY: current pins its scheduler; callback cannot suspend or re-enter.
     unsafe {
+        // The event commit's mailbox drain: a take-point position (kind 0).
+        #[cfg(feature = "record")]
+        crate::tape::units::reach((*task_pointer).group);
         (*(*task_pointer).context).current.drain();
         record_folded(task_pointer, kind, object, value);
     }

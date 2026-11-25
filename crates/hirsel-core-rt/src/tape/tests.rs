@@ -2515,3 +2515,6 @@ mod key_share_tests;
 
 #[path = "rl6.rs"]
 mod rl6;
+
+#[path = "rl8.rs"]
+mod rl8;

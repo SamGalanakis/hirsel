@@ -120,6 +120,9 @@ fn ancestor_spelling(path: &Path) -> PathBuf {
     if path.ends_with("..") {
         return path.join("..");
     }
+    if path == Path::new(".") {
+        return PathBuf::from("..");
+    }
     match path.parent() {
         Some(parent) if parent.as_os_str().is_empty() => PathBuf::from("."),
         Some(parent) if parent != path => parent.to_path_buf(),

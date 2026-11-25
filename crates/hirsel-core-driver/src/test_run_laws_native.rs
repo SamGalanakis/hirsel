@@ -1,3 +1,20 @@
+impl PackageLaw {
+    fn run_at(&self, dir: &str, args: &[&str]) -> (Option<i32>, String, String) {
+        let mut arguments = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        arguments.extend([
+            "--package-store".into(),
+            self.path("packages").to_str().unwrap().into(),
+            "--libraries".into(),
+            self.libraries.to_str().unwrap().into(),
+            "--store".into(),
+            self.path("compiler-store").to_str().unwrap().into(),
+        ]);
+        let mut command = process::tape_request_command(&arguments, &self.path(dir));
+        command.env("XDG_CACHE_HOME", self.path("cache"));
+        process::tape_request_output(command)
+    }
+}
+
 fn model_law_package(tests: &str) -> PackageLaw {
     let law = PackageLaw::new();
     law.app(
@@ -196,4 +213,27 @@ fn law_lock_of_a_package_stays_beside_its_manifest() {
         std::fs::read_to_string(law.path("app/hirsel.laws")).unwrap(),
         written
     );
+}
+
+#[test]
+fn laws_check_dot_inside_a_package_matches_the_path_form() {
+    // bug: `hirsel laws check .` inside core/programs/harness read no lock and
+    // reported every test missing, while `hirsel laws check core/programs/harness`
+    // from the repository root passed.
+    let law = PackageLaw::new();
+    law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\"]\n");
+    law.app("work/app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"main\"");
+    law.write("work/app/laws.hirsel", PROP_LAW_PACKAGE);
+    PackageLaw::pass(law.run(&["laws", "write", "work/app"]));
+    let written = std::fs::read_to_string(law.path("work/app/hirsel.laws")).unwrap();
+    let by_path = law.run(&["laws", "check", "work/app"]);
+    PackageLaw::pass(by_path);
+    let by_dot = law.run_at("work/app", &["laws", "check", "."]);
+    PackageLaw::pass(by_dot);
+    PackageLaw::pass(law.run_at("work/app", &["laws", "write", "."]));
+    assert_eq!(
+        std::fs::read_to_string(law.path("work/app/hirsel.laws")).unwrap(),
+        written
+    );
+    assert!(!law.path("work/app/app/hirsel.laws").exists());
 }

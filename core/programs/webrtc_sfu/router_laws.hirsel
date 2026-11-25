@@ -85,7 +85,7 @@ fn received(mut c: Client, out: peer.Outbox) -> List[Got] {
             continue
         }
         let mut b = copy_of(list.slice(out.data, at, at + len))
-        if b[1] >= 192 && b[1] <= 223 {
+        if (b[0] >> 6) != 2 || (b[1] >= 192 && b[1] <= 223) {
             continue
         }
         let opened = match srtp.unprotect_rtp(mut c.cs, mut b) {

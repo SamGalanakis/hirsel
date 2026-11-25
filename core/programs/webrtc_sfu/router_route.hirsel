@@ -81,9 +81,14 @@ pub fn receive(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, from: 
     while let Some(track) = peer.collided(mut r.members[mi].session) {
         restart(mut r, now, room, who, track, mut out)?
     }
+    // RTC-6: a moved estimate reallocates the subscriber's down-tracks.
+    if peer.target_bps(r.members[mi].session) != r.members[mi].estimate {
+        allocate(mut r, mi, None, now, mut out)?
+        wants(mut r, now)
+    }
     match input {
-        Media(m) => route(mut r, now, mi, m, slot, mut out),
-        Repair(m) => route(mut r, now, mi, m, slot, mut out),
+        Media(m) => route(mut r, now, mi, m, true, slot, mut out),
+        Repair(m) => route(mut r, now, mi, m, false, slot, mut out),
         Control(take c) => control(mut r, now, mi, take c, mut out),
         _ => Ok(()),
     }
@@ -149,7 +154,7 @@ fn store(mut g: Ring, handle: u64, packet: Bytes) -> u64 {
     handle
 }
 
-fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, slot: Bytes, mut out: peer.Outbox) -> Result[(), RouterError] {
+fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, fresh: bool, slot: Bytes, mut out: peer.Outbox) -> Result[(), RouterError] {
     let owner = r.members[mi].who
     // A suspended room routes no media and no repair (RTC-7, Suspend).
     if suspended(r, owner.room) {
@@ -167,15 +172,26 @@ fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, slot: Bytes, mut out
         keyframe(mut r, now, pi, m.encoding, Loss, mut out)?
     }
     let end = m.payload_at + m.payload_len
+    // RTC-6: the rate and the speaker score read every media packet; then a packet of
+    // an encoding outside the published mask goes no further.
+    if fresh {
+        measure(mut r, pi, e, end, now, mut out)?
+        observe(mut r, pi, m, now, mut out)?
+    }
+    let _ = published(mut r, pi, now)
+    if !r.publications[pi].encodings[e].on {
+        return Ok(())
+    }
     let handle = store(mut r.publications[pi].ring, r.next_handle, list.slice(slot, 0, end))
     r.next_handle += 1u64 << SLOT_SHIFT
-    spread(mut r, now, pi, m, handle, slot, mut out)
+    let talking = speaking(r.publications[pi].voice)
+    spread(mut r, now, pi, m, handle, talking, slot, mut out)
 }
 
 // RTC-5 fan-out steps 2 and 3 for one packet of publication `pi`: each local
 // down-track takes it through its `Rewrite`, and on the home unit each other unit
 // with a down-track of it gets one `Media` message.
-fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, packet: Bytes, mut out: peer.Outbox) -> Result[(), RouterError] {
+fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talking: bool, packet: Bytes, mut out: peer.Outbox) -> Result[(), RouterError] {
     let room = r.publications[pi].room
     let owner = r.publications[pi].owner
     let e: u64 = int.widen(m.encoding)
@@ -229,7 +245,14 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, packet
         }
     }
     let src = source(id, m.encoding)
+    // RTC-6's `V` toward a leg with `vad` on: the publisher's own `V` when its leg
+    // negotiated it, and otherwise whether the publication is speaking.
+    let voice = match m.voice {
+        Some(v) => v,
+        None => talking,
+    }
     let mut waits = false
+    let mut settled = false
     // Other units with a down-track of this publication, one bit per unit.
     let mut remote = 0u64
     for d in 0u64 .. list.len(r.downs) {
@@ -284,7 +307,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, packet
                 },
             },
         }
-        let leg = peer.Leg(src: owner, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: m.voice == Some(true), from: m.payload_at, len: m.payload_len)
+        let leg = peer.Leg(src: owner, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: voice, from: m.payload_at, len: m.payload_len)
         let track = r.downs[d].track
         let sent = peer.forward(mut r.members[si].session, now, track, leg, packet, mut out) ?=> |take x| Peer(x)
         if sent == OnMedia && codec == H264 {
@@ -300,8 +323,9 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, packet
         if sent == Held && pending == Some(src) {
             waits = true
         }
-        if pending == None {
+        if pending == None && r.downs[d].previous != None {
             settle(mut r, d)
+            settled = true
         }
     }
     if let Some(f) = vp9 {
@@ -316,9 +340,16 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, packet
         let held = shared.new(take plain)
         for u in 0u64 .. 64 {
             if (remote >> u) & 1 == 1 {
-                post(mut r, int.narrow(u), Media(room: room, publication: id, src: owner, m: m, handle: handle), shared.share(held))
+                let rate = r.publications[pi].encodings[e].rate
+                post(mut r, int.narrow(u), Media(room: room, publication: id, src: owner, m: m, handle: handle, speaking: talking, rate: rate), shared.share(held))
             }
         }
+    }
+    // A switch that took effect, or a settled rebind, moves the local masks (RTC-6).
+    if settled {
+        wants(mut r, now)
+    } else {
+        want(mut r, pi, now)
     }
     // A down-track waiting on this encoding asks for its keyframe (`Switch`).
     if waits {
@@ -333,7 +364,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, packet
 pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) -> Result[(), RouterError] {
     let Carried(carry: carry, packet: packet) = take msg
     match carry {
-        Media(room: room, publication: publication, src: src, m: m, handle: handle) => {
+        Media(room: room, publication: publication, src: src, m: m, handle: handle, speaking: talking, rate: rate) => {
             if fenced(r, room, src) || suspended(r, room) {
                 r.counts.stale += 1
                 return Ok(())
@@ -348,7 +379,37 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
                 return Ok(())
             }
             r.publications[pi].encodings[e].ssrc = m.ssrc
-            spread(mut r, now, pi, m, handle, packet, mut out)
+            if r.publications[pi].encodings[e].rate != rate {
+                r.publications[pi].encodings[e].rate = rate
+                reallocate(mut r, pi, now, mut out)?
+            }
+            spread(mut r, now, pi, m, handle, talking, packet, mut out)
+        },
+        Wanted(room: room, publication: publication, src: src, unit: unit, mask: mask) => {
+            let Some(pi) = live(mut r, room, publication, src) else {
+                return Ok(())
+            }
+            if r.publications[pi].home != r.unit {
+                r.counts.stale += 1
+                return Ok(())
+            }
+            wanted(mut r, pi, unit, mask, now)
+            Ok(())
+        },
+        Layers(room: room, publication: publication, src: src, mask: mask) => {
+            let Some(_) = live(mut r, room, publication, src) else {
+                return Ok(())
+            }
+            list.push(mut r.notices, Layers(publication: publication, mask: mask))
+            Ok(())
+        },
+        Score(room: room, publication: publication, src: src, score: score) => {
+            let Some(pi) = live(mut r, room, publication, src) else {
+                return Ok(())
+            }
+            r.publications[pi].voice.score = score
+            heard(mut r, room, now)
+            gate(mut r, room, now, mut out)
         },
         Ask(room: room, publication: publication, src: src, dst: dst, ask: ask) => {
             if fenced(r, room, src) || fenced(r, room, dst) || suspended(r, room) {
@@ -417,6 +478,24 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
         },
         _ => Ok(()),
     }
+}
+
+// The publication an RTC-6 message names, unless a fence covers its publisher or it
+// is gone, which counts the message `stale` (RTC-7 step 4).
+fn live(mut r: Router, room: peer.RoomId, publication: PublicationId, src: peer.Gen) -> Option[u64] {
+    if fenced(r, room, src) {
+        r.counts.stale += 1
+        return None
+    }
+    let Some(pi) = publication_at(r, room, publication) else {
+        r.counts.stale += 1
+        return None
+    }
+    if r.publications[pi].owner != src {
+        r.counts.stale += 1
+        return None
+    }
+    Some(pi)
 }
 
 fn control(mut r: Router, now: u64, mi: u64, take c: peer.ControlIn, mut out: peer.Outbox) -> Result[(), RouterError] {
@@ -617,5 +696,9 @@ pub fn poll(mut r: Router, now: u64, mut out: peer.Outbox) -> Option[u64] {
             }
         }
     }
-    wake
+    match dynamics(mut r, now, mut out) {
+        Ok(next) => earliest(wake, next),
+        // A refused keyframe request or rewrite target: the next poll retries.
+        Error(_) => wake,
+    }
 }

@@ -33,7 +33,7 @@ pub type Sent {
     data: Bytes
 }
 
-pub type Event = Fenced(peer.Participant)
+pub type Event = Fenced(peer.Participant) | Layers(publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8)
 
 pub opaque type Unit {
     r: router.Router,
@@ -295,7 +295,7 @@ pub fn take_media(mut u: Unit, now: u64) -> Result[(), router.RouterError] {
         match conn.try_receive(u.media) {
             Ok(take m) => {
                 match m.carry {
-                    Media(room: _, publication: _, src: _, m: _, handle: _) => {
+                    Media(room: _, publication: _, src: _, m: _, handle: _, speaking: _, rate: _) => {
                         u.counts.media += 1
                     },
                     Ask(room: _, publication: _, src: _, dst: _, ask: _) => {
@@ -350,6 +350,13 @@ pub fn take_timers(mut u: Unit, now: u64) -> Option[u64] {
 // Send what the router posted to the other units' media inboxes. A full inbox drops
 // the message, which is media and repair only, and counts it.
 fn deal(mut u: Unit) {
+    // The control unit's RTC-6 notices become events.
+    for n in router.take_notices(mut u.r) {
+        match n {
+            Layers(publication: p, mask: mask) => list.push(mut u.events, Layers(publication: p, mask: mask)),
+            Speakers(room: room, top: top, count: count) => list.push(mut u.events, Speakers(room: room, top: top, count: count)),
+        }
+    }
     let posts = router.take_posts(mut u.r)
     for take p in posts {
         let router.Post(to: to, carried: take m) = take p

@@ -1451,8 +1451,8 @@ W19, blocks, because those are soundness reds.
 - **Demux.** A unit resolves a datagram by its 5-tuple row, and a STUN check by its named
   ufrag among admitted members (`named`). Parked sessions are never consulted.
 - **Messages.** `Media` carries the publisher's plaintext once per remote unit with a
-  down-track of the publication, shared between those units. It carries no speaking flag
-  until S6. `RepairAsk` goes to the publication's home unit, and `RepairReply` comes back
+  down-track of the publication, shared between those units. From S6 it also carries the
+  publication's speaking state and the encoding's measured rate. `RepairAsk` goes to the publication's home unit, and `RepairReply` comes back
   with the ring's payload. A unit counts each kind it takes (`UnitCounts`).
 - **Doorbells.** After a send step, a unit sends one empty datagram to each unit it posted
   to. A doorbell from an address that is not a sibling's is counted `forged` and ignored.
@@ -1462,6 +1462,45 @@ W19, blocks, because those are soundness reds.
 - **Real sockets.** `units_on_loopback` runs three units and two browsers over
   127.0.0.1 sockets bound at port 0. The units' doors name the addresses the binds return.
 - **Not built in S5.** `close_room` across units is not built.
+
+**S6 decisions.** Gaps the spec left open, decided while S6 was built
+(`core/programs/webrtc_sfu/router_dynacast.hirsel`; laws W11 in `dynacast_laws.hirsel`,
+W12 and W13 in `speaker_laws.hirsel`):
+
+- **Masks start full.** Every encoding of a new publication starts published: the
+  publisher sends all of them until the mask says otherwise, so a remote subscriber whose
+  `Wanted` is still in flight sees no gap. The pause delay counts from the first check that
+  sees the union empty: a `Wanted` taken, a packet of the publication, or a poll.
+- **Per-unit union.** The home unit keeps one bit per unit for each encoding. A unit
+  sends `Carry.Wanted(unit, mask)` only when its local mask changed, and the home unit
+  replaces that unit's bits. `Carry.Layers` takes a published change from a home unit
+  that is not unit 0 to the control unit, which raises `Event.Layers`.
+- **Rates.** The home unit measures each encoding over 1 s windows on a grid from the
+  publication's first packet: the plaintext bytes up to the payload end of each fresh media
+  packet (not repairs), times 8. A window that closes sets the rate of each encoding that had
+  packets in it, so a paused encoding keeps its last rate. Each `Media` message carries its
+  encoding's rate to the remote units; there is no separate rate message. An unmeasured
+  encoding costs 0, so a down-track is lowered only once its rates are known.
+- **Effective target.** A lowered video target is `Layer(e', s, t)` with the target's own
+  `s` and `t`. Audio's effective target is its target. A held audio down-track keeps its mask
+  bit, so the gate never pauses a publisher's audio. Allocation runs on every poll for every
+  local member, which covers a single unit's unsubscribe, leave and revoke and a moved
+  estimate.
+- **Scores.** Durations are counted in RTP ticks at the publication's clock rate, so 400 ms
+  is 19,200 ticks at 48 kHz. The first packet, and the first after an 800 ms expiry, adds no
+  duration. A packet without the level extension counts as level 127. An expiry resets the
+  whole window, not only the score.
+- **Speakers.** Ticks fall on multiples of 400 ms of the router clock and are armed only
+  after a score changed. `count` is the number of entries in `top`. Each entry is one
+  publication, named by its owner's participant ID. Equal score and participant fall back to
+  the lower publication ID.
+- **Opus.** An Opus down-track that the gate releases asks for no keyframe.
+- **Fence.** `Wanted`, `Layers` and `Score` carry the publisher's generation. A message
+  whose publisher is fenced or no longer owns the publication is dropped and counted
+  `stale`. The state lives in `Publication` and `Down`, so leaving a seat or ending a
+  down-track removes it.
+- **Laws on one router.** W12 and W13 run on one router. The `Score` message and the gate
+  on a remote unit are covered by no law yet.
 
 **Follow-ups this spec names.**
 

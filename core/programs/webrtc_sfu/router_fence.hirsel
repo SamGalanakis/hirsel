@@ -88,6 +88,13 @@ pub fn first(r: Router, c: Change) -> u16 {
 /// in full; once it answers `Ok`, every other unit applies the same change, with a
 /// publication's `Shape` taken from the first unit's answer.
 pub fn apply(mut r: Router, now: u64, take c: Change, mut out: peer.Outbox) -> Result[Answer, RouterError] {
+    let answer = change(mut r, now, take c, mut out)
+    // RTC-6 follows every change: allocations, the audio gate and the local masks.
+    let _ = rebalance(mut r, now, mut out)
+    answer
+}
+
+fn change(mut r: Router, now: u64, take c: Change, mut out: peer.Outbox) -> Result[Answer, RouterError] {
     match take c {
         Open(room: room, limits: limits) => {
             open(mut r, room, limits)?
@@ -246,7 +253,7 @@ fn drop_seat(mut r: Router, si: u64, notify: bool, mut out: peer.Outbox) {
     let _ = list.remove(mut r.roster, s)
     if let Some(mi) = member_at(r, who.room, who.gen) {
         let m = list.remove(mut r.members, mi)
-        let Member(who: _, session: take session) = take m
+        let Member(who: _, session: take session, estimate: _) = take m
         peer.close(take session, notify, mut out)
     }
 }

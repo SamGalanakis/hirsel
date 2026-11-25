@@ -1,0 +1,674 @@
+// RTC-6 dynacast and active speakers (webrtc spec, slice S6): each unit's local
+// wanted mask and the home unit's published mask with its pause delay, the
+// bandwidth-limited effective target, the Q16 speaker scores, the control unit's
+// 400 ms speaker ticks, and the `audio_forward` gate.
+// amp(l) = round(65536 · 10^(-l / 20)) for l from 0 to 127 (RTC-6).
+const AMP: Inline[i64, 128] =[65536, 58409, 52057, 46396, 41350, 36854, 32846, 29274, 26090, 23253, 20724, 18471, 16462, 14672, 13076, 11654, 10387, 9257, 8250, 7353, 6554, 5841, 5206, 4640, 4135, 3685, 3285, 2927, 2609, 2325, 2072, 1847, 1646, 1467, 1308, 1165, 1039, 926, 825, 735, 655, 584, 521, 464, 414, 369, 328, 293, 261, 233, 207, 185, 165, 147, 131, 117, 104, 93, 83, 74, 66, 58, 52, 46, 41, 37, 33, 29, 26, 23, 21, 18, 16, 15, 13, 12, 10, 9, 8, 7, 7, 6, 5, 5, 4, 4, 3, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+// The loudest level that counts as active, -35 dBov.
+const ACTIVE_LEVEL: u8 = 35
+
+const WINDOW_MS: u64 = 400
+
+const ACTIVE_MS: u64 = 160
+
+const SILENT_NS: u64 = 800000000
+
+const TICK_NS: u64 = 400000000
+
+const RATE_NS: u64 = 1000000000
+
+const TOP: u64 = 8
+
+const MS_NS: u64 = 1000000
+
+fn quiet() -> Voice {
+    Voice(score: 0, observed: 0, active: 0, loudest: 127, highest: None, last: 0)
+}
+
+fn speaking(v: Voice) -> bool {
+    v.score >= AMP[35]
+}
+
+fn earliest(a: Option[u64], b: Option[u64]) -> Option[u64] {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if x <= y {
+            x
+        } else {
+            y
+        }),
+        (Some(x), None) => Some(x),
+        (None, y) => y,
+    }
+}
+
+// Rounds toward negative infinity, for a positive divisor.
+fn floor_div(a: i64, b: i64) -> i64 {
+    let q = a / b
+    if a % b != 0 && a < 0 {
+        q - 1
+    } else {
+        q
+    }
+}
+
+/// Take what the control unit raised since the last call (RTC-6): published mask
+/// changes and top-speaker changes.
+pub fn take_notices(mut r: Router) -> List[Notice] {
+    replace(mut r.notices, list.new())
+}
+
+/// Publication `p`'s active-speaker score as this unit holds it (RTC-6).
+pub fn speaker_score(r: Router, room: peer.RoomId, p: PublicationId) -> Option[i64] {
+    let Some(pi) = publication_at(r, room, p) else {
+        return None
+    }
+    Some(r.publications[pi].voice.score)
+}
+
+// ---- The wanted mask ----
+// This unit's local wanted mask of publication `pi`: bit `e` is set when one of its
+// down-tracks of the publication has an effective target, a current layer or a
+// pending layer on encoding `e`. A rebind's old publication keeps its bits until
+// the switch, through the current layer.
+fn local_mask(r: Router, pi: u64) -> u8 {
+    let room = r.publications[pi].room
+    let id = r.publications[pi].id
+    let n = list.len(r.publications[pi].encodings)
+    let mut mask = 0u64
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].room != room || r.downs[d].home != r.unit {
+            continue
+        }
+        let mine = r.downs[d].publication == id
+        if !mine && r.downs[d].previous != Some(id) {
+            continue
+        }
+        if mine {
+            if let Layer(encoding: e, spatial: _, temporal: _) = r.downs[d].effective {
+                let wide: u64 = int.widen(e)
+                mask = mask | (1u64 << wide)
+            }
+        }
+        let Some(mi) = member_at(r, room, r.downs[d].sub) else {
+            continue
+        }
+        let track = r.downs[d].track
+        let pending = peer.pending(r.members[mi].session, track)
+        for e in 0u64 .. n {
+            let src = source(id, int.narrow(e))
+            if pending == Some(src) || peer.current_layer(r.members[mi].session, track, src) != None {
+                mask = mask | (1u64 << e)
+            }
+        }
+    }
+    int.narrow(mask)
+}
+
+// Recompute publication `pi`'s local mask and tell its home unit when it changed.
+fn want(mut r: Router, pi: u64, now: u64) {
+    let mask = local_mask(r, pi)
+    if mask == r.publications[pi].local {
+        return
+    }
+    r.publications[pi].local = mask
+    let home = r.publications[pi].home
+    let unit = r.unit
+    if home == unit {
+        wanted(mut r, pi, unit, mask, now)
+    } else {
+        let room = r.publications[pi].room
+        let id = r.publications[pi].id
+        let owner = r.publications[pi].owner
+        post_bare(mut r, home, Wanted(room: room, publication: id, src: owner, unit: unit, mask: mask))
+    }
+}
+
+fn wants(mut r: Router, now: u64) {
+    for pi in 0u64 .. list.len(r.publications) {
+        want(mut r, pi, now)
+    }
+}
+
+// The home unit takes unit `unit`'s latest local mask; the wanted mask is the union
+// over every unit.
+fn wanted(mut r: Router, pi: u64, unit: u16, mask: u8, now: u64) {
+    let shift: u64 = int.widen(unit)
+    let bit = 1u64 << shift
+    let wide: u64 = int.widen(mask)
+    for e in 0u64 .. list.len(r.publications[pi].encodings) {
+        if (wide >> e) & 1 == 1 {
+            r.publications[pi].encodings[e].wanting = r.publications[pi].encodings[e].wanting | bit
+        } else {
+            r.publications[pi].encodings[e].wanting = r.publications[pi].encodings[e].wanting & ~bit
+        }
+    }
+    let _ = published(mut r, pi, now)
+}
+
+fn pause_ns(r: Router, room: peer.RoomId) -> u64 {
+    let ms: u64 = match room_at(r, room) {
+        Some(ri) => int.widen(r.rooms[ri].limits.pause_delay_ms),
+        None => 5000,
+    }
+    ms * MS_NS
+}
+
+// Publish the union's changes on the home unit: a bit that turns on at once, one
+// that turns off once it has stayed off for the room's pause delay, so a target
+// that comes back inside the delay costs no restart. It answers the next turn-off.
+fn published(mut r: Router, pi: u64, now: u64) -> Option[u64] {
+    let delay = pause_ns(r, r.publications[pi].room)
+    let mut changed = false
+    let mut next: Option[u64] = None
+    for e in 0u64 .. list.len(r.publications[pi].encodings) {
+        if r.publications[pi].encodings[e].wanting != 0 {
+            r.publications[pi].encodings[e].since = None
+            if !r.publications[pi].encodings[e].on {
+                r.publications[pi].encodings[e].on = true
+                changed = true
+            }
+            continue
+        }
+        if !r.publications[pi].encodings[e].on {
+            continue
+        }
+        let since = match r.publications[pi].encodings[e].since {
+            Some(t) => t,
+            None => {
+                r.publications[pi].encodings[e].since = Some(now)
+                now
+            },
+        }
+        if now >= since + delay {
+            r.publications[pi].encodings[e].on = false
+            r.publications[pi].encodings[e].since = None
+            changed = true
+        } else {
+            next = earliest(next, Some(since + delay))
+        }
+    }
+    if changed {
+        layers(mut r, pi)
+    }
+    next
+}
+
+// A published change goes to the control unit as `Event.Layers`.
+fn layers(mut r: Router, pi: u64) {
+    let mut mask = 0u64
+    for e in 0u64 .. list.len(r.publications[pi].encodings) {
+        if r.publications[pi].encodings[e].on {
+            mask = mask | (1u64 << e)
+        }
+    }
+    let id = r.publications[pi].id
+    if r.unit == 0 {
+        list.push(mut r.notices, Layers(publication: id, mask: int.narrow(mask)))
+    } else {
+        let room = r.publications[pi].room
+        let owner = r.publications[pi].owner
+        post_bare(mut r, 0, Layers(room: room, publication: id, src: owner, mask: int.narrow(mask)))
+    }
+}
+
+// ---- The effective target ----
+fn rate_of(r: Router, pi: u64, e: u64) -> i64 {
+    if e >= list.len(r.publications[pi].encodings) {
+        return 0
+    }
+    int.narrow(r.publications[pi].encodings[e].rate)
+}
+
+fn id_of(p: PublicationId) -> u64 {
+    let PublicationId(n) = p
+    n
+}
+
+// RTC-6's allocation for local member `mi`: the budget is its estimate less the rate
+// of every audio down-track, which is never lowered; every other down-track with a
+// target starts at `Off` and, in ascending publication id, round after round, is
+// raised one encoding when the step's cost fits what is left. A down-track whose
+// step does not fit stays where it is. Each down-track whose result changed, and
+// `force`, is pointed at it.
+fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let room = r.members[mi].who.room
+    let who = r.members[mi].who.gen
+    let estimate = peer.target_bps(r.members[mi].session)
+    r.members[mi].estimate = estimate
+    let mut budget: i64 = int.narrow(estimate)
+    let mut video: Inline[u64, 64] =[0u64; 64]
+    let mut level: Inline[u64, 64] =[0u64; 64]
+    let mut stuck: Inline[bool, 64] =[false; 64]
+    let mut n = 0u64
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].room != room || r.downs[d].sub != who || r.downs[d].home != r.unit {
+            continue
+        }
+        let Some(pi) = publication_at(r, room, r.downs[d].publication) else {
+            continue
+        }
+        if r.publications[pi].codec == Opus {
+            budget -= rate_of(r, pi, 0)
+            continue
+        }
+        if n == 64 {
+            continue
+        }
+        // Ascending publication id.
+        let k = id_of(r.downs[d].publication)
+        let mut at = n
+        while at > 0 && id_of(r.downs[video[at - 1]].publication) > k {
+            video[at] = video[at - 1]
+            at -= 1
+        }
+        video[at] = d
+        n += 1
+    }
+    let mut raised = true
+    while raised {
+        raised = false
+        for k in 0u64 .. n {
+            if stuck[k] {
+                continue
+            }
+            let d = video[k]
+            let Layer(encoding: top, spatial: _, temporal: _) = r.downs[d].target else {
+                stuck[k] = true
+                continue
+            }
+            // `level` is 0 at `Off` and `e + 1` at encoding `e`.
+            let at = level[k]
+            let wide: u64 = int.widen(top)
+            if at > wide {
+                stuck[k] = true
+                continue
+            }
+            let Some(pi) = publication_at(r, room, r.downs[d].publication) else {
+                stuck[k] = true
+                continue
+            }
+            let cost = rate_of(r, pi, at) - if at == 0 {
+                0i64
+            } else {
+                rate_of(r, pi, at - 1)
+            }
+            if cost <= budget {
+                budget -= cost
+                level[k] = at + 1
+                raised = true
+            } else {
+                stuck[k] = true
+            }
+        }
+    }
+    let mut lowered: Inline[Target, 64] =[Off; 64]
+    for k in 0u64 .. n {
+        let d = video[k]
+        if level[k] != 0 {
+            if let Layer(encoding: _, spatial: s, temporal: t) = r.downs[d].target {
+                lowered[k] = Layer(encoding: int.narrow(level[k] - 1), spatial: s, temporal: t)
+            }
+        }
+    }
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].room != room || r.downs[d].sub != who || r.downs[d].home != r.unit {
+            continue
+        }
+        let mut effective = r.downs[d].target
+        for k in 0u64 .. n {
+            if video[k] == d {
+                effective = lowered[k]
+            }
+        }
+        if effective != r.downs[d].effective || force == Some(d) {
+            r.moved = r.moved || effective != r.downs[d].effective
+            r.downs[d].effective = effective
+            point(mut r, d, now, mut out)?
+        }
+    }
+    Ok(())
+}
+
+// Point down-track `d`'s rewrite at its effective target, or at `Off` while the
+// audio gate holds it. A layer on another source asks for its keyframe (`Switch`);
+// Opus needs none.
+fn point(mut r: Router, d: u64, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let room = r.downs[d].room
+    let Some(mi) = member_at(r, room, r.downs[d].sub) else {
+        return Ok(())
+    }
+    let Some(pi) = publication_at(r, room, r.downs[d].publication) else {
+        return Ok(())
+    }
+    let t = if r.downs[d].held {
+        Off
+    } else {
+        r.downs[d].effective
+    }
+    let track = r.downs[d].track
+    if let Error(_) = peer.set_target(mut r.members[mi].session, track, rewrite_target(r.publications[pi], t)) {
+        return Error(Limit(32))
+    }
+    if r.publications[pi].codec == Opus {
+        return Ok(())
+    }
+    if let Some(_) = peer.pending(r.members[mi].session, track) {
+        if let Layer(encoding: e, spatial: _, temporal: _) = t {
+            keyframe(mut r, now, pi, e, Switch, mut out)?
+        }
+    }
+    Ok(())
+}
+
+// Every local subscriber of publication `pi` again, after its rates changed.
+fn reallocate(mut r: Router, pi: u64, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let room = r.publications[pi].room
+    let id = r.publications[pi].id
+    for mi in 0u64 .. list.len(r.members) {
+        if r.members[mi].who.room != room {
+            continue
+        }
+        let who = r.members[mi].who.gen
+        if let Some(_) = down_at(r, room, who, id) {
+            allocate(mut r, mi, None, now, mut out)?
+        }
+    }
+    Ok(())
+}
+
+// After a control change: every local subscriber's allocation, every room's audio
+// gate and every local mask. The change itself is applied; what this answers is
+// a refused rewrite target or keyframe request, which the next change retries.
+fn rebalance(mut r: Router, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    for mi in 0u64 .. list.len(r.members) {
+        allocate(mut r, mi, None, now, mut out)?
+    }
+    for ri in 0u64 .. list.len(r.rooms) {
+        let room = r.rooms[ri].id
+        gate(mut r, room, now, mut out)?
+    }
+    wants(mut r, now)
+    Ok(())
+}
+
+// ---- Rates ----
+// The home unit's ingress rate per encoding, in 1 s windows from the publication's
+// first packet: the bytes of each media packet up to its payload's end count in the
+// window it arrives in, and a closing window sets the rate of every encoding that
+// had packets in it. The others keep theirs.
+fn measure(mut r: Router, pi: u64, e: u64, len: u64, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let start = match r.publications[pi].window {
+        Some(t) => t,
+        None => {
+            r.publications[pi].window = Some(now)
+            now
+        },
+    }
+    if now >= start + RATE_NS {
+        let mut changed = false
+        for k in 0u64 .. list.len(r.publications[pi].encodings) {
+            let n = r.publications[pi].encodings[k].counted
+            if n == 0 {
+                continue
+            }
+            if n * 8 != r.publications[pi].encodings[k].rate {
+                changed = true
+            }
+            r.publications[pi].encodings[k].rate = n * 8
+            r.publications[pi].encodings[k].counted = 0
+        }
+        r.publications[pi].window = Some(start + (now - start) / RATE_NS * RATE_NS)
+        if changed {
+            reallocate(mut r, pi, now, mut out)?
+        }
+    }
+    r.publications[pi].encodings[e].counted += len
+    Ok(())
+}
+
+// ---- Scores ----
+// One packet of audio publication `pi` on its home unit (RTC-6, the speaker score).
+// A packet with no level reads as silence.
+fn observe(mut r: Router, pi: u64, m: peer.MediaIn, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    if r.publications[pi].codec != Opus || r.publications[pi].clock == 0 {
+        return Ok(())
+    }
+    r.publications[pi].voice.last = now
+    let d: u64 = match r.publications[pi].voice.highest {
+        None => 0,
+        Some(h) => {
+            if m.wide <= h {
+                return Ok(())
+            }
+            int.narrow(m.wide - h)
+        },
+    }
+    r.publications[pi].voice.highest = Some(m.wide)
+    r.publications[pi].voice.observed += d
+    let l = match m.audio_level {
+        Some(x) => x,
+        None => 127u8,
+    }
+    if l <= ACTIVE_LEVEL {
+        r.publications[pi].voice.active += d
+        if l < r.publications[pi].voice.loudest {
+            r.publications[pi].voice.loudest = l
+        }
+    }
+    let clock: u64 = int.widen(r.publications[pi].clock)
+    let window = clock * WINDOW_MS / 1000
+    if r.publications[pi].voice.observed < window {
+        return Ok(())
+    }
+    let before = r.publications[pi].voice.score
+    let v = r.publications[pi].voice
+    if v.active >= clock * ACTIVE_MS / 1000 {
+        let loudest: u64 = int.widen(v.loudest)
+        let active: i64 = int.narrow(v.active)
+        let lin = AMP[loudest] * active / int.narrow(window)
+        r.publications[pi].voice.score = v.score + floor_div((lin - v.score) * 2, 3)
+    } else {
+        r.publications[pi].voice.score = 0
+    }
+    r.publications[pi].voice.observed = 0
+    r.publications[pi].voice.active = 0
+    r.publications[pi].voice.loudest = 127
+    if r.publications[pi].voice.score != before {
+        scored(mut r, pi, now, mut out)?
+    }
+    Ok(())
+}
+
+// Publication `pi`'s score changed on its home unit: every other unit of the room
+// and the control unit take it, and the room's gate follows.
+fn scored(mut r: Router, pi: u64, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let room = r.publications[pi].room
+    let id = r.publications[pi].id
+    let owner = r.publications[pi].owner
+    let score = r.publications[pi].voice.score
+    let mut units = 1u64
+    for s in r.roster {
+        if s.who.room == room {
+            units = units | (1u64 << int.widen(s.home))
+        }
+    }
+    let here: u64 = int.widen(r.unit)
+    for u in 0u64 .. 64 {
+        if (units >> u) & 1 == 1 && u != here {
+            post_bare(mut r, int.narrow(u), Score(room: room, publication: id, src: owner, score: score))
+        }
+    }
+    heard(mut r, room, now)
+    gate(mut r, room, now, mut out)
+}
+
+// A score of the room changed: on the control unit, the next 400 ms tick compares
+// the top speakers.
+fn heard(mut r: Router, room: peer.RoomId, now: u64) {
+    if r.unit != 0 {
+        return
+    }
+    let Some(ri) = room_at(r, room) else {
+        return
+    }
+    if !r.rooms[ri].heard {
+        r.rooms[ri].heard = true
+        r.rooms[ri].tick = (now / TICK_NS + 1) * TICK_NS
+    }
+}
+
+// Whether publication `a` ranks above `b`: by score, then by lower participant id,
+// then by lower publication id.
+fn above(r: Router, a: u64, b: u64) -> bool {
+    let sa = r.publications[a].voice.score
+    let sb = r.publications[b].voice.score
+    if sa != sb {
+        return sa > sb
+    }
+    let Gen(id: ia, epoch: _) = r.publications[a].owner
+    let Gen(id: ib, epoch: _) = r.publications[b].owner
+    if ia != ib {
+        return ia < ib
+    }
+    id_of(r.publications[a].id) < id_of(r.publications[b].id)
+}
+
+// The `n`-th best speaking publication of `room` (from 0), leaving out `skip`'s.
+fn ranked(r: Router, room: peer.RoomId, skip: Option[peer.Gen], n: u64) -> Option[u64] {
+    let mut last: Option[u64] = None
+    for _ in 0u64 .. n + 1 {
+        let mut best: Option[u64] = None
+        for pi in 0u64 .. list.len(r.publications) {
+            let p = r.publications[pi]
+            if p.room != room || p.codec != Opus || !speaking(p.voice) || skip == Some(p.owner) {
+                continue
+            }
+            if let Some(l) = last {
+                if !above(r, l, pi) {
+                    continue
+                }
+            }
+            best = match best {
+                Some(b) if above(r, b, pi) => Some(b),
+                _ => Some(pi),
+            }
+        }
+        last = best
+        if last == None {
+            return None
+        }
+    }
+    last
+}
+
+// Whether publication `pi` is among the `n` best speakers its subscriber `sub` hears.
+fn forwarded(r: Router, room: peer.RoomId, sub: peer.Gen, pi: u64, n: u64) -> bool {
+    for k in 0u64 .. n {
+        match ranked(r, room, Some(sub), k) {
+            Some(x) if x == pi => return true,
+            Some(_) => (),
+            None => return false,
+        }
+    }
+    false
+}
+
+// RTC-6's `audio_forward = n`: each local audio down-track of the room forwards only
+// the `n` best speakers other than its subscriber, and is held at `Off` otherwise.
+// Opus switches at the next packet.
+fn gate(mut r: Router, room: peer.RoomId, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        return Ok(())
+    }
+    let n: u64 = int.widen(r.rooms[ri].limits.audio_forward)
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].room != room || r.downs[d].home != r.unit {
+            continue
+        }
+        let Some(pi) = publication_at(r, room, r.downs[d].publication) else {
+            continue
+        }
+        if r.publications[pi].codec != Opus {
+            continue
+        }
+        let barred = n != 0 && !forwarded(r, room, r.downs[d].sub, pi, n)
+        if barred != r.downs[d].held {
+            r.downs[d].held = barred
+            point(mut r, d, now, mut out)?
+        }
+    }
+    Ok(())
+}
+
+// ---- Timers ----
+// RTC-6's deadlines: each home publication's mask turn-offs and 800 ms silence, each
+// member's allocation, and on the control unit each room's 400 ms speaker tick.
+fn dynamics(mut r: Router, now: u64, mut out: peer.Outbox) -> Result[Option[u64], RouterError] {
+    let mut wake: Option[u64] = None
+    for pi in 0u64 .. list.len(r.publications) {
+        if r.publications[pi].home != r.unit {
+            continue
+        }
+        wake = earliest(wake, published(mut r, pi, now))
+        let Some(_) = r.publications[pi].voice.highest else {
+            continue
+        }
+        let quiet_at = r.publications[pi].voice.last + SILENT_NS
+        if now < quiet_at {
+            wake = earliest(wake, Some(quiet_at))
+            continue
+        }
+        let before = r.publications[pi].voice.score
+        r.publications[pi].voice = quiet()
+        if before != 0 {
+            scored(mut r, pi, now, mut out)?
+        }
+    }
+    // A single unit's unsubscribe, leave and revoke take no clock: what they freed is
+    // allocated here, as is a moved estimate, and the local masks follow.
+    let freed = r.moved
+    for mi in 0u64 .. list.len(r.members) {
+        if freed || peer.target_bps(r.members[mi].session) != r.members[mi].estimate {
+            allocate(mut r, mi, None, now, mut out)?
+        }
+    }
+    if r.moved {
+        r.moved = false
+        wants(mut r, now)
+    }
+    for ri in 0u64 .. list.len(r.rooms) {
+        if !r.rooms[ri].heard {
+            continue
+        }
+        if now < r.rooms[ri].tick {
+            wake = earliest(wake, Some(r.rooms[ri].tick))
+            continue
+        }
+        r.rooms[ri].heard = false
+        let room = r.rooms[ri].id
+        let mut top: Inline[u64, 8] =[0u64; 8]
+        let mut count = 0u64
+        let mut same = true
+        for k in 0u64 .. TOP {
+            let Some(pi) = ranked(r, room, None, k) else {
+                break
+            }
+            let Gen(id: id, epoch: _) = r.publications[pi].owner
+            top[k] = id
+            if k >= list.len(r.rooms[ri].top) || r.rooms[ri].top[k] != id {
+                same = false
+            }
+            count += 1
+        }
+        if same && count == list.len(r.rooms[ri].top) {
+            continue
+        }
+        list.clear(mut r.rooms[ri].top)
+        for k in 0u64 .. count {
+            list.push(mut r.rooms[ri].top, top[k])
+        }
+        list.push(mut r.notices, Speakers(room: room, top: top, count: int.narrow(count)))
+    }
+    Ok(wake)
+}

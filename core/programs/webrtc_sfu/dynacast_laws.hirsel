@@ -1,0 +1,269 @@
+// ---- RTC-6 dynacast across units (W11) ----
+const U3: Addr = Addr(ip: V4(0xc0000201), port: 6003)
+
+// The last payload byte of each stream: audio, P's encodings q, h and f, and V.
+const LAYER_AUDIO: u8 = 0xa0
+
+const LAYER_Q: u8 = 0xe0
+
+const LAYER_H: u8 = 0xe1
+
+const LAYER_F: u8 = 0xe2
+
+const LAYER_V: u8 = 0xd0
+
+type Four {
+    u0: units.Unit,
+    u1: units.Unit,
+    u2: units.Unit,
+    u3: units.Unit
+}
+
+fn four_units(seed: u64) -> Four {
+    let (d0, take c0, take m0) = result.unwrap(units.inboxes(U0))
+    let (d1, take c1, take m1) = result.unwrap(units.inboxes(U1))
+    let (d2, take c2, take m2) = result.unwrap(units.inboxes(U2))
+    let (d3, take c3, take m3) = result.unwrap(units.inboxes(U3))
+    let mut doors: List[units.Doors] = list.new()
+    list.push(mut doors, take d0)
+    list.push(mut doors, take d1)
+    list.push(mut doors, take d2)
+    list.push(mut doors, take d3)
+    let u0 = result.unwrap(units.unit(provide.random(seed), 0, doors, take c0, take m0, 65536, 64))
+    let u1 = result.unwrap(units.unit(provide.random(seed + 1), 1, doors, take c1, take m1, 65536, 64))
+    let u2 = result.unwrap(units.unit(provide.random(seed + 2), 2, doors, take c2, take m2, 65536, 64))
+    let u3 = result.unwrap(units.unit(provide.random(seed + 3), 3, doors, take c3, take m3, 65536, 64))
+    Four(u0: take u0, u1: take u1, u2: take u2, u3: take u3)
+}
+
+// Every unit takes its messages and writes everything, `rounds` times.
+fn turn_four(mut f: Four, now: u64, rounds: u64, mut log: List[Wire]) {
+    let mut held: List[Wire] = list.new()
+    for _ in 0u64 .. rounds {
+        drain(mut f.u0, now)
+        drain(mut f.u1, now)
+        drain(mut f.u2, now)
+        drain(mut f.u3, now)
+        write(mut f.u0, now, 0, false, mut log, mut held, false)
+        write(mut f.u1, now, 0, false, mut log, mut held, false)
+        write(mut f.u2, now, 0, false, mut log, mut held, false)
+        write(mut f.u3, now, 0, false, mut log, mut held, false)
+    }
+}
+
+fn settle_four(mut f: Four, now: u64, take c: router.Change, mut log: List[Wire]) -> router.Answer {
+    result.unwrap(units.begin(mut f.u0, now, take c))
+    let mut held: List[Wire] = list.new()
+    for _ in 0u64 .. 8 {
+        drain(mut f.u1, now)
+        drain(mut f.u2, now)
+        drain(mut f.u3, now)
+        drain(mut f.u0, now)
+        write(mut f.u1, now, 0, false, mut log, mut held, false)
+        write(mut f.u2, now, 0, false, mut log, mut held, false)
+        write(mut f.u3, now, 0, false, mut log, mut held, false)
+        write(mut f.u0, now, 0, false, mut log, mut held, false)
+        if let Some(a) = units.finished(mut f.u0) {
+            return result.unwrap(a)
+        }
+    }
+    fail("a control call did not finish")
+}
+
+fn browser_with(mut u: units.Unit, seed: u64, id: u64, offer: Bytes) -> Client {
+    let at = addr_of(int.narrow(id))
+    let who = peer.Participant(gen: gen_of(id), room: room_id())
+    let Rig(p: take p, c: _, cs: take cs, out: _) = established_with(seed, offer, who, at, 64)
+    result.unwrap(units.park(mut u, take p))
+    Client(who: gen_of(id), at: at, cs: take cs)
+}
+
+fn admit_four(mut f: Four, c: Client, home: u16, mut log: List[Wire]) {
+    let _ = settle_four(mut f, 0, Admit(who: peer.Participant(gen: c.who, room: room_id()), home: home), mut log)
+}
+
+// A payload of `size` bytes: VP8 keyframe or interframe bytes, then `mark`.
+fn filled(key: bool, mark: u8, size: u64) -> Bytes {
+    let mut body = if key {
+        vp8_key()
+    } else {
+        vp8_delta()
+    }
+    while list.len(body) < size {
+        list.push(mut body, mark)
+    }
+    body
+}
+
+fn heard_one(a: u8) -> List[u8] {
+    let mut l: List[u8] = list.new()
+    list.push(mut l, a)
+    l
+}
+
+fn heard_two(a: u8, b: u8) -> List[u8] {
+    let mut l = heard_one(a)
+    list.push(mut l, b)
+    l
+}
+
+fn sections_of(take a: Bytes, take b: Bytes) -> List[Bytes] {
+    let mut l: List[Bytes] = list.new()
+    list.push(mut l, take a)
+    if list.len(b) != 0 {
+        list.push(mut l, take b)
+    }
+    l
+}
+
+// The last payload byte of each RTP packet `c` got in `log`, in order.
+fn marks(mut c: Client, log: List[Wire]) -> List[u8] {
+    let mut got: List[u8] = list.new()
+    for wire in log {
+        if wire.to != c.at || rtcp_like(wire.data) {
+            continue
+        }
+        let mut b = copy_of(wire.data)
+        let Ok(opened) = srtp.unprotect_rtp(mut c.cs, mut b) else {
+            fail("a subscriber could not open a forwarded packet")
+        }
+        list.truncate(mut b, opened.length)
+        list.push(mut got, b[list.len(b) - 1])
+    }
+    got
+}
+
+// What subscriber `s` (0 home H, 1 A on the control unit, 2 B, 3 C) hears in step
+// `k` (50 ms each), by hand from RTC-6 and the schedule of `dynacast_mask`. Each
+// step's packets arrive in the order audio, q, h, f, V. A down-track forwards its
+// current source and switches at the first keyframe of its pending one.
+fn w11_heard(s: u64, k: u64) -> List[u8] {
+    if s == 0 {
+        // Below one base layer once the rates are known at 1,000 ms.
+        if k < 20 {
+            return heard_two(LAYER_AUDIO, LAYER_Q)
+        }
+        return heard_one(LAYER_AUDIO)
+    }
+    if s == 1 {
+        // P's base fits, V's base after it does not.
+        if k < 20 {
+            return heard_two(LAYER_Q, LAYER_V)
+        }
+        return heard_one(LAYER_Q)
+    }
+    if s == 2 {
+        if k < 80 {
+            return heard_one(LAYER_H)
+        }
+        if k == 170 || k == 200 {
+            // q still current, then f's keyframe switches.
+            return heard_two(LAYER_Q, LAYER_F)
+        }
+        if (k > 170 && k < 190) || k > 200 {
+            return heard_one(LAYER_F)
+        }
+        return heard_one(LAYER_Q)
+    }
+    // C holds f through h's interframes until h's keyframe at 3,000 ms.
+    if k < 60 {
+        return heard_one(LAYER_F)
+    }
+    heard_one(LAYER_H)
+}
+
+/// bug: keep one remote mask instead of the per-unit union, drop an encoding's bit when a down-track's pending switch starts instead of when it ends, turn a bit off before or after the pause delay or raise an event when a target returns inside it, price an audio down-track's rate or lower it, raise a later publication before an earlier one, or forward a packet outside the mask.
+/// oracle: RTC-6 by hand. Rates from packet sizes (20 B header, 20 packets per s): q 750 B = 120,000, h 168,000, f 192,000, V 192,000 and audio 192,000 bit/s against the 300,000 bit/s start estimate (RTC-6 BWE start). H's budget 108,000 is below q; A's 300,000 less q leaves 180,000, below V's base. Bits: V's only want stops at 1,000 ms, so V turns off at 6,000 ms (step 120); C holds f until h's keyframe at 3,000 ms, so f turns off at 8,000 ms (step 160) and turns on again with B's target at 8,500 ms (step 170); B drops h at 4,000 ms while C keeps it, so h never turns off; f, dropped at 9,500 ms and wanted again at 10,000 ms, raises nothing through 14,600 ms.
+@test
+fn dynacast_mask() -> Result[(), router.RouterError] {
+    let mut log: List[Wire] = list.new()
+    let mut f = four_units(150)
+    let room = room_id()
+    let _ = settle_four(mut f, 0, Open(room: room, limits: room_limits()), mut log)
+    let mut p = browser_with(mut f.u1, 151, 1, simulcast_offer())
+    let mut v = browser_with(mut f.u1, 152, 2, single_offer(b"v", b"", list.new()))
+    let mut audio_offer = minimal_head(b" a")
+    audio_section(mut audio_offer, b"a", b"sendonly", b"", b"")
+    let mut m = browser_with(mut f.u1, 153, 3, audio_offer)
+    let mut h_offer = minimal_head(b" hv ha")
+    recv_section(mut h_offer, b"hv", b"96", b"", b"1", b"")
+    audio_section(mut h_offer, b"ha", b"recvonly", b"", b"")
+    let mut subs: List[Client] = list.new()
+    list.push(mut subs, browser_with(mut f.u1, 154, 4, h_offer))
+    list.push(mut subs, browser_with(mut f.u0, 155, 5, receiving(sections_of(b"a1", b"a2"))))
+    list.push(mut subs, browser_with(mut f.u2, 156, 6, receiving(sections_of(b"b1", b""))))
+    list.push(mut subs, browser_with(mut f.u3, 157, 7, receiving(sections_of(b"c1", b""))))
+    admit_four(mut f, p, 1, mut log)
+    admit_four(mut f, v, 1, mut log)
+    admit_four(mut f, m, 1, mut log)
+    let homes: Inline[u16, 4] =[1u16, 0u16, 2u16, 3u16]
+    for s in 0u64 .. 4u64 {
+        admit_four(mut f, subs[s], homes[s], mut log)
+    }
+    let base_ns = 10 * MS
+    let pa = published(settle_four(mut f, base_ns, Publish(room: room, who: p.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let va = published(settle_four(mut f, base_ns, Publish(room: room, who: v.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let ma = published(settle_four(mut f, base_ns, Publish(room: room, who: m.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let at_q: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let at_h: router.Target = Layer(encoding: 1, spatial: 0, temporal: 0)
+    let at_f: router.Target = Layer(encoding: 2, spatial: 0, temporal: 0)
+    let _ = settle_four(mut f, base_ns, Subscribe(room: room, who: subs[0].who, p: pa, section: 0, target: at_q), mut log)
+    let _ = settle_four(mut f, base_ns, Subscribe(room: room, who: subs[0].who, p: ma, section: 1, target: at_q), mut log)
+    let _ = settle_four(mut f, base_ns, Subscribe(room: room, who: subs[1].who, p: pa, section: 0, target: at_q), mut log)
+    let _ = settle_four(mut f, base_ns, Subscribe(room: room, who: subs[1].who, p: va, section: 1, target: at_q), mut log)
+    let _ = settle_four(mut f, base_ns, Subscribe(room: room, who: subs[2].who, p: pa, section: 0, target: at_h), mut log)
+    let _ = settle_four(mut f, base_ns, Subscribe(room: room, who: subs[3].who, p: pa, section: 0, target: at_f), mut log)
+    list.clear(mut log)
+    let _ = units.take_events(mut f.u0)
+    let sizes: Inline[u64, 3] =[730, 1030, 1180]
+    let rids: Inline[Bytes, 3] =[b"q", b"h", b"f"]
+    let mut seen: List[(u64, router.PublicationId, u8)] = list.new()
+    for k in 0u64 .. 293u64 {
+        let now = base_ns + k * 50 * MS
+        let b_who = subs[2].who
+        if k == 40 {
+            let _ = settle_four(mut f, now, Retarget(room: room, who: subs[3].who, p: pa, target: at_h), mut log)
+        }
+        if k == 80 || k == 190 {
+            let _ = settle_four(mut f, now, Retarget(room: room, who: b_who, p: pa, target: at_q), mut log)
+        }
+        if k == 170 || k == 200 {
+            let _ = settle_four(mut f, now, Retarget(room: room, who: b_who, p: pa, target: at_f), mut log)
+        }
+        let seq: u16 = int.truncate(k)
+        let ts: u32 = int.truncate(k)
+        let sound = media_carrying(mut m.cs, MEDIA_SSRC, seq, 2400 * ts, b"a", 111, filled(true, LAYER_AUDIO, 1180))
+        result.unwrap(units.take_datagram(mut f.u1, now, m.at, sound))
+        for e in 0u64 .. 3u64 {
+            // h sends only interframes from 2,000 ms to 3,000 ms.
+            let key = e != 1 || k < 40 || k >= 60
+            let packet = rid_media(mut p.cs, E0 + int.truncate(e), seq, 4500 * ts, rids[e], filled(key, LAYER_Q + int.truncate(e), sizes[e]))
+            result.unwrap(units.take_datagram(mut f.u1, now, p.at, packet))
+        }
+        let other = media_carrying(mut v.cs, MEDIA_SSRC, seq, 4500 * ts, b"v", 96, filled(true, LAYER_V, 1180))
+        result.unwrap(units.take_datagram(mut f.u1, now, v.at, other))
+        turn_four(mut f, now, 4, mut log)
+        // The pacers leave what they held back (RTP-10).
+        turn_four(mut f, now + 40 * MS, 2, mut log)
+        for s in 0u64 .. 4u64 {
+            if marks(mut subs[s], log) != w11_heard(s, k) {
+                fail("a subscriber hears another encoding than its effective target and the mask allow")
+            }
+        }
+        list.clear(mut log)
+        for event in units.take_events(mut f.u0) {
+            match event {
+                Layers(publication: id, mask: bits) => list.push(mut seen, (k, id, bits)),
+                _ => fail("only Layers events are raised"),
+            }
+        }
+    }
+    let mut want: List[(u64, router.PublicationId, u8)] = list.new()
+    list.push(mut want, (120u64, va, 0u8))
+    list.push(mut want, (160u64, pa, 3u8))
+    list.push(mut want, (170u64, pa, 7u8))
+    if seen != want {
+        fail("Layers events: V off at 6,000 ms, f off at 8,000 ms and on at 8,500 ms, nothing else")
+    }
+    Ok(())
+}

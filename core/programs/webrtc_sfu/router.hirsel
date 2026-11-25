@@ -49,7 +49,29 @@ type Encoding {
     keyframes: rtp.loss.Keyframes,
     interval: u64,
     // VP9's per-source switching-up state (RTC-6), observed once per packet.
-    vp9: media_bits.unit.Vp9Layers
+    vp9: media_bits.unit.Vp9Layers,
+    // RTC-6's measured ingress rate in bits per second: the home unit's last closed
+    // window that had packets, and every other unit's copy from `Media`; `counted`
+    // is the home unit's open window.
+    rate: u64,
+    counted: u64,
+    // On the home unit, the dynacast mask (RTC-6): the units whose local mask holds
+    // this encoding, whether its bit is published, and since when the union is empty.
+    wanting: u64,
+    on: bool,
+    since: Option[u64]
+}
+
+// RTC-6's speaker score of an audio publication, in Q16, and its open window, in
+// RTP ticks of the publication's clock (home unit). Every other unit keeps `score`
+// as the home unit posted it.
+type Voice {
+    score: i64,
+    observed: u64,
+    active: u64,
+    loudest: u8,
+    highest: Option[i64],
+    last: u64
 }
 
 type Publication {
@@ -63,7 +85,13 @@ type Publication {
     pli: bool,
     fir: bool,
     encodings: List[Encoding],
-    ring: Ring
+    ring: Ring,
+    // The local wanted mask this unit last told the home unit (RTC-6).
+    local: u8,
+    // The media clock rate and the start of the open rate window (home unit).
+    clock: u32,
+    window: Option[u64],
+    voice: Voice
 }
 
 type Down {
@@ -76,6 +104,10 @@ type Down {
     section: u8,
     track: u16,
     target: Target,
+    // RTC-6's effective target, the target lowered to the subscriber's estimate, and
+    // whether `audio_forward` holds this audio down-track at `Off`.
+    effective: Target,
+    held: bool,
     // The H.264 parameter sets this leg has sent of its current source (media_bits
     // `ParameterSets`), and whether that source's last packet ended an access unit.
     sets: media_bits.unit.ParameterSets,
@@ -99,7 +131,9 @@ type Seat {
 // A session of a participant whose home is this unit.
 type Member {
     who: peer.Participant,
-    session: peer.PeerSession
+    session: peer.PeerSession,
+    // The bandwidth estimate the last allocation used (RTC-6).
+    estimate: u64
 }
 
 type Room {
@@ -109,7 +143,12 @@ type Room {
     // Fence entries (RTC-7): one per admitted id, reserved at its first join and
     // kept until the room closes. `fenced` is the highest revoked epoch, if any.
     ids: List[u64],
-    fenced: List[Option[u64]]
+    fenced: List[Option[u64]],
+    // On the control unit: whether a score changed since the last 400 ms tick, the
+    // next tick, and the top speakers last emitted (RTC-6).
+    heard: bool,
+    tick: u64,
+    top: List[u64]
 }
 
 // The home unit's 5-tuple table (RTC-3): the selected path of each local session.
@@ -150,7 +189,15 @@ pub type Control: cross = Order(seq: u64, change: Change) | Ack(seq: u64, unit: 
 /// - `Reply`: the home unit's answer to an `Ask`, the plaintext from its ring.
 /// - `Key`: a keyframe a remote down-track needs (RTC-6); the home unit coalesces it.
 /// - `Sender`: a publisher's sender report, for remote switch timelines (RTP-11).
-pub type Carry: cross = Media(room: peer.RoomId, publication: PublicationId, src: peer.Gen, m: peer.MediaIn, handle: u64) | Ask(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Reply(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Key(room: peer.RoomId, publication: PublicationId, encoding: u8, why: rtp.loss.Why) | Sender(room: peer.RoomId, publication: PublicationId, owner: peer.Gen, source: u32, info: rtp.rtcp.SenderInfo)
+///
+/// RTC-6, each with the publisher's generation, so a fence drops it when taken:
+///
+/// - `Wanted`: a unit's local wanted mask of a publication, for its home unit.
+/// - `Layers`: a published mask change, for the control unit's `Event.Layers`.
+/// - `Score`: an audio publication's speaker score, for every unit of the room.
+///
+/// `Media` also carries the home unit's speaking state and its encoding's rate.
+pub type Carry: cross = Media(room: peer.RoomId, publication: PublicationId, src: peer.Gen, m: peer.MediaIn, handle: u64, speaking: bool, rate: u64) | Wanted(room: peer.RoomId, publication: PublicationId, src: peer.Gen, unit: u16, mask: u8) | Layers(room: peer.RoomId, publication: PublicationId, src: peer.Gen, mask: u8) | Score(room: peer.RoomId, publication: PublicationId, src: peer.Gen, score: i64) | Ask(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Reply(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Key(room: peer.RoomId, publication: PublicationId, encoding: u8, why: rtp.loss.Why) | Sender(room: peer.RoomId, publication: PublicationId, owner: peer.Gen, source: u32, info: rtp.rtcp.SenderInfo)
 
 /// One media-inbox message: what it is, and the plaintext it carries (empty for
 /// `Ask`, `Key` and `Sender`).
@@ -164,6 +211,10 @@ pub type Post: cross {
     to: u16,
     carried: Carried
 }
+
+/// What the control unit raises for the signaling adapter (RTC-6): a publication's
+/// published wanted mask, and a room's top speakers by participant id.
+pub type Notice: cross = Layers(publication: PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8)
 
 pub opaque type Router {
     random: Random,
@@ -185,7 +236,10 @@ pub opaque type Router {
     // Sessions opened on this unit and not yet admitted.
     parked: List[Member],
     // The payload of messages that carry none, shared by all of them.
-    empty: Shared[Bytes]
+    empty: Shared[Bytes],
+    notices: List[Notice],
+    // A down-track ended or an effective target moved since the last poll (RTC-6).
+    moved: bool
 }
 
 const PEERS_MAX: u16 = 256
@@ -211,7 +265,7 @@ pub fn router(r: Random) -> Router {
 
 /// The router of media unit `unit` (RTC-5, at most 64 units).
 pub fn on_unit(r: Random, unit: u16) -> Router {
-    Router(random: r, unit: unit, rooms: list.new(), roster: list.new(), members: list.new(), publications: list.new(), downs: list.new(), rows: list.new(), next_publication: 1, next_handle: int.widen(unit), counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0, unknown: 0, stale: 0), posts: list.new(), parked: list.new(), empty: shared.new(list.new()))
+    Router(random: r, unit: unit, rooms: list.new(), roster: list.new(), members: list.new(), publications: list.new(), downs: list.new(), rows: list.new(), next_publication: 1, next_handle: int.widen(unit), counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0, unknown: 0, stale: 0), posts: list.new(), parked: list.new(), empty: shared.new(list.new()), notices: list.new(), moved: false)
 }
 
 pub fn counts(r: Router) -> Counts {
@@ -308,7 +362,7 @@ pub fn park(mut r: Router, take session: peer.PeerSession) -> Result[(), RouterE
         }
     }
     list.try_reserve(mut r.parked, 1) ?=> |c| Capacity(c)
-    list.push(mut r.parked, Member(who: who, session: take session))
+    list.push(mut r.parked, Member(who: who, session: take session, estimate: 0))
     Ok(())
 }
 
@@ -316,7 +370,7 @@ fn unpark(mut r: Router, who: peer.Participant) {
     for i in 0u64 .. list.len(r.parked) {
         if r.parked[i].who.room == who.room && r.parked[i].who.gen == who.gen {
             let m = list.remove(mut r.parked, i)
-            let Member(who: _, session: take s) = take m
+            let Member(who: _, session: take s, estimate: _) = take m
             drop(take s)
             return
         }
@@ -340,13 +394,15 @@ pub fn next_publication(mut r: Router) -> PublicationId {
 
 /// Subscribe `who` to a publication on its sending section `section`.
 pub fn subscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
-    add_down(mut r, room, who, p, section, target, now, mut out)
+    add_down(mut r, room, who, p, section, target, now, mut out)?
+    rebalance(mut r, now, mut out)
 }
 
 /// Point a down-track at a layer. A layer on another source asks the publisher for
 /// a keyframe of it (`Switch`), and the old source forwards until it arrives.
 pub fn set_target(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
-    retarget(mut r, room, who, p, target, now, mut out)
+    retarget(mut r, room, who, p, target, now, mut out)?
+    rebalance(mut r, now, mut out)
 }
 
 /// Rebind `who`'s down-track from publication `from` to `to` (RTC-4, RTC-5): the
@@ -355,7 +411,8 @@ pub fn set_target(mut r: Router, room: peer.RoomId, who: peer.Gen, p: Publicatio
 /// `from` forwards until then. `to`'s codec must have a payload type on the track's
 /// section.
 pub fn rebind(mut r: Router, room: peer.RoomId, who: peer.Gen, from: PublicationId, to: PublicationId, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
-    move_down(mut r, room, who, from, to, target, now, mut out)
+    move_down(mut r, room, who, from, to, target, now, mut out)?
+    rebalance(mut r, now, mut out)
 }
 
 pub fn unsubscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Result[(), RouterError] {
@@ -411,7 +468,7 @@ fn open(mut r: Router, room: peer.RoomId, limits: RoomLimits) -> Result[(), Rout
     list.try_reserve(mut ids, n) ?=> |c| Capacity(c)
     list.try_reserve(mut fences, n) ?=> |c| Capacity(c)
     list.try_reserve(mut r.rooms, 1) ?=> |c| Capacity(c)
-    list.push(mut r.rooms, Room(id: room, limits: limits, suspended: false, ids: take ids, fenced: take fences))
+    list.push(mut r.rooms, Room(id: room, limits: limits, suspended: false, ids: take ids, fenced: take fences, heard: false, tick: 0, top: list.new()))
     Ok(())
 }
 
@@ -528,6 +585,7 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
         }
     }
     let home = r.roster[si].home
+    let mut clock = 0u32
     let (shape, held) = if home == r.unit {
         let Some(mi) = member_at(r, room, who) else {
             return Error(NoParticipant)
@@ -546,6 +604,7 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
         } else {
             list.len(a.streams)
         }
+        clock = f.clock
         let g = ring(peer.session_limits(r.members[mi].session).rtx_bytes)?
         (Shape(codec: f.codec, pli: f.pli, fir: f.fir, encodings: int.narrow(count)), g)
     } else {
@@ -557,10 +616,12 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     let mut encodings: List[Encoding] = list.new()
     list.try_reserve(mut encodings, ENCODINGS_MAX) ?=> |c| Capacity(c)
     for _ in 0u8 .. shape.encodings {
-        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers()))
+        // Every encoding starts published: the publisher sends all of them until a
+        // mask says otherwise (RTC-6).
+        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, wanting: 0, on: true, since: None))
     }
     list.try_reserve(mut r.publications, 1) ?=> |c| Capacity(c)
-    list.push(mut r.publications, Publication(id: id, owner: who, home: home, room: room, section: section, codec: shape.codec, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held))
+    list.push(mut r.publications, Publication(id: id, owner: who, home: home, room: room, section: section, codec: shape.codec, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held, local: 0, clock: clock, window: None, voice: quiet()))
     r.roster[si].publications += 1
     Ok(shape)
 }
@@ -633,7 +694,7 @@ fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, s
         0u16
     }
     list.try_reserve(mut r.downs, 1) ?=> |c| Capacity(c)
-    list.push(mut r.downs, Down(sub: who, home: home, room: room, publication: p, section: section, track: track, target: Off, sets: media_bits.unit.parameter_sets(), after_end: true, previous: None, next_sets: media_bits.unit.parameter_sets(), next_after_end: true))
+    list.push(mut r.downs, Down(sub: who, home: home, room: room, publication: p, section: section, track: track, target: Off, effective: Off, held: false, sets: media_bits.unit.parameter_sets(), after_end: true, previous: None, next_sets: media_bits.unit.parameter_sets(), next_after_end: true))
     r.roster[si].downs += 1
     retarget(mut r, room, who, p, target, now, mut out)
 }
@@ -654,23 +715,19 @@ fn retarget(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, t
             return Error(Limit(int.narrow(list.len(r.publications[pi].encodings))))
         }
     }
-    if r.downs[di].home == r.unit {
-        let Some(mi) = member_at(r, room, who) else {
-            return Error(NoParticipant)
-        }
-        let t = rewrite_target(r.publications[pi], target)
-        let track = r.downs[di].track
-        if let Error(_) = peer.set_target(mut r.members[mi].session, track, t) {
-            return Error(Limit(32))
-        }
-        r.downs[di].target = target
-        if let Some(_) = peer.pending(r.members[mi].session, track) {
-            if let Layer(encoding: e, spatial: _, temporal: _) = target {
-                keyframe(mut r, now, pi, e, Switch, mut out)?
-            }
-        }
-    } else {
-        r.downs[di].target = target
+    let old = r.downs[di].target
+    r.downs[di].target = target
+    if r.downs[di].home != r.unit {
+        return Ok(())
+    }
+    let Some(mi) = member_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    // RTC-6: the subscriber's allocation decides what the rewrite is pointed at.
+    if let Error(e) = allocate(mut r, mi, Some(di), now, mut out) {
+        r.downs[di].target = old
+        let _ = allocate(mut r, mi, None, now, mut out)
+        return Error(e)
     }
     Ok(())
 }
@@ -747,6 +804,7 @@ fn end_down(mut r: Router, d: u64) {
         r.roster[si].downs -= 1
     }
     let _ = list.remove(mut r.downs, d)
+    r.moved = true
 }
 
 fn remove_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Result[(), RouterError] {

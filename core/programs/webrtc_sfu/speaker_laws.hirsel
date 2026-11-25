@@ -1,0 +1,351 @@
+// ---- RTC-6 active speakers and audio forwarding (W12, W13) ----
+// One audio section with Opus on 111, MID on extension 1 and, when `level` is not
+// empty, the RFC 6464 audio level on extension `level` with `vad` appended.
+fn audio_section(mut b: Bytes, mid: Bytes, dir: Bytes, level: Bytes, vad: Bytes) {
+    list.append(mut b, b"m=audio 9 UDP/TLS/RTP/SAVPF 111\na=mid:")
+    list.append(mut b, mid)
+    list.append(mut b, b"\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\n")
+    if list.len(level) != 0 {
+        list.append(mut b, b"a=extmap:")
+        list.append(mut b, level)
+        list.append(mut b, b" urn:ietf:params:rtp-hdrext:ssrc-audio-level")
+        list.append(mut b, vad)
+        list.append(mut b, b"\n")
+    }
+    list.append(mut b, b"a=rtcp-mux\na=")
+    list.append(mut b, dir)
+    list.append(mut b, b"\na=rtpmap:111 opus/48000/2\n")
+}
+
+fn speaker_offer(vad: Bytes) -> Bytes {
+    let mut b = minimal_head(b" a")
+    audio_section(mut b, b"a", b"sendonly", b"3", vad)
+    take b
+}
+
+// A 20 ms Opus packet `n` of section a (timestamp 960 n) whose RFC 6464 byte on
+// extension 3 carries `level` and the raw `V` bit `v`.
+fn voiced(mut cs: srtp.Session, n: u64, level: u8, v: bool) -> Bytes {
+    let mut m = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut m, 1, Mid))
+    result.unwrap(rtp.ext.bind(mut m, 3, AudioLevel))
+    rtp.ext.vad(mut m, true)
+    let mut w = rtp.ext.writer()
+    result.unwrap(rtp.ext.put(mut w, m, Mid, b"a", 0, 1))
+    result.unwrap(rtp.ext.put_level(mut w, m, v, level))
+    let f = rtp.header.Fields(marker: false, pt: 111, seq: int.truncate(n), ts: int.truncate(960 * n), ssrc: MEDIA_SSRC)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, b"\xfc\xff\xfe")
+    let _ = result.unwrap(srtp.protect_rtp(mut cs, mut b))
+    b
+}
+
+fn speaker_limits(n: u8) -> router.RoomLimits {
+    router.RoomLimits(participants: 16, ids: 16, publications: 8, down_tracks: 8, audio_forward: n, pause_delay_ms: 5000)
+}
+
+// Round `k` of 20 ms packets falls at 10 ms + 20 ms k.
+fn round_at(k: u64) -> u64 {
+    10 * MS + 20 * MS * k
+}
+
+fn scores_are(r: router.Router, ps: List[router.PublicationId], want: Inline[i64, 4], take what: String) {
+    for i in 0u64 .. 4u64 {
+        if router.speaker_score(r, room_id(), ps[i]) != Some(want[i]) {
+            fail(take what)
+        }
+    }
+}
+
+// The position of packet `k` (from 1) in its 400 ms window of 20 packets.
+fn place(k: u64) -> u64 {
+    (k - 1) % 20 + 1
+}
+
+// W12's traces: participant 1 at level 10 until round 40, with packets 30 and 31
+// swapped and the late 30 at level 0; participant 2 active (level 20) in the first
+// 8 intervals only, then at 50; participants 3 and 4 active in the first 9 (level 24)
+// and 16 (level 29) intervals of every window, otherwise at 60.
+fn w12_packet(p: u64, k: u64) -> Option[(u64, u8)] {
+    if p == 0 {
+        if k > 40 {
+            return None
+        }
+        if k == 30 {
+            return Some((31, 10))
+        }
+        if k == 31 {
+            return Some((30, 0))
+        }
+        return Some((k, 10))
+    }
+    if p == 1 {
+        return Some((k, if k >= 1 && k <= 8 {
+            20u8
+        } else {
+            50u8
+        }))
+    }
+    let (loud, n) = if p == 2 {
+        (24u8, 9u64)
+    } else {
+        (29u8, 16u64)
+    }
+    Some((k, if k >= 1 && place(k) <= n {
+        loud
+    } else {
+        60u8
+    }))
+}
+
+/// bug: count a reordered packet's level or duration, apply the 40 % rule as strictly greater, skip the reset to 0 below it, smooth with a rounding other than floor, keep a score past 800 ms of silence, rank a Q16 tie by publication instead of participant, or raise `Speakers` when the top 8 did not change.
+/// oracle: RTC-6 by hand (oracle-w12-w13.py in the S6 lane dir repeats it from the formula alone): window 1 gives 2/3 of amp(10) = 13816, of floor(6554 · 8/20) = 2621 → 1747, and of floor(4135 · 9/20) = 1860 and floor(2325 · 16/20) = 1860 → 1240 each (floats 1860.77 and 1860.24 would order them); window 2 gives 13816 + floor(6908 · 2/3) = 18421, 0 below 160 ms, and 1240 + floor(620 · 2/3) = 1653; then 1791 and 1837. Ticks fall on 400 ms: [1, 2, 3, 4] at 800 ms, [1, 3, 4] at 1,200 ms, [3, 4] at 1,600 ms once participant 1's last packet (810 ms) is 800 ms old, and nothing at 2,000 ms.
+@test
+fn active_speaker_scores() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(120))
+    result.unwrap(router.open_room(mut r, room_id(), speaker_limits(0)))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut cs: List[Client] = list.new()
+    for id in 1u64 .. 5u64 {
+        list.push(mut cs, admit(mut r, 120 + id, speaker_offer(b" vad=on"), id))
+    }
+    // Published from participant 4 down, so publication ids run against participant ids.
+    let mut backwards: List[router.PublicationId] = list.new()
+    for i in 0u64 .. 4u64 {
+        list.push(mut backwards, result.unwrap(router.publish(mut r, room_id(), cs[3 - i].who, 0)))
+    }
+    let mut ps: List[router.PublicationId] = list.new()
+    for i in 0u64 .. 4u64 {
+        list.push(mut ps, backwards[3 - i])
+    }
+    let mut speakers: List[(u64, List[u64])] = list.new()
+    let mut late: Option[Bytes] = None
+    for k in 0u64 .. 101u64 {
+        let now = round_at(k)
+        let _ = router.poll(mut r, now, mut out)
+        if k == 80 && router.speaker_score(r, room_id(), ps[0]) != Some(0) {
+            fail("a publication 800 ms without a packet keeps its score")
+        }
+        for n in router.take_notices(mut r) {
+            if let Speakers(room: _, top: top, count: count) = n {
+                let mut ids: List[u64] = list.new()
+                for j in 0u64 .. int.widen(count) {
+                    list.push(mut ids, top[j])
+                }
+                list.push(mut speakers, (k, ids))
+            }
+        }
+        peer.clear_outbox(mut out)
+        for p in 0u64 .. 4u64 {
+            let Some((n, level)) = w12_packet(p, k) else {
+                continue
+            }
+            // The browser seals 30 before 31; the network delivers 31 first.
+            let packet = if p == 0 && k == 30 {
+                late = Some(voiced(mut cs[p].cs, 30, 0, false))
+                voiced(mut cs[p].cs, n, level, false)
+            } else if p == 0 && k == 31 {
+                option.unwrap(replace(mut late, None))
+            } else {
+                voiced(mut cs[p].cs, n, level, false)
+            }
+            feed(mut r, now, cs[p].who, cs[p].at, packet, mut out)
+            peer.clear_outbox(mut out)
+        }
+        if k == 20 {
+            scores_are(r, ps,[13816i64, 1747i64, 1240i64, 1240i64], "window 1 scores")
+        }
+        if k == 40 {
+            scores_are(r, ps,[18421i64, 0i64, 1653i64, 1653i64], "window 2 scores: the reordered packet changes nothing and 160 ms is the floor")
+        }
+        if k == 60 {
+            scores_are(r, ps,[18421i64, 0i64, 1791i64, 1791i64], "window 3 scores")
+        }
+        if k == 80 {
+            scores_are(r, ps,[0i64, 0i64, 1837i64, 1837i64], "window 4 scores after the expiry")
+        }
+    }
+    let rounds: Inline[u64, 3] =[40, 60, 80]
+    let firsts: Inline[u64, 3] =[1, 1, 3]
+    let sizes: Inline[u64, 3] =[4, 3, 2]
+    let order: Inline[u64, 4] =[1, 2, 3, 4]
+    let cut: Inline[u64, 4] =[1, 3, 4, 0]
+    if list.len(speakers) != 3 {
+        fail("Speakers is raised only at the 400 ms ticks where the ranked top 8 changed")
+    }
+    for i in 0u64 .. 3u64 {
+        let (k, ids): (u64, List[u64]) = clone(speakers[i])
+        if k != rounds[i] || list.len(ids) != sizes[i] || ids[0] != firsts[i] {
+            fail("Speakers is raised at the 400 ms ticks where the ranked top 8 changed")
+        }
+        for j in 0u64 .. sizes[i] {
+            let want = if i == 0 {
+                order[j]
+            } else if i == 1 {
+                cut[j]
+            } else {
+                j + 3
+            }
+            if ids[j] != want {
+                fail("Speakers ranks by score, then a Q16 tie by lower participant id")
+            }
+        }
+    }
+    Ok(())
+}
+
+// W13's legs: participant 5 publishes a and receives on r2 to r4 with vad on;
+// 6 receives with vad off, 7 without the extension, and 8 with it on extension 7.
+fn listener_offer(level: Bytes, vad: Bytes) -> Bytes {
+    let mut b = minimal_head(b" r1 r2 r3 r4")
+    for mid in[b"r1", b"r2", b"r3", b"r4"] {
+        audio_section(mut b, mid, b"recvonly", level, vad)
+    }
+    take b
+}
+
+// The fixed rank schedule, by hand from RTC-6 (oracle-w12-w13.py): windows close at
+// rounds 20, 40, 60 and 80. Window 1 ranks speakers 1 (24569) > 2 (13816) > 3 (7769)
+// > 4 (2456); window 2 raises 4 to 44509 above 1 (32759) as its own round-40 packet
+// closes the window; 4 sends nothing after round 40, so its score is 0 at the 1,610 ms
+// poll of round 80. Listener `s` (0 is participant 1 itself) hears speaker `p` at round
+// `k` when `p` is among the two best speakers other than itself after that packet.
+fn forwards(s: u64, p: u64, k: u64) -> bool {
+    let first = if s == 0 {
+        1u64
+    } else {
+        0u64
+    }
+    if p == first {
+        return k >= 20
+    }
+    if p == first + 1 {
+        return (k >= 20 && k <= 40) || k >= 80
+    }
+    p == 3 && k == 40
+}
+
+fn w13_level(p: u64, k: u64) -> u8 {
+    if p == 3 {
+        if k <= 20 {
+            return 25
+        }
+        return 0
+    }
+    int.narrow(5 + 5 * p)
+}
+
+/// bug: forward a speaker outside the top two, count the subscriber among its own speakers, switch a rank one packet late, renumber a down-track after it was held, rewrite the level bits, write `V` on a `vad=off` leg, copy a `vad=off` publisher's raw `V`, use the publisher's extension ID, or write the extension on a leg that did not negotiate it.
+/// oracle: RTC-6 by hand: the rank schedule of `forwards` (window scores 2/3 of amp(5), amp(10), amp(15), amp(25), then amp(0) for speaker 4); outbound numbers run first, first + 1, … per down-track over every forwarded packet; the level byte's low seven bits are the publisher's; on `vad=on` legs `V` is the publisher's raw bit for speakers 1 (1) and 2 (0), which negotiated vad, and the speaking state (1) for 3 and 4, whose raw bits are 0 and 1; `vad=off` writes 0, and the absent leg has no level element.
+@test
+fn audio_forward_gate() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(130))
+    result.unwrap(router.open_room(mut r, room_id(), speaker_limits(2)))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut talkers: List[Client] = list.new()
+    let mut one_offer = minimal_head(b" a r2 r3 r4")
+    audio_section(mut one_offer, b"a", b"sendonly", b"3", b" vad=on")
+    for mid in[b"r2", b"r3", b"r4"] {
+        audio_section(mut one_offer, mid, b"recvonly", b"3", b" vad=on")
+    }
+    list.push(mut talkers, admit(mut r, 131, one_offer, 1))
+    list.push(mut talkers, admit(mut r, 132, speaker_offer(b" vad=on"), 2))
+    list.push(mut talkers, admit(mut r, 133, speaker_offer(b""), 3))
+    list.push(mut talkers, admit(mut r, 134, speaker_offer(b" vad=off"), 4))
+    let raw: Inline[bool, 4] =[true, false, false, true]
+    let mut ps: List[router.PublicationId] = list.new()
+    for p in 0u64 .. 4u64 {
+        list.push(mut ps, result.unwrap(router.publish(mut r, room_id(), talkers[p].who, 0)))
+    }
+    // Listeners: 0 is participant 1 itself; 1 vad=off; 2 no extension; 3 on extension 7.
+    let mut ls: List[Client] = list.new()
+    list.push(mut ls, admit(mut r, 136, listener_offer(b"3", b" vad=off"), 6))
+    list.push(mut ls, admit(mut r, 137, listener_offer(b"", b""), 7))
+    list.push(mut ls, admit(mut r, 138, listener_offer(b"7", b" vad=on"), 8))
+    let ids: Inline[u8, 4] =[3u8, 3u8, 0u8, 7u8]
+    let on: Inline[bool, 4] =[true, false, false, true]
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let mut ssrcs: Inline[u32, 16] =[0u32; 16]
+    for s in 0u64 .. 4u64 {
+        for p in 0u64 .. 4u64 {
+            if s == 0 && p == 0 {
+                continue
+            }
+            // Listener 0's sections are a, r2, r3, r4 and the others' r1 to r4, so
+            // speaker `p` is on section `p` for every listener.
+            let section: u8 = int.narrow(p)
+            let who = if s == 0 {
+                talkers[0].who
+            } else {
+                ls[s - 1].who
+            }
+            result.unwrap(router.subscribe(mut r, room_id(), who, ps[p], section, base, 0, mut out))
+            let (m, _) = option.unwrap(router.track_ssrcs(r, room_id(), who, ps[p]))
+            ssrcs[s * 4 + p] = m
+        }
+    }
+    peer.clear_outbox(mut out)
+    let mut next: Inline[Option[u16], 16] =[None; 16]
+    for k in 0u64 .. 100u64 {
+        let now = round_at(k)
+        let _ = router.poll(mut r, now, mut out)
+        peer.clear_outbox(mut out)
+        for p in 0u64 .. 4u64 {
+            if p == 3 && k > 40 {
+                continue
+            }
+            let level = w13_level(p, k)
+            let packet = voiced(mut talkers[p].cs, k, level, raw[p])
+            feed(mut r, now, talkers[p].who, talkers[p].at, packet, mut out)
+            for s in 0u64 .. 4u64 {
+                let got = if s == 0 {
+                    received(mut talkers[0], out)
+                } else {
+                    received(mut ls[s - 1], out)
+                }
+                if s == 0 && p == 0 {
+                    if list.len(got) != 0 {
+                        fail("a speaker hears itself")
+                    }
+                    continue
+                }
+                if !forwards(s, p, k) {
+                    if list.len(got) != 0 {
+                        fail("a held speaker was forwarded")
+                    }
+                    continue
+                }
+                let g = one(got, "a top-two speaker is forwarded at the next packet")
+                let i = s * 4 + p
+                if g.h.ssrc != ssrcs[i] {
+                    fail("a speaker arrives on another down-track")
+                }
+                if let Some(n) = next[i] {
+                    if g.h.seq != n {
+                        fail("a down-track's numbering is not continuous across its holds")
+                    }
+                }
+                next[i] = Some(plus(g.h.seq, 1))
+                if ids[s] == 0 {
+                    if ext_value(g, 3, AudioLevel) != None || ext_value(g, 7, AudioLevel) != None {
+                        fail("a leg without the extension carries a level")
+                    }
+                    continue
+                }
+                let Some(v) = ext_value(g, ids[s], AudioLevel) else {
+                    fail("a leg with the extension lost the level")
+                }
+                if (v[0] & 127) != level {
+                    fail("the seven level bits changed")
+                }
+                let want_v = on[s] && (raw[p] || p >= 2)
+                if ((v[0] & 128) != 0) != want_v {
+                    fail("V does not follow the leg's vad and the publisher's")
+                }
+            }
+            peer.clear_outbox(mut out)
+        }
+    }
+    Ok(())
+}

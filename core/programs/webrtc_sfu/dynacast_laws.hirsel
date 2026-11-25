@@ -139,18 +139,12 @@ fn marks(mut c: Client, log: List[Wire]) -> List[u8] {
 // current source and switches at the first keyframe of its pending one.
 fn w11_heard(s: u64, k: u64) -> List[u8] {
     if s == 0 {
-        // Below one base layer once the rates are known at 1,000 ms.
-        if k < 20 {
-            return heard_two(LAYER_AUDIO, LAYER_Q)
-        }
-        return heard_one(LAYER_AUDIO)
+        // Below q once the rates are known at 1,000 ms; the base is still taken.
+        return heard_two(LAYER_AUDIO, LAYER_Q)
     }
     if s == 1 {
-        // P's base fits, V's base after it does not.
-        if k < 20 {
-            return heard_two(LAYER_Q, LAYER_V)
-        }
-        return heard_one(LAYER_Q)
+        // P's base fits; V's base after it does not, and is still taken.
+        return heard_two(LAYER_Q, LAYER_V)
     }
     if s == 2 {
         if k < 80 {
@@ -172,8 +166,8 @@ fn w11_heard(s: u64, k: u64) -> List[u8] {
     heard_one(LAYER_H)
 }
 
-/// bug: keep one remote mask instead of the per-unit union, drop an encoding's bit when a down-track's pending switch starts instead of when it ends, turn a bit off before or after the pause delay or raise an event when a target returns inside it, price an audio down-track's rate or lower it, raise a later publication before an earlier one, or forward a packet outside the mask.
-/// oracle: RTC-6 by hand. Rates from packet sizes (20 B header, 20 packets per s): q 750 B = 120,000, h 168,000, f 192,000, V 192,000 and audio 192,000 bit/s against the 300,000 bit/s start estimate (RTC-6 BWE start). H's budget 108,000 is below q; A's 300,000 less q leaves 180,000, below V's base. Bits: V's only want stops at 1,000 ms, so V turns off at 6,000 ms (step 120); C holds f until h's keyframe at 3,000 ms, so f turns off at 8,000 ms (step 160) and turns on again with B's target at 8,500 ms (step 170); B drops h at 4,000 ms while C keeps it, so h never turns off; f, dropped at 9,500 ms and wanted again at 10,000 ms, raises nothing through 14,600 ms.
+/// bug: keep one remote mask instead of the per-unit union, drop an encoding's bit when a down-track's pending switch starts instead of when it ends, turn a bit off before or after the pause delay or raise an event when a target returns inside it, price an audio down-track's rate or lower it, pause a down-track whose base layer does not fit (so it never resumes), or forward a packet outside the mask.
+/// oracle: RTC-6 by hand. Rates from packet sizes (20 B header, 20 packets per s): q 750 B = 120,000, h 168,000, f 192,000, V 192,000 and audio 192,000 bit/s against the 300,000 bit/s start estimate (RTC-6 BWE start). H's budget 108,000 is below q and A's 300,000 less q leaves 180,000, below V's base; a first step is always taken, so H keeps q and A keeps q and V, and V is never unwanted. Bits: C holds f until h's keyframe at 3,000 ms, so f turns off at 8,000 ms (step 160) and turns on again with B's target at 8,500 ms (step 170); B drops h at 4,000 ms while C keeps it, so h never turns off; f, dropped at 9,500 ms and wanted again at 10,000 ms, raises nothing through 14,600 ms.
 @test
 fn dynacast_mask() -> Result[(), router.RouterError] {
     let mut log: List[Wire] = list.new()
@@ -259,11 +253,10 @@ fn dynacast_mask() -> Result[(), router.RouterError] {
         }
     }
     let mut want: List[(u64, router.PublicationId, u8)] = list.new()
-    list.push(mut want, (120u64, va, 0u8))
     list.push(mut want, (160u64, pa, 3u8))
     list.push(mut want, (170u64, pa, 7u8))
     if seen != want {
-        fail("Layers events: V off at 6,000 ms, f off at 8,000 ms and on at 8,500 ms, nothing else")
+        fail("Layers events: f off at 8,000 ms and on at 8,500 ms, nothing else")
     }
     Ok(())
 }

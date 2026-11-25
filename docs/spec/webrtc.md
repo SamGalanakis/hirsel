@@ -7,11 +7,16 @@ generations on every queue and an all-writer fence acknowledgement (RTC-7), a pr
 across signaling loss (RTC-8, runner slice R1), per-down-track sender reports and wire
 identity (RTC-4, RTC-5), decodable switching with stable target maps (RTC-6), JSEP
 `bundle-only` and `tls-id` (RTC-1, RTC-2), prefix demultiplexing (RTC-3), per-direction RID
-and simulcast (RTC-1, RTC-2), negotiated keyframe requests, bandwidth pause, RFC 6464 `vad`
+and simulcast (RTC-1, RTC-2), negotiated keyframe requests, bandwidth lowering, RFC 6464 `vad`
 per leg, SSRC collision recovery and bounded fence state. JSEP is
 [RFC 9429](https://www.rfc-editor.org/rfc/rfc9429), which obsoletes RFC 8829. BUNDLE is
 [RFC 9143](https://www.rfc-editor.org/rfc/rfc9143), which obsoletes RFC 8843. Section
-numbers cited as RFC 8843 are that text's, as the review read it. The package is
+numbers cited as RFC 8843 are that text's, as the review read it.
+Amended 2026-11-25 (webrtc-leg-stall-2651): RTC-6's allocation always takes a down-track's
+first step, so the budget lowers a down-track to its lowest encoding but never pauses it
+(LiveKit's default, `allow_pause` off). The bandwidth pause turned a leg whose base layer
+measured above the 300 kbps start estimate `Off` about 1 s into a call, and with no probing
+and nothing sent on the leg no estimate could rise to resume it. The package is
 `webrtc_sfu`, pure Hirsel under core/programs, with no `Foreign` code in its reach, so
 FFI-8 ([foreign](foreign.md)) replay and `hirsel test --sim` cover it end to end.
 
@@ -795,13 +800,17 @@ for that subscriber:
 4. In ascending publication ID, round after round, each down-track is raised one step if
    the step fits in the remaining budget. A step is the next encoding at or below its
    target, lowest first, starting from `Off`, and costs that encoding's measured ingress
-   rate minus the rate of the level it leaves. A down-track whose step does not fit stays
-   where it is for the rest of the computation. The others go on.
+   rate minus the rate of the level it leaves. The first step, from `Off` to the lowest
+   encoding, is always taken; when it does not fit, the remaining budget becomes 0. A
+   down-track whose later step does not fit stays where it is for the rest of the
+   computation. The others go on.
 5. The computation ends when a full round raises nothing.
 
-A down-track whose first step does not fit is left `Off`, which is the **bandwidth pause**.
-It resumes when a later recomputation admits it. The result is deterministic and
-computable by hand.
+The budget therefore never pauses a video down-track: one the estimate cannot carry
+forwards its lowest encoding, at its target's own spatial and temporal layers, as
+LiveKit's allocator does with pause disallowed (its default). A leg that goes `Off` on a
+budget would send nothing, so its estimate could never rise without probing, which S4 does
+not do (2651). The result is deterministic and computable by hand.
 
 `current` moves to the effective target only at a switch point, by the rules of the map
 above, and only through `Rewrite`. A simulcast change (another encoding) happens at the
@@ -1256,8 +1265,8 @@ unless named otherwise.
   encoding during a pending switch. *Oracle:* by hand from RTC-6. A bit turns on in the same
   turn, and a bit turns off after exactly 5,000 ms with no event inside the delay when a
   target returns. Each remote unit's demand sets bits, and the bit dropped by one remote unit
-  stays on while the other still wants it. The below-base down-track stays `Off`,
-  the unaffordable second base stays `Off` in publication order, and the held encoding
+  stays on while the other still wants it. The below-base down-track and the
+  unaffordable second base still forward their base layers (2651), and the held encoding
   keeps its bit until the switch. Packets outside the mask are never forwarded.
 - **W12 `active_speaker_scores`.** Audio-level traces of four publications, 20 ms packets,
   with a reordered packet, an 800 ms expiry, and two scores that tie after Q16 quantization.
@@ -1382,7 +1391,7 @@ W19, blocks, because those are soundness reds.
 | **S3** PeerSession | RTC-3 over `stun_ice` Lite, the dtls lane's server, the srtp lane's contexts and the rtp lane's parsing; prefix `classify`; authenticated MID, SSRC and payload-type binding; inbound RTX; the 5-tuple table; the `Tag`ged outbox; RTC-4's SSRC generator, sealers, collision recovery, late-packet RTX, per-down-track egress history and NACK answers, per-down-track SRs | S1; dtls, srtp and rtp lanes' first slices; the rtp amend's RTP-7 history record and RTP-11 switch timeline | W4, W19 |
 | **S4** One-unit router | RTC-5 on a single unit: rooms, publications, down-tracks, fan-out in the subscriber's wire identity, transport sequence numbers at send, bounds and fence capacity; RTC-6's stable target maps, current and pending presentation, switch timeline, and negotiated keyframe requests with in-place intervals | S2, S3; the rtp amend's in-place `Keyframes` interval | W6, W7, W9, W10, W18 (W6 and W7 need the router's down-tracks and switches) |
 | **S5** Units and fence | the control order, doorbells, `Media`, `RepairAsk` and `RepairReply` messages with tags, the uncommitted suffix; RTC-7 with its test seam, `suspend` and `resume` | S4 | W8, W14, W15 |
-| **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target with bandwidth pause, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S5 (remote units' masks) | W11, W12, W13 |
+| **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S5 (remote units' masks) | W11, W12, W13 |
 | **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness in its laws and by `room_client` (F1) in service | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
 | **S8** withdrawn | ICE-TCP is replaced by TURN over a stream (turn.md TURN-2, slice U8) | — | — |
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7 | the cost targets |
@@ -1474,7 +1483,8 @@ W19, blocks, because those are soundness reds.
   AV1 sections only (RTC-2 step 4, `sdp_descriptor_on_av1_only` against str0m's answers),
   egress writes it per down-track, and sub-layer VP9 and AV1 legs get the marker bit (RTC-6,
   W9 against LiveKit's selector, and `av1_across_units` on a unit other than the home and
-  through the pacer). Our egress for both unit-1 legs decodes under LiveKit's own descriptor
+  through the pacer, at the capture's own 20 ms pacing, above the start estimate). An RTX
+  repair carries the media packet's descriptor (W9). Our egress for both unit-1 legs decodes under LiveKit's own descriptor
   parser, and a LiveKit selector downstream at the same target takes every packet with the
   same markers. Still open: a section the browser sends VP8 on and receives AV1 on drops the
   descriptor for both directions; a track `offer` appends on a transport that negotiated no
@@ -1713,7 +1723,7 @@ switching and timelines.
 | LiveKit | Audio level: 400 ms window, -35 dBov threshold, 40 % activity, two-interval EMA (pkg/sfu/audio/audiolevel.go) | **ADAPTED** to exact integer arithmetic (RTC-6), so replay and every engine agree bit for bit. |
 | LiveKit | Forwarder with simulcast switching at keyframes and DD-driven SVC selection (pkg/sfu/forwarder.go, pkg/sfu/videolayerselector) | **ADOPTED** for switch points. Its dependency-descriptor selector is W9's cross-check for AV1 decode-target indexes. |
 | LiveKit and mediasoup | Late and repaired packets keep their source position: LiveKit's munger returns the earlier mapped sequence and refuses an unavailable mapping (pkg/sfu/rtpmunger.go); mediasoup's `SeqManager` maps input plus base and advances its high-water mark only for newer output, and restores each consumer's header before RTX (worker/src/RTC/SeqManager.cpp, RTP/RtpStreamSend.cpp) | **ADAPTED.** RTC-4 keeps source order and sends a late packet as RFC 4588 RTX, since TLS-8's sealer cannot seal below its highest index. The egress history records each subscriber's own rewrite, as mediasoup restores it. |
-| LiveKit | Bandwidth pause: a track the estimate cannot carry at its lowest layer is paused (pkg/sfu/forwarder.go) | **ADOPTED** in RTC-6's allocation, which starts every video down-track at `Off`. |
+| LiveKit | Bandwidth pause: with `allow_pause` set, a track the estimate cannot carry at its lowest layer is paused, and padding probes resume it (pkg/sfu/forwarder.go `ProvisionalAllocate`, streamallocator `maybeProbeWithPadding`); with it off, the default, the lowest layer is taken | **ADOPTED, pause off** in RTC-6's allocation (2651): the first step is always taken. Pausing needs probing to resume, which S4 does not do. |
 | Janus | Waits for a keyframe of the candidate substream before switching, and rebases sequence and timestamp from elapsed time when it has no SR (src/rtp.c) | **ADOPTED** as RTC-6's pending-source presentation and its no-SR fallback. |
 | LiveKit | NACK answered from a sequencer by resending on the media SSRC or RTX | **REPLACED** by RTX only (RTC-4). TLS-8 never seals twice and never seals below the highest index, so a media-SSRC resend would need sealed copies per subscriber. |
 | LiveKit | Single UDP port with a mux across the node, sessions found by ufrag then 5-tuple | **REPLACED** by one port per unit, so the home unit is a signaling choice and the kernel needs no steering. |

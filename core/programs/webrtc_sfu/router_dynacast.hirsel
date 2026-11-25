@@ -228,9 +228,10 @@ fn id_of(p: PublicationId) -> u64 {
 // RTC-6's allocation for local member `mi`: the budget is its estimate less the rate
 // of every audio down-track, which is never lowered; every other down-track with a
 // target starts at `Off` and, in ascending publication id, round after round, is
-// raised one encoding when the step's cost fits what is left. A down-track whose
-// step does not fit stays where it is. Each down-track whose result changed, and
-// `force`, is pointed at it.
+// raised one encoding when the step's cost fits what is left. The first step, to the
+// lowest encoding, is taken whether it fits or not (what is left is then 0), so the
+// budget never pauses a down-track. A down-track whose later step does not fit stays
+// where it is. Each down-track whose result changed, and `force`, is pointed at it.
 fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
     let room = r.members[mi].who.room
     let who = r.members[mi].who.gen
@@ -293,8 +294,13 @@ fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.
             } else {
                 rate_of(r, pi, at - 1)
             }
-            if cost <= budget {
-                budget -= cost
+            // The first step, to the lowest encoding, is always taken.
+            if at == 0 || cost <= budget {
+                budget = if cost <= budget {
+                    budget - cost
+                } else {
+                    0
+                }
                 level[k] = at + 1
                 raised = true
             } else {

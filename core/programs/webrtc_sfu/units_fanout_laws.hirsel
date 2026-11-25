@@ -324,16 +324,16 @@ fn av1_units_run(net: Net, clock: Clock) waits {
     for k in 0u64 .. list.len(packets) {
         packets[k] = renumbered(packets[k], 65529)
     }
-    // One packet each 10 ms: the capture (about 350 kbit/s at 20 ms) is through
-    // before the encoding's measured rate, above these legs' starting estimate,
-    // turns them off (RTC-6 allocation).
+    // One packet each 20 ms, the capture's own pacing: about 350 kbit/s, above these
+    // legs' 300 kbit/s starting estimate once the first 1 s window closes. A leg's
+    // lowest step is always granted (RTC-6), so every leg keeps forwarding.
     let start = list.len(h.seen)
     for k in 0u64 .. list.len(packets) {
         let mut b: Bytes = list.with_capacity(1500)
         list.append(mut b, packets[k])
         let _ = result.unwrap(srtp.protect_rtp(mut h.peers[bp].c.cs, mut b))
         send_from(mut h, bp, b)
-        for _ in 0u64 .. 2 {
+        for _ in 0u64 .. 4 {
             tick(mut h)
         }
     }

@@ -395,6 +395,35 @@ fn av1_reversed(plain: Bytes) -> Bytes {
     b
 }
 
+// An AV1 receiving section with RTX (RFC 4588), the descriptor on extension 3.
+fn av1_rtx_offer() -> Bytes {
+    let mut b = minimal_head(b" y")
+    list.append(mut b, minimal_video(b"45 46", b"y", true))
+    list.append(mut b, b"a=recvonly\na=extmap-allow-mixed\na=extmap:3 https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension\na=rtpmap:45 AV1/90000\na=rtcp-fb:45 nack\na=rtcp-fb:45 nack pli\na=rtpmap:46 rtx/90000\na=fmtp:46 apt=45\n")
+    take b
+}
+
+// RFC 4588 section 4: leg `l`'s NACK of its `j`-th packet is answered on its RTX SSRC
+// with the OSN, then that packet's payload, with its timestamp and marker, and with
+// the descriptor the media packet carried (the leg's frame number, not the source's).
+fn expect_repair(mut r: router.Router, now: u64, pv: router.PublicationId, mut l: Watched, j: u64, packets: List[Bytes], mut out: peer.Outbox, take what: String) {
+    let (m, x) = option.unwrap(router.track_ssrcs(r, room_id(), l.c.who, pv))
+    let h = l.t.heads[j]
+    peer.clear_outbox(mut out)
+    feed(mut r, now, l.c.who, l.c.at, nack(mut l.c.cs, m, h.seq), mut out)
+    let g = one(received(mut l.c, out), clone(what))
+    let body = payload_of(g)
+    let osn: u16 = list.word_be(body, 0)
+    let dd = match ext_value(g, 3, DependencyDescriptor) {
+        Some(v) => v,
+        None => list.new(),
+    }
+    if g.h.ssrc != x || g.h.pt != 46 || g.h.ts != h.ts || g.h.marker != h.marker || osn != h.seq || !same(list.slice(body, 2, list.len(body)), body_of(packets[l.t.got[j]])) || !same(dd, l.t.dds[j]) {
+        fail(take what)
+    }
+    peer.clear_outbox(mut out)
+}
+
 fn av1_legs(reversed: bool) {
     let mut r = router.router(provide.random(170))
     result.unwrap(router.open_room(mut r, room_id(), room_limits()))
@@ -405,6 +434,8 @@ fn av1_legs(reversed: bool) {
     let mut b = av1_watched(mut r, 175, 3)
     let mut c = av1_watched(mut r, 177, 4)
     let mut d = av1_watched(mut r, 179, 5)
+    let mut e = leg_of(mut r, 181, av1_rtx_offer(), 6, false)
+    e.dd = 3
     let pv = result.unwrap(router.publish(mut r, room, p.who, 0))
     let now0 = 10 * MS
     let mut now = now0
@@ -412,6 +443,7 @@ fn av1_legs(reversed: bool) {
     result.unwrap(router.subscribe(mut r, room, b.c.who, pv, 0, Layer(encoding: 0, spatial: 1, temporal: 1), now, mut out))
     result.unwrap(router.subscribe(mut r, room, c.c.who, pv, 0, Layer(encoding: 0, spatial: 2, temporal: 2), now, mut out))
     result.unwrap(router.subscribe(mut r, room, d.c.who, pv, 0, Layer(encoding: 0, spatial: 1, temporal: 255), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, e.c.who, pv, 0, Layer(encoding: 0, spatial: 2, temporal: 2), now, mut out))
     peer.clear_outbox(mut out)
     let mut packets = vectors.av1_l3t3()
     if reversed {
@@ -430,6 +462,7 @@ fn av1_legs(reversed: bool) {
         gather(mut b, out, k, body)
         gather(mut c, out, k, body)
         gather(mut d, out, k, body)
+        gather(mut e, out, k, body)
         peer.clear_outbox(mut out)
     }
     let mut all: Bytes = list.new()
@@ -450,6 +483,12 @@ fn av1_legs(reversed: bool) {
     expect_dd(b.t, packets, "AV1 S1T1")
     expect_dd(c.t, packets, "AV1 S2T2")
     expect_dd(d.t, packets, "AV1 S1T255")
+    expect_leg(e, all, packets, false, 0, "AV1 S2T2 with RTX: every frame")
+    expect_dd(e.t, packets, "AV1 S2T2 with RTX")
+    // Repairs of the keyframe's first packet (the descriptor with its structure) and of
+    // capture packet 9 (the source's frame number has wrapped to 0; the leg's is 7).
+    expect_repair(mut r, now, pv, mut e, 0, packets, mut out, "AV1 RTX repair of the structure packet")
+    expect_repair(mut r, now + MS, pv, mut e, 9, packets, mut out, "AV1 RTX repair across the frame number wrap")
 }
 
 /// bug: build the H.264 `after_end` or parameter sets of a pending source from the
@@ -460,7 +499,8 @@ fn av1_legs(reversed: bool) {
 /// anywhere but after a `U` picture; map an AV1 layer by decode-target index instead of
 /// by the structure's (S_d, T_d), so the reversed table sends other frames; leave a
 /// sub-layer VP9 or AV1 leg without the marker at its picture's end, or mark another
-/// packet; send an AV1 leg no descriptor, or the source's frame numbers.
+/// packet; send an AV1 leg no descriptor, or the source's frame numbers, on media or
+/// on an RTX repair.
 /// oracle: Chromium 156 captures (vectors/chromium_rtp.hirsel), decoded by hand from
 /// RFC 7741 section 4.2, RFC 6184 sections 5.6 to 5.8, RFC 9628 section 4.2 and AV1 RTP
 /// section A.8 by independent decoders, with RTC-6 and RTP-11's switch rules. Arrival
@@ -468,6 +508,8 @@ fn av1_legs(reversed: bool) {
 /// (re-encoded from the captured one, checked by decoding it back) are built by hand.
 /// VP9 markers are the last packet of each leg's top spatial frame by hand; AV1 markers
 /// and frame numbers are LiveKit's dependency-descriptor selector's over the capture.
+/// An RTX repair is RFC 4588 section 4 by hand: the OSN, the payload, and the media
+/// packet's own descriptor.
 @test
 fn router_fills_units() -> Result[(), router.RouterError] {
     vp8_legs()

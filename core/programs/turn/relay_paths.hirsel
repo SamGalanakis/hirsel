@@ -52,7 +52,7 @@ fn refresh(mut r: Relay, now: Now, v: Verified, h: stun_ice.Header, packet: Byte
         requested = Some(list.word_be(packet, l.lo))
     }
     if requested == Some(0u32) {
-        let gone = list.swap_remove(mut r.leases, i)
+        let gone = drop_lease(mut r, i)
         end_lease(mut r, take gone, now.mono_ns)
         return success(mut r, v, h, Some(0u32), mut out)
     }

@@ -84,12 +84,7 @@ fn held_back(r: Relay, ip: Ip) -> bool {
             return true
         }
     }
-    for i in 0u64 .. list.len(r.own) {
-        if r.own[i] == ip {
-            return true
-        }
-    }
-    false
+    map.contains(r.own, ip)
 }
 
 /// ip, or an IPv4 address embedded in it (IPv4-mapped, NAT64 64:ff9b::/96, 6to4 2002::/16,

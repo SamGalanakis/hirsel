@@ -6,7 +6,7 @@
 - recording: the same run recorded at 10^6 and at 2 * 10^6 packets. Target: the two tapes
   have the same size, so no frame is written per packet (no sink call per packet).
 - instructions: instructions per packet, reported and gating nothing, with 1 allocation and
-  with ALLOCATIONS_WIDE allocations live (the relay finds allocations by a linear scan).
+  with ALLOCATIONS_WIDE allocations live (flat: the relay finds allocations by key).
 """
 
 import argparse

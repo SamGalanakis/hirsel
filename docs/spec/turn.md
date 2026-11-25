@@ -625,8 +625,9 @@ answered.
 - A `from_peer` payload too long for one Data indication's 16-bit length is counted
   `oversize`.
 - `RelayCounts.channels` counts live bindings, not quarantined ones.
-- Allocations are found by a linear scan, by origin and by relayed address. U7's
-  counted run measures that cost.
+- Allocations are found through two maps, by origin and by relayed address, kept by the
+  one helper that adds a lease and the one that removes it, so the data path costs the
+  same at any number of live allocations. The pool's IPs are a map too.
 - stun_ice knows ACCESS-TOKEN (0x001B), so a request carrying it is not answered with
   420 (TURN-1).
 - `lifetimes_exact`'s relay half drives the relay directly, not under `std.sim.udp`,
@@ -756,12 +757,14 @@ module (`signal_turn.hirsel`), and the turn package names no application.
   any host with those tools; it is not part of `hirsel test`.
 - The cost run is `bench/turn/cost.py` over `bench/turn/relay_packets.hirsel`: setup drives
   each client to an allocation and a confirmed channel in process, and the last allocation
-  made is measured, so both linear scans pass every live allocation. "No frame per packet"
+  made is measured among every live allocation. "No frame per packet"
   is checked as equal recording sizes at 10^6 and 2 × 10^6 packets. Instructions per
   packet are reported at 1 and 1,000 live allocations.
   Measured at U7 (LLVM release): 0 allocations per packet both ways; 1,174-byte recordings
   at both counts; 515 instructions per `from_client` ChannelData and 328 per `from_peer`
-  with 1 allocation, 47,468 and 18,310 with 1,000, the cost of the linear scans (U3).
+  with 1 allocation, 47,468 and 18,310 with 1,000, the cost of U3's linear scans.
+  With keyed lookup (turn-indexed-lookup-2560): 813 per `from_client` ChannelData and 479
+  per `from_peer` at both 1 and 1,000 allocations, still 0 allocations per packet.
 
 **No byte-rate limit.** Decision: the relay limits allocations (`quota`, the pool),
 permissions and channels, not relayed bytes per second, which RFC 8656 §21.1.7 and §21.3.1

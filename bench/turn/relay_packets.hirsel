@@ -3,8 +3,7 @@
 //   OPERATION 0: from_client on ChannelData; 1: from_peer on a bound channel.
 // Setup drives ALLOCATIONS clients, each from its own address with its own subject,
 // against one relay in process to an allocation and a confirmed channel; the last one
-// made is measured, so the relay's scans by origin and by relayed address pass every
-// allocation. Between READY and DONE each packet is checked against the one answer it must
+// made is measured among every live allocation. Between READY and DONE each packet is checked against the one answer it must
 // get, and at DONE every discard counter must still be zero.
 const SIZE: u64 = 1200
 

@@ -145,7 +145,7 @@ pub fn disconnected(mut r: Relay, conn: u64) {
     let mut i = 0u64
     while i < list.len(r.leases) {
         if r.leases[i].origin.ingress == Stream(conn) {
-            let gone = list.swap_remove(mut r.leases, i)
+            let gone = drop_lease(mut r, i)
             list.push(mut r.free, gone.relayed)
             continue
         }

@@ -104,10 +104,12 @@ pub opaque type Relay {
     c: RelayConfig,
     g: Gate,
     free: List[Addr],
-    own: List[Ip],
+    own: Map[Ip, bool],
     has_v4: bool,
     has_v6: bool,
     leases: List[Lease],
+    on_origin: Map[Origin, u64],
+    at_relayed: Map[Addr, u64],
     conns: List[Conn],
     closing: List[u64],
     discards: RelayDiscards,
@@ -140,10 +142,11 @@ pub fn relay(take c: RelayConfig, rnd: Random, take master: Secret, take nonce_k
     let mut seen: Map[Addr, bool] = map.new()
     let mut has_v4 = false
     let mut has_v6 = false
-    let mut own: List[Ip] = list.with_capacity(list.len(pool))
+    let mut own: Map[Ip, bool] = map.new()
+    map.try_reserve(mut own, list.len(pool)) ?=> Capacity
     for i in 0u64 .. list.len(pool) {
         let a = pool[i]
-        list.push(mut own, a.ip)
+        map.insert(mut own, a.ip, true)
         if map.contains(seen, a) {
             return Error(Config)
         }
@@ -163,7 +166,7 @@ pub fn relay(take c: RelayConfig, rnd: Random, take master: Secret, take nonce_k
     list.try_reserve(mut scratch, RESPONSE_MAX) ?=> Capacity
     list.fill(mut scratch, RESPONSE_MAX, 0)
     let discards = RelayDiscards(malformed: 0, no_allocation: 0, no_permission: 0, policy: 0, unbound_channel: 0, reserved_channel: 0, throttled: 0, challenged: 0, oversize: 0, unknown_stream: 0, idle_stream: 0)
-    Ok(Relay(c: take c, g: take g, free: take pool, own: take own, has_v4: has_v4, has_v6: has_v6, leases: list.new(), conns: list.new(), closing: list.new(), discards: discards, ind_high: ind.high, ind_low: ind.low, last_ns: 0, due_ns: NEVER, fields: list.new(), scratch: take scratch))
+    Ok(Relay(c: take c, g: take g, free: take pool, own: take own, has_v4: has_v4, has_v6: has_v6, leases: list.new(), on_origin: map.new(), at_relayed: map.new(), conns: list.new(), closing: list.new(), discards: discards, ind_high: ind.high, ind_low: ind.low, last_ns: 0, due_ns: NEVER, fields: list.new(), scratch: take scratch))
 }
 
 /// The gate's pre-authentication discards are the relay's malformed, throttled and challenged.
@@ -197,7 +200,7 @@ fn sweep(mut r: Relay, now_ns: u64) {
     let mut i = 0u64
     while i < list.len(r.leases) {
         if now_ns >= r.leases[i].expires_ns {
-            let gone = list.swap_remove(mut r.leases, i)
+            let gone = drop_lease(mut r, i)
             let end_ns = gone.expires_ns
             end_lease(mut r, take gone, end_ns)
             continue
@@ -260,22 +263,34 @@ pub fn relay_poll(mut r: Relay, now: Now) -> Poll {
     }
 }
 
+/// The index of the allocation on o's 5-tuple.
 fn lease_on(r: Relay, o: Origin) -> Option[u64] {
-    for i in 0u64 .. list.len(r.leases) {
-        if r.leases[i].origin == o {
-            return Some(i)
-        }
-    }
-    None
+    option.copied(map.get(r.on_origin, o))
 }
 
+/// The index of the allocation relaying from relayed.
 fn lease_at(r: Relay, relayed: Addr) -> Option[u64] {
-    for i in 0u64 .. list.len(r.leases) {
-        if r.leases[i].relayed == relayed {
-            return Some(i)
-        }
+    option.copied(map.get(r.at_relayed, relayed))
+}
+
+/// Every allocation is added here, after try_reserve of one more lease and index entry.
+fn add_lease(mut r: Relay, take l: Lease) {
+    let i = list.len(r.leases)
+    map.insert(mut r.on_origin, l.origin, i)
+    map.insert(mut r.at_relayed, l.relayed, i)
+    list.push(mut r.leases, take l)
+}
+
+/// Every allocation is removed here: the last lease moves to i and is indexed there.
+fn drop_lease(mut r: Relay, i: u64) -> Lease {
+    let gone = list.swap_remove(mut r.leases, i)
+    let _ = map.remove(mut r.on_origin, gone.origin)
+    let _ = map.remove(mut r.at_relayed, gone.relayed)
+    if i < list.len(r.leases) {
+        map.insert(mut r.on_origin, r.leases[i].origin, i)
+        map.insert(mut r.at_relayed, r.leases[i].relayed, i)
     }
-    None
+    gone
 }
 
 fn relay_error(v: Verified, h: stun_ice.Header, code: u16, unknown: Option[u16], mut out: Bytes, mut scratch: Bytes) -> Result[u64, TurnError] {
@@ -475,6 +490,8 @@ fn allocate(mut r: Relay, now: Now, rnd: Random, o: Origin, v: Verified, h: stun
         requested_lifetime = Some(list.word_be(packet, l.lo))
     }
     list.try_reserve(mut r.leases, 1) ?=> Capacity
+    map.try_reserve(mut r.on_origin, 1) ?=> Capacity
+    map.try_reserve(mut r.at_relayed, 1) ?=> Capacity
     let Some(relayed) = take_address(mut r, rnd, family, even_port) else {
         return relay_error(v, h, 508, None, mut out, mut r.scratch)
     }
@@ -489,7 +506,7 @@ fn allocate(mut r: Relay, now: Now, rnd: Random, o: Origin, v: Verified, h: stun
     let mut owned_subject: Bytes = list.with_capacity(list.len(subject))
     list.append(mut owned_subject, subject)
     let held = Held(username: take username, key: secret.share(v.key))
-    list.push(mut r.leases, Lease(origin: o, relayed: relayed, family: family, held: take held, subject: take owned_subject, tx: h.transaction, partial: partial, expires_ns: expires, grants: list.new(), bindings: list.new()))
+    add_lease(mut r, Lease(origin: o, relayed: relayed, family: family, held: take held, subject: take owned_subject, tx: h.transaction, partial: partial, expires_ns: expires, grants: list.new(), bindings: list.new()))
     r.due_ns = order.min(r.due_ns, expires)
     stream_held(mut r, o)
     let i = list.len(r.leases) - 1
@@ -509,7 +526,7 @@ pub fn revoke(mut r: Relay, subject: Bytes, until_unix_s: u64, now: Now) -> Resu
     let mut i = 0u64
     while i < list.len(r.leases) {
         if list.compare_bytes(r.leases[i].subject, subject) == Equal {
-            let gone = list.swap_remove(mut r.leases, i)
+            let gone = drop_lease(mut r, i)
             end_lease(mut r, take gone, now.mono_ns)
             deleted += 1
             continue

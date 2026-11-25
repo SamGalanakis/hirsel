@@ -1932,6 +1932,13 @@ impl BodyParser {
                     RtOp::Flow(op)
                 }
                 "frame_record" => RtOp::FrameRecord,
+                name if let Some(i) = name
+                    .strip_prefix("closed_")
+                    .and_then(|i| i.parse::<u8>().ok())
+                    .filter(|&i| usize::from(i) < crate::CLOSED.len()) =>
+                {
+                    RtOp::Closed(i)
+                }
                 "join_rec" => RtOp::Returnable(Wait::Join { r: tys(1)?[0] }),
                 "conn_send_rec" => RtOp::Returnable(Wait::ConnSend { item: tys(1)?[0] }),
                 "conn_receive_rec" => RtOp::Returnable(Wait::ConnReceive { item: tys(1)?[0] }),

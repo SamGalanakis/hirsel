@@ -825,6 +825,11 @@ impl NameIndex {
             _ => return,
         };
         let Some(t) = root.token else { return };
+        // An assertion (`const _`, LANG-20) names nothing.
+        if kind == DefinitionKind::Constant && item.symbol(t) == hirsel_core_syntax::sym::UNDERSCORE
+        {
+            return;
+        }
         let name = if kind == DefinitionKind::Clone {
             // The type the body copies: the last name of its parameter's type path. A
             // body without one still gets an identity, so the checker refuses it.

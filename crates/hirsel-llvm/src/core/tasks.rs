@@ -432,6 +432,7 @@ impl FunctionEmitter<'_> {
                 self.native_call("hirsel_core_step_enter", &[B], &[ptr(CONTEXT), u(&args[0])])
             }
             RtOp::StepLeave => self.native_call("hirsel_core_step_leave", &[], &[ptr(CONTEXT)]),
+            RtOp::Closed(_) => Vec::new(),
             RtOp::StepCatch => self.native_call("hirsel_core_step_catch", &[B], &[ptr(CONTEXT)]),
             RtOp::IsolateEnter => {
                 self.native_call("hirsel_core_isolate_enter", &[B, U], &[ptr(CONTEXT)])

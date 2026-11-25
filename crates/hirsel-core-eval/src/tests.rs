@@ -3,6 +3,7 @@
 //! derived in the test, not output of this crate.
 
 mod aliasing;
+mod constant;
 mod flat;
 
 use crate as eval;
@@ -280,6 +281,20 @@ fn samples_behave_as_derived_by_hand() {
                     Param::Address { .. } => panic!("by-address arguments are FORM v1"),
                 })
                 .collect();
+            if let Some(head) = head.trim().strip_prefix("constant") {
+                let checks: Vec<&str> = parts.collect();
+                constant::run(
+                    &format!("{name}: {run}"),
+                    &m,
+                    f,
+                    &args,
+                    head,
+                    expected,
+                    &checks,
+                );
+                runs += 1;
+                continue;
+            }
             if let Some(budget) = budget {
                 flat::budget(name, run, &m, f, &args, budget.parse().unwrap(), expected);
                 runs += 1;

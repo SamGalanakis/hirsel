@@ -1631,6 +1631,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if codec && let Some(value) = self.codec_of(&g.path, types, vals, result, n) {
             return value;
         }
+        // LANG-20: a closed-list function without a body is marked at its call;
+        // one with a body marks its entry (`run_row`).
+        if g.body.is_none()
+            && let Some(i) = closed(&g.path)
+        {
+            self.runtime_row(hirsel_core_ir::RtOp::Closed(i), &[], n)?;
+        }
         if let Some(value) = self.core_operation(f, types, vals, result, n) {
             return value;
         }

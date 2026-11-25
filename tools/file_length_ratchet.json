@@ -244,9 +244,9 @@
     "reason": "comptime-flat-default-2685"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
-    "lines": 2602,
-    "raise_revision": 5,
-    "reason": "dod-columns-soa-2533"
+    "lines": 2609,
+    "raise_revision": 6,
+    "reason": "comptime-phase2-2693"
   },
   "crates/hirsel-core-front/src/body/closures.rs": {
     "lines": 2983
@@ -273,9 +273,9 @@
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3071,
-    "raise_revision": 7,
-    "reason": "coverage-gen-anchors-2579"
+    "lines": 3086,
+    "raise_revision": 8,
+    "reason": "comptime-phase2-2693"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
     "lines": 2531,
@@ -313,9 +313,9 @@
     "reason": "dod-columns-soa-2533"
   },
   "crates/hirsel-core-front/src/tests.rs": {
-    "lines": 1370,
-    "raise_revision": 1,
-    "reason": "comptime-eval-split-2612"
+    "lines": 1372,
+    "raise_revision": 2,
+    "reason": "comptime-phase2-2693"
   },
   "crates/hirsel-core-front/src/types.rs": {
     "lines": 1164
@@ -327,9 +327,9 @@
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 1959,
-    "raise_revision": 14,
-    "reason": "coverage-c3-2578"
+    "lines": 1965,
+    "raise_revision": 15,
+    "reason": "comptime-phase2-2693"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1145,
@@ -347,9 +347,9 @@
     "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2401,
-    "raise_revision": 11,
-    "reason": "coverage-gen-anchors-2579"
+    "lines": 2408,
+    "raise_revision": 12,
+    "reason": "comptime-phase2-2693"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1860,
@@ -380,7 +380,9 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-resolve/src/index.rs": {
-    "lines": 1039
+    "lines": 1044,
+    "raise_revision": 1,
+    "reason": "comptime-phase2-2693"
   },
   "crates/hirsel-core-resolve/src/resolve.rs": {
     "lines": 1543
@@ -489,9 +491,9 @@
     "reason": "census-compiler-reds-2567"
   },
   "crates/hirsel-core-syntax/src/parser.rs": {
-    "lines": 1546,
-    "raise_revision": 3,
-    "reason": "macos-s9-target-consts-2508"
+    "lines": 1555,
+    "raise_revision": 4,
+    "reason": "comptime-phase2-2693"
   },
   "crates/hirsel-core-syntax/src/tests.rs": {
     "lines": 1094

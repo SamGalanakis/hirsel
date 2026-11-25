@@ -270,10 +270,7 @@ impl Machine<'_> {
             HostOp::UdpBind | HostOp::UdpBindGroup | HostOp::UdpLocalAddr => {
                 vec![0, 1, 0, 0, 0, 0, 0, 0]
             }
-            HostOp::NetClass => ok(
-                hirsel_core_net::class::class_of(a[0] as u8, a[1], a[2]) as u64,
-                0,
-            ),
+            HostOp::NetClass => unreachable!("net.class runs on the pure core"),
             HostOp::NetDenials => {
                 let provider = self.host.world.net_ports.get(&a[0]).copied();
                 ok(

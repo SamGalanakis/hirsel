@@ -51,9 +51,11 @@ impl Program<'_> {
                     continue;
                 }
                 let name = item.symbol(item.tree.node(item.root).token.unwrap());
-                let Some(definition) = self.index.definition(self.modules[m].id, name) else {
+                // An assertion (`const _`) is evaluated as any constant and read by none.
+                let definition = self.index.definition(self.modules[m].id, name);
+                if definition.is_none() && name != hirsel_core_syntax::sym::UNDERSCORE {
                     continue;
-                };
+                }
                 let kids = item.tree.children(item.root);
                 let (expr, initialised) = targets::initialiser(item.tree, kids);
                 let type_node = kids[kids.len() - 1 - usize::from(initialised)];
@@ -61,14 +63,27 @@ impl Program<'_> {
                 let ty = self.outside_vector(at, type_node, ty, "a constant");
                 let targets = (!initialised).then(|| self.toolchain(at, ty)).flatten();
                 let id = self.constants.len() as u32;
-                self.constant_ids[definition.0 as usize] = Some(id);
+                let path = match definition {
+                    Some(definition) => {
+                        self.constant_ids[definition.0 as usize] = Some(id);
+                        self.index.definition_path(definition)
+                    }
+                    None => {
+                        let module = self.index.module_path(self.modules[m].id);
+                        DefPath(hirsel_core_ids::ItemPath {
+                            package: module.package,
+                            modules: module.modules,
+                            name: "_".into(),
+                        })
+                    }
+                };
                 let ty = if initialised || targets.is_some() {
                     ty
                 } else {
                     ERROR
                 };
                 self.constants.push(Constant {
-                    path: self.index.definition_path(definition),
+                    path,
                     at,
                     ty,
                     value: None,

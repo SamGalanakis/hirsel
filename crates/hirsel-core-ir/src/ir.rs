@@ -12,9 +12,11 @@ mod flow;
 pub(crate) use flow::for_each_successor;
 #[cfg(any(test, feature = "wf"))]
 pub(crate) use flow::successors;
+mod closed;
 mod host_op;
 mod runtime_types;
 mod simd;
+pub use closed::CLOSED;
 pub use host_op::{HostOp, host_drop_symbol};
 pub use runtime_types::Wait;
 pub use simd::SimdOp;
@@ -1035,6 +1037,10 @@ pub enum RtOp {
     },
     /// SHA-1 compression of complete blocks, without padding.
     Sha1Compress,
+    /// A function on LANG-20's closed list is reached; [`CLOSED`] names it by
+    /// index. It does nothing at run time. A constant's initialiser that
+    /// reaches it stops there, and the constant is refused.
+    Closed(u8),
 }
 
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
@@ -1253,7 +1259,7 @@ impl RtOp {
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
             RtOp::StepEnter => (vec![V(u64_)], vec![bool_]),
-            RtOp::StepLeave | RtOp::IsolateLeave => (vec![], vec![]),
+            RtOp::StepLeave | RtOp::IsolateLeave | RtOp::Closed(_) => (vec![], vec![]),
             RtOp::StepCatch => (vec![], vec![bool_]),
             RtOp::IsolateEnter => (vec![], vec![bool_, u64_]),
             RtOp::IsolateCatch => (vec![], vec![p]),

@@ -408,6 +408,7 @@ tags!(RtOp {
     80 => RsaVerifyPssSha256,
     81 => Argon2id,
     82 => Sha1Compress,
+    83 => Closed(part0),
 });
 
 tags!(Wait {

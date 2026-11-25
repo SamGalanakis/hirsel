@@ -1216,6 +1216,7 @@ fn invalid_grants_and_constants_keep_their_own_rules_and_sites() {
         ),
         ("const BAD: u8 = 256", "LANG-20", "256"),
         ("const BAD: String = b\"hello\"", "LANG-20", "b\"hello\""),
+        ("pub const _: u8 = 1", "LANG-20", "_"),
     ] {
         let (index, inputs) = program_inputs(source);
         let p = Program::declare(&index, &inputs);
@@ -1235,6 +1236,7 @@ fn aggregate_constant_errors_are_checked_before_use() {
         "const BAD: Inline[u8,0] = [200u8 + 100u8;0]",
         "type Point { x:u8 }\nfn id(x:u8)->u8{x}\nconst BAD: Point = Point(x:id(7))",
         "const A: (u8,u8) = (0,B.0)\nconst B: (u8,u8) = (A.0,0)",
+        "const _: u8 = 1\nconst _: u8 = 200u8 + 100u8",
     ] {
         let (index, inputs) = program_inputs(source);
         let p = Program::declare(&index, &inputs);

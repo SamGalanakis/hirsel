@@ -16,6 +16,31 @@ fn core_operation_declarations_do_not_drift() {
     crate::body::core_ops::assert_declarations(&p);
 }
 
+/// Bug: a function added to core module `provide`, or a closed-list entry that
+/// names no core function, leaves LANG-20's closed list short: an initialiser
+/// could make a provider. The list names every `provide` function, and each of
+/// its entries is a core function.
+#[test]
+fn closed_list_covers_provide() {
+    let (index, modules) = canonical("");
+    let p = Program::declare(&index, &modules);
+    for entry in hirsel_core_ir::CLOSED {
+        assert!(
+            p.fns.iter().any(|f| f.path.is_core(entry)),
+            "{entry} is not a core function"
+        );
+    }
+    for f in p.fns.iter().filter(|f| f.path.package_is("core", "1")) {
+        if f.path.0.modules.first().map(String::as_str) == Some("provide") {
+            assert!(
+                crate::body::closed(&f.path).is_some(),
+                "{} is not on the closed list",
+                f.path
+            );
+        }
+    }
+}
+
 #[test]
 fn cap6_ambient_kernels_take_authority() {
     let (index, modules) = canonical("");

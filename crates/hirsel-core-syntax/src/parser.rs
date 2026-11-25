@@ -504,7 +504,8 @@ impl Parser<'_> {
             }
             c.push(self.node(a, NodeKind::Attribute, Some(n), &[]));
         }
-        if self.eat(sym::PUB) {
+        let public = self.eat(sym::PUB);
+        if public {
             c.push(self.node(self.pos - 1, NodeKind::Public, None, &[]));
             if self.eat(sym::OPAQUE) {
                 c.push(self.node(self.pos - 1, NodeKind::Opaque, None, &[]));
@@ -551,7 +552,15 @@ impl Parser<'_> {
             return Ok(self.node(s, NodeKind::CloneHook, Some(name), &c));
         }
         if self.eat(sym::CONST) {
-            let name = self.name()?;
+            // `const _` is an assertion (LANG-20): it names nothing, so it is not `pub`.
+            let name = if self.at(sym::UNDERSCORE) {
+                if public {
+                    return self.fail("LANG-20", "an assertion (`const _`) is not `pub`");
+                }
+                self.bump()
+            } else {
+                self.name()?
+            };
             self.expect(sym::COLON)?;
             c.push(self.ty()?);
             if self.eat(sym::EQ) {

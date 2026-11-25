@@ -170,6 +170,7 @@ impl Function<'_, '_, '_> {
                 self.c_call("hirsel_core_step_leave", &[P], &[], &[self.context])?;
                 0
             }
+            RtOp::Closed(_) => 0,
             RtOp::StepCatch => {
                 outputs[0] = self.c_call("hirsel_core_step_catch", &[P], &[B], &[self.context])?[0];
                 1

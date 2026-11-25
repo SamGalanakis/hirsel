@@ -983,6 +983,18 @@ fn order_instructions(b: &mut Body) {
     b.inst_anchors = anchors;
 }
 
+/// The [`hirsel_core_ir::CLOSED`] index of a core function on LANG-20's closed
+/// list: reaching it refuses a constant's initialiser.
+pub(crate) fn closed(path: &DefPath) -> Option<u8> {
+    if !path.package_is("core", "1") {
+        return None;
+    }
+    hirsel_core_ir::CLOSED
+        .iter()
+        .position(|entry| path.is_core(entry))
+        .map(|i| i as u8)
+}
+
 impl Program<'_> {
     /// Check function `f`'s body and emit it into `e` (LANG-8: one visit, reading only
     /// this body, signatures and summaries).
@@ -2319,6 +2331,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 self.start(entry);
                 if let Some(id) = dest {
                     self.dest = Some((self.block_params(entry)[0], id));
+                }
+                if let Some(i) = closed(&self.fd.path) {
+                    self.runtime_row(hirsel_core_ir::RtOp::Closed(i), &[], body);
                 }
             }
             Err(what) => {

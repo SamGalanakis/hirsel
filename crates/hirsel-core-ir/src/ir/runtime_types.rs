@@ -78,7 +78,8 @@ impl RtOp {
             | RtOp::IsolateCatch
             | RtOp::StepEnter
             | RtOp::StepLeave
-            | RtOp::StepCatch => vec![],
+            | RtOp::StepCatch
+            | RtOp::Closed(_) => vec![],
         }
     }
 

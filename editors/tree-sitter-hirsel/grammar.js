@@ -113,7 +113,7 @@ module.exports = grammar({
     bounds: $ => prec.right(seq($._bound, repeat(seq('+', $._bound)))),
     _bound: _ => choice(...bounds),
     constant_definition: $ => seq(
-      optional($.visibility), 'const', field('name', $.identifier),
+      optional($.visibility), 'const', field('name', choice($.identifier, '_')),
       ':', field('type', $.type), optional(seq('=', field('value', $._expression))),
     ),
     type_definition: $ => prec.right(seq(

@@ -2159,6 +2159,10 @@
         "required": true,
         "types": [
           {
+            "type": "_",
+            "named": false
+          },
+          {
             "type": "identifier",
             "named": true
           }
@@ -6931,6 +6935,11 @@
     }
   },
   {
+    "type": "wildcard_pattern",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "!",
     "named": false
   },
@@ -7096,6 +7105,10 @@
   },
   {
     "type": "^=",
+    "named": false
+  },
+  {
+    "type": "_",
     "named": false
   },
   {
@@ -7374,10 +7387,6 @@
   {
     "type": "while",
     "named": false
-  },
-  {
-    "type": "wildcard_pattern",
-    "named": true
   },
   {
     "type": "{",

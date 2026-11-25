@@ -982,32 +982,12 @@ trait Host<'m>: Sized {
     fn rt(m: &mut Machine<'m, Self>, t: &mut Task, op: RtOp, a: &[u64]) -> X<Vec<u64>>;
     /// Clean up a handle the core does not define.
     fn drop_handle(m: &mut Machine<'m, Self>, t: &mut Task, at: u64, h: Handle) -> bool;
-}
-
-/// The host of a pure run: one task, no scheduler, threads, network or
-/// provider. A world operation or handle stops the run.
-struct Pure;
-
-impl<'m> Host<'m> for Pure {
-    fn current(&self) -> usize {
-        0
-    }
-    fn event(_: &mut Machine<'m, Self>, _: u8, _: u64, _: u64) {}
-    fn drain_refunds(_: &mut Machine<'m, Self>) {}
-    fn defer_refund(_: &mut Machine<'m, Self>, _: &Limit, _: u64) -> bool {
-        false
-    }
-    fn hand_over(_: &mut Machine<'m, Self>, _: &Limit, _: &Limit) {
-        unreachable!("a pure run has one task")
-    }
-    fn slice_end(_: &mut Machine<'m, Self>) {}
-    fn enter_call(_: &mut Machine<'m, Self>, _: &Task, _: usize) {}
-    fn rt(_: &mut Machine<'m, Self>, _: &mut Task, _: RtOp, _: &[u64]) -> X<Vec<u64>> {
-        std::panic::resume_unwind(Box::new(RunStop("WorldOperation")))
-    }
-    fn drop_handle(_: &mut Machine<'m, Self>, _: &mut Task, _: u64, _: Handle) -> bool {
-        std::panic::resume_unwind(Box::new(RunStop("WorldHandle")))
-    }
+    /// An admission against `l` was refused (MEM-34: a constant's root stops).
+    fn refused(_: &mut Machine<'m, Self>, _: &Limit) {}
+    /// A function on LANG-20's closed list is reached ([`RtOp::Closed`]).
+    fn closed(_: &mut Machine<'m, Self>, _: u8) {}
+    /// A cause is about to be recorded on `t`'s chain.
+    fn failing(_: &mut Machine<'m, Self>, _: &Task) {}
 }
 
 // ---- tasks (CONC-3..10)
@@ -4548,6 +4528,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             Ok(())
         } else {
             drop(state);
+            H::refused(self, l);
             self.event(CAPACITY, n, room);
             Err(room)
         }
@@ -4558,6 +4539,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         if overflowed {
             self.admissions += 1;
             let room = l.0.cap - l.used();
+            H::refused(self, l);
             self.event(CAPACITY, u64::MAX, room);
             return Err(room);
         }
@@ -4943,6 +4925,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     /// FAIL-10: record a cause in the innermost obligation's unused cell, which
     /// then leaves with the chain.
     fn record(&mut self, t: &mut Task, cause: Cause) {
+        H::failing(self, t);
         let cell = t
             .obligations
             .last_mut()
@@ -5026,6 +5009,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             };
             if bound.left == 0 {
                 let id = bound.id;
+                pure::root_steps_out(id);
                 let site = self.site(t);
                 self.record(
                     t,
@@ -5070,7 +5054,8 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         Ok(match op {
             RtOp::StepEnter => {
                 let n = a[0];
-                if t.step_bounds.last().is_some_and(|parent| parent.left < n) {
+                if let Some(parent) = t.step_bounds.last().filter(|p| p.left < n) {
+                    pure::root_steps_out(parent.id);
                     vec![0]
                 } else {
                     if let Some(parent) = t.step_bounds.last_mut() {
@@ -5411,6 +5396,15 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             | RtOp::ReceiveRec { .. }
             | RtOp::Transfer { .. } => {
                 unreachable!("returnable waits are native-only")
+            }
+            RtOp::Closed(i) => {
+                H::closed(self, i);
+                vec![]
+            }
+            // net.class is pure (LANG-20): an initialiser may call it.
+            RtOp::Host(HostOp::NetClass) => {
+                let class = hirsel_core_net::class::class_of(a[0] as u8, a[1], a[2]);
+                vec![class as u64, 0, 0, 0]
             }
             _ => return H::rt(self, t, op, a),
         })

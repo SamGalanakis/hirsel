@@ -89,6 +89,7 @@ fn runtime_probes() -> Module {
         RtOp::P384VerifyDer,
         RtOp::RsaVerifyPkcs1Sha256,
         RtOp::RsaVerifyPssSha256,
+        RtOp::Closed(0),
     ]
     .into_iter()
     .chain(HostOp::ALL.iter().copied().map(RtOp::Host))

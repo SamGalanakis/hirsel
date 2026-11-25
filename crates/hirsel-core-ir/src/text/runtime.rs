@@ -79,6 +79,7 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::SecretShare => "rt.secret_share".into(),
         RtOp::DescribeEmit => "rt.describe_emit".into(),
         RtOp::Flow(op) => format!("rt.{}", op.name()),
+        RtOp::Closed(i) => format!("rt.closed_{i}"),
         RtOp::LaunchTarget { view } => format!("rt.launch_target[t{}]", view.0),
         RtOp::Host(op) => format!("rt.{}", op.name()),
         RtOp::FrameRecord => "rt.frame_record".into(),

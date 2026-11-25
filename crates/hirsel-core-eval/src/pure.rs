@@ -17,6 +17,12 @@ pub struct PureRun {
     /// The failure's chain, primary first: each cause's kind, message words and
     /// site.
     pub chain: Vec<String>,
+    /// The closed-list function ([`hirsel_core_ir::CLOSED`]) whose reach stopped
+    /// the run (`Outcome::Stopped("Closed")`).
+    pub reached: Option<&'static str>,
+    /// The calls from the entry to where the run stopped, or to the site of its
+    /// failure's primary cause, innermost first; empty when it returned.
+    pub calls: Vec<FuncId>,
     /// The host instructions the pure thread retired running it (G1).
     #[cfg(feature = "host-instructions")]
     pub host: u64,
@@ -47,6 +53,23 @@ pub struct PureInput {
     pub engine: Engine,
     /// The run's map hash key; a fresh one when `None`.
     pub map_hash_key: Option<[u8; 16]>,
+    /// MEM-34: the run's root step bound. With one, the run is a constant's:
+    /// entering it takes a step, and a step past the root bound, a reservation
+    /// from it larger than it has left, or a refused admission against the root
+    /// limit stops the run (`OutOfTime`, `Capacity`), which nothing in it sees.
+    pub steps: Option<u64>,
+}
+
+impl PureInput {
+    /// MEM-34's constant budget: 2^24 steps, 64 MiB and 4,096 activations.
+    pub fn constant() -> Self {
+        Self {
+            limit: 64 << 20,
+            activations: 4096,
+            steps: Some(1 << 24),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for PureInput {
@@ -58,6 +81,7 @@ impl Default for PureInput {
             instructions: u64::MAX,
             engine: Engine::Flat,
             map_hash_key: None,
+            steps: None,
         }
     }
 }
@@ -96,11 +120,10 @@ pub fn run_pure(m: &PureModule<'_>, f: FuncId, args: &[u64], input: PureInput) -
         sites: &m.sites,
         ..Core::default()
     };
-    let limit = input.limit;
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(ROOT_STACK)
-            .spawn_scoped(scope, || pure_root(m, f, args, limit, &core))
+            .spawn_scoped(scope, || pure_root(m, f, args, &input, &core))
             .expect("a pure run's thread")
             .join()
             .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
@@ -111,7 +134,7 @@ fn pure_root(
     prepared: &PureModule<'_>,
     f: FuncId,
     args: &[u64],
-    limit: u64,
+    input: &PureInput,
     core: &Core<'_>,
 ) -> PureRun {
     #[cfg(feature = "host-instructions")]
@@ -122,10 +145,21 @@ fn pure_root(
     };
     let m = prepared.module.as_ref();
     let recipes = std::borrow::Cow::Borrowed(prepared.recipes.as_slice());
-    let mut mach = Machine::with_host(m, recipes, limit, core, Pure);
+    let host = Pure {
+        budget: input.steps.is_some(),
+        reached: None,
+        calls: Vec::new(),
+    };
+    let mut mach = Machine::with_host(m, recipes, input.limit, core, host);
     mach.install_statics();
     mach.install_descriptors(None);
     let mut t = mach.root_task(0);
+    if let Some(left) = input.steps {
+        t.step_bounds.push(StepBound {
+            id: ROOT_STEPS,
+            left,
+        });
+    }
     let destination = mach.destination(f, None);
     let arguments: Vec<u64> = destination
         .into_iter()
@@ -137,6 +171,11 @@ fn pure_root(
         room.set((&origin as *const u8 as usize, ROOT_STACK - STACK_HEADROOM));
     });
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // MEM-34: entering a constant's initialiser takes a step, as a call does.
+        if input.steps.is_some() {
+            mach.take_steps(&mut t, 1)
+                .expect("the root bound has a step");
+        }
         mach.call(&mut t, f, &arguments)
             .map(|()| std::mem::take(&mut mach.results))
     }));
@@ -144,9 +183,15 @@ fn pure_root(
         Ok(Ok(r)) => Outcome::Returned(r),
         Ok(Err(_)) => Outcome::Failed(t.chain.iter().map(|c| c.kind.into()).collect()),
         Err(payload) if payload.is::<RunStop>() => {
+            // An unwound run's activations are still on its stack.
+            mach.host.calls = t.at.iter().rev().map(|h| h.f).collect();
             Outcome::Stopped(payload.downcast::<RunStop>().unwrap().0)
         }
         Err(payload) => std::panic::resume_unwind(payload),
+    };
+    let calls = match outcome {
+        Outcome::Returned(_) => Vec::new(),
+        _ => std::mem::take(&mut mach.host.calls),
     };
     #[cfg(feature = "host-instructions")]
     let host = counter.read().unwrap() - before;
@@ -164,5 +209,69 @@ fn pure_root(
             .iter()
             .map(|c| format!("{} {:?} {:?}", c.kind, c.message, c.site))
             .collect(),
+        reached: mach
+            .host
+            .reached
+            .map(|i| hirsel_core_ir::CLOSED[usize::from(i)]),
+        calls,
+    }
+}
+
+/// The id of a constant's root step bound (MEM-34), which no `bound steps`
+/// scope's id reaches.
+pub(super) const ROOT_STEPS: u64 = u64::MAX;
+
+/// A step bound with `id` has too few steps left: when it is a constant's root
+/// bound, the run stops (MEM-34), and nothing in it sees an `OutOfTime`.
+pub(super) fn root_steps_out(id: u64) {
+    if id == ROOT_STEPS {
+        std::panic::resume_unwind(Box::new(RunStop("OutOfTime")));
+    }
+}
+
+/// The host of a pure run: one task, no scheduler, threads, network or
+/// provider. A world operation or handle stops the run.
+pub(super) struct Pure {
+    /// The run is a constant's (MEM-34): a refused root admission stops it.
+    budget: bool,
+    /// The closed-list function that stopped the run.
+    reached: Option<u8>,
+    /// The activations, innermost first, when the primary cause was recorded.
+    calls: Vec<FuncId>,
+}
+
+impl<'m> Host<'m> for Pure {
+    fn current(&self) -> usize {
+        0
+    }
+    fn event(_: &mut Machine<'m, Self>, _: u8, _: u64, _: u64) {}
+    fn drain_refunds(_: &mut Machine<'m, Self>) {}
+    fn defer_refund(_: &mut Machine<'m, Self>, _: &Limit, _: u64) -> bool {
+        false
+    }
+    fn hand_over(_: &mut Machine<'m, Self>, _: &Limit, _: &Limit) {
+        unreachable!("a pure run has one task")
+    }
+    fn slice_end(_: &mut Machine<'m, Self>) {}
+    fn enter_call(_: &mut Machine<'m, Self>, _: &Task, _: usize) {}
+    fn rt(_: &mut Machine<'m, Self>, _: &mut Task, _: RtOp, _: &[u64]) -> X<Vec<u64>> {
+        std::panic::resume_unwind(Box::new(RunStop("WorldOperation")))
+    }
+    fn drop_handle(_: &mut Machine<'m, Self>, _: &mut Task, _: u64, _: Handle) -> bool {
+        std::panic::resume_unwind(Box::new(RunStop("WorldHandle")))
+    }
+    fn refused(m: &mut Machine<'m, Self>, l: &Limit) {
+        if m.host.budget && Arc::ptr_eq(&l.0, &m.root().0) {
+            std::panic::resume_unwind(Box::new(RunStop("Capacity")));
+        }
+    }
+    fn closed(m: &mut Machine<'m, Self>, i: u8) {
+        m.host.reached = Some(i);
+        std::panic::resume_unwind(Box::new(RunStop("Closed")));
+    }
+    fn failing(m: &mut Machine<'m, Self>, t: &Task) {
+        if t.chain.is_empty() {
+            m.host.calls = t.at.iter().rev().map(|h| h.f).collect();
+        }
     }
 }

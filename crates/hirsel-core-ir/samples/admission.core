@@ -32,6 +32,10 @@
 ; Behaviour, derived by hand:
 ; run limit 100: f0(64) -> false, 36 | used 0         ; 64 admitted, 64 more refused
 ; run limit 100: f0(40) -> true, 0 | used 0
+; Under a constant's budget (MEM-34) with a root limit of 100, the refused admission
+; against the root stops the run instead of returning null:
+; run constant limit 100: f0(64) -> stopped Capacity | calls f0
+; run constant limit 100: f0(40) -> true, 0
 ; run limit 100: f1(50, 40) -> true, 0, 60 | used 0   ; 40 stays charged, 10 handed back
 ; run limit 100: f1(30, 60) -> false, 30, 100 | used 0 ; refused by the bound's 30, not 70
 ; run limit 100: f1(200, 1) -> false, 100, 100 | used 0 ; the bound itself is refused

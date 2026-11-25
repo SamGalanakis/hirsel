@@ -26,7 +26,7 @@ pub type Supplied: send {
 
 // A start sees a view of the host's seed: the services a place's grants are made from.
 pub opaque type Factory[T: send]: send {
-    start: own[send] fn(take Launch[T], T) -> Result[Started, String]
+    start: own[send] fn(take Launch[T], T) -> Result[Started, Refused]
 }
 
 pub type Unloaded: send {
@@ -208,6 +208,9 @@ type Actor[T: send] {
     watch: Option[Sender[Change]],
     kids: List[Kid],
     routes: List[(String, AccessReply)],
+    // Groups whose serving start this launcher refused while applying the host's requests,
+    // with the answer each one's waiting routes get if the host does not start it again.
+    refused: List[(String, Refused)],
     unloads: List[(String, Sender[Result[Unloaded, Refused]])],
     removes: List[(String, Sender[Result[(), Refused]])],
     reads: List[(String, ColdRead, ReadReply)],
@@ -247,7 +250,7 @@ type Forward: send {
 
 // ---- factories ----
 pub fn factory[T: send, G: send, H: shareable + inert + send, S: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Factory[T] {
-    let made = fn(take request: Launch[T], seed: T) -> Result[Started, String] {
+    let made = fn(take request: Launch[T], seed: T) -> Result[Started, Refused] {
         let config = make(clone(request.supplied))
         start_made(take request, take config)
     }
@@ -257,18 +260,18 @@ pub fn factory[T: send, G: send, H: shareable + inert + send, S: send](make: fn(
 // A factory whose `make` also sees the host's seed. `make` is still a plain fn, so only
 // linked code runs as a group.
 pub fn seeded_factory[T: send, G: send, H: shareable + inert + send, S: send](make: fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Factory[T] {
-    let made = fn(take request: Launch[T], seed: T) -> Result[Started, String] {
+    let made = fn(take request: Launch[T], seed: T) -> Result[Started, Refused] {
         let config = make(clone(request.supplied), seed)
         start_made(take request, take config)
     }
     Factory(start: take made)
 }
 
-fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Started, String] {
+fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Started, Refused] {
     let Launch(supplied: supplied, backing: take backing, sizes: sizes, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
     let mut config = match take made {
         Ok(take m) => take m,
-        Error(_) => return Error(string.from("Full"))
+        Error(_) => return Error(Full)
     }
     config.backing = take backing
     config.sizes = sizes
@@ -277,7 +280,7 @@ fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take reque
     config.max_sessions = sessions
     let overhead = match runner.operate_bytes(config) {
         Ok(total) => total,
-        Error(_) => return Error(string.from("Full"))
+        Error(_) => return Error(Full)
     }
     let share = match store.sized_with(Directory, 0u64, sizes) {
         Error(short) => short.need,
@@ -286,7 +289,7 @@ fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take reque
     let need = int.saturating_add(overhead, int.saturating_add(share, 1048576u64))
     let charge = int.saturating_add(need, PLACE_TASK_BYTES)
     if charge > available {
-        return Error(string.from("Full"))
+        return Error(Full)
     }
     let job = PlaceJob(config: take config, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need)
     let run: fn(take PlaceJob[G, H, S]) -> () waits = run_place
@@ -400,14 +403,14 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
     }
     let _ = std.dir.create_dir(a.root, workdir)
     let Ok(dir) = std.dir.narrow(a.root, workdir) else {
-        list.push(mut events, Refused(take child, Spawn(string.from("workdir"))))
+        refuse_start(mut a, take child, Failed(string.from("workdir")), mut events)
         return
     }
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let root = match runner.status_root() {
         Ok(take made) => take made,
         Error(_) => {
-            list.push(mut events, Refused(take child, Spawn(string.from("Full"))));
+            refuse_start(mut a, take child, Full, mut events);
             return
         },
     }
@@ -420,7 +423,28 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
             list.push(mut a.kids, Kid(child: clone(child), stop: Some(take stop_to), status: take root, task: Some(take running), charge: charged, expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly)))
             list.push(mut events, Launched(take child, Started))
         },
-        Error(take why) => list.push(mut events, Refused(take child, Spawn(take why))),
+        Error(take why) => refuse_start(mut a, take child, take why, mut events),
+    }
+}
+
+// A serving start this launcher refuses is reported to the host as `Spawn`, and its group's
+// waiting routes are answered with `why` once the host has applied the refusal, unless the
+// host started the group again at once (§14.9 "Ends").
+fn refuse_start[T: send](mut a: Actor[T], take child: launcher.Child, take why: Refused, mut events: List[launcher.Event]) {
+    list.push(mut a.refused, (string.from(child.group.name), clone(why)))
+    list.push(mut events, Refused(take child, Spawn(refused_text(why))))
+}
+
+fn refused_text(why: Refused) -> String {
+    match why {
+        Unknown => string.from("Unknown"),
+        Exists => string.from("Exists"),
+        Full => string.from("Full"),
+        Busy => string.from("Busy"),
+        Retiring => string.from("Retiring"),
+        Denied => string.from("Denied"),
+        Failed(e) => string.from(e),
+        Stopping => string.from("Stopping"),
     }
 }
 
@@ -512,6 +536,11 @@ fn apply[T: send](mut a: Actor[T], take reqs: List[launcher.Request]) waits {
         }
     }
     platform.settle(mut a.driving, a.h)
+    while let Some((take name, take why)) = list.pop(mut a.refused) {
+        if !group_has_kid(a, name) {
+            refuse_routes(mut a, name, take why)
+        }
+    }
     answer_routes(mut a)
 }
 
@@ -638,13 +667,15 @@ fn end_of(ended: Result[runner.Ended, runner.StartError], readable: bool) -> lau
     }
 }
 
-fn start_text(e: runner.StartError) -> String {
+// What the routes waiting on a group get when its start failed: `Full` when operate's
+// sizing refused the start, as when this launcher refuses it (§14.2, §14.9 "Ends").
+fn start_refused(e: runner.StartError) -> Refused {
     match e {
-        Open(_) => string.from("open"),
-        Listen(_) => string.from("listen"),
-        Missing(what) => string.from(what),
-        Exceeds(b) => string.from(b.name),
-        Full(_) => string.from("Full"),
+        Open(_) => Failed(string.from("open")),
+        Listen(_) => Failed(string.from("listen")),
+        Missing(what) => Failed(string.from(what)),
+        Exceeds(b) => Failed(string.from(b.name)),
+        Full(_) => Full,
     }
 }
 
@@ -664,13 +695,13 @@ fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[
     a.used -= k.charge
     answer_reads(mut a, name)
     let mut events: List[launcher.Event] = list.new()
-    let mut failed: Option[String] = None
+    let mut failed: Option[Refused] = None
     if !k.ready {
         if let Error(Open(NotCurrent(Active(version, _, read)))) = ended {
             list.push(mut events, Placed(clone(k.child), PlaceCurrent(version, clone(read))))
         }
         if let Error(e) = ended {
-            failed = Some(start_text(e))
+            failed = Some(start_refused(e))
         }
     }
     let readable = !a.halting && routed(a, name)
@@ -713,7 +744,7 @@ fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[
     apply(mut a, take reqs)
     if let Some(take why) = take failed {
         if !group_has_kid(a, name) {
-            refuse_routes(mut a, name, Failed(take why))
+            refuse_routes(mut a, name, take why)
         }
     }
 }
@@ -793,7 +824,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let fwd: fn(take Forward) -> () waits = forward_host
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take host_from, to: channel.sender(me)), fwd)
     let timers = platform.driver(tasks, clock, take host_to)
-    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
+    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), refused: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
     // Hello is answered with an empty inventory, so the host starts every Dirty group and
     // every passed due time (§14.5).
     apply(mut a, take hello)

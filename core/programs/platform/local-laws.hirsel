@@ -42,16 +42,19 @@ fn start_local(parent: Dir, make: fn(take local.Supplied) -> Result[runner.Place
 }
 
 fn start_local_in(dir: Dir, take dir_name: String, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
-    let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
     // One child's charge (RUNNER-SPEC §13.4 row 7: runner.operate_bytes is what operate
     // spends): operate_bytes of the factory's own config, the Directory writer, the 1 MiB
     // main keeps and 1 MiB of slack for the child task's own bytes.
     let sized = result.unwrap(make(local.Supplied(name: string.from("a"), tasks: tasks, clock: clock, random: random, net: net)))
     let operate = result.unwrap(runner.operate_bytes(sized))
+    let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, disk_options())))
+    start_local_sized(dir, take dir_name, make, idle_ms, operate + writer + 1048576u64 + 1048576u64, clock, random, tasks, net)
+}
+
+fn start_local_sized(dir: Dir, take dir_name: String, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity], idle_ms: u64, place_bytes: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
+    let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
     let making: local.Factory[()] = local.factory(make)
     let options = disk_options()
-    let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options)))
-    let place_bytes = operate + writer + 1048576u64 + 1048576u64
     let config = local.Config(root: dir, options: take options, factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms, place_bytes: place_bytes, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
     let made = match local.local(local.doorway(), take config) {
         Ok(take made) => take made,
@@ -326,6 +329,36 @@ pub fn law_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tas
 @test
 fn test_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
     if law_local_genesis_recovers(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// §14.2, §14.9 "Ends": a start whose charge does not fit `place_bytes` is refused, and the
+// route waiting on it is answered `Full`. The place budget here is 1 MiB, below any child's
+// charge (operate_bytes, the store share, the 1 MiB main keeps and the child task's own
+// bytes), so every start of the group is refused for size. Wrong implementation: the
+// launcher reports the refusal to the host but never answers the route, which waits for a
+// child that cannot start (or it is answered with an untyped failure).
+pub fn law_local_start_full(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let mut dir_name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
+    let run = start_local_sized(dir, take dir_name, quick_place, 60000u64, 1048576u64, clock, random, tasks, net)
+    let full = match local.route(run.door, A) {
+        Error(Full) => true,
+        _ => false,
+    }
+    let never_up = match channel.try_receive(run.changes) {
+        Error(_) => true,
+        Ok(_) => false
+    }
+    end_local(parent, take run) && full && never_up
+}
+
+@test
+fn test_local_start_full(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_local_start_full(parent, clock, random, tasks, net) {
         Ok(())
     } else {
         Error(())

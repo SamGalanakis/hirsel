@@ -29,6 +29,15 @@ core@1/box/unbox
 core@1/bytebuf/append_inline
 core@1/bytebuf/freeze
 core@1/bytebuf/as_bytes
+# DECISIONS.md 2026-11-25 (driver-unit-reds-2600, store core reach).
+core@1/bytebuf/from_tail
+core@1/bytebuf/try_reserve_hint
+core@1/bytebuf/with_tail
+# DECISIONS.md 2026-11-24 (gavel 1A, MEM-29): the task-local Cell[T].
+core@1/cell/into_inner
+core@1/cell/new
+core@1/cell/replace
+core@1/cell/with
 core@1/channel/new
 core@1/channel/receive
 core@1/channel/send
@@ -38,6 +47,14 @@ core@1/channel/try_send
 core@1/channel/try_receive
 core@1/char/from_u32
 core@1/char/to_u32
+# DECISIONS.md 2026-11-25 (driver-unit-reds-2600, store core reach).
+core@1/charge/block
+core@1/charge/boxed
+core@1/charge/channel
+core@1/charge/counted
+core@1/charge/latest
+core@1/charge/seq
+core@1/charge/task
 # DECISIONS.md 2026-11-21 (std check XXH3 kernels)
 core@1/check/xxh3_short
 core@1/check/xxh3_short_inline
@@ -321,6 +338,12 @@ core@1/list/with_capacity
 # DECISIONS.md 2026-11-19 (dedup-1357 rank 10, endian words).
 core@1/list/word_be
 core@1/list/word_le
+# DECISIONS.md 2026-11-25 (driver-unit-reds-2600, store core reach).
+core@1/list/copy_from_slice
+# DECISIONS.md 2026-11-24 (gavel 1A, MEM-29): core Log[E] retired onto the
+# library core.log.Log[E: inert] over the task-local Cell[List[E]].
+core@1/core/Cell
+core@1/log/Log
 core@1/log/append
 core@1/log/finish
 core@1/log/new
@@ -485,6 +508,8 @@ core@1/core/CertFailure
 # DECISIONS.md 2026-11-17: W3d's loopback wire client and fixture listeners.
 core@1/host/connect
 core@1/host/listen
+# DECISIONS.md 2026-11-25 (driver-unit-reds-2600, store core reach).
+core@1/host/zero_extension
 # mc-units-lang, units and connections in the language (CONC-15, CONC-17).
 core@1/core/Client
 core@1/core/Inbox

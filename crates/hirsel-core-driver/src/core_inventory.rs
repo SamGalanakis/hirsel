@@ -139,33 +139,15 @@ mod tests {
     use hirsel_core_resolve::{CorpusManifest, ModuleSource, PackageManifest};
     use std::path::Path;
 
-    /// core or std as installed: each top-level source file a module.
+    /// core or std as installed, by the driver's own library discovery.
     fn installed(root: &Path, name: &str) -> PackageManifest {
-        let mut files: Vec<_> = std::fs::read_dir(root.join("core").join(name))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| p.extension().is_some_and(|x| x == "hirsel"))
-            .collect();
-        files.sort();
-        PackageManifest {
-            namespace: None,
-            package: package(name),
-            dependencies: if name == "core" {
-                vec![]
-            } else {
-                vec![package("core")]
-            },
-            sources: files
-                .into_iter()
-                .map(|file| ModuleSource {
-                    foreign: false,
-                    captured: None,
-                    modules: vec![file.file_stem().unwrap().to_string_lossy().into()],
-                    file,
-                    signatures: true,
-                })
-                .collect(),
+        let mut manifest =
+            PackageManifest::directory(&root.join("core").join(name), package(name), true)
+                .unwrap();
+        if name != "core" {
+            manifest.dependencies.push(package("core"));
         }
+        manifest
     }
 
     fn check(

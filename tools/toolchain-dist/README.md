@@ -98,10 +98,16 @@ the CRT and link-time libraries.
 
 On Rust toolchain or LLVM bumps, run
 `tools/toolchain-dist/check-repro --output /tmp/hirsel-repro` from the commit
-to qualify. It builds that commit without PGO in two fresh local checkouts
-with separate Buck2 state and keeps both bundles in the output directory.
+to qualify. It builds that commit without PGO (or with `--pgo` and `--bolt`,
+as a release is built) in two fresh local checkouts at different paths, with
+separate Buck2 state, and keeps both bundles in the output directory.
 It compares every file and reports the first differing byte offset in each
-changed file, starting at zero.
+changed file, starting at zero. It then builds the x86_64 release std with the
+first bundle at 1, 2 and 8 jobs and compares the three stores the same way,
+except each part cache's `.budget` size estimate: programs key their parts on
+the release std's bytes, so they must not depend on `HIRSEL_JOBS`.
+`check-repro --output DIR --std-jobs PREFIX` runs only that comparison, on
+an installed bundle.
 
 Prior art: Rust release packaging at rust-lang/rust
 `a7c37f9f0ee5e93396106e9de20f4a86b4154e63`,

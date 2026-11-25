@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
-"""Build HEAD twice without PGO in fresh checkouts and compare the bundles."""
+"""Build HEAD twice in fresh checkouts and compare the bundles, then build the
+release std at several job counts with the first bundle and compare those."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 CHUNK = 1024 * 1024
+# A release std is built once per target and shipped, and programs key their
+# parts on its bytes, so it must not depend on how many jobs built it.
+STD_JOBS = (1, 2, 8)
+STD_TARGET = 'x86_64-unknown-linux-gnu'
 
 
-def build(revision, checkout, output, threads):
+def build(revision, checkout, output, threads, flags):
     subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', ROOT, checkout], check=True)
     subprocess.run(['git', 'checkout', '--quiet', '--detach', revision], cwd=checkout, check=True)
     try:
         subprocess.run([checkout / 'tools/toolchain-dist/build', '--local',
-                        '--num-threads', str(threads), '--output', output],
+                        '--num-threads', str(threads), '--output', output, *flags],
                        cwd=checkout, check=True)
     finally:
         buck = checkout / '.buck2/bin/buck2'
@@ -36,9 +44,12 @@ def first_difference(left, right):
             offset += len(x)
 
 
-def compare(left, right):
-    left_files = {p.relative_to(left) for p in left.rglob('*') if p.is_file()}
-    right_files = {p.relative_to(right) for p in right.rglob('*') if p.is_file()}
+def files(root, skip=()):
+    return {p.relative_to(root) for p in root.rglob('*') if p.is_file() and p.name not in skip}
+
+
+def compare(left, right, skip=()):
+    left_files, right_files = files(left, skip), files(right, skip)
     equal = True
     for path in sorted(left_files | right_files):
         a, b = left / path, right / path
@@ -54,24 +65,63 @@ def compare(left, right):
     return equal
 
 
+def std_at(prefix, run, jobs):
+    """Build the release std from a fresh copy of `prefix` at `jobs` jobs, with
+    its own home and cache, and return the store it wrote (`release-std/`)."""
+    home = run / 'home'
+    home.mkdir(parents=True)
+    copy = run / 'prefix'
+    shutil.copytree(prefix, copy, symlinks=True)
+    env = dict(PATH=os.defpath, HOME=str(home), XDG_CACHE_HOME=str(home / 'cache'), TMPDIR=str(home),
+               HIRSEL_JOBS=str(jobs), HIRSEL_MEMORY_LIMIT='8G')
+    subprocess.run([copy / 'hirsel', 'std-product', '--store', run / 'store', '--target', STD_TARGET],
+                   cwd=run, env=env, stdout=subprocess.DEVNULL, check=True)
+    shutil.rmtree(copy)
+    return run / 'store'
+
+
+def check_std_jobs(prefix, work):
+    """The release std store at each of STD_JOBS, byte for byte. `.budget` is a
+    part cache's size estimate, not content."""
+    print(f'check-repro: building the {STD_TARGET} release std at jobs {STD_JOBS}', flush=True)
+    with ThreadPoolExecutor(len(STD_JOBS)) as pool:
+        outputs = list(pool.map(lambda jobs: std_at(prefix, work / f'std-j{jobs}', jobs), STD_JOBS))
+    equal = True
+    for jobs, other in zip(STD_JOBS[1:], outputs[1:]):
+        print(f'check-repro: release std at jobs {STD_JOBS[0]} against jobs {jobs}', flush=True)
+        equal &= compare(outputs[0], other, skip=('.budget',))
+    return equal
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path, required=True, help='fresh directory for both bundles')
+    parser.add_argument('--output', type=Path, required=True, help='fresh directory for the outputs')
     parser.add_argument('--num-threads', type=int, default=2, help='Buck2 execution threads per build')
+    parser.add_argument('--pgo', action='store_true', help='build both compilers with PGO')
+    parser.add_argument('--bolt', action='store_true', help='rewrite both compilers with BOLT')
+    parser.add_argument('--std-jobs', type=Path, metavar='PREFIX',
+                        help='only build the release std of this installed bundle at each job count')
     args = parser.parse_args()
     output = args.output.resolve()
     if output.is_relative_to(ROOT) or output.exists():
         parser.error('output must be a fresh directory outside the checkout')
     if args.num_threads < 1:
         parser.error('--num-threads must be positive')
-    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     output.mkdir(parents=True)
-    print(f'check-repro: building {revision} twice without PGO', flush=True)
+    if args.std_jobs is not None:
+        return 0 if check_std_jobs(args.std_jobs.resolve(), output) else 1
+    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    flags = ['--pgo'] * args.pgo + ['--bolt'] * args.bolt
+    print(f'check-repro: building {revision} twice {" ".join(flags) or "without PGO"}', flush=True)
     left, right = output / 'first', output / 'second'
     with tempfile.TemporaryDirectory(prefix='hirsel-repro-', dir=output) as scratch:
-        build(revision, Path(scratch) / 'checkout', left, args.num_threads)
-        build(revision, Path(scratch) / 'second-checkout', right, args.num_threads)
-    return 0 if compare(left, right) else 1
+        # The second checkout's path differs in length too, so an embedded path shows.
+        build(revision, Path(scratch) / 'checkout', left, args.num_threads, flags)
+        build(revision, Path(scratch) / 'second-checkout', right, args.num_threads, flags)
+    equal = compare(left, right)
+    with tempfile.TemporaryDirectory(prefix='hirsel-std-jobs-', dir=output) as scratch:
+        equal &= check_std_jobs(left, Path(scratch))
+    return 0 if equal else 1
 
 
 if __name__ == '__main__':

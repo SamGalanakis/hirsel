@@ -1388,8 +1388,13 @@ void tail_part(TargetMachine &tm, Tail &t, size_t machine_text_size) {
 // whether it changed after O3, and the linkage the part does not keep: `find`
 // answers 1 with the part after the
 // tail when the caller holds it, the body is restored from it, and otherwise
-// the tail runs, on one of `jobs` threads from the part's bitcode when `jobs`
-// is above 1 or else in place, and `keep` gets the part after it. `find`
+// the tail runs from the part's bitcode on one of `jobs` threads (one when
+// `jobs` is 0 or 1), the body is restored from the part after it in the same
+// way, and `keep` gets that part. So a body goes through the same bitcode
+// round trip whatever `jobs` is: a body run in place shares its debug
+// locations and alias scopes with the module's other bodies, while a
+// restored one brings its own, and the lent bodies a library writes from the
+// module take that difference. `find`
 // answers 2 when the caller does not hold the tail and wants the part's
 // bitcode at the cut with it. A module that cannot be split is not keyed: a
 // definition the parts do not hold may reach what no part carries.
@@ -1434,7 +1439,6 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     std::string machine_key = keyed ? machine_text(tm) : "";
     StringMap<std::string> sets = keyed ? asm_lines(m) : StringMap<std::string>();
     void *tail = hirsel_llvm_tail_open(module, machine);
-    const bool parallel = keyed && jobs > 1;
     // Keys `t`'s part as the module is now and asks the caller for its tail.
     auto ask = [&](Tail &t) {
         t.key = machine_key;
@@ -1449,7 +1453,7 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
             Module &p = *part;
             t.ir = hirsel_key::module_key(p);
             found = find(context, t.key.data(), t.key.size(), t.ir.data(), t.ir.size(), &held, &held_len);
-            if (found == 2 || (found != 1 && parallel)) bitcode(p, t.input);
+            if (found != 1) bitcode(p, t.input);
             for (const GlobalValue &g : p.global_values())
                 if (g.getName() != t.f->getName()) {
                     // A global the part cannot name back is always stale.
@@ -1474,7 +1478,7 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     for (Tail &t : tails) {
         if (keyed && movable(*t.f)) ask(t);
     }
-    if (parallel) {
+    {
         std::vector<size_t> missed;
         for (size_t k = 0; k < tails.size(); ++k)
             if (tails[k].kind == Tail::Missed) missed.push_back(k);
@@ -1552,7 +1556,7 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
             if (!restored(t)) run_kept(t);
             continue;
         }
-        if (parallel && !t.live && restored(t)) {
+        if (!t.live && restored(t)) {
             keep(context, t.key.data(), t.key.size(), t.ir.data(), t.ir.size(), (const uint8_t *)t.input.data(),
                  t.witness ? t.input.size() : 0, (const uint8_t *)t.value.data(), t.value.size());
             continue;

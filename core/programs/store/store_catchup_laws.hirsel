@@ -18,7 +18,9 @@
 // chunks of OLD's upkeep under the lease with a write between them to a row
 // the first chunk indexed: the round ships the chunks as STEPS, the third
 // 'u' finishes OLD's build, and after every round the child's copy of OLD is
-// OLD at the cut, catalog and by_v's entries alike.
+// OLD at the cut, catalog and by_v's entries alike. In the untouched case
+// 'r' is one chunk of a rebuild OLD began under the lease: NEW leaves by_v
+// unchanged, so every round carries the moved record through follow_moves.
 //
 // AP21 at the install reads only the packs the install cut writes (C-7's
 // settled packs), and every cut under the export lease reads back the packs it
@@ -95,6 +97,38 @@ fn lcu_stage(source: Preparation, tasks: Tasks, unique: bool) -> Result[(StagedM
     let _ = finish(mut d, take other)?
     let staged = finish_export_declaration(source, take d)?
     Ok((take staged, by_v.id, by_id))
+}
+
+// The untouched release: rows is only redeclared, while by_v stays an
+// unchanged index of the small `other` table. No range of by_v is shipped.
+fn lcu_stage_untouched(source: Preparation, tasks: Tasks) -> Result[(StagedMigration, u32), Error] waits {
+    let key = std.codec.key_u64()
+    let mut d = declare_export(source, tasks, None)?
+    let rows = declare_table(mut d, "rows", key, std.codec.of_u64())?
+    let _ = finish(mut d, take rows)?
+    let mut other = declare_table(mut d, "other", key, std.codec.of_u64())?
+    let by_v = index(mut d, mut other, "by_v", Many, code.describe(lix_keys), key)?
+    let _ = finish(mut d, take other)?
+    let staged = finish_export_declaration(source, take d)?
+    Ok((take staged, by_v.id))
+}
+
+fn lcu_stage_case(source: Preparation, tasks: Tasks, unique: bool, untouched: bool) -> Result[(StagedMigration, u32, u32), Error] waits {
+    if untouched {
+        let (take staged, by_v) = lcu_stage_untouched(source, tasks)?
+        return Ok((take staged, by_v, 0u32))
+    }
+    lcu_stage(source, tasks, unique)
+}
+
+// The untouched index's twelve rows. This model never changes: the rounds
+// write rows, not other, so the index oracle stays independent of them.
+fn lcu_untouched_model() -> List[Option[u64]] {
+    let mut model: List[Option[u64]] = list.new()
+    for k in 0u64 .. 12 {
+        list.push(mut model, Some(3 * k))
+    }
+    take model
 }
 
 fn lcu_swap(mut db: Db, t: Table[u64, u64], a: u64, b: u64, mut model: List[Option[u64]]) -> Result[(), Error] waits {
@@ -208,6 +242,52 @@ fn lcu_no_import_pin(db: Db) -> bool {
     })
 }
 
+// The rows by_v serves, in index order, from the law's row model. A row
+// appears once for each distinct extracted key, as a Many index does.
+fn lcu_indexed_expected(model: List[Option[u64]]) -> Result[List[(u64, u64)], Error] {
+    let mut out: List[(u64, u64)] = list.new()
+    for j in 0u64 .. 7 {
+        for k in 0u64 .. list.len(model) {
+            let Some(v) = model[k] else {
+                continue
+            }
+            let keys = capacity(lix_keys(k, v))?
+            if keys[0] == j || keys[1] == j {
+                list.push(mut out, (k, v))
+            }
+        }
+    }
+    Ok(take out)
+}
+
+// Read through the index, not its raw entries, and compare the collection's
+// published row count and charge with the model. A by_v entry key is the
+// four-byte collection prefix plus two u64 keys (20 bytes, charged as 24),
+// and its unit payload is empty, so STORE-SPEC's row charge is 62 + 24 = 86.
+fn lcu_untouched_check(db: Db, ix: Index[u64, u64, u64, ()], by_v: u32) -> Result[(), DeployError] waits {
+    let expected = deploy_result(lcu_indexed_expected(lcu_untouched_model()))?
+    let read_handle = deploy_result(reader(db, 0u64))?
+    let mut rows = deploy_result(find(read_handle, snapshot(db), ix, Unbounded, Unbounded))?
+    let mut found: List[(u64, u64)] = list.new()
+    while let Some((k, v)) = deploy_result(next(read_handle, mut rows))? {
+        list.push(mut found, (k, v))
+    }
+    if found != expected {
+        fail("L-IX catch-up: a query through the followed index differs from the model")
+    }
+    let catalog = deploy_result(catalog_entries(snapshot(db)))?
+    let expected_charge = 86 * list.len(expected)
+    for item in catalog {
+        if item.id == by_v {
+            if item.rows != list.len(expected) || item.charge != expected_charge {
+                fail("L-IX catch-up: the followed index's rows or charge differ from the model")
+            }
+            return Ok(())
+        }
+    }
+    fail("L-IX catch-up: the followed index is missing from the catalog")
+}
+
 fn lcu_check(db: Db, model: List[Option[u64]], by_v: u32, by_id: u32, unique: bool) -> Result[(), DeployError] {
     if !deploy_result(lcu_public(db, by_v))? || deploy_result(lix_entries(db, by_v))? != deploy_result(lix_expected(by_v, model))? {
         fail("L-IX catch-up: by_v differs from a next_value extraction of OLD's rows")
@@ -278,9 +358,9 @@ fn lcu_mirrors(db: Db, source: Preparation, by_v: u32) -> Result[(), DeployError
     Ok(())
 }
 
-fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String, unique: bool, backfilling: bool, duplicate: bool, damage: LcuDamage) -> Result[(), DeployError] waits {
+fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String, unique: bool, backfilling: bool, duplicate: bool, untouched: bool, damage: LcuDamage) -> Result[(), DeployError] waits {
     let building = std.list.any(string.as_bytes(rounds), fn(b: u8) -> bool {
-        b == 117u8
+        b == 117u8 || b == 114u8
     })
     let directory = disk_test_directory(d)
     let scratch = disk_test_directory(d)
@@ -309,35 +389,67 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
             None
         })
     }
-    if backfilling {
-        // OLD's own by_v, left Backfilling part way: the child resumes it
-        // under the same id and ships the whole range.
+    let mut moved_ix: Option[Index[u64, u64, u64, ()]] = None
+    if backfilling || untouched {
+        // OLD's own by_v. The backfilling case leaves rows's index
+        // Backfilling part way, so the child resumes it under the same id and
+        // ships the whole range. The untouched case keeps a small Public index
+        // on other; rows still gives the store enough resident bytes for a
+        // small catalog move to catch up rather than renew.
+        if untouched {
+            let other_live = deploy_result(table(mut db, "other", key, std.codec.of_u64()))?
+            let filled_other = deploy_result(run(mut db, None, copy_env(other_live), fn(mut tx: Tx, other_table: Table[u64, u64]) -> Result[(), Error] {
+                for k in 0u64 .. 12 {
+                    put(mut tx, other_table, k, 3 * k)?
+                }
+                Ok(())
+            }))?
+            let Committed(_) = take filled_other else {
+                return Error(Store(MigrationFault))
+            }
+        }
         let mut declaration = deploy_result(declare(db, Migrate))?
         let mut rows_decl = deploy_result(declare_table(mut declaration, "rows", key, std.codec.of_u64()))?
-        let ix = deploy_result(index(mut declaration, mut rows_decl, "by_v", Many, code.describe(lix_keys), key))?
-        let _ = deploy_result(finish(mut declaration, take rows_decl))?
-        let other = deploy_result(declare_table(mut declaration, "other", key, std.codec.of_u64()))?
-        let _ = deploy_result(finish(mut declaration, take other))?
-        let _ = deploy_result(seal(mut db, take declaration))?
-        deploy_result(rebuild_index(mut db, ix))?
-        let _ = deploy_result(index_build_step(mut db, 1000))?
-        if building {
-            let _ = deploy_result(index_build_step(mut db, 2990))?
+        if backfilling {
+            let ix = deploy_result(index(mut declaration, mut rows_decl, "by_v", Many, code.describe(lix_keys), key))?
+            let _ = deploy_result(finish(mut declaration, take rows_decl))?
+            let other = deploy_result(declare_table(mut declaration, "other", key, std.codec.of_u64()))?
+            let _ = deploy_result(finish(mut declaration, take other))?
+            let _ = deploy_result(seal(mut db, take declaration))?
+            deploy_result(rebuild_index(mut db, ix))?
+            let _ = deploy_result(index_build_step(mut db, 1000))?
+            if building {
+                let _ = deploy_result(index_build_step(mut db, 2990))?
+            }
+        } else {
+            let _ = deploy_result(finish(mut declaration, take rows_decl))?
+            let mut other_decl = deploy_result(declare_table(mut declaration, "other", key, std.codec.of_u64()))?
+            let ix = deploy_result(index(mut declaration, mut other_decl, "by_v", Many, code.describe(lix_keys), key))?
+            let _ = deploy_result(finish(mut declaration, take other_decl))?
+            let _ = deploy_result(seal(mut db, take declaration))?
+            moved_ix = Some(ix)
         }
     }
     let _ = deploy_result(checkpoint(mut db))?
     let attempt = install_fixture_bytes(16u64, 7u8)
     let first = begin_export_copy(mut db, scratch, deploy_result(copied(attempt))?, 1u64)?
     let mut exported = export_copy(take first)?
-    if building {
+    if building && !untouched {
         // A chunk while the child prepares, before PREPARED is kept: the
         // first round ships it and rebases the kept delta past it.
         let _ = deploy_result(index_build_step(mut db, 2))?
     }
     let mut source = open_export(exported.dir, c, attempt, options)?
-    let (take initial_staged, by_v, by_id) = deploy_result(lcu_stage(source, tasks, unique))?
+    let (take initial_staged, by_v, by_id) = deploy_result(lcu_stage_case(source, tasks, unique, untouched))?
     let mut staged = take initial_staged
     let mut digest = lcu_ship(mut db, mut source, staged, exported.dir)?
+    if untouched {
+        let held_ix: Option[Index[u64, u64, u64, ()]] = clone(moved_ix)
+        let Some(ix) = held_ix else {
+            fail("L-IX catch-up: the untouched case declared by_v")
+        }
+        deploy_result(rebuild_index(mut db, ix))?
+    }
     let mut state = seed
     let mut next_value = 1000000u64
     let mut built = 0u64
@@ -349,6 +461,11 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
             if built == 3 && !deploy_result(lcu_public(db, by_v))? {
                 fail("L-IX catch-up: the third build round finishes OLD's by_v")
             }
+        } else if code_byte == 114u8 {
+            let Some(_) = deploy_result(index_build_step(mut db, 5))? else {
+                fail("L-IX catch-up: an untouched round builds one chunk")
+            }
+            built += 1
         } else {
             deploy_result(lcu_round(mut db, t, code_byte, state, mut next_value, mut model))?
         }
@@ -379,7 +496,7 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
                 }
                 exported = export_copy(take job)?
                 source = open_export(exported.dir, c, attempt, options)?
-                let (take renewed, _, _) = deploy_result(lcu_stage(source, tasks, unique))?
+                let (take renewed, _, _) = deploy_result(lcu_stage_case(source, tasks, unique, untouched))?
                 staged = take renewed
                 digest = lcu_ship(mut db, mut source, staged, exported.dir)?
             },
@@ -457,25 +574,51 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
         }
     }
     let _ = crash_apply(mut db, attempt, digest)?
-    lcu_check(db, model, by_v, by_id, unique)?
+    lcu_check(db, if untouched {
+        lcu_untouched_model()
+    } else {
+        clone(model)
+    }, by_v, by_id, unique)?
+    if untouched {
+        if built != 3 || !deploy_result(lcu_public(db, by_v))? {
+            fail("L-IX catch-up: three untouched rounds finish OLD's by_v")
+        }
+        let held_ix: Option[Index[u64, u64, u64, ()]] = clone(moved_ix)
+        let Some(ix) = held_ix else {
+            fail("L-IX catch-up: the untouched case declared by_v")
+        }
+        lcu_untouched_check(db, ix, by_v)?
+    }
     deploy_result(close(take db))?
     let reopened = deploy_result(open(tasks, directory, c, r, options))?
-    lcu_check(reopened, model, by_v, by_id, unique)?
+    lcu_check(reopened, if untouched {
+        lcu_untouched_model()
+    } else {
+        model
+    }, by_v, by_id, unique)?
+    if untouched {
+        let held_ix: Option[Index[u64, u64, u64, ()]] = clone(moved_ix)
+        let Some(ix) = held_ix else {
+            fail("L-IX catch-up: the untouched case declared by_v")
+        }
+        lcu_untouched_check(reopened, ix, by_v)?
+    }
     deploy_result(close(take reopened))
 }
 
 @test
 fn test_index_catch_up_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
     for seed in 0u64 .. 3 {
-        lcu_case(d, c, r, tasks, seed * 7919 + 1, "ss", false, false, false, Undamaged)?
-        lcu_case(d, c, r, tasks, seed * 7919 + 2, "scs", true, false, false, Undamaged)?
-        lcu_case(d, c, r, tasks, seed * 7919 + 3, "swbs", true, false, false, Undamaged)?
-        lcu_case(d, c, r, tasks, seed * 7919 + 4, "cs", false, true, false, Undamaged)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 1, "ss", false, false, false, false, Undamaged)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 2, "scs", true, false, false, false, Undamaged)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 3, "swbs", true, false, false, false, Undamaged)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 4, "cs", false, true, false, false, Undamaged)?
     }
-    lcu_case(d, c, r, tasks, 7, "uuus", false, true, false, Undamaged)?
-    lcu_case(d, c, r, tasks, 5, "s", true, false, true, Undamaged)?
-    lcu_case(d, c, r, tasks, 6, "sc", false, false, false, SettledLeaf)?
-    lcu_case(d, c, r, tasks, 7, "s", true, false, false, CheckpointPack)
+    lcu_case(d, c, r, tasks, 7, "uuus", false, true, false, false, Undamaged)?
+    lcu_case(d, c, r, tasks, 8, "rrrs", false, false, false, true, Undamaged)?
+    lcu_case(d, c, r, tasks, 5, "s", true, false, true, false, Undamaged)?
+    lcu_case(d, c, r, tasks, 6, "sc", false, false, false, false, SettledLeaf)?
+    lcu_case(d, c, r, tasks, 7, "s", true, false, false, false, CheckpointPack)
 }
 
 // The "catch-up" crash scenario (store_crash_tests.py). The write phase keeps

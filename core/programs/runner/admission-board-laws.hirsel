@@ -26,7 +26,7 @@ fn repair_board(mark: u8) -> List[SubRow] {
 pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool {
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let service: Service[WireSession[(), ()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), string.new())
+    let service: Service[WireSession[()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), string.new())
     let Service(context: take initial, ..) = take service
     let mut owner = take initial
     let mut work = wire_work()
@@ -107,7 +107,7 @@ fn held_quiet(from: Receiver[PubIn]) -> bool {
 pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool {
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let service: Service[WireSession[(), ()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), string.new())
+    let service: Service[WireSession[()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), string.new())
     let Service(context: take initial, ..) = take service
     let mut owner = take initial
     let mut work = wire_work()
@@ -186,7 +186,7 @@ fn repair_offer(mut b: Board[(), Qh], mut joined: List[Joiner]) -> u64 waits {
     offered
 }
 
-fn owner_takes(mut owner: WireSession[(), ()], mut work: WireWork, inbox: Receiver[WireEvent]) -> bool {
+fn owner_takes(mut owner: WireSession[()], mut work: WireWork, inbox: Receiver[WireEvent]) -> bool {
     match channel.try_receive(inbox) {
         Ok(WireEvent(e: FromRunner(take notice))) => match wire_step(mut owner, mut work, WRunner(take notice)) {
             Ok(_) => true,
@@ -216,7 +216,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let _ = at_base_generation(mut b, 7u64, 1u32, 1u64, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let service: Service[WireSession[(), ()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), string.new())
+    let service: Service[WireSession[()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), string.new())
     let Service(context: take initial, ..) = take service
     let mut owner = take initial
     let mut work = wire_work()
@@ -296,7 +296,7 @@ fn burst_drain(take d: BurstDrain) -> Result[(), ()] waits {
 pub fn law_join_waits(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let service: Service[WireSession[(), ()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), string.new())
+    let service: Service[WireSession[()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), string.new())
     let Service(context: take initial, ..) = take service
     let mut owner = take initial
     let mut work = wire_work()

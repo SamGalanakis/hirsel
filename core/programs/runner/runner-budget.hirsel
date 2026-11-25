@@ -16,12 +16,6 @@ fn add_place_bytes(a: u64, b: u64) -> Result[u64, Capacity] {
     }
 }
 
-fn place_grant_bytes[G: send, H: shareable + inert + send, S: send](config: Option[Grants[G, H, S]]) -> u64 {
-    match config {
-        Some(c) => c.grant_bytes,
-        None => 0u64,
-    }
-}
 
 fn place_head_bytes(n_place: u64, n_publisher: u64, grant: u64) -> Result[u64, Capacity] {
     let names = add_place_bytes(n_place, publisher_bytes(n_place, n_publisher)?)?
@@ -36,17 +30,20 @@ fn publisher_bytes(n_place: u64, n_publisher: u64) -> Result[u64, Capacity] {
 }
 
 pub fn serving_bytes(c: WireConfig, owners: u64, n_place: u64) -> Result[u64, Capacity] {
-    room_serving_bytes(c, owners, n_place, no_rooms())
+    room_serving_bytes(c, owners, n_place, no_rooms(), 0u64)
 }
 
-fn room_serving_bytes(c: WireConfig, owners: u64, n_place: u64, rooms: RoomPlan) -> Result[u64, Capacity] {
+fn room_serving_bytes(c: WireConfig, owners: u64, n_place: u64, rooms: RoomPlan, bind_term: u64) -> Result[u64, Capacity] {
     if c.n_granted > WIRE_SESSION_CEILING {
         return Error(Capacity(requested: c.n_granted, available: WIRE_SESSION_CEILING))
     }
     if owners > WIRE_OWNER_LIMIT {
         return Error(Capacity(requested: owners, available: WIRE_OWNER_LIMIT))
     }
-    let floors = owners * (WIRE_OWNER_FLOOR + c.n_granted + rooms.owner_bytes)
+    if bind_term > WIRE_SESSION_CEILING {
+        return Error(Capacity(requested: bind_term, available: WIRE_SESSION_CEILING))
+    }
+    let floors = owners * (WIRE_OWNER_FLOOR + c.n_granted + bind_term + rooms.owner_bytes)
     // Use less supervisor room when a caller deliberately serves fewer owners.
     let metadata = 2097152u64 + owners * 6711u64
     let overhead = if metadata < WIRE_OVERHEAD {
@@ -63,7 +60,7 @@ fn room_serving_bytes(c: WireConfig, owners: u64, n_place: u64, rooms: RoomPlan)
     add_place_bytes(pooled, rooms.relay_bytes)
 }
 
-pub fn operate_bytes[G: send, H: shareable + inert + send, S: send, B: shareable + send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
+pub fn operate_bytes[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S]) -> Result[u64, Capacity] {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit {
         launch.n_place
@@ -89,10 +86,10 @@ fn place_reservations[G: send, H: shareable + inert + send](place: StaticFn[fn(m
     Ok((claims, rooms))
 }
 
-fn operate_reservation[G: send, H: shareable + inert + send, S: send, B: shareable + send](p: PlaceConfig[G, H, S, B], n_place: u64, claims: u64, rooms: RoomPlan) -> Result[u64, Capacity] {
-    let head = place_head_bytes(n_place, p.n_publisher, place_grant_bytes(p.grants))?
+fn operate_reservation[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], n_place: u64, claims: u64, rooms: RoomPlan) -> Result[u64, Capacity] {
+    let head = place_head_bytes(n_place, p.n_publisher, place_grant_bytes(p.grants)?)?
     let funded_head = add_place_bytes(head, claims)?
-    let serving = room_serving_bytes(p.session, p.max_sessions, n_place, rooms)?
+    let serving = room_serving_bytes(p.session, p.max_sessions, n_place, rooms, wire_owner_bind_bytes(p.wire))?
     let tasks = add_place_bytes(funded_head, serving)?
     let hosted = add_place_bytes(tasks, host_control_bytes(n_place)?)?
     add_place_bytes(hosted, OPERATE_OWN_BYTES)
@@ -107,7 +104,7 @@ fn host_control_bytes(n_place: u64) -> Result[u64, Capacity] {
     add_place_bytes(pair, n_place)
 }
 
-fn place_store[G: send, H: shareable + inert + send, S: send, B: shareable + send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {
+fn place_store[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit {
         launch.n_place

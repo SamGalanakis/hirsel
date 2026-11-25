@@ -1,26 +1,38 @@
-type BindingSeed[B: shareable + send]: send = CopiedSeed(B) | SnapshotSeed(Arc[B])
-
-type BindingJob[B: shareable + send]: send {
-    seed: BindingSeed[B],
-    bind: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits],
+// One bind's job: the binding, a G the bind mint made for this bind alone, and the
+// credential. The G is dropped when the binding's task ends (RUNNER-SPEC v2.70 F4).
+type BindingJob[G: send]: send {
+    grant: G,
+    bind: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits],
     credential: Bytes,
     steps: u64
 }
 
-fn binding_job[B: shareable + send](supplied: Option[Wire[B]], take credential: Option[Bytes]) -> Option[(BindingJob[B], u64)] {
-    let Some(w) = view supplied else {
+// A bind before its mint: the bind mint's inbox and the rest of the job.
+type BindAsk[G: send]: send {
+    to: Sender[MintRequest[(), G]],
+    bind: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits],
+    credential: Bytes,
+    steps: u64,
+    allowance: u64
+}
+
+fn bind_ask[G: send](supplied: Option[BindGrant[G]], take credential: Option[Bytes]) -> Option[BindAsk[G]] {
+    let Some(b) = view supplied else {
         return None
     }
     let raw = match take credential {
         Some(take bytes_in) => take bytes_in,
         None => list.new()
     }
-    let seed = match w.seed {
-        PlainSeed(value, duplicate) => CopiedSeed(duplicate(value)),
-        PublishedSeed(handle) => SnapshotSeed(latest.read(handle)),
-    }
-    let job = BindingJob(seed: take seed, bind: w.bind, credential: take raw, steps: w.bind_steps)
-    Some((take job, w.bind_bytes))
+    Some(BindAsk(to: channel.sender(b.to), bind: b.wire.bind, credential: take raw, steps: b.wire.bind_steps, allowance: b.wire.bind_bytes))
+}
+
+// The bind mint's G for this bind, and the job that owns it. A failed mint is
+// not a credential failure, and the binding does not run (RUNNER-SPEC v2.70 F5).
+fn minted_binding[G: send](take ask: BindAsk[G]) -> Result[(BindingJob[G], u64), Fault] waits {
+    let BindAsk(to: take to, bind: bind_app, credential: take credential, steps: steps, allowance: allowance) = take ask
+    let made = ask_mint(to, ())?
+    Ok((BindingJob(grant: take made, bind: bind_app, credential: take credential, steps: steps), allowance))
 }
 
 fn anonymous_caller(random: Random) -> Option[Caller] {
@@ -41,12 +53,9 @@ fn unexpired(clock: Clock, take given: Result[BoundCaller, BindRefusal]) -> Resu
     Ok(take b)
 }
 
-fn run_binding[B: shareable + send](take job: BindingJob[B]) -> Result[BoundCaller, BindRefusal] waits {
-    let BindingJob(seed: take seed, bind: bind_app, credential: take credential, steps: steps) = take job
-    match seed {
-        CopiedSeed(value) => invoke_binding(bind_app, value, credential, steps),
-        SnapshotSeed(snapshot) => invoke_binding(bind_app, snapshot, credential, steps),
-    }
+fn run_binding[G: send](take job: BindingJob[G]) -> Result[BoundCaller, BindRefusal] waits {
+    let BindingJob(grant: take made, bind: bind_app, credential: take credential, steps: steps) = take job
+    invoke_binding(bind_app, made, credential, steps)
 }
 
 fn invoke_binding[B](bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits], seed: B, credential: Bytes, steps: u64) -> Result[BoundCaller, BindRefusal] waits {
@@ -61,14 +70,15 @@ fn invoke_binding[B](bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, Bind
     }
 }
 
-// A front with a plain wire seed applies the same bound and expiry rules
-// before it opens a private session.
-pub fn bind_credential[B: plain + send](tasks: Tasks, clock: Clock, seed: B, bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits], take credential: Bytes, bytes_budget: u64, steps: u64) -> Result[BoundCaller, BindRefusal] waits {
-    unexpired(clock, bound_caller(tasks, BindingJob(seed: CopiedSeed(seed), bind: bind_app, credential: take credential, steps: steps), bytes_budget))
+// A front outside `operate` makes its own G for each bind and applies the same
+// bound and expiry rules before it opens a private session. The G is dropped
+// when the bind ends.
+pub fn bind_credential[G: send](tasks: Tasks, clock: Clock, take grant: G, bind_app: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits], take credential: Bytes, bytes_budget: u64, steps: u64) -> Result[BoundCaller, BindRefusal] waits {
+    unexpired(clock, bound_caller(tasks, BindingJob(grant: take grant, bind: bind_app, credential: take credential, steps: steps), bytes_budget))
 }
 
-fn bound_caller[B: shareable + send](tasks: Tasks, take job: BindingJob[B], allowance: u64) -> Result[BoundCaller, BindRefusal] waits {
-    let run: fn(take BindingJob[B]) -> Result[BoundCaller, BindRefusal] waits = run_binding
+fn bound_caller[G: send](tasks: Tasks, take job: BindingJob[G], allowance: u64) -> Result[BoundCaller, BindRefusal] waits {
+    let run: fn(take BindingJob[G]) -> Result[BoundCaller, BindRefusal] waits = run_binding
     let handle = match task.try_spawn(tasks, bytes allowance, take job, run) {
         Ok(take child) => take child,
         Error(_) => return Error(Rejected),
@@ -270,7 +280,7 @@ fn owned_launch_target(target: LaunchBytes) -> String {
     result.unwrap(string.from_utf8(launch_bytes(target)))
 }
 
-pub type HttpBindError: key = RejectedCredential | BindingUnavailable | BindingDeadline | BindingCapacity
+pub type HttpBindError: send = RejectedCredential | BindingUnavailable | BindingDeadline | BindingCapacity | BindMintFailed(Fault)
 
 type HttpBindingResult: send = Bound(Result[BoundCaller, BindRefusal]) | BindingExpired
 
@@ -283,12 +293,12 @@ resource type BindingCompletion: send {
     }
 }
 
-type HttpBindingJob[B: shareable + send]: send {
-    app: BindingJob[B],
+type HttpBindingJob[G: send]: send {
+    app: BindingJob[G],
     completion: BindingCompletion
 }
 
-fn run_http_binding[B: shareable + send](take job: HttpBindingJob[B]) -> () waits {
+fn run_http_binding[G: send](take job: HttpBindingJob[G]) -> () waits {
     let HttpBindingJob(app: take app, completion: take done) = take job
     let mut completion = take done
     let caller = run_binding(take app)
@@ -296,21 +306,24 @@ fn run_http_binding[B: shareable + send](take job: HttpBindingJob[B]) -> () wait
     completion.sent = true
 }
 
-pub fn bind_http[B: shareable + send](supplied: Option[Wire[B]], take credential: Option[Bytes], take entries: List[Bytes], random: Random, clock: Clock, tasks: Tasks, deadline: u64, budget: u64, arg_max: u64) -> Result[Admitted, HttpBindError] waits {
+pub fn bind_http[G: send](supplied: Option[BindGrant[G]], take credential: Option[Bytes], take entries: List[Bytes], random: Random, clock: Clock, tasks: Tasks, deadline: u64, budget: u64, arg_max: u64) -> Result[Admitted, HttpBindError] waits {
     let arrived = host.mono_ns(clock)
     if arrived >= deadline {
         return Error(BindingDeadline)
     }
-    let binding = binding_job(supplied, take credential)
-    let Some((take app, allowance)) = take binding else {
+    let Some(take ask) = bind_ask(supplied, take credential) else {
         let caller = option.unwrap(anonymous_caller(random))
         return Ok(admitted(take caller, None, take entries, arrived, arrived, budget, arg_max))
+    }
+    let (take app, allowance) = match minted_binding(take ask) {
+        Ok(take made) => take made,
+        Error(take fault) => return Error(BindMintFailed(take fault)),
     }
     let (to, from): (Sender[HttpBindingResult], Receiver[HttpBindingResult]) = channel.new(1u64)
     let completion = BindingCompletion(to: channel.sender(to), sent: false) ?=> |(_, _)| BindingCapacity
     let alarm = std.clock.alarm(tasks, clock, deadline, to, BindingExpired)
     let job = HttpBindingJob(app: take app, completion: take completion)
-    let run: fn(take HttpBindingJob[B]) -> () waits = run_http_binding
+    let run: fn(take HttpBindingJob[G]) -> () waits = run_http_binding
     let child = task.try_spawn(tasks, bytes allowance, take job, run) ?=> |(_, _)| BindingCapacity
     let answer = channel.receive(from)
     let now = host.mono_ns(clock)
@@ -472,18 +485,23 @@ fn stream_time(head: Sender[HeadInput]) -> Option[StreamTime] waits {
     })
 }
 
-type WireHello[B: shareable + send]: send {
-    binding: Option[(BindingJob[B], u64)],
+type WireHello[G: send]: send {
+    binding: Option[BindAsk[G]],
     anonymous: Caller,
     tasks: Tasks,
     to: Sender[WireEvent],
     head: WireHead
 }
 
-fn wire_bind_hello[B: shareable + send](take job: WireHello[B]) -> () waits {
+fn wire_bind_hello[G: send](take job: WireHello[G]) -> () waits {
     let WireHello(binding: take binding, anonymous: take anonymous, tasks: tasks, to: take to, head: take head) = take job
     let identity = match take binding {
-        Some((take claim_job, allowance)) => bound_caller(tasks, take claim_job, allowance),
+        // A failed bind mint closes 1013, never 1008 (RUNNER-SPEC v2.70 F5). The
+        // binding's task owns the G, so it is dropped before HelloBound is sent.
+        Some(take ask) => match minted_binding(take ask) {
+            Ok((take bind_job, allowance)) => bound_caller(tasks, take bind_job, allowance),
+            Error(_) => Error(Unavailable),
+        },
         None => Ok(BoundCaller(caller: take anonymous, expires_at_ms: None)),
     }
     let sample = match identity {
@@ -504,39 +522,51 @@ pub type BoundCaller: send {
 
 pub type BindRefusal: codec + send = Rejected | Unavailable
 
-// A wire only binds: its seed reaches the binding and nothing else. Granted
-// entries take their G from the place's `Grants` (RUNNER-SPEC v2.67).
-pub opaque type Wire[B: shareable + send]: send {
-    seed: WireSeed[B],
-    bind: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits],
+// A wire only binds. Its binding takes a view of a G that the place's bind
+// mint makes for each bind (RUNNER-SPEC v2.70 F4).
+pub opaque type Wire[G: send]: send {
+    bind: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits],
     bind_bytes: u64,
     bind_steps: u64,
 }
 
-type WireSeed[B: shareable + send]: send = PlainSeed(B, fn(B) -> B) | PublishedSeed(Latest[B])
-
-fn copy_plain[B: plain](b: B) -> B {
-    b
+pub fn wire[G: send](bind_app: StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits], bind_bytes: u64, bind_steps: u64) -> Wire[G] {
+    Wire(bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
 }
 
-pub fn wire[B: plain + send](seed: B, bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits], bind_bytes: u64, bind_steps: u64) -> Wire[B] {
-    let duplicate: fn(B) -> B = copy_plain
-    Wire(seed: PlainSeed(seed, duplicate), bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
-}
-
-pub fn wire_bind[B: shareable + send](take seed: Latest[B], bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits], bind_bytes: u64, bind_steps: u64) -> Wire[B] {
-    Wire(seed: PublishedSeed(take seed), bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
-}
-
-fn copy_wire[B: shareable + send](supplied: Option[Wire[B]]) -> Option[Wire[B]] {
+// A session owner's room for its hello's bind child: the child's 4096 plus the
+// wire's bind_bytes, apart from n_granted (granted calls) and the room term.
+pub fn bind_owner_bytes[G: send](supplied: Option[BindGrant[G]]) -> u64 {
     match supplied {
-        Some(w) => {
-            let seed = match w.seed {
-                PlainSeed(value, duplicate) => PlainSeed(duplicate(value), duplicate),
-                PublishedSeed(handle) => PublishedSeed(latest.handle(handle)),
-            }
-            Some(Wire(seed: take seed, bind: w.bind, bind_bytes: w.bind_bytes, bind_steps: w.bind_steps))
-        },
+        Some(b) => hello_bytes(b.wire.bind_bytes),
+        None => 0u64,
+    }
+}
+
+fn wire_owner_bind_bytes[G: send](supplied: Option[Wire[G]]) -> u64 {
+    match supplied {
+        Some(w) => hello_bytes(w.bind_bytes),
+        None => 0u64,
+    }
+}
+
+fn hello_bytes(bind_bytes: u64) -> u64 {
+    int.saturating_add(4096u64, bind_bytes)
+}
+
+fn copy_wire[G: send](w: Wire[G]) -> Wire[G] {
+    Wire(bind: w.bind, bind_bytes: w.bind_bytes, bind_steps: w.bind_steps)
+}
+
+// What a session or HTTP front holds to bind: the wire and the bind mint's inbox.
+pub opaque type BindGrant[G: send]: send {
+    wire: Wire[G],
+    to: Sender[MintRequest[(), G]],
+}
+
+fn copy_bind_grant[G: send](supplied: Option[BindGrant[G]]) -> Option[BindGrant[G]] {
+    match supplied {
+        Some(b) => Some(BindGrant(wire: copy_wire(b.wire), to: channel.sender(b.to))),
         None => None,
     }
 }

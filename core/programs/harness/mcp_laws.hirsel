@@ -49,7 +49,10 @@ fn mcp_blob_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, 
 }
 
 fn mcp_blob_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g.handles, g, take key, mcp_blob_agent(), code.describe(mcp_blob_settle), None)
+    let Some(ctx) = view g.context else {
+        fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
+    }
+    harness.effect(ctx, g.handles, g, take key, mcp_blob_agent(), code.describe(mcp_blob_settle), None)
 }
 
 fn mcp_blob_settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -287,8 +290,7 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     let (tool, _tools): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(1u64)
     let services = Services(model: take model, tool: take tool, blobs: Some(copy_blob_fixture(fixture)))
     let w = result.unwrap(mcp_blob_wiring())
-    let mut config = settings_of(code.describe(mcp_blob_place), harness.entries(w), dir, clock, random, tasks, network, take services, Some(IDLE_MS))
-    config.wire = Some(runner.wire_bind(latest.new(arc.new(())), code.describe(runner.ingress.caller), 4096u64, 65536u64))
+    let config = wired_settings_of(code.describe(mcp_blob_place), harness.entries(w), dir, clock, random, tasks, network, take services, Some(IDLE_MS))
     let socket = runner.wire_defaults(65536u64).socket
     let (running, _stop, status) = launch(tasks, take config)
     mcp_exchange(mut listener, Never, "server/discover", Some(b"2026-07-28"), None, None, "200 OK", MCP_JSON, "{\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{}}}")
@@ -514,7 +516,10 @@ fn reconcile_bump(g: Grants, key: harness.EffectKey) -> Result[Option[Bytes], ha
         0u64 => Ok(Some(string.into_bytes("recovered"))),
         1u64 => {
             let target = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: 0u64)
-            if !competing_settle(g.context, target) {
+            let Some(ctx) = view g.context else {
+                fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
+            }
+            if !competing_settle(ctx, target) {
                 return Error(Refused("the other worker's settle was not ignored"))
             }
             Ok(None)
@@ -538,7 +543,10 @@ fn reconcile_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller,
 }
 
 fn reconcile_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g.handles, g, take key, reconcile_agent(), code.describe(reconcile_settle), None)
+    let Some(ctx) = view g.context else {
+        fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
+    }
+    harness.effect(ctx, g.handles, g, take key, reconcile_agent(), code.describe(reconcile_settle), None)
 }
 
 fn reconcile_settle(mut tx: store.Tx, h: harness.Handles, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {

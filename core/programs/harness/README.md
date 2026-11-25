@@ -407,7 +407,7 @@ options and the idle time.
   stops. A look wakes the child, so after a look that finds the child as the
   last one did, `ask` waits for a stop that someone else's wake caused. The
   gateway's seed holds the door (`doorway()` makes the inbox before the
-  gateway). The effect entry and `grant_bytes` must hold the wire client's two
+  gateway). The effect entry and the attempt mint's `mint_bytes` must hold the wire client's two
   1 MiB tasks. An effect that runs out of bytes raises, its run stays
   unsettled, and the place idles out.
 

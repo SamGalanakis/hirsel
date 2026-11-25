@@ -66,7 +66,7 @@ fn sse_law_empty_stream(take seed: std.stream.Seed) waits {
     std.stream.produce(take seed, sse_law_empty)
 }
 
-fn sse_law_override(req: std.http.Request, _scratch: Region, mut _out: std.http.Responder, _state: HttpConnection[(), SseLawTables, ()]) -> Result[std.http.Outcome, std.http.HandlerError] {
+fn sse_law_override(req: std.http.Request, _scratch: Region, mut _out: std.http.Responder, _state: HttpConnection[(), SseLawTables]) -> Result[std.http.Outcome, std.http.HandlerError] {
     let stream_bounds = std.stream.Bounds(event_max: 128u64, producer_bytes: 16384u64, producer_steps: 256u64)
     let mut spec = std.stream.spec(req, 200u16, stream_bounds, 0u64, sse_law_empty_stream)?
     std.stream.header(mut spec, b"Content-Type", b"text/event-stream; charset=utf-8")?
@@ -101,7 +101,7 @@ fn sse_law_raw_producer(take seed: std.stream.Seed, c: Clock, _directory: Option
     std.stream.produce_owned(take seed, (0u64, c), next)
 }
 
-fn sse_law_raw(req: std.http.Request, _scratch: Region, mut _out: std.http.Responder, state: HttpConnection[(), SseLawTables, ()]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+fn sse_law_raw(req: std.http.Request, _scratch: Region, mut _out: std.http.Responder, state: HttpConnection[(), SseLawTables]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     let Some(auth) = std.http.field(req, b"authorization") else {
         return Ok(Reply(http_reply(401u16, "", false, false, false)?))
     }
@@ -120,7 +120,8 @@ fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] wait
     let SseLawServer(listener: take listener, publisher: take pub_to, clock, random, tasks, frame_limit, lease_ms, stop: take stop) = take job
     let place: StaticFn[fn(mut Registry[(), SseLawTables]) -> Result[(), RegisterError]] = code.describe(sse_law_place)
     let reg = result.unwrap(placed(place, HTTP_LAW_PLACE_BYTES))
-    let mut builder: std.router.Builder[HttpConnection[(), SseLawTables, ()]] = std.router.builder()
+    let binds = ingress.bind_task(tasks)
+    let mut builder: std.router.Builder[HttpConnection[(), SseLawTables]] = std.router.builder()
     result.unwrap(std.router.add(mut builder, "GET", "/head-override", std.router.Route(handler: sse_law_override, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768u64), steps: None)))
     result.unwrap(std.router.add(mut builder, "GET", "/private", std.router.Route(handler: sse_law_raw, body_max: None, upgrade_bytes: None, stream_bytes: Some(65536u64), steps: None)))
     let (take routes, take plans) = result.unwrap(http_router(reg, None, take builder))
@@ -131,10 +132,10 @@ fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] wait
     let (ends, _ends_rx): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (head, _head_rx): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let relay = Relay(inbox: take relay_to, credit: take credits, end_credit: take ends, head: take head)
-    let make: scoped[view] fn() -> HttpConnection[(), SseLawTables, ()] = fn() -> HttpConnection[(), SseLawTables, ()] {
+    let make: scoped[view] fn() -> HttpConnection[(), SseLawTables] = fn() -> HttpConnection[(), SseLawTables] {
         let registry_copy = result.unwrap(placed(place, HTTP_LAW_PLACE_BYTES))
-        let supplied = wire((), code.describe(sse_law_bind), 8192u64, DEFAULT_STEPS)
-        http_connection(take registry_copy, arc.share(plans), Some(take supplied), relay_endpoint(relay), random, clock, tasks, 65536u64)
+        let supplied = grant_binds_of(binds, wire(code.describe(sse_law_bind), 8192u64, DEFAULT_STEPS))
+        http_connection(take registry_copy, arc.share(plans), take supplied, relay_endpoint(relay), random, clock, tasks, 65536u64)
     }
     let mut listeners: List[Listener] = list.with_capacity(1u64)
     list.push(mut listeners, take listener)
@@ -148,7 +149,9 @@ fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] wait
     cfg.handler_ms = 200u64
     cfg.heartbeat_ms = 20u64
     cfg.lease_ms = lease_ms
-    http_serve(take listeners, clock, tasks, take cfg, take routes, plans, reads, 2097152u64, make, 4u64, Some(take stop))
+    let served = http_serve(take listeners, clock, tasks, take cfg, take routes, plans, reads, 2097152u64, make, 4u64, Some(take stop))
+    stop_grants(Some(take binds))
+    served
 }
 
 fn sse_law_start(to: Sender[PubIn], n: Net, c: Clock, r: Random, tasks: Tasks, frame_limit: u64) -> (Addr, Sender[u64], Task[Result[(), std.http.ServeError]]) waits {

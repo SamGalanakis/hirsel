@@ -202,10 +202,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
         None => None
     }
     let attempt_grants = match running_grants {
-        Some(running) => match running.attempts {
-            Some(sender) => Some(channel.sender(sender)),
-            None => None
-        },
+        Some(running) => grant_attempts_of(running),
         None => None
     }
     let trigger_drive = match open_trigger_drive(db, local, reg, clock, tasks, channel.sender(head_to), n_place, take triggering, take attempt_grants) {

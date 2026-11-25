@@ -1,4 +1,4 @@
-fn launch(tasks: Tasks, take config: runner.PlaceConfig[Grants, harness.Handles, Services, ()]) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Latest[runner.Status]) {
+fn launch(tasks: Tasks, take config: runner.PlaceConfig[Grants, harness.Handles, Services]) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Latest[runner.Status]) {
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let allowance = life_bytes(config)
@@ -7,7 +7,7 @@ fn launch(tasks: Tasks, take config: runner.PlaceConfig[Grants, harness.Handles,
     (take running, take stop_to, take status)
 }
 
-fn life_bytes(config: runner.PlaceConfig[Grants, harness.Handles, Services, ()]) -> u64 {
+fn life_bytes(config: runner.PlaceConfig[Grants, harness.Handles, Services]) -> u64 {
     let plan = result.unwrap(store.planned(Directory, 18446744073709551615u64, config.sizes))
     // Runner owns a 1 MiB keep. The fixture leaves another MiB for its own work.
     result.unwrap(runner.operate_bytes(config)) + 2 * 1048576u64 + store.planned_bytes(plan)

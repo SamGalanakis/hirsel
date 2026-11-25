@@ -1,0 +1,400 @@
+// Module runner: the place's mint tasks (RUNNER-SPEC v2.69 §12.1 "Mint tasks").
+// Each present Mint has its own seed, task, allowance and step bound, so an
+// attempt, a wire call and a keyed claim never queue behind one another.
+pub type Mint[S: send, H: shareable + inert + send, I: send, G: send]: send {
+    seed: S,
+    mint: fn(S, H, I) -> Result[G, Capacity],
+    mint_bytes: u64,
+    mint_steps: u64,
+}
+
+pub type CallMint[G: send, H: shareable + inert + send, S: send]: send {
+    mint: Mint[S, H, (), G],
+    entries: triggers.Entries,
+}
+
+pub type Grants[G: send, H: shareable + inert + send, S: send]: send {
+    attempt: Option[Mint[S, H, TriggerContext, G]],
+    call: Option[CallMint[G, H, S]],
+    claim: Option[Mint[S, H, (), G]],
+    bind: Option[Mint[S, H, (), G]],
+}
+
+pub opaque type MintRequest[I: send, G: send]: send {
+    input: I,
+    reply: Sender[Result[G, Fault]]
+}
+
+// What a session holds to start a granted call: the call mint's inbox and the
+// entries it may start.
+pub opaque type CallGrant[G: send]: send {
+    to: Sender[MintRequest[(), G]],
+    entries: triggers.Entries,
+}
+
+type MintWorker[S: send, H: shareable + inert + send, I: send, G: send]: send {
+    mint: Mint[S, H, I, G],
+    handles: H,
+    inbox: Receiver[MintRequest[I, G]],
+}
+
+// One request's mint, as isolate around bound steps (FAIL-16, MEM-30).
+fn mint_once[S: send, H: shareable + inert + send, I: send, G: send](given: Mint[S, H, I, G], h: H, input: I) -> Result[G, Fault] {
+    let f = view given.mint
+    let run = scoped fn() -> Result[Result[G, Capacity], OutOfTime] {
+        bound steps given.mint_steps {
+            f(given.seed, h, input)
+        }
+    }
+    match isolate(run) {
+        Ok(Ok(Ok(Ok(take g)))) => Ok(take g),
+        Ok(Ok(Ok(Error(c)))) => Error(OutOfBytes(capacity_room(c))),
+        Ok(Ok(Error(e))) => Error(OutOfTime(e.steps)),
+        Ok(Error(cs)) => {
+            for cause in cs {
+                if let Capacity(c) = cause.kind {
+                    return Error(OutOfBytes(capacity_room(c)))
+                }
+                break
+            }
+            Error(Raised(raised(cs)))
+        },
+        Error(c) => Error(OutOfBytes(capacity_room(c))),
+    }
+}
+
+fn serve_mint[S: send, H: shareable + inert + send, I: send, G: send](take serving: MintWorker[S, H, I, G]) -> () waits {
+    // A failed mint fails only its own request; the task serves the next one.
+    while let Ok(take request) = channel.receive(serving.inbox) {
+        let MintRequest(input: take input, reply: take reply) = take request
+        let made = mint_once(serving.mint, serving.handles, input)
+        let _ = channel.send(reply, take made)
+    }
+}
+
+// The mint's inbox exists before the head makes H, so the serving task can
+// hold a sender while the head starts the mint task.
+type MintStart[S: send, H: shareable + inert + send, I: send, G: send]: send {
+    mint: Mint[S, H, I, G],
+    to: Sender[MintRequest[I, G]],
+    inbox: Receiver[MintRequest[I, G]],
+}
+
+type GrantStart[G: send, H: shareable + inert + send, S: send]: send {
+    attempt: Option[MintStart[S, H, TriggerContext, G]],
+    call: Option[(MintStart[S, H, (), G], triggers.Entries)],
+    claim: Option[MintStart[S, H, (), G]],
+    bind: Option[MintStart[S, H, (), G]],
+}
+
+fn mint_start[S: send, H: shareable + inert + send, I: send, G: send](take given: Mint[S, H, I, G]) -> MintStart[S, H, I, G] {
+    let (to, inbox): (Sender[MintRequest[I, G]], Receiver[MintRequest[I, G]]) = channel.new(1u64)
+    MintStart(mint: take given, to: take to, inbox: take inbox)
+}
+
+fn place_grant_start[G: send, H: shareable + inert + send, S: send](take given: Option[Grants[G, H, S]]) -> Option[GrantStart[G, H, S]] {
+    match take given {
+        Some(take g) => Some(grant_start(take g)),
+        None => None,
+    }
+}
+
+fn grant_start[G: send, H: shareable + inert + send, S: send](take given: Grants[G, H, S]) -> GrantStart[G, H, S] {
+    let Grants(attempt: take attempt, call: take calls, claim: take claim, bind: take bind_mint) = take given
+    GrantStart(attempt: match take attempt {
+        Some(take m) => Some(mint_start(take m)),
+        None => None,
+    }, call: match take calls {
+        Some(CallMint(mint: take m, entries: take entries)) => Some((mint_start(take m), take entries)),
+        None => None,
+    }, claim: match take claim {
+        Some(take m) => Some(mint_start(take m)),
+        None => None,
+    }, bind: match take bind_mint {
+        Some(take m) => Some(mint_start(take m)),
+        None => None,
+    })
+}
+
+fn grant_calls[G: send, H: shareable + inert + send, S: send](starting: GrantStart[G, H, S]) -> Option[CallGrant[G]] {
+    match starting.call {
+        Some((m, entries)) => Some(CallGrant(to: channel.sender(m.to), entries: clone(entries))),
+        None => None
+    }
+}
+
+fn grant_claims[G: send, H: shareable + inert + send, S: send](starting: GrantStart[G, H, S]) -> Option[Sender[MintRequest[(), G]]] {
+    match starting.claim {
+        Some(m) => Some(channel.sender(m.to)),
+        None => None
+    }
+}
+
+// A place's wire with its bind mint's inbox, for the serving start (RUNNER-SPEC v2.70).
+fn grant_binds[G: send, H: shareable + inert + send, S: send](starting: GrantStart[G, H, S], supplied: Option[Wire[G]]) -> Option[BindGrant[G]] {
+    let Some(w) = view supplied else {
+        return None
+    }
+    let Some(m) = view starting.bind else {
+        return None
+    }
+    Some(BindGrant(wire: copy_wire(w), to: channel.sender(m.to)))
+}
+
+// The running mint tasks and the attempt mint's inbox, which the trigger
+// drive keeps.
+pub opaque type PlaceGrants[G: send] {
+    attempts: Option[Sender[MintRequest[TriggerContext, G]]],
+    calls: Option[CallGrant[G]],
+    claims: Option[Sender[MintRequest[(), G]]],
+    binds: Option[Sender[MintRequest[(), G]]],
+    workers: List[Task[()]],
+}
+
+fn spawn_mint[S: send, H: shareable + inert + send, I: send, G: send](tasks: Tasks, h: H, take starting: MintStart[S, H, I, G], mut workers: List[Task[()]]) -> Sender[MintRequest[I, G]] {
+    let MintStart(mint: take given, to: take to, inbox: take inbox) = take starting
+    let allowance = given.mint_bytes
+    let serving = MintWorker(mint: take given, handles: store.copy_env(h), inbox: take inbox)
+    let run: fn(take MintWorker[S, H, I, G]) -> () waits = serve_mint
+    list.push(mut workers, task.spawn(tasks, bytes allowance, take serving, run))
+    take to
+}
+
+fn start_grants[G: send, H: shareable + inert + send, S: send](tasks: Tasks, h: H, take starting: GrantStart[G, H, S]) -> PlaceGrants[G] {
+    let GrantStart(attempt: take attempt, call: take call_start, claim: take claim, bind: take bind_mint) = take starting
+    let mut workers: List[Task[()]] = list.new()
+    let attempts = match take attempt {
+        Some(take m) => Some(spawn_mint(tasks, h, take m, mut workers)),
+        None => None
+    }
+    let calls = match take call_start {
+        Some((take m, take entries)) => Some(CallGrant(to: spawn_mint(tasks, h, take m, mut workers), entries: take entries)),
+        None => None
+    }
+    let claims = match take claim {
+        Some(take m) => Some(spawn_mint(tasks, h, take m, mut workers)),
+        None => None
+    }
+    let binds = match take bind_mint {
+        Some(take m) => Some(spawn_mint(tasks, h, take m, mut workers)),
+        None => None
+    }
+    PlaceGrants(attempts: take attempts, calls: take calls, claims: take claims, binds: take binds, workers: take workers)
+}
+
+// Mint tasks outside a place's head, for a session served without one (the
+// wire fixtures). `h` is whatever the mints read; a place passes its handles.
+pub fn grant_task[G: send, H: shareable + inert + send, S: send](tasks: Tasks, h: H, take given: Grants[G, H, S]) -> PlaceGrants[G] {
+    start_grants(tasks, h, grant_start(take given))
+}
+
+pub fn grant_calls_of[G: send](running: PlaceGrants[G]) -> Option[CallGrant[G]] {
+    match running.calls {
+        Some(c) => Some(copy_call_grant(c)),
+        None => None
+    }
+}
+
+pub fn grant_claims_of[G: send](running: PlaceGrants[G]) -> Option[Sender[MintRequest[(), G]]] {
+    match running.claims {
+        Some(to) => Some(channel.sender(to)),
+        None => None
+    }
+}
+
+// A wire with the running bind mint's inbox, for a session or HTTP front served
+// without a place's head. None when there is no bind mint.
+pub fn grant_binds_of[G: send](running: PlaceGrants[G], take w: Wire[G]) -> Option[BindGrant[G]] {
+    match running.binds {
+        Some(to) => Some(BindGrant(wire: take w, to: channel.sender(to))),
+        None => None
+    }
+}
+
+fn grant_attempts_of[G: send](running: PlaceGrants[G]) -> Option[Sender[MintRequest[TriggerContext, G]]] {
+    match running.attempts {
+        Some(to) => Some(channel.sender(to)),
+        None => None
+    }
+}
+
+pub fn stop_grants[G: send](take running: Option[PlaceGrants[G]]) -> () waits {
+    if let Some(PlaceGrants(workers: take workers, ..)) = take running {
+        for take running_mint in take workers {
+            let _ = task.cancel_join(take running_mint)
+        }
+    }
+}
+
+// Ask a mint task for one G. A mint task that is gone is Failed(Gone).
+fn ask_mint[I: send, G: send](to: Sender[MintRequest[I, G]], take input: I) -> Result[G, Fault] waits {
+    let (reply, inbox): (Sender[Result[G, Fault]], Receiver[Result[G, Fault]]) = channel.new(1u64)
+    if let Error(_) = channel.send(to, MintRequest(input: take input, reply: take reply)) {
+        return Error(Gone)
+    }
+    match channel.receive(inbox) {
+        Ok(take given) => take given,
+        Error(_) => Error(Gone),
+    }
+}
+
+// Where a granted run takes its G: given, or asked of the call or attempt mint
+// task (RUNNER-SPEC v2.69).
+type JobGrant[G: send]: send = Direct(G) | FromCall(Sender[MintRequest[(), G]]) | FromAttempt(Sender[MintRequest[TriggerContext, G]], TriggerContext)
+
+type Job[G: send, A, R]: send {
+    f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits],
+    ca: std.codec.Codec[A],
+    cr: std.codec.Codec[R],
+    grant: JobGrant[G],
+    caller: Caller,
+    arg: Bytes,
+    steps: u64
+}
+
+// The granted adapter, the body of the task `start` spawns under `bytes n`.
+fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
+    let allowance = j.steps
+    let ran = bound steps allowance {
+        let Job(f: f, ca: ca, cr: cr, grant: take source, caller: take caller, arg: take arg, steps: _) = take j
+        let grants = match take source {
+            Direct(take value) => take value,
+            FromCall(to) => match ask_mint(to, ()) {
+                Ok(take value) => take value,
+                Error(take fault) => return Failed(take fault),
+            },
+            FromAttempt(to, take ctx) => match ask_mint(to, take ctx) {
+                Ok(take value) => take value,
+                Error(take fault) => return Failed(take fault),
+            },
+        }
+        let body = code.callable(f)
+        match std.codec.decode(ca, arg) {
+            Ok(take a) => match body(grants, caller, take a) {
+                Ok(take r) => encoded(cr, r),
+                Error(c) => Failed(OutOfBytes(capacity_room(c))),
+            },
+            Error(e) => Refused(Malformed(bad(e))),
+        }
+    }
+    match take ran {
+        Ok(take o) => take o,
+        Error(e) => Failed(OutOfTime(e.steps))
+    }
+}
+
+// Whether a call grant lets a wire call start the entry with this identity
+// and argument schema (RUNNER-SPEC v2.69).
+fn call_listed[G: send](grant: CallGrant[G], identity: Bytes, schema: Bytes) -> bool {
+    triggers.lists_granted(grant.entries, identity, schema)
+}
+
+// The registry key of a call is the entry's identity and two fingerprints.
+fn call_grant_allows[G: send, H: shareable + inert + send](grant: CallGrant[G], r: Registry[G, H], key: Bytes) -> bool {
+    let n = list.len(key)
+    for entry in r.exported {
+        let identity = view entry.described.identity
+        let size = list.len(identity)
+        if size + 16u64 == n && list.slice(key, 0u64, size) == identity {
+            return triggers.lists_granted(grant.entries, identity, entry.described.args)
+        }
+    }
+    false
+}
+
+fn copy_call_grant[G: send](grant: CallGrant[G]) -> CallGrant[G] {
+    CallGrant(to: channel.sender(grant.to), entries: clone(grant.entries))
+}
+
+fn call_mint_of[G: send](grant: CallGrant[G]) -> Sender[MintRequest[(), G]] {
+    channel.sender(grant.to)
+}
+
+// The head's terms for its mint tasks and the operate terms for their inboxes.
+fn mint_task_bytes[S: send, H: shareable + inert + send, I: send, G: send](m: Mint[S, H, I, G]) -> Result[u64, Capacity] {
+    match charge.task(bytes[()], m.mint_bytes) {
+        Some(n) => Ok(n),
+        None => Error(Capacity(requested: m.mint_bytes, available: 0u64)),
+    }
+}
+
+fn place_grant_bytes[G: send, H: shareable + inert + send, S: send](config: Option[Grants[G, H, S]]) -> Result[u64, Capacity] {
+    let Some(c) = view config else {
+        return Ok(0u64)
+    }
+    let attempt_inbox = option.unwrap(charge.channel(bytes[MintRequest[TriggerContext, G]], 1u64))
+    let call_inbox = option.unwrap(charge.channel(bytes[MintRequest[(), G]], 1u64))
+    let mut total = 0u64
+    if let Some(m) = c.attempt {
+        total = add_place_bytes(total, mint_task_bytes(m)?)?
+        total = add_place_bytes(total, attempt_inbox)?
+    }
+    if let Some(cm) = c.call {
+        total = add_place_bytes(total, mint_task_bytes(cm.mint)?)?
+        total = add_place_bytes(total, call_inbox)?
+    }
+    if let Some(m) = c.claim {
+        total = add_place_bytes(total, mint_task_bytes(m)?)?
+        total = add_place_bytes(total, call_inbox)?
+    }
+    if let Some(m) = c.bind {
+        total = add_place_bytes(total, mint_task_bytes(m)?)?
+        total = add_place_bytes(total, call_inbox)?
+    }
+    Ok(total)
+}
+
+// RUNNER-SPEC v2.69 and v2.70: a wire needs a bind mint, a trigger config that
+// lists a granted entry needs an attempt mint, and every call-list element names
+// a registered granted entry.
+fn check_grant_lists[G: send, H: shareable + inert + send, S: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, given: Option[Grants[G, H, S]], configured: Option[TriggerConfig], wired: bool) -> Option[OpenError] {
+    let has_bind = match given {
+        Some(Grants(bind: Some(_), ..)) => true,
+        _ => false
+    }
+    if wired && !has_bind {
+        return Some(BindNoGrant)
+    }
+    let has_attempt = match given {
+        Some(Grants(attempt: Some(_), ..)) => true,
+        _ => false
+    }
+    if !has_attempt {
+        if let Some(t) = configured {
+            if let Some(take path) = triggers.first_unlisted(t.entries, scoped fn(_path: Bytes, _schema: Bytes, is_granted: bool) -> bool {
+                !is_granted
+            }) {
+                return Some(TriggerNoGrant(take path))
+            }
+        }
+    }
+    let Some(g) = view given else {
+        return None
+    }
+    let Some(cm) = view g.call else {
+        return None
+    }
+    let reg = match placed(place, n_place) {
+        Ok(take reg) => take reg,
+        Error(take problem) => return Some(Place(take problem)),
+    }
+    if let Some(take path) = triggers.first_unlisted(cm.entries, scoped fn(path: Bytes, schema: Bytes, is_granted: bool) -> bool {
+        is_granted && registers_granted(reg, path, schema)
+    }) {
+        return Some(CallNotGranted(take path))
+    }
+    None
+}
+
+fn registers_granted[G: send, H: shareable + inert + send](reg: Registry[G, H], path: Bytes, schema: Bytes) -> bool {
+    for entry in reg.exported {
+        let is_granted = match entry.described.kind {
+            Granted => true,
+            _ => false,
+        }
+        if is_granted && entry.described.args == schema && triggers.names_path(entry.described.identity, path) {
+            return true
+        }
+    }
+    false
+}

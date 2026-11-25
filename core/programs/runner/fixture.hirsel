@@ -22,16 +22,16 @@ const OWN_BYTES: u64 = 65536u64
 
 type PlaceEvent: send = Phase(runner.Phase) | Finished(Result[runner.Ended, runner.StartError]) | Expired
 
-type PlaceJob[G: send, H: shareable + inert + send, S: send, B: shareable + send]: send {
-    config: runner.PlaceConfig[G, H, S, B],
+type PlaceJob[G: send, H: shareable + inert + send, S: send]: send {
+    config: runner.PlaceConfig[G, H, S],
     stop: Receiver[()],
     status: Latest[runner.Status],
     to: Sender[PlaceEvent],
     need: u64,
 }
 
-type Operated[G: send, H: shareable + inert + send, S: send, B: shareable + send]: send {
-    config: runner.PlaceConfig[G, H, S, B],
+type Operated[G: send, H: shareable + inert + send, S: send]: send {
+    config: runner.PlaceConfig[G, H, S],
     stop: Receiver[()],
     status: Latest[runner.Status],
     watch: Sender[Receiver[runner.Phase]],
@@ -145,12 +145,12 @@ fn loopback_any(a: Addr) -> bool {
     }
 }
 
-fn run_place[G: send, H: shareable + inert + send, S: send, B: shareable + send](take job: PlaceJob[G, H, S, B]) -> () waits {
+fn run_place[G: send, H: shareable + inert + send, S: send](take job: PlaceJob[G, H, S]) -> () waits {
     let PlaceJob(config: take config, stop: take halt, status: take root, to: take to, need: need) = take job
     let tasks = config.tasks
     let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let request = Operated(config: take config, stop: take halt, status: take root, watch: take handoff)
-    let run: fn(take Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits = run_operate
+    let run: fn(take Operated[G, H, S]) -> Result[runner.Ended, runner.StartError] waits = run_operate
     let running = task.spawn(tasks, bytes need, take request, run)
     if let Ok(take phases) = channel.receive(phases_from) {
         while let Ok(phase) = channel.receive(phases) {
@@ -166,12 +166,12 @@ fn run_place[G: send, H: shareable + inert + send, S: send, B: shareable + send]
     let _ = channel.send(to, Finished(take ended))
 }
 
-fn run_operate[G: send, H: shareable + inert + send, S: send, B: shareable + send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
+fn run_operate[G: send, H: shareable + inert + send, S: send](take request: Operated[G, H, S]) -> Result[runner.Ended, runner.StartError] waits {
     let Operated(config: take config, stop: take halt, status: take root, watch: take phases) = take request
     runner.operate(take config, take halt, root, Some(take phases))
 }
 
-pub fn start[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: runner.PlaceConfig[G, H, S, B], within_ms: u64) -> Result[Fixture, FixtureError] waits {
+pub fn start[G: send, H: shareable + inert + send, S: send](take p: runner.PlaceConfig[G, H, S], within_ms: u64) -> Result[Fixture, FixtureError] waits {
     match p.backing {
         Memory => (),
         Temp(_) => (),
@@ -205,7 +205,7 @@ pub fn start[G: send, H: shareable + inert + send, S: send, B: shareable + send]
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (me, events): (Sender[PlaceEvent], Receiver[PlaceEvent]) = channel.new(16u64)
     let job = PlaceJob(config: take p, stop: take stop_from, status: latest.handle(root), to: channel.sender(me), need: need)
-    let run: fn(take PlaceJob[G, H, S, B]) -> () waits = run_place
+    let run: fn(take PlaceJob[G, H, S]) -> () waits = run_place
     let place = match task.try_spawn(tasks, bytes int.saturating_add(need, OWN_BYTES), take job, run) {
         Ok(take spawned) => take spawned,
         Error((cap, _)) => return Error(Full(cap)),

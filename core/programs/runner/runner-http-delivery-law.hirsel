@@ -633,7 +633,7 @@ type L15RetireDrive: send {
     retired: Sender[List[store.StreamKey]]
 }
 
-fn l15_fail_after_call(req: std.http.Request, scratch: Region, mut response: std.http.Responder, state: HttpConnection[(), HttpLawHandles, ()]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+fn l15_fail_after_call(req: std.http.Request, scratch: Region, mut response: std.http.Responder, state: HttpConnection[(), HttpLawHandles]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     let _ = http_generated_handler(req, scratch, mut response, state)?
     fail("connection task fails after the call's response was prepared")
 }

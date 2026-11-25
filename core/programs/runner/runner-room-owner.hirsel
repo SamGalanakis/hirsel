@@ -425,7 +425,7 @@ fn copy_room_link(link: RoomLink) -> RoomLink {
     RoomLink(relay: channel.sender(link.relay), round_read: latest.handle(link.round_read), max_message: link.max_message, live_limit: link.live_limit)
 }
 
-fn wire_room_subscribe[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, sub: u32, take request: RoomRequest, take prepared: SubscriptionInput) -> Result[(), u16] {
+fn wire_room_subscribe[G: send](mut s: WireSession[G], mut work: WireWork, sub: u32, take request: RoomRequest, take prepared: SubscriptionInput) -> Result[(), u16] {
     if let None = work.rooms {
         let Some(take link) = copy_configured_room_link(s.room_link) else {
             wire_end(mut s, mut work.output, sub, Refused(Overloaded))
@@ -459,7 +459,7 @@ fn wire_room_subscribe[G: send, B: shareable + send](mut s: WireSession[G, B], m
     Ok(())
 }
 
-fn wire_room_sync[G: send, B: shareable + send](s: WireSession[G, B], mut work: WireWork) {
+fn wire_room_sync[G: send](s: WireSession[G], mut work: WireWork) {
     let Some(take state) = replace(mut work.rooms, None) else {
         return
     }
@@ -481,7 +481,7 @@ fn wire_room_sync[G: send, B: shareable + send](s: WireSession[G, B], mut work: 
     work.rooms = Some(take rooms)
 }
 
-fn wire_room_state[G: send, B: shareable + send](s: WireSession[G, B], mut work: WireWork, sub: u32, value: Option[Bytes]) -> Result[(), u16] {
+fn wire_room_state[G: send](s: WireSession[G], mut work: WireWork, sub: u32, value: Option[Bytes]) -> Result[(), u16] {
     if let None = sub_generation(s.subs, sub) {
         return wire_check_room_input(s, sub)
     }
@@ -498,7 +498,7 @@ fn wire_room_state[G: send, B: shareable + send](s: WireSession[G, B], mut work:
     handled
 }
 
-fn wire_room_message[G: send, B: shareable + send](s: WireSession[G, B], mut work: WireWork, sub: u32, to: Option[u32], value: Bytes) -> Result[(), u16] {
+fn wire_room_message[G: send](s: WireSession[G], mut work: WireWork, sub: u32, to: Option[u32], value: Bytes) -> Result[(), u16] {
     if let None = sub_generation(s.subs, sub) {
         return wire_check_room_input(s, sub)
     }

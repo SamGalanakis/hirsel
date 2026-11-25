@@ -206,10 +206,10 @@ fn keyed_registry_count[G: send, H: shareable + inert + send](reg: Registry[G, H
     Some(maximum)
 }
 
-// A keyed claim runs with a G from the place's call mint (http.md K-2).
+// A keyed claim runs with a G from the place's claim mint (http.md K-2).
 fn check_keyed_grants[G: send, H: shareable + inert + send, S: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, supplied: Option[Grants[G, H, S]]) -> Option[OpenError] {
     if let Some(given) = supplied {
-        if !none(given.call) {
+        if !none(given.claim) {
             return None
         }
     }
@@ -219,6 +219,14 @@ fn check_keyed_grants[G: send, H: shareable + inert + send, S: send](place: Stat
         }
     }
     None
+}
+
+fn grant_open_report(mut line: String, what: String, path: Bytes, detail: String) {
+    string.push(mut line, what)
+    if let Ok(take shown) = string.from_utf8(clone(path)) {
+        string.push(mut line, shown)
+    }
+    string.push(mut line, detail)
 }
 
 fn keyed_open_report(mut line: String, name: Bytes, detail: String) {

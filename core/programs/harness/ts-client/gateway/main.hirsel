@@ -8,9 +8,8 @@ fn scripted_entries(mut r: runner.Registry[notes.main.Grants, notes.main.Handles
     runner.transact(mut r, code.describe(scripted_revoke_entry), notes.main.BYTES, runner.DEFAULT_STEPS)
 }
 
-fn scripted_place(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, notes.main.Handles, notes.main.Services, ()], Capacity] {
-    let mut config = notes.main.settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: notes.main.copy_stream(s.stream, supplied.name)))
-    config.wire = Some(runner.wire_bind(latest.new(arc.new(())), code.describe(runner.ingress.caller), 4096u64, 65536u64))
+fn scripted_place(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, notes.main.Handles, notes.main.Services], Capacity] {
+    let mut config = notes.main.wired_settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: notes.main.copy_stream(s.stream, supplied.name)))
     config.place = code.describe(scripted_entries)
     Ok(take config)
 }

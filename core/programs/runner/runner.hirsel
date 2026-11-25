@@ -76,7 +76,7 @@ pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes, Bytes)
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
 pub type Selection: send = Current(u64) | Reopen | Install(fate.Fates) | InstallAt(u64, fate.Fates) | InstallFrom(fate.Fates)
 
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | PredecessorChanged(Bytes) | InstallUncertain(store.Error) | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoGrant(Bytes) | Unsettled(fate.HeldReport)
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | PredecessorChanged(Bytes) | InstallUncertain(store.Error) | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoGrant(Bytes) | BindNoGrant | TriggerNoGrant(Bytes) | CallNotGranted(Bytes) | Unsettled(fate.HeldReport)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 
@@ -103,7 +103,7 @@ pub type Stop: codec + send {
 
 // An objects@1 place (RUNNER-SPEC v2.50). `credentials.secret` is a sealed
 // grant. The head starts the client and opens it through `open_authority`.
-pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: shareable + send]: send {
+pub type PlaceConfig[G: send, H: shareable + inert + send, S: send]: send {
     backing: Backing,
     sizes: store.Overrides,
     selection: Selection,
@@ -121,7 +121,7 @@ pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: shareable
     clock: Clock,
     random: Random,
     stop: Stop,
-    wire: Option[Wire[B]],
+    wire: Option[Wire[G]],
     grants: Option[Grants[G, H, S]],
     triggers: Option[TriggerConfig],
     idle: Option[u64],
@@ -300,15 +300,15 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
     Ok(task.spawn(tasks, bytes 4096u64, take alarm, drain_timer))
 }
 
-pub fn operate[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
+pub fn operate[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     operate_with_report(take p, take stop, status, take watching, None)
 }
 
-pub fn operate_report[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
+pub fn operate_report[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
     operate_with_report(take p, take stop, status, take watching, Some(errors))
 }
 
-fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
+fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit {
         launch.n_place
@@ -322,7 +322,11 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
             None => None
         },
     }
-    if let Some(take problem) = check_keyed_grants(p.place, n_place, p.grants) {
+    let mut refusal = check_keyed_grants(p.place, n_place, p.grants)
+    if none(refusal) {
+        refusal = check_grant_lists(p.place, n_place, p.grants, p.triggers, !none(p.wire))
+    }
+    if let Some(take problem) = take refusal {
         if let Some(_) = install {
             return finish_install(Error(Open(take problem)))
         }
@@ -384,7 +388,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
     let (head_to, inbox_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(65u64)
     let hosting = start_host_control(tasks, clock, n_place, head_to, to)?
     let (finish_to, finish_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let serving_total = room_serving_bytes(wire_config, limit, n_place, rooms) ?=> Full
+    let serving_total = room_serving_bytes(wire_config, limit, n_place, rooms, wire_owner_bind_bytes(supplied_wire)) ?=> Full
     let serve_slots = serve_inbox_capacity(limit)
     // The supervisor allocates this channel before the serving task starts.
     let serving_reserve = serving_total - option.unwrap(charge.channel(bytes[ServeInput], serve_slots))
@@ -402,14 +406,11 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
             None
         },
     }
-    let head = place_head_bytes(n_place, n_publisher, place_grant_bytes(place_grants)) ?=> Full
-    let granting = match take place_grants {
-        Some(take given) => Some(grant_start(take given)),
-        None => None
-    }
-    let session_grants = match granting {
-        Some(starting) => grant_calls(starting),
-        None => None
+    let head = place_head_bytes(n_place, n_publisher, place_grant_bytes(place_grants) ?=> Full) ?=> Full
+    let granting = place_grant_start(take place_grants)
+    let (session_grants, session_binds) = match granting {
+        Some(starting) => (grant_calls(starting), grant_binds(starting, supplied_wire)),
+        None => (None, None)
     }
     let funded_head = add_place_bytes(head, claims - recovery_inbox_slot()) ?=> Full
     let allowance = add_place_bytes(funded_head, store_bytes) ?=> Full
@@ -426,7 +427,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
     let mut serving: Option[Task[()]] = None
     let mut drain_waiter: Option[Task[()]] = None
     let mut ready: Option[(Listener, Sender[PubIn])] = None
-    let mut unused_listener_inputs = Some((take proxies, take supplied_wire, take session_grants, take inbox_serve))
+    let mut unused_listener_inputs = Some((take proxies, take session_binds, take session_grants, take inbox_serve))
     let mut phase: PlacePhase = OpeningPlace
     let mut finishing: PlaceFinish = WaitingToFinish
     let mut serve_done: Option[u64] = None
@@ -509,7 +510,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
                         Some(host) => Some(channel.sender(host.ack)),
                         None => None
                     }, report: report)
-                    let run: fn(take ServePlace[G, H, B]) -> () waits = run_serve_place
+                    let run: fn(take ServePlace[G, H]) -> () waits = run_serve_place
                     serving = Some(task.spawn(tasks, bytes serving_reserve, take serving_config, run))
                 }
                 match channel.receive(inbox) {
@@ -769,17 +770,17 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
     }
 }
 
-pub fn prepare_place[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
+pub fn prepare_place[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
     let (take options, _, _, _, _) = place_store(p, Some(errors))?
     let n_place = p.n_place
     prepare_placed(take p, take options, n_place, take attempt, take image)
 }
 
-fn operate_prepare[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
+fn operate_prepare[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
     prepare_placed(take p, take options, n_place, launch_bytes(attempt), launch_bytes(image))
 }
 
-fn prepare_placed[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, take attempt: Bytes, take image: Bytes) -> Result[Ended, StartError] waits {
+fn prepare_placed[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64, take attempt: Bytes, take image: Bytes) -> Result[Ended, StartError] waits {
     let PlaceConfig(backing: take backing, place: place, on_migrate: on_migrate, schema: schema, clock: clock, tasks: tasks, triggers: take config, ..) = take p
     let Disk(scratch) = backing else {
         return Error(Missing("scratch"))
@@ -924,45 +925,6 @@ fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.c
         },
         Ok(Error(c)) => Failed(OutOfBytes(capacity_room(c))),
         Error(c) => Refused(Budget(capacity_room(c))),
-    }
-}
-
-type JobGrant[G: send]: send = Direct(G) | FromPlace(Sender[GrantRequest[G]], GrantFor)
-
-type Job[G: send, A, R]: send {
-    f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits],
-    ca: std.codec.Codec[A],
-    cr: std.codec.Codec[R],
-    grant: JobGrant[G],
-    caller: Caller,
-    arg: Bytes,
-    steps: u64
-}
-
-// The granted adapter, the body of the task `start` spawns under `bytes n`.
-fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
-    let allowance = j.steps
-    let ran = bound steps allowance {
-        let Job(f: f, ca: ca, cr: cr, grant: take source, caller: take caller, arg: take arg, steps: _) = take j
-        let grants = match take source {
-            Direct(take value) => take value,
-            FromPlace(to, take why) => match place_grant(to, take why) {
-                Ok(take value) => take value,
-                Error(take outcome) => return take outcome,
-            },
-        }
-        let body = code.callable(f)
-        match std.codec.decode(ca, arg) {
-            Ok(take a) => match body(grants, caller, take a) {
-                Ok(take r) => encoded(cr, r),
-                Error(c) => Failed(OutOfBytes(capacity_room(c))),
-            },
-            Error(e) => Refused(Malformed(bad(e))),
-        }
-    }
-    match take ran {
-        Ok(take o) => take o,
-        Error(e) => Failed(OutOfTime(e.steps))
     }
 }
 
@@ -1263,7 +1225,10 @@ pub fn start_text(problem: StartError) -> String {
             string.push_u64(mut line, saved)
         },
         Open(KeyedOpChanged(name, field)) => keyed_open_report(mut line, name, field),
-        Open(KeyedNoGrant(name)) => keyed_open_report(mut line, name, "needs a call grant"),
+        Open(KeyedNoGrant(name)) => keyed_open_report(mut line, name, "needs a claim mint"),
+        Open(BindNoGrant) => string.push(mut line, "the place has a wire and no bind mint"),
+        Open(TriggerNoGrant(path)) => grant_open_report(mut line, "trigger entry ", path, " is granted and the place has no attempt mint"),
+        Open(CallNotGranted(path)) => grant_open_report(mut line, "call mint entry ", path, " names no registered granted entry"),
         Open(InstallUncertain(e)) => {
             string.push(mut line, "install outcome unknown: ");
             push_store_error(mut line, e)
@@ -3092,19 +3057,19 @@ type TriggerDrive[G: send] {
     to: Sender[HeadInput],
     entries: triggers.Entries,
     author: Caller,
-    grants: Option[Sender[GrantRequest[G]]],
+    grants: Option[Sender[MintRequest[TriggerContext, G]]],
     active: Map[triggers.Id, Task[Outcome]],
     timer: Option[ArmedTimer]
 }
 
-fn make_trigger_drive[G: send](take tables: triggers.Tables, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig, take grants: Option[Sender[GrantRequest[G]]]) -> Result[Box[TriggerDrive[G]], store.Error] {
+fn make_trigger_drive[G: send](take tables: triggers.Tables, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig, take grants: Option[Sender[MintRequest[TriggerContext, G]]]) -> Result[Box[TriggerDrive[G]], store.Error] {
     let stamp = copy_bytes(revision)?
     let TriggerConfig(entries: take entries, author: take author) = take config
     let drive = TriggerDrive(tables: take tables, revision: take stamp, clock: clock, tasks: tasks, to: take to, entries: take entries, author: take author, grants: take grants, active: map.new(), timer: None)
     Ok(box.new(take drive))
 }
 
-fn open_trigger_drive[G: send, H: shareable + inert + send](db: store.Db, h: H, reg: Registry[G, H], clock: Clock, tasks: Tasks, take to: Sender[HeadInput], n_place: u64, take config: Option[TriggerConfig], take grants: Option[Sender[GrantRequest[G]]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] waits {
+fn open_trigger_drive[G: send, H: shareable + inert + send](db: store.Db, h: H, reg: Registry[G, H], clock: Clock, tasks: Tasks, take to: Sender[HeadInput], n_place: u64, take config: Option[TriggerConfig], take grants: Option[Sender[MintRequest[TriggerContext, G]]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] waits {
     let snapshot = store.snapshot(db)
     let tables = declared_triggers(reg, h, snapshot)?
     if let Some(take configured) = take config {
@@ -3347,7 +3312,7 @@ fn launch_trigger[G: send, H: shareable + inert + send](r: Registry[G, H], mut d
     }
     map.reserve(mut drive.active, 1u64)
     let context = TriggerContext(attempt: a, to: channel.sender(drive.to))
-    let source = FromPlace(take grant_to, ForAttempt(take context))
+    let source = FromAttempt(take grant_to, take context)
     let raw: Bytes = match copy_bytes(triggers.argument(p)) {
         Ok(take payload) => take payload,
         Error(Full(cap)) => return Error(Budget(capacity_room(store_capacity(cap)))),

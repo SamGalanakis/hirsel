@@ -44,8 +44,9 @@ fn recovery_binding(_seed: (), credential: Bytes) -> Result[BoundCaller, BindRef
     Ok(BoundCaller(caller: store.Caller(issuer: 2u8, subject: b"sdk-recovery"), expires_at_ms: None))
 }
 
-fn recovery_wire() -> Option[Wire[()]] {
-    Some(wire((), code.describe(recovery_binding), 8192u64, DEFAULT_STEPS))
+// The recovery binding with the unit bind mint `running` serves.
+fn recovery_wire(running: PlaceGrants[()]) -> Option[BindGrant[()]] {
+    grant_binds_of(running, wire(code.describe(recovery_binding), 8192u64, DEFAULT_STEPS))
 }
 
 type RecoveryWs: send {
@@ -59,14 +60,16 @@ type RecoveryWs: send {
 
 fn recovery_ws(take job: RecoveryWs) waits {
     let RecoveryWs(listener: take listener, head: take head, publisher: take post_to, clock, random, tasks) = take job
+    let binds = ingress.bind_task(tasks)
     let mut config = wire_defaults(65536u64)
     config.n_pool = 4194304u64
     config.socket.max_frame = 65536u64
-    let make: scoped[view] fn() -> Service[WireSession[(), ()]] = fn() -> Service[WireSession[(), ()]] {
-        wire_target_service(random, recovery_wire(), None, head, clock, tasks, config, owned_launch_target(launch_env().target))
+    let make: scoped[view] fn() -> Service[WireSession[()]] = fn() -> Service[WireSession[()]] {
+        wire_target_service(random, recovery_wire(binds), None, head, clock, tasks, config, owned_launch_target(launch_env().target))
     }
-    let allocate: own[send] fn(mut WireSession[(), ()], take ServiceAllocation) -> Result[ServicePlan, u16] = result.unwrap(wire_place_allocator(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
-    result.unwrap(serve_wire(take listener, tasks, clock, post_to, config, 4u64, list.new(), make, take allocate))
+    let allocate: own[send] fn(mut WireSession[()], take ServiceAllocation) -> Result[ServicePlan, u16] = result.unwrap(wire_place_allocator(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
+    result.unwrap(serve_wire(take listener, tasks, clock, post_to, config, 4u64, list.new(), bind_owner_bytes(recovery_wire(binds)), make, take allocate))
+    stop_grants(Some(take binds))
 }
 
 type RecoveryHttp: send {
@@ -79,12 +82,13 @@ type RecoveryHttp: send {
 
 fn recovery_http(take job: RecoveryHttp) waits {
     let RecoveryHttp(listener: take listener, relay: take endpoint, clock, random, tasks) = take job
+    let binds = ingress.bind_task(tasks)
     let registered = result.unwrap(placed(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
-    let builder: std.router.Builder[HttpConnection[(), RecoveryTables, ()]] = std.router.builder()
+    let builder: std.router.Builder[HttpConnection[(), RecoveryTables]] = std.router.builder()
     let (take routes, take plans) = result.unwrap(http_router(registered, None, take builder))
-    let make: scoped[view] fn() -> HttpConnection[(), RecoveryTables, ()] = fn() -> HttpConnection[(), RecoveryTables, ()] {
+    let make: scoped[view] fn() -> HttpConnection[(), RecoveryTables] = fn() -> HttpConnection[(), RecoveryTables] {
         let reg = result.unwrap(placed(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
-        http_connection(take reg, arc.share(plans), recovery_wire(), relay_endpoint(endpoint), random, clock, tasks, 65536u64)
+        http_connection(take reg, arc.share(plans), recovery_wire(binds), relay_endpoint(endpoint), random, clock, tasks, 65536u64)
     }
     let mut config = std.http.defaults()
     config.sockets_max = 2u64
@@ -96,6 +100,7 @@ fn recovery_http(take job: RecoveryHttp) waits {
     let mut listeners: List[Listener] = list.new()
     list.push(mut listeners, take listener)
     result.unwrap(http_serve_connections(take listeners, clock, tasks, take config, take routes, 2097152u64, make, None))
+    stop_grants(Some(take binds))
 }
 
 type RecoveryServers: send {

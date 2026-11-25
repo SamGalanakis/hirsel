@@ -54,7 +54,7 @@ fn park_law_places(mut reg: Registry[(), ParkLawHandles]) -> Result[(), Register
     transact(mut reg, code.describe(park_law_wake), 131072u64, DEFAULT_STEPS)
 }
 
-fn park_law_grants(_seed: (), _handles: ParkLawHandles, take _ctx: TriggerContext) -> Result[(), Capacity] {
+fn park_law_grants(_seed: (), _handles: ParkLawHandles, _ctx: TriggerContext) -> Result[(), Capacity] {
     Ok(())
 }
 
@@ -104,13 +104,10 @@ fn promise_resumes_once(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     })
     let _ = park_law_commit(mut reopened, take ran)
     let config = TriggerConfig(entries: take entries, author: law_caller(0u64))
-    let given: Grants[(), ParkLawHandles, ()] = Grants(seed: (), attempt: Some(park_law_grants), call: None, grant_bytes: 65536u64)
+    let given: Grants[(), ParkLawHandles, ()] = Grants(attempt: Some(Mint(seed: (), mint: park_law_grants, mint_bytes: 65536u64, mint_steps: DEFAULT_STEPS)), call: None, claim: None, bind: None)
     let running = start_grants(tasks, h, grant_start(take given))
     let (notify, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
-    let drive = result.unwrap(make_trigger_drive(clone(h.triggers), c, tasks, take notify, clone(b"v2"), take config, match running.attempts {
-        Some(to) => Some(channel.sender(to)),
-        None => None
-    }))
+    let drive = result.unwrap(make_trigger_drive(clone(h.triggers), c, tasks, take notify, clone(b"v2"), take config, grant_attempts_of(running)))
     let reg = result.unwrap(placed(code.describe(park_law_places), 1048576u64))
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(16u64)
     let mut head = Head(db: take reopened, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take to, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None)

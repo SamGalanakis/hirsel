@@ -15,11 +15,11 @@ pub opaque type HttpRoutes: shareable + send {
     gone: List[Bytes],
 }
 
-pub opaque type HttpConnection[G: send, H: shareable + inert + send, B: shareable + send]: send {
+pub opaque type HttpConnection[G: send, H: shareable + inert + send]: send {
     registered: Registry[G, H],
     routes: Arc[HttpRoutes],
-    wire: Option[Wire[B]],
-    grants: Option[Sender[GrantRequest[G]]],
+    wire: Option[BindGrant[G]],
+    grants: Option[Sender[MintRequest[(), G]]],
     relay: Relay,
     random: Random,
     clock: Clock,
@@ -29,7 +29,7 @@ pub opaque type HttpConnection[G: send, H: shareable + inert + send, B: shareabl
     retire: Latest[Option[Bytes]],
 }
 
-pub fn http_connection[G: send, H: shareable + inert + send, B: shareable + send](take registered: Registry[G, H], take routes: Arc[HttpRoutes], take supplied: Option[Wire[B]], take relay: Relay, random: Random, clock: Clock, tasks: Tasks, budget: u64) -> HttpConnection[G, H, B] {
+pub fn http_connection[G: send, H: shareable + inert + send](take registered: Registry[G, H], take routes: Arc[HttpRoutes], take supplied: Option[BindGrant[G]], take relay: Relay, random: Random, clock: Clock, tasks: Tasks, budget: u64) -> HttpConnection[G, H] {
     let mut registry_copy = take registered
     for key in routes.gone {
         result.unwrap(retain_gone(mut registry_copy, std.http.copy_bytes(key)))
@@ -37,12 +37,12 @@ pub fn http_connection[G: send, H: shareable + inert + send, B: shareable + send
     HttpConnection(registered: take registry_copy, routes: take routes, wire: take supplied, grants: None, relay: take relay, random: random, clock: clock, tasks: tasks, budget: budget, reads: None, retire: latest.new(arc.new(None)))
 }
 
-// A keyed claim runs with a G from the place's call mint (http.md K-2, RUNNER-SPEC v2.67).
-pub fn http_grant_calls[G: send, H: shareable + inert + send, B: shareable + send](mut connection: HttpConnection[G, H, B], take to: Sender[GrantRequest[G]]) {
+// A keyed claim runs with a G from the place's claim mint (http.md K-2, RUNNER-SPEC v2.69).
+pub fn http_grant_claims[G: send, H: shareable + inert + send](mut connection: HttpConnection[G, H], take to: Sender[MintRequest[(), G]]) {
     connection.grants = Some(take to)
 }
 
-pub fn http_enable_reads[G: send, H: shareable + inert + send, B: shareable + send](mut connection: HttpConnection[G, H, B], take access: HttpReadAccess) {
+pub fn http_enable_reads[G: send, H: shareable + inert + send](mut connection: HttpConnection[G, H], take access: HttpReadAccess) {
     connection.reads = Some(take access)
 }
 
@@ -116,15 +116,15 @@ fn compile_keyed_operation(name: Bytes, route: String, policy: store.KeyedPolicy
     Ok(HttpOperation(binding: take binding, input: arc.new(take args), output: arc.new(take output), projections: arc.new(list.new()), kind: Transact, alias: alias, retention_ms: Some(policy.retention_ms), claim_headers: clone(record.headers)))
 }
 
-fn add_http_operation[G: send, H: shareable + inert + send, B: shareable + send](mut builder: std.router.Builder[HttpConnection[G, H, B]], mut plan: HttpRoutes, entry: Exported, saved: HttpDescribe, alias: bool) -> Result[(), BindError] {
+fn add_http_operation[G: send, H: shareable + inert + send](mut builder: std.router.Builder[HttpConnection[G, H]], mut plan: HttpRoutes, entry: Exported, saved: HttpDescribe, alias: bool) -> Result[(), BindError] {
     let operation = compile_http_operation(saved, entry, alias) ?=> |take check| BindError(op: string.from(saved.binding.op), check: take check)
     add_compiled_http_operation(mut builder, mut plan, take operation)
 }
 
-fn add_compiled_http_operation[G: send, H: shareable + inert + send, B: shareable + send](mut builder: std.router.Builder[HttpConnection[G, H, B]], mut plan: HttpRoutes, take operation: HttpOperation) -> Result[(), BindError] {
+fn add_compiled_http_operation[G: send, H: shareable + inert + send](mut builder: std.router.Builder[HttpConnection[G, H]], mut plan: HttpRoutes, take operation: HttpOperation) -> Result[(), BindError] {
     {
         let binding = view operation.binding
-        let mut route_desc: std.router.Route[HttpConnection[G, H, B]] = std.router.raw(http_generated_handler)
+        let mut route_desc: std.router.Route[HttpConnection[G, H]] = std.router.raw(http_generated_handler)
         route_desc.body_max = Some(binding.body_max)
         // The promoted owner's reservation is computed from the server's output
         // capacity and the bounded seed actually handed over by this request.
@@ -147,7 +147,7 @@ fn add_compiled_http_operation[G: send, H: shareable + inert + send, B: shareabl
 
 /// Builds one router for raw routes, current generated bindings and the
 /// previous activation's gone-entry aliases.
-pub fn http_router[G: send, H: shareable + inert + send, B: shareable + send](registered: Registry[G, H], previous: Option[Describe], take routes: std.router.Builder[HttpConnection[G, H, B]]) -> Result[(std.router.Router[HttpConnection[G, H, B]], Arc[HttpRoutes]), BindError] {
+pub fn http_router[G: send, H: shareable + inert + send](registered: Registry[G, H], previous: Option[Describe], take routes: std.router.Builder[HttpConnection[G, H]]) -> Result[(std.router.Router[HttpConnection[G, H]], Arc[HttpRoutes]), BindError] {
     let empty = HttpRetirements(policies: map.new())
     http_router_with_retirements(registered, previous, empty, take routes)
 }
@@ -170,7 +170,7 @@ pub fn http_retirements[G: send, H: shareable + inert + send](db: store.Db, regi
     Ok(HttpRetirements(policies: take policies))
 }
 
-pub fn http_router_with_retirements[G: send, H: shareable + inert + send, B: shareable + send](registered: Registry[G, H], previous: Option[Describe], retired: HttpRetirements, take routes: std.router.Builder[HttpConnection[G, H, B]]) -> Result[(std.router.Router[HttpConnection[G, H, B]], Arc[HttpRoutes]), BindError] {
+pub fn http_router_with_retirements[G: send, H: shareable + inert + send](registered: Registry[G, H], previous: Option[Describe], retired: HttpRetirements, take routes: std.router.Builder[HttpConnection[G, H]]) -> Result[(std.router.Router[HttpConnection[G, H]], Arc[HttpRoutes]), BindError] {
     let mut builder = take routes
     std.router.clear_tags(mut builder)
     let mut plan = HttpRoutes(operations: list.new(), openapi: arc.new(list.new()), gone: list.new())
@@ -208,19 +208,19 @@ pub fn http_router_with_retirements[G: send, H: shareable + inert + send, B: sha
         }
     }
     plan.openapi = arc.new(http_openapi(plan.operations))
-    let openapi_route: std.router.Route[HttpConnection[G, H, B]] = std.router.raw(http_openapi_handler)
+    let openapi_route: std.router.Route[HttpConnection[G, H]] = std.router.raw(http_openapi_handler)
     std.router.add(mut builder, "GET", "/.hirsel/openapi.json", take openapi_route) ?=> |_| BindError(op: string.new(), check: Route)
     let router = std.router.build(take builder) ?=> |_| BindError(op: string.new(), check: Route)
     Ok((take router, arc.new(take plan)))
 }
 
-fn http_read_finished[G: send, H: shareable + inert + send, B: shareable + send](state: HttpConnection[G, H, B]) {
+fn http_read_finished[G: send, H: shareable + inert + send](state: HttpConnection[G, H]) {
     if let Some(access) = view state.reads {
         let _ = channel.try_send(access.publisher, PubIn(e: Drained))
     }
 }
 
-fn http_openapi_handler[G: send, H: shareable + inert + send, B: shareable + send](_req: std.http.Request, _scratch: Region, mut _resp: std.http.Responder, state: HttpConnection[G, H, B]) -> Result[std.http.Outcome, std.http.HandlerError] {
+fn http_openapi_handler[G: send, H: shareable + inert + send](_req: std.http.Request, _scratch: Region, mut _resp: std.http.Responder, state: HttpConnection[G, H]) -> Result[std.http.Outcome, std.http.HandlerError] {
     let mut reply = std.http.response_shared(200u16, arc.share(state.routes.openapi), false)?
     std.http.content_type(mut reply, ApplicationJson)?
     Ok(Reply(take reply))
@@ -313,7 +313,7 @@ fn http_check_caller(req: std.http.Request, caller: Caller) -> HttpCallerCheck {
     }
 }
 
-fn http_generated_handler[G: send, H: shareable + inert + send, B: shareable + send](req: std.http.Request, _scratch: Region, mut resp: std.http.Responder, state: HttpConnection[G, H, B]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+fn http_generated_handler[G: send, H: shareable + inert + send](req: std.http.Request, _scratch: Region, mut resp: std.http.Responder, state: HttpConnection[G, H]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     let operation = view state.routes.operations[std.http.route_tag(req) - 1u64]
     let binding = view operation.binding
     if binding.mode == Keyed {
@@ -345,6 +345,9 @@ fn http_generated_handler[G: send, H: shareable + inert + send, B: shareable + s
         Ok(take admit) => take admit,
         Error(RejectedCredential) => return Ok(Reply(http_reply(401u16, "", false, false, false)?)),
         Error(BindingUnavailable) => return Ok(Reply(http_binding_unavailable()?)),
+        // A failed bind mint is never 401: the credential was not judged (RUNNER-SPEC v2.70 F5).
+        Error(BindMintFailed(OutOfBytes(_))) => return Ok(Reply(http_binding_unavailable()?)),
+        Error(BindMintFailed(fault)) => return Ok(Reply(http_fault(fault, false)?)),
         Error(_) => return Ok(Reply(http_reply(503u16, "", false, true, false)?)),
     }
     if binding.mode == Stream {
@@ -441,7 +444,8 @@ fn claim_job_reply[G: send](take work: (ClaimJob[G], ClaimCompletionSignal)) wai
     completion.sent = true
 }
 
-fn derive_http_claim[G: send](req: std.http.Request, body: Bytes, mint: Sender[GrantRequest[G]], claim: Claim[G], tasks: Tasks, clock: Clock, deadline: u64) -> Option[Claimed] waits {
+// Error is the claim mint's failure, which is not an authentication failure.
+fn derive_http_claim[G: send](req: std.http.Request, body: Bytes, mint: Sender[MintRequest[(), G]], claim: Claim[G], tasks: Tasks, clock: Clock, deadline: u64) -> Result[Option[Claimed], Fault] waits {
     let copied = bound bytes claim.claim_bytes {
         isolate(scoped fn() -> ClaimRequest {
             let mut headers: List[(String, Bytes)] = list.new()
@@ -459,32 +463,30 @@ fn derive_http_claim[G: send](req: std.http.Request, body: Bytes, mint: Sender[G
         })
     }
     let Ok(Ok(Ok(take request))) = take copied else {
-        return None
+        return Ok(None)
     }
-    let Ok(take seed) = place_grant(mint, ForCall) else {
-        return None
-    }
+    let seed = ask_mint(mint, ())?
     let job = ClaimJob(seed: take seed, derive: claim.f, request: take request, steps: claim.claim_steps)
     let (to, from): (Sender[Option[Claimed]], Receiver[Option[Claimed]]) = channel.new(1u64)
     let Ok(take completion) = ClaimCompletionSignal(to: channel.sender(to), sent: false) else {
-        return None
+        return Ok(None)
     }
     let alarm = std.clock.alarm(tasks, clock, deadline, to, None)
     let runner: fn(take (ClaimJob[G], ClaimCompletionSignal)) -> () waits = claim_job_reply
     let Ok(take child) = task.try_spawn(tasks, bytes claim.claim_bytes, (take job, take completion), runner) else {
         let _ = std.task.cancel_join(take alarm)
-        return None
+        return Ok(None)
     }
     let result = channel.receive(from)
     let _ = std.task.cancel_join(take child)
     let _ = std.task.cancel_join(take alarm)
     match take result {
-        Ok(take value) => take value,
-        Error(_) => None
+        Ok(take value) => Ok(take value),
+        Error(_) => Ok(None)
     }
 }
 
-fn http_keyed_handler[G: send, H: shareable + inert + send, B: shareable + send](req: std.http.Request, mut resp: std.http.Responder, state: HttpConnection[G, H, B], operation: HttpOperation) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+fn http_keyed_handler[G: send, H: shareable + inert + send](req: std.http.Request, mut resp: std.http.Responder, state: HttpConnection[G, H], operation: HttpOperation) -> Result[std.http.Outcome, std.http.HandlerError] waits {
     let arrived = host.mono_ns(state.clock)
     let binding = view operation.binding
     let horizon = std.order.min(std.http.handler_deadline(req), std.clock.deadline_after_ms(arrived, binding.deadline_ms))
@@ -502,7 +504,12 @@ fn http_keyed_handler[G: send, H: shareable + inert + send, B: shareable + send]
     if host.mono_ns(state.clock) >= horizon {
         return Ok(Reply(http_refusal(Deadline)?))
     }
-    let classified = derive_http_claim(req, body, mint, registered.claim, state.tasks, state.clock, horizon)
+    // K-2: a failed mint is 503 for capacity and B-7's 500 for a fault or step bound.
+    let classified = match derive_http_claim(req, body, mint, registered.claim, state.tasks, state.clock, horizon) {
+        Ok(take derived) => take derived,
+        Error(OutOfBytes(_)) => return Ok(Reply(http_binding_unavailable()?)),
+        Error(take fault) => return Ok(Reply(http_fault(fault, false)?)),
+    }
     if host.mono_ns(state.clock) >= horizon {
         return Ok(Reply(http_refusal(Deadline)?))
     }
@@ -566,7 +573,7 @@ fn http_retire_request(relay: Relay, register: Latest[Option[Bytes]]) waits {
     }
 }
 
-fn http_request_finished[G: send, H: shareable + inert + send, B: shareable + send](state: HttpConnection[G, H, B]) waits {
+fn http_request_finished[G: send, H: shareable + inert + send](state: HttpConnection[G, H]) waits {
     http_retire_request(state.relay, state.retire)
 }
 
@@ -587,17 +594,17 @@ fn http_retire_connection(take ended: HttpConnectionRetirement) waits {
     http_retire_request(ended.relay, ended.register)
 }
 
-fn http_connection_plan[G: send, H: shareable + inert + send, B: shareable + send](take state: HttpConnection[G, H, B]) -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] {
+fn http_connection_plan[G: send, H: shareable + inert + send](take state: HttpConnection[G, H]) -> std.http.ConnectionPlan[HttpConnection[G, H], HttpConnectionRetirement] {
     let register = latest.handle(state.retire)
     let relay = relay_endpoint(state.relay)
     let cleanup = HttpConnectionRetirement(relay: take relay, register: take register)
     std.http.ConnectionPlan(state: take state, retire: Some(take cleanup))
 }
 
-pub fn http_serve_connections[G: send, H: shareable + inert + send, B: shareable + send](take listeners: List[Listener], clock: Clock, tasks: Tasks, take cfg: std.http.Config, take routes: std.router.Router[HttpConnection[G, H, B]], state_bytes: u64, make_state: scoped[view] fn() -> HttpConnection[G, H, B], take stop: Option[Receiver[u64]]) -> Result[(), std.http.ServeError] waits {
-    let plan: scoped[view] fn() -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] = fn() -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] {
+pub fn http_serve_connections[G: send, H: shareable + inert + send](take listeners: List[Listener], clock: Clock, tasks: Tasks, take cfg: std.http.Config, take routes: std.router.Router[HttpConnection[G, H]], state_bytes: u64, make_state: scoped[view] fn() -> HttpConnection[G, H], take stop: Option[Receiver[u64]]) -> Result[(), std.http.ServeError] waits {
+    let plan: scoped[view] fn() -> std.http.ConnectionPlan[HttpConnection[G, H], HttpConnectionRetirement] = fn() -> std.http.ConnectionPlan[HttpConnection[G, H], HttpConnectionRetirement] {
         http_connection_plan(make_state())
     }
-    let request_done: fn(HttpConnection[G, H, B]) waits = http_request_finished
+    let request_done: fn(HttpConnection[G, H]) waits = http_request_finished
     std.http.serve_with_connection_plan(take listeners, clock, tasks, take cfg, take routes, state_bytes, plan, request_done, http_needs_retirement, http_retire_connection, take stop)
 }

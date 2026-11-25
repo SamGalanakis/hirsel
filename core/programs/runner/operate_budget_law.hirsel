@@ -6,13 +6,13 @@ fn empty_schema(mut d: store.Declare) -> Result[(), store.Error] {
     Ok(())
 }
 
-fn budget_config(take disk: Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfig[(), (), (), ()] {
+fn budget_config(take disk: Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfig[(), (), ()] {
     let mut session_sizes = wire_defaults(65536u64)
     session_sizes.n_pool = 4194304u64
     PlaceConfig(backing: take disk, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(empty_place), n_place: 262144u64, on_migrate: None, schema: code.describe(empty_schema), session: session_sizes, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
 }
 
-fn refused_budget(take input: (PlaceConfig[(), (), (), ()], u64)) -> Result[Ended, StartError] waits {
+fn refused_budget(take input: (PlaceConfig[(), (), ()], u64)) -> Result[Ended, StartError] waits {
     let (take p, root) = take input
     let nested = result.unwrap(bound bytes 0u64 {
         runtime.root_limit()
@@ -45,7 +45,7 @@ fn stop_at_ready(take ready: StopAtReady) -> bool waits {
     false
 }
 
-fn open_sized_place(take config: PlaceConfig[(), (), (), ()]) -> Result[(), String] waits {
+fn open_sized_place(take config: PlaceConfig[(), (), ()]) -> Result[(), String] waits {
     let tasks = config.tasks
     let (stopping, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (watching, phases): (Sender[Receiver[Phase]], Receiver[Receiver[Phase]]) = channel.new(1u64)
@@ -63,19 +63,19 @@ fn open_sized_place(take config: PlaceConfig[(), (), (), ()]) -> Result[(), Stri
     }
 }
 
-fn bucket_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfig[(), (), (), ()] {
+fn bucket_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfig[(), (), ()] {
     let key = result.unwrap(secret.seal(clone(string.as_bytes("budget fixture")), "mac"))
     capture_budget_config(c, r, tasks, n, "http://127.0.0.1:1", key)
 }
 
-fn capture_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: String, key: Secret) -> PlaceConfig[(), (), (), ()] {
+fn capture_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: String, key: Secret) -> PlaceConfig[(), (), ()] {
     let bucket = BucketBacking(net: n, place: std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), credentials: std.cred.from_secret("access", secret.share(key), ""), lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64)
     let mut config = budget_config(Bucket(take bucket), c, r, tasks, n)
     config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(65536u64), pack_bytes: Some(65536u64), group_bytes: Some(65536u64), group_commits: None, lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
     take config
 }
 
-fn bucket_budget_at_limit(take config: PlaceConfig[(), (), (), ()]) -> Result[(u64, u64), StartError] waits {
+fn bucket_budget_at_limit(take config: PlaceConfig[(), (), ()]) -> Result[(u64, u64), StartError] waits {
     let (_, share, total, _, _) = place_store(config, None)?
     Ok((share, total))
 }
@@ -91,7 +91,7 @@ fn keyed_budget_runner_bytes() -> u64 {
     BUDGET_RUNNER_BYTES + 288 + 4096 + bytes[HeadInput]
 }
 
-fn bucket_budget_store(config: PlaceConfig[(), (), (), ()]) -> u64 {
+fn bucket_budget_store(config: PlaceConfig[(), (), ()]) -> u64 {
     let Bucket(backing) = view config.backing else {
         fail("L60: expected Bucket backing")
     }
@@ -126,7 +126,7 @@ fn budget_bucket_server(take input: (Listener, std.sim.s3.Loopback, Clock)) wait
     let _ = std.sim.s3.serve_loopback(mut serving, take bucket, clock)
 }
 
-fn seed_budget_bucket(take config: PlaceConfig[(), (), (), ()]) -> Result[store.StoreId, String] waits {
+fn seed_budget_bucket(take config: PlaceConfig[(), (), ()]) -> Result[store.StoreId, String] waits {
     let (take options, _, _, _, _) = place_store(config, None) ?=> |problem| start_text(problem)
     let PlaceConfig(backing: take backing, clock: clock, random: random, tasks: tasks, ..) = take config
     let (take opened, _) = open_backing(take backing, options, tasks, clock, random) ?=> |problem| start_text(backing_start_error(take problem))
@@ -149,7 +149,7 @@ fn seed_budget_bucket(take config: PlaceConfig[(), (), (), ()]) -> Result[store.
     Ok(id)
 }
 
-fn refused_bucket_place(take config: PlaceConfig[(), (), (), ()]) -> Result[Ended, StartError] waits {
+fn refused_bucket_place(take config: PlaceConfig[(), (), ()]) -> Result[Ended, StartError] waits {
     let (closing, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
     let ended = operate(take config, take stop, result.unwrap(status_root()), None)
     let _ = take closing

@@ -2,6 +2,26 @@
 // openssl key and token per run and passes the JWKS document and the token; after two bound
 // calls and a checkpoint it searches every store file for the token's payload and signature
 // segments, the key's x and y and a marker claim.
+// The place's bind G (RUNNER-SPEC v2.70): the verifier's handle, which its bind mint copies.
+type JwtGrant: send {
+    seed: Latest[jwtbind.Seed]
+}
+
+fn jwt_bind_mint(s: JwtGrant, _h: (), _bind: ()) -> Result[JwtGrant, Capacity] {
+    Ok(JwtGrant(seed: latest.handle(s.seed)))
+}
+
+// The crash place's entries, on a place whose G is the bind G.
+fn jwt_place(mut r: runner.Registry[JwtGrant, Hd]) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(bump), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(deny), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(trip), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn jwt_bound(g: JwtGrant, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    jwtbind.bind(latest.read(g.seed), credential)
+}
+
 type JwtClient: send {
     tasks: Tasks,
     net: Net,
@@ -9,7 +29,7 @@ type JwtClient: send {
     random: Random,
     head: Sender[runner.HeadInput],
     post: Sender[runner.PubIn],
-    wire: runner.Wire[jwtbind.Seed],
+    wire: Option[runner.BindGrant[JwtGrant]],
     token: Bytes
 }
 
@@ -21,10 +41,8 @@ fn jwt_client(take d: JwtClient) -> String waits {
     config.q = 1u64
     config.budget = 65536u64
     config.socket.max_frame = 32768u64
-    // The session task's allowance must hold the hello's bind child (4096 + BIND_BYTES).
-    config.n_granted = 4096u64 + jwtbind.BIND_BYTES
-    let no_grants: Option[Sender[runner.GrantRequest[()]]] = None
-    let pair = runner.wire_client.pair_config(tasks, n, c, r, Some(take session_wire), take no_grants, head, post, code.describe(place), keys, Some(take token), config, 2097152u64)
+    let no_grants: Option[runner.CallGrant[JwtGrant]] = None
+    let pair = runner.wire_client.pair_config(tasks, n, c, r, take session_wire, take no_grants, head, post, code.describe(jwt_place), keys, Some(take token), config, 2097152u64)
     let (take wire, take server) = match take pair {
         Ok(take connected) => take connected,
         Error(Allocation(_)) => return "L68: client allocation refused",
@@ -71,15 +89,18 @@ pub fn no_jwt_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: 
         Ok(take v) => take v,
         Error(_) => fail("L68: the fixture JWKS was refused"),
     }
-    let session_wire: runner.Wire[jwtbind.Seed] = runner.wire_bind(jwtbind.seed(v), code.describe(jwtbind.bind), jwtbind.BIND_BYTES, jwtbind.BIND_STEPS)
+    let given: runner.Grants[JwtGrant, (), JwtGrant] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: JwtGrant(seed: jwtbind.seed(v)), mint: jwt_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
+    let binds = runner.grant_task(tasks, (), take given)
+    let session_wire = runner.grant_binds_of(binds, runner.wire(code.describe(jwt_bound), jwtbind.BIND_BYTES, jwtbind.BIND_STEPS))
     let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
     result.unwrap(install_data(mut db))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let seed = JwtClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: runner.post(mail), wire: take session_wire, token: take token)
     let driving = task.spawn(tasks, bytes 33554432u64, take seed, jwt_client)
-    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64))
+    result.unwrap(runner.place_head(take db, code.describe(jwt_place), N_PLACE, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64))
     clean(result.unwrap(task.join(take driving)))
+    runner.stop_grants(Some(take binds))
     let mut o = options()
     o.create = false
     let mut again = result.unwrap(store.open(tasks, d, c, r, o))

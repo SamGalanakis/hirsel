@@ -38,7 +38,7 @@ fn terminal_age_case(tasks: Tasks, clock: Clock, random: Random, replaced: bool)
     let Notice(e: Updated(take pending)) = publisher_notice(take event) else { return Error("missing owner update") }
 
     let (head, _requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
-    let service: Service[WireSession[(), ()]] = wire_service_seed(random, no_wire(), head, clock, tasks, wire_defaults(1048576u64), string.new())
+    let service: Service[WireSession[()]] = wire_service_seed(random, no_wire(), head, clock, tasks, wire_defaults(1048576u64), string.new())
     let Service(context: take initial, ..) = take service
     let mut owner = take initial
     let mut work = wire_work()

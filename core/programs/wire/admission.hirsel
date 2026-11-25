@@ -100,6 +100,15 @@ fn bind_test(random: Random, credential: Bytes) -> Result[runner.BoundCaller, ru
     runner.ingress.caller((), credential)
 }
 
+// The front's bind mint (RUNNER-SPEC v2.70): each bind gets the fixture's Random.
+fn admission_wire() -> runner.Wire[Random] {
+    runner.wire(code.describe(bind_test), 4096u64, 65536u64)
+}
+
+fn random_grant(r: Random, _h: (), _bind: ()) -> Result[Random, Capacity] {
+    Ok(r)
+}
+
 fn server(take seed: Server) -> () waits {
     let Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: take post) = take seed
     let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) {
@@ -113,10 +122,13 @@ fn server(take seed: Server) -> () waits {
             config.budget = 65536u64
         }
     }
-    let make: scoped[view] fn() -> runner.Service[runner.WireSession[Random, Random]] = fn() -> runner.Service[runner.WireSession[Random, Random]] {
-        runner.wire_service(random, Some(runner.wire(random, code.describe(bind_test), 4096u64, 65536u64)), head, c, tasks, config, a)
+    let given: runner.Grants[Random, (), Random] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: random, mint: random_grant, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
+    let binds = runner.grant_task(tasks, (), take given)
+    let make: scoped[view] fn() -> runner.Service[runner.WireSession[Random]] = fn() -> runner.Service[runner.WireSession[Random]] {
+        runner.wire_service(random, runner.grant_binds_of(binds, admission_wire()), head, c, tasks, config, a)
     }
-    let _ = runner.serve_wire(take listener, tasks, c, post, config, 128u64, list.new(), make, result.unwrap(runner.wire_place_allocator(code.describe(place), 1048576u64)))
+    let _ = runner.serve_wire(take listener, tasks, c, post, config, 128u64, list.new(), runner.bind_owner_bytes(runner.grant_binds_of(binds, admission_wire())), make, result.unwrap(runner.wire_place_allocator(code.describe(place), 1048576u64)))
+    runner.stop_grants(Some(take binds))
 }
 
 // A callback fault ends the owner task under FAIL-14.
@@ -148,7 +160,7 @@ fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Ex
     if reject {
         config.budget = 100u64
     }
-    match runner.serve_wire(take listener, tasks, c, runner.post(mail), config, 1u64, list.new(), fault_service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] {
+    match runner.serve_wire(take listener, tasks, c, runner.post(mail), config, 1u64, list.new(), 0u64, fault_service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] {
         Error(1013u16)
     }) {
         Error(Configuration) => if reject {

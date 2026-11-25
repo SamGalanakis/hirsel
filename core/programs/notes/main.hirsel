@@ -208,9 +208,10 @@ pub type Services: send {
     stream: Option[Stream]
 }
 
+// `context` is the attempt's; a bind's G (RUNNER-SPEC v2.70) has none.
 pub type Grants: send {
     handles: Handles,
-    context: runner.TriggerContext,
+    context: Option[runner.TriggerContext],
     helper: Sender[HelperAsk],
     clock: Clock,
     live: Option[Live],
@@ -228,7 +229,7 @@ pub fn copy_live(l: Live, group: String) -> Live {
     Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out, preview: harness.preview.copy_door(l.preview), group: string.from(group), model: string.from(l.model))
 }
 
-fn make_grants(s: Services, h: Handles, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
+fn make_grants(s: Services, h: Handles, ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
     let live = match s.live {
         Some(l) => Some(copy_live(l, l.group)),
         None => None,
@@ -238,8 +239,19 @@ fn make_grants(s: Services, h: Handles, take ctx: runner.TriggerContext) -> Resu
         None => string.new(),
     }
     let stream = copy_stream(s.stream, group)
-    Ok(Grants(handles: clone(h), context: take ctx, helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: take stream))
+    Ok(Grants(handles: clone(h), context: Some(runner.share_trigger_context(ctx)), helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: take stream))
 }
+
+// A bind's G: no trigger context, live model or stream.
+fn bind_grants(s: Services, h: Handles, _bind: ()) -> Result[Grants, Capacity] {
+    Ok(Grants(handles: clone(h), context: None, helper: channel.sender(s.helper), clock: s.clock, live: None, stream: None))
+}
+
+// The ingress binding over this place's G (RUNNER-SPEC v2.70); it reads nothing from G.
+fn bound_caller(_g: Grants, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    runner.ingress.caller((), credential)
+}
+
 
 // ---- Outside tools: they run in a worker, off the write lock ----
 fn clock_tool(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] {
@@ -474,7 +486,10 @@ fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Resul
     if let Some(l) = view g.live {
         target = Some(harness.preview.target(l.preview, l.group, g.clock))
     }
-    harness.effect(g.context, g.handles.harness, g, take key, notes_agent(g.handles.tables), code.describe(settle), take target)
+    let Some(ctx) = view g.context else {
+        fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
+    }
+    harness.effect(ctx, g.handles.harness, g, take key, notes_agent(g.handles.tables), code.describe(settle), take target)
 }
 
 fn settle(mut tx: store.Tx, h: Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -517,8 +532,8 @@ type HelperGrants: send {
     context: runner.TriggerContext
 }
 
-fn helper_grants(s: (), h: harness.Handles, take ctx: runner.TriggerContext) -> Result[HelperGrants, Capacity] {
-    Ok(HelperGrants(handles: clone(h), context: take ctx))
+fn helper_grants(s: (), h: harness.Handles, ctx: runner.TriggerContext) -> Result[HelperGrants, Capacity] {
+    Ok(HelperGrants(handles: clone(h), context: runner.share_trigger_context(ctx)))
 }
 
 // Answers with the first sentence of the newest user message.
@@ -589,10 +604,10 @@ pub type HelperSeed: send {
     net: Net
 }
 
-fn helper_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> runner.PlaceConfig[HelperGrants, harness.Handles, (), ()] {
+fn helper_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> runner.PlaceConfig[HelperGrants, harness.Handles, ()] {
     let w = result.unwrap(helper_wired())
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()))
-    let config_grants: runner.Grants[HelperGrants, harness.Handles, ()] = runner.Grants(seed: (), attempt: Some(helper_grants), call: None, grant_bytes: 65536u64)
+    let config_grants: runner.Grants[HelperGrants, harness.Handles, ()] = runner.Grants(attempt: Some(runner.Mint(seed: (), mint: helper_grants, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)), call: None, claim: None, bind: None)
     runner.PlaceConfig(backing: Disk(dir), sizes: sizes(), selection: Reopen, place: code.describe(helper_place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
@@ -667,7 +682,7 @@ pub fn wire() -> runner.WireConfig {
 
 // Runs a place until it is idle: no run can move without a person or a
 // timer, so `operate` returns.
-fn until_idle[G: send, H: shareable + inert + send, S: send](take config: runner.PlaceConfig[G, H, S, ()]) -> Result[(), String] waits {
+fn until_idle[G: send, H: shareable + inert + send, S: send](take config: runner.PlaceConfig[G, H, S]) -> Result[(), String] waits {
     let (stop, stopped): (Sender[()], Receiver[()]) = channel.new(1u64)
     let Ok(status) = runner.status_root() else {
         return Error("place: status")
@@ -689,16 +704,30 @@ fn until_idle[G: send, H: shareable + inert + send, S: send](take config: runner
     }
 }
 
-pub fn settings(take backing: runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, Handles, Services, ()] {
+pub fn settings(take backing: runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, Handles, Services] {
+    place_settings(take backing, clock, random, tasks, net, take s, false)
+}
+
+// `settings` with runner.ingress's binding and the bind mint it needs.
+pub fn wired_settings(take backing: runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, Handles, Services] {
+    place_settings(take backing, clock, random, tasks, net, take s, true)
+}
+
+fn place_settings(take backing: runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, ingress: bool) -> runner.PlaceConfig[Grants, Handles, Services] {
     let w = result.unwrap(wired())
-    let grant_bytes = if let Some(_) = view s.live {
+    let mint_bytes = if let Some(_) = view s.live {
         LIVE_GRANT_BYTES
     } else {
         65536u64
     }
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()))
-    let config_grants: runner.Grants[Grants, Handles, Services] = runner.Grants(seed: take s, attempt: Some(make_grants), call: None, grant_bytes: grant_bytes)
-    runner.PlaceConfig(backing: take backing, sizes: sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(schema), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS))
+    let (binding, bind_mint) = if ingress {
+        (Some(runner.wire(code.describe(bound_caller), 4096u64, 65536u64)), Some(runner.Mint(seed: Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: None), mint: bind_grants, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)))
+    } else {
+        (None, None)
+    }
+    let config_grants: runner.Grants[Grants, Handles, Services] = runner.Grants(attempt: Some(runner.Mint(seed: take s, mint: make_grants, mint_bytes: mint_bytes, mint_steps: runner.DEFAULT_STEPS)), call: None, claim: None, bind: take bind_mint)
+    runner.PlaceConfig(backing: take backing, sizes: sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(schema), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: take binding, grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
 // ---- printing ----

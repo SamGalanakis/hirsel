@@ -11,7 +11,7 @@ type IdleGrant: send {
     attempt: u64
 }
 
-fn idle_grant(seed: IdleSeed, unused_handles: Hd, take ctx: runner.TriggerContext) -> Result[IdleGrant, Capacity] {
+fn idle_grant(seed: IdleSeed, unused_handles: Hd, ctx: runner.TriggerContext) -> Result[IdleGrant, Capacity] {
     let number = triggers.number(runner.trigger_attempt(ctx))
     Ok(IdleGrant(clock: seed.clock, starts: channel.sender(seed.starts), attempt: number))
 }
@@ -101,10 +101,10 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
     let (starts, started): (Sender[u64], Receiver[u64]) = channel.new(2u64)
     let (entries, _) = idle_entries()
     let config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()))
-    let config_grants: runner.Grants[IdleGrant, Hd, IdleSeed] = runner.Grants(seed: IdleSeed(clock: virtual_time, starts: take starts), attempt: Some(idle_grant), call: None, grant_bytes: 65536u64)
+    let config_grants: runner.Grants[IdleGrant, Hd, IdleSeed] = runner.Grants(attempt: Some(runner.Mint(seed: IdleSeed(clock: virtual_time, starts: take starts), mint: idle_grant, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)), call: None, claim: None, bind: None)
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[IdleGrant, Hd, IdleSeed, ()] = runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(idle_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(ping_schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: listen, net: network, tasks: tasks, clock: virtual_time, random: random, stop: stop, wire: None, grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS))
+    let settings: runner.PlaceConfig[IdleGrant, Hd, IdleSeed] = runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(idle_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(ping_schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: listen, net: network, tasks: tasks, clock: virtual_time, random: random, stop: stop, wire: None, grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS))
     let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
     loop {
         match channel.receive(phases) {

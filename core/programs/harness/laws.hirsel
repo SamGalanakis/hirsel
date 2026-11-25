@@ -17,9 +17,10 @@ type Services: send {
     blobs: Option[BlobFixture]
 }
 
+// `context` is the attempt's; a bind's G (RUNNER-SPEC v2.70) has none.
 type Grants: send {
     handles: harness.Handles,
-    context: runner.TriggerContext,
+    context: Option[runner.TriggerContext],
     model: Sender[ModelAsk],
     tool: Sender[ToolAsk],
     blobs: Option[BlobFixture]
@@ -119,9 +120,19 @@ fn copy_services(s: Services) -> Services {
     Services(model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s))
 }
 
-fn make_grants(s: Services, h: harness.Handles, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
-    Ok(Grants(handles: clone(h), context: take ctx, model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)))
+fn make_grants(s: Services, h: harness.Handles, ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
+    Ok(Grants(handles: clone(h), context: Some(runner.share_trigger_context(ctx)), model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)))
 }
+
+fn bind_grants(s: Services, h: harness.Handles, _bind: ()) -> Result[Grants, Capacity] {
+    Ok(Grants(handles: clone(h), context: None, model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: None))
+}
+
+// The ingress binding over this place's G (RUNNER-SPEC v2.70); it reads nothing from G.
+fn bound_caller(_g: Grants, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    runner.ingress.caller((), credential)
+}
+
 
 fn scripted_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let mut after_tool = false
@@ -169,7 +180,10 @@ fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g.handles, g, take key, crash_agent(), code.describe(settle), None)
+    let Some(ctx) = view g.context else {
+        fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
+    }
+    harness.effect(ctx, g.handles, g, take key, crash_agent(), code.describe(settle), None)
 }
 
 fn settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -181,32 +195,6 @@ fn settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take
 
 fn place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
     harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), harness.select_handles, BYTES, BYTES)
-}
-
-// ---- running a place ----
-type Life: send {
-    config: runner.PlaceConfig[Grants, harness.Handles, Services, ()],
-    stop: Receiver[()],
-    status: Latest[runner.Status]
-}
-
-fn live(take life: Life) -> Result[runner.Ended, runner.StartError] waits {
-    let Life(config: take config, stop: take stop, status: take status) = take life
-    runner.operate(take config, take stop, status, None)
-}
-
-type Registered = StaticFn[fn(mut runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError]]
-
-fn settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
-    settings_of(code.describe(place), harness.entries(result.unwrap(wired())), dir, clock, random, tasks, net, take s, idle)
-}
-
-fn settings_of(registered: Registered, take allowed: runner.triggers.Entries, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
-    let config = runner.TriggerConfig(entries: take allowed, author: store.Caller(issuer: 0u8, subject: list.new()))
-    let config_grants: runner.Grants[Grants, harness.Handles, Services] = runner.Grants(seed: take s, attempt: Some(make_grants), call: None, grant_bytes: 65536u64)
-    let mut wire = runner.wire_defaults(65536u64)
-    wire.n_pool = 4194304u64
-    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Reopen, place: registered, n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, grants: Some(take config_grants), triggers: Some(take config), idle: idle)
 }
 
 // One user message, committed before any place runs.
@@ -1507,7 +1495,10 @@ fn matrix_action(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, tak
 }
 
 fn matrix_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g.handles, g, take key, matrix_agent(), code.describe(matrix_settle), None)
+    let Some(ctx) = view g.context else {
+        fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
+    }
+    harness.effect(ctx, g.handles, g, take key, matrix_agent(), code.describe(matrix_settle), None)
 }
 
 fn matrix_settle(mut tx: store.Tx, h: harness.Handles, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -1522,7 +1513,7 @@ fn matrix_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), r
     harness.register_standard(mut r, code.describe(matrix_advance), code.describe(matrix_effect), code.describe(matrix_settle), harness.select_handles, BYTES, BYTES)
 }
 
-fn matrix_settings(scenario: MatrixScenario, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+fn matrix_settings(scenario: MatrixScenario, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services] {
     if scenario == ToolAndAnswer {
         return settings(dir, clock, random, tasks, net, take s, Some(MATRIX_IDLE_MS))
     }
@@ -1693,7 +1684,7 @@ fn blob_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), run
     harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), harness.select_handles, BYTES, 8388608u64)
 }
 
-fn blob_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take services: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+fn blob_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take services: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services] {
     settings_of(code.describe(blob_place), harness.entries(result.unwrap(wired())), dir, clock, random, tasks, net, take services, Some(IDLE_MS))
 }
 

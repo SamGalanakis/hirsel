@@ -29,9 +29,10 @@ type Services: send {
     chunks: u64,
 }
 
+// `context` is the attempt's; a bind's G (RUNNER-SPEC v2.70) has none.
 type Grants: send {
     handles: harness.Handles,
-    context: runner.TriggerContext,
+    context: Option[runner.TriggerContext],
     s: Services
 }
 
@@ -139,7 +140,10 @@ fn child_of(s: Services) -> harness.gateway.Child {
 // The subagent: a child session, keyed by this place and this effect's trigger run,
 // asked to tally.
 fn delegate(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
-    let key = harness.gateway.child_key(g.s.name, g.context)
+    let Some(ctx) = view g.context else {
+        fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
+    }
+    let key = harness.gateway.child_key(g.s.name, ctx)
     harness.gateway.ask(g.s.door, take key, Fresh("scripted", All), child_of(g.s), "tally it")
 }
 
@@ -175,7 +179,10 @@ fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Resul
         Some(p) => Some(harness.preview.target(p, g.s.name, g.s.clock)),
         None => None,
     }
-    harness.effect(g.context, g.handles, g, take key, gated_agent(), code.describe(settle), take target)
+    let Some(ctx) = view g.context else {
+        fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
+    }
+    harness.effect(ctx, g.handles, g, take key, gated_agent(), code.describe(settle), take target)
 }
 
 fn settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -217,9 +224,19 @@ fn services_of(s: Services, take name: String) -> Services {
     }, chunks: s.chunks)
 }
 
-fn make_grants(s: Services, h: harness.Handles, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
-    Ok(Grants(handles: clone(h), context: take ctx, s: services_of(s, string.from(s.name))))
+fn make_grants(s: Services, h: harness.Handles, ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
+    Ok(Grants(handles: clone(h), context: Some(runner.share_trigger_context(ctx)), s: services_of(s, string.from(s.name))))
 }
+
+fn bind_grants(s: Services, h: harness.Handles, _bind: ()) -> Result[Grants, Capacity] {
+    Ok(Grants(handles: clone(h), context: None, s: services_of(s, string.from(s.name))))
+}
+
+// The ingress binding over this place's G (RUNNER-SPEC v2.70); it reads nothing from G.
+fn bound_caller(_g: Grants, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    runner.ingress.caller((), credential)
+}
+
 
 fn wire() -> runner.WireConfig {
     let mut w = runner.wire_defaults(65536u64)
@@ -229,11 +246,11 @@ fn wire() -> runner.WireConfig {
 
 // The host replaces the backing, selection, idle time and wire session count with its own (§14.9). The binding maps
 // one credential to one Caller across connections, as a browser's login would.
-fn session_place(take supplied: platform.local.Supplied, s: Services) -> Result[runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
+fn session_place(take supplied: platform.local.Supplied, s: Services) -> Result[runner.PlaceConfig[Grants, harness.Handles, Services], Capacity] {
     let w = result.unwrap(wired())
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()))
-    let config_grants: runner.Grants[Grants, harness.Handles, Services] = runner.Grants(seed: services_of(s, string.from(supplied.name)), attempt: Some(make_grants), call: None, grant_bytes: EFFECT_GRANT)
-    Ok(runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: Some(runner.wire_bind(latest.new(arc.new(())), code.describe(runner.ingress.caller), 4096u64, 65536u64)), grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS)))
+    let config_grants: runner.Grants[Grants, harness.Handles, Services] = runner.Grants(attempt: Some(runner.Mint(seed: services_of(s, string.from(supplied.name)), mint: make_grants, mint_bytes: EFFECT_GRANT, mint_steps: runner.DEFAULT_STEPS)), call: None, claim: None, bind: Some(runner.Mint(seed: services_of(s, string.from(supplied.name)), mint: bind_grants, mint_bytes: EFFECT_GRANT, mint_steps: runner.DEFAULT_STEPS)))
+    Ok(runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: Some(runner.wire(code.describe(bound_caller), 4096u64, 65536u64)), grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS)))
 }
 
 fn session_factory() -> platform.local.Factory[Services] {

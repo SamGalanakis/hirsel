@@ -54,6 +54,7 @@ store = { major = 1, path = "../store" }
 "runner-http-subscription.hirsel" = "runner"
 "runner-http-envelope.hirsel" = "runner"
 "runner-trigger-context.hirsel" = "runner"
+"runner-mint.hirsel" = "runner"
 "runner-reexec.hirsel" = "runner"
 "runner-transact.hirsel" = "runner"
 "runner-subscriptions.hirsel" = "runner"
@@ -93,6 +94,7 @@ dirs = ["."]
 "runner_hung_laws.hirsel" = "runner_calls"
 "runner-idle-law.hirsel" = "runner_calls"
 "runner-bind-law.hirsel" = "runner_calls"
+"runner-mint-laws.hirsel" = "runner_calls"
 "runner-expiry-law.hirsel" = "runner_calls"
 "runner-managed-law.hirsel" = "runner_calls"
 "session-laws.hirsel" = "runner"
@@ -139,6 +141,21 @@ limit = 1342177280
 limit = 1342177280
 
 [tests.runs."runner@1/runner_calls/test_bind_granted"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner_calls/test_mint_per_use"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner_calls/test_bind_mint_refused"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner_calls/test_mint_scope"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner_calls/test_grants_without_triggers"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner_calls/test_trigger_no_grant_refuses"]
 limit = 1342177280
 
 [tests.runs."runner@1/runner/operate_derived_budgets"]

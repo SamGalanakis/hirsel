@@ -166,7 +166,7 @@ pub fn verifier(take issuer: Issuer, take source: Source, net: Net, take trust: 
     }
 }
 
-// The handle runner.wire_bind takes.
+// The verifier's handle, which a bind mint copies into its G.
 pub fn seed(v: Verifier) -> Latest[Seed] {
     latest.handle(v.root)
 }

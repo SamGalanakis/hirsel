@@ -1,0 +1,10 @@
+// A mint never waits (RUNNER-SPEC v2.69 F3), so a Mint's mint is a plain fn: one
+// that waits does not type-check as a Mint.
+fn waiting(c: Clock, _handles: (), _input: ()) -> Result[(), Capacity] waits {
+    std.clock.sleep_ns(c, 1u64)
+    Ok(())
+}
+
+pub fn configure(c: Clock) -> runner.Mint[Clock, (), (), ()] {
+    runner.Mint(seed: c, mint: waiting, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)
+}

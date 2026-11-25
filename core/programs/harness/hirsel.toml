@@ -45,6 +45,7 @@ dirs = ["."]
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"laws_place.hirsel" = "laws"
 "settle_laws.hirsel" = "laws"
 "life_fixture.hirsel" = "laws"
 "catalog_laws.hirsel" = "laws"

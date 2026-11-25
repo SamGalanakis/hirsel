@@ -94,8 +94,9 @@ fn http_law_binding(_seed: (), credential: Bytes) -> Result[BoundCaller, BindRef
     ingress.caller((), credential)
 }
 
-fn http_law_bind() -> Option[Wire[()]] {
-    Some(wire((), code.describe(http_law_binding), 4096u64, 65536u64))
+// The law's binding with the unit bind mint `running` serves.
+fn http_law_bind(running: PlaceGrants[()]) -> Option[BindGrant[()]] {
+    grant_binds_of(running, wire(code.describe(http_law_binding), 4096u64, 65536u64))
 }
 
 fn http_law_credential() -> Bytes {
@@ -218,7 +219,10 @@ fn http_law_raw(req: std.http.Request, _scratch: Region, mut resp: std.http.Resp
     let mut entries: List[Bytes] = list.with_capacity(1u64)
     list.push(mut entries, clone(state.writes))
     let handler_deadline = std.http.handler_deadline(req)
-    let admit = match bind_http(http_law_bind(), take credential, take entries, state.random, state.clock, state.tasks, handler_deadline, 65536u64, HTTP_LAW_ARG_MAX) {
+    let binds = ingress.bind_task(state.tasks)
+    let bound_http = bind_http(http_law_bind(binds), take credential, take entries, state.random, state.clock, state.tasks, handler_deadline, 65536u64, HTTP_LAW_ARG_MAX)
+    stop_grants(Some(take binds))
+    let admit = match take bound_http {
         Ok(take context) => take context,
         Error(RejectedCredential) => return http_law_reply(401u16, list.new(), false),
         Error(_) => return http_law_reply(503u16, list.new(), false),
@@ -267,14 +271,16 @@ fn http_law_serve(take job: HttpLawServer) waits {
     let mut listeners: List[Listener] = list.with_capacity(1u64)
     list.push(mut listeners, take listener)
     if generated {
+        let binds = ingress.bind_task(tasks)
         let reg = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
-        let builder: std.router.Builder[HttpConnection[(), HttpLawHandles, ()]] = std.router.builder()
+        let builder: std.router.Builder[HttpConnection[(), HttpLawHandles]] = std.router.builder()
         let (take router, take prepared_routes) = result.unwrap(http_router(reg, None, take builder))
-        let connection: scoped[view] fn() -> HttpConnection[(), HttpLawHandles, ()] = fn() -> HttpConnection[(), HttpLawHandles, ()] {
+        let connection: scoped[view] fn() -> HttpConnection[(), HttpLawHandles] = fn() -> HttpConnection[(), HttpLawHandles] {
             let registry_copy = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
-            http_connection(take registry_copy, arc.share(prepared_routes), http_law_bind(), relay_endpoint(endpoint), random, clock, tasks, 65536u64)
+            http_connection(take registry_copy, arc.share(prepared_routes), http_law_bind(binds), relay_endpoint(endpoint), random, clock, tasks, 65536u64)
         }
         result.unwrap(http_serve_connections(take listeners, clock, tasks, http_law_config(), take router, 2097152u64, connection, None))
+        stop_grants(Some(take binds))
         return
     }
     let mut routes: std.router.Builder[HttpLawRoute] = std.router.builder()
@@ -431,7 +437,10 @@ fn http_law_keys(reg: Registry[(), HttpLawHandles]) -> List[Bytes] {
 }
 
 fn http_law_socket(d: HttpLawDrive, keys: List[Bytes], take credential: Bytes) -> Result[(wire_client.Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
-    wire_client.pair(d.tasks, d.net, d.clock, d.random, http_law_bind(), d.head, d.publisher_out, code.describe(http_law_place), keys, Some(take credential), 2u64, 4194304u64)
+    let binds = ingress.bind_task(d.tasks)
+    let paired = wire_client.pair(d.tasks, d.net, d.clock, d.random, http_law_bind(binds), d.head, d.publisher_out, code.describe(http_law_place), keys, Some(take credential), 2u64, 4194304u64)
+    stop_grants(Some(take binds))
+    paired
 }
 
 fn http_law_wire(s: wire_client.Conn, stream: u32, p: u64, index: u32, deadline_ms: u32, data: Bytes) -> Outcome waits {

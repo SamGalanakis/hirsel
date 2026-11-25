@@ -1,0 +1,39 @@
+// Running a place for the offline laws (split from laws.hirsel).
+type Life: send {
+    config: runner.PlaceConfig[Grants, harness.Handles, Services],
+    stop: Receiver[()],
+    status: Latest[runner.Status]
+}
+
+fn live(take life: Life) -> Result[runner.Ended, runner.StartError] waits {
+    let Life(config: take config, stop: take stop, status: take status) = take life
+    runner.operate(take config, take stop, status, None)
+}
+
+type Registered = StaticFn[fn(mut runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError]]
+
+fn settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> runner.PlaceConfig[Grants, harness.Handles, Services] {
+    settings_of(code.describe(place), harness.entries(result.unwrap(wired())), dir, clock, random, tasks, net, take s, idle)
+}
+
+fn settings_of(registered: Registered, take allowed: runner.triggers.Entries, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> runner.PlaceConfig[Grants, harness.Handles, Services] {
+    place_settings(registered, take allowed, dir, clock, random, tasks, net, take s, idle, false)
+}
+
+// `settings_of` with runner.ingress's binding and the bind mint it needs.
+fn wired_settings_of(registered: Registered, take allowed: runner.triggers.Entries, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> runner.PlaceConfig[Grants, harness.Handles, Services] {
+    place_settings(registered, take allowed, dir, clock, random, tasks, net, take s, idle, true)
+}
+
+fn place_settings(registered: Registered, take allowed: runner.triggers.Entries, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64], ingress: bool) -> runner.PlaceConfig[Grants, harness.Handles, Services] {
+    let config = runner.TriggerConfig(entries: take allowed, author: store.Caller(issuer: 0u8, subject: list.new()))
+    let (binding, bind_mint) = if ingress {
+        (Some(runner.wire(code.describe(bound_caller), 4096u64, 65536u64)), Some(runner.Mint(seed: copy_services(s), mint: bind_grants, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)))
+    } else {
+        (None, None)
+    }
+    let config_grants: runner.Grants[Grants, harness.Handles, Services] = runner.Grants(attempt: Some(runner.Mint(seed: take s, mint: make_grants, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)), call: None, claim: None, bind: take bind_mint)
+    let mut wire = runner.wire_defaults(65536u64)
+    wire.n_pool = 4194304u64
+    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Reopen, place: registered, n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: take binding, grants: Some(take config_grants), triggers: Some(take config), idle: idle)
+}

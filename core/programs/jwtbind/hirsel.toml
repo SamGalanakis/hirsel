@@ -18,3 +18,6 @@ dirs = ["."]
 
 [tests.sources]
 "jwtbind_laws.hirsel" = "jwtbind"
+
+[tests.runs."jwtbind@1/jwtbind/jwt_default_place"]
+limit = 1342177280

@@ -106,8 +106,8 @@ type HedgeGrants: send {
     service: HedgeServices
 }
 
-fn grant_hedge(s: HedgeServices, h: harness.Handles, take ctx: runner.TriggerContext) -> Result[HedgeGrants, Capacity] {
-    Ok(HedgeGrants(handles: clone(h), context: take ctx, service: HedgeServices(worker: provider.share_worker(s.worker), net: s.net, address: s.address, clock: s.clock, enabled: s.enabled)))
+fn grant_hedge(s: HedgeServices, h: harness.Handles, ctx: runner.TriggerContext) -> Result[HedgeGrants, Capacity] {
+    Ok(HedgeGrants(handles: clone(h), context: runner.share_trigger_context(ctx), service: HedgeServices(worker: provider.share_worker(s.worker), net: s.net, address: s.address, clock: s.clock, enabled: s.enabled)))
 }
 
 fn model_single(g: HedgeGrants, take req: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
@@ -203,10 +203,10 @@ fn law_hedge_charge(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let (worker, history) = provider.worker(tasks, 262144u64)
     let service = HedgeServices(worker: take worker, net: fake, address: address, clock: clock, enabled: enabled)
     let config = runner.TriggerConfig(entries: harness.entries(hedge_wire()), author: store.Caller(issuer: 0u8, subject: b""))
-    let config_grants: runner.Grants[HedgeGrants, harness.Handles, HedgeServices] = runner.Grants(seed: take service, attempt: Some(grant_hedge), call: None, grant_bytes: 65536u64)
+    let config_grants: runner.Grants[HedgeGrants, harness.Handles, HedgeServices] = runner.Grants(attempt: Some(runner.Mint(seed: take service, mint: grant_hedge, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)), call: None, claim: None, bind: None)
     let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[HedgeGrants, harness.Handles, HedgeServices, ()] = runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Reopen, place: code.describe(hedge_place), n_place: HEDGE_ENTRY_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: take session, max_sessions: 1u64, proxies: list.new(), n_publisher: HEDGE_ENTRY_BYTES, listen: loopback, net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, grants: Some(take config_grants), triggers: Some(take config), idle: Some(300u64))
+    let settings: runner.PlaceConfig[HedgeGrants, harness.Handles, HedgeServices] = runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Reopen, place: code.describe(hedge_place), n_place: HEDGE_ENTRY_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: take session, max_sessions: 1u64, proxies: list.new(), n_publisher: HEDGE_ENTRY_BYTES, listen: loopback, net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, grants: Some(take config_grants), triggers: Some(take config), idle: Some(300u64))
     let (stop, from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let ended = runner.operate(take settings, take from, latest.handle(status), None)

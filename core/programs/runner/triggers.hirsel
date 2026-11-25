@@ -208,6 +208,28 @@ fn listed(entries: Entries, path_bytes: Bytes, schema: Bytes, carries_grants: bo
     false
 }
 
+/// Whether the list names the entry with this identity and argument schema as
+/// a granted entry (RUNNER-SPEC v2.69 `CallMint.entries`).
+pub fn lists_granted(entries: Entries, identity: Bytes, schema: Bytes) -> bool {
+    listed(entries, definition_path(identity), schema, true)
+}
+
+/// The path of the first listed element `known` refuses, given its path,
+/// argument schema and whether it is granted.
+pub fn first_unlisted(entries: Entries, known: scoped[view] fn(Bytes, Bytes, bool) -> bool) -> Option[Bytes] {
+    for ref in entries.listed {
+        if !known(ref.path, ref.schema, ref.granted) {
+            return Some(clone(ref.path))
+        }
+    }
+    None
+}
+
+/// Whether a registered identity names this entry path.
+pub fn names_path(identity: Bytes, path_bytes: Bytes) -> bool {
+    definition_path(identity) == path_bytes
+}
+
 pub fn write[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A], arg: A, when: Due) -> Result[Id, Error] {
     let (id, at) = allocate_id(mut tx, t, entries, target)?
     write_at(mut tx, t, target, id, arg, when, at)

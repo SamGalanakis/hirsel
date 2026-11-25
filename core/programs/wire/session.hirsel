@@ -35,7 +35,7 @@ fn run(n: Net, tasks: Tasks, clock: Clock, config: runner.WireConfig) -> Result[
     }
     let mail = result.unwrap(runner.mailbox(64u64))
     let to_publisher = runner.post(mail)
-    let result = runner.serve_wire(take listener, tasks, clock, to_publisher, c, 16u64, list.new(), service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) })
+    let result = runner.serve_wire(take listener, tasks, clock, to_publisher, c, 16u64, list.new(), 0u64, service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) })
     match result { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
 }
 

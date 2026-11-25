@@ -394,7 +394,10 @@ fn race_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take
 }
 
 fn race_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g.handles, g, take key, race_agent(), code.describe(race_settle), None)
+    let Some(ctx) = view g.context else {
+        fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
+    }
+    harness.effect(ctx, g.handles, g, take key, race_agent(), code.describe(race_settle), None)
 }
 
 fn race_settle(mut tx: store.Tx, h: harness.Handles, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {

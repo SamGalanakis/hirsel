@@ -338,14 +338,14 @@ fn client_keys() -> List[Bytes] {
 }
 
 fn try_conn(d: Drive, q: u64, n_session: u64) -> Option[Conn] waits {
-    match wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(ingress.binding()), d.head, d.post, code.describe(place), client_keys(), Some(clone(d.token)), q, n_session) {
+    match wire_client.pair_ingress(d.tasks, d.net, d.clock, d.random, d.head, d.post, code.describe(place), client_keys(), Some(clone(d.token)), q, n_session) {
         Ok((take cn, take h)) => Some(Socket(take cn, take h)),
         Error(_) => None,
     }
 }
 
 fn conn(d: Drive, q: u64) -> Conn waits {
-    let (take cn, take h) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(ingress.binding()), d.head, d.post, code.describe(place), client_keys(), Some(clone(d.token)), q, 2097152u64))
+    let (take cn, take h) = paired(wire_client.pair_ingress(d.tasks, d.net, d.clock, d.random, d.head, d.post, code.describe(place), client_keys(), Some(clone(d.token)), q, 2097152u64))
     Socket(take cn, take h)
 }
 
@@ -787,7 +787,7 @@ pub fn law_calls_duplicate(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool wa
 // A fresh anonymous session runs the same call. Retirement can add an intervening commit.
 fn anonymous_reply(d: Drive, birth: u64) -> Option[u64] waits {
     let requested = client_keys()
-    let unbound: Option[runner.Wire[()]] = None
+    let unbound: Option[runner.BindGrant[()]] = None
     let (take wire, take session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post, code.describe(place), requested, Some(clone(d.token)), 0u64, 2097152u64))
     wire_client.send_frame(wire, Call(store.StreamId(t: birth, n: 7u64), 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
     let observed = match wire_client.next(wire) {
@@ -841,7 +841,7 @@ fn stamp_place(mut registry: runner.Registry[WireStamp, Hd]) -> Result[(), runne
 }
 
 // The place's call mint: a fresh WireStamp for each Granted call.
-fn stamp_mint(seed: WireStamp, _h: ()) -> Result[WireStamp, Capacity] {
+fn stamp_mint(seed: WireStamp, _h: (), _call: ()) -> Result[WireStamp, Capacity] {
     Ok(WireStamp(clock: seed.clock, offset: seed.offset))
 }
 
@@ -853,9 +853,9 @@ fn drive_granted_copies(take d: Drive) -> () waits {
     config.budget = 65536u64
     config.socket.max_frame = 32768u64
     config.n_granted = 131072u64
-    let given: runner.Grants[WireStamp, (), WireStamp] = runner.Grants(seed: WireStamp(clock: d.clock, offset: 40u64), attempt: None, call: Some(stamp_mint), grant_bytes: 65536u64)
+    let given: runner.Grants[WireStamp, (), WireStamp] = runner.Grants(attempt: None, call: Some(runner.CallMint(mint: runner.Mint(seed: WireStamp(clock: d.clock, offset: 40u64), mint: stamp_mint, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS), entries: granted_list(code.describe(stamp_wire)))), claim: None, bind: None)
     let running = runner.grant_task(d.tasks, (), take given)
-    let unbound: Option[runner.Wire[()]] = None
+    let unbound: Option[runner.BindGrant[WireStamp]] = None
     let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, take unbound, runner.grant_calls_of(running), d.head, d.post, code.describe(stamp_place), requested, None, config, 2097152u64))
     // The minted offset is 40. Each call independently returns offset + input.
     for p in 0u64 .. 2u64 {

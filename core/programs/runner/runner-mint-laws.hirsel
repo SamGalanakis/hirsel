@@ -1,0 +1,552 @@
+// L36's mint laws (RUNNER-SPEC §12.1 "Mint tasks", CHANGES-v2.69 F1-F7, CHANGES-v2.70
+// F4-F5). Every mint here takes its serial from a channel the test filled with 1, 2, ..,
+// and a mode token the test may send first: 1 raises, 2 loops, 3 returns Error(Capacity).
+// The mint trace (lane 2513): a mint's start record is kind * 100 + serial on the test's
+// report channel (kind 1 call, 2 attempt, 3 bind), sent before its mode applies; its
+// outcome record is what the asker saw (the call's answer, the Hello's close code, or the
+// trigger run's report 1000 + kind * 100 + serial).
+type Mn: send {
+    kind: u64,
+    serial: u64,
+    report: Sender[u64],
+    arrive: Sender[Sender[()]]
+}
+
+type MnSeed: send {
+    kind: u64,
+    serials: Receiver[u64],
+    modes: Receiver[u64],
+    report: Sender[u64],
+    arrive: Sender[Sender[()]]
+}
+
+// The test's ends of each mint's mode channel.
+type MnModes {
+    calls: Sender[u64],
+    attempts: Sender[u64],
+    binds: Sender[u64]
+}
+
+const MN_STEPS: u64 = 200000u64
+
+const MN_SERIALS: u64 = 16u64
+
+fn mn_seed(kind: u64, report: Sender[u64], arrive: Sender[Sender[()]]) -> (MnSeed, Sender[u64]) {
+    let (serial_to, serials): (Sender[u64], Receiver[u64]) = channel.new(MN_SERIALS)
+    let mut n = 1u64
+    while n <= MN_SERIALS {
+        result.unwrap(channel.try_send(serial_to, n))
+        n += 1u64
+    }
+    let (mode_to, modes): (Sender[u64], Receiver[u64]) = channel.new(4u64)
+    (MnSeed(kind: kind, serials: take serials, modes: take modes, report: channel.sender(report), arrive: channel.sender(arrive)), take mode_to)
+}
+
+// A mint cannot wait (RUNNER-SPEC v2.69), so it reports with try_send.
+fn mn_make(s: MnSeed) -> Result[Mn, Capacity] {
+    let serial = match channel.try_receive(s.serials) {
+        Ok(n) => n,
+        Error(_) => 0u64,
+    }
+    result.unwrap(channel.try_send(s.report, s.kind * 100u64 + serial))
+    match channel.try_receive(s.modes) {
+        Ok(1u64) => fail("mint: the test asked for a fault"),
+        Ok(2u64) => {
+            let mut spin = 0u64
+            loop {
+                spin += 1u64
+            }
+        },
+        Ok(3u64) => return Error(Capacity(requested: 1u64, available: 0u64)),
+        _ => (),
+    }
+    Ok(Mn(kind: s.kind, serial: serial, report: channel.sender(s.report), arrive: channel.sender(s.arrive)))
+}
+
+fn mn_unit(s: MnSeed, unused_handles: Hd, _use: ()) -> Result[Mn, Capacity] {
+    mn_make(s)
+}
+
+fn mn_attempt(s: MnSeed, unused_handles: Hd, _context: runner.TriggerContext) -> Result[Mn, Capacity] {
+    mn_make(s)
+}
+
+// Hands the test a sender that lets this use go on, and waits for it.
+fn hold(g: Mn) -> () waits {
+    let (go, wait): (Sender[()], Receiver[()]) = channel.new(1u64)
+    result.unwrap(channel.send(g.arrive, take go))
+    let _ = channel.receive(wait)
+}
+
+// The listed granted entry: held on the test's gate when asked, then answers its G.
+fn mn_called(g: Mn, caller: runner.Caller, take held: u64) -> Result[u64, Capacity] waits {
+    if held == 1u64 {
+        hold(g)
+    }
+    Ok(g.kind * 100u64 + g.serial)
+}
+
+// A granted entry the call list does not name (call_mint_scope's F).
+fn mn_unlisted(g: Mn, caller: runner.Caller, take unused: u64) -> Result[u64, Capacity] {
+    Ok(g.serial)
+}
+
+// Registered by no place, so a call list naming it refuses the open.
+fn mn_stray(g: Mn, caller: runner.Caller, take unused: u64) -> Result[u64, Capacity] {
+    Ok(g.serial)
+}
+
+// The granted trigger run reports its G.
+fn mn_run(g: Mn, caller: runner.Caller, take k: u64) -> Result[u64, Capacity] waits {
+    result.unwrap(channel.send(g.report, 1000u64 + g.kind * 100u64 + g.serial))
+    Ok(k)
+}
+
+fn mn_run_entries() -> (triggers.Entries, triggers.Entry[u64]) {
+    let target: triggers.Entry[u64] = result.unwrap(triggers.granted(code.describe(mn_run)))
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, target))
+    (take entries, take target)
+}
+
+// Writes one granted trigger run after this commit.
+fn mn_arm(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
+    let Some(t) = view h.triggers else {
+        return Error(1u32)
+    }
+    let (entries, target) = mn_run_entries()
+    match triggers.write(mut tx, t, entries, target, k, AfterCommit) {
+        Ok(id) => Ok(id.version),
+        Error(_) => Error(2u32),
+    }
+}
+
+fn mn_place(mut r: runner.Registry[Mn, Hd]) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut r, fn(h: Hd) -> triggers.Tables {
+        ping_tables(h)
+    })
+    runner.transact(mut r, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(mn_arm), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut r, code.describe(mn_called), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut r, code.describe(mn_unlisted), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut r, code.describe(mn_run), 65536u64, runner.DEFAULT_STEPS)
+}
+
+// Credential [2] binds at once and [3] is held on the test's gate first; both are
+// Caller(2, [c]). The binding sees only the bind mint's G.
+fn mn_binding(g: Mn, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] waits {
+    if list.len(credential) != 1u64 || g.kind != 3u64 {
+        return Error(Rejected)
+    }
+    if credential[0u64] == 3u8 {
+        hold(g)
+    }
+    Ok(runner.BoundCaller(caller: subject_caller(credential[0u64]), expires_at_ms: None))
+}
+
+fn mn_grants(report: Sender[u64], arrive: Sender[Sender[()]], take calls: Option[triggers.Entries], attempts: bool, binds: bool) -> (runner.Grants[Mn, Hd, MnSeed], MnModes) {
+    let (call_seed, call_modes) = mn_seed(1u64, report, arrive)
+    let (attempt_seed, attempt_modes) = mn_seed(2u64, report, arrive)
+    let (bind_seed, bind_modes) = mn_seed(3u64, report, arrive)
+    let unit: fn(MnSeed, Hd, ()) -> Result[Mn, Capacity] = mn_unit
+    let call_mint = match take calls {
+        Some(take entries) => Some(runner.CallMint(mint: runner.Mint(seed: take call_seed, mint: unit, mint_bytes: 65536u64, mint_steps: MN_STEPS), entries: take entries)),
+        None => None,
+    }
+    let attempt_mint = if attempts {
+        Some(runner.Mint(seed: take attempt_seed, mint: mn_attempt, mint_bytes: 65536u64, mint_steps: MN_STEPS))
+    } else {
+        None
+    }
+    let bind_mint = if binds {
+        Some(runner.Mint(seed: take bind_seed, mint: unit, mint_bytes: 65536u64, mint_steps: MN_STEPS))
+    } else {
+        None
+    }
+    (runner.Grants(attempt: take attempt_mint, call: take call_mint, claim: None, bind: take bind_mint), MnModes(calls: take call_modes, attempts: take attempt_modes, binds: take bind_modes))
+}
+
+fn called_list() -> triggers.Entries {
+    granted_list(code.describe(mn_called))
+}
+
+fn mn_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take backing: runner.Backing, take grants: Option[runner.Grants[Mn, Hd, MnSeed]], wired: bool, triggered: bool) -> runner.PlaceConfig[Mn, Hd, MnSeed] {
+    let mut session = runner.wire_defaults(65536u64)
+    session.n_pool = 4194304u64
+    session.n_granted = 131072u64
+    let binding: Option[runner.Wire[Mn]] = if wired {
+        Some(runner.wire(code.describe(mn_binding), 4096u64, 65536u64))
+    } else {
+        None
+    }
+    let configured = if triggered {
+        let (entries, _) = mn_run_entries()
+        Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new())))
+    } else {
+        None
+    }
+    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(mn_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(ping_schema), session: session, max_sessions: 3u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take binding, grants: take grants, triggers: take configured, idle: None)
+}
+
+fn next_arrival(clock: Clock, arrivals: Receiver[Sender[()]]) -> Option[Sender[()]] waits {
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
+    loop {
+        match channel.try_receive(arrivals) {
+            Ok(take go) => return Some(take go),
+            Error(Empty) => if host.mono_ns(clock) >= deadline {
+                return None
+            },
+            Error(_) => return None,
+        }
+        std.clock.sleep_ns(clock, 1000000u64)
+    }
+}
+
+fn mn_release(take go: Option[Sender[()]]) -> bool waits {
+    match take go {
+        Some(take to) => match channel.send(to, ()) {
+            Ok(()) => true,
+            Error(_) => false,
+        },
+        None => false,
+    }
+}
+
+fn both(a: u64, b: u64, x: u64, y: u64) -> bool {
+    (a == x && b == y) || (a == y && b == x)
+}
+
+// A call's answer as one number: its value, or 9000 + a code for the refusal or fault.
+fn answer_code(a: fixture.Answer[u64]) -> u64 {
+    match a {
+        Returned(v) => v,
+        Failed(OutOfBytes(_)) => 9001u64,
+        Failed(Raised(_)) => 9002u64,
+        Failed(OutOfTime(n)) => if n == MN_STEPS {
+            9003u64
+        } else {
+            9013u64
+        },
+        Refused(NotAllowed) => 9004u64,
+        _ => 9999u64,
+    }
+}
+
+fn mn_ask(mut c: fixture.Client, held: u64) -> u64 waits {
+    match fixture.call(mut c, fixture.granted_entry(code.describe(mn_called)), held, 5000u32) {
+        Ok(r) => answer_code(r.answer),
+        Error(_) => 9998u64,
+    }
+}
+
+fn mn_ok[R](got: Result[fixture.Replied[Result[R, u32]], fixture.CallError]) -> bool {
+    match got {
+        Ok(r) => match r.answer {
+            Returned(Ok(_)) => true,
+            _ => false,
+        },
+        Error(_) => false,
+    }
+}
+
+// One session on its own task: binds with credential [3] (held), then makes one held call.
+type CallJob: send {
+    tasks: Tasks,
+    net: Net,
+    clock: Clock,
+    random: Random,
+    keys: List[Bytes],
+    address: Addr,
+    out: Sender[u64]
+}
+
+fn mn_call_job(take j: CallJob) -> () waits {
+    let CallJob(tasks: tasks, net: net, clock: clock, random: random, keys: take mn_keys, address: address, out: take out) = take j
+    let got_code = match fixture.client_at(tasks, net, clock, random, mn_keys, runner.wire_defaults(65536u64).socket, address, Some(b"\x03"), 0u64, 5000u64) {
+        Ok(take c) => {
+            let mut held = take c
+            let got = mn_ask(mut held, 1u64)
+            fixture.close(take held)
+            got
+        },
+        Error(_) => 9996u64,
+    }
+    let _ = channel.send(out, got_code)
+}
+
+fn spawn_call(tasks: Tasks, net: Net, clock: Clock, random: Random, address: Addr, out: Sender[u64]) -> Task[()] {
+    let mn_keys = result.unwrap(fixture.entry_keys(code.describe(mn_place)))
+    let job = CallJob(tasks: tasks, net: net, clock: clock, random: random, keys: take mn_keys, address: address, out: channel.sender(out))
+    let run: fn(take CallJob) -> () waits = mn_call_job
+    task.spawn(tasks, bytes 16777216u64, take job, run)
+}
+
+fn mn_ended(take f: fixture.Fixture) -> bool waits {
+    match fixture.end(take f, 5000u64) {
+        Ok(Stopped(_)) => true,
+        _ => false,
+    }
+}
+
+// mint_per_call (v2.69 F7), bind_mint_per_bind's wire half (v2.70 F4), mint_step_bound
+// (F3) and mint_allowance_apart's fault and capacity halves (F1): each bind and each
+// granted call has its own mint, held uses take serials 1 and 2 at once, and a mint's
+// loop, fault or Capacity fails only its own call while the next call and a due trigger
+// run.
+pub fn law_mint_per_use(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(64u64)
+    let (arrive, arrivals): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(8u64)
+    let (grants, modes) = mn_grants(report, arrive, Some(called_list()), true, true)
+    let wired = result.unwrap(fixture.start(mn_settings(clock, random, tasks, net, Memory, Some(take grants), true, true), 5000u64))
+    let address = option.unwrap(fixture.status(wired).addr)
+    let (out, outs): (Sender[u64], Receiver[u64]) = channel.new(4u64)
+    let first = spawn_call(tasks, net, clock, random, address, out)
+    let second = spawn_call(tasks, net, clock, random, address, out)
+    // Two Hellos held in their binds at once: two bind mints, serials 1 and 2.
+    let bind_a = next_arrival(clock, arrivals)
+    let bind_b = next_arrival(clock, arrivals)
+    let binds_apart = both(next_report(clock, reports), next_report(clock, reports), 301u64, 302u64) && quiet(reports)
+    let binds_go = mn_release(take bind_a) && mn_release(take bind_b)
+    // Two granted calls held at once: two call mints, serials 1 and 2.
+    let call_a = next_arrival(clock, arrivals)
+    let call_b = next_arrival(clock, arrivals)
+    let calls_apart = both(next_report(clock, reports), next_report(clock, reports), 101u64, 102u64) && quiet(reports)
+    let calls_go = mn_release(take call_a) && mn_release(take call_b)
+    let answered = both(next_report(clock, outs), next_report(clock, outs), 101u64, 102u64)
+    let _ = task.join(take first)
+    let _ = task.join(take second)
+    // A third session after both ended: bind serial 3; a transact call mints nothing.
+    let mut c = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
+    let third_bound = next_report(clock, reports) == 303u64
+    let pure = mn_ok(fixture.call(mut c, fixture.transact_entry(code.describe(write)), 5u64, 2000u32)) && quiet(reports)
+    // The stored calls come before the granted ones: a granted call records no stream
+    // position, and the store admits only latest + 1 (open red, RUNNER-SPEC v2.71).
+    let armed = mn_ok(fixture.call(mut c, fixture.transact_entry(code.describe(mn_arm)), 3u64, 2000u32))
+    let attempted = next_report(clock, reports) == 201u64 && next_report(clock, reports) == 1201u64
+    let third_call = mn_ask(mut c, 0u64) == 103u64 && next_report(clock, reports) == 103u64
+    // A looping mint fails only its call, with the mint's own step bound.
+    result.unwrap(channel.send(modes.calls, 2u64))
+    let looped = mn_ask(mut c, 0u64) == 9003u64 && next_report(clock, reports) == 104u64
+    let after_loop = mn_ask(mut c, 0u64) == 105u64 && next_report(clock, reports) == 105u64
+    result.unwrap(channel.send(modes.calls, 1u64))
+    let raised = mn_ask(mut c, 0u64) == 9002u64 && next_report(clock, reports) == 106u64
+    result.unwrap(channel.send(modes.calls, 3u64))
+    let full = mn_ask(mut c, 0u64) == 9001u64 && next_report(clock, reports) == 107u64
+    let after_faults = mn_ask(mut c, 0u64) == 108u64 && next_report(clock, reports) == 108u64 && quiet(reports)
+    fixture.close(take c)
+    // The attempt mint still serves after the call mint's failures.
+    let mut d = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
+    let fourth_bound = next_report(clock, reports) == 304u64
+    let rearmed = mn_ok(fixture.call(mut d, fixture.transact_entry(code.describe(mn_arm)), 4u64, 2000u32))
+    let reattempted = next_report(clock, reports) == 202u64 && next_report(clock, reports) == 1202u64 && quiet(reports)
+    fixture.close(take d)
+    let _ = take modes
+    let stopped = mn_ended(take wired)
+    binds_apart && binds_go && calls_apart && calls_go && answered && third_bound && pure && armed && attempted && third_call && looped && after_loop && raised && full && after_faults && fourth_bound && rearmed && reattempted && stopped
+}
+
+// bind_mint_refused's wire half (v2.70 F5): a bind mint that returns Error(Capacity),
+// faults or loops closes the Hello 1013, never 1008, and the next Hello binds.
+pub fn law_bind_mint_refused(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(64u64)
+    let (arrive, arrivals): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(8u64)
+    let (grants, modes) = mn_grants(report, arrive, Some(called_list()), true, true)
+    let wired = result.unwrap(fixture.start(mn_settings(clock, random, tasks, net, Memory, Some(take grants), true, true), 5000u64))
+    let address = option.unwrap(fixture.status(wired).addr)
+    let mn_keys = result.unwrap(fixture.entry_keys(code.describe(mn_place)))
+    let mut refused = true
+    let mut serial = 1u64
+    for mode in [3u64, 1u64, 2u64] {
+        result.unwrap(channel.send(modes.binds, mode))
+        let closed = match wire_client.connect_for(tasks, net, address, clock, random, clone(mn_keys), Some(b"\x02"), runner.wire_defaults(65536u64).socket, 5000u64, 5000u64) {
+            Error(Protocol(1013u16)) => next_report(clock, reports) == 300u64 + serial && quiet(reports),
+            _ => false,
+        }
+        refused = refused && closed
+        serial += 1u64
+    }
+    let mut c = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
+    let session_bound = fixture.bound_caller(c).issuer == 2u8 && next_report(clock, reports) == 304u64
+    fixture.close(take c)
+    let _ = take modes
+    let _ = take arrivals
+    let stopped = mn_ended(take wired)
+    refused && session_bound && stopped
+}
+
+// bind_no_grant (v2.70 F5) and call_mint_scope's call half (v2.69 F4). A wire without a
+// bind mint refuses the open; with no wire the place opens and binds anonymously,
+// minting nothing. A call list naming an unregistered entry refuses the open; a wire
+// call to a granted entry the list does not name is refused before any mint.
+pub fn law_mint_scope(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(64u64)
+    let (arrive, arrivals): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(8u64)
+    let (no_bind, _) = mn_grants(report, arrive, Some(called_list()), true, false)
+    let bind_refused = match fixture.start(mn_settings(clock, random, tasks, net, Memory, Some(take no_bind), true, true), 5000u64) {
+        Error(Start(Open(BindNoGrant))) => true,
+        _ => false,
+    }
+    let (stray, _) = mn_grants(report, arrive, Some(granted_list(code.describe(mn_stray))), true, true)
+    let stray_refused = match fixture.start(mn_settings(clock, random, tasks, net, Memory, Some(take stray), true, true), 5000u64) {
+        Error(Start(Open(CallNotGranted(path)))) => path == b"runner@1/runner_calls/mn_stray",
+        _ => false,
+    }
+    let opens_quiet = quiet(reports)
+    let (anonymous, _) = mn_grants(report, arrive, Some(called_list()), true, false)
+    let open = result.unwrap(fixture.start(mn_settings(clock, random, tasks, net, Memory, Some(take anonymous), false, true), 5000u64))
+    let mut c = result.unwrap(fixture.client(open, None, 5000u64))
+    let anonymous_bound = fixture.bound_caller(c).issuer == 1u8 && quiet(reports)
+    let unlisted = match fixture.call(mut c, fixture.granted_entry(code.describe(mn_unlisted)), 0u64, 2000u32) {
+        Ok(r) => answer_code(r.answer) == 9004u64 && quiet(reports),
+        Error(_) => false,
+    }
+    let listed = mn_ask(mut c, 0u64) == 101u64 && next_report(clock, reports) == 101u64 && quiet(reports)
+    fixture.close(take c)
+    let _ = take arrivals
+    let stopped = mn_ended(take open)
+    bind_refused && stray_refused && opens_quiet && anonymous_bound && unlisted && listed && stopped
+}
+
+// grants_without_triggers' call half (v2.69 F5): a place with a call mint and no trigger
+// config answers a granted call with the call mint's G.
+pub fn law_grants_without_triggers(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(64u64)
+    let (arrive, arrivals): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(8u64)
+    let (grants, _) = mn_grants(report, arrive, Some(called_list()), false, true)
+    let wired = result.unwrap(fixture.start(mn_settings(clock, random, tasks, net, Memory, Some(take grants), true, false), 5000u64))
+    let mut c = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
+    let session_bound = next_report(clock, reports) == 301u64
+    let called = mn_ask(mut c, 0u64) == 101u64 && next_report(clock, reports) == 101u64 && quiet(reports)
+    fixture.close(take c)
+    let _ = take arrivals
+    let stopped = mn_ended(take wired)
+    session_bound && called && stopped
+}
+
+// One pending granted run for mn_run, row_written straight to the store and due at once.
+fn mn_pending(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> triggers.Id waits {
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
+    let mut declaration = result.unwrap(store.declare(db, Migrate))
+    let _ = result.unwrap(ping_schema(mut declaration))
+    let _ = result.unwrap(store.seal(mut db, take declaration))
+    let tables = ping_tables(result.unwrap(store.bind_declaration(mut db, Migrate, ping_schema)))
+    let (entries, target) = mn_run_entries()
+    let ran_write = store.run(mut db, None, (store.copy_env(tables), store.copy_env(entries), store.copy_env(target)), fn(mut tx, call_env) -> Result[triggers.Id, triggers.Error] {
+        triggers.write(mut tx, call_env.0, call_env.1, call_env.2, 6u64, At(0u64))
+    })
+    let row_written = match take ran_write {
+        Ok(Committed(row)) => row,
+        _ => fail("mint: trigger write failed"),
+    }
+    result.unwrap(store.durable(mut db, row_written.ticket))
+    result.unwrap(store.close(take db))
+    row_written.value
+}
+
+// The row's attempt count and terminal outcome, read after the place has closed.
+fn mn_row(dir: Dir, clock: Clock, random: Random, tasks: Tasks, id: triggers.Id) -> (u64, Option[triggers.Terminal]) waits {
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
+    let tables = ping_tables(result.unwrap(store.bind_declaration(mut db, Open, ping_schema)))
+    let reader = result.unwrap(store.reader(db, 0u64))
+    let tried = match result.unwrap(triggers.pending_at(reader, store.snapshot(db), tables, id)) {
+        Some(p) => triggers.attempts(p),
+        None => 0u64,
+    }
+    let terminal = result.unwrap(triggers.outcome(reader, store.snapshot(db), tables, id))
+    result.unwrap(store.close(take db))
+    (tried, take terminal)
+}
+
+fn mn_disk(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take grants: runner.Grants[Mn, Hd, MnSeed]) -> runner.PlaceConfig[Mn, Hd, MnSeed] {
+    let mut config = mn_settings(clock, random, tasks, net, Disk(dir), Some(take grants), false, true)
+    config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
+    take config
+}
+
+// trigger_no_grant_refuses (v2.69 F2): a store holds one pending granted row for mn_run.
+// Opened with mn_run listed and no attempt mint, operate refuses TriggerNoGrant(its path)
+// and the row is unchanged; reopened with an attempt mint, it runs once with that mint's G.
+fn trigger_no_grant_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let id = mn_pending(dir, clock, random, tasks)
+    let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(64u64)
+    let (arrive, arrivals): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(8u64)
+    let (bare, _) = mn_grants(report, arrive, None, false, false)
+    let expected: Bytes = b"runner@1/runner_calls/mn_run"
+    let refused = match try_start_managed(tasks, mn_disk(dir, clock, random, tasks, net, take bare), false, 1073741824u64) {
+        Error(Open(TriggerNoGrant(path))) => path == expected,
+        Ok((take running, _, _, _)) => match task.join(take running) {
+            Ok(Error(Open(TriggerNoGrant(path)))) => path == expected,
+            _ => false,
+        },
+        _ => false,
+    }
+    let (tried_before, terminal_before) = mn_row(dir, clock, random, tasks, id)
+    let unchanged = refused && tried_before == 0u64 && quiet(reports) && match terminal_before {
+        None => true,
+        _ => false,
+    }
+    let (granting, _) = mn_grants(report, arrive, None, true, false)
+    let (running, stop_to, _, _) = start_managed(tasks, mn_disk(dir, clock, random, tasks, net, take granting), false)
+    let ran = next_report(clock, reports) == 201u64 && next_report(clock, reports) == 1201u64
+    result.unwrap(channel.send(stop_to, ()))
+    let stopped = match task.join(take running) {
+        Ok(Ok(Stopped(_))) => true,
+        _ => false,
+    }
+    let once = quiet(reports)
+    let (tried, terminal) = mn_row(dir, clock, random, tasks, id)
+    let returned = tried <= 1u64 && match terminal {
+        Some(Returned(_)) => true,
+        _ => false,
+    }
+    let _ = take arrivals
+    result.unwrap(std.dir.remove_all(parent, name))
+    unchanged && ran && stopped && once && returned
+}
+
+@test
+fn test_mint_per_use(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_mint_per_use(clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_bind_mint_refused(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_bind_mint_refused(clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_mint_scope(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_mint_scope(clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_grants_without_triggers(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_grants_without_triggers(clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_trigger_no_grant_refuses(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if trigger_no_grant_case(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

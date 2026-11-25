@@ -63,8 +63,8 @@ fn connect(d: Drive, id: u64) -> Conn waits {
 }
 
 fn connect_in(d: Drive, id: u64, q: u64) -> Conn waits {
-    let (take wire, take session) = result.unwrap(wire_client.pair(d.tasks, d.net, d.clock, d.random,
-        Some(ingress.binding()), d.head, d.post, code.describe(place), keys(), Some(clone(d.token)), q, 2097152u64))
+    let (take wire, take session) = result.unwrap(wire_client.pair_ingress(d.tasks, d.net, d.clock, d.random,
+        d.head, d.post, code.describe(place), keys(), Some(clone(d.token)), q, 2097152u64))
     Conn(id: id, clock: d.clock, out: d.out, wire: take wire, task: take session)
 }
 

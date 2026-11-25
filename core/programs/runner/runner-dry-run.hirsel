@@ -1,4 +1,4 @@
-fn operate_dry_run[G: send, H: shareable + inert + send, S: send, B: shareable + send](p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
+fn operate_dry_run[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
     let dir = match p.backing {
         Disk(d) => d,
         Temp(d) => d,

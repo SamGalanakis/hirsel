@@ -55,11 +55,11 @@ pub fn law_owner_take_wakes() -> bool {
 }
 
 // No wire configuration, for unit drivers that bind nothing.
-fn no_wire() -> Option[Wire[()]] {
+fn no_wire() -> Option[BindGrant[()]] {
     None
 }
 
-fn wire_service_seed[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
+fn wire_service_seed[G: send](random: Random, take session_wire: Option[BindGrant[G]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G]] {
     wire_service_with_head(random, take session_wire, None, LifecycleHead(channel.sender(head)), clock, tasks, config, take target)
 }
 
@@ -87,7 +87,7 @@ fn leaving_sub_does_not_block_successor(clock: Clock, random: Random, tasks: Tas
     result.unwrap(channel.try_send(pub_to, PubIn(e: Drained)))
     let mut config = wire_defaults(1048576u64)
     config.max_subs = 1u64
-    let service: Service[WireSession[(), ()]] = wire_service_seed(random, no_wire(), head_to, clock, tasks, config, string.new())
+    let service: Service[WireSession[()]] = wire_service_seed(random, no_wire(), head_to, clock, tasks, config, string.new())
     let Service(context: take initial, ..) = take service
     let mut ctx = take initial
     ctx.phase = 3u8
@@ -199,7 +199,7 @@ fn room_law_large_entries(mut reg: Registry[(), ()]) -> Result[(), RegisterError
     room(mut reg, code.describe(room_law_admit), slots(), state, std.codec.of_bytes(), RoomBounds(peers: 9u32, state: STATE_MAX, message: MESSAGE_MAX), 4096u64, 1024u64, DEFAULT_STEPS)
 }
 
-fn room_law_settings(c: Clock, random: Random, tasks: Tasks, net: Net, large_room: bool) -> PlaceConfig[(), (), (), ()] {
+fn room_law_settings(c: Clock, random: Random, tasks: Tasks, net: Net, large_room: bool) -> PlaceConfig[(), (), ()] {
     let entries = if large_room {
         code.describe(room_law_large_entries)
     } else {

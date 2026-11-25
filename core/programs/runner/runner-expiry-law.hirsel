@@ -14,11 +14,19 @@ fn expiring_caller(_seed: (), credential: Bytes) -> Result[runner.BoundCaller, r
 }
 
 fn expiring_pair(d: Drive, e: u8) -> Result[(wire_client.Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
-    let binding: runner.Wire[()] = runner.wire_bind(latest.new(arc.new(())), code.describe(expiring_caller), 4096u64, 65536u64)
+    let binds = runner.ingress.bind_task(d.tasks)
+    let binding = runner.grant_binds_of(binds, runner.wire(code.describe(expiring_caller), 4096u64, 65536u64))
     let mut credential: Bytes = list.new()
     list.push(mut credential, 2u8)
     list.push(mut credential, e)
-    wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(take binding), d.head, d.post, code.describe(place), client_keys(), Some(take credential), 1u64, 2097152u64)
+    let expiring = wire_client.pair(d.tasks, d.net, d.clock, d.random, take binding, d.head, d.post, code.describe(place), client_keys(), Some(take credential), 1u64, 2097152u64)
+    runner.stop_grants(Some(take binds))
+    expiring
+}
+
+// expiring_caller for a session whose G is the held call's ExpiryHold.
+fn expiring_hold_caller(_g: ExpiryHold, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    expiring_caller((), credential)
 }
 
 // A binding whose expiry the wall has reached (before it, or equal to it) is refused at
@@ -82,7 +90,7 @@ fn expiry_hold_place(mut registry: runner.Registry[ExpiryHold, Hd]) -> Result[()
     runner.granted(mut registry, code.describe(expiry_held), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn expiry_hold_mint(seed: ExpiryHold, _h: ()) -> Result[ExpiryHold, Capacity] {
+fn expiry_hold_mint(seed: ExpiryHold, _h: (), _call: ()) -> Result[ExpiryHold, Capacity] {
     Ok(ExpiryHold(clock: seed.clock))
 }
 
@@ -96,13 +104,13 @@ fn drive_expiry_late(take job: Expiring) -> () waits {
     config.budget = 65536u64
     config.socket.max_frame = 32768u64
     config.n_granted = 131072u64
-    let binding = runner.wire((), code.describe(expiring_caller), 4096u64, 65536u64)
-    let given: runner.Grants[ExpiryHold, (), ExpiryHold] = runner.Grants(seed: ExpiryHold(clock: d.clock), attempt: None, call: Some(expiry_hold_mint), grant_bytes: 65536u64)
+    let given: runner.Grants[ExpiryHold, (), ExpiryHold] = runner.Grants(attempt: None, call: Some(runner.CallMint(mint: runner.Mint(seed: ExpiryHold(clock: d.clock), mint: expiry_hold_mint, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS), entries: granted_list(code.describe(expiry_held)))), claim: None, bind: Some(runner.Mint(seed: ExpiryHold(clock: d.clock), mint: expiry_hold_mint, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)))
     let running = runner.grant_task(d.tasks, (), take given)
+    let binding = runner.grant_binds_of(running, runner.wire(code.describe(expiring_hold_caller), 4096u64, 65536u64))
     let mut credential: Bytes = list.new()
     list.push(mut credential, 2u8)
     list.push(mut credential, 60u8)
-    let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, Some(take binding), runner.grant_calls_of(running), d.head, d.post, code.describe(expiry_hold_place), requested, Some(take credential), config, 2097152u64))
+    let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, take binding, runner.grant_calls_of(running), d.head, d.post, code.describe(expiry_hold_place), requested, Some(take credential), config, 2097152u64))
     wire_client.send_frame(wire, Call(wire.stream, 0u64, 0u32, 10000u32, u64_arg(7u64)))
     clock.set_wall(mut hand, 1050u64)
     clock.advance_to(mut hand, 1u64)

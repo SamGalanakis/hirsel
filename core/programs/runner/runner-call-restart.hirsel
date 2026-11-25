@@ -119,7 +119,7 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     Ok(())
 }
 
-fn no_trigger_grant(seed: (), unused_handles: Hd, take unused: runner.TriggerContext) -> Result[(), Capacity] {
+fn no_trigger_grant(seed: (), unused_handles: Hd, unused: runner.TriggerContext) -> Result[(), Capacity] {
     fail("an empty trigger list cannot start a trigger")
 }
 
@@ -150,15 +150,19 @@ fn fixture_place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn unit_call(seed: (), unused_handles: Hd) -> Result[(), Capacity] {
+fn unit_call(seed: (), unused_handles: Hd, _call: ()) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take wire: Option[runner.Wire[()]], call: bool) -> runner.PlaceConfig[(), Hd, (), ()] {
-    let grants: Option[runner.Grants[(), Hd, ()]] = if call {
-        Some(runner.Grants(seed: (), attempt: None, call: Some(unit_call), grant_bytes: 65536u64))
+// `call` gives the place ingress's binding with its unit bind mint and a call mint for
+// ping; without it the place has neither.
+fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, wired: bool, call: bool) -> runner.PlaceConfig[(), Hd, ()] {
+    let (wire, grants): (Option[runner.Wire[()]], Option[runner.Grants[(), Hd, ()]]) = if call {
+        (Some(ingress.binding()), Some(runner.Grants(attempt: None, call: Some(runner.CallMint(mint: runner.Mint(seed: (), mint: unit_call, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS), entries: granted_list(code.describe(ping)))), claim: None, bind: Some(ingress.bind_mint()))))
+    } else if wired {
+        (Some(ingress.binding()), Some(ingress.bind_grants()))
     } else {
-        None
+        (None, None)
     }
     let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
@@ -172,7 +176,7 @@ fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take w
 pub fn law_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let put_entry = fixture.transact_entry(code.describe(write))
     let ping_entry = fixture.granted_entry(code.describe(ping))
-    let with_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, Some(ingress.binding()), true), 5000u64))
+    let with_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, true, true), 5000u64))
     let mut c = result.unwrap(fixture.client(with_wire, Some(ingress.credential(random)), 5000u64))
     let put_reply = result.unwrap(fixture.call(mut c, put_entry, 5u64, 2000u32))
     let put_durable = match put_reply.answer {
@@ -188,7 +192,7 @@ pub fn law_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net)
         Ok(Stopped(None)) => true,
         _ => false
     }
-    let without_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, None, false), 5000u64))
+    let without_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, false, false), 5000u64))
     let mut d = result.unwrap(fixture.client(without_wire, None, 5000u64))
     let ping_refused = match result.unwrap(fixture.call(mut d, ping_entry, 9u64, 2000u32)).answer {
         Refused(NotAllowed) => true,
@@ -223,7 +227,7 @@ fn test_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) ->
 pub fn law_client_live_stream(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     want(host.wall_ms(clock) > store.STREAM_RETENTION_MS, "client_live_stream: the wall clock is not live")
     let put_entry = client.transact_entry(code.describe(write))
-    let f = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, Some(ingress.binding()), false), 5000u64))
+    let f = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, true, false), 5000u64))
     let Some(address) = fixture.status(f).addr else {
         fail("client_live_stream: the place has no address")
     }
@@ -262,7 +266,7 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     let bounds = runner.Stop(lag_ms: 0u64, grace_ms: 1000u64)
     let mut settings = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
     settings.triggers = Some(runner.TriggerConfig(entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new())))
-    settings.grants = Some(runner.Grants(seed: (), attempt: Some(no_trigger_grant), call: None, grant_bytes: 0u64))
+    settings.grants = Some(runner.Grants(attempt: Some(runner.Mint(seed: (), mint: no_trigger_grant, mint_bytes: 0u64, mint_steps: runner.DEFAULT_STEPS)), call: None, claim: None, bind: Some(ingress.bind_mint())))
     let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
     if let Ok(Starting(Recovering)) = channel.receive(phases) {} else {
         fail("expected Recovering")
@@ -356,7 +360,7 @@ fn managed_release(status: runner.Status) -> Bytes {
     clone(status.release)
 }
 
-fn serve_until_ready(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd, (), ()]) -> u64 waits {
+fn serve_until_ready(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd, ()]) -> u64 waits {
     let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
     loop {
         match channel.receive(phases) {
@@ -599,8 +603,7 @@ fn ping_place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn unit_grant(seed: (), unused_handles: Hd, take context: runner.TriggerContext) -> Result[(), Capacity] {
-    let _ = take context
+fn unit_grant(seed: (), unused_handles: Hd, context: runner.TriggerContext) -> Result[(), Capacity] {
     Ok(())
 }
 
@@ -633,7 +636,7 @@ pub fn law_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tas
     settings.schema = code.describe(ping_schema)
     let (entries, _) = ping_entries()
     settings.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new())))
-    settings.grants = Some(runner.Grants(seed: (), attempt: Some(unit_grant), call: None, grant_bytes: 65536u64))
+    settings.grants = Some(runner.Grants(attempt: Some(runner.Mint(seed: (), mint: unit_grant, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)), call: None, claim: None, bind: Some(ingress.bind_mint())))
     let socket = settings.session.socket
     let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
     loop {

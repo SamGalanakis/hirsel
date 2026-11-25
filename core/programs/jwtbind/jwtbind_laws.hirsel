@@ -207,12 +207,13 @@ fn jwt_caller_map(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     small.max_token = string.byte_len(T_BASE) - 1u64
     let m = seed_of(take small, c, JWKS_K1, 0xffffffffffffffffu64, 0xffffffffffffffffu64)
     check(rejected(try_bind(m, T_BASE)), "L65: a token over max_token is refused")
-    // bind is the StaticFn wire_bind takes, over the verifier's own seed handle.
+    // bind is a binding runner.wire takes, for a place whose bind G is the verifier's Seed.
     let v = match verifier(place_issuer(), Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
         Ok(take v) => take v,
         Error(_) => return Error(()),
     }
-    let _wired: runner.Wire[Seed] = runner.wire_bind(seed(v), code.describe(bind), BIND_BYTES, BIND_STEPS)
+    let _wired: runner.Wire[Seed] = runner.wire(code.describe(bind), BIND_BYTES, BIND_STEPS)
+    let _handle: Latest[Seed] = seed(v)
     let mut rsa = issuer_defaults(string.from(ISS), string.from(AUD), 9u8, std.jwt.allow(Rs256))
     rsa.max_token = std.jwt.MAX_TOKEN
     let w = match verifier(take rsa, Static(string.from(JWKS_RSA)), n, System, c, r, tasks) {
@@ -464,5 +465,63 @@ fn jwt_unavailable_remote(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] wai
     check(unavailable(try_bind(current(v), T_BASE)), "L67: setting the wall back does not freshen a stale set")
     let _ = take v
     let _ = take watch
+    Ok(())
+}
+
+// A place that binds JWTs on the runner's default WireConfig (n_granted 0): the session owner
+// must hold its hello's bind child, 4096 + BIND_BYTES, apart from n_granted (RUNNER-SPEC
+// §3 "Binding"). An owner sized FLOOR + n_granted alone cannot spawn the child, so the
+// session never welcomes the token's Caller(9, user-42).
+type DefaultGrant: send {
+    seed: Latest[Seed]
+}
+
+fn default_bind_mint(s: DefaultGrant, _h: (), _bind: ()) -> Result[DefaultGrant, Capacity] {
+    Ok(DefaultGrant(seed: latest.handle(s.seed)))
+}
+
+// T_BASE expired on the wall clock the place runs on, and an expired result closes 1008, so
+// this binding keeps jwtbind's Caller and drops its expiry: the law is the owner's room.
+fn default_bound(g: DefaultGrant, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    let verified = bind(latest.read(g.seed), credential)?
+    Ok(runner.BoundCaller(caller: clone(verified.caller), expires_at_ms: None))
+}
+
+fn default_place(mut r: runner.Registry[DefaultGrant, ()]) -> Result[(), runner.RegisterError] {
+    Ok(())
+}
+
+fn no_schema(mut d: store.Declare) -> Result[(), store.Error] {
+    Ok(())
+}
+
+@test
+fn jwt_default_place(clock: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    // The seed reads a virtual clock a second before E; the place runs on the real one.
+    let (c, take hand) = provide.clock(0u64, BEFORE_MS)
+    let v = match verifier(place_issuer(), Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
+        Ok(take v) => take v,
+        Error(_) => return Error(()),
+    }
+    // wire_defaults but for the pool, which the test's limit cannot hold; n_granted stays 0.
+    let mut session = runner.wire_defaults(65536u64)
+    session.n_pool = 4194304u64
+    let given: runner.Grants[DefaultGrant, (), DefaultGrant] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: DefaultGrant(seed: seed(v)), mint: default_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
+    let settings: runner.PlaceConfig[DefaultGrant, (), DefaultGrant] = runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(default_place), n_place: 1048576u64, on_migrate: None, schema: code.describe(no_schema), session: session, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: clock, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.wire(code.describe(default_bound), BIND_BYTES, BIND_STEPS)), grants: Some(take given), triggers: None, idle: None)
+    let Ok(place) = runner.fixture.start(take settings, 5000u64) else {
+        fail("the default place did not start")
+    }
+    let Ok(client) = runner.fixture.client(place, Some(with_prefix("Bearer ", T_BASE)), 5000u64) else {
+        fail("a default place did not welcome a valid JWT: its owner could not hold the bind child")
+    }
+    let welcome = runner.fixture.bound_caller(client)
+    check(welcome.issuer == 9u8 && welcome.subject == b"user-42", "the default place welcomes Caller(9, user-42)")
+    runner.fixture.close(take client)
+    check(match runner.fixture.end(take place, 5000u64) {
+        Ok(Stopped(None)) => true,
+        _ => false
+    }, "the default place stops cleanly")
+    let _ = take v
+    let _ = take hand
     Ok(())
 }

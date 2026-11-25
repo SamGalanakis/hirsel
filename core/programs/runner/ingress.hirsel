@@ -17,7 +17,35 @@ pub fn caller(_seed: (), supplied: Bytes) -> Result[runner.BoundCaller, runner.B
 }
 
 pub fn binding() -> runner.Wire[()] {
-    runner.wire((), code.describe(caller), 4096u64, 65536u64)
+    runner.wire(code.describe(caller), 4096u64, 65536u64)
+}
+
+// The unit G each bind of `binding` takes (RUNNER-SPEC v2.70 F4): this binding
+// needs no authority, so its bind mint makes ().
+fn unit_grant[H: shareable + inert + send](_seed: (), _handles: H, _input: ()) -> Result[(), Capacity] {
+    Ok(())
+}
+
+pub fn bind_mint[H: shareable + inert + send]() -> runner.Mint[(), H, (), ()] {
+    let mint: fn((), H, ()) -> Result[(), Capacity] = unit_grant
+    runner.Mint(seed: (), mint: mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)
+}
+
+// A place's grants when its only mint is the unit bind mint.
+pub fn bind_grants[H: shareable + inert + send]() -> runner.Grants[(), H, ()] {
+    runner.Grants(attempt: None, call: None, claim: None, bind: Some(bind_mint()))
+}
+
+// The unit bind mint's task, for a session front served without a place's head.
+// The front stops it with runner.stop_grants when its sessions end.
+pub fn bind_task(tasks: Tasks) -> runner.PlaceGrants[()] {
+    let given: runner.Grants[(), (), ()] = bind_grants()
+    runner.grant_task(tasks, (), take given)
+}
+
+// `binding` with the bind mint `running` serves.
+pub fn bound_wire(running: runner.PlaceGrants[()]) -> Option[runner.BindGrant[()]] {
+    runner.grant_binds_of(running, binding())
 }
 
 pub fn credential(random: Random) -> Bytes {

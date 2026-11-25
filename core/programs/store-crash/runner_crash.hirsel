@@ -134,7 +134,7 @@ pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, 
             Some(arg) if arg == "hold-install" => code.describe(hold_install),
             _ => code.describe(migrate),
         }
-        let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: N_PLACE, on_migrate: Some(migration), schema: code.describe(schema), session: wire, max_sessions: 4u64, proxies: list.new(), n_publisher: 3145728u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: None, triggers: None, idle: None)
+        let config: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: N_PLACE, on_migrate: Some(migration), schema: code.describe(schema), session: wire, max_sessions: 4u64, proxies: list.new(), n_publisher: 3145728u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
         let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     }
@@ -149,7 +149,7 @@ pub fn identity_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: N
         wire.n_pool = 4194304u64
         let mut disk = options()
         disk.lock_wait_ms = 10000u64
-        let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: n_place, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 4u64, proxies: list.new(), n_publisher: 3145728u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: None, triggers: None, idle: None)
+        let config: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: n_place, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 4u64, proxies: list.new(), n_publisher: 3145728u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
         let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     }
@@ -263,7 +263,7 @@ fn secret_client(take d: SecretClient) -> String waits {
     let SecretClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: take post, token: take token) = take d
     let mut keys: List[Bytes] = list.new()
     list.push(mut keys, body_key(0u64))
-    let pair = runner.wire_client.pair(tasks, n, c, r, Some(runner.ingress.binding()), head, post, code.describe(place), keys, Some(take token), 1u64, 2097152u64)
+    let pair = runner.wire_client.pair_ingress(tasks, n, c, r, head, post, code.describe(place), keys, Some(take token), 1u64, 2097152u64)
     let (take wire, take server) = match take pair {
         Ok(take connected) => take connected,
         Error(Allocation(_)) => return "L31: client allocation refused",
@@ -506,6 +506,7 @@ fn accept(take seed: Accept) -> () waits {
     config.q = 2u64
     config.socket.max_frame = 32768u64
     let pool = result.unwrap(std.wsock.pending(config.socket))
+    let binds = runner.ingress.bind_task(tasks)
     let mut owners: List[Task[Result[(), std.wsock.Error]]] = list.new()
     for _ in 0u64 .. sessions {
         let mut port: Bytes = list.with_capacity(2u64)
@@ -518,14 +519,17 @@ fn accept(take seed: Accept) -> () waits {
         let socket = result.unwrap(std.net.accept_from(mut l, peer, Never))
         let lease = option.unwrap(result.unwrap(std.wsock.acquire(pool)))
         let up = result.unwrap(std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c)))
-        let no_grants: Option[Sender[runner.GrantRequest[()]]] = None
-        let service = runner.wire_target_service(random, Some(runner.ingress.binding()), take no_grants, head, c, tasks, config, "crash fixture")
-        let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, result.unwrap(runner.wire_place_allocator(code.describe(place), N_PLACE)), post, config, c))
+        let no_grants: Option[runner.CallGrant[()]] = None
+        let crash_wire = runner.ingress.bound_wire(binds)
+        let bind_term = runner.bind_owner_bytes(crash_wire)
+        let service = runner.wire_target_service(random, take crash_wire, take no_grants, head, c, tasks, config, "crash fixture")
+        let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, result.unwrap(runner.wire_place_allocator(code.describe(place), N_PLACE)), post, config, c, bind_term))
         list.push(mut owners, take owner)
     }
     for take owner in owners {
         let _ = task.join(take owner)
     }
+    runner.stop_grants(Some(take binds))
 }
 
 fn served(take db: store.Db, selection: runner.Selection, c: Clock, r: Random, tasks: Tasks, n: Net, input: Stdin, out: Stdout, sessions: u64) -> Result[(), runner.OpenError] waits {
@@ -615,7 +619,7 @@ fn count(d: Dir, c: Clock, r: Random, tasks: Tasks) -> (u64, u64) waits {
 }
 
 type DeadlinePlace: send {
-    config: runner.PlaceConfig[(), Hd, (), ()],
+    config: runner.PlaceConfig[(), Hd, ()],
     stop: Receiver[()],
     status: Latest[runner.Status],
     watch: Sender[Receiver[runner.Phase]],
@@ -726,7 +730,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(existing.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(existing.pack_bytes), group_bytes: Some(int.widen(existing.group_bytes)), group_commits: Some(existing.group_commits), lock_wait_ms: Some(existing.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: take chosen, place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: None, triggers: None, idle: None)
+    let settings: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(existing.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(existing.pack_bytes), group_bytes: Some(int.widen(existing.group_bytes)), group_commits: Some(existing.group_commits), lock_wait_ms: Some(existing.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: take chosen, place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
     let installing = match settings.selection {
         Install(_) => true,
         _ => false
@@ -809,7 +813,7 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
     }
 }
 
-fn deadline_disk_bytes(config: runner.PlaceConfig[(), Hd, (), ()]) -> u64 {
+fn deadline_disk_bytes(config: runner.PlaceConfig[(), Hd, ()]) -> u64 {
     let plan = result.unwrap(store.planned(Directory, 18446744073709551615u64, config.sizes))
     // Runner's 1 MiB keep and 1 MiB for the fixture.
     result.unwrap(runner.operate_bytes(config)) + 2 * 1048576u64 + store.planned_bytes(plan)
@@ -821,7 +825,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
     wire.socket.max_frame = 65536u64
-    let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(runner.ingress.binding()), grants: None, triggers: None, idle: None)
+    let config: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
     let allowance = deadline_disk_bytes(config)
     let seed = DeadlinePlace(config: take config, stop: take stopping, status: latest.handle(status), watch: take watch)
     let running = task.spawn(tasks, bytes allowance, take seed, deadline_place)

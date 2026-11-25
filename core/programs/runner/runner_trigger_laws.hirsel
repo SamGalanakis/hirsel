@@ -109,8 +109,8 @@ fn trigger_law_body(mut tx: store.Tx, h: TriggerLawTables, author: Caller, take 
     Ok(next)
 }
 
-fn trigger_law_grants(seed: (), unused_handles: TriggerLawTables, take ctx: TriggerContext) -> Result[TriggerContext, Capacity] {
-    Ok(take ctx)
+fn trigger_law_grants(seed: (), unused_handles: TriggerLawTables, ctx: TriggerContext) -> Result[TriggerContext, Capacity] {
+    Ok(share_trigger_context(ctx))
 }
 
 fn trigger_law_config(take entries: triggers.Entries) -> TriggerConfig {
@@ -118,8 +118,8 @@ fn trigger_law_config(take entries: triggers.Entries) -> TriggerConfig {
 }
 
 // The law's attempt mint, served by a grant task the law starts beside the drive.
-fn trigger_law_attempts(tasks: Tasks, h: TriggerLawTables) -> Option[Sender[GrantRequest[TriggerContext]]] {
-    let given: Grants[TriggerContext, TriggerLawTables, ()] = Grants(seed: (), attempt: Some(trigger_law_grants), call: None, grant_bytes: 65536u64)
+fn trigger_law_attempts(tasks: Tasks, h: TriggerLawTables) -> Option[Sender[MintRequest[TriggerContext, TriggerContext]]] {
+    let given: Grants[TriggerContext, TriggerLawTables, ()] = Grants(attempt: Some(Mint(seed: (), mint: trigger_law_grants, mint_bytes: 65536u64, mint_steps: DEFAULT_STEPS)), call: None, claim: None, bind: None)
     let running = start_grants(tasks, h, grant_start(take given))
     let PlaceGrants(attempts: take attempts, ..) = take running
     take attempts

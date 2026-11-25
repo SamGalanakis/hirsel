@@ -300,7 +300,7 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
 
 // Installation shares the serving head's open and activation, then closes the store
 // before it sends proof. No publisher, triggers, or listener start for this launch.
-fn operate_install[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
+fn operate_install[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
     let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, ..) = take p
     let persistent = persistent_backing(backing)
     let typed = match selection {

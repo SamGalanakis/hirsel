@@ -141,7 +141,7 @@ fn join_wire_owner[C: send](take plan: WireJoiner[C]) -> Result[(), std.wsock.Er
 }
 
 // W3c constructs the service at Hello and joins the publisher at the first Subscribe.
-pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded, take service: Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16], to_publisher: Sender[PubIn], c: WireConfig, clock: Clock) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
+pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded, take service: Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16], to_publisher: Sender[PubIn], c: WireConfig, clock: Clock, bind_term: u64) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
     let mut opening_service = take service
     let retirement = replace(mut opening_service.retirement, None)
     let boxed = box.new(take opening_service)
@@ -150,7 +150,7 @@ pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded
     let allowance = if wire_configuration(c) {
         let pool = option.unwrap(charge.task(bytes[()], wire_connection_pool_bytes(c)))
         let inbox = option.unwrap(charge.channel(bytes[WireAllocation[C]], WIRE_STANDALONE_SLOTS))
-        WIRE_OWNER_FLOOR - wire_owner_task_bytes() + c.n_granted + pool + inbox
+        WIRE_OWNER_FLOOR - wire_owner_task_bytes() + c.n_granted + bind_term + pool + inbox
     } else {
         0u64
     }

@@ -30,19 +30,19 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
     let (pub_input, published): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let held: Registry[(), ()] = registry()
-    let allocate = fn(mut context: WireSession[(), ()], take plan: ServiceAllocation) -> Result[ServicePlan, u16] {
+    let allocate = fn(mut context: WireSession[()], take plan: ServiceAllocation) -> Result[ServicePlan, u16] {
         wire_service_allocate(mut context, held, take plan)
     }
-    let allocation: Result[(Sender[WireAllocation[WireSession[(), ()]]], Task[()]), Capacity] =
+    let allocation: Result[(Sender[WireAllocation[WireSession[()]]], Task[()]), Capacity] =
         start_wire_pool(tasks, config, clock, wire_connection_pool_bytes(config), 2u64, take allocate)
     let (take pool, take pooling) = result.unwrap(take allocation)
-    let service: Service[WireSession[(), ()]] = wire_service_seed(random, no_wire(), head, clock, tasks, config, string.new())
+    let service: Service[WireSession[()]] = wire_service_seed(random, no_wire(), head, clock, tasks, config, string.new())
     let completion = result.unwrap(OwnerCompletion(to: take to, id: 1u64, abandoned: 0u64))
     let job = WireAccept(socket: take socket, peer: peer.ip, accepted: host.mono_ns(clock), wire_slot: take pending_slot,
         proxies: list.new(), service: box.new(take service), publisher: take pub_input, c: config, clock: clock, tasks: tasks,
         control: None, completion: take completion, allocation: take pool, report: None)
     let allowance = WIRE_OWNER_FLOOR + wire_connection_pool_bytes(config)
-    let serve: fn(take WireAccept[WireSession[(), ()]]) -> Result[(), std.wsock.Error] waits = wire_accepted
+    let serve: fn(take WireAccept[WireSession[()]]) -> Result[(), std.wsock.Error] waits = wire_accepted
 
     let mut request: Bytes = clone(b"GET /hirsel HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")
     if list.len(offered) != 0u64 {

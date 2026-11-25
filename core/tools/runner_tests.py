@@ -933,23 +933,19 @@ def evaluate(evaluator, inputs_path, definition, launch_image=None):
     return value, report
 
 
-WIRE_BOUNDS = (('wire_bind_nonshareable', 'OwnedSeed', 'shareable'),)
-
-
-def granted_bound(args, root, work, row):
-    for name, movable, bound in WIRE_BOUNDS:
-        rejected = manifest(root, work, name, extra=[(root / f'core/programs/runner/{name}.hirsel', name)])
-        command = [str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
-                   '--source-core', '--source-std', '--store', str(work / name), '--json']
-        checked = run_case(name, 'checker', command, capture_output=True, text=True)
-        report = json.loads(checked.stdout)
-        actual = [(d.get('rule'), d.get('message')) for d in report.get('diagnostics', [])]
-        expected = [('LANG-12', f'`runner@1/{name}/{movable}` is not {bound}')]
-        if bound == 'shareable':  # The argument and result annotations are also refused.
-            expected[:0] = [('LANG-12', 'type argument is not shareable')] * 2
-        passed = (checked.returncode == 1 and report.get('accepted') is False and actual == expected
-                  and not report.get('incomplete') and not report.get('resources'))
-        row(engine='checker', law=name, passed=passed, result=report)
+def mint_waits(args, root, work, row):
+    """L36 mint_waits (RUNNER-SPEC v2.69 F3): a Mint whose mint waits is refused on its type."""
+    name = 'mint_waits'
+    rejected = manifest(root, work, name, extra=[(root / f'core/programs/runner/{name}.hirsel', name)])
+    command = [str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
+               '--source-core', '--source-std', '--store', str(work / name), '--json']
+    checked = run_case(name, 'checker', command, capture_output=True, text=True)
+    report = json.loads(checked.stdout)
+    actual = [(d.get('rule'), d.get('message')) for d in report.get('diagnostics', [])]
+    expected = [('LANG-13', 'the callable does not fit the written callable type')]
+    passed = (checked.returncode == 1 and report.get('accepted') is False and actual == expected
+              and not report.get('incomplete') and not report.get('resources'))
+    row(engine='checker', law=name, passed=passed, result=report)
 
 
 def activation_body_edit(root, work):
@@ -1331,7 +1327,7 @@ def main():
                     print('FAIL', json.dumps(r)[:2000])
             return int(any(not r['passed'] for r in rows))
         if r1 and 'granted_copied' in selected_calls and args.compiler is not None:
-            granted_bound(args, root, work, row)
+            mint_waits(args, root, work, row)
         base = manifest(root, work, 'inputs')
         if r0:
             values = l12_values(evaluator, root, work, 'tree')

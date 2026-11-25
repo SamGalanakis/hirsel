@@ -1,6 +1,7 @@
 hirsel.laws 1
-jwtbind@1/jwtbind/jwt_caller_map src=7f1182ba8cb0066c sig=533a3adfe4b0998f run=a58227ecac7d1e85 bug=- oracle=- rows=pending
+jwtbind@1/jwtbind/jwt_caller_map src=0ddbfae0fc08a293 sig=cd1ad1ebed95e36c run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 jwtbind@1/jwtbind/jwt_config_refused src=c46661d8d063bb75 sig=098854b22e1b8cbb run=a58227ecac7d1e85 bug=- oracle=- rows=pending
+jwtbind@1/jwtbind/jwt_default_place src=e7c3b3ad609250a1 sig=72361aec0bfb311d run=607dcf6bff52df2b bug=- oracle=- rows=pending
 jwtbind@1/jwtbind/jwt_expiry_instant src=620637cd49b056bd sig=eee9e41023c4b8c7 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 jwtbind@1/jwtbind/jwt_rotation src=7d7d0c48c984d1b8 sig=21f05dc0e8b9d67a run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 jwtbind@1/jwtbind/jwt_unavailable_remote src=22844ec9b3789d69 sig=440a6163e2825a05 run=a58227ecac7d1e85 bug=- oracle=- rows=pending

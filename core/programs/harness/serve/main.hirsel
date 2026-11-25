@@ -4,14 +4,13 @@ const PLACE_POOL: u64 = 134217728u64
 
 const HELPER_BYTES: u64 = 67108864u64
 
-fn session(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, notes.main.Handles, notes.main.Services, ()], Capacity] {
+fn session(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, notes.main.Handles, notes.main.Services], Capacity] {
     let live = match s.live {
         Some(l) => Some(notes.main.copy_live(l, supplied.name)),
         None => None,
     }
     let seed = notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: notes.main.copy_stream(s.stream, supplied.name))
-    let mut config = notes.main.settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, take seed)
-    config.wire = Some(runner.wire_bind(latest.new(arc.new(())), code.describe(runner.ingress.caller), 4096u64, 65536u64))
+    let config = notes.main.wired_settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, take seed)
     Ok(take config)
 }
 

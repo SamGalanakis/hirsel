@@ -324,7 +324,7 @@ fn fixture_generations(g: u64) -> List[(u32, u64)] {
 
 // This unit driver feeds the production wire service, including its finish path.
 // It owns no public client transport. The existing publisher tests exercise marks.
-type RetiredOwner: send { service: Service[WireSession[(), ()]], places: Registry[(), Qh], from: Receiver[WireEvent], output: Sender[Down], publisher: Sender[PubIn] }
+type RetiredOwner: send { service: Service[WireSession[()]], places: Registry[(), Qh], from: Receiver[WireEvent], output: Sender[Down], publisher: Sender[PubIn] }
 
 fn retired_owner(take seed: RetiredOwner) -> Result[(), ()] waits {
     let RetiredOwner(service: take initial, places: take places, from: take from, output: take output, publisher: take pub_to) = take seed
@@ -365,7 +365,7 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     let (down_to, down): (Sender[Down], Receiver[Down]) = channel.new(16u64)
     let (inbox, events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
-    let mut service: Service[WireSession[(), ()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), "fixture")
+    let mut service: Service[WireSession[()]] = wire_service_seed(r, no_wire(), head, c, tasks, wire_defaults(1048576u64), "fixture")
     service.context.marked = true
     service.context.phase = 3u8
     // Past hello every session holds a Caller; a Subscribe without one ends it (1008).

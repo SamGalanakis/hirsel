@@ -1,15 +1,18 @@
 // L69's random arm (§13.6, §13.12): under seeded random edits on every
-// head (page values and BLOBs), forks, pins of a head and of a historical
-// Snapshot, unpins, branch deletes, cuts and residency round trips on main,
-// with a crash on each side of the MANIFEST rename, every
-// head and every pin reads exactly what an independent model of its commits
-// says. The oracle is the model plus the frame walker of 5860634f, run over
+// head (page values and BLOBs) of two tables, forks, pins of a head and of a
+// historical Snapshot, unpins, branch deletes, cuts, residency round trips on
+// main and residency moves of the second table, with a crash on each side of
+// the MANIFEST rename, every head and every pin reads exactly what an
+// independent model of its commits says: by key, by scan and count with
+// random bounds, by span, and by the diff between any two of them; and a
+// transaction reads its head's rows with its own staged writes over them. The oracle is the model plus the frame walker of 5860634f, run over
 // every published root together: each stamp sits at one location in the
 // generation (B3), and every reached frame sits in a listed pack on disk.
 // A pack's live bytes are advisory under §13.6, so the walker checks
 // reachability, not that accounting estimate.
 type RandomModel {
-    // branch id -> key -> edit; an absent key is deleted.
+    // branch id -> key -> edit; an absent key is deleted. A key below
+    // MARK_BASE is a row of `rows`, MARK_BASE + k is row k of `marks`.
     heads: Map[u32, Map[u64, u8]],
     pins: Map[String, Map[u64, u8]],
     forks: u64,
@@ -19,6 +22,11 @@ type RandomModel {
 const RANDOM_ROWS: u64 = 160
 
 const RANDOM_WIDTH: u64 = 48
+
+// The second table, `marks`, created Memory beside the Tiered `rows`.
+const MARK_ROWS: u64 = 32
+
+const MARK_BASE: u64 = 1000
 
 // Past the 1,024-byte inline limit, so the value is stored as a BLOB.
 const RANDOM_BLOB_WIDTH: u64 = 1100
@@ -54,38 +62,84 @@ fn random_expected(model: Map[u64, u8], key: u64) -> Option[Bytes] {
     }
 }
 
-fn random_reads(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], model: Map[u64, u8]) -> Result[(), Error] waits {
-    for key in 0u64 .. RANDOM_ROWS {
+// One table's part of a head's or pin's model, keyed by that table's keys.
+fn random_part(model: Map[u64, u8], marks: bool) -> Map[u64, u8] {
+    let mut part: Map[u64, u8] = map.new()
+    for (key, edit) in model {
+        if marks && key >= MARK_BASE {
+            map.insert(mut part, key - MARK_BASE, edit)
+        } else if !marks && key < MARK_BASE {
+            map.insert(mut part, key, edit)
+        }
+    }
+    take part
+}
+
+fn random_in(key: u64, lo: Bound[u64], hi: Bound[u64]) -> bool {
+    let above = match lo {
+        Included(b) => key >= b,
+        Excluded(b) => key > b,
+        Unbounded => true,
+    }
+    let below = match hi {
+        Included(b) => key <= b,
+        Excluded(b) => key < b,
+        Unbounded => true,
+    }
+    above && below
+}
+
+// The model's rows of one table inside [lo, hi].
+fn random_window(model: Map[u64, u8], n: u64, lo: Bound[u64], hi: Bound[u64]) -> u64 {
+    let mut inside = 0u64
+    for key in 0u64 .. n {
+        if map.contains(model, key) && random_in(key, lo, hi) {
+            inside += 1
+        }
+    }
+    inside
+}
+
+// A bound up to two keys past the table's last key, so ends land on
+// present keys, absent keys and past the table.
+fn random_bound(mut g: std.rand.Pcg, n: u64) -> Bound[u64] {
+    match std.rand.below(mut g, 3) {
+        0 => Unbounded,
+        1 => Included(std.rand.below(mut g, n + 2)),
+        _ => Excluded(std.rand.below(mut g, n + 2)),
+    }
+}
+
+fn random_reads(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], model: Map[u64, u8], n: u64) -> Result[(), Error] waits {
+    for key in 0u64 .. n {
         if get(read_handle, s, rows, key)? != random_expected(model, key) {
             fail("L69 random: every head and pin reads what its commits wrote")
         }
     }
-    random_scan(read_handle, s, rows, model, false)?
-    random_scan(read_handle, s, rows, model, true)?
-    let mut window = 0u64
-    for key in 40u64 .. 120 {
-        if map.contains(model, key) {
-            window += 1
-        }
-    }
-    if count_at(read_handle, s, rows, Unbounded, Unbounded)? != map.len(model) || count_at(read_handle, s, rows, Included(40u64), Excluded(120u64))? != window {
+    random_scan(read_handle, s, rows, model, n, Unbounded, Unbounded, false)?
+    random_scan(read_handle, s, rows, model, n, Unbounded, Unbounded, true)?
+    if count_at(read_handle, s, rows, Unbounded, Unbounded)? != map.len(model) || count_at(read_handle, s, rows, Included(40u64), Excluded(120u64))? != random_window(model, n, Included(40u64), Excluded(120u64)) {
         fail("L69 random: every head and pin counts the rows its commits wrote")
     }
     Ok(())
 }
 
-// A scan, forward or reverse, yields exactly the model's rows in key order.
-fn random_scan(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], model: Map[u64, u8], reverse: bool) -> Result[(), Error] waits {
+// A scan over [lo, hi], forward or reverse, yields exactly the model's rows
+// there in key order.
+fn random_scan(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], model: Map[u64, u8], n: u64, lo: Bound[u64], hi: Bound[u64], reverse: bool) -> Result[(), Error] waits {
     let mut scanned = if reverse {
-        scan_reverse(read_handle, s, rows, Unbounded, Unbounded)?
+        scan_reverse(read_handle, s, rows, lo, hi)?
     } else {
-        scan(read_handle, s, rows, Unbounded, Unbounded)?
+        scan(read_handle, s, rows, lo, hi)?
     }
-    for at in 0u64 .. RANDOM_ROWS {
+    for at in 0u64 .. n {
         let key = if reverse {
-            RANDOM_ROWS - 1 - at
+            n - 1 - at
         } else {
             at
+        }
+        if !random_in(key, lo, hi) {
+            continue
         }
         if let Some(edit) = map.get(model, key) {
             if next(read_handle, mut scanned)? != Some((key, compact_value_of(key, edit, random_width(edit)))) {
@@ -99,6 +153,15 @@ fn random_scan(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], model:
     Ok(())
 }
 
+// Both tables of one head or pin, read whole.
+fn random_reads_both(read_handle: Reader, s: Snapshot, rows: Table[u64, Bytes], marks: Option[Table[u64, Bytes]], model: Map[u64, u8]) -> Result[(), Error] waits {
+    random_reads(read_handle, s, rows, random_part(model, false), RANDOM_ROWS)?
+    if let Some(second) = marks {
+        random_reads(read_handle, s, second, random_part(model, true), MARK_ROWS)?
+    }
+    Ok(())
+}
+
 fn random_walk_root(d: Dir, db: Db, s: Snapshot, rows: Table[u64, Bytes], mut walk: CompactWalk) -> Result[(), Error] waits {
     match std.page.collection_slot(s.roots.collections.root, prefix(rows.id)?) {
         Some((ColdPage(root), _)) => compact_walk_frame(d, db, root, mut walk),
@@ -107,7 +170,7 @@ fn random_walk_root(d: Dir, db: Db, s: Snapshot, rows: Table[u64, Bytes], mut wa
 }
 
 // Runs after a cut, so every head's and pin's root is published.
-fn random_check(d: Dir, db: Db, rows: Table[u64, Bytes], model: RandomModel) -> Result[(), Error] waits {
+fn random_check(d: Dir, db: Db, rows: Table[u64, Bytes], marks: Option[Table[u64, Bytes]], model: RandomModel) -> Result[(), Error] waits {
     if list.len(db.heads) != map.len(model.heads) {
         fail("L69 random: the store keeps exactly the model's branches")
     }
@@ -119,7 +182,7 @@ fn random_check(d: Dir, db: Db, rows: Table[u64, Bytes], model: RandomModel) -> 
         }
         let s = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
         random_walk_root(d, db, s, rows, mut walk)?
-        random_reads(read_handle, s, rows, expected)?
+        random_reads_both(read_handle, s, rows, marks, expected)?
         drop(take s)
     }
     for (name, expected) in model.pins {
@@ -127,7 +190,7 @@ fn random_check(d: Dir, db: Db, rows: Table[u64, Bytes], model: RandomModel) -> 
             fail("L69 random: every pin the model holds is published")
         }
         random_walk_root(d, db, held, rows, mut walk)?
-        random_reads(read_handle, held, rows, expected)?
+        random_reads_both(read_handle, held, rows, marks, expected)?
         drop(take held)
     }
     drop(take read_handle)
@@ -167,10 +230,276 @@ fn random_residency_round_trip(mut db: Db, rows: Table[u64, Bytes], model: Rando
     }
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let s = snapshot_of(db, Branch(store: db.store, id: db.heads[0u64].id))?
-    random_reads(read_handle, s, rows, expected)?
+    random_reads(read_handle, s, rows, random_part(expected, false), RANDOM_ROWS)?
     drop(take s)
     drop(take read_handle)
     set_residency(mut db, rows.id, Tiered)
+}
+
+// L69's two tables: `rows`, a Tiered table of RANDOM_ROWS rows emitted Cold
+// into one pack as compact_cold_table_of builds it, and `marks`, a Memory
+// table of MARK_ROWS rows. Both are declared before `rows` turns Tiered,
+// since a Tiered store refuses a schema change (§13.10, Tiered(Migrate)).
+fn random_tables(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(Table[u64, Bytes], Table[u64, Bytes]), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let (take rows, take marks) = law_pair(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes(), "marks", std.codec.key_u64(), std.codec.of_bytes())?
+    let fixture: (Table[u64, Bytes], Table[u64, Bytes]) = (clone(rows), clone(marks))
+    let Committed(_) = run(mut db, None, copy_env(fixture), fn(mut tx: Tx, env: (Table[u64, Bytes], Table[u64, Bytes])) -> Result[(), Error] {
+        for key in 0u64 .. RANDOM_ROWS {
+            put(mut tx, env.0, key, compact_value_of(key, 0, RANDOM_WIDTH))?
+        }
+        for key in 0u64 .. MARK_ROWS {
+            put(mut tx, env.1, key, compact_value_of(key, 0, RANDOM_WIDTH))?
+        }
+        Ok(())
+    })? else {
+        fail("L69 random: the fixture puts commit")
+    }
+    let id = prefix(rows.id)?
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let (take root, take descriptor) = {
+        let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
+            fail("L69 random: the fixture has no rows table")
+        }
+        (arc.share(here), rooted_collection_record(here, before[52u64], 1)?)
+    }
+    if std.page.level(std.page.image_of(root)) == 0 {
+        fail("L69 random: the rows table spans more than one leaf")
+    }
+    let mut draw = stamp_after(db.next_node)?
+    let first = draw
+    page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw))?
+    page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw))?
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    Ok((rows, marks))
+}
+
+// One read-and-write call: it stages `edits`, then reads its table by key,
+// by fetch_many, by a bounded count and by bounded ranges both ways.
+// `expected` is the head's model with the edits applied.
+type RandomTxEnv {
+    table: Table[u64, Bytes],
+    edits: List[(u64, Option[u8])],
+    expected: Map[u64, u8],
+    n: u64,
+    probes: List[u64],
+    lo: Bound[u64],
+    hi: Bound[u64]
+}
+
+fn random_tx_range(tx: Tx, env: RandomTxEnv, reverse: bool) -> Result[bool, Error] {
+    let mut rows = if reverse {
+        range_reverse(tx, env.table, clone(env.lo), clone(env.hi))?
+    } else {
+        range(tx, env.table, clone(env.lo), clone(env.hi))?
+    }
+    for at in 0u64 .. env.n {
+        let key = if reverse {
+            env.n - 1 - at
+        } else {
+            at
+        }
+        if !random_in(key, env.lo, env.hi) {
+            continue
+        }
+        if let Some(edit) = map.get(env.expected, key) {
+            if next_in(tx, mut rows)? != Some((key, compact_value_of(key, edit, random_width(edit)))) {
+                return Ok(false)
+            }
+        }
+    }
+    Ok(next_in(tx, mut rows)? == None)
+}
+
+fn random_tx_body(mut tx: Tx, env: RandomTxEnv) -> Result[bool, Error] {
+    for (key, edit) in env.edits {
+        match edit {
+            Some(e) => put(mut tx, env.table, key, compact_value_of(key, e, random_width(e)))?,
+            None => {
+                let _ = delete(mut tx, env.table, key)?
+            },
+        }
+    }
+    for key in env.probes {
+        if fetch(tx, env.table, key)? != random_expected(env.expected, key) {
+            return Ok(false)
+        }
+    }
+    let many = fetch_many(tx, env.table, clone(env.probes))?
+    for at in 0u64 .. list.len(env.probes) {
+        if many[at] != random_expected(env.expected, env.probes[at]) {
+            return Ok(false)
+        }
+    }
+    if count(tx, env.table, clone(env.lo), clone(env.hi))? != random_window(env.expected, env.n, env.lo, env.hi) {
+        return Ok(false)
+    }
+    Ok(random_tx_range(tx, env, false)? && random_tx_range(tx, env, true)?)
+}
+
+fn random_tx_reads(mut db: Db, id: u32, take env: RandomTxEnv) -> Result[(), Error] waits {
+    let target = Branch(store: db.store, id)
+    let done = match run_on(mut db, target, Some(100000000), copy_env(env), random_tx_body)? {
+        Committed(take done) => take done,
+        // A read that fails inside the call names its own error.
+        Aborted(Undone(value: take e, ..)) => return Error(take e),
+        Failed(_) => fail("L69 random: every read-and-write call commits, not Failed"),
+        Refused(_) => fail("L69 random: every read-and-write call commits, not Refused"),
+        Stopped(_) => fail("L69 random: every read-and-write call commits, not Stopped"),
+    }
+    if !done.value {
+        fail("L69 random: a transaction reads its head's rows with its own staged writes over them")
+    }
+    Ok(())
+}
+
+// Head `pick`, or pin `pick - heads` in name order, with its model.
+fn random_side(db: Db, model: RandomModel, pick: u64) -> Result[(Snapshot, Map[u64, u8]), Error] {
+    if pick < list.len(db.heads) {
+        let id = db.heads[pick].id
+        let Some(expected) = map.get(model.heads, id) else {
+            fail("L69 random: every branch is one the model forked")
+        }
+        return Ok((snapshot_of(db, Branch(store: db.store, id))?, clone(expected)))
+    }
+    let mut at = list.len(db.heads)
+    for n in 0u64 .. 3 {
+        let name = random_pin_name(n)
+        let Some(expected) = map.get(model.pins, name) else {
+            continue
+        }
+        if at == pick {
+            let Some(held) = pinned(db, name) else {
+                fail("L69 random: every pin the model holds is published")
+            }
+            return Ok((take held, clone(expected)))
+        }
+        at += 1
+    }
+    fail("L69 random: the side is a head or a pin")
+}
+
+// The diff from `a` to `b` of one table, in key order: each key whose value
+// differs, with b's value (§1.5: no row equal on both sides).
+fn random_expected_diff(t: Table[u64, Bytes], a: Map[u64, u8], b: Map[u64, u8], n: u64, mut out: List[(Bytes, Option[Bytes])]) -> Result[(), Error] {
+    for key in 0u64 .. n {
+        let after = random_expected(b, key)
+        if random_expected(a, key) != after {
+            list.push(mut out, (log_key(t.id, key)?, take after))
+        }
+    }
+    Ok(())
+}
+
+fn random_check_diff(seen: List[Change], rows: Table[u64, Bytes], marks: Table[u64, Bytes], wanted: List[(Bytes, Option[Bytes])]) -> Result[(), Error] {
+    if list.len(seen) != list.len(wanted) {
+        fail("L69 random: the diff of two heads or pins is exactly the rows their models differ in")
+    }
+    for at in 0u64 .. list.len(seen) {
+        let owner = list.slice(seen[at].tree_key, 0, 4)
+        let t: Table[u64, Bytes] = if owner == prefix(rows.id)? {
+            clone(rows)
+        } else if owner == prefix(marks.id)? {
+            clone(marks)
+        } else {
+            fail("L69 random: a diff names only rows of the two tables")
+        }
+        let value = match view seen[at].value {
+            Some(raw) => Some(row_value(t.readers, t.id, raw)?),
+            None => None,
+        }
+        if seen[at].tree_key != wanted[at].0 || value != wanted[at].1 {
+            fail("L69 random: the diff of two heads or pins is exactly the rows their models differ in")
+        }
+    }
+    Ok(())
+}
+
+// Every change from `a` (None: from nothing) to `b`, `per_page` rows a
+// page, each page resumed where the last one stopped.
+fn random_paged(read_handle: Reader, a: Option[Snapshot], b: Snapshot, per_page: u64) -> Result[List[Change], Error] waits {
+    let mut low: Bytes = list.new()
+    let mut hi: Bytes = list.new()
+    list.push(mut hi, 255u8)
+    let mut paged: List[Change] = list.new()
+    loop {
+        let page = changes_page(read_handle, clone(a), b, low, hi, Limits(rows: per_page, byte_limit: VALUE_LIMIT + 1048576))?
+        if list.len(page.trimmed) != 0 || list.len(page.bounds) != 0 {
+            fail("L69 random: a diff of tables has no trims or bounds")
+        }
+        let ChangePage(changes: take found, next: take resume, ..) = take page
+        for take change in take found {
+            list.push(mut paged, take change)
+        }
+        let Some(take next_low) = take resume else {
+            break
+        }
+        low = take next_low
+    }
+    Ok(take paged)
+}
+
+// The two tables' diffs from model `a` to model `b`, in tree-key order.
+fn random_wanted(rows: Table[u64, Bytes], marks: Table[u64, Bytes], a: Map[u64, u8], b: Map[u64, u8]) -> Result[List[(Bytes, Option[Bytes])], Error] {
+    let mut wanted: List[(Bytes, Option[Bytes])] = list.new()
+    if rows.id < marks.id {
+        random_expected_diff(rows, random_part(a, false), random_part(b, false), RANDOM_ROWS, mut wanted)?
+        random_expected_diff(marks, random_part(a, true), random_part(b, true), MARK_ROWS, mut wanted)?
+    } else {
+        random_expected_diff(marks, random_part(a, true), random_part(b, true), MARK_ROWS, mut wanted)?
+        random_expected_diff(rows, random_part(a, false), random_part(b, false), RANDOM_ROWS, mut wanted)?
+    }
+    Ok(take wanted)
+}
+
+// changes(a, b) whole, changes_page from a to b resumed `per_page` rows at a
+// time, and b's initial changes from nothing, against the models.
+fn random_diff(read_handle: Reader, a: Snapshot, b: Snapshot, a_model: Map[u64, u8], b_model: Map[u64, u8], rows: Table[u64, Bytes], marks: Table[u64, Bytes], per_page: u64) -> Result[(), Error] waits {
+    let wanted = random_wanted(rows, marks, a_model, b_model)?
+    let whole = changes(read_handle, a, b)?
+    if list.len(whole.trimmed) != 0 || list.len(whole.bounds) != 0 {
+        fail("L69 random: a diff of tables has no trims or bounds")
+    }
+    random_check_diff(whole.rows, rows, marks, wanted)?
+    random_check_diff(random_paged(read_handle, Some(clone(a)), b, per_page)?, rows, marks, wanted)?
+    let nothing: Map[u64, u8] = map.new()
+    random_check_diff(random_paged(read_handle, None, b, per_page)?, rows, marks, random_wanted(rows, marks, nothing, b_model)?)
+}
+
+// span_changes of [lo, hi) of one table, whole and stepped, against the model.
+fn random_span(read_handle: Reader, s: Snapshot, t: Table[u64, Bytes], model: Map[u64, u8], lo: u64, hi: u64) -> Result[(), Error] waits {
+    let mut wanted: List[(Bytes, Option[Bytes])] = list.new()
+    for key in lo .. hi {
+        if map.contains(model, key) {
+            list.push(mut wanted, (log_key(t.id, key)?, random_expected(model, key)))
+        }
+    }
+    let low = log_key(t.id, lo)?
+    let high = log_key(t.id, hi)?
+    let whole = span_changes(read_handle, s, low, high)?
+    let mut stepped: List[Change] = list.new()
+    let mut cursor = open_span_changes(read_handle, s, low, high)?
+    while let Some(take change) = next_span_change(read_handle, mut cursor)? {
+        list.push(mut stepped, take change)
+    }
+    for seen in[whole, stepped] {
+        if list.len(seen) != list.len(wanted) {
+            fail("L69 random: a span of every head and pin yields its commits' rows in key order")
+        }
+        for at in 0u64 .. list.len(seen) {
+            let value = match view seen[at].value {
+                Some(raw) => Some(row_value(t.readers, t.id, raw)?),
+                None => None,
+            }
+            if seen[at].tree_key != wanted[at].0 || value != wanted[at].1 {
+                fail("L69 random: a span of every head and pin yields its commits' rows in key order")
+            }
+        }
+    }
+    Ok(())
 }
 
 // A cut whose every MANIFEST seal is refused after its packs are written.
@@ -215,7 +544,7 @@ fn random_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, take db: Db, renamed:
 
 fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[(), Error] waits {
     let floor = 182375272u64
-    let rows = compact_cold_table_of(d, c, r, tasks, floor, RANDOM_ROWS, RANDOM_WIDTH)?
+    let (take rows, take marks) = random_tables(d, c, r, tasks, floor)?
     let mut options = compact_crash_options(floor)?
     options.probe_budget = 4
     let mut db = open(tasks, d, c, r, clone(options))?
@@ -224,31 +553,50 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
     for key in 0u64 .. RANDOM_ROWS {
         map.insert(mut initial, key, 0u8)
     }
+    for key in 0u64 .. MARK_ROWS {
+        map.insert(mut initial, MARK_BASE + key, 0u8)
+    }
     let mut model = RandomModel(heads: map.new(), pins: map.new(), forks: 0, pinned_count: 0)
     map.insert(mut model.heads, db.heads[0u64].id, take initial)
     // A Snapshot of main kept across later steps, then pinned as history.
     let mut history: Option[(Snapshot, Map[u64, u8])] = None
     let mut crashes = 0u64
+    let mut marks_tiered = false
     for _ in 0u64 .. 80 {
-        let op = std.rand.below(mut g, 15)
+        let op = std.rand.below(mut g, 20)
         if op < 6 {
             let slot = std.rand.below(mut g, list.len(db.heads))
             let id = db.heads[slot].id
-            let key = std.rand.below(mut g, RANDOM_ROWS)
+            let on_marks = std.rand.below(mut g, 4) == 0
+            let key = std.rand.below(mut g, if on_marks {
+                MARK_ROWS
+            } else {
+                RANDOM_ROWS
+            })
             let edit: Option[u8] = if std.rand.below(mut g, 4) == 0 {
                 None
             } else {
                 Some(int.truncate(1 + std.rand.below(mut g, 254)))
             }
-            random_edit(mut db, rows, id, key, edit)?
+            let edited: Table[u64, Bytes] = if on_marks {
+                clone(marks)
+            } else {
+                clone(rows)
+            }
+            random_edit(mut db, edited, id, key, edit)?
+            let at = if on_marks {
+                MARK_BASE + key
+            } else {
+                key
+            }
             let mut changed: Map[u64, u8] = option.unwrap(map.remove(mut model.heads, id))
             match edit {
                 Some(e) => {
-                    map.insert(mut changed, key, e)
+                    map.insert(mut changed, at, e)
                     let _ = std.prop.sometimes("edit", true)
                 },
                 None => {
-                    let _ = map.remove(mut changed, key)
+                    let _ = map.remove(mut changed, at)
                     let _ = std.prop.sometimes("delete a key", true)
                 },
             }
@@ -336,11 +684,128 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             let _ = std.prop.sometimes("delete a branch", true)
         } else if op == 11 {
             let _ = checkpoint(mut db)?
-            random_check(d, db, rows, model)?
+            random_check(d, db, rows, Some(clone(marks)), model)?
             let _ = std.prop.sometimes("cut", true)
         } else if op == 14 {
             random_residency_round_trip(mut db, rows, model)?
             let _ = std.prop.sometimes("residency round trip", true)
+        } else if op == 15 {
+            let slot = std.rand.below(mut g, list.len(db.heads))
+            let id = db.heads[slot].id
+            let on_marks = std.rand.below(mut g, 2) == 0
+            let n = if on_marks {
+                MARK_ROWS
+            } else {
+                RANDOM_ROWS
+            }
+            let base = if on_marks {
+                MARK_BASE
+            } else {
+                0u64
+            }
+            let mut changed: Map[u64, u8] = option.unwrap(map.remove(mut model.heads, id))
+            let mut edits: List[(u64, Option[u8])] = list.new()
+            for _ in 0u64 .. 1 + std.rand.below(mut g, 4) {
+                let key = std.rand.below(mut g, n)
+                let edit: Option[u8] = if std.rand.below(mut g, 3) == 0 {
+                    None
+                } else {
+                    Some(int.truncate(1 + std.rand.below(mut g, 254)))
+                }
+                match edit {
+                    Some(e) => map.insert(mut changed, base + key, e),
+                    None => {
+                        let _ = map.remove(mut changed, base + key)
+                    },
+                }
+                list.push(mut edits, (key, edit))
+            }
+            let mut probes: List[u64] = list.new()
+            for _ in 0u64 .. 1 + std.rand.below(mut g, 6) {
+                list.push(mut probes, std.rand.below(mut g, n + 2))
+            }
+            for (key, _) in edits {
+                list.push(mut probes, key)
+            }
+            let lo = random_bound(mut g, n)
+            let hi = random_bound(mut g, n)
+            let env = RandomTxEnv(table: if on_marks {
+                clone(marks)
+            } else {
+                clone(rows)
+            }, edits: take edits, expected: random_part(changed, on_marks), n, probes: take probes, lo, hi)
+            random_tx_reads(mut db, id, take env)?
+            map.insert(mut model.heads, id, take changed)
+            let _ = std.prop.sometimes("transaction reads its staged writes", true)
+        } else if op == 16 {
+            let sides = list.len(db.heads) + map.len(model.pins)
+            let (take a, take a_model) = random_side(db, model, std.rand.below(mut g, sides))?
+            let (take b, take b_model) = random_side(db, model, std.rand.below(mut g, sides))?
+            let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+            random_diff(read_handle, a, b, a_model, b_model, rows, marks, 1 + std.rand.below(mut g, 8))?
+            drop(take a)
+            drop(take b)
+            drop(take read_handle)
+            let _ = std.prop.sometimes("diff two heads or pins", true)
+        } else if op == 17 || op == 18 {
+            let sides = list.len(db.heads) + map.len(model.pins)
+            let (take s, take side_model) = random_side(db, model, std.rand.below(mut g, sides))?
+            let on_marks = std.rand.below(mut g, 2) == 0
+            let n = if on_marks {
+                MARK_ROWS
+            } else {
+                RANDOM_ROWS
+            }
+            let t: Table[u64, Bytes] = if on_marks {
+                clone(marks)
+            } else {
+                clone(rows)
+            }
+            let part = random_part(side_model, on_marks)
+            let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+            if op == 17 {
+                let one_end = std.rand.below(mut g, n + 2)
+                let other_end = std.rand.below(mut g, n + 2)
+                let (lo, hi) = if one_end <= other_end {
+                    (one_end, other_end)
+                } else {
+                    (other_end, one_end)
+                }
+                random_span(read_handle, s, t, part, lo, hi)?
+                let _ = std.prop.sometimes("span", true)
+            } else {
+                let lo = random_bound(mut g, n)
+                let hi = random_bound(mut g, n)
+                random_scan(read_handle, s, t, part, n, lo, hi, std.rand.below(mut g, 2) == 0)?
+                if count_at(read_handle, s, t, lo, hi)? != random_window(part, n, lo, hi) {
+                    fail("L69 random: every head and pin counts the rows its commits wrote")
+                }
+                let _ = std.prop.sometimes("bounded scan", true)
+            }
+            drop(take s)
+            drop(take read_handle)
+        } else if op == 19 {
+            // §13.8 on the second table: main's marks move to the other
+            // residency and stay there (Tiered takes effect at the cut
+            // below), and main reads its model.
+            let to_memory = marks_tiered
+            marks_tiered = !marks_tiered
+            set_residency(mut db, marks.id, if to_memory {
+                Memory
+            } else {
+                Tiered
+            })?
+            let _ = checkpoint(mut db)?
+            let Some(expected) = map.get(model.heads, db.heads[0u64].id) else {
+                fail("L69 random: main is in the model")
+            }
+            let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+            let s = snapshot_of(db, Branch(store: db.store, id: db.heads[0u64].id))?
+            random_reads(read_handle, s, marks, random_part(expected, true), MARK_ROWS)?
+            drop(take s)
+            drop(take read_handle)
+            let _ = std.prop.sometimes("marks to Memory", to_memory)
+            let _ = std.prop.sometimes("marks to Tiered", !to_memory)
         } else if op >= 12 {
             if let Some((take s, _)) = take history {
                 drop(take s)
@@ -353,7 +818,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             let _ = std.prop.sometimes("crash before the rename", !renamed)
             let _ = std.prop.sometimes("crash after the rename", renamed)
             let _ = checkpoint(mut db)?
-            random_check(d, db, rows, model)?
+            random_check(d, db, rows, Some(clone(marks)), model)?
         }
     }
     if let Some((take s, _)) = take history {
@@ -363,11 +828,11 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
         fail("L69 random: the seed crashes at least once")
     }
     let _ = checkpoint(mut db)?
-    random_check(d, db, rows, model)?
+    random_check(d, db, rows, Some(clone(marks)), model)?
     close(take db)?
     let mut reopened = open(tasks, d, c, r, options)?
     let _ = checkpoint(mut reopened)?
-    random_check(d, reopened, rows, model)?
+    random_check(d, reopened, rows, Some(clone(marks)), model)?
     close(take reopened)
 }
 
@@ -415,10 +880,10 @@ fn test_l69_pin_after_its_pack_retires(d: Dir, c: Clock, r: Random, tasks: Tasks
     map.insert(mut model.pins, clone("history"), take initial)
     let _ = pin(mut db, "history", s)?
     let _ = checkpoint(mut db)?
-    random_check(d, db, rows, model)?
+    random_check(d, db, rows, None, model)?
     close(take db)?
     let mut reopened = open(tasks, d, c, r, options)?
     let _ = checkpoint(mut reopened)?
-    random_check(d, reopened, rows, model)?
+    random_check(d, reopened, rows, None, model)?
     close(take reopened)
 }

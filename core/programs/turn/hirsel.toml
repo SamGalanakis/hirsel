@@ -16,6 +16,7 @@ stun_ice = { major = 1, path = "../stun_ice" }
 "relay.hirsel" = "turn"
 "relay_paths.hirsel" = "turn"
 "streams.hirsel" = "turn"
+"policy.hirsel" = "turn"
 
 [tests]
 limit = 67108864
@@ -23,3 +24,4 @@ limit = 67108864
 [tests.sources]
 "laws.hirsel" = "laws"
 "relay_laws.hirsel" = "laws"
+"policy_laws.hirsel" = "laws"

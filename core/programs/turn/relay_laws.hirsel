@@ -51,7 +51,13 @@ fn relay_config() -> turn.RelayConfig {
     c.sources = 64
     c.challenge_per_s = 1000
     c.derive_per_source_s = 1000
+    // The peers here are in RFC 5737's documentation ranges, which TURN-7 denies unless allowed.
+    c.policy.allow = list_of2(documentation(0xc0000200), documentation(0xc6336400))
     c
+}
+
+fn documentation(net: u32) -> turn.Allow {
+    turn.Allow(prefix: turn.Prefix(ip: V4(net), bits: 24), ports_lo: 0, ports_hi: 65535)
 }
 
 fn new_relay(take c: turn.RelayConfig, take pool: List[Addr], seed: u64) -> turn.Relay {
@@ -585,7 +591,7 @@ fn relay_lifetimes(rnd: Random) -> Result[(), turn.TurnError] {
     relay_expiry(rnd)
 }
 
-/// The relay half of lifetimes_exact, from 11 s on.
+/// The relay half of lifetimes_exact, from 11 s on, with ChannelData after its permission.
 fn relay_expiry(rnd: Random) -> Result[(), turn.TurnError] {
     let mut rl = new_relay(relay_config(), list_of2(POOL_1, POOL_2), 94)
     let o = udp(HOST_A)
@@ -607,6 +613,16 @@ fn relay_expiry(rnd: Random) -> Result[(), turn.TurnError] {
         let c = turn.relay_counts(rl)
         if c.permissions != permissions || c.channels != channels || c.allocations != 1 {
             fail("expired early")
+        }
+        // ChannelData needs the peer's live permission as well as the channel (coturn):
+        // PEER_2's permission ended at 303 s, its channel lives until 603 s.
+        if s == 603 {
+            if let Some(_) = relayed_to(mut rl, ns(s * S - 1), rnd, o, channel_data(0x4000, b"late")) {
+                fail("ChannelData relayed on a live channel whose permission expired")
+            }
+            if turn.relay_discards(rl).no_permission != 1 {
+                fail("ChannelData without a permission not counted no_permission")
+            }
         }
         if s == 903 {
             if bind_code(mut rl, ns(s * S - 1), rnd, o, n, 4, 0x4000, PEER_2) != 400 || bind_code(mut rl, ns(s * S - 1), rnd, o, n, 5, 0x4000, PEER_3) != 400 {

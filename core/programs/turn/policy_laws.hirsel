@@ -1,0 +1,355 @@
+// TURN-7 and TURN-9 laws (slice U4): the peer policy, quota per subject and revocation.
+/// 93.184.216.9, the relay host's own public address in these cases.
+const OWN: u32 = 0x5db8d809
+
+const OWN_POOL: Addr = Addr(ip: V4(0x5db8d80a), port: 50000)
+
+const OWN_POOL_6: Addr = Addr(ip: V6(0x2606280002200001, 0x10), port: 50000)
+
+fn v4(ip: u32, port: u16) -> Addr {
+    Addr(ip: V4(ip), port: port)
+}
+
+fn v6(hi: u64, lo: u64, port: u16) -> Addr {
+    Addr(ip: V6(hi, lo), port: port)
+}
+
+fn prefix4(ip: u32, bits: u8) -> turn.Prefix {
+    turn.Prefix(ip: V4(ip), bits: bits)
+}
+
+fn allow4(ip: u32, lo: u16, hi: u16) -> turn.Allow {
+    turn.Allow(prefix: prefix4(ip, 32), ports_lo: lo, ports_hi: hi)
+}
+
+/// The username and SHA-256 key of the credential minted for subject, expiring at expiry.
+fn credential(expiry: u64, subject: Bytes) -> (Bytes, Secret) {
+    let mut name: Bytes = list.new()
+    let mut password: Bytes = list.new()
+    result.unwrap(turn.mint(sealed(20, 0x0b, "mac"), expiry, subject, mut name, mut password))
+    let sealed_password = result.unwrap(secret.seal(take password, "digest"))
+    let key = result.unwrap(turn.client_key(sealed_password, name, b"example.org", Sha256))
+    (name, key)
+}
+
+fn allocate_as(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin, expiry: u64, subject: Bytes, low: u64, extras: List[Extra]) -> Bytes {
+    let n = nonce_for(mut rl, now, rnd, o)
+    let (name, key) = credential(expiry, subject)
+    exchange(mut rl, now, rnd, o, signed_by(name, take key, stun_ice.ALLOCATE, low, n, extras))
+}
+
+/// A relay with one IPv4 allocation from HOST_A and one IPv6 allocation from HOST_B.
+type Both {
+    rl: turn.Relay,
+    n4: Bytes,
+    n6: Bytes,
+    relayed: Addr
+}
+
+fn both(take policy: turn.PeerPolicy, rnd: Random, seed: u64) -> Both {
+    let mut c = relay_config()
+    c.policy = take policy
+    let mut rl = new_relay(take c, list_of2(OWN_POOL, OWN_POOL_6), seed)
+    let n4 = nonce_for(mut rl, at(1000), rnd, udp(HOST_A))
+    let n6 = nonce_for(mut rl, at(1000), rnd, udp(HOST_B))
+    let four = exchange(mut rl, at(1000), rnd, udp(HOST_A), alice(stun_ice.ALLOCATE, 1, copy_of(n4), list_of1(udp_transport())))
+    let six = exchange(mut rl, at(1000), rnd, udp(HOST_B), alice(stun_ice.ALLOCATE, 2, copy_of(n6), list_of2(udp_transport(), family_v6())))
+    if code_of(four) != 0 || code_of(six) != 0 {
+        fail("an allocation for the policy cases failed")
+    }
+    Both(rl: take rl, n4: take n4, n6: take n6, relayed: relayed_in(four))
+}
+
+/// The CreatePermission answer for peer, on the allocation of peer's family.
+fn permit_code(mut s: Both, rnd: Random, low: u64, peer: Addr) -> u16 {
+    let (o, n) = match peer.ip {
+        V4(_) => (udp(HOST_A), copy_of(s.n4)),
+        V6(_, _) => (udp(HOST_B), copy_of(s.n6)),
+    }
+    code_of(exchange(mut s.rl, at(2000), rnd, o, alice(stun_ice.CREATE_PERMISSION, low, n, list_of1(Xor(stun_ice.XOR_PEER_ADDRESS, peer)))))
+}
+
+fn code4(mut s: Both, rnd: Random, low: u64, case: (u32, u16, u16)) -> bool {
+    let (ip, port, want) = case
+    permit_code(mut s, rnd, low, v4(ip, port)) == want
+}
+
+fn code6(mut s: Both, rnd: Random, low: u64, case: (u64, u64, u16, u16)) -> bool {
+    let (hi, lo, port, want) = case
+    permit_code(mut s, rnd, low, v6(hi, lo, port)) == want
+}
+
+/// NET-18's table, first and last address of each row, and the public addresses beside
+/// them; an allow entry for 10.0.0.5 ports 50000 to 50100.
+fn class_rows(rnd: Random) {
+    let mut policy = turn.PeerPolicy(deny: list.new(), allow: list_of1(allow4(0x0a000005, 50000, 50100)), local: list.new())
+    let mut s = both(take policy, rnd, 141)
+    let rows4 =[(0x00000000u32, 9000u16, 403u16), (0x00ffffffu32, 9000u16, 403u16), (0x0a000000u32, 9000u16, 403u16), (0x0affffffu32, 9000u16, 403u16), (0xac100000u32, 9000u16, 403u16), (0xac1fffffu32, 9000u16, 403u16), (0xc0a80000u32, 9000u16, 403u16), (0xc0a8ffffu32, 9000u16, 403u16), (0x64400000u32, 9000u16, 403u16), (0x647fffffu32, 9000u16, 403u16), (0x7f000000u32, 9000u16, 403u16), (0x7fffffffu32, 9000u16, 403u16), (0xa9fe0000u32, 9000u16, 403u16), (0xa9feffffu32, 9000u16, 403u16), (0xc0000000u32, 9000u16, 403u16), (0xc00000ffu32, 9000u16, 403u16), (0xc0000200u32, 9000u16, 403u16), (0xc00002ffu32, 9000u16, 403u16), (0xc6336400u32, 9000u16, 403u16), (0xc63364ffu32, 9000u16, 403u16), (0xcb007100u32, 9000u16, 403u16), (0xcb0071ffu32, 9000u16, 403u16), (0xc0586300u32, 9000u16, 403u16), (0xc05863ffu32, 9000u16, 403u16), (0xc6120000u32, 9000u16, 403u16), (0xc613ffffu32, 9000u16, 403u16), (0xe0000000u32, 9000u16, 403u16), (0xefffffffu32, 9000u16, 403u16), (0xf0000000u32, 9000u16, 403u16), (0xfffffffeu32, 9000u16, 403u16), (0xffffffffu32, 9000u16, 403u16)]
+    for i in 0u64 .. 31 {
+        if !code4(mut s, rnd, 10 + i, rows4[i]) {
+            fail("an IPv4 address of a denied NET-18 row admitted")
+        }
+    }
+    let public4 =[(0x01000000u32, 9000u16, 0u16), (0x09ffffffu32, 9000u16, 0u16), (0x0b000000u32, 9000u16, 0u16), (0x643fffffu32, 9000u16, 0u16), (0x64800000u32, 9000u16, 0u16), (0xac0fffffu32, 9000u16, 0u16), (0xac200000u32, 9000u16, 0u16), (0xc611ffffu32, 9000u16, 0u16), (0xc6140000u32, 9000u16, 0u16), (0xdfffffffu32, 9000u16, 0u16), (0x0a000005u32, 50000u16, 0u16), (0x0a000005u32, 50100u16, 0u16), (0x0a000005u32, 49999u16, 403u16), (0x0a000005u32, 50101u16, 403u16), (0x0a000006u32, 50000u16, 403u16)]
+    for i in 0u64 .. 15 {
+        if !code4(mut s, rnd, 100 + i, public4[i]) {
+            fail("a public IPv4 address, or the allow entry's edges, answered wrongly")
+        }
+    }
+    let ones = 0xffffffffffffffffu64
+    let rows6 =[(0u64, 0u64, 9000u16, 403u16), (0u64, 1u64, 9000u16, 403u16), (0x0064ff9b00010000u64, 0u64, 9000u16, 403u16), (0x0064ff9b0001ffffu64, ones, 9000u16, 403u16), (0x2001010000000000u64, 0u64, 9000u16, 403u16), (0x200101ffffffffffu64, ones, 9000u16, 403u16), (0x20010db800000000u64, 0u64, 9000u16, 403u16), (0x20010db8ffffffffu64, ones, 9000u16, 403u16), (0x3fff000000000000u64, 0u64, 9000u16, 403u16), (0x3fff0fffffffffffu64, ones, 9000u16, 403u16), (0xfc00000000000000u64, 0u64, 9000u16, 403u16), (0xfdffffffffffffffu64, ones, 9000u16, 403u16), (0xfe80000000000000u64, 0u64, 9000u16, 403u16), (0xfebfffffffffffffu64, ones, 9000u16, 403u16), (0xff00000000000000u64, 0u64, 9000u16, 403u16), (ones, ones, 9000u16, 403u16), (0x0100000000000000u64, 0u64, 9000u16, 403u16), (0x1fffffffffffffffu64, ones, 9000u16, 403u16), (0x4000000000000000u64, 0u64, 9000u16, 403u16), (0x5f00000000000000u64, 0u64, 9000u16, 403u16), (0xfec0000000000000u64, 1u64, 9000u16, 403u16)]
+    for i in 0u64 .. 21 {
+        if !code6(mut s, rnd, 200 + i, rows6[i]) {
+            fail("an IPv6 address of a denied NET-18 row admitted")
+        }
+    }
+    // Public IPv6, and the embedded forms judged by the IPv4 address inside.
+    let public6 =[(0x2000000000000000u64, 1u64, 9000u16, 0u16), (0x3ffeffffffffffffu64, ones, 9000u16, 0u16), (0x3fff100000000000u64, 0u64, 9000u16, 0u16), (0x2606470000000000u64, 0x1111u64, 9000u16, 0u16), (0u64, 0x0000ffff7f000001u64, 9000u16, 403u16), (0u64, 0x0000ffff08080808u64, 9000u16, 0u16), (0x0064ff9b00000000u64, 0x08080808u64, 9000u16, 0u16), (0x0064ff9b00000000u64, 0xa9fea9feu64, 9000u16, 403u16), (0x20027f0000010000u64, 1u64, 9000u16, 403u16), (0x2002080808080000u64, 1u64, 9000u16, 0u16), (0x2001000008080808u64, 0xf7f7f7f7u64, 9000u16, 0u16), (0x200100000a000001u64, 0xf7f7f7f7u64, 9000u16, 403u16), (0u64, 0x0000ffff0a000005u64, 50000u16, 0u16)]
+    for i in 0u64 .. 13 {
+        if !code6(mut s, rnd, 300 + i, public6[i]) {
+            fail("a public or embedded IPv6 address answered wrongly")
+        }
+    }
+}
+
+/// local, the pool and a deny entry, with the relay's own address's media ports allowed.
+fn own_addresses(rnd: Random) {
+    let mut policy = turn.PeerPolicy(deny: list_of1(prefix4(0x08080800, 24)), allow: list_of1(allow4(OWN, 40000, 40100)), local: list_of1(V4(OWN)))
+    let mut s = both(take policy, rnd, 142)
+    let rows4 =[(0x5db8d80au32, 50002u16, 403u16), (OWN, 3478u16, 403u16), (OWN, 40101u16, 403u16), (OWN, 40000u16, 0u16), (0x08080808u32, 9000u16, 403u16), (0x08080404u32, 9000u16, 0u16)]
+    for i in 0u64 .. 6 {
+        if !code4(mut s, rnd, 10 + i, rows4[i]) {
+            fail("the pool, the TURN port, an uncovered port of local or a deny entry admitted")
+        }
+    }
+    let rows6 =[(0u64, 0x0000ffff5db8d809u64, 3478u16, 403u16), (0u64, 0x0000ffff5db8d809u64, 40000u16, 0u16), (0x0064ff9b00000000u64, 0x5db8d809u64, 3478u16, 403u16), (0x0064ff9b00000000u64, 0x08080808u64, 9000u16, 403u16), (0u64, 0x0000ffff08080808u64, 9000u16, 403u16), (0x2002080808080000u64, 1u64, 9000u16, 403u16), (0x2001000008080808u64, 0xf7f7f7f7u64, 9000u16, 403u16), (0x2001000008080404u64, 0xf7f7f7f7u64, 9000u16, 403u16), (0x0064ff9b00000000u64, 0x08080404u64, 9000u16, 0u16), (0x2606280002200001u64, 0x10u64, 9000u16, 403u16)]
+    for i in 0u64 .. 10 {
+        if !code6(mut s, rnd, 100 + i, rows6[i]) {
+            fail("an embedded form of local, the pool or a deny entry admitted")
+        }
+    }
+    // OWN holds a permission now (port 40000). Send and the peer's datagrams are checked on
+    // the full address: port 3478 of the permitted IP is discarded and counted policy.
+    let o = udp(HOST_A)
+    if let Some(_) = relayed_to(mut s.rl, at(3000), rnd, o, send_indication(v4(OWN, 3478), b"x", 1)) {
+        fail("a Send to the relay's TURN port relayed")
+    }
+    let Some((_, to, _)) = relayed_to(mut s.rl, at(3000), rnd, o, send_indication(v4(OWN, 40050), b"x", 2)) else {
+        fail("a Send to an allowed media port dropped")
+    }
+    if to != v4(OWN, 40050) {
+        fail("the Send went to another peer")
+    }
+    if let Some(_) = from_peer_bytes(mut s.rl, at(3000), s.relayed, v4(OWN, 3478), b"in") {
+        fail("a datagram from an uncovered port of a permitted IP relayed")
+    }
+    let Some(_) = from_peer_bytes(mut s.rl, at(3000), s.relayed, v4(OWN, 40001), b"in") else {
+        fail("a datagram from an allowed port dropped")
+    }
+    if bind_code(mut s.rl, at(3000), rnd, o, s.n4, 400, 0x4000, v4(OWN, 3478)) != 403 || bind_code(mut s.rl, at(3000), rnd, o, s.n4, 401, 0x4000, v4(OWN, 40000)) != 0 {
+        fail("ChannelBind not checked on the full address")
+    }
+    if turn.relay_discards(s.rl).policy != 2 {
+        fail("the policy discards not counted")
+    }
+}
+
+/// U8's shape: deny everything and allow one media address and port.
+fn deny_all(rnd: Random) {
+    let deny = list_of2(prefix4(0, 0), turn.Prefix(ip: V6(0, 0), bits: 0))
+    let mut policy = turn.PeerPolicy(deny: take deny, allow: list_of1(allow4(0x5db8d814, 5000, 5000)), local: list.new())
+    let mut s = both(take policy, rnd, 143)
+    let rows4 =[(0x08080808u32, 9000u16, 403u16), (0x5db8d814u32, 5000u16, 0u16), (0x5db8d814u32, 5001u16, 403u16)]
+    for i in 0u64 .. 3 {
+        if !code4(mut s, rnd, 10 + i, rows4[i]) {
+            fail("a deny-all policy admitted other than its allow entry")
+        }
+    }
+    let rows6 =[(0x2606470000000000u64, 0x1111u64, 5000u16, 403u16), (0u64, 0x0000ffff5db8d814u64, 5000u16, 0u16), (0x0064ff9b00000000u64, 0x5db8d814u64, 5000u16, 403u16)]
+    for i in 0u64 .. 3 {
+        if !code6(mut s, rnd, 100 + i, rows6[i]) {
+            fail("a deny-all policy admitted IPv6 other than the mapped allow entry")
+        }
+    }
+}
+
+fn refused(take policy: turn.PeerPolicy) -> bool {
+    let mut c = relay_config()
+    c.policy = take policy
+    if let Error(Config) = turn.relay(take c, provide.random(1), sealed(20, 0x0b, "kdf"), sealed(32, 0x5a, "mac"), list_of1(OWN_POOL)) {
+        true
+    } else {
+        false
+    }
+}
+
+/// bug: admit a peer NET-18 does not call Public, or one in deny, local or the pool,
+/// directly or through an IPv4-mapped, NAT64, 6to4 or Teredo form; let allow cover a port
+/// outside its range or an embedded form it does not name; check Send, ChannelBind or a
+/// peer's datagram on the IP alone; or accept a malformed prefix or port range.
+/// oracle: NET-18's address-class table (the IANA special-purpose registries) by hand, each
+/// row's first and last address and the public addresses beside them; TURN-7's policy rules
+/// by hand for allow, deny, local and the pool.
+@test
+fn peer_policy() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(140)
+    class_rows(rnd)
+    own_addresses(rnd)
+    deny_all(rnd)
+    let bad_v4 = turn.PeerPolicy(deny: list_of1(prefix4(0, 33)), allow: list.new(), local: list.new())
+    let host_bits = turn.PeerPolicy(deny: list_of1(prefix4(0x0a000001, 8)), allow: list.new(), local: list.new())
+    let backwards = turn.PeerPolicy(deny: list.new(), allow: list_of1(allow4(OWN, 5000, 4000)), local: list.new())
+    let bad_v6 = turn.PeerPolicy(deny: list_of1(turn.Prefix(ip: V6(0x2001000000000000, 1), bits: 64)), allow: list.new(), local: list.new())
+    if !refused(take bad_v4) || !refused(take host_bits) || !refused(take backwards) || !refused(take bad_v6) {
+        fail("a malformed prefix or port range accepted")
+    }
+    Ok(())
+}
+
+/// bug: count the quota per username, so a subject minted twice holds 24 allocations, or
+/// let an allocation take an address the pool does not have, or let streams past `streams`,
+/// or count `streams_per_source` by the whole IPv6 address or a wider prefix than the /64.
+/// oracle: TURN-7 Allocate step 10 and the pool rule by hand: 12 succeed, the 13th is 486;
+/// with two addresses, the third subject is 508; with `streams` 3 the fourth connection is
+/// StreamsFull; with `streams_per_source` 2 the third from one /64 is StreamsFull and one
+/// from the next /64 succeeds (TURN-7 stream connections, U5's exact-prefix decision).
+@test
+fn quota_and_capacity() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(150)
+    let mut pool: List[Addr] = list.new()
+    for k in 0u64 .. 13 {
+        let port: u16 = int.narrow(50000 + 2 * k)
+        list.push(mut pool, Addr(ip: V4(0xc0000264), port: port))
+    }
+    let mut rl = new_relay(relay_config(), take pool, 151)
+    for k in 0u64 .. 13 {
+        let ip: u32 = int.narrow(0xcb007110 + k)
+        let expiry = if k % 2 == 0 {
+            1700000000u64
+        } else {
+            1700000500u64
+        }
+        let want: u16 = if k < 12 {
+            0
+        } else {
+            486
+        }
+        if code_of(allocate_as(mut rl, at(1000), rnd, udp(v4(ip, 40000)), expiry, b"alice", 1 + k, list_of1(udp_transport()))) != want {
+            fail("alice's allocations under two usernames not limited to 12")
+        }
+    }
+    let mut small = new_relay(relay_config(), list_of2(POOL_1, POOL_2), 152)
+    let subjects =[b"alice", b"bob", b"carol"]
+    let codes =[0u16, 0u16, 508u16]
+    for k in 0u64 .. 3 {
+        let ip: u32 = int.narrow(0xcb007120 + k)
+        if code_of(allocate_as(mut small, at(1000), rnd, udp(v4(ip, 40000)), 1700000000, subjects[k], 20 + k, list_of1(udp_transport()))) != codes[k] {
+            fail("a pool of two addresses not exhausted at the third subject")
+        }
+    }
+    // Three streams in all: the fourth connection is refused, whatever its source.
+    let mut c = relay_config()
+    c.streams = 3
+    let mut few = new_relay(take c, list_of1(POOL_1), 153)
+    for k in 0u64 .. 4 {
+        let ip: u32 = int.narrow(0xcb007130 + k)
+        let full = stream_full(turn.connected(mut few, k, SERVER, v4(ip, 40000), at(1000)))
+        if full != (k == 3) {
+            fail("streams + 1 connections not refused at the last")
+        }
+    }
+    // Two streams per source: a third from the same /64 is refused, one from the next /64 is not.
+    let mut pc = relay_config()
+    pc.streams_per_source = 2
+    let mut per = new_relay(take pc, list_of1(POOL_1), 154)
+    let sources =[v6(0x20010db800010000, 1, 40000), v6(0x20010db800010000, 0xffff00000000, 40001), v6(0x20010db800010000, 0xffffffffffffffff, 40002), v6(0x20010db800010001, 1, 40000)]
+    let full_at =[false, false, true, false]
+    for k in 0u64 .. 4 {
+        if stream_full(turn.connected(mut per, 10 + k, SERVER, sources[k], at(1000))) != full_at[k] {
+            fail("streams_per_source not counted per /64")
+        }
+    }
+    Ok(())
+}
+
+/// Whether connected answered StreamsFull; any other refusal fails the law.
+fn stream_full(r: Result[(), turn.TurnError]) -> bool {
+    match r {
+        Ok(()) => false,
+        Error(StreamsFull) => true,
+        Error(_) => fail("connected refused for another reason"),
+    }
+}
+
+/// Send from o to PEER_1, and PEER_1's datagram to relayed: whether each was relayed.
+fn carries(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin, relayed: Addr, low: u64) -> (bool, bool) {
+    let out = if let Some(_) = relayed_to(mut rl, now, rnd, o, send_indication(PEER_1, b"up", low)) {
+        true
+    } else {
+        false
+    }
+    let back = match from_peer_bytes(mut rl, now, relayed, PEER_1, b"down") {
+        Some((to, _)) => {
+            if to != o {
+                fail("a peer datagram went to another client")
+            }
+            true
+        },
+        None => false,
+    }
+    (out, back)
+}
+
+/// bug: leave a revoked subject's allocation relaying in either direction, revoke by
+/// username so a second credential's allocation survives, revoke another subject's, keep
+/// the addresses from the pool, or admit the subject before until_unix_s.
+/// oracle: TURN-9 by hand: no ToPeer or ToClient for alice's two allocations after the
+/// call, bob's still both ways, 2 deleted and their addresses free, and TURN-5 step 4's 401
+/// for a new Allocate at until_unix_s - 1, success at until_unix_s.
+@test
+fn revoke_drops_paths() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(160)
+    let pool = list_of4(POOL_1, POOL_2, Addr(ip: V4(0xc0000264), port: 50004), Addr(ip: V4(0xc0000264), port: 50006))
+    let mut rl = new_relay(relay_config(), take pool, 161)
+    let who =[(HOST_A, 1700000000u64, b"alice"), (HOST_B, 1700000000u64, b"bob"), (HOST_C, 1700000500u64, b"alice")]
+    let mut relayed: List[Addr] = list.new()
+    for k in 0u64 .. 3 {
+        let (host, expiry, subject) = who[k]
+        let o = udp(host)
+        let now = at(1000 + 10 * k)
+        let reply = allocate_as(mut rl, now, rnd, o, expiry, subject, 1 + k, list_of1(udp_transport()))
+        list.push(mut relayed, relayed_in(reply))
+        let n = nonce_for(mut rl, now, rnd, o)
+        let (name, key) = credential(expiry, subject)
+        if code_of(exchange(mut rl, now, rnd, o, signed_by(name, take key, stun_ice.CREATE_PERMISSION, 10 + k, n, list_of1(Xor(stun_ice.XOR_PEER_ADDRESS, PEER_1))))) != 0 {
+            fail("CreatePermission refused")
+        }
+        if carries(mut rl, now, rnd, o, relayed[k], 20 + k) != (true, true) {
+            fail("an allocation did not carry data both ways before the revoke")
+        }
+    }
+    let until = UNIX + 100
+    if result.unwrap(turn.revoke(mut rl, b"alice", until, at(2000))) != 2 {
+        fail("revoke did not delete alice's two allocations")
+    }
+    let c = turn.relay_counts(rl)
+    if c.allocations != 1 || c.pool_free != 3 {
+        fail("revoked allocations kept or their addresses not back in the pool")
+    }
+    for k in 0u64 .. 3 {
+        let (host, _, _) = who[k]
+        let want = k == 1
+        if carries(mut rl, at(3000), rnd, udp(host), relayed[k], 30 + k) != (want, want) {
+            fail("a revoked allocation relayed, or bob's stopped")
+        }
+    }
+    let early = turn.Now(mono_ns: 4 * S, unix_s: until - 1)
+    if code_of(allocate_as(mut rl, early, rnd, udp(HOST_D), 1700000000, b"alice", 40, list_of1(udp_transport()))) != 401 {
+        fail("the revoked subject allocated before until_unix_s")
+    }
+    let due = turn.Now(mono_ns: 5 * S, unix_s: until)
+    if code_of(allocate_as(mut rl, due, rnd, udp(HOST_D), 1700000000, b"alice", 41, list_of1(udp_transport()))) != 0 {
+        fail("the subject still refused at until_unix_s")
+    }
+    Ok(())
+}

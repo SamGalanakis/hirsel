@@ -1,0 +1,130 @@
+// TURN-7's peer policy (slice U4): NET-18's class table, deny, local and allow, checked on
+// the full address by every path that relays to or from a peer. It allocates nothing.
+/// The high word of NAT64's well-known prefix 64:ff9b::/96 (RFC 6052 section 2.1).
+const NAT64_HI: u64 = 0x0064ff9b00000000
+
+fn low32(x: u64) -> Ip {
+    V4(int.truncate(x))
+}
+
+/// An IPv4-mapped address (::ffff:0:0/96) as its IPv4 address; any other as written.
+fn unmapped(ip: Ip) -> Ip {
+    match ip {
+        V6(hi, lo) => if hi == 0 && lo >> 32 == 0xffff {
+            low32(lo)
+        } else {
+            ip
+        },
+        V4(_) => ip,
+    }
+}
+
+/// Whether prefix p holds ip; a prefix of the other family holds nothing.
+fn holds(p: Prefix, ip: Ip) -> bool {
+    match (p.ip, ip) {
+        (V4(a), V4(b)) => {
+            let bits: u32 = int.widen(p.bits)
+            bits == 0 || (a ^ b) >> (32 - bits) == 0
+        },
+        (V6(ah, al), V6(bh, bl)) => {
+            let bits: u64 = int.widen(p.bits)
+            if bits <= 64 {
+                bits == 0 || (ah ^ bh) >> (64 - bits) == 0
+            } else {
+                ah == bh && (al ^ bl) >> (128 - bits) == 0
+            }
+        },
+        _ => false,
+    }
+}
+
+/// A prefix is well formed when its length fits its family and no bit past it is set.
+fn prefix_ok(p: Prefix) -> bool {
+    match p.ip {
+        V4(a) => {
+            let bits: u32 = int.widen(p.bits)
+            bits == 32 || bits < 32 && a << bits == 0
+        },
+        V6(h, l) => {
+            let bits: u64 = int.widen(p.bits)
+            if bits <= 64 {
+                (bits == 64 || h << bits == 0) && l == 0
+            } else {
+                bits == 128 || bits < 128 && l << (bits - 64) == 0
+            }
+        },
+    }
+}
+
+/// relay refuses a policy with a malformed prefix or an allow whose ports run backwards.
+fn policy_ok(p: PeerPolicy) -> bool {
+    for i in 0u64 .. list.len(p.deny) {
+        if !prefix_ok(p.deny[i]) {
+            return false
+        }
+    }
+    for i in 0u64 .. list.len(p.allow) {
+        let a = p.allow[i]
+        if !prefix_ok(a.prefix) || a.ports_lo > a.ports_hi {
+            return false
+        }
+    }
+    true
+}
+
+/// ip is in deny, in local, or one of the relay's pool IPs.
+fn held_back(r: Relay, ip: Ip) -> bool {
+    for i in 0u64 .. list.len(r.c.policy.deny) {
+        if holds(r.c.policy.deny[i], ip) {
+            return true
+        }
+    }
+    for i in 0u64 .. list.len(r.c.policy.local) {
+        if r.c.policy.local[i] == ip {
+            return true
+        }
+    }
+    for i in 0u64 .. list.len(r.own) {
+        if r.own[i] == ip {
+            return true
+        }
+    }
+    false
+}
+
+/// ip, or an IPv4 address embedded in it (IPv4-mapped, NAT64 64:ff9b::/96, 6to4 2002::/16,
+/// or either of Teredo's two), is listed. 64:ff9b:1::/48 embeds nothing (RFC 8215).
+fn listed_any(r: Relay, ip: Ip) -> bool {
+    if held_back(r, ip) {
+        return true
+    }
+    let V6(hi, lo) = ip else {
+        return false
+    }
+    if hi == 0 && lo >> 32 == 0xffff || hi == NAT64_HI && lo >> 32 == 0 {
+        held_back(r, low32(lo))
+    } else if hi >> 48 == 0x2002 {
+        held_back(r, low32(hi >> 16))
+    } else if hi >> 32 == 0x20010000 {
+        held_back(r, low32(hi)) || held_back(r, low32(lo ^ 0xffffffffffffffff))
+    } else {
+        false
+    }
+}
+
+/// TURN-7: an address is admitted when an allow entry covers it and its port (an
+/// IPv4-mapped address also as its IPv4 address), or else when NET-18 calls it Public and
+/// neither it nor an IPv4 address inside it is in deny, local or the pool.
+fn peer_allowed(r: Relay, peer: Addr) -> bool {
+    let plain = unmapped(peer.ip)
+    for i in 0u64 .. list.len(r.c.policy.allow) {
+        let a = r.c.policy.allow[i]
+        if peer.port >= a.ports_lo && peer.port <= a.ports_hi && (holds(a.prefix, peer.ip) || holds(a.prefix, plain)) {
+            return true
+        }
+    }
+    if let Public = net.class(peer.ip) {} else {
+        return false
+    }
+    !listed_any(r, peer.ip)
+}

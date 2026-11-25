@@ -492,7 +492,7 @@ pub fn from_peer(mut r: Relay, now: Now, relayed: Addr, peer: Addr, mut slot: By
 pub fn connected(mut r: Relay, conn: u64, local: Addr, client: Addr, now: Now) -> Result[(), TurnError]
 pub fn disconnected(mut r: Relay, conn: u64)
 pub fn relay_poll(mut r: Relay, now: Now) -> Poll
-pub fn revoke(mut r: Relay, subject: Bytes, until_unix_s: u64) -> Result[u64, TurnError]
+pub fn revoke(mut r: Relay, subject: Bytes, until_unix_s: u64, now: Now) -> Result[u64, TurnError]
 pub fn relay_discards(r: Relay) -> RelayDiscards
 pub fn relay_counts(r: Relay) -> RelayCounts
 ```
@@ -577,8 +577,8 @@ and the peer's permission for 300 s.
 **Send indication.** No allocation, no DATA, no XOR-PEER-ADDRESS, or no permission for the
 peer's IP: discarded and counted. The policy is checked again on the full address (an `Allow`
 carries ports, a permission does not). A Send never refreshes a permission. **ChannelData**
-on an unbound number, with a length past the datagram, or numbered 0x5000 to 0xFFFF: discarded
-and counted. A Send or ChannelData payload over 65,507 bytes (possible only from a `Stream`
+on an unbound number, with a length past the datagram, numbered 0x5000 to 0xFFFF, or whose
+peer's IP has no live permission: discarded and counted. A Send or ChannelData payload over 65,507 bytes (possible only from a `Stream`
 origin) cannot be one UDP datagram to the peer: discarded and counted `oversize`.
 Indications and ChannelData without an allocation on the origin are discarded, never
 answered.
@@ -587,18 +587,13 @@ answered.
 
 - `poll` is `relay_poll`: a package has no overloading, and the client's `poll` holds
   the name. `relay` takes its config.
-- `revoke` is U4. The stream fields, `connected` and `disconnected` came in U5 (below).
-- `relay` answers `Config` for a non-empty policy until U4 builds it. It also answers
-  `Config` for:
+- The stream fields, `connected` and `disconnected` came in U5 (below).
+- `relay` answers `Config` for:
   - a zero `lifetime_s`, `quota`, `permissions` or `channels`;
   - `lifetime_max_s` below `lifetime_s`, or more than 4,096 `channels`;
   - an empty pool, or an address listed twice.
-  One function checks the policy, and all five paths call it. In U3 it admits every
-  address.
+  One function checks the policy, and all five paths call it.
 - `Reply(o, n)` loans out `out[0..n)`, as the client's `poll` does.
-- ChannelData is checked against the channel binding, not against a permission (Pion's
-  `handleChannelData` does the same). The binding installed the permission, and a
-  binding whose permission has lapsed still names one peer.
 - A Send indication is discarded and counted `malformed` when it carries any of:
   - DONT-FRAGMENT;
   - an unknown comprehension-required attribute;
@@ -649,6 +644,39 @@ answered.
   then `WakeAt` or `Idle`.
 - `connected`'s address parameter is named `source` in the code, because `client` is the
   package's client constructor.
+
+**Decisions made building U4.** Each is reversible inside the package.
+
+- **ChannelData needs a live permission for its peer's IP**, as well as a live channel;
+  without one it is discarded and counted `no_permission`. U3 followed Pion
+  (`handleChannelData` at `7bffbda` checks only the binding). RFC 8656 §12.6 states no
+  server rule either way, but §2 gives a channel a longer life than a permission (600 s
+  against 300 s) so that the client must keep refreshing the permission, and coturn
+  (`/tmp/ref-coturn` at `04fad0c`) deletes a permission's channels when the permission
+  expires (`turn_permission_clean`, from its sweep in `ns_turn_server.c`). Without the
+  check a client that stopped refreshing kept relaying to the peer for up to 300 s more,
+  past the window RFC 8656 §9 sets. The relay keeps the binding until 600 s, unlike coturn,
+  so the 300 s quarantine of TURN-6 starts at the channel's own expiry. A ChannelBind
+  refreshes the permission, and the client refreshes it every 240 s (TURN-6), so a client
+  that keeps its channel keeps its permission.
+- `relay` also answers `Config` for a policy with a prefix whose length exceeds its family
+  (32 or 128) or that has a bit set past its length, or an `allow` whose `ports_lo`
+  exceeds `ports_hi`. A typo then refuses the relay instead of covering the wrong range.
+- `relay` keeps the pool's IPs beside `local` and checks both, so the caller's `local`
+  holds only the host's other addresses.
+- An `allow` entry covers an IPv4-mapped address when it contains either the written
+  address or its IPv4 address; `deny`, `local` and the pool are matched against the written
+  address and every IPv4 address embedded in it (mapped, NAT64, 6to4, and both of
+  Teredo's). `64:ff9b:1::/48` embeds nothing.
+- `revoke` answers `Config` for a subject outside TURN-5's grammar, and reserves the pool
+  space before it changes anything, so a `Capacity` failure leaves the relay as it was.
+- `revoke_drops_paths` drives the relay directly, interleaving client and peer data on
+  each allocation before and after the call, as `lifetimes_exact`'s relay half does,
+  instead of under `std.sim.udp`: the invariant is about the relay's answers, and no loss
+  or delay changes them.
+- `revoke` takes `now` like the other entry points: it advances the clock first, and ends
+  each allocation through `end_lease` at `now`, so a `Stream` origin's idle timer restarts
+  from the revoke.
 
 **No byte-rate limit.** Decision: the relay limits allocations (`quota`, the pool),
 permissions and channels, not relayed bytes per second, which RFC 8656 §21.1.7 and §21.3.1
@@ -729,7 +757,7 @@ path identity.
 
 ### TURN-9: Revocation
 
-`revoke(r, subject, until_unix_s)` deletes every allocation whose username's subject is
+`revoke(r, subject, until_unix_s, now)` deletes every allocation whose username's subject is
 `subject` at once (no further `ToPeer` or `ToClient` for them), returns their addresses to the
 pool, and refuses that subject at TURN-5 step 4 until `until_unix_s`, which the caller sets
 to the latest expiry it minted for the subject. Entries leave the revoked set at their time.
@@ -864,8 +892,10 @@ not re-pinned; U0 must leave it green.
   *Oracle:* that table, which cites RFC 8656 §7.2 per row.
 - **`lifetimes_exact`** (U3, U2). *Scenario:* under `std.sim.udp` with no loss: allocation,
   permission and channel expiry on the relay, the client's refresh times, the 300 s channel
-  quarantine, and LIFETIME below the default and above the maximum. *Oracle:* RFC 8656
-  §7, §9 and §12 numbers by hand, to the nanosecond.
+  quarantine, LIFETIME below the default and above the maximum, and ChannelData on a live
+  channel whose permission has expired (discarded, `no_permission`). *Oracle:* RFC 8656
+  §7, §9 and §12 numbers by hand, to the nanosecond; coturn's permission sweep for the
+  ChannelData case.
 - **`retransmit_schedule`** (U2). *Scenario:* an unanswered Allocate over `Datagram` and over
   `Stream`. *Oracle:* RFC 8489 §6.2.1 arithmetic (0, 500, 1,500, 3,500, 7,500, 15,500,
   31,500 ms; failure at 39,500 ms) and §6.2.2 (one send, failure at 39,500 ms).
@@ -882,18 +912,19 @@ not re-pinned; U0 must leave it green.
   `allow`: CreatePermission or Send to a pool address, to the TURN port, and to the public
   address on a port outside `allow`; and a datagram to a relayed address from an admitted
   IP's uncovered port. Then the IPv4-mapped and `64:ff9b::` forms of a `local` address and
-  of a `deny` entry: 403. *Oracle:* NET-18's table and the IANA registries for the
-  class; LiveKit's `isRestrictedPeerIP` and `turnRelayPolicy.allows`, run in Go from the
-  clone, where they agree with the table (the differences listed in TURN-7 excepted), with
-  their answers written into the case: 403 for each local case, and the inbound datagram
-  discarded and counted `policy`.
+  of a `deny` entry: 403. Then a deny-all policy with one `allow` entry (U8's shape), and
+  malformed prefixes and port ranges (`Config`). *Oracle:* NET-18's table and the IANA
+  registries for the class, by hand, each row's first and last address and the public
+  addresses beside them; TURN-7's rules by hand for the rest: 403 for each local case, and
+  the inbound datagram discarded and counted `policy`.
 - **`quota_and_capacity`** (U4). *Scenario:* 13 allocations for one subject, spread over two
   usernames (two expiries); a pool of two addresses and three subjects; `streams` + 1
   `connected` calls; `streams_per_source` + 1 `connected` calls from one /64, then one from
   another prefix. *Oracle:* by hand: 486, then 508, then `StreamsFull`, then `StreamsFull`
   for the last of the one prefix and success for the other.
-- **`revoke_drops_paths`** (U4). *Scenario:* revoke a subject with live allocations while both
-  directions carry data under `std.sim.udp`. *Oracle:* the invariant that no `ToPeer` or
+- **`revoke_drops_paths`** (U4). *Scenario:* revoke a subject with live allocations under two
+  usernames, beside another subject's, while both directions carry data (driven directly,
+  TURN-7's U4 decisions). *Oracle:* the invariant that no `ToPeer` or
   `ToClient` for those allocations follows the call, checked on the capture, and 401 at
   TURN-5 step 4 for a new Allocate until `until_unix_s`.
 - **`stream_framing`** (U5). *Scenario:* client and relay over `std.sim.net` with 1,000

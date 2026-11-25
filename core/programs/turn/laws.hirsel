@@ -654,8 +654,10 @@ fn allocated_at(lifetime_s: u32, rnd: Random) -> Result[u64, turn.TurnError] {
 /// bug: refresh at the requested instead of the granted lifetime, miss the 240 s
 /// permission or 540 s channel refresh, or reuse a lapsed channel number within 300 s;
 /// on the relay, grant other than the clamped lifetime, or expire an allocation,
-/// permission, channel or quarantine at any other time.
-/// oracle: RFC 8656 sections 7, 9 and 12 by hand, to the nanosecond.
+/// permission, channel or quarantine at any other time, or relay ChannelData whose
+/// peer's permission has expired.
+/// oracle: RFC 8656 sections 7, 9 and 12 by hand, to the nanosecond; coturn's
+/// permission sweep, which deletes an expired permission's channels, for ChannelData.
 @test
 fn lifetimes_exact() -> Result[(), turn.TurnError] {
     let rnd = provide.random(91)

@@ -308,8 +308,8 @@ fn send_indication(mut r: Relay, o: Origin, h: stun_ice.Header, packet: Bytes) -
     ToPeer(r.leases[i].relayed, peer, d)
 }
 
-/// RFC 8656 section 12.6: ChannelData on a bound number is relayed to its peer. It is never
-/// answered and refreshes nothing; like Pion, it checks the binding, not the permission.
+/// RFC 8656 section 12.6: ChannelData on a bound number is relayed to its peer while the
+/// peer's IP holds a live permission, as coturn does. It is never answered and refreshes nothing.
 fn channel_data_in(mut r: Relay, o: Origin, packet: Bytes) -> Out {
     let n = list.len(packet)
     let number: u16 = list.word_be(packet, 0)
@@ -336,6 +336,10 @@ fn channel_data_in(mut r: Relay, o: Origin, packet: Bytes) -> Out {
     }
     let Some(peer) = to else {
         r.discards.unbound_channel += 1
+        return Nothing
+    }
+    if !grant_live(r.leases[i], peer.ip) {
+        r.discards.no_permission += 1
         return Nothing
     }
     if !peer_allowed(r, peer) {

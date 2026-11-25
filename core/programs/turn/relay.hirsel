@@ -23,7 +23,7 @@ pub type Allow {
     ports_hi: u16
 }
 
-/// TURN-7's peer policy. U3 accepts only the empty policy; U4 builds the check.
+/// TURN-7's peer policy, checked in policy.hirsel.
 pub type PeerPolicy {
     deny: List[Prefix],
     allow: List[Allow],
@@ -104,6 +104,7 @@ pub opaque type Relay {
     c: RelayConfig,
     g: Gate,
     free: List[Addr],
+    own: List[Ip],
     has_v4: bool,
     has_v6: bool,
     leases: List[Lease],
@@ -133,17 +134,16 @@ fn family_of(a: Addr) -> Family {
 
 /// The pool is the relay's whole capacity: each address once, bound by the caller.
 pub fn relay(take c: RelayConfig, rnd: Random, take master: Secret, take nonce_key: Secret, take pool: List[Addr]) -> Result[Relay, TurnError] {
-    if list.len(c.policy.deny) != 0 || list.len(c.policy.allow) != 0 || list.len(c.policy.local) != 0 {
-        return Error(Config)
-    }
-    if c.lifetime_s == 0 || c.lifetime_max_s < c.lifetime_s || c.quota == 0 || c.permissions == 0 || c.channels == 0 || c.channels > 4096 || c.streams == 0 || c.streams_per_source == 0 || c.stream_allocate_s == 0 || list.len(pool) == 0 {
+    if c.lifetime_s == 0 || c.lifetime_max_s < c.lifetime_s || c.quota == 0 || c.permissions == 0 || c.channels == 0 || c.channels > 4096 || c.streams == 0 || c.streams_per_source == 0 || c.stream_allocate_s == 0 || list.len(pool) == 0 || !policy_ok(c.policy) {
         return Error(Config)
     }
     let mut seen: Map[Addr, bool] = map.new()
     let mut has_v4 = false
     let mut has_v6 = false
+    let mut own: List[Ip] = list.with_capacity(list.len(pool))
     for i in 0u64 .. list.len(pool) {
         let a = pool[i]
+        list.push(mut own, a.ip)
         if map.contains(seen, a) {
             return Error(Config)
         }
@@ -163,7 +163,7 @@ pub fn relay(take c: RelayConfig, rnd: Random, take master: Secret, take nonce_k
     list.try_reserve(mut scratch, RESPONSE_MAX) ?=> Capacity
     list.fill(mut scratch, RESPONSE_MAX, 0)
     let discards = RelayDiscards(malformed: 0, no_allocation: 0, no_permission: 0, policy: 0, unbound_channel: 0, reserved_channel: 0, throttled: 0, challenged: 0, oversize: 0, unknown_stream: 0, idle_stream: 0)
-    Ok(Relay(c: take c, g: take g, free: take pool, has_v4: has_v4, has_v6: has_v6, leases: list.new(), conns: list.new(), closing: list.new(), discards: discards, ind_high: ind.high, ind_low: ind.low, last_ns: 0, due_ns: NEVER, fields: list.new(), scratch: take scratch))
+    Ok(Relay(c: take c, g: take g, free: take pool, own: take own, has_v4: has_v4, has_v6: has_v6, leases: list.new(), conns: list.new(), closing: list.new(), discards: discards, ind_high: ind.high, ind_low: ind.low, last_ns: 0, due_ns: NEVER, fields: list.new(), scratch: take scratch))
 }
 
 /// The gate's pre-authentication discards are the relay's malformed, throttled and challenged.
@@ -276,13 +276,6 @@ fn lease_at(r: Relay, relayed: Addr) -> Option[u64] {
         }
     }
     None
-}
-
-/// TURN-7's peer policy. U3 holds only the empty policy (relay refuses any other), which
-/// admits every address; U4 adds NET-18's class table, deny, local and allow here. Every
-/// path that relays to or from a peer calls it on the full address.
-fn peer_allowed(_r: Relay, _peer: Addr) -> bool {
-    true
 }
 
 fn relay_error(v: Verified, h: stun_ice.Header, code: u16, unknown: Option[u16], mut out: Bytes, mut scratch: Bytes) -> Result[u64, TurnError] {
@@ -501,4 +494,27 @@ fn allocate(mut r: Relay, now: Now, rnd: Random, o: Origin, v: Verified, h: stun
     stream_held(mut r, o)
     let i = list.len(r.leases) - 1
     allocated_reply(mut r, v, h, i, lifetime, mut out)
+}
+
+/// TURN-9: delete every allocation of subject, under any of its usernames, return their
+/// addresses to the pool, and refuse subject at TURN-5 step 4 until until_unix_s.
+pub fn revoke(mut r: Relay, subject: Bytes, until_unix_s: u64, now: Now) -> Result[u64, TurnError] {
+    if !subject_ok(subject, 0, list.len(subject)) {
+        return Error(Config)
+    }
+    advance(mut r, now.mono_ns)?
+    list.try_reserve(mut r.free, list.len(r.leases)) ?=> Capacity
+    gate_revoke(mut r.g, subject, until_unix_s)
+    let mut deleted = 0u64
+    let mut i = 0u64
+    while i < list.len(r.leases) {
+        if list.compare_bytes(r.leases[i].subject, subject) == Equal {
+            let gone = list.swap_remove(mut r.leases, i)
+            end_lease(mut r, take gone, now.mono_ns)
+            deleted += 1
+            continue
+        }
+        i += 1
+    }
+    Ok(deleted)
 }

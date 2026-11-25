@@ -188,8 +188,10 @@ environment setting to stay inside the board's existing resource limits.
   flags Hirsel growth of 2,048 bytes or more. The receipt includes the strip
   version and options and SHA-256 hashes of the stripped and original binaries.
 - The checkbox gate flags RSS per live session growth greater than 10% on
-  either server, for both subscribed and unsubscribed sessions. The board
-  reports toggles/s and its change from the baseline as a trend.
+  either server, for both subscribed and unsubscribed sessions. Each memory row
+  reads the server's `smaps_rollup` RSS after startup before any session opens
+  and again while 64 sessions are live, then reports their difference divided
+  by 64. The board reports toggles/s and its change from the baseline as a trend.
 
 Exit 0 means the board is complete and clean. Exit 1 means measurements are
 incomplete, exit 2 means a comparison or counter was refused, and exit 3
@@ -261,7 +263,7 @@ single observations.
 | LangArena release compile | Whole-suite LLVM, Cargo release and Goose emission plus Clang compile/link, with the same Spectralnorm oracles. |
 | AWFY original-14 release compile | Original harness only, with the board's LLVM and Goose/Clang flags and an isolated dependency-free Cargo package for the Rust port. Each executable must pass all 14 reference workloads. The edit adds an exact `board-edit` marker to the verified-success line. |
 | Peak RSS | Whole-process peak in KiB from the verified runtime samples. The suite ratios cover 14/14, 8/8 and 50/50 pairs for each peer. The aggregate geomean uses all 72 underlying ratios once per peer. Missing or censored pairs reduce coverage and withhold that peer's aggregate. |
-| Checkbox memory | Fresh private stores with the same verified seed and 64 live connections per arm. Each subscription mode reports live `smaps_rollup` RSS and process `VmHWM`, both in bytes. Rust is the server peer. |
+| Checkbox memory | Fresh private stores with the same verified seed and 64 live connections per arm. Each subscription mode reports live `smaps_rollup` RSS minus the server's startup idle RSS, read before any session opens, plus process `VmHWM`, all in bytes. Rust is the server peer. |
 | AWFY image size | Bytes after GNU `strip --strip-all -R .comment` on a disposable copy of each verified original-14 harness. There is one image per peer. |
 | Units A1 | Hirsel/Tokio passing offered ceilings, measured goodput and scheduled-arrival latency by filesystem, population and SHA-256 backend. Matched offers separately compare CPU µs per verified turn and latency with the same offered rate and qualified sync grouping. |
 | Units regimes | Hirsel/Tokio work rates and relative width-1 speedups at each verified case, grain and worker width. Checkbox has native grain. Arc and Checkbox expose one runnable unit. |

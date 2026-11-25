@@ -48,7 +48,6 @@ fn fresh_objects(
         .unwrap();
     assert!(product.accepted(), "{:?}", product.diagnostics);
     let options = NativeOptions {
-        store: dir.join(format!("fresh-native{n}")),
         cas: dir.join(format!("fresh-cas{n}")),
         debug_lines: options.debug_lines,
         ..native_options(options.backend, dir)
@@ -308,10 +307,7 @@ fn a_body_record_with_another_module_part_misses_its_object() {
         let compiled = compiled_names(&names);
         assert_eq!(compiled.len(), 1, "{backend:?}: {compiled:?}");
         assert!(compiled[0].contains("name: \"get\""), "{compiled:?}");
-        let empty = NativeOptions {
-            store: dir.path().join("empty-native"),
-            ..native_options(backend, dir.path())
-        };
+        let empty = native_options(backend, dir.path());
         assert_eq!(
             without_compiled(&names),
             without_compiled(&objects_of(&served, &empty)),

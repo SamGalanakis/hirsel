@@ -768,7 +768,7 @@ impl Driver {
                     .map(|s| request_record::file_name(s.4.as_deref(), &s.0))
                     .collect()
             };
-            match request_record::lookup(&store, key, record, names)? {
+            match request_record::lookup(key, record, names)? {
                 Ok(hit) => {
                     meter.finish("request record/hit");
                     return Ok(Checked::Hit(hit));

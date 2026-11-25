@@ -77,7 +77,6 @@ impl Report {
         library: Option<&Path>,
         manifest: Option<&Path>,
         place_timeout: Duration,
-        store: &Path,
         meter: &mut Meter,
     ) -> Result<Output<'_>, Box<dyn std::error::Error>> {
         let root = publication.root;
@@ -110,7 +109,7 @@ impl Report {
                 },
             );
             if let Some((key, value)) = self.record.take() {
-                request_record::publish(store, key, &value.with_native(Some(build)))?;
+                request_record::publish(&options.cas, key, &value.with_native(Some(build)))?;
                 meter.finish("request record/publish");
             }
         }

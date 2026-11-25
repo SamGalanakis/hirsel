@@ -64,7 +64,7 @@ fn rl7_helpers_record_their_own_streams() {
         options.grant_mask = ["Tasks", "Random", "Stdout"]
             .iter()
             .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
-        options.store = dir.path().join(format!("rl7-store-{backend:?}"));
+        options.cas = dir.path().join(format!("rl7-store-{backend:?}"));
         options.output = dir.path().join(format!("rl7-{backend:?}"));
         let program = product.build(&entry, &options).unwrap().executable;
         let path = dir.path().join(format!("rl7-{backend:?}.tape"));
@@ -241,7 +241,7 @@ fn rl9_sent_items_match_their_takes() {
         options.grant_mask = ["Tasks", "Stdout"]
             .iter()
             .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
-        options.store = dir.path().join(format!("rl9-store-{backend:?}"));
+        options.cas = dir.path().join(format!("rl9-store-{backend:?}"));
         options.output = dir.path().join(format!("rl9-{backend:?}"));
         let program = product.build(&entry, &options).unwrap().executable;
         let path = dir.path().join(format!("rl9-{backend:?}.tape"));
@@ -441,7 +441,6 @@ fn rl9_shared_crosses_into_a_helper() {
         options.grant_mask = ["Tasks", "Stdout"]
             .iter()
             .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
-        options.store = dir.path().join(format!("shared-store-{backend:?}"));
         options.output = dir.path().join(format!("shared-{backend:?}"));
         let program = product.build(&entry, &options).unwrap().executable;
         let path = dir.path().join(format!("shared-{backend:?}.tape"));
@@ -530,7 +529,6 @@ fn rl9_record(source: &str, dir: &Path, name: &str, backend: Backend, printed: &
     options.grant_mask = ["Tasks", "Stdout"]
         .iter()
         .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
-    options.store = dir.join(format!("{name}-store-{backend:?}"));
     options.output = dir.join(format!("{name}-{backend:?}"));
     let program = product.build(&entry, &options).unwrap().executable;
     let path = dir.join(format!("{name}-{backend:?}.tape"));

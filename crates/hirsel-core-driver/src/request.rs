@@ -908,7 +908,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             target.clone(),
             select_runtime()?,
             select_link(cc)?,
-            store.join("native"),
             output_path.unwrap_or_else(|| PathBuf::from("program")),
         );
         options.backend = match recipe.launch.backend {
@@ -1165,8 +1164,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         }
     }
 
-    let native_store = request.store.join("native");
-    let store_root = request.store.clone();
+    // The request's store keeps scratch; executables and request records live
+    // in the content store, and the old flat `native` store is removed.
+    let request_store = crate::Store::new(&request.store)?;
+    request_store.retire(&request.store.join("native"))?;
     let foreign_replay = replay_command
         && request
             .inputs
@@ -1184,7 +1185,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     meter.finish("startup/discovery");
     // Concurrent requests share keyed artifacts. Their launch paths are private.
     let temporary_output = (matches!(command, "run" | "test") && output_path.is_none())
-        .then(|| crate::Store::new(&native_store)?.scratch())
+        .then(|| request_store.scratch())
         .transpose()?;
     // Native options come before the reach: a Cranelift development build
     // walks its instance records, which its options address. An options
@@ -1210,7 +1211,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 target.clone(),
                 archive,
                 link,
-                native_store,
                 output_path.unwrap_or(default_output),
             );
             if release {
@@ -1664,7 +1664,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                             library.as_deref(),
                             release_manifest.as_deref(),
                             place_timeout,
-                            &store_root,
                             &mut meter,
                         )?;
                         return finish(
@@ -1786,6 +1785,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     // A request that stopped is never recorded, except for the output
     // write after a stored build.
     if let Some(key) = key
+        && let Some(record) = &record
         && (output.stopped.is_none() || undelivered.is_some())
         && let Some(value) = crate::request_record::Value::of(crate::request_record::Answer {
             product: &product,
@@ -1796,7 +1796,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             native: output.native.as_ref().or(undelivered.as_ref()),
         })
     {
-        crate::request_record::publish(&store_root, key, &value)?;
+        crate::request_record::publish(record.cas(), key, &value)?;
         meter.finish("request record/publish");
     }
     finish(

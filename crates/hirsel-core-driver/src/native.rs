@@ -108,7 +108,6 @@ pub struct NativeOptions {
     pub target: String,
     pub runtime: PathBuf,
     pub link: Link,
-    pub store: PathBuf,
     /// The content store every build's objects and records live in (the
     /// user's by default).
     pub cas: PathBuf,
@@ -151,13 +150,7 @@ impl NativeOptions {
     /// A request's options before its flags: the development engine
     /// (Cranelift), unoptimised, without line tables or charge report. An
     /// installation prebuilds for exactly these.
-    pub fn development(
-        target: String,
-        runtime: PathBuf,
-        link: Link,
-        store: PathBuf,
-        output: PathBuf,
-    ) -> Self {
+    pub fn development(target: String, runtime: PathBuf, link: Link, output: PathBuf) -> Self {
         Self {
             backend: Backend::Cranelift,
             optimize: false,
@@ -165,7 +158,6 @@ impl NativeOptions {
             target,
             runtime,
             link,
-            store,
             cas: crate::store::collect::user(),
             output,
             root_limit: 64 * 1024 * 1024,
@@ -1510,7 +1502,7 @@ fn link_objects(
         Some(assembly) => key("hirsel.recipe-final-link.v3", &assembly)?,
         None => key("hirsel.core-executable.v9", &(build, entry_plan))?,
     };
-    let store = Store::native(&options.store)?;
+    let store = Store::cas(&options.cas)?;
     let coverage = options
         .coverage
         .is_some()
@@ -1797,7 +1789,7 @@ fn link_objects(
             )
             .map_err(bind_error)?
         };
-        let binary = NativeImage { bytes, debug };
+        let mut binary = NativeImage::new(bytes, debug);
         binary.publish(&store, link_key)?;
         (binary, true)
     };
@@ -2021,7 +2013,6 @@ pub(crate) mod tests {
             link: Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
-            store: dir.join("native"),
             cas: dir.join("cas"),
             output: dir.join("program"),
             root_limit: 1_048_576,
@@ -2551,17 +2542,15 @@ fn f5 = n5 g5 extern
                 "the edited record needs new release code"
             );
 
-            // A fresh native store has to link using the content store's parts.
-            let store =
-                std::mem::replace(&mut options.store, dir.path().join("another-record-native"));
+            // Another output takes the stored executable: where it is written
+            // is not in the link key.
             let output = std::mem::replace(
                 &mut options.output,
                 dir.path().join("another-record-program"),
             );
             let reused = product.build(&entry, &options).unwrap();
-            options.store = store;
             options.output = output;
-            assert_eq!((reused.compiled, reused.linked), (0, true));
+            assert_eq!((reused.compiled, reused.linked), (0, false));
             run_clean(&reused.executable, 1);
         } else {
             assert_eq!(built.compiled, 1);
@@ -2704,12 +2693,11 @@ fn f5 = n5 g5 extern
             2
         };
         assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), decoded);
-        // A second application's private native store: every object and part of
+        // A second application's build: every object and part of
         // the same program is already in the user's content store, so it
         // compiles and generates none and links no library object.
         let mut other_options = native_options(backend, dir.path());
         other_options.optimize = optimize;
-        other_options.store = dir.path().join("another-app-native");
         if optimize {
             let built = installed.build(&entry, &other_options).unwrap();
             assert_eq!(built.identity, native.identity);

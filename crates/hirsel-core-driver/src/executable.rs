@@ -6,7 +6,9 @@
 //! so a file written and then executed at once can be busy for a moment that
 //! no `O_CLOEXEC` closes. The writer therefore runs on a thread with its own
 //! descriptor table: no other thread's fork can copy its descriptor.
+use std::fs::File;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -14,6 +16,30 @@ use std::path::Path;
 /// descriptor table: no process other than this writer ever holds the file
 /// open for writing.
 pub(crate) fn write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    write_from(path, bytes, None, mode)
+}
+
+/// Fill `file`, empty, with `bytes`: a reflink of `source`, a file holding
+/// exactly those bytes, where the filesystem shares extents between them,
+/// and otherwise one copy.
+pub(crate) fn fill(file: &mut File, bytes: &[u8], source: Option<&File>) -> io::Result<()> {
+    if let Some(source) = source
+        // SAFETY: FICLONE reads two descriptors, both open for the call. A
+        // failed clone leaves the destination unchanged.
+        && unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0
+    {
+        return Ok(());
+    }
+    crate::store::write_bounded(file, &[bytes])
+}
+
+/// `write`, the bytes reflinked from `source` where it can be (`fill`).
+pub(crate) fn write_from(
+    path: &Path,
+    bytes: &[u8],
+    source: Option<&File>,
+    mode: u32,
+) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -47,7 +73,7 @@ pub(crate) fn write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
                     }
                 }
                 let mut file = tempfile::NamedTempFile::new_in(parent)?;
-                crate::store::write_bounded(&mut file, &[bytes])?;
+                fill(file.as_file_mut(), bytes, source)?;
                 file.as_file()
                     .set_permissions(std::fs::Permissions::from_mode(mode))?;
                 file.persist(path).map_err(|e| e.error)?;
@@ -62,12 +88,14 @@ pub(crate) fn write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
 pub(crate) fn output_stop(error: &io::Error) -> String {
     format!("output: {error}")
 }
-/// Write a checked executable's `bytes` to `output`, its directory made.
-pub(crate) fn deliver(output: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Write a checked executable's `bytes` to `output`, its directory made,
+/// reflinked from `source` where it can be (`fill`). The stored blob keeps
+/// its own mode: only the delivered file is executable.
+pub(crate) fn deliver(output: &Path, bytes: &[u8], source: Option<&File>) -> io::Result<()> {
     if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    write(output, bytes, 0o755)
+    write_from(output, bytes, source, 0o755)
 }
 
 #[cfg(test)]

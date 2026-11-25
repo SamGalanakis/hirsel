@@ -491,7 +491,7 @@ fn failure_sites_two_files(backend: Backend) {
         let primed = product.build(&entry, &options).unwrap();
         fresh += 1;
         let mut empty = native_options(backend, dir.path());
-        empty.store = dir.path().join(format!("fresh-{fresh}"));
+        empty.cas = dir.path().join(format!("fresh-{fresh}"));
         empty.output = dir.path().join(format!("fresh-program-{fresh}"));
         let alone = product.build(&entry, &empty).unwrap();
         let bytes = std::fs::read(&primed.executable).unwrap();

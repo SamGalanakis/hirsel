@@ -16,8 +16,12 @@ The `rechecked` field counts bodies recomputed on this request.
 
 ## Native build options
 
-`hirsel run` uses a temporary executable in the compiler cache by default.
-Pass `-o PATH` to keep the executable at a specific path.
+`hirsel run` uses a temporary executable in the request's store by default.
+Pass `-o PATH` to keep the executable at a specific path. A build stores its
+executable and detached debug file in the user's content store
+(`$XDG_CACHE_HOME/hirsel/cas`) and delivers a reflink of it, or a copy where the
+filesystem has none; a stored executable that fails its check is linked again,
+never run.
 
 Native binaries from both backends include `.eh_frame` unwind
 information. Native builds write detached DWARF alongside the executable.

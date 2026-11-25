@@ -826,7 +826,6 @@ fn assemble<'a>(
         launch.target.clone(),
         runtime,
         Link::Installed(link),
-        ad.state.join("build-cache"),
         staging.path().join("image"),
     );
     native.optimize = launch.backend == hirsel_core_ir::release_recipe::Backend::Llvm;

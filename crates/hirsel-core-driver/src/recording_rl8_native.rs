@@ -459,7 +459,6 @@ fn rl8_take_positions_natively() {
             options.grant_mask = ["Tasks", "Stdout"]
                 .iter()
                 .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
-            options.store = dir.path().join(format!("store-{backend:?}"));
             options.output = dir.path().join(format!("rl8-{backend:?}"));
             let program = product.build(&entry, &options).unwrap().executable;
             let path = dir.path().join(format!("rl8-{backend:?}.tape"));

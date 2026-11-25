@@ -25,8 +25,7 @@
 //! Opening a store whose layout stamp is not this format's deletes its old
 //! layout: a content store's records and sides, whose frames no reader of
 //! this format takes, and, for the per-user store, the named directories
-//! of older cache formats beside it. A flat compiler store (`Store::native`)
-//! drops its hex-named files, whose frames are of an older format.
+//! of older cache formats beside it.
 use super::{Store, lock};
 use hirsel_core_ids::ContentHash;
 use std::fs::{self, File, FileTimes, Metadata};
@@ -112,24 +111,6 @@ impl Store {
         Ok(store)
     }
 
-    /// A compiler's flat store at `root`: its executables and its request
-    /// records. A store last written in another format loses its hex-named
-    /// files, which no reader of this format takes, and its old code packs.
-    pub(crate) fn native(root: &Path) -> io::Result<Self> {
-        let store = Self::new(root)?;
-        if !stamped(root)? {
-            for entry in fs::read_dir(root)? {
-                let entry = entry?;
-                if hex_name(&entry, 64) && entry.file_type()?.is_file() {
-                    present(fs::remove_file(entry.path()))?;
-                }
-            }
-            store.retire(&root.join("code"))?;
-            store.stamp()?;
-        }
-        Ok(store)
-    }
-
     /// The std side under `key`, a content store pinned until dropped.
     pub(crate) fn side(&self, key: ContentHash) -> io::Result<Self> {
         let cas = self.cas.as_ref().expect("a content store");
@@ -150,7 +131,7 @@ impl Store {
 
     /// Remove `path`, a directory or file, by renaming it into a scratch
     /// directory first, so a crash leaves a temporary, never half of it.
-    fn retire(&self, path: &Path) -> io::Result<()> {
+    pub(crate) fn retire(&self, path: &Path) -> io::Result<()> {
         if present(fs::symlink_metadata(path))?.is_none() {
             return Ok(());
         }
@@ -599,8 +580,7 @@ mod tests {
 
     /// Law: opening a store written in an older format deletes that layout
     /// and nothing else: a content store's records and sides, the named
-    /// dead directories beside the per-user store, a flat compiler store's
-    /// hex-named files and old packs. Blobs, which are named by their bytes,
+    /// dead directories beside the per-user store. Blobs, which are named by their bytes,
     /// stay, and so do other tools' directories. Bug: a pattern sweep of
     /// `*-v<N>` siblings would delete another tool's cache.
     #[test]
@@ -633,18 +613,5 @@ mod tests {
         for kept in ["lean", "cargo-units", "llvm-source-v2", "core-packages"] {
             assert!(cache.join(kept).exists(), "{kept} is kept");
         }
-
-        let native = cache.join("native");
-        fs::create_dir_all(native.join("code/packs")).unwrap();
-        let old = native.join(format!("{:064x}", 7));
-        fs::write(&old, b"old frame").unwrap();
-        fs::write(native.join("resident.lock"), b"").unwrap();
-        Store::native(&native).unwrap();
-        assert!(!old.exists() && !native.join("code").exists());
-        assert!(native.join("resident.lock").exists());
-        // Stamped, a store keeps what it writes.
-        fs::write(&old, b"new frame").unwrap();
-        Store::native(&native).unwrap();
-        assert!(old.exists());
     }
 }

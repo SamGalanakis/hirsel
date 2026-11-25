@@ -36,13 +36,7 @@ impl CheckProduct {
         link: Link,
         scratch: &Path,
     ) -> Result<Prebuilt, NativeStop> {
-        let options = &NativeOptions::development(
-            target,
-            runtime,
-            link,
-            scratch.join("native"),
-            scratch.join("program"),
-        );
+        let options = &NativeOptions::development(target, runtime, link, scratch.join("program"));
         let image = self
             .image
             .as_ref()

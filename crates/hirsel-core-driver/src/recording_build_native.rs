@@ -493,7 +493,7 @@ fn tape_run_build(
     );
     let mut options = native_options(backend, dir);
     options.runtime = if replay.is_some() { env_observe_runtime() } else { env_record_runtime() };
-    options.store = dir.join(store);
+    options.cas = dir.join(store);
     options.output = dir.join(format!("{store}-program"));
     options.grant_mask = if replay.is_some() {
         0
@@ -1975,7 +1975,6 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
             rel_opts.recording = false;
             rel_opts.grant_mask = *grant_mask;
             rel_opts.output = dir.path().join(format!("rl1-{name}-{backend:?}-rel"));
-            rel_opts.store = dir.path().join(format!("rl1-store-{name}-{backend:?}-rel"));
             let rel = product.build(&entry, &rel_opts).unwrap();
 
             // Release executable must contain zero `tape::` symbols.
@@ -2005,7 +2004,6 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
             rec_opts.runtime = record_rt.clone();
             rec_opts.recording = true;
             rec_opts.output = dir.path().join(format!("rl1-{name}-{backend:?}-rec"));
-            rec_opts.store = dir.path().join(format!("rl1-store-{name}-{backend:?}-rec"));
             let rec = product.build(&entry, &rec_opts).unwrap();
             assert_eq!(rel.revision, rec.revision, "{name} {backend:?} revision");
 
@@ -2181,7 +2179,6 @@ fn coverage_changes_nothing(dir: &Path, root: &Path, release_rt: &Path, record_r
                 optimize,
                 grant_mask: (1 << 4) | (1 << grant_kind("Tasks").unwrap()),
                 output: dir.join(&name),
-                store: dir.join(format!("{name}-store")),
                 ..native_options(backend, dir)
             };
             (product.build(&entry, &options).unwrap().executable, options)
@@ -2238,7 +2235,7 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
         options.recording = true;
         options.grant_mask = if replay.is_some() { 0 } else { 1 << 4 };
         options.replay = replay;
-        options.store = dir.path().join(format!("rl2-store-{tag}"));
+        options.cas = dir.path().join(format!("rl2-store-{tag}"));
         options.output = dir.path().join(format!("rl2-bin-{tag}"));
         product
             .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)

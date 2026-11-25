@@ -156,7 +156,7 @@ fn pure() -> Result[(), ()] { Ok(()) }
         "--libraries",
         law.libraries.to_str().unwrap(),
         "--store",
-        options.store.to_str().unwrap(),
+        law.dir.path().join("store").to_str().unwrap(),
         "--source-core",
         "--json",
         "--runtime",
@@ -241,7 +241,7 @@ fn reads_env(e: Env, out: Stdout) -> Result[(), ()] waits {
     };
     configure("HIRSEL_TEST_FIXTURE");
     assert_eq!(run(), "visible");
-    assert!(law.path("app/.hirsel-core/native").is_dir());
+    assert!(law.path("app/.hirsel-core").is_dir() && law.path("cache/hirsel/cas/k").is_dir());
     configure("HIRSEL_TEST_OTHER");
     assert_eq!(run(), "denied");
 

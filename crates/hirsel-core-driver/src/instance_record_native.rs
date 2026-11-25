@@ -86,7 +86,6 @@ fn exit_layout_misses_the_entry_record(backend: Backend) {
     let fresh = executable_bytes(
         &record_check(APP, &core, dir.path(), "fresh"),
         &NativeOptions {
-            store: dir.path().join("fresh-native"),
             cas: dir.path().join("fresh-cas"),
             ..native_options(backend, dir.path())
         },
@@ -157,7 +156,6 @@ fn same_length_ir_damage_refuses_once_then_builds_fresh() {
     let fresh = executable_bytes(
         &record_check(APP, &core, dir.path(), "fresh"),
         &NativeOptions {
-            store: dir.path().join("fresh-native"),
             cas: dir.path().join("fresh-cas"),
             ..lines(true)
         },
@@ -207,7 +205,6 @@ fn each_plan_input_builds_a_fresh_stores_executable() {
         let fresh = executable_bytes(
             &record_check(APP, &core, dir.path(), &format!("fresh{n}")),
             &NativeOptions {
-                store: dir.path().join(format!("fresh-native{n}")),
                 cas: dir.path().join(format!("fresh-cas{n}")),
                 ..options
             },
@@ -223,7 +220,7 @@ fn each_plan_input_builds_a_fresh_stores_executable() {
     let fresh = record_check(APP, &core, dir.path(), "fresh-limit");
     assert!(
         fresh
-            .build(&entry, &NativeOptions { store: dir.path().join("fresh-native-limit"), cas: dir.path().join("fresh-cas-limit"), ..limited() })
+            .build(&entry, &NativeOptions { cas: dir.path().join("fresh-cas-limit"), ..limited() })
             .is_err(),
         "instance limit: a fresh store stops"
     );
@@ -296,7 +293,6 @@ fn a_forged_closure_misses_its_parent() {
     let fresh = executable_bytes(
         &record_check(APP, &core, dir.path(), "fresh"),
         &NativeOptions {
-            store: dir.path().join("fresh-native"),
             cas: dir.path().join("fresh-cas"),
             ..native_options(Backend::Cranelift, dir.path())
         },
@@ -374,7 +370,6 @@ fn new_reachable_diagnostic(backend: Backend) {
     assert_eq!(executable_bytes(&primed, &options).1, Some(0), "{backend:?}: primed");
     let edited = build_diagnostics(&library_check(&after, LIB, &core, dir.path(), "store"), &options);
     let fresh_options = NativeOptions {
-        store: dir.path().join("fresh-native"),
         cas: dir.path().join("fresh-cas"),
         ..native_options(backend, dir.path())
     };
@@ -412,7 +407,6 @@ fn rejected_repair(backend: Backend) {
     let fresh = executable_bytes(
         &library_check(&app, REPAIRED, &core, dir.path(), "fresh"),
         &NativeOptions {
-            store: dir.path().join("fresh-native"),
             cas: dir.path().join("fresh-cas"),
             ..native_options(backend, dir.path())
         },
@@ -441,13 +435,23 @@ enum Damage {
     /// The second half removed.
     Truncate,
 }
-/// The objects a native store holds: its ELF files (a record starts with the
-/// store's magic).
+/// The objects a content store holds: its relocatable ELF blobs with code,
+/// not the linked executables and detached debug files beside them.
 fn stored_objects(root: &Path) -> Vec<PathBuf> {
+    use object::{Object, ObjectKind, ObjectSection};
+    let code = |bytes: &[u8]| {
+        object::File::parse(bytes).is_ok_and(|file| {
+            file.kind() == ObjectKind::Relocatable
+                && file.sections().any(|s| {
+                    s.name().is_ok_and(|n| n.starts_with(".text"))
+                        && s.file_range().is_some_and(|(_, size)| size > 0)
+                })
+        })
+    };
     crate::store::collect::blobs(root)
         .into_iter()
         .map(|(path, _)| path)
-        .filter(|p| std::fs::read(p).is_ok_and(|b| b.starts_with(b"\x7fELF")))
+        .filter(|p| std::fs::read(p).is_ok_and(|b| code(&b)))
         .collect()
 }
 fn damage(path: &Path, how: Damage) {
@@ -505,7 +509,6 @@ fn damaged_objects_build_a_fresh_stores_executable(backend: Backend) {
         let fresh = executable_bytes(
             &record_check(DAMAGE_EDIT, &core, dir.path(), "fresh"),
             &NativeOptions {
-                store: dir.path().join("fresh-native"),
                 cas: dir.path().join("fresh-cas"),
                 ..native_options(backend, dir.path())
             },
@@ -527,9 +530,11 @@ fn damaged_objects_build_a_fresh_stores_executable_llvm() {
     damaged_objects_build_a_fresh_stores_executable(Backend::Llvm);
 }
 
-/// Law: a reused executable is the store's verified record, so a damaged one
-/// is linked again on a no-change request and the result is the first
-/// build's executable. Guards the executable record's check on reuse.
+/// Law: a reused executable is the content store's checked blob, so a damaged
+/// one is linked again on a no-change request and the result is the first
+/// build's executable. Guards the blob's check on reuse. The blob is the
+/// target's executable format, without the exec bit, which only the
+/// delivered file has.
 fn damaged_executable_links_again(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let core = core_sources();
@@ -539,14 +544,19 @@ fn damaged_executable_links_again(backend: Backend) {
     let built = product.build(&entry, &options).unwrap();
     let status = Command::new(&built.executable).status().unwrap().code();
     let first = (std::fs::read(&built.executable).unwrap(), status);
-    // The executable record is framed under the build's key; its detached
-    // DWARF, also an ELF file, is a record of its own.
-    let record = Store::new(&options.store).unwrap().path(built.identity);
+    // The executable is an unframed blob named by its bytes.
+    let blob = Store::cas(&options.cas)
+        .unwrap()
+        .blob_path(crate::store::Bare::of(&first.0).address);
+    let magic: &[u8] = if options.target.contains("apple") { b"\xcf\xfa\xed\xfe" } else { b"\x7fELF" };
     assert!(
-        std::fs::read(&record).is_ok_and(|b| b.get(crate::store::HEADER..crate::store::HEADER + 4) == Some(b"\x7fELF")),
-        "the executable record"
+        std::fs::read(&blob).is_ok_and(|b| b.starts_with(magic)),
+        "the executable blob"
     );
-    damage(&record, Damage::Middle);
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o111;
+    assert_eq!((mode(&blob), mode(&built.executable)), (0, 0o111), "only the delivered file is executable");
+    damage(&blob, Damage::Middle);
     let again = product.build(&entry, &options).unwrap();
     assert!(again.linked, "the damaged executable is not reused");
     let status = Command::new(&again.executable).status().unwrap().code();

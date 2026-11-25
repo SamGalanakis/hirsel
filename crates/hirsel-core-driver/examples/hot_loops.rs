@@ -45,7 +45,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "x86_64-unknown-linux-gnu".into(),
             PathBuf::from(&args[2]),
             hirsel_core_driver::Link::Driver(PathBuf::from(&args[3])),
-            out.join("native"),
             out.join("unused"),
         );
         options.backend = if args.iter().any(|s| s == "cranelift") {

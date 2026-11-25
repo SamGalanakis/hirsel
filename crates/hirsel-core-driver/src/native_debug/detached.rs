@@ -3,6 +3,7 @@ use hirsel_core_layout::ObjectFormat;
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 use sha2::{Digest, Sha256};
 use std::{
+    fs::File,
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -180,7 +181,7 @@ pub(crate) fn add_source_note(object: &mut object::write::Object<'_>, source: Co
     }
 }
 
-fn deliver(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
+fn deliver(path: &Path, image: &[u8], debug: &[u8], source: Option<&File>) -> io::Result<()> {
     // The debug object records the image's identity; hashing the image again
     // would only find it.
     let recorded = object::File::parse(debug).map_err(io::Error::other)?;
@@ -198,47 +199,69 @@ fn deliver(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
     let parent = target.parent().unwrap();
     std::fs::create_dir_all(parent)?;
     let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    crate::store::write_bounded(&mut staged, &[debug])?;
+    crate::executable::fill(staged.as_file_mut(), debug, source)?;
     staged.persist(target).map_err(|e| e.error)?;
     Ok(())
 }
 
+/// A linked executable and its detached debug file: in a content store, two
+/// blobs named, in that order, by the record under the link key.
 pub(crate) struct NativeImage {
     pub(crate) bytes: Arc<Vec<u8>>,
     pub(crate) debug: Vec<u8>,
+    /// The blobs the checked bytes were read from or written to, which
+    /// delivery reflinks: whatever later replaces or evicts their names,
+    /// these files hold those bytes. None before the image is stored.
+    blobs: Option<[File; 2]>,
 }
 
 impl NativeImage {
-    fn debug_key(key: ContentHash) -> ContentHash {
-        ContentHash::of_parts("hirsel.core-executable-dwarf.v1", [&key.0[..]])
+    pub(crate) fn new(bytes: Arc<Vec<u8>>, debug: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            debug,
+            blobs: None,
+        }
     }
 
+    /// The image under `key` when its record and both blobs check: a blob
+    /// damaged, or swapped for another's, is a miss, and the build links
+    /// again.
     pub(crate) fn load(store: &crate::Store, key: ContentHash) -> io::Result<Option<Self>> {
-        let Some(bytes) = store.get(key)? else {
-            return Ok(None);
-        };
-        let Some(debug) = store.get(Self::debug_key(key))? else {
+        let Some([(bytes, image), (debug, detached)]) = store.get_keyed_blobs(key)? else {
             return Ok(None);
         };
         Ok(Some(Self {
             bytes: Arc::new(bytes),
             debug,
+            blobs: Some([image, detached]),
         }))
     }
 
-    pub(crate) fn publish(&self, store: &crate::Store, key: ContentHash) -> io::Result<()> {
-        {
-            let _phase = crate::meter::trace::span("DWARF cache publication");
-            store.put_keyed(Self::debug_key(key), &self.debug)?;
-        }
+    pub(crate) fn publish(&mut self, store: &crate::Store, key: ContentHash) -> io::Result<()> {
         let _phase = crate::meter::trace::span("executable cache publication");
-        store.put_keyed_executable(key, &self.bytes)
+        let bares = {
+            let _digest = crate::meter::trace::span("executable digest");
+            [
+                crate::store::Bare::of(&self.bytes),
+                crate::store::Bare::of(&self.debug),
+            ]
+        };
+        let image = store.write_blob(bares[0], &self.bytes)?;
+        let detached = store.write_blob(bares[1], &self.debug)?;
+        store.put_keyed_bares(key, &bares)?;
+        self.blobs = Some([image, detached]);
+        Ok(())
     }
 
     pub(crate) fn deliver(&self, path: &Path) -> io::Result<()> {
         let _phase = crate::meter::trace::span("output delivery");
-        deliver(path, &self.bytes, &self.debug)?;
-        crate::executable::deliver(path, &self.bytes)
+        let [image, detached] = match &self.blobs {
+            Some([image, detached]) => [Some(image), Some(detached)],
+            None => [None, None],
+        };
+        deliver(path, &self.bytes, &self.debug, detached)?;
+        crate::executable::deliver(path, &self.bytes, image)
     }
 }
 

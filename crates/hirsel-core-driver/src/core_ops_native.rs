@@ -112,7 +112,6 @@ fn core_operations(backend: Backend) {
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
-            store: dir.path().join("native"),
             cas: dir.path().join("cas"),
             output: dir.path().join("program"),
             root_limit: limit,
@@ -208,7 +207,6 @@ fn counted_operations(backend: Backend) {
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
-            store: dir.path().join("native"),
             cas: dir.path().join("cas"),
             output: dir.path().join("program"),
             root_limit: 288 + room,
@@ -289,7 +287,6 @@ fn args_operations(backend: Backend, len_only: bool) {
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
-            store: dir.path().join("native"),
             cas: dir.path().join("cas"),
             output: dir.path().join("program"),
             root_limit: 1_048_576,
@@ -378,7 +375,6 @@ fn stream_operations(backend: Backend) {
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
-            store: dir.path().join("native"),
             cas: dir.path().join("cas"),
             output: dir.path().join("program"),
             root_limit: 1_048_576,
@@ -458,7 +454,6 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         link: crate::native::Link::Driver(
             PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
         ),
-        store: dir.path().join("native"),
         cas: dir.path().join("cas"),
         output: dir.path().join("program"),
         root_limit: 1_048_576,
@@ -560,7 +555,6 @@ fn host_operations(backend: Backend) {
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
-            store: dir.path().join("native"),
             cas: dir.path().join("cas"),
             output: dir.path().join("program"),
             root_limit: 1_048_576,
@@ -674,7 +668,6 @@ pub fn proof_clone_run() -> u64 {
         link: crate::native::Link::Driver(
             PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
         ),
-        store: dir.path().join("native"),
         cas: dir.path().join("cas"),
         output: dir.path().join("program"),
         root_limit: 1_048_576,

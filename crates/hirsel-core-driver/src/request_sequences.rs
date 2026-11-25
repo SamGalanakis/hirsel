@@ -439,7 +439,7 @@ fn run_sequence(
     let options = |tag: &str, req: &Req| {
         backend.map(|backend| {
             let mut options = NativeOptions {
-                store: dir.path().join(format!("{tag}-native")),
+                cas: dir.path().join(format!("{tag}-cas")),
                 output: dir.path().join(format!("{tag}-program")),
                 ..native_options(backend, dir.path())
             };
@@ -2367,6 +2367,10 @@ fn native_args(root: &Path, output: &str) -> Vec<String> {
         root.join(output).display().to_string(),
     ]
 }
+/// The content store (executables, request records) of requests on `store`.
+fn cache_for(store: &Path) -> PathBuf {
+    store.with_extension("cache")
+}
 /// Run `step` against the store `store`, from a run directory `run` that
 /// holds its output file and metrics; return the answer and its reuse stages.
 fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (Ran, String) {
@@ -2395,6 +2399,7 @@ fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (
     child
         .args(["--exact", "native::tests::process::request_child", "--ignored", "--nocapture", "--test-threads=1"])
         .env("REQUEST_CHILD_ARGS", serde_json::to_string(&args).unwrap())
+        .env("XDG_CACHE_HOME", cache_for(store))
         .current_dir(root);
     for (name, value) in &step.env {
         match value {
@@ -2410,6 +2415,7 @@ fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (
             None => panic!("request child did not start: {text}"),
         };
         let text = text
+            .replace(&cache_for(store).display().to_string(), "<cache>")
             .replace(&store.display().to_string(), "<store>")
             .replace(&run.display().to_string(), "<run>");
         // A memory refusal's allocation size and resident peak are this
@@ -2509,13 +2515,11 @@ const MAIN_BAD: &str = "pub fn main()->Result[(),Exit]{Error(Exit(status:nope))}
 /// A memory limit the harness starts under and checking core does not
 /// (measured: 8M refuses the check, 12M passes it).
 const LOW_LIMIT: &str = "8M";
-fn with(step: Step, change: impl FnOnce(&mut Step)) -> Step {
-    let mut step = step;
+fn with(mut step: Step, change: impl FnOnce(&mut Step)) -> Step {
     change(&mut step);
     step
 }
-/// Remove, from the primed store, the file whose bytes are the executable the
-/// last primed step wrote.
+/// Remove the blob holding the executable the last primed step wrote.
 fn delete_stored_executable(root: &Path) {
     for path in stored_executable(root) {
         std::fs::remove_file(path).unwrap();
@@ -2524,9 +2528,8 @@ fn delete_stored_executable(root: &Path) {
 fn damage_stored_executable(root: &Path) {
     for path in stored_executable(root) {
         let mut bytes = std::fs::read(&path).unwrap();
-        // The payload's last byte, which the frame's checksum covers.
-        let last = bytes.len() - 49;
-        bytes[last] ^= 1;
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 1;
         std::fs::write(path, bytes).unwrap();
     }
 }
@@ -2537,16 +2540,13 @@ fn stored_executable(root: &Path) -> Vec<PathBuf> {
         return vec![];
     };
     let mut found = vec![];
-    let mut dirs = vec![root.join("primed-store")];
+    let mut dirs = vec![cache_for(&root.join("primed-store"))];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 dirs.push(path);
-            } else if std::fs::read(&path).is_ok_and(|bytes| {
-                let after_header = bytes.get(crate::store::HEADER..).unwrap_or_default();
-                after_header.len() == program.len() + 48 && after_header.starts_with(&program)
-            }) {
+            } else if std::fs::read(&path).is_ok_and(|bytes| bytes == program) {
                 found.push(path);
             }
         }

@@ -97,7 +97,6 @@ mod build_identity {
         let built = release.assemble(&options, Default::default()).unwrap();
         let bytes = std::fs::read(built.executable).unwrap();
         std::fs::remove_file(dir.path().join("main.hirsel")).unwrap();
-        options.store = dir.path().join("cold");
         options.cas = dir.path().join("cold-cas");
         let reopened =
             Publication::open(&code, root, &crate::request::local_admission_limits()).unwrap();
@@ -187,7 +186,7 @@ mod assembly_environment {
             .unwrap();
         assert!(status.success(), "prepare the changed runtime fixture");
         let warm = assemble(&options);
-        options.store = dir.path().join("cold");
+        options.cas = dir.path().join("cold");
         let cold = assemble(&options);
         assert_eq!(
             warm.0, cold.0,
@@ -229,7 +228,7 @@ mod assembly_environment {
         };
         let original = assemble(&options, false);
         let warm = assemble(&options, true);
-        options.store = dir.path().join("cold");
+        options.cas = dir.path().join("cold");
         let cold = assemble(&options, true);
         assert_eq!(original.1, Some(7));
         assert_eq!(cold.1, Some(8));

@@ -33,7 +33,6 @@ fn reach_steps(name: &str, backend: Backend, core: &Path, steps: &[Step]) {
         let fresh = reach_build(
             &record_check(step.app, core, dir.path(), &format!("fresh{n}")),
             &NativeOptions {
-                store: fresh_store.clone(),
                 cas: fresh_store.join("cas"),
                 output: dir.path().join(format!("fresh-program{n}")),
                 ..native_options(backend, dir.path())
@@ -179,7 +178,6 @@ fn reach_two_images_and_a_shadowing_name() {
         let fresh = reach_build(
             &record_check(APP, core, dir.path(), &format!("fresh{n}")),
             &NativeOptions {
-                store: dir.path().join(format!("fresh-native{n}")),
                 cas: dir.path().join(format!("fresh-cas{n}")),
                 output: dir.path().join(format!("fresh-program{n}")),
                 ..native_options(Backend::Cranelift, dir.path())
@@ -309,7 +307,6 @@ fn release_part_alone_is_the_part_beside_other_misses() {
         let (fresh_build, fresh_bytes, _) = reach_build(
             &record_check(&second, &core_sources(), dir.path(), "fresh"),
             &NativeOptions {
-                store: dir.path().join("fresh-native"),
                 cas: fresh_parts.clone(),
                 output: dir.path().join("fresh-program"),
                 optimize: true,
@@ -414,7 +411,6 @@ fn release_edit_is_the_cold_build() {
             let (cold, cold_bytes, _) = reach_build(
                 &record_check(app, core, dir.path(), &format!("fresh{n}")),
                 &NativeOptions {
-                    store: dir.path().join(format!("fresh-native{n}")),
                     cas: dir.path().join(format!("fresh-cas{n}")),
                     output: dir.path().join(format!("fresh-program{n}")),
                     optimize: true,
@@ -507,7 +503,6 @@ fn reach_replaced_objects_build_a_fresh_stores_executable() {
     let fresh = reach_build(
         &record_check(&edited, &core, dir.path(), "fresh"),
         &NativeOptions {
-            store: dir.path().join("fresh-native"),
             cas: dir.path().join("fresh-cas"),
             output: dir.path().join("fresh-program"),
             ..native_options(Backend::Cranelift, dir.path())
@@ -550,7 +545,6 @@ fn reach_inode_swap_after_the_check_links_the_checked_object() {
     let fresh = reach_build(
         &record_check(&edited, &core, dir.path(), "fresh"),
         &NativeOptions {
-            store: dir.path().join("fresh-native"),
             cas: dir.path().join("fresh-cas"),
             output: dir.path().join("fresh-program"),
             ..native_options(Backend::Cranelift, dir.path())
@@ -582,7 +576,6 @@ fn reach_object_swapped_before_the_link_opens_it_links_the_checked_bytes() {
         let base = || NativeOptions { optimize, ..native_options(backend, dir.path()) };
         let options = base();
         let at = |name: &str| NativeOptions {
-            store: dir.path().join(format!("{name}-native")),
             output: dir.path().join(format!("{name}-program")),
             ..base()
         };
@@ -656,7 +649,7 @@ fn parallel_builds_launch_at_once() {
                         std::fs::create_dir_all(&here).unwrap();
                         let product = record_check(APP, core, &here, "check");
                         let mut options = NativeOptions {
-                            store: dir.join("shared-native"),
+                            cas: dir.join("shared-cas"),
                             optimize,
                             ..native_options(backend, &here)
                         };
@@ -700,7 +693,7 @@ fn reach_files_build(dir: &Path, project: &str, files: &[(&str, &str)], store: &
         .unwrap();
     assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
     let mut options = native_options(backend, dir);
-    options.store = dir.join(store).join("native");
+    options.cas = dir.join(store).join("native");
     options.output = dir.join(store).join("program");
     options.debug_lines = true;
     options.grant_mask = 1 << 4;
@@ -838,7 +831,6 @@ fn reach_record_only_for_a_complete_walk_and_kept_past_an_output_failure() {
     let (_, fresh, _) = reach_build(
         &record_check(REACH_APP, &core, dir.path(), "fresh"),
         &NativeOptions {
-            store: fresh_store.clone(),
             cas: fresh_store.join("cas"),
             output: dir.path().join("fresh-program"),
             ..native_options(Backend::Cranelift, dir.path())
@@ -884,7 +876,6 @@ fn reach_writer_crash_after_each_rename_then_builds_fresh() {
     let (_, fresh, _) = reach_build(
         &record_check(&edited, &core, dir.path(), "fresh"),
         &NativeOptions {
-            store: fresh_store.clone(),
             cas: fresh_store.join("cas"),
             output: dir.path().join("fresh-program"),
             ..native_options(Backend::Cranelift, dir.path())
@@ -894,7 +885,6 @@ fn reach_writer_crash_after_each_rename_then_builds_fresh() {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     for k in 0.. {
         let options = NativeOptions {
-            store: dir.path().join(format!("crash-{k}")),
             cas: dir.path().join(format!("crash-{k}-cas")),
             output: dir.path().join(format!("crash-program-{k}")),
             ..native_options(Backend::Cranelift, dir.path())
@@ -943,7 +933,7 @@ fn descriptor_build(dir: &Path, files: &[(&str, &str)], store: &str, backend: Ba
     assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
     let mut options = native_options(backend, dir);
     options.optimize = optimize;
-    options.store = dir.join(store).join("native");
+    options.cas = dir.join(store).join("native");
     options.output = dir.join(store).join("program");
     let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
     let output = Command::new(&built.executable).output().unwrap();

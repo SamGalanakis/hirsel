@@ -74,18 +74,24 @@ checks the supplied library sources. In a checkout these controls use its `core`
 directory; `--libraries` supplies another source root. Installed product builds
 need no extracted library source files.
 
-Native objects and records live in the user's content store,
+Native objects, executables and records live in the user's content store,
 `$XDG_CACHE_HOME/hirsel/cas` (or `$HOME/.cache/hirsel/cas`), which every build
 of the user's shares. A blob (an object, its debug rows, a release part, a std
-part's bitcode, an image unit, a code pack) is the file `o/<sha256>` of its
-bytes; a record is `k/<key>`, a frame that names blobs by digest and carries an
+part's bitcode, an image unit, a code pack, a linked executable and its
+detached debug file) is the file `o/<sha256>` of its bytes; a record is `k/<key>`, a frame that names blobs by digest and carries an
 origin, which a reader requires to be this machine's. Both are sharded by their
 first byte (`o/xx/<62 hex>`). A record whose blob is missing or fails its check
 is a miss and is rebuilt, and so is a record or blob stored under another's
 name. A release std side is a store of the same shape under `s/<key>/`, which a
 build pins with a shared lock while it reads it. An image ships its prebuilt
 objects (`native`) and release std (`release-std`) as stores of the same shape.
-A request's `--store` keeps its executables, request records and scratch.
+An executable is the blob the record under its link key names, with its
+debug file's: a build whose executable blob is damaged, or holds another's
+bytes, links again and never runs it. A request's record (its answer, under its
+inputs' key, which does not name the request's store) is a record of the same
+store. Delivery reflinks the checked blob to the output
+where the filesystem shares extents, and otherwise copies it; only the
+delivered file is executable. A request's `--store` keeps its scratch.
 One collector keeps the content store under 10 GiB: at most once a day, or
 hourly while over, it removes the least recently used records, blobs and
 unpinned sides (a hit touches what it read) down to 7/8 of that. A file a
@@ -457,7 +463,7 @@ Exit 0 means at least one test matched and every selected test passed. Exit 1
 means a selected test failed. Exit 2 means no tests matched or configuration
 could not be read. `--backend` and `--release` select the same engines and
 options as `build`. `--output` is a
-test-executable directory, defaulting to the private store's `native/tests`.
+test-executable directory, defaulting to a scratch directory in the request's store.
 
 `test --test-timeout <positive seconds>` optionally bounds each independent
 native execution. It starts after build/link and records `timed_out` in JSON;

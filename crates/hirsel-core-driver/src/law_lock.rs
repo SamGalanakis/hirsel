@@ -70,7 +70,6 @@ impl Inventory {
             Default::default(),
             crate::Link::Driver(Default::default()),
             Default::default(),
-            Default::default(),
         );
         let mut result = BTreeMap::new();
         for test in tests {

@@ -27,9 +27,11 @@ use hirsel_core_syntax::Span;
 /// What one request adds to its snapshot to make the record's key.
 pub(crate) struct Request {
     tuple: Vec<u8>,
-    /// Where the request's executables are stored; a build's value is a hit
-    /// only while its executable there passes its check.
-    native_store: Option<PathBuf>,
+    /// The content store the record and a build's executable live in; a
+    /// build's value is a hit only while its executable there passes its
+    /// check.
+    cas: PathBuf,
+    native: bool,
 }
 /// The memory limits a request runs under.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
@@ -72,15 +74,19 @@ impl Request {
                     &options.runtime,
                 )?;
                 options.observed = Some(Arc::new(observed));
-                Some(native_tuple(options)?)
+                Some((options.cas.clone(), native_tuple(options)?))
             }
             None => None,
         };
-        let native_store = native.as_ref().map(|(store, _)| store.clone());
         Ok(Self {
-            tuple: encode(&(command, variant, native.map(|(_, tuple)| tuple)))?,
-            native_store,
+            tuple: encode(&(command, variant, native.as_ref().map(|(_, tuple)| tuple)))?,
+            native: native.is_some(),
+            cas: native.map_or_else(crate::store::collect::user, |(cas, _)| cas),
         })
+    }
+    /// The content store the record lives in.
+    pub(crate) fn cas(&self) -> &Path {
+        &self.cas
     }
     pub(crate) fn key(&self, snapshot: ContentHash) -> ContentHash {
         ContentHash::of_parts("hirsel.request-record.v4", [&snapshot.0[..], &self.tuple])
@@ -88,7 +94,7 @@ impl Request {
 }
 /// Every native option, by name: those that change the executable enter the
 /// key, and those that do not say why.
-fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
+fn native_tuple(options: &NativeOptions) -> io::Result<Vec<u8>> {
     let NativeOptions {
         recording,
         coverage,
@@ -101,11 +107,10 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
         // identities, which name their bytes.
         runtime: _,
         link: _,
-        // The store holds the record; the output is rendered per request.
-        store,
+        // The output is rendered per request.
         output: _,
         // An object is a function of its key alone, so where the content
-        // store is does not change the executable.
+        // store is does not change the executable; the store holds the record.
         cas: _,
         root_limit,
         instance_limit,
@@ -148,7 +153,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
     if let Some(scope) = coverage {
         tuple.extend(encode(&(hirsel_core_ir::coverage::KEY_TAG, scope))?);
     }
-    Ok((store.clone(), tuple))
+    Ok(tuple)
 }
 
 /// A source file a site is in: a request file by its position in the
@@ -273,29 +278,26 @@ impl Miss {
     }
 }
 pub(crate) fn lookup(
-    store: &Store,
     key: ContentHash,
     request: &Request,
     names: impl FnOnce() -> Vec<String>,
 ) -> io::Result<Result<Hit, Miss>> {
+    let store = Store::cas(&request.cas)?;
     let Some(value) = store.get(key)?.and_then(|bytes| decode::<Value>(&bytes)) else {
         return Ok(Err(Miss::Absent));
     };
     if !Limits::current().cover(value.limits) {
         return Ok(Err(Miss::Limits));
     }
-    let executable = match (&value.native, &request.native_store) {
-        (None, _) => None,
-        (Some(native), Some(native_store)) => {
-            match crate::native_debug::NativeImage::load(
-                &Store::new(native_store)?,
-                native.identity,
-            )? {
+    let executable = match &value.native {
+        None => None,
+        Some(native) if request.native => {
+            match crate::native_debug::NativeImage::load(&store, native.identity)? {
                 Some(binary) => Some(binary),
                 None => return Ok(Err(Miss::Executable)),
             }
         }
-        (Some(_), None) => return Ok(Err(Miss::Executable)),
+        Some(_) => return Ok(Err(Miss::Executable)),
     };
     Ok(Ok(Hit {
         value,
@@ -304,8 +306,8 @@ pub(crate) fn lookup(
     }))
 }
 /// Publish `value` under `key` by one atomic rename.
-pub(crate) fn publish(store: &Path, key: ContentHash, value: &Value) -> io::Result<()> {
-    Store::new(store)?.put_keyed(key, &encode(value)?)
+pub(crate) fn publish(cas: &Path, key: ContentHash, value: &Value) -> io::Result<()> {
+    Store::cas(cas)?.put_keyed(key, &encode(value)?)
 }
 
 /// The name a site's file is rendered with: its manifest-relative name, or

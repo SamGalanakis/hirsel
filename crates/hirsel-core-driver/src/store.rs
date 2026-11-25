@@ -28,6 +28,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use twox_hash::XxHash3_64;
 
+#[path = "blob.rs"]
+mod blob;
 #[path = "collect.rs"]
 pub(crate) mod collect;
 
@@ -432,7 +434,13 @@ impl Store {
     }
     fn temporary(&self) -> io::Result<Temporary> {
         let (path, file, _) = self.locked(
-            |path| OpenOptions::new().create_new(true).write(true).open(path),
+            |path| {
+                OpenOptions::new()
+                    .create_new(true)
+                    .read(true)
+                    .write(true)
+                    .open(path)
+            },
             |_, file| file.try_clone(),
         )?;
         Ok(Temporary { path, file })
@@ -518,39 +526,6 @@ impl Store {
     pub fn put(&self, bytes: &[u8]) -> io::Result<ContentHash> {
         self.archive(|writer| writer.write_all(bytes))
     }
-    /// Publish `bytes` as a blob named by their SHA-256. The file is passed
-    /// directly to native linkers by path, so it carries no frame: its
-    /// checksum travels in the record that names it, and a file at the name
-    /// whose bytes are not the record's fails the read check, a miss.
-    /// The bytes always replace the file by a rename: a file already at the
-    /// path may be one whose check just failed, and an existing name says
-    /// nothing about its bytes.
-    pub(crate) fn put_blob(&self, bytes: &[u8]) -> io::Result<Bare> {
-        let bare = Bare {
-            address: {
-                hirsel_core_front::cost_scope!("non-check", "archive write and digest");
-                ContentHash(Sha256::digest(bytes).into())
-            },
-            check: checksum(bytes),
-        };
-        self.publish(&self.blob_path(bare.address), [bytes])?;
-        wrote("bare");
-        Ok(bare)
-    }
-    /// Publish `bytes` as a blob and a record under `key` naming it.
-    pub(crate) fn put_keyed_blob(&self, key: ContentHash, bytes: &[u8]) -> io::Result<Bare> {
-        let bare = self.put_blob(bytes)?;
-        self.put_keyed(key, &encode_bare(bare))?;
-        Ok(bare)
-    }
-    /// The blob the record under `key` names, with its bytes, when both
-    /// check.
-    pub(crate) fn get_keyed_blob(&self, key: ContentHash) -> io::Result<Option<(Bare, Vec<u8>)>> {
-        let Some(bare) = self.get(key)?.as_deref().and_then(decode_bare) else {
-            return Ok(None);
-        };
-        Ok(self.get_blob(bare)?.map(|bytes| (bare, bytes)))
-    }
     pub(crate) fn archive(
         &self,
         emit: impl FnOnce(&mut ArchiveWriter) -> io::Result<()>,
@@ -582,24 +557,10 @@ impl Store {
     /// file by a rename and a reader sees one whole frame or none. The
     /// frame is written around the borrowed payload without copying it.
     pub(crate) fn put_keyed(&self, key: ContentHash, payload: &[u8]) -> io::Result<()> {
-        self.put_keyed_record(key, payload, false)
-    }
-
-    pub(crate) fn put_keyed_executable(&self, key: ContentHash, payload: &[u8]) -> io::Result<()> {
-        self.put_keyed_record(key, payload, true)
-    }
-
-    fn put_keyed_record(
-        &self,
-        key: ContentHash,
-        payload: &[u8],
-        executable: bool,
-    ) -> io::Result<()> {
         let header = Self::header();
         let mut trailer = [0; TRAILER];
         trailer[..8].copy_from_slice(&(payload.len() as u64).to_le_bytes());
         {
-            let _phase = executable.then(|| crate::meter::trace::span("executable checksum"));
             hirsel_core_front::cost_scope!("non-check", "archive write and digest");
             let mut check = XxHash3_64::new();
             check.write(&header);
@@ -608,7 +569,6 @@ impl Store {
             trailer[8..16].copy_from_slice(&check.finish().to_le_bytes());
         }
         trailer[16..].copy_from_slice(&key.0);
-        let _phase = executable.then(|| crate::meter::trace::span("executable record write"));
         self.publish(&self.path(key), [&header, payload, &trailer])?;
         wrote("record");
         Ok(())
@@ -819,26 +779,6 @@ impl Store {
             return Ok(None);
         }
         Ok(Some((bytes, end)))
-    }
-    /// A blob's bytes when they pass their check: a blob damaged, or
-    /// swapped for another's, is a miss.
-    pub(crate) fn get_blob(&self, bare: Bare) -> io::Result<Option<Vec<u8>>> {
-        let mut file = match File::open(self.blob_path(bare.address)) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        crate::meter::count(crate::meter::Count::FilesOpened, 1);
-        crate::meter::count(crate::meter::Count::ObjectsOpened, 1);
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        if checksum(&bytes) != bare.check {
-            return Ok(None);
-        }
-        if self.cas.is_some() {
-            collect::touch(&file);
-        }
-        Ok(Some(bytes))
     }
     /// Where the selection `name` lives: at the root of a flat store, and
     /// among a content store's records, where the collector sees it.

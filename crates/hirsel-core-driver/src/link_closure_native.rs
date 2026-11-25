@@ -59,7 +59,7 @@ fn a_file_the_link_reads_keys_the_executable() {
         fresh += 1;
         let mut empty = native_options(Backend::Cranelift, dir.path());
         empty.link = options.link.clone();
-        empty.store = dir.path().join(format!("fresh-{fresh}"));
+        empty.cas = dir.path().join(format!("fresh-{fresh}"));
         empty.output = dir.path().join(format!("fresh-program-{fresh}"));
         let built = product.build(&entry, &empty).unwrap();
         run_clean(&built.executable, 7);

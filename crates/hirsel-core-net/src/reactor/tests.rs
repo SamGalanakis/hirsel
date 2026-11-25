@@ -287,8 +287,8 @@ fn replaced_watch_leaves_one_poll() {
         while !sent.load(Ordering::Acquire) {
             std::hint::spin_loop();
         }
-        ring.recover_watches(true);
-        ring.submit_watch_recovery().unwrap();
+        ring.recover_watches();
+        ring.watches().submit_recovery(&ring).unwrap();
         ring.enter(Some(0));
         assert_eq!(peer.join().unwrap().unwrap(), 1);
     });
@@ -306,8 +306,8 @@ fn replaced_watch_leaves_one_poll() {
     }
     settle();
     for _ in 0..2 {
-        ring.recover_watches(true);
-        ring.submit_watch_recovery().unwrap();
+        ring.recover_watches();
+        ring.watches().submit_recovery(&ring).unwrap();
         assert_eq!(ring.pending_submissions(), 64);
         ring.enter(Some(0));
     }

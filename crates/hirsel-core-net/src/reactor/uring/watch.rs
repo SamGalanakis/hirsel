@@ -29,7 +29,7 @@ pub(in crate::reactor) struct Watches {
     work: VecDeque<Work>,
     rechecks: VecDeque<u64>,
     wake: bool,
-    last_overflow: u32,
+    last_dropped: u32,
     next: u64,
     #[cfg(test)]
     pub(in crate::reactor) retried: usize,
@@ -132,11 +132,15 @@ impl Watches {
         n
     }
 
-    pub(super) fn recover(&mut self, overflow: u32, dropped: bool) {
-        if !dropped && self.last_overflow == overflow {
-            return;
+    pub(super) fn recover_if_dropped(&mut self, dropped: u32) {
+        if self.last_dropped != dropped {
+            self.recover(dropped);
         }
-        self.last_overflow = overflow;
+    }
+
+    #[cold]
+    fn recover(&mut self, dropped: u32) {
+        self.last_dropped = dropped;
         self.wake = true;
         self.work.clear();
         self.work
@@ -148,6 +152,35 @@ impl Watches {
         );
         self.rechecks.clear();
         self.rechecks.extend(self.live.keys().copied());
+    }
+
+    pub(in crate::reactor) fn submit_recovery(&mut self, ring: &Uring) -> io::Result<bool> {
+        let mut left = Uring::ENTRIES;
+        while let Some(work) = self.work.front() {
+            if left == 0 || left == 1 && matches!(work, Work::Replace(..)) {
+                break;
+            }
+            match self.work.pop_front().unwrap() {
+                Work::Remove(id) => {
+                    if self.ids.contains_key(&id) {
+                        ring.push(Uring::poll_remove(id), None);
+                        left -= 1;
+                    }
+                }
+                Work::Replace(tag, old) => {
+                    if self.is_current(tag, old) {
+                        let id = self.id(tag)?;
+                        self.retire(tag, old);
+                        let watch = self.live.get_mut(&tag).unwrap();
+                        watch.id = id;
+                        ring.push(Uring::poll_remove(old), None);
+                        ring.arm(watch);
+                        left -= 2;
+                    }
+                }
+            }
+        }
+        Ok(self.due())
     }
 }
 
@@ -199,38 +232,8 @@ impl Uring {
         true
     }
 
-    pub(in crate::reactor) fn recover_watches(&self, dropped: bool) {
-        let overflow = self.ring.dropped();
-        self.watches().recover(overflow, dropped);
-    }
-
-    pub(in crate::reactor) fn submit_watch_recovery(&self) -> io::Result<bool> {
-        let mut watches = self.watches();
-        let mut left = Self::ENTRIES;
-        while let Some(work) = watches.work.front() {
-            if left == 0 || left == 1 && matches!(work, Work::Replace(..)) {
-                break;
-            }
-            match watches.work.pop_front().unwrap() {
-                Work::Remove(id) => {
-                    if watches.ids.contains_key(&id) {
-                        self.push(Self::poll_remove(id), None);
-                        left -= 1;
-                    }
-                }
-                Work::Replace(tag, old) => {
-                    if watches.is_current(tag, old) {
-                        let id = watches.id(tag)?;
-                        watches.retire(tag, old);
-                        let watch = watches.live.get_mut(&tag).unwrap();
-                        watch.id = id;
-                        self.push(Self::poll_remove(old), None);
-                        self.arm(watch);
-                        left -= 2;
-                    }
-                }
-            }
-        }
-        Ok(watches.due())
+    pub(in crate::reactor) fn recover_watches(&self) {
+        let dropped = self.ring.dropped();
+        self.watches().recover(dropped);
     }
 }

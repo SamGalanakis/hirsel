@@ -262,26 +262,28 @@ impl Uring {
         };
         let result = enter_queue(&self.ring, &self.sq, timeout_ns, refused);
         if result.is_err_and(|error| error.raw_os_error() == Some(libc::EBADR)) {
-            self.recover_watches(true);
+            self.recover_watches();
         }
     }
 
     /// One owner turn into `out`. A timeout of Some(0) does not block and
     /// None blocks until a completion.
     pub(super) fn wait(&self, out: &mut [Event], timeout_ns: Option<u64>) -> io::Result<usize> {
-        self.recover_watches(false);
+        let dropped = self.ring.dropped();
         self.completion.check_dropped()?;
         let limit = POLL_BATCH as usize;
         let mut remaining = limit;
         let mut completion_left = limit;
         let n = self.completion.reap(self, out, &mut completion_left);
-        let n = n + self.reap(&mut out[n..], &mut remaining)?;
-        let n = n + self.watches().recheck(&mut out[n..]);
+        let mut watches = self.watches();
+        watches.recover_if_dropped(dropped);
+        let n = n + self.reap(&mut watches, &mut out[n..], &mut remaining)?;
+        let recovering = watches.submit_recovery(self)?;
+        drop(watches);
         self.trim();
         // Kept transmit slots are freed by a later turn, so do not sleep
         // past their trim.
         let trim_ns = sendzc::TRIM.as_nanos() as u64;
-        let recovering = self.submit_watch_recovery()?;
         let timeout_ns = if n != 0 || remaining < limit || recovering {
             Some(0)
         } else if self.tx_kept() && timeout_ns.is_none_or(|ns| ns > trim_ns) {
@@ -294,17 +296,22 @@ impl Uring {
             return Ok(n);
         }
         let n = self.completion.reap(self, out, &mut completion_left);
-        let n = n + self.reap(&mut out[n..], &mut remaining)?;
+        let n = n + self.reap(&mut self.watches(), &mut out[n..], &mut remaining)?;
         self.trim();
-        Ok(n + self.watches().recheck(&mut out[n..]))
+        Ok(n)
     }
 
     /// Translate posted completions into `(tag, flags)` events. A poll that
     /// ends (no `F_MORE`) is re-armed through the mailbox unless a removal or
     /// an adoption replaced it: the kernel ends a multishot poll when the
     /// completion queue overflows, and cancels it when its arming thread exits.
-    fn reap(&self, out: &mut [Event], remaining: &mut usize) -> io::Result<usize> {
-        let mut watched = self.watches();
+    /// Append synthetic rechecks after real readiness events.
+    fn reap(
+        &self,
+        watches: &mut Watches,
+        out: &mut [Event],
+        remaining: &mut usize,
+    ) -> io::Result<usize> {
         let mut n = 0;
         while *remaining != 0 && n < out.len() {
             // SAFETY: the owner holds its turn, the only completion reader.
@@ -316,12 +323,12 @@ impl Uring {
             let (tag, flags) = match data {
                 WAKE => (WAKE, Ready::READABLE),
                 data if data & REMOVE != 0 => {
-                    watched.removed(data & !REMOVE, cqe.result())?;
+                    watches.removed(data & !REMOVE, cqe.result())?;
                     continue;
                 }
                 _ => {
                     let res = cqe.result();
-                    let Some(tag) = watched.polled(self, cqe)? else {
+                    let Some(tag) = watches.polled(self, cqe)? else {
                         continue;
                     };
                     if res <= 0 || tag == COMPLETION_READY {
@@ -333,7 +340,7 @@ impl Uring {
             out[n] = Event::new(tag, flags);
             n += 1;
         }
-        Ok(n)
+        Ok(n + watches.recheck(&mut out[n..]))
     }
 }
 

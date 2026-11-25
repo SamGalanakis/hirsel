@@ -91,6 +91,7 @@ impl Request {
 fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
     let NativeOptions {
         recording,
+        coverage,
         replay,
         backend,
         optimize,
@@ -125,27 +126,29 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
     // The toolchain image holds the link recipe's identity and the runtime
     // archive's bytes, so it alone names what the link reads.
     let (toolchain, _) = observed.as_deref().expect("observed above");
-    Ok((
-        store.clone(),
-        encode(&(
-            backend,
-            optimize,
-            debug_lines,
-            target,
-            root_limit,
-            instance_limit,
-            directories,
-            grant_mask,
-            (net_rules, unix_roots),
-            (secret_grants, cred_grants),
-            (foreign_grants, exec_grants),
-            env_patterns,
-            recording,
-            replay,
-            toolchain.image,
-            toolchain.environment,
-        ))?,
-    ))
+    let mut tuple = encode(&(
+        backend,
+        optimize,
+        debug_lines,
+        target,
+        root_limit,
+        instance_limit,
+        directories,
+        grant_mask,
+        (net_rules, unix_roots),
+        (secret_grants, cred_grants),
+        (foreign_grants, exec_grants),
+        env_patterns,
+        recording,
+        replay,
+        toolchain.image,
+        toolchain.environment,
+    ))?;
+    // Appended only when on, so a plain request's key is the key it had.
+    if let Some(scope) = coverage {
+        tuple.extend(encode(&("coverage", scope))?);
+    }
+    Ok((store.clone(), tuple))
 }
 
 /// A source file a site is in: a request file by its position in the

@@ -23,13 +23,18 @@ pub fn finish_native_object(
     debug_lines: bool,
 ) -> std::result::Result<NativeObject, String> {
     if !debug_lines {
-        return Ok(NativeObject { bytes, debug: None });
+        return Ok(NativeObject {
+            bytes,
+            debug: None,
+            coverage: None,
+        });
     }
     let file = object::File::parse(bytes.as_slice()).map_err(error)?;
     let (debug, addresses) = extract(&file, unit)?;
     Ok(NativeObject {
         bytes: addresses.strip(&bytes)?,
         debug: Some(debug),
+        coverage: None,
     })
 }
 

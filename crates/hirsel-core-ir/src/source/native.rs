@@ -9,6 +9,9 @@ use std::fmt::Write;
 pub struct NativeObject {
     pub bytes: Vec<u8>,
     pub debug: Option<NativeDebug>,
+    /// A coverage object's map fragment, stored beside it under its key.
+    #[serde(skip)]
+    pub coverage: Option<crate::coverage::Fragment>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

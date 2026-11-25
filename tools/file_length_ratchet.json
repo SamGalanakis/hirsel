@@ -160,9 +160,9 @@
     "lines": 1203
   },
   "crates/hirsel-core-driver/src/core_ops_native.rs": {
-    "lines": 2467,
-    "raise_revision": 2,
-    "reason": "net18-s2-2481"
+    "lines": 2474,
+    "raise_revision": 3,
+    "reason": "coverage-c1-2551"
   },
   "crates/hirsel-core-driver/src/launcher/laws.rs": {
     "lines": 1410
@@ -181,9 +181,9 @@
     "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2769,
-    "raise_revision": 4,
-    "reason": "net18-s3-2482"
+    "lines": 2785,
+    "raise_revision": 5,
+    "reason": "coverage-c1-2551"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1126,
@@ -229,9 +229,9 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 3013,
-    "raise_revision": 10,
-    "reason": "ds-root-limit-msg-2523"
+    "lines": 3118,
+    "raise_revision": 11,
+    "reason": "coverage-c1-2551"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 4108,
@@ -330,14 +330,14 @@
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 1940,
-    "raise_revision": 10,
-    "reason": "ds-cold-fn-2520"
+    "lines": 1945,
+    "raise_revision": 11,
+    "reason": "coverage-c1-2551"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
-    "lines": 1151,
-    "raise_revision": 2,
-    "reason": "crypto-sha512-2121"
+    "lines": 1143,
+    "raise_revision": 3,
+    "reason": "coverage-c1-2551"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
     "lines": 1281,
@@ -525,7 +525,9 @@
     "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-llvm/src/core/split.rs": {
-    "lines": 1082
+    "lines": 1082,
+    "raise_revision": 1,
+    "reason": "coverage-c1-2551"
   },
   "crates/hirsel-llvm/src/core/steps.rs": {
     "lines": 1728

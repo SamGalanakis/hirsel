@@ -170,6 +170,14 @@ fn prog4_pass_cache(backend: Backend) {
     let (_, source) = run(&product, "good", &undelivered, false);
     assert_eq!(source, Source::Cached);
     assert!(!undelivered.output.exists());
+    // Coverage "Off is off": a plain pass is not served as a coverage pass.
+    let covered = NativeOptions {
+        coverage: Some([package("app")].into()),
+        ..limited.clone()
+    };
+    let (outcome, source) = run(&product, "good", &covered, false);
+    assert_eq!(source, Source::Executed, "{outcome:?}");
+    assert!(outcome.passed(), "{outcome:?}");
 
     let (outcome, source) = run(&product, "allocation", &limited, false);
     assert_eq!(source, Source::Executed);
@@ -342,11 +350,108 @@ fn prog4_cache_damage(product: &CheckProduct, options: &NativeOptions, dir: &Pat
     }
 }
 
+const KNOWN_ARMS: &str = r#"
+type Pick = PickA | PickB | PickC
+fn known(n: u64, p: Pick) -> u64 {
+    let mut out = 0u64
+    if n == 9u64 { out = 1u64 }
+    let base = match p {
+        PickA => 10u64,
+        PickB => 20u64,
+        PickC => 30u64
+    }
+    if n < 5u64 && n > 0u64 { out + base } else { out + base + 1u64 }
+}
+@test
+fn arms() -> Result[(), ()] { if known(0u64, PickA) + known(2u64, PickB) == 31u64 { Ok(()) } else { Error(()) } }
+"#;
+
+/// Coverage "Off is off" and "Known arms" (`docs/coverage.md`, "Laws"), on
+/// Cranelift. A plain build after a coverage build in one store has no
+/// `hirsel_cov` section (oracle: the section's absence), and the coverage
+/// build's raw file reports `known`'s arms as derived by hand from its
+/// source: an `if` without `else` taken only `no`, a `match` whose third arm
+/// no input reaches, and `&&` whose right side always runs.
+fn coverage_off_and_known_arms() {
+    use object::{Object, ObjectSection};
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default()
+        .check(prog4_request(KNOWN_ARMS, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    let test = DefPath::from_full("app@1/main/arms").unwrap();
+    let plain = native_options(Backend::Cranelift, dir.path());
+    let scope: hirsel_core_ir::coverage::Scope = [package("app")].into();
+    let covered = NativeOptions { coverage: Some(scope.clone()), output: dir.path().join("covered"), ..plain.clone() };
+    let section = |options: &NativeOptions| {
+        let built = product.build(&test, options).unwrap();
+        let bytes = std::fs::read(&built.executable).unwrap();
+        let file = object::File::parse(&*bytes).unwrap();
+        let found = file.section_by_name(hirsel_core_ir::coverage::SECTION).is_some();
+        (built.executable, found)
+    };
+    let (executable, found) = section(&covered);
+    assert!(found, "a coverage executable has the flag section");
+    assert!(!section(&plain).1, "a plain build after a coverage build has no flag section");
+
+    let raw = dir.path().join("run.hcov");
+    let status = Command::new(&executable).env("HIRSEL_COVERAGE", &raw).status().unwrap();
+    assert_eq!(status.code(), Some(0));
+    let file = std::fs::read(&raw).unwrap();
+    let word = |at: usize| u32::from_le_bytes(file[at..at + 4].try_into().unwrap());
+    let long = |at: usize| u64::from_le_bytes(file[at..at + 8].try_into().unwrap()) as usize;
+    assert_eq!(&file[..8], b"HIRSELCV");
+    assert_eq!((word(36), word(48)), (1, 0x4544_4F4E), "a passed run, observed");
+    let (start, length) = (long(16), long(24));
+    let section = &file[start..start + length];
+    // Each record: magic, site count, id, then one flag byte per site.
+    let mut records = std::collections::BTreeMap::new();
+    let mut at = 0;
+    while at < section.len() {
+        let magic = u32::from_le_bytes(section[at..at + 4].try_into().unwrap());
+        if magic != hirsel_core_ir::coverage::RECORD_MAGIC {
+            at += 8;
+            continue;
+        }
+        let n = u32::from_le_bytes(section[at + 4..at + 8].try_into().unwrap()) as usize;
+        let id: [u8; 32] = section[at + 8..at + 40].try_into().unwrap();
+        records.insert(id, section[at + 40..at + 40 + n].to_vec());
+        at += (40 + n).next_multiple_of(8);
+    }
+    let identity = Identity::plain(DefPath::from_full("app@1/main/known").unwrap());
+    let units = product.units([identity.clone()], 4096).unwrap();
+    let modules = units.modules().unwrap();
+    let (mut module, function) = hirsel_core_materialize::join(&modules, &identity).unwrap();
+    module.coverage = Some(scope);
+    let sites = hirsel_core_ir::coverage::sites(&module, function).unwrap();
+    let flags = &records[&sites.id.0];
+    let reached: BTreeMap<_, _> = sites.sites.iter().zip(flags).map(|(s, f)| (s.key.clone(), *f == 1)).collect();
+    // Keys by hand: offsets within `known` of each decision's source text.
+    let item = &KNOWN_ARMS[KNOWN_ARMS.find("fn known").unwrap()..];
+    let key = |text: &str, arm: &str| {
+        let start = item.find(text).unwrap();
+        format!("app@1/main/known@{start}-{}.0:{arm}", start + text.len())
+    };
+    let mut expected = BTreeMap::from([("app@1/main/known#e".to_owned(), true)]);
+    for (text, yes, no) in [
+        ("n == 9u64", false, true),
+        ("PickA", true, true),
+        ("PickB", true, false),
+        ("n < 5u64", true, false),
+        ("n < 5u64 && n > 0u64", true, true),
+    ] {
+        expected.insert(key(text, "yes"), yes);
+        expected.insert(key(text, "no"), no);
+    }
+    assert_eq!(reached, expected);
+}
+
 #[test]
 #[ignore = "explicit native integration target"]
 fn prog4_independent_runs_limits_and_outcomes_cranelift() {
     prog4_runs(Backend::Cranelift);
     prog4_pass_cache(Backend::Cranelift);
+    coverage_off_and_known_arms();
 }
 #[test]
 #[ignore = "explicit native integration target"]

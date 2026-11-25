@@ -1109,6 +1109,7 @@
 hirsel_guard::install!();
 
 pub mod address;
+pub mod coverage;
 pub mod decode;
 /// Reference evaluator for samples and producers' behaviour cases.
 #[cfg(any(test, feature = "eval"))]

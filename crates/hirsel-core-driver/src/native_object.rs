@@ -28,6 +28,13 @@ fn debug_name(key: ContentHash) -> ContentHash {
     ContentHash::of_parts("hirsel.core-object-debug.v1", [&key.0[..]])
 }
 const DEBUG_SCHEMA: u32 = 1;
+/// The name of the coverage map fragment stored with the object named
+/// `identity` ([`object_name`]), a function of the object's key that a link
+/// holding the object's identity can derive.
+fn coverage_name(identity: ContentHash) -> ContentHash {
+    ContentHash::of_parts("hirsel.core-object-coverage.v1", [&identity.0[..]])
+}
+const COVERAGE_SCHEMA: u32 = 1;
 
 /// Store `native`'s object and debug rows under the names `key` derives: the
 /// object and the debug rows' name.
@@ -45,7 +52,29 @@ fn put_parts(
         }
         None => None,
     };
+    // A coverage object's fragment is stored before its record, so a record
+    // under a coverage key always has one. The record does not name it: a
+    // plain record's bytes are the bytes it had before coverage.
+    if let Some(fragment) = &native.coverage {
+        store.put_keyed(
+            coverage_name(object.address),
+            &encode(&(COVERAGE_SCHEMA, fragment))?,
+        )?;
+    }
     Ok((object, debug))
+}
+
+/// The map fragment stored with the coverage object named `identity`
+/// ([`crate::native::ObjectProduct::identity`]), when it checks.
+#[expect(dead_code, reason = "the C2 runner capture joins a link's fragments")]
+pub(crate) fn load_coverage(
+    store: &Store,
+    identity: ContentHash,
+) -> io::Result<Option<hirsel_core_ir::coverage::Fragment>> {
+    Ok(store
+        .get(coverage_name(identity))?
+        .and_then(|bytes| decode::<(u32, hirsel_core_ir::coverage::Fragment)>(&bytes))
+        .and_then(|(schema, fragment)| (schema == COVERAGE_SCHEMA).then_some(fragment)))
 }
 
 /// Publish an emitted object and its debug rows with their record under
@@ -76,7 +105,14 @@ pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, 
     let Some(bytes) = store.get_bare(object)? else {
         return Ok(None);
     };
-    Ok(Some((object, NativeObject { bytes, debug })))
+    Ok(Some((
+        object,
+        NativeObject {
+            bytes,
+            debug,
+            coverage: None,
+        },
+    )))
 }
 
 /// The parts of the record under `key` that are a function of the key: the
@@ -238,6 +274,7 @@ mod tests {
                 sequences: vec![],
                 scopes: vec![],
             }),
+            coverage: None,
         };
         let instance = |name: &str| Instance {
             schema: INSTANCE_SCHEMA,
@@ -332,6 +369,7 @@ mod tests {
                     }],
                     scopes: vec![],
                 }),
+                coverage: None,
             };
             let identity = publish(&store, key, &object).unwrap();
             let (loaded, warm) = load(&store, key).unwrap().unwrap();

@@ -85,6 +85,9 @@ pub struct ReplayPlan {
 pub struct NativeOptions {
     /// Link and enter the recording runtime (`hirsel build --recording`, `run --record`, `replay`, `test --replay`).
     pub recording: bool,
+    /// Coverage build (`docs/coverage.md`): the packages whose bodies have
+    /// sites, or none for a build without the switch.
+    pub coverage: Option<hirsel_core_ir::coverage::Scope>,
     /// Launcher-only replay plan (`hirsel replay`, `test --replay` replay phase).
     pub replay: Option<ReplayPlan>,
     pub backend: Backend,
@@ -157,6 +160,7 @@ impl NativeOptions {
             root_limit: 64 * 1024 * 1024,
             instance_limit: DEFAULT_INSTANCE_LIMIT,
             recording: false,
+            coverage: None,
             replay: None,
             directories: vec![],
             grant_mask: 0,
@@ -363,6 +367,7 @@ fn emit_unit(
     // the unmerged IR; the compiler identity in every key names this step.
     let mut shared = module.clone();
     shared.law_observation = options.recording;
+    shared.coverage = options.coverage.clone();
     shared.external_call_sites = !options.foreign_grants.is_empty();
     let Module {
         functions,
@@ -412,7 +417,7 @@ fn emit_unit(
 /// object schema, the compiler, the runtime ABI, the engine library, the
 /// target, the backend and the emission settings.
 pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::Result<Vec<u8>> {
-    encode(&(
+    let mut environment = encode(&(
         crate::native_object::SCHEMA,
         compiler_identity()?,
         runtime,
@@ -424,7 +429,13 @@ pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::
         options.logical_charge_report.is_some(),
         !options.foreign_grants.is_empty(),
         matches!(options.backend, Backend::Llvm) && !hirsel_llvm_lazy::core::facts_enabled(),
-    ))
+    ))?;
+    // A coverage build's objects depend on its scope. A build without the
+    // switch appends nothing, so its keys are the keys it had before coverage.
+    if let Some(scope) = &options.coverage {
+        environment.extend(encode(&("coverage", scope))?);
+    }
+    Ok(environment)
 }
 /// `domain` over the encoded `(environment, rest)`: a tuple encodes as its
 /// fields in order.
@@ -1702,7 +1713,11 @@ fn link_objects(
         }
         // A resident compiler links a development edit by patching its last
         // link's executable when it can (crate::incremental_link).
-        let incremental = !options.optimize && !options.debug_lines && crate::resident::serving();
+        // The incremental link's frames do not carry the coverage switch.
+        let incremental = !options.optimize
+            && !options.debug_lines
+            && options.coverage.is_none()
+            && crate::resident::serving();
         let patched = std::cell::Cell::new(false);
         let link = |recipe: &crate::tool_inputs::LinkRecipe| {
             let run = |live_sites: Option<&BTreeSet<u64>>, emit_relocations| {
@@ -2013,6 +2028,7 @@ pub(crate) mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         NativeOptions {
             recording: false,
+            coverage: None,
             replay: None,
             backend,
             optimize: false,

@@ -21,6 +21,7 @@ pub mod block;
 pub mod causes;
 pub mod channel;
 pub mod counted;
+mod coverage;
 mod crc;
 mod crc32c;
 pub mod cred;

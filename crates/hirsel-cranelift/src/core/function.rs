@@ -70,6 +70,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub empty_bound: bool,
     pub observe_charge: bool,
     pub(super) law: Option<c::law::Hooks>,
+    pub(super) coverage: Option<super::coverage::Flags>,
 }
 
 pub(super) fn emit(
@@ -78,6 +79,7 @@ pub(super) fn emit(
     function: &c::Function,
     signature: &abi::Signature,
     tables: &super::Tables<'_>,
+    coverage: Option<&super::coverage::Record>,
 ) -> Result<()> {
     let body = function.body.as_ref().unwrap();
     let (input, layouts, signatures, functions, statics) = (
@@ -256,6 +258,7 @@ pub(super) fn emit(
             low
         };
     }
+    let coverage = coverage.map(|record| super::coverage::Flags::new(record, object, b.func));
     let mut f = Function {
         b,
         object,
@@ -304,7 +307,10 @@ pub(super) fn emit(
                 .max()
                 .unwrap_or(0),
         ),
+        coverage,
     };
+    // The entry flag, before anything in the body can stop it.
+    f.set_flag(0, None);
     for i in order(body) {
         let block = &body.blocks[i];
         if i != 0 {
@@ -397,6 +403,11 @@ pub(super) fn emit(
             }
             Terminator::Branch { condition, yes, no } => {
                 let cond = f.get(*condition);
+                if let Some(flag) = f.decision(i) {
+                    // `no` then `yes`: the taken arm's flag is the first plus
+                    // whether the condition held.
+                    f.set_flag(flag, Some(cond));
+                }
                 let mut ya = std::mem::take(&mut f.calls.edges[0]);
                 let mut na = std::mem::take(&mut f.calls.edges[1]);
                 let yes = f.edge(*yes, &mut ya);
@@ -411,14 +422,28 @@ pub(super) fn emit(
             } => {
                 let value = f.get(*value);
                 let mut args = std::mem::take(&mut f.calls.edges[0]);
-                for arm in arms.get(&body.pools.arms).unwrap() {
+                let flags = f.decision(i);
+                for (n, arm) in arms.get(&body.pools.arms).unwrap().iter().enumerate() {
                     let test =
                         f.b.ins()
                             .icmp_imm_s(ir::condcodes::IntCC::Equal, value, arm.value as i64);
                     let next = f.b.create_block();
-                    let target = f.edge(arm.edge, &mut args);
-                    f.b.ins().brif(test, target, &args, next, &[]);
+                    if let Some(flag) = flags {
+                        // A coverage arm sets its flag on its own edge.
+                        let taken = f.b.create_block();
+                        f.b.ins().brif(test, taken, &[], next, &[]);
+                        f.b.switch_to_block(taken);
+                        f.set_flag(flag + n as u32, None);
+                        let target = f.edge(arm.edge, &mut args);
+                        f.b.ins().jump(target, &args);
+                    } else {
+                        let target = f.edge(arm.edge, &mut args);
+                        f.b.ins().brif(test, target, &args, next, &[]);
+                    }
                     f.b.switch_to_block(next);
+                }
+                if let Some(flag) = flags {
+                    f.set_flag(flag + arms.len, None);
                 }
                 let target = f.edge(*otherwise, &mut args);
                 f.b.ins().jump(target, &args);

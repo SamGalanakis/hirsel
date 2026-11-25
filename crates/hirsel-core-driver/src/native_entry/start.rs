@@ -35,6 +35,9 @@ pub(super) fn emit(
         hirsel_core_layout::Arch::X86_64 => f.void_call("hirsel_core_init_isa", &[])?,
         hirsel_core_layout::Arch::Aarch64 => {}
     }
+    if plan.coverage {
+        coverage_open(&mut f)?;
+    }
     let argc = f.b.ins().uextend(I64, parameters[0]);
     let n = f.b.ins().iadd_imm_s(argc, -1);
     let one = f.constant(1);
@@ -259,10 +262,44 @@ pub(super) fn emit(
         report::emit(&mut f, path)?;
     }
     let status = f.b.ins().uextend(I32, status);
+    if plan.coverage {
+        // The test's result decides the exit status here, so the outcome is
+        // written here: a run that never returns leaves it "not recorded".
+        f.void_call("hirsel_core_coverage_outcome", &[status])?;
+    }
     f.b.ins().return_(&[status]);
     f.b.seal_all_blocks();
     f.b.finalize(f.object.target_config());
     unwind.define(object, main, &mut context).map_err(error)
+}
+
+/// Map the flag section onto the raw file before user code and before any
+/// thread starts. The entry's own eight zero bytes are a record-free padding
+/// word, so the section and its linker-defined bounds exist in every coverage
+/// executable, also one whose bodies have no sites.
+fn coverage_open(f: &mut Code<'_, '_>) -> Result<()> {
+    let mut padding = DataDescription::new();
+    padding.define(vec![0; 8].into_boxed_slice());
+    padding.set_align(8);
+    padding.set_custom_section(hirsel_core_ir::coverage::SECTION);
+    padding.set_used(true);
+    let id = f
+        .object
+        .declare_anonymous_data(true, false)
+        .map_err(error)?;
+    f.object.define_data(id, &padding).map_err(error)?;
+    let mut bound = |name: String| -> Result<Value> {
+        let id = f
+            .object
+            .declare_data(&name, Linkage::Import, true, false)
+            .map_err(error)?;
+        Ok(f.address(id))
+    };
+    let section = hirsel_core_ir::coverage::SECTION;
+    let start = bound(format!("__start_{section}"))?;
+    let stop = bound(format!("__stop_{section}"))?;
+    let length = f.b.ins().isub(stop, start);
+    f.void_call("hirsel_core_coverage_open", &[start, length])
 }
 
 fn argv(f: &mut Code<'_, '_>, argv: Value, args: Value, n: Value) -> Result<()> {

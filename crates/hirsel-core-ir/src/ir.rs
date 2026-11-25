@@ -1630,6 +1630,11 @@ pub struct Module {
     /// Insert engine observations only while emitting a recording build.
     #[serde(skip)]
     pub law_observation: bool,
+    /// Flag the sites of bodies from these packages while emitting a coverage
+    /// build ([`crate::coverage`]). Like `law_observation`, a condition of the
+    /// emission, outside the checked body encoding.
+    #[serde(skip)]
+    pub coverage: Option<crate::coverage::Scope>,
     /// Callable code variants' identities, separate from PROG-5 semantic instances:
     /// an optimiser may emit several code bodies for one instance without changing
     /// the identity of its function values.

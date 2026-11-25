@@ -9,7 +9,7 @@
 //   rules, and equal exits.
 // - L4 reach: an edit to an item main does not reach leaves it equal (c03,
 //   r1); an edit inside the reach changes it (s03, s04).
-// - L6 configuration: a root limit alone leaves it equal (s45).
+// - L6 configuration: a root limit alone leaves it equal (s45), as does coverage on A.
 // - Engines: Cranelift, LLVM dev and LLVM release give one revision for every
 //   corpus program. Oracle: the definition has no engine input.
 // - Determinism: a primed store (the other side built first, then a repeat)
@@ -318,13 +318,12 @@ fn revision_request(app: &str, std: Option<&Path>, dir: &Path) -> CheckRequest {
 type Config = (Backend, bool, u64);
 const CRANELIFT: Config = (Backend::Cranelift, false, 1_048_576);
 /// Check and build `app` in `dir` (its stores primed by whatever was built
-/// there before); the entry's revision and the executable's exit.
-fn revision_build(app: &str, std: Option<&Path>, dir: &Path, (backend, optimize, root_limit): Config) -> (ContentHash, Option<i32>) {
-    let product = Driver::default()
-        .check(revision_request(app, std, dir), &mut Meter::new(false))
-        .unwrap();
+/// there before), with coverage of the app package when `coverage`; the
+/// entry's revision and the executable's exit.
+fn revision_build(app: &str, std: Option<&Path>, dir: &Path, (backend, optimize, root_limit): Config, coverage: bool) -> (ContentHash, Option<i32>) {
+    let product = Driver::default().check(revision_request(app, std, dir), &mut Meter::new(false)).unwrap();
     assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
-    let options = NativeOptions { optimize, root_limit, ..native_options(backend, dir) };
+    let options = NativeOptions { optimize, root_limit, coverage: coverage.then(|| [package("app")].into()), ..native_options(backend, dir) };
     let built = product
         .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
         .unwrap();
@@ -359,8 +358,8 @@ fn revision_laws_and_reuse() {
         std::fs::create_dir_all(&b_dir).unwrap();
         let a_std = revision_std(case.std.0, dir.path(), "a");
         let b_std = revision_std(case.std.1, dir.path(), "b");
-        let a = revision_build(case.a, a_std.as_deref(), &a_dir, CRANELIFT);
-        let b = revision_build(case.b, b_std.as_deref(), &b_dir, CRANELIFT);
+        let a = revision_build(case.a, a_std.as_deref(), &a_dir, CRANELIFT, false);
+        let b = revision_build(case.b, b_std.as_deref(), &b_dir, CRANELIFT, false);
         let name = case.name;
         assert_eq!(a.1, Some(0), "{name}: A runs clean");
         match case.expect {
@@ -374,10 +373,11 @@ fn revision_laws_and_reuse() {
             }
         }
         // B into A's store (partly reused), then A again (wholly reused).
-        let primed_b = revision_build(case.b, b_std.as_deref(), &a_dir, CRANELIFT);
-        let primed_a = revision_build(case.a, a_std.as_deref(), &a_dir, CRANELIFT);
+        let primed_b = revision_build(case.b, b_std.as_deref(), &a_dir, CRANELIFT, false);
+        let primed_a = revision_build(case.a, a_std.as_deref(), &a_dir, CRANELIFT, false);
         assert_eq!(primed_b.0, b.0, "{name}: B in a primed store");
         assert_eq!(primed_a.0, a.0, "{name}: A again in a primed store");
+        assert_eq!(revision_build(case.a, a_std.as_deref(), &a_dir, CRANELIFT, true), a, "{name}: coverage Identity");
     }
     // L6: the root limit alone.
     let dir = tempfile::tempdir().unwrap();
@@ -385,8 +385,8 @@ fn revision_laws_and_reuse() {
     let (a_dir, b_dir) = (dir.path().join("a"), dir.path().join("b"));
     std::fs::create_dir_all(&a_dir).unwrap();
     std::fs::create_dir_all(&b_dir).unwrap();
-    let a = revision_build(&app, None, &a_dir, CRANELIFT);
-    let b = revision_build(&app, None, &b_dir, (Backend::Cranelift, false, 0));
+    let a = revision_build(&app, None, &a_dir, CRANELIFT, false);
+    let b = revision_build(&app, None, &b_dir, (Backend::Cranelift, false, 0), false);
     assert_eq!(a.0, b.0, "s45: L6 a root limit is not a revision input");
     revision_warm_slot_order_is_current();
 }
@@ -432,7 +432,7 @@ fn revision_engines_agree() {
                 .map(|(n, config)| {
                     let at = dir.path().join(format!("e{n}"));
                     std::fs::create_dir_all(&at).unwrap();
-                    revision_build(app, std.as_deref(), &at, config)
+                    revision_build(app, std.as_deref(), &at, config, false)
                 })
                 .collect();
             let name = case.name;

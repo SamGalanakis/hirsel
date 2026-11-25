@@ -20,6 +20,7 @@ mod abi;
 pub use abi::{Signature as NativeSignature, c_param};
 mod calls;
 mod case;
+mod coverage;
 mod debug;
 mod drop;
 mod failure;
@@ -485,6 +486,7 @@ fn emit(
         frontend: FunctionBuilderContext::new(),
     };
     let mut debug_functions = Vec::new();
+    let mut fragment = c::coverage::Fragment::default();
     for (index, f) in input.functions.iter().enumerate() {
         if f.body.is_none() {
             continue;
@@ -496,7 +498,11 @@ fn emit(
         object.clear_context(context);
         context.func.signature = sig.clif.clone();
         let builder = FunctionBuilder::new(&mut context.func, builder_context);
-        function::emit(&mut object, builder, f, sig, &tables)?;
+        let record = coverage::declare(&mut object, input, c::FuncId(index as u32))?;
+        function::emit(&mut object, builder, f, sig, &tables, record.as_ref())?;
+        if let Some(record) = record {
+            fragment.add(input, c::FuncId(index as u32), &record.sites);
+        }
         drop(build);
         tables.define(observer, &mut object, functions[index], context)?;
         if options.debug_lines {
@@ -521,5 +527,6 @@ fn emit(
     Ok(Object {
         bytes: crate::object::finish(product).map_err(error)?,
         debug,
+        coverage: input.coverage.is_some().then_some(fragment),
     })
 }

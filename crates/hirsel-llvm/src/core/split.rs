@@ -105,6 +105,7 @@ pub fn split_native_object(
         out.push(NativeObject {
             bytes: part.write(),
             debug,
+            coverage: None,
         });
     }
     if let Some(lost) = (0..input.sections.len())

@@ -22,8 +22,12 @@ reversible defaults of the same day:
 
 D3 to D6 are reversible until slice C4 publishes the profile format.
 
-Nothing here is built yet. Slices C1 to C5 build it in order, and each section below says
-which slice owns it.
+Slices C1 to C5 build this in order, and each section below says which slice owns it.
+
+Version note (2026-11-25, coverage-c1-cranelift-2551): slice C1 built the sites, the switch,
+the Cranelift flag stores, the raw file and the map fragments. It amended "Sites" with what
+the store sample showed (the site rule is not yet accepted), the header's section offset,
+the id framing, the outcome, the entry's padding record, fragment naming, and "Caching".
 
 These are out of scope:
 
@@ -81,10 +85,12 @@ observable. If a metering pass changes a result because of an unrelated store, t
 "Same observations" law goes red, and the fix belongs in that pass.
 
 **Zero cost when off.** A build without the switch computes no site table, emits no store,
-has no `hirsel_cov` section and links no coverage runtime function. Its object, release-part
-and executable keys are the keys it has today. The coverage runtime function is reached only
-from a coverage executable's entry, and a plain link drops it, so the existing runtime
-archives serve both builds and no archive is added.
+has no `hirsel_cov` section and calls no coverage runtime function. Its objects are the
+bytes, and its object, release-part and executable keys the keys, it has without the switch.
+The coverage runtime functions are called only from a coverage executable's entry. A link
+that collects unused sections drops them, and a dev link keeps them uncalled, as it keeps
+every unused runtime function. The existing runtime archives serve both builds and no
+archive is added.
 
 **Program-invisible.** No language or std operation reads a flag, and the program cannot
 ask whether coverage is on. The runtime removes `HIRSEL_COVERAGE` from the environment
@@ -141,18 +147,40 @@ and every code variant of a body (the step-free and returnable copies) writes th
 sites. Offsets are relative to the item, so an edit elsewhere in the file leaves the keys
 unchanged.
 
-**Provisional mechanism.** Which decisions carry an anchor is a fact of the lowering, and
-this contract does not assume one. That covers how `?`, `&&`, `||` and generated checks
-lower, and whether an edge marked cold is ever a source arm. Slice C1 settles it. C1 dumps
-the site table for the `store` package and reads a sample against the source. The rule
-above is accepted when:
+**The rule is not yet accepted.** Which decisions carry an anchor is a fact of the lowering.
+Slice C1 dumped the site table of the `store` package, over the bodies its `tiered` tests
+reach: 1,556 bodies with 12,807 decisions, all two-way branches. C1 read a sample against the
+source. The rule was to be accepted when:
 
-- every `if`, `else if`, `match` arm, `?`, `&&` and `||` in the sample has its arms in the
-  table;
-- no site in the sample points at code the source did not write.
+1. every `if`, `else if`, `match` arm, `?`, `&&` and `||` in the sample has its arms in the
+   table;
+2. no site in the sample points at code the source did not write.
 
-If the sample fails a condition, C1 narrows or widens the rule by anchor and edge kind and
-amends this section before C4 publishes keys. The key format does not change.
+Condition 1 holds:
+
+- An `if` or `while` condition, and `for`, are decisions at the condition's or loop's range.
+- A `?` is a decision at the `?` expression.
+- A `match` and `if let` lower to one two-way decision per refutable pattern, at the
+  pattern. No source construct lowers to a switch; only generated clone and key glue does,
+  and it carries no anchor.
+- `a && b` and `a || b` are a decision at `a`, whose arms are short-circuit and evaluate
+  `b`, and the construct that reads the result decides again at the whole expression.
+
+Condition 2 fails. The front gives the terminators it generates inside a source expression
+that expression's anchor. About 4,400 decisions sit at a built-in call (`list.push`,
+`list.try_reserve`, `list.put_word_le`, `int.checked_add`, `int.narrow` and the like), about
+900 more at indexing and field reads, and more at `==` on non-scalar values. Neither the
+cold mark on an edge nor where an arm's target lies tells them apart from source decisions.
+`?`, for one, has every target inside its own range. No rule over the IR as it is accepts
+condition 2.
+
+The fix is in the front: a generated terminator must not take its expression's anchor as a
+decision anchor, while keeping a place for debug lines and law rows. Block anchors are part
+of the body hash, so that change moves every body hash and revision once. It is its own
+slice, and it lands before C4 publishes keys. Until it lands, a report counts generated arms.
+The key format does not change. One key can name decisions in more than one code variant of
+a body. Their sites are equal, and only the first anchored place of an arm's target can
+differ.
 
 **Scope.** Only items of packages given as source in the request have sites: the workspace
 members, plus `core` and `std` when they are given as source (`--source-core`,
@@ -274,8 +302,10 @@ A map is one JSON document:
 - `src` is the first 8 bytes, in hex, of SHA-256 over the function's source bytes without
   doc comments, framed by its length in eight little-endian bytes, as in `hirsel.laws`.
 
-The driver builds the map at link by joining the map fragment stored with each linked object
-under that object's key. Positions come from the native source table, as law rows do.
+The driver builds the map at link by joining the map fragment stored with each linked
+object. A fragment is named by the object's identity, under the domain
+`hirsel.core-object-coverage.v1`, and is written before the object's root record. Positions
+come from the native source table, as law rows do.
 
 ### The raw file
 
@@ -305,17 +335,18 @@ the run reads as `unobserved`.
 | 0 | 8 | magic, the bytes `HIRSELCV` |
 | 8 | 4 | format version, 1 |
 | 12 | 4 | page size |
-| 16 | 8 | offset of the section copy in the file (one page) |
-| 24 | 8 | length of the section copy |
+| 16 | 8 | offset of the section in the file: one page plus the section's offset in its first page |
+| 24 | 8 | length of the section |
 | 32 | 4 | seed present: 1 when `HIRSEL_TEST_SIM_SEED` parsed as a u64 at startup, else 0 |
 | 36 | 4 | outcome: 0 not recorded, 1 passed, 2 failed |
 | 40 | 8 | the seed, or 0 |
 | 48 | 4 | end mark, `0x45444F4E`, written last at startup |
 
 Reading the seed is not an effect of the program: the runtime reads the variable as given and
-leaves it in place. The outcome is written once, by the entry code, when the test's result
-decides the exit status. A run killed or aborted before that leaves outcome 0. A reader
-counts outcome 0 as failed, because PROG-4 fails a test that a stop ends.
+leaves it in place. The outcome is written once, by the entry code, from the exit status the
+entry returns: 1 when it is 0, else 2. A run killed or aborted before that, or one that ends
+by calling `exit` directly, leaves outcome 0. A reader counts outcome 0 as failed, because
+PROG-4 fails a test that a stop ends.
 
 **Records.** The section copy is a sequence of records, each starting at an 8-byte-aligned
 offset:
@@ -328,9 +359,10 @@ offset:
 | flags, one byte per site, 0 or 1 | `n` |
 | zero padding to the next 8-byte boundary | 0 to 7 |
 
-Any zero bytes between records are padding, and a reader skips them in 8-byte steps. `id` is
-SHA-256 over the domain tag `hirsel.coverage.sites.v1` and then each site key in order,
-each framed by its length in eight little-endian bytes. Two bodies with the same sites share
+Any zero bytes between records are padding, and a reader skips them in 8-byte steps. The
+entry adds one 8-byte zero record, so the section exists in every coverage executable. `id`
+is SHA-256 over the domain tag `hirsel.coverage.sites.v1` and then each site key in order,
+each of them, the tag included, framed by its length in eight little-endian bytes. Two bodies with the same sites share
 an id. Their flags are OR-ed when the file is read. A raw record whose id no given map holds
 is an error naming the file, never a silent drop.
 
@@ -536,22 +568,24 @@ together.
 
 - **Options.** `NativeOptions` gains `coverage`, the scope or none. The places that set the
   module's law-observation field set the coverage field from it.
-- **Keys.** The native environment tuple gains whether coverage is on, beside recording.
-  Object, release-part and executable keys already hash that tuple, so coverage objects and
-  plain objects never collide, and they share one store.
-- **The edit loop is untouched.** A plain build's tuple has the field false. Nothing it
-  looks up or writes changes, and a `--coverage` run evicts nothing.
+- **Keys.** The native environment tuple gains the coverage scope, appended only when
+  coverage is on. Object, release-part and executable keys already hash that tuple, so
+  coverage objects and plain objects never collide, and they share one store. The request
+  record's native tuple appends it the same way. The incremental link frame does not take
+  it, so a coverage build links from scratch.
+- **The edit loop is untouched.** A plain build's tuple has the bytes it has without the
+  switch. Nothing it looks up or writes changes, and a `--coverage` run evicts nothing.
 - **Installed std.** Std is out of scope unless given as source, so the release std's key
   does not take the field. A coverage run over an installed std compiles only the program.
-- **Map fragments** are stored with each object under the object's key.
+- **Map fragments** are stored with each object, named by its identity.
 - **Test passes.** The pass cache schema becomes 5. A cached pass gains its raw profile. A
   `--coverage` run reuses a pass only when the pass was recorded with its profile, the rule
   `--laws` uses for rows. This is sound because a flag profile is a function of a determined
   run, and only parameterless tests are cached. Runs under `--sim`, `--replay` or
   `--property-corpus` are never cached, with or without coverage.
-- **C1 confirms** that the test key's build-record digest covers the environment tuple,
-  and that the resident compiler's memo is keyed by it. If either does not, C1 adds the
-  coverage field there.
+- **C1 confirmed** that the test key's build-record digest covers the environment tuple,
+  and that the resident compiler's memo is keyed by it. A plain pass is not served to a
+  coverage run.
 
 ## Laws
 

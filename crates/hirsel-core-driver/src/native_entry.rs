@@ -67,6 +67,11 @@ pub(crate) struct Plan<'a> {
     directories: &'a [String],
     charge_report: Option<Vec<u8>>,
     recording: bool,
+    /// A coverage executable's entry maps its flags onto the raw file
+    /// (`docs/coverage.md`, "The raw file"). Absent from a plain plan's
+    /// encoding, which is the encoding it had before coverage.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    coverage: bool,
     replay: Option<&'a crate::native::ReplayPlan>,
     foreign: Vec<foreign::Function<'a>>,
     exec: Vec<(String, Vec<u8>, [u8; 32])>,
@@ -251,6 +256,7 @@ impl<'a> Plan<'a> {
             cred_grants,
             directories: &options.directories,
             recording: options.recording,
+            coverage: options.coverage.is_some(),
             replay: options.replay.as_ref(),
             foreign: vec![],
             exec,

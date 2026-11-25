@@ -101,6 +101,7 @@ fn core_operations(backend: Backend) {
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
             recording: false,
+            coverage: None,
             replay: None,
             backend,
             optimize: false,
@@ -196,6 +197,7 @@ fn counted_operations(backend: Backend) {
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
             recording: false,
+            coverage: None,
             replay: None,
             backend,
             optimize: false,
@@ -276,6 +278,7 @@ fn args_operations(backend: Backend, len_only: bool) {
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
             recording: false,
+            coverage: None,
             replay: None,
             backend,
             optimize: false,
@@ -364,6 +367,7 @@ fn stream_operations(backend: Backend) {
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
             recording: false,
+            coverage: None,
             replay: None,
             backend,
             optimize: false,
@@ -443,6 +447,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let options = NativeOptions {
         recording: false,
+        coverage: None,
         replay: None,
         backend,
         optimize,
@@ -544,6 +549,7 @@ fn host_operations(backend: Backend) {
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
             recording: false,
+            coverage: None,
             replay: None,
             backend,
             optimize: false,
@@ -657,6 +663,7 @@ pub fn proof_clone_run() -> u64 {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let options = NativeOptions {
         recording: false,
+        coverage: None,
         replay: None,
         backend,
         optimize: false,

@@ -216,6 +216,45 @@ fn test_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) ->
     }
 }
 
+// SDK §Transport and STORE-SPEC AH2: the native client names its call stream by the keyed
+// time in Welcome, so under a live wall clock (past the stream retention) the place admits
+// it and two calls at p 0 and p 1 both commit. A stream named at t = 0 is older than the
+// retention and is refused HistoryUnavailable.
+pub fn law_client_live_stream(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    want(host.wall_ms(clock) > store.STREAM_RETENTION_MS, "client_live_stream: the wall clock is not live")
+    let put_entry = client.transact_entry(code.describe(write))
+    let f = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, Some(ingress.binding()), false), 5000u64))
+    let Some(address) = fixture.status(f).addr else {
+        fail("client_live_stream: the place has no address")
+    }
+    let live_keys = result.unwrap(client.entry_keys(code.describe(fixture_place)))
+    let mut c = result.unwrap(client.client_at(net, clock, random, live_keys, runner.wire_defaults(65536u64).socket, address, b"127.0.0.1", Some(ingress.credential(random)), 0u64, 5000u64))
+    let first = match result.unwrap(client.call(mut c, put_entry, 5u64, 2000u32)).answer {
+        Returned(Ok(at)) => at >= 1u64,
+        Refused(HistoryUnavailable) => fail("client_live_stream: the client's stream was refused HistoryUnavailable"),
+        _ => false
+    }
+    let second = match result.unwrap(client.call(mut c, put_entry, 6u64, 2000u32)).answer {
+        Returned(Ok(_)) => true,
+        _ => false
+    }
+    client.close(take c)
+    let stopped = match fixture.end(take f, 5000u64) {
+        Ok(_) => true,
+        Error(_) => false
+    }
+    first && second && stopped
+}
+
+@test
+fn test_client_live_stream(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_client_live_stream(clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
 pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
@@ -449,7 +488,7 @@ fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net:
         Ok(take connected) => take connected,
         Error(_) => fail("lag: connection refused inside the lag window"),
     }
-    wire_client.send_frame(connection, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, wire_client.slot(client_keys(), k_write()), 1000u32, u64_arg(43u64)))
+    wire_client.send_frame(connection, Call(connection.stream, 0u64, wire_client.slot(client_keys(), k_write()), 1000u32, u64_arg(43u64)))
     match wire_client.next(connection) {
         Ok(Batch(_, _, _, done)) => {
             want(list.len(done) == 1u64 && done[0u64].p == 0u64, "lag: wrong outcome count")
@@ -566,7 +605,7 @@ fn unit_grant(seed: (), unused_handles: Hd, take context: runner.TriggerContext)
 }
 
 fn ping_call(client: wire_client.Conn, ping_keys: List[Bytes], key: Bytes, position: u64, arg: u64) -> u64 waits {
-    wire_client.send_frame(client, Call(store.StreamId(t: 0u64, n: 0u64), position, wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
+    wire_client.send_frame(client, Call(client.stream, position, wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
     loop {
         match wire_client.next(client) {
             Ok(Batch(_, _, _, done)) => for item in done {

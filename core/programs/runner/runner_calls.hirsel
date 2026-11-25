@@ -859,7 +859,7 @@ fn drive_granted_copies(take d: Drive) -> () waits {
     let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, take unbound, runner.grant_calls_of(running), d.head, d.post, code.describe(stamp_place), requested, None, config, 2097152u64))
     // The minted offset is 40. Each call independently returns offset + input.
     for p in 0u64 .. 2u64 {
-        wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 0u64), p, 0u32, 10000u32, u64_arg(p + 1u64)))
+        wire_client.send_frame(wire, Call(wire.stream, p, 0u32, 10000u32, u64_arg(p + 1u64)))
         let returned = match wire_client.next(wire) {
             Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 && done[0u64].p == p => match done[0u64].outcome {
                 Returned(raw) => match std.codec.decode(std.codec.of_u64(), raw) {

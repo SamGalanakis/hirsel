@@ -135,6 +135,9 @@ dirs = ["."]
 [tests.runs."runner@1/runner_calls/test_fixture_granted"]
 limit = 1342177280
 
+[tests.runs."runner@1/runner_calls/test_client_live_stream"]
+limit = 1342177280
+
 [tests.runs."runner@1/runner_calls/test_bind_granted"]
 limit = 1342177280
 

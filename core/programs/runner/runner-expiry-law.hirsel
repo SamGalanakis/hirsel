@@ -103,7 +103,7 @@ fn drive_expiry_late(take job: Expiring) -> () waits {
     list.push(mut credential, 2u8)
     list.push(mut credential, 60u8)
     let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, Some(take binding), runner.grant_calls_of(running), d.head, d.post, code.describe(expiry_hold_place), requested, Some(take credential), config, 2097152u64))
-    wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 10000u32, u64_arg(7u64)))
+    wire_client.send_frame(wire, Call(wire.stream, 0u64, 0u32, 10000u32, u64_arg(7u64)))
     clock.set_wall(mut hand, 1050u64)
     clock.advance_to(mut hand, 1u64)
     expiry_ends(wire, string.from("bind_expiry: a call answered after the expiry was delivered"))

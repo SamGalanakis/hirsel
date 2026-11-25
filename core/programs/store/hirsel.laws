@@ -142,6 +142,7 @@ store@1/store/journal_test_worker src=a85d5d34d054d8e4 sig=bc93cb67810f9b07 run=
 store@1/store/journal_window_prefix src=71c8802406ee816a sig=02c367e0e976d49f run=aea7d2502fa22260 bug=- oracle=- rows=pending
 store@1/store/log_changes_and_tail_window src=17ed4efb7b796d0f sig=b07844b5df77127f run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/log_dense_and_append_fill src=f87123bd2e998fbe sig=8c0b3f68cffcd428 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/log_follower_dropped_candidate src=4ad6aa74640a6492 sig=47d31dad7a434532 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_follower_refuses_expired_catch_up src=79ee902d999f1751 sig=d1f15b0009f1d76b run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_level_uses_host_barrier src=01bebd20fb174a03 sig=20b3f24660c5bd92 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_trim_bounded_and_dense src=22d9efa86366f26f sig=0613b4e6c8fcb93d run=ea720f3846592392 bug=- oracle=- rows=pending

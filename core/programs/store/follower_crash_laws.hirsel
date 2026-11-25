@@ -82,3 +82,43 @@ fn disk_crash_live_read_write(d: Dir, c: Clock, tasks: Tasks, out: Stdout, scena
     close_follower_service(take service)?
     Ok(published)
 }
+
+// BL10 (2284 G2): a candidate the caller dropped at its deadline leaves the
+// published capture P in place. The next attempt sees the same key, but it
+// names P, not the dropped candidate, so it must capture the writer's acked
+// head again rather than answer "nothing new" until the dead writer writes.
+@test
+fn log_follower_dropped_candidate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut writer = open(tasks, directory, c, r, options)?
+    let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut writer, rows, 1, 10) {
+        fail("G2: the first row was refused")
+    }
+    close(take writer)?
+    let mut progress = LogCaptureProgress(next_id: 1, last: None)
+    let forever = 18446744073709551615u64
+    let Some(published) = log_follow_capture(directory, c, forever, mut progress, None, forever, None)? else {
+        fail("G2: the first capture published nothing")
+    }
+    let mut later = open(tasks, directory, c, r, options)?
+    let again = table(mut later, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut later, again, 1, 20) {
+        fail("G2: the second row was refused")
+    }
+    let acked = version(snapshot(later))
+    close(take later)?
+    for _ in 0u64 .. 2 {
+        let Some(candidate) = log_follow_capture(directory, c, forever, mut progress, Some(published.store), forever, Some(arc.share(published)))? else {
+            fail("G2: a capture behind the acked head answered nothing new")
+        }
+        if candidate.state.tips[0u64].head != acked {
+            fail("G2: the capture missed the acked head")
+        }
+        // The caller's deadline passes before the swap; the candidate drops.
+        let _ = take candidate
+    }
+    Ok(())
+}

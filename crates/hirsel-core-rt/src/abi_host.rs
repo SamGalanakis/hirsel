@@ -95,6 +95,10 @@ pub(crate) unsafe fn format_cause_at(
                 std::str::from_utf8_unchecked(data),
                 site
             )
+        } else if cause.kind() == crate::causes::CAPACITY {
+            // `Cause::capacity` keeps `c`'s words in the carrier's data and length.
+            let (requested, available) = (cause.message.data.addr(), cause.message.len);
+            format!("{name}(requested: {requested}, available: {available}) at {site}")
         } else {
             format!("{name} at {site}")
         }

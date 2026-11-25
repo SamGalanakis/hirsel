@@ -62,6 +62,11 @@ program's, and come after cleanup; a failure in that cleanup is the run's outcom
 (101) and the error's line is not written. An `Exit` carries only a status, so it writes
 nothing.
 
+A `Capacity(c)` cause's line is `Capacity(requested: N, available: A) at SITE`, with `c`'s
+two fields ([MEM-21](budgets.md#mem-21-admission)). When the refusing limit was
+the run's root limit `L`, the line goes on with
+` (root limit L bytes; raise it with --limit or the manifest)`.
+
 The text of an error value is the value written as Hirsel source, from `E`'s declarations:
 
 - A record is `Name(field: v, ..)`, a tuple `(v, ..)` and the unit `()`.

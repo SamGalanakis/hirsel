@@ -376,7 +376,7 @@ pub unsafe extern "C" fn hirsel_core_raise_capacity(
         available,
     };
     // SAFETY: the caller supplies the live context and unused obligation.
-    unsafe { hirsel_core_raise(context, Cause::capacity(capacity, site)) };
+    unsafe { causes::record_capacity(&mut *context, capacity, site) };
 }
 /// Deliver the current chain by ownership transfer, without admission/allocation.
 /// # Safety

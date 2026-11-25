@@ -151,6 +151,8 @@ pub struct Context {
     pub(crate) spare_isolate_cell: Option<Box<std::mem::MaybeUninit<causes::Cell>>>,
     pub(crate) foreign: *const foreign::Run,
     pub(crate) root_limit: u64,
+    /// The cause in `causes` that the root limit refused, if any (PROG-3).
+    pub(crate) root_refusal: *const causes::Cause,
 }
 
 const _: () =
@@ -234,6 +236,7 @@ impl Context {
             spare_isolate_cell: None,
             foreign: std::ptr::null(),
             root_limit,
+            root_refusal: std::ptr::null(),
         }
     }
 

@@ -24,6 +24,8 @@ fn allocation() -> Result[(), Capacity] {
     list.try_reserve(mut values, 8u64)
 }
 @test
+fn raised_allocation() -> Result[(), ()] { let _: Bytes = list.with_capacity(8u64); Ok(()) }
+@test
 fn granted(out: Stdout) -> Result[(), ()] waits { result.unwrap(stdout.write(out, "test ran\n")); Ok(()) }
 "#;
 fn prog4_request(source: &str, dir: &Path) -> CheckRequest {
@@ -43,7 +45,7 @@ fn prog4_runs(backend: Backend) {
     let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
     assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
     assert!(product.rechecked.is_empty());
-    assert_eq!(product.tests().map(|d| d.0.name.as_str()).collect::<Vec<_>>(), ["allocation", "error", "exit_seven", "exit_zero", "failed", "good", "granted", "own_error", "own_success", "stopped"]);
+    assert_eq!(product.tests().map(|d| d.0.name.as_str()).collect::<Vec<_>>(), ["allocation", "error", "exit_seven", "exit_zero", "failed", "good", "granted", "own_error", "own_success", "raised_allocation", "stopped"]);
     let mut options = native_options(backend, dir.path());
     let test = |name: &str| DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
     for (name, limit, grants, code, stdout, stderr) in [
@@ -59,6 +61,7 @@ fn prog4_runs(backend: Backend) {
         // No room beyond main's 288: reserving 8 one-byte elements asks for 8.
         ("allocation", 288, 0, 1, "", "error: Capacity(requested: 8, available: 0)\n"),
         ("allocation", 296, 0, 0, "", ""),
+        ("raised_allocation", 288, 0, 101, "", "Capacity(requested: 8, available: 0) at app@1/main.hirsel:"), // and the root limit's hint
         ("good", 287, 0, 103, "", "not started: the root limit is below main's startup charge of 288 bytes\n"),
         ("granted", 4096, 0, 103, "", "not started: grant `out` is not in the run's configuration\n"),
         ("granted", 4096, 1 << 4, 0, "test ran\n", ""),
@@ -74,10 +77,11 @@ fn prog4_runs(backend: Backend) {
         assert_eq!(outcome.output.stdout, stdout.as_bytes(), "{name}");
         if name == "stopped" {
             assert!(outcome.output.stderr.ends_with(b"Stack\n"), "{outcome:?}");
-        } else if matches!(name, "failed" | "own_error") {
+        } else if matches!(name, "failed" | "own_error" | "raised_allocation") {
             let lines = String::from_utf8(outcome.output.stderr).unwrap();
             assert_eq!(lines.lines().count(), 1, "{name}: {lines}");
             assert!(lines.starts_with(stderr), "{name}: {lines}");
+            assert!(name != "raised_allocation" || lines.ends_with(" (root limit 288 bytes; raise it with --limit or the manifest)\n"), "{lines}");
         } else {
             assert_eq!(outcome.output.stderr, stderr.as_bytes(), "{name}");
         }

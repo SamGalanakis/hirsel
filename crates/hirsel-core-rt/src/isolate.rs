@@ -106,6 +106,9 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
             };
         }
 
+        if caught.iter().any(|c| std::ptr::eq(c, context.root_refusal)) {
+            context.root_refusal = std::ptr::null();
+        }
         let used = reservation.used;
         if used {
             let cell = reservation

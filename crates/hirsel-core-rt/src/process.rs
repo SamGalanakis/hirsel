@@ -499,11 +499,17 @@ unsafe fn run_config(
                 if let Some(describe) = config.describe {
                     let line = describe(config.state, cause);
                     (config.diagnostic)(config.state, line.data, line.len);
-                    diagnostic(config, b"\n");
                 } else {
                     diagnostic(config, crate::abi_host::format_cause(cause).as_bytes());
-                    diagnostic(config, b"\n");
                 }
+                if std::ptr::eq(cause, context.root_refusal) {
+                    let limit = config.root_limit;
+                    let hint = format!(
+                        " (root limit {limit} bytes; raise it with --limit or the manifest)"
+                    );
+                    diagnostic(config, hint.as_bytes());
+                }
+                diagnostic(config, b"\n");
             }
             101
         } else {

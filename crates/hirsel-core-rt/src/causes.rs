@@ -294,6 +294,21 @@ pub unsafe fn record(context: &mut Context, cause: Cause) {
     context.causes.append(cell);
 }
 
+/// Record `Capacity(c)` for an admission the current limit refused (MEM-21);
+/// every admission charges the current limit (MEM-26). The report names a
+/// refusal by the root limit (PROG-3).
+/// # Safety
+/// As for [`record`].
+pub unsafe fn record_capacity(context: &mut Context, capacity: Capacity, site: u64) {
+    let root = context.current.is_root();
+    let mut cell = take_cell(context);
+    cell.cause = Cause::capacity(capacity, site);
+    if root {
+        context.root_refusal = &cell.cause;
+    }
+    context.causes.append(cell);
+}
+
 fn take_cell(context: &mut Context) -> Box<Cell> {
     let cell = if context.active_resource.is_null() {
         context.primary.take().unwrap()

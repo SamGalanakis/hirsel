@@ -835,6 +835,12 @@ impl Funding {
         // SAFETY: this handle pins its canonical live limit record.
         unsafe { (*self.payer.get().canonical().links()).live.capacity }
     }
+    /// Whether the live limit is a unit's root, reserved from no other (MEM-19).
+    pub(crate) fn is_root(&self) -> bool {
+        // SAFETY: this handle pins its canonical live limit record.
+        let links = unsafe { &*self.payer.get().canonical().links() };
+        links.live.parent.is_none()
+    }
 
     #[cfg(any(test, feature = "charge-observation"))]
     pub(crate) fn observation_capacity(&self) -> u64 {

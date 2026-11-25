@@ -227,9 +227,9 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 3009,
-    "raise_revision": 9,
-    "reason": "law-signature-scope-2443"
+    "lines": 3013,
+    "raise_revision": 10,
+    "reason": "ds-root-limit-msg-2523"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 4108,
@@ -398,9 +398,9 @@
     "lines": 1051
   },
   "crates/hirsel-core-rt/src/limit.rs": {
-    "lines": 1376,
-    "raise_revision": 1,
-    "reason": "w3a-b-sized-2009"
+    "lines": 1285,
+    "raise_revision": 2,
+    "reason": "ds-root-limit-msg-2523"
   },
   "crates/hirsel-core-rt/src/net.rs": {
     "lines": 1390,

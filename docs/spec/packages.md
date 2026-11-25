@@ -1853,7 +1853,7 @@ r6 = `068a6be0a352dea1d8d7faf1e80eb05040387670` (time `1700000000 +0000`, messag
 parent; its own commit is `refs/tags/v1`, `refs/heads/main` and `HEAD`'s target) is `demo@1`
 of section 12 at the top of the tree. Its `hirsel.toml` is:
 
-```toml
+```text
 [package]
 name = "demo"
 major = 1

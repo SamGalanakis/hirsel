@@ -1,0 +1,231 @@
+// Hybrid retrieval (OPTIMAL-STORE-ENDSTATE §III.3, Store 3.4): reciprocal
+// rank fusion of ranked result lists, such as a search@1 and a vector@1
+// query over the same table. Scores are sums of 1 / (c + rank) compared as
+// exact fractions, so the fused order never depends on rounding.
+/// One fused row: its key and its rank in each input list, 1 for the
+/// first, in the order the lists were given. A rank of 0 means the row is
+/// not in that list.
+pub type Hit[K] {
+    key: K,
+    ranks: List[u64]
+}
+
+// A natural number as little-endian u64 limbs with no high zero limb, so
+// zero is the empty list and a longer number is a larger one.
+type Nat = List[u64]
+
+fn nat(lo: u64, hi: u64) -> Nat {
+    let mut n: Nat = list.new()
+    if hi != 0 {
+        list.push(mut n, lo)
+        list.push(mut n, hi)
+    } else if lo != 0 {
+        list.push(mut n, lo)
+    }
+    take n
+}
+
+fn trim(mut n: Nat) {
+    while list.len(n) > 0 && n[list.len(n) - 1] == 0 {
+        list.truncate(mut n, list.len(n) - 1)
+    }
+}
+
+fn add(a: Nat, b: Nat) -> Nat {
+    let width = if list.len(a) > list.len(b) {
+        list.len(a)
+    } else {
+        list.len(b)
+    }
+    let mut sum: Nat = list.with_capacity(width + 1)
+    let mut carry = 0u64
+    for i in 0u64 .. width {
+        let x = if i < list.len(a) {
+            a[i]
+        } else {
+            0u64
+        }
+        let y = if i < list.len(b) {
+            b[i]
+        } else {
+            0u64
+        }
+        let partial = int.wrapping_add(x, y)
+        let first: u64 = if partial < x {
+            1
+        } else {
+            0
+        }
+        let limb = int.wrapping_add(partial, carry)
+        let second: u64 = if limb < partial {
+            1
+        } else {
+            0
+        }
+        list.push(mut sum, limb)
+        carry = first + second
+    }
+    list.push(mut sum, carry)
+    trim(mut sum)
+    take sum
+}
+
+fn mul(a: Nat, b: Nat) -> Nat {
+    let mut product: Nat = list.new()
+    if list.len(a) == 0 || list.len(b) == 0 {
+        return take product
+    }
+    list.fill(mut product, list.len(a) + list.len(b), 0u64)
+    for i in 0u64 .. list.len(a) {
+        let mut carry = 0u64
+        for j in 0u64 .. list.len(b) {
+            // a[i] * b[j] + product[i + j] + carry < 2^128, so the high
+            // word takes both carries without overflowing.
+            let (hi, lo) = int.mul_wide(a[i], b[j])
+            let with_limb = int.wrapping_add(lo, product[i + j])
+            let first: u64 = if with_limb < lo {
+                1
+            } else {
+                0
+            }
+            let limb = int.wrapping_add(with_limb, carry)
+            let second: u64 = if limb < with_limb {
+                1
+            } else {
+                0
+            }
+            let _ = list.set(mut product, i + j, limb)
+            carry = hi + first + second
+        }
+        let _ = list.set(mut product, i + list.len(b), carry)
+    }
+    trim(mut product)
+    take product
+}
+
+fn compare(a: Nat, b: Nat) -> Order {
+    if list.len(a) != list.len(b) {
+        return if list.len(a) < list.len(b) {
+            Less
+        } else {
+            Greater
+        }
+    }
+    let mut i = list.len(a)
+    while i > 0 {
+        i -= 1
+        if a[i] != b[i] {
+            return if a[i] < b[i] {
+                Less
+            } else {
+                Greater
+            }
+        }
+    }
+    Equal
+}
+
+// c + rank as a Nat; the sum can pass 2^64 - 1.
+fn denominator(c: u64, rank: u64) -> Nat {
+    let low = int.wrapping_add(c, rank)
+    let high: u64 = if low < c {
+        1
+    } else {
+        0
+    }
+    nat(low, high)
+}
+
+// The fused score Σ 1 / (c + rank) over the lists that hold the row, as
+// numerator and denominator: the denominator is the product of the row's
+// c + rank terms and the numerator the sum of each product leaving one out.
+fn fraction(c: u64, ranks: List[u64]) -> (Nat, Nat) {
+    let mut numerator = nat(0, 0)
+    let mut whole = nat(1, 0)
+    for rank in ranks {
+        if rank == 0 {
+            continue
+        }
+        let term = denominator(c, rank)
+        // n / d + 1 / t = (n · t + d) / (d · t)
+        numerator = add(mul(numerator, term), whole)
+        whole = mul(whole, term)
+    }
+    (take numerator, take whole)
+}
+
+type Scored[K] = (Nat, Nat, Bytes, Hit[K])
+
+// Ranked first is the greater fraction, then the smaller key bytes.
+fn ranked[K](left: Scored[K], right: Scored[K]) -> Order {
+    // left.0 / left.1 against right.0 / right.1, cross-multiplied.
+    match compare(mul(left.0, right.1), mul(right.0, left.1)) {
+        Greater => Less,
+        Less => Greater,
+        Equal => list.compare_bytes(left.2, right.2),
+    }
+}
+
+/// Fuses `lists`, each ranked best first, into the `k` rows with the
+/// greatest Σ 1 / (c + rank), best first. A row's rank in a list is its
+/// first position there, from 1; a later repeat of a key in the same list
+/// is not counted. A list that does not hold the row adds nothing. Scores
+/// are exact fractions, and equal scores rank in increasing order of the
+/// key's encoded bytes under `key`, so one set of lists gives one order.
+/// Any `c` is allowed: `c + rank` is computed without overflow.
+pub fn fuse[K](key: std.codec.Key[K], c: u64, take lists: List[List[K]], k: u64) -> List[Hit[K]] {
+    let width = list.len(lists)
+    let mut slots: Map[Bytes, u64] = map.new()
+    let mut keys: List[K] = list.new()
+    let mut encodings: List[Bytes] = list.new()
+    let mut ranks: List[u64] = list.new()
+    let mut which = 0u64
+    for take entries in take lists {
+        let mut rank = 0u64
+        for take row in take entries {
+            rank += 1
+            let mut encoded: Bytes = list.new()
+            std.codec.encode_key(key, row, mut encoded)
+            let known: Option[u64] = option.copied(map.get(slots, encoded))
+            let slot = match known {
+                Some(found) => found,
+                None => {
+                    let fresh = list.len(keys)
+                    map.insert(mut slots, clone(encoded), fresh)
+                    list.push(mut keys, take row)
+                    list.push(mut encodings, clone(encoded))
+                    for _ in 0u64 .. width {
+                        list.push(mut ranks, 0u64)
+                    }
+                    fresh
+                },
+            }
+            if ranks[slot * width + which] == 0 {
+                let _ = list.set(mut ranks, slot * width + which, rank)
+            }
+        }
+        which += 1
+    }
+    let mut scored: List[Scored[K]] = list.with_capacity(list.len(keys))
+    let mut slot = 0u64
+    let mut texts = take encodings
+    for take row in take keys {
+        let mut own: List[u64] = list.with_capacity(width)
+        for i in 0u64 .. width {
+            list.push(mut own, ranks[slot * width + i])
+        }
+        let (take numerator, take whole) = fraction(c, own)
+        let encoded = list.set(mut texts, slot, list.new())
+        list.push(mut scored, (take numerator, take whole, take encoded, Hit(key: take row, ranks: take own)))
+        slot += 1
+    }
+    std.list.sort(mut scored, ranked)
+    let mut hits: List[Hit[K]] = list.new()
+    for take (_, _, _, take hit) in take scored {
+        if list.len(hits) == k {
+            break
+        }
+        list.push(mut hits, take hit)
+    }
+    take hits
+}

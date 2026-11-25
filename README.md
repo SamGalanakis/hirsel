@@ -128,6 +128,7 @@ Additional first-party packages in this repository (bind locally with `path = ".
 - [video_packager](core/programs/video_packager/) — CMAF, HLS, and DASH media packaging.
 - [image_core](core/programs/image_core/) — image probing, transforms, and PNG, QOI, GIF, and AVIF codecs.
 - [vector](core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
+- [hybrid](core/programs/hybrid/) — exact reciprocal rank fusion of ranked lists, such as `search` and `vector` results.
 - [spatial](core/programs/spatial/) — Hilbert-curve spatial indexing over a `store` table.
 - [postgres](core/programs/postgres/) — PostgreSQL client with TLS and streaming query results.
 - [jwtbind](core/programs/jwtbind/) — JWT verification and runner caller binding.

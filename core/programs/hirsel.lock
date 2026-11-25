@@ -32,6 +32,11 @@ source = "member:h264"
 edges = ["media_bits@1", "std@1"]
 
 [[package]]
+id = "hybrid@1"
+source = "member:hybrid"
+edges = ["std@1"]
+
+[[package]]
 id = "image_core@1"
 source = "member:image_core"
 edges = ["media_bits@1", "media_container@1", "std@1"]

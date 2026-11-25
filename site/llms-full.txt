@@ -55,6 +55,7 @@ Additional first-party packages in this repository (bind locally with `path = ".
 - [video_packager](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/video_packager/) — CMAF, HLS, and DASH media packaging.
 - [image_core](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/image_core/) — image probing, transforms, and PNG, QOI, GIF, and AVIF codecs.
 - [vector](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
+- [hybrid](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/hybrid/) — exact reciprocal rank fusion of ranked lists, such as `search` and `vector` results.
 - [spatial](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/spatial/) — Hilbert-curve spatial indexing over a `store` table.
 - [postgres](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/postgres/) — PostgreSQL client with TLS and streaming query results.
 - [jwtbind](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/jwtbind/) — JWT verification and runner caller binding.

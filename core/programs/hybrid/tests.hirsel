@@ -1,0 +1,170 @@
+// Every expected order and rank below is worked out by hand in the
+// comments, from Σ 1 / (c + rank), never read from fuse's output.
+const MAX: u64 = 18446744073709551615u64
+
+fn expect(take label: String, take got: List[hybrid.Hit[u64]], order: List[u64], ranks: List[List[u64]]) {
+    if list.len(got) != list.len(order) {
+        fail(clone(label))
+    }
+    for i in 0u64 .. list.len(order) {
+        if got[i].key != order[i] || got[i].ranks != ranks[i] {
+            fail(clone(label))
+        }
+    }
+}
+
+fn ranks2(a: u64, b: u64) -> List[u64] {
+    let mut r: List[u64] = list.new()
+    list.push(mut r, a)
+    list.push(mut r, b)
+    take r
+}
+
+fn ranks3(a: u64, b: u64, c: u64) -> List[u64] {
+    let mut r: List[u64] = ranks2(a, b)
+    list.push(mut r, c)
+    take r
+}
+
+fn prefix(xs: List[u64], n: u64) -> List[u64] {
+    let mut out: List[u64] = clone(xs)
+    list.truncate(mut out, n)
+    take out
+}
+
+fn prefix_ranks(xs: List[List[u64]], n: u64) -> List[List[u64]] {
+    let mut out: List[List[u64]] = clone(xs)
+    list.truncate(mut out, n)
+    take out
+}
+
+// c = 1, so a rank r scores 1 / (1 + r).
+//   search: 30 10 40 50 1    ranks 1..5
+//   vector: 20  5 35 45 10   ranks 1..5
+//   30: 1/2                  10: 1/3 + 1/6 = 1/2
+//   20: 1/2                   5: 1/3
+//   40: 1/4                  35: 1/4
+//   50: 1/5                  45: 1/5
+//    1: 1/6
+// Three-way tie at 1/2, one of them a sum of two lists, ordered 10, 20,
+// 30 by key; neither list order nor first appearance gives that order.
+// Then 5, the 1/4 pair 35, 40, the 1/5 pair 45, 50, and 1.
+fn small_c() {
+    let mut search: List[u64] = list.new()
+    let mut vector: List[u64] = list.new()
+    for x in[30u64, 10u64, 40u64, 50u64, 1u64] {
+        list.push(mut search, x)
+    }
+    for x in[20u64, 5u64, 35u64, 45u64, 10u64] {
+        list.push(mut vector, x)
+    }
+    let mut order: List[u64] = list.new()
+    for x in[10u64, 20u64, 30u64, 5u64, 35u64, 40u64, 45u64, 50u64, 1u64] {
+        list.push(mut order, x)
+    }
+    let mut ranks: List[List[u64]] = list.new()
+    list.push(mut ranks, ranks2(2, 5))
+    list.push(mut ranks, ranks2(0, 1))
+    list.push(mut ranks, ranks2(1, 0))
+    list.push(mut ranks, ranks2(0, 2))
+    list.push(mut ranks, ranks2(0, 3))
+    list.push(mut ranks, ranks2(3, 0))
+    list.push(mut ranks, ranks2(0, 4))
+    list.push(mut ranks, ranks2(4, 0))
+    list.push(mut ranks, ranks2(5, 0))
+    for k in[100u64, 9u64, 4u64, 2u64, 0u64] {
+        let mut lists: List[List[u64]] = list.new()
+        list.push(mut lists, clone(search))
+        list.push(mut lists, clone(vector))
+        let got = hybrid.fuse(std.codec.key_u64(), 1, take lists, k)
+        let n = if k < 9 {
+            k
+        } else {
+            9u64
+        }
+        expect("hybrid law: c = 1 fusion differs from the hand-computed order", take got, prefix(order, n), prefix_ranks(ranks, n))
+    }
+}
+
+// Three lists, with keys chosen so that key order is not the fused order
+// wherever a float score would tie:
+//   search: P=2 Q=1 X=3            ranks 1..3
+//   vector: Y=6 Z=4 Q=1 P=2        ranks 1..4
+//   third:  R=5                    rank 1
+//   P: 1/(c+1) + 1/(c+4) = (2c+5) / (c² + 5c + 4)
+//   Q: 1/(c+2) + 1/(c+3) = (2c+5) / (c² + 5c + 6)
+// Equal numerators and a smaller denominator, so P ranks above Q for
+// every c, though Q has the smaller key. R and Y tie at 1/(c+1) and rank
+// 5 before 6, though Y comes first in the lists. Then Z at 1/(c+2) and X
+// at 1/(c+3). The order is P Q R Y Z X: 2 1 5 6 4 3.
+// At c = 60, P = 125/3904 and Q = 125/3906. At c = 2^64 - 1 every c + rank
+// passes 2^64 - 1, and P and Q differ by about 2/c² of their size, far
+// below an f64's resolution, as Z and X differ from R and Y.
+fn crossed(c: u64) {
+    let mut lists: List[List[u64]] = list.new()
+    let mut search: List[u64] = list.new()
+    for x in[2u64, 1u64, 3u64] {
+        list.push(mut search, x)
+    }
+    let mut vector: List[u64] = list.new()
+    for x in[6u64, 4u64, 1u64, 2u64] {
+        list.push(mut vector, x)
+    }
+    let mut third: List[u64] = list.new()
+    list.push(mut third, 5u64)
+    list.push(mut lists, take search)
+    list.push(mut lists, take vector)
+    list.push(mut lists, take third)
+    let mut order: List[u64] = list.new()
+    for x in[2u64, 1u64, 5u64, 6u64, 4u64, 3u64] {
+        list.push(mut order, x)
+    }
+    let mut ranks: List[List[u64]] = list.new()
+    list.push(mut ranks, ranks3(1, 4, 0))
+    list.push(mut ranks, ranks3(2, 3, 0))
+    list.push(mut ranks, ranks3(0, 0, 1))
+    list.push(mut ranks, ranks3(0, 1, 0))
+    list.push(mut ranks, ranks3(0, 2, 0))
+    list.push(mut ranks, ranks3(3, 0, 0))
+    let got = hybrid.fuse(std.codec.key_u64(), c, take lists, 10)
+    expect("hybrid law: ranks (1, 4) must beat (2, 3), and ties go by key", take got, order, ranks)
+}
+
+// A repeated key counts at its first position only, and an empty list or
+// no lists fuse to nothing. c = 60:
+//   search: 7 8 7     7: 1/61, its repeat at rank 3 adds nothing
+//   vector: (empty)
+//   8: 1/62
+fn repeats() {
+    let mut lists: List[List[u64]] = list.new()
+    let mut search: List[u64] = list.new()
+    for x in[7u64, 8u64, 7u64] {
+        list.push(mut search, x)
+    }
+    list.push(mut lists, take search)
+    list.push(mut lists, list.new())
+    let mut order: List[u64] = list.new()
+    list.push(mut order, 7u64)
+    list.push(mut order, 8u64)
+    let mut ranks: List[List[u64]] = list.new()
+    list.push(mut ranks, ranks2(1, 0))
+    list.push(mut ranks, ranks2(2, 0))
+    expect("hybrid law: a repeated key must count once, at its first rank", hybrid.fuse(std.codec.key_u64(), 60, take lists, 5), order, ranks)
+    let none: List[List[u64]] = list.new()
+    if list.len(hybrid.fuse(std.codec.key_u64(), 60, take none, 5)) != 0 {
+        fail("hybrid law: no lists must fuse to nothing")
+    }
+}
+
+/// bug: fused scores compared as f64 sums, or c + rank wrapping in u64,
+/// order (2, 3) above (1, 4) at c = 2^64 - 1; ties broken by list order or
+/// first appearance instead of key bytes, a repeat counted twice, or a cut
+/// at k that drops a better row, differ from the hand-computed orders.
+@test
+fn hand_fusions() -> Result[(), ()] {
+    small_c()
+    crossed(60)
+    crossed(MAX)
+    repeats()
+    Ok(())
+}

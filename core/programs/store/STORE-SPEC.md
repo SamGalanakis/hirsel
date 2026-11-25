@@ -1,4 +1,6 @@
-# STORE-SPEC v2.136: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.137: the M4 store library (lane store-spec-1001)
+
+v2.137 (store-hybrid-3-4-2792; Store 3.4): built. **Hybrid fusion** (§1.2 "Hybrid fusion"). `hybrid@1` fuses ranked key lists by reciprocal rank fusion, `Σ 1 / (c + rank)`, comparing scores as exact fractions and ranking equal scores by the key's encoded bytes, so the fused order never depends on rounding. It reads no store. Reversible: a new package and text; no store code or format change.
 
 v2.136 (store-tiered-changes-diff-2786): built. **`changes_page` diffs a Tiered collection by tree root** (§1.5). v2.116 merged a changed collection that is Tiered on either side over all its rows. When both sides are Tiered, the merge now reads only the spans a stamp diff of the two collection trees leaves (the leaves under changed edges, each side's replayed keys, a Log's moved window edges), so the cost is the pages on changed paths plus the rows of those leaves. The results are unchanged. L63 (j) gains a multi-level case: 20,000 Cold rows against eight edits, diffed whole and one change per page in both directions against the hand-derived edit set. On it one whole forward diff read 40,000 rows before; it now expands 10 interior pages and reads 1,376 rows. No format change. Reversible: library code.
 
@@ -1789,6 +1791,12 @@ type IndexState = Backfilling(Option[Bytes]) | Public | Failed(Bytes, Bytes)
   - Red on three seeded bugs: ties in descending key order, a corpus that leaves out rows with no terms, and a term frequency dropped to 1.
 
 **Index key codec (v2.121).** `primary_key[J, K, V, P](ix: Index[J, K, V, P]) -> Key[K]` returns the key codec of the index's table.
+
+**Hybrid fusion (v2.137, Store 3.4).** The `hybrid@1` package fuses ranked lists, such as a search form A and a vector query over one table, by reciprocal rank fusion. It is a pure library over the lists: it calls no store function and depends only on `std` (D10).
+- **Call.** `hybrid.fuse(key, c, lists, k) -> List[Hit[K]]` takes the key codec of the rows (`key_codec(t)` or `primary_key(ix)`), the constant `c: u64`, the lists of keys, each best first, and `k`. A `Hit` holds the key and its rank in each list, from 1, with 0 where the list does not hold it.
+- **Score.** A row scores `Σ 1 / (c + rank)` over the lists that hold it. Its rank in a list is its first position there; a later repeat adds nothing. `c + rank` is computed without overflow for every `u64` pair.
+- **Order.** Scores are compared as exact fractions (numerators and denominators as limb integers, cross-multiplied), so the order never depends on rounding. Equal scores rank in increasing order of the key's encoded bytes, so one set of lists gives one order. The first `k` rows are returned.
+- **Law.** `hand_fusions` in `core/programs/hybrid/tests.hirsel` checks orders and ranks worked out by hand: a three-way tie at `c = 1` with one tied score a sum of two lists (`1/3 + 1/6 = 1/2`); ranks `(1, 4)` above `(2, 3)` at `c = 60` and at `c = 2^64 − 1`, where the two scores differ by less than an `f64` resolves and every `c + rank` passes `2^64 − 1`; ties at `1 / (c + 1)` across lists ordered by key, not by list order; cuts at `k` inside a tied group; and a repeated key counted once. Red before this change, when `hybrid@1` does not exist.
 
 **The builder.** An index is built in chunks of `INDEX_CHUNK` = 4,096 rows, in primary-key order after the cursor.
 - **Each chunk reads the current head.** The chunk's rows come from main's roots at the moment it runs, never from the roots the build started at, so a row written between chunks is extracted as it now is.

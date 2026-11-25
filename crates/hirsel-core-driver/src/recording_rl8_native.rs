@@ -101,6 +101,11 @@ fn wait_one(take i: Inbox[u64]) -> u64 waits {
 
 fn at_once(take n: u64) -> u64 { n }
 
+type Held: cross {
+    n: u64,
+    s: Shared[u64],
+}
+
 fn got(r: Result[u64, InboxPoll]) -> u64 {
     match r {
         Ok(v) => v,
@@ -147,6 +152,17 @@ fn rl8_shared_item(ordinal: Option<u8>, node: u8) -> Vec<u8> {
     v.extend(ordinal);
     v.extend([0, 0, 0, 0, node]);
     v.extend(rl8_word(42));
+    v
+}
+
+/// A `Held` item (`n` 7, `s` the node holding 42), as a value: 16 plain
+/// bytes, `n` at offset 0 and the holder word at 8 zeroed (two 8-byte fields
+/// of one alignment keep their declared order), then one part: the holder's
+/// `Shared` snapshot as in `rl8_shared_item`.
+fn rl8_held_item(ordinal: Option<u8>, node: u8) -> Vec<u8> {
+    let mut v = vec![16, 7];
+    v.extend([0; 15]);
+    v.extend(&rl8_shared_item(ordinal, node)[9..]);
     v
 }
 
@@ -319,6 +335,40 @@ fn rl8_cases() -> Vec<Rl8Case> {
                 let g = g as u8;
                 let mut body = vec![RL8_ITEM, g + 2];
                 body.extend(rl8_shared_item(Some(g + 4), g + 1));
+                body
+            }),
+        },
+        // A `Shared` node held in a struct field (`Held.s`, at offset 8),
+        // crossing its own unit's connection: the counts and ordinals are
+        // `shared_at_home`'s. `t`'s drop drops its field's holder (position
+        // 2), and `s`'s is the last (position 3), so the shared release is
+        // (gap 0, kind 0, count 3) naming node 1. The item is the struct's
+        // 16 bytes with only the holder word zeroed, then the node's
+        // snapshot with its payload.
+        Rl8Case {
+            name: "shared_in_a_field",
+            body: r#"
+    let s: Shared[u64] = shared.new(42)
+    let (c, i): (Client[Held], Inbox[Held]) = result.unwrap(conn.new(4, bytes 0))
+    result.unwrap(conn.try_send(c, Held(n: 7, s: shared.share(s))))
+    let t = result.unwrap(conn.try_receive(i))
+    {
+        let gone = take t
+    }
+    {
+        let gone = take s
+    }
+"#,
+            script: vec![],
+            takes: vec![
+                (2, Operation, 1, RL8_ITEM, 2),
+                (0, Operation, 3, RL8_SHARED_RELEASE, 1),
+            ],
+            sent: (|g| vec![rl8_held_item(None, g as u8 + 1)], 2),
+            item: Some(|g| {
+                let g = g as u8;
+                let mut body = vec![RL8_ITEM, g + 2];
+                body.extend(rl8_held_item(Some(g + 4), g + 1));
                 body
             }),
         },

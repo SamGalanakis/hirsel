@@ -102,6 +102,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::profiler_replay_memory_peaks_match_the_runtime_metrics",
         "native::tests::profiler_replays_an_explicit_inputs_entry_and_checks_its_identity",
         "native::tests::build_identity::grant_binding_order",
+        "native::tests::build_identity::test_binaries_take_no_place",
         "native::tests::cli_replays_resolution_without_resolver",
         "native::tests::cli_replays_public_reach",
         "native::tests::run_tape_replays_process_stop",

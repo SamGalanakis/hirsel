@@ -43,8 +43,10 @@ impl CheckProduct {
         let mut record_options = self.granted(test, options);
         record_options.recording = true;
         record_options.replay = None;
+        let slots = super::InheritedSlots::take(&mut record_options);
         let built = self.build(test, &record_options)?;
         let mut cmd = runner.test_command(&std::fs::canonicalize(&built.executable)?);
+        slots.pass(&mut cmd);
         for grant in &record_options.exec_grants {
             grant.approve(&mut cmd);
         }

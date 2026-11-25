@@ -560,10 +560,10 @@ impl Memos {
         Ok(module)
     }
 
-    /// The unit index of `entry`'s publications into `code` under
-    /// `options`, read from `options`' store: none for an optimised LLVM
-    /// build, whose units a separately lowered std takes, or a coverage
-    /// build.
+    /// The unit index of `entry`'s publications under `options`, read from `options`' store:
+    /// none for an optimised LLVM build, whose units a separately lowered std takes, or a coverage
+    /// build. Its key names no code store: a memo is taken only while `code` holds its body and
+    /// annex, and its module is read back under its hash.
     fn open(
         options: &NativeOptions,
         entry: &Identity,
@@ -576,8 +576,8 @@ impl Memos {
             return Ok(None);
         }
         let key = key(
-            "hirsel.recipe-unit-index.v1",
-            &(crate::reuse::compiler_identity()?, entry, code.root()),
+            "hirsel.recipe-unit-index.v2",
+            &(crate::reuse::compiler_identity()?, entry),
         )?;
         let read = cached(&Store::cas(&options.cas)?, key)?
             .and_then(|bytes| crate::decode::<UnitIndex>(&bytes))

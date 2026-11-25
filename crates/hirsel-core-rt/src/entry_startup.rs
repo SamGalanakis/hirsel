@@ -1,5 +1,7 @@
 //! Startup refusals: what stops a run before main, and their `not started: ` lines.
-use super::{View, bytes, io};
+use super::{DirectoryOperations, OsProvider, View, bytes, io};
+use hirsel_core_ids::launch::{FIRST_INHERITED_FD, INHERITED_SLOT};
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
 pub(crate) enum StartupError {
@@ -111,4 +113,31 @@ pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *co
     }
     // SAFETY: the configured diagnostic fd and line live through this write.
     unsafe { crate::os::diagnostic(stderr, line.as_ptr(), line.len()) };
+}
+/// Own the descriptor a launch passed for an inherited slot, and keep it from
+/// the run's children. A slot the launch did not pass is EBADF.
+pub(crate) fn take_inherited(fd: i32) -> io::Result<OwnedFd> {
+    // SAFETY: fcntl only marks the descriptor; ownership is taken once it is known open.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the launch transferred this slot's descriptor to the run.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+/// Open the directory grant `index`, configured as `slot`: a path, or
+/// [`INHERITED_SLOT`] for the directory the launch passed at its descriptor.
+pub(super) fn grant_directory(
+    os: &mut OsProvider,
+    operations: &DirectoryOperations,
+    slot: &[u8],
+    index: usize,
+) -> Result<u64, StartupError> {
+    if slot == INHERITED_SLOT.as_bytes() {
+        let fd = FIRST_INHERITED_FD + index as i32;
+        return take_inherited(fd)
+            .and_then(|dir| (operations.adopt)(os, dir))
+            .map_err(|error| StartupError::Directory(format!("/dev/fd/{fd}").into(), error));
+    }
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(slot));
+    (operations.grant)(os, path).map_err(|error| StartupError::Directory(path.to_owned(), error))
 }

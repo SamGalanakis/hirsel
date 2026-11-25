@@ -5,7 +5,7 @@
 mod launch_options;
 #[path = "entry_startup.rs"]
 mod startup;
-pub(crate) use startup::{Missing, StartupError, report_startup};
+pub(crate) use startup::{Missing, StartupError, report_startup, take_inherited};
 
 use crate::{
     Context,
@@ -507,9 +507,7 @@ impl OsProcess {
                     .exec_ops
                     .as_ref()
                     .ok_or_else(|| StartupError::Exec("no Exec startup operations".into()))?;
-                let bindings =
-                    std::slice::from_raw_parts(input.exec_bindings, input.exec_bindings_len);
-                Some((ops.load)(bindings, &exec_approvals, describe_mode, unix)?)
+                Some((ops.load)(input, &exec_approvals, describe_mode, unix)?)
             } else {
                 if unix {
                     let probe = net_ops.ok_or(StartupError::NetRules)?.unix_probe;
@@ -556,15 +554,12 @@ impl OsProcess {
                 dirs.resize(input.directories_len, handle);
             } else if !describe_mode && let Some(operations) = directory_ops {
                 for index in 0..input.directories_len {
-                    let path = Path::new(OsStr::from_bytes(bytes(*input.directories.add(index))));
-                    let path = if index == 0 && inherited_store.is_some() {
-                        Path::new("/proc/self/fd/5")
+                    let slot = if index == 0 && inherited_store.is_some() {
+                        &b"/proc/self/fd/5"[..]
                     } else {
-                        path
+                        bytes(*input.directories.add(index))
                     };
-                    let handle = (operations.grant)(&mut os, path)
-                        .map_err(|error| StartupError::Directory(path.to_owned(), error))?;
-                    dirs.push(handle);
+                    dirs.push(startup::grant_directory(&mut os, operations, slot, index)?);
                 }
             }
             drop(inherited_store);

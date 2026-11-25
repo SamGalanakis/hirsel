@@ -40,7 +40,13 @@ impl Request {
     }
 
     pub fn load_from(&self, workdir: &Path) -> Result<Policy, String> {
-        let source = std::fs::read_to_string(workdir.join(&self.file)).map_err(|error| {
+        self.read(std::fs::read_to_string(workdir.join(&self.file)))
+    }
+
+    /// The policy in `source`: the text of this request's file, or the error
+    /// reading it.
+    pub fn read(&self, source: std::io::Result<String>) -> Result<Policy, String> {
+        let source = source.map_err(|error| {
             format!(
                 "Exec[{}]: could not read policy {:?}: {error}",
                 self.names.join(","),

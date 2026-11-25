@@ -13,6 +13,14 @@ use std::sync::{Arc, LazyLock};
 pub const DEFAULT_N_PLACE: u64 = 16 * 1024 * 1024;
 /// Private platform transport for the launcher PID, image descriptor and SHA-256.
 pub const LAUNCH_IMAGE_ENV: &str = "HIRSEL_LAUNCH_IMAGE";
+/// A directory or Exec-workdir slot sealed as this byte string names no path:
+/// its launch passes the directory as an inherited descriptor instead, so the
+/// executable does not depend on where it was built. No path contains NUL.
+pub const INHERITED_SLOT: &str = "\0";
+/// The descriptor of the first inherited slot. Directory slots come first in
+/// grant order, then each Exec binding's workdir; a slot sealed as a path
+/// still takes its number. Fds 3 to 7 belong to the launcher.
+pub const FIRST_INHERITED_FD: i32 = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Executable {

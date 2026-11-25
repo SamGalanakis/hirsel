@@ -9,12 +9,14 @@ mod cache;
 mod coverage;
 mod laws;
 mod replay;
+mod slots;
 pub use cache::TestCache;
 use cache::test_key;
 use coverage::CoverageCapture;
 pub(crate) use coverage::{Flags, RunCoverage, Session, header, records};
 use laws::LawCapture;
 pub(crate) use laws::{LawReport, LawRow, class_rank};
+use slots::InheritedSlots;
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
@@ -679,6 +681,7 @@ impl CheckProduct {
         // An unused launch grant could otherwise touch host state before the
         // test starts.
         let mut options = self.granted(test, options);
+        let slots = InheritedSlots::take(&mut options);
         let mut reached = if options.foreign_grants.is_empty() || options.recording {
             self.reachable_for(test, &options)?
         } else {
@@ -763,6 +766,7 @@ impl CheckProduct {
         if let Some(seed) = seed {
             command.env(SEED_ENV, seed.to_string());
         }
+        slots.pass(&mut command);
         let directory = private_directory(&mut command)?;
         let observe = laws.is_some() && !foreign;
         let laws = observe

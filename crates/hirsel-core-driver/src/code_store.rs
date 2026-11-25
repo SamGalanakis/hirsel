@@ -204,10 +204,6 @@ impl CodeStore {
         self.cache.is_some()
     }
 
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// A loose object's path.
     pub fn path(&self, kind: ObjectKind, hash: ContentHash) -> PathBuf {
         self.root

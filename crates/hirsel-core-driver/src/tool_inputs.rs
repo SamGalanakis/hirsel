@@ -158,20 +158,34 @@ pub fn link_driver(program: &Path) -> io::Result<PathBuf> {
     selected(program, &search())
 }
 
-/// Where the driver's link recipe and toolchain manifest live: beside its
-/// toolchain when that tree is ours to write, else in the user's cache (a
-/// system `/usr/bin/cc` has an unwritable `/usr`). The driver key names the
-/// files, so both homes hold distinct entries for distinct drivers.
-fn recipe_directory(driver: &Path) -> io::Result<PathBuf> {
-    if let Some(root) = driver.parent().and_then(Path::parent) {
-        let beside = root.join(".hirsel-link-recipes");
-        if std::fs::create_dir_all(&beside).is_ok() && tempfile::tempfile_in(&beside).is_ok() {
-            return Ok(beside);
-        }
-    }
-    let cache = PackageProduct::default_cache().join("link-recipes");
-    std::fs::create_dir_all(&cache)?;
-    Ok(cache)
+/// Link recipes, the link editor a driver names, and toolchain manifests are
+/// records in the user's content store under keys of what selects them; an
+/// object a capture compiles is a blob there, which the recipe names by path.
+/// No toolchain tree is written, so a read-only one (a system `/usr/bin/cc`)
+/// captures as any other.
+fn recipes() -> io::Result<Store> {
+    Store::cas(&crate::store::collect::user())
+}
+
+fn record_key(domain: &str, parts: &impl Serialize) -> io::Result<ContentHash> {
+    Ok(ContentHash::of_parts(
+        domain,
+        [crate::encode(parts)?.as_slice()],
+    ))
+}
+
+fn read_record<T: serde::de::DeserializeOwned>(store: &Store, key: ContentHash) -> Option<T> {
+    let bytes = store.get(key).ok()??;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_record(store: &Store, key: ContentHash, value: &impl Serialize) -> io::Result<()> {
+    store.put_keyed(key, &serde_json::to_vec(value).map_err(io::Error::other)?)
+}
+
+/// The toolchain manifest of `target` through the capture keyed `key`.
+fn toolchain_key(target: &str, key: &str) -> io::Result<ContentHash> {
+    record_key("hirsel.toolchain-manifest.v1", &(target, key))
 }
 
 /// One host file's content under its own record: the stat rule decides
@@ -554,8 +568,8 @@ fn driver_toolchain(
     runtime: &Path,
 ) -> io::Result<(Toolchain, LinkRecipe)> {
     let (recipe, key, environment) = capture_keyed_link_recipe(cc, target, false, &search())?;
-    let root = recipe_directory(cc)?;
-    let path = root.join(format!("toolchain-{target}-{key}.json"));
+    let store = recipes()?;
+    let record = toolchain_key(target, &key)?;
     let mut paths = vec![cc.canonicalize()?, runtime.to_owned()];
     if let Some(lib) = find_llvm_library(cc) {
         paths.push(lib);
@@ -563,9 +577,7 @@ fn driver_toolchain(
     paths.extend(recipe.files.iter().map(|file| file.path.clone()));
     paths.sort();
     paths.dedup();
-    let old = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<ToolchainManifest>(&bytes).ok())
+    let old = read_record::<ToolchainManifest>(&store, record)
         .filter(|manifest| manifest.schema == TOOLCHAIN_SCHEMA && manifest.target == target);
     let mut files = Vec::with_capacity(paths.len());
     for file in paths {
@@ -613,7 +625,7 @@ fn driver_toolchain(
             files,
             identity,
         };
-        publish(&root, &path, &manifest)?;
+        write_record(&store, record, &manifest)?;
     }
     Ok((toolchain, recipe))
 }
@@ -652,34 +664,24 @@ struct EditorName {
 }
 const EDITOR_NAME_SCHEMA: u32 = 1;
 
-fn editor_name_path(directory: &Path, target: &str, driver_key: &str) -> PathBuf {
-    directory.join(format!("editor-{target}-{driver_key}.json"))
+fn editor_name_key(target: &str, driver_key: &str) -> io::Result<ContentHash> {
+    record_key("hirsel.link-editor-name.v1", &(target, driver_key))
 }
 
-/// The recipe file of `driver` linking through `linker`. The link editor is
+/// The recipe record of `driver` linking through `linker`. The link editor is
 /// part of the key: two requests whose `PATH`s select different link editors
 /// through one driver (a test that puts a private LLVM copy first) never share
 /// a recipe, and a recipe captured outside an installation, whose own ld.lld
 /// links, is never reused inside one or from a moved one.
-fn recipe_path(
-    directory: &Path,
-    target: &str,
-    driver_key: &str,
-    linker: &Path,
-) -> io::Result<(PathBuf, String)> {
-    let hash = ContentHash::of_parts(
-        "hirsel.link-recipe-key.v1",
-        [driver_key.as_bytes(), crate::encode(&linker)?.as_slice()],
-    );
-    let key: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
-    Ok((directory.join(format!("{target}-{key}.json")), key))
+fn recipe_key(target: &str, driver_key: &str, linker: &Path) -> io::Result<ContentHash> {
+    record_key("hirsel.link-recipe.v1", &(target, driver_key, linker))
 }
 
 /// The link editor this request links with: the installation's own, else the
 /// one the driver's recorded name selects on this request's `PATH`. `None`
 /// when no capture has recorded the driver's name yet.
 fn selected_editor(
-    directory: &Path,
+    store: &Store,
     target: &str,
     driver_key: &str,
     installed: Option<&Path>,
@@ -688,9 +690,7 @@ fn selected_editor(
     if let Some(installed) = installed {
         return Ok(Some(installed.to_owned()));
     }
-    let recorded = std::fs::read(editor_name_path(directory, target, driver_key))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<EditorName>(&bytes).ok())
+    let recorded = read_record::<EditorName>(store, editor_name_key(target, driver_key)?)
         .filter(|record| record.schema == EDITOR_NAME_SCHEMA);
     Ok(recorded.and_then(|record| selected(&record.name, search).ok()))
 }
@@ -879,20 +879,19 @@ fn capture_link_recipe_with(
         .find(|(name, _)| *name == "PATH")
         .map_or(OsStr::new(""), |(_, value)| value.as_os_str());
     let driver = cc.to_owned();
-    let directory = std::path::absolute(recipe_directory(&driver)?)?;
+    let store = recipes()?;
     let installed_linker = installed_linker();
     if !force
         && let Some(linker) = selected_editor(
-            &directory,
+            &store,
             target,
             file_key,
             installed_linker.as_deref(),
             search,
         )?
     {
-        let (path, _) = recipe_path(&directory, target, file_key, &linker)?;
-        if let Ok(bytes) = std::fs::read(&path)
-            && let Ok(mut recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
+        let key = recipe_key(target, file_key, &linker)?;
+        if let Some(mut recipe) = read_record::<LinkRecipe>(&store, key)
             && recipe.schema == LINK_RECIPE_SCHEMA
             && recipe.target == target
             && recipe.linker == linker
@@ -901,7 +900,7 @@ fn capture_link_recipe_with(
             match refresh_recipe_inputs(&mut recipe)? {
                 RecipeInputs::Current => return Ok(recipe),
                 RecipeInputs::Restated => {
-                    publish(&directory, &path, &recipe)?;
+                    write_record(&store, key, &recipe)?;
                     return Ok(recipe);
                 }
                 RecipeInputs::Changed => {}
@@ -923,7 +922,7 @@ fn capture_link_recipe_with(
             )));
         }
     }
-    let capture_dir = tempfile::tempdir_in(&directory)?;
+    let capture_dir = tempfile::tempdir()?;
     let synthetic_source = capture_dir.path().join("recipe.c");
     std::fs::write(&synthetic_source, "int main(void) { return 0; }\n")?;
     let capture = |driver: &Path, source: &Path, output: &Path| {
@@ -999,7 +998,7 @@ fn capture_link_recipe_with(
         }
         _ => name,
     };
-    let (path, driver_key) = recipe_path(&directory, target, file_key, &linker)?;
+    let key = recipe_key(target, file_key, &linker)?;
     let mut source_files = Vec::new();
     let mut compiled_objects = std::collections::HashMap::new();
     for (index, line) in stderr.lines().enumerate() {
@@ -1025,11 +1024,11 @@ fn capture_link_recipe_with(
         if Path::new(source) == synthetic_source.as_path() {
             continue;
         }
-        let stable = directory.join(format!("extra-{driver_key}-{index}.o"));
+        let compiled_path = capture_dir.path().join(format!("extra-{index}.o"));
         let mut command = environment.command(&words[0]);
         let mut args = words[1..].to_vec();
         if let Some(output) = args.iter_mut().position(|word| word == "-o") {
-            args[output + 1] = stable.display().to_string();
+            args[output + 1] = compiled_path.display().to_string();
         }
         let compiled = command.args(&args).output()?;
         if !compiled.status.success() {
@@ -1039,7 +1038,10 @@ fn capture_link_recipe_with(
                 String::from_utf8_lossy(&compiled.stderr)
             )));
         }
-        compiled_objects.insert(transient_output, stable.clone());
+        // The link reads the object as a blob; the recipe records its bytes
+        // among the files the link reads, so a blob since evicted recaptures.
+        let blob = store.put_blob(&std::fs::read(&compiled_path)?)?;
+        compiled_objects.insert(transient_output, store.blob_path(blob.address));
         let source = PathBuf::from(source);
         source_files.push(recipe_file(&source)?);
     }
@@ -1152,17 +1154,13 @@ fn capture_link_recipe_with(
         absent,
         identity,
     };
-    publish(&directory, &path, &recipe)?;
+    write_record(&store, key, &recipe)?;
     if installed_linker.is_none() {
         let record = EditorName {
             schema: EDITOR_NAME_SCHEMA,
             name,
         };
-        publish(
-            &directory,
-            &editor_name_path(&directory, target, file_key),
-            &record,
-        )?;
+        write_record(&store, editor_name_key(target, file_key)?, &record)?;
     }
     Ok(recipe)
 }

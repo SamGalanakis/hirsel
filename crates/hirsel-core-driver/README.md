@@ -210,10 +210,14 @@ backend, optimization and runtime bytes. Reached installed-package objects live
 in the package store and are shared across application stores. They compile on
 first demand, including nongeneric bodies; no eager monolithic core object is
 built. Executables additionally key the entry
-thunk, headers, runtime bytes, and the resolved C-driver/link-editor paths,
-content digests and the C-driver version. Digests are cached by device/inode,
-length, mode, nanosecond mtime and ctime; replacement and in-place changes
-refresh them even when version output is unchanged. Incidental metadata changes
+thunk, headers, runtime bytes, the C driver's and link editor's bytes (not
+their paths, and no version output), and the link recipe: the editor's argv
+and the path and bytes of every file the link reads. Digests are cached by
+device/inode, length, mode, nanosecond mtime and ctime; replacement and
+in-place changes refresh them. Link recipes, the editor name a driver gives
+and toolchain manifests are records in the per-user content store's `k/`,
+under keys of the target, driver bytes, capture environment and editor; an
+object a capture compiles is an `o/` blob there. Incidental metadata changes
 do not invalidate a link whose tool content is unchanged. PATH selection is repeated
 on each link request; a missing selected editor is a named link refusal. A warm build reads integrity-checked products
 and compiles/links nothing; an implementation edit rebuilds its object and relinks.

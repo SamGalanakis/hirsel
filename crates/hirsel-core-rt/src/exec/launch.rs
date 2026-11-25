@@ -1,7 +1,12 @@
 use super::{Grant, probe};
 use crate::host::exec::Supervisor;
-use crate::{entry::StartupError, process::View};
+use crate::{
+    entry::{OsConfig, StartupError},
+    process::View,
+};
+use hirsel_core_ids::launch::{FIRST_INHERITED_FD, INHERITED_SLOT};
 use hirsel_core_net::exec::Request;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,7 +19,7 @@ pub struct Binding {
 }
 
 pub struct Operations {
-    pub(crate) load: unsafe fn(&[Binding], &[&[u8]], bool, bool) -> Result<Launch, StartupError>,
+    pub(crate) load: unsafe fn(&OsConfig, &[&[u8]], bool, bool) -> Result<Launch, StartupError>,
 }
 
 #[unsafe(no_mangle)]
@@ -33,12 +38,17 @@ impl Launch {
     }
 }
 
+/// The bindings `input` seals. A binding's inherited workdir is at its slot's
+/// descriptor, numbered after every directory slot.
 unsafe fn load(
-    bindings: &[Binding],
+    input: &OsConfig,
     approvals: &[&[u8]],
     preview: bool,
     unix: bool,
 ) -> Result<Launch, StartupError> {
+    // SAFETY: the launcher's table holds `exec_bindings_len` bindings.
+    let bindings =
+        unsafe { std::slice::from_raw_parts(input.exec_bindings, input.exec_bindings_len) };
     let mut requests = Vec::with_capacity(bindings.len());
     for (index, binding) in bindings.iter().enumerate() {
         // SAFETY: the caller pins all request bytes in its link-time table.
@@ -60,8 +70,17 @@ unsafe fn load(
                 request.names.join(",")
             )));
         }
-        let base = Path::new(std::ffi::OsStr::from_bytes(view(binding.workdir)));
-        let policy = Grant::verify(&request, base, binding.digest).map_err(StartupError::Exec)?;
+        let workdir = view(binding.workdir);
+        let policy = if workdir == INHERITED_SLOT.as_bytes() {
+            let fd = FIRST_INHERITED_FD + (input.directories_len + index) as i32;
+            let source =
+                crate::entry::take_inherited(fd).and_then(|dir| read_beneath(&dir, &request.file));
+            Grant::check(&request, request.read(source), binding.digest)
+        } else {
+            let base = Path::new(std::ffi::OsStr::from_bytes(workdir));
+            Grant::check(&request, request.load_from(base), binding.digest)
+        }
+        .map_err(StartupError::Exec)?;
         requests.push(policy);
     }
     if approvals.len() != requests.len() {
@@ -89,6 +108,30 @@ unsafe fn load(
         lines.extend(approval);
     }
     Ok(Launch { grants, lines })
+}
+
+/// The policy file `file` names under the inherited workdir `dir`, as a path
+/// under that workdir would name it: an absolute `file` names itself.
+fn read_beneath(dir: &OwnedFd, file: &str) -> std::io::Result<String> {
+    use std::io::Read;
+    let name = std::ffi::CString::new(file)
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    // SAFETY: `dir` is open and `name` is NUL-terminated; the result is owned below.
+    let raw = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a fresh descriptor.
+    let mut file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+    let mut source = String::new();
+    file.read_to_string(&mut source)?;
+    Ok(source)
 }
 
 fn probe_with_unix() -> std::io::Result<()> {

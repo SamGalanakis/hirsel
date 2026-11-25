@@ -401,49 +401,6 @@ fn a_libllvm_one_byte_apart_is_another_llvm_identity() {
 }
 
 #[test]
-fn a_driver_whose_toolchain_tree_is_read_only_still_links() {
-    // A system driver (/usr/bin/cc) has a toolchain root nobody but root may write.
-    let work = tempfile::tempdir().unwrap();
-    let tree = work.path().join("usr");
-    let bin = tree.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let linker = work.path().join("ld.lld");
-    let crt = work.path().join("crt1.o");
-    std::fs::write(&linker, b"linker").unwrap();
-    std::fs::write(&crt, b"crt").unwrap();
-    let cc = bin.join("cc");
-    crate::executable::write(
-        &cc,
-        format!(
-            "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"-lc\"' >&2\n",
-            linker.display(),
-            crt.display()
-        )
-        .as_bytes(),
-        0o755,
-    )
-    .unwrap();
-    let runtime = work.path().join("runtime.a");
-    std::fs::write(&runtime, b"runtime").unwrap();
-    let read_only = |mode| std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(mode));
-    read_only(0o555).unwrap();
-    let target = "x86_64-unknown-linux-gnu";
-    let key = capture_key(&cc);
-    let identity = driver_toolchain(&cc, target, &runtime);
-    let recipe = capture_link_recipe(&cc, target, false, &search());
-    read_only(0o755).unwrap();
-    let cache = PackageProduct::default_cache().join("link-recipes");
-    for name in [
-        format!("{target}-{key}.json"),
-        format!("toolchain-{target}-{key}.json"),
-    ] {
-        let _ = std::fs::remove_file(cache.join(name));
-    }
-    identity.unwrap();
-    assert_eq!(recipe.unwrap().linker, linker);
-}
-
-#[test]
 fn a_rematerialised_toolchain_file_is_read_once() {
     // Buck re-links toolchain files: same bytes, new inode and ctime. The request
     // that sees it re-hashes once and records the new stat; later requests read
@@ -486,9 +443,9 @@ fn a_rematerialised_toolchain_file_is_read_once() {
     assert_eq!(READS.get(), 4, "cc, linker, CRT and runtime, once each");
     CLOCK.set(Some(1 + WINDOW));
     assert_eq!(driver_toolchain(&cc, target, &runtime).unwrap().0, identity);
-    let directory = recipe_directory(&cc).unwrap();
-    let key = capture_key(&cc);
-    let manifest_path = directory.join(format!("toolchain-{target}-{key}.json"));
+    let manifest_path = recipes()
+        .unwrap()
+        .path(toolchain_key(target, &capture_key(&cc)).unwrap());
     let written = std::fs::metadata(&manifest_path).unwrap().ino();
     READS.set(0);
     assert_eq!(driver_toolchain(&cc, target, &runtime).unwrap().0, identity);

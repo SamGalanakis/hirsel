@@ -297,7 +297,6 @@ fn a_record_written_by_the_earlier_stat_rule_is_not_read() {
     let runtime = work.path().join("runtime.a");
     std::fs::write(&runtime, b"runtime").unwrap();
     let target = "x86_64-unknown-linux-gnu";
-    let directory = recipe_directory(&cc).unwrap();
     let key = capture_key(&cc);
     let stale = |path: &Path| {
         serde_json::json!({
@@ -313,9 +312,10 @@ fn a_record_written_by_the_earlier_stat_rule_is_not_read() {
         "files": [stale(&cc.canonicalize().unwrap()), stale(&runtime), stale(&linker), stale(&crt)],
         "identity": ContentHash::of_bytes(b"identity"),
     });
-    std::fs::write(
-        directory.join(format!("toolchain-{target}-{key}.json")),
-        serde_json::to_vec(&manifest).unwrap(),
+    write_record(
+        &recipes().unwrap(),
+        toolchain_key(target, &key).unwrap(),
+        &manifest,
     )
     .unwrap();
     assert_eq!(

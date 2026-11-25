@@ -225,6 +225,7 @@ fn a_child_tool_sees_only_its_listed_environment() {
             .env("TOOL_ENV_DIR", dir)
             .env("TOOL_ENV_STEP", step)
             .env("TOOL_ENV_DRIVER", &driver)
+            .env("XDG_CACHE_HOME", dir.join("xdg"))
             .env("REVIEW_MARK", mark)
             .env("PATH", path)
             .output()
@@ -245,7 +246,7 @@ fn a_child_tool_sees_only_its_listed_environment() {
             .collect()
     };
     let fresh = || {
-        for stale in ["project", "cache", "tree/.hirsel-link-recipes"] {
+        for stale in ["project", "cache", "xdg"] {
             std::fs::remove_dir_all(dir.join(stale)).unwrap();
         }
     };

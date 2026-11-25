@@ -108,6 +108,91 @@ mod build_identity {
         );
     }
 
+    /// A test's Dir slot and its Exec policy directory are the launch's:
+    /// identical packages in two places give identical executable keys and
+    /// identical test binaries, and each run still uses its own directory.
+    #[test]
+    fn test_binaries_take_no_place() {
+        use crate::package_content::{archive_digest, hex};
+        let image = Path::new("/bin/true").canonicalize().unwrap();
+        let profile = format!(
+            "[true]\nimage = {:?}\nsha256 = \"{}\"\nargv0 = \"true\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = \"/\" }}\n",
+            image.to_str().unwrap(),
+            hex(&archive_digest(&std::fs::read(&image).unwrap())),
+        );
+        let source = "@test\nfn writes_its_directory(d: Dir) -> Result[(), ()] waits {\n\
+            let file = result.unwrap(host.open(d, \"probe\", CreateNew))\n\
+            result.unwrap(host.close(take file))\n\
+            Ok(())\n}\n\
+            @test\nfn reads_its_policy(e: Exec) -> Result[(), ()] { Ok(()) }\n";
+        let tests = ["writes_its_directory", "reads_its_policy"];
+        let places = [PackageLaw::new(), PackageLaw::new()];
+        let mut runs = Vec::new();
+        for law in &places {
+            law.app("app", "");
+            law.write("app/main.hirsel", source);
+            law.write("profiles.toml", &profile);
+            std::fs::create_dir(law.path("data")).unwrap();
+            let out = law.path("out");
+            let (status, stdout, stderr) = law.run(&[
+                "test",
+                "app",
+                "--json",
+                "--limit",
+                "67108864",
+                "--grant",
+                "Exec=profiles.toml true",
+                "--dir",
+                "data",
+                "-o",
+                out.to_str().unwrap(),
+            ]);
+            assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+            assert!(law.path("data/probe").is_file(), "the Dir slot is this place's");
+            // Each binary, and the name of the executable record that holds it.
+            let records = law.path("cache/hirsel/cas/k");
+            let run = tests.map(|test| {
+                let test = DefPath::from_full(&format!("app@1/main/{test}")).unwrap();
+                let name = crate::request::hex(ContentHash::of_bytes(test.to_string().as_bytes()));
+                let binary = std::fs::read(out.join(name)).unwrap();
+                let digest = archive_digest(&binary);
+                let keys = walkdir(&records)
+                    .into_iter()
+                    .filter(|record| {
+                        std::fs::read(record)
+                            .unwrap()
+                            .windows(32)
+                            .any(|window| window == digest)
+                    })
+                    .map(|record| record.strip_prefix(&records).unwrap().to_owned())
+                    .collect::<Vec<_>>();
+                assert_eq!(keys.len(), 1, "one executable record names {test}");
+                (binary, keys)
+            });
+            runs.push(run);
+        }
+        for (test, (a, b)) in tests.iter().zip(runs[0].iter().zip(&runs[1])) {
+            assert!(a.0 == b.0, "{test}: the binaries differ between places");
+            assert_eq!(a.1, b.1, "{test}: the executable keys differ between places");
+        }
+    }
+
+    fn walkdir(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut pending = vec![root.to_owned()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files
+    }
+
     #[test]
     fn site_only_change() {
         let dir = tempfile::tempdir().unwrap();

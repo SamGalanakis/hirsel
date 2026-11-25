@@ -2,7 +2,6 @@
 use hirsel_core_net::exec::{ExecRules, PinnedProfile, Policy, Request};
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
 use std::sync::Arc;
 
 mod launch;
@@ -44,8 +43,12 @@ impl Grant {
         }
     }
 
-    fn verify(request: &Request, workdir: &Path, expected: [u8; 32]) -> Result<Policy, String> {
-        let policy = request.load_from(workdir)?;
+    fn check(
+        request: &Request,
+        policy: Result<Policy, String>,
+        expected: [u8; 32],
+    ) -> Result<Policy, String> {
+        let policy = policy?;
         if policy.digest != expected {
             return Err(format!(
                 "Exec[{}]: launch policy digest differs from the build binding",

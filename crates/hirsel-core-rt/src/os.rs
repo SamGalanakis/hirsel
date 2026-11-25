@@ -38,6 +38,8 @@ pub(crate) type IssueFile = unsafe extern "C" fn(*mut u8, *mut Request) -> Outco
 /// names this table only when it supplies directory paths.
 pub struct DirectoryOperations {
     pub(crate) grant: fn(&mut OsProvider, &Path) -> io::Result<u64>,
+    /// A directory the launch passed as an inherited descriptor.
+    pub(crate) adopt: fn(&mut OsProvider, OwnedFd) -> io::Result<u64>,
     pub(crate) probe: fn(&OsProvider, u64) -> io::Result<()>,
     pub(crate) issue: IssueFile,
 }
@@ -45,6 +47,7 @@ pub struct DirectoryOperations {
 #[unsafe(no_mangle)]
 pub static hirsel_core_os_directory_ops: DirectoryOperations = DirectoryOperations {
     grant: OsProvider::grant,
+    adopt: OsProvider::adopt,
     probe: OsProvider::probe_directory,
     issue: issue_file,
 };
@@ -121,6 +124,13 @@ impl OsProvider {
             }
             Ok(file)
         })?;
+        Ok(self.insert_directory(file.into()))
+    }
+    pub(crate) fn adopt(&mut self, directory: OwnedFd) -> io::Result<u64> {
+        let file = std::fs::File::from(directory);
+        if !file.metadata()?.is_dir() {
+            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+        }
         Ok(self.insert_directory(file.into()))
     }
     /// Startup-only capability probe. The per-operation confined open is unchanged.

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::{path::PathBuf, process::Command};
 
 mod sites;
-use sites::Sites;
+pub(super) use sites::Sites;
 
 const MODEL_FAILURE_KINDS: [&str; 4] = ["Violated", "Stuck", "Unwitnessed", "Handler"];
 
@@ -197,13 +197,7 @@ pub(super) struct LawCapture {
 }
 
 impl LawCapture {
-    pub(super) fn attach(
-        command: &mut Command,
-        product: &crate::CheckProduct,
-        test: &DefPath,
-        limit: usize,
-    ) -> Option<Self> {
-        let sites = Sites::for_test(product, test, limit).ok()?;
+    pub(super) fn attach(command: &mut Command, sites: Sites) -> Option<Self> {
         let directory = tempfile::tempdir().ok()?;
         let path = directory.path().join("laws");
         command.env("HIRSEL_LAWS", &path);

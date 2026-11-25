@@ -62,6 +62,17 @@ environment and standard streams. Its output is byte-identical to a
 one-shot build. A `run` request's program runs in the client process,
 under the client's terminal and signals.
 
+A `test` request is a session on its connection. The compiler checks
+the request, builds each test and hands the client each launch; the
+client runs every test, in a private working directory under the
+client's own environment and execution deadline, reads its law and
+coverage files, and writes a pass to the pass cache. The compiler reads
+the pass cache, reports each row as its test ends, in order, and folds
+coverage, the law lock and a law baseline when the client finishes the
+session. A one-shot `test` runs the same session in one process, so its
+rows, verdicts and pass-cache writes are the same. The compiler serves
+the session alone; closing the connection drops it.
+
 If the connection ends before the compiler answers, `--resident`
 reconnects to a resident compiler, starting one if needed, and retries
 compilation once. A `test` request or a request that can publish to a

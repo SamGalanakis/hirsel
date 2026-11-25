@@ -11,6 +11,7 @@ const TEST_PASS_SCHEMA: u32 = 5;
 
 /// Reused passes of determined tests (PROG-4).
 pub struct TestCache {
+    root: PathBuf,
     store: Store,
 }
 
@@ -18,8 +19,13 @@ impl TestCache {
     /// A cache that cannot be opened leaves every test to execute.
     pub fn open(root: &Path) -> Option<Self> {
         Some(Self {
+            root: root.to_owned(),
             store: Store::new(root).ok()?,
         })
+    }
+
+    pub(super) fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn default_root() -> PathBuf {

@@ -1406,9 +1406,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         None
     };
     if test_command {
-        use crate::{Source, TestCache};
-
-        let test_runs = test_runs.expect("a test request has its run configuration");
+        let runs = test_runs.expect("a test request has its run configuration");
         let own_tests = || {
             product.tests().filter(|path| {
                 test_owner
@@ -1416,7 +1414,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                     .is_none_or(|owner| &path.0.package == owner)
             })
         };
-        test_runs.check_names(&own_tests().collect())?;
+        runs.check_names(&own_tests().collect())?;
         let tests: Vec<_> = own_tests()
             .filter(|path| {
                 test_filter
@@ -1428,191 +1426,55 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .collect();
         let law_inventory = law_files
             .as_ref()
-            .map(|files| crate::law_lock::Inventory::of(&product, &tests, files, &test_runs))
+            .map(|files| crate::law_lock::Inventory::of(&product, &tests, files, &runs))
             .transpose()?;
-        let mut observations =
-            std::collections::BTreeMap::<String, crate::test_run::LawReport>::new();
         let corpus = corpus_path
             .as_deref()
             .map(crate::property_corpus::Corpus::open)
             .transpose()?;
-        let cache = if corpus.is_none()
+        // The server reads the pass cache; the process that runs a test writes it.
+        let cache = (corpus.is_none()
             && !test_sim
             && !test_replay
-            && matches!(runner, crate::Runner::Native)
-        {
-            TestCache::open(&TestCache::default_root())
-        } else {
-            None
-        };
-        let mut rows = Vec::new();
-        let mut failed = false;
-        let coverage_flags = coverage;
-        let mut coverage = test_coverage.then(|| {
-            crate::test_run::Session::new(native_options.as_ref().unwrap(), coverage_flags.runs)
-        });
-        let jobs = test_jobs.map_or_else(crate::test_run::affinity_jobs, Ok)?;
-        for index in 0..if tests.is_empty() {
-            0
-        } else {
-            test_seeds.unwrap_or(1)
-        } {
-            let seed = test_sim.then_some(test_seed.unwrap_or(seed_base + index));
-            let batch = crate::test_run::TestBatch {
-                runs: &test_runs,
-                jobs,
-                timeout: test_timeout,
-                runner: &runner,
-                replay: test_replay,
-                laws: test_laws,
-                plain_runtime: installed.as_ref().and_then(|i| {
-                    if charge_observation {
-                        i.observed_runtime(&target, false)
-                    } else {
-                        i.runtime(&target)
-                    }
-                }),
-                expect_verdict: expect_verdict.as_deref(),
-                cache: cache.as_ref(),
-                rerun: test_rerun || test_write_laws,
-                seed,
-                corpus: corpus.as_ref(),
-            };
-            batch.run(&product, &tests, native_options.as_ref().unwrap(), |test, result| {
-            let label = seed.map_or_else(|| test.to_string(), |seed| format!("{test} (seed {seed})"));
-            let mut row = match result {
-                Ok((outcome, source)) => {
-                    let passed = outcome.passed();
-                    let wall_ms = (source == Source::Executed)
-                        .then(|| outcome.wall_time.as_secs_f64() * 1000.0);
-                    let source = source.as_str();
-                    failed |= !passed;
-                    let corpus_note = outcome.corpus.map_or_else(String::new, |state| {
-                        format!(" [property corpus {state}]")
-                    });
-                    let strength = test_laws.then(|| outcome.laws.strength());
-                    let mut laws_note = strength.map_or_else(String::new, |class| format!(" {class}"));
-                    if let Some(session) = &mut coverage {
-                        laws_note.push_str(&session.run(rows.len(), test, seed, passed, &outcome.coverage));
-                    }
-                    if !json {
-                        if let Some(wall_ms) = wall_ms {
-                            if passed {
-                                println!("pass {source} {label}{corpus_note}{laws_note} ({wall_ms:.3} ms)");
-                            } else {
-                                let mut reason = if outcome.timed_out {
-                                    "execution timed out".to_owned()
-                                } else {
-                                    crate::test_run::outcome_text(outcome.output.status)
-                                };
-                                if !outcome.output.stderr.is_empty() {
-                                    reason.push_str(": ");
-                                    reason.push_str(
-                                        &String::from_utf8_lossy(&outcome.output.stderr)
-                                            .lines()
-                                            .collect::<Vec<_>>()
-                                            .join(" | "),
-                                    );
-                                }
-                                println!("fail {source} {label}{corpus_note}{laws_note}: {reason} ({wall_ms:.3} ms)");
-                                for line in String::from_utf8_lossy(&outcome.output.stdout).lines() {
-                                    println!("  stdout: {line}");
-                                }
-                            }
-                        } else {
-                            println!("pass {source} {label}{laws_note}");
-                        }
-                    }
-                    let mut row = serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms});
-                    if let Some(state) = outcome.corpus {
-                        row["property_corpus"] = state.into();
-                    }
-                    if let Some(strength) = strength {
-                        if !json {
-                            outcome.laws.print();
-                        }
-                        row["law_strength"] = strength.into();
-                        row["laws"] = outcome.laws.json_rows();
-                    }
-                    if test_write_laws || law_baseline.is_some() {
-                        match observations.entry(test.to_string()) {
-                            std::collections::btree_map::Entry::Occupied(mut held) => held.get_mut().merge(outcome.laws),
-                            std::collections::btree_map::Entry::Vacant(slot) => { slot.insert(outcome.laws); }
-                        }
-                    }
-                    row
+            && matches!(runner, crate::Runner::Native))
+        .then(|| crate::TestCache::open(&crate::TestCache::default_root()))
+        .flatten();
+        let session = crate::test_run::TestSession::prepare(crate::test_run::Prepare {
+            options: native_options.expect("a test request has native options"),
+            runs,
+            tests,
+            law_inventory,
+            law_directory: law_directory.clone(),
+            law_baseline,
+            corpus,
+            cache,
+            sim: test_sim,
+            replay: test_replay,
+            laws: test_laws,
+            write_laws: test_write_laws,
+            rerun: test_rerun || test_write_laws,
+            coverage: test_coverage.then_some(coverage),
+            jobs: test_jobs.map_or_else(crate::test_run::affinity_jobs, Ok)?,
+            timeout: test_timeout,
+            seeds: test_seeds.unwrap_or(1),
+            seed: test_seed,
+            seed_base,
+            plain_runtime: installed.as_ref().and_then(|i| {
+                if charge_observation {
+                    i.observed_runtime(&target, false)
+                } else {
+                    i.runtime(&target)
                 }
-                Err(error) => {
-                    failed = true;
-                    if let Some(session) = &mut coverage {
-                        session.run(rows.len(), test, seed, false, &crate::test_run::RunCoverage::Unobserved("stopped".into()));
-                    }
-                    let mut row = serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null});
-                    if test_laws {
-                        row["law_strength"] = if matches!(error, crate::NativeStop::ForeignRecording { .. }) { "unobserved (FFI-8)" } else { "unobserved" }.into();
-                        row["laws"] = serde_json::json!([]);
-                    }
-                    if let crate::NativeStop::ForeignRecording { site, .. } = &error {
-                        row["site"] = site.as_str().into();
-                        if !json {
-                            eprintln!("{site}: recording refusal site");
-                            println!("fail executed {label}: {error}");
-                        }
-                    } else if !json {
-                        println!("fail executed {label}: {error} (time unavailable)");
-                    }
-                    row
-                }
-            };
-            if let Some(seed) = seed {
-                row["seed"] = seed.into();
-            }
-            rows.push(row);
+            }),
+            runner,
+            expect_verdict,
+            json,
+            meter,
+            metrics,
+            output: temporary_output,
+            product,
         });
-        }
-        if let Some(current) = law_inventory {
-            crate::law_lock::update(law_directory, |lock| lock.record(&current, &observations))?;
-        }
-        let regressions = law_baseline
-            .as_ref()
-            .map(|baseline| baseline.compare(&observations));
-        let law_red = regressions.as_ref().is_some_and(|rows| !rows.is_empty());
-        failed |= law_red;
-        let passed = !tests.is_empty() && !failed;
-        let coverage = coverage.and_then(|session| {
-            let scope = native_options.as_ref().unwrap().coverage.as_ref().unwrap();
-            session.finish(&product, scope, &mut rows, &coverage_flags)
-        });
-        if json {
-            let mut report = serde_json::json!({"passed":passed,"tests":rows});
-            if let Some(coverage) = &coverage {
-                report["coverage"] = coverage.document.clone();
-            }
-            if let Some(regressions) = regressions {
-                report["law_regressions"] = serde_json::json!(regressions);
-            }
-            println!("{report}");
-        } else {
-            for red in regressions.into_iter().flatten() {
-                println!("{red}");
-            }
-            if let Some(coverage) = &coverage {
-                print!("{}", coverage.text);
-            }
-        }
-        if tests.is_empty() && !json {
-            eprintln!("no tests found");
-        }
-        meter.finish("test execution/output");
-        if let Some(path) = metrics {
-            meter.write_metrics(path)?;
-        }
-        drop(temporary_output);
-        return conclude(Outcome::Exit(if tests.is_empty() && !law_red {
-            2
-        } else {
-            i32::from(failed)
-        }));
+        return conclude(Outcome::Test(Box::new(session)));
     }
     let mut stopped = None;
     // A build whose executable is stored though writing it to the output
@@ -1895,19 +1757,22 @@ fn answer_hit(
         metrics,
     )
 }
-/// What a request leaves for its caller: an exit status, or the program it
+/// What a request leaves for its caller: an exit status, the program it
 /// built for `run` or `replay`, which the caller runs and whose status is the
-/// request's. A resident compiler's client runs the program itself, so it has
-/// the client's terminal, signals and process group.
+/// request's, or a `test` request's session, whose launches the caller runs.
+/// A resident compiler's client runs the program and the tests itself, so
+/// they have the client's terminal, signals, directory and environment.
 pub enum Outcome {
     Exit(i32),
     Launch(Launch),
+    Test(Box<crate::TestSession>),
 }
 #[path = "request_launch.rs"]
 mod launch;
 pub use launch::Launch;
+pub(crate) use launch::report_request_error;
 pub(crate) use launch::serve;
-use launch::{conclude, finish, report_request_error};
+use launch::{conclude, finish};
 
 /// Run the request `args` names (the arguments after the program name) and
 /// exit with its status, through a resident compiler when one serves the

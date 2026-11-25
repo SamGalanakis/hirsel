@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 type Locations = BTreeMap<String, (DefPath, u32)>;
 
-#[derive(Default)]
-pub(in crate::test_run) struct Sites(BTreeMap<&'static str, Locations>);
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+pub(in crate::test_run) struct Sites(BTreeMap<String, Locations>);
 
 impl Sites {
     pub(super) fn get(&self, callee: &str) -> Option<&Locations> {
@@ -57,7 +57,10 @@ impl Sites {
         let positions = sources.positions();
         let mut result = Self::default();
         for ((callee, definition), offsets) in by_definition {
-            let locations = result.0.entry(law::CALLEES[callee as usize]).or_default();
+            let locations = result
+                .0
+                .entry(law::CALLEES[callee as usize].to_owned())
+                .or_default();
             for (ordinal, offset) in (1u32..).zip(offsets) {
                 if let Some((file, line, column)) = positions.position(&definition, offset) {
                     locations.insert(

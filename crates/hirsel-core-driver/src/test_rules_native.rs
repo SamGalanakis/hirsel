@@ -341,3 +341,136 @@ fn program_build_warns_for_each_ungranted_parameter_in_order() {
     assert_eq!(status, Some(0), "{stdout}\n{stderr}");
     assert_eq!(ungranted_warnings(&stderr), [ungranted("err"), ungranted("out")]);
 }
+
+/// The server of `resident_test_session_gives_the_one_shot_run`: serve the
+/// store `RESIDENT_CHILD_STORE` names, under its client's environment.
+#[test]
+#[ignore = "explicit native integration target"]
+fn resident_child() {
+    let Some(store) = std::env::var_os("RESIDENT_CHILD_STORE") else {
+        return;
+    };
+    // SAFETY: no other thread of this child reads or writes the environment yet.
+    unsafe { std::env::remove_var("RESIDENT_CHILD_STORE") };
+    crate::request::main(vec!["serve".into(), "--store".into(), store.into_string().unwrap()])
+}
+
+/// S3 bug law: a test run through the resident compiler gives the rows,
+/// verdicts and pass-cache writes of a one-shot run, though the server runs in
+/// another directory under another environment. The client runs each test, so
+/// a test reads the client's environment (here PWD, which a server does not
+/// compare) and its pass is written where the client's run writes it.
+#[test]
+fn resident_test_session_gives_the_one_shot_run() {
+    let law = PackageLaw::new();
+    law.manifest(
+        "app",
+        "app",
+        1,
+        "[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 1048576\n\n[tests.runs.\"app@1/main/reads_pwd\"]\ngrants = [\"Stdout\", \"Env=PWD\"]\n",
+    );
+    law.write(
+        "app/main.hirsel",
+        r#"
+@test
+fn reads_pwd(e: Env, out: Stdout) -> Result[(), ()] waits {
+    match env.get(e, "PWD") {
+        Ok(Some(value)) => result.unwrap(stdout.write(out, value)),
+        _ => result.unwrap(stdout.write(out, "denied")),
+    }
+    Ok(())
+}
+@test
+fn determined() -> Result[(), ()] { Ok(()) }
+@test
+fn error() -> Result[(), ()] { Error(()) }
+"#,
+    );
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = options.link else {
+        unreachable!()
+    };
+    let path = |path: PathBuf| path.canonicalize().unwrap().to_str().unwrap().to_owned();
+    let store = law.path("compiler-store");
+    let args: Vec<String> = vec![
+        "test".into(),
+        "app".into(),
+        "--libraries".into(),
+        law.libraries.to_str().unwrap().into(),
+        "--store".into(),
+        store.to_str().unwrap().into(),
+        "--runtime".into(),
+        path(options.runtime),
+        "--cc".into(),
+        path(cc),
+        "--json".into(),
+    ];
+    let client = law.dir.path().to_owned();
+    let elsewhere = law.path("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let results = law.path("cache/hirsel/core-packages/test-results");
+    let shared = |command: &mut std::process::Command| {
+        command
+            .env("XDG_CACHE_HOME", law.path("cache"))
+            .env("HIRSEL_TRACE_REQUEST_PHASES", "1");
+    };
+    fn files(root: &Path, at: &Path, into: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in std::fs::read_dir(at).into_iter().flatten() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files(root, &path, into);
+            } else {
+                into.insert(path.strip_prefix(root).unwrap().to_owned(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let run = || {
+        let mut request = process::tape_request_command(&args, &client);
+        shared(request.env("PWD", &client));
+        let (status, stdout, stderr) = process::tape_request_output(request);
+        let mut report: serde_json::Value =
+            serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}\n{stderr}"));
+        for row in report["tests"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("wall_ms");
+        }
+        let mut written = std::collections::BTreeMap::new();
+        files(&results, &results, &mut written);
+        (status, report, written, stderr)
+    };
+    let one_shot = run();
+    let rows = one_shot.1["tests"].as_array().unwrap();
+    let row = |name: &str| rows.iter().find(|row| row["definition"] == name).unwrap();
+    assert_eq!(one_shot.0, Some(1), "{}", one_shot.3);
+    assert_eq!(row("app@1/main/reads_pwd")["stdout"], client.to_str().unwrap());
+    assert_eq!(row("app@1/main/error")["passed"], false);
+    assert_eq!(row("app@1/main/determined")["passed"], true);
+    assert!(!one_shot.2.is_empty(), "the determined pass is stored");
+    assert!(!one_shot.3.contains("hirsel-request-phases"), "{}", one_shot.3);
+    std::fs::remove_dir_all(&results).unwrap();
+
+    let mut server = std::process::Command::new(std::env::current_exe().unwrap());
+    server
+        .args(["--exact", "native::tests::resident_child", "--ignored", "--nocapture", "--test-threads=1"])
+        .env("REQUEST_CHILD_ARGS", serde_json::to_string(&args).unwrap())
+        .env("RESIDENT_CHILD_STORE", &store)
+        .env("PWD", &elsewhere)
+        .current_dir(&elsewhere)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    shared(&mut server);
+    let mut server = server.spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !store.join("resident.sock").exists() {
+        assert!(server.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline, "the server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let served = run();
+    let (stopped, _, _) = process::tape_request(
+        &["serve".into(), "--store".into(), store.to_str().unwrap().into(), "--stop".into()],
+        &client,
+    );
+    assert_eq!(stopped, Some(0));
+    assert!(server.wait().unwrap().success());
+    assert!(served.3.contains("hirsel-request-phases"), "the server did not serve: {}", served.3);
+    assert_eq!((&served.0, &served.1, &served.2), (&one_shot.0, &one_shot.1, &one_shot.2));
+}

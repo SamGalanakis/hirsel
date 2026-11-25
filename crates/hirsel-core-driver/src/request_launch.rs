@@ -35,7 +35,7 @@ pub(super) mod dry_run;
 #[path = "store_cli.rs"]
 pub(super) mod store_cli;
 
-pub(super) fn report_request_error(error: &(dyn std::error::Error + 'static)) -> i32 {
+pub(crate) fn report_request_error(error: &(dyn std::error::Error + 'static)) -> i32 {
     if let Some(damage) = error
         .downcast_ref::<std::io::Error>()
         .and_then(std::io::Error::get_ref)
@@ -74,11 +74,15 @@ pub(super) fn store_tool(
 
 pub(super) fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::Error>> {
     if crate::resident::serving() {
-        crate::resident::answer(&outcome);
+        // A session answers as its client steps it (`resident::serve_session`).
+        if !matches!(outcome, Outcome::Test(_)) {
+            crate::resident::answer(&outcome);
+        }
         return Ok(outcome);
     }
     match outcome {
         Outcome::Exit(code) => std::process::exit(code),
+        Outcome::Test(session) => std::process::exit(session.conclude()),
         Outcome::Launch(launch) => {
             let code = Launch::execute(&launch.argv, &launch.env)?;
             drop(launch);

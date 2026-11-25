@@ -13,7 +13,12 @@
 //! The server listens on `resident.sock` in the store and holds
 //! `resident.lock` there while it runs. A `run` request's program runs in the
 //! client, under the client's terminal and signals; the server keeps the
-//! program's scratch directory until that client hangs up.
+//! program's scratch directory until that client hangs up. A `test` request
+//! is a session on its connection: the server answers with the session's
+//! plan, the client steps each unit and runs every launch the server hands
+//! back (under the client's directory and environment, which write the pass
+//! cache), and the server folds coverage and the law lock when the client
+//! finishes. Hanging up drops the session.
 use crate::request::Outcome;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -104,6 +109,22 @@ enum Answer {
         env: Vec<(Vec<u8>, Vec<u8>)>,
     },
     Refused(String),
+    /// A `test` request's session: how its units' launches may overlap.
+    Session(crate::test_run::Plan),
+    /// A unit's next launch, or None once it ended.
+    Test(Option<crate::test_run::LaunchSpec>),
+}
+
+/// A session's client messages after its request.
+#[derive(Serialize, Deserialize)]
+enum Step {
+    /// Step `unit` with the run of its last launch (None to start it).
+    Unit {
+        unit: usize,
+        ran: Option<Result<crate::test_run::Ran, String>>,
+    },
+    /// Every unit ended: fold and answer the exit status.
+    Finish,
 }
 
 fn write_message(stream: &mut UnixStream, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
@@ -213,7 +234,7 @@ fn route(args: &[String]) -> Option<Route> {
     }
     let mut store = None;
     let mut resident = false;
-    // Test processes run on the server and may already have had effects.
+    // A test session's launches may already have had effects.
     let mut retryable = invocation.command.name != "test";
     let mut manifest = None;
     let mut recipe = None;
@@ -360,7 +381,56 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
             }
             Answer::Refused(reason) if resident => return Err(io::Error::other(reason)),
             Answer::Refused(_) => return Ok(None),
+            // A test request is not retryable, so its output is not held.
+            Answer::Session(plan) => return drive_session(&mut stream, &plan).map(Some),
+            Answer::Test(_) => return Err(io::Error::other("the server answered out of turn")),
         }
+    }
+}
+
+/// A test session's client: run each launch the server hands back here,
+/// then ask the server to finish. The request's exit status.
+fn drive_session(stream: &mut UnixStream, plan: &crate::test_run::Plan) -> io::Result<i32> {
+    struct Remote<'a> {
+        stream: &'a mut UnixStream,
+        /// The status the server ended the session with early.
+        ended: Option<i32>,
+    }
+    impl Remote<'_> {
+        fn send(&mut self, step: &Step) -> io::Result<Answer> {
+            write_message(self.stream, &serde_json::to_vec(step)?, &[])?;
+            let (answer, _) = read_message(self.stream)?;
+            Ok(serde_json::from_slice(&answer)?)
+        }
+    }
+    impl crate::test_run::Steps for Remote<'_> {
+        fn step(
+            &mut self,
+            unit: usize,
+            ran: Option<Result<crate::test_run::Ran, String>>,
+        ) -> io::Result<Option<crate::test_run::LaunchSpec>> {
+            match self.send(&Step::Unit { unit, ran })? {
+                Answer::Test(launch) => Ok(launch),
+                Answer::Exit(code) => {
+                    self.ended = Some(code);
+                    Err(io::Error::other("the server ended the session"))
+                }
+                _ => Err(io::Error::other("the server answered out of turn")),
+            }
+        }
+    }
+    let mut remote = Remote {
+        stream,
+        ended: None,
+    };
+    let lost =
+        |error: io::Error| io::Error::other(format!("the server ended without an answer: {error}"));
+    if let Err(error) = crate::test_run::drive(plan, &mut remote) {
+        return remote.ended.ok_or_else(|| lost(error));
+    }
+    match remote.send(&Step::Finish).map_err(lost)? {
+        Answer::Exit(code) => Ok(code),
+        _ => Err(io::Error::other("the server answered out of turn")),
     }
 }
 
@@ -458,6 +528,7 @@ pub(crate) fn answer(outcome: &Outcome) {
     };
     let answer = match outcome {
         Outcome::Exit(code) => Answer::Exit(*code),
+        Outcome::Test(_) => unreachable!("a session answers as its client steps it"),
         Outcome::Launch(launch) => Answer::Launch {
             argv: launch.argv.iter().map(|a| a.as_bytes().to_vec()).collect(),
             env: launch
@@ -618,9 +689,14 @@ fn serve_requests(
             eprintln!("hirsel: the working directory {} is gone", cwd.display());
             Ok(Outcome::Exit(2))
         };
-        let panicked = outcome.is_err();
-        let outcome = outcome.unwrap_or(Outcome::Exit(101));
-        answer(&outcome);
+        let (outcome, panicked) = match outcome {
+            Ok(Outcome::Test(session)) => (None, !serve_session(*session)),
+            Ok(outcome) => (Some(outcome), false),
+            Err(_) => (Some(Outcome::Exit(101)), true),
+        };
+        if let Some(outcome) = &outcome {
+            answer(outcome);
+        }
         let _ = io::stdout().flush();
         let _ = io::stderr().flush();
         for (fd, from) in saved.iter().enumerate() {
@@ -628,7 +704,7 @@ fn serve_requests(
             unsafe { libc::dup2(from.as_raw_fd(), fd as RawFd) };
         }
         let _ = std::env::set_current_dir(&home);
-        if let Outcome::Launch(launch) = outcome {
+        if let Some(Outcome::Launch(launch)) = outcome {
             launched.push((stream, launch.keep));
         }
         if panicked {
@@ -639,6 +715,53 @@ fn serve_requests(
         retire_when_idle = !sets.fit(max_memory);
     }
     Ok(0)
+}
+
+/// Serve a test session on the connection of its request, under the
+/// client's descriptors and directory, until the client finishes it or hangs
+/// up (which drops it). False when a step panicked: the server's state may
+/// be torn, and the client is answered 101.
+fn serve_session(mut session: crate::TestSession) -> bool {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let Some(mut stream) = CLIENT.with_borrow_mut(Option::take) else {
+        return true;
+    };
+    let send = |stream: &mut UnixStream, answer: &Answer| {
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        let bytes = serde_json::to_vec(answer).expect("an answer encodes");
+        write_message(stream, &bytes, &[])
+    };
+    if send(&mut stream, &Answer::Session(session.plan().clone())).is_err() {
+        return true;
+    }
+    loop {
+        let Ok((bytes, _)) = read_message(&mut stream) else {
+            return true;
+        };
+        let Ok(step) = serde_json::from_slice::<Step>(&bytes) else {
+            return true;
+        };
+        let answer = match step {
+            Step::Unit { unit, ran } => {
+                catch_unwind(AssertUnwindSafe(|| session.step(unit, ran))).map(Answer::Test)
+            }
+            Step::Finish => {
+                let code = catch_unwind(AssertUnwindSafe(move || session.finish()));
+                crate::meter::trace::finish();
+                let finished = code.is_ok();
+                let _ = send(&mut stream, &Answer::Exit(code.unwrap_or(101)));
+                return finished;
+            }
+        };
+        let Ok(answer) = answer else {
+            let _ = send(&mut stream, &Answer::Exit(101));
+            return false;
+        };
+        if send(&mut stream, &answer).is_err() {
+            return true;
+        }
+    }
 }
 
 fn refuse(stream: &mut UnixStream, reason: &str) -> io::Result<()> {

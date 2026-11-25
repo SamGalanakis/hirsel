@@ -3,26 +3,30 @@
 use crate::native::EntryDecl;
 use crate::property_corpus;
 use crate::{CheckProduct, NativeOptions, NativeStop};
-use hirsel_core_ids::{ContentHash, DefPath};
+use hirsel_core_ids::DefPath;
 
 mod cache;
 mod coverage;
+mod launch;
 mod laws;
 mod replay;
+mod session;
 mod slots;
 pub use cache::TestCache;
 use cache::test_key;
 use coverage::CoverageCapture;
 pub(crate) use coverage::{Flags, RunCoverage, Session, header, records};
-use laws::LawCapture;
+use launch::Observe;
+pub(crate) use launch::{LaunchSpec, Plan, Ran, Steps, drive};
 pub(crate) use laws::{LawReport, LawRow, class_rank};
+pub(crate) use session::Prepare;
+pub use session::TestSession;
 use slots::InheritedSlots;
-use std::collections::BTreeMap;
-use std::io::{self, Read};
+use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
+use std::time::Duration;
 
 /// Execution inputs are separate from the target-independent checking products
 /// and target-specific object/link products. Cross execution is always explicit.
@@ -213,14 +217,6 @@ pub(crate) fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
     });
 }
 
-/// PROG-4: each test run starts in a working directory of its own, empty
-/// when it starts; a relative directory grant resolves against it.
-fn private_directory(command: &mut Command) -> io::Result<tempfile::TempDir> {
-    let directory = tempfile::Builder::new().prefix("hirsel-test-").tempdir()?;
-    command.current_dir(directory.path());
-    Ok(directory)
-}
-
 pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
     let mut mask = vec![0usize; 16];
     loop {
@@ -246,361 +242,10 @@ pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
     }
 }
 
-type TestResult = Result<(TestOutcome, Source), NativeStop>;
-
-enum TestLaunch<'a> {
+enum TestLaunch {
     Cached(TestOutcome),
-    Run(TestProcess<'a>),
-}
-
-impl TestLaunch<'_> {
-    fn finish(self, test: &DefPath, timeout: Option<Duration>) -> TestResult {
-        match self {
-            TestLaunch::Cached(outcome) => Ok((outcome, Source::Cached)),
-            TestLaunch::Run(process) => process.run(test, timeout),
-        }
-    }
-}
-
-struct TestProcess<'a> {
-    command: Command,
-    executable: PathBuf,
-    pass: Option<(&'a TestCache, ContentHash)>,
-    /// Removed once the run is collected.
-    _directory: tempfile::TempDir,
-    laws: Option<LawCapture>,
-    coverage: Option<CoverageCapture>,
-    foreign: bool,
-}
-
-impl TestProcess<'_> {
-    fn run(mut self, test: &DefPath, timeout: Option<Duration>) -> TestResult {
-        let (output, timed_out, wall_time) = execute(&mut self.command, timeout)?;
-        let outcome = TestOutcome {
-            definition: test.clone(),
-            output,
-            timed_out,
-            wall_time,
-            corpus: None,
-            laws: if self.foreign {
-                LawReport::Foreign
-            } else {
-                self.laws
-                    .as_ref()
-                    .map_or_else(LawReport::default, LawCapture::report)
-            },
-            coverage: self
-                .coverage
-                .as_ref()
-                .map_or_else(RunCoverage::default, CoverageCapture::report),
-        };
-        if outcome.passed()
-            && (self.laws.is_none() || matches!(outcome.laws, LawReport::Observed(_)))
-            && (self.coverage.is_none() || matches!(outcome.coverage, RunCoverage::Observed(_)))
-            && let Some((cache, key)) = self.pass
-        {
-            cache.put(key, &outcome.output, &outcome.laws, &outcome.coverage);
-        }
-        Ok((outcome, Source::Executed))
-    }
-}
-
-pub(crate) struct TestBatch<'a> {
-    pub runs: &'a crate::package_dir::TestRuns,
-    pub jobs: NonZeroUsize,
-    pub timeout: Option<Duration>,
-    pub runner: &'a Runner,
-    pub replay: bool,
-    pub laws: bool,
-    pub plain_runtime: Option<PathBuf>,
-    pub expect_verdict: Option<&'a str>,
-    pub cache: Option<&'a TestCache>,
-    pub rerun: bool,
-    pub seed: Option<u64>,
-    pub corpus: Option<&'a property_corpus::Corpus>,
-}
-
-impl TestBatch<'_> {
-    fn run_one(
-        &self,
-        product: &CheckProduct,
-        test: &DefPath,
-        options: &NativeOptions,
-    ) -> TestResult {
-        product
-            .test_launch(
-                test,
-                options,
-                self.runner,
-                self.cache,
-                self.rerun,
-                self.seed,
-                self.laws.then_some(self.plain_runtime.as_deref()),
-            )?
-            .finish(test, self.timeout)
-    }
-
-    fn run_corpus(
-        &self,
-        corpus: &property_corpus::Corpus,
-        product: &CheckProduct,
-        test: &DefPath,
-        options: &NativeOptions,
-    ) -> TestResult {
-        corpus.check_grants(&product.granted(test, options).directories)?;
-        let run = |seed, input: &str| {
-            let TestLaunch::Run(mut process) = product.test_launch(
-                test,
-                options,
-                self.runner,
-                None,
-                true,
-                seed,
-                self.laws.then_some(self.plain_runtime.as_deref()),
-            )?
-            else {
-                unreachable!("corpus runs have no pass cache")
-            };
-            process.command.env(property_corpus::ENV, input);
-            let executable = process.executable.clone();
-            let (outcome, source) = process.run(test, self.timeout)?;
-            Ok::<_, NativeStop>((outcome, source, executable))
-        };
-        let mut replay_time = Duration::ZERO;
-        let stale = match corpus.read(test)? {
-            property_corpus::SavedEntry::Missing => false,
-            property_corpus::SavedEntry::Stale => {
-                corpus.retire(test)?;
-                true
-            }
-            property_corpus::SavedEntry::Current(saved) => {
-                let (mut outcome, source, executable) = run(saved.launch_seed, &saved.input)?;
-                match property_corpus::report(&outcome.output, outcome.timed_out, &executable) {
-                    Some(property_corpus::Report::Stale) => {
-                        corpus.retire(test)?;
-                        replay_time = outcome.wall_time;
-                        true
-                    }
-                    Some(property_corpus::Report::Failure(failure)) => {
-                        outcome.corpus = Some(if saved.confirms(&failure) {
-                            "confirmed"
-                        } else {
-                            corpus.write(test, saved.launch_seed, failure)?;
-                            "changed-failure"
-                        });
-                        return Ok((outcome, source));
-                    }
-                    None => {
-                        if outcome.passed() {
-                            return Err(NativeStop::Entry(
-                                "test did not verify its saved property corpus entry".into(),
-                            ));
-                        }
-                        outcome.corpus = Some("unverified");
-                        return Ok((outcome, source));
-                    }
-                }
-            }
-        };
-        let (mut outcome, source, executable) = run(self.seed, "search")?;
-        outcome.wall_time += replay_time;
-        if let Some(property_corpus::Report::Failure(failure)) =
-            property_corpus::report(&outcome.output, outcome.timed_out, &executable)
-        {
-            corpus.write(test, self.seed, failure)?;
-            outcome.corpus = Some(if stale { "stale-and-saved" } else { "saved" });
-        } else if stale {
-            outcome.corpus = Some("stale");
-        }
-        Ok((outcome, source))
-    }
-
-    pub(crate) fn run(
-        self,
-        product: &CheckProduct,
-        tests: &[DefPath],
-        options: &NativeOptions,
-        mut report: impl FnMut(&DefPath, TestResult),
-    ) {
-        // Each test's own run configuration; one test's never changes another's.
-        let configure = |test: &DefPath| {
-            let mut test_options = self.runs.options(test, options);
-            let mut grant_env = |name| {
-                let env = test_options
-                    .env_patterns
-                    .get_or_insert_with(Default::default);
-                if !env.covers(name) {
-                    env.extend(hirsel_core_net::EnvPatterns::parse(name).unwrap());
-                }
-                test_options.grant_mask |= 1 << crate::grant_kind("Env").unwrap();
-            };
-            if self.seed.is_some() || self.corpus.is_some() {
-                grant_env(SEED_ENV);
-            }
-            if self.corpus.is_some() {
-                grant_env(property_corpus::ENV);
-            }
-            if let Some(Ok(decl)) = product.test_entries.get(test) {
-                let exec = decl
-                    .parameters
-                    .iter()
-                    .filter(|p| p.ty == "core@1/core/Exec")
-                    .count();
-                if !self.replay {
-                    // Every grant this test's command line does not approve,
-                    // Exec then Foreign, each in parameter order.
-                    let mut refusals = Vec::new();
-                    for grant in test_options.exec_grants.iter().take(exec) {
-                        if !options
-                            .exec_grants
-                            .iter()
-                            .any(|approved| approved.request.text() == grant.request.text())
-                        {
-                            refusals.push(grant.refusal());
-                        }
-                    }
-                    for interface in decl.parameters.iter().filter_map(|p| p.foreign_interface()) {
-                        let refusal = format!(
-                            "not granted: Foreign[{interface}]: pass --grant Foreign={interface} to hirsel test"
-                        );
-                        if (!test_options.foreign_grants.contains(interface)
-                            || !options.foreign_grants.contains(interface))
-                            && !refusals.contains(&refusal)
-                        {
-                            refusals.push(refusal);
-                        }
-                    }
-                    if !refusals.is_empty() {
-                        return Err(NativeStop::Entry(refusals.join("\n")));
-                    }
-                    for grant in test_options.exec_grants.iter_mut().take(exec) {
-                        grant.workdir = Some(std::env::current_dir()?);
-                        grant.seal_policy()?;
-                    }
-                }
-            }
-            test_options.output = options
-                .output
-                .join(crate::request::hex(ContentHash::of_bytes(
-                    test.to_string().as_bytes(),
-                )));
-            Ok(test_options)
-        };
-        if self.jobs.get() == 1
-            || tests.len() <= 1
-            || self.replay
-            || self.corpus.is_some()
-            || (options.recording && !self.laws)
-            || options.replay.is_some()
-            || options.logical_charge_report.is_some()
-            || !matches!(self.runner, Runner::Native)
-        {
-            for test in tests {
-                let test_options = match configure(test) {
-                    Ok(options) => options,
-                    Err(error) => {
-                        report(test, Err(error));
-                        continue;
-                    }
-                };
-                let result = if self.replay {
-                    product
-                        .run_test_replay(
-                            test,
-                            &test_options,
-                            self.timeout,
-                            self.runner,
-                            self.expect_verdict,
-                            self.laws,
-                        )
-                        .map(|outcome| (outcome, Source::Executed))
-                } else if let Some(corpus) = self.corpus {
-                    self.run_corpus(corpus, product, test, &test_options)
-                } else {
-                    self.run_one(product, test, &test_options)
-                };
-                report(test, result);
-            }
-            return;
-        }
-
-        let mut next_row = 0;
-        let mut rows = BTreeMap::new();
-        let mut complete = |index, result| {
-            rows.insert(index, result);
-            while let Some(result) = rows.remove(&next_row) {
-                report(&tests[next_row], result);
-                next_row += 1;
-            }
-        };
-
-        std::thread::scope(|scope| {
-            let (completed, results) = std::sync::mpsc::channel();
-            let unwrap = |outcome: std::thread::Result<TestResult>| {
-                outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            };
-            let mut running = 0;
-            for (index, test) in tests.iter().enumerate() {
-                let test_options = match configure(test) {
-                    Ok(options) => options,
-                    Err(error) => {
-                        complete(index, Err(error));
-                        continue;
-                    }
-                };
-                let exclusive = product.test_needs_exclusive_run(test, &test_options);
-                let slots = if exclusive { 0 } else { self.jobs.get() - 1 };
-                while running > slots {
-                    let (index, outcome) =
-                        results.recv().expect("running child reports its result");
-                    complete(index, unwrap(outcome));
-                    running -= 1;
-                }
-
-                if exclusive {
-                    complete(index, self.run_one(product, test, &test_options));
-                    continue;
-                }
-                let process = match product.test_launch(
-                    test,
-                    &test_options,
-                    self.runner,
-                    self.cache,
-                    self.rerun,
-                    self.seed,
-                    self.laws.then_some(self.plain_runtime.as_deref()),
-                ) {
-                    Ok(TestLaunch::Run(process)) => process,
-                    Ok(TestLaunch::Cached(outcome)) => {
-                        complete(index, Ok((outcome, Source::Cached)));
-                        continue;
-                    }
-                    Err(error) => {
-                        complete(index, Err(error));
-                        continue;
-                    }
-                };
-                let completed = completed.clone();
-                let timeout = self.timeout;
-                let waiter = std::thread::Builder::new().spawn_scoped(scope, move || {
-                    // Report panics too so the caller can unwind while the
-                    // scope joins the remaining children.
-                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        process.run(test, timeout)
-                    }));
-                    let _ = completed.send((index, outcome));
-                });
-                match waiter {
-                    Ok(_) => running += 1,
-                    Err(error) => complete(index, Err(error.into())),
-                }
-            }
-            drop(completed);
-            for (index, outcome) in results {
-                complete(index, unwrap(outcome));
-            }
-        });
-    }
+    /// The launch and the executable it runs.
+    Run(LaunchSpec, PathBuf),
 }
 
 pub(crate) fn parameterless_test(decl: &Result<EntryDecl, String>) -> Option<&EntryDecl> {
@@ -657,21 +302,30 @@ impl CheckProduct {
         cache: Option<&TestCache>,
         rerun: bool,
     ) -> Result<(TestOutcome, Source), NativeStop> {
-        self.test_launch(test, options, runner, cache, rerun, None, None)?
-            .finish(test, timeout)
+        let context = session::Context {
+            runner,
+            timeout,
+            cache,
+            rerun,
+            ..Default::default()
+        };
+        session::Unit::new(test.clone(), None, Ok(options.clone())).run_here(self, &context)
     }
 
+    /// A test's launch, or its stored pass. `laws` asks for law rows, with
+    /// the plain runtime a foreign test builds with (FFI-8).
     #[allow(clippy::too_many_arguments)]
-    fn test_launch<'a>(
+    fn test_launch(
         &self,
         test: &DefPath,
         options: &NativeOptions,
         runner: &Runner,
-        cache: Option<&'a TestCache>,
+        cache: Option<&TestCache>,
         rerun: bool,
         seed: Option<u64>,
         laws: Option<Option<&Path>>,
-    ) -> Result<TestLaunch<'a>, NativeStop> {
+        timeout: Option<Duration>,
+    ) -> Result<TestLaunch, NativeStop> {
         let Some(decl) = self.test_entries.get(test) else {
             return Err(NativeStop::Entry(format!(
                 "{test} is not a discovered @test"
@@ -766,26 +420,22 @@ impl CheckProduct {
         if let Some(seed) = seed {
             command.env(SEED_ENV, seed.to_string());
         }
-        slots.pass(&mut command);
-        let directory = private_directory(&mut command)?;
         let observe = laws.is_some() && !foreign;
-        let laws = observe
-            .then(|| LawCapture::attach(&mut command, self, test, options.instance_limit))
+        let sites = observe
+            .then(|| laws::Sites::for_test(self, test, options.instance_limit).ok())
             .flatten();
-        let pass = pass.filter(|_| !observe || laws.is_some());
-        let coverage = options
-            .coverage
-            .is_some()
-            .then(|| CoverageCapture::attach(&mut command, built.coverage.as_ref()));
-        Ok(TestLaunch::Run(TestProcess {
-            command,
-            executable,
-            pass,
-            _directory: directory,
-            laws,
-            coverage,
+        let pass = pass.filter(|_| !observe || sites.is_some());
+        let observe = Observe {
+            laws: sites,
+            coverage: options
+                .coverage
+                .is_some()
+                .then(|| built.coverage.as_deref().cloned()),
+            pass: pass.map(|(cache, key)| (cache.root().to_owned(), key)),
             foreign,
-        }))
+        };
+        let spec = LaunchSpec::new(&command, slots, observe, timeout);
+        Ok(TestLaunch::Run(spec, executable))
     }
 
     /// `options` reduced to what `test`'s parameters take.
@@ -828,86 +478,5 @@ impl CheckProduct {
                 | "core@1/core/Tasks" => false,
                 _ => true,
             })
-    }
-}
-
-fn execute(
-    command: &mut Command,
-    timeout: Option<Duration>,
-) -> io::Result<(Output, bool, Duration)> {
-    let start = Instant::now();
-    let (output, timed_out) = capture(command, timeout)?;
-    Ok((output, timed_out, start.elapsed()))
-}
-
-fn capture(command: &mut Command, timeout: Option<Duration>) -> io::Result<(Output, bool)> {
-    let Some(timeout) = timeout else {
-        return command.output().map(|output| (output, false));
-    };
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let started = Instant::now();
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    std::thread::scope(|scope| {
-        let read = |stream: &mut dyn Read| {
-            let mut bytes = Vec::new();
-            stream.read_to_end(&mut bytes)?;
-            Ok::<_, io::Error>(bytes)
-        };
-        let out = scope.spawn(move || read(&mut stdout));
-        let err = scope.spawn(move || read(&mut stderr));
-        let (status, timed_out) = loop {
-            if let Some(status) = child.try_wait()? {
-                break (status, false);
-            }
-            if started.elapsed() >= timeout {
-                // Only the process this test runner spawned is terminated.
-                child.kill()?;
-                break (child.wait()?, true);
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
-        Ok((
-            Output {
-                status,
-                stdout: out
-                    .join()
-                    .map_err(|_| io::Error::other("test stdout reader panicked"))??,
-                stderr: err
-                    .join()
-                    .map_err(|_| io::Error::other("test stderr reader panicked"))??,
-            },
-            timed_out,
-        ))
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn execution_deadline_retains_output_and_does_not_stop_the_next_run() {
-        let deadline = Duration::from_millis(50);
-        let (output, timed_out, wall_time) = execute(
-            Command::new("sh").args(["-c", "printf before; exec sleep 60"]),
-            Some(deadline),
-        )
-        .unwrap();
-        assert!(timed_out);
-        assert!(wall_time >= deadline);
-        assert!(!output.status.success());
-        assert_eq!(output.stdout, b"before");
-        let (output, timed_out, _) = execute(
-            Command::new("sh").args(["-c", "printf after"]),
-            Some(Duration::from_secs(5)),
-        )
-        .unwrap();
-        assert!(!timed_out);
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"after");
     }
 }

@@ -79,7 +79,7 @@ pub use native::{
 };
 pub use reach::ReachCounters;
 pub use reachability::{GapStop, Reachable, default_target};
-pub use test_run::{Runner, Source, TestCache, TestOutcome};
+pub use test_run::{Runner, Source, TestCache, TestOutcome, TestSession};
 mod meter;
 pub use diagnostics::{
     Applicability, AvailableMember, Diagnostic, DiagnosticCause, Edit, Fix, IncompleteDiagnostic,

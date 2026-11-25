@@ -222,6 +222,55 @@ fn pieces(b: Bytes, sep: u8) -> List[Bytes] {
     out
 }
 
+/// The payload type a `red` format's blocks carry: RFC 2198 section 5's
+/// `a=fmtp:63 111/111` names one per block, and RTP-13 takes a `red` format only
+/// when every block names the same one.
+pub fn red_base(f: Format) -> Option[u8] {
+    if f.codec != Red {
+        return None
+    }
+    // Walked in place: egress asks this for every audio packet (W18).
+    let b = view f.fmtp
+    let mut base: Option[u8] = None
+    let mut at: u64 = 0
+    loop {
+        let end = delimiter(b, at, b'/')
+        let mut lo = skip_space(b, at)
+        let mut hi = end
+        while hi > lo && space(b[hi - 1]) {
+            hi -= 1
+        }
+        if hi == lo || hi - lo > 3 {
+            return None
+        }
+        let mut v: u64 = 0
+        while lo < hi {
+            let c = b[lo]
+            if c < b'0' || c > b'9' {
+                return None
+            }
+            let digit: u64 = int.widen(c - b'0')
+            v = v * 10 + digit
+            lo += 1
+        }
+        if v > 127 {
+            return None
+        }
+        let pt: u8 = int.truncate(v)
+        if let Some(first) = base {
+            if first != pt {
+                return None
+            }
+        }
+        base = Some(pt)
+        if end == list.len(b) {
+            break
+        }
+        at = end + 1
+    }
+    base
+}
+
 fn parameter(b: Bytes, key: Bytes) -> Option[Bytes] {
     for part in pieces(b, b';') {
         let start = skip_space(part, 0)

@@ -4,7 +4,9 @@ Version note (2026-11-24, media-rtp-spec-2318): first text of RTP-1 to RTP-12, W
 real-time media track. Amended by rtp-spec-amend-2340 for the 16 findings of review 2336 and the
 rtp side of WebRTC review 2333 (findings 4 and 5). Amended by rtp-s8-rewrite-2476 for the five
 RTP-11 gaps slice S9 (2362) found: `Unit.frame`, `Unit`'s home, the H.264 caller state, the
-target-number sentence, and AV1 without chains; and for the switch projection's rounding. Not yet built; the fences are `unbuilt`. The
+target-number sentence, and AV1 without chains; and for the switch projection's rounding. Amended by webrtc-opus-red-c1-2652 (2026-11-25) for [RTP-13](#rtp-13-redundant-audio-red), RFC 2198
+redundant audio: the `red` module, its ring and the redundancy policy, the RTP-12 exception for a
+ring of depth 0, and the matching line of *Not taken in Wave 1*. Not yet built; the fences are `unbuilt`. The
 section ends with the [build laws](#build-laws) and the [build slices](#build-slices).
 
 `rtp` is a pure Hirsel package at `core/programs/rtp/` <!-- doc-ref: planned -->. It holds the parts of a real-time
@@ -15,6 +17,8 @@ media endpoint or forwarder that sit between the packet cipher and the codec:
   transport-wide feedback;
 - reception statistics, round-trip time and loss tracking;
 - a retransmission history and RTX ([RFC 4588](https://www.rfc-editor.org/rfc/rfc4588));
+- redundant audio ([RFC 2198](https://www.rfc-editor.org/rfc/rfc2198) RED) and the level of
+  redundancy a lossy stream carries;
 - transport-wide sequence numbers and their feedback;
 - a delay-based bandwidth estimator and a pacer;
 - per-stream sequence and timestamp rewriting, with layer switching that waits for a
@@ -79,9 +83,11 @@ section here or to a named owner.
 | dynacast (`Off | Layer(rid)` per subscriber, unselected layers paused) | the forwarding spec; `Rewrite.target` ([RTP-11](#rtp-11-stream-rewriting-and-layer-switching)) takes `Off` or a layer |
 | revocation: stop forwarding, flush or cancel queued RTX | the fence is the forwarding spec's; [RTP-12](#rtp-12-state-charges-and-close) gives the synchronous `close` of rewrite, history and pacer state |
 | DTLS, SRTP and SRTCP | the DTLS spec |
+| Opus RED (RFC 2198) redundancy on lossy down-tracks | [RTP-13](#rtp-13-redundant-audio-red); which leg carries it is the forwarding spec's (RTC-5) |
 
 **Not taken in Wave 1**, each a later decision with no hook left for it here: REMB, RTCP XR,
-RTCP APP (parsed as `Other` and skipped), FEC of any kind (RED, ULPFEC, FlexFEC), the video
+RTCP APP (parsed as `Other` and skipped), FEC other than RED (ULPFEC, FlexFEC; RED is
+[RTP-13](#rtp-13-redundant-audio-red)), the video
 layers allocation extension, transport-cc v2's feedback request, RFC 8888 congestion control
 feedback, abs-capture-time, playout-delay, video-orientation, RFC 6465 mixer-to-client audio
 levels, SDES items other than CNAME, and libwebrtc's second-generation loss-based estimator.
@@ -1400,7 +1406,9 @@ points at the picture the receiver was sent.
 Every piece of state is sized when it is made: a history's slots, a log's ring, a pacer's
 slots, a loss window, a rewrite's ranges and frames, a counter's slots. Each size must be
 positive, and a size of 0 is refused with `Capacity`, because a ring of no slots has no
-`mod`. Each constructor admits its complete charge from the current limit
+`mod`. The one exception is a RED `Ring` ([RTP-13](#rtp-13-redundant-audio-red)): depth 0
+is the ring of a stream that carries no redundancy, keeps nothing and charges nothing, and
+every operation on it checks for no slots before any `mod`. Each constructor admits its complete charge from the current limit
 ([MEM-24](budgets.md#mem-24-logical-charges)) or answers `Capacity`, and the drop refunds it.
 A charge is computed with checked arithmetic and rounded up to whole bytes: a loss window
 charges `ceil(window / 8)` bytes of bitmap plus 17 bytes per tracked index (two times and a
@@ -1436,6 +1444,86 @@ the vector of law `header_chrome_vector`. Instructions come from one `perf stat`
 cycles from 60 interleaved pairs on a shielded CPU, as the host rules say. The forwarding
 spec owns the per-subscriber fan-out target (250 ns), of which this path is part. No peer
 ratio is quoted.
+
+## RTP-13: Redundant audio (RED)
+
+```hirsel unbuilt
+// module red
+pub type Error: key = Short | Overrun
+pub type Block { pt: u8, offset: u16, at: u64, len: u64 }
+pub const MAX_OFFSET: u32 = 16383
+pub const MAX_BLOCK: u64 = 1023
+pub const MAX_DISTANCE: u8 = 2
+
+pub fn parse(pkt: Bytes, from: u64, len: u64, mut out: List[Block]) -> Result[(), Error]
+pub fn primary(pkt: Bytes, from: u64, len: u64) -> Result[Block, Error]
+
+pub opaque type Ring
+pub fn ring(depth: u8) -> Result[Ring, Capacity]
+pub fn keep(mut r: Ring, index: u64, ts: u32, pkt: Bytes, from: u64, len: u64)
+pub fn write(mut out: Bytes, pt: u8, r: Ring, index: u64, ts: u32, pkt: Bytes, from: u64, len: u64, most: u8, since: u64) -> Result[u64, Capacity]
+
+pub type Redundancy: key = Off | Distance(u8)
+pub type Policy: key { level: Redundancy, held: u64 }
+pub const DWELL_NS: u64 = 2000000000
+pub fn policy() -> Policy
+pub fn distance(p: Policy) -> u8
+pub fn on_loss(mut p: Policy, loss: u8, now: u64)
+```
+
+A RED payload ([RFC 2198](https://www.rfc-editor.org/rfc/rfc2198)) carries a primary
+encoding and copies of earlier ones, so a receiver that lost a packet can take its frame
+from a later one. WebRTC uses it for Opus: `red/48000/2` with an `fmtp` of the primary's
+payload type, once per block (`111/111` is the primary and one copy, both Opus 111). The
+module is pure and sans-IO: it reads and writes payload bytes, keeps the primaries it was
+handed, and decides a level from the loss samples it is given.
+
+**Layout** (RFC 2198 §3). A payload is a run of headers, then the blocks in the same order.
+Every header but the last is 4 bytes: `F` = 1, the 7-bit payload type, a 14-bit timestamp
+offset behind the packet's timestamp, and a 10-bit block length. The last header is 1 byte,
+`F` = 0 and the primary's payload type; the primary's length is what remains of the payload.
+Blocks are oldest first and the primary is last. So an offset is at most `MAX_OFFSET`
+(16,383 ticks, 341 ms at 48 kHz) and a redundant block at most `MAX_BLOCK` (1,023) bytes.
+
+**Reading.** `parse` writes every block of `pkt[from .. from + len]` to `out` (cleared
+first) as a view: its payload type, its offset (0 for the primary) and where its bytes lie in
+`pkt`. Nothing is copied. A payload is refused when it is empty or a header is cut or there is
+no final header (`Short`), or when the redundant lengths run past its end (`Overrun`); then
+`out` is left empty. A primary of 0 bytes is legal. `primary` answers the primary alone with
+the same checks and no list. Both are stateless and may run on bytes not yet authenticated.
+
+**Ring.** A `Ring` keeps the last `depth` primaries of one stream by extended index, in slots
+of `MAX_BLOCK` bytes reserved and charged when it is made (depth 1 to 8; more is `Capacity`).
+Depth 0 is a ring that keeps nothing and charges nothing (the RTP-12 exception). `keep`
+copies a primary into slot `index mod depth` with its index and timestamp; a primary longer
+than `MAX_BLOCK` empties its slot instead, because no header can carry it. The copy is the
+only one: the slots are reserved once, so keeping and writing allocate nothing.
+
+**Writing.** `write` appends to `out` the RED payload of the primary `pkt[from .. from +
+len]` at `index` and timestamp `ts`, with up to `min(most, MAX_DISTANCE)` past primaries as
+redundant blocks, every block tagged `pt`. Index `index - d` is carried when the ring holds
+exactly that index, it is at or after `since`, and its offset `ts - kept_ts` is 1 to
+`MAX_OFFSET`; otherwise it is left out and the payload is shorter. `since` is the first index
+the receiver can place behind this one: a forwarder that switched source or resumed a
+held leg sets it there, so no block from before the switch is sent. Blocks are written
+oldest first. `write` checks the room in `out` before it appends, and a refusal appends
+nothing; the answer is the payload's length. Distance 0 writes the 1-byte header and the
+primary.
+
+**Policy.** A `Policy` is one down-track's redundancy level, `Off` or `Distance(1 | 2)`,
+fed loss samples in RTP-5's unit (`fraction`, loss in 1/256). A sample at or above a rise
+threshold raises the level to it at once: 3/256 (1.2%) for distance 1 and 13/256 (5.1%) for
+distance 2. A sample at or above the current level's hold threshold holds it: 1/256 for
+distance 1 and 3/256 for distance 2. When no sample has held the level for `DWELL_NS` (2 s),
+the next sample steps it down one level, so a clean leg goes from 2 to 1 to `Off` and
+carries no redundancy bytes after two dwells. The gap between rise and hold keeps a leg
+whose loss hovers at a threshold from flapping. Which samples a forwarder feeds is the
+forwarding spec's (RTC-5).
+
+**Not here.** Recovering a lost packet on receipt from the blocks of a later one is the
+receiver's; a forwarder that receives RED forwards the primary or rebuilds RED, and does not
+repair its own uplink. RED for video, and redundancy in another encoding than the primary's,
+are not taken.
 
 ## Prior art
 
@@ -1775,6 +1863,20 @@ written here and repeated in the law's comment.
   target is at least 0.9 times the offered rate. *Oracle:* the configured source rate, with
   0.9 and 10 s as acceptance thresholds. The classic loss rule settles near 0.8 Mbit/s
   here.
+- **`red_parse` (RTP-13).** *Harness:* `core/programs/rtp/red_laws.hirsel`. RFC 2198 §4's
+  example behind 3 bytes of prefix gives LPC (PT 7, offset 320, 14 bytes at 8) and the DVI4
+  primary (PT 5, 6 bytes at 22). An Opus chain `ef 1e 00 03 ef 0f 01 2c 6f` gives (111, 1920,
+  3 at 9), (111, 960, 300 at 12) and (111, 0, 5 at 312): 1920 = 30 << 6 and 960 = 15 << 6.
+  `ef ff ff ff` is offset 16,383 and length 1,023. A 0-byte primary is legal; a cut header,
+  a missing final header and an empty payload are `Short`, and lengths past the end are
+  `Overrun`, with `out` left empty. *Oracle:* RFC 2198 §3 and §4, by hand.
+- **`red_write_round_trip` (RTP-13).** A ring of depth 2 holding indices 7 and 8 at
+  timestamps 1000 and 1960, and primary 9 at 2920, writes `ef 1e 00 03 ef 0f 00 02 6f`, `abc`,
+  `de`, the primary; distance 1, distance 0, `since` 8, a missing index, an overwritten slot,
+  a 1,024-byte primary and a 16,384-tick offset each leave out exactly the blocks RTP-13
+  says, and 16,383 ticks back is carried (`ef ff fc 01`). A write with no room names 7 bytes
+  wanted in 5 and appends nothing; `parse` reads back what `write` wrote. *Oracle:* RTP-13
+  and RFC 2198 §3, by hand.
 - **`parse_rewrite_cost` (RTP-12).** The cost path of RTP-12: at most 80 ns, 0 allocations. Passing since
   rtp-s11b-ext-2501: 74.6 ns median (p99 78.7), 304.5 cycles and 1,530 instructions per packet
   on shielded CPU 16 at 4.1 GHz, against 92.8 ns and 1,966 instructions for its parent.
@@ -1803,6 +1905,7 @@ package. Each law is carried by exactly one slice.
 | **S10** network laws | the four `sim.udp` laws | S4 to S7, `std.sim.udp` (media-w0-sim-udp-2324) | `nack_recovery_under_loss`, `congestion_backoff`, `policer_converges_to_policed_rate`, `inherent_loss_does_not_collapse` | M | Sol |
 | **S11** cost | the RTP-12 cost path; the only slice with a cost target and the only one that runs a benchmark | S1, S3, S8 | `parse_rewrite_cost`: [`python3 bench/rtp/cost.py <scratch-dir>`](../../bench/rtp/cost.py) checks 0 allocations per packet (the default mode), reports instructions (mode `instructions`) and times the path on a shielded CPU (mode `time`) | S | Sol |
 | **S12** protected RTX | the SRTP wire case of RTP-7, in `core/programs/srtp/` | S4, DTLS slice S5 | `rtx_protected` in `core/programs/srtp/laws.hirsel` | S | Devin |
+| **S13** RED | RTP-13: module `red` (parse, ring, write, policy); its webrtc use is RTC-5's | S1, S3 | `red_parse`, `red_write_round_trip` | S | Opus |
 
 Every slice that changes a `.hirsel` source under `core/programs/rtp` <!-- doc-ref: planned --> or
 `core/programs/media_bits` refreshes that package's `hirsel.laws` in the same commit.

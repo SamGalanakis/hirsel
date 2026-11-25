@@ -215,7 +215,13 @@ type Track {
     // AV1 frame numbers, keyed by the source frame (timestamp and frame number), and
     // the source they are translated from.
     frames: rtp.counter.Counter,
-    frames_source: Option[u32]
+    frames_source: Option[u32],
+    // RTP-13: how many past primaries an audio track carries, the first source index
+    // it may carry, and the NACKed and sent packets since its last report block.
+    red: rtp.red.Policy,
+    red_from: u64,
+    nacked: u64,
+    forwarded: u64
 }
 
 type Section {
@@ -259,6 +265,8 @@ pub opaque type PeerSession {
     pkt: Bytes,
     word: Bytes,
     dd: Bytes,
+    // An RTP-13 RED payload a down-track sends, rebuilt for each packet.
+    red: Bytes,
     ext: rtp.ext.ExtWriter,
     // The pacer, its `pacer_packets` payload slots reserved at `open`, the free ones,
     // and the entries `unpace` takes out.
@@ -445,8 +453,9 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
         list.push(mut slab, take b)
         list.push(mut free, int.narrow(n - 1 - i))
     }
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
+    list.try_reserve(mut p.red, SLOT) ?=> |c| Capacity(c)
     list.try_reserve(mut p.word, 2) ?=> |c| Capacity(c)
     list.try_reserve(mut p.dd, DD_LIMIT) ?=> |c| Capacity(c)
     let fresh = draw(mut p)

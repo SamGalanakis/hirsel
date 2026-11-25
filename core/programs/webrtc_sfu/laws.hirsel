@@ -929,11 +929,12 @@ fn flip(packet: Bytes, at: u64) -> Bytes {
 fn egress(mut r: Rig, payload: Bytes) {
     let track = result.unwrap(peer.add_track(mut r.p, 2, 100, 0))
     result.unwrap(peer.set_target(mut r.p, track, Layer(source: 9, target: 0)))
+    let none = result.unwrap(rtp.red.ring(0))
     for i in 0u64 .. 5 {
         let ts: i64 = int.narrow(3000 * i)
         let u = rtp.rewrite.Unit(start: true, end: true, keyframe: i == 0, needs: 1, switches: 0xffffffff, frame: 0)
         let leg = peer.Leg(src: Gen(id: 9, epoch: 1), handle: i, source: 9, index: 100 + i, ts: ts, marker: true, codec: Vp8, padding_only: false, unit: u, level: None, voice: false, from: 0, len: list.len(payload), closes: 0, dd_at: 0, dd_len: 0)
-        if result.unwrap(peer.forward(mut r.p, 6 * MS + i * MS, track, leg, payload, mut r.out)) != OnMedia {
+        if result.unwrap(peer.forward(mut r.p, 6 * MS + i * MS, track, leg, payload, none, mut r.out)) != OnMedia {
             fail("an on-time packet was not sent on the media SSRC")
         }
     }

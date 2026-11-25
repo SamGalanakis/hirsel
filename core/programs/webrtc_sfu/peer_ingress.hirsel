@@ -128,11 +128,20 @@ fn pt_section(p: PeerSession, pt: u8) -> (u64, u8) {
     (count, found)
 }
 
-fn section_format(p: PeerSession, section: u8, pt: u8) -> Option[sdp.Format] {
+// What ingress reads of an agreed format, copied without its `fmtp`, so routing a
+// packet whose format has one allocates nothing (W18).
+type Facts {
+    codec: sdp.Codec,
+    clock: u32,
+    apt: Option[u8],
+    nack: bool
+}
+
+fn section_format(p: PeerSession, section: u8, pt: u8) -> Option[Facts] {
     let i: u64 = int.widen(section)
     for f in p.sections[i].agreed.formats {
         if f.pt == pt {
-            return Some(clone(f))
+            return Some(Facts(codec: f.codec, clock: f.clock, apt: f.apt, nack: f.nack))
         }
     }
     None
@@ -255,6 +264,19 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
     if is_rtx {
         return repair_in(mut p, now, sec, encoding, format, h, opened.index, slot, known, found)
     }
+    // RTP-13: a RED packet is its primary from here on; the redundant blocks are
+    // not read.
+    let (media_at, media_len, pt) = if format.codec == Red {
+        match rtp.red.primary(slot, payload_at, payload_len) {
+            Ok(b) => (b.at, b.len, b.pt),
+            Error(_) => {
+                p.drops.malformed += 1
+                return Ok(Nothing)
+            },
+        }
+    } else {
+        (payload_at, payload_len, h.pt)
+    }
     let level = level_in(map, found, slot, h)
     let i = match known {
         Some(i) => {
@@ -279,7 +301,7 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
     }
     let (wide, reset) = arrived(mut p, i, opened.index, h.ts, now, known != None)
     let layer = if format.codec == Vp8 {
-        match media_bits.unit.vp8(list.slice(slot, payload_at, payload_at + payload_len), h.marker) {
+        match media_bits.unit.vp8(list.slice(slot, media_at, media_at + media_len), h.marker) {
             Ok(u) => Some(u),
             Error(_) => None,
         }
@@ -288,7 +310,7 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
     }
     let (voice, audio_level) = level
     let (dd_at, dd_len) = dependency_in(found)
-    Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: h.pt, ts: h.ts, wide: wide, reset: reset, marker: h.marker, payload_at: payload_at, payload_len: payload_len, audio_level: audio_level, voice: voice, layer: layer, dd_at: dd_at, dd_len: dd_len)))
+    Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: pt, ts: h.ts, wide: wide, reset: reset, marker: h.marker, payload_at: media_at, payload_len: media_len, audio_level: audio_level, voice: voice, layer: layer, dd_at: dd_at, dd_len: dd_len)))
 }
 
 // Where the dependency descriptor's value is, if the section binds it (RTC-6, AV1).
@@ -350,7 +372,7 @@ fn media_of_rtx(p: PeerSession, sec: u8, encoding: u8, rtx_ssrc: u32) -> Option[
     None
 }
 
-fn repair_in(mut p: PeerSession, now: u64, sec: u8, encoding: u8, format: sdp.Format, h: rtp.header.Header, index: u64, slot: Bytes, known: Option[u64], found: Option[rtp.ext.Found]) -> Result[Input, PeerError] {
+fn repair_in(mut p: PeerSession, now: u64, sec: u8, encoding: u8, format: Facts, h: rtp.header.Header, index: u64, slot: Bytes, known: Option[u64], found: Option[rtp.ext.Found]) -> Result[Input, PeerError] {
     let Some(apt) = format.apt else {
         p.drops.format += 1
         return Ok(Nothing)
@@ -472,10 +494,11 @@ fn rtcp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Re
                 collide(mut p, now, ssrc, mut out)?
                 for b in 0u8 .. count {
                     if let Ok(block) = rtp.rtcp.block(slot, pkt, b) {
-                        if let Some(_) = track_of(p, block.ssrc) {
+                        if let Some(t) = track_of(p, block.ssrc) {
                             if let Some(rtt) = rtp.stats.rtt(block, ntp(now)) {
                                 p.rtt = Some(rtt)
                             }
+                            red_report(mut p, t, block.fraction, now)
                         }
                     }
                 }
@@ -508,10 +531,40 @@ fn rtcp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Re
     Ok(Control(take c))
 }
 
+// RTP-13: an audio track's loss at a report block is the larger of the block's
+// fraction and the share of the packets sent since the last block that were NACKed.
+fn red_report(mut p: PeerSession, t: u64, fraction: u8, now: u64) {
+    if p.tracks[t].video {
+        return
+    }
+    let sent = p.tracks[t].forwarded
+    let share: u64 = if sent == 0 {
+        0
+    } else {
+        order.min(255u64, p.tracks[t].nacked * 256 / sent)
+    }
+    let mine: u64 = int.widen(fraction)
+    rtp.red.on_loss(mut p.tracks[t].red, int.truncate(order.max(mine, share)), now)
+    p.tracks[t].nacked = 0
+    p.tracks[t].forwarded = 0
+}
+
 fn nack_in(mut p: PeerSession, now: u64, pkt: Bytes, r: rtp.rtcp.Packet, media: u32, mut asks: List[RepairAsk]) {
     let Some(t) = track_of(p, media) else {
         p.drops.nack += 1
         return
+    }
+    if !p.tracks[t].video {
+        let mut at = 0u64
+        while let Ok(Some((_, blp))) = rtp.rtcp.nack_next(pkt, r, mut at) {
+            let mut bits: u64 = 1
+            for bit in 0u16 .. 16 {
+                if (blp >> bit) & 1 == 1 {
+                    bits += 1
+                }
+            }
+            p.tracks[t].nacked += bits
+        }
     }
     if p.tracks[t].rtx_ssrc == 0 || p.tracks[t].highest == EMPTY {
         p.drops.nack += 1

@@ -1,0 +1,516 @@
+// ---- RTP-13 RED on audio legs (C1) ----
+// The publisher sends Opus on 111 and RED on 63 (`63 111/111`, as Chromium 156
+// offers). The RED subscriber takes Opus on 109 and RED on 120 (`120 109/109`), so
+// every block of a rebuilt payload must carry 109; the plain subscriber takes Opus
+// on 111 alone.
+fn red_audio(mut b: Bytes, mid: Bytes, dir: Bytes, opus: Bytes, red: Bytes) {
+    list.append(mut b, b"m=audio 9 UDP/TLS/RTP/SAVPF ")
+    list.append(mut b, opus)
+    if list.len(red) != 0 {
+        list.append(mut b, b" ")
+        list.append(mut b, red)
+    }
+    list.append(mut b, b"\na=mid:")
+    list.append(mut b, mid)
+    list.append(mut b, b"\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\na=rtcp-mux\na=")
+    list.append(mut b, dir)
+    list.append(mut b, b"\na=rtpmap:")
+    list.append(mut b, opus)
+    list.append(mut b, b" opus/48000/2\n")
+    if list.len(red) != 0 {
+        list.append(mut b, b"a=rtpmap:")
+        list.append(mut b, red)
+        list.append(mut b, b" red/48000/2\na=fmtp:")
+        list.append(mut b, red)
+        list.append(mut b, b" ")
+        list.append(mut b, opus)
+        list.append(mut b, b"/")
+        list.append(mut b, opus)
+        list.append(mut b, b"\n")
+    }
+}
+
+fn red_publisher() -> Bytes {
+    let mut b = minimal_head(b" a")
+    red_audio(mut b, b"a", b"sendonly", b"111", b"63")
+    take b
+}
+
+fn red_listener(red: bool) -> Bytes {
+    let mut b = minimal_head(b" r")
+    if red {
+        red_audio(mut b, b"r", b"recvonly", b"109", b"120")
+    } else {
+        red_audio(mut b, b"r", b"recvonly", b"111", b"")
+    }
+    take b
+}
+
+const RED_FRAME_BYTES: u64 = 20
+
+// Opus frame `k`'s 20 bytes: its number, big-endian, then a pattern of it.
+fn red_frame_of(k: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(RED_FRAME_BYTES)
+    list.push(mut b, int.truncate(k >> 8))
+    list.push(mut b, int.truncate(k))
+    for j in 2u64 .. RED_FRAME_BYTES {
+        list.push(mut b, int.truncate((k * 7 + j * 13) & 0xff))
+    }
+    b
+}
+
+// RFC 2198 by hand: frames k - n .. k - 1 as redundant blocks 960 ticks apart, oldest
+// first, then frame k, every block tagged `pt`. A 20-byte block 960 n ticks back has
+// the header 1ppppppp, (960 n) >> 6, ((960 n) & 63) << 2 and 20: 960 = 15 << 6.
+fn red_of(pt: u8, k: u64, n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(64 + 4 * RED_FRAME_BYTES)
+    let mut back = n
+    while back > 0 {
+        list.push(mut b, 128u8 | pt)
+        list.push(mut b, int.truncate(15 * back))
+        list.push(mut b, 0u8)
+        list.push(mut b, int.truncate(RED_FRAME_BYTES))
+        back -= 1
+    }
+    list.push(mut b, pt)
+    back = n
+    while back > 0 {
+        list.append(mut b, red_frame_of(k - back))
+        back -= 1
+    }
+    list.append(mut b, red_frame_of(k))
+    b
+}
+
+// The publisher's packet k: RED on 63 with frame k - 1 behind frame k.
+fn red_published(mut cs: srtp.Session, k: u64) -> Bytes {
+    let n = if k == 0 {
+        0u64
+    } else {
+        1u64
+    }
+    media_carrying(mut cs, MEDIA_SSRC, int.truncate(k), int.truncate(960 * k), b"a", 63, red_of(111, k, n))
+}
+
+fn red_report(mut cs: srtp.Session, source: u32, fraction: u8) -> Bytes {
+    let mut b: Bytes = list.with_capacity(1500)
+    let mut blocks: List[rtp.rtcp.Block] = list.new()
+    list.push(mut blocks, rtp.rtcp.Block(ssrc: source, fraction: fraction, lost: 0, highest: 0, jitter: 0, lsr: 0, dlsr: 0))
+    let _ = result.unwrap(rtp.rtcp.write_rr(CLIENT_SSRC, view blocks, mut b))
+    let _ = result.unwrap(rtp.rtcp.write_cname(CLIENT_SSRC, b"browser", mut b))
+    sealed_rtcp(mut cs, take b)
+}
+
+type RedRoom {
+    r: router.Router,
+    publisher: Client,
+    red: Client,
+    plain: Client,
+    ssrc: u32
+}
+
+fn red_room(seed: u64) -> RedRoom {
+    let mut r = router.router(provide.random(seed))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let publisher = admit(mut r, seed + 1, red_publisher(), 1)
+    let red = admit(mut r, seed + 2, red_listener(true), 2)
+    let plain = admit(mut r, seed + 3, red_listener(false), 3)
+    let p = result.unwrap(router.publish(mut r, room_id(), publisher.who, 0))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    result.unwrap(router.subscribe(mut r, room_id(), red.who, p, 0, base, 0, mut out))
+    result.unwrap(router.subscribe(mut r, room_id(), plain.who, p, 0, base, 0, mut out))
+    let (ssrc, _) = option.unwrap(router.track_ssrcs(r, room_id(), red.who, p))
+    RedRoom(r: take r, publisher: take publisher, red: take red, plain: take plain, ssrc: ssrc)
+}
+
+fn red_tick(k: u64) -> u64 {
+    10 * MS + 20 * MS * k
+}
+
+// The distance RTP-13 gives packet k when a report of 26/256 (10%) comes at packets
+// 50, 100 and 150 and one of 0 at 200, 250, 300 and 350, 1 s apart: the first raises
+// to 2; 100 and 150 hold it (26 >= 3); 200 holds nothing, 1 s after the last hold;
+// 250, 2 s after it, steps to 1; 300 is 1 s later; 350 steps to off.
+fn red_hand_distance(k: u64) -> u64 {
+    if k < 50 || k >= 400 {
+        return 0
+    }
+    if k < 300 {
+        return 2
+    }
+    1
+}
+
+/// bug: Allocate per packet to read, keep or rebuild RED, send RED before any report asks for it, raise only on a later report, let a sample between a level's hold and its rise fail to hold it, never step down or step down without the dwell, tag a rebuilt block with the publisher's payload type, carry a block from the wrong index or with the wrong offset, forward the publisher's RED to a leg that did not agree RED, or send a RED payload on the Opus payload type.
+/// oracle: RTP-13 by hand (`hand_distance`): rise to 2 at a 26/256 report, hold at >= 3/256 (the 5/256 report at 4.01 s), step down one after 2 s with no holding report, so 2 until 6.01 s, 1 until 8.01 s, and a leg clean from 4.01 s carries no redundancy from 8.01 s; payloads by RFC 2198 by hand (`red_of`) on the subscriber's own 109 and 120, and frame k alone on 111 for the plain leg; a zero-byte bound around one distance-2 packet, as W18.
+@test
+fn red_steps_down_on_a_clean_leg() -> Result[(), router.RouterError] {
+    let mut room = red_room(2652)
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    for k in 0u64 .. 500u64 {
+        let now = red_tick(k)
+        if k != 0 && k % 50 == 0 && k <= 450 {
+            // 26/256 rises to 2; 5/256 at 4.01 s is under 2's rise and at its hold.
+            let fraction: u8 = if k <= 150 {
+                26
+            } else if k == 200 {
+                5
+            } else {
+                0
+            }
+            let rr = red_report(mut room.red.cs, room.ssrc, fraction)
+            feed(mut room.r, now, room.red.who, room.red.at, rr, mut out)
+        }
+        peer.clear_outbox(mut out)
+        let packet = red_published(mut room.publisher.cs, k)
+        if k == 200 {
+            // W18 for audio: reading a RED payload, keeping its primary and rebuilding
+            // RED at distance 2 for one leg and the primary for another allocate nothing.
+            let mut slot = packet
+            let attempt = bound bytes 0 {
+                router.receive(mut room.r, now, room_id(), room.publisher.who, room.publisher.at, mut slot, mut out)
+            }
+            match attempt {
+                Ok(verdict) => verdict?,
+                Error(_) => fail("forwarding RED at distance 2 allocated"),
+            }
+        } else {
+            feed(mut room.r, now, room.publisher.who, room.publisher.at, packet, mut out)
+        }
+        let g = one(received(mut room.red, out), "the RED leg gets every packet")
+        let d = red_hand_distance(k)
+        if d == 0 {
+            if g.h.pt != 109 || payload_of(g) != red_frame_of(k) {
+                fail("a packet the policy leaves off is Opus on the leg's 109")
+            }
+        } else if g.h.pt != 120 || payload_of(g) != red_of(109, k, d) {
+            fail("a packet at distance d is RED on 120 with frames k - d .. k on 109")
+        }
+        let h = one(received(mut room.plain, out), "the plain leg gets every packet")
+        if h.h.pt != 111 || payload_of(h) != red_frame_of(k) {
+            fail("a leg without RED gets the primary alone")
+        }
+    }
+    Ok(())
+}
+
+// ---- Law (b): bursty loss over sim.udp ----
+const RED_RX: Addr = Addr(ip: V4(0x0a000002), port: 5004)
+
+const PLAIN_RX: Addr = Addr(ip: V4(0x0a000003), port: 5004)
+
+const SFU_TX: Addr = Addr(ip: V4(0x0a000001), port: 5004)
+
+const RED_SOCKET: UdpOptions = UdpOptions(slots: 256, slot_bytes: 1536)
+
+const RED_FRAMES: u64 = 500
+
+fn red_end_ns() -> u64 {
+    red_tick(RED_FRAMES) + 500 * MS
+}
+
+type RedListener: send {
+    socket: UdpSocket,
+    clock: Clock
+}
+
+// What one receiver held: every plaintext packet that crossed the link.
+type RedHeard: send {
+    pkts: List[Bytes]
+}
+
+// A receiver: it keeps each arrival and sends an RR every second whose fraction is
+// RFC 3550 section 6.4.1's, (expected - received) 256 / expected over the interval.
+fn red_listen(take end: RedListener) -> RedHeard waits {
+    let RedListener(socket: take owned, clock) = take end
+    let mut socket = take owned
+    let mut pkts: List[Bytes] = list.new()
+    let mut data: Bytes = list.with_capacity(65536)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    let mut heard_ssrc: Option[u32] = None
+    let mut highest: Option[u64] = None
+    let mut last_highest = 0u64
+    let mut count = 0u64
+    let mut next_report = 1000 * MS
+    loop {
+        let wake = order.min(next_report, red_end_ns())
+        let got = host.udp_recv(mut socket, mut data, mut packets, At(clock, wake))
+        let now = host.mono_ns(clock)
+        match got {
+            Ok(_) => {
+                for d in packets {
+                    let UdpPacket(at: start, len: size, ..) = d
+                    let pkt: Bytes = clone(list.slice(data, start, start + size))
+                    let h = result.unwrap(rtp.header.parse(pkt))
+                    heard_ssrc = Some(h.ssrc)
+                    let index: u64 = match highest {
+                        None => int.widen(h.seq),
+                        Some(top) => {
+                            let Index(i) = rtp.seq.estimate(top, h.seq) else {
+                                fail("an arrival outside the index domain")
+                            }
+                            i
+                        },
+                    }
+                    if highest == None {
+                        last_highest = int.wrapping_sub(index, 1u64)
+                    }
+                    if highest == None || index > option.unwrap(highest) {
+                        highest = Some(index)
+                    }
+                    count += 1
+                    list.push(mut pkts, take pkt)
+                }
+            },
+            Error(TimedOut) => (),
+            Error(_) => fail("a receiver's receive failed"),
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+        if now >= red_end_ns() {
+            break
+        }
+        if now >= next_report {
+            next_report += 1000 * MS
+            if let (Some(ssrc), Some(top)) = (heard_ssrc, highest) {
+                let expected = int.wrapping_sub(top, last_highest)
+                let lost = if expected > count {
+                    expected - count
+                } else {
+                    0
+                }
+                let fraction: u8 = if expected == 0 {
+                    0
+                } else {
+                    int.truncate(order.min(255u64, lost * 256 / expected))
+                }
+                last_highest = top
+                count = 0
+                let mut b: Bytes = list.with_capacity(128)
+                let mut blocks: List[rtp.rtcp.Block] = list.new()
+                list.push(mut blocks, rtp.rtcp.Block(ssrc: ssrc, fraction: fraction, lost: 0, highest: int.truncate(top), jitter: 0, lsr: 0, dlsr: 0))
+                let _ = result.unwrap(rtp.rtcp.write_rr(CLIENT_SSRC, view blocks, mut b))
+                let _ = result.unwrap(rtp.rtcp.write_cname(CLIENT_SSRC, b"browser", mut b))
+                red_send_datagram(mut socket, SFU_TX, b)
+            }
+        }
+    }
+    RedHeard(pkts: take pkts)
+}
+
+fn red_send_datagram(mut socket: UdpSocket, to: Addr, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn: 0))
+    if result.unwrap(host.udp_send(mut socket, data, tx, Never)) != 1 {
+        fail("sim.udp did not commit the datagram")
+    }
+}
+
+// RFC 2198 read by hand, apart from rtp.red: the blocks of `p[at ..]` as (ticks back,
+// start, length), the primary last with 0 ticks back.
+fn red_blocks_of(p: Bytes, at: u64) -> List[(u64, u64, u64)] {
+    let mut heads: List[(u64, u64)] = list.new()
+    let mut h = at
+    while (p[h] & 128) != 0 {
+        let b1: u64 = int.widen(p[h + 1])
+        let b2: u64 = int.widen(p[h + 2])
+        let b3: u64 = int.widen(p[h + 3])
+        list.push(mut heads, ((b1 << 6) | (b2 >> 2), ((b2 & 3) << 8) | b3))
+        h += 4
+    }
+    let mut d = h + 1
+    let mut out: List[(u64, u64, u64)] = list.new()
+    for (back, len) in heads {
+        list.push(mut out, (back, d, len))
+        d += len
+    }
+    list.push(mut out, (0u64, d, list.len(p) - d))
+    out
+}
+
+// Frame k counts as recovered when a block that names it (its primary frame number
+// less its ticks back / 960) holds frame k's bytes.
+type RedCount {
+    arrived: List[bool],
+    recovered: List[bool],
+    // Arrivals from frame `from` on whose RED payload is not frames k - 2 .. k.
+    short: u64
+}
+
+fn red_count_leg(heard: RedHeard, opus_pt: u8, red_pt: u8, from: u64) -> RedCount {
+    let mut arrived: List[bool] = list.new()
+    list.fill(mut arrived, RED_FRAMES, false)
+    let mut recovered: List[bool] = list.new()
+    list.fill(mut recovered, RED_FRAMES, false)
+    let mut short = 0u64
+    for pkt in heard.pkts {
+        let h = result.unwrap(rtp.header.parse(pkt))
+        if h.pt != opus_pt && h.pt != red_pt {
+            fail("a leg gets a payload type it did not agree")
+        }
+        let bs = if h.pt == red_pt {
+            red_blocks_of(pkt, h.end)
+        } else {
+            let mut my_one: List[(u64, u64, u64)] = list.new()
+            list.push(mut my_one, (0u64, h.end, list.len(pkt) - h.end))
+            my_one
+        }
+        let (_, at, _) = bs[list.len(bs) - 1]
+        let hi: u64 = int.widen(pkt[at])
+        let lo: u64 = int.widen(pkt[at + 1])
+        let k = (hi << 8) | lo
+        if k >= RED_FRAMES {
+            fail("a primary names a frame never sent")
+        }
+        arrived[k] = true
+        if k >= from && (list.len(bs) != 3 || h.pt != red_pt) {
+            short += 1
+        }
+        for (back, start, len) in bs {
+            if back % 960 != 0 || back / 960 > k {
+                continue
+            }
+            let f = k - back / 960
+            if list.slice(pkt, start, start + len) == red_frame_of(f) {
+                recovered[f] = true
+            }
+        }
+    }
+    RedCount(arrived: take arrived, recovered: take recovered, short: short)
+}
+
+// Run the RED room's two legs over sim.udp with Gilbert-Elliot loss: bad loses every
+// packet, good none, bad to good half the time, so bursts average 2, and good to bad
+// at `enter` ppm, so the bad state's share is enter / (enter + 500,000).
+fn red_bursty(tasks: Tasks, enter: u64, seed: u64, sends_red: bool) -> (RedCount, RedCount) waits {
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 20 * MS
+    config.loss = std.sim.udp.Loss(good_to_bad: enter, bad_to_good: 500000, good_loss: 0, bad_loss: 1000000)
+    let (network, take port) = provide.net(bytes 1048576)
+    let (take sim_world, clock) = std.sim.world.new(seed, 0, 0)
+    let server = std.sim.udp.Server(config, plan: std.sim.world.plan(seed), world: take sim_world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take server, std.sim.udp.serve)
+    let (take sfu, _) = result.unwrap(host.udp_bind(network, SFU_TX, RED_SOCKET))
+    let (take red_socket, _) = result.unwrap(host.udp_bind(network, RED_RX, RED_SOCKET))
+    let (take plain_socket, _) = result.unwrap(host.udp_bind(network, PLAIN_RX, RED_SOCKET))
+    let red_task = task.spawn(tasks, bytes 16777216, RedListener(socket: take red_socket, clock), red_listen)
+    let plain_task = task.spawn(tasks, bytes 16777216, RedListener(socket: take plain_socket, clock), red_listen)
+    let mut socket = take sfu
+    let mut room = red_room(seed)
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut data: Bytes = list.with_capacity(65536)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    for k in 0u64 .. RED_FRAMES {
+        // Reports until frame k is due, each sealed as the RED subscriber's browser.
+        loop {
+            let got = host.udp_recv(mut socket, mut data, mut packets, At(clock, red_tick(k)))
+            let now = host.mono_ns(clock)
+            match got {
+                Ok(_) => {
+                    for d in packets {
+                        let UdpPacket(at: start, len: size, peer: from, ..) = d
+                        if from != RED_RX {
+                            continue
+                        }
+                        let mut plain_rr: Bytes = list.with_capacity(size + 64)
+                        list.append(mut plain_rr, list.slice(data, start, start + size))
+                        let rr = sealed_rtcp(mut room.red.cs, take plain_rr)
+                        peer.clear_outbox(mut out)
+                        feed(mut room.r, now, room.red.who, room.red.at, rr, mut out)
+                    }
+                },
+                Error(TimedOut) => (),
+                Error(_) => fail("the SFU's receive failed"),
+            }
+            list.clear(mut data)
+            list.clear(mut packets)
+            if now >= red_tick(k) {
+                break
+            }
+        }
+        let now = host.mono_ns(clock)
+        peer.clear_outbox(mut out)
+        let _ = router.poll(mut room.r, now, mut out)
+        peer.clear_outbox(mut out)
+        // A publisher that sends plain Opus reaches the RED leg as RED all the same:
+        // the router rebuilds it from its own ring.
+        let packet = if sends_red {
+            red_published(mut room.publisher.cs, k)
+        } else {
+            media_carrying(mut room.publisher.cs, MEDIA_SSRC, int.truncate(k), int.truncate(960 * k), b"a", 111, red_frame_of(k))
+        }
+        feed(mut room.r, now, room.publisher.who, room.publisher.at, packet, mut out)
+        for g in received(mut room.red, out) {
+            red_send_datagram(mut socket, RED_RX, g.pkt)
+        }
+        for g in received(mut room.plain, out) {
+            red_send_datagram(mut socket, PLAIN_RX, g.pkt)
+        }
+    }
+    let red_heard = result.unwrap(task.join(take red_task))
+    let plain_heard = result.unwrap(task.join(take plain_task))
+    drop(take socket)
+    result.unwrap(task.join(take served))
+    // From 3 s on, after three reports, the RED leg is at distance 2.
+    (red_count_leg(red_heard, 109, 120, 150), red_count_leg(plain_heard, 111, 0, RED_FRAMES))
+}
+
+// The analytic recovery of frames `from` .. RED_FRAMES - 3 from the arrival trace alone:
+// frame k is in hand when packet k, k + 1 or k + 2 arrived (RFC 2198 at distance 2).
+fn red_analytic(c: RedCount, from: u64) -> (u64, u64, u64) {
+    let mut primaries = 0u64
+    let mut hand = 0u64
+    let mut got = 0u64
+    for k in from .. RED_FRAMES - 2 {
+        if c.arrived[k] {
+            primaries += 1
+        }
+        if c.arrived[k] || c.arrived[k + 1] || c.arrived[k + 2] {
+            hand += 1
+        }
+        if c.recovered[k] {
+            got += 1
+        }
+    }
+    (primaries, hand, got)
+}
+
+fn red_bursts(tasks: Tasks, enter: u64, seed: u64, sends_red: bool, low: u64, high: u64) waits {
+    let (red, plain) = red_bursty(tasks, enter, seed, sends_red)
+    if red.short != 0 {
+        fail("the RED leg left distance 2 under loss after its third report")
+    }
+    let (primaries, hand, got) = red_analytic(red, 150)
+    let window = RED_FRAMES - 2 - 150
+    let lost = window - primaries
+    if lost * 100 < low * window || lost * 100 > high * window {
+        fail("the link's loss is far from its configured share")
+    }
+    if got < hand {
+        fail("the RED leg recovered fewer frames than its arrivals carry at distance 2")
+    }
+    if hand <= primaries {
+        fail("no frame lost as a primary came back as a redundant block")
+    }
+    let (plain_primaries, _, plain_got) = red_analytic(plain, 150)
+    if plain_got != plain_primaries {
+        fail("the plain leg recovers exactly the primaries that arrived")
+    }
+}
+
+/// bug: Rebuild RED from the wrong ring slot or offset, carry one past primary where the policy is at 2, drop to a lower distance at 10% bursty loss, or let the publisher's RED or redundancy reach the leg that did not agree RED.
+/// oracle: The arrival trace sim.udp's seeded Gilbert-Elliot chain produced (10%, mean burst 2), read with RFC 2198 by hand: frame k is recoverable when packet k, k + 1 or k + 2 arrived; the RED leg must hold every recoverable frame from 3 s on, and the plain leg exactly its arrived primaries. The observed loss must lie within 5% to 15%.
+@test
+fn red_recovers_bursty_loss_10(tasks: Tasks) -> Result[(), ()] waits {
+    red_bursts(tasks, 55556, 2652, true, 5, 15)
+    Ok(())
+}
+
+/// bug: The same as at 10%, at 20% bursty loss, where bursts of two hide both a primary and its first copy more often; or build RED only for a publisher that sends it.
+/// oracle: As at 10%, with good to bad at 125,000 ppm (20%, mean burst 2) and a publisher that sends plain Opus, so every redundant block is the router's own; the observed loss must lie within 13% to 27%.
+@test
+fn red_recovers_bursty_loss_20(tasks: Tasks) -> Result[(), ()] waits {
+    red_bursts(tasks, 125000, 2653, false, 13, 27)
+    Ok(())
+}

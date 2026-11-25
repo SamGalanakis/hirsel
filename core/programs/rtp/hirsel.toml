@@ -21,6 +21,7 @@ std = { major = 1 }
 "loss.hirsel" = "loss"
 "rewrite.hirsel" = "rewrite"
 "counter.hirsel" = "counter"
+"red.hirsel" = "red"
 
 [tests]
 limit = 67108864
@@ -33,3 +34,4 @@ grants = ["Tasks"]
 "pacer_laws.hirsel" = "laws"
 "net_laws.hirsel" = "net"
 "rewrite_laws.hirsel" = "laws"
+"red_laws.hirsel" = "laws"

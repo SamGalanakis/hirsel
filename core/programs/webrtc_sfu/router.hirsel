@@ -100,6 +100,9 @@ type Publication {
     fir: bool,
     encodings: List[Encoding],
     ring: Ring,
+    // RTP-13: an Opus publication's last primaries, kept on every unit with one of
+    // its down-tracks, which rebuild RED from them. Other codecs keep none.
+    red: rtp.red.Ring,
     // The local wanted mask this unit last told the home unit (RTC-6).
     local: u8,
     // The media clock rate and the start of the open rate window (home unit).
@@ -645,8 +648,14 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
         // mask says otherwise (RTC-6).
         list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, wanting: 0, on: true, since: None, structure: media_bits.dependency.empty(), structure_frame: None, last: None, last_ts: 0, last_marker: false))
     }
+    let depth = if shape.codec == Opus {
+        rtp.red.MAX_DISTANCE
+    } else {
+        0u8
+    }
+    let red = rtp.red.ring(depth) ?=> |c| Capacity(c)
     list.try_reserve(mut r.publications, 1) ?=> |c| Capacity(c)
-    list.push(mut r.publications, Publication(id: id, owner: who, home: home, room: room, section: section, codec: shape.codec, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held, local: 0, clock: clock, window: None, voice: quiet()))
+    list.push(mut r.publications, Publication(id: id, owner: who, home: home, room: room, section: section, codec: shape.codec, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held, red: take red, local: 0, clock: clock, window: None, voice: quiet()))
     r.roster[si].publications += 1
     Ok(shape)
 }

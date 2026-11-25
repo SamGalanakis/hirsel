@@ -76,6 +76,7 @@ pub fn default_policy() -> Policy {
     let mut video: List[Codec] = list.new()
     let mut exts: List[Ext] = list.new()
     list.push(mut audio, Opus)
+    list.push(mut audio, Red)
     for codec in[Vp8, Vp9, H264, Av1] {
         list.push(mut video, codec)
     }
@@ -185,7 +186,7 @@ fn local_bundle(local: LocalEnd, mut d: Description) -> Result[(), SdpError] {
 }
 
 fn supports(policy: Policy, media: Media, f: Format) -> bool {
-    if media == Application || f.codec == Rtx {
+    if media == Application || f.codec == Rtx || f.codec == Red {
         return false
     }
     let supported = if media == Audio {
@@ -210,6 +211,17 @@ fn put_formats(policy: Policy, offered: Section, mut out: List[Format]) -> Resul
         let mut keep = supports(policy, offered.media, f)
         if f.codec == Rtx {
             if let Some(pt) = f.apt {
+                for base in offered.formats {
+                    if base.pt == pt && supports(policy, offered.media, base) {
+                        keep = true
+                    }
+                }
+            }
+        }
+        // RTP-13: `red` is kept when the policy lists it and its blocks carry a
+        // format that is kept.
+        if let Some(pt) = red_base(f) {
+            if list_has(policy.audio, Red) && offered.media == Audio {
                 for base in offered.formats {
                     if base.pt == pt && supports(policy, offered.media, base) {
                         keep = true
@@ -532,6 +544,12 @@ fn track_section(policy: Policy, source: TrackSource, s: Section, index: u8, por
             }
         }
         out.extmaps = take kept
+    }
+    for f in source.formats {
+        if red_base(f) == Some(base) && list_has(policy.audio, Red) {
+            add(mut out.formats, clone(f))?
+            break
+        }
     }
     for f in source.formats {
         if f.codec == Rtx && f.apt == Some(base) {

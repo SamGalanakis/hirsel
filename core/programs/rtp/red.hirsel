@@ -1,0 +1,275 @@
+// RTP-13: RFC 2198 redundant audio data, pure and sans-IO.
+pub type Error: key = Short | Overrun
+
+/// One block of a RED payload: its payload type, its timestamp offset behind the
+/// packet's timestamp (0 for the primary) and where its bytes lie in the buffer the
+/// payload was read from.
+pub type Block {
+    pt: u8,
+    offset: u16,
+    at: u64,
+    len: u64
+}
+
+/// A redundant block's offset is 14 bits and its length 10 bits (RFC 2198 §3).
+pub const MAX_OFFSET: u32 = 16383
+
+pub const MAX_BLOCK: u64 = 1023
+
+/// The most past primaries a writer carries (RTP-13).
+pub const MAX_DISTANCE: u8 = 2
+
+// Walk the headers of the RED payload `pkt[from .. from + len]`. Each block found
+// is pushed to `out` in payload order when `collect`, the primary last; a header
+// or a block length that runs past the payload is refused before any is pushed.
+fn walk(pkt: Bytes, from: u64, len: u64, collect: bool, mut out: List[Block]) -> Result[Block, Error] {
+    if from > list.len(pkt) || len > list.len(pkt) - from || len == 0 {
+        return Error(Short)
+    }
+    let end = from + len
+    // First pass: find the end of the headers and the sum of the redundant lengths.
+    let mut at = from
+    let mut redundant: u64 = 0
+    while (pkt[at] & 128) != 0 {
+        if 4 > end - at {
+            return Error(Short)
+        }
+        let b2: u64 = int.widen(pkt[at + 2])
+        let b3: u64 = int.widen(pkt[at + 3])
+        redundant += ((b2 & 3) << 8) | b3
+        at += 4
+        if at == end {
+            return Error(Short)
+        }
+    }
+    let data = at + 1
+    if redundant > end - data {
+        return Error(Overrun)
+    }
+    // Second pass: emit the blocks with their positions.
+    let mut h = from
+    let mut d = data
+    while h < at {
+        let b1: u16 = int.widen(pkt[h + 1])
+        let b2: u16 = int.widen(pkt[h + 2])
+        let low: u64 = int.widen(pkt[h + 2])
+        let b3: u64 = int.widen(pkt[h + 3])
+        let size = ((low & 3) << 8) | b3
+        let block = Block(pt: pkt[h] & 127, offset: (b1 << 6) | (b2 >> 2), at: d, len: size)
+        if collect {
+            list.push(mut out, block)
+        }
+        d += size
+        h += 4
+    }
+    let last = Block(pt: pkt[at] & 127, offset: 0, at: d, len: end - d)
+    if collect {
+        list.push(mut out, last)
+    }
+    Ok(last)
+}
+
+/// Every block of the RED payload `pkt[from .. from + len]`, oldest first and the
+/// primary last, as views into `pkt` written to `out` (cleared first). A payload
+/// whose headers or block lengths run past its end is refused and `out` is left
+/// empty.
+pub fn parse(pkt: Bytes, from: u64, len: u64, mut out: List[Block]) -> Result[(), Error] {
+    list.clear(mut out)
+    match walk(pkt, from, len, true, mut out) {
+        Ok(_) => Ok(()),
+        Error(e) => {
+            list.clear(mut out)
+            Error(e)
+        },
+    }
+}
+
+/// The primary block of a RED payload, checked as `parse` checks it, with no list.
+pub fn primary(pkt: Bytes, from: u64, len: u64) -> Result[Block, Error] {
+    let mut none: List[Block] = list.new()
+    walk(pkt, from, len, false, mut none)
+}
+
+/// The last primaries of one source by index, in fixed slots reserved when the
+/// ring is made. A writer reads redundant blocks from here.
+pub opaque type Ring {
+    slots: List[Bytes],
+    index: List[u64],
+    ts: List[u32]
+}
+
+const EMPTY: u64 = 0xffffffffffffffff
+
+/// A ring of `depth` slots; depth 0 reserves nothing and keeps nothing.
+pub fn ring(depth: u8) -> Result[Ring, Capacity] {
+    let n: u64 = int.widen(depth)
+    if n > 8 {
+        return Error(Capacity(requested: n, available: 8))
+    }
+    let mut slots: List[Bytes] = list.new()
+    let mut index: List[u64] = list.new()
+    let mut ts: List[u32] = list.new()
+    list.try_reserve(mut slots, n)?
+    list.try_reserve(mut index, n)?
+    list.try_reserve(mut ts, n)?
+    for _ in 0u64 .. n {
+        let mut b: Bytes = list.new()
+        list.try_reserve(mut b, MAX_BLOCK)?
+        list.push(mut slots, take b)
+        list.push(mut index, EMPTY)
+        list.push(mut ts, 0)
+    }
+    Ok(Ring(slots: take slots, index: take index, ts: take ts))
+}
+
+/// Keep the primary `pkt[from .. from + len]` of the packet at `index` and
+/// timestamp `ts`. A primary too long for a redundant block clears its slot.
+pub fn keep(mut r: Ring, index: u64, ts: u32, pkt: Bytes, from: u64, len: u64) {
+    if list.len(r.slots) == 0 {
+        return
+    }
+    let k = index % list.len(r.slots)
+    list.clear(mut r.slots[k])
+    if len > MAX_BLOCK || from > list.len(pkt) || len > list.len(pkt) - from {
+        r.index[k] = EMPTY
+        return
+    }
+    list.append(mut r.slots[k], list.slice(pkt, from, from + len))
+    r.index[k] = index
+    r.ts[k] = ts
+}
+
+// The kept primary `back` indices behind `index`, when it is in the ring, at or
+// after `since`, and fits a redundant block behind `ts`.
+fn past(r: Ring, index: u64, ts: u32, back: u64, since: u64) -> Option[u64] {
+    if back > index || index - back < since || list.len(r.slots) == 0 {
+        return None
+    }
+    let want = index - back
+    let k = want % list.len(r.slots)
+    if r.index[k] != want {
+        return None
+    }
+    let offset = ts - r.ts[k]
+    if offset == 0 || offset > MAX_OFFSET {
+        return None
+    }
+    Some(k)
+}
+
+/// Append to `out` the RED payload of the primary `pkt[from .. from + len]` at
+/// `index` and timestamp `ts`, with every kept primary up to `most` indices
+/// behind it (at most `MAX_DISTANCE`, none before `since`) as redundant blocks,
+/// oldest first. Every block is tagged `pt`. Nothing is appended when `out` lacks
+/// room; the result is the payload's length.
+pub fn write(mut out: Bytes, pt: u8, r: Ring, index: u64, ts: u32, pkt: Bytes, from: u64, len: u64, most: u8, since: u64) -> Result[u64, Capacity] {
+    let d: u64 = int.widen(order.min(most, MAX_DISTANCE))
+    let mut size = 1 + len
+    let mut back = d
+    while back > 0 {
+        if let Some(k) = past(r, index, ts, back, since) {
+            size += 4 + list.len(r.slots[k])
+        }
+        back -= 1
+    }
+    let start = list.len(out)
+    let available = list.capacity(out) - start
+    if size > available {
+        return Error(Capacity(requested: size, available: available))
+    }
+    back = d
+    while back > 0 {
+        if let Some(k) = past(r, index, ts, back, since) {
+            let offset = ts - r.ts[k]
+            let n = list.len(r.slots[k])
+            list.push(mut out, 128u8 | pt)
+            list.push(mut out, int.truncate(offset >> 6))
+            let hi: u32 = int.truncate(n >> 8)
+            list.push(mut out, int.truncate(((offset & 63) << 2) | hi))
+            list.push(mut out, int.truncate(n))
+        }
+        back -= 1
+    }
+    list.push(mut out, pt & 127)
+    back = d
+    while back > 0 {
+        if let Some(k) = past(r, index, ts, back, since) {
+            list.append(mut out, r.slots[k])
+        }
+        back -= 1
+    }
+    list.append(mut out, list.slice(pkt, from, from + len))
+    Ok(size)
+}
+
+/// How many past primaries a down-track carries (RTP-13).
+pub type Redundancy: key = Off | Distance(u8)
+
+/// A down-track's redundancy and when a report last held it there.
+pub type Policy: key {
+    level: Redundancy,
+    held: u64
+}
+
+/// A report holds a level for this long after it; then the level steps down one.
+pub const DWELL_NS: u64 = 2000000000
+
+// Loss in 1/256 (RTP-5's fraction) that raises the level to distance 1 and 2, and
+// that holds distance 1 and 2.
+const RISE_1: u8 = 3
+
+const RISE_2: u8 = 13
+
+const HOLD_1: u8 = 1
+
+const HOLD_2: u8 = 3
+
+pub fn policy() -> Policy {
+    Policy(level: Off, held: 0)
+}
+
+pub fn distance(p: Policy) -> u8 {
+    match p.level {
+        Off => 0,
+        Distance(d) => d,
+    }
+}
+
+/// Take one loss sample at `now`, in 1/256: a sample at a level's rise raises to it at
+/// once; one at the current level's hold keeps it; a level no sample held for
+/// `DWELL_NS` steps down one.
+pub fn on_loss(mut p: Policy, loss: u8, now: u64) {
+    let d = distance(p)
+    let rise = if loss >= RISE_2 {
+        2u8
+    } else if loss >= RISE_1 {
+        1u8
+    } else {
+        0u8
+    }
+    if rise > d {
+        p.level = Distance(rise)
+        p.held = now
+        return
+    }
+    if d == 0 {
+        return
+    }
+    let hold = if d >= 2 {
+        HOLD_2
+    } else {
+        HOLD_1
+    }
+    if loss >= hold {
+        p.held = now
+        return
+    }
+    if now >= p.held && now - p.held >= DWELL_NS {
+        p.level = if d >= 2 {
+            Distance(1)
+        } else {
+            Off
+        }
+        p.held = now
+    }
+}

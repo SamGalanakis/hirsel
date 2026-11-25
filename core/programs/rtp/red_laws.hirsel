@@ -1,0 +1,145 @@
+// RFC 2198 §3 layout, by hand. A redundant header is F=1 and the 7-bit PT, then a
+// 14-bit timestamp offset and a 10-bit length: offset 320 is 0x05 then 0b000000
+// in the high six bits of the third byte, and offset 16383 with length 1023 is
+// every bit set.
+// The RFC 2198 §4 example: LPC (PT 7) 320 ticks back as a 14-byte block behind a
+// DVI4 (PT 5) primary of 6 bytes, in a buffer with 3 bytes before the payload.
+fn rfc_example() -> Bytes {
+    b"\xaa\xbb\xcc\x87\x05\x00\x0e\x05LLLLLLLLLLLLLLdddddd"
+}
+
+// An Opus chain: 3 bytes 1,920 ticks back, 300 bytes 960 back, then a 5-byte
+// primary, every block PT 111 (0x6f). 1920 = 30 << 6, 960 = 15 << 6 and 300 =
+// 0x12c, so the headers are ef 1e 00 03 and ef 0f 01 2c, then 6f.
+fn opus_chain() -> Bytes {
+    let mut b: Bytes = list.with_capacity(320)
+    list.append(mut b, b"\xef\x1e\x00\x03\xef\x0f\x01\x2c\x6f")
+    list.append(mut b, b"abc")
+    list.fill(mut b, 300, 0x42u8)
+    list.append(mut b, b"PRIME")
+    b
+}
+
+fn expect_block(got: red.Block, pt: u8, offset: u16, at: u64, len: u64, take what: String) {
+    if got.pt != pt || got.offset != offset || got.at != at || got.len != len {
+        fail(take what)
+    }
+}
+
+fn red_refused(pkt: Bytes, want: red.Error, take what: String) {
+    let mut blocks: List[red.Block] = list.with_capacity(4)
+    list.push(mut blocks, red.Block(pt: 0, offset: 0, at: 0, len: 0))
+    let matched = match red.parse(pkt, 0, list.len(pkt), mut blocks) {
+        Error(Short) => want == Short,
+        Error(Overrun) => want == Overrun,
+        Ok(_) => false,
+    }
+    if !matched || list.len(blocks) != 0 {
+        fail(take what)
+    }
+    match red.primary(pkt, 0, list.len(pkt)) {
+        Error(_) => {},
+        Ok(_) => fail("primary accepts what parse refuses"),
+    }
+}
+
+/// bug: Read the 14-bit offset or the 10-bit length across the wrong bits, take the first block for the primary, place a block's bytes from the start of the buffer rather than the payload, or accept a header or block length that runs past the payload.
+/// oracle: RFC 2198 §3 and §4, by hand: the example's LPC block is PT 7, offset 320, 14 bytes at 8 and the DVI4 primary PT 5, 6 bytes at 22; the Opus chain's blocks are (111, 1920, 3 at 9), (111, 960, 300 at 12) and (111, 0, 5 at 312); offset 16383 and length 1023 set every bit of ff ff ff.
+@test
+fn red_parse() -> Result[(), ()] {
+    let mut blocks: List[red.Block] = list.with_capacity(4)
+    let rfc = rfc_example()
+    result.unwrap(red.parse(rfc, 3, list.len(rfc) - 3, mut blocks))
+    if list.len(blocks) != 2 {
+        fail("the RFC example has two blocks")
+    }
+    expect_block(blocks[0], 7, 320, 8, 14, "the LPC block")
+    expect_block(blocks[1], 5, 0, 22, 6, "the DVI4 primary")
+    expect_block(result.unwrap(red.primary(rfc, 3, list.len(rfc) - 3)), 5, 0, 22, 6, "primary alone")
+    let chain = opus_chain()
+    result.unwrap(red.parse(chain, 0, list.len(chain), mut blocks))
+    if list.len(blocks) != 3 {
+        fail("the chain has three blocks")
+    }
+    expect_block(blocks[0], 111, 1920, 9, 3, "two back")
+    expect_block(blocks[1], 111, 960, 12, 300, "one back")
+    expect_block(blocks[2], 111, 0, 312, 5, "the chain's primary")
+    // The widest header: offset 16383, length 1023, then a 1-byte primary.
+    let mut wide: Bytes = list.with_capacity(1030)
+    list.append(mut wide, b"\xef\xff\xff\xff\x6f")
+    list.fill(mut wide, 1024, 7u8)
+    result.unwrap(red.parse(wide, 0, list.len(wide), mut blocks))
+    expect_block(blocks[0], 111, 16383, 5, 1023, "every offset and length bit")
+    expect_block(blocks[1], 111, 0, 1028, 1, "a 1-byte primary")
+    // A primary of zero bytes is legal (RFC 2198 leaves its length to the packet).
+    result.unwrap(red.parse(b"\x6f", 0, 1, mut blocks))
+    expect_block(blocks[0], 111, 0, 1, 0, "an empty primary")
+    red_refused(b"", Short, "no payload")
+    red_refused(b"\xef\x1e\x00", Short, "a cut redundant header")
+    red_refused(b"\xef\x1e\x00\x03", Short, "no final header")
+    red_refused(b"\xef\x1e\x00\x03\xef\x0f\x01\x2c", Short, "two headers and no final one")
+    red_refused(b"\xef\x1e\x00\x03\x6fab", Overrun, "a 3-byte block in 2 bytes")
+    red_refused(b"\xef\x1e\x00\x03\xef\x0f\x01\x2c\x6fabc", Overrun, "the chain cut after its first block")
+    Ok(())
+}
+
+fn red_keep(mut r: red.Ring, index: u64, ts: u32, take data: Bytes) {
+    red.keep(mut r, index, ts, data, 0, list.len(data))
+}
+
+fn red_written(r: red.Ring, index: u64, ts: u32, take primary: Bytes, distance: u8, since: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(1500)
+    let n = result.unwrap(red.write(mut out, 111, r, index, ts, primary, 0, list.len(primary), distance, since))
+    if n != list.len(out) {
+        fail("write's length is the payload's")
+    }
+    out
+}
+
+fn red_same(got: Bytes, want: Bytes, take what: String) {
+    if got != want {
+        fail(take what)
+    }
+}
+
+/// bug: Write the redundant blocks newest first, count the offset from the wrong end, carry a primary the receiver is past or one before the switch, keep a block too long or too old for its header, append part of a payload that does not fit, or lose a byte between write and parse.
+/// oracle: RFC 2198 §3, by hand: indices 7, 8 and 9 at timestamps 1000, 1960 and 2920 give ef 1e 00 03 (1920 = 30 << 6 back, 3 bytes), ef 0f 00 02 (960 = 15 << 6, 2 bytes), 6f, then abc, de and the primary; a 1,024-byte primary or one 16,384 ticks back carries no block.
+@test
+fn red_write_round_trip() -> Result[(), ()] {
+    let mut r = result.unwrap(red.ring(2))
+    red_keep(mut r, 7, 1000, b"abc")
+    red_keep(mut r, 8, 1960, b"de")
+    let two = red_written(r, 9, 2920, b"PRIME", 2, 0)
+    red_same(two, b"\xef\x1e\x00\x03\xef\x0f\x00\x02\x6fabcdePRIME", "distance 2")
+    let mut blocks: List[red.Block] = list.with_capacity(4)
+    result.unwrap(red.parse(two, 0, list.len(two), mut blocks))
+    if list.len(blocks) != 3 || list.slice(two, blocks[0].at, blocks[0].at + blocks[0].len) != b"abc" || list.slice(two, blocks[1].at, blocks[1].at + blocks[1].len) != b"de" || list.slice(two, blocks[2].at, blocks[2].at + blocks[2].len) != b"PRIME" {
+        fail("parse reads back what write wrote")
+    }
+    red_same(red_written(r, 9, 2920, b"PRIME", 1, 0), b"\xef\x0f\x00\x02\x6fdePRIME", "distance 1")
+    red_same(red_written(r, 9, 2920, b"PRIME", 0, 0), b"\x6fPRIME", "distance 0 is the primary alone")
+    red_same(red_written(r, 9, 2920, b"PRIME", 2, 8), b"\xef\x0f\x00\x02\x6fdePRIME", "nothing before the switch")
+    red_same(red_written(r, 10, 3880, b"X", 2, 0), b"\xef\x1e\x00\x02\x6fdeX", "index 8 is two back, 9 was never kept")
+    // A ring of depth 2 keeps 9 over 7: index 7 is gone.
+    red_keep(mut r, 9, 2920, b"PRIME")
+    red_same(red_written(r, 11, 4840, b"Y", 2, 0), b"\xef\x1e\x00\x05\x6fPRIMEY", "only 9 is in the ring for 11")
+    // Too long, too old: no block.
+    let mut long: Bytes = list.with_capacity(1024)
+    list.fill(mut long, 1024, 1u8)
+    red_keep(mut r, 20, 100000, take long)
+    red_keep(mut r, 21, 100960, b"q")
+    red_same(red_written(r, 22, 117344, b"Z", 2, 0), b"\x6fZ", "1,024 bytes and 16,384 ticks fit no header")
+    red_same(red_written(r, 22, 117343, b"Z", 2, 0), b"\xef\xff\xfc\x01\x6fqZ", "16,383 ticks back fits")
+    // No room: nothing appended.
+    let mut tight: Bytes = list.with_capacity(6)
+    list.push(mut tight, 9u8)
+    match red.write(mut tight, 111, r, 22, 117343, b"Z", 0, 1, 2, 0) {
+        Error(c) => {
+            if c.requested != 7 || c.available != 5 || list.len(tight) != 1 {
+                fail("a refused write names its size and appends nothing")
+            }
+        },
+        Ok(_) => fail("7 bytes in 5"),
+    }
+    Ok(())
+}

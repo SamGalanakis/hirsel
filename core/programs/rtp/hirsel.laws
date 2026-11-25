@@ -17,6 +17,8 @@ rtp@1/laws/nack_pairs src=dc7869253ad91c4b sig=97b3f7757eef94c5 run=c2c0c6612d4c
 rtp@1/laws/pacer_spacing src=05e9443f4729c100 sig=df09cfa6d197b94b run=c2c0c6612d4cbb79 bug=788ee78ac492c7f9 oracle=426dcbc8aaa8536e rows=pending
 rtp@1/laws/padding_counts src=aff74e460b677878 sig=211d7b25d8275457 run=c2c0c6612d4cbb79 bug=458edda0f4aac832 oracle=cb09ac157a61d470 rows=pending
 rtp@1/laws/reception_report src=f130202e7ddd997b sig=f378f2467c633ec9 run=c2c0c6612d4cbb79 bug=a6d44245ff175dd3 oracle=3c98d995e956e2ea rows=pending
+rtp@1/laws/red_parse src=3f81f170ce1a550e sig=02f2aa461904d780 run=c2c0c6612d4cbb79 bug=8d3e30c4f2e238b7 oracle=2bf3ad1065d46628 rows=pending
+rtp@1/laws/red_write_round_trip src=88df224affe97977 sig=aaad738e52e8886e run=c2c0c6612d4cbb79 bug=da468e65a1c0167f oracle=69903408377f77d5 rows=pending
 rtp@1/laws/rewrite_continuity src=e817bcb2dd152592 sig=ffbbfbbf6b785f3a run=c2c0c6612d4cbb79 bug=8d869c7b1aefb9a1 oracle=8b56d2e87b2e8985 rows=pending
 rtp@1/laws/rewrite_late src=a53146a0d26f02f5 sig=ffbbfbbf6b785f3a run=c2c0c6612d4cbb79 bug=f8ab8ace159c530d oracle=8be6e36587738581 rows=pending
 rtp@1/laws/rtcp_compound_rules src=74238701094bd3ab sig=de41a1a57b767b8d run=c2c0c6612d4cbb79 bug=6a02d1b8e07f938f oracle=715e979a354ca8bb rows=pending

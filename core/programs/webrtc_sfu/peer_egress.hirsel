@@ -107,7 +107,7 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let frames = rtp.counter.counter(16, Translate, COUNTER_SLOTS) ?=> |c| Capacity(c)
     list.try_reserve(mut p.tracks, 1) ?=> |c| Capacity(c)
-    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None))
+    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0))
     Ok(int.narrow(list.len(p.tracks) - 1))
 }
 
@@ -150,6 +150,16 @@ pub fn current_layer(p: PeerSession, track: u16, source: u32) -> Option[u8] {
 fn send_pt(a: sdp.Agreed, codec: sdp.Codec) -> Option[u8] {
     for f in a.formats {
         if f.codec == codec {
+            return Some(f.pt)
+        }
+    }
+    None
+}
+
+// The `red` format whose blocks carry `pt` (RTP-13).
+fn red_pt(a: sdp.Agreed, pt: u8) -> Option[u8] {
+    for f in a.formats {
+        if sdp.red_base(f) == Some(pt) {
             return Some(f.pt)
         }
     }
@@ -493,7 +503,7 @@ pub fn unpace(mut p: PeerSession, track: u16) {
 /// `Rewrite` decides: `Forward` goes out on the media SSRC in the subscriber's wire
 /// identity; `Late` goes out at once as an RFC 4588 repair on the RTX SSRC, or is
 /// dropped and counted when the leg negotiated no RTX; `Drop` and `Wait` send nothing.
-pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Bytes, mut out: Outbox) -> Result[Sent, PeerError] {
+pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Bytes, past: rtp.red.Ring, mut out: Outbox) -> Result[Sent, PeerError] {
     if p.closed {
         return Error(Closed)
     }
@@ -513,7 +523,11 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
     let (index, ts, late) = match decision {
         Forward(i, w) => (i, w, false),
         Late(i, w) => (i, w, true),
-        _ => return Ok(Held),
+        _ => {
+            // RTP-13: a packet after a hold carries nothing from before it.
+            p.tracks[t].red_from = leg.index + 1
+            return Ok(Held)
+        },
     }
     let si: u64 = int.widen(p.tracks[t].section)
     let Some(pt) = send_pt(p.sections[si].agreed, leg.codec) else {
@@ -541,7 +555,33 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
     } else {
         Audio
     }
-    let staged = stage(mut p, now, mut out, q, class, None, payload, leg.from, leg.len, picture, tl0, dd)?
+    if p.tracks[t].src != Some(leg.src) {
+        p.tracks[t].red_from = leg.index
+    }
+    let distance = rtp.red.distance(p.tracks[t].red)
+    let staged = match red_pt(p.sections[si].agreed, pt) {
+        Some(rpt) if distance > 0 && !p.tracks[t].video => {
+            // RTP-13: the leg's own RED payload, every block tagged with its own Opus
+            // payload type, from the primaries the unit kept.
+            let mut buf = replace(mut p.red, list.new())
+            list.clear(mut buf)
+            let built = rtp.red.write(mut buf, pt, past, leg.index, int.truncate(leg.ts), payload, leg.from, leg.len, distance, p.tracks[t].red_from)
+            let r = match built {
+                Ok(n) => {
+                    let mut g = q
+                    g.fields.pt = rpt
+                    stage(mut p, now, mut out, g, class, None, buf, 0, n, None, None, None)
+                },
+                Error(_) => stage(mut p, now, mut out, q, class, None, payload, leg.from, leg.len, picture, tl0, dd),
+            }
+            p.red = take buf
+            r?
+        },
+        _ => stage(mut p, now, mut out, q, class, None, payload, leg.from, leg.len, picture, tl0, dd)?,
+    }
+    if staged {
+        p.tracks[t].forwarded += 1
+    }
     p.tracks[t].highest = index
     p.tracks[t].src = Some(leg.src)
     if p.tracks[t].video {

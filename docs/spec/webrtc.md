@@ -19,6 +19,9 @@ measured above the 300 kbps start estimate `Off` about 1 s into a call, and with
 and nothing sent on the leg no estimate could rise to resume it. The package is
 `webrtc_sfu`, pure Hirsel under core/programs, with no `Foreign` code in its reach, so
 FFI-8 ([foreign](foreign.md)) replay and `hirsel test --sim` cover it end to end.
+Amended 2026-11-25 (webrtc-opus-red-c1-2652) for Opus RED: RTC-2 answers `red/48000/2` with
+its primary mapping, RTC-4 says how a RED leg would be repaired, and RTC-5 rebuilds RED per
+down-track from a per-publication ring under a loss-driven policy ([RTP-13](rtp.md#rtp-13-redundant-audio-red)).
 
 This chapter specifies three layers, each sans-IO:
 
@@ -49,7 +52,7 @@ specify them again:
 | [NET-15 to NET-17](net.md#udp) | `UdpSocket`, `udp_recv`, `udp_send`, `UdpTx`, the `UdpBind` and `UdpSend` rules | the PeerSession's datagrams |
 | `stun_ice` (media-stun-ice-2203, built) | STUN Binding, ICE-Lite `lite`, `lite_receive`, `lite_selected` | the server's ICE agent |
 | media-dtls-spec-2317 (DTLS-1 to DTLS-9, SRTP-1 onward; drafted) | the DTLS 1.2 server handshake, flights and retransmission, the record layer, the `use_srtp` export; the SRTP and SRTCP contexts, ROC estimation and the replay window | the DTLS endpoint and the SRTP contexts |
-| media-rtp-spec-2318 (RTP-1 to RTP-12, the `rtp` package) | RTP header and extension parsing and writing, RTCP (SR, RR, SDES, BYE, NACK, PLI, FIR, TWCC), the retransmission `History` with RTX, delay-based BWE, the pacer, per-down-track sequence and timestamp rewriting (`Rewrite`, answering `Forward`, `Late`, `Drop` or `Wait`), and the synchronous `close` operations of RTP-12 | every byte-level RTP and RTCP operation |
+| media-rtp-spec-2318 (RTP-1 to RTP-13, the `rtp` package) | RTP header and extension parsing and writing, RTCP (SR, RR, SDES, BYE, NACK, PLI, FIR, TWCC), the retransmission `History` with RTX, delay-based BWE, the pacer, per-down-track sequence and timestamp rewriting (`Rewrite`, answering `Forward`, `Late`, `Drop` or `Wait`), the synchronous `close` operations of RTP-12, and RTP-13's RED reader, ring, writer and policy | every byte-level RTP and RTCP operation |
 | `media_bits` (built; VP8 added by slice S2 here) | Opus TOC, H.264 NAL and FU-A, VP9 descriptor, AV1 Dependency Descriptor, keyframe detection | layer identity and switch points |
 
 Where a sibling's final names differ from the names used here, the sibling's names win, and
@@ -250,7 +253,10 @@ server adds (RTC-5).
    their payload types, `fmtp` and `rtcp-fb` kept as offered. The answerer keeps the
    offerer's payload types (RFC 9429 §5.3.1). H.264 formats are kept only with
    `packetization-mode=1`, since FU-A and STAP-A are what `media_bits` reads. An `Rtx`
-   format is kept when its `apt` format is kept. A section left with no media format is
+   format is kept when its `apt` format is kept. A `Red` format is kept on an audio section when
+   the policy lists `Red` and its `fmtp` names one payload type for every block
+   (`111/111`), that of a format kept here; the answer keeps the offerer's mapping as
+   offered. `default_policy` lists `Opus` and `Red` for audio. A section left with no media format is
    answered `Rejected`.
 4. Extmaps are the offer's for extensions the policy lists, with the offer's IDs (RFC 8285
    §7). An extmap with a direction is answered with the complementary direction, and one
@@ -301,7 +307,8 @@ must keep the running sections' count prefix, order, MIDs and media kinds (RFC 9
 (RTC-5). It reuses every existing section in place (RFC 9429 §5.2.2) and appends one
 `recvonly`-for-the-client section per added down-track, with a new MID drawn from the
 session's counter (`"s0"`, `"s1"`, ...), the first matching format from the publication's
-agreed formats, and one SSRC and one RTX SSRC (RTC-4). It marks a removed down-track's section
+agreed formats (with the publication's agreed `Red` format whose blocks name it, when the
+policy lists `Red`), and one SSRC and one RTX SSRC (RTC-4). It marks a removed down-track's section
 `inactive` and reuses it for a later down-track of the same media kind, keeping its MID.
 A server offer carries `a=setup:actpass` as RFC 8842 §5.5 requires of every offer. Its ICE
 credentials, fingerprint, `tls-id` and candidate are those of the current session, and none
@@ -520,7 +527,8 @@ So:
   and marker, the RTX payload type, and the RTX stream's next sequence number, sealed under
   the RTX sealer. Otherwise it is dropped and counted. A late packet is never given a new
   media sequence number. Audio sections never negotiate RTX, and Opus concealment covers
-  the loss.
+  the loss. On a leg that agreed `Red`, the redundant blocks of later packets cover it
+  as well (RTC-5).
 - **NACK repair is RTX only, from a per-down-track history.** Each video down-track keeps an
   egress `History` (RTP-7) keyed by its extended outbound index. Each entry holds the source
   generation (RTC-3 `Gen`), a handle to the plaintext in the publisher's ingress ring, and
@@ -532,7 +540,11 @@ So:
   the recorded sequence number as OSN and a fresh transport sequence number. The history is
   gated at every source switch (`History.gate` with `Rewrite.switch_index`), so a NACK for a
   packet from before a switch answers nothing. A subscriber that negotiated no RTX for the
-  format gets no answer, and the NACK is counted. Its loss is covered by a keyframe request
+  format gets no answer, and the NACK is counted. Audio negotiates no RTX today, so no audio
+  down-track keeps an egress history and a NACK on an audio leg is answered by nothing; it
+  feeds that leg's RED policy (RTC-5). When audio RTX is taken, a RED leg's history records
+  the RED payload type and payload as written, and a repair resends that payload, never a
+  RED payload rebuilt from the ring's later state. Its loss is covered by a keyframe request
   when the rtp lane's rules call for one. Caching sealed media bytes per subscriber to resend
   them would cost a copy of every packet for every subscriber, so it is not done.
 - **Sender reports are per down-track.** An SR describes the RTP packets that its SSRC sent
@@ -661,6 +673,35 @@ history on the remote unit. A hit sends `RepairAsk(P, src, dst, ingress index)` 
 unit. The home unit replies `RepairReply(P, src, dst, Shared[Bytes])` if `src` is not fenced
 there, and the remote unit rechecks both `src` and `dst` against its own fences when it
 takes the reply. Only units with a subscriber pay anything for a publication.
+
+**Redundant audio (RED, [RTP-13](rtp.md#rtp-13-redundant-audio-red)).** RED is decided per
+down-track, never forwarded as the publisher sent it.
+
+- *Ingress.* A packet on a publisher's agreed `Red` payload type is read with `red.primary`;
+  the primary's bytes and payload type are the `Media` that is routed, and a payload
+  `red.primary` refuses is dropped and counted malformed. The publisher's redundant blocks
+  are not forwarded and do not repair the uplink: recovering a lost uplink packet from a
+  later packet's blocks is not taken.
+- *Ring.* Each Opus publication keeps a `red.Ring` of depth `MAX_DISTANCE` (2) on every
+  unit that routes it; other codecs keep a ring of depth 0. In step 2, after every local
+  down-track has been written, the unit keeps the packet's primary under its ingress index
+  and timestamp, so the ring holds only earlier packets while legs read it. **Deviation**
+  from the `Shared[Bytes]` handle the rest of fan-out uses: the ring copies each primary (at
+  most `MAX_BLOCK` bytes) into slots reserved when the publication is made, because W18
+  allows no allocation per forwarded packet and a held handle per primary would be one.
+- *Policy.* Each audio down-track keeps a `red.Policy`. Each RR block for the down-track's
+  SSRC is one loss sample: the larger of its `fraction` and the leg's NACK rate since the
+  previous block, `min(255, 256 · nacked / forwarded)`, where `nacked` counts the packets
+  the leg's NACKs name (each FCI's PID and the set bits of its BLP) and `forwarded` the
+  packets staged for it.
+- *Egress.* A leg whose section agreed `Red` and whose policy is at distance `d > 0` is sent
+  `red.write` of the primary with up to `d` past primaries, every block tagged the leg's own
+  Opus payload type, in a packet on the leg's `Red` payload type. `since` is the leg's first
+  packet from its current source (a change of source, or the first packet after the leg was
+  held, starts it again), so no block crosses a switch whose timestamps the receiver cannot
+  place. A write refused for room sends the primary alone. A leg that did not agree `Red`,
+  or whose policy is `Off`, gets the primary alone on its Opus payload type, so a publisher's
+  RED never reaches a leg that did not agree it.
 
 **RTCP is terminated.** The session walks feedback with `rtcp.next(pkt, mut at)` after
 `rtcp.check(pkt, mode)` accepts the datagram (RTC-3). The router never forwards a subscriber's
@@ -1346,6 +1387,27 @@ unless named otherwise.
   equal and raises one drop counter. A following valid packet at the next index is accepted.
   A negative control that runs statistics before `open` must fail.
 
+- **W21 `red_steps_down_on_a_clean_leg`.** *Harness:* `core/programs/webrtc_sfu/red_laws.hirsel`. A
+  publisher sends Opus as RED (`red/48000/2`, `111/111`, distance 1) to a leg that agreed
+  RED on its own payload types (Opus 109, RED 120) and a leg that did not (Opus 111), 500
+  packets at 20 ms. Receiver reports at 1.01 s, 2.01 s, ... up to 9.01 s carry fraction
+  26/256 up to 3.01 s, 5/256 at 4.01 s and 0 after. *Oracle:* RTP-13's policy by hand:
+  distance 2 from the first report, held by the 5/256 report (under distance 2's rise, at its
+  hold), until 6.01 s, 1 until 8.01 s, then `Off`; each RED packet's blocks are the exact
+  earlier frames at offsets of 960 ticks, tagged 109, and the plain leg gets only primaries
+  on 111. From 8.01 s, 0 redundancy bytes. Routing one distance-2 packet allocates 0 bytes,
+  as W18.
+- **W22 `red_recovers_bursty_loss_10` and W23 `red_recovers_bursty_loss_20`.** *Harness:*
+  `std.sim.udp` between the router's egress and two receivers, a Gilbert-Elliott chain per
+  destination with mean burst 2 (bad state loses all, leaves it half the time) and 10% or
+  20% stationary loss; the receivers' RRs, RFC 3550's fraction each second, cross the same
+  links back. 500 Opus packets. *Oracle:* the seeded arrival trace read by hand with RFC
+  2198: a frame is recoverable when its own packet or one of the next two arrived. From 3 s
+  on, every RED packet carries two blocks, the RED leg holds every recoverable frame, the
+  plain leg holds exactly its arrived primaries, and the observed loss lies in 5–15% or
+  13–27%. W22's publisher sends RED; W23's sends plain Opus, so the RED leg's
+  blocks are rebuilt from primaries the publisher never sent as RED.
+
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.
 
@@ -1395,6 +1457,7 @@ W19, blocks, because those are soundness reds.
 | **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness in its laws and by `room_client` (F1) in service | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
 | **S8** withdrawn | ICE-TCP is replaced by TURN over a stream (turn.md TURN-2, slice U8) | — | — |
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7 | the cost targets |
+| **C1** Opus RED | RTP-13 and its use here: RTC-2's `Red` answer, RTC-5's ring, policy and RED legs | S6 | W21, W22, W23 |
 | **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 
 **S4 decisions.** Gaps the spec left open, decided while S4 was built:

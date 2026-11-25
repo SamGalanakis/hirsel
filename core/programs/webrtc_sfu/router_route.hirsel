@@ -494,7 +494,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
         }
         let leg = peer.Leg(src: owner, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: voice, from: m.payload_at, len: m.payload_len, closes: closes, dd_at: m.dd_at, dd_len: m.dd_len)
         let track = r.downs[d].track
-        let sent = peer.forward(mut r.members[si].session, now, track, leg, packet, mut out) ?=> |take x| Peer(x)
+        let sent = peer.forward(mut r.members[si].session, now, track, leg, packet, r.publications[pi].red, mut out) ?=> |take x| Peer(x)
         if sent == OnMedia && codec == H264 {
             // A switch: the old source's sets no longer describe what the receiver holds.
             if r.downs[d].sets_source != Some(src) {
@@ -524,6 +524,9 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
     if let Some(f) = vp9 {
         media_bits.unit.vp9_observe(mut r.publications[pi].encodings[e].vp9, f)
     }
+    // RTP-13: the primary joins the ring after every leg read it, so it is past only
+    // for the packets after it.
+    rtp.red.keep(mut r.publications[pi].red, m.index, m.ts, packet, m.payload_at, m.payload_len)
     // Step 3, on the home unit only: one plaintext copy, shared by every other unit
     // that has a down-track of the publication.
     if remote != 0 && r.publications[pi].home == r.unit {

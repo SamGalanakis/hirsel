@@ -2410,33 +2410,6 @@ fn insert_row(mut ids: u64, mut roots: Roots, take p: Bytes, take raw: Bytes) ->
     Ok(replaced)
 }
 
-fn sort_bulk_rows(mut rows: List[std.page.Row]) -> Result[(), Error] {
-    let mut positions: List[u64] = list.new()
-    let n = list.len(rows)
-    capacity(list.try_reserve(mut positions, n))?
-    for slot in 0u64 .. n {
-        list.push(mut positions, slot)
-    }
-    list.sort(mut positions, scoped fn(a: u64, b: u64) -> Order {
-        match list.compare_bytes(rows[a].key, rows[b].key) {
-            Equal => order.compare(a, b),
-            different => different,
-        }
-    })
-    for first in 0u64 .. n {
-        let mut at = first
-        let mut source = positions[at]
-        while source != first {
-            list.swap(mut rows, at, source)
-            positions[at] = at
-            at = source
-            source = positions[at]
-        }
-        positions[at] = at
-    }
-    Ok(())
-}
-
 // AP13. Collect and admit the encoded workspace, sort the destination
 // records, then build the table and each index bottom up.
 fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes) -> Result[Built, Error] {

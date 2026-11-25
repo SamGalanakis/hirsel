@@ -106,16 +106,29 @@ def verify_extractions(hirsel, inputs, work, project):
     probe = copy.deepcopy(inputs)
     add_source(probe, 'runner', 'triggers', HERE / 'diff/probe.hirsel')
     probe_path = manifest(work / 'probe.json', probe)
-    for name, reason in (
+    def probe_of(path):
+        return run(hirsel, 'lean', 'probe', path, '--inputs', probe_path, '--store',
+                   work / 'store-a', directory=work).stdout
+
+    for name, *reasons in (
         ('probe_cancel', 'runtime operation CheckCancel'),
         ('probe_spawn', 'runtime operation Spawn'),
         ('next_pending', 'indirect call'),
         ('first', 'drops store@1/store/Reader (Resource'),
+        # Every refusal, not just the first: settle's state type and its store call.
+        ('settle', 'no Lean type for `store.StagedMigration`',
+         'calls store@1/store/stage_rewrite, which is neither extracted nor bound'),
     ):
-        outcome = run(hirsel, 'lean', 'probe', f'runner@1/triggers/{name}', '--inputs',
-                      probe_path, '--store', work / 'store-a', directory=work).stdout
-        if reason not in outcome:
-            raise RuntimeError(f'exclusion did not fire ({reason}): {outcome}')
+        outcome = probe_of(f'runner@1/triggers/{name}')
+        for reason in reasons:
+            if reason not in outcome:
+                raise RuntimeError(f'probe missed a refusal ({reason}): {outcome}')
+    # A function extract accepts, the probe accepts.
+    for module, _, functions, *_ in TARGETS.values():
+        for name in functions:
+            outcome = probe_of(f'{module}/{name}')
+            if not outcome.startswith(f'{module}/{name}: 0 refusals'):
+                raise RuntimeError(f'probe refuses what extract accepts: {outcome}')
     print('KC1 PASS', flush=True)
 
 

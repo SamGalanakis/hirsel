@@ -8,7 +8,10 @@ refuse extraction before it replaces the output.
 
 Use the same arguments with `hirsel lean status` to compare the current extraction with
 a saved file. Different bytes or a missing file report `stale` with exit status 0.
-`hirsel lean probe` takes one full definition path and reports excluded operations.
+`hirsel lean probe` takes one full definition path and runs the same extraction over that
+function and the functions of its file it calls. It lists every refusal, not just the first:
+excluded operations, types with no Lean type, and calls with no Lean binding. Extraction's
+report lists them the same way. A probe with no refusals extracts.
 
 Pass the built `hirsel` and `hirsel-core-contract-eval` binaries to the opt-in suite.
 

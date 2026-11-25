@@ -9,46 +9,48 @@ pub(super) fn check_body(
     body: &IrBody,
     sig: &hirsel_core_ir::Signature,
     stats: &mut JoinStats,
-) -> R<()> {
+) {
     // Parameter modes: the syntax mode must be the IR loan.
     if sig.params.len() != f.params.len() {
-        bail!(
+        stats.refused.push(format!(
             "{}: {} syntax parameters, {} IR parameters",
             f.name,
             f.params.len(),
             sig.params.len()
-        );
-    }
-    for (p, q) in f.params.iter().zip(&sig.params) {
-        let loan = match q {
-            IrParam::Value(_) => Mode::View,
-            IrParam::Address {
-                loan: Loan::Mut, ..
-            } => Mode::Mut,
-            IrParam::Address {
-                loan: Loan::View, ..
-            } => Mode::View,
-            IrParam::Address {
-                loan: Loan::Take, ..
-            } => Mode::Take,
-            #[allow(unreachable_patterns)]
-            IrParam::Address { loan, .. } => {
-                bail!("{}: parameter {} has loan {loan:?}", f.name, p.name)
+        ));
+    } else {
+        for (p, q) in f.params.iter().zip(&sig.params) {
+            let loan = match q {
+                IrParam::Value(_) => Mode::View,
+                IrParam::Address {
+                    loan: Loan::Mut, ..
+                } => Mode::Mut,
+                IrParam::Address {
+                    loan: Loan::View, ..
+                } => Mode::View,
+                IrParam::Address {
+                    loan: Loan::Take, ..
+                } => Mode::Take,
+                #[allow(unreachable_patterns)]
+                IrParam::Address { loan, .. } => {
+                    stats.refused.push(format!(
+                        "{}: parameter {} has loan {loan:?}",
+                        f.name, p.name
+                    ));
+                    continue;
+                }
+            };
+            if loan != p.mode {
+                stats.refused.push(format!(
+                    "{}: parameter {} is {:?} in syntax, {:?} in the IR",
+                    f.name, p.name, p.mode, loan
+                ));
+                continue;
             }
-        };
-        if loan != p.mode {
-            bail!(
-                "{}: parameter {} is {:?} in syntax, {:?} in the IR",
-                f.name,
-                p.name,
-                p.mode,
-                loan
-            );
+            stats.params_checked += 1;
         }
-        stats.params_checked += 1;
     }
     exclusions(&f.name, ir, body, stats);
-    Ok(())
 }
 
 /// The instruction kinds an extracted body may contain. Each is either pure data movement or
@@ -107,7 +109,7 @@ pub(super) fn kind_name(inst: &Inst) -> String {
 /// The exclusion checks: indirect calls, runtime operations with host effects (cancellation
 /// checks among them), drops reaching a finalizer or a resource, instruction kinds outside
 /// `allowed`, and failing instructions the model has no account of.
-pub(super) fn exclusions(name: &str, ir: &Module, body: &IrBody, stats: &mut JoinStats) {
+fn exclusions(name: &str, ir: &Module, body: &IrBody, stats: &mut JoinStats) {
     for (i, inst) in body.insts.iter().enumerate() {
         let at = body.inst_anchors[i]
             .map(|a| format!("{}..{}", a.start, a.end))
@@ -212,4 +214,62 @@ pub(super) fn verify_joins(fx: &mut Fx<'_, '_>) {
             }
         }
     }
+}
+
+/// Every type a function names that has no Lean type, and every call with no Lean binding, not
+/// just the first: the emission's own `ty` and `resolve` applied to each type and call the
+/// function names. Run on a scratch `Fx`, since `resolve` records joins.
+pub(super) fn audit(fx: &mut Fx<'_, '_>) -> Vec<String> {
+    let f = fx.f;
+    let s = f.src;
+    let mut types: Vec<NodeId> = f.params.iter().filter(|p| !p.tx).map(|p| p.ty).collect();
+    match (f.result, &f.prog) {
+        (Some(r), Some(_)) => types.extend(s.kids(r).iter().skip(1).take(2)),
+        (Some(r), None) => types.push(r),
+        (None, _) => {}
+    }
+    let mut calls = Vec::new();
+    s.walk(f.root, &mut |n| match s.kind(n) {
+        K::Let | K::LetMut => {
+            if let [pat, ty, value] = s.kids(n)
+                && !(s.kind(*value) == K::Block && s.kind(*pat) == K::ConstructorPattern)
+            {
+                types.push(*ty);
+            }
+        }
+        K::Call => calls.push(n),
+        _ => {}
+    });
+    let mut out = Vec::new();
+    for t in types {
+        if let Err(e) = fx.m.ty(s, t, &f.generics) {
+            out.push(format!("{}: {e}", f.name));
+        }
+    }
+    for c in calls {
+        if let Err(e) = fx.resolve(c) {
+            out.push(e);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    out.retain(|x| seen.insert(x.clone()));
+    out
+}
+
+/// The field and payload types of a module type that have no Lean type.
+pub(super) fn type_audit(m: &ModuleInfo<'_>, t: &TypeInfo<'_>) -> Vec<String> {
+    let nodes: Vec<NodeId> = match &t.body {
+        TypeBody::Record(fs) => fs.iter().map(|(_, n)| *n).collect(),
+        TypeBody::Variant(cs) => cs.iter().flat_map(|(_, ps)| ps.iter().copied()).collect(),
+    };
+    let mut out = Vec::new();
+    for n in nodes {
+        if let Err(e) = m.ty(t.src, n, &t.generics) {
+            let e = format!("type {}: {e}", t.name);
+            if !out.contains(&e) {
+                out.push(e);
+            }
+        }
+    }
+    out
 }

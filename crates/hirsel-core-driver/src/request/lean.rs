@@ -30,12 +30,13 @@ mod bindings;
 mod checks;
 mod coreir;
 mod expr;
+mod probe;
 mod stmt;
 mod syntax;
 
 use crate::cli::{Invocation, OptionId};
 use bindings::{BUILTINS, PRELUDE_CTORS, PRELUDE_FNS, PreludeFn};
-use checks::{check_body, exclusions};
+use checks::{audit, check_body, type_audit};
 use syntax::*;
 
 fn check(inputs: &Path, store: &Path) -> R<Arc<CheckProduct>> {
@@ -280,7 +281,8 @@ fn pad(n: usize) -> String {
 struct Extraction {
     lean: String,
     report: String,
-    ok: bool,
+    /// Everything extraction refuses, in every function and type it emits, not just the first.
+    refusals: Vec<String>,
 }
 
 fn extract(product: &CheckProduct, prefix: &str, names: &[String]) -> R<Extraction> {
@@ -467,8 +469,14 @@ fn extract(product: &CheckProduct, prefix: &str, names: &[String]) -> R<Extracti
     }
     let mut shapes_checked = 0;
     let mut no_shape: Vec<String> = Vec::new();
+    let mut type_refusals = Vec::new();
     for t in &ordered {
         let ti = &m.types[t];
+        let missing = type_audit(&m, ti);
+        if !missing.is_empty() {
+            type_refusals.extend(missing);
+            continue;
+        }
         emit_type(&m, ti, &mut out)?;
         // A generic type's shape is named by its parameters, `Entry[$0]`.
         let params: Vec<String> = (0..ti.generics.len()).map(|i| format!("${i}")).collect();
@@ -542,7 +550,7 @@ fn extract(product: &CheckProduct, prefix: &str, names: &[String]) -> R<Extracti
             .ok_or_else(|| format!("{}: no IR body", f.name))?;
         let body = func.body.as_ref().unwrap();
         let sig = &ir.signatures[func.signature.index()];
-        let mut fx = Fx {
+        let new_fx = || Fx {
             m: &m,
             f,
             s: f.src,
@@ -555,9 +563,18 @@ fn extract(product: &CheckProduct, prefix: &str, names: &[String]) -> R<Extracti
             joined_ir: BTreeSet::new(),
             joined_failures: BTreeSet::new(),
         };
-        check_body(f, ir, body, sig, &mut fx.stats)?;
-        emit_fn(&mut fx, &mut out)?;
-        checks::verify_joins(&mut fx);
+        let mut fx = new_fx();
+        check_body(f, ir, body, sig, &mut fx.stats);
+        let mut missing = f.refusals.clone();
+        missing.extend(audit(&mut new_fx()));
+        if missing.is_empty() {
+            match emit_fn(&mut fx, &mut out) {
+                Ok(()) => checks::verify_joins(&mut fx),
+                Err(e) => fx.stats.refused.push(e),
+            }
+        } else {
+            fx.stats.refused.extend(missing);
+        }
         let st = fx.stats;
         writeln!(
             report,
@@ -589,12 +606,13 @@ fn extract(product: &CheckProduct, prefix: &str, names: &[String]) -> R<Extracti
         }
     }
     writeln!(out, "end {}", lean_namespace(prefix)).unwrap();
-    let ok = total.unresolved_syntax.is_empty()
-        && total.unresolved_ir.is_empty()
-        && total.refused.is_empty();
+    for x in &type_refusals {
+        writeln!(report, "  ! {x}").unwrap();
+    }
+    total.refused.extend(type_refusals);
     writeln!(
         report,
-        "TOTAL functions {}  types {} (IR shapes checked {}, no IR shape: {})  calls joined {}  builtins joined {}  unresolved syntax->IR {}  unresolved IR->syntax {}  refused (host op / cancel / finalizer / indirect) {}  drops checked {}",
+        "TOTAL functions {}  types {} (IR shapes checked {}, no IR shape: {})  calls joined {}  builtins joined {}  unresolved syntax->IR {}  unresolved IR->syntax {}  refused {}  drops checked {}",
         m.fns.len(), ordered.len(), shapes_checked, if no_shape.is_empty() { "none".to_string() } else { no_shape.join(" ") }, total.calls_joined, total.builtins_joined,
         total.unresolved_syntax.len(), total.unresolved_ir.len(), total.refused.len(), total.drops_checked
     )
@@ -610,10 +628,11 @@ fn extract(product: &CheckProduct, prefix: &str, names: &[String]) -> R<Extracti
         census.join(", ")
     )
     .unwrap();
+    let refusals = [total.unresolved_syntax, total.unresolved_ir, total.refused].concat();
     Ok(Extraction {
         lean: out,
         report,
-        ok,
+        refusals,
     })
 }
 
@@ -868,37 +887,6 @@ fn emit_fn(fx: &mut Fx, out: &mut String) -> R<()> {
 
 // ---------------------------------------------------------------------------------------------
 
-fn probe(product: &CheckProduct, path: &DefPath) -> R<()> {
-    let def = product
-        .definitions
-        .get(path)
-        .ok_or_else(|| format!("{path}: not a checked function"))?;
-    let ir = def.ir().map_err(|e| e.to_string())?;
-    let func = ir
-        .functions
-        .iter()
-        .find(|g| ir.instances[g.instance.index()].definition == *path && g.body.is_some())
-        .ok_or_else(|| format!("{path}: no IR body"))?;
-    let mut stats = JoinStats::default();
-    exclusions(
-        &path.to_string(),
-        ir,
-        func.body.as_ref().unwrap(),
-        &mut stats,
-    );
-    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
-    for r in &stats.refused {
-        let reason = r.split_once(": ").map(|x| x.1).unwrap_or(r);
-        let reason = reason.rsplit_once(" at ").map(|x| x.0).unwrap_or(reason);
-        *reasons.entry(reason.to_owned()).or_default() += 1;
-    }
-    println!("{path}: {} refusals", stats.refused.len());
-    for (r, n) in reasons {
-        println!("  {n} x {r}");
-    }
-    Ok(())
-}
-
 pub(crate) fn run(invocation: Invocation) -> R<()> {
     let mut inputs = None;
     let mut store = None;
@@ -933,7 +921,7 @@ pub(crate) fn run(invocation: Invocation) -> R<()> {
     }
     let product = check(Path::new(inputs), Path::new(store))?;
     if invocation.command.name == "lean probe" {
-        return probe(
+        return probe::probe(
             &product,
             &DefPath::from_full(module).ok_or("invalid definition path")?,
         );
@@ -950,7 +938,7 @@ pub(crate) fn run(invocation: Invocation) -> R<()> {
     }
     let extracted = extract(&product, module, &invocation.arguments)?;
     print!("{}", extracted.report);
-    if !extracted.ok {
+    if !extracted.refusals.is_empty() {
         bail!("extraction refused: unresolved calls or excluded operations");
     }
     if invocation.command.name == "lean status" {

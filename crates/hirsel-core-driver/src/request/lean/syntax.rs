@@ -107,6 +107,8 @@ pub(super) struct FnInfo<'a> {
     /// `Some(state)` when the function returns `Result` and runs in `Hirsel.Prog`.
     pub(super) prog: Option<State>,
     pub(super) order: usize,
+    /// Parts of the declaration extraction has no rule for (`waits`, ..).
+    pub(super) refusals: Vec<String>,
 }
 
 pub(super) struct ModuleInfo<'a> {
@@ -177,6 +179,7 @@ pub(super) fn fn_info<'a>(
     let mut generics = Vec::new();
     let mut params = Vec::new();
     let mut result = None;
+    let mut refusals = Vec::new();
     for &c in src.kids(root) {
         match src.kind(c) {
             K::Generics => generics = src.kids(c).iter().map(|&g| src.tok(g).to_owned()).collect(),
@@ -200,7 +203,7 @@ pub(super) fn fn_info<'a>(
             }
             K::ResultType => result = Some(src.kid(c, 0)?),
             K::Public | K::Block => {}
-            other => bail!("{name}: unsupported function part {other:?}"),
+            other => refusals.push(format!("{name}: unsupported function part {other:?}")),
         }
     }
     let returns_result = result
@@ -233,6 +236,7 @@ pub(super) fn fn_info<'a>(
         result,
         prog,
         order,
+        refusals,
     })
 }
 

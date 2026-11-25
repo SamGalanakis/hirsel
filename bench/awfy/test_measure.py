@@ -17,6 +17,7 @@ from pathlib import Path
 
 import awfy_measure
 from board import EXPECTED, Board, measurement_slot, rebaseline, receipt
+from checkbox_gate import checkbox_value, session_rss_sample
 import bench_cpus
 import build
 import cold_phases
@@ -228,6 +229,13 @@ class BoardCompletion(unittest.TestCase):
             "instructions": 123, "cycles": 99, "verified": True,
             "pmu_times_ns": {event: [[100, 100]] for event in ("instructions:u", "cycles:u")},
         }
+
+    def test_checkbox_rss_subtracts_startup_idle_before_session_division(self):
+        idle, loaded = 8 * 1024**2, 12 * 1024**2
+        sample = session_rss_sample({"status": "ok", "server_rss_bytes": loaded, "connections": 64}, idle)
+        self.assertEqual(sample["server_idle_rss_bytes"], idle)
+        self.assertEqual(sample["server_loaded_rss_bytes"], loaded)
+        self.assertEqual(int(checkbox_value(sample, "server_rss_bytes")), (loaded - idle) // 64)
 
     def test_second_descriptor_cannot_take_measurement_lock(self):
         with tempfile.TemporaryDirectory() as temp:

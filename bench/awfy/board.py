@@ -30,6 +30,7 @@ import comparison
 import comparison_units
 import receipt
 from board_baseline import rows_by_label
+from checkbox_gate import CHECKBOX_CLIENTS, checkbox_changes, process_rss_bytes, session_rss_sample
 from receipt import measurement_slot, write as write_json
 from timing_shield import BOARD as LOCK, REGIMES, hold, measurement_affinity
 from comparison import SPECTRALNORM, SPECTRALNORM_CHECKSUM, spectralnorm_marker
@@ -57,7 +58,6 @@ CHECKBOX_METRICS = {
     "memory-subscribed": "server_rss_bytes",
     "memory-unsubscribed": "server_rss_bytes",
 }
-CHECKBOX_CLIENTS = 64
 NOTES = (
     "Hirsel checks bounds and overflow, admits bytes and charges Steps only where a step bound can be current; "
     "Rust and Goose check bounds only.",
@@ -74,8 +74,10 @@ NOTES = (
     "the Spectralnorm checksum from 1051192944 to 1051192945.",
     "Checkbox runs use the same checked wire driver and durable workload on both servers. "
     "Throughput is toggles/s including connection and convergence time; higher is better. "
-    "Throughput is reported as a trend. The board flags RSS per live session rising by more "
-    "than 10%. Goose has no compile or checkbox peer here.", board_host.NOTE,
+    "Throughput is reported as a trend. Each memory row reads the server's smaps_rollup RSS "
+    "after startup before any session opens and again while 64 sessions are live, and reports "
+    "the increase per live session. The board flags that RSS rising by more than 10%. "
+    "Goose has no compile or checkbox peer here.", board_host.NOTE,
 )
 
 
@@ -145,27 +147,6 @@ def inactive_counters(report):
                 key = f"{suites[goal]}/{name}"
                 blocked.setdefault(key, []).append(f"{goal}/{name}/{side}: inactive-counter (must be fully active)")
     return {key: ", ".join(reasons) for key, reasons in blocked.items()}
-
-
-def checkbox_value(sample, metric):
-    value = Decimal(str(sample[metric]))
-    if sample["status"] != "ok" or not value.is_finite() or value <= 0:
-        raise ValueError(f"invalid {metric} sample")
-    if metric == "server_rss_bytes":
-        if sample["connections"] != CHECKBOX_CLIENTS:
-            raise ValueError(f"RSS must cover {CHECKBOX_CLIENTS} live sessions")
-        value /= CHECKBOX_CLIENTS
-    return value
-
-
-def checkbox_changes(reference, candidate, metric):
-    for row in (reference, candidate):
-        if row["status"] != "ok" or tuple(row["metrics"]) != (metric,):
-            raise ValueError("checkbox row has a different metric or an incomplete sample")
-    for side in ("hirsel", "rust"):
-        before, after = (checkbox_value(row["samples"][side], metric) for row in (reference, candidate))
-        percent = Decimal(100) * (after - before) / before
-        yield side, before, after, percent
 
 
 def instruction_keys():
@@ -990,6 +971,7 @@ def checkbox_rows(board, out, prepared, server_cpu, loader_cpu, *, extended=Fals
                 with smt_activity(siblings, f"{mode}/{side}") as busy, private_server(
                     command, address, directory, env, server_cpu
                 ) as pid:
+                    idle_rss = process_rss_bytes(pid) if metric == "server_rss_bytes" else None
                     load_command = [tools / "wire-load", mode, "--url", f"ws://{address}/hirsel",
                                     "--wants", wants, "--clients", str(clients)]
                     load_command += ["--toggles", str(toggles), "--pace", "1000"] if mode == "converge" else ["--server-pid", str(pid)]
@@ -1005,7 +987,7 @@ def checkbox_rows(board, out, prepared, server_cpu, loader_cpu, *, extended=Fals
                     samples[side] = {"status": "ok" if valid else "incomplete-convergence",
                                      "seconds": seconds, metric: clients * toggles / seconds if valid else None}
                 else:
-                    sample = json.loads(result.stdout)
+                    sample = session_rss_sample(json.loads(result.stdout), idle_rss)
                     valid = result.returncode == 0 and sample["complete"] and sample["connections"] == clients
                     samples[side] = sample | {"status": "ok" if valid else "incomplete-memory"}
                     if extended:

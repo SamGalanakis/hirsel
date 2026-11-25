@@ -248,9 +248,12 @@ verdicts.
 Recording is an optional switch, off by default, and independent of every other build
 choice. A build without the switch contains no recording machinery. A recording build is
 the same program, for the same target and engine at the same optimisation, with that
-machinery added; it runs with recording off or on. There is no other build split: no build
-mode, optimisation level or debug setting turns recording on or off, or changes what a
-program means ([PROG-6](programs.md#prog-6-one-meaning)). In all three (no switch, the
+machinery added; it runs with recording off or on. Coverage is a second such switch, with
+the same guarantee ([coverage](../coverage.md)): a coverage build is the same program with
+reached flags added that no program operation reads, and it makes the same observations as
+the build without it. There is no other build split: no build mode, optimisation level or
+debug setting turns recording or coverage on or off, or changes what a program means
+([PROG-6](programs.md#prog-6-one-meaning)). For recording, in all three (no switch, the
 switch with recording off, and with it on), a run given the same values at the replay point
 (CAP-8) in the same order makes the same observations
 ([SEM-8](semantics.md#sem-8-determinism)): its values, output and outcome, its causes and

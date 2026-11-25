@@ -219,7 +219,7 @@ Given the same program, the same values at the replay point
 policy, every run that no run stop ends ([FAIL-15](failure.md#fail-15-run-stops)) and whose
 program reaches no foreign function ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)) behaves
 identically on every run of one **build**: the program as one engine compiled it, for one
-target, at one optimisation level. A recording build of it is the same build
+target, at one optimisation level. A recording or coverage build of it is the same build
 ([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)). Its **observables** are exactly:
 
 - its values, its output and its outcome;

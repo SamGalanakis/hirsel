@@ -102,6 +102,31 @@ fixed for the session.
 | `--status` | a loop answered | — | usage | no loop |
 | `--stop` | the loop stopped | — | usage | no loop |
 
+## Coverage
+
+*Specified, not built; [coverage](../coverage.md) is the full text.* A coverage build adds
+reached flags at function entries and source control-flow arms. It is the same build
+([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)), and no program reads a
+flag (R28).
+
+| Form | Does |
+|---|---|
+| `hirsel test [package-dir] --coverage [--json]`<!-- doc-ref: planned --> | builds the coverage build, runs the selected tests and reports reached entries and arms; with `--laws`, also each test's law rows |
+| `--coverage-out FILE`<!-- doc-ref: planned --> | also writes the merged profile |
+| `--coverage-base FILE`<!-- doc-ref: planned --> | adds a diff against an earlier profile |
+| `--coverage-targets FILE`<!-- doc-ref: planned --> | restricts the uncovered list to the source ranges in FILE |
+| `--coverage-runs`<!-- doc-ref: planned --> | keeps one row per run in the profile |
+| `--seed-base K`<!-- doc-ref: planned --> | with `--seeds N`, runs seeds K to K+N-1 |
+| `hirsel coverage FILE... [--map FILE]... [--base FILE] [--targets FILE] [--json] [-o FILE]`<!-- doc-ref: planned --> | merges raw files and profiles, reports and diffs, and runs nothing |
+
+Each coverage option implies `--coverage`<!-- doc-ref: planned -->. A narrowed run is allowed. With `-o DIR`, each
+test's site map is written beside its executable as `HEX.covmap`. Coverage never changes an
+exit code: `hirsel test` exits as it does without it, and `hirsel coverage`<!-- doc-ref: planned --> exits 0 when it
+reports, 1 when it refuses an input and 2 on usage errors.
+
+`hirsel laws` stays static and about the lock: `check` and `write` run no test, and it has
+no coverage option. Coverage never enters a law row or `hirsel.laws`.
+
 ## Adding a dependency
 
 `hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`

@@ -1,0 +1,180 @@
+// `hirsel store inspect` and `hirsel store stats` (STORE-SPEC §15.6): the
+// catalog and each collection's size, read from one snapshot. A read-only
+// open (§11.19) gives one beside a live writer; nothing here writes.
+/// What a catalog record declares. An index is Many or Unique; an aggregate
+/// holds per-group totals.
+pub type EntryForm: send = TableForm | IndexForm(IndexKind) | AggregateForm | CellForm | LogForm
+
+/// One catalog record and its collection's descriptor: `rows` and `charge`
+/// are the CollectionRoot's exact row count and row charge (AP4), and `tiered`
+/// its residency. `table` is an index's table, else the record's own name.
+/// `revision` is the index's composite revision (§1.2), empty otherwise.
+pub type CatalogEntry: send {
+    name: String,
+    table: String,
+    id: u32,
+    form: EntryForm,
+    state: IndexState,
+    revision: Bytes,
+    rows: u64,
+    charge: u64,
+    tiered: bool
+}
+
+/// The store a snapshot reads.
+pub fn snapshot_identity(s: Snapshot) -> StoreId {
+    s.store
+}
+
+/// Every catalog record at `s`, tables, cells and logs (system ones, named
+/// `hirsel.`, included) in name order, then each table's indexes.
+pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
+    let mut out: List[CatalogEntry] = list.new()
+    let mut names: Map[u32, String] = map.new()
+    let mut end_key: Bytes = list.new()
+    list.push(mut end_key, 3u8)
+    let mut records = byte_cursor(s.roots.catalog, Included(table_key("")?), end_key)?
+    while let Some((take key, raw)) = next_bytes(mut records)? {
+        let record = decode_catalog(raw)?
+        let (name, owner_name, form) = if record.kind == 2 {
+            let index_name = declaration_index_name(key)?
+            let table_name = match map.get(names, record.owner) {
+                Some(found) => string.from(found),
+                None => return Error(malformed(0)),
+            }
+            let form = match record.shape {
+                Entries(kind) => IndexForm(kind),
+                Sums => AggregateForm,
+            }
+            (take index_name, take table_name, form)
+        } else {
+            let own = catalog_collection_name(key, record.kind)?
+            map.insert(mut names, record.id, string.from(own))
+            let form = if record.kind == 3 {
+                CellForm
+            } else if record.kind == 4 {
+                LogForm
+            } else {
+                TableForm
+            }
+            (string.from(own), take own, form)
+        }
+        let (rows, charge, tiered) = match std.page.collection_entry(s.roots.collections.root, prefix(record.id)?) {
+            Some((_, descriptor)) => (list.word_le(descriptor, 36), list.word_le(descriptor, 44), descriptor[53u64] == 1),
+            None => (0u64, 0u64, false),
+        }
+        capacity(list.try_reserve(mut out, 1))?
+        list.push(mut out, CatalogEntry(name: take name, table: take owner_name, id: record.id, form: form, state: copied_state(record.state)?, revision: copied(record.revision)?, rows: rows, charge: charge, tiered: tiered))
+    }
+    Ok(take out)
+}
+
+// `hirsel store verify --release EXE` and `hirsel store repair` (STORE-SPEC
+// §15.6) run in the release's own process, which binds its extractors. A
+// verify reads a cloned image and writes nothing; a repair runs in place.
+// Rows or entries a walk or build slice reads, and bytes a scrub slice reads.
+// The operator commands own the store, so slices only bound memory.
+const OPERATOR_ROWS: u64 = 1024u64
+
+const OPERATOR_SCRUB_BYTES: u64 = 16777216u64
+
+/// What `verify_release` found. `changed` names each index whose composite
+/// revision this release would change (a Migrate rebuilds it, an Open refuses
+/// `Changed`); `faults` are scrub faults; `findings` come from a report walk
+/// under this release's extractors, `checked` the rows and entries it read;
+/// `coverage` says which indexes the walk could not check, and why.
+pub type VerifyOutcome: send {
+    changed: List[String],
+    faults: List[Fault],
+    findings: List[WalkFinding],
+    checked: u64,
+    coverage: List[IndexCoverage]
+}
+
+/// Declares `schema` in verify mode, scrubs every pack and walks every index
+/// this release binds to the end in Report mode. It never commits.
+pub fn verify_release[H](mut db: Db, schema: StaticFn[fn(mut Declare) -> Result[H, Error]]) -> Result[VerifyOutcome, Error] waits {
+    let mut d = declare_verify(db)?
+    let _ = (code.callable(schema))(mut d)?
+    let changed_names = seal_verify(mut db, take d)?
+    let mut faults: List[Fault] = list.new()
+    match begin_scrub(mut db) {
+        Ok(take tour) => {
+            let mut scrubbing = take tour
+            loop {
+                let report = scrub_step(mut scrubbing, OPERATOR_SCRUB_BYTES)?
+                for f in report.faults {
+                    capacity(list.try_reserve(mut faults, 1))?
+                    list.push(mut faults, clone(f))
+                }
+                if let None = report.next {
+                    break
+                }
+            }
+        },
+        // A store without a directory has no packs.
+        Error(NotFound) => (),
+        Error(take e) => return Error(take e),
+    }
+    let mut walk = begin_verify(Report)
+    let mut findings: List[WalkFinding] = list.new()
+    let mut checked = 0u64
+    loop {
+        let report = verify_step(mut db, mut walk, OPERATOR_ROWS)?
+        checked = report.checked
+        for f in report.findings {
+            capacity(list.try_reserve(mut findings, 1))?
+            list.push(mut findings, WalkFinding(index: clone(f.index), entry: copied(f.entry)?, fault: f.fault))
+        }
+        if report.done {
+            break
+        }
+    }
+    Ok(VerifyOutcome(changed: take changed_names, faults: take faults, findings: take findings, checked: checked, coverage: walk_coverage(db)?))
+}
+
+/// What `repair_indexes` did: the walk's findings (each demoted its index),
+/// the indexes the builder then built, and those it left Failed.
+pub type RepairOutcome: send {
+    findings: List[WalkFinding],
+    built: List[String],
+    failed: List[String]
+}
+
+/// Walks every bound index in Repair mode, demoting each one proven wrong,
+/// then builds every Backfilling index to the end. None when an export lease
+/// is held: a deploy is preparing from this store, and its catch-up refuses
+/// a catalog change, so neither runs.
+pub fn repair_indexes(mut db: Db) -> Result[Option[RepairOutcome], Error] waits {
+    if export_leased(db) {
+        return Ok(None)
+    }
+    let mut walk = begin_verify(Repair)
+    let mut findings: List[WalkFinding] = list.new()
+    loop {
+        let report = verify_step(mut db, mut walk, OPERATOR_ROWS)?
+        for f in report.findings {
+            capacity(list.try_reserve(mut findings, 1))?
+            list.push(mut findings, WalkFinding(index: clone(f.index), entry: copied(f.entry)?, fault: f.fault))
+        }
+        if report.done {
+            break
+        }
+    }
+    let mut built: List[String] = list.new()
+    while let Some(take name) = index_build_step(mut db, OPERATOR_ROWS)? {
+        let so_far = list.len(built)
+        if so_far == 0 || built[so_far - 1] != name {
+            capacity(list.try_reserve(mut built, 1))?
+            list.push(mut built, take name)
+        }
+    }
+    let mut failed: List[String] = list.new()
+    for seen in attention(db)?.indexes {
+        if let Failed(_, _) = seen.state {
+            capacity(list.try_reserve(mut failed, 1))?
+            list.push(mut failed, named(seen.index)?)
+        }
+    }
+    Ok(Some(RepairOutcome(findings: take findings, built: take built, failed: take failed)))
+}

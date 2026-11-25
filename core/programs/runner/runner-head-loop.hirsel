@@ -8,18 +8,25 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
     let mut idle = false
     // The forwarded request channel closed (InboxEnded); the head ends once idle.
     let mut ended = false
-    let mut reported: Option[(u64, u64, bool)] = None
+    let mut reported: Option[((u64, u64, bool), (u64, u64, u64, u64, u64))] = None
     loop {
         check_store_health(head.db)?
-        report_attention(head.db, drain, mut reported)
-        if head.cut { return Ok(false) }
+        report_attention(head.db, head.upkeep, drain, mut reported)
+        if head.cut {
+            return Ok(false)
+        }
         if let Some(control) = drain {
-            if let Ok(()) = channel.try_receive(control.finish) { release_held(mut head, true)?; return Ok(false) }
+            if let Ok(()) = channel.try_receive(control.finish) {
+                release_held(mut head, true)?;
+                return Ok(false)
+            }
             if let Some(_) = drain_window(latest.read(control.window)) {
                 end_write_pause(mut head.db, mut pause, control, AttemptBusy)
                 // A drain cuts running attempts. Their current rows stay until
                 // the next open, which starts a higher attempt.
-                if let Some(take scheduled) = replace(mut head.trigger_drive, None) { tables = Some(stop_triggers(take scheduled)) }
+                if let Some(take scheduled) = replace(mut head.trigger_drive, None) {
+                    tables = Some(stop_triggers(take scheduled))
+                }
             } else if let Some(ms) = control.idle {
                 let eligible = none(pause) && head_is_idle(head, ms)?
                 if eligible != idle {
@@ -43,10 +50,14 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
         }
         if none(pause) && !closed {
             if resuming {
-                if next_waiting(mut head, drain)? { continue }
+                if next_waiting(mut head, drain)? {
+                    continue
+                }
                 resuming = list.len(head.waiting) != 0u64
             }
-            if advance_triggers(mut head)? { continue }
+            if advance_triggers(mut head)? {
+                continue
+            }
         }
         let next = match replace(mut input, None) {
             Some(take next) => Some(take next),
@@ -59,7 +70,9 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             },
             Some(RunRequest(take req)) => {
                 head_arrival(mut head, take req, closed, !none(pause) || resuming)?
-                if none(pause) { continue }
+                if none(pause) {
+                    continue
+                }
                 held_write = held_write || list.len(head.waiting) != 0u64
             },
             Some(StartCutover(take boxed)) => {
@@ -72,10 +85,16 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                     } else if let Error(take why) = start_write_pause(mut pause, take work, control) {
                         let _ = channel.try_send(host_result, Error(take why))
                     } else {
-                        if starting { held_write = list.len(head.waiting) != 0u64 }
-                        for i in 0u64 .. list.len(head.waiting) { head.waiting[i].held_by_pause = true }
+                        if starting {
+                            held_write = list.len(head.waiting) != 0u64
+                        }
+                        for i in 0u64 .. list.len(head.waiting) {
+                            head.waiting[i].held_by_pause = true
+                        }
                     }
-                } else { let _ = channel.try_send(host_result, Error(AttemptBusy)) }
+                } else {
+                    let _ = channel.try_send(host_result, Error(AttemptBusy))
+                }
                 continue
             },
             Some(AbortCutover(attempt, retry_of, done)) => {
@@ -99,9 +118,15 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             },
             Some(ExportCommand(take command)) => {
                 let ExportCommand(scratch: scratch, attempt: take attempt, retry: retry, answer: take host_result) = box.unbox(take command)
-                let allowed: Result[(), store.DeployError] = if none(drain) || closed { Error(AttemptBusy) }
-                    else if retry { retry_export(mut pause, attempt) }
-                    else if !none(pause) { Error(AttemptBusy) } else { Ok(()) }
+                let allowed: Result[(), store.DeployError] = if none(drain) || closed {
+                    Error(AttemptBusy)
+                } else if retry {
+                    retry_export(mut pause, attempt)
+                } else if !none(pause) {
+                    Error(AttemptBusy)
+                } else {
+                    Ok(())
+                }
                 let exported: Result[store.ExportCopy, store.DeployError] = match take allowed {
                     Ok(()) => match activation_version(head.db) {
                         Ok(version) => store.begin_export_copy(mut head.db, scratch, take attempt, version),
@@ -109,7 +134,9 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                     },
                     Error(take why) => Error(take why),
                 }
-                if let Error(Store(Poisoned(e))) = exported { return Error(Poisoned(e)) }
+                if let Error(Store(Poisoned(e))) = exported {
+                    return Error(Poisoned(e))
+                }
                 let _ = channel.try_send(host_result, take exported)
                 continue
             },
@@ -123,17 +150,35 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                 let KeepImport(built: take built, answer: take host_result) = box.unbox(take command)
                 let digest = store.imported_digest(built)
                 let kept: Result[Inline[u8, 32], store.DeployError] = match store.keep_import(mut head.db, take built) {
-                    Ok(()) => Ok(digest), Error(take why) => Error(take why),
+                    Ok(()) => Ok(digest),
+                    Error(take why) => Error(take why),
                 }
                 let _ = channel.try_send(host_result, take kept)
                 continue
             },
-            Some(RetireCaller(take caller)) => { retire_head_caller(mut head, caller); continue },
-            Some(HeadClose) => { if !closed { closed = true; close_head_admission(mut head)? }; continue },
-            Some(HeadFinish) => { release_held(mut head, true)?; return Ok(false) },
-            Some(SyncWake) => { release_held(mut head, false)?; continue },
+            Some(RetireCaller(take caller)) => {
+                retire_head_caller(mut head, caller);
+                continue
+            },
+            Some(HeadClose) => {
+                if !closed {
+                    closed = true;
+                    close_head_admission(mut head)?
+                };
+                continue
+            },
+            Some(HeadFinish) => {
+                release_held(mut head, true)?;
+                return Ok(false)
+            },
+            Some(SyncWake) => {
+                release_held(mut head, false)?;
+                continue
+            },
             Some(ParkWake) => {
-                if !closed && none(pause) { let _ = resume_recovery(mut head)? }
+                if !closed && none(pause) {
+                    let _ = resume_recovery(mut head)?
+                }
                 continue
             },
             Some(RecoveryTick) => {
@@ -144,7 +189,10 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                 continue
             },
             Some(StoreUnhealthy) => continue,
-            Some(InboxEnded) => { ended = true; continue },
+            Some(InboxEnded) => {
+                ended = true;
+                continue
+            },
             Some(CheckHeadIdle) => {
                 if let Some(control) = drain {
                     let eligible = match control.idle {
@@ -155,14 +203,25 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                 }
                 continue
             },
-            Some(TriggerWake(at)) => { clear_trigger_timer(mut head, at); continue },
-            Some(TriggerMessage(take message)) => { trigger_message(mut head, take message, closed)?; continue },
-            Some(TriggerDone(a, take outcome)) => { trigger_done(mut head, a, take outcome, closed)?; continue },
+            Some(TriggerWake(at)) => {
+                clear_trigger_timer(mut head, at);
+                continue
+            },
+            Some(TriggerMessage(take message)) => {
+                trigger_message(mut head, take message, closed)?;
+                continue
+            },
+            Some(TriggerDone(a, take outcome)) => {
+                trigger_done(mut head, a, take outcome, closed)?;
+                continue
+            },
             Some(_) => continue,
             None => (),
         }
         // Ready parked calls rerun before any call not yet started, a write pause included.
-        if rerun_parked(mut head, drain)? { continue }
+        if rerun_parked(mut head, drain)? {
+            continue
+        }
         if let Some(control) = drain {
             if pause_has_work(pause) {
                 if pause_progress(mut head, mut pause, control, held_write)? {
@@ -171,45 +230,79 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                     let _ = channel.receive(control.finish)
                     return Ok(true)
                 }
-                if none(pause) { refresh_waiting(mut head, true); resuming = true }
+                if none(pause) {
+                    refresh_waiting(mut head, true);
+                    resuming = true
+                }
                 continue
             }
         }
-        if none(pause) && !closed && next_waiting(mut head, drain)? { continue }
+        if none(pause) && !closed && next_waiting(mut head, drain)? {
+            continue
+        }
         if list.len(head.group) > 0u64 {
-            if let Some(take more) = settle_probe(inbox) { input = Some(take more); continue }
+            if let Some(take more) = settle_probe(inbox) {
+                input = Some(take more);
+                continue
+            }
             // The group's sync runs while the head takes later work; its replies wait
             // for that sync (release_held), behind every earlier group's.
             close_group(mut head)
             let blocking = !head.wakes
             release_held(mut head, blocking)?
-            if !closed && none(pause) { advance_recovery(mut head)? }
+            if !closed && none(pause) {
+                advance_recovery(mut head)?
+            }
             continue
         }
         if list.len(head.held) != 0u64 {
             // Every group is closed. A SyncWake or new work ends this wait.
             release_held(mut head, false)?
             if list.len(head.held) != 0u64 {
-                match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => { release_held(mut head, true)?; return Ok(false) } }
+                match head_next(inbox, true) {
+                    Some(take message) => {
+                        input = Some(take message)
+                    },
+                    None => {
+                        release_held(mut head, true)?;
+                        return Ok(false)
+                    }
+                }
             }
             continue
         }
-        if none(pause) && advance_stream_retirement(mut head)? { continue }
-        if none(pause) && !closed && !ended && advance_maintenance(mut head)? { continue }
-        if ended && list.len(head.parked) == 0u64 { return Ok(false) }
-        match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(false) }
+        if none(pause) && advance_stream_retirement(mut head)? {
+            continue
+        }
+        if none(pause) && !closed && !ended && advance_maintenance(mut head)? {
+            continue
+        }
+        if ended && list.len(head.parked) == 0u64 {
+            return Ok(false)
+        }
+        match head_next(inbox, true) {
+            Some(take message) => {
+                input = Some(take message)
+            },
+            None => return Ok(false)
+        }
     }
 }
 
 // Sends the store's attention to Status when its mark moved since the last
 // report (RUNNER-SPEC CHANGES-v2.75). An answer that cannot be allocated keeps the last
 // one, and the next turn tries again.
-fn report_attention(db: store.Db, drain: Option[HeadDrain], mut reported: Option[(u64, u64, bool)]) {
-    let Some(control) = view drain else { return }
-    let mark = store.attention_mark(db)
-    if reported == Some(mark) { return }
+fn report_attention(db: store.Db, done: Upkeep, drain: Option[HeadDrain], mut reported: Option[((u64, u64, bool), (u64, u64, u64, u64, u64))]) {
+    let Some(control) = view drain else {
+        return
+    }
+    let mark = (store.attention_mark(db), (done.swept, done.tours, done.scrub_faults, done.walks, done.walk_findings))
+    if reported == Some(mark) {
+        return
+    }
     if let Ok(take seen) = store.attention(db) {
-        if let Ok(()) = channel.try_send(control.events, StoreAttention(take seen)) {
+        let counts = UpkeepCounts(swept: done.swept, tours: done.tours, scrub_faults: done.scrub_faults, walks: done.walks, walk_findings: done.walk_findings)
+        if let Ok(()) = channel.try_send(control.events, StoreAttention(take seen, counts)) {
             reported = Some(mark)
         }
     }
@@ -217,10 +310,12 @@ fn report_attention(db: store.Db, drain: Option[HeadDrain], mut reported: Option
 
 // `Status.store` is what the store reports to its operator (`store.attention`):
 // each index's state, drift and demotions, and Bucket reclaim failures. It is
-// empty until the head's first turn. Republished at the current phase, so the
-// watch channel gets no send.
-fn publish_store(status: Latest[Status], mut current: Status, take seen: store.Attention) -> Result[(), StartError] {
+// empty until the head's first turn. `Status.upkeep` counts the head's idle
+// upkeep (Head.upkeep) beside it, republished when a count moves. Republished
+// at the current phase, so the watch channel gets no send.
+fn publish_store(status: Latest[Status], mut current: Status, take seen: store.Attention, counts: UpkeepCounts) -> Result[(), StartError] {
     current.store = take seen
+    current.upkeep = counts
     let now = current.phase
     publish_phase(status, None, mut current, now)
 }
@@ -243,4 +338,15 @@ fn head_is_idle[G: send, H: shareable + inert + send](head: Head[G, H], idle: u6
         }
     }
     Ok(true)
+}
+
+// What the head's idle upkeep has done since it started (RUNNER-SPEC §12.5):
+// expired rows swept, finished scrub tours and index walks, and the faults
+// and findings they reported.
+pub type UpkeepCounts: shareable + send {
+    swept: u64,
+    tours: u64,
+    scrub_faults: u64,
+    walks: u64,
+    walk_findings: u64
 }

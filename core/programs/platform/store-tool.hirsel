@@ -7,10 +7,13 @@
 // fd 4 the empty new store directory). It prints `backup <store id> head <H>` or
 // `restored <store id> head <H>`. Exit 0 done, 1 refused (its name on stderr), 2 usage,
 // 75 the store is held by a writer.
-
+//
+// `inspect` and `stats` (§15.6) read fd 3 through a read-only open, beside a live
+// writer; `verify` scrubs fd 3, a cloned image the driver made, and exits 1 on a
+// fault. Each ignores fd 4, which the driver points at fd 3.
 fn id_hex(hi: u64, lo: u64) -> String {
     let mut raw: Bytes = list.with_capacity(16)
-    for word in [hi, lo] {
+    for word in[hi, lo] {
         for i in 0u64 .. 8 {
             list.push(mut raw, int.truncate(word >> (56u64 - i * 8u64)))
         }
@@ -98,6 +101,167 @@ fn backup(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, take options: s
     finished(out, "backup", exported.stamp)
 }
 
+fn say(out: Stdout, line: String) -> Result[(), Exit] waits {
+    match stdout.write(out, line) {
+        Ok(_) => Ok(()),
+        Error(_) => Error(Exit(status: 1u8)),
+    }
+}
+
+fn form_text(form: store.EntryForm) -> String {
+    match form {
+        TableForm => "table",
+        IndexForm(Many) => "index Many",
+        IndexForm(Unique) => "index Unique",
+        AggregateForm => "aggregate",
+        CellForm => "cell",
+        LogForm => "log",
+    }
+}
+
+fn state_text(state: store.IndexState) -> String {
+    match state {
+        Public => "Public",
+        Backfilling(_) => "Backfilling",
+        Failed(_, _) => "Failed",
+    }
+}
+
+// `inspect`: every catalog record (tables, cells, logs, indexes and aggregates,
+// with each index's state and revision) and each collection's row count.
+// `stats` adds each collection's row charge and the directory's journal and pack
+// files. A read-only open has no writer state, so pins and Accounts are not shown.
+fn describe(d: Dir, c: Clock, options: store.Options, stats: bool, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    let opened = match store.open_read_only(d, c, options) {
+        Ok(take ro) => take ro,
+        Error(e) => return refused(err, store_refusal(e)),
+    }
+    let s = store.read_only_snapshot(opened)
+    let entries = match store.catalog_entries(s) {
+        Ok(take found) => take found,
+        Error(e) => return refused(err, store_refusal(e)),
+    }
+    let mut text = string.from("store ")
+    let id = store.snapshot_identity(s)
+    string.push(mut text, id_hex(id.hi, id.lo))
+    string.push(mut text, " head ")
+    string.push_u64(mut text, store.version(s))
+    string.push(mut text, "\n")
+    for entry in entries {
+        string.push(mut text, form_text(entry.form))
+        string.push(mut text, " ")
+        if entry.table != entry.name {
+            string.push(mut text, entry.table)
+            string.push(mut text, ".")
+        }
+        string.push(mut text, entry.name)
+        let derived = match entry.form {
+            IndexForm(_) => true,
+            AggregateForm => true,
+            _ => false,
+        }
+        if derived {
+            string.push(mut text, " ")
+            string.push(mut text, state_text(entry.state))
+            if list.len(entry.revision) != 0 {
+                string.push(mut text, " revision ")
+                string.push(mut text, std.hex.encode(entry.revision))
+            }
+        }
+        string.push(mut text, ": ")
+        string.push_u64(mut text, entry.rows)
+        string.push(mut text, " rows")
+        if stats {
+            string.push(mut text, ", ")
+            string.push_u64(mut text, entry.charge)
+            string.push(mut text, " bytes")
+        }
+        if entry.tiered {
+            string.push(mut text, ", Tiered")
+        }
+        string.push(mut text, "\n")
+    }
+    if stats {
+        let listed = match std.dir.list(d, None) {
+            Ok(take found) => take found,
+            Error(_) => return refused(err, "Io"),
+        }
+        let mut journal = (0u64, 0u64)
+        let mut packs = (0u64, 0u64)
+        for file in listed {
+            let journal_file = string.starts_with(file.name, "j-") && !string.ends_with(file.name, ".end")
+            if !journal_file && !string.starts_with(file.name, "p-") {
+                continue
+            }
+            let size = match std.dir.stat(d, file.name) {
+                Ok(seen) => seen.size,
+                Error(_) => return refused(err, "Io"),
+            }
+            if journal_file {
+                journal = (journal.0 + 1u64, journal.1 + size)
+            } else {
+                packs = (packs.0 + 1u64, packs.1 + size)
+            }
+        }
+        string.push(mut text, "journal: ")
+        string.push_u64(mut text, journal.0)
+        string.push(mut text, " segments, ")
+        string.push_u64(mut text, journal.1)
+        string.push(mut text, " bytes\npacks: ")
+        string.push_u64(mut text, packs.0)
+        string.push(mut text, " files, ")
+        string.push_u64(mut text, packs.1)
+        string.push(mut text, " bytes\naccounts and pins: not shown by a read-only open\n")
+    }
+    say(out, text)
+}
+
+// `verify` without a release: one full scrub tour over the image, every
+// page's checksum and structure. Each fault is printed; any fault exits 1.
+fn scrub_image(d: Dir, c: Clock, r: Random, tasks: Tasks, take options: store.Options, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    options.create = false
+    let mut db = match store.open(tasks, d, c, r, options) {
+        Ok(take opened) => take opened,
+        Error(e) => return refused(err, store_refusal(e)),
+    }
+    let mut tour = match store.begin_scrub(mut db) {
+        Ok(take t) => take t,
+        Error(e) => return refused(err, store_refusal(e)),
+    }
+    let mut text = string.new()
+    let mut faults = 0u64
+    let mut checked = 0u64
+    loop {
+        let report = match store.scrub_step(mut tour, 16777216u64) {
+            Ok(take seen) => take seen,
+            Error(e) => return refused(err, store_refusal(e)),
+        }
+        checked = report.checked
+        for fault in report.faults {
+            faults += 1u64
+            string.push(mut text, "scrub fault ")
+            string.push(mut text, fault.file)
+            string.push(mut text, " at ")
+            string.push_u64(mut text, fault.offset)
+            string.push(mut text, "\n")
+        }
+        if let None = report.next {
+            break
+        }
+    }
+    let _ = store.close(take db)
+    string.push(mut text, "verify: scrubbed ")
+    string.push_u64(mut text, checked)
+    string.push(mut text, " bytes, ")
+    string.push_u64(mut text, faults)
+    string.push(mut text, " faults\n")
+    say(out, text)?
+    if faults != 0 {
+        return Error(Exit(status: 1u8))
+    }
+    Ok(())
+}
+
 pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, err: Stderr, argv: Args) -> Result[(), Exit] waits {
     let options = match store.sized(Directory, 2147483648u64) {
         Ok(take sized) => take sized,
@@ -108,6 +272,12 @@ pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, 
     }
     if verb == "backup" {
         return backup(from, to, c, r, tasks, take options, out, err)
+    }
+    if verb == "inspect" || verb == "stats" {
+        return describe(from, c, take options, verb == "stats", out, err)
+    }
+    if verb == "verify" {
+        return scrub_image(from, c, r, tasks, take options, out, err)
     }
     if verb != "restore" {
         return Error(Exit(status: 2u8))

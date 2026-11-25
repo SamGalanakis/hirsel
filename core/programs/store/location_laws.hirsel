@@ -120,7 +120,9 @@ fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePt
 // AP3's bounds: every key under a branch entry is at or above its logical
 // separator and below the next entry's, inherited down the tree. Unsigned
 // byte order, as the pager compares keys.
-fn law_bytes_below(a: Bytes, b: Bytes) -> bool { list.compare_bytes(a, b) == Less }
+fn law_bytes_below(a: Bytes, b: Bytes) -> bool {
+    list.compare_bytes(a, b) == Less
+}
 
 fn law_within(key: Bytes, lo: Option[Bytes], hi: Option[Bytes]) -> bool {
     let above = match lo {
@@ -138,7 +140,9 @@ fn law_within(key: Bytes, lo: Option[Bytes], hi: Option[Bytes]) -> bool {
 // A branch's entry 0 is empty and takes no prefix.
 fn law_entry_key(page: Bytes, row: u64, cell: u64, first_branch: bool) -> Bytes {
     let mut key: Bytes = list.new()
-    if first_branch { return take key }
+    if first_branch {
+        return take key
+    }
     list.append(mut key, list.slice(page, 24, 24 + read_le(page, 4, 2)))
     list.append(mut key, list.slice(page, row + 2, cell))
     take key
@@ -194,21 +198,35 @@ fn law_follow_bounded(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr
             slot += 2
             let key = law_entry_key(page, row, cell, on_branch && first)
             if on_branch && first {
-                if read_le(page, row, 2) != 0 { fail("location law: a branch's entry 0 has a separator") }
+                if read_le(page, row, 2) != 0 {
+                    fail("location law: a branch's entry 0 has a separator")
+                }
             } else {
-                if !law_within(key, lo, hi) { fail("location law: a key or separator outside its parent's bounds") }
+                if !law_within(key, lo, hi) {
+                    fail("location law: a key or separator outside its parent's bounds")
+                }
                 if let Some(before) = previous {
-                    if !law_bytes_below(before, key) { fail("location law: keys out of order in a page") }
+                    if !law_bytes_below(before, key) {
+                        fail("location law: keys out of order in a page")
+                    }
                 }
             }
             // A branch child's bounds: this separator (entry 0 inherits the
             // page's low bound) up to the next entry's separator.
-            let child_lo = if on_branch && first { law_bound(lo)? } else { Some(copied(key)?) }
+            let child_lo = if on_branch && first {
+                law_bound(lo)?
+            } else {
+                Some(copied(key)?)
+            }
             let child_hi = if on_branch && slot < list.len(page) {
                 let next_row = read_le(page, slot, 2)
                 Some(law_entry_key(page, next_row, next_row + 2 + read_le(page, next_row, 2), false))
-            } else { law_bound(hi)? }
-            if !(on_branch && first) { previous = Some(copied(key)?) }
+            } else {
+                law_bound(hi)?
+            }
+            if !(on_branch && first) {
+                previous = Some(copied(key)?)
+            }
             let mut child_class = class
             let mut child_tree = tree
             let child = if page[0u64] != 0 {
@@ -528,20 +546,34 @@ fn disk_test_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
 // corrupted index alone must be demoted, counted as drift once, and walk
 // clean once the builder has rebuilt it.
 fn walk_value(k: u64) -> u64 {
-    if k == 1 { 0 } else if k == 10 || k == 11 { 1000 + k * 20 } else if k == 12 { 55 } else { k * 13 }
+    if k == 1 {
+        0
+    } else if k == 10 || k == 11 {
+        1000 + k * 20
+    } else if k == 12 {
+        55
+    } else {
+        k * 13
+    }
 }
 
 fn walk_bucket_keys(_k: u64, v: u64) -> Result[List[u64], Capacity] {
     let mut keys: List[u64] = list.new()
-    if v == 0 { return Ok(take keys) }
+    if v == 0 {
+        return Ok(take keys)
+    }
     list.push(mut keys, v / 10)
-    if v >= 1000 { list.push(mut keys, v / 10 + 1) }
+    if v >= 1000 {
+        list.push(mut keys, v / 10 + 1)
+    }
     Ok(take keys)
 }
 
 fn walk_unique_keys(_k: u64, v: u64) -> Result[List[u64], Capacity] {
     let mut keys: List[u64] = list.new()
-    if v != 0 { list.push(mut keys, v) }
+    if v != 0 {
+        list.push(mut keys, v)
+    }
     Ok(take keys)
 }
 
@@ -551,7 +583,9 @@ fn walk_cover_keys(_k: u64, v: u64) -> Result[List[u64], Capacity] {
     Ok(take keys)
 }
 
-fn walk_cover_payload(_k: u64, v: u64) -> Result[u64, Capacity] { Ok(v) }
+fn walk_cover_payload(_k: u64, v: u64) -> Result[u64, Capacity] {
+    Ok(v)
+}
 
 // An aggregate on the same table: its rows are group totals, which the
 // walker must leave alone (a walk that read them as entries finds them all
@@ -582,7 +616,9 @@ fn walk_fixture(c: Clock) -> Result[WalkFixture, Error] waits {
     let rows = finish(mut d, take items)?
     let _ = seal(mut db, take d)?
     for k in 1u64 .. 13 {
-        if !typed_put(mut db, rows, k, walk_value(k)) { return Error(Foreign) }
+        if !typed_put(mut db, rows, k, walk_value(k)) {
+            return Error(Foreign)
+        }
     }
     Ok(WalkFixture(db: take db, rows: rows, bucket: bucket_ix, uniq: uniq_ix, cover: cover_ix))
 }
@@ -592,7 +628,9 @@ fn walk_fixture(c: Clock) -> Result[WalkFixture, Error] waits {
 fn walk_entry(j: u64, primary: Option[u64]) -> Bytes {
     let mut out: Bytes = list.new()
     std.codec.encode_key(std.codec.key_u64(), j, mut out)
-    if let Some(p) = primary { std.codec.encode_key(std.codec.key_u64(), p, mut out) }
+    if let Some(p) = primary {
+        std.codec.encode_key(std.codec.key_u64(), p, mut out)
+    }
     take out
 }
 
@@ -608,7 +646,11 @@ fn walk_edit(mut db: Db, id: u32, edited: Bytes, val: Option[Bytes]) -> Result[(
     let cut = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
         match val {
             Some(v) => put_bytes(mut tx, id, edited, v),
-            None => if delete_bytes(mut tx, id, edited)? { Ok(()) } else { Error(Missing("walk fixture entry")) },
+            None => if delete_bytes(mut tx, id, edited)? {
+                Ok(())
+            } else {
+                Error(Missing("walk fixture entry"))
+            },
         }
     })?
     match take cut {
@@ -619,23 +661,29 @@ fn walk_edit(mut db: Db, id: u32, edited: Bytes, val: Option[Bytes]) -> Result[(
 
 // Walks every index to the end, `limit` rows or entries a slice, calling
 // `between` before each slice.
-fn walk_all(mut db: Db, rows: Table[u64, u64], limit: u64, between: scoped fn(mut Db, Table[u64, u64], u64) -> Result[(), Error] waits) -> Result[(List[WalkFinding], u64), Error] waits {
-    let mut walk = begin_verify()
+fn walk_all(mut db: Db, rows: Table[u64, u64], mode: WalkMode, limit: u64, between: scoped fn(mut Db, Table[u64, u64], u64) -> Result[(), Error] waits) -> Result[(List[WalkFinding], u64), Error] waits {
+    let mut walk = begin_verify(mode)
     let mut found: List[WalkFinding] = list.new()
     let mut slices = 0u64
     loop {
-        if slices > 1000 { fail("§1.2 walker: the walk never ended") }
+        if slices > 1000 {
+            fail("§1.2 walker: the walk never ended")
+        }
         between(mut db, rows, slices)?
         let report = verify_step(mut db, mut walk, limit)?
         slices += 1
         for f in report.findings {
             list.push(mut found, WalkFinding(index: clone(f.index), entry: copied(f.entry)?, fault: f.fault))
         }
-        if report.done { return Ok((take found, report.checked)) }
+        if report.done {
+            return Ok((take found, report.checked))
+        }
     }
 }
 
-fn walk_still(mut _db: Db, _rows: Table[u64, u64], _slice: u64) -> Result[(), Error] { Ok(()) }
+fn walk_still(mut _db: Db, _rows: Table[u64, u64], _slice: u64) -> Result[(), Error] {
+    Ok(())
+}
 
 fn walk_serves[P](db: Db, ix: Index[u64, u64, u64, P]) -> Result[bool, Error] waits {
     match find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Unbounded, Unbounded) {
@@ -656,26 +704,62 @@ fn walk_fault_is(a: WalkFault, b: WalkFault) -> bool {
 
 // One corruption: `which` names the index (0 bucket, 1 uniq, 2 cover), and
 // `edited`/`val` the raw edit of its collection.
-fn walk_corrupt_case(c: Clock, which: u64, edited: Bytes, val: Option[Bytes], fault: WalkFault) -> Result[(), Error] waits {
+fn walk_corrupt_case(c: Clock, which: u64, edited: Bytes, val: Option[Bytes], fault: WalkFault, also: Option[WalkFault]) -> Result[(), Error] waits {
     let mut fx = walk_fixture(c)?
-    let (id, name) = if which == 0 { (fx.bucket.id, "bucket") } else if which == 1 { (fx.uniq.id, "uniq") } else { (fx.cover.id, "cover") }
+    let (id, name) = if which == 0 {
+        (fx.bucket.id, "bucket")
+    } else if which == 1 {
+        (fx.uniq.id, "uniq")
+    } else {
+        (fx.cover.id, "cover")
+    }
     walk_edit(mut fx.db, id, edited, val)?
-    let (found, _) = walk_all(mut fx.db, fx.rows, 3, walk_still)?
-    if list.len(found) != 1 { fail("§1.2 walker: a corrupted index must give exactly one finding") }
+    // Report mode (hirsel store verify) walks the index on past a finding, so
+    // an entry wrong from both sides is reported again by the entries phase
+    // (`also`); it changes nothing: every index still serves, no drift, no commit.
+    let head = fx.db.heads[0].head
+    let (reported, _) = walk_all(mut fx.db, fx.rows, Report, 3, walk_still)?
+    let mut expected: List[WalkFault] = list.new()
+    list.push(mut expected, fault)
+    if let Some(second) = also {
+        list.push(mut expected, second)
+    }
+    if list.len(reported) != list.len(expected) {
+        fail("§1.2 walker: a report walk gave the wrong number of findings")
+    }
+    for i in 0u64 .. list.len(expected) {
+        if reported[i].index != name || reported[i].entry != logical_key(id, edited)? || !walk_fault_is(reported[i].fault, expected[i]) {
+            fail("§1.2 walker: a report finding names the wrong index, entry or fault")
+        }
+    }
+    if !walk_serves(fx.db, fx.bucket)? || !walk_serves(fx.db, fx.uniq)? || !walk_serves(fx.db, fx.cover)? {
+        fail("§1.2 walker: a report walk demoted an index")
+    }
+    if list.len(attention(fx.db)?.drift) != 0 || fx.db.heads[0].head != head {
+        fail("§1.2 walker: a report walk wrote to the store")
+    }
+    let (found, _) = walk_all(mut fx.db, fx.rows, Repair, 3, walk_still)?
+    if list.len(found) != 1 {
+        fail("§1.2 walker: a corrupted index must give exactly one finding")
+    }
     if found[0].index != name || found[0].entry != logical_key(id, edited)? || !walk_fault_is(found[0].fault, fault) {
         fail("§1.2 walker: the finding names the wrong index, entry or fault")
     }
-    let serving = [walk_serves(fx.db, fx.bucket)?, walk_serves(fx.db, fx.uniq)?, walk_serves(fx.db, fx.cover)?]
+    let serving =[walk_serves(fx.db, fx.bucket)?, walk_serves(fx.db, fx.uniq)?, walk_serves(fx.db, fx.cover)?]
     for i in 0u64 .. 3 {
-        if serving[i] != (i != which) { fail("§1.2 walker: the walk must demote the corrupted index and only it") }
+        if serving[i] != (i != which) {
+            fail("§1.2 walker: the walk must demote the corrupted index and only it")
+        }
     }
     let drift = attention(fx.db)?.drift
     if list.len(drift) != 1 || drift[0].index != name || drift[0].count != 1 {
         fail("§1.2 walker: a finding counts as drift once")
     }
     while let Some(_) = index_build_step(mut fx.db, 16)? {}
-    let (again, _) = walk_all(mut fx.db, fx.rows, 3, walk_still)?
-    if list.len(again) != 0 { fail("§1.2 walker: a rebuilt index still has findings") }
+    let (again, _) = walk_all(mut fx.db, fx.rows, Repair, 3, walk_still)?
+    if list.len(again) != 0 {
+        fail("§1.2 walker: a rebuilt index still has findings")
+    }
     Ok(())
 }
 
@@ -688,7 +772,9 @@ fn walk_churn(mut db: Db, rows: Table[u64, u64], slice: u64) -> Result[(), Error
             let _ = delete(mut tx, input.0, input.1)?
             Ok(())
         })?
-        if let Committed(_) = ran {} else { return Error(Foreign) }
+        if let Committed(_) = ran {} else {
+            return Error(Foreign)
+        }
     } else if !typed_put(mut db, rows, k, 2000 + 7 * slice) {
         return Error(Foreign)
     }
@@ -700,13 +786,21 @@ fn test_index_walker_clean(c: Clock) -> Result[(), Error] waits {
     // Unchanged rows: bucket has 12 rows and 13 entries (rows 2..9 and 12 one
     // each, rows 10 and 11 two), uniq 12 rows and 11 entries, cover 12 and 12.
     let mut fx = walk_fixture(c)?
-    let (found, checked) = walk_all(mut fx.db, fx.rows, 1000, walk_still)?
-    if list.len(found) != 0 { fail("§1.2 walker: a clean store has findings") }
-    if checked != 12 + 13 + 12 + 11 + 12 + 12 { fail("§1.2 walker: the walk skipped rows or entries") }
+    let (found, checked) = walk_all(mut fx.db, fx.rows, Repair, 1000, walk_still)?
+    if list.len(found) != 0 {
+        fail("§1.2 walker: a clean store has findings")
+    }
+    if checked != 12 + 13 + 12 + 11 + 12 + 12 {
+        fail("§1.2 walker: the walk skipped rows or entries")
+    }
     // Two at a time, with the rows changing under the walk.
-    let (churned, _) = walk_all(mut fx.db, fx.rows, 2, walk_churn)?
-    if list.len(churned) != 0 { fail("§1.2 walker: writes between slices made a finding") }
-    if list.len(attention(fx.db)?.drift) != 0 { fail("§1.2 walker: a clean walk counted drift") }
+    let (churned, _) = walk_all(mut fx.db, fx.rows, Repair, 2, walk_churn)?
+    if list.len(churned) != 0 {
+        fail("§1.2 walker: writes between slices made a finding")
+    }
+    if list.len(attention(fx.db)?.drift) != 0 {
+        fail("§1.2 walker: a clean walk counted drift")
+    }
     if !walk_serves(fx.db, fx.bucket)? || !walk_serves(fx.db, fx.uniq)? || !walk_serves(fx.db, fx.cover)? {
         fail("§1.2 walker: a clean walk demoted an index")
     }
@@ -721,19 +815,21 @@ fn test_index_walker_corruptions(c: Clock) -> Result[(), Error] waits {
     let owner_3 = walk_stored(fx.db, fx.uniq.id, walk_entry(39, None))?
     let payload_2 = walk_stored(fx.db, fx.cover.id, walk_entry(1, Some(2)))?
     // Missing: row 3's only bucket entry, and row 10's second (1200 -> 120, 121).
-    walk_corrupt_case(c, 0, walk_entry(3, Some(3)), None, Missing)?
-    walk_corrupt_case(c, 0, walk_entry(121, Some(10)), None, Missing)?
+    walk_corrupt_case(c, 0, walk_entry(3, Some(3)), None, Missing, None)?
+    walk_corrupt_case(c, 0, walk_entry(121, Some(10)), None, Missing, None)?
     // Extra: an entry for row 99, which does not exist.
-    walk_corrupt_case(c, 0, walk_entry(5, Some(99)), Some(copied(any_bucket)?), Extra)?
+    walk_corrupt_case(c, 0, walk_entry(5, Some(99)), Some(copied(any_bucket)?), Extra, None)?
     // Extra: row 12 (55) exists but produces bucket 5, not 2.
-    walk_corrupt_case(c, 0, walk_entry(2, Some(12)), Some(copied(any_bucket)?), Extra)?
+    walk_corrupt_case(c, 0, walk_entry(2, Some(12)), Some(copied(any_bucket)?), Extra, None)?
     // Payload: uniq 26 names row 3 as its owner. The rows phase reads row 2
     // first, which produces 26, and a Unique entry's owner is in its payload.
-    walk_corrupt_case(c, 1, walk_entry(26, None), Some(copied(owner_3)?), Payload)?
+    // A report walk goes on to the entries phase: row 3 produces 39, not 26, so Extra.
+    walk_corrupt_case(c, 1, walk_entry(26, None), Some(copied(owner_3)?), Payload, Some(Extra))?
     // Extra: uniq 999, which no row produces, names row 3, which produces 39.
-    walk_corrupt_case(c, 1, walk_entry(999, None), Some(copied(owner_3)?), Extra)?
-    // Payload: row 4's cover entry carries row 2's projection, 26 for 52.
-    walk_corrupt_case(c, 2, walk_entry(2, Some(4)), Some(copied(payload_2)?), Payload)?
+    walk_corrupt_case(c, 1, walk_entry(999, None), Some(copied(owner_3)?), Extra, None)?
+    // Payload: row 4's cover entry carries row 2's projection, 26 for 52,
+    // seen from row 4 and again from the entry.
+    walk_corrupt_case(c, 2, walk_entry(2, Some(4)), Some(copied(payload_2)?), Payload, Some(Payload))?
     Ok(())
 }
 
@@ -761,7 +857,9 @@ fn disk_test_location_separator_bounds(d: Dir, c: Clock, r: Random, tasks: Tasks
     }
     law_location_commit(run(mut db, None, rows, fn(mut tx, t) -> Result[(), Error] {
         for n in 0u64 .. 4000 {
-            if n % 3 == 0 { let _ = delete(mut tx, t, n)? }
+            if n % 3 == 0 {
+                let _ = delete(mut tx, t, n)?
+            }
         }
         Ok(())
     })?)?

@@ -196,7 +196,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
 fn next_life_event(events: Receiver[LifeEvent]) -> Result[LifeEvent, Closed[()]] waits {
     loop {
         match channel.receive(events) {
-            Ok(StoreAttention(_)) => continue,
+            Ok(StoreAttention(_, _)) => continue,
             Ok(take other) => return Ok(take other),
             Error(e) => return Error(e),
         }

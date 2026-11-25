@@ -13,7 +13,6 @@
 // cursor is counted when the builder reaches it, so no row counts twice.
 // Every group is one row, so a hot group is a point every writer to it
 // touches; the store's one writer serialises them.
-
 pub opaque type Aggregate[G]: shareable + send {
     store: StoreId,
     id: u32,
@@ -52,7 +51,9 @@ fn merged_groups(take parts: List[GroupPart]) -> Result[(List[Bytes], List[u64],
     for take GroupPart(key: take key, value: value) in take sorted {
         if let Some((take held, members, sum)) = take pending {
             if held == key {
-                let Some(total) = int.checked_add(sum, value) else { return Error(Limit(Value)) }
+                let Some(total) = int.checked_add(sum, value) else {
+                    return Error(Limit(Value))
+                }
                 pending = Some((take held, members + 1, total))
                 continue
             }
@@ -80,28 +81,23 @@ type AggregateExtractor[G, K, V]: send {
 /// Declares an aggregate over `t`: `by` gives each row its groups and
 /// values. Under Migrate a new or changed aggregate is built from the
 /// table's rows; reads of it refuse with NotReady until it is Public.
-pub fn aggregate[G, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String,
-    by: StaticFn[fn(K, V) -> Result[List[(G, u64)], Capacity]], take key: std.codec.Key[G]) -> Result[Aggregate[G], Error] {
+pub fn aggregate[G, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, by: StaticFn[fn(K, V) -> Result[List[(G, u64)], Capacity]], take key: std.codec.Key[G]) -> Result[Aggregate[G], Error] {
     active_table(d, t)?
     d.failed = true
     declaration_name(name)?
     let lookup_key = catalog_index_key(t.handle.id, name)?
-    let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1,
-        key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0,
-        by: copied(code.identity(by))?, revision: index_revision(d.versioned, by, t.handle, key, std.codec.of_unit())?,
-        shape: Sums, payload_schemas: list.new(), projection: None, state: Backfilling(None))
+    let (take revision, ends) = index_revision(d.versioned, by, t.handle, key, std.codec.of_unit())?
+    let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision, shape: Sums, payload_schemas: list.new(), projection: None, state: Backfilling(None))
     let existing = existing_index_record(d, lookup_key, name)?
-    let needs_rebuild = settle_index_record(mut d, lookup_key, name, take existing, mut proposed)?
+    let rebuilt_for = settle_index_record(mut d, lookup_key, name, take existing, mut proposed, ends)?
     let schema_binding = aggregate_binding(t.handle, proposed, by, key)
-    build_declared_record(mut d, t.handle, lookup_key, name, proposed, schema_binding.index, needs_rebuild)?
+    build_declared_record(mut d, t.handle, lookup_key, name, proposed, schema_binding.index, take rebuilt_for)?
     let public = match get_page_row(d.plan.roots.catalog, lookup_key) {
         Some(raw) => record_public(raw),
         None => false,
     }
-    let handle = Aggregate(store: t.handle.store, id: proposed.id, catalog_key: catalog_key_handle(take lookup_key)?,
-        catalog_page: catalog_page(d.plan.roots.catalog)?, key: key, public: public)
-    if let Follower = d.mode {
-    } else {
+    let handle = Aggregate(store: t.handle.store, id: proposed.id, catalog_key: catalog_key_handle(take lookup_key)?, catalog_page: catalog_page(d.plan.roots.catalog)?, key: key, public: public)
+    if let Follower = d.mode {} else {
         list.push(mut d.plan.bindings, take schema_binding)
     }
     map.insert(mut d.indexes, proposed.id, ())
@@ -130,10 +126,14 @@ pub fn totals[G](tx: Tx, a: Aggregate[G], g: G) -> Result[Totals, Error] {
 /// reads refuse until the builder finishes it.
 pub fn rebuild_aggregate[G](mut db: Db, a: Aggregate[G]) -> Result[(), Error] waits {
     healthy(db)?
-    if !same(db.store, a.store) { return Error(Foreign) }
+    if !same(db.store, a.store) {
+        return Error(Foreign)
+    }
     let mut plan = schema_plan(db)
     let record = catalog_entry_in(plan.roots.catalog, a.catalog_key)?
-    if record.id != a.id { return Error(Stale(a.id)) }
+    if record.id != a.id {
+        return Error(Stale(a.id))
+    }
     demote_index(mut plan, a.catalog_key)?
     if plan.changed {
         let _ = publish_schema_plan(mut db, take plan)?
@@ -141,8 +141,7 @@ pub fn rebuild_aggregate[G](mut db: Db, a: Aggregate[G]) -> Result[(), Error] wa
     Ok(())
 }
 
-fn aggregate_binding[G, K, V](t: Table[K, V], record: Catalog, by: StaticFn[fn(K, V) -> Result[List[(G, u64)], Capacity]],
-    key: std.codec.Key[G]) -> IndexRegistration {
+fn aggregate_binding[G, K, V](t: Table[K, V], record: Catalog, by: StaticFn[fn(K, V) -> Result[List[(G, u64)], Capacity]], key: std.codec.Key[G]) -> IndexRegistration {
     let extractor: AggregateExtractor[G, K, V] = AggregateExtractor(table: clone(t), id: record.id, key: key, by: by)
     let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
         extract_aggregate(extractor, raw, primary)
@@ -188,8 +187,7 @@ fn totals_bytes(members: u64, sum: u64) -> Result[Bytes, Error] {
 // its count and sum less the old row's part and plus the new row's. The
 // edits are planned against the transaction's rows before any is applied;
 // a claimed row whose old part is not in its group's totals is drift.
-fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes,
-    take old: Option[IndexValue], take new: Option[IndexValue]) -> Result[(), Error] {
+fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes, take old: Option[IndexValue], take new: Option[IndexValue]) -> Result[(), Error] {
     if !index_claims(record.state, primary) {
         return Ok(())
     }
@@ -206,11 +204,27 @@ fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], re
     while i < list.len(old_keys) || j < list.len(new_keys) {
         let take_old = i < list.len(old_keys) && (j >= list.len(new_keys) || old_keys[i] <= new_keys[j])
         let take_new = j < list.len(new_keys) && (i >= list.len(old_keys) || new_keys[j] <= old_keys[i])
-        let key = if take_old { copied(old_keys[i])? } else { copied(new_keys[j])? }
-        let (less_count, less_sum) = if take_old { (1u64, old_sums[i]) } else { (0u64, 0u64) }
-        let (more_count, more_sum) = if take_new { (1u64, new_sums[j]) } else { (0u64, 0u64) }
-        if take_old { i += 1 }
-        if take_new { j += 1 }
+        let key = if take_old {
+            copied(old_keys[i])?
+        } else {
+            copied(new_keys[j])?
+        }
+        let (less_count, less_sum) = if take_old {
+            (1u64, old_sums[i])
+        } else {
+            (0u64, 0u64)
+        }
+        let (more_count, more_sum) = if take_new {
+            (1u64, new_sums[j])
+        } else {
+            (0u64, 0u64)
+        }
+        if take_old {
+            i += 1
+        }
+        if take_new {
+            j += 1
+        }
         if less_count == more_count && less_sum == more_sum {
             continue
         }
@@ -223,7 +237,9 @@ fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], re
             return Ok(())
         }
         let next_count = members - less_count + more_count
-        let Some(next_sum) = int.checked_add(sum - less_sum, more_sum) else { return Error(Limit(Value)) }
+        let Some(next_sum) = int.checked_add(sum - less_sum, more_sum) else {
+            return Error(Limit(Value))
+        }
         if next_count == 0 {
             if next_sum != 0 {
                 stage_index_drift(mut edits, record)
@@ -244,8 +260,7 @@ fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], re
 
 // A build chunk's totals: each row's groups and values, gathered and
 // sorted by group, then added to each group's totals in one write.
-fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bool, ceiling: u64, first: u64, mut next_stamp: u64,
-    extractor: RegisteredIndex, rows: List[(Bytes, Bytes)]) -> Result[(), Error] {
+fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bool, ceiling: u64, first: u64, mut next_stamp: u64, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)]) -> Result[(), Error] {
     let mut parts: List[GroupPart] = list.new()
     for (logical, raw) in rows {
         let primary = list.slice(logical, 4, list.len(logical))
@@ -270,7 +285,9 @@ fn add_chunk_totals(mut collections: PageTree, mut live_bytes: u64, retained: bo
             },
             None => (0u64, 0u64),
         }
-        let Some(next_sum) = int.checked_add(sum, total) else { return Error(Limit(Value)) }
+        let Some(next_sum) = int.checked_add(sum, total) else {
+            return Error(Limit(Value))
+        }
         let value = totals_bytes(members + added, next_sum)?
         live_bytes = int.saturating_add(live_bytes, entry(group, value))
         over_ceiling(live_bytes, ceiling)?

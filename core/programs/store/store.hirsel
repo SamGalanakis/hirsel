@@ -2540,7 +2540,7 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_
     let Built(roots: take roots, live: live_bytes, read, written) = built?
     keep_schema(mut plan, take roots, live_bytes, id + 1)?
     if let Some(mut backfills) = plan.preview {
-        list.push(mut backfills, MigrationBackfill(table: named(to_name)?, index: None, read: read, written: written, outcome: Filled))
+        list.push(mut backfills, MigrationBackfill(table: named(to_name)?, index: None, cause: None, read: read, written: written, outcome: Filled))
     }
     Ok(())
 }
@@ -3369,9 +3369,7 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
             // An index entry carries its payload: a Unique entry starts with
             // its owner's primary, and either kind may carry a projection.
             if unique {
-                let Ok(owner_end) = unique_owner_end(encoded) else {
-                    return Error(ImportMalformed)
-                }
+                let owner_end = unique_owner_end(encoded) ?=> |_| ImportMalformed
                 if owner_end == 4 {
                     return Error(ImportMalformed)
                 }

@@ -392,9 +392,9 @@ impl OsProcess {
             let options = launch_options::parse(argv.clone(), input.exec_bindings_len != 0)?;
             let args: Vec<_> = argv.skip(options.prefix).map(<[u8]>::to_vec).collect();
             let prepare_path = options.prepare_path(&args, input.directories_len)?;
-            let dry_run_path = options.dry_run_path(&args, input.directories_len)?;
-            let isolated_store = prepare_path.or(dry_run_path);
-            let dry_run = dry_run_path.is_some();
+            let store_op = options.store_op_path(&args, input.directories_len)?;
+            let isolated_store = prepare_path.or(store_op.map(|(_, dir)| dir));
+            let dry_run = store_op.is_some();
             let program_args = if dry_run { &args[2..] } else { &args[..] };
             let installing = options.installing();
             let launch_options::LaunchOptions {
@@ -456,8 +456,8 @@ impl OsProcess {
             if prepare_path.is_some() {
                 launch = launch_options::with_prepare(launch, &args)?;
             }
-            if dry_run {
-                launch = launch.with_dry_run();
+            if let Some((op, _)) = store_op {
+                launch = launch.with_store_op(op);
             }
             if let Some(predecessor) = install_predecessor {
                 launch = launch.with_install_predecessor(predecessor);

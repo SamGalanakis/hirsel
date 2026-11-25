@@ -40,7 +40,11 @@ commands! {
     "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
     "dev", "dev SERVER [--listen ADDR] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
     "dry-run", "dry-run --exe NEW --store DIR [-- arguments...]", "Preview a candidate’s migration against a store.";
-    "store", "store <backup|restore>", "Back up a store or restore one from a backup.";
+    "store", "store <inspect|stats|verify|repair|backup|restore>", "Inspect, verify, repair, back up or restore a store.";
+    "store inspect", "store inspect DIR", "List the store's tables, indexes (kind, state, revision), cells and logs, beside a live writer.";
+    "store stats", "store stats DIR", "Print each collection's rows and bytes and the store's journal and pack files, beside a live writer.";
+    "store verify", "store verify DIR [--release EXE]", "Scrub a copy of the store; with --release, also walk every index the release binds against its table.";
+    "store repair", "store repair DIR --release EXE", "With the store stopped, demote each index the release proves wrong and rebuild every unbuilt index.";
     "store backup", "store backup DIR TARGET", "Copy the store at DIR, at a durable head, into the empty or new directory TARGET.";
     "store restore", "store restore BACKUP DIR", "Restore a backup into the empty or new directory DIR, keeping the store's identity.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";

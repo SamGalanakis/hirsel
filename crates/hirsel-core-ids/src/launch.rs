@@ -70,7 +70,9 @@ pub struct Metadata {
     install_child: Option<u64>,
     install_predecessor: Option<[u8; 32]>,
     witness: Option<u64>,
-    dry_run: bool,
+    /// Launch word 20: 0 serves, 1 `hirsel dry-run`, 2 `hirsel store verify`,
+    /// 3 `hirsel store repair`.
+    store_op: u8,
 }
 
 impl Metadata {
@@ -108,7 +110,7 @@ impl Metadata {
             install_child: None,
             install_predecessor: None,
             witness: None,
-            dry_run: false,
+            store_op: 0,
         }
     }
 
@@ -215,8 +217,8 @@ impl Metadata {
         self
     }
 
-    pub fn with_dry_run(mut self) -> Self {
-        self.dry_run = true;
+    pub fn with_store_op(mut self, op: u8) -> Self {
+        self.store_op = op;
         self
     }
 
@@ -277,7 +279,7 @@ impl Metadata {
                 .map_or(0, |revision| revision.len() as u64),
             18 => self.revision.as_ref().map_or(0, |revision| byte(revision)),
             19 => self.witness.unwrap_or(0),
-            20 => u64::from(self.dry_run),
+            20 => u64::from(self.store_op),
             21 => self.install_predecessor.as_ref().map_or(0, |_| 32),
             22 => self
                 .install_predecessor

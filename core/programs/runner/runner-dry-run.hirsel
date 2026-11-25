@@ -1,3 +1,50 @@
+// The launch header that marks a store operator's report on the describe
+// stream: `hirsel dry-run`, `hirsel store verify` or `hirsel store repair`.
+fn store_op_header(op: StoreOp) -> Result[(), StartError] {
+    let line: Bytes = match op {
+        Serving => return Ok(()),
+        DryRun => b"hirsel dry-run\n",
+        StoreVerify => b"hirsel store verify\n",
+        StoreRepair => b"hirsel store repair\n",
+    }
+    if !launch_emit(line) {
+        return Error(Missing("store report output"))
+    }
+    Ok(())
+}
+
+fn operates(op: StoreOp) -> bool {
+    if let Serving = op {
+        false
+    } else {
+        true
+    }
+}
+
+fn run_store_op[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64, op: StoreOp) -> Result[Ended, StartError] waits {
+    match op {
+        Serving => Error(Missing("a store operation")),
+        DryRun => operate_dry_run(p, take options, n_place),
+        StoreVerify => operate_store_verify(p, take options, n_place),
+        StoreRepair => operate_store_repair(p, take options, n_place),
+    }
+}
+
+// Why `hirsel store verify` or `repair` ends nonzero: problems found, or
+// (repair only) an export lease held by a deploy preparing from the store.
+pub type OperatorRefusal: send = Unverified(u64) | ExportLeased
+
+fn push_operator_refusal(mut line: String, refusal: OperatorRefusal) {
+    match refusal {
+        Unverified(problems) => {
+            string.push(mut line, "store verify found ")
+            string.push_u64(mut line, problems)
+            string.push(mut line, " problems")
+        },
+        ExportLeased => string.push(mut line, "an export lease is held (a deploy is preparing from this store); repair after it ends"),
+    }
+}
+
 fn operate_dry_run[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
     let dir = match p.backing {
         Disk(d) => d,
@@ -38,6 +85,13 @@ fn operate_dry_run[G: send, H: shareable + inert + send, S: send](p: PlaceConfig
         if let Some(name) = filled.index {
             string.push(mut text, ".")
             string.push(mut text, name)
+        }
+        // Why the candidate rebuilds it (STORE-SPEC §15.6): the revision input
+        // that changed, and the rows it reads (the table's exact count).
+        if let Some(why) = filled.cause {
+            string.push(mut text, " (")
+            string.push(mut text, why)
+            string.push(mut text, ")")
         }
         string.push(mut text, ": read ")
         string.push_u64(mut text, filled.read)
@@ -95,4 +149,114 @@ fn dry_run_size(mut text: String, name: String, count: u64) {
     string.push(mut text, name)
     string.push(mut text, "=")
     string.push_u64(mut text, count)
+}
+
+// `hirsel store verify DIR --release EXE` (STORE-SPEC §15.6): the release
+// reads a cloned image of DIR and writes nothing. It prints each index whose
+// revision it would change, each scrub fault, each report-walk finding under
+// its own extractors and each index the walk could not check, then a summary.
+// Any change, fault or finding ends it Unverified, a nonzero exit.
+fn operate_store_verify[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
+    let mut db = open_operator_store(p, take options, n_place)?
+    let found = store.verify_release(mut db, p.schema) ?=> |problem| Open(Store(problem))
+    let mut text = string.new()
+    for name in found.changed {
+        string.push(mut text, "changed ")
+        string.push(mut text, name)
+        string.push(mut text, ": this release's revision differs (an open refuses it, a deploy rebuilds it)\n")
+    }
+    for fault in found.faults {
+        string.push(mut text, "scrub fault ")
+        string.push(mut text, fault.file)
+        string.push(mut text, " at ")
+        string.push_u64(mut text, fault.offset)
+        string.push(mut text, "\n")
+    }
+    for finding in found.findings {
+        string.push(mut text, "finding ")
+        string.push(mut text, finding.index)
+        string.push(mut text, match finding.fault {
+            Missing => " Missing ",
+            Extra => " Extra ",
+            Payload => " Payload ",
+        })
+        string.push(mut text, std.hex.encode(finding.entry))
+        string.push(mut text, "\n")
+    }
+    for seen in found.coverage {
+        let why = match seen.coverage {
+            Walked => continue,
+            NotPublic => "not Public",
+            Aggregate => "an aggregate",
+            Unbound => "not bound by this release",
+        }
+        string.push(mut text, "not walked ")
+        string.push(mut text, seen.index)
+        string.push(mut text, ": ")
+        string.push(mut text, why)
+        string.push(mut text, "\n")
+    }
+    let problems = list.len(found.changed) + list.len(found.faults) + list.len(found.findings)
+    string.push(mut text, "verify: walked ")
+    string.push_u64(mut text, found.checked)
+    string.push(mut text, " rows and entries, ")
+    string.push_u64(mut text, problems)
+    string.push(mut text, " problems\n")
+    let _ = store.close(take db)
+    if !launch_emit(string.as_bytes(text)) {
+        return Error(Missing("store report output"))
+    }
+    if problems != 0 {
+        return Error(Open(Operator(Unverified(problems))))
+    }
+    Ok(Unstarted)
+}
+
+// `hirsel store repair DIR --release EXE`: the release opens DIR in place
+// (Open; a changed revision refuses), walks every index it binds in Repair
+// mode and builds every Backfilling index to the end. It refuses while an
+// export lease is held.
+fn operate_store_repair[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
+    let mut db = open_operator_store(p, take options, n_place)?
+    let _ = store.bind_declaration(mut db, Open, code.callable(p.schema)) ?=> |problem| Open(Store(problem))
+    let Some(done) = store.repair_indexes(mut db) ?=> |problem| Open(Store(problem)) else {
+        let _ = store.close(take db)
+        return Error(Open(Operator(ExportLeased)))
+    }
+    let mut text = string.new()
+    for finding in done.findings {
+        string.push(mut text, "demoted ")
+        string.push(mut text, finding.index)
+        string.push(mut text, "\n")
+    }
+    for name in done.built {
+        string.push(mut text, "built ")
+        string.push(mut text, name)
+        string.push(mut text, "\n")
+    }
+    for name in done.failed {
+        string.push(mut text, "failed ")
+        string.push(mut text, name)
+        string.push(mut text, ": a unique conflict; fix the rows, then repair again\n")
+    }
+    store.close(take db) ?=> |problem| Open(Store(problem))
+    if !launch_emit(string.as_bytes(text)) {
+        return Error(Missing("store report output"))
+    }
+    if list.len(done.failed) != 0 {
+        return Error(Open(Operator(Unverified(list.len(done.failed)))))
+    }
+    Ok(Unstarted)
+}
+
+fn open_operator_store[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64) -> Result[store.Db, StartError] waits {
+    let dir = match p.backing {
+        Disk(d) => d,
+        Temp(d) => d,
+        _ => return Error(Missing("directory store")),
+    }
+    let _ = placed(p.place, n_place) ?=> |problem| Open(Place(problem))
+    let mut opening = take options
+    opening.create = false
+    Ok(store.open(p.tasks, dir, p.clock, p.random, opening) ?=> |problem| Open(Store(problem)))
 }

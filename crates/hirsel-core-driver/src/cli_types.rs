@@ -74,6 +74,7 @@ pub enum OptionId {
     Store,
     Fresh,
     DryRunExe,
+    StoreRelease,
     Inputs,
     PackageStore,
     Locked,

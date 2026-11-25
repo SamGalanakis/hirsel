@@ -141,6 +141,9 @@ pub type BackfillOutcome: send = Filled | Conflict(ConflictKeys)
 pub type MigrationBackfill: send {
     table: String,
     index: Option[String],
+    // An index build's reason: "new index", "unfinished build", or the
+    // changed inputs ("row codec", "extractor code", ...).
+    cause: Option[String],
     read: u64,
     written: u64,
     outcome: BackfillOutcome
@@ -156,8 +159,7 @@ pub type MigrationPreview {
 
 // Run the ordinary migration operations against shared roots. Only the
 // diagnostics leave this function. No staged roots can be installed.
-pub fn preview_migration[H](db: Db, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]],
-    schema: StaticFn[fn(mut Declare) -> Result[H, Error]]) -> Result[MigrationPreview, Error] waits {
+pub fn preview_migration[H](db: Db, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]], schema: StaticFn[fn(mut Declare) -> Result[H, Error]]) -> Result[MigrationPreview, Error] waits {
     healthy(db)?
     require_memory_collections(store_has_tiered(db), Migrate)?
     let mut plan = schema_plan(db)
@@ -181,7 +183,11 @@ pub fn preview_migration[H](db: Db, tasks: Tasks, configure: Option[StaticFn[fn(
 }
 
 fn catalog_collection_name(key: Bytes, kind: u8) -> Result[String, Error] {
-    let start = if kind == 2u8 { 5u64 } else { 1u64 }
+    let start = if kind == 2u8 {
+        5u64
+    } else {
+        1u64
+    }
     Ok(string.from_utf8(copied(list.slice(key, start, list.len(key)))?) ?=> |_| malformed(0u64))
 }
 

@@ -485,7 +485,7 @@ def cli_dry_run_conflict():
     assert done.returncode == 1, (done.stdout, done.stderr)
     assert 'add index unique' in done.stdout.splitlines(), done.stdout
     # The fixture inserts 9 and 3 with value 22, plus 5 with value 17.
-    assert ('backfill rows.unique: read 3, wrote 2, Conflict: '
+    assert ('backfill rows.unique (new index): read 3, wrote 2, Conflict: '
             '0000000000000003 and 0000000000000009') in done.stdout.splitlines(), done.stdout
     assert {file.name: file.read_bytes() for file in store.iterdir()} == before
 

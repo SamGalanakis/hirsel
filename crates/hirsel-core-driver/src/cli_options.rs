@@ -900,6 +900,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "The built candidate executable."
     ),
     option!(
+        StoreRelease,
+        ["--release"],
+        Some("EXE"),
+        ["store verify", "store repair"],
+        "The release executable whose extractors check or rebuild the store's indexes."
+    ),
+    option!(
         Inputs,
         ["--inputs"],
         Some("MANIFEST"),

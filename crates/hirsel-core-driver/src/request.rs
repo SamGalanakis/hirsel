@@ -101,7 +101,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             )?));
         }
         "dev" => return conclude(Outcome::Exit(launch::dev::run(invocation)?)),
-        "dry-run" | "store backup" | "store restore" => return launch::store_tool(invocation),
+        store if store == "dry-run" || store.starts_with("store ") => {
+            return launch::store_tool(invocation);
+        }
         _ => {}
     }
     if command == "replay"
@@ -495,6 +497,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::Tenant
             | Opt::GroupStore
             | Opt::DryRunExe
+            | Opt::StoreRelease
             | Opt::Trusted
             | Opt::RequestId
             | Opt::RequestStatus
@@ -1294,13 +1297,13 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let (product, key) = match checked {
         crate::Checked::Product(product, key) => (product, key),
         crate::Checked::Hit(hit) => {
-            let output = native_output(&prepared);
+            let native = prepared.as_ref().and_then(|p| p.as_ref().ok());
             return answer_hit(
                 &hit,
                 command,
                 json,
                 &sources,
-                output.as_deref(),
+                native.map(|n| n.output.as_path()),
                 &runner,
                 run_args,
                 record_path.as_deref(),
@@ -1809,15 +1812,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         &mut meter,
         metrics,
     )
-}
-/// The output path of a native request's options.
-fn native_output(
-    prepared: &Option<Result<NativeOptions, Box<dyn std::error::Error>>>,
-) -> Option<PathBuf> {
-    match prepared {
-        Some(Ok(options)) => Some(options.output.clone()),
-        _ => None,
-    }
 }
 /// Answer a request from its record: render the value for this request,
 /// write a build's stored executable to its output, and finish as a checked

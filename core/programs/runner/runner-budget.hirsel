@@ -16,7 +16,6 @@ fn add_place_bytes(a: u64, b: u64) -> Result[u64, Capacity] {
     }
 }
 
-
 fn place_head_bytes(n_place: u64, n_publisher: u64, grant: u64) -> Result[u64, Capacity] {
     let names = add_place_bytes(n_place, publisher_bytes(n_place, n_publisher)?)?
     let head = add_place_bytes(names, HEAD_OWN_BYTES)?
@@ -150,7 +149,7 @@ fn place_store[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, 
 }
 
 fn report_store_shortage(report: Option[Stderr], short: store.Shortage, cap: Capacity) waits {
-    if launch_env().dry_run {
+    if let DryRun = launch_env().store_op {
         let _ = launch_emit(string.as_bytes(shortage_text(short, cap)))
     } else if let Some(out) = report {
         let _ = stderr.write(out, shortage_text(short, cap))

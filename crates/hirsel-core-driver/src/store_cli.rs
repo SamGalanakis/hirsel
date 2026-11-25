@@ -1,7 +1,11 @@
 //! `hirsel store backup DIR TARGET` and `hirsel store restore BACKUP DIR`
-//! (STORE-SPEC §15.4): open both directories, creating the second if it is absent, and
-//! run the installed `libexec/hirsel/store_tool` with them as fds 3 and 4.
+//! (STORE-SPEC §15.4), and `hirsel store inspect DIR`, `hirsel store stats DIR` and
+//! `hirsel store verify DIR` (§15.6): open the directories and run the installed
+//! `libexec/hirsel/store_tool` with them as fds 3 and 4. Backup and restore create
+//! the second directory if it is absent. Inspect and stats read the store itself
+//! beside a live writer; verify scrubs a clone. Those three pass one directory as both.
 
+use super::dry_run::copy_store;
 use crate::cli::Invocation;
 use std::{
     fs::{self, File, OpenOptions},
@@ -15,7 +19,7 @@ use std::{
 
 type Error = Box<dyn std::error::Error>;
 
-fn open_dir(path: &str) -> io::Result<File> {
+fn open_dir(path: impl AsRef<std::path::Path>) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY)
@@ -26,12 +30,35 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     let (verb, usage) = match invocation.command.name {
         "store backup" => ("backup", "store backup DIR TARGET"),
         "store restore" => ("restore", "store restore BACKUP DIR"),
-        _ => return Err("store takes backup or restore".into()),
+        "store inspect" => ("inspect", "store inspect DIR"),
+        "store stats" => ("stats", "store stats DIR"),
+        "store verify" => ("verify", "store verify DIR [--release EXE]"),
+        _ => return Err("usage: hirsel store <inspect|stats|verify|repair|backup|restore>".into()),
     };
     if !invocation.options.is_empty() {
         return Err(format!("usage: hirsel {usage}").into());
     }
-    let (Some(from), [to]) = (invocation.positional.as_deref(), &invocation.arguments[..]) else {
+    let Some(from) = invocation.positional.as_deref() else {
+        return Err(format!("usage: hirsel {usage}").into());
+    };
+    if matches!(verb, "inspect" | "stats" | "verify") {
+        if !invocation.arguments.is_empty() {
+            return Err(format!("usage: hirsel {usage}").into());
+        }
+        let image = tempfile::tempdir()?;
+        let source = if verb == "verify" {
+            if !copy_store(std::path::Path::new(from), image.path())? {
+                eprintln!("hirsel store: the store is held by a writer");
+                return Ok(75);
+            }
+            open_dir(image.path())?
+        } else {
+            open_dir(from)?
+        };
+        let same = source.try_clone()?;
+        return store_tool(verb, source, same);
+    }
+    let [to] = &invocation.arguments[..] else {
         return Err(format!("usage: hirsel {usage}").into());
     };
     let source = open_dir(from)?;
@@ -41,6 +68,10 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
         Err(error) => return Err(error.into()),
     }
     let target = open_dir(to)?;
+    store_tool(verb, source, target)
+}
+
+fn store_tool(verb: &str, source: File, target: File) -> Result<i32, Error> {
     let (source_fd, target_fd) = (source.as_raw_fd(), target.as_raw_fd());
     let mut command = Command::new(crate::operator_cli::installed("store_tool")?);
     command.arg(verb).stdin(Stdio::null());

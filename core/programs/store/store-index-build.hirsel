@@ -423,7 +423,7 @@ pub fn rebuild_index[J, K, V, P](mut db: Db, ix: Index[J, K, V, P]) -> Result[()
 // record as Backfilling(None) over an empty collection; an existing entry
 // index is rebuilt whole, an aggregate resumes from its cursor, and a Failed
 // one restarts from an empty index.
-fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, take record: Catalog, extractor: RegisteredIndex, new_index: bool) -> Result[(), Error] {
+fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, take record: Catalog, extractor: RegisteredIndex, new_index: bool, take cause: String) -> Result[(), Error] {
     if !same(plan.store, t.store) {
         return Error(Foreign)
     }
@@ -469,7 +469,7 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
     }
     if let Some(mut backfills) = plan.preview {
         let table_name = catalog_collection_name(t.catalog_key, 1u8)?
-        list.push(mut backfills, MigrationBackfill(table: take table_name, index: Some(clone(name)), read: read, written: written, outcome: take outcome))
+        list.push(mut backfills, MigrationBackfill(table: take table_name, index: Some(clone(name)), cause: Some(take cause), read: read, written: written, outcome: take outcome))
     }
     Ok(())
 }

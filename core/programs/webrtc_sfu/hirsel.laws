@@ -29,7 +29,7 @@ webrtc_sfu@1/laws/sdp_browser_offers src=72aa04acfd6ed9bb sig=27a8867defd021ce r
 webrtc_sfu@1/laws/sdp_descriptor_on_av1_only src=0df0cee9a7b3a9c0 sig=929676be500eacd7 run=c2c0c6612d4cbb79 bug=e5d7cadead6878b7 oracle=c5946798397dcf06 rows=pending
 webrtc_sfu@1/laws/sdp_refusals src=3ddf011a8a38e14b sig=761d96d0c07b43f9 run=c2c0c6612d4cbb79 bug=c5d4fb3e5b1de441 oracle=9b65796e47db47a5 rows=pending
 webrtc_sfu@1/laws/sdp_rfc_examples src=81b5ac44fee02f57 sig=f1845804d683a253 run=c2c0c6612d4cbb79 bug=e7f7502401bccf8d oracle=86792fafb6d5c439 rows=pending
-webrtc_sfu@1/laws/service_answers_over_the_room src=0e62762c32a0e226 sig=15ec187950ece7f9 run=0a8864e34a11a72f bug=5cd9251c1d61fe0c oracle=42b0def1a9812cc5 rows=pending
+webrtc_sfu@1/laws/service_answers_over_the_room src=0e62762c32a0e226 sig=21cba082df6ee376 run=0a8864e34a11a72f bug=5cd9251c1d61fe0c oracle=42b0def1a9812cc5 rows=pending
 webrtc_sfu@1/laws/signaling_loss_fails_closed src=b8a9a1b68000a02e sig=07e093c62b65da1e run=c7b2a52baff70a63 bug=1d8c89257f64b087 oracle=1bc13dab3fdd6e00 rows=pending
 webrtc_sfu@1/laws/ssrc_survives_switches src=c018efcdce5400e0 sig=cf4e2bb5f97847e9 run=c2c0c6612d4cbb79 bug=f2295f10bf707b65 oracle=0c7ec1f582b2fa33 rows=pending
 webrtc_sfu@1/laws/unauthenticated_changes_nothing src=7315e4f4c09b7fbd sig=a57266bcade0ae45 run=c2c0c6612d4cbb79 bug=6c3f1522e1c86436 oracle=5047e9c0d66829af rows=pending

@@ -195,11 +195,17 @@ fn unique_backfill_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(
     let _ = seal(mut db, take initial)?
     let result = run(mut db, None, (primary_table, rows, duplicate), fn(mut tx, input) -> Result[(), Error] {
         for i in 0u64 .. input.1 {
-            put(mut tx, input.0, i, if input.2 == Some(i) { 0u64 } else { i })?
+            put(mut tx, input.0, i, if input.2 == Some(i) {
+                0u64
+            } else {
+                i
+            })?
         }
         Ok(())
     })?
-    if let Committed(_) = result {} else { return Error(MigrationFault) }
+    if let Committed(_) = result {} else {
+        return Error(MigrationFault)
+    }
     let before = snapshot(db)
     let mut declaration = declare(db, Migrate)?
     let mut target_decl = declare_table(mut declaration, "rows", key, value)?
@@ -214,8 +220,7 @@ fn unique_backfill_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(
             _ => return Error(MigrationFault),
         }
         let after = snapshot(db)
-        if version(before) != version(after) || tree_stamp(before.roots.catalog) != tree_stamp(after.roots.catalog) ||
-            tree_stamp(before.roots.collections) != tree_stamp(after.roots.collections) {
+        if version(before) != version(after) || tree_stamp(before.roots.catalog) != tree_stamp(after.roots.catalog) || tree_stamp(before.roots.collections) != tree_stamp(after.roots.collections) {
             return Error(MigrationFault)
         }
         return Ok(())
@@ -226,21 +231,27 @@ fn unique_backfill_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(
     let after = snapshot(db)
     let mut cursor = byte_cursor(after.roots.collections, Included(prefix(ix.id)?), prefix(ix.id + 1)?)?
     for expected in 0u64 .. rows {
-        let Some((index_key, raw)) = next_bytes(mut cursor)? else { return Error(MigrationFault) }
+        let Some((index_key, raw)) = next_bytes(mut cursor)? else {
+            return Error(MigrationFault)
+        }
         if list.len(index_key) != 12 || list.len(raw) != 12 || read_le(raw, 0, 4) != 8 {
             return Error(MigrationFault)
         }
         let j: u64 = list.word_be(index_key, 4)
         let k: u64 = list.word_be(raw, 4)
-        if j != expected || k != expected { return Error(MigrationFault) }
+        if j != expected || k != expected {
+            return Error(MigrationFault)
+        }
     }
-    if let Some(_) = next_bytes(mut cursor)? { return Error(MigrationFault) }
+    if let Some(_) = next_bytes(mut cursor)? {
+        return Error(MigrationFault)
+    }
     Ok(())
 }
 
 fn law_unique_backfill(c: Clock) -> Result[(), Error] waits {
-    let sizes: Inline[u64, 6] = [0, 1, 4095, 4096, 4097, 12289]
-    let duplicates: Inline[u64, 10] = [1, 4095, 4096, 4097, 8191, 8192, 8193, 12287, 12288, 2]
+    let sizes: Inline[u64, 6] =[0, 1, 4095, 4096, 4097, 12289]
+    let duplicates: Inline[u64, 10] =[1, 4095, 4096, 4097, 8191, 8192, 8193, 12287, 12288, 2]
     for rows in sizes {
         unique_backfill_case(c, rows, None)?
         for duplicate in duplicates {
@@ -267,7 +278,9 @@ fn assert_cover_bytes(db: Db, index_id: u32, key: u64, expected: u64) -> Result[
     list.put_word_be(mut logical, key)
     list.put_word_be(mut logical, key)
     let s = snapshot(db)
-    let Some(raw) = get_page_row(s.roots.collections, logical) else { return Error(MigrationFault) }
+    let Some(raw) = get_page_row(s.roots.collections, logical) else {
+        return Error(MigrationFault)
+    }
     if list.len(raw) != 10 || read_le(raw, 0, 2) != 0 || read_le(raw, 2, 8) != expected {
         return Error(MigrationFault)
     }
@@ -322,6 +335,29 @@ fn drift_codec(drift: Drift) -> std.codec.Codec[u64] {
     }
 }
 
+// The release `hirsel store verify --release` runs: its row codec is the
+// drift's, its extractor and projection the original ones.
+fn drift_release_with(mut d: Declare, value: std.codec.Codec[u64]) -> Result[(), Error] {
+    d.versioned = true
+    let key = std.codec.key_u64()
+    let mut rows = declare_table(mut d, "rows", key, value)?
+    let _ = covering(mut d, mut rows, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), std.codec.of_u64())?
+    let _ = finish(mut d, take rows)?
+    Ok(())
+}
+
+fn drift_release(mut d: Declare) -> Result[(), Error] {
+    drift_release_with(mut d, drift_codec(DriftExtractor))
+}
+
+fn drift_release_default(mut d: Declare) -> Result[(), Error] {
+    drift_release_with(mut d, drift_codec(DriftDefault))
+}
+
+fn drift_release_from(mut d: Declare) -> Result[(), Error] {
+    drift_release_with(mut d, drift_codec(DriftFrom))
+}
+
 fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
     let mut db = test_db(c, 1073741824)
     let key = std.codec.key_u64()
@@ -334,11 +370,14 @@ fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
     let ix = covering(mut initial, mut first_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), payload)?
     let primary_table = finish(mut initial, take first_decl)?
     let _ = seal(mut db, take initial)?
-    if !typed_put(mut db, primary_table, 5, 7) { return Error(MigrationFault) }
+    if !typed_put(mut db, primary_table, 5, 7) {
+        return Error(MigrationFault)
+    }
     assert_cover_bytes(db, ix.id, 5, 12)?
-    if !typed_put(mut db, primary_table, 5, 8) { return Error(MigrationFault) }
+    if !typed_put(mut db, primary_table, 5, 8) {
+        return Error(MigrationFault)
+    }
     assert_cover_bytes(db, ix.id, 5, 13)?
-
     // Use the catalog bytes a previous release would leave. Its function names
     // match and one revision differs: forged for the extractor or projection,
     // the row codec's own for a default or `from` this release changes. Give
@@ -348,8 +387,12 @@ fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
     let mut prior_revision: Bytes = list.new()
     list.fill(mut prior_revision, 32, 1u8)
     match drift {
-        DriftExtractor => { record.revision = take prior_revision },
-        DriftProjection => { record.projection = Some((copied(code.identity(code.describe(cover_sum)))?, take prior_revision)) },
+        DriftExtractor => {
+            record.revision = take prior_revision
+        },
+        DriftProjection => {
+            record.projection = Some((copied(code.identity(code.describe(cover_sum)))?, take prior_revision))
+        },
         _ => (),
     }
     let raw = encode_catalog(record)?
@@ -364,7 +407,7 @@ fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
     prior.changed = true
     let _ = publish_schema_plan(mut db, take prior)?
     let now = drift_codec(drift)
-    let read_modes: Inline[Mode, 2] = [Open, Follower]
+    let read_modes: Inline[Mode, 2] =[Open, Follower]
     for mode in read_modes {
         let mut opened = declare(db, Open)?
         opened.mode = mode
@@ -375,15 +418,46 @@ fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
             _ => return Error(MigrationFault),
         }
     }
+    // `hirsel store verify --release` (Appendix A's store): this release
+    // declares in verify mode, which names `cover` as changed instead of
+    // refusing, and a report walk under its binding finds the stale entry,
+    // from row 5 (rows phase) and again from the entry (entries phase).
+    // Row 5 projects 5 + 8 = 13 (5 + 1008 under DriftFrom); the entry holds 99.
+    let schema = match drift {
+        DriftDefault => code.describe(drift_release_default),
+        DriftFrom => code.describe(drift_release_from),
+        _ => code.describe(drift_release),
+    }
+    let head = version(snapshot(db))
+    let found = verify_release(mut db, schema)?
+    if list.len(found.changed) != 1 || found.changed[0] != "cover" || list.len(found.faults) != 0 {
+        return Error(MigrationFault)
+    }
+    if list.len(found.findings) != 2 || version(snapshot(db)) != head {
+        return Error(MigrationFault)
+    }
+    for f in found.findings {
+        if f.index != "cover" || f.entry != fake_key {
+            return Error(MigrationFault)
+        }
+        if let Payload = f.fault {} else {
+            return Error(MigrationFault)
+        }
+    }
     let mut migration = declare(db, Migrate)?
     migration.versioned = true
     let mut rebuilt_decl = declare_table(mut migration, "rows", key, now)?
     let rebuilt = covering(mut migration, mut rebuilt_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), payload)?
     let _ = finish(mut migration, take rebuilt_decl)?
     let _ = seal(mut db, take migration)?
-    if rebuilt.id == ix.id { return Error(MigrationFault) }
+    if rebuilt.id == ix.id {
+        return Error(MigrationFault)
+    }
     // The rebuild reads row 5 = 8 through this release's codec.
-    let expected = match drift { DriftFrom => 1013u64, _ => 13u64 }
+    let expected = match drift {
+        DriftFrom => 1013u64,
+        _ => 13u64
+    }
     assert_cover_bytes(db, rebuilt.id, 5, expected)
 }
 
@@ -432,7 +506,9 @@ fn put_conflict_sequence(mut tx: Tx, items: Table[u64, (u64, u64)]) -> Result[()
         Error(Conflict(name)) if name == "z_first" => (),
         _ => return Error(MigrationFault),
     }
-    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before { return Error(MigrationFault) }
+    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before {
+        return Error(MigrationFault)
+    }
     match delete(mut tx, items, 1) {
         Error(Conflict(name)) if name == "z_first" => (),
         _ => return Error(MigrationFault),
@@ -441,7 +517,9 @@ fn put_conflict_sequence(mut tx: Tx, items: Table[u64, (u64, u64)]) -> Result[()
         Error(Conflict(name)) if name == "z_first" => (),
         _ => return Error(MigrationFault),
     }
-    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before { return Error(MigrationFault) }
+    if (tx.resident, tx.frame_bytes, tx.ids, tx.rows) != before {
+        return Error(MigrationFault)
+    }
     Ok(())
 }
 
@@ -464,11 +542,17 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
         _ => return Error(MigrationFault),
     }
     let observed = log.finish(take reads)
-    if list.len(observed) != 6 { return Error(MigrationFault) }
+    if list.len(observed) != 6 {
+        return Error(MigrationFault)
+    }
     for probe in observed {
         if let Point(key) = probe {
-            if list.len(key) != 12 { return Error(MigrationFault) }
-        } else { return Error(MigrationFault) }
+            if list.len(key) != 12 {
+                return Error(MigrationFault)
+            }
+        } else {
+            return Error(MigrationFault)
+        }
     }
     let attempted = run(mut db, None, items, fn(mut tx, handle) -> Result[(), Error] {
         put_conflict_sequence(mut tx, handle)
@@ -484,7 +568,9 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     let stream = law_stream_bytes(key_word(23), keyed_time(db))
     let request = request_digest(stream, stream)
     let admitted = admit_law_stream(mut db, stream, 0, request)?
-    let Admitted(take complete) = take admitted else { return Error(MigrationFault) }
+    let Admitted(take complete) = take admitted else {
+        return Error(MigrationFault)
+    }
     let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
     let served = serve(mut db, take complete, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {
         result.unwrap(put_conflict_sequence(mut tx, handle))
@@ -494,9 +580,13 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
         Ok(Kept(receipt)) if receipt.reply == key_word(7) => (),
         _ => return Error(MigrationFault),
     }
-    if get(result.unwrap(reader(db, 0)), snapshot(db), items, 1)? != None { return Error(MigrationFault) }
+    if get(result.unwrap(reader(db, 0)), snapshot(db), items, 1)? != None {
+        return Error(MigrationFault)
+    }
     let next_admission = admit_law_stream(mut db, stream, 1, request)?
-    let Admitted(take next_completion) = take next_admission else { return Error(MigrationFault) }
+    let Admitted(take next_completion) = take next_admission else {
+        return Error(MigrationFault)
+    }
     let staged_base = version(snapshot(db))
     let next_result = serve(mut db, take next_completion, plan, None, items, fn(mut tx, handle) -> Result[Bytes, Bytes] {
         result.unwrap(put_conflict_sequence(mut tx, handle))
@@ -506,7 +596,9 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
         Ok(Failed(_, Conflict(name))) if name == "z_first" => (),
         _ => return Error(MigrationFault),
     }
-    if version(snapshot(db)) != staged_base { return Error(MigrationFault) }
+    if version(snapshot(db)) != staged_base {
+        return Error(MigrationFault)
+    }
     Ok(())
 }
 
@@ -538,19 +630,24 @@ fn typed_cursor_case(c: Clock) -> Result[(), Error] waits {
         put(mut tx, target, (255u8, 1u64), 11)?
         put(mut tx, target, (255u8, 2u64), 13)?
         put(mut tx, target, (0u8, 20u64), 17)?
-        if count(tx, target, Included((255u8, 0u64)), Unbounded)? != 2 { return Error(MigrationFault) }
+        if count(tx, target, Included((255u8, 0u64)), Unbounded)? != 2 {
+            return Error(MigrationFault)
+        }
         Ok(())
     })?
-    if let Committed(_) = inserted {} else { return Error(MigrationFault) }
+    if let Committed(_) = inserted {} else {
+        return Error(MigrationFault)
+    }
     let at = snapshot(db)
     let read_handle = reader(db, 0)?
     let observed = look(read_handle, at, None, (items, covering_index, unique_index), fn(tx, input) -> Result[(), Error] {
         let pair = (255u8, 1u64)
         let leading: std.codec.Key[u8] = std.codec.key_of()
-        if fetch(tx, input.0, pair)? != Some(11u64) { return Error(MigrationFault) }
+        if fetch(tx, input.0, pair)? != Some(11u64) {
+            return Error(MigrationFault)
+        }
         let mut table_cursor = range_prefix(tx, input.0, 255u8, leading)?
-        if next_in(tx, mut table_cursor)? != Some((pair, 11u64)) ||
-            next_in(tx, mut table_cursor)? != Some(((255u8, 2u64), 13u64)) || next_in(tx, mut table_cursor)? != None {
+        if next_in(tx, mut table_cursor)? != Some((pair, 11u64)) || next_in(tx, mut table_cursor)? != Some(((255u8, 2u64), 13u64)) || next_in(tx, mut table_cursor)? != None {
             return Error(MigrationFault)
         }
         match range_prefix(tx, input.0, 255u64, std.codec.key_u64()) {
@@ -558,10 +655,11 @@ fn typed_cursor_case(c: Clock) -> Result[(), Error] waits {
             _ => return Error(MigrationFault),
         }
         let mut joined = lookup_prefix(tx, input.1, 255u8, leading)?
-        if next_indexed(mut joined)? != Some((pair, 11u64)) { return Error(MigrationFault) }
+        if next_indexed(mut joined)? != Some((pair, 11u64)) {
+            return Error(MigrationFault)
+        }
         let mut covering_cursor = entries(tx, input.1, Included(pair), Included(pair))?
-        if next_entry(mut covering_cursor)? != Some((pair, pair, 12u64)) ||
-            next_entry(mut covering_cursor)? != Some((pair, (255u8, 2u64), 15u64)) || next_entry(mut covering_cursor)? != None {
+        if next_entry(mut covering_cursor)? != Some((pair, pair, 12u64)) || next_entry(mut covering_cursor)? != Some((pair, (255u8, 2u64), 15u64)) || next_entry(mut covering_cursor)? != None {
             return Error(MigrationFault)
         }
         let mut owners = entries(tx, input.2, Included(2), Included(2))?
@@ -574,9 +672,13 @@ fn typed_cursor_case(c: Clock) -> Result[(), Error] waits {
         Seen(Seen(value: Ok(()), reads: observed_reads, ..)) => {
             let mut points = 0u64
             for cursor_read in observed_reads {
-                if let Point(_) = cursor_read { points += 1 }
+                if let Point(_) = cursor_read {
+                    points += 1
+                }
             }
-            if points != 2 { return Error(MigrationFault) }
+            if points != 2 {
+                return Error(MigrationFault)
+            }
         },
         _ => return Error(MigrationFault),
     }
@@ -613,22 +715,27 @@ fn test_migration_preview_conflict(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
         put(mut tx, t, 3u64, 22u64)?
         put(mut tx, t, 5u64, 17u64)
     })?
-    let Committed(done) = saved else { return Error(MigrationFault) }
+    let Committed(done) = saved else {
+        return Error(MigrationFault)
+    }
     durable(mut db, done.ticket)?
     let before = refusal_directory(directory)
     let head = version(snapshot(db))
     let result = preview_migration(db, tasks, None, code.describe(preview_law_schema))?
-    if let Some(_) = result.failure { return Error(MigrationFault) }
+    if let Some(_) = result.failure {
+        return Error(MigrationFault)
+    }
     if list.len(result.changes) != 1u64 || list.len(result.backfills) != 1u64 {
         return Error(MigrationFault)
     }
-    let CollectionAdded(added) = result.changes[0] else { return Error(MigrationFault) }
+    let CollectionAdded(added) = result.changes[0] else {
+        return Error(MigrationFault)
+    }
     let backfill = result.backfills[0]
-    let Conflict(keys) = backfill.outcome else { return Error(MigrationFault) }
-    if added.kind != 2u8 || added.name != "unique" || backfill.table != "rows" ||
-        backfill.index != Some("unique") || backfill.read != 3u64 || backfill.written != 2u64 ||
-        keys.first != b"\x00\x00\x00\x00\x00\x00\x00\x03" || keys.second != b"\x00\x00\x00\x00\x00\x00\x00\x09" ||
-        head != version(snapshot(db)) || !refusal_directory_unchanged(directory, before) {
+    let Conflict(keys) = backfill.outcome else {
+        return Error(MigrationFault)
+    }
+    if added.kind != 2u8 || added.name != "unique" || backfill.table != "rows" || backfill.index != Some("unique") || backfill.read != 3u64 || backfill.written != 2u64 || keys.first != b"\x00\x00\x00\x00\x00\x00\x00\x03" || keys.second != b"\x00\x00\x00\x00\x00\x00\x00\x09" || head != version(snapshot(db)) || !refusal_directory_unchanged(directory, before) {
         return Error(MigrationFault)
     }
     Ok(())
@@ -638,7 +745,9 @@ fn test_migration_preview_conflict(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
 // Backfilling(None), as a demotion leaves it, and 2 for anything else.
 fn bucket_reported(db: Db) -> Result[u8, Error] {
     let reported = attention(db)?.indexes
-    if list.len(reported) != 1 || reported[0].index != "bucket" { return Ok(2) }
+    if list.len(reported) != 1 || reported[0].index != "bucket" {
+        return Ok(2)
+    }
     Ok(match reported[0].state {
         Public => 0u8,
         Backfilling(None) => 1u8,
@@ -687,8 +796,12 @@ fn test_index_drift_counted(c: Clock) -> Result[(), Error] waits {
         },
         _ => return Error(Foreign),
     }
-    if list.len(attention(db)?.drift) != 0 || bucket_reported(db)? != 0 { return Error(Foreign) }
-    let moved = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] { put(mut tx, t, 7, 5) })?
+    if list.len(attention(db)?.drift) != 0 || bucket_reported(db)? != 0 {
+        return Error(Foreign)
+    }
+    let moved = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 7, 5)
+    })?
     match take moved {
         Failed(Drift(name)) if name == "bucket" => (),
         _ => return Error(Foreign),
@@ -703,9 +816,15 @@ fn test_index_drift_counted(c: Clock) -> Result[(), Error] waits {
     }
     while let Some(_) = index_build_step(mut db, 16)? {}
     let rebuilt_seen = attention(db)?.drift
-    if bucket_reported(db)? != 0 || list.len(rebuilt_seen) != 1 || rebuilt_seen[0].count != 1 || rebuilt_seen[0].demoted != 1 { return Error(Foreign) }
-    if !typed_put(mut db, rows, 7, 5) || typed_value(snapshot(db), rows, 7) != 5 { return Error(Foreign) }
+    if bucket_reported(db)? != 0 || list.len(rebuilt_seen) != 1 || rebuilt_seen[0].count != 1 || rebuilt_seen[0].demoted != 1 {
+        return Error(Foreign)
+    }
+    if !typed_put(mut db, rows, 7, 5) || typed_value(snapshot(db), rows, 7) != 5 {
+        return Error(Foreign)
+    }
     let mut rebuilt = find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Included(1), Included(1))?
-    if next(law_reader(rebuilt.capture), mut rebuilt)? != Some((7u64, 5u64)) { return Error(Foreign) }
+    if next(law_reader(rebuilt.capture), mut rebuilt)? != Some((7u64, 5u64)) {
+        return Error(Foreign)
+    }
     Ok(())
 }

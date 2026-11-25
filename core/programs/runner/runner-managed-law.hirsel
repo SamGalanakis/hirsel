@@ -106,5 +106,6 @@ fn opened_text(e: runner.OpenError) -> String {
         BindNoGrant => "calls: place_head: a wire needs a bind mint",
         TriggerNoGrant(_) => "calls: place_head: granted trigger entry needs an attempt mint",
         CallNotGranted(_) => "calls: place_head: call mint entry is not granted",
+        Operator(_) => "calls: place_head: a store operator refused",
     })
 }

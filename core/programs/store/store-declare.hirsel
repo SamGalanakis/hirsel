@@ -17,7 +17,11 @@ pub opaque type Declare {
     indexes: Map[u32, ()],
     failed: bool,
     conflict: Option[String],
-    versioned: bool
+    versioned: bool,
+    // A verify declaration (`declare_verify`): an index whose code or codec
+    // revision changed binds the release's extractor to the stored index
+    // instead of refusing Changed, and its name is kept here.
+    verifying: Option[List[String]]
 }
 
 pub opaque type TableDecl[K, V] {
@@ -38,7 +42,39 @@ fn same_declaration_base(a: DeclarationBase, b: DeclarationBase) -> bool {
 }
 
 fn new_declaration(mode: Mode, base: DeclarationBase, take plan: SchemaPlan, versioned: bool) -> Declare {
-    Declare(mode: mode, base: base, plan: take plan, tables: map.new(), indexes: map.new(), failed: false, conflict: None, versioned: versioned)
+    Declare(mode: mode, base: base, plan: take plan, tables: map.new(), indexes: map.new(), failed: false, conflict: None, versioned: versioned, verifying: None)
+}
+
+/// An Open declaration for `hirsel store verify` (§1.2 "The index walker"):
+/// an index whose extractor or codec revision differs from the one that
+/// built it binds this release's extractor to the stored entries, so the
+/// walker checks them with the code that will read them. Seal it with
+/// `seal_verify`, which commits nothing.
+pub fn declare_verify(db: Db) -> Result[Declare, Error] {
+    let mut d = declare(db, Open)?
+    d.verifying = Some(list.new())
+    Ok(take d)
+}
+
+/// Binds a verify declaration's extractors to the open store and returns
+/// the indexes whose revision changed. It never commits: a declaration that
+/// would change the catalog is refused `Changed`.
+pub fn seal_verify(mut db: Db, take d: Declare) -> Result[List[String], Error] {
+    healthy(db)?
+    if !same_declaration_base(d.base, declaration_base(db)) {
+        return Error(Foreign)
+    }
+    complete_declaration(d)?
+    let Declare(plan: take candidate, verifying: take changed, ..) = take d
+    let Some(take names) = take changed else {
+        return Error(Foreign)
+    }
+    let mut proposal = take candidate
+    if proposal.changed {
+        return Error(Changed(string.from("catalog")))
+    }
+    db.indexes = declared_index_registry(replace(mut proposal.bindings, list.new()))
+    Ok(take names)
 }
 
 pub fn declare(db: Db, mode: Mode) -> Result[Declare, Error] {
@@ -70,17 +106,19 @@ pub fn has_table(snap: Snapshot, name: String) -> Result[bool, Error] {
 
 pub fn declare_read_only(source: ReadOnly) -> Declare {
     let snap = view source.snapshot
-    let base = DeclarationBase(store: snap.store, opened: snap.open, version: snap.head,
-        stamp: snap.watermark, changes: 0u64, live: 0u64)
-    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark,
-        next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), preview: None)
+    let base = DeclarationBase(store: snap.store, opened: snap.open, version: snap.head, stamp: snap.watermark, changes: 0u64, live: 0u64)
+    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), preview: None)
     new_declaration(Follower, base, take plan, true)
 }
 
-pub type DeclaredCollection: codec + send { name: String, id: u32, owner: u32, kind: u8 }
+pub type DeclaredCollection: codec + send {
+    name: String,
+    id: u32,
+    owner: u32,
+    kind: u8
+}
 
-pub fn describe_declarations[H](clock: Clock,
-    schema: StaticFn[fn(mut Declare) -> Result[H, Error]]) -> Result[List[DeclaredCollection], Error] {
+pub fn describe_declarations[H](clock: Clock, schema: StaticFn[fn(mut Declare) -> Result[H, Error]]) -> Result[List[DeclaredCollection], Error] {
     let db = memory_at(clock, StoreId(hi: 0u64, lo: 0u64), result.unwrap(sized(Memory, 1074790400u64)))
     let mut declared = declare(db, Migrate)?
     let _ = (code.callable(schema))(mut declared)?
@@ -102,8 +140,12 @@ pub fn declare_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migrat
 }
 
 pub fn finish_migration(db: Db, take d: Declare) -> Result[StagedMigration, Error] {
-    let Migrate = d.mode else { return Error(Foreign) }
-    if !same_declaration_base(d.base, declaration_base(db)) { return Error(Foreign) }
+    let Migrate = d.mode else {
+        return Error(Foreign)
+    }
+    if !same_declaration_base(d.base, declaration_base(db)) {
+        return Error(Foreign)
+    }
     complete_declaration(d)?
     let Declare(plan: take plan, ..) = take d
     Ok(staged_migration(db, take plan, true))
@@ -140,13 +182,17 @@ pub fn declare_table[K, V](mut d: Declare, name: String, take key: std.codec.Key
 
 // The release witness reads this reserved table before application handles exist.
 pub fn declare_release_table[V](mut d: Declare, take value: std.codec.Codec[V]) -> Result[Table[u64, V], Error] {
-    let Follower = d.mode else { return Error(Foreign) }
+    let Follower = d.mode else {
+        return Error(Foreign)
+    }
     let declared = declare_table_inner(mut d, "hirsel.runner.releases", std.codec.key_u64(), value)?
     finish(mut d, take declared)
 }
 
 pub fn declare_activation_table(mut d: Declare) -> Result[Table[u8, Bytes], Error] {
-    let Follower = d.mode else { return Error(Foreign) }
+    let Follower = d.mode else {
+        return Error(Foreign)
+    }
     let declared = declare_table_inner(mut d, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
     finish(mut d, take declared)
 }
@@ -160,7 +206,9 @@ fn declare_table_inner[K, V](mut d: Declare, name: String, take key: std.codec.K
     let exists = match get_page_row(d.plan.roots.catalog, lookup_key) {
         Some(record) => {
             if record[0] != 1 {
-                if let Migrate = d.mode { return Error(Exists(named(name)?)) }
+                if let Migrate = d.mode {
+                    return Error(Exists(named(name)?))
+                }
                 return Error(Changed(named(name)?))
             }
             let id: u32 = int.truncate(read_le(record, 1, 4))
@@ -219,7 +267,9 @@ fn remove_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> R
     let charge = remove_store_collection(mut roots.collections, record.id, mut plan.next_node)?
     let mut live_bytes = plan.live
     if !plan.retained {
-        let Some(raw) = get_page_row(roots.catalog, key) else { return Error(Stale(record.id)) }
+        let Some(raw) = get_page_row(roots.catalog, key) else {
+            return Error(Stale(record.id))
+        }
         live_bytes = int.saturating_sub(live_bytes, charge + entry(key, raw))
     }
     remove_store_row(mut roots.catalog, key, mut plan.next_node)?
@@ -229,7 +279,9 @@ fn remove_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> R
 
 fn declaration_revision[F](versioned: bool, f: StaticFn[F]) -> Result[Bytes, Error] {
     if versioned {
-        let Some(hash) = code.revision(f) else { return Error(Missing("revision")) }
+        let Some(hash) = code.revision(f) else {
+            return Error(Missing("revision"))
+        }
         return copied(hash)
     }
     Ok(list.new())
@@ -238,52 +290,111 @@ fn declaration_revision[F](versioned: bool, f: StaticFn[F]) -> Result[Bytes, Err
 // An index's composite revision: its extractor's code revision, then the
 // codec revisions of K, V, J and P, which cover what decoding reads (defaults,
 // `via` bodies). A change to any of them changes what the index holds.
-fn index_revision[F, J, K, V, P](versioned: bool, by: StaticFn[F], t: Table[K, V],
-    key: std.codec.Key[J], codec: std.codec.Codec[P]) -> Result[Bytes, Error] {
+// The composite revision and the end of each of its parts, in
+// `revision_part` order, which names the input a rebuild comes from.
+fn index_revision[F, J, K, V, P](versioned: bool, by: StaticFn[F], t: Table[K, V], key: std.codec.Key[J], codec: std.codec.Codec[P]) -> Result[(Bytes, List[u64]), Error] {
     let mut out = declaration_revision(versioned, by)?
+    let mut ends: List[u64] = list.new()
+    list.push(mut ends, list.len(out))
     if versioned {
         codec_revision(mut out, std.codec.key_revision(t.key))?
+        list.push(mut ends, list.len(out))
         codec_revision(mut out, std.codec.revision(t.readers.codec))?
+        list.push(mut ends, list.len(out))
         codec_revision(mut out, std.codec.key_revision(key))?
+        list.push(mut ends, list.len(out))
         codec_revision(mut out, std.codec.revision(codec))?
+        list.push(mut ends, list.len(out))
+    }
+    Ok((take out, take ends))
+}
+
+fn revision_part(i: u64) -> String {
+    if i == 0 {
+        "extractor code"
+    } else if i == 1 {
+        "table key codec"
+    } else if i == 2 {
+        "row codec"
+    } else if i == 3 {
+        "index key codec"
+    } else {
+        "payload codec"
+    }
+}
+
+fn note_cause(mut out: String, what: String) {
+    if string.byte_len(out) != 0 {
+        string.push(mut out, ", ")
+    }
+    string.push(mut out, what)
+}
+
+// Why a declared index differs from its stored record (`hirsel dry-run`'s
+// rebuild report): the inputs that changed, by the parts of the revision.
+// A stored revision of another length was written before the composite
+// revision (v2.112), so its parts cannot be told apart.
+fn rebuild_cause(old: Catalog, proposed: Catalog, ends: List[u64]) -> Result[String, Error] {
+    let mut out = string.new()
+    if shape_byte(old.shape) != shape_byte(proposed.shape) {
+        note_cause(mut out, "shape")
+    }
+    if old.by != proposed.by {
+        note_cause(mut out, "extractor")
+    }
+    if old.key != proposed.key {
+        note_cause(mut out, "index key schema")
+    }
+    if old.payload_schemas != proposed.payload_schemas {
+        note_cause(mut out, "payload schema")
+    }
+    if old.projection != proposed.projection {
+        note_cause(mut out, "projection")
+    }
+    if old.revision != proposed.revision {
+        if list.len(old.revision) != list.len(proposed.revision) {
+            note_cause(mut out, "revision layout")
+        } else {
+            let mut from = 0u64
+            for i in 0u64 .. list.len(ends) {
+                let end = ends[i]
+                if list.slice(old.revision, from, end) != list.slice(proposed.revision, from, end) {
+                    note_cause(mut out, revision_part(i))
+                }
+                from = end
+            }
+        }
     }
     Ok(take out)
 }
 
 fn codec_revision(mut out: Bytes, take revision: Option[Bytes]) -> Result[(), Error] {
-    let Some(part) = revision else { return Error(Missing("revision")) }
+    let Some(part) = revision else {
+        return Error(Missing("revision"))
+    }
     list.append(mut out, part)
     Ok(())
 }
 
-pub fn index[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
-    by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
+pub fn index[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
     define_index(mut d, t, name, kind, by, key, None, std.codec.of_unit(), None, false)
 }
 
-pub fn covering[J, K, V, P](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
-    by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J],
-    project: StaticFn[fn(K, V) -> Result[P, Capacity]], take payload: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
+pub fn covering[J, K, V, P](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J], project: StaticFn[fn(K, V) -> Result[P, Capacity]], take payload: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
     define_index(mut d, t, name, kind, by, key, Some(project), payload, None, false)
 }
 
-pub fn covering_row[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
-    by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, V], Error] {
+pub fn covering_row[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, V], Error] {
     define_index(mut d, t, name, kind, by, key, None, t.handle.readers.codec, Some(arc.share(t.handle.readers)), true)
 }
 
-fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, kind: IndexKind,
-    by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J],
-    project: Option[StaticFn[fn(K, V) -> Result[P, Capacity]]], codec: std.codec.Codec[P],
-    take row_readers: Option[Arc[Readers[P]]], cover_row: bool) -> Result[Index[J, K, V, P], Error] {
+fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J], project: Option[StaticFn[fn(K, V) -> Result[P, Capacity]]], codec: std.codec.Codec[P], take row_readers: Option[Arc[Readers[P]]], cover_row: bool) -> Result[Index[J, K, V, P], Error] {
     active_table(d, t)?
     d.failed = true
     declaration_name(name)?
     let lookup_key = catalog_index_key(t.handle.id, name)?
-    let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1,
-        key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0,
-        by: copied(code.identity(by))?, revision: index_revision(d.versioned, by, t.handle, key, codec)?,
-        shape: Entries(kind), payload_schemas: list.new(), projection: None, state: Backfilling(None))
+    let (take revision, ends) = index_revision(d.versioned, by, t.handle, key, codec)?
+    let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision, shape: Entries(kind), payload_schemas: list.new(), projection: None, state: Backfilling(None))
     let existing = existing_index_record(d, lookup_key, name)?
     let mut extractor_project: Option[IndexProjection[K, V, P]] = None
     let mut payload_readers = take row_readers
@@ -310,12 +421,11 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
         }
         extractor_project = Some(IndexProjection(by: projection_record, codec: codec, number: number))
     }
-    let needs_rebuild = settle_index_record(mut d, lookup_key, name, take existing, mut proposed)?
+    let rebuilt_for = settle_index_record(mut d, lookup_key, name, take existing, mut proposed, ends)?
     let schema_binding = declare_binding(t.handle, proposed, kind, by, key, take extractor_project, cover_row)
-    build_declared_record(mut d, t.handle, lookup_key, name, proposed, schema_binding.index, needs_rebuild)?
+    build_declared_record(mut d, t.handle, lookup_key, name, proposed, schema_binding.index, take rebuilt_for)?
     let handle = catalog_index_handle(d.plan.roots.catalog, t.handle, proposed, take lookup_key, key, take payload_readers, codec)?
-    if let Follower = d.mode {
-    } else {
+    if let Follower = d.mode {} else {
         list.push(mut d.plan.bindings, take schema_binding)
     }
     map.insert(mut d.indexes, proposed.id, ())
@@ -326,7 +436,9 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
 // The index record a declaration names, refusing a second declaration of
 // one index.
 fn existing_index_record(d: Declare, lookup_key: Bytes, name: String) -> Result[Option[Catalog], Error] {
-    let Some(raw) = get_page_row(d.plan.roots.catalog, lookup_key) else { return Ok(None) }
+    let Some(raw) = get_page_row(d.plan.roots.catalog, lookup_key) else {
+        return Ok(None)
+    }
     let record = decode_catalog(raw)?
     if map.contains(d.indexes, record.id) {
         return Error(Exists(named(name)?))
@@ -337,27 +449,39 @@ fn existing_index_record(d: Declare, lookup_key: Bytes, name: String) -> Result[
 // Whether a declared index needs a fresh build. An unchanged record keeps
 // its id and state; a changed one is rebuilt under Migrate and refused
 // otherwise. A change of shape (Many, Unique, aggregate) is a change.
-fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take existing: Option[Catalog], mut proposed: Catalog) -> Result[bool, Error] {
+// Some(cause) when the index is built afresh, saying why.
+fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take existing: Option[Catalog], mut proposed: Catalog, ends: List[u64]) -> Result[Option[String], Error] {
     match take existing {
         None => {
-            if let Migrate = d.mode { Ok(true) } else { Error(Missing(named(name)?)) }
+            if let Migrate = d.mode {
+                Ok(Some(string.from("new index")))
+            } else {
+                Error(Missing(named(name)?))
+            }
         },
         Some(take old) => {
             let schemas_changed = old.key != proposed.key || old.payload_schemas != proposed.payload_schemas
             let code_changed = shape_byte(old.shape) != shape_byte(proposed.shape) || old.by != proposed.by || old.revision != proposed.revision || old.projection != proposed.projection
             if schemas_changed || code_changed {
                 if let Migrate = d.mode {
+                    let cause = rebuild_cause(old, proposed, ends)?
                     remove_declared_index(mut d.plan, lookup_key, old)?
-                    Ok(true)
+                    Ok(Some(take cause))
                 } else if schemas_changed {
                     Error(Schema(0))
+                } else if let Some(mut changed) = d.verifying {
+                    capacity(list.try_reserve(mut changed, 1))?
+                    list.push(mut changed, named(name)?)
+                    proposed.id = old.id
+                    proposed.state = copied_state(old.state)?
+                    Ok(None)
                 } else {
                     Error(Changed(named(name)?))
                 }
             } else {
                 proposed.id = old.id
                 proposed.state = copied_state(old.state)?
-                Ok(false)
+                Ok(None)
             }
         },
     }
@@ -366,14 +490,29 @@ fn settle_index_record(mut d: Declare, lookup_key: Bytes, name: String, take exi
 // Migrate builds a new or changed index, and finishes one left building or
 // failed by an earlier build; Open and Follower accept it, and its reads
 // refuse until it is Public.
-fn build_declared_record[K, V](mut d: Declare, t: Table[K, V], lookup_key: Bytes, name: String, proposed: Catalog, extractor: RegisteredIndex, needs_rebuild: bool) -> Result[(), Error] {
-    let migrating = if let Migrate = d.mode { true } else { false }
+fn build_declared_record[K, V](mut d: Declare, t: Table[K, V], lookup_key: Bytes, name: String, proposed: Catalog, extractor: RegisteredIndex, take rebuilt_for: Option[String]) -> Result[(), Error] {
+    let migrating = if let Migrate = d.mode {
+        true
+    } else {
+        false
+    }
+    let needs_rebuild = if let Some(_) = rebuilt_for {
+        true
+    } else {
+        false
+    }
     let resume = match proposed.state {
         Public => false,
         _ => !needs_rebuild && migrating,
     }
-    if !needs_rebuild && !resume { return Ok(()) }
-    match stage_index_build(mut d.plan, t, lookup_key, name, copied_record(proposed)?, extractor, needs_rebuild) {
+    if !needs_rebuild && !resume {
+        return Ok(())
+    }
+    let cause = match take rebuilt_for {
+        Some(take why) => take why,
+        None => string.from("unfinished build"),
+    }
+    match stage_index_build(mut d.plan, t, lookup_key, name, copied_record(proposed)?, extractor, needs_rebuild, take cause) {
         Error(Conflict(take conflict)) => {
             d.conflict = Some(clone(conflict))
             Error(Conflict(take conflict))
@@ -390,7 +529,9 @@ fn index_payload_number(mut schemas: List[Bytes], description: Bytes) -> Result[
         }
     }
     let next_number = list.len(schemas)
-    if next_number == 65535 { return Error(Limit(Value)) }
+    if next_number == 65535 {
+        return Error(Limit(Value))
+    }
     list.push(mut schemas, copied(description)?)
     Ok(int.truncate(next_number))
 }
@@ -436,7 +577,9 @@ pub fn finish[K, V](mut d: Declare, take t: TableDecl[K, V]) -> Result[Table[K, 
 }
 
 fn complete_declaration(d: Declare) -> Result[(), Error] {
-    if let Some(name) = d.conflict { return Error(Conflict(clone(name))) }
+    if let Some(name) = d.conflict {
+        return Error(Conflict(clone(name)))
+    }
     if d.failed {
         return Error(MigrationFault)
     }
@@ -455,7 +598,9 @@ fn complete_declaration(d: Declare) -> Result[(), Error] {
 
 pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
     healthy(db)?
-    if let Follower = d.mode { return Error(Foreign) }
+    if let Follower = d.mode {
+        return Error(Foreign)
+    }
     if !same_declaration_base(d.base, declaration_base(db)) {
         return Error(Foreign)
     }
@@ -473,15 +618,16 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
 }
 
 pub fn seal_follower(f: Follower, take d: Declare) -> Result[(), Error] {
-    let Follower = d.mode else { return Error(Foreign) }
+    let Follower = d.mode else {
+        return Error(Foreign)
+    }
     if !same_declaration_base(d.base, follower_base(f)) {
         return Error(Foreign)
     }
     complete_declaration(d)
 }
 
-pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take from_key: std.codec.Key[K], take from_value: std.codec.Codec[V],
-    to: String, take to_key: std.codec.Key[K2], take to_value: std.codec.Codec[V2], convert: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
+pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take from_key: std.codec.Key[K], take from_value: std.codec.Codec[V], to: String, take to_key: std.codec.Key[K2], take to_value: std.codec.Codec[V2], convert: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
     require_memory_collections(m.tiered, Migrate)?
     declaration_name(from)?
     declaration_name(to)?
@@ -511,11 +657,15 @@ pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Er
         let Some(raw) = get_page_row(m.plan.roots.catalog, old_key) else {
             return Error(Missing(named(from)?))
         }
-        if old_key == new_key { return Ok(()) }
+        if old_key == new_key {
+            return Ok(())
+        }
         if let Some(_) = get_page_row(m.plan.roots.catalog, new_key) {
             return Error(Exists(named(to)?))
         }
-        if !m.plan.retained { live_bytes -= entry(old_key, raw) }
+        if !m.plan.retained {
+            live_bytes -= entry(old_key, raw)
+        }
         copied(raw)?
     }
     let base = share_roots(m.plan.roots)

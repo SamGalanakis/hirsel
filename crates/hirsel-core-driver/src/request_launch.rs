@@ -58,11 +58,18 @@ pub(super) fn report_request_error(error: &(dyn std::error::Error + 'static)) ->
 pub(super) fn store_tool(
     invocation: crate::cli::Invocation,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
-    conclude(Outcome::Exit(if invocation.command.name == "dry-run" {
-        dry_run::run(invocation)?
-    } else {
-        store_cli::run(invocation)?
-    }))
+    let releases = matches!(invocation.command.name, "store verify" | "store repair")
+        && invocation
+            .options
+            .iter()
+            .any(|(id, _)| *id == crate::cli::OptionId::StoreRelease);
+    conclude(Outcome::Exit(
+        if invocation.command.name == "dry-run" || releases {
+            dry_run::run(invocation)?
+        } else {
+            store_cli::run(invocation)?
+        },
+    ))
 }
 
 pub(super) fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::Error>> {

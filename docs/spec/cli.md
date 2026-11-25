@@ -102,7 +102,7 @@ fixed for the session.
 | `--status` | a loop answered | — | usage | no loop |
 | `--stop` | the loop stopped | — | usage | no loop |
 
-## Store backup and restore
+## Store commands
 
 `hirsel store` commands operate on the directory of a log@1 store. They run in the
 installation's `libexec/hirsel/store_tool`, which is granted only the two directories the driver
@@ -112,12 +112,17 @@ passes it. [STORE-SPEC §15](../../core/programs/store/STORE-SPEC.md) has the fu
 |---|---|
 | `hirsel store backup DIR TARGET` | copies the store at `DIR` into the empty directory `TARGET`, which it creates if absent, at the head it leases; prints `backup <store id> head <H>` |
 | `hirsel store restore BACKUP DIR` | makes a store at the empty directory `DIR` from a backup; prints `restored <store id> head <H>` |
+| `hirsel store inspect DIR` | prints the store's identity and head, then each table and index with its state, revision, exact row count and charged bytes; a read-only open, so it reads a store that is served |
+| `hirsel store stats DIR` | the `inspect` lines, plus the journal's segments and bytes and the pack count |
+| `hirsel store verify DIR` | scrubs a copy of the store and prints each fault |
+| `hirsel store verify DIR --release EXE` | on a copy, declares the release's schema, scrubs, and checks every Public index against its table under the release's extractors; prints each changed revision, fault and wrong entry; changes nothing |
+| `hirsel store repair DIR --release EXE` | on DIR itself: demotes each index with a wrong entry and builds every index to the end; refuses while a deploy's export lease is held |
 
 A backup opens the store as its writer, so a store another process holds exits 75 and is not
 changed. A store a place serves is backed up through its host, which is not built yet. A
 restored store keeps its source's identity: restore replaces a lost store and does not clone one.
 An interrupted restore leaves a directory that no `open` accepts; remove it and run the restore
-again. Exit status: 0 done, 1 refused (the refusal is on stderr), 2 usage, 75 held.
+again. Exit status: 0 done, 1 refused (the refusal is on stderr) or, for `verify DIR`, a scrub fault, 2 usage, 75 held. The `--release` forms exit as the release does when it refuses to start (nonzero, `store verify found N problems` on stderr).
 
 ## Coverage
 

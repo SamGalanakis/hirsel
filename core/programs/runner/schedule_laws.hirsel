@@ -276,7 +276,7 @@ fn expiry_sweep_keeps_time_and_limits(random: Random) -> Result[(), store.Error]
             fail("the parity index disagrees with the swept table")
         }
     }
-    let mut walk = store.begin_verify()
+    let mut walk = store.begin_verify(Repair)
     loop {
         let report = store.verify_step(mut db, mut walk, 1024u64)?
         if list.len(report.findings) != 0u64 {

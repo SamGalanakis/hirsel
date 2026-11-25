@@ -137,14 +137,20 @@ impl LaunchOptions<'_> {
         self.install_child.is_some() || self.install_predecessor.is_some()
     }
 
-    pub(super) fn dry_run_path<'b>(
+    /// `--hirsel-dry-run DIR` (1), `--hirsel-store-verify DIR` (2) or
+    /// `--hirsel-store-repair DIR` (3): the launch word 20 value and the store
+    /// directory the run uses instead of its granted one.
+    pub(super) fn store_op_path<'b>(
         &self,
         args: &'b [Vec<u8>],
         directories: usize,
-    ) -> Result<Option<&'b Path>, StartupError> {
-        if !args.first().is_some_and(|arg| arg == b"--hirsel-dry-run") {
-            return Ok(None);
-        }
+    ) -> Result<Option<(u8, &'b Path)>, StartupError> {
+        let op = match args.first().map(Vec::as_slice) {
+            Some(b"--hirsel-dry-run") => 1,
+            Some(b"--hirsel-store-verify") => 2,
+            Some(b"--hirsel-store-repair") => 3,
+            _ => return Ok(None),
+        };
         let path = args.get(1).map(|value| Path::new(OsStr::from_bytes(value)));
         match path {
             Some(dir)
@@ -155,7 +161,7 @@ impl LaunchOptions<'_> {
                     && !self.wake
                     && !self.installing() =>
             {
-                Ok(Some(dir))
+                Ok(Some((op, dir)))
             }
             _ => Err(io::Error::from_raw_os_error(libc::EINVAL).into()),
         }

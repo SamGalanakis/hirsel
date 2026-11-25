@@ -164,8 +164,14 @@ async function poll(p, test, ms, what) {
   throw new Error(`${p.name}: ${what}; last stats ${JSON.stringify(last)}`);
 }
 
+// The inbound bytes on the section subscription `id` filled. After its publisher departs
+// the page drops the subscription (RTC-8 Departures), so the section is the one `pair`
+// noted when it subscribed.
 async function bytesOf(p, id) {
-  const i = inboundOf(await p.stats(), id);
+  const s = await p.stats();
+  const mid = s.subs.find(x => x.id === String(id))?.mid ?? p.mids?.get(String(id));
+  assert(mid != null, `no subscription ${id}`);
+  const i = s.inbound.find(x => x.mid === mid);
   return i ? i.bytes : 0;
 }
 
@@ -201,6 +207,7 @@ async function pair(kinds, relay) {
     for (const p of pubs) await x.subscribe(p.id, p.kind === 0 ? 'audio' : 'video', 2);
     x.pubs = pubs;
     x.peer = y;
+    x.mids = new Map((await x.stats()).subs.map(u => [u.id, u.mid]));
   }
   return [a, b];
 }

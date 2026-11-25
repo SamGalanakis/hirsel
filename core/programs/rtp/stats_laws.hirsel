@@ -155,23 +155,23 @@ fn reception_report() -> Result[(), ()] {
     Ok(())
 }
 
-/// bug: Send more than one keyframe request per interval, send a FIR for picture loss, renumber a FIR repeat, or keep the old interval after set_interval.
-/// oracle: RFC 5104 sections 4.3.1.1 and 4.3.1.2, by hand.
+/// bug: Send more than one keyframe request per interval, send a FIR for picture loss, repeat a FIR at the number already sent (libwebrtc answers a number once, so a switch whose keyframe was lost never lands), or keep the old interval after set_interval.
+/// oracle: RFC 5104 section 4.3.1.2 (no FIR for picture loss) and libwebrtc's RTCPReceiver::HandleFir (a FIR repeating the last number from the same sender is ignored), by hand: one request per interval, numbered 0, 1, 2, 3 in the order sent.
 @test
 fn keyframe_coalesce() -> Result[(), ()] {
     let mut k = loss.keyframes(true, 200 * MS)
     if loss.want(mut k, Switch, 0) != Some(Fir(0)) || loss.want(mut k, Switch, 10 * MS) != None || loss.want(mut k, Switch, 50 * MS) != None {
         fail("burst inside the interval")
     }
-    if loss.want(mut k, Switch, 210 * MS) != Some(Fir(0)) {
+    if loss.want(mut k, Switch, 210 * MS) != Some(Fir(1)) {
         fail("FIR repeat")
     }
     loss.set_interval(mut k, 100 * MS)
-    if loss.want(mut k, Switch, 300 * MS) != None || loss.want(mut k, Switch, 310 * MS) != Some(Fir(0)) {
+    if loss.want(mut k, Switch, 300 * MS) != None || loss.want(mut k, Switch, 310 * MS) != Some(Fir(2)) {
         fail("repeat after set_interval")
     }
     loss.keyframe_seen(mut k)
-    if loss.want(mut k, Switch, 320 * MS) != Some(Fir(1)) {
+    if loss.want(mut k, Switch, 320 * MS) != Some(Fir(3)) {
         fail("new FIR")
     }
     loss.keyframe_seen(mut k)

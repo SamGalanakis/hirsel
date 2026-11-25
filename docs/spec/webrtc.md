@@ -1059,8 +1059,10 @@ A PLI is sent only when the publisher negotiated `nack pli` for that payload typ
 was not negotiated, the down-track waits for the next independent frame and counts the wait.
 The throttle interval is `max(100 ms, rtt)`, where `rtt` is the publisher session's round-trip
 estimate. When the estimate moves by more than a quarter, the router updates the interval **in place** on the
-same `Keyframes`, keeping its outstanding request and its FIR command sequence number
-(RFC 5104 §4.3.1.1). It never makes a new one. `Keyframes` coalesces, so N subscribers asking
+same `Keyframes`, keeping its outstanding request. It never makes a new one. Every FIR
+sent, a repeat too, takes the next command sequence number (RTP-6): Chromium answers a
+number once, so a repeat at the old number after a lost keyframe would hold a layer switch
+forever (N1, 2779). `Keyframes` coalesces, so N subscribers asking
 at once cost one request. The router calls `keyframe_seen` at each keyframe it reads.
 
 **Publisher pause (dynacast).** For each publication, each unit computes its **local
@@ -2154,8 +2156,8 @@ W12 and W13 in `speaker_laws.hirsel`):
   generation, the ingress plaintext handle and the original output rewrite (sequence number,
   timestamp, marker, payload type, MID, extension IDs, codec counters). The history is gated
   at each source switch (RTC-4).
-- RTP-6's `Keyframes`: an in-place interval update that keeps the outstanding request and
-  the FIR command sequence number (RTC-6).
+- RTP-6's `Keyframes`: an in-place interval update that keeps the outstanding request
+  (RTC-6).
 
 ## Prior art
 

@@ -646,12 +646,17 @@ whether the upstream peer negotiated `ccm fir`.
   already outstanding and `interval_ns` has not passed since it was sent. An outstanding
   request of either kind covers a new `want` of either kind, because one keyframe answers
   both.
-- A FIR request is **new** when no FIR is outstanding: it takes the next command sequence
-  number, mod 256. A **repeat**, sent when `interval_ns` passed with the request still
-  outstanding, carries the same number, as RFC 5104 §4.3.1.1 requires.
+- Every FIR sent takes the next command sequence number, mod 256, a **repeat** (sent when
+  `interval_ns` passed with the request still outstanding) as well as a new request.
+  RFC 5104 §4.3.1.1 keeps a repeat's number, but a FIR sender cannot tell a lost FIR from a
+  lost or unseen keyframe, and libwebrtc's `RTCPReceiver::HandleFir` ignores a FIR that
+  repeats the last number from the same sender: a repeat at the old number after a lost
+  keyframe is never answered, and the layer switch it asks for never lands (N1, 2779:
+  Chromium's q encoding counted 217 FIRs and 4 keyframes in 30 s). libwebrtc, mediasoup and
+  pion number every FIR they send; so does `Keyframes`.
 - `set_interval` changes the interval in place, as the caller's round-trip estimate moves.
-  The outstanding request and its FIR command sequence number are kept, and the next repeat
-  is due at the last send plus the new interval.
+  The outstanding request is kept, and the next repeat is due at the last send plus the new
+  interval.
 - `keyframe_seen` ends the outstanding request. The next `want` is new and goes at once.
 
 The caller detects keyframes with `media_bits` and tells `Keyframes`. Which subscribers
@@ -660,7 +665,7 @@ asked, and whether they may ask, is the caller's.
 Law: NACK pairs cover exactly the missing indices that are due, each in the fewest pairs a
 left-to-right packing gives, and an output that is too short loses no retry state. A burst
 of `want` calls inside one interval yields one upstream request. Picture loss never sends a
-FIR, and the FIR sequence number changes only for a new request.
+FIR, and no two FIRs sent carry the same sequence number until it wraps.
 
 ## RTP-7: Retransmission history and RTX
 

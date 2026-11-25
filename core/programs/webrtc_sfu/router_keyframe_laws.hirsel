@@ -139,11 +139,12 @@ fn only_key(mut c: Client, out: peer.Outbox, ssrc: u32, take what: String) {
 }
 
 /// bug: send one PLI per waiting down-track or per loss, ask a publisher for feedback
-/// it never negotiated, give a FIR retry a new sequence number or the next request
-/// the old one, or keep a stale request interval after the round trip moves.
+/// it never negotiated, give a FIR retry or the next request a number already sent, or
+/// keep a stale request interval after the round trip moves.
 /// oracle: W10 and RTC-6 by hand: one `Keyframes` per publication encoding, PLI only
 /// with `nack pli` and FIR only with `ccm fir` (RFC 4585 section 6.3.1, RFC 5104
-/// sections 3.5.1 and 4.3.1.1), retries no sooner than `max(100 ms, rtt)`. The RR's
+/// section 3.5.1), every FIR numbered after the last (libwebrtc's HandleFir ignores a
+/// repeated number: 0, 1, 2), retries no sooner than `max(100 ms, rtt)`. The RR's
 /// LSR is 13,108/65,536 s before the middle of NTP 1 s, so the round trip is 200.012 ms.
 @test
 fn keyframe_request_coalesces_across_subscribers() -> Result[(), router.RouterError] {
@@ -260,8 +261,8 @@ fn keyframe_request_coalesces_across_subscribers() -> Result[(), router.RouterEr
     now = 1210 * MS
     send_one(mut r, now, mut p2, SOLO_SSRC, b"t", 3, vp8_delta(), mut out)
     let f1 = asked(mut p2, out, SOLO_SSRC)
-    if list.len(f1.firs) != 1 || f1.firs[0] != 0 {
-        fail("the FIR retry does not repeat sequence number 0")
+    if list.len(f1.firs) != 1 || f1.firs[0] != 1 {
+        fail("the FIR retry does not take the next sequence number, 1")
     }
     peer.clear_outbox(mut out)
     now = 1220 * MS
@@ -271,7 +272,7 @@ fn keyframe_request_coalesces_across_subscribers() -> Result[(), router.RouterEr
     result.unwrap(router.set_target(mut r, room, s1.who, pt, Off, now, mut out))
     result.unwrap(router.set_target(mut r, room, s1.who, pt, low, now, mut out))
     let f2 = asked(mut p2, out, SOLO_SSRC)
-    if list.len(f2.firs) != 1 || f2.firs[0] != 1 {
+    if list.len(f2.firs) != 1 || f2.firs[0] != 2 {
         fail("a request after the keyframe does not carry the next FIR number")
     }
     peer.clear_outbox(mut out)

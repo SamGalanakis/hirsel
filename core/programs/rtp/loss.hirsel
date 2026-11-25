@@ -35,9 +35,7 @@ pub opaque type Keyframes {
     fir: bool,
     interval_ns: u64,
     outstanding: bool,
-    fir_outstanding: bool,
     sent_at: u64,
-    seq: u8,
     next_seq: u8
 }
 
@@ -176,7 +174,7 @@ pub fn due(mut l: Losses, now_ns: u64, rtt_ns: Option[u64], max: u32, mut pairs:
 }
 
 pub fn keyframes(fir: bool, interval_ns: u64) -> Keyframes {
-    Keyframes(fir: fir, interval_ns: interval_ns, outstanding: false, fir_outstanding: false, sent_at: 0, seq: 0, next_seq: 0)
+    Keyframes(fir: fir, interval_ns: interval_ns, outstanding: false, sent_at: 0, next_seq: 0)
 }
 
 pub fn want(mut k: Keyframes, why: Why, now_ns: u64) -> Option[Request] {
@@ -189,12 +187,12 @@ pub fn want(mut k: Keyframes, why: Why, now_ns: u64) -> Option[Request] {
     if why == Loss || !k.fir {
         return Some(Pli)
     }
-    if !k.fir_outstanding {
-        k.seq = k.next_seq
-        k.next_seq = int.wrapping_add(k.next_seq, 1u8)
-        k.fir_outstanding = true
-    }
-    Some(Fir(k.seq))
+    // Every FIR sent takes the next command sequence number, a repeat too: a sender
+    // ignores a FIR whose number it already answered, so a repeat at the old number
+    // after a lost keyframe would never be answered (libwebrtc RTCPReceiver::HandleFir).
+    let seq = k.next_seq
+    k.next_seq = int.wrapping_add(k.next_seq, 1u8)
+    Some(Fir(seq))
 }
 
 pub fn set_interval(mut k: Keyframes, interval_ns: u64) {
@@ -203,5 +201,4 @@ pub fn set_interval(mut k: Keyframes, interval_ns: u64) {
 
 pub fn keyframe_seen(mut k: Keyframes) {
     k.outstanding = false
-    k.fir_outstanding = false
 }

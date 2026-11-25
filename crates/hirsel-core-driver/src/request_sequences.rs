@@ -307,6 +307,7 @@ fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) ->
             "diagnostics": product.diagnostics_for(reach.diagnostics.iter().copied()).unwrap(),
             "incomplete": product.incomplete_for(reach.incomplete.iter().copied()).unwrap(),
             "resources": product.resources_for(reach.resources.iter()).unwrap(),
+            "instances": reach.instances.as_ref().err().map(ToString::to_string),
         });
         if !reach.accepted() {
             return serde_json::json!({ "refused": refused });
@@ -464,15 +465,13 @@ fn run_sequence(
             req,
             inputs.clone(),
             dir.path().join("resident"),
-            options("resident", req),
-                    );
+            options("resident", req));
         let disk_answer = request(
             &mut Driver::default(),
             req,
             inputs.clone(),
             dir.path().join("disk"),
-            options("disk", req),
-                    );
+            options("disk", req));
         // The two stores saw the same requests, so a record one shape keys
         // holds the same bytes in both: its name is not its content's hash,
         // and nothing else would tell two writers' records apart.
@@ -2190,6 +2189,7 @@ fn request_sequences_build_as_an_empty_store() {
         .collect();
     run_sequences(natives, Some(Backend::Cranelift), &[]);
 }
+include!("source_std_native.rs");
 
 // The process leg (S3; STEP-C 2.1 replay law). A request is the `hirsel`
 // executable's: a child of this test binary runs `crate::request::main` with

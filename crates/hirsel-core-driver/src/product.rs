@@ -265,8 +265,8 @@ impl Driver {
         self.check_package_product(request, root, meter, (true, ProductLibraries::Core), None)?
             .product()
     }
-    /// Check over the selected library product. A source tree's core and std
-    /// share one image so core templates see std's codec declarations.
+    /// Check over the selected library product. Core and a std checked from
+    /// source share one image so core templates see std's codec declarations.
     pub(crate) fn check_package_product(
         &mut self,
         mut request: CheckRequest,
@@ -302,16 +302,16 @@ impl Driver {
         } else {
             None
         };
-        let image_has_std = standard.is_some() || source_tree;
+        // std from source shares core's image, so core templates see std's codec hooks.
+        let source_std = std.filter(|_| standard.is_none());
+        let image_has_std = standard.is_some() || source_std.is_some();
         let product = if let Some(texts) = standard {
             PackageProduct::bundled_libraries(root, meter, Some(&texts))?
-        } else if is_bundled {
+        } else if is_bundled && source_std.is_none() {
             PackageProduct::bundled(root, meter)?
         } else {
             let mut packages = vec![core.clone()];
-            if let Some(std) = std.filter(|_| source_tree) {
-                packages.push(std.clone());
-            }
+            packages.extend(source_std.cloned());
             let inputs = CorpusManifest {
                 core: request.inputs.core.clone(),
                 packages,

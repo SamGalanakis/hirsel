@@ -1,5 +1,6 @@
-//! A granted capability that crosses units inside an item (docs/recording.md,
-//! "Handle snapshots", unit tapes U3). Its grant is read from the cell that
+//! A granted or narrowed capability that crosses units inside a value: an
+//! item, a helper's entry or its result (docs/recording.md, "Handle
+//! snapshots", unit tapes U3). Its grant is read from the cell that
 //! recorded it before any cell is locked, since the sending or receiving
 //! unit's own cell is locked while the item's value is written. Where it
 //! arrives it takes a new object ordinal and the receiving unit's registry
@@ -24,14 +25,15 @@ struct Grant {
     exec: Option<Arc<ExecRules>>,
 }
 
-const UNGRANTED: &str = "an item holds a capability not granted through the recording";
+const UNGRANTED: &str = "a value holds a capability not granted through the recording";
 const VIRTUAL: &str =
-    "an item holds a capability of virtual construction, whose snapshot this build does not write";
+    "a value holds a capability of virtual construction, whose snapshot this build does not write";
 const NARROWED: &str =
-    "an item holds a narrowed capability, whose snapshot this build does not write";
+    "a value holds a narrowed Exec capability, whose profile snapshot this build does not write";
 const KIND: &str =
-    "an item holds a Net, Env or Cred capability, whose snapshot this build does not write";
-const UNRESOLVED: &str = "an item holds a capability the recording did not resolve";
+    "a value holds an Env or Cred capability, whose snapshot this build does not write";
+const NET_RULES: &str = "a value holds a Net capability whose rules a snapshot cannot hold";
+const UNRESOLVED: &str = "a value holds a capability the recording did not resolve";
 
 /// Each of `words`, resolved through `registry`: the unit's own designation,
 /// or the run's.
@@ -63,15 +65,34 @@ fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
         .ok_or(UNGRANTED)?;
     let o = ordinal_of(h);
     let (kind, stored) = live.grants.get(&o).cloned().ok_or(NARROWED)?;
-    if !matches!(kind, 0 | 2..=6 | 8 | 13) {
-        return Err(KIND);
-    }
+    let inner = live.objects[o - 1].inner;
+    let stored = match kind {
+        0 | 2..=6 | 8 | 13 => stored,
+        // A Net's rules, granted or narrowed, are its source's handle.
+        1 => net_rules(inner.ok_or(NET_RULES)?.handle)?,
+        _ => return Err(KIND),
+    };
     Ok(Grant {
         kind,
         stored,
-        inner: live.objects[o - 1].inner,
+        inner,
         exec: live.exec_rules.get(&o).cloned(),
     })
+}
+
+/// A Net's rules as its snapshot holds them: the rule count, then each rule
+/// as the header's grant snapshot writes it.
+fn net_rules(rules: u64) -> Result<Vec<u8>, &'static str> {
+    // SAFETY: a recorded Net's source handle is its run-pinned rule list,
+    // whose rows the run keeps live.
+    let rules: Option<Vec<_>> = unsafe {
+        (*(rules as *const crate::net::Rules))
+            .as_slice()
+            .iter()
+            .map(|r| r.decode())
+            .collect()
+    };
+    format::net_snapshot(&rules.ok_or(NET_RULES)?).map_err(|_| NET_RULES)
 }
 
 /// A capability snapshot: tag 5, `ordinal`, then the kind and its stored
@@ -91,14 +112,14 @@ fn find(grants: &[Granted], word: u64) -> Result<&Grant, &'static str> {
 }
 
 /// A sent capability's snapshot; the canonical form leaves its ordinal out.
-pub(super) fn sent(grants: &[Granted], word: u64) -> Result<Vec<u8>, &'static str> {
+pub(in crate::tape) fn sent(grants: &[Granted], word: u64) -> Result<Vec<u8>, &'static str> {
     find(grants, word).map(|g| snapshot(0, g))
 }
 
 /// An arriving capability: a new object ordinal in the receiving unit, its
 /// snapshot, and its word's designation there, applied once the whole item
 /// is written.
-pub(super) fn arrived(
+pub(in crate::tape) fn arrived(
     live: &mut Live,
     generation: u32,
     grants: &[Granted],
@@ -122,7 +143,11 @@ pub(super) fn arrived(
 /// Designate each arrived word on the receiving unit's cell. A word that
 /// arrives again is designated anew: the latest arrival's ordinal is the
 /// one its later operations use.
-pub(super) fn designate(group: Group, registry: &mut Registry, designations: &[(u64, u64)]) {
+pub(in crate::tape) fn designate(
+    group: Group,
+    registry: &mut Registry,
+    designations: &[(u64, u64)],
+) {
     for &(word, h) in designations {
         registry.designate_in_unit(word, &group.cell.provider, h);
     }

@@ -329,19 +329,18 @@ pub(crate) unsafe fn item_words(
     item: *const u8,
     content: Option<*const u8>,
 ) -> Vec<u64> {
-    let mut words = Vec::new();
-    if let Some(layout) = layout(conn) {
-        let mut handle = |kind, word| {
-            if kind == CAPABILITY {
-                words.push(word);
-            }
-            Ok(Vec::new())
-        };
-        // SAFETY: by the contract. A value that cannot be written is cut
-        // where it is written, so its error here is not this walk's.
-        let _ = unsafe { item_value(&layout, item, content, &mut handle) };
-    }
-    words
+    let Some((bytes, owners)) = layout(conn) else {
+        return Vec::new();
+    };
+    let x = Cross {
+        bytes,
+        owners: owners.as_ptr(),
+        count: owners.len() as u64,
+        at: 0,
+        len: bytes,
+    };
+    // SAFETY: by the contract.
+    unsafe { helper::capability_words(item, &x, content) }
 }
 
 /// A send's item as a value, from the sender's live item; with the client's

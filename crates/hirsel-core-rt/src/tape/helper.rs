@@ -172,13 +172,17 @@ pub(crate) unsafe fn spawn(
     let spawner = crate::tasks::current_group()?;
     // Resolve each capability word before any cell is locked: the registry's
     // resolution may itself reach the spawner's cell.
-    let resolved: Vec<_> = x
-        .owners()
+    // The wrapped input's first row is `f`'s, outside `x`'s span.
+    let held = Cross {
+        owners: x.owners()[1.min(x.owners().len())..].as_ptr(),
+        count: x.count.saturating_sub(1),
+        ..*x
+    };
+    // SAFETY: the input is initialized as `x` describes it.
+    let words = unsafe { capability_words(input, &held, None) };
+    let resolved: Vec<_> = words
         .iter()
-        .filter(|o| o[1] == CAPABILITY)
-        .map(|o| {
-            // SAFETY: an owner row names an initialized word of the input.
-            let word = unsafe { input.add(o[0] as usize).cast::<u64>().read_unaligned() };
+        .map(|&word| {
             // SAFETY: the spawner's context resolves its own capability words.
             unsafe {
                 (
@@ -189,6 +193,14 @@ pub(crate) unsafe fn spawn(
             }
         })
         .collect();
+    // SAFETY: the spawner's context and its host files are live.
+    let files = unsafe { (*context).host_files };
+    let granted = if words.is_empty() || files.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: as above.
+        units::item_grants::resolve(unsafe { &(*files).registry }, &words)
+    };
     let cell = cell();
     let mut fresh = cell.state.lock().unwrap();
     let generation = fresh
@@ -251,43 +263,7 @@ pub(crate) unsafe fn spawn(
                 live.takes.nodes.insert(word as usize, ordinal);
                 return units::shared_snapshot(word, ordinal);
             }
-            let &(_, provider, h) = resolved.iter().find(|r| r.0 == word).unwrap();
-            // A grant's provider is a copy of its cell's; the cell's state
-            // pointer names the cell.
-            // A resolved provider points at a live Provider (the enclosing
-            // block's safety).
-            let provider = &*provider;
-            if !dispatch::owns(provider)
-                || provider.state != spawner.cell.provider.state
-                || generation_of(h) != spawner.generation
-            {
-                return Err("the entry holds a capability not granted through the recording");
-            }
-            let o = ordinal_of(h);
-            let Some((kind, stored)) = parent.grants.get(&o).cloned() else {
-                return Err(
-                    "the entry holds a narrowed capability, which a snapshot writes from U3",
-                );
-            };
-            if !matches!(kind, 0 | 2..=6 | 8 | 13) {
-                return Err("the entry holds a capability whose snapshot is written from U3");
-            }
-            live.objects.push(Object {
-                inner: parent.objects[o - 1].inner,
-                open_resource: false,
-            });
-            let ordinal = live.objects.len();
-            if let Some(rules) = parent.exec_rules.get(&o) {
-                live.exec_rules.insert(ordinal, rules.clone());
-            }
-            live.grants.insert(ordinal, (kind, stored.clone()));
-            grants.push((word, handle(generation, ordinal)));
-            let mut snapshot = vec![5];
-            put_varint(&mut snapshot, ordinal as u64);
-            snapshot.push(kind);
-            put_varint(&mut snapshot, stored.len() as u64);
-            snapshot.extend_from_slice(&stored);
-            Ok(snapshot)
+            units::item_grants::arrived(&mut live, generation, &granted, word, &mut grants)
         })
     };
     drop(state);
@@ -415,6 +391,28 @@ unsafe fn entry(
 }
 
 const HANDLE: &str = "the value holds a socket handle, whose snapshot this build does not write";
+
+/// The capability words of a value, in the order it holds them, nested ones
+/// included: what `item_grants::resolve` reads before any cell is locked.
+/// # Safety
+/// As for `value`.
+pub(super) unsafe fn capability_words(
+    base: *const u8,
+    x: &Cross,
+    content: Option<*const u8>,
+) -> Vec<u64> {
+    let mut words = Vec::new();
+    let mut collect = |kind, word| {
+        if kind == CAPABILITY {
+            words.push(word);
+        }
+        Ok(Vec::new())
+    };
+    // SAFETY: forwarded. A value that cannot be written is cut where it is
+    // written, so its error here is not this walk's.
+    let _ = unsafe { value(base, x, content, &mut collect) };
+    words
+}
 const NO_IDENTITY: &str = "the entry's function has no code identity (a closure)";
 
 /// A value that crosses units: its plain bytes with each owner word zeroed,

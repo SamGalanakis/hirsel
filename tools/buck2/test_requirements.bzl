@@ -89,6 +89,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::rl9_shared_survives_its_helper",
         "native::tests::rl9_waiting_send_is_accepted",
         "native::tests::rl9_capability_crosses_in_an_item",
+        "native::tests::rl9_net_crosses_in_an_item_and_an_entry",
         "native::tests::test_replay_flag_records_and_replays",
         "native::tests::package_cred_grants_are_per_test_and_replay_uses_the_tape",
         "native::tests::served_scram_replays_with_the_same_send_calls",

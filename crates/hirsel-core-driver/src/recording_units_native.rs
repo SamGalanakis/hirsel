@@ -526,6 +526,19 @@ fn rl9_record_with(
     printed: &str,
     grants: &[&str],
 ) -> PathBuf {
+    rl9_record_net(source, dir, name, backend, printed, grants, &[])
+}
+
+/// `rl9_record_with`, the run's Net granted `net_rules`.
+fn rl9_record_net(
+    source: &str,
+    dir: &Path,
+    name: &str,
+    backend: Backend,
+    printed: &str,
+    grants: &[&str],
+    net_rules: &[&str],
+) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut request = source_request(source, dir);
     request.inputs.packages[1] =
@@ -541,6 +554,10 @@ fn rl9_record_with(
     options.grant_mask = grants
         .iter()
         .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
+    options.net_rules = net_rules
+        .iter()
+        .map(|r| hirsel_core_net::GrantRule::parse(r).unwrap())
+        .collect();
     options.output = dir.join(format!("{name}-{backend:?}"));
     let program = product.build(&entry, &options).unwrap().executable;
     let path = dir.join(format!("{name}-{backend:?}.tape"));
@@ -883,3 +900,5 @@ fn rl9_capability_crosses_in_an_item() {
 
 // RL8 natively, the ordering seam (feature `testing`).
 include!("recording_rl8_native.rs");
+// Handle snapshots that cross in items, entries and results.
+include!("recording_handles_native.rs");

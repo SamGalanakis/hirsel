@@ -139,6 +139,16 @@ fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
         return Ok(vec![]);
     }
     let mut out = vec![NET_KIND];
+    out.extend(net_snapshot(rules)?);
+    Ok(out)
+}
+
+/// A `Net` capability's rules as the header's grant snapshot writes them
+/// after the `Net` kind byte: the rule count, then each rule. A capability
+/// snapshot (docs/recording.md, "Snapshots", tag 5) holds these bytes, and
+/// there a narrowing may leave no rule.
+pub fn net_snapshot(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
+    let mut out = Vec::new();
     put_varint(&mut out, rules.len() as u64);
     for rule in rules {
         match rule {

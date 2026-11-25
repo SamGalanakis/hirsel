@@ -209,6 +209,11 @@ impl Hooks for TapeHooks {
         if inner.is_none() {
             live.replay_net_rules.insert(ordinal, rules);
         }
+        if live.mode == super::Mode::Record {
+            // A narrowed Net is a Net grant of its own: a value that carries
+            // it snapshots its rules (docs/recording.md, "Snapshots").
+            live.grants.insert(ordinal, (crate::entry::NET, Vec::new()));
+        }
         live.objects.push(Object {
             inner,
             open_resource: false,

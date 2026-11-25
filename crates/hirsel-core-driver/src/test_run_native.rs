@@ -2485,7 +2485,7 @@ fn sqlite_directory_recovery_locking_and_sync() {
     let manifest = fs::read_to_string(fixture.join("hirsel.toml")).unwrap()
         .replace("\"native.hirsel\" = \"native\"", "\"native.hirsel\" = \"native\"\n\"boundary.hirsel\" = \"boundary\"");
     law.write("core/programs/sqlite/hirsel.toml", manifest);
-    for file in ["sqlite.hirsel", "native.hirsel", "libhirsel_sqlite.a", "tests.hirsel"] {
+    for file in ["sqlite.hirsel", "native.hirsel", "libhirsel_sqlite.a", "tests.hirsel", "error_buffer_test.hirsel", "example.hirsel"] {
         law.write(&format!("core/programs/sqlite/{file}"), fs::read(fixture.join(file)).unwrap());
     }
     law.write("core/programs/sqlite/boundary.hirsel", r#"
@@ -2882,9 +2882,9 @@ __attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
     // The non-foreign control runs last, so the refusal rows above run even when it fails.
     for engine in ["cranelift", "llvm"] {
         let _ = (fs::remove_file(law.path("image")), fs::remove_dir_all(law.path("image")));
-        let (_, _, pure_error) = invoke("build", engine, &["--target", ARM, "--entry", "ffi_laws@1/main/pure"]);
+        let (pure_status, pure_output, pure_error) = invoke("build", engine, &["--target", ARM, "--entry", "ffi_laws@1/main/pure"]);
         assert!(!pure_error.contains("FFI-3"), "{pure_error}");
-        assert!(called.exists(), "the non-foreign control reached the linker");
+        assert!(called.exists(), "the non-foreign control did not reach the linker: {engine} {pure_status:?}\n{pure_output}\n{pure_error}");
         fs::remove_file(&called).unwrap();
     }
 }

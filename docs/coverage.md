@@ -700,6 +700,11 @@ Seed 0 runs at preparation under `hirsel test` and is not in the campaign's prof
   unit too), before binding, and carries them beside the unit by symbol and definition.
   Binding keeps the canonical block order but drops the anchor of a decision whose place has
   no source position, so a rebound body takes its decisions by block, not from its anchors.
+  A body finds its unit from the first anchor that names one. A `core` body has no anchors
+  after binding, because its failure sites are its caller's and its items have no native
+  source positions. It takes the decisions of the unit its own instance roots, since a unit is
+  carried by the symbol of its root's identity and every code variant of that root keeps the
+  instance (`engines_agree_on_core_leaves`, run in the prog4 LLVM test).
   The returnable rewrite (`returnable::apply`) runs after binding and rebuilds each variant
   and root it makes with blocks of its own: a new block 0 for the dispatch, the source entry
   moved, and the block that holds a wait split into call, resume, check, park and continuation
@@ -748,6 +753,12 @@ its run on LLVM debug and on LLVM release is reached exactly when it is on Crane
 Known arms' keys and places hold on all three. `core/tools/std_native.py --engines-agree`
 runs the same comparison over every determined corpus case (no tasks, clock, network, exec,
 Unix or granted calls, no argv or schedule); it reads the profile's `sites` rows, so it
-follows the C4 profile format.
+follows the C4 profile format. It leaves out the sites whose reach depends on the map hash
+seed, which the runtime draws per process: the arms of `core.map`'s bucket walks (`probe`,
+`vacancy`, `reprobe_crowded`), which decide on group bits and 7-bit tags placed by the
+seeded hash, and every site of `more_groups`, which a walk calls only past a group with no
+empty lane. The walks' entries are compared. The sites of the `Crowded` path (`probe_staged`
+and `put_absent` arms, `commit_crowded` and `promote`) also depend on the seed, but only
+when eight groups are full; they stay compared, and a red there names this rule.
 A red in any of them blocks a landing, since it means the coverage build is a different
 build.

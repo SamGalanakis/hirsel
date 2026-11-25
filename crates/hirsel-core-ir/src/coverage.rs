@@ -164,7 +164,26 @@ fn in_scope_of(module: &Module, function: FuncId, scope: &Scope) -> bool {
     let definition = &module.instances[row.instance.index()].definition;
     scope.contains(&definition.0.package)
         && (body.blocks.iter().any(|b| b.anchor.is_some())
-            || body.inst_anchors.iter().any(Option::is_some))
+            || body.inst_anchors.iter().any(Option::is_some)
+            || rooted_unit(module, function).is_some())
+}
+
+/// The unit a bound body with no anchors roots, when `coverage_rebound`
+/// holds that unit's decisions of its definition. Binding gives a core@1 body
+/// no anchors (its failure sites are its caller's, so its items have no
+/// native source positions), but its unit is keyed by its own instance's
+/// symbol, which every code variant of the root keeps.
+fn rooted_unit(module: &Module, function: FuncId) -> Option<String> {
+    let rebound = module.coverage_rebound.as_deref()?;
+    let row = &module.functions[function.index()];
+    let symbol = module.identity(row.instance).symbol();
+    let definition = module.instances[row.instance.index()]
+        .definition
+        .to_string();
+    rebound
+        .get(&symbol)?
+        .contains_key(&definition)
+        .then_some(symbol)
 }
 
 /// `function`'s sites, or none when the module does not flag it
@@ -268,7 +287,10 @@ fn sites_of(module: &Module, function: FuncId, scope: &Scope) -> Result<Option<S
         row: None,
     }];
     let mut decisions = vec![None; body.blocks.len()];
-    if let Some(symbol) = rebound_unit(module, body) {
+    let unit = rebound_unit(module, body)
+        .map(str::to_owned)
+        .or_else(|| rooted_unit(module, function));
+    if let Some(symbol) = unit.as_deref() {
         let definition = module.instances[row.instance.index()]
             .definition
             .to_string();

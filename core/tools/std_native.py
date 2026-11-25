@@ -515,10 +515,24 @@ def determined(case):
             and not any(word in case.call for word in ('tasks', 'clock', '(https)', '(exec', '(unix', '(granted')))
 
 
+# The bodies whose arms decide on the bucket index of a Map. A map places each
+# key by `hash`, `place` or `strong`, which the runtime keys per process from
+# getrandom (`map_hash_key`), so which groups a walk visits, whether a group
+# has a match or an empty lane, and whether a 7-bit tag match is the key are
+# not functions of the program. Their entries are still compared, except
+# more_groups', which a walk calls only past a group with no empty lane. The
+# Crowded path (probe_staged and put_absent arms, commit_crowded, promote)
+# depends on the seed only when eight groups are full, and stays compared.
+SEEDED_ARMS = ('core@1/map/probe@', 'core@1/map/vacancy@', 'core@1/map/reprobe_crowded@', 'core@1/map/more_groups@',
+               'core@1/map/more_groups#e')
+
+
 def reached_sites(profile_path):
-    """Each site key of a written coverage profile, with whether a run reached it."""
+    """Each site key of a written coverage profile, with whether a run reached
+    it, less the arms whose reach depends on the map hash seed."""
     profile = json.loads(profile_path.read_text())
-    return {row['site']: bool(row['passed_runs'] or row['failed_runs']) for row in profile['sites']}
+    return {row['site']: bool(row['passed_runs'] or row['failed_runs']) for row in profile['sites']
+            if not row['site'].startswith(SEEDED_ARMS)}
 
 
 def engines_agree(agree, rows, output):

@@ -60,3 +60,52 @@ fn engines_agree_across_waits() {
     assert_eq!(coverage_across_waits(Backend::Llvm, false), cranelift);
     assert_eq!(coverage_across_waits(Backend::Llvm, true), cranelift);
 }
+
+const CORE_LEAVES: &str = r#"
+@test
+fn leaves() -> Result[(), ()] {
+    let s = string.slice("hex 7f", 4u64, 6u64)
+    let b = string.as_bytes(s)
+    let mut m: Map[u64, u64] = map.new()
+    map.insert(mut m, 5u64, string.byte_len(s))
+    match (int.ascii_digit(b[0], 16u32), map.get(m, 5u64)) {
+        (Some(d), Some(n)) => if d == 7u8 && n == 2u64 { Ok(()) } else { Error(()) },
+        _ => Error(()),
+    }
+}
+"#;
+
+/// The reached sites of `app` and `core` for CORE_LEAVES, which calls two
+/// small plain core bodies, `int.ascii_digit` and `string.slice`, and the
+/// generic `map.insert` and `map.get` of one key.
+fn core_leaves_coverage(backend: Backend, optimize: bool) -> BTreeMap<String, bool> {
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default().check(prog4_request(CORE_LEAVES, dir.path()), &mut Meter::new(false)).unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    let test = DefPath::from_full("app@1/main/leaves").unwrap();
+    let options = NativeOptions { optimize, coverage: Some([package("app"), package("core")].into()), ..native_options(backend, dir.path()) };
+    let outcome = product.run_test(&test, &options).unwrap_or_else(|stop| panic!("{backend:?} {optimize}: {stop}"));
+    assert!(outcome.passed(), "{outcome:?}");
+    coverage_reached(&outcome.coverage)
+}
+
+/// Engines agree on plain core bodies: LLVM release keeps every site of
+/// `core@1/int/ascii_digit` and `core@1/string/slice`, and reaches the
+/// sites Cranelift reaches.
+fn engines_agree_on_core_leaves() {
+    let cranelift = core_leaves_coverage(Backend::Cranelift, false);
+    for key in ["core@1/int/ascii_digit#e", "core@1/string/slice#e", "core@1/map/get#e"] {
+        assert_eq!(cranelift.get(key), Some(&true), "{key}");
+    }
+    let release = core_leaves_coverage(Backend::Llvm, true);
+    let differ: Vec<_> = cranelift.keys().chain(release.keys()).filter(|k| cranelift.get(*k) != release.get(*k)).collect();
+    assert!(differ.is_empty(), "LLVM release differs from Cranelift at {differ:?}");
+}
+
+
+/// The Engines agree laws of release units: across returnable waits and on
+/// plain and generic core bodies.
+fn release_engines_agree() {
+    engines_agree_across_waits();
+    engines_agree_on_core_leaves();
+}

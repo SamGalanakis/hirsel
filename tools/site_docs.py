@@ -642,7 +642,7 @@ def part_open(no: int, pid: str, title: str, intro_html: str, banner_html: str =
 
 
 def install_part_html(install_sh: str, ref: str, parser, query) -> str:
-    tag_example = ref if ref != "main" else "v0.1.0-pre"
+    tag_example = ref if ref != "main" else "v0.2.0-pre"
     card = lambda lines, lang, label: render_code_card(lines, lang, parser, query, label)
     one_liner = card(["curl -fsSL https://hirsel.ai/install.sh | sh"], "sh", "install-one-liner")
     quickstart = card(

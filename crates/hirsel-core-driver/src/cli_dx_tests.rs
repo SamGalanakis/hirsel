@@ -127,21 +127,21 @@ fn inspect_option_validation_handles_module_and_filter() {
 
 #[test]
 fn version_and_spec_url_resolution_handles_release_tags_and_prereleases() {
-    assert_eq!(resolve_version(None, "0.1.0-pre"), "0.1.0-pre");
-    assert_eq!(resolve_version(Some(""), "0.1.0-pre"), "0.1.0-pre");
+    assert_eq!(resolve_version(None, "0.2.0-pre"), "0.2.0-pre");
+    assert_eq!(resolve_version(Some(""), "0.2.0-pre"), "0.2.0-pre");
     assert_eq!(
-        resolve_version(Some("v0.1.0-pre.2"), "0.1.0-pre"),
-        "0.1.0-pre.2"
+        resolve_version(Some("v0.2.0-pre.2"), "0.2.0-pre"),
+        "0.2.0-pre.2"
     );
-    assert_eq!(resolve_version(Some("0.2.0"), "0.1.0-pre"), "0.2.0");
+    assert_eq!(resolve_version(Some("0.2.0"), "0.2.0-pre"), "0.2.0");
 
     assert_eq!(
         spec_url_for(None, "docs/spec/resolution.md", "lang-7"),
         "https://github.com/SamGalanakis/hirsel/blob/main/docs/spec/resolution.md#lang-7"
     );
     assert_eq!(
-        spec_url_for(Some("v0.1.0-pre"), "docs/spec/resolution.md", "lang-7"),
-        "https://github.com/SamGalanakis/hirsel/blob/v0.1.0-pre/docs/spec/resolution.md#lang-7"
+        spec_url_for(Some("v0.2.0-pre"), "docs/spec/resolution.md", "lang-7"),
+        "https://github.com/SamGalanakis/hirsel/blob/v0.2.0-pre/docs/spec/resolution.md#lang-7"
     );
     assert_eq!(
         spec_url_for(Some("0.2.0"), "docs/spec/programs.md", "prog-2"),

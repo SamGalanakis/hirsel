@@ -208,13 +208,13 @@ fn hirsel_version_and_env_report_full_version_and_docs_url() {
     let out = stdout(&ver);
     let lines: Vec<_> = out.lines().collect();
     assert!(lines.len() >= 3, "{out}");
-    assert_eq!(lines[0], "hirsel 0.1.0-pre");
+    assert_eq!(lines[0], "hirsel 0.2.0-pre");
     assert!(lines[1].starts_with("compiler "), "{out}");
     assert_eq!(lines[2], "docs https://hirsel.ai");
 
     let env_json = run_in(work.path(), &["env", "--json"]);
     assert!(env_json.status.success(), "stderr:\n{}", stderr(&env_json));
     let report: Value = serde_json::from_str(&stdout(&env_json)).unwrap();
-    assert_eq!(report["version"], "0.1.0-pre");
+    assert_eq!(report["version"], "0.2.0-pre");
     assert_eq!(report["docs"], "https://hirsel.ai");
 }

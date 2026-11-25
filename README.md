@@ -25,7 +25,7 @@
 </p>
 
 <p align="center">
-  <sub>Status: <b>v0.1.0-pre</b> · Linux x86_64 (glibc 2.28+) · Apple Silicon macOS in progress</sub>
+  <sub>Status: <b>v0.2.0-pre</b> · Linux x86_64 (glibc 2.28+) · Apple Silicon macOS in progress</sub>
 </p>
 
 <picture>

@@ -348,7 +348,29 @@ fn disk_bench_bl15_follower(d: Dir, c: Clock, tasks: Tasks, out: Stdout, name: S
     Ok(())
 }
 
+type DiskBenchUnit: cross {
+    d: Dir,
+    c: Clock,
+    r: Random,
+    tasks: Tasks,
+    out: Stdout,
+    argv: Args,
+}
+
+fn disk_bench_unit(take u: DiskBenchUnit) -> Result[(), Exit] waits {
+    disk_bench_body(u.d, u.c, u.r, u.tasks, u.out, u.argv)
+}
+
+// The body runs in one spawned unit, as checkbox's shipping_benchmark runs its app, so the
+// binary links the units runner; under HIRSEL_UNTIED=W its file ops take the slot ring
+// (STORE-SPEC §3.3b) instead of running inline on a tied thread.
 pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let u = DiskBenchUnit(d: d, c: c, r: r, tasks: tasks, out: out, argv: argv)
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 1073741824 - 1048576, take u, disk_bench_unit))
+    result.unwrap(task.join(take h))
+}
+
+fn disk_bench_body(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let mode = option.unwrap(args.get(argv, 0))
     if mode == "RB" {
         let width_arg = option.unwrap(args.get(argv, 1))

@@ -8,6 +8,8 @@ FRAME_HEADER = 16
 PAGE = 0x0021
 TARGET = 4096
 COMMITS = 64
+# The Store's DISK_FORMAT (store.hirsel). Formats 6-9 left the MANIFEST payload R6 reads unchanged.
+DISK_FORMAT = 9
 
 
 @dataclass
@@ -40,8 +42,8 @@ class Manifest:
         raw = (directory / 'MANIFEST').read_bytes()
         kind, version, width = unpack_from('<HHI', raw, PACK_HEADER)
         disk_format, = unpack_from('<I', raw, 24)
-        if disk_format != 5 or (kind, version, width) != (0x0031, 1, len(raw) - PACK_HEADER - FRAME_HEADER):
-            raise ValueError('R6 expected a format-5 MANIFEST')
+        if disk_format != DISK_FORMAT or (kind, version, width) != (0x0031, 1, len(raw) - PACK_HEADER - FRAME_HEADER):
+            raise ValueError(f'R6 expected a format-{DISK_FORMAT} MANIFEST, found format {disk_format}')
         manifest = raw[PACK_HEADER + FRAME_HEADER:]
         self.next_stamp = unpack_from('<Q', manifest, 24)[0]
         self.next_pack = unpack_from('<Q', manifest, 40)[0]

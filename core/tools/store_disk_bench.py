@@ -93,6 +93,7 @@ def burst_sample(binary, host, out, env, width, burst, stores):
 
 
 BL15_COMMITS = 20000
+BL15_CPUS = ('16', '17')  # writer, follower
 # io_uring_enter is recorded beside the handoffs so a row shows whether it ran on a ring host: a tied
 # process (one whose binary spawns no unit) runs every file op inline and records neither event.
 HANDOFF = ['-e', 'sched:sched_switch', '--filter', 'prev_comm == "hirsel-host"',
@@ -136,14 +137,14 @@ def bl15_sample(binary, host, out, env, follower):
             marks[mark] = time.monotonic_ns()
         return line[1]
 
-    writer = launch('16', 'writer', 'BL15', BL15_COMMITS)
+    writer = launch(BL15_CPUS[0], 'writer', 'BL15', BL15_COMMITS)
     reader = None
     try:
         name = step(writer, 'DIR', 'open')
         os.write(gate, b's')
         target = step(writer, 'OPENED', 'opened')
         if follower:
-            reader = launch('17', 'follower', 'BL15F', name, target)
+            reader = launch(BL15_CPUS[1], 'follower', 'BL15F', name, target)
             step(reader, 'FOLLOWING')
         marks['commit'] = time.monotonic_ns()
         os.write(gate, b's')
@@ -237,6 +238,9 @@ def main():
             indexes='none or one J=id%4', sample='one per configuration',
             cpu=16, protocol='READY/DONE; R8-load counts creation, population and the first checkpoint; other modes exclude population; validation and final drops excluded'), indent=2) + '\n')
     if args.measure:
+        # One pool worker: the bench body's spawned unit runs on the pool, so its file ops take the
+        # slot ring (STORE-SPEC §3.3b) instead of running inline on a tied thread.
+        env |= {'HIRSEL_UNTIED': '1'}
         rows = []
         with open('/tmp/core-llvm-905-measure.lock', 'a') as core_lock, open('/tmp/hirsel-langarena-measure.lock', 'a') as shared_lock:
             fcntl.flock(core_lock, fcntl.LOCK_EX)

@@ -10,24 +10,77 @@ pub(super) struct Reached {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
-    /// Copy argument `at` of open call `call`. A scalar, not a view, is read into a
-    /// temporary before the call, so it shares no storage with the call's `mut`
-    /// arguments and crosses their loans (OWN-9). Every other hold still stops it,
-    /// a `mut` capture its callable argument reserves (index `u32::MAX`) included.
+    /// Copy argument `at` of open call `call` (OWN-7), read first as a scalar (OWN-9).
     pub(super) fn copy_argument(&mut self, at: At, call: u32, n: NodeId) {
-        if self.is_view(at.ty) || !matches!(self.rep(at.ty), Ok(Rep::Scalar(_))) {
-            return self.use_place(at, Use::Value, n);
+        self.scalar_argument(call, at.ty, |cx| cx.use_place(at, Use::Value, n));
+    }
+    /// Evaluate `eval`, an argument of type `ty` of open call `call`. A scalar, not a
+    /// view, is read into a temporary before the call, so it shares no storage with the
+    /// call's `mut` arguments: its copies, and the views its own calls take, cross those
+    /// loans (OWN-9). A `mut` capture a callable argument reserves (index `u32::MAX`), a
+    /// view that outlives the call it is taken for and every write still stop it.
+    pub(super) fn scalar_argument<R>(
+        &mut self,
+        call: u32,
+        ty: TyId,
+        eval: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let scalar =
+            self.copies(ty) && !self.is_view(ty) && matches!(self.rep(ty), Ok(Rep::Scalar(_)));
+        if scalar {
+            self.scalar_calls.push(call);
         }
-        if self.capture_move(at.place.slot, Use::Value, at.ty, n) {
-            self.need_live(at.place.slot, n);
-            let site = self.span(n);
-            self.check_holds_skipping(
-                at.place,
-                Act::Read,
-                site,
-                |_, hold| matches!(hold, Hold::CallMut(c, i) if c == call && i != u32::MAX),
-            );
+        let r = eval(self);
+        if scalar {
+            self.scalar_calls.pop();
         }
+        r
+    }
+    /// Argument `e` of open call `call`, built at `place` when it has one; a scalar
+    /// built in no place is read before the call (OWN-9).
+    pub(super) fn argument_into(
+        &mut self,
+        call: u32,
+        e: NodeId,
+        w: Want,
+        place: Option<AddressId>,
+        placed: bool,
+    ) -> Option<ValueId> {
+        if place.is_some() || placed {
+            return self.expr_into(e, Some(w), place).1;
+        }
+        self.scalar_argument(call, w.ty, |cx| cx.expr_into(e, Some(w), None).1)
+    }
+    /// Call `call` completes inside a scalar argument: a view argument its result is
+    /// anchored to outlives it, so it is compared again with every hold (OWN-9).
+    pub(super) fn scalar_kept_views(&mut self, from: usize, call: u32, anchors: &[u32]) {
+        if self.scalar_calls.is_empty() {
+            return;
+        }
+        for r in from..self.freezes.len() {
+            let f = self.freezes[r];
+            if matches!(f.hold, Hold::CallView(c, i) if c == call && anchors.contains(&i)) {
+                let site = self.span(f.site);
+                self.check_holds_skipping(f.place, Act::Read, site, |j, _| j == r);
+            }
+        }
+    }
+    /// `check_holds` for a read: a copy, or a view held only by its call (`crosses`),
+    /// crosses the `mut` argument loans of the calls in `scalar_calls`.
+    pub(super) fn check_read_holds(&mut self, p: Place, crosses: bool, n: NodeId) -> bool {
+        if !crosses || self.scalar_calls.is_empty() {
+            return self.check_holds(p, Act::Read, n);
+        }
+        let calls = std::mem::take(&mut self.scalar_calls);
+        let site = self.span(n);
+        let ok = self.check_holds_skipping(
+            p,
+            Act::Read,
+            site,
+            |_, hold| matches!(hold, Hold::CallMut(c, i) if i != u32::MAX && calls.contains(&c)),
+        );
+        self.scalar_calls = calls;
+        ok
     }
     #[inline(always)]
     pub(super) fn temporary_storage(&self, t: cleanup::Temp) -> Option<AddressId> {

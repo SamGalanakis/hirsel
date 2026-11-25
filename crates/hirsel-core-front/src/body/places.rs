@@ -772,7 +772,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 if copy {
                     self.need_live(s, n);
-                    self.check_holds(at.place, Act::Read, n);
+                    self.check_read_holds(at.place, true, n);
                     return;
                 }
                 if at.place.len > 0 {
@@ -813,7 +813,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             Use::View(hold) => {
                 self.need_live(s, n);
-                if self.check_holds(at.place, Act::Read, n) {
+                if self.check_read_holds(at.place, matches!(hold, Hold::CallView(..)), n) {
                     self.freeze(at.place, hold, n);
                 }
             }

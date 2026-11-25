@@ -1,12 +1,23 @@
 // OWN-9: a by-value scalar argument is read into a temporary before places are compared,
 // so `f(mut t, t.root)` is accepted and the callee sees the value read before it ran.
+// An argument expression of scalar type is read the same way: `int.widen(t.root)`.
 type Tree {
     root: u64,
     items: List[u64]
 }
 
+type Tree32 {
+    root: u32,
+    items: List[u64]
+}
+
 fn set_root(mut t: Tree, old: u64) -> u64 {
     t.root = 9u64;
+    old
+}
+
+fn set_root32(mut t: Tree32, old: u64) -> u64 {
+    t.root = 9u32;
     old
 }
 
@@ -16,4 +27,12 @@ pub fn scalar_read_first() -> u64 {
     old * 10u64 + t.root
 }
 
+pub fn widened_read_first() -> u64 {
+    let mut t = Tree32(root: 4u32, items: list.new())
+    let old = set_root32(mut t, int.widen(t.root))
+    let now: u64 = int.widen(t.root)
+    old * 10u64 + now
+}
+
 // expect: run scalar_read_first() = 49
+// expect: run widened_read_first() = 49

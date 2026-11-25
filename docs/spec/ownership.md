@@ -425,11 +425,14 @@ Two places overlap when one is a prefix of the other, when they differ first at 
 indexes of the same sequence, or when they differ first at the payloads of two different
 variants of the same value. Two different fields of one record, or of one variant, do not
 overlap. Index operands are
-evaluated left to right into temporaries before the places are compared, and so is an
-argument that is a place of scalar type passed by value: `f(mut t, t.root)` reads
-`t.root` before the call, as `let r = t.root` on the line before would. A by-value
-argument of any other type, such as a `List` or a record, is compared as a place, and so is
-any argument against a `mut` capture that a callable argument of the call reserves. This one
+evaluated left to right into temporaries before the places are compared, and so is a
+by-value argument of scalar type, whatever expression gives it: `f(mut t, t.root)` and
+`f(mut t, int.widen(t.root))` read `t.root` before the call, as `let r = t.root` on the
+line before would. Its reads and the views its own calls take cross the call's `mut`
+arguments; a loan, move or write it makes, such as `f(mut t, g(mut t))`, and a view it
+keeps past its own call are still compared. A by-value argument of any other type, such as
+a `List` or a record, is compared as a place, and so is any argument against a `mut` capture
+that a callable argument of the call reserves. This one
 relation governs views, reservations, `mut` loans, moves, assignments, replacements,
 arguments of one call and captures.
 

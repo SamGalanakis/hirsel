@@ -581,7 +581,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     } else {
                         None
                     };
-                    self.expr_into(e, Some(w), place).1
+                    self.argument_into(call, e, w, place, map_insertion.is_some())
                 }
                 None => {
                     // A call takes the partly known parameter type as its expected type.
@@ -717,9 +717,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // result is anchored to. A view argument stays frozen, and a `mut` argument's
         // loan becomes a freeze in this same step, before any later sibling is
         // checked; both last for the result's extent, whatever variant it holds
-        // (OWN-10, OWN-11, OWN-20). A call that fails delivers no result, so no
-        // freeze outlives it.
+        // (OWN-10, OWN-11, OWN-20). A call that fails delivers no result, so no freeze outlives it.
         let anchors = &g.anchors;
+        self.scalar_kept_views(holds, call, anchors);
         self.unfreeze(holds, |h| match h {
             Hold::CallView(c, i) | Hold::CallMut(c, i) if c == call => {
                 anchors.contains(&i).then_some(Hold::View(Extent::Temp))

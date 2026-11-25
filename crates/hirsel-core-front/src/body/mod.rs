@@ -475,8 +475,7 @@ impl Emitter {
     }
     /// The signature-only row of generated glue at `key`, made on first mention. Glue's
     /// constructor emits its fixed convention directly: it has no source carriage for
-    /// seal to convert, so `sealed` is its source signature too, interned with every
-    /// other.
+    /// seal to convert, so `sealed` is its source signature too, interned with every other.
     fn glue_function(
         &mut self,
         key: InstanceKey,
@@ -790,8 +789,7 @@ impl Emitter {
         )
         .expect("only fixed layouts are carried")
     }
-    /// The size and alignment of row `id`'s fields laid out together (a resource's
-    /// block).
+    /// The size and alignment of row `id`'s fields laid out together (a resource's block).
     fn block(&self, id: TypeId) -> (u64, u64) {
         match &self.recipes[id.index()].layout {
             Layout::Fixed(f) => (f.size, f.align),
@@ -1254,6 +1252,8 @@ struct Cx<'c, 'a, 'e> {
     /// snapshotted, and the arguments so passed.
     direct_call: Option<(u32, Option<SlotId>)>,
     direct_args: Vec<(usize, TypeId, NodeId)>,
+    /// The open calls whose `mut` argument loans a scalar argument's reads cross (OWN-9).
+    scalar_calls: Vec<u32>,
     callable_signatures: HashMap<TyId, callable_abi::CallableAbi>,
     callable_reps: Vec<Rep>,
     callable_regions: Vec<u32>,
@@ -1307,8 +1307,7 @@ struct Cx<'c, 'a, 'e> {
     /// state serves every failing instruction until it changes.
     epoch: u64,
     fail_cache: Option<((u64, usize, usize), BlockId)>,
-    /// Emitting failure cleanup: a failing drop appends its cause and cleanup goes on
-    /// (FAIL-10).
+    /// Emitting failure cleanup: a failing drop appends its cause and cleanup goes on (FAIL-10).
     failing: bool,
     /// The edge whose cleanup is being emitted (FAIL-9).
     edge: Option<cleanup::Edge>,
@@ -1426,6 +1425,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             call_seq: 0,
             direct_call: None,
             direct_args: vec![],
+            scalar_calls: vec![],
             callable_signatures: HashMap::default(),
             callable_reps: vec![],
             callable_regions: vec![],

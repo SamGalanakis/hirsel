@@ -205,8 +205,7 @@ pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
 fn rl9_sent_items_match_their_takes() {
     // The recorder opens its tape beneath the tape directory (openat2).
     crate::openat2_required::require();
-    use hirsel_tape_format::{Args, Arrival, Frame, Index, op};
-    use std::os::unix::fs::FileExt;
+    use hirsel_tape_format::{Args, Arrival, Frame, op};
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
@@ -250,26 +249,7 @@ fn rl9_sent_items_match_their_takes() {
         assert_eq!((code, out.as_str()), (Some(0), "conn"), "{backend:?}: {err}");
         assert!(!err.contains("truncated"), "{backend:?}: {err}");
 
-        let file = std::fs::File::open(&path).unwrap();
-        let read = |at: u64, b: &mut [u8]| file.read_at(b, at);
-        let (mut index, _) = Index::open(read).unwrap();
-        let paths: Vec<_> = index.paths().collect();
-        let names: Vec<_> = paths.iter().map(|(_, n)| n.as_str()).collect();
-        assert_eq!(names, ["root", "root.0"], "{backend:?}");
-        let mut streams = Vec::new();
-        for (id, _) in &paths {
-            let mut blocks = index.take(*id).unwrap();
-            let mut decoder = blocks.decoder(read).unwrap();
-            let mut frames = Vec::new();
-            while let Some((flags, payload)) = blocks.next(read).unwrap() {
-                frames.extend(
-                    decoder
-                        .block(payload, flags & hirsel_tape_format::END != 0)
-                        .unwrap(),
-                );
-            }
-            streams.push((decoder.take_entry(), frames));
-        }
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
         // Per stream: each send's (client ordinal, arguments) and each
         // item take's (inbox ordinal, canonical item).
         let sends = |frames: &[Frame]| -> Vec<(u64, Args)> {
@@ -377,5 +357,160 @@ fn rl9_sent_items_match_their_takes() {
         );
     }
 }
+/// The streams of a two-unit recording, root then `root.0`: each one's
+/// entry and frames.
+fn rl9_streams(
+    path: &Path,
+    at: &str,
+) -> Vec<(Option<hirsel_tape_format::Entry>, Vec<hirsel_tape_format::Frame>)> {
+    use hirsel_tape_format::Index;
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::File::open(path).unwrap();
+    let read = |at: u64, b: &mut [u8]| file.read_at(b, at);
+    let (mut index, _) = Index::open(read).unwrap();
+    let paths: Vec<_> = index.paths().collect();
+    let names: Vec<_> = paths.iter().map(|(_, n)| n.as_str()).collect();
+    assert_eq!(names, ["root", "root.0"], "{at}");
+    let mut streams = Vec::new();
+    for (id, _) in &paths {
+        let mut blocks = index.take(*id).unwrap();
+        let mut decoder = blocks.decoder(read).unwrap();
+        let mut frames = Vec::new();
+        while let Some((flags, payload)) = blocks.next(read).unwrap() {
+            frames.extend(
+                decoder
+                    .block(payload, flags & hirsel_tape_format::END != 0)
+                    .unwrap(),
+            );
+        }
+        streams.push((decoder.take_entry(), frames));
+    }
+    streams
+}
+
+/// RL9's `Shared` program: the root moves its only holder of a node into a
+/// helper's entry, and the helper drops it before it returns.
+const RL9_SHARED: &str = r#"
+fn reader(take s: Shared[u64]) -> u64 {
+    7
+}
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let s: Shared[u64] = shared.new(42)
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, take s, reader))
+    if result.unwrap(task.join(take h)) != 7 { return Error(Exit(status: 3)) }
+    result.unwrap(stdout.write(out, "shared"))
+    Ok(())
+}
+"#;
+
+/// RL9 for a `Shared` node crossing into a helper (U3). Hand-derived from
+/// docs/recording.md: the root numbers the node g+1 at `shared.new` and the
+/// helper handle g+2 at the spawn. The helper's entry holds the node as a
+/// value: 8 plain bytes (the holder word zeroed), one part, a handle (1), a
+/// `Shared` snapshot (1), its ordinal 1 in the helper (which has no grants),
+/// home stream 0 and node g+1, then the payload, 8 plain bytes holding 42 and
+/// no parts. The spawn's arguments hold the same value in canonical form,
+/// the ordinal left out. The helper's drop of the only holder is a foreign
+/// last drop: it posts the shared release home, so the helper's stream takes
+/// nothing for it and the root takes `shared release` (7, stream 0, node
+/// g+1). The post precedes the helper's end in home's mailbox, so the root
+/// takes the release before the helper end, whose survivor list is empty.
+/// Both are taken in the root's `task.join`, parked or not as the helper's
+/// timing has it, so their gap and point kind are not this law's.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_shared_crosses_into_a_helper() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Args, Arrival, Frame, HelperOutcome, op};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = source_request(RL9_SHARED, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let mut options = native_options(backend, dir.path());
+        options.runtime = env_record_runtime();
+        options.recording = true;
+        options.grant_mask = ["Tasks", "Stdout"]
+            .iter()
+            .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
+        options.store = dir.path().join(format!("shared-store-{backend:?}"));
+        options.output = dir.path().join(format!("shared-{backend:?}"));
+        let program = product.build(&entry, &options).unwrap().executable;
+        let path = dir.path().join(format!("shared-{backend:?}.tape"));
+        let (code, out, err) = tape_run(&program, &[], Some(&path));
+        assert_eq!((code, out.as_str()), (Some(0), "shared"), "{backend:?}: {err}");
+        assert!(!err.contains("truncated"), "{backend:?}: {err}");
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
+        let g = streams[0]
+            .1
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        let value = |ordinal: Option<u8>| {
+            let mut v = vec![8, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1];
+            v.extend(ordinal);
+            v.extend([0, 0, 0, 0, g + 1, 8, 42, 0, 0, 0, 0, 0, 0, 0, 0]);
+            v
+        };
+
+        let (entry, helper) = &streams[1];
+        let body = entry.as_ref().expect("a helper entry").body();
+        assert_eq!(body.value.bytes(), value(Some(1)), "{backend:?}: entry");
+        let spawned = [
+            body.descriptor.to_vec(),
+            65536u64.to_le_bytes().to_vec(),
+            value(None),
+        ]
+        .concat();
+        let spawns: Vec<_> = streams[0]
+            .1
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op { op: o, args, .. } if *o == op::UNIT_SPAWN => Some(args.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spawns, [Args::of_parts(&[&spawned])], "{backend:?}: spawn");
+        let takes = |frames: &[Frame]| -> Vec<Vec<u8>> {
+            frames
+                .iter()
+                .filter_map(|f| match f {
+                    Frame::Take { body, .. } => Some(body.bytes().to_vec()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(takes(helper), Vec::<Vec<u8>>::new(), "{backend:?}: helper takes");
+        let home = takes(&streams[0].1);
+        assert_eq!(home.len(), 2, "{backend:?}: root takes {home:?}");
+        assert_eq!(home[0], [7, 0, 0, 0, 0, g + 1], "{backend:?}: release");
+        let Frame::Take { body, .. } = streams[0]
+            .1
+            .iter()
+            .filter(|f| matches!(f, Frame::Take { .. }))
+            .nth(1)
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        match body.arrival() {
+            Arrival::HelperEnd(ordinal, HelperOutcome::Returned(v), survivors) => {
+                assert_eq!(ordinal, g as u64 + 2, "{backend:?}: helper ordinal");
+                assert_eq!(v.bytes(), [8, 7, 0, 0, 0, 0, 0, 0, 0, 0], "{backend:?}");
+                assert!(survivors.is_empty(), "{backend:?}: {survivors:?}");
+            }
+            a => panic!("{backend:?}: {a:?}"),
+        }
+    }
+}
+
 // RL8 natively, the ordering seam (feature `testing`).
 include!("recording_rl8_native.rs");

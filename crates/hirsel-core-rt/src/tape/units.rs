@@ -604,11 +604,13 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 body.extend_from_slice(&retained.saturating_sub(header).to_le_bytes());
             }
             Arrival::SharedRelease(node) => {
+                // The release ends the node: nothing names it after.
                 let Some((stream, ordinal)) =
-                    nodes(|n| n.get(&node).map(|e| (e.stream, e.ordinal)))
+                    nodes(|n| n.remove(&node).map(|e| (e.stream, e.ordinal)))
                 else {
                     return live.cut(UNNAMED_NODE);
                 };
+                live.takes.nodes.remove(&node);
                 body.push(7);
                 body.extend_from_slice(&stream.to_le_bytes());
                 put_varint(&mut body, ordinal);

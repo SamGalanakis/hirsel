@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Build an isolated distribution bundle, optionally with a pinned PGO profile.
+"""Build an isolated distribution bundle, optionally from pinned PGO and BOLT profiles.
 
     tools/toolchain-dist/build --train-profile DIR [--llvm-profdata /path/to/llvm-profdata]
-    tools/toolchain-dist/build --output /tmp/dist [--bolt] [--pgo DIR/<sha256>.profdata]
+    tools/toolchain-dist/build --output /tmp/dist [--pgo DIR/<sha256>.profdata [--bolt DIR/<sha256>.fdata]]
 
 Training counts differ from run to run, so a release never trains: it takes a
-profile trained once and named by its SHA-256, and refuses one whose bytes do
-not match its name. Uses Buck2's remote pool. Training uses one tools/capped
-command at a time. Keep output and work outside the repository; profiles are
-never committed.
+PGO profile and a BOLT profile, each trained once and named by its SHA-256, and
+refuses one whose bytes do not match its name. `--train-profile` writes both;
+the BOLT profile is trained on the PGO-use compiler built from the PGO profile
+beside it, the only binary it is valid for. Uses Buck2's remote pool. Training
+uses one tools/capped command at a time. Keep output and work outside the
+repository; profiles are never committed.
 """
 import argparse
 from contextlib import contextmanager
@@ -93,29 +95,41 @@ def build_targets(mode, options, *targets, bolt='off'):
     return [ROOT / outputs['root' + target] for target in targets]
 
 
-def build(mode, output, options, work, *, bolt=False):
-    if bolt:
-        compiler, runtimes = build_targets(mode, options, COMPILER_TARGET, RUNTIME_TARGET, bolt='link')
-        runtime = runtimes / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
-        # Keep BOLT's input binary, its merged profile and its output, so two
-        # builds that differ can be compared stage by stage.
-        kept = work / 'bolt'
-        if kept.exists():
-            raise SystemExit(f'{kept} exists: use a fresh work directory')
-        kept.mkdir(parents=True)
-        shutil.copyfile(compiler, kept / 'hirsel')
+def bolt(command, mode, options, work, *arguments):
+    """Link the compiler for BOLT, keep that input as `work/bolt/hirsel` and run
+    `bolt.py command INPUT RUNTIME *arguments`."""
+    compiler, runtimes = build_targets(mode, options, COMPILER_TARGET, RUNTIME_TARGET, bolt='link')
+    runtime = runtimes / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
+    kept = work / 'bolt'
+    if kept.exists():
+        raise SystemExit(f'{kept} exists: use a fresh work directory')
+    kept.mkdir(parents=True)
+    shutil.copyfile(compiler, kept / 'hirsel')
+    # A BOLT profile is valid only for this binary: training and every build
+    # from that profile print the same digest.
+    print(f'dist: BOLT input sha256 {sha256(kept / "hirsel")}', flush=True)
+    jobs = min(4, len(os.sched_getaffinity(0)))
+    subprocess.run([ROOT / 'tools/capped', sys.executable, ROOT / 'tools/native-toolchain/bolt.py',
+                    command, compiler, runtime, *arguments], cwd=ROOT, check=True,
+                   env=dict(os.environ, HIRSEL_JOBS=str(jobs), HIRSEL_MEMORY_LIMIT='8G'))
+
+
+def build(mode, output, options, work, *, fdata=None):
+    if fdata is not None:
         try:
-            jobs = min(4, len(os.sched_getaffinity(0)))
-            subprocess.run([ROOT / 'tools/capped', sys.executable, ROOT / 'tools/native-toolchain/bolt.py',
-                            'compiler', compiler, runtime, BOLT_COMPILER, '--keep', kept], cwd=ROOT, check=True,
-                           env=dict(os.environ, HIRSEL_JOBS=str(jobs), HIRSEL_MEMORY_LIMIT='8G'))
-            shutil.copyfile(BOLT_COMPILER, kept / 'hirsel.bolt')
+            bolt('compiler', mode, options, work, BOLT_COMPILER, '--fdata', fdata)
+            shutil.copyfile(BOLT_COMPILER, work / 'bolt/hirsel.bolt')
             (bundle,) = build_targets(mode, options, '//:hirsel-toolchain', bolt='use')
         finally:
             BOLT_COMPILER.unlink(missing_ok=True)
     else:
         (bundle,) = build_targets(mode, options, '//:hirsel-toolchain')
     shutil.copytree(bundle, output, dirs_exist_ok=True)
+
+
+def sha256(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def witness(output):
@@ -206,20 +220,26 @@ def fresh_witness(prefix):
     print('dist: fresh-root acceptance passed', flush=True)
 
 
-def pinned_profile(path):
-    """The profile's bytes must hash to its name, `<sha256>.profdata`."""
-    stem = path.name.removesuffix('.profdata')
-    if not re.fullmatch(r'[0-9a-f]{64}', stem) or path.suffix != '.profdata':
-        raise SystemExit(f'{path}: a pinned profile is named <sha256>.profdata')
-    with path.open('rb') as stream:
-        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
-    if actual != stem:
+def pinned_profile(path, suffix):
+    """The profile's bytes must hash to its name, `<sha256><suffix>`."""
+    stem = path.name.removesuffix(suffix)
+    if not re.fullmatch(r'[0-9a-f]{64}', stem) or path.suffix != suffix:
+        raise SystemExit(f'{path}: a pinned profile is named <sha256>{suffix}')
+    if (actual := sha256(path)) != stem:
         raise SystemExit(f'{path}: bytes hash to {actual}, not the pinned {stem}')
     return path
 
 
+def pin(path, output, suffix):
+    pinned = output / (sha256(path) + suffix)
+    shutil.copyfile(path, pinned)
+    print(pinned, flush=True)
+
+
 def train(output, work, options, cpu, profdata):
-    """Instrument, train and merge once; write `output/<sha256>.profdata`."""
+    """Train both profiles once: write `output/<sha256>.profdata`, then build the
+    PGO-use compiler from it, train BOLT on that binary and write
+    `output/<sha256>.fdata`."""
     if profdata is None:
         profdata = subprocess.check_output([str(ROOT / 'tools/toolchain-dist/profile-tools')], text=True).strip()
     work.mkdir(parents=True, exist_ok=True)
@@ -239,13 +259,14 @@ def train(output, work, options, cpu, profdata):
                    env=dict(os.environ, HIRSEL_JOBS='1'), check=True)
     subprocess.run([profdata, 'show', str(merged)], check=True)
     output.mkdir(parents=True, exist_ok=True)
-    with merged.open('rb') as stream:
-        pinned = output / (hashlib.file_digest(stream, 'sha256').hexdigest() + '.profdata')
-    shutil.copyfile(merged, pinned)
-    print(pinned, flush=True)
+    pin(merged, output, '.profdata')
+    shutil.copyfile(merged, PROFILE)
+    fdata = work / 'merged.fdata'
+    bolt('compiler-profile', 'use', options, work, fdata)
+    pin(fdata, output, '.fdata')
 
 
-def manifest(output, mode, bolt):
+def manifest(output, mode, fdata):
     try:
         notices.collect(output, mode)
     except Exception:
@@ -258,13 +279,14 @@ def manifest(output, mode, bolt):
     record = dict(commit=command('git', 'rev-parse', 'HEAD'),
                   patch_sha256=hashlib.sha256(command('git', 'diff', 'HEAD').encode()).hexdigest(),
                   rustc=command(str(ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc'), '-vV'),
-                  profile='dist', pgo=mode, bolt=bolt, lto='fat', codegen_units=1,
+                  profile='dist', pgo=mode, lto='fat', codegen_units=1,
                   training='hirsel new project: check, Cranelift, LLVM',
                   hirsel_sha256=digest(output / 'hirsel'),
                   core_packages_sha256=hashlib.sha256(json.dumps({str(p.relative_to(output / 'core-packages')): digest(p) for p in sorted((output / 'core-packages').rglob('*')) if p.is_file()}, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
                   notices_sha256=digest(output / 'notices/manifest.json'))
     if mode == 'use':
         record['profdata_sha256'] = digest(output / 'hirsel.profdata')
+    record['fdata_sha256'] = digest(fdata) if fdata else None
     (output / 'hirsel-build.json').write_text(json.dumps(record, indent=2) + '\n')
 
 
@@ -290,7 +312,9 @@ def main():
     parser.add_argument('--work', type=Path)
     parser.add_argument('--pgo', type=Path, metavar='PROFILE',
                         help='use this pinned profile, named <sha256>.profdata (from --train-profile)')
-    parser.add_argument('--bolt', action='store_true', help='optimize the compiler with llvm-bolt and merge-fdata')
+    parser.add_argument('--bolt', type=Path, metavar='FDATA',
+                        help='rewrite the compiler with llvm-bolt from this pinned profile, named <sha256>.fdata '
+                             '(from --train-profile, beside the --pgo profile)')
     parser.add_argument('--cpu', type=int, default=8)
     parser.add_argument('--local', action='store_true', help='build locally without the remote action cache')
     parser.add_argument('--num-threads', type=int, help='Buck2 execution threads')
@@ -298,6 +322,8 @@ def main():
     args = parser.parse_args()
     if (args.bolt or args.pgo) and args.output is None:
         parser.error('--bolt and --pgo require --output')
+    if args.bolt and not args.pgo:
+        parser.error('--bolt requires --pgo: a BOLT profile is trained on the PGO-use compiler')
     if args.llvm_profdata and args.train_profile is None:
         parser.error('--llvm-profdata requires --train-profile')
     if args.check_glibc is not None:
@@ -307,7 +333,8 @@ def main():
         check_glibc(args.check_fresh.resolve())
         fresh_witness(args.check_fresh.resolve())
         return
-    profile = pinned_profile(args.pgo.resolve()) if args.pgo else None
+    profile = pinned_profile(args.pgo.resolve(), '.profdata') if args.pgo else None
+    fdata = pinned_profile(args.bolt.resolve(), '.fdata') if args.bolt else None
     output = (args.output or args.train_profile).resolve()
     if args.output is not None and output.exists():
         parser.error('output already exists; use a fresh directory')
@@ -327,19 +354,15 @@ def main():
             train(output, work, options, args.cpu, args.llvm_profdata)
         return
     if profile is None:
-        if args.bolt:
-            with profile_lock():
-                build('off', output, options, work, bolt=True)
-        else:
-            build('off', output, options, work)
-        manifest(output, 'off', args.bolt)
+        build('off', output, options, work)
+        manifest(output, 'off', None)
         witness(output)
         return
     with profile_lock():
         shutil.copyfile(profile, PROFILE)
-        build('use', output, options, work, bolt=args.bolt)
+        build('use', output, options, work, fdata=fdata)
         shutil.copyfile(profile, output / 'hirsel.profdata')
-        manifest(output, 'use', args.bolt)
+        manifest(output, 'use', fdata)
         witness(output)
 
 

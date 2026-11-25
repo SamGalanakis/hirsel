@@ -26,27 +26,38 @@ Training checks the retained native hello source and builds it with Cranelift an
 
 The PGO pipeline retains the existing tsrs training structure: instrument, run ordinary source commands, require nonempty profiles, merge, and rebuild with matching symbol metadata.
 
-`tools/toolchain-dist/build --bolt` rewrites the distribution compiler with
-the same BOLT options and release workloads as the engine library. Install
-the pinned tools with `tools/native-toolchain/install --bolt-tools DIR` and
-put `DIR/bin` on PATH. The bundle builds its installed package products
-after the rewrite, using the resulting compiler and its build ID. The
-compiler's DWARF is decompressed for the rewrite and compressed again for
-the distribution. When
-combined with `--pgo`, BOLT runs after the PGO-use link. The work directory
-(`--work`, default `OUTPUT-work`) keeps `bolt/hirsel` (BOLT's input),
-`bolt/merged.fdata` (its profile), `bolt/hirsel.bolt` (its output) and
-`bolt/held-out.json`. Before the rewrite is kept, BOLT's input and output each
-build every M1 program, which the profile never sees (it trains on the release
-std and cold LangArena only); the build fails unless each program's `.text` is
-byte-identical, and `held-out.json` records both sides' user CPU time, ungated.
+`tools/toolchain-dist/build --pgo DIR/<sha256>.profdata --bolt DIR/<sha256>.fdata`
+rewrites the PGO-use compiler with the same BOLT options and release workloads
+as the engine library, from a pinned BOLT profile. BOLT's training counts
+differ from run to run like PGO's (about 0.008%), so, as with PGO, a release
+never trains: `--train-profile DIR` writes the BOLT profile beside the PGO one,
+trained on the PGO-use compiler that profile builds, and `--bolt` refuses bytes
+that do not hash to the name. A BOLT profile is valid only for the exact binary
+it was trained on, so `--bolt` requires `--pgo` and the two must come from one
+`--train-profile` run at the same source and `RELEASE_TAG` (the version is
+compiled in). Training and every build print `dist: BOLT input sha256`; the
+digests match when the profile fits. `hirsel-build.json` records
+`profdata_sha256` and `fdata_sha256`. Install the pinned tools with
+`tools/native-toolchain/install --bolt-tools DIR` and put `DIR/bin` on PATH.
+The bundle builds its installed package products after the rewrite, using the
+resulting compiler and its build ID. The compiler's DWARF is decompressed for
+the rewrite and compressed again for the distribution. The work directory
+(`--work`, default `OUTPUT-work`) keeps `bolt/hirsel` (BOLT's input) and
+`bolt/hirsel.bolt` (its output). Before the rewrite is kept, BOLT's input and
+output each build every M1 program, which the profile never sees (it trains on
+the release std and cold LangArena only); the build fails unless each program's
+`.text` is byte-identical, and both sides' user CPU time is printed, ungated.
 The nightly board builds with `DIST_BOLT=off`, so it never measures this
-compiler; the benchmarks page says so. The
-compiler is rewritten with `--bolt-info=0`: BOLT's note records its command
-line, which names temporary directories. Given one input and one profile, the
-rewrite is byte-identical at four threads. BOLT's own training is not: its
-counts differ from run to run like PGO's, so a `--bolt` build is not yet
-reproducible (release-pgo-pinned-profile-2754).
+compiler; the benchmarks page says so. The compiler is rewritten with
+`--bolt-info=0`: BOLT's note records its command line, which names temporary
+directories. Given one input and one profile, the rewrite is byte-identical.
+
+The release workflow has two stages. `train` runs `--train-profile` once and
+uploads both profiles; `build` takes them by hash, builds, runs the glibc and
+fresh-root gates, and the release publishes `<sha256>.profdata` and
+`<sha256>.fdata` beside the archive, so anyone can rebuild the compiler bit for
+bit at the tag. A `workflow_dispatch` run builds a `v0.0.0-dispatch.<run id>`
+version and publishes nothing unless dispatched on a `v*` tag with `publish`.
 
 `NOTICES.md` at the repository root is the distribution's notice inventory. It is
 generated, never edited: `tools/toolchain-dist/notices.py --write [--bundle DIR]`
@@ -122,8 +133,9 @@ On Rust toolchain or LLVM bumps, run
 to qualify. It builds that commit without PGO (or with `--pgo` and `--bolt`,
 as a release is built) in two fresh local checkouts at different paths, with
 separate Buck2 state, and keeps both bundles in the output directory.
-`--pgo PROFILE` builds both from that pinned profile; bare `--pgo` first
-trains one in the first checkout and keeps it under `OUTPUT/profile/`.
+`--pgo PROFILE [--bolt FDATA]` builds both from those pinned profiles; bare
+`--pgo [--bolt]` first trains both in the first checkout and keeps them under
+`OUTPUT/profile/`.
 It compares every file and reports the first differing byte offset in each
 changed file, starting at zero. It then builds the x86_64 release std with the
 first bundle at 1, 2 and 8 jobs and compares the three stores the same way,

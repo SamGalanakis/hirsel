@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Instrument, train and optimize the release compiler or its libLLVM with BOLT.
 
+The compiler is trained and rewritten in separate steps: `compiler-profile`
+writes the merged profile, and `compiler` rewrites from a given profile. A
+release rewrites from a pinned profile, because training counts differ from
+run to run; the profile is valid only for the exact binary it was trained on.
+
 A BOLTed compiler must emit what its input emits on programs its profile never saw:
 every M1 program, outside WORKLOADS. Both compilers build each as a release executable
 and every .text section must be byte-identical; the builds' total user CPU time on each
@@ -134,12 +139,14 @@ def engine_shards(source, work):
         yield batch, [f'-funcs-file-no-regex={selection}']
 
 
-def optimize(kind, compiler, library, runtime, output, keep=None):
+def optimize(kind, compiler, library, runtime, output, *, data=None, profile_only=False):
+    """Rewrite `library` (or, for the compiler, `compiler`) into `output`. Train
+    a profile unless `data` gives one; with `profile_only`, write the merged
+    profile to `output` instead of rewriting."""
     # LangArena opens more files than Docker's default soft descriptor limit.
     _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
     bolt = os.environ.get('LLVM_BOLT', 'llvm-bolt')
-    merge = os.environ.get('MERGE_FDATA', 'merge-fdata')
     jobs = os.environ.get('HIRSEL_JOBS', '4')
     tool = [bolt, f'-thread-count={jobs}', '-relocs']
     with tempfile.TemporaryDirectory(prefix='hirsel-bolt-') as scratch:
@@ -149,33 +156,10 @@ def optimize(kind, compiler, library, runtime, output, keep=None):
             # BOLT updates DWARF addresses in uncompressed sections.
             source = work / 'hirsel'
             run([OBJCOPY, '--decompress-debug-sections', compiler, source], work)
-        instrumented = shadow(library.parent, compiler, work / 'shadow')
-        target = instrumented if kind == 'compiler' else shadow_engine(instrumented)
-        staged = target.with_name('instrumented')
-        batches = engine_shards(source, work) if kind == 'engine' else [(work, [])]
-        recorded = set()
-        for batch, selection in batches:
-            if selection:
-                print(f'bolt: instrumenting engine function group {batch.name}', flush=True)
-            profile = batch / 'prof.fdata'
-            run([*tool, source, '-instrument', *selection, f'-instrumentation-binpath={target}',
-                 f'-instrumentation-file={profile}', '-instrumentation-file-append-pid', '-o', staged], work)
-            staged.replace(target)
-            recorded.update(train(instrumented, runtime, batch / 'training', profile))
-            target.unlink()
-            shutil.rmtree(batch / 'training')
-        if missing := WORKLOADS - recorded:
-            raise RuntimeError(f'no nonempty BOLT profile from {", ".join(sorted(missing))}')
-        profile = work / 'merged.fdata'
-        raw = sorted(path for path in work.rglob('prof.fdata.*') if path.stat().st_size)
-        with profile.open('wb') as merged:
-            run([merge, *raw], work, stdout=merged)
-        if profile.stat().st_size == 0:
-            raise RuntimeError('merge-fdata produced an empty profile')
-        for path in raw:
-            path.unlink()
-        if keep is not None:
-            shutil.copyfile(profile, keep / 'merged.fdata')
+        profile = data if data is not None else profile_of(kind, compiler, library, runtime, source, tool, work)
+        if profile_only:
+            shutil.copyfile(profile, output)
+            return
         with tempfile.TemporaryDirectory(prefix='.bolt-', dir=output.parent) as staging:
             candidate = Path(staging) / output.name
             # BOLT's note records its command line, whose paths are temporary
@@ -184,10 +168,39 @@ def optimize(kind, compiler, library, runtime, output, keep=None):
             run([*tool, source, '-data', profile, *OPTIMIZE, *note, '-o', candidate], work)
             if kind == 'compiler':
                 run([OBJCOPY, '--compress-debug-sections=zlib', candidate], work)
-                seconds = held_out({'input': compiler, 'bolt': candidate}, runtime, work)
-                if keep is not None:
-                    (keep / 'held-out.json').write_text(json.dumps(dict(workload=HELD_OUT, user_seconds=seconds)))
+                held_out({'input': compiler, 'bolt': candidate}, runtime, work)
             candidate.replace(output)
+
+
+def profile_of(kind, compiler, library, runtime, source, tool, work):
+    """Instrument `source`, train it on WORKLOADS and return the merged profile in `work`."""
+    merge = os.environ.get('MERGE_FDATA', 'merge-fdata')
+    instrumented = shadow(library.parent, compiler, work / 'shadow')
+    target = instrumented if kind == 'compiler' else shadow_engine(instrumented)
+    staged = target.with_name('instrumented')
+    batches = engine_shards(source, work) if kind == 'engine' else [(work, [])]
+    recorded = set()
+    for batch, selection in batches:
+        if selection:
+            print(f'bolt: instrumenting engine function group {batch.name}', flush=True)
+        profile = batch / 'prof.fdata'
+        run([*tool, source, '-instrument', *selection, f'-instrumentation-binpath={target}',
+             f'-instrumentation-file={profile}', '-instrumentation-file-append-pid', '-o', staged], work)
+        staged.replace(target)
+        recorded.update(train(instrumented, runtime, batch / 'training', profile))
+        target.unlink()
+        shutil.rmtree(batch / 'training')
+    if missing := WORKLOADS - recorded:
+        raise RuntimeError(f'no nonempty BOLT profile from {", ".join(sorted(missing))}')
+    profile = work / 'merged.fdata'
+    raw = sorted(path for path in work.rglob('prof.fdata.*') if path.stat().st_size)
+    with profile.open('wb') as merged:
+        run([merge, *raw], work, stdout=merged)
+    if profile.stat().st_size == 0:
+        raise RuntimeError('merge-fdata produced an empty profile')
+    for path in raw:
+        path.unlink()
+    return profile
 
 
 def main():
@@ -197,11 +210,15 @@ def main():
     engine.add_argument('library', type=Path)
     engine.add_argument('output', type=Path)
     engine.add_argument('--artifacts', type=Path, required=True)
-    compiler = commands.add_parser('compiler')
+    profile = commands.add_parser('compiler-profile', help='train the compiler and write its merged profile')
+    profile.add_argument('compiler', type=Path)
+    profile.add_argument('runtime', type=Path)
+    profile.add_argument('output', type=Path)
+    compiler = commands.add_parser('compiler', help='rewrite the compiler from a profile compiler-profile wrote')
     compiler.add_argument('compiler', type=Path)
     compiler.add_argument('runtime', type=Path)
     compiler.add_argument('output', type=Path)
-    compiler.add_argument('--keep', type=Path, help='copy the merged BOLT profile into this directory')
+    compiler.add_argument('--fdata', type=Path, required=True)
     args = parser.parse_args()
     if args.command == 'engine':
         artifacts = json.loads(args.artifacts.read_text())
@@ -209,7 +226,8 @@ def main():
                  Path(artifacts['runtime']).resolve(), args.output.absolute())
     else:
         optimize('compiler', args.compiler.resolve(), LLVM, args.runtime.resolve(), args.output.absolute(),
-                 args.keep.resolve() if args.keep else None)
+                 data=args.fdata.resolve() if args.command == 'compiler' else None,
+                 profile_only=args.command == 'compiler-profile')
 
 
 if __name__ == '__main__':

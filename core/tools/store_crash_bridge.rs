@@ -186,6 +186,27 @@ impl Bridge {
         // The out-of-process witness records returned durability even when a
         // different task has just encountered the simulated filesystem cut.
         if op == 12 {
+            // BL10, BL9 (iii): reader segment syncs and directory syncs since
+            // the last SYNCS, in any phase; with counts, they must match.
+            if let Some(expected) = data[..len].strip_prefix(b"SYNCS") {
+                if let Some(counts) = expected.strip_prefix(b" ") {
+                    let counts: Vec<u64> = std::str::from_utf8(counts)
+                        .expect("SYNCS is ASCII")
+                        .split(' ')
+                        .map(|count| count.parse().expect("SYNCS count"))
+                        .collect();
+                    assert_eq!(
+                        self.reader_syncs[..],
+                        counts[..],
+                        "reader segment and directory syncs"
+                    );
+                }
+                self.reader_syncs = [0; 2];
+                return Outcome {
+                    written: len as u64,
+                    ..Outcome::default()
+                };
+            }
             // The late-write cases' new owner acknowledges its own commits.
             if self.phase == 1 || (self.phase == 3 && self.late.is_some()) {
                 if &data[..len] == b"DONE" {
@@ -200,22 +221,6 @@ impl Bridge {
                     }
                 } else if &data[..len] == b"ARM" {
                     self.armed = true;
-                } else if let Some(expected) = data[..len].strip_prefix(b"SYNCS") {
-                    // BL10: reader segment syncs and directory syncs since
-                    // the last SYNCS; with counts, they must match.
-                    if let Some(counts) = expected.strip_prefix(b" ") {
-                        let counts: Vec<u64> = std::str::from_utf8(counts)
-                            .expect("SYNCS is ASCII")
-                            .split(' ')
-                            .map(|count| count.parse().expect("SYNCS count"))
-                            .collect();
-                        assert_eq!(
-                            self.reader_syncs[..],
-                            counts[..],
-                            "reader segment and directory syncs"
-                        );
-                    }
-                    self.reader_syncs = [0; 2];
                 } else if &data[..len] == b"CHILD RETURNED" {
                     if let Some(fork) = &mut self.fork_observation {
                         fork.child_returned = true;

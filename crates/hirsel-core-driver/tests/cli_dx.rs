@@ -194,7 +194,7 @@ fn hirsel_explain_module_hint_and_rule_canonical_url() {
     let rule_text = stdout(&rule_out);
     assert!(rule_text.contains("docs/spec/"), "{rule_text}");
     assert!(
-        rule_text.contains("https://github.com/SamGalanakis/hirsel-lang/blob/"),
+        rule_text.contains("https://github.com/SamGalanakis/hirsel/blob/"),
         "{rule_text}"
     );
 }

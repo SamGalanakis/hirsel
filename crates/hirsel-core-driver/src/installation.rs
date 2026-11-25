@@ -255,7 +255,7 @@ fn hex(hash: ContentHash) -> String {
 }
 
 pub const DOCS_URL: &str = "https://hirsel.ai";
-pub const REPOSITORY_URL: &str = "https://github.com/SamGalanakis/hirsel-lang";
+pub const REPOSITORY_URL: &str = "https://github.com/SamGalanakis/hirsel";
 
 /// Full release or pre-release version of this compiler binary.
 pub fn version() -> &'static str {

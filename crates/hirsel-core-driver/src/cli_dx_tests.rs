@@ -137,14 +137,14 @@ fn version_and_spec_url_resolution_handles_release_tags_and_prereleases() {
 
     assert_eq!(
         spec_url_for(None, "docs/spec/resolution.md", "lang-7"),
-        "https://github.com/SamGalanakis/hirsel-lang/blob/main/docs/spec/resolution.md#lang-7"
+        "https://github.com/SamGalanakis/hirsel/blob/main/docs/spec/resolution.md#lang-7"
     );
     assert_eq!(
         spec_url_for(Some("v0.1.0-pre"), "docs/spec/resolution.md", "lang-7"),
-        "https://github.com/SamGalanakis/hirsel-lang/blob/v0.1.0-pre/docs/spec/resolution.md#lang-7"
+        "https://github.com/SamGalanakis/hirsel/blob/v0.1.0-pre/docs/spec/resolution.md#lang-7"
     );
     assert_eq!(
         spec_url_for(Some("0.2.0"), "docs/spec/programs.md", "prog-2"),
-        "https://github.com/SamGalanakis/hirsel-lang/blob/v0.2.0/docs/spec/programs.md#prog-2"
+        "https://github.com/SamGalanakis/hirsel/blob/v0.2.0/docs/spec/programs.md#prog-2"
     );
 }

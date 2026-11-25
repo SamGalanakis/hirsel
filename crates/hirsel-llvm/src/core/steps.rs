@@ -1282,6 +1282,7 @@ impl FunctionEmitter<'_> {
                 _ => unreachable!(),
             };
             let value = self.numeric(condition);
+            self.set_branch_flag(plan.header, &value);
             let exists = self.cmp(Predicate::Ne, &Type::I8, &value, &int(0));
             let reserve = Label::new("step_reserve", n);
             let out = self.edge_label(plan.no);
@@ -1473,7 +1474,11 @@ impl FunctionEmitter<'_> {
                     };
                     let condition = self.numeric(condition);
                     let in_range = self.cmp(Predicate::Ne, &Type::I8, &condition, &int(0));
+                    let flag = self.decision(block);
                     if full {
+                        if let Some(flag) = flag {
+                            self.set_flag(flag, Some(&in_range));
+                        }
                         let yes = self.edge_label(plan.yes);
                         self.cond(&in_range, yes, done);
                         self.emit_edge(yes, plan.yes);
@@ -1484,6 +1489,11 @@ impl FunctionEmitter<'_> {
                         let iteration = Label::new("step_chunk_iteration", n);
                         self.cond(&within_chunk, iteration, done);
                         self.block(iteration);
+                        // A chunk's end re-enters the checked header, which
+                        // sets the flag of the arm it takes there.
+                        if let Some(flag) = flag {
+                            self.set_flag(flag + 1, None);
+                        }
                         // The partial quota ends before the original loop does.
                         // Preserve the source bound for accesses in its body.
                         self.runtime_void("llvm.assume", &[arg(Type::I1, in_range)]);

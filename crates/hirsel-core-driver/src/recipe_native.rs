@@ -56,6 +56,10 @@ pub(super) struct Unit {
     /// The unit's key in its store's unit index, when its publication keeps
     /// one ([`Memo`]).
     memo: Option<ContentHash>,
+    /// In a coverage build, the decisions of the unit's bodies as their source
+    /// gives them, which binding their anchors to the unit's sites loses
+    /// ([`hirsel_core_ir::coverage::Rebound`]).
+    pub(super) coverage: Option<hirsel_core_ir::coverage::UnitDecisions>,
 }
 
 #[derive(Clone)]
@@ -189,6 +193,7 @@ fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Modu
         annex,
         builtins,
         memo: None,
+        coverage: None,
     }
 }
 
@@ -271,6 +276,7 @@ impl CheckProduct {
             Some(names),
             index.as_ref(),
             defer_modules,
+            options.coverage.as_ref(),
         )?;
         // The bodies in identity order before their sort, as one map of every
         // unit gives them.
@@ -332,6 +338,7 @@ impl CheckProduct {
         names: Option<Vec<String>>,
         index: Option<&Memos>,
         defer_modules: bool,
+        coverage: Option<&hirsel_core_ir::coverage::Scope>,
     ) -> Result<Released, NativeStop> {
         let _phase = crate::meter::trace::span("release units");
         let instances = reached.require()?;
@@ -361,6 +368,15 @@ impl CheckProduct {
                     Some(key)
                 }
                 _ => None,
+            };
+            // The materialised body is the unit's, before binding: it still
+            // has its anchors.
+            let coverage = match coverage {
+                Some(scope) => Some(hirsel_core_ir::coverage::unit_decisions(
+                    instance.ir()?,
+                    scope,
+                )),
+                None => None,
             };
             // The materialised module is `retain`'s canonical decoding of
             // `instance.code`, so its annex is read off without encoding again.
@@ -393,6 +409,7 @@ impl CheckProduct {
                     annex,
                     builtins,
                     memo,
+                    coverage,
                 },
             );
         }
@@ -545,13 +562,17 @@ impl Memos {
 
     /// The unit index of `entry`'s publications into `code` under
     /// `options`, read from `options`' store: none for an optimised LLVM
-    /// build, whose units a separately lowered std takes.
+    /// build, whose units a separately lowered std takes, or a coverage
+    /// build.
     fn open(
         options: &NativeOptions,
         entry: &Identity,
         code: &CodeStore,
     ) -> Result<Option<Self>, NativeStop> {
-        if matches!(options.backend, Backend::Llvm) && options.optimize {
+        // A coverage build reads each unit's decisions off its body.
+        if matches!(options.backend, Backend::Llvm) && options.optimize
+            || options.coverage.is_some()
+        {
             return Ok(None);
         }
         let key = key(
@@ -1371,6 +1392,7 @@ impl Publication {
                         annex,
                         builtins,
                         memo: None,
+                        coverage: None,
                     },
                 );
             }
@@ -1460,10 +1482,12 @@ fn unit_object_key(
     module: &Module,
     builtins: &[u32],
 ) -> io::Result<ContentHash> {
-    key(
-        "hirsel.recipe-native-object.v2",
-        &(emitter, identity, module, builtins),
-    )
+    let object = (emitter, identity, module, builtins);
+    match &module.coverage_rebound {
+        None => key("hirsel.recipe-native-object.v2", &object),
+        // An edit can move a key and keep a body and its annex.
+        Some(rebound) => key("hirsel.recipe-native-object.v2", &(object, rebound)),
+    }
 }
 
 impl CheckProduct {
@@ -1720,8 +1744,13 @@ impl Publication {
                         code,
                         builtins,
                         memo,
+                        coverage,
                     }) => {
-                        let module = module.into_bound(&annex, &identity);
+                        let mut module = module.into_bound(&annex, &identity);
+                        if let Some(decisions) = coverage {
+                            let symbol = hirsel_core_ir::symbol(identity.digest());
+                            module.coverage_rebound = Some(Arc::new([(symbol, decisions)].into()));
+                        }
                         drop(annex);
                         let object_key = unit_object_key(emitter, &identity, &module, &builtins)?;
                         objects.push(object(

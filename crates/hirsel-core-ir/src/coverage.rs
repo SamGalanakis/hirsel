@@ -2,6 +2,7 @@
 //! places of a body a coverage build flags, their order and their keys. Both
 //! engines and the driver read a body's sites from [`sites`].
 
+use crate::source::numbers_unit_sites;
 use crate::{Anchor, BlockId, Body, EdgeId, FuncId, Module, Terminator};
 use hirsel_core_ids::{ContentHash, DefPath, PackageId};
 use std::fmt::Write as _;
@@ -9,6 +10,23 @@ use std::fmt::Write as _;
 /// The packages whose items have sites: those given as source in the request.
 /// A module without a scope ([`Module::coverage`] `None`) has no sites.
 pub type Scope = std::collections::BTreeSet<PackageId>;
+
+/// A body's decisions by block, each as its arms' rows, read off the body
+/// before its anchors are rebound ([`decisions`]).
+pub type Decisions = Vec<Option<Vec<SiteRow>>>;
+
+/// A unit's decisions by the definition of each body it holds (its root and
+/// its closures, whose anchors binding rebinds to the unit's sites too).
+pub type UnitDecisions = std::collections::BTreeMap<String, Decisions>;
+
+/// The decisions of units whose anchors were rebound to their unit's sites,
+/// by unit symbol. A release unit's anchors name `source@1/unit/<symbol>/<n>`,
+/// a site of the unit at no offset, so the keys cannot be read off them; and
+/// binding drops the anchor of a decision whose place has no source position.
+/// Blocks keep their canonical order through binding, and every copy of a
+/// body (code variants, step versions) keeps its blocks, so a body's
+/// decisions are found by block.
+pub type Rebound = std::collections::BTreeMap<String, UnitDecisions>;
 
 /// The domain tag of a record id.
 pub const ID_TAG: &str = "hirsel.coverage.sites.v1";
@@ -63,6 +81,8 @@ pub struct Site {
     /// entry, the anchor's item for an arm.
     pub definition: DefPath,
     pub kind: Kind,
+    /// An arm's row as its source gave it, for a rebound body.
+    pub row: Option<SiteRow>,
 }
 
 /// A body's sites in their one order: the entry, then each decision's arms in
@@ -96,9 +116,13 @@ impl Sites {
 /// Whether `module` flags `function`'s body: its definition's package is in
 /// the scope and the body has source, so generated glue has no sites.
 pub fn in_scope(module: &Module, function: FuncId) -> bool {
-    let Some(scope) = &module.coverage else {
-        return false;
-    };
+    module
+        .coverage
+        .as_ref()
+        .is_some_and(|scope| in_scope_of(module, function, scope))
+}
+
+fn in_scope_of(module: &Module, function: FuncId, scope: &Scope) -> bool {
     let row = &module.functions[function.index()];
     let Some(body) = &row.body else {
         return false;
@@ -113,7 +137,80 @@ pub fn in_scope(module: &Module, function: FuncId) -> bool {
 /// ([`in_scope`]). Every instance and code variant of one item's body gives
 /// the same keys, since keys name the source item and offsets within it.
 pub fn sites(module: &Module, function: FuncId) -> Option<Sites> {
-    if !in_scope(module, function) {
+    sites_of(module, function, module.coverage.as_ref()?)
+}
+
+/// `function`'s decisions under `scope` by block, or none when `scope` does
+/// not flag it: what [`Rebound`] keeps of a body before its anchors are
+/// rebound.
+pub fn decisions(module: &Module, function: FuncId, scope: &Scope) -> Option<Decisions> {
+    let sites = sites_of(module, function, scope)?;
+    let blocks = module.functions[function.index()]
+        .body
+        .as_ref()?
+        .blocks
+        .len();
+    let mut decisions: Decisions = vec![None; blocks];
+    for (site, row) in sites.sites.iter().zip(rows(module, function, &sites)) {
+        if let Kind::Arm { block, .. } = site.kind {
+            decisions[block.index()]
+                .get_or_insert_with(Vec::new)
+                .push(row);
+        }
+    }
+    Some(decisions)
+}
+
+/// The decisions of every body of a unit's materialised `module` that
+/// `scope` flags, by definition: what [`Rebound`] keeps of a unit.
+pub fn unit_decisions(module: &Module, scope: &Scope) -> UnitDecisions {
+    let mut unit = UnitDecisions::new();
+    for (f, row) in module.functions.iter().enumerate() {
+        let Some(decisions) = decisions(module, FuncId(f as u32), scope) else {
+            continue;
+        };
+        let definition = module.instances[row.instance.index()]
+            .definition
+            .to_string();
+        if let Some(other) = unit.insert(definition, decisions.clone()) {
+            // Two bodies of one definition in a unit are told apart by
+            // nothing a rebound body keeps.
+            assert!(
+                other == decisions,
+                "coverage: a unit holds two bodies of one definition"
+            );
+        }
+    }
+    unit
+}
+
+/// The arms of the decision `terminator` ends a block with, if it is one.
+fn arms(terminator: &Terminator) -> Option<Vec<Arm>> {
+    match terminator {
+        Terminator::Branch { .. } => Some(vec![Arm::No, Arm::Yes]),
+        Terminator::Switch { arms, .. } => Some(
+            (0..arms.len)
+                .map(Arm::Case)
+                .chain(std::iter::once(Arm::Otherwise))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// The symbol of the unit whose sites `body`'s anchors were rebound to.
+fn rebound_unit<'m>(module: &'m Module, body: &Body) -> Option<&'m str> {
+    let blocks = body.blocks.iter().map(|block| block.anchor);
+    blocks
+        .chain(body.inst_anchors.iter().copied())
+        .flatten()
+        .map(|anchor| &module.items[anchor.item.index()])
+        .find(|item| numbers_unit_sites(item))
+        .map(|item| item.0.modules[1].as_str())
+}
+
+fn sites_of(module: &Module, function: FuncId, scope: &Scope) -> Option<Sites> {
+    if !in_scope_of(module, function, scope) {
         return None;
     }
     let row = &module.functions[function.index()];
@@ -124,38 +221,71 @@ pub fn sites(module: &Module, function: FuncId) -> Option<Sites> {
         key: format!("{definition}#e"),
         definition,
         kind: Kind::Entry,
+        row: None,
     }];
-    let mut shared = std::collections::HashMap::<(u32, u32, u32), u32>::new();
     let mut decisions = vec![None; body.blocks.len()];
-    for (index, block) in body.blocks.iter().enumerate() {
-        let Some(anchor) = block.anchor.filter(|_| block.decision) else {
-            continue;
-        };
-        let arms: Vec<Arm> = match &body.terminators[index] {
-            Terminator::Branch { .. } => vec![Arm::No, Arm::Yes],
-            Terminator::Switch { arms, .. } => (0..arms.len)
-                .map(Arm::Case)
-                .chain(std::iter::once(Arm::Otherwise))
-                .collect(),
-            _ => continue,
-        };
-        let item = module.items[anchor.item.index()].clone();
-        let n = shared
-            .entry((anchor.item.0, anchor.start, anchor.end))
-            .or_default();
-        decisions[index] = Some(sites.len() as u32);
-        let block = BlockId(index as u32);
-        for arm in arms {
-            let mut key = String::new();
-            write!(key, "{item}@{}-{}.{n}:{arm}", anchor.start, anchor.end).unwrap();
-            sites.push(Site {
-                anchor: Some(anchor),
-                key,
-                definition: item.clone(),
-                kind: Kind::Arm { block, arm },
+    if let Some(symbol) = rebound_unit(module, body) {
+        let definition = module.instances[row.instance.index()]
+            .definition
+            .to_string();
+        let unit = (module.coverage_rebound.as_deref())
+            .and_then(|rebound| rebound.get(symbol)?.get(&definition))
+            .unwrap_or_else(|| panic!("coverage: {definition} of unit {symbol} has no decisions"));
+        // A mismatch would misattribute flags, so it stops the build.
+        assert!(
+            unit.len() == body.blocks.len(),
+            "coverage: a body of {definition} in unit {symbol} does not have its source's blocks"
+        );
+        for (index, rows) in unit.iter().enumerate() {
+            let Some(rows) = rows else {
+                continue;
+            };
+            let arms = arms(&body.terminators[index]).filter(|arms| arms.len() == rows.len());
+            let arms = arms.unwrap_or_else(|| {
+                panic!("coverage: block {index} of {definition} in unit {symbol} does not match its source")
             });
+            decisions[index] = Some(sites.len() as u32);
+            for (arm, row) in arms.into_iter().zip(rows) {
+                sites.push(Site {
+                    anchor: body.blocks[index].anchor,
+                    key: row.key.clone(),
+                    definition: row.decision.as_ref().unwrap().definition.clone(),
+                    kind: Kind::Arm {
+                        block: BlockId(index as u32),
+                        arm,
+                    },
+                    row: Some(row.clone()),
+                });
+            }
         }
-        *n += 1;
+    } else {
+        let mut shared = std::collections::HashMap::<(u32, u32, u32), u32>::new();
+        for (index, block) in body.blocks.iter().enumerate() {
+            let anchor = block.anchor.filter(|_| block.decision);
+            let (Some(anchor), Some(arms)) = (anchor, arms(&body.terminators[index])) else {
+                continue;
+            };
+            let item = &module.items[anchor.item.index()];
+            decisions[index] = Some(sites.len() as u32);
+            let n = shared
+                .entry((anchor.item.0, anchor.start, anchor.end))
+                .or_default();
+            for arm in arms {
+                let mut key = String::new();
+                write!(key, "{item}@{}-{}.{n}:{arm}", anchor.start, anchor.end).unwrap();
+                sites.push(Site {
+                    anchor: Some(anchor),
+                    key,
+                    definition: item.clone(),
+                    kind: Kind::Arm {
+                        block: BlockId(index as u32),
+                        arm,
+                    },
+                    row: None,
+                });
+            }
+            *n += 1;
+        }
     }
     let id = ContentHash::of_parts(ID_TAG, sites.iter().map(|s| s.key.as_bytes()));
     Some(Sites {
@@ -179,7 +309,7 @@ pub fn edge(body: &Body, block: BlockId, arm: Arm) -> EdgeId {
 }
 
 /// A source range: byte offsets relative to the start of `definition`.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Position {
     pub definition: DefPath,
     pub start: u32,
@@ -187,7 +317,7 @@ pub struct Position {
 }
 
 /// One site as a map fragment holds it.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SiteRow {
     pub key: String,
     /// An arm's name; none for an entry.
@@ -222,47 +352,67 @@ impl Fragment {
             return;
         }
         let row = &module.functions[function.index()];
-        let body = row.body.as_ref().unwrap();
-        let position = |anchor: Anchor| Position {
-            definition: module.items[anchor.item.index()].clone(),
-            start: anchor.start,
-            end: anchor.end,
-        };
-        let rows = sites
-            .sites
-            .iter()
-            .map(|site| match site.kind {
-                Kind::Entry => SiteRow {
-                    key: site.key.clone(),
-                    arm: None,
-                    decision: None,
-                    target: None,
-                },
-                Kind::Arm { block, arm } => {
-                    let index = body.edges[edge(body, block, arm).index()].target.index();
-                    let target = &body.blocks[index];
-                    let (start, len) = (target.insts.start as usize, target.insts.len as usize);
-                    let first = (start..start + len)
-                        .find_map(|i| body.inst_anchors.get(i).copied().flatten());
-                    // An empty arm, such as the `no` of an `if` without `else`,
-                    // reaches a block with no source code of its own that only
-                    // jumps on: it has no position ("The site map", `arm_line`).
-                    let empty =
-                        first.is_none() && matches!(body.terminators[index], Terminator::Jump(_));
-                    let first = first.or(target.anchor).filter(|_| !empty);
-                    SiteRow {
-                        key: site.key.clone(),
-                        arm: Some(arm.to_string()),
-                        decision: site.anchor.map(position),
-                        target: first.map(position),
-                    }
-                }
-            })
-            .collect();
         self.records.push(Record {
             id: sites.id,
             function: module.instances[row.instance.index()].definition.clone(),
-            sites: rows,
+            sites: rows(module, function, sites),
         });
     }
+}
+
+/// The rows of `function`'s `sites`: a rebound arm's as its source gave it.
+fn rows(module: &Module, function: FuncId, sites: &Sites) -> Vec<SiteRow> {
+    let body = module.functions[function.index()].body.as_ref().unwrap();
+    let position = |anchor: Anchor| Position {
+        definition: module.items[anchor.item.index()].clone(),
+        start: anchor.start,
+        end: anchor.end,
+    };
+    sites
+        .sites
+        .iter()
+        .map(|site| match (&site.row, &site.kind) {
+            (Some(row), _) => row.clone(),
+            (None, Kind::Entry) => SiteRow {
+                key: site.key.clone(),
+                arm: None,
+                decision: None,
+                target: None,
+            },
+            (&None, &Kind::Arm { block, arm }) => {
+                let index = body.edges[edge(body, block, arm).index()].target.index();
+                let target = &body.blocks[index];
+                let (start, len) = (target.insts.start as usize, target.insts.len as usize);
+                let first =
+                    (start..start + len).find_map(|i| body.inst_anchors.get(i).copied().flatten());
+                // An empty arm, such as the `no` of an `if` without `else`,
+                // reaches a block with no source code of its own that only
+                // jumps on: it has no position ("The site map", `arm_line`).
+                let empty =
+                    first.is_none() && matches!(body.terminators[index], Terminator::Jump(_));
+                let first = first.or(target.anchor).filter(|_| !empty);
+                SiteRow {
+                    key: site.key.clone(),
+                    arm: Some(arm.to_string()),
+                    decision: site.anchor.map(position),
+                    target: first.map(position),
+                }
+            }
+        })
+        .collect()
+}
+
+/// The map fragment of an object `module` is emitted into whole, in a
+/// coverage build: each flagged function's record, in function order, as an
+/// engine that emits every body adds them.
+pub fn fragment(module: &Module) -> Option<Fragment> {
+    module.coverage.as_ref()?;
+    let mut fragment = Fragment::default();
+    for f in 0..module.functions.len() {
+        let function = FuncId(f as u32);
+        if let Some(sites) = sites(module, function) {
+            fragment.add(module, function, &sites);
+        }
+    }
+    Some(fragment)
 }

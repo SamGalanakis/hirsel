@@ -222,6 +222,7 @@ pub(super) fn glue_emitter<'a>(
         next: 0,
         fixed_point: None,
         fixed_rank: None,
+        coverage: None,
     }
 }
 
@@ -1194,6 +1195,7 @@ impl FunctionEmitter<'_> {
                     init: Some(Value::Bytes(bytes)),
                     align: 8,
                     absolute_symbol: false,
+                    section: None,
                 });
                 self.runtime_void(
                     "hirsel_core_foreign_cleanup",
@@ -1345,6 +1347,7 @@ fn counted_glue(
                 }),
                 align: 8,
                 absolute_symbol: false,
+                section: None,
             });
         }
         sink.begin_function(

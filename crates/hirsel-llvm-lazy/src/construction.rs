@@ -49,7 +49,20 @@ pub(crate) struct Api {
     pub constant_struct: unsafe extern "C" fn(Raw, *const Raw, usize, u8) -> Raw,
     pub constant_bytes: unsafe extern "C" fn(Raw, *const u8, usize) -> Raw,
     pub global_ref: unsafe extern "C" fn(Raw, *const c_char, usize) -> Raw,
-    pub global: unsafe extern "C" fn(Raw, *const c_char, usize, Raw, Raw, u32, u8, u8, u32, u8),
+    pub global: unsafe extern "C" fn(
+        Raw,
+        *const c_char,
+        usize,
+        Raw,
+        Raw,
+        u32,
+        u8,
+        u8,
+        u32,
+        u8,
+        *const c_char,
+        usize,
+    ),
     pub function:
         unsafe extern "C" fn(Raw, *const c_char, usize, Raw, *const Raw, usize, u32) -> Raw,
     pub attribute: unsafe extern "C" fn(Raw, Raw, u32, u32, Raw, u64),
@@ -108,6 +121,7 @@ pub(crate) struct Api {
     pub unit_stream:
         unsafe extern "C" fn(Raw, *const c_char, *const c_char, *const c_char, *mut Output),
     pub end_body: unsafe extern "C" fn(Raw),
+    pub used: unsafe extern "C" fn(Raw, *const Raw, usize),
 }
 
 pub(crate) struct Context {

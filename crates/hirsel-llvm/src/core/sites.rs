@@ -41,6 +41,7 @@ impl FunctionEmitter<'_> {
                 init: Some(word),
                 align: 8,
                 absolute_symbol: false,
+                section: None,
             });
             self.load(&Type::I64, &Value::global(pool), 8)
         } else {
@@ -66,6 +67,7 @@ impl FunctionEmitter<'_> {
             init: None,
             align: 0,
             absolute_symbol: true,
+            section: None,
         });
     }
 

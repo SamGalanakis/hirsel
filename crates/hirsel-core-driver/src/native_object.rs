@@ -56,12 +56,23 @@ fn put_parts(
     // under a coverage key always has one. The record does not name it: a
     // plain record's bytes are the bytes it had before coverage.
     if let Some(fragment) = &native.coverage {
-        store.put_keyed(
-            coverage_name(object.address),
-            &encode(&(COVERAGE_SCHEMA, fragment))?,
-        )?;
+        put_coverage(store, object.address, fragment)?;
     }
     Ok((object, debug))
+}
+
+/// Store `fragment` as the map fragment of the coverage object named
+/// `identity`, which a link reading `store` joins ([`join_coverage`]).
+pub(crate) fn put_coverage(
+    store: &Store,
+    identity: ContentHash,
+    fragment: &hirsel_core_ir::coverage::Fragment,
+) -> io::Result<()> {
+    store.put_keyed(
+        coverage_name(identity),
+        &encode(&(COVERAGE_SCHEMA, fragment))?,
+    )?;
+    Ok(())
 }
 
 /// The map fragment stored with the coverage object named `identity`

@@ -606,6 +606,18 @@ together.
 - **Installed std.** Std is out of scope unless given as source, so the release std's key
   does not take the field. A coverage run over an installed std compiles only the program.
 - **Map fragments** are stored with each object, named by its identity.
+- **Release units.** A release unit's body is rebound to unit-relative anchors
+  (`source@1/unit/<symbol>/<n>`) before the joined module is built, so the joined module
+  cannot derive item-relative keys from it. The release path computes each unit's decisions
+  from its materialized bodies (its root and its closures, whose anchors are rebound to the
+  unit too), before binding, and carries them beside the unit by symbol and definition.
+  Binding keeps the canonical block order but drops the anchor of a decision whose place has
+  no source position, so a rebound body takes its decisions by block, not from its anchors.
+  The build panics if the blocks or a decision's arms differ from the source's, since a
+  mismatch would misattribute flags. The carried decisions join the unit's object key only
+  when coverage is on. Unit memos are off under coverage.
+- **Library coverage on release.** When the scope names `core` or `std`, the release std side
+  is empty and the program's own release build lowers every unit, so each unit gets records.
 - **Test passes.** The pass cache schema becomes 5. A cached pass gains its raw profile. A
   `--coverage` run reuses a pass only when the pass was recorded with its profile, the rule
   `--laws` uses for rows. This is sound because a flag profile is a function of a determined
@@ -630,6 +642,9 @@ named existing harnesses. None adds a new harness.
 | **Killed run** | a profile lost when the runner kills a test | the timeout case in `crates/hirsel-core-driver/src/test_run_native.rs` | the site before the hang is reached, and the run counts as failed |
 | **Off is off** | a coverage object reused by a plain build | `crates/hirsel-core-driver/src/test_run_native.rs`: after a `--coverage` run, the plain executable has no `hirsel_cov` section, and a plain pass is not served as a coverage pass | the section's absence |
 
-"Same observations", "Tape crosses" and "Engines agree" on LLVM release belong to slice C3.
+Slice C3 runs "Same observations" and "Tape crosses" on Cranelift, LLVM debug and LLVM
+release. "Engines agree" runs in the Known arms package, through the runner: each site of
+its run on LLVM debug and on LLVM release is reached exactly when it is on Cranelift, and
+Known arms' keys and places hold on all three. The `std_native.py` corpus is not yet a case.
 A red in any of them blocks a landing, since it means the coverage build is a different
 build.

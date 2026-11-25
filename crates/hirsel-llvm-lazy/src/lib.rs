@@ -462,6 +462,7 @@ b0(v0: u64):
             bytes,
             hirsel_core_ids::ContentHash::of_bytes(b"release line table"),
             true,
+            None,
         )
         .unwrap();
         let debug = object.debug.unwrap();

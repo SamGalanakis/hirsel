@@ -186,7 +186,7 @@ fn extraction_preserves_forward_origins_disjoint_ranges_and_generated_rows() {
                 .unwrap();
             let bytes = object.write().unwrap();
             let key = ContentHash::of_bytes(b"fixture");
-            let product = finish_native_object(bytes.clone(), key, true).unwrap();
+            let product = finish_native_object(bytes.clone(), key, true, None).unwrap();
             let debug = product.debug.unwrap();
             assert_eq!(debug.scopes.len(), 4);
             assert_eq!(debug.scopes[0].origin, Some(3));
@@ -231,7 +231,7 @@ fn extraction_preserves_forward_origins_disjoint_ranges_and_generated_rows() {
                 debug.scopes[1].call,
                 Some(NativeLocation { item: 0, start: 27 })
             );
-            let changed = finish_native_object(bytes, ContentHash::of_bytes(b"other"), true)
+            let changed = finish_native_object(bytes, ContentHash::of_bytes(b"other"), true, None)
                 .unwrap()
                 .debug
                 .unwrap();

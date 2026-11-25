@@ -15,6 +15,7 @@
 //! generated beside it. Anything outside that shape stops the cut; the engine
 //! keys a module it cannot cut as one whole part instead.
 use hirsel_core_ids::ContentHash;
+use hirsel_core_ir::coverage::Fragment;
 use hirsel_core_ir::source::{CodeSection, NativeDebug, NativeObject, ScopeKind, debug_symbol};
 use hirsel_core_layout::ObjectFormat;
 use object::LittleEndian as LE;
@@ -79,12 +80,14 @@ pub fn split_native_object(
     object: &[u8],
     parts: &[(&str, ContentHash)],
     debug_lines: bool,
+    coverage: Option<Fragment>,
 ) -> Result<Vec<NativeObject>, String> {
     if let [("", key)] = parts {
         return Ok(vec![super::finish_native_object(
             object.to_vec(),
             *key,
             debug_lines,
+            coverage,
         )?]);
     }
     match format(object)? {
@@ -94,6 +97,11 @@ pub fn split_native_object(
         ObjectFormat::MachO => {
             return Err("a Mach-O release object cannot be cut per part yet".into());
         }
+    }
+    // A coverage module's records are writable data in their own section,
+    // so it is generated whole (`unsplittable_content`).
+    if coverage.is_some() {
+        return Err("a coverage object is cut per definition".into());
     }
     let input = Input::parse(object)?;
     let debug = if debug_lines {

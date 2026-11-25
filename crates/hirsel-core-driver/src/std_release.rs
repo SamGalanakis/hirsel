@@ -233,20 +233,32 @@ pub(crate) fn std_side(
 ) -> Result<StdSide, NativeStop> {
     let generator = Generator::of(options);
     let kin = generator.kin()?;
+    let empty = |key| StdSide {
+        key,
+        roots: BTreeSet::new(),
+        summaries: BTreeMap::new(),
+        points: BTreeMap::new(),
+        parts: StdParts::default(),
+        lent: LentBodies::default(),
+        lowered: 0,
+    };
+    // A coverage build of a library package flags its bodies in the
+    // program's own module: a side lends its bodies, so it is cut per
+    // definition and holds no records, and its key omits the switch.
+    let covered = options.coverage.as_ref().is_some_and(|scope| {
+        units
+            .keys()
+            .any(|i| self::library(&i.definition) && scope.contains(&i.definition.0.package))
+    });
+    if covered {
+        return Ok(empty(side_key(kin, false, &[], &[])?));
+    }
     if let Some(side) = prebuilt_side(units, library, kin)? {
         return Ok(side);
     }
     let (roots, reached) = program_side(units, entry);
     if roots.is_empty() {
-        return Ok(StdSide {
-            key: side_key(kin, false, &[], &[])?,
-            roots: BTreeSet::new(),
-            summaries: BTreeMap::new(),
-            points: BTreeMap::new(),
-            parts: StdParts::default(),
-            lent: LentBodies::default(),
-            lowered: 0,
-        });
+        return Ok(empty(side_key(kin, false, &[], &[])?));
     }
     let side_units = SideUnits {
         roots,
@@ -870,7 +882,8 @@ fn finish(
     exports: &BTreeSet<String>,
     private_names: &BTreeSet<&[u8]>,
 ) -> Result<hirsel_core_ir::source::NativeObject, String> {
-    let mut cut = hirsel_llvm_lazy::core::split_native_object(object, &[(&part.name, key)], true)?;
+    let mut cut =
+        hirsel_llvm_lazy::core::split_native_object(object, &[(&part.name, key)], true, None)?;
     let mut object = cut.pop().ok_or("a release std part cuts to no object")?;
     let strong = hirsel_llvm_lazy::core::strong_definitions(&object.bytes)?;
     let own: BTreeSet<Vec<u8>> = strong

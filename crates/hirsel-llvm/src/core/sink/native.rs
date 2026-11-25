@@ -478,7 +478,8 @@ impl Sink for NativeSink<'_> {
             .init
             .as_ref()
             .map_or(std::ptr::null_mut(), |v| self.value(v, &g.ty));
-        // SAFETY: the name is borrowed; handles belong to this unit.
+        let section = g.section.unwrap_or("");
+        // SAFETY: the names are borrowed; handles belong to this unit.
         unsafe {
             (self.api.global)(
                 self.unit,
@@ -491,8 +492,18 @@ impl Sink for NativeSink<'_> {
                 u8::from(g.externally_initialized),
                 g.align,
                 u8::from(g.absolute_symbol),
+                section.as_ptr().cast(),
+                section.len(),
             )
         }
+    }
+    fn used(&mut self, globals: &[Name]) {
+        let values: Vec<_> = globals
+            .iter()
+            .map(|g| self.value(&Value::Global(g.clone()), &Type::Ptr))
+            .collect();
+        // SAFETY: the values are this unit's globals.
+        unsafe { (self.api.used)(self.unit, values.as_ptr(), values.len()) }
     }
     fn declare(&mut self, name: &str, sig: &FnSig, attrs: &FnAttrs) {
         let f = self.function(name, sig, attrs);

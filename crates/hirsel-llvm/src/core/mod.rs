@@ -13,6 +13,7 @@ mod cleanup;
 mod collections;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod copy_tests;
+mod coverage;
 mod debug;
 pub use debug::finish_native_object;
 mod split;
@@ -433,6 +434,7 @@ fn emit_module(
             init: None,
             align: 1,
             absolute_symbol: false,
+            section: None,
         });
     }
     items.release_sites = provided.release_sites.then(ReleaseSites::default);
@@ -475,8 +477,10 @@ fn emit_module(
             init: Some(Value::Bytes(bytes.into_owned())),
             align,
             absolute_symbol: false,
+            section: None,
         });
     }
+    let records = coverage::records(module, target, sink)?;
     // Each function a body of this unit describes, its descriptor `{code,
     // length, revision}` then the identity bytes, defined weak beside the
     // described instance: every unit that describes it defines it, and
@@ -518,6 +522,7 @@ fn emit_module(
                             )),
                             align: 1,
                             absolute_symbol: false,
+                            section: None,
                         });
                         let fields = vec![
                             (Type::Ptr, Value::global(bytes)),
@@ -542,6 +547,7 @@ fn emit_module(
                     init: Some(init),
                     align: 8,
                     absolute_symbol: false,
+                    section: None,
                 });
             }
             let bytes = module.statics[identity.index()].literal_bytes().unwrap();
@@ -563,6 +569,7 @@ fn emit_module(
                 }),
                 align: 8,
                 absolute_symbol: false,
+                section: None,
             });
         }
     }
@@ -757,6 +764,7 @@ fn emit_module(
                 next: 0,
                 fixed_point: None,
                 fixed_rank: None,
+                coverage: records.get(i).and_then(Option::as_ref),
             };
             // A selecting entry takes the function's symbol; its checked body
             // keeps the direct calls.
@@ -928,6 +936,7 @@ fn emit_module(
                     && !empty::loop_free(body);
             }
             let fills = hirsel_core_ir::fills::fills(body);
+            e.set_flag(0, None);
             e.br(Label::block(0u32));
             for (i, b) in body.blocks.iter().enumerate() {
                 e.block(Label::block(i));
@@ -1065,7 +1074,9 @@ fn emit_module(
     cleanup::release_lasts(
         module, target, &recipes, &failures, facts, &lasts, sink, &mut items,
     )?;
-    Ok(items.emit(sink))
+    let sites = items.emit(sink);
+    coverage::retain(&records, sink);
+    Ok(sites)
 }
 
 /// Lower one owned unit directly into a native module of `context`.
@@ -1586,6 +1597,8 @@ struct FunctionEmitter<'a> {
     /// In fixed counted glue, the step of the field being walked counted from
     /// the block's first; None inside an array.
     fixed_rank: Option<u64>,
+    /// The record a coverage body's flags live in.
+    coverage: Option<&'a coverage::Flags>,
 }
 impl FunctionEmitter<'_> {
     fn counter(&mut self) -> usize {
@@ -1986,6 +1999,7 @@ impl FunctionEmitter<'_> {
             }),
             align: 8,
             absolute_symbol: false,
+            section: None,
         });
         let pointer = if argument.byval.is_none() || !fixed {
             let pointer = self.temp(shape);
@@ -2374,6 +2388,7 @@ impl FunctionEmitter<'_> {
             }
             Terminator::Branch { condition, yes, no } => {
                 let c = self.numeric(condition);
+                self.set_branch_flag(block, &c);
                 let y = self.edge_label(yes);
                 let n = self.edge_label(no);
                 // An edge into a block that makes a cold call is unlikely.
@@ -2401,21 +2416,45 @@ impl FunctionEmitter<'_> {
             } => {
                 let v = self.numeric(value);
                 let t = ty(self.vty(value));
-                let other = self.edge_label(otherwise);
+                // A coverage arm sets its flag on its own edge.
+                let flag = self.decision(block);
+                let arm_label = |e: &mut Self, edge: EdgeId| match flag {
+                    Some(_) => Label::edge(e.counter(), edge.0),
+                    None => e.edge_label(edge),
+                };
+                let other = arm_label(self, otherwise);
                 let arms = arms
                     .get(&self.body.pools.arms)
                     .unwrap()
                     .iter()
-                    .map(|a| (*a, self.edge_label(a.edge)))
+                    .map(|a| (*a, arm_label(self, a.edge)))
                     .collect::<Vec<_>>();
                 let cases: Vec<_> = arms
                     .iter()
                     .map(|(a, label)| (i128::from(a.value), *label))
                     .collect();
                 self.effect(Operation::Switch(&t, &v, other, &cases));
-                self.emit_edge(other, otherwise);
-                for (a, label) in arms {
-                    self.emit_edge(label, a.edge);
+                match flag {
+                    Some(flag) => {
+                        let n = arms.len() as u32;
+                        let taken = arms
+                            .iter()
+                            .enumerate()
+                            .map(|(k, (a, label))| (flag + k as u32, *label, a.edge))
+                            .chain([(flag + n, other, otherwise)]);
+                        for (flag, label, edge) in taken {
+                            self.block(label);
+                            self.set_flag(flag, None);
+                            let to = self.edge(edge);
+                            self.br(to);
+                        }
+                    }
+                    None => {
+                        self.emit_edge(other, otherwise);
+                        for (a, label) in arms {
+                            self.emit_edge(label, a.edge);
+                        }
+                    }
                 }
             }
             Terminator::Return(values) => self.return_at(block, values),

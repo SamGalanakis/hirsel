@@ -1644,6 +1644,11 @@ pub struct Module {
     /// emission, outside the checked body encoding.
     #[serde(skip)]
     pub coverage: Option<crate::coverage::Scope>,
+    /// In a coverage build of units whose anchors name their unit's sites
+    /// (release units), each unit's decisions as its source gives them
+    /// ([`crate::coverage::Rebound`]).
+    #[serde(skip)]
+    pub coverage_rebound: Option<std::sync::Arc<crate::coverage::Rebound>>,
     /// Callable code variants' identities, separate from PROG-5 semantic instances:
     /// an optimiser may emit several code bodies for one instance without changing
     /// the identity of its function values.

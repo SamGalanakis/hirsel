@@ -416,14 +416,15 @@ fn arms() -> Result[(), ()] { if known(0u64, PickA) + known(2u64, PickB) + gener
 "#;
 
 /// Coverage "Off is off" and "Known arms" (`docs/coverage.md`, "Laws"), on
-/// Cranelift. A plain build after a coverage build in one store has no
+/// `backend` (an optimised build when `optimize`). A plain build after a coverage build in one store has no
 /// `hirsel_cov` section (oracle: the section's absence), and the coverage
 /// build's raw file reports `known`'s arms as derived by hand from its
 /// source: an `if` without `else` taken only `no`, a `match` whose third arm
 /// no input reaches, and `&&` whose right side always runs. `generated`'s only
 /// decision is its `if`: the branches the front makes for `list.push`, the
-/// index read, `int.checked_add` and record `==` are not sites.
-fn coverage_off_and_known_arms() {
+/// index read, `int.checked_add` and record `==` are not sites. Returns each
+/// site key with whether the run reached it, which "Engines agree" compares.
+fn coverage_off_and_known_arms(backend: Backend, optimize: bool) -> BTreeMap<String, bool> {
     use object::{Object, ObjectSection};
     let dir = tempfile::tempdir().unwrap();
     let product = Driver::default()
@@ -431,7 +432,7 @@ fn coverage_off_and_known_arms() {
         .unwrap();
     assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
     let test = DefPath::from_full("app@1/main/arms").unwrap();
-    let plain = native_options(Backend::Cranelift, dir.path());
+    let plain = NativeOptions { optimize, ..native_options(backend, dir.path()) };
     let scope: hirsel_core_ir::coverage::Scope = [package("app")].into();
     let covered = NativeOptions { coverage: Some(scope.clone()), output: dir.path().join("covered"), ..plain.clone() };
     let section = |options: &NativeOptions| {
@@ -509,6 +510,7 @@ fn coverage_off_and_known_arms() {
             assert_eq!(row.get("arm_col").is_some(), arm_line.is_some(), "{text} {arm}");
         }
     }
+    all
 }
 
 /// Each site key of a run's coverage, with whether the run reached it.
@@ -527,13 +529,18 @@ fn coverage_reached(coverage: &crate::test_run::RunCoverage) -> BTreeMap<String,
 fn prog4_independent_runs_limits_and_outcomes_cranelift() {
     prog4_runs(Backend::Cranelift);
     prog4_pass_cache(Backend::Cranelift);
-    coverage_off_and_known_arms();
+    coverage_off_and_known_arms(Backend::Cranelift, false);
 }
 #[test]
 #[ignore = "explicit native integration target"]
 fn prog4_independent_runs_limits_and_outcomes_llvm() {
     prog4_runs(Backend::Llvm);
     prog4_pass_cache(Backend::Llvm);
+    // Engines agree: every site of the program, for one input, is reached or
+    // not alike under Cranelift and both LLVM builds.
+    let cranelift = coverage_off_and_known_arms(Backend::Cranelift, false);
+    assert_eq!(coverage_off_and_known_arms(Backend::Llvm, false), cranelift);
+    assert_eq!(coverage_off_and_known_arms(Backend::Llvm, true), cranelift);
 }
 
 #[test]

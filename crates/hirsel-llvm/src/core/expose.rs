@@ -621,6 +621,10 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
     // still inline the call after the proof has run.
     let step_entries = preserve_step_trees.then(|| literal_recursive_entries(module));
     let step_entry = |i: usize| step_entries.as_ref().is_some_and(|entries| entries[i]);
+    // A coverage body keeps its own blocks, so its flags are the sites
+    // `coverage::sites` reads from it: none is copied into a caller, and
+    // none takes a callee's.
+    let covered = |i: usize| hirsel_core_ir::coverage::in_scope(module, FuncId(i as u32));
     let eligible = module
         .functions
         .iter()
@@ -628,6 +632,7 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         .map(|(i, f)| {
             f.body.as_ref().filter(|b| {
                 !step_entry(i)
+                    && !covered(i)
                     && !(module.law_observation
                         && hirsel_core_ir::law::observes(
                             &module.instances[f.instance.index()].definition,
@@ -644,7 +649,7 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         let Some(original) = &f.body else {
             continue;
         };
-        if original.calls.is_empty() || step_entry(i) {
+        if original.calls.is_empty() || step_entry(i) || covered(i) {
             continue;
         }
         // An unmetered terminal call already has FORM's forwarding ABI. Keep

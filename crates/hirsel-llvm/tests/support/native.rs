@@ -804,8 +804,8 @@ fn assert_native_debug_product(bytes: &[u8]) -> hirsel_core_ir::source::NativeDe
     use hirsel_core_ir::source::ScopeKind;
     use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
     let unit = hirsel_core_ids::ContentHash::of_bytes(b"native debug witness");
-    let product = finish_native_object(bytes.to_vec(), unit, true).unwrap();
-    let lazy = hirsel_llvm_lazy::core::finish_native_object(bytes.to_vec(), unit, true).unwrap();
+    let product = finish_native_object(bytes.to_vec(), unit, true, None).unwrap();
+    let lazy = hirsel_llvm_lazy::core::finish_native_object(bytes.to_vec(), unit, true, None).unwrap();
     assert_eq!(product, lazy, "eager/lazy debug extraction differs");
     let file = object::File::parse(product.bytes.as_slice()).unwrap();
     assert!(file.section_by_name(".debug_info").is_none());
@@ -868,7 +868,7 @@ fn assert_native_debug_product(bytes: &[u8]) -> hirsel_core_ir::source::NativeDe
             .iter()
             .any(|s| matches!(&s.kind, ScopeKind::Function { linkage } if !linkage.is_empty()))
     );
-    let off = finish_native_object(bytes.to_vec(), unit, false).unwrap();
+    let off = finish_native_object(bytes.to_vec(), unit, false, None).unwrap();
     assert_eq!(off.bytes, bytes);
     assert!(off.debug.is_none());
     debug

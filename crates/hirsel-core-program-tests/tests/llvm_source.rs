@@ -2532,6 +2532,7 @@ fn site_fixture(target: Target) {
             bytes,
             hirsel_core_ids::ContentHash::of_bytes(b"executed native debug witness"),
             debug_lines,
+            None,
         )
         .unwrap();
         assert_eq!(product.debug.is_some(), debug_lines);

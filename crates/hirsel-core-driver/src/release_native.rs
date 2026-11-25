@@ -259,6 +259,7 @@ pub(super) fn emit_release_image(
 ) -> Result<Emitted, NativeStop> {
     joined.external_call_sites = !options.foreign_grants.is_empty();
     joined.law_observation = options.recording;
+    joined.coverage = options.coverage.clone();
     let _context = hirsel_guard::process_memory_context(format!(
         "building the release image of {}",
         instance.definition.0.name
@@ -346,20 +347,31 @@ pub(super) fn emit_release_image(
         runtime,
         options.logical_charge_report.is_some(),
     );
-    let unit = unit_key(
-        &(
-            &generator,
-            options.logical_charge_report.is_some(),
-            !hirsel_llvm_lazy::core::facts_enabled(),
-            runtime,
-            instance,
-            closed_executable,
-            std_key,
-            lent_key,
-            &refs,
-        ),
-        &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
-    )?;
+    let inputs = (
+        &generator,
+        options.logical_charge_report.is_some(),
+        !hirsel_llvm_lazy::core::facts_enabled(),
+        runtime,
+        instance,
+        closed_executable,
+        std_key,
+        lent_key,
+        &refs,
+    );
+    let consumed_facts = consumed.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    // The module's encoding omits the coverage switch. A build without it
+    // keys what it keyed before coverage.
+    let unit = match &options.coverage {
+        None => unit_key(&inputs, &consumed_facts)?,
+        // An edit can move a key and keep a body and its annex.
+        Some(scope) => {
+            let rebound = modules[0].coverage_rebound.as_deref();
+            unit_key(&(inputs, ("coverage", scope, rebound)), &consumed_facts)?
+        }
+    };
+    drop(consumed_facts);
+    // The map fragment of the module, which a coverage build generates whole.
+    let fragment = hirsel_core_ir::coverage::fragment(&modules[0]);
     drop(consumed);
     // The Core modules and facts are read only until the unit is lowered.
     let mut core = Some((modules, facts));
@@ -463,7 +475,8 @@ pub(super) fn emit_release_image(
             .map(|(part, &key)| (part.name.as_str(), key))
             .collect::<Vec<_>>();
         let cut = |object: &[u8], parts: &[(&str, ContentHash)]| {
-            hirsel_llvm_lazy::core::split_native_object(object, parts, true).map_err(emit)
+            hirsel_llvm_lazy::core::split_native_object(object, parts, true, fragment.clone())
+                .map_err(emit)
         };
         let mut made = match program.objects.as_slice() {
             [object] => cut(object, &missed)?,
@@ -500,6 +513,15 @@ pub(super) fn emit_release_image(
         record.sites.clone_from(&sites);
         record.debug_sites.clone_from(&debug_sites);
         store.put_keyed(unit, &encode(&record)?)?;
+    }
+    // The parts live in the shared parts store and the link joins the site
+    // maps of the program's store, so each part's fragment, made or reused,
+    // is stored there: a coverage unit is one part, and its fragment is the
+    // unit's.
+    if let Some(fragment) = &fragment {
+        for (bare, _, _) in &held {
+            crate::native_object::put_coverage(store, bare.address, fragment)?;
+        }
     }
     let objects = held
         .into_iter()
@@ -538,6 +560,15 @@ pub(super) fn release_objects(
     closed_executable: bool,
 ) -> Result<Emitted, NativeStop> {
     let reached = units.keys().cloned().collect::<Vec<_>>();
+    let mut units = units;
+    // A coverage build's unit decisions, by the symbol its anchors name.
+    let rebound: hirsel_core_ir::coverage::Rebound = units
+        .iter_mut()
+        .filter_map(|(identity, unit)| {
+            let decisions = unit.coverage.take()?;
+            Some((hirsel_core_ir::symbol(identity.digest()), decisions))
+        })
+        .collect();
     let mut modules = Vec::with_capacity(units.len());
     let mut owners = Vec::with_capacity(units.len());
     for unit in units.into_values() {
@@ -559,7 +590,11 @@ pub(super) fn release_objects(
             ))
         },
     )?;
-    let joined = join_modules(entry, &reached, modules, |_| FuncId(0))?;
+    let mut joined = join_modules(entry, &reached, modules, |_| FuncId(0))?;
+    joined.0.coverage_rebound = options
+        .coverage
+        .is_some()
+        .then(|| std::sync::Arc::new(rebound));
     let mut emitted = emit_release_image(
         entry,
         &reached,

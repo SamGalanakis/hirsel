@@ -2,6 +2,7 @@
 //! Cached linker inputs contain code and section aliases; rows live beside them.
 use gimli::{EndianSlice, LittleEndian};
 use hirsel_core_ids::{ContentHash, DefPath};
+use hirsel_core_ir::coverage::Fragment;
 use hirsel_core_ir::source::{
     CodeRange, CodeSection, DebugScope, LineRow, LineSequence, NativeDebug, NativeLocation,
     NativeObject, ScopeKind, debug_symbol,
@@ -18,16 +19,19 @@ fn error(e: impl std::fmt::Display) -> String {
 
 /// Finish a freshly emitted object, never a cached or linked one. Neutral LLVM
 /// positions are item byte offsets, so this operation needs no current source.
+/// `coverage` is the map fragment of the module the object was generated from
+/// whole ([`hirsel_core_ir::coverage::fragment`]).
 pub fn finish_native_object(
     bytes: Vec<u8>,
     unit: ContentHash,
     debug_lines: bool,
+    coverage: Option<Fragment>,
 ) -> std::result::Result<NativeObject, String> {
     if !debug_lines {
         return Ok(NativeObject {
             bytes,
             debug: None,
-            coverage: None,
+            coverage,
         });
     }
     let file = object::File::parse(bytes.as_slice()).map_err(error)?;
@@ -41,7 +45,7 @@ pub fn finish_native_object(
     Ok(NativeObject {
         bytes,
         debug: Some(debug),
-        coverage: None,
+        coverage,
     })
 }
 

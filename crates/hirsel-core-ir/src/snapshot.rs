@@ -64,6 +64,12 @@ pub struct Snapshot {
     pub module: Module,
     pub external_call_sites: bool,
     pub law_observation: bool,
+    /// A coverage build's scope (`docs/coverage.md`); absent otherwise, so a
+    /// plain snapshot keeps its bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<crate::coverage::Scope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_rebound: Option<crate::coverage::Rebound>,
     /// Configured release launch, when one was supplied. A source extraction has
     /// no configured launch or live grant handles.
     pub launch: Option<Launch>,
@@ -147,6 +153,8 @@ impl Snapshot {
             roots,
             external_call_sites: module.external_call_sites,
             law_observation: module.law_observation,
+            coverage: module.coverage.clone(),
+            coverage_rebound: module.coverage_rebound.as_deref().cloned(),
             module,
             launch,
             layout,
@@ -165,6 +173,9 @@ impl Snapshot {
         let mut snapshot: Self = serde_json::from_reader(input)?;
         snapshot.module.external_call_sites = snapshot.external_call_sites;
         snapshot.module.law_observation = snapshot.law_observation;
+        snapshot.module.coverage = snapshot.coverage.clone();
+        snapshot.module.coverage_rebound =
+            snapshot.coverage_rebound.clone().map(std::sync::Arc::new);
         Ok(snapshot)
     }
 

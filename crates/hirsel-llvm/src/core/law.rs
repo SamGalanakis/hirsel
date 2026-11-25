@@ -60,6 +60,7 @@ impl FunctionEmitter<'_> {
                 )),
                 align: 8,
                 absolute_symbol: false,
+                section: None,
             });
             (
                 self.numeric(hook.value),

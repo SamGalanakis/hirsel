@@ -38,7 +38,7 @@ typedef struct {
     LLVMValueRef (*constant_bytes)(HirselLlvmBuilder *, const uint8_t *, size_t);
     LLVMValueRef (*global_ref)(HirselLlvmBuilder *, const char *, size_t);
     void (*global)(HirselLlvmBuilder *, const char *, size_t, LLVMTypeRef, LLVMValueRef,
-                   unsigned, uint8_t, uint8_t, unsigned, uint8_t);
+                   unsigned, uint8_t, uint8_t, unsigned, uint8_t, const char *, size_t);
     LLVMValueRef (*function)(HirselLlvmBuilder *, const char *, size_t, LLVMTypeRef,
                              LLVMTypeRef const *, size_t, unsigned);
     void (*attribute)(HirselLlvmBuilder *, LLVMValueRef, unsigned, unsigned, LLVMTypeRef, uint64_t);
@@ -96,6 +96,7 @@ typedef struct {
     LLVMValueRef (*insert_element)(HirselLlvmBuilder *, LLVMValueRef, LLVMValueRef, unsigned);
     void (*unit_stream)(HirselLlvmBuilder *, const char *, const char *, const char *, HirselBuilderOutput *);
     void (*end_body)(HirselLlvmBuilder *);
+    void (*used)(HirselLlvmBuilder *, LLVMValueRef const *, size_t);
 } HirselLlvmBuilderApi;
 const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api(void);
 #ifdef __cplusplus

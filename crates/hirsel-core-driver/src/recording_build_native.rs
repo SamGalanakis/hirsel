@@ -2051,6 +2051,8 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
         }
     }
 
+    coverage_changes_nothing(dir.path(), &root, &release_rt, &record_rt);
+
     // `hirsel build --recording` with a release runtime archive is refused before native emission.
     let app = dir.path().join("rl1-refuse-app");
     std::fs::create_dir(&app).unwrap();
@@ -2086,6 +2088,125 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
         !refused_output.exists(),
         "refused build emitted an executable"
     );
+}
+/// A body whose output depends on where a stop falls: the trips a loop with a
+/// call and a decision in it completes before `bound steps` stops it, the
+/// `Capacity.available` of a refusal after two admissions, and the order in
+/// which two tasks that each cross slice ends report their progress.
+const STOP_POINTS: &str = r#"
+fn note(tx: Sender[u64], i: u64) { let _ = channel.try_send(tx, i) }
+fn drain(rx: Receiver[u64]) -> u64 {
+    let mut count = 0u64
+    while let Ok(_) = channel.try_receive(rx) { count += 1 }
+    count
+}
+fn trips() -> u64 {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(4096u64)
+    let _ = bound steps 997 {
+        let mut i = 0u64
+        loop {
+            if i % 3u64 == 0u64 { note(tx, i) } else { note(tx, i + 1u64) }
+            i += 1u64
+        }
+    }
+    drain(rx)
+}
+fn available() -> u64 {
+    let attempted = isolate(fn() -> Result[Box[u64], Capacity] {
+        bound bytes 20 {
+            let first = box.new(1u64)
+            let second = box.new(2u64)
+            box.new(3u64)
+        }
+    })
+    let Ok(Error(take causes)) = take attempted else { return 1000u64 }
+    for c in causes {
+        return match c.kind {
+            Capacity(k) => k.available,
+            _ => 2000u64,
+        }
+    }
+    3000u64
+}
+type Job: send { tx: Sender[u64], id: u64 }
+fn work(take j: Job) {
+    let mut i = 0u64
+    while i < 400000u64 {
+        if i % 50000u64 == 0u64 { let _ = channel.try_send(j.tx, j.id) }
+        i += 1u64
+    }
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    if trips() == 0u64 { result.unwrap(stdout.write(out, "none")) }
+    let mut n = trips()
+    while n > 0u64 { result.unwrap(stdout.write(out, "t")); n -= 1u64 }
+    let mut m = available()
+    while m > 0u64 { result.unwrap(stdout.write(out, "c")); m -= 1u64 }
+    let (tx, rx): (Sender[u64], Receiver[u64]) = channel.new(64u64)
+    // Tasks spawned under a bound take steps, so their slices end.
+    let _ = bound steps 100000000 {
+        let a = task.spawn(tasks, bytes 4096, Job(tx: channel.sender(tx), id: 1u64), work)
+        let b = task.spawn(tasks, bytes 4096, Job(tx: channel.sender(tx), id: 2u64), work)
+        let _ = task.join(take a)
+        let _ = task.join(take b)
+    }
+    while let Ok(id) = channel.try_receive(rx) {
+        result.unwrap(stdout.write(out, if id == 1u64 { "a" } else { "b" }))
+    }
+    Ok(())
+}
+"#;
+
+/// Coverage "Same observations" and "Tape crosses" (`docs/coverage.md`,
+/// "Laws") on Cranelift and on LLVM's dev and release builds: [`STOP_POINTS`]
+/// prints the same bytes and exits the same way with and without coverage of
+/// its package (oracle: the build without coverage), and its tape, recorded on
+/// the plain recording build, replays to its end on the coverage recording
+/// build.
+fn coverage_changes_nothing(dir: &Path, root: &Path, release_rt: &Path, record_rt: &Path) {
+    let mut request = source_request(STOP_POINTS, dir);
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let scope: hirsel_core_ir::coverage::Scope = [package("app")].into();
+    for (backend, optimize) in [(Backend::Cranelift, false), (Backend::Llvm, false), (Backend::Llvm, true)] {
+        let build = |recording: bool, coverage: bool| {
+            let name = format!("cov-{backend:?}-{optimize}-{recording}-{coverage}");
+            let options = NativeOptions {
+                runtime: if recording { record_rt } else { release_rt }.to_owned(),
+                recording,
+                coverage: coverage.then(|| scope.clone()),
+                optimize,
+                grant_mask: (1 << 4) | (1 << grant_kind("Tasks").unwrap()),
+                output: dir.join(&name),
+                store: dir.join(format!("{name}-store")),
+                ..native_options(backend, dir)
+            };
+            (product.build(&entry, &options).unwrap().executable, options)
+        };
+        let plain = tape_run(&build(false, false).0, &[], None);
+        assert_eq!(plain.0, Some(0), "{backend:?} {optimize}: {}", plain.2);
+        // The tasks' outputs interleave only when their slices end.
+        assert!(plain.1.contains("tt") && plain.1.contains("ab") && plain.1.contains("ba"), "{}", plain.1);
+        let covered = tape_run(&build(false, true).0, &[], None);
+        assert_eq!(covered, plain, "{backend:?} {optimize}: same observations");
+
+        let tape = dir.join(format!("cov-{backend:?}-{optimize}.tape"));
+        let recorded = tape_run(&build(true, false).0, &[], Some(&tape));
+        assert_eq!(recorded, plain, "{backend:?} {optimize}: recording");
+        let (_, mut replay) = build(true, true);
+        replay.grant_mask = 0;
+        replay.output = dir.join(format!("cov-{backend:?}-{optimize}-replay"));
+        replay.replay = Some(crate::ReplayPlan {
+            path: tape.to_str().unwrap().into(),
+            diagnose: false,
+        });
+        let replayed = product.build(&entry, &replay).unwrap();
+        let (code, out, err) = tape_run(&replayed.executable, &[], None);
+        assert_eq!((code, out), (Some(0), String::new()), "{backend:?} {optimize}: tape crosses: {err}");
+    }
 }
 include!("recording_units_native.rs");
 /// Step 8.2 (RL2): divergence ends the replay at its hand-counted frame

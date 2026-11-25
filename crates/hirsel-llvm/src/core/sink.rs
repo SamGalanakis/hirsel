@@ -591,6 +591,8 @@ pub(super) struct Global {
     pub init: Option<Value>,
     pub align: u32,
     pub absolute_symbol: bool,
+    /// The object section that holds the definition, when it names one.
+    pub section: Option<&'static str>,
 }
 #[derive(Clone, Debug)]
 pub(super) enum MdItem {
@@ -676,6 +678,9 @@ pub(super) trait Sink {
     fn declare(&mut self, name: &str, sig: &FnSig, attrs: &FnAttrs);
     fn metadata(&mut self, id: usize, node: &Metadata);
     fn named_metadata(&mut self, name: &str, ids: &[usize]);
+    /// `@llvm.used` over `globals`, which are defined: neither the optimiser
+    /// nor the linker's section collection drops them. Called once, last.
+    fn used(&mut self, globals: &[Name]);
     fn begin_function(&mut self, name: &str, sig: &FnSig, params: &[Local], attrs: &FnAttrs);
     fn end_function(&mut self);
     fn block(&mut self, label: Label);
@@ -849,6 +854,9 @@ impl Sink for TextSink {
         if let Some(init) = &g.init {
             write!(out, " {init}").unwrap();
         }
+        if let Some(section) = g.section {
+            write!(out, ", section \"{section}\"").unwrap();
+        }
         if g.align != 0 {
             write!(out, ", align {}", g.align).unwrap();
         }
@@ -862,6 +870,20 @@ impl Sink for TextSink {
             .unwrap();
         }
         out.push('\n');
+    }
+    fn used(&mut self, globals: &[Name]) {
+        let out = &mut self.text;
+        write!(
+            out,
+            "@llvm.used = appending global [{} x ptr] [",
+            globals.len()
+        )
+        .unwrap();
+        for (i, g) in globals.iter().enumerate() {
+            out.push_str(if i == 0 { "ptr " } else { ", ptr " });
+            write_global(out, g).unwrap();
+        }
+        out.push_str("], section \"llvm.metadata\"\n");
     }
     fn declare(&mut self, name: &str, sig: &FnSig, attrs: &FnAttrs) {
         let out = &mut self.text;

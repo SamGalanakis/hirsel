@@ -16,6 +16,7 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/Utils/ModuleUtils.h>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -153,12 +154,14 @@ static void resolve(HirselLlvmBuilder *u, StringRef symbol, GlobalValue *definit
     u->forward.erase(it);
 }
 static void global(HirselLlvmBuilder *u, const char *name, size_t len, LLVMTypeRef type, LLVMValueRef init,
-                   unsigned linkage, uint8_t constant, uint8_t externally_initialized, unsigned alignment, uint8_t absolute) {
+                   unsigned linkage, uint8_t constant, uint8_t externally_initialized, unsigned alignment, uint8_t absolute,
+                   const char *section, size_t section_len) {
     StringRef symbol(name, len);
     auto *g = new GlobalVariable(*u->module, unwrap(type), false, GlobalValue::ExternalLinkage, nullptr, symbol);
     if (init) g->setInitializer(cast<Constant>(unwrap(init)));
     g->setConstant(constant); g->setLinkage(linkages[linkage]); g->setExternallyInitialized(externally_initialized);
     if (alignment) g->setAlignment(Align(alignment));
+    if (section_len) g->setSection(StringRef(section, section_len));
     if (absolute) {
         // Site words are below source_positions::SITE_END (2^31), so code
         // materialises them as sign-extended 32-bit immediates.
@@ -234,6 +237,12 @@ static void subprogram(LLVMValueRef f, LLVMMetadataRef md) { cast<Function>(unwr
 static void begin_body(HirselLlvmBuilder *u, LLVMValueRef f) {
     u->function = cast<Function>(unwrap(f)); u->last_alloca = nullptr;
     u->builder.SetInsertPoint(BasicBlock::Create(u->context, "entry", u->function));
+}
+// `@llvm.used` over defined globals, as the parser reads it at the module's end.
+static void used(HirselLlvmBuilder *u, LLVMValueRef const *globals, size_t n) {
+    SmallVector<GlobalValue *, 8> list;
+    for (size_t i = 0; i < n; ++i) list.push_back(cast<GlobalValue>(unwrap(globals[i])));
+    appendToUsed(*u->module, list);
 }
 static void end_body(HirselLlvmBuilder *u) {
     u->builder.ClearInsertionPoint();
@@ -393,6 +402,6 @@ extern "C" const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api() {
         atomic_rmw, fence, branch, conditional, switch_value, return_value, unreachable,
         module_asm, metadata_ref, metadata_string, metadata_integer, metadata_tuple, metadata_bind, named_metadata,
         attach, location, metadata_value, di_file, di_compile_unit, di_subroutine_type, di_subprogram, di_location,
-        di_lexical_block_file, shuffle, extract_element, insert_element, unit_stream, end_body};
+        di_lexical_block_file, shuffle, extract_element, insert_element, unit_stream, end_body, used};
     return &api;
 }

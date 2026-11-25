@@ -51,9 +51,13 @@ ret
             .success()
     );
     let names = ["normal", "custom"].map(|name| (name, ContentHash::of_bytes(name.as_bytes())));
-    let parts =
-        hirsel_llvm_lazy::core::split_native_object(&std::fs::read(whole).unwrap(), &names, false)
-            .unwrap();
+    let parts = hirsel_llvm_lazy::core::split_native_object(
+        &std::fs::read(whole).unwrap(),
+        &names,
+        false,
+        None,
+    )
+    .unwrap();
     let paths = parts
         .into_iter()
         .zip(names)
@@ -404,12 +408,13 @@ fn llvm_unwind_covers_live_whole_split_and_reused_code() {
                 .map(|p| (p.name.as_str(), ContentHash::of_bytes(p.name.as_bytes())))
                 .collect::<Vec<_>>();
             let objects = match cold.objects.as_slice() {
-                [whole] => core::split_native_object(whole, &names, false).unwrap(),
+                [whole] => core::split_native_object(whole, &names, false, None).unwrap(),
                 objects => objects
                     .iter()
                     .zip(&names)
                     .flat_map(|(bytes, name)| {
-                        core::split_native_object(bytes, std::slice::from_ref(name), false).unwrap()
+                        core::split_native_object(bytes, std::slice::from_ref(name), false, None)
+                            .unwrap()
                     })
                     .collect(),
             };
@@ -494,7 +499,7 @@ fn llvm_unwind_covers_live_whole_split_and_reused_code() {
         .objects
         .iter()
         .flat_map(|whole| {
-            core::split_native_object(whole, &[("", ContentHash::of_bytes(b"whole"))], false)
+            core::split_native_object(whole, &[("", ContentHash::of_bytes(b"whole"))], false, None)
                 .unwrap()
         })
         .map(|object| object.bytes.into())
@@ -600,12 +605,13 @@ fn llvm_split_parts_share_one_weak_placeholder() {
             .map(|p| (p.name.as_str(), ContentHash::of_bytes(p.name.as_bytes())))
             .collect::<Vec<_>>();
         let objects = match program.objects.as_slice() {
-            [whole] => core::split_native_object(whole, &names, false).unwrap(),
+            [whole] => core::split_native_object(whole, &names, false, None).unwrap(),
             objects => objects
                 .iter()
                 .zip(&names)
                 .flat_map(|(bytes, name)| {
-                    core::split_native_object(bytes, std::slice::from_ref(name), false).unwrap()
+                    core::split_native_object(bytes, std::slice::from_ref(name), false, None)
+                        .unwrap()
                 })
                 .collect(),
         };

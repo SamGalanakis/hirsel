@@ -413,7 +413,10 @@ fn emit_unit(
             true,
         )
         .map_err(|e| e.to_string())
-        .and_then(|bytes| hirsel_llvm_lazy::core::finish_native_object(bytes, object_key, true)),
+        .and_then(|bytes| {
+            let coverage = hirsel_core_ir::coverage::fragment(module);
+            hirsel_llvm_lazy::core::finish_native_object(bytes, object_key, true, coverage)
+        }),
     }
 }
 
@@ -601,7 +604,15 @@ impl CheckProduct {
         let root = Identity::plain(entry.clone());
         let code = crate::code_store::CodeStore::cache(&options.store, "code")?;
         let mut units = self
-            .release_units(&root, &reached, &code, None, None, false)?
+            .release_units(
+                &root,
+                &reached,
+                &code,
+                None,
+                None,
+                false,
+                options.coverage.as_ref(),
+            )?
             .units;
         let runtime = inputs.toolchain.runtime;
         let library = self.image.as_ref().map(|image| image.store_root());

@@ -91,6 +91,7 @@ pub(super) fn emit(
             init: Some(Value::Zero),
             align: 8,
             absolute_symbol: false,
+            section: None,
         });
     }
     let input = Value::Local(Local::INPUT);

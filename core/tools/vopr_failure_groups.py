@@ -56,7 +56,7 @@ def publish(run):
                     key = group(row)
                     counts[key] += 1
                     samples.setdefault(key, {"receipt": batch.name, "build": row.get("build"),
-                                             "seed": row.get("seed")})
+                                             "digest": row.get("digest"), "seed": row.get("seed")})
     output = run / "failure-groups.tmp"
     with output.open("w") as report:
         for key in counts:

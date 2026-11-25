@@ -28,8 +28,11 @@ export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_
 taskset -c 8-11 python3 core/tools/sim_campaign.py --compiler "${paths[0]}" \
   --runtime "${paths[1]}" --recording-runtime "${paths[2]}" --work "$scratch/prepared"
 
-cd "$scratch"
 status=0
+# Earlier nights' reds first; this allocates no seeds.
+taskset -c 8-11 python3 tools/sim-campaign reds-first "$scratch/prepared/manifest.json" "$run" || status=$?
+
+cd "$scratch"
 taskset -c 8-11 python3 "$briefs/vopr-campaign-2092/sweep2.py" "$checkout/tools/sim-campaign" \
   1 24 --nightly "$run" || status=$?
 taskset -c 8-11 python3 "$checkout/core/tools/vopr_failure_groups.py" "$run"

@@ -10,6 +10,7 @@ from bisect import bisect_right
 from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,9 @@ class Law:
     min_traces: int = 0
     build: str | None = None
     required_witnesses: tuple[str, ...] = ()
+    # The law executable's SHA-256: a prior red's seed names the same schedule
+    # only while this is unchanged (Ephyra regressions.rs:4-14 "stale").
+    digest: str | None = None
 
 
 def allocate(db, campaign, shards, count):
@@ -159,7 +163,8 @@ def seed_zero_failed(db, campaign, law, results):
     verdict = law.seed_zero if law.seed_zero is not None else run_seed(law.binary, 0)
     if verdict["status"] == 0:
         return False
-    row = {**verdict, "law": law.name, "build": law.build, "seed": 0, "kind": "deterministic_red",
+    row = {**verdict, "law": law.name, "build": law.build, "digest": law.digest, "seed": 0,
+           "kind": "deterministic_red",
            "failure_class": failure_class(verdict)}
     line = json.dumps(row)
     with db:
@@ -210,7 +215,7 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
         if laws is not None:
             shard = bisect_right(stops, seed)
             law = laws[shard]
-            row["law"], executable = law.name, law.binary
+            row["law"], row["digest"], executable = law.name, law.digest, law.binary
             if law.build is not None:
                 row["build"] = law.build
             for label, count in (witnesses or {}).items():
@@ -353,9 +358,71 @@ def read_laws(path):
                 or any(not isinstance(label, str) for label in required)
                 or len(set(required)) != len(required) or (required and build is None)):
             raise ValueError(f"invalid reach witness declaration for {law}")
-        laws.append(Law(law, local_executable(path.parent / binary), count, seed_zero, minimum, build, tuple(required)))
+        binary = local_executable(path.parent / binary)
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        laws.append(Law(law, binary, count, seed_zero, minimum, build, tuple(required), digest))
         names.add(law)
     return laws
+
+
+def prior_reds(run):
+    """Each earlier night's failure groups with a sample seed, latest night first per (law, seed)."""
+    reds = {}
+    for report in sorted(run.parent.glob("*/failure-groups.jsonl")):
+        if report.parent == run:
+            continue
+        for line in report.read_text().splitlines():
+            entry = json.loads(line)
+            if type(entry.get("seed")) is int:
+                reds[entry["group"][0], entry["seed"]] = {**entry, "night": report.parent.name}
+    return list(reds.values())
+
+
+def stale(entry, law):
+    if law is None:
+        return "law no longer in the campaign"
+    if entry.get("digest") is None:
+        return "red has no law digest"
+    if entry["digest"] != law.digest:
+        return "law build changed"
+    return None
+
+
+def reds_first(manifest, run, dry_run):
+    """Re-run each earlier night's red sample seed before any fresh seed is allocated.
+
+    Allocates no ledger range, so laws without a prior red get no extra seeds. A
+    stale red is still re-run, but its verdict says nothing about the original bug.
+    """
+    laws = {law.name: law for law in read_laws(manifest)}
+    reds = prior_reds(run)
+    still_red = 0
+    output = run / "reds-first.tmp"
+    with output.open("w") as report:
+        for entry in reds:
+            name, seed = entry["group"][0], entry["seed"]
+            law = laws.get(name)
+            mark = stale(entry, law)
+            print(f"replay {name} seed {seed} from {entry['night']}" + (f" (stale: {mark})" if mark else ""),
+                  file=sys.stderr, flush=True)
+            if dry_run:
+                continue
+            verdict = None
+            if law is not None:
+                verdict = run_seed(law.binary, seed) if seed or law.seed_zero is None else law.seed_zero
+            row = {"replay_of": entry["group"], "night": entry["night"], "law": name, "seed": seed,
+                   "stale": mark, "build": law and law.build, "digest": law and law.digest,
+                   "still_red": None if verdict is None else verdict["status"] != 0, **(verdict or {})}
+            still_red += bool(row["still_red"])
+            print(json.dumps(row), file=report, flush=True)
+    if dry_run:
+        output.unlink()
+        print(f"then fresh seeds for {len(laws)} laws", file=sys.stderr)
+        return 0
+    output.replace(run / "reds-first.jsonl")
+    print(f"reds first: {still_red} of {len(reds)} earlier reds still red, "
+          f"{sum(stale(entry, laws.get(entry['group'][0])) is not None for entry in reds)} stale", file=sys.stderr)
+    return int(still_red > 0)
 
 
 def dispatch_arguments(parser):
@@ -384,8 +451,14 @@ def main():
     batch = commands.add_parser("batch", help="reserve a range per law and dispatch on one spare start")
     dispatch_arguments(batch)
     batch.add_argument("manifest", type=Path, help="JSON array of law, executable and seeds")
+    first = commands.add_parser("reds-first", help="re-run earlier nights' red seeds before fresh seeds")
+    first.add_argument("manifest", type=Path, help="this night's prepared campaign manifest")
+    first.add_argument("run", type=Path, help="this night's directory; its siblings are earlier nights")
+    first.add_argument("--dry-run", action="store_true", help="print the replay order without running")
     args = parser.parse_args()
     try:
+        if args.command == "reds-first":
+            return reds_first(args.manifest, args.run.resolve(strict=True), args.dry_run)
         if args.command == "run":
             if not 0 <= args.start < args.stop <= 2**64:
                 parser.error("expected a nonempty u64 seed range")

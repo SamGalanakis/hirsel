@@ -689,3 +689,42 @@ fn package_dev_releases_held_runs() {
     );
     assert!(!recovered.stop().contains("installed activation"));
 }
+
+// packages.md `[program]`: a package that declares its run configuration is the
+// build's only source of `--limit`, `--dir` and `--grant`, and dev's build is one
+// such build. Its first `dirs` path is the Dir slot dev's launch fills with the
+// store, so the place opens the store and serves through dev's listener.
+#[test]
+fn package_dev_takes_grants_from_program() {
+    let fixture = Fixture::new();
+    let manifest = fs::read_to_string(fixture.law.path("runner/hirsel.toml")).unwrap();
+    fixture.law.write(
+        "runner/hirsel.toml",
+        manifest
+            + "limit = 1610612736\n\
+               grants = [\"Clock\", \"Random\", \"Tasks\", \"Process\", \"Stderr\", \"Net=Listen 127.0.0.1/32 0-65535\"]\n\
+               dirs = [\".\"]\n",
+    );
+    let mut dev = fixture.dev("program", &[]);
+    dev.wait_for("hirsel dev listening on ");
+    let stdout = fs::read_to_string(&dev.output).unwrap();
+    let address = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("hirsel dev listening on "))
+        .unwrap();
+    let mut socket = TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    write!(
+        socket,
+        "GET /hirsel/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut answer = String::new();
+    socket.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    let status: Value = serde_json::from_str(answer.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(status["phase"], "ready");
+    assert!(dev.stop().contains("activation 1,"));
+}

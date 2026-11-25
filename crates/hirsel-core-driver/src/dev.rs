@@ -115,6 +115,8 @@ struct Options {
     listen: SocketAddr,
     workdir: PathBuf,
     build: Vec<OsString>,
+    limit: bool,
+    net: bool,
     arguments: Vec<String>,
     store: Option<PathBuf>,
     fresh: bool,
@@ -128,13 +130,13 @@ impl Options {
             listen: ([127, 0, 0, 1], 7700).into(),
             workdir: std::env::current_dir()?,
             build: Vec::new(),
+            limit: false,
+            net: false,
             arguments: invocation.arguments,
             store: None,
             fresh: false,
             n_place: hirsel_core_ids::launch::DEFAULT_N_PLACE,
         };
-        let mut limit = false;
-        let mut net = false;
         for (id, value) in invocation.options {
             let flag = match id {
                 OptionId::Listen => {
@@ -157,11 +159,11 @@ impl Options {
                     continue;
                 }
                 OptionId::Limit => {
-                    limit = true;
+                    options.limit = true;
                     "--limit"
                 }
                 OptionId::Grant => {
-                    net |= value
+                    options.net |= value
                         .as_deref()
                         .is_some_and(|grant| grant.starts_with("Net"));
                     "--grant"
@@ -192,20 +194,36 @@ impl Options {
         if !options.listen.ip().is_loopback() {
             return Err("dev listens on a loopback address".into());
         }
-        if !limit {
-            options
-                .build
-                .extend(["--limit".into(), "1610612736".into()]);
+        Ok(options)
+    }
+
+    /// The build's `--dir`, `--limit` and `--grant`. A package whose `[program]`
+    /// declares its run configuration is their only source (packages.md, R3),
+    /// so dev adds none and its first `dirs` path is the store slot dev's
+    /// launch replaces. Otherwise dev grants what the place needs, store first.
+    fn grants(&self, store: &Path) -> Vec<OsString> {
+        let declared = Workspace::discover(&self.server)
+            .ok()
+            .flatten()
+            .and_then(|workspace| {
+                let selected = workspace.selected().ok()?;
+                Some(workspace.members.get(selected)?.package.program.is_some())
+            });
+        if declared == Some(true) {
+            return self.build.clone();
+        }
+        let mut build = vec!["--dir".into(), store.into()];
+        build.extend(self.build.iter().cloned());
+        if !self.limit {
+            build.extend(["--limit".into(), "1610612736".into()]);
         }
         for grant in ["Clock", "Random", "Tasks", "Process", "Stderr"] {
-            options.build.extend(["--grant".into(), grant.into()]);
+            build.extend(["--grant".into(), grant.into()]);
         }
-        if !net {
-            options
-                .build
-                .extend(["--grant".into(), "Net=Listen 127.0.0.1/32 0-65535".into()]);
+        if !self.net {
+            build.extend(["--grant".into(), "Net=Listen 127.0.0.1/32 0-65535".into()]);
         }
-        Ok(options)
+        build
     }
 
     fn build(&self, directory: &directory::Directory, output: &Path) -> Result<bool, Error> {
@@ -215,9 +233,7 @@ impl Options {
             .arg(&self.server)
             .arg("--store")
             .arg(directory.root.join("compiler"))
-            .arg("--dir")
-            .arg(&directory.store)
-            .args(&self.build)
+            .args(self.grants(&directory.store))
             .arg("--output")
             .arg(output);
         // The public listening address is the first stdout line.

@@ -273,7 +273,9 @@ refuses a package without that function. A dependency's `[program]` is never rea
 `limit`, `grants` and `dirs` are the executable's run configuration. `grants` take the `--grant`
 syntax and `dirs` the `--dir` paths, one per Dir parameter in order. A relative `dirs` path is
 kept as written and resolves where the executable starts, as a `--dir` path does. `build`,
-`publish` and `run` read them; `test`, `replay`, `register` and `deploy` do not. When any of the
+`publish`, `run` and `dev`'s builds read them; `test`, `replay`, `register` and `deploy` do
+not. Under `dev` the first `dirs` path names the Dir slot dev fills with its store at launch,
+and dev adds no limit or grant of its own. When any of the
 three is present, they are the build's only source of `limit`, `dir` and `grant`: a `--limit`,
 `--dir` or `--grant` flag is refused with `this package declares [program] grants in
 hirsel.toml. Set limit, dirs and grants there`. `Foreign` and `Exec` approvals are outside the

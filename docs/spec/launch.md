@@ -663,7 +663,13 @@ the forms marked planned are the ones that do not exist yet.
 `SERVER` is a package directory with a server entry and defaults to the current directory.
 The loop also takes the build options `--limit`, `--grant`, `--dir`, `--backend`,
 `--libraries`, `--runtime`, `--source-core` and `--source-std`, and passes arguments after `--`
-to the place.
+to the place. Without a `[program]` run configuration dev builds with the store's `--dir`
+first, then the user's `--dir`, `--limit` and `--grant`, then the root limit `1610612736` unless
+`--limit` names one, `Clock`, `Random`, `Tasks`, `Process` and `Stderr`, and `Net=Listen
+127.0.0.1/32 0-65535` unless a `Net` grant is given. A package whose `[program]` declares
+`limit`, `grants` or `dirs` is the build's only source of them ([packages.md](packages.md)):
+dev adds none, the three flags are refused as for `hirsel build`, and the first `dirs` path is
+the store slot.
 
 | Option | Meaning | Default |
 |---|---|---|

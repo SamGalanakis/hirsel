@@ -7,7 +7,8 @@ checks only those whose lock could move: a package is selected when a path
 changed since BASE (worktree and untracked files included) lies in it or in a
 package it reaches through `path` dependencies (a vectors package reaches its
 parent). A change under any of ALL_TRIGGERS selects every package: std, the
-core library, the workspace manifest and lock, the lock writer and this file."""
+core library, the workspace manifest and lock, the crate sources that compute
+the lock's hashes and this file."""
 
 import argparse
 from contextlib import ExitStack
@@ -36,10 +37,19 @@ FOREIGN_GRANTS = {
 # A full check is about 400 s cold, so a general compiler change does not select
 # everything; only the code that computes the lock columns does. A compiler change
 # that moves digests elsewhere is caught by the next check that selects the package.
+# The crate sources that compute a lock's columns: src and sig (law_lock), the
+# header and signature digests sig records (reuse.rs), their hash framing and
+# definition identity (hirsel-core-ids), the canonical token stream they hash
+# (token kinds, lexer, syntax tree) and the policy tuple run records
+# (native_entry.rs). Any other compiler change that moves a lock is caught by
+# the nightly's full check.
 ALL_TRIGGERS = (
     "core/std/", "core/core/",
     "core/programs/hirsel.toml", "core/programs/hirsel.lock",
-    "crates/hirsel-core-driver/src/law_lock.rs", "core/tools/law_board.py",
+    "crates/hirsel-core-driver/src/law_lock", "crates/hirsel-core-driver/src/reuse.rs",
+    "crates/hirsel-core-driver/src/native_entry.rs", "crates/hirsel-core-ids/src/lib.rs",
+    "crates/hirsel-core-syntax/src/token.rs", "crates/hirsel-core-syntax/src/lexer.rs",
+    "crates/hirsel-core-syntax/src/lib.rs", "core/tools/law_board.py",
 )
 
 

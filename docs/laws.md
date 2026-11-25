@@ -50,10 +50,14 @@ and runs `core/tools/law_board.py check --changed-since origin/main`, which runs
 the `*/vectors` packages) that a change since the merge base can move: a changed
 path inside the package or inside a package it reaches through `path`
 dependencies. A change to `core/std`, `core/core`, the workspace manifest or
-lock, `law_lock.rs` or `law_board.py` checks every lock package. Without
-`--changed-since`, `law_board.py check` checks them all. The nightly runs the
-members and reports law regressions in its run log, with per-package results
-under `laws/`.
+lock, `law_board.py`, or a crate source that computes a lock's hashes
+(`law_lock.rs` and `law_lock/`, `reuse.rs`'s header and signature digests,
+`native_entry.rs`'s policy tuple, `hirsel-core-ids/src/lib.rs`, and
+`hirsel-core-syntax`'s `token.rs`, `lexer.rs` and `lib.rs`) checks every lock
+package. Without `--changed-since`, `law_board.py check` checks them all. The
+nightly runs that full check, so a lock moved by any other compiler change is
+caught within a day, then runs the members and reports law regressions in its
+run log, with per-package results under `laws/`.
 
 ## Pass and fail are unchanged
 

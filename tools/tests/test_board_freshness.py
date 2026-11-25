@@ -98,6 +98,9 @@ promote(Path(run) / "board/board.json", Path(base), Path(previous) if previous e
     touch "$3/board.md" "${HIRSEL_BOARD_BASE}/board-completed" ;;
   'python3 tools/buck2/prepare.py ') exit 0 ;;
   '.buck2/bin/buck2 build -j4') echo '{"root//:hirsel-toolchain":"prefix"}' ;;
+  'python3 core/tools/law_board.py check')
+    [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$4" == --compiler && $# == 5 ]] || exit 90
+    exit 0 ;;
   'python3 core/tools/law_board.py nightly')
     [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$6" == --commit && "$7" == "$FIXTURE_PREVIOUS" ]] || exit 90
     echo "fixture: weaker property row"

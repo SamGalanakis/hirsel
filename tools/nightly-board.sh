@@ -148,6 +148,11 @@ compiler=$(build_toolchain 2>>"$run/run.log") || toolchain_status=$?
 if [[ -z "$law_status" ]]; then
   law_status=$toolchain_status
   if (( law_status == 0 )); then
+    # The full lock check: catches a lock moved by a compiler change the land lint does not select.
+    taskset -c 8-11 python3 core/tools/law_board.py check --compiler "$checkout/$compiler/hirsel" \
+      >>"$run/run.log" 2>&1 || law_status=$?
+  fi
+  if (( law_status == 0 )); then
     taskset -c 8-11 python3 core/tools/law_board.py nightly --compiler "$checkout/$compiler/hirsel" \
       "${law_baseline[@]}" --logs "$run/laws" >>"$run/run.log" 2>&1 || law_status=$?
   fi

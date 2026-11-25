@@ -2,10 +2,16 @@
 // runs one Router over its own socket; unit 0 is the control unit, which makes every
 // control call. A unit's steps are separate functions so a test can interleave them
 // (W14); `turn` runs them in RTC-5's order over a real socket.
+/// A control order or acknowledgement, with a publication's Opus parameters.
+pub type ControlMessage: cross {
+    step: router.Control,
+    opus_fmtp: Option[Shared[Bytes]]
+}
+
 /// The doors of one unit, which every other unit holds: its control inbox, its media
 /// inbox and the address of its socket, where doorbells go.
 pub type Doors: cross {
-    control: Client[router.Control],
+    control: Client[ControlMessage],
     media: Client[router.Carried],
     addr: Addr
 }
@@ -39,7 +45,7 @@ pub opaque type Unit {
     r: router.Router,
     index: u16,
     doors: List[Doors],
-    control: Inbox[router.Control],
+    control: Inbox[ControlMessage],
     media: Inbox[router.Carried],
     // Every queued datagram not yet committed by `udp_send`. What a partial send
     // left is the uncommitted suffix; the send step purges all of it each time.
@@ -50,7 +56,7 @@ pub opaque type Unit {
     // A bit per unit this unit posted to in this turn: their doorbells.
     rung: u64,
     // Acknowledgements the control unit's full inbox refused, in order.
-    acks: List[router.Control],
+    acks: List[ControlMessage],
     counts: UnitCounts,
     // The test seam: at most `limit` datagrams per `udp_send` (0: no limit), and
     // the tap of what each call committed when `tapping`.
@@ -73,8 +79,8 @@ pub const UNIT_WAIT_NS: u64 = 50000000
 const INBOX: u64 = 1024
 
 /// One unit's inboxes and doors. `addr` is the address of the socket it will run on.
-pub fn inboxes(addr: Addr) -> Result[(Doors, Inbox[router.Control], Inbox[router.Carried]), router.RouterError] {
-    let c: Result[(Client[router.Control], Inbox[router.Control]), Capacity] = conn.new(INBOX, bytes 1048576)
+pub fn inboxes(addr: Addr) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError] {
+    let c: Result[(Client[ControlMessage], Inbox[ControlMessage]), Capacity] = conn.new(INBOX, bytes 1048576)
     let (control, take control_in) = c ?=> |x| Capacity(x)
     let m: Result[(Client[router.Carried], Inbox[router.Carried]), Capacity] = conn.new(INBOX, bytes 4194304)
     let (media, take media_in) = m ?=> |x| Capacity(x)
@@ -83,7 +89,7 @@ pub fn inboxes(addr: Addr) -> Result[(Doors, Inbox[router.Control], Inbox[router
 
 /// Unit `index` of `list.len(doors)` units, over its own inboxes. `doors` names every
 /// unit's doors in unit order, its own included.
-pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[router.Control], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64) -> Result[Unit, router.RouterError] {
+pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64) -> Result[Unit, router.RouterError] {
     if list.len(doors) > 64 {
         return Error(Limit(64))
     }
@@ -170,11 +176,12 @@ pub fn begin(mut u: Unit, now: u64, take c: router.Change) -> Result[(), router.
     if home == 0 {
         u.waiting = 1
         let a = router.apply(mut u.r, now, change, mut u.out)
-        answered(mut u, now, seq, 0, take a)
+        let fmtp = applied_opus_fmtp(u, change, a)
+        answered(mut u, now, seq, 0, take a, fmtp)
     } else {
         let shift: u64 = int.widen(home)
         u.waiting = 1 << shift
-        order(mut u, home, seq, change)
+        order(mut u, home, seq, change, None)
     }
     Ok(())
 }
@@ -201,14 +208,14 @@ pub fn finished(mut u: Unit) -> Option[Result[router.Answer, router.RouterError]
     Some(take a)
 }
 
-fn order(mut u: Unit, to: u16, seq: u64, c: router.Change) {
+fn order(mut u: Unit, to: u16, seq: u64, c: router.Change, fmtp: Option[Shared[Bytes]]) {
     let i: u64 = int.widen(to)
-    let _ = conn.try_send(u.doors[i].control, Order(seq: seq, change: c))
+    let _ = conn.try_send(u.doors[i].control, ControlMessage(step: Order(seq: seq, change: c), opus_fmtp: clone(fmtp)))
     u.rung = u.rung | (1 << i)
 }
 
 // One unit's answer to the call in flight.
-fn answered(mut u: Unit, now: u64, seq: u64, from: u16, take a: Result[router.Answer, router.RouterError]) {
+fn answered(mut u: Unit, now: u64, seq: u64, from: u16, take a: Result[router.Answer, router.RouterError], fmtp: Option[Shared[Bytes]]) {
     let Some(change) = u.change else {
         return
     }
@@ -248,10 +255,10 @@ fn answered(mut u: Unit, now: u64, seq: u64, from: u16, take a: Result[router.An
             continue
         }
         if k == 0 {
-            let _ = router.apply(mut u.r, now, given, mut u.out)
+            let _ = router.apply_with_fmtp(mut u.r, now, given, fmtp, mut u.out)
         } else {
             u.waiting = u.waiting | (1 << i)
-            order(mut u, k, seq, given)
+            order(mut u, k, seq, given, fmtp)
         }
     }
 }
@@ -263,20 +270,28 @@ pub fn take_control(mut u: Unit, now: u64) {
     retry_acks(mut u)
     while true {
         match conn.try_receive(u.control) {
-            Ok(Order(seq: seq, change: c)) => {
-                let a = router.apply(mut u.r, now, c, mut u.out)
+            Ok(ControlMessage(step: Order(seq: seq, change: c), opus_fmtp: fmtp)) => {
+                let a = router.apply_with_fmtp(mut u.r, now, c, fmtp, mut u.out)
                 let _ = router.purge(u.r, mut u.out)
-                ack(mut u, seq, take a)
+                let published = applied_opus_fmtp(u, c, a)
+                ack(mut u, seq, take a, take published)
             },
-            Ok(Ack(seq: seq, unit: k, answer: take a)) => answered(mut u, now, seq, k, take a),
+            Ok(ControlMessage(step: Ack(seq: seq, unit: k, answer: a), opus_fmtp: fmtp)) => answered(mut u, now, seq, k, a, fmtp),
             Error(_) => break,
         }
     }
 }
 
-fn ack(mut u: Unit, seq: u64, take a: Result[router.Answer, router.RouterError]) {
+fn applied_opus_fmtp(u: Unit, c: router.Change, answer: Result[router.Answer, router.RouterError]) -> Option[Shared[Bytes]] {
+    if let Ok(Shaped(id: _, shape: _)) = answer {
+        return router.published_opus_fmtp(u.r, c)
+    }
+    None
+}
+
+fn ack(mut u: Unit, seq: u64, take a: Result[router.Answer, router.RouterError], take fmtp: Option[Shared[Bytes]]) {
     let index = u.index
-    list.push(mut u.acks, Ack(seq: seq, unit: index, answer: take a))
+    list.push(mut u.acks, ControlMessage(step: Ack(seq: seq, unit: index, answer: take a), opus_fmtp: take fmtp))
     retry_acks(mut u)
 }
 

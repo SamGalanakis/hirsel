@@ -1,0 +1,94 @@
+fn opus_section(mut b: Bytes, mid: Bytes, pt: Bytes, dir: Bytes, fmtp: Bytes) {
+    list.append(mut b, b"m=audio 9 UDP/TLS/RTP/SAVPF ")
+    list.append(mut b, pt)
+    list.append(mut b, b"\na=mid:")
+    list.append(mut b, mid)
+    list.append(mut b, b"\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\na=rtcp-mux\na=")
+    list.append(mut b, dir)
+    list.append(mut b, b"\na=rtpmap:")
+    list.append(mut b, pt)
+    list.append(mut b, b" opus/48000/2\na=fmtp:")
+    list.append(mut b, pt)
+    list.push(mut b, b' ')
+    list.append(mut b, fmtp)
+    list.push(mut b, b'\n')
+}
+
+fn opus_wire_section(s: sdp.Section, mid: u8, dir: sdp.Direction, pt: u8, fmtp: Bytes) -> bool {
+    s.port != Rejected && s.media == Audio && s.mid_len == 1 && s.mid[0] == mid && s.dir == dir && list.len(s.formats) == 1 && s.formats[0].codec == Opus && s.formats[0].pt == pt && same(s.formats[0].fmtp, fmtp)
+}
+
+fn opus_reoffer(mut u: units.Unit, who: peer.Gen, mut d: sdp.Description) -> Result[u64, sdp.SdpError] {
+    for take notice in units.take_events(mut u) {
+        if let Offer(who: dst, version: version, text: text) = notice {
+            if dst == who {
+                sdp.parse(text, mut d)?
+                return Ok(version)
+            }
+        }
+    }
+    fail("subscriber received no Opus re-offer")
+}
+
+/// bug: compare Opus fmtp across bundled MIDs or advertise a different track's fmtp.
+/// oracle: JSEP section 5.3 keeps the MIDs, reverses the sendonly directions and
+/// answers on PT 111. RFC 7587 section 7.1 gives mono by default and describes the
+/// Opus attributes per endpoint. RTC-2 keeps the publisher's bytes on its own MID.
+/// The re-offer uses the subscriber's PT 109 on both MIDs with each source's bytes.
+@test
+fn sdp_opus_fmtp_per_section() -> Result[(), sdp.SdpError] {
+    let mono: Bytes = b"useinbandfec=1"
+    let stereo: Bytes = b"stereo=1;sprop-stereo=1;maxaveragebitrate=128000"
+    let prefs: Bytes = b"useinbandfec=0"
+    let mut offer = minimal_head(b" m s")
+    opus_section(mut offer, b"m", b"111", b"sendonly", mono)
+    opus_section(mut offer, b"s", b"111", b"sendonly", stereo)
+    let mut d = sdp.description()
+    sdp.parse(offer, mut d)?
+    let local = local_end(1)
+    let mut reply = sdp.description()
+    let mut agreed = sdp.negotiated(local)
+    sdp.answer(sdp.default_policy(), None, d, local, mut reply, mut agreed)?
+    let mut answer: Bytes = list.new()
+    let _ = sdp.write(reply, mut answer)?
+    sdp.parse(answer, mut d)?
+    if list.len(d.sections) != 2 || !opus_wire_section(d.sections[0], b'm', RecvOnly, 111, mono) || !opus_wire_section(d.sections[1], b's', RecvOnly, 111, stereo) {
+        fail("publisher answer changed a section's Opus fmtp")
+    }
+    let room = room_id()
+    let mut w = three_units(74)
+    let mut log: List[Wire] = list.new()
+    let _ = settle(mut w, 0, Open(room: room, limits: room_limits()), mut log)
+    let publisher = browser_with(mut w.u1, 75, 1, offer)
+    admit_on(mut w, publisher, 1, mut log)
+    let mic = published(settle(mut w, 0, Publish(room: room, who: publisher.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let screen = published(settle(mut w, 0, Publish(room: room, who: publisher.who, section: 1, id: PublicationId(0), shape: None), mut log))
+    let mut subscriber = minimal_head(b" a b")
+    opus_section(mut subscriber, b"a", b"109", b"recvonly", prefs)
+    opus_section(mut subscriber, b"b", b"109", b"recvonly", prefs)
+    let sub = browser_with(mut w.u2, 80, 2, subscriber)
+    admit_on(mut w, sub, 2, mut log)
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let _ = settle(mut w, 1, Subscribe(room: room, who: sub.who, p: mic, section: 0, target: base), mut log)
+    let version = opus_reoffer(mut w.u0, sub.who, mut d)?
+    if !opus_wire_section(d.sections[0], b'a', SendOnly, 109, mono) || !opus_wire_section(d.sections[1], b'b', SendOnly, 109, prefs) {
+        fail("microphone fmtp leaked into the other subscriber section")
+    }
+    let _ = settle(mut w, 2, Subscribe(room: room, who: sub.who, p: screen, section: 1, target: base), mut log)
+    sdp.parse(subscriber, mut d)?
+    d.setup = Active
+    let Party(id: _, certificate: certificate) = party(81)
+    let fingerprint = std.sha256.hash(certificate)
+    for i in 0u64 .. 32 {
+        d.fingerprint[i] = fingerprint[i]
+    }
+    list.clear(mut answer)
+    let _ = sdp.write(d, mut answer)?
+    result.unwrap(units.answer_reoffer(mut w.u0, room, sub.who, version, take answer))
+    quiesce(mut w, 3, 2, false, mut log)
+    let next = opus_reoffer(mut w.u0, sub.who, mut d)?
+    if next <= version || !opus_wire_section(d.sections[0], b'a', SendOnly, 109, mono) || !opus_wire_section(d.sections[1], b'b', SendOnly, 109, stereo) {
+        fail("subscriber offer did not keep each publication's Opus fmtp")
+    }
+    Ok(())
+}

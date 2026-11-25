@@ -42,6 +42,7 @@ grants = ["Tasks", "Clock", "Random", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 1
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"sdp_opus_laws.hirsel" = "laws"
 "ingress_laws.hirsel" = "laws"
 "router_laws.hirsel" = "laws"
 "router_keyframe_laws.hirsel" = "laws"

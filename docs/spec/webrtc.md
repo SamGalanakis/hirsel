@@ -234,11 +234,14 @@ checked at parse, because a description that breaks them cannot be answered:
 - every bundled section has a `mid` (`NoMid(i)`);
 - one extension URI has one ID in every bundled section, and one ID one URI
   (`ExtmapConflict(id)`, RFC 8843 §9.2);
-- one payload type is one codec configuration in every bundled section where it appears
-  (`PayloadConflict(pt)`). RFC 8843 §9.1.1 requires this of an offerer that reuses a
-  payload type across bundled sections, so the rule refuses only what the RFC already
-  forbids. A payload type may legally appear in two sections with that one configuration.
-  RTC-3 then cannot route by payload type alone, and routes by MID and SSRC binding.
+- a payload type reused across bundled sections must have the same media kind, codec,
+  clock rate and channel count (`PayloadConflict(pt)`). RFC 9143 §9.1.1 and RFC 8859
+  §4.7 specify additional restrictions on senders that reuse payload types. For browser
+  interoperability the SFU accepts section-local `fmtp`, RTX `apt` and `rtcp-fb` values
+  on a repeated payload type. For example, bundled mono microphone and stereo screen
+  audio can share Opus PT 111. RTC-3 resolves a repeated payload type by MID or SSRC
+  binding. Payload type alone can select a section only when it is unique among the
+  receiving sections.
 - with `rtcp-mux`, no RTP section uses payload types 64 to 95
   ([RFC 5761](https://www.rfc-editor.org/rfc/rfc5761) §4), because their marker-bit form
   collides with RTCP packet types 192 to 223 in the second octet (`PayloadConflict(pt)`).
@@ -372,6 +375,10 @@ A re-offer writes, per down-track that has a FlexFEC SSRC on a section that agre
 an `a=ssrc-group:FEC-FR <media> <fec>` line and the FEC SSRC's `a=ssrc` lines; libwebrtc
 creates its FlexFEC receive stream only from that line. One server offer is in flight at a
 time: an offer asked for while one is outstanding is made when its answer is taken.
+When a subscription or rebind changes the Opus `fmtp` on a subscriber's sending section,
+the router re-offers that section with the publication's parameters and the subscriber's
+negotiated payload type. Each publication takes its Opus parameters from its own receiving
+section, including when the two sessions live on different units.
 `accept_answer` keeps `rtcp-rsize` on a section only when the answer repeats it. It marks a removed down-track's section
 `inactive` and reuses it for a later down-track of the same media kind, keeping its MID.
 A server offer carries `a=setup:actpass` as RFC 8842 §5.5 requires of every offer. Its ICE
@@ -387,6 +394,9 @@ offer it answers (`sent`), and refuses with nothing changed:
 - the same protocol line as offered (`AnswerMismatch(i)`);
 - a direction that is a valid answer to the offered one (`AnswerMismatch(i)`);
 - only formats the offer listed, with the offered payload types (`AnswerMismatch(i)`);
+  Opus offer and answer parameters describe their respective endpoints (RFC 7587 §7.1).
+  The server keeps its offered Opus `fmtp` for future offers. If the section also receives,
+  its incoming Opus parameters come from the answer.
 - the remote ICE credentials, fingerprint and `tls-id` of the running association, and
   `a=setup:active` (`AssociationChanged`).
 
@@ -1759,6 +1769,12 @@ unless named otherwise.
   rebuilt bit-exactly with the transport number zeroed; only 9 and 10 are NACKed, and each
   comes back as exactly one RTX. Red on main, where no FEC SSRC is drawn and no re-offer is
   raised.
+- **W31 `sdp_opus_fmtp_per_section`.** An offer bundles mono microphone and stereo screen
+  audio on Opus PT 111. Both answer sections keep the corresponding `fmtp` on PT 111.
+  A subscriber receives the two publications on PT 109. Its re-offers carry each source's
+  parameters on the assigned MID, even when the second subscription arrives while the
+  first re-offer is in flight and the subscriber answers with its own Opus preferences.
+  The parent refuses the publisher offer with `PayloadConflict(111)`.
 
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.

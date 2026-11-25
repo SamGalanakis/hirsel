@@ -676,13 +676,14 @@ fn valid_answer_direction(sent: Direction, remote: Direction) -> bool {
     (!has_send(remote) || has_recv(sent)) && (!has_recv(remote) || has_send(sent))
 }
 
-fn matches_format(sent: List[Format], a: Format) -> bool {
-    for f in sent {
-        if format_config(f, a) && (!a.nack || f.nack) && (!a.pli || f.pli) && (!a.fir || f.fir) && (!a.twcc || f.twcc) {
-            return true
+fn offered_format(sent: List[Format], a: Format) -> Option[u64] {
+    for i in 0u64 .. list.len(sent) {
+        let f = sent[i]
+        if f.pt == a.pt && same_encoding(f, a) && (a.codec == Opus || same_parameters(f.fmtp, a.fmtp)) && (!a.nack || f.nack) && (!a.pli || f.pli) && (!a.fir || f.fir) && (!a.twcc || f.twcc) {
+            return Some(i)
         }
     }
-    false
+    None
 }
 
 fn narrow_local(sent: Section, remote: Section, index: u8) -> Result[Section, SdpError] {
@@ -698,14 +699,20 @@ fn narrow_local(sent: Section, remote: Section, index: u8) -> Result[Section, Sd
     if sent.port == Rejected || !valid_answer_direction(sent.dir, remote.dir) || list.len(remote.formats) == 0 {
         return Error(AnswerMismatch(index))
     }
+    list.clear(mut s.formats)
     for f in remote.formats {
-        if !matches_format(sent.formats, f) {
+        let Some(i) = offered_format(sent.formats, f) else {
             return Error(AnswerMismatch(index))
         }
+        let mut agreed: Format = clone(f)
+        // Opus offer and answer parameters describe their own endpoints (RFC 7587 section 7.1).
+        if f.codec == Opus {
+            agreed.fmtp = clone(sent.formats[i].fmtp)
+        }
+        add(mut s.formats, take agreed)?
     }
     s.dir = complement(remote.dir)
     s.rtcp_rsize = sent.rtcp_rsize && remote.rtcp_rsize
-    s.formats = clone(remote.formats)
     list.clear(mut s.extmaps)
     for e in remote.extmaps {
         let mut found = false
@@ -759,7 +766,15 @@ pub fn accept_answer(current: Negotiated, sent: Description, remote: Description
         }
         narrowed.mixed_extmaps = narrowed.port != Rejected && mixed && !n.mixed_extmaps
         let down = i >= list.len(current.sections) || current.sections[i].down_track
-        add(mut n.sections, agreed_section(index, narrowed, remote.sections[i], drop_rids(), down, n.mixed_extmaps))?
+        let mut a = agreed_section(index, narrowed, remote.sections[i], drop_rids(), down, n.mixed_extmaps)
+        if a.recv {
+            for j in 0u64 .. list.len(a.formats) {
+                if a.formats[j].codec == Opus {
+                    a.formats[j].fmtp = clone(remote.sections[i].formats[j].fmtp)
+                }
+            }
+        }
+        add(mut n.sections, take a)?
     }
     agreed = take n
     Ok(())

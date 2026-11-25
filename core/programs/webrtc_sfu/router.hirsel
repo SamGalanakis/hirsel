@@ -105,6 +105,7 @@ type Publication {
     room: peer.RoomId,
     section: u8,
     codec: sdp.Codec,
+    opus_fmtp: Shared[Bytes],
     pli: bool,
     fir: bool,
     encodings: List[Encoding],
@@ -421,21 +422,6 @@ fn unpark(mut r: Router, who: peer.Participant) {
     }
 }
 
-/// Make the receiving section `section` of `who`'s session a publication.
-pub fn publish(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8) -> Result[PublicationId, RouterError] {
-    let id = PublicationId(r.next_publication)
-    let _ = add_publication(mut r, room, who, section, id, None)?
-    r.next_publication += 1
-    Ok(id)
-}
-
-/// The next publication id the control unit hands out.
-pub fn next_publication(mut r: Router) -> PublicationId {
-    let id = PublicationId(r.next_publication)
-    r.next_publication += 1
-    id
-}
-
 /// Subscribe `who` to a publication on its sending section `section`.
 pub fn subscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
     add_down(mut r, room, who, p, section, target, now, mut out)?
@@ -617,7 +603,7 @@ fn ring(rtx_bytes: u64) -> Result[Ring, RouterError] {
 
 // The home unit reads the shape from the agreement and reserves the ring; every
 // other unit takes the shape it was given and keeps no ring.
-fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8, id: PublicationId, given: Option[Shape]) -> Result[Shape, RouterError] {
+fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8, id: PublicationId, given: Option[Shape], fmtp: Option[Shared[Bytes]]) -> Result[Shape, RouterError] {
     let Some(ri) = room_at(r, room) else {
         return Error(NoRoom)
     }
@@ -635,7 +621,7 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     }
     let home = r.roster[si].home
     let mut clock = 0u32
-    let (shape, held) = if home == r.unit {
+    let (shape, take held, take opus_fmtp) = if home == r.unit {
         let Some(mi) = member_at(r, room, who) else {
             return Error(NoParticipant)
         }
@@ -655,12 +641,21 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
         }
         clock = f.clock
         let g = ring(peer.session_limits(r.members[mi].session).rtx_bytes)?
-        (Shape(codec: f.codec, pli: f.pli, fir: f.fir, encodings: int.narrow(count)), g)
+        let params: Shared[Bytes] = if f.codec == Opus && list.len(f.fmtp) != 0 {
+            shared.new(clone(f.fmtp))
+        } else {
+            shared.share(r.empty)
+        }
+        (Shape(codec: f.codec, pli: f.pli, fir: f.fir, encodings: int.narrow(count)), take g, take params)
     } else {
         let Some(sh) = given else {
             return Error(NoPublication)
         }
-        (sh, Ring(slots: list.new(), handles: list.new()))
+        let opus = match fmtp {
+            Some(params) => shared.share(params),
+            None => shared.share(r.empty),
+        }
+        (sh, Ring(slots: list.new(), handles: list.new()), take opus)
     }
     let mut encodings: List[Encoding] = list.new()
     list.try_reserve(mut encodings, ENCODINGS_MAX) ?=> |c| Capacity(c)
@@ -676,7 +671,7 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     }
     let red = rtp.red.ring(depth) ?=> |c| Capacity(c)
     list.try_reserve(mut r.publications, 1) ?=> |c| Capacity(c)
-    list.push(mut r.publications, Publication(id: id, owner: who, home: home, room: room, section: section, codec: shape.codec, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held, red: take red, local: 0, clock: clock, window: None, voice: quiet(), dropped: 0, orientation: None))
+    list.push(mut r.publications, Publication(id: id, owner: who, home: home, room: room, section: section, codec: shape.codec, opus_fmtp: take opus_fmtp, pli: shape.pli, fir: shape.fir, encodings: take encodings, ring: take held, red: take red, local: 0, clock: clock, window: None, voice: quiet(), dropped: 0, orientation: None))
     r.roster[si].publications += 1
     Ok(shape)
 }
@@ -778,7 +773,7 @@ fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, s
     let Some(si) = seat_at(r, room, who) else {
         return Error(NoParticipant)
     }
-    let Some(_) = publication_at(r, room, p) else {
+    let Some(pi) = publication_at(r, room, p) else {
         return Error(NoPublication)
     }
     if let Some(_) = down_at(r, room, who, p) {
@@ -798,8 +793,8 @@ fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, s
         let first_seq: u16 = list.word_be(b, 0)
         let first_ts: u32 = list.word_be(b, 2)
         let track = peer.add_track(mut r.members[mi].session, section, first_seq, first_ts) ?=> |take e| Peer(e)
-        // RTP-14: the participant learns the track's FlexFEC SSRC from a re-offer.
-        if peer.fec_unannounced(r.members[mi].session, track) {
+        let opus = r.publications[pi].codec == Opus && peer.set_opus_fmtp(mut r.members[mi].session, track, r.publications[pi].opus_fmtp)
+        if opus || peer.fec_unannounced(r.members[mi].session, track) {
             reoffer(mut r, room, who)
         }
         track
@@ -925,7 +920,15 @@ fn move_down(mut r: Router, room: peer.RoomId, who: peer.Gen, from: PublicationI
     }
     r.downs[di].publication = to
     r.downs[di].next_chains = media_bits.unit.av1_chains()
-    retarget(mut r, room, who, to, target, now, mut out)
+    retarget(mut r, room, who, to, target, now, mut out)?
+    if r.publications[pi].codec == Opus {
+        if let Some(mi) = member_at(r, room, who) {
+            if peer.set_opus_fmtp(mut r.members[mi].session, r.downs[di].track, r.publications[pi].opus_fmtp) {
+                reoffer(mut r, room, who)
+            }
+        }
+    }
+    Ok(())
 }
 
 // The switch to the rebound publication happened, or no longer waits: its AV1

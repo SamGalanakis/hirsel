@@ -657,7 +657,7 @@ fn check_bundle(ds: List[Section], bundle: List[u8]) -> Result[(), SdpError] {
             }
             for x in s.formats {
                 for y in p.formats {
-                    if x.pt == y.pt && !format_config(x, y) {
+                    if x.pt == y.pt && (s.media != p.media || !same_encoding(x, y)) {
                         return Error(PayloadConflict(x.pt))
                     }
                 }

@@ -1,10 +1,35 @@
 // RTC-4 re-offers and renegotiation: the SSRCs a session announces, the answer it takes
 // and the agreement it installs.
-/// RTC-4's re-offer, after a collision or for a new FlexFEC SSRC: every section a
-/// down-track sends on carries the track's current SSRC, for video its RTX SSRC as
-/// `a=ssrc` and `a=ssrc-group:FID` lines, and its FlexFEC SSRC as `a=ssrc` and
-/// `a=ssrc-group:FEC-FR` lines (RTC-2). Every other line keeps the running agreement,
-/// at the next origin version, which is also the returned version. The offer stays in
+/// Set the source Opus parameters on a down-track. A changed wire value needs a re-offer.
+pub fn set_opus_fmtp(mut p: PeerSession, track: u16, fmtp: Bytes) -> bool {
+    let i: u64 = int.widen(track)
+    if i >= list.len(p.tracks) || p.tracks[i].ended {
+        return false
+    }
+    let si: u64 = int.widen(p.tracks[i].section)
+    if si >= list.len(p.agreed.sections) {
+        return false
+    }
+    p.tracks[i].opus_fmtp = Some(clone(fmtp))
+    if let Some((_, sent)) = p.offered {
+        if si < list.len(sent.sections) {
+            return opus_fmtp_differs(sent.sections[si], fmtp)
+        }
+    }
+    opus_fmtp_differs(p.agreed.sections[si].local, fmtp)
+}
+
+fn opus_fmtp_differs(s: sdp.Section, fmtp: Bytes) -> bool {
+    for f in s.formats {
+        if f.codec == Opus {
+            return list.compare_bytes(f.fmtp, fmtp) != Equal
+        }
+    }
+    false
+}
+
+/// RTC-4's re-offer gives each sending section its down-track's current SSRCs
+/// (RTC-2) and source Opus fmtp. It returns the next origin version. The offer stays in
 /// flight until `answer_reoffer` takes its answer. While one is in flight no other is
 /// made: the answer is `None`, and `reoffer_due` holds until that answer is taken.
 pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Result[Option[u64], PeerError] {
@@ -30,6 +55,14 @@ pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Resul
         let si: u64 = int.widen(t.section)
         if t.ended || si >= list.len(current.sections) {
             continue
+        }
+        if let Some(fmtp) = t.opus_fmtp {
+            for i in 0u64 .. list.len(current.sections[si].local.formats) {
+                if current.sections[si].local.formats[i].codec == Opus {
+                    current.sections[si].local.formats[i].fmtp = clone(fmtp)
+                    break
+                }
+            }
         }
         list.push(mut current.sections[si].local.ssrcs, t.ssrc)
         if t.rtx_ssrc != 0 {

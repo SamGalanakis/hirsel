@@ -239,6 +239,7 @@ type Inbound {
 type Track {
     section: u8,
     video: bool,
+    opus_fmtp: Option[Bytes],
     ssrc: u32,
     rtx_ssrc: u32,
     rtx_seq: u16,

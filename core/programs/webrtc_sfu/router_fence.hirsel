@@ -86,17 +86,37 @@ pub fn first(r: Router, c: Change) -> u16 {
     }
 }
 
+/// Make the receiving section `section` of `who`'s session a publication.
+pub fn publish(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8) -> Result[PublicationId, RouterError] {
+    let id = PublicationId(r.next_publication)
+    let _ = add_publication(mut r, room, who, section, id, None, None)?
+    r.next_publication += 1
+    Ok(id)
+}
+
+/// The next publication id the control unit hands out.
+pub fn next_publication(mut r: Router) -> PublicationId {
+    let id = PublicationId(r.next_publication)
+    r.next_publication += 1
+    id
+}
+
 /// Apply one change of the control order to this unit. The first unit checks it
 /// in full; once it answers `Ok`, every other unit applies the same change, with a
 /// publication's `Shape` taken from the first unit's answer.
 pub fn apply(mut r: Router, now: u64, take c: Change, mut out: peer.Outbox) -> Result[Answer, RouterError] {
-    let answer = change(mut r, now, take c, mut out)
+    apply_with_fmtp(mut r, now, take c, None, mut out)
+}
+
+/// Apply an order that can carry Opus parameters from the publication's home unit.
+pub fn apply_with_fmtp(mut r: Router, now: u64, take c: Change, fmtp: Option[Shared[Bytes]], mut out: peer.Outbox) -> Result[Answer, RouterError] {
+    let answer = change(mut r, now, take c, fmtp, mut out)
     // RTC-6 follows every change: allocations, the audio gate and the local masks.
     let _ = rebalance(mut r, now, mut out)
     answer
 }
 
-fn change(mut r: Router, now: u64, take c: Change, mut out: peer.Outbox) -> Result[Answer, RouterError] {
+fn change(mut r: Router, now: u64, take c: Change, fmtp: Option[Shared[Bytes]], mut out: peer.Outbox) -> Result[Answer, RouterError] {
     match take c {
         Open(room: room, limits: limits) => {
             open(mut r, room, limits)?
@@ -114,7 +134,7 @@ fn change(mut r: Router, now: u64, take c: Change, mut out: peer.Outbox) -> Resu
             Ok(Done)
         },
         Publish(room: room, who: who, section: section, id: id, shape: shape) => {
-            let made = add_publication(mut r, room, who, section, id, shape)?
+            let made = add_publication(mut r, room, who, section, id, shape, fmtp)?
             Ok(Shaped(id: id, shape: made))
         },
         Subscribe(room: room, who: who, p: p, section: section, target: target) => {
@@ -153,6 +173,17 @@ fn change(mut r: Router, now: u64, take c: Change, mut out: peer.Outbox) -> Resu
             Ok(Done)
         },
     }
+}
+
+/// Opus parameters to carry with a successful first application of `c`.
+pub fn published_opus_fmtp(r: Router, c: Change) -> Option[Shared[Bytes]] {
+    if let Publish(room: room, who: _, section: _, id: id, shape: None) = c {
+        let pi = publication_at(r, room, id)?
+        if r.publications[pi].codec == Opus {
+            return Some(shared.share(r.publications[pi].opus_fmtp))
+        }
+    }
+    None
 }
 
 // ---- Revoke and suspend on a unit ----

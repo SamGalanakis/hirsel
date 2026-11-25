@@ -407,8 +407,8 @@ fn directions(send: bool, recv: bool) -> Direction {
     }
 }
 
-fn format_config(a: Format, b: Format) -> bool {
-    a.pt == b.pt && a.codec == b.codec && a.clock == b.clock && a.channels == b.channels && same_parameters(a.fmtp, b.fmtp)
+fn same_encoding(a: Format, b: Format) -> bool {
+    a.codec == b.codec && a.clock == b.clock && a.channels == b.channels
 }
 
 fn ext_uri(ext: Ext) -> Bytes {

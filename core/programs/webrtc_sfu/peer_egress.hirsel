@@ -124,7 +124,7 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     let pictures = rtp.counter.counter(15, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let frames = rtp.counter.counter(16, Translate, COUNTER_SLOTS) ?=> |c| Capacity(c)
-    let track = Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None, fec_ssrc: fec_ssrc, fec_seq: first_seq, fec_key: false, fec: take fec, fec_policy: rtp.fec.policy())
+    let track = Track(section: section, video: video, opus_fmtp: None, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None, fec_ssrc: fec_ssrc, fec_seq: first_seq, fec_key: false, fec: take fec, fec_policy: rtp.fec.policy())
     for t in 0u64 .. list.len(p.tracks) {
         if p.tracks[t].ended {
             p.tracks[t] = take track

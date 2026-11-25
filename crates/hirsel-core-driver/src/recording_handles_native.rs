@@ -467,3 +467,73 @@ fn rl9_nested_shared_crosses() {
         assert_eq!(parts, shared, "{backend:?}: node parts");
     }
 }
+
+/// Capabilities as array elements cross: the root sends itself an inline
+/// array of two `Random`s and draws through the second.
+const RL9_ARRAY: &str = r#"
+pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let (l, li): (Client[Inline[Random, 2]], Inbox[Inline[Random, 2]]) = result.unwrap(conn.new(1, bytes 0))
+    let rs: Inline[Random, 2] = [r, r]
+    result.unwrap(conn.try_send(l, rs))
+    let got = result.unwrap(conn.try_receive(li))
+    let mut b: Bytes = list.with_capacity(8)
+    host.random(got[1], mut b)
+    result.unwrap(stdout.write(out, "array"))
+    Ok(())
+}
+"#;
+
+/// Array elements that are capabilities cross as their own snapshots
+/// (recording.md, "Values" and "Snapshots"), hand-derived before the first
+/// run. The root numbers the connection g+1 and its client g+2. An
+/// `Inline[Random, 2]` is 16 plain bytes, both capability words zeroed, then
+/// a tag 5 snapshot per element in index order (kind 3, no stored bytes):
+/// the elements arrive as g+3 and g+4, so the take is `[0, g+1]` and that
+/// value, and the draw through element 1 is a `RANDOM` on g+4.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_array_elements_cross() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame, op};
+
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_with(
+            RL9_ARRAY,
+            dir.path(),
+            "array",
+            backend,
+            "array",
+            &["Tasks", "Random", "Stdout"],
+        );
+        let root = &rl8_root_frames(&path);
+        let g = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        let items: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)) => {
+                    Some(body.bytes().to_vec())
+                }
+                _ => None,
+            })
+            .collect();
+        let array = [
+            vec![0, g + 1, 16],
+            vec![0; 16],
+            vec![2, 1, 5, g + 3, 3, 0, 1, 5, g + 4, 3, 0],
+        ]
+        .concat();
+        assert_eq!(items, [array], "{backend:?}: the array");
+        let draws: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op { op: o, object, .. } if *o == op::RANDOM => Some(*object),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(draws, [u64::from(g + 4)], "{backend:?}: draw");
+    }
+}

@@ -94,6 +94,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::rl9_env_and_cred_cross_in_an_item_and_an_entry",
         "native::tests::rl9_result_crosses_with_its_handles",
         "native::tests::rl9_nested_shared_crosses",
+        "native::tests::rl9_array_elements_cross",
         "native::tests::test_replay_flag_records_and_replays",
         "native::tests::package_cred_grants_are_per_test_and_replay_uses_the_tape",
         "native::tests::served_scram_replays_with_the_same_send_calls",

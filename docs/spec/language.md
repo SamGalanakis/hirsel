@@ -732,11 +732,89 @@ constant stack whatever the depth of the value; a finalizer is an ordinary call.
 
 ### LANG-20: Constants
 
-`const N: T = e` declares a plain constant or a static string. For a plain `T`, `e` may use
-literals, operators, tuple, plain and `Inline` array constructions, other constants and
-`bytes[T]` ([MEM-33](budgets.md#mem-33-reading-a-logical-charge)); it calls no function. Constants are evaluated once, before any body is checked, in
-dependency order, by the rules of [semantics](semantics.md); a constant that would fail, or whose
-constants reach itself, is refused. A **static string** is a constant of type `String` whose
+`const N: T = e` declares a plain constant, a static string or an assertion. Its initialiser
+`e` is a **closed expression**: it names literals, constants, functions and types, and no
+local or parameter. Hirsel has no other compile-time code: no marker on a function, no
+compile-time parameter and no compile-time block ([reserved](reserved.md#not-in-v1)).
+
+**Two kinds of constant, one keyword.** A **manifest constant expression** uses only
+literals, operators, tuple, plain and `Inline` array constructions, manifest constants, the
+toolchain constants below and `bytes[T]` ([MEM-33](budgets.md#mem-33-reading-a-logical-charge));
+it calls no function. A constant whose initialiser is one is a **manifest constant**. A
+**computed constant** is one whose initialiser calls a function or names a computed
+constant. Which kind a constant is follows from its initialiser and the constants it names,
+without running anything.
+
+- **Manifest constants** are evaluated once, before any body is checked, in dependency
+  order, by the rules of [semantics](semantics.md). They belong to the declarations: types,
+  retention ([PROG-6](programs.md#prog-6-one-meaning)) and checking may read their values.
+- **Computed constants**<!-- doc-ref: planned --> are evaluated after their initialiser and
+  every function it can reach are checked. The initialiser's retained code
+  ([PROG-10](programs.md#prog-10-code-addresses)) runs as a call with no argument, with the
+  meaning the reference evaluator gives it, under the budget of
+  [MEM-34](budgets.md#mem-34-constant-budgets). Nothing decided before that reads a computed
+  constant's value: no type, no retention (PROG-6) and no judgment of the checker depends on
+  it, so a computed constant is opaque to checking. A body that reads one reads its value at
+  run time (PROG-10), and an engine may still fold it.
+- **Every computed constant is evaluated.** Whenever a package is checked or built,
+  `hirsel check` included, each computed constant it declares is evaluated, whether or not
+  any code reads it. So acceptance never depends on the command or on what an entry reaches.
+
+**What an initialiser may call.** It may call any function, with no marker on the function,
+except these:
+
+- A function whose type is `waits`. An initialiser is not a `waits` context, so the call is
+  refused at the call, before anything runs.
+- A function that needs a capability. The initialiser holds none to pass: authority enters a
+  program only through its entry ([CAP-1](capabilities.md#cap-1-authority-is-explicit)). So
+  the call is a type error, found before anything runs.
+- A function on the **closed list** below, or a foreign function
+  ([FFI-2](foreign.md#ffi-2-foreign-modules)). These take no capability, so typing admits
+  the call. Reaching one while the initialiser runs refuses the constant, with the call
+  chain. A foreign function runs on the host's stack
+  ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)) and cannot run for another target. The
+  closed list holds the core functions that make authority, provider-held keys or task
+  objects, or that read the run itself:
+  - every function of core module `provide`, which makes virtual providers, and so
+    capabilities, from nothing;
+  - `secret.seal` and `schedule.quic_initial`, which make a `Secret` and a `Schedule`,
+    whose key material a provider holds outside the run;
+  - `channel.new`, `channel.sender`, `conn.new`, `conn.client`, `latest.new`,
+    `latest.handle` and `flow.new`, which make task objects ([tasks](tasks.md));
+  - `runtime.root_limit`, which reads the run's limit; `task.check_cancel`, which reads its
+    cancellation; `unique.new`, which makes a fresh identity; and `code.revision`, whose
+    value depends on how the compiler lowers code
+    ([PROG-9](programs.md#prog-9-code-descriptors)).
+
+  The list is closed, and only core extends it. A core function added later that makes one
+  of these things or reads the run joins the list in the change that adds it. Every other
+  core function means in an initialiser what it means at run time.
+
+**The value.** A computed constant's type is plain
+([OWN-1](ownership.md#own-1-representation-is-declared-once)) and holds no function value:
+no `fn` type and no `StaticFn`. Any other type is refused here, at the type. The initialiser
+may build `List`, `Map` and `String` values while it runs. None of them survives, because a
+plain value holds no owned storage, so no check at run time is needed. A computed `String`
+or `Bytes` constant is not in v1 ([reserved](reserved.md#not-in-v1)).
+
+**Refusal.** A computed constant is refused when its run fails
+([FAIL-2](failure.md#fail-2-causes)), reaches a function on the closed list or a foreign
+function, or exceeds its budget (MEM-34). The refusal names the constant, the cause (a
+failure's primary cause with its message, the closed-list or foreign function, or the budget
+that ran out), and the chain of calls from the initialiser to the site, innermost first.
+
+**Cycles.** A constant that needs its own value is refused. For a manifest constant, that
+means its constants reach itself. For a computed constant, it means its initialiser can
+reach a read of the constant, through any function it can reach and any constant those
+read. Reach is PROG-10's slot reach, so this refusal is decided before anything runs.
+
+**Assertions.** A constant named `_`, `const _: T = e`<!-- doc-ref: planned -->, is an
+**assertion**. Its initialiser is evaluated like any other constant's, manifest or computed,
+and its value is kept nowhere. `_` names nothing, so a module may declare any number of
+assertions, none of them can be read, and a `pub` assertion is refused. An assertion whose
+run fails refuses the build, as any constant's failure does.
+
+A **static string** is a constant of type `String` whose
 `e` is a string literal or another static string, `const NAME: String = "hirsel"`, and
 nothing else: never a concatenation, a call or a byte string. Each use of it is its literal,
 under the literal's contract ([core](core.md)): static, allocating nothing and never
@@ -747,11 +825,14 @@ with a `String` field are refused here, at the type, and so is every other non-p
 `arch`, end at their type, by the core library's power to leave a declaration to the
 implementation ([core](core.md)): the toolchain supplies each value from the build's target
 ([PROG-6](programs.md#prog-6-one-meaning)). They are the only constants of that kind, and a
-constant without an initialiser anywhere else is refused. A constant whose initialiser uses a
-toolchain constant is evaluated once for each target the `target` module names, reserved
-ones included, and a failure on any one refuses it on every target, so the target never
-decides acceptance. Each such refusal ends `, for target <triple>`, naming the first target
-that fails. The checker evaluates no body for it: a constant still calls no function.
+constant without an initialiser anywhere else is refused. A constant **depends on `target`**
+when its initialiser names a toolchain constant or a constant that depends on `target`, or,
+for a computed constant, when a function its initialiser can reach does. Such a constant is
+evaluated once for each target the `target` module names, reserved ones included. Each
+evaluation of a computed one runs that target's retained code (PROG-10). A failure on any
+target refuses the constant on every target, so the target never decides acceptance. Each
+such refusal ends `, for target <triple>`, naming the first target that fails. The checker
+evaluates no body for a manifest constant.
 
 ```hirsel
 const WORDS: u64 = 64
@@ -768,6 +849,44 @@ fn title() -> String { TITLE }
 ```hirsel unbuilt
 const PAIR: (String, u64) = ("a", 1)                      // refused: LANG-20, String in a tuple
 ```
+```hirsel unbuilt
+fn square(n: u64) -> u64 { n * n }
+const AREA: u64 = square(12)                              // computed: 144
+const SIDES: u64 = 4                                      // manifest
+```
+```text
+fn fits(size: u64, limit: u64) {
+    if size > limit { core.fail("record is larger than its cache budget") }
+}
+type Particle { x: f32, y: f32, z: f32, mass: f32 }
+const _: () = fits(bytes[Particle], 16)                   // accepted: 16 is not over 16
+```
+```hirsel unbuilt
+fn grow(n: u8) -> u8 { n + 200 }
+const BIG: u8 = grow(100)                                 // refused: LANG-20, Overflow in grow
+```
+```hirsel unbuilt
+fn fresh() -> u64 { let _ = unique.new(); 1 }
+const ID: u64 = fresh()                                   // refused: LANG-20, unique.new is on the closed list
+```
+```hirsel unbuilt
+fn width() -> u64 { 4 }
+fn pick(n: u64) -> u64 { if WIDE { n } else { 0 } }       // both arms retained: WIDE is computed
+const WIDE: bool = width() > 2
+```
+
+Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION decisions 1, 2, 3a, 6
+and 11, ruled A; not yet built): a constant's initialiser may call functions. It was "calls no
+function". The constants LANG-20 admitted before are now the manifest constants, with the same
+meaning, so every program accepted before is accepted with the same values. A computed
+constant is evaluated after checking, under MEM-34's budget. Its value decides no type and no
+retention. `const _` is an assertion. The closed list was settled from core's operation table
+(the runtime lanes of the front's core bindings). Beyond the direction's six functions, it
+adds every `provide` function, which mints virtual capabilities without authority, so CAP-1
+alone does not keep a provider out of an initialiser. It also adds the key-material makers and
+the task-object makers. `charge.latest` is not on the list: it is a MEM-33 recipe, a pure
+function. Reversible before 1.0: the spec only. Shrinking the closed list or raising MEM-34's
+numbers later turns refusals into acceptances and changes no accepted value.
 
 ### LANG-21: Operators
 

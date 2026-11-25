@@ -275,7 +275,7 @@ raises `Fail(text)`. A later typed reading of a failure is a core function over 
 
 User-made shared limits; mutexes and shared cells; atomics, which are not planned (R3); weak counted references; catching
 failures other than by `isolate`; deadlines and timeouts other than `host.sleep_until` and the network operations' declared `until`; task sets and selection; `@noalloc`; compile-time
-evaluation beyond `const`; unsafe code; foreign functions other than FFI-2's, and every R5
+evaluation other than LANG-20's computed constants, whose limits are listed below; unsafe code; foreign functions other than FFI-2's, and every R5
 *Later* item; layout declarations other
 than `@compact`; methods, traits and implementation contracts; imports; list and map
 literals (an `Inline` array literal is not one); format strings; `forget`; static brands;
@@ -287,3 +287,30 @@ viewing the environment (LANG-14), and would add a second calling mode, from sev
 library writes one function per width; generics over an `Inline` length; float lanes, 64-byte vectors, vectors in fields and collections, and checked lane arithmetic, whose `+` would fail with `Overflow` when any lane overflows, at the operator ([SEM-11](semantics.md#sem-11-vectors)); persistent mutable views; derivation other than a codec's (SEM-10); contracts and
 facts; `@varint` (R25); documents in segments (R26); the store, runners and places; a step grant for
 finalizers, which would let cleanup under an exhausted step bound take steps ([MEM-30](budgets.md#mem-30-step-bounds)).
+
+**Compile-time evaluation.** A computed constant ([LANG-20](language.md#lang-20-constants)) is
+an ordinary function run by the compiler under a fixed budget
+([MEM-34](budgets.md#mem-34-constant-budgets)) to make a plain value. Everything else that other
+languages run at compile time stays out:
+- **Native plugins.** No code runs in the compiler with the host's authority. An initialiser
+  runs checked Hirsel only, and a foreign function it reaches refuses the constant.
+- **Host I/O at compile time.** An initialiser holds no capability and reaches no clock, file,
+  network, process or random source, so a build reads nothing the program text does not name
+  ([PROG-6](programs.md#prog-6-one-meaning)).
+- **Lazy or unchecked code.** Every body is checked on every target, and every arm of a branch
+  on a computed constant is retained. Only a manifest constant expression decides retention.
+- **Types as values.** No type, bound, length or layout depends on a computed value, so types
+  stay local ([LANG-11](language.md#lang-11-typing-is-local)) and generics rigid
+  ([LANG-12](language.md#lang-12-generics)).
+- **Generated declarations or source text.** No declaration, item or source text comes from
+  evaluation; every declaration is in a source file of its package ([PROG-1](programs.md#prog-1-packages)).
+- **Compile-time parameters.** No parameter is evaluated at compile time, so a function has
+  one meaning, not one per argument.
+- **Computed `String`, `Bytes` and function values.** A computed constant's type has no
+  `String`, `Bytes`, `fn` or `StaticFn` until the image format can store them; a manifest
+  `String` or `Bytes` constant is unaffected.
+
+Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION §0 and §5; not yet
+built): "compile-time evaluation beyond `const`" became LANG-20's computed constants plus this
+list of what stays out. Each item is reversible before 1.0 only by a later ruling, and the
+first six are permanent refusals by that direction's intent.

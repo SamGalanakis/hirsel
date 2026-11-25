@@ -35,9 +35,10 @@ this state; every rule of this specification that refuses a body is decided from
 - the **construction frames**: for each open `emit` literal, its type and next field, and
   whether the current expression is a `?` operand or in tail position
   ([MEM-4](memory.md#mem-4-sized-destinations));
-- the published **type summaries** ([OWN-2](#own-2-type-summaries)) and **constant values**
-  ([LANG-20](language.md#lang-20-constants)), which declaration preprocessing computes once
-  ([index](index.md)) and checking reads and never recomputes.
+- the published **type summaries** ([OWN-2](#own-2-type-summaries)) and **manifest constant
+  values** ([LANG-20](language.md#lang-20-constants)), which declaration preprocessing computes
+  once ([index](index.md)) and checking reads and never recomputes. A computed constant's
+  value is not checker state: it is evaluated after checking.
 
 At a join ([OWN-16](#own-16-joins)), availability joins by its table, freeze records,
 reservations, anchor sets and capture descriptors join by union, `mut` dominating view, and the accumulators by

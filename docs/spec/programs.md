@@ -327,7 +327,8 @@ builtin address (PROG-10) for a core function the compiler implements, such as `
 Equal revisions mean equal addresses, so Hirsel has one identity for code; the revision only
 keeps the bytes a program holds apart from the keys of a code store. Nothing else enters: not
 the backend, the runtime, the target (except, once retention is built, through the arms
-PROG-6 retains for it), the optimisation level, the root limit, source
+PROG-6 retains for it, and through the value of a computed constant that depends on it,
+LANG-20), the optimisation level, the root limit, source
 positions or optimisation hints. So:
 
 - an edit to comments, layout, local or parameter names, item order, or an item the
@@ -438,7 +439,7 @@ on the evaluator, the checker corpus) `x86_64-unknown-linux-gnu`, the toolchain'
 
 **Body.** An instance's **body** is the normal form of its retained code: its own function, the
 functions generated beside it, the shapes, signatures, statics and instance rows they use, and
-its **slots**, the functions it uses but does not define. It holds:
+its **slots**, the functions it uses but does not define and the computed constants it reads. It holds:
 
 - every operation and terminator, in its order within its block, so parse decisions,
   type-selected calls, failure order and the order of charges are kept;
@@ -452,14 +453,14 @@ its **slots**, the functions it uses but does not define. It holds:
 - the instance's own identity, so `ident[u64]` and `ident[u32]` have different bodies, and
   each slot's identity and signature.
 
-The slots are exactly the functions the retained code can run: the target of each call, each
+The function slots are exactly the functions the retained code can run: the target of each call, each
 function value and each descriptor (`code.describe`) in a block the body keeps, each core
 function the compiler implements that such a block uses (below), and the finalizer of every
 type that a value in that code can hold, through fields and cases included. A hook that only
 describes a type, such as a codec maker no retained code calls, is metadata in its shape and
 never a slot. A codec maker that code calls is a slot, and the codec it returns holds its
 parts as descriptors, each a slot of the maker, so the parts' revisions cover the default
-literals and `via` bodies their decoding reads ([SEM-10](semantics.md#sem-10-codecs)). One inventory serves every consumer: the slots a body lists are the ones its
+literals and `via` bodies their decoding reads ([SEM-10](semantics.md#sem-10-codecs)). Each computed constant the retained code reads is a constant slot (below). One inventory serves every consumer: the slots a body lists are the ones its
 group binds, the ones its program links, and the only places a revision root of a described
 function is looked for.
 
@@ -476,7 +477,8 @@ types' closure hashes, and those with bodies are walked in that order, until non
 The types of compact roots not yet numbered then take the next numbers in ascending order of
 closure hash, and the roots are written sorted by type number and width, without repeats.
 Blocks the entry does not reach are left out, with every call and reference in them. A body's
-slots are its bodiless functions in number order.
+slots are its bodiless functions in number order, then its constant slots, each computed
+constant numbered at its first reference, in number order.
 
 Every enumeration is written with a tag from a fixed, append-only table, and every count and
 index as unsigned LEB128. The body starts with the seven ASCII bytes `HIRBODY`, a zero byte
@@ -503,7 +505,7 @@ Groups are hashed dependency-first: a group's hash is computed after the hash of
 binds. A group lists its members in ascending identity order, which never ties, so the order
 does not depend on how they were found. For each member it gives the body hash and, for each of
 the member's slots in order, a **binding**: `Internal(k)`, the group's member k;
-`External(address)`; or `Builtin(n)`. The **group hash** is `H("hirsel.code-group.v1", group)`,
+`External(address)`; `Builtin(n)`; or, for a constant slot, `Value(h)` (below). The **group hash** is `H("hirsel.code-group.v1", group)`,
 and member k's address is `H("hirsel.code-address.v1", group hash ‖ k)`, with `k` a 32-bit
 little-endian number. An edit to a callee therefore changes its callers' addresses, through
 their groups, but not their bodies.
@@ -526,6 +528,38 @@ descriptor of it alike. The lowered operations stay in the body as well. An engi
 each builtin at the numbers it lists and refuses a program that binds any other; it never runs
 a builtin under a number other than the one bound. Engine operations inside a body are written
 as tags, and a change in the meaning of one gets a new tag, under the same rule.
+
+**Computed constants**<!-- doc-ref: planned --> ([LANG-20](language.md#lang-20-constants)).
+
+- **The initialiser is an instance.** A computed constant's initialiser is a function
+  generated beside the constant, named as above: its owner is the constant, its kind is
+  initialiser, and its signature is `() -> T`. The initialisers of a module's assertions
+  (`const _`) are told apart by their ordinal among that module's assertions, in source
+  order. An initialiser has a body, slots and an address like any instance. It is a root of
+  the reach walk, whether or not the program's entry reaches the constant. For a constant
+  that depends on `target`, its address is computed once for each target, from that target's
+  retained code.
+- **Value bytes and value hash.** A computed constant's **value bytes** are its value written
+  as follows: a scalar little-endian at its width; `bool` as one byte, 0 or 1; `char` as four
+  bytes; `()` as nothing; a float as its IEEE 754 bit pattern; a tuple or record field by
+  field, in declaration order; an `Inline` array element by element; and a value of a type
+  with cases as its case index, a 32-bit little-endian number, followed by that case's
+  fields. Its **value hash** is `H("hirsel.code-value.v1", c ‖ v)`, where `c` is the
+  constant type's closure hash and `v` the value bytes.
+- **A reader's address holds the value hash.** Retained code that reads a computed constant
+  never holds its value. It names the constant in a **constant slot**, bound in its group as
+  `Value(h)`, where `h` is the value hash, the way a call is bound to its callee's address. So
+  a reader's address includes the value hash of each computed constant it reads. An edit
+  that changes a constant's value changes the address of every reader. An edit that leaves
+  the value equal, such as a rewrite of a function the initialiser calls, changes no
+  reader's address. A reader's body names only the slot, so its body hash does not change
+  when the value does. An initialiser that reads another computed constant holds that
+  constant in a constant slot too, so its own address includes the other constant's value
+  hash.
+- **What an evaluation is a function of.** A computed constant's outcome, its value or its
+  refusal, is a function of its initialiser's address, and for a constant that depends on
+  `target`, of the target. An implementation may reuse an outcome under that key, and under
+  no key that does not cover the address.
 
 So equal addresses mean the same checked code everywhere it reaches, on every engine and
 build. The driver's reuse keys (pre-check keys, record and instance keys, image roots) decide
@@ -575,6 +609,21 @@ so a branch on a constant expression keeps only its taken arm, per target. The h
 4, the body domain is `hirsel.code-body.v4`, and bodies of version 3 are refused, not
 converted.
 
+Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION 3.3 and decision 4;
+not yet built): a computed constant's initialiser is an instance and a root of the reach walk.
+A reader names a computed constant in a constant slot bound `Value(h)`, so the reader's address
+includes the value hash and its body does not. This takes a new normal form and a new group
+encoding. When it is built, normal form 5 (`hirsel.code-body.v5`) and `hirsel.code-group.v2`
+replace version 4 and `hirsel.code-group.v1`, and bodies and groups of the old versions are
+refused, not converted. The domain `hirsel.code-value.v1` is added. The new versions follow
+this section's own rule that a change to the normal form or to a group's encoding takes a new
+version. PROG-9's 2026-11-24 note kept its version byte, but that concerned identity bytes, and
+here every body that reads a computed constant changes. With this design the cache never
+records which bodies a run read, so the 2026-11-12 hybrid ruling is met by its reversal
+clause. An address names every body an initialiser can run, so the key is complete, and the
+value hash stops an over-approximated re-evaluation from spreading to readers. Reversible
+before 1.0: the spec only. No address carrying a constant slot has been published.
+
 ### PROG-11: Map index
 
 A Map's physical layout, its index, its placement and its private builtins are an agreement
@@ -600,6 +649,10 @@ names no rule; such a refusal is not a meaning of the program. Likewise, where a
 runs out and which admission an over-tight byte bound refuses are a build's resource
 outcomes, fixed for that build but not the same on every engine
 ([SEM-8](semantics.md#sem-8-determinism)); they are not meanings of the program either.
+A computed constant's run is the exception: it counts steps by the reference count and
+charges by the logical charges on every build
+([MEM-34](budgets.md#mem-34-constant-budgets)), so whether its budget refuses it is a
+meaning of the program.
 A package's dependencies are fixed before the compiler runs ([packages](packages.md)): a
 published library by its root, a workspace member by its captured files, and a toolchain
 package by the toolchain, so `--locked` and `--frozen` decide only whether a command
@@ -626,9 +679,14 @@ which the toolchain supplies (LANG-20). These rules hold:
   ([LANG-20](language.md#lang-20-constants)).
 - **Retention is decided by form.** A `match` whose scrutinee, or an `if` whose condition,
   is a constant expression keeps only its taken arm in retained code (PROG-10). A constant
-  expression is exactly what LANG-20 admits in a plain constant's initialiser (literals,
-  operators, constructions, other constants and `bytes[T]`), so it has no call and no local. So `match target.os { ... }` keeps one
-  arm, and `let o = target.os` followed by `match o { ... }` keeps both, on every engine.
+  expression here is a manifest constant expression (LANG-20): literals, operators,
+  constructions, manifest constants, toolchain constants and `bytes[T]`, so it has no call
+  and no local. Retention and types read manifest constant expressions only; a computed
+  constant that depends on `target` is evaluated for every target.<!-- doc-ref: planned -->
+  So `match target.os { ... }` keeps one
+  arm, and `let o = target.os` followed by `match o { ... }` keeps both, on every engine. A
+  branch on a computed constant is an ordinary branch: every arm is retained, and an engine
+  may still fold it.
   How much an engine folds never decides what is retained. The rule holds for every
   constant, not only `target`'s. Reach ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused))
   and FFI-3 are computed over retained code.
@@ -675,7 +733,7 @@ every build whose entry reaches `pick` reaches `target.unsupported`.
 **Constant-form branches, exactly** (macos-s9-target-consts-2508). Only a `match` scrutinee and
 an `if` condition qualify; `if let`, `while` and `loop` never do. The expression qualifies when
 it evaluates as a constant on every target the module names. One that fails on any target, or
-names a local, a call or a type parameter, keeps every arm and is refused for nothing here; so
+names a local, a call, a computed constant or a type parameter, keeps every arm and is refused for nothing here; so
 does a `match` scrutinee that is an unsuffixed literal, which has no type of its own. Each arm
 is decided on each target: an arm whose pattern the value matches is taken and the arms after
 it are dropped, and an arm whose pattern no constant decides (a float pattern) stays an
@@ -688,3 +746,15 @@ on every run and every replay, so it passes no replay point
 ([CAP-1](capabilities.md#cap-1-authority-is-explicit)). A run-time description of the host
 is not provided. A value of `target.Os` is not a claim that Hirsel supports that target:
 macOS stays in [reserved](reserved.md) until its native gate is green.
+
+Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION 3.5 and decision 11;
+not yet built): LANG-20 admits calls, so the definition of a constant expression above now
+names manifest constant expressions. Before this change it was "exactly what LANG-20 admits",
+which would have taken in calls. The definition's text was edited, not only extended, but
+every branch that qualified before still qualifies, and nothing that qualifies is new. Two
+sentences are added. The first says retention and types read manifest constant expressions
+only, and a computed constant that depends on `target` is evaluated for every target. The
+second makes a computed constant's budget a meaning of the program, not a build's resource
+outcome. Reversible: the spec only. Letting a computed constant decide retention later would
+be compatible, but it would make the retained set depend on evaluation, which depends on the
+retained set.

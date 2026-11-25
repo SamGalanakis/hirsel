@@ -21,9 +21,10 @@ These goals decide between designs. A rule that would break one of them is wrong
    and the declarations it names ([LANG-8](language.md#lang-8-signatures)). No rule needs a
    solve, a fixpoint or a walk over other definitions' bodies. Before any body is checked,
    **declaration preprocessing** computes each type's summary
-   ([OWN-2](ownership.md#own-2-type-summaries)) and each constant's value
+   ([OWN-2](ownership.md#own-2-type-summaries)) and each manifest constant's value
    ([LANG-20](language.md#lang-20-constants)) once, in dependency order, from declarations
-   alone. An engine lowers each checked definition once; it may call a known callback
+   alone. A computed constant runs only after checking, and nothing checking decides reads
+   its value. An engine lowers each checked definition once; it may call a known callback
    directly, and never checks a body again to do so.
 2. **Representation is declared.** A type's declaration fixes whether its values are
    plain, own, region, resource, counted or scoped, and every use inherits it
@@ -57,7 +58,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Language](language.md) | LANG-6 to LANG-21 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
 | [Memory](memory.md) | MEM-1 to MEM-18, MEM-29; performance targets MEM-31 to MEM-32 |
-| [Budgets](budgets.md) | MEM-19 to MEM-28, MEM-30, MEM-33 |
+| [Budgets](budgets.md) | MEM-19 to MEM-28, MEM-30, MEM-33, MEM-34 |
 | [Failure](failure.md) | FAIL-1 to FAIL-16 |
 | [Tasks](tasks.md) | CONC-1 to CONC-15, CONC-17 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-9 |
@@ -138,6 +139,8 @@ archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sq
 | capability | [CAP-1](capabilities.md#cap-1-authority-is-explicit) |
 | claim function, keyed operation | [K-2](http.md#k-2-the-principal-and-the-key-come-from-application-code), [K-1](http.md#k-1-the-declaration) |
 | commit point | [FAIL-3](failure.md#fail-3-commit-points) |
+| computed constant, manifest constant, assertion | [LANG-20](language.md#lang-20-constants) |
+| constant budget | [MEM-34](budgets.md#mem-34-constant-budgets) |
 | copyable | [OWN-3](ownership.md#own-3-kinds) |
 | current limit, limit | [MEM-19](budgets.md#mem-19-limits) |
 | event | [CONC-10](tasks.md#conc-10-event-order) |

@@ -333,7 +333,7 @@ pub fn latest() -> Option[u64]                                       // a Latest
 
 A price is then the recipe applied to the type: `charge.channel(bytes[Ack], 3 * g + 3)`,
 `charge.task(bytes[Result[(), Error]], grant)`. These are ordinary functions, so a derived
-price is a `fn` or a `let`, never a `const` (LANG-20 calls no function). Their results are
+price is a `fn` or a `let`, or a `const`, which LANG-20 evaluates as a computed constant. Their results are
 exactly MEM-24's rows; a later policy (MEM-24's last paragraph) changes the module and
 `bytes`, and no caller.
 
@@ -501,3 +501,82 @@ fn grow(mut xs: List[u64], k: u64) -> Result[(), OutOfTime] {
   Ok(())
 }
 ```
+
+### MEM-34: Constant budgets
+
+A computed constant ([LANG-20](language.md#lang-20-constants)) is evaluated under a **constant
+budget**, the same for every constant and every build: its own root
+step bound of **16,777,216** steps (2^24), its own root limit of **67,108,864** bytes (64 MiB)
+and at most **4,096** activations. Each assertion (`const _`) has a budget of its own, as
+every other computed constant has. The budget is part of the meaning of the program
+([PROG-6](programs.md#prog-6-one-meaning)), so it is counted the same way on every build:
+
+- **Steps**<!-- doc-ref: planned --> are the reference count (MEM-30), not a build's own count. An engine that counts
+  otherwise evaluates a constant as if it took the reference count.
+- **Bytes** are the logical charges (MEM-24), exactly. MEM-28's latitude does not apply: an
+  allocation the evaluating engine elides is charged as if made, and a scratch block a core
+  function takes is charged at its logical charge.
+- **Activations** are the calls entered and not yet returned, of a function, a callable or a
+  core function, with the initialiser counting as one, and the user code entered without a
+  call (MEM-30's list) while it runs. Entering the initialiser takes one step, as a call
+  does.
+
+`bound steps` and `bound bytes` inside the initialiser reserve from the constant's root
+bounds, as anywhere else (MEM-25, MEM-30). They can narrow the budget but never widen it.
+The constant is refused, and its run ends, at the first of these:
+- a step past what the root step bound has left;
+- a reservation from the root step bound larger than what it has left, at a `bound steps`
+  entry, which elsewhere returns `Error(OutOfTime(steps: n))`;
+- an admission or reservation against the root limit larger than what it has left, which
+  elsewhere raises `Capacity` or returns it as a value: a `bound bytes` entry, an
+  `isolate`'s entry, a resource literal or a `try_` operation (MEM-21);
+- an entry that would make a 4,097th activation.
+
+The refusal names `OutOfTime`, `Capacity` or the activation budget as its cause. It is not
+a failure of the run (FAIL-2): no scope and no `isolate` in the initialiser sees it, and no
+`Result` it returns holds it. A refusal by a bound the initialiser made itself, inside the
+root, is ordinary: its value or failure is the one MEM-25 or MEM-30 says, because its size is
+written in the program, not set by this rule. So no constant's value depends on the
+budget's numbers, and raising them turns only refusals into acceptances.
+
+The numbers are for a constant evaluated once per build, not for a hot path. A table a
+program builds once in its initialiser, such as CRC tables, a compiled regular expression,
+or a lookup array of 64 KiB, fits with room to spare. Work that is too much for these
+numbers belongs at run time, under the run's own bounds.
+
+```hirsel unbuilt
+fn count(n: u64) -> u64 { let mut i: u64 = 0; while i < n { i += 1 }; i }
+const SMALL: u64 = count(1000)            // 1000, in 1,002 steps: the entry, the call and 1,000 back edges
+const HUGE: u64 = count(16777216)         // refused: LANG-20, OutOfTime: 2^24 back edges and two steps more
+```
+
+Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION 3.1 C4 and §5; not
+yet built): the new rule. The numbers come from Phase 0's measurements, since nothing else
+had been measured:
+- **Steps 16,777,216.** Measured by the reference count: `crc32.table()` takes 5,889 steps,
+  and `regex.valid` of the 25-byte date pattern takes 80,853 (comptime-eval-split-2612 and
+  comptime-e3c-dispatch-2663). That leaves room of 2,849 times for crc and 207 times for
+  regex. The old CT-5 budget of 1,000,000 source events, against which the old flate tables
+  took 598,608, is a different unit, and 2^24 is 28 times that. At the limit, if each step
+  costs as those two workloads do, the tree walker costs about 2,892 to 3,143 host
+  instructions per step and the flat engine 1,219 to 1,253, so 48.5 to 52.7 billion and
+  20.5 to 21.0 billion instructions. That is seconds, not minutes, for the one constant a
+  build might have that large. A step that is a core call can cost more, and the byte limit
+  bounds what it works on (MEM-30, "Waits, bytes and tasks").
+- **Bytes 67,108,864.** Not measured: Phase 0's probes recorded no bytes. Derived from the
+  spec instead. `crc32.table()` charges 0, because an `Inline` array is a plain value.
+  `regex.new` of a pattern of length L admits two arenas of 64 × (L + 1) bytes, 1,664 each
+  for the date pattern, a group-name list and a class-range pool, which grow with the
+  pattern, and a program of at most RE-8's `SIZE_LIMIT`, 10,485,760. A program at
+  that limit leaves 56,623,104 bytes, and the arenas alone fit in it for every L up to
+  442,367 ((67,108,864 − 10,485,760) / 128 = 442,368 = L + 1), so every pattern a program
+  would write as a literal fits with room for the rest. A 64 KiB table, the largest Phase 4 plans, is 1/1,024 of it.
+- **Activations 4,096.** Not measured: Phase 0's probes recorded no depth. Derived instead:
+  the deepest recursive path in the corpus is 27 activations, so this is 151 times as many.
+  `std`'s regex checks its 250 levels of nesting with an explicit work list, not recursion.
+  At that path's 27,520 host stack bytes, about 1,019 per activation, 4,096 activations take
+  about 4.2 MB, far less than the 128 MiB root stack. So the activation count, not the host
+  stack, decides where deep recursion stops, and it stops at the same place on every host.
+Reversible before 1.0 in one direction only: raising a number turns refusals into
+acceptances and changes no accepted constant's value, while lowering one can refuse
+programs that were accepted.

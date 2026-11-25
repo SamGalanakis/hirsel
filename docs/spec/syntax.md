@@ -39,7 +39,8 @@ A keyword cannot be declared or used as a name anywhere, after a `.` included. T
 are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `cross`, `key`, `ordered`, `integer`, `float`, `packed`,
 `streamable`, `codec` and `inert` in a bound list; `via` after a bound list, and `to` and `from` in
 its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header; `steps` after `bound`, as a parameter mark and as an argument mark; `clone` at the start of an item; `cold` before `fn` at the start of a function item; `grant` after a type's bounds. Library types and functions, including `Region`,
-`View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
+`View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern, and after `const` it names an assertion
+([LANG-20](language.md#lang-20-constants))<!-- doc-ref: planned -->; it is not a name.
 
 ```hirsel
 fn view_count(n: u64) -> u64 { n }                        // `view_count` is one identifier
@@ -217,7 +218,7 @@ file        = { NL | item, ( END | EOF ) }, EOF ;
 item        = { attribute }, [ "pub", [ "opaque" ] ], ( [ "cold" ], function | type-def | const-def )
             | "clone", fn-header, block ;
 attribute   = "@", ( "test" | "compact", "(", ( "u16" | "u32" | "u64" ), ")" ) ;
-const-def   = "const", name, ":", type, "=", expression ;
+const-def   = "const", ( name | "_" ), ":", type, "=", expression ;
 function    = "fn", name, fn-header, block ;
 fn-header   = [ generics ], "(", list(parameter), ")", [ "->", type ],
               [ "waits" ], [ outlives ] ;
@@ -390,3 +391,9 @@ clone[T](b: Bag[T]) { Bag(items: clone(b.items)) }
 type Own { n: u64 }
 fn placed(r: Region) { let _ = Own(n: 1) in r }           // refused: MEM-2, no postfix in
 ```
+
+Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION decision 11; not yet
+built, in the compiler or the editor grammar): `const-def` admits `_` in place of the name,
+for LANG-20's assertions, and LANG-2 says that `_` after `const` is not a name. LANG-20's
+assertion example is a `text` fence until the editor grammar parses it. Reversible before
+1.0.

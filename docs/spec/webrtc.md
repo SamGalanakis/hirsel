@@ -1437,8 +1437,8 @@ W19, blocks, because those are soundness reds.
   subscriber's decoder gets AV1 frames without one, and a leg whose last layer frame of a
   picture is not the picture's last gets no marker bit. A structure-carrying descriptor
   older than the structure in use (a repair or a reordered packet of an earlier keyframe)
-  is dropped and counted `unparsed`. The re-offer after an
-  SSRC collision (RTC-4) waits for the renegotiation path. Each is an open red on S4's ticket.
+  is dropped and counted `unparsed`. Each is an open red on S4's ticket. The re-offer
+  after an SSRC collision (RTC-4) is built in S7 (S7 decisions, Re-offer).
 
 **S5 decisions.** Gaps the spec left open, decided while S5 was built
 (`core/programs/webrtc_sfu/units.hirsel`, `router_fence.hirsel`):
@@ -1551,6 +1551,27 @@ W12 and W13 in `speaker_laws.hirsel`):
   owner as `Layers(publication, mask)`, and `Event.Speakers` to the room as
   `Speakers(peers, count)`, each router id replaced by its seat's peer number. `Speakers`
   carries a `List[u64]`, because `Inline` is not `codec`.
+- **Re-offer.** After the collisions one `peer.receive` found, the home unit makes one
+  re-offer (`peer.reoffer`): every section a down-track sends on names the track's
+  current SSRC and RTX SSRC (`a=ssrc`, `a=ssrc-group:FID`), at the next origin version,
+  which is also the `Offer` signal's version. It reaches the control unit as `Carry.Offer`
+  (SDP in the packet) and `Event.Offer`, and the adapter sends it to the peer. The peer's
+  `Answer` while a re-offer is in flight goes back through `router.answer_reoffer` to the
+  home unit as `Carry.Answer`. Each carry is dropped if its participant is fenced. The
+  answer is refused when no re-offer is in flight, when it names another version, or when
+  it does not parse or match the offer (`sdp.accept_answer`). A peer's `Refused` while a
+  re-offer is in flight also refuses it.
+- **Refused re-offer.** The home unit closes the session in place (`peer.shut`): nothing
+  more goes in or out on it, and forwarding and repairs to it are skipped rather than
+  failing the publisher's packet. `Carry.Shut` and `Event.Shut` tell the adapter, which
+  revokes the admission at its epoch (with `Fenced` once the fence holds), as `Leave`
+  does. The seat then waits at the next epoch for the peer's fresh offer: that is the
+  rejoin. A re-offer raised while the room is lost cannot be sent, so it is treated as
+  refused. A media inbox that is full drops the carry, as it drops media. A dropped
+  `Offer` leaves the re-offer unanswered, and a dropped `Answer` leaves it in flight.
+- **Refused codes.** Code 0 is a signal the peer may not send. Codes 1 to 10 are the
+  `RouterError` tags in declaration order: `NoRoom`, `NoParticipant`, `NoPublication`,
+  `Fenced`, `Suspended`, `Exists`, `Limit`, `Unrepresentable`, `Peer` and `Capacity`.
 - **Embed callables.** In the native build, a named function converted to an `Embed`
   field crashes (SIGSEGV). Closures do not, so W16 uses closures.
 

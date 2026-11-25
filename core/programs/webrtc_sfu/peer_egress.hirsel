@@ -667,6 +667,76 @@ pub fn poll(mut p: PeerSession, now: u64, mut out: Outbox) -> Poll {
     }
 }
 
+/// RTC-4's re-offer after a collision: every section a down-track sends on carries the
+/// track's current SSRC and, for video, its RTX SSRC as `a=ssrc` and `a=ssrc-group:FID`
+/// lines (RTC-2). Every other line keeps the running agreement, at the next origin
+/// version, which is also the returned version. The offer stays in flight until
+/// `answer_reoffer` takes its answer.
+pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Result[u64, PeerError] {
+    if p.closed {
+        return Error(Closed)
+    }
+    let mut current: sdp.Negotiated = clone(p.agreed)
+    for t in p.tracks {
+        let si: u64 = int.widen(t.section)
+        if si >= list.len(current.sections) {
+            continue
+        }
+        list.clear(mut current.sections[si].local.ssrcs)
+        list.clear(mut current.sections[si].local.rtx_pairs)
+        list.push(mut current.sections[si].local.ssrcs, t.ssrc)
+        if t.rtx_ssrc != 0 {
+            list.push(mut current.sections[si].local.rtx_pairs, (t.ssrc, t.rtx_ssrc))
+            list.push(mut current.sections[si].local.ssrcs, t.rtx_ssrc)
+        }
+    }
+    current.local.origin_version += 1
+    let mut d = sdp.description()
+    sdp.offer(policy, current, current.local, list.new(), mut d) ?=> |take e| Sdp(e)
+    list.clear(mut text)
+    let _ = sdp.write(d, mut text) ?=> |take e| Sdp(e)
+    let version = d.origin_version
+    p.offered = Some((version, take d))
+    Ok(version)
+}
+
+/// Take the answer to the re-offer in flight. One that answers no offer in flight, names
+/// another version, does not parse or does not match the offer is refused (RTC-4): the
+/// session closes in place, so nothing more goes in or out on it, and the participant
+/// renegotiates by rejoining. A matching answer installs the agreement.
+pub fn answer_reoffer(mut p: PeerSession, version: u64, text: Bytes) -> Result[(), PeerError] {
+    if p.closed {
+        return Error(Closed)
+    }
+    let refused = Sdp(AnswerMismatch(0))
+    let Some((v, take sent)) = replace(mut p.offered, None) else {
+        p.closed = true
+        return Error(refused)
+    }
+    if v != version {
+        p.closed = true
+        return Error(refused)
+    }
+    let mut remote = sdp.description()
+    if let Error(take e) = sdp.parse(text, mut remote) {
+        p.closed = true
+        return Error(Sdp(e))
+    }
+    let mut agreed = sdp.negotiated(p.agreed.local)
+    if let Error(take e) = sdp.accept_answer(p.agreed, sent, remote, mut agreed) {
+        p.closed = true
+        return Error(Sdp(e))
+    }
+    renegotiated(mut p, agreed)
+}
+
+/// Close the session in place: nothing more goes in or out on it (RTC-4's refused
+/// re-offer). The router's member stays until its revoke.
+pub fn shut(mut p: PeerSession) {
+    p.closed = true
+    p.offered = None
+}
+
 /// Install a renegotiated agreement. Bindings of sections no longer receiving go.
 pub fn renegotiated(mut p: PeerSession, agreed: sdp.Negotiated) -> Result[(), PeerError] {
     if p.closed {

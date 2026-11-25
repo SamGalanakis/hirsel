@@ -245,7 +245,10 @@ pub opaque type PeerSession {
     unpaced: List[Paced],
     // Publishers fenced in the room (RTC-7), each at its highest revoked epoch: a
     // paced entry from one is dropped when the pacer lets it out.
-    barred: List[Gen]
+    barred: List[Gen],
+    // The re-offer in flight after a collision (RTC-4): its version and the description
+    // sent, which the answer is checked against.
+    offered: Option[(u64, sdp.Description)]
 }
 
 const EMPTY: u64 = 0xffffffffffffffff
@@ -416,7 +419,7 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
         list.push(mut slab, take b)
         list.push(mut free, int.narrow(n - 1 - i))
     }
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new())
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.word, 2) ?=> |c| Capacity(c)
     let fresh = draw(mut p)

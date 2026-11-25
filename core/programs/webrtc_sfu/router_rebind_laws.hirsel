@@ -109,6 +109,56 @@ fn listed(xs: List[u32], v: u32) -> bool {
     false
 }
 
+// The one re-offer the router raised for `who` after a collision (RTC-4).
+fn w7_reoffered(mut r: router.Router, who: peer.Gen) -> (u64, Bytes) {
+    let mut found: Option[(u64, Bytes)] = None
+    for take n in router.take_notices(mut r) {
+        match take n {
+            Offer(who: w, version: v, text: take t) if w == who => {
+                if found != None {
+                    fail("the collision raised two re-offers")
+                }
+                found = Some((v, take t))
+            },
+            _ => (),
+        }
+    }
+    let Some(take got) = found else {
+        fail("the collision raised no re-offer")
+    }
+    take got
+}
+
+// Whether the router raised `Shut` for `who`: its re-offer was refused (RTC-4).
+fn w7_shut(mut r: router.Router, who: peer.Gen) -> bool {
+    let mut shut = false
+    for take n in router.take_notices(mut r) {
+        if let Shut(who: w) = n {
+            if w == who {
+                shut = true
+            }
+        }
+    }
+    shut
+}
+
+// The subscriber's answer to the re-offer: its own offer's lines as the DTLS client,
+// with the fingerprint of the certificate it handshook with (party `client_seed`).
+fn w7_answer(client_seed: u64) -> Bytes {
+    let mut b: Bytes = b"v=0\no=- 5 10 IN IP4 0.0.0.0\ns=-\nt=0 0\na=group:BUNDLE d\na=ice-ufrag:remote\na=ice-pwd:remote-pass-0123456789abcd\na=fingerprint:sha-256 1F:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\na=setup:active\na=tls-id:remote-association\n"
+    recv_section(mut b, b"d", b"96", b"97", b"1", b"3")
+    let mut d = sdp.description()
+    result.unwrap(sdp.parse(b, mut d))
+    let Party(id: _, certificate: certificate) = party(client_seed)
+    let h = std.sha256.hash(certificate)
+    for i in 0u64 .. 32 {
+        d.fingerprint[i] = h[i]
+    }
+    let mut text: Bytes = list.new()
+    let _ = result.unwrap(sdp.write(d, mut text))
+    take text
+}
+
 // One W7 run. With `cross` false one publisher owns sections a, b and c, so its SRs
 // share a sender clock and every source switch is projected through them (RTP-11);
 // with `cross` true three publishers own one each, the router presents no rebound
@@ -256,6 +306,32 @@ fn rebind_run(cross: bool, seed: u64) {
     if m2 == m || m2 == x || x2 == m || x2 == x || m2 == 0 || x2 == 0 || m2 == x2 {
         fail("the collision did not draw fresh SSRCs")
     }
+    // RTC-4 and RTC-2: one re-offer at the admission's origin version 1 plus one, as
+    // the server's actpass offer on the running ICE credentials, whose one section
+    // names the fresh pair in `a=ssrc` and `a=ssrc-group:FID` and neither retired SSRC.
+    let (version, text) = w7_reoffered(mut r, s.who)
+    if version != 2 {
+        fail("the re-offer is not at the next origin version")
+    }
+    let mut d = sdp.description()
+    result.unwrap(sdp.parse(text, mut d))
+    if d.setup != ActPass || list.compare_bytes(d.ice_ufrag, b"server") != Equal || list.len(d.sections) != 1 {
+        fail("the re-offer changed the session's offer lines")
+    }
+    let named = d.sections[0].ssrcs
+    if list.len(named) != 2 || !listed(named, m2) || !listed(named, x2) || listed(named, m) || listed(named, x) {
+        fail("the re-offer does not name exactly the fresh SSRCs")
+    }
+    if list.len(d.sections[0].rtx_pairs) != 1 || d.sections[0].rtx_pairs[0] != (m2, x2) {
+        fail("the re-offer does not pair the fresh RTX SSRC with the fresh media SSRC")
+    }
+    // One run answers at once and the session keeps going; the other answers last.
+    if !cross {
+        result.unwrap(router.answer_reoffer(mut r, room, s.who, version, w7_answer(seed + 10)))
+        if w7_shut(mut r, s.who) {
+            fail("a matching answer to the re-offer closed the session")
+        }
+    }
     peer.clear_outbox(mut out)
     // The fresh stream starts at a keyframe, on the fresh SSRC only.
     send(mut r, 401 * MS, mut pubs[oc], RC, b"c", 40002, TC + 6000, true, vp8_delta(), mut out)
@@ -266,10 +342,21 @@ fn rebind_run(cross: bool, seed: u64) {
     peer.clear_outbox(mut out)
     send(mut r, 403 * MS, mut pubs[oc], RC, b"c", 40004, TC + 12000, true, vp8_key(), mut out)
     on_leg(one(received(mut s, out), "the fresh stream's next frame"), m2, plus(first.h.seq, 1), later(first.h.ts, 3000), "the fresh stream's numbering")
+    peer.clear_outbox(mut out)
+    if cross {
+        // An answer naming another version is refused: the session closes, nothing more
+        // goes out on it, and the control unit hears `Shut` so the participant rejoins.
+        result.unwrap(router.answer_reoffer(mut r, room, s.who, version + 1, w7_answer(seed + 10)))
+        if !w7_shut(mut r, s.who) {
+            fail("a refused re-offer did not close the session")
+        }
+        send(mut r, 404 * MS, mut pubs[oc], RC, b"c", 40005, TC + 15000, true, vp8_key(), mut out)
+        nothing(mut s, out, "a session whose re-offer was refused still sent")
+    }
 }
 
-/// bug: change a down-track's SSRC or sealer at a layer switch, Off or a rebind; drop the old publication before the new one's keyframe; let a rebind's switch go back in time or reuse a number; project a switch through SRs of two sender clocks; or keep the old SSRC, the old numbering or a delta-frame start after a collision.
-/// oracle: W7 by hand from RTC-4, RTC-6 and RTP-11: the outbound index rises by one per forwarded packet (o to o + 12); timestamps keep each source's differences, and each switch anchors as the comments derive (resume t + 9270, B t + 59070 projected or t + 15540 on arrival, C t + 104970 or t + 21720); the collision sends a BYE for both SSRCs (RFC 3550 section 8.2), asks C for a keyframe, and the stream continues on fresh SSRCs from C's next keyframe.
+/// bug: change a down-track's SSRC or sealer at a layer switch, Off or a rebind; drop the old publication before the new one's keyframe; let a rebind's switch go back in time or reuse a number; project a switch through SRs of two sender clocks; keep the old SSRC, the old numbering or a delta-frame start after a collision; leave the fresh SSRCs out of the re-offer or keep sending after it is refused.
+/// oracle: W7 by hand from RTC-4, RTC-6 and RTP-11: the outbound index rises by one per forwarded packet (o to o + 12); timestamps keep each source's differences, and each switch anchors as the comments derive (resume t + 9270, B t + 59070 projected or t + 15540 on arrival, C t + 104970 or t + 21720); the collision sends a BYE for both SSRCs (RFC 3550 section 8.2), asks C for a keyframe, and the stream continues on fresh SSRCs from C's next keyframe; one re-offer at origin version 2 names exactly the fresh pair (RFC 4588 section 4 FID), a matching answer keeps the session and one naming version 3 closes it with `Shut` (RTC-4).
 @test
 fn ssrc_survives_switches() -> Result[(), router.RouterError] {
     rebind_run(false, 100)

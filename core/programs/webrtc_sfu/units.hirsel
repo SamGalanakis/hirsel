@@ -33,7 +33,7 @@ pub type Sent {
     data: Bytes
 }
 
-pub type Event = Fenced(peer.Participant) | Layers(publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8)
+pub type Event = Fenced(peer.Participant) | Layers(publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Gen, version: u64, text: Bytes) | Shut(who: peer.Gen)
 
 pub opaque type Unit {
     r: router.Router,
@@ -128,6 +128,14 @@ pub fn take_tap(mut u: Unit) -> List[Sent] {
 }
 
 /// Take the events since the last call: `Fenced` after a revoke returns (RTC-7).
+/// Hand a participant's answer to its re-offer to the session's home unit (RTC-4), on
+/// the control unit.
+pub fn answer_reoffer(mut u: Unit, room: peer.RoomId, who: peer.Gen, version: u64, take text: Bytes) -> Result[(), router.RouterError] {
+    router.answer_reoffer(mut u.r, room, who, version, take text)?
+    deal(mut u)
+    Ok(())
+}
+
 pub fn take_events(mut u: Unit) -> List[Event] {
     replace(mut u.events, list.new())
 }
@@ -351,10 +359,12 @@ pub fn take_timers(mut u: Unit, now: u64) -> Option[u64] {
 // the message, which is media and repair only, and counts it.
 fn deal(mut u: Unit) {
     // The control unit's RTC-6 notices become events.
-    for n in router.take_notices(mut u.r) {
-        match n {
+    for take n in router.take_notices(mut u.r) {
+        match take n {
             Layers(publication: p, mask: mask) => list.push(mut u.events, Layers(publication: p, mask: mask)),
             Speakers(room: room, top: top, count: count) => list.push(mut u.events, Speakers(room: room, top: top, count: count)),
+            Offer(who: who, version: version, text: take text) => list.push(mut u.events, Offer(who: who, version: version, text: take text)),
+            Shut(who: who) => list.push(mut u.events, Shut(who: who)),
         }
     }
     let posts = router.take_posts(mut u.r)

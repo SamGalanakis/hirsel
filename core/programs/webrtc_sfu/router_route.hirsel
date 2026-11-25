@@ -78,8 +78,13 @@ pub fn receive(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, from: 
         return Error(NoParticipant)
     }
     let input = peer.receive(mut r.members[mi].session, now, from, mut slot, mut out) ?=> |take e| Peer(e)
+    let mut restarted = false
     while let Some(track) = peer.collided(mut r.members[mi].session) {
         restart(mut r, now, room, who, track, mut out)?
+        restarted = true
+    }
+    if restarted {
+        reoffer(mut r, room, who)
     }
     // RTC-6: a moved estimate reallocates the subscriber's down-tracks.
     if peer.target_bps(r.members[mi].session) != r.members[mi].estimate {
@@ -113,6 +118,68 @@ fn restart(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, track: u16
         }
     }
     Ok(())
+}
+
+// RTC-4: the collided down-tracks' fresh SSRCs go to the participant in one re-offer,
+// which the control unit sends on. A re-offer the session cannot make closes it, as a
+// refused one does.
+fn reoffer(mut r: Router, room: peer.RoomId, who: peer.Gen) {
+    let Some(mi) = member_at(r, room, who) else {
+        return
+    }
+    let mut text: Bytes = list.new()
+    match peer.reoffer(mut r.members[mi].session, sdp.default_policy(), mut text) {
+        Ok(version) => {
+            if r.unit == 0 {
+                list.push(mut r.notices, Offer(who: who, version: version, text: take text))
+            } else {
+                post(mut r, 0, Offer(room: room, src: who, version: version), shared.new(take text))
+            }
+        },
+        Error(_) => shut(mut r, room, who),
+    }
+}
+
+/// Close `who`'s session in place after a refused re-offer (RTC-4) and tell the control
+/// unit, whose adapter revokes the participant so it rejoins.
+pub fn shut(mut r: Router, room: peer.RoomId, who: peer.Gen) {
+    if let Some(mi) = member_at(r, room, who) {
+        peer.shut(mut r.members[mi].session)
+    }
+    if r.unit == 0 {
+        list.push(mut r.notices, Shut(who: who))
+    } else {
+        post_bare(mut r, 0, Shut(room: room, src: who))
+    }
+}
+
+/// Take the participant's answer to its re-offer (RTC-4) on the control unit and hand it
+/// to the session's home unit, which installs it or, refused, closes the session and
+/// raises `Shut`. A fenced or unknown participant's answer is `Fenced` or
+/// `NoParticipant` and goes nowhere.
+pub fn answer_reoffer(mut r: Router, room: peer.RoomId, who: peer.Gen, version: u64, take text: Bytes) -> Result[(), RouterError] {
+    if fenced(r, room, who) {
+        return Error(Fenced)
+    }
+    let Some(si) = seat_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    let home = r.roster[si].home
+    if home == r.unit {
+        settle_answer(mut r, room, who, version, text)
+    } else {
+        post(mut r, home, Answer(room: room, dst: who, version: version), shared.new(take text))
+    }
+    Ok(())
+}
+
+fn settle_answer(mut r: Router, room: peer.RoomId, who: peer.Gen, version: u64, text: Bytes) {
+    let Some(mi) = member_at(r, room, who) else {
+        return
+    }
+    if let Error(_) = peer.answer_reoffer(mut r.members[mi].session, version, text) {
+        shut(mut r, room, who)
+    }
 }
 
 fn owned(r: Router, room: peer.RoomId, owner: peer.Gen, section: u8) -> Option[u64] {
@@ -376,7 +443,13 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
         }
         let leg = peer.Leg(src: owner, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: voice, from: m.payload_at, len: m.payload_len)
         let track = r.downs[d].track
-        let sent = peer.forward(mut r.members[si].session, now, track, leg, packet, mut out) ?=> |take x| Peer(x)
+        // A session a refused re-offer closed waits for its revoke and takes nothing; it
+        // does not fail the publisher's packet (RTC-4).
+        let sent = match peer.forward(mut r.members[si].session, now, track, leg, packet, mut out) {
+            Ok(x) => x,
+            Error(Closed) => continue,
+            Error(take x) => return Error(Peer(x)),
+        }
         if sent == OnMedia && codec == H264 {
             if fresh {
                 let _ = media_bits.unit.h264_sent(mut r.downs[d].next_sets, payload)
@@ -523,8 +596,11 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
                 r.counts.stale += 1
                 return Ok(())
             }
-            let _ = peer.resend(mut r.members[mi].session, now, ask, packet, mut out) ?=> |take e| Peer(e)
-            Ok(())
+            match peer.resend(mut r.members[mi].session, now, ask, packet, mut out) {
+                Ok(_) => Ok(()),
+                Error(Closed) => Ok(()),
+                Error(take e) => Error(Peer(e)),
+            }
         },
         Key(room: room, publication: publication, encoding: encoding, why: why) => {
             let Some(pi) = publication_at(r, room, publication) else {
@@ -536,6 +612,30 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
                 return Ok(())
             }
             keyframe(mut r, now, pi, encoding, why, mut out)
+        },
+        Offer(room: room, src: src, version: version) => {
+            if fenced(r, room, src) {
+                r.counts.stale += 1
+                return Ok(())
+            }
+            list.push(mut r.notices, Offer(who: src, version: version, text: clone(packet)))
+            Ok(())
+        },
+        Answer(room: room, dst: dst, version: version) => {
+            if fenced(r, room, dst) {
+                r.counts.stale += 1
+                return Ok(())
+            }
+            settle_answer(mut r, room, dst, version, packet)
+            Ok(())
+        },
+        Shut(room: room, src: src) => {
+            if fenced(r, room, src) {
+                r.counts.stale += 1
+                return Ok(())
+            }
+            list.push(mut r.notices, Shut(who: src))
+            Ok(())
         },
         Sender(room: room, publication: publication, owner: owner, source: origin, info: info) => {
             if fenced(r, room, owner) {

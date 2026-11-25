@@ -210,7 +210,15 @@ pub type Control: cross = Order(seq: u64, change: Change) | Ack(seq: u64, unit: 
 /// - `Score`: an audio publication's speaker score, for every unit of the room.
 ///
 /// `Media` also carries the home unit's speaking state and its encoding's rate.
-pub type Carry: cross = Media(room: peer.RoomId, publication: PublicationId, src: peer.Gen, m: peer.MediaIn, handle: u64, speaking: bool, rate: u64) | Wanted(room: peer.RoomId, publication: PublicationId, src: peer.Gen, unit: u16, mask: u8) | Layers(room: peer.RoomId, publication: PublicationId, src: peer.Gen, mask: u8) | Score(room: peer.RoomId, publication: PublicationId, src: peer.Gen, score: i64) | Ask(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Reply(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Key(room: peer.RoomId, publication: PublicationId, encoding: u8, why: rtp.loss.Why) | Sender(room: peer.RoomId, publication: PublicationId, owner: peer.Gen, source: u32, info: rtp.rtcp.SenderInfo)
+///
+/// RTC-4's re-offer, from a session's home unit to the control unit, with the
+/// participant's generation:
+///
+/// - `Offer`: the re-offer after a collision, its SDP in `packet`.
+/// - `Shut`: a refused re-offer closed the session.
+/// - `Answer`: the participant's answer to it, from the control unit to the home unit,
+///   its SDP in `packet`.
+pub type Carry: cross = Media(room: peer.RoomId, publication: PublicationId, src: peer.Gen, m: peer.MediaIn, handle: u64, speaking: bool, rate: u64) | Wanted(room: peer.RoomId, publication: PublicationId, src: peer.Gen, unit: u16, mask: u8) | Layers(room: peer.RoomId, publication: PublicationId, src: peer.Gen, mask: u8) | Score(room: peer.RoomId, publication: PublicationId, src: peer.Gen, score: i64) | Ask(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Reply(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Key(room: peer.RoomId, publication: PublicationId, encoding: u8, why: rtp.loss.Why) | Sender(room: peer.RoomId, publication: PublicationId, owner: peer.Gen, source: u32, info: rtp.rtcp.SenderInfo) | Offer(room: peer.RoomId, src: peer.Gen, version: u64) | Shut(room: peer.RoomId, src: peer.Gen) | Answer(room: peer.RoomId, dst: peer.Gen, version: u64)
 
 /// One media-inbox message: what it is, and the plaintext it carries (empty for
 /// `Ask`, `Key` and `Sender`).
@@ -227,7 +235,7 @@ pub type Post: cross {
 
 /// What the control unit raises for the signaling adapter (RTC-6): a publication's
 /// published wanted mask, and a room's top speakers by participant id.
-pub type Notice: cross = Layers(publication: PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8)
+pub type Notice: cross = Layers(publication: PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Gen, version: u64, text: Bytes) | Shut(who: peer.Gen)
 
 pub opaque type Router {
     random: Random,

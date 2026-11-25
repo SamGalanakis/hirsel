@@ -51,14 +51,12 @@ fn l62_replay_log_window(mut db: Db, events: Log[u32], event_number: u32) -> Res
     let mut draw = stamp_after(db.next_node)?
     let mut account = ReplayTieredAccount(total: 258, exact: true)
     let trimmed = JournalOp(key: prefix(id)?, value: None, prior: 0, trim: Some(JournalTrim(floor: 1, dropped: 86)))
-    replay_tiered_op("j-1", mut tree, mut draw, mut account,
-        ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 0, next: 3))), trimmed)?
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 0, next: 3))), trimmed)?
     let mut value: Bytes = list.with_capacity(6)
     list.put_word_le(mut value, events.binding.readers.current)
     list.put_word_le(mut value, event_number)
     let appended = JournalOp(key: log_key(id, 3)?, value: Some(take value), prior: 0, trim: None)
-    replay_tiered_op("j-1", mut tree, mut draw, mut account,
-        ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: Some(LogBounds(first: 1, next: 3))), appended)?
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: Some(LogBounds(first: 1, next: 3))), appended)?
     db.heads[0u64].roots.collections = take tree
     db.next_node = draw - 1
     db.heads[0u64].head += 1
@@ -80,10 +78,7 @@ fn l62_log_window_reads(mut db: Db, events: Log[u32]) -> Result[(), Error] waits
     list.put_word_le(mut eleven, 11u32)
     list.put_word_le(mut thirteen, 13u32)
     // The windows are [1, 3) and [2, 4). Only 1 and 3 change membership.
-    if list.len(added) != 2 || added[0u64].tree_key != old_key || added[0u64].value != None ||
-        added[1u64].tree_key != new_key || published_log(events, added[1u64])? != Some(take thirteen) ||
-        list.len(removed) != 2 || removed[0u64].tree_key != old_key || published_log(events, removed[0u64])? != Some(take eleven) ||
-        removed[1u64].tree_key != new_key || removed[1u64].value != None {
+    if list.len(added) != 2 || added[0u64].tree_key != old_key || added[0u64].value != None || added[1u64].tree_key != new_key || published_log(events, added[1u64])? != Some(take thirteen) || list.len(removed) != 2 || removed[0u64].tree_key != old_key || published_log(events, removed[0u64])? != Some(take eleven) || removed[1u64].tree_key != new_key || removed[1u64].value != None {
         fail("L82: a moving window must recover entering rows from Cold pages and replay")
     }
     db.heads[0u64].roots.collections = share_page_tree(before.roots.collections)
@@ -95,8 +90,7 @@ fn l62_log_window_reads(mut db: Db, events: Log[u32]) -> Result[(), Error] waits
     list.put_word_le(mut fourteen, 14u32)
     // Both branches retain [2, 4), share seq 2 on disk and appended distinct
     // suffix values at seq 3. The latter is a replacement within the overlap.
-    if list.len(branch_delta) != 1 || branch_delta[0u64].tree_key != new_key ||
-        published_log(events, branch_delta[0u64])? != Some(take fourteen) {
+    if list.len(branch_delta) != 1 || branch_delta[0u64].tree_key != new_key || published_log(events, branch_delta[0u64])? != Some(take fourteen) {
         fail("L82: a shared Cold root must not hide a fork's replayed suffix")
     }
     Ok(())
@@ -107,10 +101,12 @@ fn test_l82_tiered_tail_window_resolves_entering_rows(d: Dir, c: Clock, tasks: T
     let fixtures = disk_test_directory(d)
     let mut db = test_db(c, 2147483648)
     let mut schema = declare(db, Migrate)?
-    let events = declare_log(mut schema, "events", std.codec.of_u32())?
+    let events = declare_log(mut schema, "events", std.codec.of_u32(), Forever)?
     let _ = seal(mut db, take schema)?
     let Committed(_) = run(mut db, None, copy_env(events), fn(mut tx: Tx, log_handle: Log[u32]) -> Result[(), Error] {
-        for value in 10u32 .. 13u32 { let _ = append(mut tx, log_handle, value)? }
+        for value in 10u32 .. 13u32 {
+            let _ = append(mut tx, log_handle, value)?
+        }
         Ok(())
     })? else {
         fail("L82: fixture Log appends must commit")
@@ -128,9 +124,7 @@ fn test_l82_tiered_tail_window_resolves_entering_rows(d: Dir, c: Clock, tasks: T
 fn l62_snapshot_point_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let s = snapshot(db)
-    if get(read_handle, s, rows_handle, 1u64)? != Some(42u32) ||
-        get(read_handle, s, rows_handle, 1u64)? != Some(42u32) ||
-        get(read_handle, s, rows_handle, 2u64)? != None {
+    if get(read_handle, s, rows_handle, 1u64)? != Some(42u32) || get(read_handle, s, rows_handle, 1u64)? != Some(42u32) || get(read_handle, s, rows_handle, 2u64)? != None {
         fail("L62: Reader value changed across cold, warm, and absent point lookups")
     }
     Ok(())
@@ -212,23 +206,15 @@ fn l62_snapshot_scan_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), E
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let s = snapshot(db)
     let mut forward = scan(read_handle, s, rows_handle, Unbounded, Unbounded)?
-    if next(read_handle, mut forward)? != Some((1u64, 10u32)) ||
-        next(read_handle, mut forward)? != Some((2u64, 20u32)) ||
-        next(read_handle, mut forward)? != Some((5u64, 50u32)) ||
-        next(read_handle, mut forward)? != None ||
-        next(read_handle, mut forward)? != None {
+    if next(read_handle, mut forward)? != Some((1u64, 10u32)) || next(read_handle, mut forward)? != Some((2u64, 20u32)) || next(read_handle, mut forward)? != Some((5u64, 50u32)) || next(read_handle, mut forward)? != None || next(read_handle, mut forward)? != None {
         fail("L62: a forward scan must merge Cold rows with replay puts and deletes")
     }
     let mut backward = scan_reverse(read_handle, s, rows_handle, Included(2u64), Excluded(5u64))?
-    if next(read_handle, mut backward)? != Some((2u64, 20u32)) ||
-        next(read_handle, mut backward)? != None {
+    if next(read_handle, mut backward)? != Some((2u64, 20u32)) || next(read_handle, mut backward)? != None {
         fail("L62: a reverse scan must resume below its last key within the bounds")
     }
     let mut reverse_all = scan_reverse(read_handle, s, rows_handle, Unbounded, Unbounded)?
-    if next(read_handle, mut reverse_all)? != Some((5u64, 50u32)) ||
-        next(read_handle, mut reverse_all)? != Some((2u64, 20u32)) ||
-        next(read_handle, mut reverse_all)? != Some((1u64, 10u32)) ||
-        next(read_handle, mut reverse_all)? != None {
+    if next(read_handle, mut reverse_all)? != Some((5u64, 50u32)) || next(read_handle, mut reverse_all)? != Some((2u64, 20u32)) || next(read_handle, mut reverse_all)? != Some((1u64, 10u32)) || next(read_handle, mut reverse_all)? != None {
         fail("L62: a reverse scan must include surviving Cold rows on both sides of the overlay")
     }
     Ok(())
@@ -400,9 +386,7 @@ fn l62_snapshot_index_reads(db: Db, parity: Index[u32, u64, u32, ()]) -> Result[
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let s = snapshot(db)
     let mut odds = find(read_handle, s, parity, Included(1u32), Included(1u32))?
-    if next(read_handle, mut odds)? != Some((1u64, 43u32)) ||
-        next(read_handle, mut odds)? != Some((3u64, 39u32)) ||
-        next(read_handle, mut odds)? != None {
+    if next(read_handle, mut odds)? != Some((1u64, 43u32)) || next(read_handle, mut odds)? != Some((3u64, 39u32)) || next(read_handle, mut odds)? != None {
         fail("L62: a Cold index scan must read the matching primary row for each index entry")
     }
     let limits = Limits(rows: 1, byte_limit: 18)

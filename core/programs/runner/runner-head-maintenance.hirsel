@@ -5,8 +5,10 @@
 //
 // 1. one index build chunk while an index is Backfilling (§1.2);
 // 2. one expiry sweep commit while a row is due (STORE-SPEC §1.2 "Expiry");
-// 3. one slice of the current scrub tour (§11.17);
-// 4. one slice of the index walker (STORE-SPEC §1.2).
+// 3. one retention sweep commit while a Log is over its declared `Keep(n)`
+//    (STORE-SPEC §14.4a);
+// 4. one slice of the current scrub tour (§11.17);
+// 5. one slice of the index walker (STORE-SPEC §1.2).
 //
 // Slices run only on idle turns: a build chunk after every 16th group under
 // load raised user-commit p99 from 31 us to 19.5 ms (Store 1.3's kill rule,
@@ -14,8 +16,8 @@
 // demotion are catalog changes, so neither runs while an export lease is
 // held: catch-up (STORE-SPEC §3.5a) refuses a catalog change on OLD as Drift. A job whose slice is refused stops for this open of
 // the place; only Poisoned ends the head.
-// Rows per build chunk and per walker slice. Each build chunk is one schema
-// commit, one checkpoint.
+// Rows per build chunk, per walker slice and per retention sweep. Each build
+// chunk is one schema commit, one checkpoint.
 const UPKEEP_ROWS: u64 = 1024u64
 
 // Row bytes one expiry sweep commit deletes, beside UPKEEP_ROWS rows.
@@ -34,6 +36,7 @@ type Upkeep {
     built: bool,
     sweeping: bool,
     swept: u64,
+    retaining: bool,
     scrubbing: bool,
     tour: Option[store.Scrub],
     tour_from: u64,
@@ -47,7 +50,7 @@ type Upkeep {
 }
 
 fn upkeep() -> Upkeep {
-    Upkeep(building: true, built: false, sweeping: true, swept: 0u64, scrubbing: true, tour: None, tour_from: 0u64, tours: 0u64, scrub_faults: 0u64, walking: true, walk: store.begin_verify(Repair), walk_from: 0u64, walks: 0u64, walk_findings: 0u64)
+    Upkeep(building: true, built: false, sweeping: true, swept: 0u64, retaining: true, scrubbing: true, tour: None, tour_from: 0u64, tours: 0u64, scrub_faults: 0u64, walking: true, walk: store.begin_verify(Repair), walk_from: 0u64, walks: 0u64, walk_findings: 0u64)
 }
 
 // One slice of the first job that has work. False when none has, so the
@@ -57,6 +60,9 @@ fn advance_maintenance[G: send, H: shareable + inert + send](mut hd: Head[G, H])
         return Ok(true)
     }
     if upkeep_sweep(mut hd)? {
+        return Ok(true)
+    }
+    if upkeep_retain(mut hd)? {
         return Ok(true)
     }
     if upkeep_scrub(mut hd)? {
@@ -131,6 +137,27 @@ fn upkeep_sweep[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Res
         Error(Poisoned(e)) => Error(Poisoned(e)),
         Error(_) => {
             hd.upkeep.sweeping = false
+            Ok(false)
+        },
+    }
+}
+
+// A retention sweep is a data commit like an expiry sweep's: it closes as a
+// group with no answers and is released once its sync covers it (V4).
+fn upkeep_retain[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Result[bool, store.Error] waits {
+    if !hd.upkeep.retaining {
+        return Ok(false)
+    }
+    match store.retain_step(mut hd.db, UPKEEP_ROWS) {
+        Ok(Some(ticket)) => {
+            hd.last = Some(ticket)
+            close_group(mut hd)
+            Ok(true)
+        },
+        Ok(None) => Ok(false),
+        Error(Poisoned(e)) => Error(Poisoned(e)),
+        Error(_) => {
+            hd.upkeep.retaining = false
             Ok(false)
         },
     }

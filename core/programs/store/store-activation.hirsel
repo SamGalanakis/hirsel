@@ -216,7 +216,7 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
     let StagedMigration(plan: take staged_plan, declared: declared, ..) = take staged
     let mut plan = take staged_plan
     let registration = if declared {
-        Some(declared_index_registry(replace(mut plan.bindings, list.new())))
+        Some((declared_index_registry(replace(mut plan.bindings, list.new())), replace(mut plan.retention, list.new())))
     } else {
         None
     }
@@ -226,8 +226,9 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
     }
     match publish_schema_plan_binding(mut db, take plan, activation) {
         Ok(_) => {
-            if let Some(take registry) = take registration {
+            if let Some((take registry, take retained)) = take registration {
                 db.indexes = take registry
+                bind_retention(mut db, take retained)
             }
             Ok(())
         },

@@ -1,4 +1,6 @@
-# STORE-SPEC v2.127: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.128: the M4 store library (lane store-spec-1001)
+
+v2.128 (store-log-retain-1-6-2668; Store 1.6): built. **Log retention (§14.4a).** `declare_log` takes a `Retain`, `Forever` or `Keep(n)`. `retain_step(mut db, limit)` is one bounded sweep commit that trims each `Keep(n)` Log towards its newest n, at most `limit` entries a slice, lowest id first. Like an expiry sweep it is a data commit, so it runs while an export lease is held; the runner's head calls it on idle turns (RUNNER-SPEC v2.79 §12.5). The retention is part of the release's declaration, as an extractor is, so the catalog does not record it. No format change. Reversible: code and text only.
 
 v2.127 (store-ops-1-4-2664; Store 1.4): built. **The operator's store commands** (§15.6). (1) `hirsel store inspect DIR` and `stats DIR` print each table and index with its state, revision, exact row count and charged bytes through a read-only open (`catalog_entries`); `stats` adds the journal's segments and bytes and the pack count. `hirsel store verify DIR` scrubs a copy. (2) `hirsel store verify DIR --release EXE` runs `verify_release` on a copy: the release's schema declared in verify mode (`declare_verify`, `seal_verify`: a changed revision is recorded by name and keeps its id and state), a full scrub tour, and a walk in the new `Report` mode (`begin_verify(mode)`: `Report` lists every finding, never demotes and never commits), then `walk_coverage`, each index not walked and why. (3) `hirsel store repair DIR --release EXE` runs `repair_indexes` on the store itself: refused while an export lease is held, else a `Repair` walk to its end and `index_build_step` until nothing is Backfilling, with each failed index named. (4) `MigrationBackfill.cause` names why `hirsel dry-run` rebuilds an index: `new index`, `unfinished build`, or the changed inputs (`rebuild_cause`). Aggregates stay out of the walk (§15.6 "Not built"). Laws: `walk_corrupt_case` (location_laws) runs a Report walk before each repair case and checks its findings against the hand-derived set, every index still serving and the head unchanged (red when Report demotes); `covering_revision_case` (store_declare_laws) runs `verify_release` over the Appendix A store, a covering index whose payload was written under an old default literal, and expects `changed = [cover]` and the stale entry found (red when Report demotes, and when verify mode drops the changed name). Reversible: code and text; no format change.
 
@@ -6781,7 +6783,8 @@ AP3's map-leaf decode rule ("vtag 0 and vlen 56") becomes "vtag 0, and vlen as t
 pub opaque type Cell[V]: shareable + send   // StoreId, id, catalog key, Arc[Readers[V]]; reads and writes
 pub opaque type Log[V]: shareable + send    // StoreId, id, catalog key, Arc[Readers[V]]; reads and writes
 pub fn declare_cell[V](mut d: Declare, name: String, take value: codec.Codec[V]) -> Result[Cell[V], Error]
-pub fn declare_log[V](mut d: Declare, name: String, take value: codec.Codec[V]) -> Result[Log[V], Error]
+pub fn declare_log[V](mut d: Declare, name: String, take value: codec.Codec[V], retain: Retain) -> Result[Log[V], Error]
+pub type Retain: codec = Forever | Keep(u64)   // v2.128, §14.4a
 ```
 
 - `declare_cell` and `declare_log` follow `declare_table`'s rules in every mode (§1.2): names, the reserved `hirsel.` namespace, value schemas (D1), `Missing`, `Schema(i)`, `Undeclared`. They return the handle at once, because there is nothing more to declare.
@@ -6859,6 +6862,26 @@ pub fn log_scan[V](r: Reader, s: Snapshot, l: Log[V], lo: Bound[u64], hi: Bound[
 - `log_range`: O(height + rows).
 
 These are logical page visits per attempt, plus the value bytes read or decoded (MEM-30; v2.61, astra 1998 #14). None depends on the Log's length. On a Tiered Log a cold page aborts and reruns the attempt (§13.3): each attempt is charged, reruns are accounted under §13.3, and a fuel mismatch in replay follows §13's rule. The touched-page refusal depends on the root and the demand sequence, never on cache hits.
+
+### 14.4a Retention (v2.128, Store 1.6)
+
+```hirsel
+pub type Retain: codec = Forever | Keep(u64)
+pub fn retain_step(mut db: Db, limit: u64) -> Result[Option[Ticket], Error] waits
+```
+
+A Log declares how much of itself it keeps. `Forever` keeps every entry until a program trims it. `Keep(n)` keeps the newest n: entries below `next − n` are removed by the retention sweep, never by an append or a read.
+
+- **Where it lives.** A Log's `Retain` is part of the release's declaration, as an index's extractor is (§1.2), and the catalog does not record it. `seal` and an activation's install replace the store's retention with the declaration's, so a Log that the current release does not declare `Keep(n)` is not swept. A `Migration` declares no Log, so `run_migration` leaves the retention as it is. No format change.
+- **The sweep.** `retain_step(mut db, limit)` is one slice: one commit on main that, for each Log declared `Keep(n)` in id order, trims a Log of (first, next) with next − first > n towards next − n, removing at most `limit` entries over all the Logs of the slice. A Log that takes the rest of the budget leaves the next Log to the next slice. The trim is `trim_before`'s (§14.4, §14.5), through the ordinary commit path, so a sweep is a journal commit, replays and follows as any trim does, and its changes are `Trimmed` (§14.8).
+  - It returns the commit's ticket, or None when no Log is over its retention.
+  - It runs while an export lease is held: a sweep is a data commit, which catch-up replays like any group's (§3.5a), as it does an expiry sweep (§1.2 "Expiry").
+  - A Log that main's head no longer has under its declared name (dropped or renamed by a later migration) is skipped.
+  - `limit` = 0 is `Limit(Transaction)`.
+- **No read filter.** An entry past its Log's retention is readable until the sweep's commit removes it, as with any trim.
+- **Driver.** The runner's head calls `retain_step(mut db, 1024)` on idle turns (RUNNER-SPEC §12.5 job 2). `trim_before` stays: it is the call a program makes to trim at a point it chooses, such as a consumed queue's floor, and the sweep uses its staging.
+- **Age.** Retention by age needs a time per entry, which a Log does not record. It waits for the TTL design (§III.4 of the store end-state plan).
+- **Law.** `log_retain_sweep` (cell_log_laws.hirsel): four Logs, `Keep(3)` over 10 then 12 entries, `Keep(5)` over 2, `Forever` over 6 and `Keep(2)` over 4, swept two entries a slice. After each slice every Log's bounds equal a hand table, and every seq is readable exactly from that table's first. Two appends between slices move the window. A release that re-declares a `Keep` Log `Forever` stops its sweep. Seeds: a window of n + 1 or n − 1, and a sweep that ignores `limit`.
 
 ### 14.5 Pages: the append split and the trim
 

@@ -403,7 +403,7 @@ fn test_tiered_log_range_reads_cold_leaves_and_staged_tail(d: Dir, c: Clock, r: 
     let floor = 182375272u64
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     let mut declaring = declare(db, Migrate)?
-    let events = declare_log(mut declaring, "events", std.codec.of_bytes())?
+    let events = declare_log(mut declaring, "events", std.codec.of_bytes(), Forever)?
     let _ = seal(mut db, take declaring)?
     log_append_entries(mut db, events, 0, 300)?
     {

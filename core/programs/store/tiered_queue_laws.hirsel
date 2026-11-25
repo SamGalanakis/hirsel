@@ -8,7 +8,7 @@ fn l87_cold_log(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, appended:
 fn l87_cold_log_padded(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, appended: u64, width: u64, padded: bool) -> Result[Log[Bytes], Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     let mut declaring = declare(db, Migrate)?
-    let events = declare_log(mut declaring, "events", std.codec.of_bytes())?
+    let events = declare_log(mut declaring, "events", std.codec.of_bytes(), Forever)?
     if padded {
         let padding = declare_table(mut declaring, "padding", std.codec.key_u64(), std.codec.of_bytes())?
         let _ = finish(mut declaring, take padding)?
@@ -111,12 +111,10 @@ fn test_l87_fold_cut_queues_detached_leaf(d: Dir, c: Clock, r: Random, tasks: Ta
         fail("L87: the served trim of a Cold Tiered Log commits")
     }
     close(take cold)?
-
     let mut replayed = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let _ = checkpoint(mut replayed)?
     let _ = checkpoint(mut replayed)?
     close(take replayed)?
-
     let reopened = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let queued = l87_queue(reopened)?
     if list.len(queued) != 1 || disk_state(reopened).pages.lists.deferred_next != 1 {
@@ -294,7 +292,6 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     }
     let _ = checkpoint(mut db)?
     close(take db)?
-
     let reopened = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let queued = l87_queue(reopened)?
     let expected = 1 + list.len(dropped)
@@ -306,7 +303,11 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
         let TieredPage(target) = row.target else {
             fail("L87: detached subtrees are queued as Page rows")
         }
-        let wanted = if at == 0 { leaf } else { dropped[at - 1] }
+        let wanted = if at == 0 {
+            leaf
+        } else {
+            dropped[at - 1]
+        }
         if seq != at || row.branch_id != 0 || target != wanted {
             fail("L87: the queue names each detached Cold page in order at its exact location")
         }
@@ -358,7 +359,7 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
         }
         page_total += int.widen(ptr.len)
     }
-    let blob_pack = blobs[0u64].1.pack
+    let blob_pack = blobs[0u64].1 .pack
     let mut blob_total = 0u64
     for (_, body) in blobs {
         if body.pack != blob_pack {

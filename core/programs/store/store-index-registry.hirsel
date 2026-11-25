@@ -25,11 +25,13 @@ type IndexRegistration: send {
 
 type IndexRegistry: send {
     entries: Map[(u32, u32, u16), RegisteredIndex],
-    next_ordinal: u64
+    next_ordinal: u64,
+    // Each Log the declaration keeps to its newest n (§14.4a), by id.
+    retention: Map[u32, LogRetention]
 }
 
 fn empty_index_registry() -> IndexRegistry {
-    IndexRegistry(entries: map.new(), next_ordinal: 0)
+    IndexRegistry(entries: map.new(), next_ordinal: 0, retention: map.new())
 }
 
 fn declared_index_registry(take bindings: List[IndexRegistration]) -> IndexRegistry {

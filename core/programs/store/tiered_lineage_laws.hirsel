@@ -92,7 +92,7 @@ fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Task
     let root = disk_test_directory(d)
     let mut db = open(tasks, root, c, r, journal_crash_options())?
     let mut declaring = declare(db, Migrate)?
-    let events = declare_log(mut declaring, "events", std.codec.of_bytes())?
+    let events = declare_log(mut declaring, "events", std.codec.of_bytes(), Forever)?
     let _ = seal(mut db, take declaring)?
     let Committed(_) = run(mut db, None, copy_env(events), fn(mut tx: Tx, l: Log[Bytes]) -> Result[(), Error] {
         let mut body: Bytes = list.with_capacity(3)
@@ -107,11 +107,9 @@ fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Task
     let main = snapshot(db)
     let (beta, _) = fork(mut db, "beta", main)?
     close(take db)?
-
     let mut replayed = open(tasks, root, c, r, journal_crash_options())?
     let _ = checkpoint(mut replayed)?
     close(take replayed)?
-
     let mut reopened = open(tasks, root, c, r, journal_crash_options())?
     let expected = LineageFork(child: beta.id, parent: 0, watermark: watermark, adopted: false)
     let published = {
@@ -126,7 +124,6 @@ fn test_lineage_fork_row_through_replay(d: Dir, c: Clock, r: Random, tasks: Task
     }
     let _ = delete_branch(mut reopened, beta)?
     close(take reopened)?
-
     let deleted = open(tasks, root, c, r, journal_crash_options())?
     if map.len(disk_state(deleted).pages.lists.rows.forks) != 0 {
         fail("lineage: a deleted branch's row with no dependent is removed")
@@ -181,7 +178,6 @@ fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: T
     l68_write_rows(mut db, 3u64, 33u32, None)?
     let _ = checkpoint(mut db)?
     close(take db)?
-
     db = open(tasks, d, c, r, l69_options(floor)?)?
     let cell = LineageCell(branch: 0, boundary: w, side: 1, interval: 0, pack: leaf.pack)
     let filed = map.len(disk_state(db).pages.lists.rows.cells) == 1 && map.get_or(disk_state(db).pages.lists.rows.cells, cell, 0u64) == width
@@ -190,7 +186,6 @@ fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: T
     }
     let _ = unpin(mut db, "held")?
     close(take db)?
-
     db = open(tasks, d, c, r, l69_options(floor)?)?
     if map.len(disk_state(db).pages.lists.rows.cells) != 0 || l69_pack_live(db, leaf.pack) != before - width {
         fail("L69: the last unpin at w drops the cell and charges exactly the leaf")
@@ -201,7 +196,6 @@ fn test_l69_cut_files_replaced_cold_frames(d: Dir, c: Clock, r: Random, tasks: T
     l68_write_rows(mut db, 5u64, 55u32, None)?
     let _ = checkpoint(mut db)?
     close(take db)?
-
     let reopened = open(tasks, d, c, r, l69_options(floor)?)?
     if map.len(disk_state(reopened).pages.lists.rows.cells) != 0 || l69_pack_live(reopened, later.pack) != later_before - later_width {
         fail("L69: with no holder the overwrite's kill leaves live at its cut")

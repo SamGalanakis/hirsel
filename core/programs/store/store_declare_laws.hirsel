@@ -43,7 +43,7 @@ fn migration_list_retire(mut m: Migration) -> Result[(), Error] {
 }
 
 fn migration_list_schema(mut d: Declare) -> Result[(u32, u32), Error] {
-    let log = declare_log(mut d, "é", std.codec.of_u64())?
+    let log = declare_log(mut d, "é", std.codec.of_u64(), Forever)?
     let cell = declare_cell(mut d, "a", std.codec.of_u64())?
     let pair_key: std.codec.Key[(u64, u64)] = std.codec.key_of()
     let _ = declare_edge(mut d, "Z", "reverse", pair_key, std.codec.key_u64(), std.codec.key_u64())?

@@ -425,7 +425,7 @@ pub fn declare_replay(db: Db, source: ReplaySource) -> Result[Declare, Error] {
     if !same(source.store, db.store) || source.open != open_number(db) {
         return Error(Foreign)
     }
-    let plan = SchemaPlan(store: db.store, roots: share_roots(source.base), next_node: db.next_node, next_table: db.next_table, live: 0, ceiling: db.ceiling, retained: true, changed: false, bindings: list.new(), preview: None)
+    let plan = SchemaPlan(store: db.store, roots: share_roots(source.base), next_node: db.next_node, next_table: db.next_table, live: 0, ceiling: db.ceiling, retained: true, changed: false, bindings: list.new(), retention: list.new(), preview: None)
     Ok(new_declaration(Open, replay_declaration_base(source), take plan, is_disk(db)))
 }
 

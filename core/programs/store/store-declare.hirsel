@@ -107,7 +107,7 @@ pub fn has_table(snap: Snapshot, name: String) -> Result[bool, Error] {
 pub fn declare_read_only(source: ReadOnly) -> Declare {
     let snap = view source.snapshot
     let base = DeclarationBase(store: snap.store, opened: snap.open, version: snap.head, stamp: snap.watermark, changes: 0u64, live: 0u64)
-    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), preview: None)
+    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), retention: list.new(), preview: None)
     new_declaration(Follower, base, take plan, true)
 }
 
@@ -128,7 +128,7 @@ pub fn describe_declarations[H](clock: Clock, schema: StaticFn[fn(mut Declare) -
 
 pub fn declare_follower(f: Follower) -> Declare {
     let capture = view f.capture
-    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), preview: None)
+    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), retention: list.new(), preview: None)
     new_declaration(Follower, follower_base(f), take plan, true)
 }
 
@@ -608,12 +608,15 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
     let Declare(plan: take candidate, ..) = take d
     let mut proposal = take candidate
     let registry = declared_index_registry(replace(mut proposal.bindings, list.new()))
+    let retained = replace(mut proposal.retention, list.new())
     if proposal.changed {
         let committed = publish_schema_plan(mut db, take proposal)?
         db.indexes = take registry
+        bind_retention(mut db, take retained)
         return Ok(committed)
     }
     db.indexes = take registry
+    bind_retention(mut db, take retained)
     Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0].head)))
 }
 

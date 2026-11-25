@@ -1,0 +1,144 @@
+/// Refusal sweeps: every admission a subject's calls make, refused in turn, must leave the
+/// subject usable (MEM-21, MEM-25).
+/// Which call of a refusal-sweep run is bounded, and to how many bytes.
+pub type Budget {
+    call: u64,
+    limit: u64
+}
+
+/// One run of a refusal sweep. `end` is the run's end class and `calls` how many calls it
+/// made on its subject; `next` is the least budget past the bounded call's refusal
+/// (`past`), or `None` when that call was not refused.
+pub type Refusal[E] {
+    end: E,
+    calls: u64,
+    next: Option[u64]
+}
+
+/// What a passing sweep did: its runs, and the runs a `Capacity` failure ended (MEM-21:
+/// an admission that is not one of the four value refusals fails; the subject goes with it).
+pub type Swept {
+    runs: u64,
+    failed: u64
+}
+
+/// The least budget past `c`, refused at `budget`; the next byte when `c` names no shortfall.
+pub fn past(budget: u64, c: Capacity) -> u64 {
+    if c.requested > c.available {
+        budget + (c.requested - c.available)
+    } else {
+        budget + 1
+    }
+}
+
+/// The byte limit when `b` bounds call `call`.
+pub fn bounded(b: Option[Budget], call: u64) -> Option[u64] {
+    match b {
+        Some(x) if x.call == call => Some(x.limit),
+        _ => None,
+    }
+}
+
+const REFUSAL_REDS: u64 = 8
+
+fn refusal_red[E](mut reds: String, b: Budget, what: String, end: Option[E], want: E, show_fn: own fn(E, mut String)) {
+    if string.byte_len(reds) != 0 {
+        string.push(mut reds, "\n")
+    }
+    string.push(mut reds, "call ")
+    string.push_u64(mut reds, b.call)
+    string.push(mut reds, " budget ")
+    string.push_u64(mut reds, b.limit)
+    string.push(mut reds, ": ")
+    string.push(mut reds, what)
+    if let Some(e) = end {
+        string.push(mut reds, " ")
+        show_fn(e, mut reds)
+    }
+    string.push(mut reds, ", want ")
+    show_fn(want, mut reds)
+}
+
+fn cause_name(kind: CauseKind) -> String {
+    match kind {
+        Fail(text) => {
+            let mut s = string.from("fault Fail: ")
+            string.push(mut s, text)
+            s
+        },
+        Overflow => string.from("fault Overflow"),
+        Bounds => string.from("fault Bounds"),
+        Division => string.from("fault Division"),
+        Unwrap => string.from("fault Unwrap"),
+        Cancelled => string.from("fault Cancelled"),
+        Capacity(_) => string.from("fault Capacity"),
+        OutOfTime => string.from("fault OutOfTime"),
+    }
+}
+
+/// The every-admission refusal sweep (MEM-21). `run(subject, index, budget)` drives one
+/// subject from a fresh start to its end, numbering its calls on the subject from 0. With
+/// `budget` `None` nothing is bounded: the never-refused run. With `Some(b)`, call `b.call`
+/// runs under `bound bytes b.limit`, and a call refused as the value `Capacity` is repeated
+/// unbounded. `index` differs per run, for fresh randomness. For each call of the
+/// never-refused run, budgets start at 0 and step to each run's `next`, so the sweep visits
+/// every budget at which that call first meets a refusal, up to the one at which it meets
+/// none. Every run must end in the never-refused run's class or with a `Capacity` failure
+/// (MEM-21), and raise no other failure. The result counts the runs, or lists the first reds.
+pub fn sweep[C, E: key](subject: C, run: fn(C, u64, Option[Budget]) -> Refusal[E], take show_fn: own fn(E, mut String)) -> Result[Swept, String] {
+    let Refusal(end: take want, calls: calls, next: first) = run(subject, 0, None)
+    if let Some(_) = first {
+        fail("refuse: the never-refused run met a refusal")
+    }
+    let mut reds = string.new()
+    let mut count = 0u64
+    let mut runs = 0u64
+    let mut failed = 0u64
+    for call in 0u64 .. calls {
+        let mut limit = 0u64
+        while count < REFUSAL_REDS {
+            runs += 1
+            let b = Budget(call: call, limit: limit)
+            let outcome = isolate(fn() -> Refusal[E] {
+                run(subject, runs, Some(b))
+            })
+            let next = match take outcome {
+                Ok(Ok(Refusal(end: take end, next: n, ..))) => {
+                    if end != want {
+                        refusal_red(mut reds, b, "end", Some(take end), want, show_fn)
+                        count += 1
+                    }
+                    n
+                },
+                Ok(Error(causes)) => {
+                    let mut step = limit + 1
+                    for cause in causes {
+                        if let Capacity(c) = cause.kind {
+                            step = past(limit, c)
+                            failed += 1
+                        } else {
+                            let none: Option[E] = None
+                            refusal_red(mut reds, b, cause_name(cause.kind), take none, want, show_fn)
+                            count += 1
+                        }
+                        break
+                    }
+                    Some(step)
+                },
+                Error(_) => fail("refuse: the refusal sweep's isolate was refused"),
+            }
+            let Some(n) = next else {
+                break
+            }
+            limit = if n > limit {
+                n
+            } else {
+                limit + 1
+            }
+        }
+    }
+    if count != 0 {
+        return Error(take reds)
+    }
+    Ok(Swept(runs: runs, failed: failed))
+}

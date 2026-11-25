@@ -581,13 +581,13 @@ fn earliest(c: Client) -> u64 {
 fn step(mut c: Client, now: Now, r: Random, mut out: Bytes) -> Result[Poll, TurnError] {
     let now_ns = now.mono_ns
     if !c.started {
-        c.started = true
         let ind = draw_tx(r)
         c.ind_high = ind.high
         c.ind_low = ind.low
         list.try_reserve(mut c.txs, 1) ?=> Capacity
         let tx = new_tx(c, AllocateJob)
         list.push(mut c.txs, tx)
+        c.started = true
     }
     refreshes(mut c, now_ns)?
     let mut i = 0u64

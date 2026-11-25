@@ -520,3 +520,106 @@ fn rtx_protected() -> Result[(), srtp.SrtpError] {
     rtx_case(AeadAes128Gcm, rtx_wire_gcm(), rtx_clear_osn_gcm())?
     rtx_case(AeadAes256Gcm, rtx_wire_gcm256(), rtx_clear_osn_gcm256())
 }
+
+type SweepCalls {
+    budget: Option[std.refuse.Budget],
+    calls: u64,
+    next: Option[u64]
+}
+
+type SweepOp = SealRtp | OpenRtp | SealRtcp | OpenRtcp
+
+fn sweep_op(mut s: srtp.Session, mut buf: Bytes, op: SweepOp) -> Result[u64, srtp.SrtpError] {
+    match op {
+        SealRtp => srtp.protect_rtp(mut s, mut buf),
+        OpenRtp => match srtp.unprotect_rtp(mut s, mut buf) {
+            Ok(o) => Ok(o.length),
+            Error(take e) => Error(take e),
+        },
+        SealRtcp => srtp.protect_rtcp(mut s, mut buf),
+        OpenRtcp => srtp.unprotect_rtcp(mut s, mut buf),
+    }
+}
+
+/// One call on `s`, bounded when the budget names it; a call refused for Capacity is
+/// repeated unbounded on the same buffer.
+fn swept(mut s: srtp.Session, mut buf: Bytes, op: SweepOp, mut k: SweepCalls) -> Result[u64, srtp.SrtpError] {
+    let bound_to = std.refuse.bounded(k.budget, k.calls)
+    k.calls += 1
+    let Some(b) = bound_to else {
+        return sweep_op(mut s, mut buf, op)
+    }
+    match (bound bytes b {
+        sweep_op(mut s, mut buf, op)
+    }) {
+        Ok(Error(Capacity(c))) => {
+            k.next = Some(std.refuse.past(b, c))
+            sweep_op(mut s, mut buf, op)
+        },
+        Ok(take x) => take x,
+        Error(_) => fail("sweep: the bound was refused on entry"),
+    }
+}
+
+/// Six RTP packets on two SSRCs and two SRTCP packets, each protected by the sender and
+/// opened by the receiver, every call under the budget it names. The end class is how many
+/// came back byte for byte.
+fn swept_session(p: schedule.SrtpProfile, index: u64, budget: Option[std.refuse.Budget]) -> std.refuse.Refusal[u64] {
+    let mut send = sender(p)
+    let mut receive = receiver(p, LIMITS)
+    let mut k = SweepCalls(budget: budget, calls: 0, next: None)
+    let _ = index
+    let mut good = 0u64
+    let mut ssrc = LIB_SSRC
+    for _ in 0u64 .. 2 {
+        for seq in 1u16 .. 4 {
+            let plain = rtp_plain(ssrc, seq)
+            let mut buf = copy_packet(plain, srtp.tag_room(p))
+            if let Ok(_) = swept(mut send, mut buf, SealRtp, mut k) {
+                if let Ok(n) = swept(mut receive, mut buf, OpenRtp, mut k) {
+                    if n == list.len(plain) && buf == plain {
+                        good += 1
+                    }
+                }
+            }
+        }
+        ssrc = 0xbeef
+    }
+    for _ in 0u64 .. 2 {
+        let plain = rtcp_plain()
+        let mut buf = copy_packet(plain, srtp.tag_room(p) + 4)
+        if let Ok(_) = swept(mut send, mut buf, SealRtcp, mut k) {
+            if let Ok(n) = swept(mut receive, mut buf, OpenRtcp, mut k) {
+                if n == list.len(plain) && buf == plain {
+                    good += 1
+                }
+            }
+        }
+    }
+    std.refuse.Refusal(end: good, calls: k.calls, next: k.next)
+}
+
+fn show_count(n: u64, mut out: String) {
+    string.push_u64(mut out, n)
+    string.push(mut out, " packets back")
+}
+
+/// bug: a Capacity refusal while protecting or opening leaves a session that loses or
+/// corrupts packets: a stream half made, an index or replay bit advanced past a packet that
+/// was never sealed or delivered.
+/// oracle: SRTP-6 and MEM-21: `Capacity` is returned before
+/// issue with nothing changed, so at every budget where some call first meets a refusal,
+/// repeating that call unbounded brings all 8 packets back byte for byte (RFC 3711 sections
+/// 3.3 and 3.4), as the never-refused run does, and no failure but Capacity is raised.
+@test
+fn capacity_sweep_session() -> Result[(), ()] {
+    let cm: schedule.SrtpProfile = Aes128CmHmacSha1_80
+    let gcm: schedule.SrtpProfile = AeadAes128Gcm
+    if let Error(take text) = std.refuse.sweep(cm, swept_session, show_count) {
+        fail(take text)
+    }
+    if let Error(take text) = std.refuse.sweep(gcm, swept_session, show_count) {
+        fail(take text)
+    }
+    Ok(())
+}

@@ -283,3 +283,181 @@ fn oversized_epoch1_never_held() -> Result[(), ()] {
     }
     Ok(())
 }
+
+/// One side's end state in a refusal sweep: 0 Handshaking, 1 Connected, 2 Closed.
+fn sweep_state(e: dtls.Endpoint) -> u8 {
+    match dtls.state(e) {
+        Handshaking => 0,
+        Connected => 1,
+        _ => 2,
+    }
+}
+
+type SweepEnd: key {
+    client: u8,
+    server: u8,
+    keys: bool
+}
+
+fn show_sweep_end(e: SweepEnd, mut out: String) {
+    string.push(mut out, "client ")
+    string.push_u64(mut out, int.widen(e.client))
+    string.push(mut out, " server ")
+    string.push_u64(mut out, int.widen(e.server))
+    string.push(mut out, if e.keys {
+        " keys agree"
+    } else {
+        " keys differ"
+    })
+}
+
+/// Numbers the calls of a swept run and bounds the one its budget names.
+type SweepCalls {
+    budget: Option[std.refuse.Budget],
+    calls: u64,
+    next: Option[u64],
+    now: u64
+}
+
+/// The bound for the next call, counting it.
+fn sweep_call(mut k: SweepCalls) -> Option[u64] {
+    let b = std.refuse.bounded(k.budget, k.calls)
+    k.calls += 1
+    b
+}
+
+/// `datagram` into `e`, bounded when the budget names this call; a call refused for
+/// Capacity is repeated unbounded.
+fn sweep_receive(mut e: dtls.Endpoint, r: Random, datagram: Bytes, mut k: SweepCalls) {
+    let mut data: Bytes = list.with_capacity(2048)
+    let Some(b) = sweep_call(mut k) else {
+        let _ = dtls.receive(mut e, k.now, r, datagram, mut data)
+        return
+    }
+    let outcome = bound bytes b {
+        dtls.receive(mut e, k.now, r, datagram, mut data)
+    }
+    match outcome {
+        Ok(Error(Capacity(c))) => {
+            k.next = Some(std.refuse.past(b, c))
+            let _ = dtls.receive(mut e, k.now, r, datagram, mut data)
+        },
+        Ok(_) => (),
+        Error(_) => fail("sweep: the bound was refused on entry"),
+    }
+}
+
+/// Every datagram `e` has queued, each poll bounded when the budget names it; a refused
+/// poll is repeated unbounded.
+fn sweep_drain(mut e: dtls.Endpoint, r: Random, mut k: SweepCalls) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    while true {
+        let mut d: Bytes = list.with_capacity(70000)
+        let bound_to = sweep_call(mut k)
+        let mut polled = match bound_to {
+            Some(b) => match (bound bytes b {
+                dtls.poll(mut e, k.now, r, mut d)
+            }) {
+                Ok(take p) => take p,
+                Error(_) => fail("sweep: the bound was refused on entry"),
+            },
+            None => dtls.poll(mut e, k.now, r, mut d),
+        }
+        if let Error(Capacity(c)) = polled {
+            if let Some(b) = bound_to {
+                k.next = Some(std.refuse.past(b, c))
+            }
+            polled = dtls.poll(mut e, k.now, r, mut d)
+        }
+        match polled {
+            Ok(Send(_)) => list.push(mut out, take d),
+            _ => break,
+        }
+    }
+    out
+}
+
+/// Whether an SRTP packet sealed with the client's exporter keys opens with the server's
+/// (RFC 5764 section 4.2: the client's sending keys are the server's receiving keys).
+fn exporter_agrees(mut client: dtls.Endpoint, mut server: dtls.Endpoint) -> bool {
+    let Ok(take sent_keys) = dtls.take_srtp(mut client) else {
+        return false
+    }
+    let mut sent = take sent_keys
+    let Ok(take answered) = dtls.take_srtp(mut server) else {
+        return false
+    }
+    let Ok(take issued) = schedule.sealer(mut sent, Rtp, 0xbeef, 1) else {
+        return false
+    }
+    let mut sealer = take issued
+    let Ok(opener) = schedule.opener(answered, Rtp) else {
+        return false
+    }
+    let plain = unhex("80600001000000010000beef7377656570")
+    let mut buf: Bytes = list.with_capacity(list.len(plain) + 16)
+    list.append(mut buf, plain)
+    let Ok(_) = packet.seal(mut sealer, 1, mut buf, 0, 12, b"") else {
+        return false
+    }
+    let Ok(_) = packet.open(opener, 0xbeef, 1, mut buf, 0, 12, b"") else {
+        return false
+    }
+    list.starts_with(buf, plain)
+}
+
+type SweepParties {
+    client: Party,
+    server: Party
+}
+
+/// A pinned client and server handshaking with no loss, every call on either endpoint under
+/// `budget`.
+fn swept_handshake(p: SweepParties, index: u64, budget: Option[std.refuse.Budget]) -> std.refuse.Refusal[SweepEnd] {
+    let rc = provide.random(900000 + 2 * index)
+    let rs = provide.random(900001 + 2 * index)
+    let mut client = result.unwrap(dtls.client(dtls.share_identity(p.client.id), dtls.defaults(), address(1)))
+    let mut server = result.unwrap(dtls.server(dtls.share_identity(p.server.id), dtls.defaults(), address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(p.server.certificate)))
+    result.unwrap(dtls.expect(mut server, pin_list(p.client.certificate)))
+    let mut k = SweepCalls(budget: budget, calls: 0, next: None, now: 0)
+    // A round that moves nothing waits one second, as a caller polls at WakeAt: a refusal
+    // that only delays a flight to its retransmission still connects (DTLS-5 timers).
+    for _ in 0u64 .. 24 {
+        let to_server = sweep_drain(mut client, rc, mut k)
+        for i in 0u64 .. list.len(to_server) {
+            sweep_receive(mut server, rs, to_server[i], mut k)
+        }
+        let to_client = sweep_drain(mut server, rs, mut k)
+        for i in 0u64 .. list.len(to_client) {
+            sweep_receive(mut client, rc, to_client[i], mut k)
+        }
+        if is_connected(client) && is_connected(server) {
+            break
+        }
+        if list.len(to_server) == 0 && list.len(to_client) == 0 {
+            k.now += SECOND
+        }
+    }
+    let c = sweep_state(client)
+    let s = sweep_state(server)
+    let keys = c == 1 && s == 1 && exporter_agrees(mut client, mut server)
+    std.refuse.Refusal(end: SweepEnd(client: c, server: s, keys: keys), calls: k.calls, next: k.next)
+}
+
+/// bug: a Capacity refusal anywhere in the handshake leaves an endpoint that never connects:
+/// a refused message skipped (attack 2434 F4), a refused flight 6 over a cleared transcript
+/// (F5), or a refused record open faulting the task (2465).
+/// oracle: DTLS-8 and MEM-21: a refusal leaves the endpoint usable, so at every budget where
+/// some call first meets a refusal, repeating that call unbounded still connects both sides
+/// with agreeing SRTP keys (RFC 5764 section 4.2), as the never-refused run does, and no
+/// failure but Capacity is raised.
+@test
+fn capacity_sweep_handshake() -> Result[(), ()] {
+    let parties = SweepParties(client: party(821), server: party(822))
+    let swept = std.refuse.sweep(parties, swept_handshake, show_sweep_end)
+    match take swept {
+        Ok(_) => Ok(()),
+        Error(take text) => fail(take text),
+    }
+}

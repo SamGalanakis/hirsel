@@ -711,3 +711,181 @@ fn lifetimes_exact() -> Result[(), turn.TurnError] {
     }
     relay_lifetimes(rnd)
 }
+
+/// One refusal-sweep run's call count, the budget that bounds one of them, and the next
+/// budget worth trying at that call.
+type SweepCalls {
+    budget: Option[std.refuse.Budget],
+    calls: u64,
+    next: Option[u64]
+}
+
+fn sweep_call(mut k: SweepCalls) -> Option[u64] {
+    let b = std.refuse.bounded(k.budget, k.calls)
+    k.calls += 1
+    b
+}
+
+fn sweep_refused(mut k: SweepCalls, b: u64, c: Capacity) {
+    k.next = Some(std.refuse.past(b, c))
+}
+
+/// turn.poll, bounded when the budget names this call; a poll refused for Capacity is
+/// repeated unbounded.
+fn sweep_poll(mut cl: turn.Client, now: turn.Now, rnd: Random, mut out: Bytes, mut k: SweepCalls) -> Result[turn.Poll, turn.TurnError] {
+    let Some(b) = sweep_call(mut k) else {
+        return turn.poll(mut cl, now, rnd, mut out)
+    }
+    match (bound bytes b {
+        turn.poll(mut cl, now, rnd, mut out)
+    }) {
+        Ok(Error(Capacity(c))) => {
+            sweep_refused(mut k, b, c)
+            turn.poll(mut cl, now, rnd, mut out)
+        },
+        Ok(take p) => take p,
+        Error(_) => fail("sweep: the bound was refused on entry"),
+    }
+}
+
+/// turn.receive of a copy of reply, bounded when the budget names this call; a receive
+/// refused for Capacity is repeated unbounded on a fresh copy.
+fn sweep_take(mut cl: turn.Client, now: turn.Now, rnd: Random, reply: Bytes, mut k: SweepCalls) -> Result[(), turn.TurnError] {
+    let mut packet = copy_of(reply)
+    let Some(b) = sweep_call(mut k) else {
+        let _ = turn.receive(mut cl, now, rnd, mut packet)?
+        return Ok(())
+    }
+    match (bound bytes b {
+        turn.receive(mut cl, now, rnd, mut packet)
+    }) {
+        Ok(Error(Capacity(c))) => {
+            sweep_refused(mut k, b, c)
+            let mut again = copy_of(reply)
+            let _ = turn.receive(mut cl, now, rnd, mut again)?
+        },
+        Ok(take r) => {
+            let _ = (take r)?
+        },
+        Error(_) => fail("sweep: the bound was refused on entry"),
+    }
+    Ok(())
+}
+
+/// drive, with each client call numbered and the budget's call bounded.
+fn sweep_drive(mut cl: turn.Client, mut rl: Relay, now: turn.Now, rnd: Random, mut k: SweepCalls) -> Result[turn.Poll, turn.TurnError] {
+    for _ in 0u64 .. 64 {
+        let mut out = buffer(512)
+        match sweep_poll(mut cl, now, rnd, mut out, mut k)? {
+            Send(n) => {
+                list.truncate(mut out, n)
+                let mut reply = buffer(1500)
+                let m = serve(mut rl, now, out, mut reply)?
+                if m > 0 {
+                    list.truncate(mut reply, m)
+                    sweep_take(mut cl, now, rnd, reply, mut k)?
+                }
+            },
+            p => return Ok(p),
+        }
+    }
+    fail("turn.client kept sending")
+}
+
+fn sweep_request(mut cl: turn.Client, peer: Addr, channel: bool, now: turn.Now) -> Result[u16, turn.TurnError] {
+    if channel {
+        return turn.bind(mut cl, peer, now)
+    }
+    turn.permit(mut cl, peer, now)?
+    Ok(0)
+}
+
+/// sweep_drive at now and then at each wake within 30 s, so a request a refused poll
+/// left to its retransmission still completes.
+fn sweep_settle(mut cl: turn.Client, mut rl: Relay, now: turn.Now, rnd: Random, mut k: SweepCalls) -> Result[(), turn.TurnError] {
+    let mut t = now.mono_ns
+    for _ in 0u64 .. 16 {
+        let w = wake_of(sweep_drive(mut cl, mut rl, turn.Now(mono_ns: t, unix_s: now.unix_s), rnd, mut k)?)
+        if w >= now.mono_ns + 30 * S {
+            return Ok(())
+        }
+        t = order.max(w, t)
+    }
+    Ok(())
+}
+
+/// turn.permit or turn.bind of peer, bounded when the budget names this call; a request
+/// refused for Capacity is repeated unbounded.
+fn sweep_ask(mut cl: turn.Client, peer: Addr, channel: bool, now: turn.Now, mut k: SweepCalls) -> Result[u16, turn.TurnError] {
+    let Some(b) = sweep_call(mut k) else {
+        return sweep_request(mut cl, peer, channel, now)
+    }
+    let asked = bound bytes b {
+        sweep_request(mut cl, peer, channel, now)
+    }
+    match asked {
+        Ok(Error(Capacity(c))) => {
+            sweep_refused(mut k, b, c)
+            sweep_request(mut cl, peer, channel, now)
+        },
+        Ok(take r) => take r,
+        Error(_) => fail("sweep: the bound was refused on entry"),
+    }
+}
+
+/// How a swept client ended: 0 allocating, 1 allocated, 2 closed, 3 an error reached the
+/// test; and the channel its bind was given. Times are not compared: a request a refused
+/// poll did not send goes out at its retransmission.
+type SweepEnd: key {
+    state: u8,
+    channel: u16
+}
+
+fn show_sweep_end(e: SweepEnd, mut out: String) {
+    string.push(mut out, "state ")
+    string.push_u64(mut out, int.widen(e.state))
+    string.push(mut out, " channel ")
+    string.push_u64(mut out, int.widen(e.channel))
+}
+
+fn swept_flow(mut cl: turn.Client, rnd: Random, mut k: SweepCalls) -> Result[SweepEnd, turn.TurnError] {
+    let mut c = config()
+    c.nonce_s = 86400
+    let mut rl = relay_for(take c, 81)
+    sweep_settle(mut cl, mut rl, at(1000), rnd, mut k)?
+    let _ = sweep_ask(mut cl, Addr(ip: V4(0xc6336401), port: 9000), false, at(40000), mut k)?
+    sweep_settle(mut cl, mut rl, at(40000), rnd, mut k)?
+    let channel = sweep_ask(mut cl, Addr(ip: V4(0xc6336402), port: 9000), true, at(80000), mut k)?
+    sweep_settle(mut cl, mut rl, at(80000), rnd, mut k)?
+    let state: u8 = match turn.client_state(cl) {
+        Allocating => 0,
+        Allocated(_) => 1,
+        Closed(_) => 2,
+    }
+    Ok(SweepEnd(state: state, channel: channel))
+}
+
+/// Allocate, permit and bind against the relay helper; each client call numbered, the
+/// budget's call bounded and, when refused, repeated unbounded.
+fn swept_client(seed: u64, index: u64, budget: Option[std.refuse.Budget]) -> std.refuse.Refusal[SweepEnd] {
+    let mut k = SweepCalls(budget: budget, calls: 0, next: None)
+    let rnd = provide.random(seed + index)
+    let mut cl = result.unwrap(turn.client(turn.client_defaults(), SERVER, username(), user_password()))
+    let end = match swept_flow(mut cl, rnd, mut k) {
+        Ok(take e) => take e,
+        Error(_) => SweepEnd(state: 3, channel: 0),
+    }
+    std.refuse.Refusal(end: end, calls: k.calls, next: k.next)
+}
+
+/// bug: a client call refused for Capacity loses the allocation or the channel, or closes
+/// the client.
+/// oracle: TURN-3 (Capacity is not fatal for a Client) and MEM-21: the end equals the
+/// never-refused run's.
+@test
+fn capacity_sweep_client() -> Result[(), turn.TurnError] {
+    match std.refuse.sweep(950000u64, swept_client, show_sweep_end) {
+        Ok(_) => Ok(()),
+        Error(take text) => fail(take text),
+    }
+}

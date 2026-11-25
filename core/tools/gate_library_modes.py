@@ -313,6 +313,52 @@ def main():
                 refused = invoke('build', str(app), '--release', '-o', str(work / 'gone'), expected=2)
                 self.assertIn(str(linker), refused.stderr)
 
+        def test_a_copied_bundle_supplies_the_webrtc_packages_to_a_program_outside_the_repo(self):
+            # The shipped toolchain supplies webrtc_sfu@1 and turn@1, with every package they
+            # bind, from core-packages/: a program bound to them by toolchain major builds
+            # natively from a copied prefix with no checkout, no environment variable and no
+            # tool on PATH.
+            bundle = Path(os.environ['HIRSEL_TOOLCHAIN_BUNDLE']).resolve()
+            with tempfile.TemporaryDirectory(prefix='hirsel-bundle-') as temporary:
+                work = Path(temporary)
+                root, decoy, home = work / 'toolchain', work / 'path-bin', work / 'home'
+                shutil.copytree(bundle, root, symlinks=True)
+                for directory, _, files in os.walk(root):
+                    os.chmod(directory, 0o755)
+                    for name in files:
+                        path = Path(directory) / name
+                        if not path.is_symlink():
+                            path.chmod(path.stat().st_mode | 0o200)
+                for directory in [decoy, home]:
+                    directory.mkdir()
+                found = work / 'path-tool.log'
+                for tool in ['cc', 'gcc', 'clang', 'ld', 'ld.lld']:
+                    (decoy / tool).write_text('#!/bin/sh\necho ' + tool + ' >> ' + repr(str(found)) + '\nexit 1\n')
+                    (decoy / tool).chmod(0o755)
+                clean = {'PATH': str(decoy) + ':/usr/bin:/bin', 'HOME': str(home)}
+                app = work / 'call'
+                app.mkdir()
+                (app / 'hirsel.toml').write_text(
+                    '[package]\nname = "call"\nmajor = 1\ncharge = "charge-v1"\n\n'
+                    '[dependencies]\nstd = { major = 1 }\nwebrtc_sfu = { major = 1 }\nturn = { major = 1 }\n\n'
+                    '[sources]\n"main.hirsel" = "main"\n')
+                (app / 'main.hirsel').write_text(
+                    'pub fn main() -> Result[(), Exit] {\n'
+                    '    if webrtc_sfu.signal.code(Suspended) != 5 || list.len(turn.offered_algorithms()) == 0 {\n'
+                    '        return Error(Exit(status: 3))\n'
+                    '    }\n'
+                    '    Ok(())\n'
+                    '}\n')
+                program = work / 'call-program'
+                built = self.progress.run([str(root / 'hirsel'), 'build', str(app), '--store', str(work / 'store'),
+                                           '-o', str(program), '--json'],
+                                          cwd=work, env=clean, capture_output=True, text=True)
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                self.assertTrue(json.loads(built.stdout.splitlines()[-1])['native']['linked'])
+                ran = self.progress.run([str(program)], cwd=work, env=clean, capture_output=True, text=True)
+                self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+                self.assertFalse(found.exists(), found.read_text() if found.exists() else '')
+
         def test_fmt_checks_writes_and_refuses_without_partial_changes(self):
             with tempfile.TemporaryDirectory(prefix='hirsel-fmt-') as temporary:
                 package = Path(temporary)

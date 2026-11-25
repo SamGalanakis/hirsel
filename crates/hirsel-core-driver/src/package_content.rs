@@ -15,11 +15,33 @@ const CHARGE: &str = "charge-v1";
 
 /// The packages the installed toolchain supplies, each with the toolchain packages it binds.
 /// `std@1` is the toolchain's std image; the others are package archives in
-/// `core-packages/<name>-<major>.hpkg`.
+/// `core-packages/<name>-<major>.hpkg`, packed from `core/programs/<name>` (the
+/// `toolchain-packages` rule in tools/buck2/defs.bzl lists the same names).
 const TOOLCHAIN: &[(&str, u32, &[&str])] = &[
     ("std", 1, &[]),
     ("store", 1, &["std"]),
     ("runner", 1, &["std", "store"]),
+    ("media_bits", 1, &["std"]),
+    ("rtp", 1, &["std"]),
+    ("srtp", 1, &["std"]),
+    ("dtls", 1, &["std"]),
+    ("stun_ice", 1, &["std"]),
+    ("turn", 1, &["std", "stun_ice"]),
+    (
+        "webrtc_sfu",
+        1,
+        &[
+            "std",
+            "dtls",
+            "media_bits",
+            "rtp",
+            "srtp",
+            "stun_ice",
+            "turn",
+            "runner",
+            "store",
+        ],
+    ),
 ];
 
 pub(crate) fn toolchain_major(name: &str) -> Option<u32> {

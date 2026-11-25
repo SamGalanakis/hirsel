@@ -51,8 +51,8 @@ another first. The framed bytes are never compared: `aa` comes before `b`, altho
 of `b` is the smaller byte string. A module's rows are in strictly ascending order of target
 bytewise. Bindings and files are likewise strictly ascending, so no two are equal.
 
-`core@1` is bound in every package and is never written as a binding. `std@1`, `store@1` and
-`runner@1` can be bound as toolchain packages (section 2) and are written with tag `0`. A library
+`core@1` is bound in every package and is never written as a binding. The toolchain packages
+of section 2 can be bound as toolchain packages and are written with tag `0`. A library
 root records the major it uses, and the toolchain that checks it supplies that package.
 A toolchain binding has no root.
 Its content is the toolchain's and enters every key through the compiler and the toolchain
@@ -223,9 +223,12 @@ one, is refused: the directory walk below is only for a directory with no manife
 major of each name. Each value has exactly one of these forms. `major` is required in all but
 the last.
 
-- `{ major }` alone binds a **toolchain package**. The installed toolchain supplies
-  `std@1`, `store@1` and `runner@1`; `runner@1` binds the toolchain's `std@1` and `store@1`, so
-  binding it brings them in. A workspace using a toolchain package cannot also bind that
+- `{ major }` alone binds a **toolchain package**. The installed toolchain supplies `std@1`,
+  `store@1`, `runner@1`, `webrtc_sfu@1`, `turn@1`, `dtls@1`, `srtp@1`, `rtp@1`, `stun_ice@1`
+  and `media_bits@1`. Each binds only toolchain packages: `store@1`, `dtls@1`, `srtp@1`,
+  `rtp@1`, `stun_ice@1` and `media_bits@1` bind `std@1`; `runner@1` binds `std@1` and
+  `store@1`; `turn@1` binds `std@1` and `stun_ice@1`; `webrtc_sfu@1` binds all the others.
+  Binding a package brings in the toolchain packages it binds. A workspace using a toolchain package cannot also bind that
   package as a member or published library. `core` is bound in every package and
   may not be declared.
 - `{ major, path }` binds a member of the same workspace (section 4). The path is relative to

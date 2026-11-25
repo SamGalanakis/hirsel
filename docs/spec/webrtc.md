@@ -35,6 +35,14 @@ This chapter specifies three layers, each sans-IO:
   dynacast, active-speaker forwarding and the synchronous revocation fence
   `revoke(room, participant, epoch)`.
 
+**Using the shipped package.** The installed toolchain ships `webrtc_sfu@1` in
+`core-packages/` with every package it binds: `turn@1`, `dtls@1`, `srtp@1`, `rtp@1`,
+`stun_ice@1`, `media_bits@1`, `runner@1` and `store@1`
+([building](../building.md#the-installation)). A service outside the repository binds it as
+`webrtc_sfu = { major = 1 }`, with `turn = { major = 1 }` if it names TURN types itself, and
+builds with the installed `hirsel` alone; it calls `webrtc_sfu.signal.serve` (RTC-8). Inside
+the repository the workspace binds it by path, `core/programs/webrtc_sfu`.
+
 Signaling runs over the generic `runner.room` (RTC-8) through a sans-IO adapter. The section
 ends with the [build laws](#webrtc-build-laws), the [cost targets](#cost-targets), the
 [build slices](#build-slices) and [prior art](#prior-art).

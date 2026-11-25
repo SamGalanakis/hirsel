@@ -485,7 +485,7 @@ def first_party(meta: dict) -> str:
     unguarded = []
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_store_package", "hirsel_test", "hirsel_toolchain_bundle")\n',
+        'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_toolchain_packages", "hirsel_test", "hirsel_toolchain_bundle")\n',
     ]
 
     out.append("\n" + "\n".join(call("export_file", name=f"darwin-{library.lower()}-symbols", src=f"tools/native-toolchain/darwin/{library}.symbols", visibility=["PUBLIC"]) for library in ("libSystem", "CoreFoundation", "Security")) + "\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/*.hirsel", "core/std/sim/*.hirsel"])')))
@@ -714,8 +714,7 @@ def first_party(meta: dict) -> str:
                             crate_root="tools/tests/test_tool_profile.rs", srcs=["tools/tests/test_tool_profile.rs"],
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",
                             version="0.1.0", edition="2024"))
-    out.append("\n" + call("hirsel_store_package", name="store-package", hirsel="//:hirsel-core-driver-bin-hirsel",
-                            sources=Raw('glob(["core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/tests/*.hirsel"]) + ["core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml"]')))
+    out.append("\n" + call("hirsel_toolchain_packages", name="toolchain-packages", hirsel="//:hirsel-core-driver-bin-hirsel"))
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
                             runtimes="//:hirsel-core-rt-archives",
                             recording_runtimes="//:hirsel-core-rt-record-archives",
@@ -723,7 +722,7 @@ def first_party(meta: dict) -> str:
                             prof_recording_runtimes="//:hirsel-core-rt-prof-record-archives",
                             observed_runtimes="//:hirsel-core-rt-observed-archives",
                             observed_recording_runtimes="//:hirsel-core-rt-observed-record-archives",
-                            store_package="//:store-package",
+                            toolchain_packages="//:toolchain-packages",
                             platform_sources=Raw('glob(["core/programs/platform/*.hirsel"]) + ["core/programs/platform/hirsel.toml"]'),
                             visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",

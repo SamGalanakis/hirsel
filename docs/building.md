@@ -19,13 +19,22 @@ capabilities. The driver's internals are in
 Install a Linux x86_64 release with `curl -fsSL https://hirsel.ai/install.sh | sh`
 (requires glibc 2.28+; Apple Silicon macOS support is in progress). Re-run the installer
 to upgrade, or set `HIRSEL_VERSION` to pin a specific release tag.
-An installation is a relocatable prefix containing `hirsel`, the published `core`, `std`, `store@1` and
-`runner@1` packages (including prebuilt release standard-library objects), target runtime archives,
+An installation is a relocatable prefix containing `hirsel`, the published `core` and `std` images
+(including prebuilt release standard-library objects), the toolchain packages, target runtime archives,
 the bundled native link kit (`link/kit/`), `bin/ld.lld`, `libexec/hirsel/`, and the LLVM libraries
 shipped with the compiler. Installed toolchains use the bundled link kit and do **not** require
 host C development packages (`libc6-dev` / `libgcc-N-dev`). Host C development packages are only
 needed when linking with a custom `--cc` driver outside the bundled link kit. If any link input is
 missing, Hirsel names the first missing input before invoking the linker.
+
+The toolchain packages are package archives in `core-packages/<name>-<major>.hpkg`: `store@1`
+and `runner@1`, and the WebRTC stack, `webrtc_sfu@1` with `turn@1`, `dtls@1`, `srtp@1`,
+`rtp@1`, `stun_ice@1` and `media_bits@1`. A program binds one by major alone, for example
+`webrtc_sfu = { major = 1 }` in its `[dependencies]`. The toolchain supplies it with every
+toolchain package it binds, so a program outside the repository builds against the WebRTC
+SFU and TURN from the installed prefix and nothing else
+([Packages](spec/packages.md), section 2). `buck2 build //:hirsel-toolchain` packs each one
+from its directory under `core/programs/`, binding its dependencies by major.
 
 `hirsel --version` prints the toolchain version, compiler identity and registered
 runtime archive identities by target.

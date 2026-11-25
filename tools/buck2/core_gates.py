@@ -10,6 +10,7 @@ def core_gates(out, call, Raw):
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                        "HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives",
+                                       "HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain",
                                        "HIRSEL_LINK_KIT": "//tools/buck2/native-toolchain:kit",
                                        "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                                        "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"},

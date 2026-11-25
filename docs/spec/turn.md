@@ -889,6 +889,11 @@ caller's trace reads.
   `local`.
 - Demultiplexes by first byte (RFC 7983) on every socket it shares.
 
+**Using the shipped package.** The installed toolchain ships `turn@1` with `stun_ice@1` in
+`core-packages/` ([building](../building.md#the-installation)). A caller outside the repository
+binds it as `turn = { major = 1 }` and builds with the installed `hirsel` alone; inside the
+repository the workspace binds it by path, `core/programs/turn`.
+
 ## Consumer contract coverage
 
 | requirement (CONSUMER-CONTRACT §2) | where | laws |

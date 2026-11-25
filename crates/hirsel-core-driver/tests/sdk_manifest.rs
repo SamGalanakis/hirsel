@@ -120,7 +120,6 @@ fn sdk_manifest_round_trips_the_packed_consumer() {
     assert_eq!(tables.len(), 2);
     assert!(tables.iter().any(|table| table["name"] == "items"));
     let entries = manifest["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 2);
     assert!(entries.iter().all(|entry| {
         entry["module"] == json!(["packed_consumer"])
             && entry["args_fp"].as_str().unwrap().parse::<u64>().is_ok()
@@ -128,8 +127,8 @@ fn sdk_manifest_round_trips_the_packed_consumer() {
     }));
 
     let unit = json!({"key": false, "root": [0], "definitions": []});
-    let [reply, rows] = entries.as_slice() else {
-        unreachable!()
+    let [reply, rows, room] = entries.as_slice() else {
+        panic!("entries are packed_reply, packed_rows, packed_room: {entries:?}")
     };
     assert_eq!(reply["name"], "packed_reply");
     assert_eq!(reply["kind"], "compute");
@@ -177,5 +176,47 @@ fn sdk_manifest_round_trips_the_packed_consumer() {
                 }]
             }
         }])
+    );
+    // docs/spec/sdk.md: a room's slots are its declared slots, as for a
+    // query, and only a room has `room` with its state and message value
+    // codecs and the bounds packed_consumer.hirsel passes to runner.room.
+    assert_eq!(room["name"], "packed_room");
+    assert_eq!(room["kind"], "room");
+    assert_eq!(room["args"], unit);
+    assert_eq!(room["slots"], rows["slots"]);
+    assert!(reply.get("room").is_none() && rows.get("room").is_none());
+    assert_eq!(
+        room["room"],
+        json!({
+            "state": {
+                "key": false,
+                "root": [19, 0],
+                "definitions": [{
+                    "name": "runner.packed_consumer.Cursor",
+                    "arguments": [],
+                    "kind": 0,
+                    "body": [
+                        {"name": "x", "removed": false, "type": [5]},
+                        {"name": "y", "removed": false, "type": [5]}
+                    ]
+                }]
+            },
+            "message": {
+                "key": false,
+                "root": [19, 0],
+                "definitions": [{
+                    "name": "runner.packed_consumer.Note",
+                    "arguments": [],
+                    "kind": 1,
+                    "body": [
+                        {"name": "Ping", "removed": false, "fields": [[6]]},
+                        {"name": "Text", "removed": false, "fields": [[13]]}
+                    ]
+                }]
+            },
+            "peers": 4,
+            "state_max": 8,
+            "message_max": 64
+        })
     );
 }

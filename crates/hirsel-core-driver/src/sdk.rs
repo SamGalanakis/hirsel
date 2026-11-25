@@ -752,7 +752,7 @@ mod tests {
             assert!(files["entries.js"].contains(line), "{line}");
         }
         assert!(files["entries.d.ts"].contains(
-            "export function bind(client: Transport): {call: { \"a\": { \"get\": (args: codec.Args0, options?: CallOptions) => Promise<Outcome<codec.Result0>> }; \"b\": { \"get\": (args: codec.Args1, options?: CallOptions) => Promise<Outcome<codec.Result1>> }; \"x\": { \"y\": { \"get\": (args: codec.Args2, options?: CallOptions) => Promise<Outcome<codec.Result2>> } } }; subscribe: {  }; subscribeDecoded: {  } };\n"
+            "export function bind(client: Transport): {call: { \"a\": { \"get\": (args: codec.Args0, options?: CallOptions) => Promise<Outcome<codec.Result0>> }; \"b\": { \"get\": (args: codec.Args1, options?: CallOptions) => Promise<Outcome<codec.Result1>> }; \"x\": { \"y\": { \"get\": (args: codec.Args2, options?: CallOptions) => Promise<Outcome<codec.Result2>> } } }; subscribe: {  }; subscribeDecoded: {  }; room: {  } };\n"
         ));
         assert_eq!(
             stub_path(&entry("x", "%74oggle").identity).unwrap(),

@@ -861,11 +861,11 @@ fn fits(size: u64, limit: u64) {
 type Particle { x: f32, y: f32, z: f32, mass: f32 }
 const _: () = fits(bytes[Particle], 16)                   // accepted: 16 is not over 16
 ```
-```hirsel unbuilt
+```hirsel
 fn grow(n: u8) -> u8 { n + 200 }
 const BIG: u8 = grow(100)                                 // refused: LANG-20, Overflow in grow
 ```
-```hirsel unbuilt
+```hirsel
 fn fresh() -> u64 { let _ = unique.new(); 1 }
 const ID: u64 = fresh()                                   // refused: LANG-20, unique.new is on the closed list
 ```

@@ -237,7 +237,10 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         for index, definition in enumerate(entries.values()):
             report = scratch / f'prepare-{index}.json'
             reports[definition] = report
-            launch = ['--laws', *recording] if definition in REACH_WITNESSES else normal
+            if recording_runtime:
+                launch = ['--laws', *recording]
+            else:
+                launch = ['--laws', *recording] if definition in REACH_WITNESSES else normal
             rows.update(run_preparation(command + launch + libraries + [str(programs / kind)],
                                         scratch, report, [definition]))
     elif kind == 'postgres':
@@ -258,7 +261,8 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         print(f'Preparing {len(entries)} {kind} laws', flush=True)
         report = scratch / 'prepare.json'
         reports = dict.fromkeys(entries.values(), report)
-        rows = run_preparation(command + normal, scratch, report, entries.values())
+        launch = ['--laws', *recording] if recording_runtime else normal
+        rows = run_preparation(command + launch, scratch, report, entries.values())
     laws = []
     for law, definition in entries.items():
         report = reports[definition]
@@ -271,7 +275,8 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         count = seeds if seeds is not None else FLOOD_SEEDS.get(law, DEFAULT_SEEDS)
         laws.append({'build': build, 'law': law, 'executable': str(binary), 'seeds': count,
                      'seed_zero': seed_zero, 'min_traces': min(count, TRACE_FLOORS.get(law, 0)),
-                     'required_witnesses': REACH_WITNESSES.get(law, [])})
+                     'required_witnesses': REACH_WITNESSES.get(law, []),
+                     'record_replay': recording_runtime is not None})
     shutil.rmtree(scratch / 'objects')
     return laws
 

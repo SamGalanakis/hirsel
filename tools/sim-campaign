@@ -21,9 +21,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 
 
 TRACE = re.compile(r"^trace (\S+)$", re.MULTILINE)
+REPLAY_VERDICT = re.compile(r"^replay: (\S+)", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class Law:
     # The law executable's SHA-256: a prior red's seed names the same schedule
     # only while this is unchanged (Ephyra regressions.rs:4-14 "stale").
     digest: str | None = None
+    record_replay: bool = False
 
 
 def allocate(db, campaign, shards, count):
@@ -130,32 +133,100 @@ def failure_class(row):
     return next((name for marker, name in FAILURE_CLASSES if marker in text), None)
 
 
-def run_seed(executable, seed, diagnose_red=False):
-    with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
-        observation = Path(directory) / "laws"
-        inputs = {"cwd": directory, "stdin": subprocess.DEVNULL,
-                  "env": {"HIRSEL_TEST_SIM_SEED": str(seed), "HIRSEL_LAWS": str(observation)},
-                  "capture_output": True}
-        ran = subprocess.run([executable], **inputs)
+def run_timed(command, inputs):
+    started = time.monotonic()
+    try:
+        ran = subprocess.run(command, timeout=300, **inputs)
+        return ran, time.monotonic() - started, False
+    except subprocess.TimeoutExpired as expired:
+        output = expired.output or b""
+        stderr = expired.stderr or b""
+        if isinstance(output, str):
+            output = output.encode()
+        if isinstance(stderr, str):
+            stderr = stderr.encode()
+        ran = subprocess.CompletedProcess(command, 124, output, stderr)
+        return ran, time.monotonic() - started, True
+
+
+def replay_failure(tape, ran):
+    """None for a Sealed replay, else its stable tape-differential class."""
+    if not tape.is_file():
+        return "TapeMissing"
+    stdout = ran.stdout.decode(errors="replace")
+    stderr = ran.stderr.decode(errors="replace")
+    if ran.returncode == 0 and not stdout and not stderr:
+        return None
+    verdict = REPLAY_VERDICT.search(stderr)
+    if verdict:
+        return verdict[1].split(" at ", 1)[0]
+    if ran.returncode == 0:
+        return "UnsealedOutput"
+    return f"ReplayExit{ran.returncode}"
+
+
+def run_tape_replay(executable, tape, directory):
+    directory.mkdir(mode=0o700)
+    if not tape.is_file():
+        return {"status": 1, "stdout": "", "stderr": "record-replay: tape missing"}, "TapeMissing"
+    replay, seconds, timed_out = run_timed([str(executable), "--hirsel-replay-recording", "same", str(tape)],
+                                          {"cwd": directory, "stdin": subprocess.DEVNULL, "env": {},
+                                           "capture_output": True})
+    row = {"status": replay.returncode, "stdout": replay.stdout.decode(errors="replace"),
+           "stderr": replay.stderr.decode(errors="replace"), "seconds": seconds}
+    if timed_out:
+        row["stderr"] += "record-replay: replay timed out after 300s\n"
+    return row, replay_failure(tape, replay)
+
+
+def run_seed(executable, seed, diagnose_red=False, record_replay=False):
+    with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as root:
+        root = Path(root)
+        recording = root / "record"
+        recording.mkdir(mode=0o700)
+        observation = root / "laws"
+        tape = root / "seed.tape"
+        env = {"HIRSEL_TEST_SIM_SEED": str(seed), "HIRSEL_LAWS": str(observation)}
+        if record_replay:
+            env["HIRSEL_RECORD"] = str(tape)
+        inputs = {"cwd": recording, "stdin": subprocess.DEVNULL, "env": env, "capture_output": True}
+        ran, seconds, timed_out = run_timed([executable], inputs)
         verdict = outcome(ran, observation)
-        row = {"seed": seed, **verdict}
+        row = {"seed": seed, **verdict, "seconds": seconds}
+        if timed_out:
+            row["stderr"] += "record-replay: recording run timed out after 300s\n"
         row["failure_class"] = failure_class(row)
+        tape_failure = None
+        if record_replay:
+            row["tape_replay"], tape_failure = run_tape_replay(executable, tape, root / "replay")
+            if tape_failure is not None:
+                row["tape_divergence"] = tape_failure
+                row["failure_class"] = f"record_replay:{tape_failure}"
+                if row["status"] == 0:
+                    row["status"] = 1
         if diagnose_red and ran.returncode != 0:
-            # Recreate the empty directory at the same path the first run saw.
-            shutil.rmtree(directory)
-            Path(directory).mkdir(mode=0o700)
-            replay = subprocess.run([executable], **inputs)
-            row["diagnostic_replay"] = outcome(replay, observation)
-            row["same_build_nondeterminism"] = (ran.returncode, ran.stdout, ran.stderr) != (
-                replay.returncode, replay.stdout, replay.stderr) or (
-                verdict["witnesses"] != row["diagnostic_replay"]["witnesses"])
+            if record_replay:
+                row["diagnostic_replay"] = row["tape_replay"]
+                row["same_build_nondeterminism"] = tape_failure is not None
+            else:
+                # Recreate the empty directory at the same path the first run saw.
+                shutil.rmtree(recording)
+                recording.mkdir(mode=0o700)
+                replay, _, _ = run_timed([executable], inputs)
+                row["diagnostic_replay"] = outcome(replay, observation)
+                row["same_build_nondeterminism"] = (ran.returncode, ran.stdout, ran.stderr) != (
+                    replay.returncode, replay.stdout, replay.stderr) or (
+                    verdict["witnesses"] != row["diagnostic_replay"]["witnesses"])
     return row
 
 
-def run_shard(executable, start, stop, diagnose_red=False):
+def run_shard(executable, start, stop, diagnose_red=False, record_replay=False):
     for seed in range(start, stop):
-        row = run_seed(executable, seed, diagnose_red)
-        row["replay"] = shlex.join([sys.argv[0], "run", str(executable), str(seed), str(seed + 1)])
+        row = run_seed(executable, seed, diagnose_red, record_replay)
+        command = [sys.argv[0], "run", str(executable), str(seed), str(seed + 1)]
+        if record_replay:
+            command.append("--record-replay")
+        row["replay"] = shlex.join(command)
         print(json.dumps(row), flush=True)
 
 
@@ -165,7 +236,7 @@ def seed_zero_failed(db, campaign, law, results):
         return False
     row = {**verdict, "law": law.name, "build": law.build, "digest": law.digest, "seed": 0,
            "kind": "deterministic_red",
-           "failure_class": failure_class(verdict)}
+           "failure_class": verdict.get("failure_class") or failure_class(verdict)}
     line = json.dumps(row)
     with db:
         db.execute("""CREATE TABLE IF NOT EXISTS deterministic_reds (
@@ -205,7 +276,16 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
                 if status == 0 or type(changed) is not bool or type(replay["status"]) is not int:
                     raise ValueError("unexpected diagnostic replay")
                 replays.append((campaign, seed, changed, replay["status"], replay["stdout"], replay["stderr"]))
-            row["failure_class"] = failure_class(row)
+            if "seconds" in row and type(row["seconds"]) not in (int, float):
+                raise ValueError("invalid seed seconds")
+            if "tape_replay" in row:
+                replay = row["tape_replay"]
+                if (type(replay.get("status")) is not int
+                        or not all(isinstance(replay.get(stream), str) for stream in ("stdout", "stderr"))
+                        or type(replay.get("seconds")) not in (int, float)
+                        or ("tape_divergence" in row and not isinstance(row["tape_divergence"], str))):
+                    raise ValueError("unexpected tape replay")
+            row["failure_class"] = row.get("failure_class") or failure_class(row)
             if row["failure_class"] is not None:
                 classes.append((campaign, seed, row["failure_class"]))
         except (ValueError, KeyError, TypeError):
@@ -224,8 +304,10 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
             hashes = TRACE.findall(row.get("stdout", ""))
             if len(hashes) == 1:
                 traces[shard].add(hashes[0])
-        row["replay"] = shlex.join([str(Path(__file__).resolve()), "run", str(executable),
-                                    str(seed), str(seed + 1)])
+        command = [str(Path(__file__).resolve()), "run", str(executable), str(seed), str(seed + 1)]
+        if laws is not None and law.record_replay:
+            command.append("--record-replay")
+        row["replay"] = shlex.join(command)
         print(json.dumps(row), file=results, flush=True)
         observed[seed] = status
     with db:
@@ -298,7 +380,8 @@ def dispatch_campaign(args, executable=None, laws=None):
             shutil.copy2(executable, bundle / "law")
             jobs = [{"lane": f"vopr-{args.campaign}-{shard}", "bundle": "bundle",
                      "seconds": args.shard_seconds,
-                     "command": f"./sim-campaign run ./law {start} {stop} --diagnose-red"}
+                     "command": f"./sim-campaign run ./law {start} {stop} --diagnose-red"
+                                + (" --record-replay" if getattr(args, "record_replay", False) else "")}
                     for shard, (start, stop) in enumerate(ranges)]
         else:
             ranges = allocate_ranges(db, args.campaign, [(law.name, law.seeds) for law in laws])
@@ -306,7 +389,7 @@ def dispatch_campaign(args, executable=None, laws=None):
             for index, (law, (start, stop)) in enumerate(zip(laws, ranges, strict=True)):
                 name = f"law-{index}"
                 shutil.copy2(law.binary, bundle / name)
-                remote.append((name, start, stop))
+                remote.append((name, start, stop, law.record_replay))
             (bundle / "ranges.json").write_text(json.dumps(remote))
             jobs = [{"lane": f"vopr-{args.campaign}", "bundle": "bundle", "seconds": 900,
                      "command": "./sim-campaign run-batch ranges.json"}]
@@ -358,9 +441,13 @@ def read_laws(path):
                 or any(not isinstance(label, str) for label in required)
                 or len(set(required)) != len(required) or (required and build is None)):
             raise ValueError(f"invalid reach witness declaration for {law}")
+        record_replay = entry.get("record_replay", False)
+        if type(record_replay) is not bool:
+            raise ValueError(f"invalid record-replay flag for {law}")
         binary = local_executable(path.parent / binary)
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-        laws.append(Law(law, binary, count, seed_zero, minimum, build, tuple(required), digest))
+        laws.append(Law(law, binary, count, seed_zero, minimum, build, tuple(required), digest,
+                        record_replay))
         names.add(law)
     return laws
 
@@ -409,7 +496,8 @@ def reds_first(manifest, run, dry_run):
                 continue
             verdict = None
             if law is not None:
-                verdict = run_seed(law.binary, seed) if seed or law.seed_zero is None else law.seed_zero
+                verdict = (run_seed(law.binary, seed, record_replay=law.record_replay)
+                           if seed or law.seed_zero is None else law.seed_zero)
             row = {"replay_of": entry["group"], "night": entry["night"], "law": name, "seed": seed,
                    "stale": mark, "build": law and law.build, "digest": law and law.digest,
                    "still_red": None if verdict is None else verdict["status"] != 0, **(verdict or {})}
@@ -440,6 +528,7 @@ def main():
     run.add_argument("start", type=int)
     run.add_argument("stop", type=int)
     run.add_argument("--diagnose-red", action="store_true", help=argparse.SUPPRESS)
+    run.add_argument("--record-replay", action="store_true", help="record the seed and replay its tape")
     remote = commands.add_parser("run-batch", help="run prepared ranges inside one VM")
     remote.add_argument("ranges", type=Path)
     campaign = commands.add_parser("dispatch", help="reserve ranges and dispatch a campaign")
@@ -448,6 +537,8 @@ def main():
     campaign.add_argument("--shards", type=positive, required=True)
     campaign.add_argument("--seeds-per-shard", type=positive, required=True)
     campaign.add_argument("--shard-seconds", type=positive, required=True)
+    campaign.add_argument("--record-replay", action="store_true",
+                          help="record each seed and require a Sealed tape replay")
     batch = commands.add_parser("batch", help="reserve a range per law and dispatch on one spare start")
     dispatch_arguments(batch)
     batch.add_argument("manifest", type=Path, help="JSON array of law, executable and seeds")
@@ -462,11 +553,15 @@ def main():
         if args.command == "run":
             if not 0 <= args.start < args.stop <= 2**64:
                 parser.error("expected a nonempty u64 seed range")
-            run_shard(args.executable.resolve(strict=True), args.start, args.stop, args.diagnose_red)
+            run_shard(args.executable.resolve(strict=True), args.start, args.stop, args.diagnose_red,
+                      args.record_replay)
             return 0
         if args.command == "run-batch":
-            for executable, start, stop in json.loads(args.ranges.read_text()):
-                run_shard(local_executable(args.ranges.parent / executable), start, stop, diagnose_red=True)
+            for entry in json.loads(args.ranges.read_text()):
+                executable, start, stop, *rest = entry
+                record_replay = bool(rest[0]) if rest else False
+                run_shard(local_executable(args.ranges.parent / executable), start, stop,
+                          diagnose_red=True, record_replay=record_replay)
             return 0
         if args.command == "batch":
             return dispatch_campaign(args, laws=read_laws(args.manifest))

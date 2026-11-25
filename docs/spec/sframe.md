@@ -1,9 +1,14 @@
 # SFrame: end-to-end media encryption
 
-Version note (2026-11-25, sframe-c9a-spec-2642): first text of SFRAME-1 to SFRAME-13, the
-C9a item of the SOTA video-calls plan. Not yet built: every fence is `unbuilt` and every test
-path is planned. The sections end with [decisions](#decisions), [build laws](#build-laws),
-[cost targets](#cost-targets) and [build slices](#build-slices).
+Version note (2026-11-25, sframe-c9a-spec-2642 v2): amended after the crypto attack
+(sframe-attack-2649). The Annex B escape is now a bijection (SFRAME-9), H.264 parameter sets
+are made stable against Chrome's receive-side SPS rewrite (SFRAME-10), a ratcheted `base` is
+the key at its step and a receiver can be advanced (SFRAME-8), ranged capacity and length rules
+are bounded before any CTR is spent (SFRAME-9), and sender reservations, receive floors, a
+jump bound and the per-track rule close S1 to S5. v1 (same day) was the first text of SFRAME-1
+to SFRAME-13, the C9a item of the SOTA video-calls plan. The sections end with
+[decisions](#decisions), [build laws](#build-laws), [cost targets](#cost-targets) and
+[build slices](#build-slices).
 
 This text defines a new package, `core/programs/sframe/` <!-- doc-ref: planned -->. It is a pure library implementing
 [RFC 9605](https://www.rfc-editor.org/rfc/rfc9605) (SFrame) with the cipher suite
@@ -37,7 +42,25 @@ no change to core, and the cost is this:
 - **One sender per key is library state, not a core guarantee.** Core cannot see one base
   key installed in two senders, or in a sender and a receiver, within a run or across runs.
 - Program-held key bytes are not zeroed when released, so a ratchet's forward secrecy
-  against a later memory read is weaker than a core schedule's.
+  against a later memory read is weaker than a core schedule's. A ratcheted sender and every
+  receiver following it hold the current base key for the generation's life, because
+  `ratchet` and the forward search need it.
+- **The secret boundary gives use-marking, not confidentiality.** `sframe_secret` is computed
+  in library code, and the AEAD key is one HKDF-Expand from it. Holding that key behind
+  `secret.seal` stops it being used for the wrong purpose; it does not keep it from the
+  program.
+- **Recordings hold base keys.** A base key reaches a member over `runner.room` or TLS and is
+  opened by `aead_open`, and a recording of `aead_open` holds the plaintext it opened
+  ([TLS-5](tls.md)). So a tape of an E2EE member holds every base key it received, at rest,
+  and anyone who reads the tape can decrypt the recorded media. Treat every such tape as
+  key-bearing.
+- **RFC 9605 §4.4.1's base-key duties are the caller's.** The RFC says a base key "MUST NOT be
+  used for encryption by multiple senders" and that implementations MUST mark each base key
+  for encryption or decryption, never both. The library marks only the keys it derives. The
+  same bytes passed to `sender` in two processes, or to `sender` and `install` in one, are
+  accepted. Two senders on one base key and one KID both start at CTR 0: the same key and
+  nonce from the first frame, which gives away the XOR of the plaintexts and GCM's
+  authentication key.
 
 [Keying end state](#keying-end-state) names the core change that removes every one of these
 costs: a TLS-8 `import_sframe` schedule. The library API keeps its shape, and the base key
@@ -108,30 +131,33 @@ pub fn encode_header(h: Header, mut out: Bytes) -> Result[u64, Capacity]
 pub fn decode_header(b: Bytes, at: u64) -> Result[(Header, u64), HeaderError]
 
 pub type Scheme = Fixed(u64) | Ratcheted(Ratchet)
-pub type Ratchet { generation: u64, bits: u8, step: u64 }
-pub type Follow { generation: u64, bits: u8, step: u64, forward: u8, keep: u8 }
+pub type Ratchet { generation: u64, bits: u8, step: u64 }      // base is the key at step
+pub type Follow { generation: u64, bits: u8, step: u64, forward: u8, keep: u8, floor: u64 }
 
-pub type Limits { frame: u64, window: u64, keys: u64, ranges: u64 }
-pub fn limits() -> Limits                               // 4 MiB, 128, 16, 256
+pub type Limits { frame: u64, window: u64, keys: u64, ranges: u64, jump: u64 }
+pub fn limits() -> Limits                               // 4 MiB, 128, 16, 256, 0 (off)
 
-pub type SframeError = Invalid | Framing | Exhausted | Keys | Secret(secret.SecretError) | Capacity(Capacity)
-pub type Discard: key = Malformed | Replayed | TooOld | Tampered
+pub type SframeError = Invalid | Framing | Unreserved | Exhausted | Keys | Secret(secret.SecretError) | Capacity(Capacity)
+pub type Discard: key = Malformed | Replayed | TooOld | TooFar | Tampered
 pub type OpenError = NoKey(u64) | Discarded(Discard) | Capacity(Capacity)
 pub type Sealed { kid: u64, ctr: u64, len: u64 }
 pub type Opened { kid: u64, ctr: u64, len: u64 }
+pub type Mark { ctr: u64, volume: u64 }
 
 pub type Sender
-pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take base: Bytes, floor: u64, l: Limits) -> Result[Sender, SframeError]
+pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take base: Bytes, from: Mark, l: Limits) -> Result[Sender, SframeError]
 pub fn kid(s: Sender) -> u64
 pub fn next_ctr(s: Sender) -> u64
+pub fn reserve(mut s: Sender, frames: u64, volume: u64) -> Result[Mark, SframeError]
 pub fn ratchet(mut s: Sender) -> Result[(), SframeError]
 pub fn seal(mut s: Sender, metadata: Bytes, plain: Bytes, mut out: Bytes) -> Result[Sealed, SframeError]
 pub fn seal_ranged(mut s: Sender, layout: ranges.Layout, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Sealed, SframeError]
 
 pub type Receiver
-pub fn receiver(suite: Suite, framing: ranges.Framing, l: Limits) -> Receiver
-pub fn install(mut r: Receiver, kid: u64, take base: Bytes) -> Result[(), SframeError]
+pub fn receiver(suite: Suite, framing: ranges.Framing, l: Limits) -> Result[Receiver, SframeError]
+pub fn install(mut r: Receiver, kid: u64, take base: Bytes, floor: u64) -> Result[(), SframeError]
 pub fn install_ratcheted(mut r: Receiver, f: Follow, take base: Bytes) -> Result[(), SframeError]
+pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take base: Bytes, floor: u64) -> Result[(), SframeError]
 pub fn remove(mut r: Receiver, kid: u64) -> bool
 pub fn remove_generation(mut r: Receiver, bits: u8, generation: u64) -> bool
 pub fn open(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError]
@@ -144,13 +170,19 @@ pub type Escape = Bare | AnnexB
 pub type Framing = Rfc | Ranged(Escape)
 pub type Range { at: u64, len: u64 }
 pub type Layout { ranges: List[Range] }
-pub type RangeError = Malformed | TooMany
+pub type RangeError = Malformed | TooMany | Unstable | Capacity(Capacity)
+pub fn bound(f: Framing, n: u64) -> u64                 // worst wire length of n working bytes
 pub fn none() -> Layout
 pub fn vp8(frame: Bytes) -> Layout
 pub fn h264(frame: Bytes, l: sframe.Limits) -> Result[Layout, RangeError]
 pub fn h265(frame: Bytes, l: sframe.Limits) -> Result[Layout, RangeError]
-pub fn normalize(frame: Bytes, mut out: Bytes) -> Result[u64, Capacity]   // 3-byte start codes to 4
+pub fn normalize_h264(frame: Bytes, mut out: Bytes) -> Result[u64, RangeError]   // start codes, trailing zeros, SPS (SFRAME-10)
+pub fn normalize_h265(frame: Bytes, mut out: Bytes) -> Result[u64, RangeError]   // start codes, trailing zeros
 ```
+
+`Limits` is checked when a sender or receiver is made: `frame` 1 to `2^30`, `window` 64 to
+4096, `keys` 1 to 256, `ranges` 0 to 1024, `jump` 0 (off) or at least `window`. Anything else
+is `Invalid`.
 
 `Sender` and `Receiver` are plain records that own `Secret` values, so they are move-only and
 neither `key` nor `codec`. Neither type can be compared, stored or encoded. A sender or
@@ -232,22 +264,39 @@ CTR.
 
 - **Nonce.** `be96(ctr)` is the CTR as a 12-byte big-endian integer. CTR is at most 64 bits,
   so it lands in the salt's last 8 bytes.
-- **`sender(suite, framing, scheme, take base, floor, l)`** makes one sending key:
+- **`sender(suite, framing, scheme, take base, from, l)`** makes one sending key:
   - `Fixed(kid)` sends under `kid`.
   - `Ratcheted(Ratchet(generation, bits, step))` sends under
-    `(generation << bits) | (step mod 2^bits)`, after applying the ratchet `step` times to
-    `base` (SFRAME-8). `bits` is 1 to 16, and `generation` must fit in `64 − bits` bits.
-    Anything else is `Invalid`.
-  - The first CTR is `floor`. A sender that resumes a key it used before passes a floor above
-    every CTR it sent (RFC 9605 §9.1). `next_ctr` gives the next CTR, so the caller can store
-    it before sealing.
+    `(generation << bits) | (step mod 2^bits)`. `base` is the key **at** `step`: the sender
+    does not ratchet when it is made (SFRAME-8). `bits` is 1 to 16, and `generation` must fit
+    in `64 − bits` bits. Anything else is `Invalid`.
+  - `from` is where the key's counters start: `Mark(0, 0)` for a key never used, or the last
+    mark the caller stored for a key it resumes (below).
+- **Reservations.** RFC 9605 §9.1 asks a sender to store its next counter before using it.
+  A durable write per frame is not something a media sender does, so the sender spends
+  counters only inside a **reservation** the caller has stored.
+  - A sender holds a **ceiling** `Mark(ctr, volume)`. It starts equal to `from`, so a new
+    sender reserves nothing and every seal is `Unreserved`.
+  - `reserve(mut s, frames, volume)` raises the ceiling to `next + frames` CTRs and
+    `spent + volume` volume units (below), each capped at the key's limit, and answers the new
+    ceiling. It changes nothing else, and it is `Exhausted` when the key has nothing left to
+    reserve.
+  - The caller stores the answered ceiling durably before it seals past the old one. A sender
+    that resumes passes that stored ceiling as `from`. Counters between the last seal and the
+    stored ceiling are skipped, never reused, so a crash at any point cannot repeat a nonce
+    and the volume limit holds across runs.
+  - `next_ctr` gives the next CTR.
+  - The default is a fresh base key per run, which needs no stored state at all. Resuming a
+    key is for a sender that cannot get a new one.
 - **`seal(mut s, metadata, plain, mut out)`** is the RFC framing. It appends
-  `header ‖ ciphertext ‖ tag` to the spare of `out` and answers `Sealed(kid, ctr, len)`. The
-  results, in this order, all before the AEAD call, with no state changed on a refusal:
+  `header ‖ ciphertext ‖ tag` to the spare of `out` and answers `Sealed(kid, ctr, len)`, with
+  `len` the exact number of bytes appended. The results, in this order, all before the AEAD
+  call, with no state changed on a refusal:
   - `Framing`: the sender's framing is not `Rfc` (for `seal_ranged`, not `Ranged`).
   - `Invalid`: `plain` is longer than `l.frame`.
-  - `Exhausted`: the next CTR is past `2^64 − 1`, or the key's volume would pass its limit
-    (below).
+  - `Exhausted`: the next CTR is `2^64 − 1` or more, or the key's volume would pass its limit
+    (below). The key is spent; the caller ratchets or rekeys.
+  - `Unreserved`: the next CTR or the volume would pass the ceiling. The caller reserves more.
   - `Capacity(c)`: the spare of `out` is shorter than the result, with the result's length as
     `requested`.
   - Otherwise the AEAD sink seals. On success the CTR advances by one and the volume grows.
@@ -255,13 +304,17 @@ CTR.
     plain bound are fixed, and the spare was checked.
 - **Volume limit.** Each sending key counts `q + σ`: frames sealed, plus 16-byte blocks of
   plaintext and AAD. It refuses with `Exhausted` past `2^34`, about 256 GiB.
-  - Basis: the AES-GCM confidentiality bound of draft-irtf-cfrg-aead-limits
-    [section unverified]. Below an attacker advantage of about `2^-60` it allows
-    `σ + q ≲ 2^34.5`, the same margin TLS 1.3 takes.
+  - Basis: draft-irtf-cfrg-aead-limits-09 §5.1.1, the AES-GCM confidentiality bound
+    `CA ≤ (σ + q + 1)^2 / 2^129`. At `2^34` the advantage is about `2^-61`, the margin
+    TLS 1.3 takes. The integrity bound (§5.1.2) allows about `2^52` forgery attempts against
+    4 MiB frames, which no receiver reaches, so receivers count nothing.
   - At 20 Mbit/s the limit is about 30 hours. The caller ratchets or rekeys before then, so
     a sender exposes no lifetime timer.
 - **Simulcast and SVC.** Each layer's frame is its own ciphertext with its own CTR (RFC 9605
-  §6.1.2, §6.1.3). A sender shared across layers counts one CTR sequence for all of them.
+  §6.1.2, §6.1.3). A sender shared across the encodings or layers of one media stream counts
+  one CTR sequence for all of them. Sharing one key across different media streams is a
+  caller error with two consequences, stated in SFRAME-13: frames splice between the streams,
+  and the replay window is counted in the wrong unit.
 
 ### SFRAME-6: Opening
 
@@ -277,8 +330,9 @@ The steps, in this order:
 2. **Key lookup.** The KID names a fixed key, a retained or current ratchet step, or a
    forward candidate (SFRAME-8). None of these gives `NoKey(kid)`. The RFC lets the caller
    buffer such a frame and retry once a key arrives (§4.4.4).
-3. **Window check** for a fixed key or a retained or current step: `Discarded(Replayed)` or
-   `Discarded(TooOld)` (SFRAME-7). A forward candidate's window is empty, so it passes.
+3. **Window check** (SFRAME-7): `Discarded(TooOld)`, `Discarded(Replayed)` or
+   `Discarded(TooFar)`. A forward candidate's window is empty with the floor 0, so only
+   `TooFar` can refuse it.
 4. `Capacity(c)` when the spare of `out` is shorter than the plaintext, which is the frame
    length minus the header length minus 16.
 5. **The AEAD sink opens** with nonce `sframe_salt XOR be96(ctr)` and AAD
@@ -295,22 +349,40 @@ for the same reason (RFC 3711 §3.3).
 
 ### SFRAME-7: The replay window
 
-Each receiving key keeps an RFC 3711 §3.3.2 window over CTR. It accepts a CTR it has not
-accepted before that is above `highest − W`, and it advances only after a frame
-authenticates.
+Each receiving key keeps an RFC 3711 §3.3.2 window over CTR, above a floor the caller
+gives. It accepts a CTR it has not accepted before that is at or above the floor and above
+`highest − W`, and it advances only after a frame authenticates.
 
-- **Size.** `W` is `l.window`, 64 to 4096, default 128. The state is the highest accepted
-  CTR and a `W`-bit map below it.
-- **First frame.** A key's first authenticated frame sets `highest`, whatever its CTR. A
-  frame cannot authenticate without the key, so no floor is needed.
+- **Size.** `W` is `l.window`, 64 to 4096, default 128. The state is the floor, the highest
+  accepted CTR and a `W`-bit map below it.
+- **Floor.** `install`, `install_ratcheted` and `advance` take `floor`, and a CTR below it is
+  `TooOld` from the start. Only forgery needs no floor: a frame cannot authenticate without the
+  key. Replay does need one. A receiver that restarts, re-subscribes, or removes and
+  reinstalls a key has an empty window, and anyone who recorded the stream can then replay
+  genuine frames from minutes ago, which authenticate and are shown as live. The key
+  distribution message carries the sender's current CTR, and the receiver installs with it as
+  the floor. A floor of 0 accepts the whole history once.
+- **First frame.** A key's first authenticated frame at or above the floor sets `highest`.
 - **Classifying a CTR** against the state:
+  - below the floor: `TooOld`;
+  - above `highest + l.jump`, when `l.jump` is not 0 and `highest` is set: `TooFar`;
   - above `highest`: accepted, and the map shifts;
   - in `(highest − W, highest]`: accepted only when its bit is clear, otherwise `Replayed`;
   - at or below `highest − W`: `TooOld`.
-- **Gaps** of any size are fine: an SFU that drops a layer or a simulcast encoding leaves
-  gaps in CTR, and a jump forward only shifts the map.
+- **Gaps** of any size are fine when `l.jump` is 0: an SFU that drops a layer or a simulcast
+  encoding leaves gaps in CTR, and a jump forward only shifts the map.
+- **A member can black out a sender** (RFC 9605 §7.2: any holder of a key can forge under it).
+  An outsider cannot move the window (law W1). A member can seal one frame under the victim's
+  KID at CTR `2^64 − 2`. It sets `highest` there, and every later genuine frame is `TooOld` at
+  each receiver that saw it, until the victim rekeys, even after the forger has left. A member
+  can forge media anyway, so what this adds is persistence. `l.jump` bounds it: with `jump`
+  set, a frame more than `jump` above `highest` is `TooFar` and moves nothing, so a blackout
+  needs a stream of forged frames and ends when the forger stops or is removed. The cost is
+  that a genuine gap larger than `jump`, such as a sender paused for a long time with its CTR
+  advancing, is discarded until the receiver reinstalls. The default is off; a deployment
+  that sends gaps of a known size turns it on above them.
 - **Scope.** Each KID's key has its own window, because CTR restarts under each new key. A
-  ratchet step's window starts empty, and removing a key drops its window.
+  ratchet step's window starts empty with floor 0, and removing a key drops its window.
 - **Order.** The window is read at step 3 of SFRAME-6 and written at step 6. A forged frame
   with a high CTR therefore never moves `highest` (law W1).
 
@@ -329,20 +401,29 @@ authenticates under it.
 - **Who decides when.** The library supplies the mechanism and the caller decides when to
   use it. A new receiver joining is a reason to ratchet. A receiver leaving needs a new
   generation, which is a new base key sent out of band (RFC 9605 §5.1).
+- **What `base` means.** For `sender`, `install_ratcheted` and `advance`, `base` is the key
+  **at** the given `step`. Nobody ratchets at construction, so making a sender or receiver
+  costs one derivation whatever `step` is. A joiner is handed the current step's key, never
+  step 0's, so it cannot read the generation's earlier media, which is what ratcheting on a
+  join is for. A party that keeps `(base, step)` keeps the latest pair.
 - **Sending.** `ratchet(mut s)` on a `Ratcheted` sender:
   - replaces the base key with the next one and adds 1 to `step`;
   - derives the new KID's key and salt;
-  - restarts the CTR at 0 under the new key and resets the volume.
+  - restarts the counters at `Mark(0, 0)` under the new key, with the ceiling there too, so
+    the caller reserves (SFRAME-5) and stores `(step, ceiling)` before the next seal. A crash
+    between `ratchet` and that write resumes the old step from its stored ceiling, which is
+    still safe.
   - The old key's `Secret` is released.
-  - It is `Invalid` on a `Fixed` sender. A `Secret(e)` or `Capacity` result leaves the sender
-    as it was.
+  - It is `Invalid` on a `Fixed` sender and `Exhausted` when `step` is `2^64 − 1`. A
+    `Secret(e)` or `Capacity` result leaves the sender as it was.
   - Within one generation the KID repeats every `2^R` steps, each time with a different base
     key, so `(base_key, KID, CTR)` stays unique (RFC 9605 §9.1).
-- **Following.** `install_ratcheted(mut r, Follow(generation, bits, step, forward, keep), take base)`
-  installs a generation at `step`. It needs `1 ≤ forward ≤ 16`, `keep ≤ 16` and
-  `keep + 1 + forward ≤ 2^bits`; anything else is `Invalid`. That bound gives every low-bit
-  value at most one meaning. For a frame whose KID's high bits name the generation and whose
-  low bits are `low`, with current step `s`:
+- **Following.** `install_ratcheted(mut r, Follow(generation, bits, step, forward, keep, floor), take base)`
+  installs a generation whose current step is `step`, with `floor` for that step's window. It
+  needs `1 ≤ forward ≤ 16`, `forward ≤ keep ≤ 16` and `keep + 1 + forward ≤ 2^bits`; anything
+  else is `Invalid`. The last bound gives every low-bit value at most one meaning. For a frame
+  whose KID's high bits name the generation and whose low bits are `low`, with current step
+  `s`:
   - If `low` is a retained or the current step's low bits, the frame uses that step's key.
     Retained steps are the up to `keep` steps before `s` that the receiver already holds.
   - Otherwise `d = (low − s) mod 2^bits`. When `1 ≤ d ≤ forward`, the library ratchets a copy
@@ -352,21 +433,34 @@ authenticates under it.
     intermediate steps join the retained set, which keeps only the `keep` steps below the new
     current one. Released steps drop their `Secret` and window.
   - **No commit.** A candidate that fails to authenticate is discarded and changes nothing.
+  - **Why `keep ≥ forward`.** Any member can seal a genuine frame at `s + forward` (RFC 9605
+    §7.2). If `keep` were smaller, that one commit would release step `s`, and the real
+    sender's frames would be `NoKey` until it ratcheted past. With `keep ≥ forward` the step a
+    commit jumped from is always retained.
+- **Catching up.** `advance(mut r, bits, generation, step, take base, floor)` moves an
+  installed generation to a later step with a supplied key: the key distribution's recovery
+  path for a receiver that missed more than `forward` steps, or any rekey within a generation.
+  Held steps in `[step − keep, step)` stay retained with their windows; older ones are
+  released. It is `Invalid` when the generation is not installed or `step` is not above the
+  current step, and it derives before it changes anything, so a `Secret(e)` leaves the
+  receiver as it was.
 - **Cost of a forgery.** An attacker who picks a KID can make one frame cost at most
   `forward` ratchet steps, one `derive_hkdf_sha256` and one AEAD open, all refunded. It can
   never move `s` (law K2).
 - **Generations.**
   - A ratcheted generation claims the `2^bits` KIDs `generation << bits` to
     `(generation << bits) | (2^bits − 1)`.
-  - `install` of a fixed KID inside a claimed range is `Invalid`, as is
-    `install_ratcheted` over an installed KID or generation.
+  - `install` of a fixed KID inside a claimed range is `Invalid`, as is `install` of a fixed
+    KID already installed and `install_ratcheted` over an installed KID or generation. The
+    caller removes first. `remove` then `install` of the same key reopens replay unless the
+    new install's floor is above the old window (SFRAME-7).
   - Old generations stay until `remove_generation`, so frames reordered across a rekey still
     open.
-  - The table holds at most `l.keys` keys (each fixed key and each held step counts one,
-    1 to 256). A full table makes `install` and `install_ratcheted` refuse with `Keys`, and a
-    commit drops retained steps first so it never exceeds `l.keys`.
-- **Fixed KIDs.** `install(mut r, kid, take base)` adds one fixed key. Its base key is not
-  kept after derivation. KID assignment across senders (RFC 9605 §9.2) is the caller's.
+  - The table holds at most `l.keys` keys. A fixed key counts one, and a ratcheted generation
+    counts `keep + 1` from its install, the most it can ever hold, so commits and `advance`
+    never need to evict. An install that would pass `l.keys` refuses with `Keys`.
+- **Fixed KIDs.** `install(mut r, kid, take base, floor)` adds one fixed key. Its base key is
+  not kept after derivation. KID assignment across senders (RFC 9605 §9.2) is the caller's.
 - **Unchecked.** The library cannot tell whether two parties hold the same base key, which is
   the first [keying cost](#sframe-end-to-end-media-encryption).
 
@@ -381,7 +475,7 @@ layout and the clear bytes as part of RFC 9605's `metadata`, so the crypto is RF
 transform. It reads codec structure in the frame: VP8's frame tag, and H.264's start codes and
 NAL headers. The SFU reads the same bytes for keyframes. The RFC framing puts the header at the
 front and encrypts everything, which breaks them. This is the mode LiveKit's FrameCryptor and
-DAVE use (LiveKit read in source for this text; DAVE [unverified]). RFC 9605 defines no wire format for it, so this
+DAVE use (both read in source). RFC 9605 defines no wire format for it, so this
 framing is Hirsel's own. It interoperates with Hirsel's JavaScript transform and with other
 `sframe` users.
 
@@ -391,6 +485,12 @@ touch, the last range ends within the frame, and there are at most `l.ranges` of
 encoding `enc(layout)` is ULEB128 of the range count, then for each range ULEB128 of `gap` and
 `len`. `gap` is the distance from the end of the previous range, or from 0 for the first.
 Every ULEB128 is minimal, and every value is below `2^32`.
+
+**Lengths.** `bound(f, n)` is the longest wire form of `n` working-form bytes: `n` for `Rfc`
+and `Ranged(Bare)`, and `n + n/2 + 1` (integer division) for `Ranged(AnnexB)`, because the
+escape adds at most one byte per two zeros and one at a NAL's end. `T(l)` is the longest
+trailer, `16 + 17 + 5 + 10·l.ranges + 2`: the tag, the longest header, the longest layout
+(ULEB128 count and two ULEB128 values per range, each below `2^32`) and `L`.
 
 **Sealing.** `seal_ranged(mut s, layout, metadata, frame, mut out)`. Let `clear` be the bytes
 of the frame's working form inside the layout's ranges and `secret` the bytes outside them, both
@@ -402,8 +502,12 @@ steps:
    - `Framing`: the sender's framing is not `Ranged`;
    - `Invalid`: the layout is not canonical for the working form, or `frame` is longer than
      `l.frame`, or, under `AnnexB`, `frame` breaks a rule of [Annex B frames](#annex-b-frames);
-   - then `Exhausted` and `Capacity`, as in SFRAME-5. `Capacity` is checked against the
-     escaped length, which the sender computes before sealing.
+   - then `Exhausted` and `Unreserved`, as in SFRAME-5;
+   - then `Capacity` when the spare of `out` is shorter than
+     `bound(framing, len(working form) + len(trailer))`, with that bound as `requested`.
+     The exact wire length depends on the ciphertext, which does not exist yet, so the check
+     is against the bound. Nothing can refuse after the AEAD call, so a refusal never spends a
+     CTR and no CTR is ever sealed twice.
 2. Seal `secret` as RFC 9605 `encrypt(CTR, KID, metadata′, secret)`, with
    `metadata′ = enc(layout) ‖ clear ‖ metadata`. So the AAD is
    `header ‖ enc(layout) ‖ clear ‖ metadata`. `enc(layout)` determines the length of `clear`,
@@ -414,23 +518,32 @@ steps:
 4. Append the **trailer** `tag ‖ header ‖ enc(layout) ‖ L`. `L` is
    `len(header) + len(enc(layout))` as 2 bytes big-endian. A canonical layout within
    `l.ranges ≤ 1024` keeps `L` below `2^16`.
-5. Under `AnnexB`, escape the result at the frame's own NAL boundaries (below). The trailer is
-   part of the last NAL.
+5. Under `AnnexB`, apply the **wire escape** at the frame's own NAL boundaries (below). The
+   trailer is part of the last NAL.
+6. Answer `Sealed(kid, ctr, len)` with `len` the exact number of bytes appended.
 
-**Opening.** `open_ranged(mut r, metadata, frame, mut out)`:
+**Opening.** `open_ranged(mut r, metadata, frame, mut out)`. Every refusal before step 5 is
+`Discarded(Malformed)` unless named otherwise, with nothing appended and no state changed:
 
-1. Under `AnnexB`, find the start codes and unescape each NAL. A frame that is not canonically
-   escaped is `Discarded(Malformed)`.
-2. Read `L` from the last 2 bytes. The header starts `L + 2` bytes from the end. Decode it
+1. `frame` is longer than `bound(framing, l.frame + T(l))`. This bounds every pre-authentication
+   pass by `l.frame` and `l.ranges`, and two receivers with equal limits accept the same
+   frames.
+2. Under `AnnexB`, find the start codes and unescape each NAL with the wire rule. A NAL that
+   is not in the wire escape's image is refused.
+3. With `n` the length of the working form: `n < 20`, or `L` (its last 2 bytes) below 2, or
+   `n < L + 18`, is refused. Otherwise the header starts `L + 2` bytes from the end. Decode it
    (SFRAME-3), and decode the layout from the rest of those `L` bytes. The layout must end
-   exactly at `L` and be canonical for a body of `len − 2 − L − 16` bytes. Under `AnnexB`,
-   each start code found in step 1 must lie inside a clear range. The 16 bytes before the
-   header are the tag.
-3. Any failure in step 2 is `Discarded(Malformed)`.
-4. Then apply SFRAME-6 from step 2, to the reconstructed RFC ciphertext
+   exactly at `L` and be canonical for a body of `n − 2 − L − 16` bytes. Under `AnnexB`, each
+   start code found in step 2 must lie inside a clear range. The 16 bytes before the header
+   are the tag.
+4. `Capacity(c)` when the spare of `out` is shorter than `bound(framing, len(body))`, with
+   that bound as `requested`. The output is re-escaped plaintext, whose length is not known
+   before authentication.
+5. Then apply SFRAME-6 from step 2, to the reconstructed RFC ciphertext
    `header ‖ secret(body) ‖ tag` with `metadata′ = enc(layout) ‖ clear(body) ‖ metadata`.
-5. On success, `out` receives the original frame, escaped again under `AnnexB`: the clear
-   bytes in place, and the opened plaintext at the secret positions.
+6. On success, `out` receives the original frame: the clear bytes in place and the opened
+   plaintext at the secret positions, and under `AnnexB` escaped with the **codec escape**
+   (below). `Opened.len` is the exact length.
 
 **What the binding covers.** The header, the layout and every clear byte are in the AAD. A
 change to any of them, or to the ciphertext or the tag, fails the tag. Binding the layout
@@ -448,41 +561,61 @@ H.264 and H.265 byte streams find NAL units by start codes, so ciphertext and tr
 must never contain one. In uniform bytes a start-code emulation (`00 00` followed by a byte
 `≤ 0x03`) occurs at about `2^-22` per position. That is about one per 4 MiB: rare per frame,
 but certain within minutes of a video stream. `Ranged(AnnexB)` handles it with the codecs'
-own emulation prevention (H.264 §7.4.1, H.265 §7.4.2 [section numbers unverified]).
+own emulation prevention (H.264 §7.4.1 and §7.4.1.1, H.265 §7.4.2 and §7.4.2.1) and one extra
+rule at each NAL's end.
 
 - **Input rules.** `seal_ranged` refuses with `Invalid`:
   - a frame that does not begin with a start code;
   - a 3-byte start code (`00 00 01`), anywhere. WebRTC's H.264 and H.265 depacketizers rebuild
-    every NAL with a 4-byte start code whatever the sender sent (verified in LiveKit's
-    `normalizeAnnexBStartCodes`, client-sdk-js `src/e2ee/worker/naluUtils.ts`). A 3-byte start
-    code inside a clear range would reach the receiver changed and fail the tag.
-    `ranges.normalize(frame, mut out)` rewrites them first.
-  - a NAL whose body is not canonically escaped. A conforming encoder's output always is,
-    because the codecs forbid `00 00 03` before a byte above `0x03`.
+    every NAL with a 4-byte start code whatever the sender sent (libwebrtc
+    `h264_sps_pps_tracker.cc`, and LiveKit's `normalizeAnnexBStartCodes` in client-sdk-js
+    `src/e2ee/worker/naluUtils.ts`). A 3-byte start code inside a clear range would reach the
+    receiver changed and fail the tag.
+  - a NAL whose body ends in `00`. Annex B allows `trailing_zero_8bits` after a NAL, and
+    depacketizers drop them, so they would not survive the trip either.
+  - a NAL whose body is not canonically escaped under the codec escape. A conforming
+    encoder's output always is, because the codecs forbid `00 00 03` before a byte above
+    `0x03`.
   - a layout under which a start code is not inside a clear range.
+
+  `ranges.normalize_h264` and `normalize_h265` rewrite 3-byte start codes to 4 and strip
+  trailing zero bytes, so a sender passes every frame through one of them first.
 - **Working form.** Each NAL body (the bytes between its start code and the next) is
   unescaped by removing the `03` of every `00 00 03`. Layout offsets, `clear`, `secret` and
   the AAD are all over this form.
-- **Escape.** The sender takes NAL boundaries from the input frame's start codes, never by
-  scanning the sealed bytes, which may contain `00 00 01` by chance. In each NAL body it
-  inserts:
-  - an `03` after every `00 00` that is followed by a byte `≤ 0x03`;
-  - an `03` after a final `00`.
-- **Unescape.** The receiver splits at `00 00 00 01` and removes those bytes. It refuses:
-  - an `00 00 03` that is not followed by a byte `≤ 0x03` or by the NAL's end;
-  - an `00 00` followed by a byte `≤ 0x02` inside a NAL;
-  - a NAL ending in `00`.
-
-  So escaping is a bijection onto canonical streams, and one sealed frame has one wire form.
-- **What parsers see.** For a conforming input, re-escaping a NAL changes no clear range's
-  unescaped bytes. Only an `03` next to a clear/secret boundary can come or go. The codec
-  parsers that read clear bytes (the packetizer, the receiver's parameter-set tracking and the
-  SFU) all unescape before parsing, so they read exactly the encoder's values.
+- **Wire escape** (sealing step 5). The sender takes NAL boundaries from the input frame's
+  start codes, never by scanning the sealed bytes, which may contain `00 00 01` by chance. In
+  each NAL body it:
+  - inserts an `03` after every `00 00` that is followed by a byte `≤ 0x03` (the interior
+    rule);
+  - then, if the result ends in `00` followed by zero or more `03`, appends one `03` (the tail
+    rule).
+- **Wire unescape** (opening step 2). The receiver splits at `00 00 00 01`. For each NAL body
+  `w` it refuses a `w` that ends in `00`; if `w` ends in `00` followed by one or more `03`, it
+  removes the last `03`; then it removes the `03` of every interior `00 00 03`. The NAL is
+  accepted only when wire-escaping the result gives `w` back, so every refused stream is
+  outside the escape's image and every sealed frame has exactly one wire form.
+- **Why the tail rule.** The interior rule alone is not injective at a NAL's end: a sealed
+  body ending `41 00` and one ending `41 00 03` would both go on the wire as `41 00 03`. About
+  one NAL in 256 that is not the last in its frame and ends in ciphertext would then fail to
+  open, and the last NAL too whenever `L`'s low byte is 0. No tail rule that is independent of
+  the layout can be injective and also leave every NAL not ending in `00` unchanged. Under
+  this one, a wholly clear NAL whose working form ends in `00` and then `03`s carries one more
+  `03` on the wire than the encoder wrote. The receiver removes it before authentication, so
+  the AAD and `out` are unaffected; only pre-decryption parsers (the SFU, Chrome's
+  depacketizer) see it, after the last bit they read.
+- **Codec escape** (opening step 6). `out` is escaped with the codecs' own rule: the interior
+  rule, plus an `03` after a final `00 00`. For a frame that met the input rules this returns
+  the sender's bytes exactly.
+- **What parsers see.** For a conforming input, wire-escaping a NAL changes no clear range's
+  unescaped bytes. Only an `03` next to a clear/secret boundary or at a NAL's end can come or
+  go. The codec parsers that read clear bytes (the packetizer, the receiver's parameter-set
+  tracking and the SFU) all unescape before parsing, so they read exactly the encoder's values.
 - **Why this and not retrying.** Escaping is deterministic and spends no CTR. The other
   approach, resealing under a fresh nonce until no emulation appears, fails outright when the
   trailer holds an emulation, because the header and layout bytes do not change between
-  attempts. LiveKit escapes its ciphertext and trailer the same way (`writeRbsp`, verified in
-  `src/e2ee/worker/FrameCryptor.ts`).
+  attempts. DAVE reseals up to 10 times (libdave `encryptor.cpp`). LiveKit escapes its
+  ciphertext and trailer (`writeRbsp`, `src/e2ee/worker/FrameCryptor.ts`).
 
 ### SFRAME-10: Codec range rules
 
@@ -493,16 +626,18 @@ sender computes one, because the receiver reads the layout from the trailer.
 | --- | --- | --- | --- |
 | Opus | `Ranged(Bare)`, `none()` | none: the whole frame is encrypted | nothing parses an Opus frame before the decoder; the SFU reads audio level from the header extension |
 | VP8 | `Ranged(Bare)`, `vp8(frame)` | the first 10 bytes of a keyframe (frame tag, start code, dimensions; RFC 6386 §9.1), the first 3 bytes of an interframe, or the whole frame when shorter | the SFU's and the receiver depacketizer's keyframe and size checks (`media_bits.vp8`, webrtc router) |
-| H.264 | `Ranged(AnnexB)`, `h264(frame, l)` | every start code; all of every SPS (type 7) and PPS (type 8); for each slice (types 1 and 5) its NAL header and slice header through `pic_parameter_set_id`; for any other NAL its 1-byte header | the RFC 6184 packetizer, the receiver's SPS/PPS tracking before decryption, and the SFU's keyframe and parameter-set checks |
-| H.265 | `Ranged(AnnexB)`, `h265(frame, l)` | every start code; all of every VPS, SPS and PPS (types 32 to 34); for each slice segment (types 0 to 9 and 16 to 21) its 2-byte header and slice header through `slice_pic_parameter_set_id`; for any other NAL its 2-byte header | the RFC 7798 packetizer, the receiver's parameter-set tracking, and the same SFU checks |
+| H.264 | `Ranged(AnnexB)`, `h264(frame, l)` after `normalize_h264` | every start code; all of every SPS (type 7) and PPS (type 8); for each slice (types 1 and 5) its NAL header and slice header through `pic_parameter_set_id`; for any other NAL its 1-byte header | the RFC 6184 packetizer, the receiver's SPS/PPS tracking before decryption, and the SFU's keyframe and parameter-set checks |
+| H.265 | `Ranged(AnnexB)`, `h265(frame, l)` after `normalize_h265` | every start code; all of every VPS, SPS and PPS (types 32 to 34); for each slice segment (types 0 to 9 and 16 to 21) its 2-byte header and slice header through `slice_pic_parameter_set_id`; for any other NAL its 2-byte header | the RFC 7798 packetizer, the receiver's parameter-set tracking, and the same SFU checks |
 
 - **VP8.** `vp8` reads the frame tag's `P` bit (bit 0 of byte 0, `0` for a keyframe). It is
   total: any frame gives a layout.
-- **H.264 and H.265.** `h264` and `h265` run over the working form, using a new splitter
-  shared by both, `media_bits.annexb.next`. They check each header with `media_bits.h264.nal`
-  or `media_bits.hevc.nal`. They answer:
+- **H.264 and H.265.** `h264` and `h265` run over the working form, using a splitter shared
+  by both and kept in `ranges` because it applies the input rules above. They check each
+  header with `media_bits.h264.nal` or `media_bits.hevc.nal`. They answer:
   - `Malformed` for a frame that breaks the input rules of [Annex B frames](#annex-b-frames),
-    for a NAL shorter than its header, or for a slice header that ends before its PPS id;
+    for a NAL shorter than its header, for a slice header that ends before its PPS id, or for
+    an H.264 SPS that does not parse through its VUI;
+  - `Unstable` for an H.264 SPS that Chrome would rewrite (below);
   - `TooMany` for more than `l.ranges` ranges. Adjacent ranges merge, so a start code, its
     NAL header and a clear slice-header prefix are one range.
 - **The slice-header prefix.** The clear prefix is the bytes that hold the slice header's
@@ -511,13 +646,42 @@ sender computes one, because the receiver reads the layout from the trailer.
   - H.265 §7.3.6.1: `first_slice_segment_in_pic_flag`, `no_output_of_prior_pics_flag` (for
     IRAP types 16 to 23), and `slice_pic_parameter_set_id`.
 
-  The prefix is the whole bytes covering those bits. Its cause is verified in LiveKit's source:
-  Chrome reads `pic_parameter_set_id` from an H.264 IDR slice before the decrypt transform and
-  drops the keyframe if it names an unknown PPS (`FrameCryptor.ts`, LiveKit issue #2180).
-  LiveKit keeps the NAL header and one more byte clear, and reseals until the encrypted bits
-  happen to read the right id. Keeping the parsed bits clear removes that retry. H.265 slices
-  get the same prefix: Chrome's H.265 tracking is not checked [unverified], and the prefix
-  leaks nothing beyond the parameter sets.
+  The prefix is the whole bytes covering those bits. Its cause is in libwebrtc's H.264
+  depacketizer, which runs before the receive transform: it parses the slice header of every
+  slice (types 1 and 5, not only IDR) and drops the packet when that parse fails
+  (`video_rtp_depacketizer_h264.cc`), and the SPS/PPS tracker drops a keyframe whose PPS id is
+  unknown. LiveKit keeps the NAL header and one more byte clear and reseals until the
+  encrypted bits happen to read the right id (`FrameCryptor.ts`, LiveKit issue #2180);
+  keeping the parsed bits clear removes that retry. Chrome's H.265 depacketizer reads only
+  `first_slice_segment_in_pic_flag` and rewrites nothing (`video_rtp_depacketizer_h265.cc`),
+  so the H.265 prefix is more than Chrome needs; it is kept for the SFU and leaks nothing
+  beyond the parameter sets.
+- **H.264 SPS stability.** libwebrtc's H.264 depacketizer runs
+  `SpsVuiRewriter::ParseAndRewriteSps(…, kIncoming)` on every SPS and replaces its bytes
+  before the receive transform sees the frame (`video_rtp_depacketizer_h264.cc`,
+  `common_video/h264/sps_vui_rewriter.cc`). The SPS is clear and in the AAD, so a rewritten
+  SPS fails the tag, and every keyframe of the track is `Tampered`. With no colour space
+  given, as on receive, it rewrites exactly when:
+  - the SPS has no VUI (`vui_parameters_present_flag = 0`);
+  - the VUI has no `bitstream_restriction_flag`;
+  - or the bitstream restriction has `max_num_reorder_frames ≠ 0` or
+    `max_dec_frame_buffering > max_num_ref_frames`.
+
+  A Chrome sender is never hit, because Chrome rewrites its own SPS the same way before its
+  send transform (`frame_encode_metadata_writer.cc`, key frames only). A native sender, a
+  server-side member or any encoder with B-frames or a bare SPS is hit on every keyframe.
+  So:
+  - `h264` answers `Unstable` for an SPS meeting any condition.
+  - `normalize_h264` rewrites such an SPS as libwebrtc does: it adds a VUI or a bitstream
+    restriction, or replaces the restriction's last two values, with
+    `max_num_reorder_frames = 0` and `max_dec_frame_buffering = max_num_ref_frames`, and the
+    defaults libwebrtc writes for the rest (`motion_vectors_over_pic_boundaries_flag = 1`,
+    `max_bytes_per_pic_denom = 2`, `max_bits_per_mb_denom = 1`, both
+    `log2_max_mv_length_* = 16`). It then re-escapes the SPS and strips its trailing zero
+    bytes. Its output is a fixed point: libwebrtc's incoming pass leaves it unchanged.
+  - A rewritten SPS tells the decoder not to reorder, so an encoder that really emits
+    B-frames will show them late or out of order at every libwebrtc receiver, encrypted or
+    not. A native sender sends no B-frames, as WebRTC encoders do not.
 - **Parameter sets are clear.** The receiver's depacketizer keeps SPS and PPS before
   decryption, and the webrtc router's parameter-set check (`media_bits.unit.h264_sent`) reads
   them, so E2EE tracks keep that check. LiveKit keeps them clear too: it leaves every byte
@@ -525,15 +689,24 @@ sender computes one, because the receiver reads the layout from the trailer.
   clear keyframe bytes and the RTP stream reveal anyway. SEI, AUD and the other NALs are
   encrypted beyond their headers, which keeps SEI user data private. LiveKit leaves leading SEI
   clear; this text does not.
-- **Browser evidence before the build.** The H.264 and H.265 rules are built in B2 only with
-  a captured Chrome round trip per codec (sender transform output, then receiver transform
-  input, for a keyframe and a delta frame) as a vector, and the B2 build checks it first.
-  - The capture must show that the receiver's bytes equal the sender's after 4-byte
-    normalization, and that the decoder runs.
+- **Browser evidence (law G2).** The H.264 and H.265 rules are checked against Chromium itself:
+  a capture script drives headless Chromium through a loopback peer connection with
+  `RTCRtpScriptTransform` on both ends, sets each sender frame's data to a given byte string,
+  and records what the receiver's transform is handed. A Chrome-to-Chrome capture cannot see
+  M1-class failures, because Chrome's own sender has already normalized, so the capture sends
+  frames from a non-libwebrtc encoder (`ffmpeg`'s `libx264` with B-frames, whose SPS meets a
+  rewrite condition) as well as Chrome's own:
+  - Chrome's own H.264 and H.265 frames, sealed by `oracle.py` with the rules here, arrive
+    unchanged and open.
+  - The native frames sealed without normalizing arrive with their SPS rewritten and are
+    `Tampered`, and `h264` refuses them as `Unstable`. This is the failure the gate exists to
+    see.
+  - The same frames after `normalize_h264` arrive unchanged and open, and `normalize_h264`'s
+    SPS equals the SPS Chrome produced from the raw one, trailing zeros aside.
   - If Chrome inserts or drops NALs (for example out-of-band `sprop-parameter-sets`, which
     Hirsel's SDP never signals), the codec's rule is re-gated like B3.
 - **Deferred.** VP9 and AV1 are not in the first build (slice B3). Neither is known to need
-  ranges, and VP9 may need none [unverified]:
+  ranges, and VP9 may need none; the B3 capture decides:
   - libwebrtc's VP9 packetizer takes its descriptor from encoder metadata.
   - AV1's packetizer parses OBU headers and sizes, drops temporal delimiters, and its
     depacketizer is reported to rewrite OBU size fields. If so, a receiver's frame is not the
@@ -606,9 +779,29 @@ webrtc package's.
   - Distribute base keys over an end-to-end secure channel, such as LiveKit-style
     per-participant keys sent to members over `runner.room` under each member's key
     agreement.
-  - Give each sender its own base key or its own KIDs (RFC 9605 §9.2).
+  - Give each sender its own base key or its own KIDs (RFC 9605 §9.2), and never pass one base
+    key to two senders or to a sender and a receiver (RFC 9605 §4.4.1; the library cannot
+    check it).
   - Send a new generation when a member leaves.
-  - Prefer a fresh base key per run to a resumed CTR floor.
+  - Send each key with the sender's current step and CTR, and install with that CTR as the
+    floor (SFRAME-7).
+  - Use a fresh base key per run. A resumed key needs its stored ceiling (SFRAME-5).
+  - Keep a receiver that missed more than `forward` steps alive with `advance` (SFRAME-8).
+- **One key per media stream.** Callers MUST give each media stream (camera, screen share,
+  microphone) its own `Sender` and KID; the encodings of one simulcast stream or the layers of
+  one SVC stream may share one. Nothing in the AAD names the track, so with one key across
+  streams:
+  - **frames splice:** an SFU can forward camera frames on the screen-share track, and they
+    authenticate, so the viewer sees the camera as the shared screen;
+  - **the window is in the wrong unit:** one `Receiver` for audio at 50 frames/s and three
+    video layers at 30 counts 140 CTRs a second, so `W = 128` is under a second of video, and
+    a frame held a second in the jitter path is `TooOld`.
+
+  A deployment that must share a key binds a track id in `metadata`, which removes the splice,
+  and sizes `l.window` for the combined rate. RFC 9605 §6.1.1 only ties a frame to its sender
+  by KID.
+- **Tapes.** A recording of an E2EE member holds its base keys (keying cost). Keep such tapes
+  as secret as the media keys themselves.
 - **Counters.** Count `Discard` reasons and `NoKey` per track. An elevated `Tampered` rate is
   a forgery signal (RFC 9605 §7.5).
 - **Metadata.** Use authenticated metadata only after `open` succeeds (RFC 9605 §9.4).
@@ -632,7 +825,7 @@ derivation sinks: fixed labels, fixed output boundaries and one purpose per outp
 // module schedule (TLS-8), the end state
 pub fn import_sframe(suite: SframeSuite, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
 pub fn sframe_ratchet(mut s: Schedule) -> Result[(), ScheduleError]
-pub fn sframe_sealer(mut s: Schedule, kid: u64, floor: u64) -> Result[Sealer, ScheduleError]
+pub fn sframe_sealer(mut s: Schedule, kid: u64, from: Mark) -> Result[Sealer, ScheduleError]
 pub fn sframe_opener(s: Schedule, kid: u64) -> Result[Opener, ScheduleError]
 ```
 
@@ -649,8 +842,9 @@ pub fn sframe_opener(s: Schedule, kid: u64) -> Result[Opener, ScheduleError]
   RFC 9605 fixes it per (base key, KID). A sender-keys deployment gives each party one send
   base key and one receive base key per peer, which fits. A shared-group base key with
   per-member KIDs does not, unless the import names its sending KIDs.
-- **Trigger.** The first consumer whose base key reaches the run only as a `Secret` (an
-  entry grant, or MLS), or a security review that requires core-enforced single-sender. It is
+- **Trigger.** Any of: the first consumer whose base key reaches the run only as a `Secret` (an
+  entry grant, or MLS); a security review that requires core-enforced single-sender; or a
+  requirement that recordings of E2EE members hold no base keys. It is
   its own Opus spec lane with a Fable attack (size M), amending TLS-8.
 
 ## Consumer contract coverage
@@ -677,8 +871,8 @@ pub fn sframe_opener(s: Schedule, kid: u64) -> Result[Opener, ScheduleError]
   - codec-aware unencrypted ranges authenticated as AAD, with Opus fully encrypted;
   - an MLS-exported per-sender key with a hash ratchet;
   - a truncated 8-byte tag and a custom footer, which are not taken.
-  - Its handling of H.26x start-code emulation is reported as retry-with-new-nonce
-    [unverified].
+  - It handles H.26x start-code emulation by resealing under a new nonce, up to 10 times
+    (libdave `encryptor.cpp`), and leaves H.265 slices clear for the 2-byte header only.
 - **LiveKit E2EE** (client-sdk-js FrameCryptor, its native FrameCryptor in webrtc-sdk): it
   keeps VP8's 10 or 3 bytes clear, and for H.264 and H.265 every byte up to two bytes into the
   first slice. It reseals H.264 IDR frames until the PPS id reads right, normalizes 3-byte start
@@ -698,13 +892,17 @@ Each decision gives its reason and how hard it is to reverse.
 | D1 | No core change; the base key and salt are program bytes, and the AEAD key sits behind the secret boundary | Required by the brief, and the salt cannot come from a `Secret` | S once TLS-8 gains `import_sframe` (keying end state); the API keeps its shape |
 | D2 | The per-KID AEAD key comes from `derive_hkdf_sha256` and not from sealing a library-computed key | It names the sink the brief asks for, gives receivers an `open`-only key, and C.3 checks both HKDF computations against each other | Trivial: one call site |
 | D3 | Suite 0x0004 only | TLS-5 has no truncated tag and no HKDF-SHA512 sink | Adding 0x0005 is S plus a core sink |
-| D4 | Range rules live in `sframe.ranges` over `media_bits` parsers; `media_bits` gains only `annexb.next` | A clear range is an E2EE packetizer decision, not codec parsing | Moving the rules into `media_bits` is mechanical |
-| D5 | Annex B emulation is handled by escaping, not by retrying | Deterministic, wastes no CTR, and works when the trailer holds an emulation | Retrying would change the wire form, which is fine before any deployment |
+| D4 | Range rules, the Annex B splitter and the SPS normalizer live in `sframe.ranges`; `media_bits` is unchanged | A clear range is an E2EE packetizer decision, not codec parsing | Moving the rules into `media_bits` is mechanical |
+| D5 | Annex B emulation is handled by escaping, not by retrying, with a tail rule that makes the wire escape a bijection and a separate codec escape for the output | Deterministic, wastes no CTR, works when the trailer holds an emulation, and every sealed frame has one wire form. The uniform tail rule adds one `03` to a clear NAL ending in `00 03`, which pre-decryption parsers read past; the alternative, a layout-dependent tail rule, makes unescape depend on the trailer | Wire format: fine before the first deployed client, hard after |
 | D6 | The trailer is `tag ‖ header ‖ layout ‖ L` and a key has one framing for life | It parses from the end with no magic number, keeps the codec's own leading bytes in place, and stops cross-framing confusion | Wire format: fine before the first deployed client, hard after |
-| D7 | H.264 and H.265 keep start codes, parameter sets, NAL headers and each slice header through its PPS id clear; everything else is encrypted | Chrome parses parameter sets and the IDR slice's PPS id before decryption (LiveKit source), and the SFU keeps its parameter-set check; the PPS-id prefix removes LiveKit's reseal retry. Gated on a Chrome capture in B2 | A layout change with no wire-format change, since layouts are sent |
+| D7 | H.264 and H.265 keep start codes, parameter sets, NAL headers and each slice header through its PPS id clear; everything else is encrypted | Chrome parses parameter sets and every slice's PPS id before decryption (libwebrtc source), and the SFU keeps its parameter-set check; the PPS-id prefix removes LiveKit's reseal retry. Checked against Chromium by law G2 | A layout change with no wire-format change, since layouts are sent |
 | D8 | `NoKey(kid)` is separate from `Discarded(_)`; discard reasons stay local | RFC 9605 §4.4.4 lets the caller buffer a frame with no key and requires a discard otherwise | Trivial |
 | D9 | A receiver commits a forward ratchet step only after authentication, with `keep + 1 + forward ≤ 2^bits` | An attacker who picks a KID cannot move the receiver, and every KID's low bits have one meaning | Trivial |
-| D10 | A sender volume limit of `2^34` blocks plus frames per key | The AES-GCM confidentiality bound at about TLS 1.3's margin | A constant |
+| D10 | A sender volume limit of `2^34` blocks plus frames per key | The AES-GCM confidentiality bound (aead-limits §5.1.1) at about TLS 1.3's margin | A constant |
+| D11 | An H.264 SPS Chrome would rewrite is refused (`Unstable`), and `normalize_h264` applies libwebrtc's rewrite before sealing | Keeps the SPS authenticated and the track working with a Chrome receiver. Leaving the SPS out of the AAD instead would let an SFU change the resolution and profile the decoder sees | Moving the SPS out of the AAD is a framing change; adding more normalizations is S |
+| D12 | A ratcheted `base` is the key at its step, and `advance` re-keys a following receiver | A joiner never needs step 0's key, construction is one derivation, and a receiver that falls behind recovers without dropping its retained steps | Trivial before deployment |
+| D13 | A sender seals only within a reserved ceiling the caller has stored | A per-frame durable write is not practical; a ceiling makes a crash skip counters instead of reusing them, and carries the volume across runs | Removing reservations is trivial; it reopens nonce reuse on resume |
+| D14 | Receive floors, `keep ≥ forward`, and an optional `jump` bound, off by default | Floors stop replay into a fresh window; `keep ≥ forward` stops one member frame from evicting the real step; `jump` bounds a member's one-frame blackout at the cost of discarding genuine large gaps, so a deployment opts in | Constants and a default |
 
 ## Build laws
 
@@ -717,16 +915,18 @@ are generated by `oracle.py`, an independent Python reference written from SFRAM
 | Law | Bug it catches | Oracle and case | Seeded bug that goes red |
 | --- | --- | --- | --- |
 | **V1** header vectors | a wrong length field, KID and CTR in the wrong order, or non-minimal output | All 289 C.1 cases: `encode_header` gives `header`, and `decode_header` gives `kid` and `ctr` with the full length. Hand-made non-minimal headers (`80 05`, `08 00`, `90 00 01`, `81 00 ff`, …) give `Malformed`, and each prefix of a C.1 header gives `Short`. `Short` is checked first: `88 05` announces 3 bytes and is `Short` | `K` set to the length instead of the length minus one |
-| **V2** C.3 suite 0x0004 | a wrong label (compressed KID, missing suite, missing space), the salt XORed at the little end, metadata left out of the AAD, or the sink and library HKDF disagreeing | C.3's case: library HKDF gives `sframe_secret`, `sframe_salt` and `nonce`; `seal` under `Fixed(0x123)`, floor `0x4567`, gives `ct`; `open` gives `pt`. The same `ct` with one metadata byte changed is `Tampered` | the KID put in the label in its header form |
-| **R1** round trip | a framing, layout, escape or scatter bug that loses or moves bytes | Seeded property: random frames (0 to 64 KiB, heavy in `00` runs), canonical layouts, both framings, `Bare` and `AnnexB`, KIDs and CTRs across header-length edges (7/8, 255/256, `2^56`). `open` of `seal` is the frame, under the identity invariant. Ranged frames also equal `oracle.py`'s bytes for 32 fixed cases | no `03` appended after a NAL's final `00` |
+| **V2** C.3 suite 0x0004 | a wrong label (compressed KID, missing suite, missing space), the salt XORed at the little end, metadata left out of the AAD, or the sink and library HKDF disagreeing | C.3's case: library HKDF gives `sframe_secret`, `sframe_salt` and `nonce`; `seal` under `Fixed(0x123)`, from `Mark(0x4567, 0)` with a reservation, gives `ct`; `open` gives `pt`. The same `ct` with one metadata byte changed is `Tampered` | the KID put in the label in its header form |
+| **R1** round trip | a framing, layout, escape or scatter bug that loses or moves bytes | Seeded property: random frames (0 to 64 KiB, heavy in `00` runs), canonical layouts, both framings, `Bare` and `AnnexB`, KIDs and CTRs across header-length edges (7/8, 255/256, `2^56`). `open` of `seal` is the frame, and `Sealed.len` is the bytes appended and at most the bound. Ranged frames also equal `oracle.py`'s bytes for 32 fixed cases | no `03` appended after a NAL's final `00` |
 | **T1** tamper rejection | a header, ciphertext, tag, clear byte, layout or `L` not authenticated | For a sealed frame of each framing with a 3-range layout, every single-bit flip of every byte is `Discarded(_)` or, for a KID bit, `NoKey(_)`, and never `Ok`. Metadata changed by one byte is `Tampered` | the clear bytes left out of `metadata′` (a clear-range flip opens) |
 | **T2** layout binding | a layout not in the AAD | A constructed pair: a frame `[c][x]` with layout `{(0,1)}`, sealed under successive CTRs until the ciphertext byte equals `c` (expected 256 tries, deterministic under the fixed seed). The relayout `{(1,1)}` of the same wire bytes is `Tampered` | `enc(layout)` left out of `metadata′` |
-| **W1** replay window | a window that marks before authentication, an off-by-one at `W`, or a shift that drops bits on a large gap | Reference model, as `srtp`'s `replay_reference_model`: seeded CTR sequences with reorder, duplicates, gaps up to `2^20` and the edges `W − 1`, `W`, `W + 1`, against a model set "accepted iff unseen and `ctr > highest − W`". A forged frame at `highest + 1000` followed by a genuine `highest + 1` opens | the window marked before the tag check |
-| **K1** ratchet | a wrong ratchet label, length or salt, or a wrong KID mask | Python `hmac` over RFC 9605 §5.1 for base `00..0f` gives `base_key[1] = fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87`. A sender with `bits = 2` ratchets five times; its KIDs are `g<<2 | 1, 2, 3, 0, 1`, and a receiver with `forward = 1`, `keep = 2` opens each frame in order | `step mod 2^bits` computed as `step mod bits` |
-| **K2** forward bounds | a candidate committed before authentication, or a forward step past the bound | A forged frame at `d = forward` leaves `s` unchanged, and a genuine frame at the old step still opens. `d = forward + 1` is `NoKey`. `install_ratcheted` with `keep + 1 + forward > 2^bits` is `Invalid` | the candidate committed before the open |
-| **S1** sender counters | a refusal that consumes a CTR, a reused CTR, or exhaustion off by one | `Capacity` from a short spare, then a successful seal with the same `ctr`. A sender at floor `2^64 − 1` seals once, then `Exhausted`. A volume one block below the limit seals, and one over is `Exhausted` | CTR advanced before the `Capacity` check |
-| **G1** codec ranges | a wrong VP8 keyframe bit, a start code left out, a parameter set encrypted, a PPS id cut by a wrong `ue(v)` length, or a wrong H.265 header length | Hand-built frames: a VP8 keyframe and an interframe (RFC 6386 §9.1) give `{(0,10)}` and `{(0,3)}`, and a 2-byte frame gives `{(0,2)}`. An H.264 access unit SPS, PPS, SEI, IDR slice (`first_mb 0`, `slice_type 7`, `pps_id 300`: 1 + 7 + 17 = 25 bits of `ue(v)`, so 4 bytes after the NAL header) gives ranges counted by hand from H.264 §7.3.3 and Exp-Golomb §9.1. The same for H.265 with 2-byte headers. The B2 Chrome captures open | the PPS id's `ue(v)` read as a fixed 8 bits |
-| **A1** Annex B escaping | an emulation left in the wire, a boundary taken from the sealed bytes, or a non-canonical stream accepted | Seeded property: unescape of escape is the identity, and the escaped body never contains `00 00 0x` (`x ≤ 2`) outside start codes or ends in `00` (the H.264 §7.4.1 invariants). A sealed frame whose ciphertext contains `00 00 01` keeps its NAL count. Each hand-made non-canonical stream (`00 00 03 04`, a final `00`, `00 00 02`) is `Malformed`. 3-byte start codes are refused by `seal_ranged` and rewritten by `normalize` | NAL boundaries found by scanning the sealed body |
+| **W1** replay window | a window that marks before authentication, an off-by-one at `W`, a shift that drops bits on a large gap, a floor not applied, or `jump` off by one | Reference model, as `srtp`'s `replay_reference_model`: seeded CTR sequences with reorder, duplicates, gaps up to `2^20`, floors and `jump` on and off, and the edges `W − 1`, `W`, `W + 1`, `jump`, `jump + 1`, against a model set "accepted iff unseen, at or above the floor, `ctr > highest − W` and, with `jump`, `ctr ≤ highest + jump`". A forged frame at `highest + 1000` followed by a genuine `highest + 1` opens | the window marked before the tag check |
+| **K1** ratchet | a wrong ratchet label, length or salt, a wrong KID mask, or `base` taken as step 0's key | Python `hmac` over RFC 9605 §5.1 for base `00..0f` gives `base_key[1] = fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87`. A sender made at step 1 with that key and a receiver installed at step 0 with `00..0f` and `forward = 1` agree. A sender with `bits = 2` ratchets five times; its KIDs are `g<<2 \| 1, 2, 3, 0, 1`, and the receiver opens each frame in order | `step mod 2^bits` computed as `step mod bits` |
+| **K2** forward bounds | a candidate committed before authentication, a forward step past the bound, the jumped-from step evicted, or `advance` losing retained steps | A forged frame at `d = forward` leaves `s` unchanged, and a genuine frame at the old step still opens. `d = forward + 1` is `NoKey`. A genuine member frame at `s + forward` commits and the real step `s` still opens. `install_ratcheted` with `keep < forward` or `keep + 1 + forward > 2^bits` is `Invalid`. A receiver behind by `forward + 3` steps is `NoKey`, then opens after `advance`, and a frame at a step still within `keep` opens too | the candidate committed before the open |
+| **S1** sender counters | a refusal that consumes a CTR, a reused CTR, a seal past the reservation, or exhaustion off by one | `Capacity` from a short spare, then a successful seal with the same `ctr`. A fresh sender is `Unreserved` until `reserve`. A sender resumed from a stored ceiling seals first at that ceiling's CTR, never below. A sender from `Mark(2^64 − 2, 0)` seals once, then `Exhausted`. A volume one block below the limit seals, and one over is `Exhausted` | CTR advanced before the `Capacity` check |
+| **L1** ranged lengths | a capacity known only after the AEAD call, an unbounded or mismatched input bound, or an underflow on a short frame | `seal_ranged` with a spare one byte under `bound(AnnexB, n + trailer)` is `Capacity` with that bound as `requested`, and the next seal at the bound uses the same CTR. A frame of all-zero working bytes reaches the bound's order (`3n/2`) on the wire and opens. `open_ranged` refuses, as `Malformed` and with nothing appended, a frame one byte over `bound(l.frame + T(l))`, every frame shorter than 20 bytes, and `L` values 0, 1, `n − 17` and `0xffff`. A spare one byte under the open bound is `Capacity` | the seal's spare checked against the unescaped length |
+| **G1** codec ranges | a wrong VP8 keyframe bit, a start code left out, a parameter set encrypted, a PPS id cut by a wrong `ue(v)` length, a wrong H.265 header length, or an SPS Chrome would rewrite accepted | Hand-built frames: a VP8 keyframe and an interframe (RFC 6386 §9.1) give `{(0,10)}` and `{(0,3)}`, and a 2-byte frame gives `{(0,2)}`. An H.264 access unit SPS, PPS, SEI, IDR slice (`first_mb 0`, `slice_type 7`, `pps_id 300`: 1 + 7 + 17 = 25 bits of `ue(v)`, so 4 bytes after the NAL header) gives ranges counted by hand from H.264 §7.3.3 and Exp-Golomb §9.1. The same for H.265 with 2-byte headers. libwebrtc's four `sps_vui_rewriter_unittest.cc` SPS modes (no VUI, no bitstream restriction, suboptimal restriction, optimal) give `Unstable` three times and a layout once | the PPS id's `ue(v)` read as a fixed 8 bits |
+| **G2** Chromium round trip | a rule that Chrome's depacketizer breaks: an SPS rewritten, a NAL dropped or added, a start code changed, or a slice header that fails libwebrtc's parse | Vectors captured from headless Chromium 153 (loopback, `RTCRtpScriptTransform`, the capture script in the package): Chrome's own H.264 and H.265 keyframes and delta frames, and `libx264` frames with B-frames, each sealed by `oracle.py`. The receiver-side bytes of Chrome's frames and of normalized `libx264` frames equal the sent bytes and open. The raw `libx264` frames arrive changed and are `Tampered`, and `h264` refuses them as `Unstable`. `normalize_h264` of the raw SPS equals Chrome's rewrite of it, trailing zeros aside | `normalize_h264` that leaves `max_dec_frame_buffering` unchanged |
+| **A1** Annex B escaping | an emulation left in the wire, a boundary taken from the sealed bytes, a non-injective tail rule, or a non-canonical stream accepted | Exhaustive over every body of length 0 to 8 on the alphabet `00 01 02 03 41`: wire unescape of wire escape is the identity, the escaped body never contains `00 00 0x` (`x ≤ 2`) and never ends in `00`, and no two bodies share a wire form. Exhaustive over every wire string of length 0 to 8 on the same alphabet: unescape accepts it exactly when it is the escape of some body. Named cases: a body ending in a single `00`, a clear NAL ending `00 03`, and a trailer with `L = 256` round-trip. A sealed frame whose ciphertext contains `00 00 01` keeps its NAL count. 3-byte start codes and trailing zeros are refused by `seal_ranged` and rewritten by `normalize_h264` | a wire tail rule that appends `03` only after a final `00` |
 
 No law repeats TLS-5's AEAD or HKDF vectors (AE2, KD laws). V2 and R1 reach the sinks only
 through SFrame's own inputs.
@@ -747,12 +947,12 @@ through SFrame's own inputs.
 | Slice | Size | Depends on | Delivers | Laws |
 | --- | --- | --- | --- | --- |
 | **B1** core | M | — | `hirsel.toml` (std and `media_bits`), `sframe` module: header, library HKDF, key schedule, `Sender`, `Receiver`, `seal`, `open`, window, ratchet; `vectors.hirsel` from RFC C.1 and C.3 | V1, V2, W1, K1, K2, S1, and R1 and T1 for the RFC framing |
-| **B2** ranged | M | B1 | `ranges` module: layout encoding, `seal_ranged`, `open_ranged`, Annex B escaping, `vp8`, `h264`, `h265`; `media_bits.annexb.next`; `oracle.py` | R1 and T1 for ranged framing, T2, G1, A1; the H.264 and H.265 Chrome capture vectors |
+| **B2** ranged | M | B1 | `ranges` module: layout encoding, `seal_ranged`, `open_ranged`, Annex B escaping, `vp8`, `h264`, `h265`, `normalize_h264`, `normalize_h265`; `oracle.py`; the Chromium capture script and its vectors | R1 and T1 for ranged framing, T2, L1, G1, G2, A1 |
 | **B3** VP9 and AV1 | S | B2, a browser capture of each codec's round trip through Encoded Transform | their range rules, or `none()` for VP9 if the capture confirms it | G1 cases |
 | **P1** rtp-sframe | S | B1, a named consumer (the Hirsel native SDK) | `descriptor`, `ssrc_key`; reassembly in `rtp`; `a=sframe` in webrtc | draft §7 per-SSRC key by Python `hmac`; descriptor round trip |
 | **C9b** SFU routing law | S | B2, the AV1 follow-ups | SFRAME-13's routing guarantees in `webrtc_sfu` | the W9 random-payload law |
 | **E1** keying end state | M | a trigger (keying end state) | TLS-8 `import_sframe`, then `sframe` moves to `Secret` base keys | TLS-8 PC laws for the new import |
 
 B1 and B2 make up this lane's build. Some test reds may ride along when landing unblocks other
-work. Compile, lint, spec-fence and docs reds never may. The new package joins the toolchain
-bundle after 2627 lands.
+work. Compile, lint, spec-fence and docs reds never may. The package is not in the toolchain
+bundle; it joins when a consumer ships with it.

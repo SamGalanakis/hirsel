@@ -1,4 +1,4 @@
-use super::HostOp;
+use super::*;
 
 pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
     match op {
@@ -116,4 +116,61 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::Sync | HostOp::SyncDir | HostOp::ZeroExtension | HostOp::StatFile => &["u64"],
         _ => &["u64", "ptr"],
     }
+}
+
+/// The C-boundary poison law (`c_boundary_poison.rs`) under one seed.
+fn check_c_boundary_poison(target: Target, seed: u64) {
+    let law = super::c_boundary_poison::law(seed);
+    let module = text::parse(&law.core).unwrap_or_else(|e| panic!("{e:?}\n{}", law.core));
+    wf::module(&module).unwrap_or_else(|e| panic!("{e:?}\n{}", law.core));
+    let mut source = law.c.clone();
+    for i in 0..module.functions.len() {
+        source = source.replace(&format!("@F{i}@"), &symbol(&module, FuncId(i as u32)));
+    }
+    source.push_str(&module.site_bindings());
+    for optimization in [Optimization::None, Optimization::Speed] {
+        let scratch = host_memory::NativeArtifacts::new();
+        let dir = scratch.path();
+        std::fs::write(
+            dir.join("core.o"),
+            module.object(target, optimization, false),
+        )
+        .unwrap();
+        std::fs::write(dir.join("test.c"), &source).unwrap();
+        let mut compiler = c_linker(target, false);
+        for symbol in super::c_boundary_poison::wraps(&source) {
+            compiler.arg(format!("-Wl,--wrap={symbol}"));
+        }
+        output(
+            link_runtime(compiler.arg(dir.join("test.c")).arg(dir.join("core.o")))
+                .arg("-o")
+                .arg(dir.join("test")),
+        );
+        let run = c_executable(target, false, &dir.join("test"))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let failures = super::c_boundary_poison::failures(&law, &stdout);
+        assert!(
+            failures.is_empty(),
+            "{target:?} seed {seed:#x} {optimization:?}: {} of {} cells failed ({:?})\n{}",
+            failures.len(),
+            law.cells,
+            run.status,
+            failures.join("\n")
+        );
+    }
+}
+
+/// Poisoned upper register and stack-slot bits must not change a value
+/// crossing the C boundary in either direction (`c_boundary_poison.rs`).
+#[test]
+fn c_boundary_poison_bits() {
+    check_c_boundary_poison(Target::X86_64Linux, 0x2496_c0de_5eed);
+}
+
+#[test]
+#[ignore = "explicit AArch64 runtime integration target"]
+fn aarch64_c_boundary_poison_bits() {
+    check_c_boundary_poison(Target::Aarch64Linux, 0x2496_c0de_5eed);
 }

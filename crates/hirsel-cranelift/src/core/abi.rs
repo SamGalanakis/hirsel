@@ -4,7 +4,6 @@ use super::*;
 use cranelift_codegen::ir::{
     ArgumentPurpose, MemFlagsData as MemFlags, StackSlotData, StackSlotKind, Value,
 };
-use cranelift_codegen::isa::CallConv;
 use hirsel_core_ir::native_layout::{CallLayouts, ScalarRecord};
 
 pub struct Signature {
@@ -21,12 +20,12 @@ pub struct Signature {
 }
 impl Signature {
     pub fn new(s: &c::Signature, object: &ObjectModule, layouts: &CallLayouts) -> Self {
-        Self::build(s, Some(layouts), aarch64(object), true)
+        Self::build(s, Some(layouts), object, true)
     }
     /// A Hirsel entry with no scalar-record parameter or result rewrites.
     /// Scalars, pointers and a destination follow the same ABI as unit code.
     pub fn foreign(s: &c::Signature, object: &ObjectModule) -> Self {
-        Self::build(s, None, aarch64(object), true)
+        Self::build(s, None, object, true)
     }
     pub fn c(object: &ObjectModule, params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
@@ -36,20 +35,28 @@ impl Signature {
                 None,
             ),
             None,
-            aarch64(object),
+            object,
             false,
         );
-        // C bool parameters carry zero-extension in Rust/LLVM's ABI. Without
-        // it, upper register bits can leak into an event's u64 boolean value.
-        for (index, ty) in params.iter().enumerate() {
-            if *ty == Ty::Scalar(Scalar::Bool) {
-                let parameter = &mut signature.clif.params[index + usize::from(signature.indirect)];
-                *parameter = (*parameter).uext();
-            }
+        // Narrow C arguments and a lone narrow result carry the target's
+        // extension: the C side of the call relies on the bits it names.
+        let abi = c_abi(object);
+        for (index, &t) in params.iter().enumerate() {
+            let parameter = &mut signature.clif.params[index + usize::from(signature.indirect)];
+            *parameter = extended(*parameter, abi, t);
+        }
+        if let ([t], [result]) = (results, signature.clif.returns.as_mut_slice()) {
+            *result = extended(*result, abi, *t);
         }
         signature
     }
-    fn build(s: &c::Signature, layouts: Option<&CallLayouts>, arm: bool, context: bool) -> Self {
+    fn build(
+        s: &c::Signature,
+        layouts: Option<&CallLayouts>,
+        object: &ObjectModule,
+        context: bool,
+    ) -> Self {
+        let arm = aarch64(object);
         let record = layouts.and_then(|layouts| layouts.result(s));
         let dest = s.dest.is_some() && record.is_none();
         let mut results: Vec<Ty> = if let Some(record) = record {
@@ -64,7 +71,7 @@ impl Signature {
         if context {
             results.push(Ty::Scalar(Scalar::U8));
         }
-        let mut clif = ir::Signature::new(CallConv::SystemV);
+        let mut clif = ir::Signature::new(object.isa().default_call_conv());
         let mut offsets = Vec::new();
         let mut size: u32 = 0;
         let mut align = 1;
@@ -312,6 +319,25 @@ fn result_flags(t: ir::Type) -> MemFlags {
 /// The module owns one target; every imported/generated C signature uses it.
 pub(super) fn aarch64(object: &ObjectModule) -> bool {
     object.isa().name() == "aarch64"
+}
+
+/// The C ABI of the module's one target.
+fn c_abi(object: &ObjectModule) -> hirsel_core_layout::CAbi {
+    let triple = object.isa().triple().to_string();
+    hirsel_core_layout::Target::from_triple(&triple)
+        .unwrap_or_else(|| panic!("no C ABI for target {triple}"))
+        .c_abi()
+}
+fn extended(param: AbiParam, abi: hirsel_core_layout::CAbi, t: Ty) -> AbiParam {
+    match hirsel_core_layout::c_extension(abi, t) {
+        hirsel_core_layout::CExtension::None => param,
+        hirsel_core_layout::CExtension::Zero => param.uext(),
+        hirsel_core_layout::CExtension::Sign => param.sext(),
+    }
+}
+/// A C scalar argument or result of `t` for this module's target.
+pub fn c_param(object: &ObjectModule, t: Ty) -> AbiParam {
+    extended(AbiParam::new(ty(t)), c_abi(object), t)
 }
 
 pub(super) fn record_place(b: &mut FunctionBuilder<'_>, record: ScalarRecord) -> Value {

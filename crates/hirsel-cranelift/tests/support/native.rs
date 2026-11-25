@@ -111,6 +111,11 @@ fn declare_functions(source: &mut String, module: &c::Module, sites: &[u64]) {
         }
         source.push_str(",uint64_t);\n");
     }
+    bind_sites(source, module, sites);
+    source.push_str("static void emit_test_site(uint64_t site) { uint64_t present=site!=0; fwrite(&present,8,1,stdout); fwrite(&site,8,1,stdout); }\n");
+}
+
+fn bind_sites(source: &mut String, module: &c::Module, sites: &[u64]) {
     for (item, site) in module.items.iter().zip(sites) {
         writeln!(
             source,
@@ -119,7 +124,6 @@ fn declare_functions(source: &mut String, module: &c::Module, sites: &[u64]) {
         )
         .unwrap();
     }
-    source.push_str("static void emit_test_site(uint64_t site) { uint64_t present=site!=0; fwrite(&present,8,1,stdout); fwrite(&site,8,1,stdout); }\n");
 }
 
 fn execute(input: &impl NativeInput, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
@@ -662,7 +666,7 @@ fn link_program_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool)
             "-o",
             "run",
         ])
-        .args(source.contains("HIRSEL_TEST_WRAP_SPAWN").then_some("-Wl,--wrap=hirsel_core_spawn"))
+        .args(c_boundary_poison::wraps(source).iter().map(|symbol| format!("-Wl,--wrap={symbol}")))
         .output()
         .unwrap();
     assert!(
@@ -686,7 +690,22 @@ fn link_run(scratch: &NativeArtifacts, source: &str) -> Vec<u64> {
 }
 fn link_run_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool) -> Vec<u64> {
     let binary = link_program_checked(scratch, source, memcheck);
-    let mut command = if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
+    let run = native_command(&binary, memcheck).output().unwrap();
+    assert!(
+        run.status.success() && !String::from_utf8_lossy(&run.stderr).contains("checked allocator: leaked "),
+        "native execution: {:?}\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let actual: Vec<_> = run
+        .stdout
+        .chunks_exact(8)
+        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    actual
+}
+fn native_command(binary: &std::path::Path, memcheck: bool) -> Command {
+    if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
         let mut command =
             Command::new(std::env::var_os("HIRSEL_VALGRIND").expect("declared Memcheck tool"));
         command
@@ -696,7 +715,7 @@ fn link_run_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool) -> 
                 "--exit-on-first-error=yes",
                 "--error-exitcode=99",
             ])
-            .arg(&binary);
+            .arg(binary);
         command
     } else {
         // Native fixtures must turn a stuck runtime/child into an ordinary
@@ -713,26 +732,17 @@ fn link_run_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool) -> 
                 .arg(std::env::var_os("HIRSEL_QEMU_AARCH64").map(PathBuf::from).unwrap_or_else(|| input_path("HIRSEL_TOOLCHAIN_QEMU").join("qemu-aarch64")))
                 .arg("-L")
                 .arg(std::env::var_os("HIRSEL_AARCH64_SYSROOT").map(PathBuf::from).unwrap_or_else(|| input_path("HIRSEL_TOOLCHAIN_ARM").join("aarch64-none-linux-gnu/libc")))
-                .arg(&binary);
+                .arg(binary);
         } else {
-            command.arg(&binary);
+            command.arg(binary);
         }
         command
-    };
-    let run = command.output().unwrap();
-    assert!(
-        run.status.success() && !String::from_utf8_lossy(&run.stderr).contains("checked allocator: leaked "),
-        "native execution: {:?}\n{}",
-        run.status,
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let actual: Vec<_> = run
-        .stdout
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-    actual
+    }
 }
+
+#[allow(dead_code)] // Only the backends' own suites run the law; every includer links its wraps.
+#[path = "../../../hirsel-core-rt/testdata/c_boundary_poison.rs"]
+mod c_boundary_poison;
 
 fn sample_runs(m: &c::Module, text: &str) -> Vec<(FuncId, Vec<u64>)> {
     text.lines()
@@ -825,8 +835,6 @@ fn check_sample_with_refusals(source: &str, optimize: bool) {
     execute_cases(&module, optimize, &native);
 }
 
-
-
 fn input_path(variable: &str) -> PathBuf {
     let path = PathBuf::from(
         std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} is explicit test data")),
@@ -914,12 +922,6 @@ b0(v0: f32, v1: f32):
     execute(&m, &runs, false);
     execute(&m, &runs, true);
 }
-
-
-
-
-
-
 
 fn check_relative_debug_rows() {
     use cranelift_object::object::{Object as _, ObjectSection as _, ObjectSymbol as _};
@@ -1187,10 +1189,6 @@ b0(v0: u64):
         }
     }
 }
-
-
-
-
 
 include!("copy.rs");
 

@@ -36,17 +36,12 @@ pub(super) fn private_suffix(has_status: bool, ok: bool) -> &'static str {
         ".infallible"
     }
 }
+/// The target's C extension of `t` (`hirsel_core_layout::c_extension`).
 pub(super) fn extension(target: hirsel_core_layout::Target, t: Ty) -> Extension {
-    if target == hirsel_core_layout::Target::Aarch64Linux
-        || size(t) >= 4
-        || t.is_float()
-        || t == Ty::Ptr
-    {
-        Extension::None
-    } else if t.int().is_some_and(|x| x.0) {
-        Extension::Sign
-    } else {
-        Extension::Zero
+    match hirsel_core_layout::c_extension(target.c_abi(), t) {
+        hirsel_core_layout::CExtension::None => Extension::None,
+        hirsel_core_layout::CExtension::Zero => Extension::Zero,
+        hirsel_core_layout::CExtension::Sign => Extension::Sign,
     }
 }
 impl Return {
@@ -933,5 +928,24 @@ impl FunctionEmitter<'_> {
             },
             ..CallAttrs::default()
         }
+    }
+}
+
+impl FunctionEmitter<'_> {
+    /// A runtime C argument under the target's extension rule. Call sites
+    /// name a narrow argument's signedness as `Zero` or `Sign`; the rule
+    /// decides whether the target extends it.
+    pub(super) fn c_param(&self, mut p: Parameter) -> Parameter {
+        let signed = p.extension == Extension::Sign;
+        let t = match p.ty {
+            Type::Int(1) => Some(Scalar::Bool),
+            Type::Int(8) => Some(if signed { Scalar::I8 } else { Scalar::U8 }),
+            Type::Int(16) => Some(if signed { Scalar::I16 } else { Scalar::U16 }),
+            _ => None,
+        };
+        if let Some(t) = t {
+            p.extension = extension(self.abi.target, Ty::Scalar(t));
+        }
+        p
     }
 }

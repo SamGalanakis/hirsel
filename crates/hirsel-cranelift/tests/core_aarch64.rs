@@ -3,6 +3,7 @@
 const NATIVE_TARGET: &str = "aarch64-unknown-linux-gnu";
 hirsel_guard::install!();
 include!("support/native.rs");
+include!("support/poison.rs");
 #[path = "support/providers.rs"]
 mod providers;
 

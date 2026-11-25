@@ -1594,13 +1594,6 @@ struct FunctionEmitter<'a> {
     fixed_rank: Option<u64>,
 }
 impl FunctionEmitter<'_> {
-    /// AAPCS64 leaves narrow C arguments' upper bits unspecified.
-    fn c_param(&self, mut p: Parameter) -> Parameter {
-        if self.abi.target == Target::Aarch64Linux {
-            p.extension = Extension::None;
-        }
-        p
-    }
     fn counter(&mut self) -> usize {
         let n = self.next;
         self.next += 1;

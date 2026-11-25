@@ -369,50 +369,12 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
     invocations.push_str("return 0;}\n");
     c.push_str(&invocations);
     std::fs::write(dir.join("test.c"), c).unwrap();
-    let prefix =
-        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").expect("pinned LLVM prefix"));
-    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(
-            std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("CoreIR native runtime test input"),
-        );
-    let mut compiler = match target {
-        Target::X86_64Linux => {
-            let mut command = Command::new(prefix.join("bin/clang"));
-            command.arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()));
-            command
-        }
-        Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
-    };
-    if memcheck && target == Target::X86_64Linux {
-        // The pool's system loader is stripped; use the declared symbol-bearing
-        // loader/runtime paired with Memcheck, just as the toolchain proof does.
-        let runtime = PathBuf::from(
-            std::env::var_os("HIRSEL_VALGRIND_RUNTIME").expect("declared Memcheck runtime"),
-        );
-        compiler
-            .args(["-Xlinker", "--dynamic-linker", "-Xlinker"])
-            .arg(runtime.join("ld-linux-x86-64.so.2"))
-            .args(["-Xlinker", "-rpath", "-Xlinker"])
-            .arg(&runtime);
-    }
-    for symbol in [
-        "hirsel_core_free_value",
-        "hirsel_core_block_payer",
-        "hirsel_core_release",
-    ] {
-        if bindings.contains(&format!("__wrap_{symbol}")) {
-            compiler.arg(format!("-Wl,--wrap={symbol}"));
-        }
+    let mut compiler = c_linker(target, memcheck);
+    for symbol in c_boundary_poison::wraps(bindings) {
+        compiler.arg(format!("-Wl,--wrap={symbol}"));
     }
     output(
-        compiler
-            .args(["-std=c11", "-O0", "-fPIC", "-pie", "-Wl,-z,text", "-I"])
-            .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"))
-            .arg(dir.join("test.c"))
-            .arg(dir.join("core.o"))
-            .arg(runtime)
-            .args(["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"])
+        link_runtime(compiler.arg(dir.join("test.c")).arg(dir.join("core.o")))
             .arg("-o")
             .arg(dir.join("test")),
     );
@@ -431,30 +393,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             );
         }
     }
-    let mut executable = match target {
-        Target::X86_64Linux if memcheck => {
-            let mut command =
-                Command::new(std::env::var_os("HIRSEL_VALGRIND").expect("declared Memcheck tool"));
-            command
-                .args([
-                    "--tool=memcheck",
-                    "--quiet",
-                    "--exit-on-first-error=yes",
-                    "--error-exitcode=99",
-                ])
-                .arg(dir.join("test"));
-            command
-        }
-        Target::X86_64Linux => Command::new(dir.join("test")),
-        Target::Aarch64Linux => {
-            let mut command = Command::new(std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap());
-            command
-                .arg("-L")
-                .arg(std::env::var_os("HIRSEL_AARCH64_SYSROOT").unwrap())
-                .arg(dir.join("test"));
-            command
-        }
-    };
+    let mut executable = c_executable(target, memcheck, &dir.join("test"));
     output(&mut executable)
         .lines()
         .enumerate()
@@ -908,3 +847,77 @@ fn assert_native_debug_product(bytes: &[u8]) -> hirsel_core_ir::source::NativeDe
     assert!(off.debug.is_none());
     debug
 }
+
+/// The pinned C compiler and link line for a native program on `target`;
+/// the caller adds its sources and output.
+fn c_linker(target: Target, memcheck: bool) -> Command {
+    let prefix =
+        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").expect("pinned LLVM prefix"));
+    let mut compiler = match target {
+        Target::X86_64Linux => {
+            let mut command = Command::new(prefix.join("bin/clang"));
+            command.arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()));
+            command
+        }
+        Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
+    };
+    if memcheck && target == Target::X86_64Linux {
+        // The pool's system loader is stripped; use the declared symbol-bearing
+        // loader/runtime paired with Memcheck, just as the toolchain proof does.
+        let runtime = PathBuf::from(
+            std::env::var_os("HIRSEL_VALGRIND_RUNTIME").expect("declared Memcheck runtime"),
+        );
+        compiler
+            .args(["-Xlinker", "--dynamic-linker", "-Xlinker"])
+            .arg(runtime.join("ld-linux-x86-64.so.2"))
+            .args(["-Xlinker", "-rpath", "-Xlinker"])
+            .arg(&runtime);
+    }
+    compiler
+        .args(["-std=c11", "-O0", "-fPIC", "-pie", "-Wl,-z,text", "-I"])
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"));
+    compiler
+}
+/// Ends a link line: the core runtime archive and the system libraries, after
+/// the objects that reference them.
+fn link_runtime(compiler: &mut Command) -> &mut Command {
+    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(
+            std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("CoreIR native runtime test input"),
+        );
+    compiler
+        .arg(runtime)
+        .args(["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"])
+}
+/// The command that runs `binary` on `target`.
+fn c_executable(target: Target, memcheck: bool, binary: &std::path::Path) -> Command {
+    match target {
+        Target::X86_64Linux if memcheck => {
+            let mut command =
+                Command::new(std::env::var_os("HIRSEL_VALGRIND").expect("declared Memcheck tool"));
+            command
+                .args([
+                    "--tool=memcheck",
+                    "--quiet",
+                    "--exit-on-first-error=yes",
+                    "--error-exitcode=99",
+                ])
+                .arg(binary);
+            command
+        }
+        Target::X86_64Linux => Command::new(binary),
+        Target::Aarch64Linux => {
+            let mut command = Command::new(std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap());
+            command
+                .arg("-L")
+                .arg(std::env::var_os("HIRSEL_AARCH64_SYSROOT").unwrap())
+                .arg(binary);
+            command
+        }
+    }
+}
+
+#[allow(dead_code)] // Only hirsel-llvm's own suite runs the law; every includer links its wraps.
+#[path = "../../../hirsel-core-rt/testdata/c_boundary_poison.rs"]
+mod c_boundary_poison;

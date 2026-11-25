@@ -6,7 +6,7 @@ use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, Value};
 use hirsel_core_ir::release_recipe::ForeignLeaf;
 use hirsel_core_ir::{Loan, Param, PlaceTy, Signature, TypeId};
 use hirsel_core_layout::{Body, Carried, Case, Field, FieldTy, Repr, Scalar, Shape, Ty};
-use hirsel_cranelift::core::{NativeSignature, memory_layout as abi};
+use hirsel_cranelift::core::{NativeSignature, c_param, memory_layout as abi};
 use std::collections::BTreeMap;
 
 #[derive(Serialize)]
@@ -177,7 +177,7 @@ fn thunk(
         let offset = (index * 16) as i32;
         match argument {
             Argument::Scalar(s) => {
-                c_signature.params.push(c_scalar(s));
+                c_signature.params.push(c_param(f.object, Ty::Scalar(s)));
                 params.push(f.load(scalar_type(s), words, offset));
             }
             Argument::Bytes { .. } => {
@@ -203,7 +203,7 @@ fn thunk(
     }
     c_signature.returns.extend(match parsed.result {
         Return::Unit => None,
-        Return::Scalar(s) => Some(c_scalar(s)),
+        Return::Scalar(s) => Some(c_param(f.object, Ty::Scalar(s))),
         Return::New(_) => Some(AbiParam::new(I64)),
     });
     let native = f
@@ -376,15 +376,6 @@ fn scalar_type(scalar: Scalar) -> ir::Type {
         Scalar::F32 => ir::types::F32,
         Scalar::F64 => ir::types::F64,
         _ => ir::Type::int((scalar.size() * 8) as u16).unwrap(),
-    }
-}
-
-fn c_scalar(scalar: Scalar) -> AbiParam {
-    let param = AbiParam::new(scalar_type(scalar));
-    match scalar {
-        Scalar::I8 | Scalar::I16 => param.sext(),
-        Scalar::U8 | Scalar::U16 => param.uext(),
-        _ => param,
     }
 }
 

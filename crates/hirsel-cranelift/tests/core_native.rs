@@ -2,6 +2,7 @@
 const NATIVE_TARGET: &str = "x86_64-unknown-linux-gnu";
 hirsel_guard::install!();
 include!("support/native.rs");
+include!("support/poison.rs");
 #[path = "support/providers.rs"]
 mod providers;
 
@@ -1053,7 +1054,6 @@ b3:
     fs::write(scratch.path().join("input.o"), object.bytes).unwrap();
     let source = format!(
         r#"
-#define HIRSEL_TEST_WRAP_SPAWN
 #include <stdint.h>
 #include <stdlib.h>
 #include "hirsel_core_rt.h"

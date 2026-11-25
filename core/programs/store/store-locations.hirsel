@@ -100,7 +100,9 @@ fn published_tree_pointer(known: PageLocations, root: Arc[std.page.Page]) -> std
 
 fn published_page_roots(known: PageLocations, roots: PageRoots) -> LocatedRoots {
     let mut keyed: List[std.page.PagePtr] = list.with_capacity(list.len(roots.keyed))
-    for tree in roots.keyed { list.push(mut keyed, published_page_pointer(known, tree)) }
+    for tree in roots.keyed {
+        list.push(mut keyed, published_page_pointer(known, tree))
+    }
     LocatedRoots(collections: published_page_pointer(known, roots.collections), streams: published_page_pointer(known, roots.streams), catalog: published_page_pointer(known, roots.catalog), keyed: take keyed)
 }
 
@@ -246,6 +248,20 @@ fn relocation_ancestors(known: PageLocations, bodies: List[u64]) -> Map[u64, ()]
     take marked
 }
 
+// A page may own an edge only as a branch, a collection-map page or a leaf
+// with a body: std.page admits a blob cell only when its body index is below
+// the page's body count. Other leaves need no per-slot edge decode.
+fn may_own_edges(page: Arc[std.page.Page]) -> bool {
+    let image = std.page.image_of(page)
+    if std.page.level(image) != 0 || std.page.key_domain(image) == CollectionMap {
+        return true
+    }
+    let Some(_) = std.page.blob_slot(page, 0) else {
+        return false
+    }
+    true
+}
+
 fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], class: u8) -> Result[(), Error] {
     let image = std.page.image_of(root)
     let stamp = std.page.stamp(image)
@@ -253,7 +269,12 @@ fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], class: 
         return Ok(())
     }
     let mut outgoing: List[u64] = list.new()
-    for slot in 0u64 .. std.page.count(image) {
+    let scanned = if may_own_edges(root) {
+        std.page.count(image)
+    } else {
+        0
+    }
+    for slot in 0u64 .. scanned {
         match std.page.owning_edge(image, slot) {
             Some(PageEdge(child)) => {
                 if child.stamp != 0 && std.page.tiered_root_at(image, slot) == None {
@@ -355,7 +376,12 @@ fn plan_tree_frames(known: PageLocations, marked: Map[u64, ()], root: Arc[std.pa
         return
     }
     map.insert(mut output.emitted, stamp, ())
-    for slot in 0u64 .. std.page.count(image) {
+    let scanned = if may_own_edges(root) {
+        std.page.count(image)
+    } else {
+        0
+    }
+    for slot in 0u64 .. scanned {
         match std.page.owning_edge(image, slot) {
             Some(PageEdge(child)) => {
                 if child.stamp != 0 && std.page.tiered_root_at(image, slot) == None {

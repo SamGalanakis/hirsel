@@ -263,7 +263,7 @@ mod tests {
         let child = script(root.path(), "printf '%s' \"$1,$2\"; exit 2");
         match describe_child(&child, 100, Duration::from_secs(1)) {
             Err(DescribeError::PlaceError(bytes)) => {
-                assert_eq!(bytes, b"--hirsel-describe,--hirsel-n-place=100")
+                assert_eq!(bytes, b"--hirsel-n-place=100,--hirsel-describe")
             }
             other => panic!("{other:?}"),
         }

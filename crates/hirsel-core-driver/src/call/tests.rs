@@ -20,9 +20,13 @@ fn call_wrong_typed_flags_refuse_before_any_connection() {
         out.extend((b.len() as u32).to_le_bytes());
         out.extend(b);
     };
+    // Describe: digest, target, n_place, revision, one compute export
+    // (kind, identity, args, result, fingerprints, revision, no slots, no
+    // value), no tables, no HTTP bindings.
     blob(&mut describe, &[]);
     blob(&mut describe, b"t");
     describe.extend(17u64.to_le_bytes());
+    blob(&mut describe, &[]);
     describe.extend(1u32.to_le_bytes());
     describe.extend(0u32.to_le_bytes());
     blob(&mut describe, identity);
@@ -31,6 +35,10 @@ fn call_wrong_typed_flags_refuse_before_any_connection() {
     describe.extend(1u64.to_le_bytes());
     describe.extend(2u64.to_le_bytes());
     blob(&mut describe, &[]);
+    describe.extend(0u32.to_le_bytes());
+    blob(&mut describe, &[]);
+    describe.extend(0u32.to_le_bytes());
+    describe.extend(0u32.to_le_bytes());
     let server = dir.path().join("server");
     std::fs::write(&server, []).unwrap();
     let attempt = |flags: &[&str]| {

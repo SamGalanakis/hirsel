@@ -100,7 +100,7 @@ store@1/store/journal_frame_oversize src=b30798267bb46832 sig=0117e730921e8a44 r
 store@1/store/journal_frame_size_boundary src=fa12362bb1790317 sig=c4500f4b1ccbb9d1 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/journal_test_ack_channel src=7f1f0ea0a56dfc4f sig=ae03272e111cc4c5 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_apply src=f34daebfd0eb9944 sig=54facd1e9982ba5d run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/journal_test_backup_restore src=d4f657749ddddd99 sig=ace3d7ec334bdf43 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/journal_test_backup_restore src=7c289969da4edbfd sig=00f6eafeb1f1d979 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_bootstrap src=63d3a5ab9b3df97c sig=7ca39feed3f626e4 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_call_vector src=4ac70ead719dc98b sig=7eafb9247a7a13f8 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/journal_test_cap_arithmetic src=877fc3f5b1cafeb7 sig=20722d93cdbb4742 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

@@ -472,7 +472,7 @@ no environment variable, no checkout and no C driver.
     ROOT/hirsel                      this compiler, its RPATH patched to $ORIGIN/lib
     ROOT/lib/                        libLLVM.so.23.1 and the libraries it loads from the pinned tree
     ROOT/bin/ld.lld                  the link editor
-    ROOT/libexec/hirsel/             the platform host and pin_reader binaries
+    ROOT/libexec/hirsel/             the platform host, pin_reader and store_tool binaries
     ROOT/link/<target>.json          the bundle-relative link recipe
     ROOT/link/kit/                   the startup objects and link-only libraries
     ROOT/runtime/<target>/<hash>/    runtime archives, by content

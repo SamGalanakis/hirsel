@@ -32,25 +32,21 @@ fn backup_law_same_rows(left: Db, at_left: Snapshot, right: Db, at_right: Snapsh
     }
 }
 
-// L89 (§15.5). A restored backup opens as an ordinary store and equals its
-// source at the leased head, row by row, whatever the source wrote, deleted
-// or checkpointed after the lease.
-@test
-fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
-    let source = disk_test_directory(d)
-    let target = disk_test_directory(d)
-    let restored = disk_test_directory(d)
-    let mut options = result.unwrap(sized(Directory, 2147483648u64))
-    options.pack_bytes = 1048576
-    let mut db = deploy_result(open(tasks, source, c, r, options))?
+fn backup_law_schema(mut schema: Declare) -> Result[(Table[u64, u64], Index[u64, u64, u64, ()], Table[u64, u64]), Error] {
     let key = std.codec.key_u64()
     let value = std.codec.of_u64()
+    let mut declared_items = declare_table(mut schema, "items", key, value)?
+    let ix = index(mut schema, mut declared_items, "bucket", Many, code.describe(bucket_keys), key)?
+    let items = finish(mut schema, take declared_items)?
+    let declared_other = declare_table(mut schema, "other", key, value)?
+    let other = finish(mut schema, take declared_other)?
+    Ok((items, ix, other))
+}
+
+fn backup_law_seed(tasks: Tasks, source: Dir, c: Clock, r: Random, options: Options) -> Result[(), DeployError] waits {
+    let mut db = deploy_result(open(tasks, source, c, r, options))?
     let mut schema = deploy_result(declare(db, Migrate))?
-    let mut declared_items = deploy_result(declare_table(mut schema, "items", key, value))?
-    let ix = deploy_result(index(mut schema, mut declared_items, "bucket", Many, code.describe(bucket_keys), key))?
-    let items = deploy_result(finish(mut schema, take declared_items))?
-    let declared_other = deploy_result(declare_table(mut schema, "other", key, value))?
-    let other = deploy_result(finish(mut schema, take declared_other))?
+    let (items, _, other) = deploy_result(backup_law_schema(mut schema))?
     let _ = deploy_result(seal(mut db, take schema))?
     for k in 0u64 .. 40 {
         if !typed_put(mut db, items, k, k * 3) || !typed_put(mut db, other, k * 7, k) {
@@ -61,6 +57,30 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         }
     }
     if !backup_law_delete(mut db, items, 5) || !typed_put(mut db, items, 6, 1000) {
+        return Error(ExportMismatch)
+    }
+    deploy_result(close(take db))
+}
+
+// L89 (§15.5). A restored backup opens as an ordinary store and equals its
+// source at the leased head, row by row, whatever the source wrote, deleted
+// or checkpointed after the lease.
+@test
+fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let source = disk_test_directory(d)
+    let target = disk_test_directory(d)
+    let restored = disk_test_directory(d)
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.pack_bytes = 1048576
+    // The first open writes, checkpoints, deletes and overwrites, then closes.
+    // The reopen rotates to a new segment with no checkpoint, so the backup
+    // holds a finished segment (no END file) before its terminal one.
+    backup_law_seed(tasks, source, c, r, options)?
+    let mut db = deploy_result(open(tasks, source, c, r, options))?
+    let mut schema = deploy_result(declare(db, Open))?
+    let (items, ix, other) = deploy_result(backup_law_schema(mut schema))?
+    let _ = deploy_result(seal(mut db, take schema))?
+    if !typed_put(mut db, other, 1000, 1) || !typed_put(mut db, items, 7, 2000) {
         return Error(ExportMismatch)
     }
     let leased = snapshot(db)
@@ -86,6 +106,15 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         return Error(ExportMismatch)
     }
     let copied_backup = export_copy(take job)?
+    let mut segments = 0u64
+    for listed in result.unwrap(std.dir.list(target, None)) {
+        if string.starts_with(listed.name, "j-") {
+            segments = segments + 1
+        }
+    }
+    if segments < 2 {
+        return Error(ExportMismatch)
+    }
     release_export(mut db, attempt)
     if copied_backup.stamp.head != version(leased) {
         return Error(ExportMismatch)
@@ -107,7 +136,7 @@ fn journal_test_backup_restore(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     if version(now) != version(leased) || twin.store.hi != db.store.hi || twin.store.lo != db.store.lo {
         return Error(ExportMismatch)
     }
-    if backup_law_same_rows(db, leased, twin, now, items)? != 39 || backup_law_same_rows(db, leased, twin, now, other)? != 40 {
+    if backup_law_same_rows(db, leased, twin, now, items)? != 39 || backup_law_same_rows(db, leased, twin, now, other)? != 41 {
         return Error(ExportMismatch)
     }
     let mut found = deploy_result(find(result.unwrap(reader(twin, 0u64)), now, ix, Included(2), Included(2)))?

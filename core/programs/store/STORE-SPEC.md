@@ -6960,7 +6960,7 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
 - a store that is not on disk, or an `attempt` that is not 16 bytes, is refused `ExportMismatch`;
 - a store that already holds a lease is refused `AttemptBusy`.
 
-`target` must be empty. A target with any entry is refused `Scratch(Exists("backup target"))`, and nothing is leased. The stamp's `activation` is 0: the store knows no activation, and a restore ignores the field. The returned `ExportCopy` writes into `target` itself, and its `Exported.name` is empty. An `ExportCopy` from `begin_export_copy` still makes a scratch subdirectory, unchanged.
+`target` must be empty. A target with any entry is refused `Scratch(Exists("backup target"))`, and nothing is leased. The stamp's `activation` is the source's own: 0 for a Directory store, which knows no activation, and the head's activation for a Bucket store, whose capture then never refuses `Drift`. A restore ignores the field. The returned `ExportCopy` writes into `target` itself, and its `Exported.name` is empty. An `ExportCopy` from `begin_export_copy` still makes a scratch subdirectory, unchanged.
 
 **`restore(from, to, c, options)`** reads `from` and never writes to it. It writes `to` in five steps:
 
@@ -6987,13 +6987,13 @@ These commands sit beside the `inspect`, `stats` and `verify` commands that row 
 
 - **Served stores.** `backup` opens the store as its writer. If another process holds `LOCK`, the command exits 75 and changes nothing: "the store is held by a writer". Backing up a store that a place serves goes through the place's head, which already holds the `Db`, and the consistency of §15.2 is the library's. The operator route is `hirsel store backup --state S --group G TARGET`<!-- doc-ref: planned -->: the host asks the place's head for a backup lease over the control socket, as a deploy asks for an export (`HostExport`), copies the image to `TARGET` and releases the lease. It is specified here and **not built**.
 - **Exit status.** 0: done. 1: refused, with the refusal's name on stderr: `AttemptBusy`, `ExportMismatch`, `Exists`, `Corrupt`, `Full`, `Tiered`, or an I/O error. 2: usage. 75: the store is held.
-- **Memory.** The tool opens the store with the resident limit compiled into it, the platform host's `store.sized(Directory, 2 GiB)`. A larger store is refused `Full`.
+- **Memory.** The tool opens the store with the resident limit compiled into it, `store.sized(Directory, 2 GiB)`, inside a 1 GiB process limit as the platform executables have. A larger store is refused `Full`.
 
 ### 15.5 Law L89 `backup_restore`
 
-Harness: `store_journal_laws.hirsel`, beside the export cases (`journal_test_fork_exports`). The oracle is the source store itself, read through a snapshot taken at the leased head.
+Harness: the store package's law files, as `journal_test_backup_restore` in `store_backup_laws.hirsel` (a sibling of `store_journal_laws.hirsel`, which holds the export cases, at its length limit). The oracle is the source store itself, read through a snapshot taken at the leased head.
 
-The case uses a log@1 store with two tables, one of them with a `Many` index. It checkpoints part of the rows, so the image holds both packs and journal-only commits. Then:
+The case uses a log@1 store with two tables, one of them with a `Many` index. It checkpoints part of the rows, so the image holds both packs and journal-only commits, and closes and reopens the store before the lease, so the image holds a finished segment with no `END` file before the terminal one (the law checks that the backup has at least two segments). Then:
 1. It takes a snapshot S and `begin_backup`.
 2. It commits more puts, overwrites and deletes after the lease and before the copy runs.
 3. It copies, releases, closes the source, restores into a fresh directory and opens the restored store with an ordinary `open`.

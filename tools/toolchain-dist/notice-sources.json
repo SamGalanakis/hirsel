@@ -34,6 +34,9 @@
     "libexec/hirsel/pin_reader": {
       "contents": "the Hirsel offline pin reader, linked with the shipped runtime archive"
     },
+    "libexec/hirsel/store_tool": {
+      "contents": "the Hirsel store backup and restore tool, linked with the shipped runtime archive"
+    },
     "libexec/hirsel/.hirsel-debug/*.debug": {
       "contents": "detached debug information for the platform executables"
     },

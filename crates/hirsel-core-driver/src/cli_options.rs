@@ -441,7 +441,7 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         ["--resident"],
         None,
         ["build", "run", "test"],
-        "Serve the request from the package's resident compiler, starting one if none serves it."
+        "Serve the request from this toolchain's resident compiler, starting one if none runs."
     ),
     option!(
         MaxMemory,
@@ -455,7 +455,7 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         ["--stop"],
         None,
         ["serve"],
-        "Stop the package's resident compiler."
+        "Stop this toolchain's resident compiler."
     ),
     option!(
         ProfTasks,
@@ -881,7 +881,6 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
             "core-product",
             "std-product",
             "sdk",
-            "serve",
             "dry-run",
             "dev",
             "laws check",

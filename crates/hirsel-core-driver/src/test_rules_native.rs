@@ -230,6 +230,7 @@ fn reads_env(e: Env, out: Stdout) -> Result[(), ()] waits {
         let mut request = process::tape_request_command(&args, law.dir.path());
         request
             .env("XDG_CACHE_HOME", law.path("cache"))
+            .env("XDG_RUNTIME_DIR", law.path("runtime"))
             .env("HIRSEL_TEST_FIXTURE", "visible");
         request
     };
@@ -245,8 +246,12 @@ fn reads_env(e: Env, out: Stdout) -> Result[(), ()] waits {
     configure("HIRSEL_TEST_OTHER");
     assert_eq!(run(), "denied");
 
-    let listener = std::os::unix::net::UnixListener::bind(law.path("app/.hirsel-core/resident.sock"))
+    let socket = crate::resident::socket_under(&law.path("runtime"));
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .recursive(true)
+        .create(socket.parent().unwrap())
         .unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
     let server = std::thread::spawn(move || {
         use std::io::Read;
 
@@ -342,17 +347,49 @@ fn program_build_warns_for_each_ungranted_parameter_in_order() {
     assert_eq!(ungranted_warnings(&stderr), [ungranted("err"), ungranted("out")]);
 }
 
-/// The server of `resident_test_session_gives_the_one_shot_run`: serve the
-/// store `RESIDENT_CHILD_STORE` names, under its client's environment.
+/// The server of the resident laws: this toolchain's `hirsel serve`, under
+/// the `XDG_RUNTIME_DIR` its law names.
 #[test]
 #[ignore = "explicit native integration target"]
 fn resident_child() {
-    let Some(store) = std::env::var_os("RESIDENT_CHILD_STORE") else {
+    if std::env::var_os("RESIDENT_CHILD").is_none() {
         return;
-    };
+    }
     // SAFETY: no other thread of this child reads or writes the environment yet.
-    unsafe { std::env::remove_var("RESIDENT_CHILD_STORE") };
-    crate::request::main(vec!["serve".into(), "--store".into(), store.into_string().unwrap()])
+    unsafe { std::env::remove_var("RESIDENT_CHILD") };
+    crate::request::main(vec!["serve".into()])
+}
+
+/// Start the resident laws' server in `directory` under `runtime`, and wait
+/// until it listens.
+fn start_resident(runtime: &Path, directory: &Path, shared: impl Fn(&mut std::process::Command)) -> std::process::Child {
+    let mut server = std::process::Command::new(std::env::current_exe().unwrap());
+    server
+        .args(["--exact", "native::tests::resident_child", "--ignored", "--nocapture", "--test-threads=1"])
+        .env("REQUEST_CHILD_ARGS", "[]")
+        .env("RESIDENT_CHILD", "1")
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("PWD", directory)
+        .current_dir(directory)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    shared(&mut server);
+    let mut server = server.spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !crate::resident::socket_under(runtime).exists() {
+        assert!(server.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline, "the server did not start");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    server
+}
+
+/// Stop the resident laws' server under `runtime`.
+fn stop_resident(runtime: &Path, directory: &Path, mut server: std::process::Child) {
+    let mut stop = process::tape_request_command(&["serve".into(), "--stop".into()], directory);
+    stop.env("XDG_RUNTIME_DIR", runtime);
+    let (stopped, stdout, stderr) = process::tape_request_output(stop);
+    assert_eq!(stopped, Some(0), "{stdout}\n{stderr}");
+    assert!(server.wait().unwrap().success());
 }
 
 /// S3 bug law: a test run through the resident compiler gives the rows,
@@ -409,9 +446,11 @@ fn error() -> Result[(), ()] { Error(()) }
     let elsewhere = law.path("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
     let results = law.path("cache/hirsel/core-packages/test-results");
+    let runtime = law.path("runtime");
     let shared = |command: &mut std::process::Command| {
         command
             .env("XDG_CACHE_HOME", law.path("cache"))
+            .env("XDG_RUNTIME_DIR", &runtime)
             .env("HIRSEL_TRACE_REQUEST_PHASES", "1");
     };
     fn files(root: &Path, at: &Path, into: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
@@ -448,29 +487,92 @@ fn error() -> Result[(), ()] { Error(()) }
     assert!(!one_shot.3.contains("hirsel-request-phases"), "{}", one_shot.3);
     std::fs::remove_dir_all(&results).unwrap();
 
-    let mut server = std::process::Command::new(std::env::current_exe().unwrap());
-    server
-        .args(["--exact", "native::tests::resident_child", "--ignored", "--nocapture", "--test-threads=1"])
-        .env("REQUEST_CHILD_ARGS", serde_json::to_string(&args).unwrap())
-        .env("RESIDENT_CHILD_STORE", &store)
-        .env("PWD", &elsewhere)
-        .current_dir(&elsewhere)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    shared(&mut server);
-    let mut server = server.spawn().unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !store.join("resident.sock").exists() {
-        assert!(server.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline, "the server did not start");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let server = start_resident(&runtime, &elsewhere, shared);
     let served = run();
-    let (stopped, _, _) = process::tape_request(
-        &["serve".into(), "--store".into(), store.to_str().unwrap().into(), "--stop".into()],
-        &client,
-    );
-    assert_eq!(stopped, Some(0));
-    assert!(server.wait().unwrap().success());
+    stop_resident(&runtime, &client, server);
     assert!(served.3.contains("hirsel-request-phases"), "the server did not serve: {}", served.3);
     assert_eq!((&served.0, &served.1, &served.2), (&one_shot.0, &one_shot.1, &one_shot.2));
+}
+
+/// S4 bug law: one server answers every directory and environment. A request
+/// from another directory, under an environment the server was not started
+/// with, gets a fresh process's answer, and a request that panics fails alone.
+/// Two copies of a package, in `one` and `two` with their own default stores,
+/// build through a server started in a third directory without the phase
+/// trace their clients set; each answer carries the trace (the server took the
+/// client's environment) and builds the program a one-shot build does. A
+/// request whose serving panics answers 101, the server lives, and the next
+/// request is served as before. Red where a server compares whole
+/// environments (the clients' trace is refused and they compile themselves)
+/// or where a panic ends the server (the third request finds none).
+#[test]
+fn resident_server_answers_every_directory_and_contains_a_panic() {
+    let law = PackageLaw::new();
+    for side in ["one", "two"] {
+        law.manifest(&format!("{side}/app"), "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+        law.write(
+            &format!("{side}/app/main.hirsel"),
+            format!("pub fn main(out: Stdout) -> Result[(), Exit] waits {{\n    result.unwrap(stdout.write(out, \"{side}\\n\"))\n    Ok(())\n}}\n"),
+        );
+    }
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = options.link else {
+        unreachable!()
+    };
+    let path = |path: PathBuf| path.canonicalize().unwrap().to_str().unwrap().to_owned();
+    let args: Vec<String> = vec![
+        "build".into(),
+        "app".into(),
+        "--output".into(),
+        "program".into(),
+        "--libraries".into(),
+        law.libraries.to_str().unwrap().into(),
+        "--runtime".into(),
+        path(options.runtime),
+        "--cc".into(),
+        path(cc),
+    ];
+    let runtime = law.path("runtime");
+    let shared = |command: &mut std::process::Command| {
+        command.env("XDG_CACHE_HOME", law.path("cache")).env("XDG_RUNTIME_DIR", &runtime);
+    };
+    let build = |side: &str, panic: bool| {
+        let directory = law.path(side);
+        let _ = std::fs::remove_file(directory.join("program"));
+        let mut request = process::tape_request_command(&args, &directory);
+        shared(&mut request);
+        request
+            .env("PWD", &directory)
+            .env("HIRSEL_TRACE_REQUEST_PHASES", "1")
+            .env("HIRSEL_RESIDENT_LAW_SIDE", side);
+        if panic {
+            request.env("HIRSEL_RESIDENT_LAW_PANIC", "1");
+        }
+        let (status, stdout, stderr) = process::tape_request_output(request);
+        let program = std::process::Command::new(directory.join("program")).output().ok();
+        let ran = program.map(|run| (run.status.code(), run.stdout));
+        ((status, stdout, ran), stderr)
+    };
+    let one_shot = [build("one", false), build("two", false)];
+    for (side, (answer, stderr)) in ["one", "two"].iter().zip(&one_shot) {
+        assert_eq!(answer.0, Some(0), "{stderr}");
+        assert_eq!(answer.2, Some((Some(0), format!("{side}\n").into_bytes())), "{stderr}");
+        assert!(!stderr.contains("hirsel-request-phases"), "{stderr}");
+    }
+
+    let elsewhere = law.path("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let mut server = start_resident(&runtime, &elsewhere, shared);
+    for (n, side) in ["one", "two"].into_iter().enumerate() {
+        let (answer, stderr) = build(side, false);
+        assert!(stderr.contains("hirsel-request-phases"), "{side} was not served: {stderr}");
+        assert_eq!(answer, one_shot[n].0, "{side}: {stderr}");
+    }
+    let (panicked, stderr) = build("two", true);
+    assert_eq!(panicked.0, Some(101), "{stderr}");
+    assert!(server.try_wait().unwrap().is_none(), "the panic ended the server");
+    let (answer, stderr) = build("one", false);
+    assert!(stderr.contains("hirsel-request-phases"), "one was not served after the panic: {stderr}");
+    assert_eq!(answer, one_shot[0].0, "{stderr}");
+    stop_resident(&runtime, &elsewhere, server);
 }

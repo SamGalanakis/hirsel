@@ -46,21 +46,24 @@ charge observation archive.
 
 ## Resident compiler
 
-`hirsel serve [package-dir]` keeps one compiler process for a store
-(`--store`, or `.hirsel-core` in the package directory). That process
-answers the store's `build`, `run` and `test` requests and keeps in memory the
-state those requests derive from unchanged inputs. The process listens
-on `resident.sock` in the store and holds `resident.lock` while it runs.
+`hirsel serve` keeps one compiler process per user and toolchain. That
+process answers `build`, `run` and `test` requests from every directory and
+store, and keeps in memory the state those requests derive from unchanged
+inputs, shared between working copies of the same sources. A toolchain is
+named by the content identity of its compiler executable: two copies of one
+compiler build share a server. The process listens on `<toolchain>.sock`
+in the user's runtime directory (`$XDG_RUNTIME_DIR/hirsel`, or
+`/tmp/hirsel-<uid>` when that is unset), which must be private to the user,
+and holds `<toolchain>.lock` there while it runs.
 
-`hirsel build`, `hirsel run` and `hirsel test` send their request to the store's
-resident compiler when one is running, and otherwise compile in their
-own process. `--resident` also starts a resident compiler when none
-serves the store, and replaces one that refuses the request. A
-resident compiler runs the request on the same path a one-shot
-compiler takes, with the client's arguments, working directory,
-environment and standard streams. Its output is byte-identical to a
-one-shot build. A `run` request's program runs in the client process,
-under the client's terminal and signals.
+`hirsel build`, `hirsel run` and `hirsel test` send their request to their
+toolchain's resident compiler when one is running, and otherwise compile in
+their own process. `--resident` also starts a resident compiler when none
+runs. A resident compiler runs the request on the same path a one-shot
+compiler takes, with the client's arguments, working directory, environment,
+umask and standard streams, and then restores its own. Its output is
+byte-identical to a one-shot build. A `run` request's program runs in the
+client process, under the client's terminal and signals.
 
 A `test` request is a session on its connection. The compiler checks
 the request, builds each test and hands the client each launch; the
@@ -79,15 +82,29 @@ compilation once. A `test` request or a request that can publish to a
 durable code store or invoke a custom linker reports the lost answer. The
 client starts a `run` program after receiving the complete launch answer.
 
-A resident compiler refuses a request from another toolchain or another
-environment. The client then compiles in its own process. A refusal for
-another toolchain also stops the server. After each request, the server
-evicts least recently used working sets until its resident memory fits
-`--max-memory BYTES` (default 1.75 GiB). An exact memo entry shared by
-several working sets stays cached while any of those sets remains.
-If the limit is still exceeded after eviction, the server exits when
-its launched clients finish. It also exits after a request that panics.
-`hirsel serve --stop` stops the store's server.
+A compiler reads a few variables once, when it starts:
+`HIRSEL_MEMORY_LIMIT`, `HIRSEL_GUARD_ORACLE`, `HIRSEL_LLVM_NO_FACTS` and
+`HIRSEL_LLVM_EXPERIMENT_BUILD_ID`. A resident compiler refuses a request
+whose digest of those variables differs from its own, and a request from
+another toolchain. The client then compiles in its own process, and the
+server keeps serving. A server re-reads its executable's identity for each
+request, refuses the request and exits once the file holds another
+toolchain or is gone.
+
+A request that panics fails alone: its client is answered with status 101,
+and the server drops every remembered derivation, since the request may
+have left one half made, and serves the next request. After each request,
+the server releases the derivations its working set last used before its
+previous request, then evicts least recently used working sets until its
+resident memory fits `--max-memory BYTES` (default 1.75 GiB). An exact
+memo entry shared by several working sets stays cached while any of those
+sets uses it. The working sets' remembered development links together hold
+at most 256 MiB; past that, the sets that linked least recently forget
+theirs and link afresh. If the limit is still exceeded after eviction, the
+server exits when its launched clients finish. A server returns its free
+memory to the system after a second without requests, and exits after ten
+minutes without requests or launched clients. `hirsel serve --stop` stops
+the toolchain's server.
 
 ## Dev loop
 

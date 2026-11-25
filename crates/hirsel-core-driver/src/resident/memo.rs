@@ -1,5 +1,8 @@
-//! Exact derivations can be shared between resident working sets. Under
-//! memory pressure each set releases its ownership of the entries it used.
+//! Exact derivations can be shared between resident working sets. Each set
+//! owns the entries its last two requests used: after a request its older
+//! entries are released (an edit's stale derivations), and under memory
+//! pressure whole sets are released, least recently used first. An entry
+//! stays while any set owns it.
 
 use super::serving;
 use hirsel_core_ids::ContentHash;
@@ -8,16 +11,22 @@ use hirsel_core_syntax::{Derive, ParseMode, ParseOutput, Symbol, Symbols};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SetId(usize);
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// The serial number of the request being served.
+static REQUEST: AtomicU64 = AtomicU64::new(0);
 
-fn current() -> SetId {
-    SetId(ACTIVE.load(Ordering::Relaxed))
+/// The set being served and its request's serial number.
+fn current() -> (SetId, u64) {
+    (
+        SetId(ACTIVE.load(Ordering::Relaxed)),
+        REQUEST.load(Ordering::Relaxed),
+    )
 }
 
 /// The path identifies the work whose state can be evicted together. It
@@ -43,28 +52,63 @@ impl Input {
     }
 }
 
+struct Set {
+    id: SetId,
+    input: Input,
+    /// The serial number of the set's request before its latest one.
+    previous: u64,
+    latest: u64,
+}
+
 #[derive(Default)]
 pub(super) struct WorkingSets {
-    age: VecDeque<(SetId, Input)>,
+    age: VecDeque<Set>,
     next: usize,
+    requests: u64,
 }
 
 impl WorkingSets {
     fn touch(&mut self, input: Input) -> SetId {
-        let set = match self.age.iter().position(|(_, key)| *key == input) {
+        self.requests += 1;
+        let mut set = match self.age.iter().position(|set| set.input == input) {
             Some(index) => self.age.remove(index).unwrap(),
             None => {
                 self.next += 1;
-                (SetId(self.next), input)
+                Set {
+                    id: SetId(self.next),
+                    input,
+                    previous: 0,
+                    latest: 0,
+                }
             }
         };
-        let id = set.0;
+        set.previous = set.latest;
+        set.latest = self.requests;
+        let id = set.id;
         self.age.push_back(set);
         id
     }
 
     pub(super) fn begin(&mut self, input: Input) {
         ACTIVE.store(self.touch(input).0, Ordering::Relaxed);
+        REQUEST.store(self.requests, Ordering::Relaxed);
+    }
+
+    /// After the served set's request: release what it last used before its
+    /// previous request, the derivations of inputs it no longer has.
+    pub(super) fn settle(&mut self) {
+        let (id, _) = current();
+        if let Some(set) = self.age.iter().find(|set| set.id == id) {
+            let before = set.previous;
+            release(&|owner, request| owner == id && request < before);
+        }
+    }
+
+    /// Release every set, as after a request that panicked: what it was
+    /// deriving may be half made.
+    pub(super) fn forget(&mut self) {
+        self.age.clear();
+        release(&|_, _| true);
     }
 
     /// Try to get below the cap, and say if even empty memos are too large.
@@ -74,10 +118,10 @@ impl WorkingSets {
         mut evict: impl FnMut(SetId),
     ) -> bool {
         while over_budget() {
-            let Some((id, _)) = self.age.pop_front() else {
+            let Some(set) = self.age.pop_front() else {
                 return false;
             };
-            evict(id);
+            evict(set.id);
         }
         true
     }
@@ -90,7 +134,7 @@ impl WorkingSets {
         self.trim(
             || super::resident_bytes() > max_memory,
             |id| {
-                evict(id);
+                release(&|owner, _| owner == id);
                 release_unused_pages();
             },
         )
@@ -103,7 +147,8 @@ unsafe extern "C" {
     fn mi_collect(force: bool);
 }
 
-fn release_unused_pages() {
+/// Return the allocator's free pages to the system, as an idle server does.
+pub(super) fn release_unused_pages() {
     // SAFETY: mimalloc can collect its unused pages at any time. The CLI
     // uses it as its allocator, and this call takes no pointers.
     unsafe { mi_collect(true) };
@@ -111,35 +156,30 @@ fn release_unused_pages() {
 
 struct Value<V> {
     value: V,
-    owner: SetId,
-    shared: Vec<SetId>,
+    /// Each set that used it, with the request that last did.
+    owners: Vec<(SetId, u64)>,
 }
 
 impl<V> Value<V> {
-    fn new(value: V, owner: SetId) -> Self {
+    fn new(value: V, (owner, request): (SetId, u64)) -> Self {
         Self {
             value,
-            owner,
-            shared: Vec::new(),
+            owners: vec![(owner, request)],
         }
     }
 
-    fn touch(&mut self, id: SetId) {
-        if self.owner != id && !self.shared.contains(&id) {
-            self.shared.push(id);
+    fn touch(&mut self, (id, request): (SetId, u64)) {
+        match self.owners.iter_mut().find(|(owner, _)| *owner == id) {
+            Some(owner) => owner.1 = request,
+            None => self.owners.push((id, request)),
         }
     }
 
-    fn remove_owner(&mut self, id: SetId) -> bool {
-        if self.owner == id {
-            let Some(owner) = self.shared.pop() else {
-                return false;
-            };
-            self.owner = owner;
-        } else if let Some(index) = self.shared.iter().position(|owner| *owner == id) {
-            self.shared.swap_remove(index);
-        }
-        true
+    /// Drop the ownerships `drop` names; false when none remains.
+    fn release(&mut self, drop: &dyn Fn(SetId, u64) -> bool) -> bool {
+        self.owners
+            .retain(|&(owner, request)| !drop(owner, request));
+        !self.owners.is_empty()
     }
 }
 
@@ -192,7 +232,7 @@ impl<K: std::hash::Hash + Eq, V: Clone> Memo<K, V> {
         }
     }
 
-    fn remember(&self, key: K, value: V, owner: SetId) {
+    fn remember(&self, key: K, value: V, owner: (SetId, u64)) {
         use std::collections::hash_map::Entry;
         match self.entries.lock().unwrap().entry(key) {
             Entry::Occupied(mut entry) => {
@@ -206,13 +246,13 @@ impl<K: std::hash::Hash + Eq, V: Clone> Memo<K, V> {
         }
     }
 
-    fn evict(&self, id: SetId) {
+    fn release(&self, drop: &dyn Fn(SetId, u64) -> bool) {
         let Some(entries) = LazyLock::get(&self.entries) else {
             return;
         };
         let mut entries = entries.lock().unwrap();
         let before = entries.len();
-        entries.retain(|_, entry| entry.remove_owner(id));
+        entries.retain(|_, entry| entry.release(drop));
         if entries.len() < before {
             entries.shrink_to_fit();
         }
@@ -232,13 +272,13 @@ impl<K: std::hash::Hash + Eq, V: Clone> WorkingMemo<K, V> {
         key: Option<K>,
         make: impl FnOnce() -> Result<V, E>,
     ) -> Result<V, E> {
-        self.0.get_or(key.map(|key| (current(), key)), make)
+        self.0.get_or(key.map(|key| (current().0, key)), make)
     }
 }
 
 impl<T: Default> WorkingMemo<(), Arc<Mutex<T>>> {
     pub(crate) fn previous(&self) -> Option<Arc<Mutex<T>>> {
-        self.0.get(&(current(), ()))
+        self.0.get(&(current().0, ()))
     }
 
     pub(crate) fn previous_or_default(&self) -> Arc<Mutex<T>> {
@@ -400,20 +440,21 @@ pub(crate) static RESOLVED: Memo<
     Vec<Arc<Resolution>>,
 > = Memo::new();
 
-fn evict(id: SetId) {
-    MATERIALISED.evict(id);
-    RECIPE_REACH.0.evict(id);
-    RECIPE_GROUPS.0.evict(id);
-    REFERENCED.evict(id);
-    OBJECT_RECORDS.evict(id);
-    DEBUG_POSITIONS.evict(id);
-    RUNTIME_SOURCES.evict(id);
-    SOURCE_HASHES.evict(id);
-    PARSED.evict(id);
-    RESOLVED.evict(id);
-    crate::incremental_link::RESIDENT.0.evict(id);
-    crate::code_store::PACKS.evict(id);
-    crate::source_delta::STATE.0.evict(id);
+/// Drop, from every memo, the ownerships `drop` names.
+fn release(drop: &dyn Fn(SetId, u64) -> bool) {
+    MATERIALISED.release(drop);
+    RECIPE_REACH.0.release(drop);
+    RECIPE_GROUPS.0.release(drop);
+    REFERENCED.release(drop);
+    OBJECT_RECORDS.release(drop);
+    DEBUG_POSITIONS.release(drop);
+    RUNTIME_SOURCES.release(drop);
+    SOURCE_HASHES.release(drop);
+    PARSED.release(drop);
+    RESOLVED.release(drop);
+    crate::incremental_link::RESIDENT.0.release(drop);
+    crate::code_store::PACKS.release(drop);
+    crate::source_delta::STATE.0.release(drop);
 }
 
 #[cfg(test)]
@@ -436,15 +477,15 @@ mod tests {
         let links: Memo<u32, &str> = Memo::new();
         {
             let mut parses = parses.entries.lock().unwrap();
-            parses.insert(1, Value::new("A and B", a));
-            parses.get_mut(&1).unwrap().touch(b);
-            parses.insert(2, Value::new("B only", b));
-            parses.insert(3, Value::new("C only", c));
+            parses.insert(1, Value::new("A and B", (a, 0)));
+            parses.get_mut(&1).unwrap().touch((b, 0));
+            parses.insert(2, Value::new("B only", (b, 0)));
+            parses.insert(3, Value::new("C only", (c, 0)));
         }
         {
             let mut links = links.entries.lock().unwrap();
-            links.insert(4, Value::new("B link", b));
-            links.insert(5, Value::new("A link", a));
+            links.insert(4, Value::new("B link", (b, 0)));
+            links.insert(5, Value::new("A link", (a, 0)));
         }
 
         assert!(sets.trim(|| false, |_| panic!("evicted under budget")));
@@ -453,8 +494,8 @@ mod tests {
             || evictions.borrow().len() < 2,
             |id| {
                 evictions.borrow_mut().push(id);
-                parses.evict(id);
-                links.evict(id);
+                parses.release(&|owner, _| owner == id);
+                links.release(&|owner, _| owner == id);
             },
         ));
         assert_eq!(evictions.into_inner(), [b, c]);

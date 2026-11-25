@@ -1301,14 +1301,14 @@ pub(crate) fn compiler_identity() -> io::Result<ContentHash> {
         } else {
             std::env::current_exe()?
         };
-        compiler_stream_identity(&mut std::fs::File::open(path)?)
+        executable_identity(&mut std::fs::File::open(path)?)
     });
     ID.as_ref()
         .copied()
         .map_err(|e| io::Error::other(e.to_string()))
 }
 
-fn compiler_stream_identity(reader: &mut (impl io::Read + io::Seek)) -> io::Result<ContentHash> {
+pub fn executable_identity(reader: &mut (impl io::Read + io::Seek)) -> io::Result<ContentHash> {
     use object::Object as _;
     let linked = {
         let cache = object::read::ReadCache::new(&mut *reader);
@@ -1396,9 +1396,7 @@ mod tests {
         }
         // Independent SHA-256 of the domain and ID, each framed by u64 LE length.
         assert_eq!(
-            compiler_stream_identity(&mut io::Cursor::new(&elf))
-                .unwrap()
-                .0,
+            executable_identity(&mut io::Cursor::new(&elf)).unwrap().0,
             [
                 169, 29, 73, 236, 7, 183, 253, 11, 157, 25, 184, 241, 93, 180, 53, 99, 6, 172, 106,
                 55, 33, 198, 174, 102, 215, 24, 56, 121, 46, 189, 104, 222
@@ -1406,16 +1404,14 @@ mod tests {
         );
         elf[136] = 255;
         assert_eq!(
-            compiler_stream_identity(&mut io::Cursor::new(&elf))
-                .unwrap()
-                .0,
+            executable_identity(&mut io::Cursor::new(&elf)).unwrap().0,
             [
                 178, 69, 107, 16, 225, 205, 99, 73, 2, 221, 87, 102, 200, 207, 27, 15, 58, 15, 242,
                 147, 200, 57, 12, 20, 206, 186, 7, 15, 122, 208, 179, 22
             ]
         );
         assert_eq!(
-            compiler_stream_identity(&mut io::Cursor::new(b"compiler-without-a-note"))
+            executable_identity(&mut io::Cursor::new(b"compiler-without-a-note"))
                 .unwrap()
                 .0,
             [

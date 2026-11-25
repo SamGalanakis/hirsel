@@ -1,25 +1,37 @@
-//! The resident compiler (`hirsel serve`): one long-lived process per store
-//! that serves the store's `build`, `run` and `test` requests, so the state a request
-//! derives from unchanged inputs stays in memory between edits.
+//! The resident compiler (`hirsel serve`): one long-lived process per user
+//! and toolchain that serves `build`, `run` and `test` requests from every
+//! directory, so the state a request derives from unchanged inputs stays in
+//! memory between edits and is shared by working copies of one source.
 //!
-//! A request runs in the server exactly as it runs one-shot: the server calls
-//! the same [`crate::request`] path with the client's arguments, working
-//! directory and standard descriptors, and answers with the request's
-//! [`Outcome`]. A one-shot process is a session with one request; nothing
-//! here computes an answer of its own. A client whose toolchain or
-//! environment differs from the server's is refused, and then runs the
-//! request itself (with `--resident`, it replaces the server first).
+//! A request runs in the server exactly as it runs one-shot: for the request
+//! the server takes the client's standard descriptors, working directory,
+//! environment and umask, calls the same [`crate::request`] path with the
+//! client's arguments, and answers with the request's [`Outcome`]; then it
+//! restores its own. Only the variables a process reads once, when it starts
+//! ([`STARTUP_VARIABLES`]), cannot be taken per request: a client whose
+//! digest of them differs from the server's, or that runs another toolchain,
+//! is refused and runs the request itself. A refusal never stops the server.
 //!
-//! The server listens on `resident.sock` in the store and holds
-//! `resident.lock` there while it runs. A `run` request's program runs in the
-//! client, under the client's terminal and signals; the server keeps the
-//! program's scratch directory until that client hangs up. A `test` request
-//! is a session on its connection: the server answers with the session's
-//! plan, the client steps each unit and runs every launch the server hands
-//! back (under the client's directory and environment, which write the pass
-//! cache), and the server folds coverage and the law lock when the client
-//! finishes. Hanging up drops the session.
+//! The server listens on `<toolchain>.sock` in the user's runtime directory
+//! (`$XDG_RUNTIME_DIR/hirsel`, else `/tmp/hirsel-<uid>`), named by the content
+//! identity of its compiler executable, and holds `<toolchain>.lock` there
+//! while it runs. It re-reads its executable's identity on each request and
+//! exits once that changed. A request that panics fails alone: its client is
+//! answered 101, and the server forgets every working set, since what the
+//! request was deriving may be half made. The server returns its free pages
+//! to the system after a second without requests and exits after
+//! [`IDLE_EXIT`] without any.
+//!
+//! A `run` request's program runs in the client, under the client's
+//! terminal and signals; the server keeps the program's scratch directory
+//! until that client hangs up. A `test` request is a session on its
+//! connection: the server answers with the session's plan, the client steps
+//! each unit and runs every launch the server hands back (under the client's
+//! directory and environment, which write the pass cache), and the server
+//! folds coverage and the law lock when the client finishes. Hanging up drops
+//! the session.
 use crate::request::Outcome;
+use hirsel_core_ids::ContentHash;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{self, Read, Seek, Write};
@@ -28,6 +40,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -37,12 +50,25 @@ pub(crate) use memo::{
     RESOLVED, RUNTIME_SOURCES, WorkingMemo, parse_file, source_hash, symbol_suffix,
 };
 
-const SOCKET: &str = "resident.sock";
-const LOCK: &str = "resident.lock";
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 /// Cold Place builds peaked at 1,168 MiB. Add 512 MiB for retained sets
 /// and round up to a 256 MiB boundary.
 pub(crate) const DEFAULT_MAX_MEMORY: u64 = 1792 << 20;
+/// How long a server without requests or launched clients stays: sccache's.
+const IDLE_EXIT: Duration = Duration::from_secs(600);
+/// How long a server waits without requests before returning free pages.
+const COLLECT_AFTER: Duration = Duration::from_secs(1);
+/// The variables a compiler reads once, when it starts, so that a server
+/// keeps its own: the memory limit and the guard's oracle switch (read at the
+/// first allocation), and the LLVM engine's facts switch and expected build
+/// id (read at its first use). Every other variable a request reads is its
+/// client's.
+const STARTUP_VARIABLES: [&str; 4] = [
+    "HIRSEL_MEMORY_LIMIT",
+    "HIRSEL_GUARD_ORACLE",
+    hirsel_llvm_lazy::core::NO_FACTS_VARIABLE,
+    "HIRSEL_LLVM_EXPERIMENT_BUILD_ID",
+];
 
 static SERVING: AtomicBool = AtomicBool::new(false);
 thread_local! {
@@ -55,38 +81,91 @@ pub(crate) fn serving() -> bool {
     SERVING.load(Ordering::Relaxed)
 }
 
-/// The toolchain a process runs: its executable file's identity on disk. A
-/// replaced or rebuilt toolchain has another.
+/// The toolchain a process runs, by content: its compiler executable's
+/// identity, which names its products ([`crate::reuse::compiler_identity`]).
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Debug)]
-struct Toolchain {
-    dev: u64,
-    ino: u64,
-    len: u64,
-    mtime: i64,
-    mtime_nsec: i64,
-}
+struct Toolchain(ContentHash);
 impl Toolchain {
-    fn current() -> io::Result<Self> {
-        let meta = std::fs::metadata(std::env::current_exe()?)?;
-        Ok(Self {
-            dev: meta.dev(),
-            ino: meta.ino(),
-            len: meta.len(),
-            mtime: meta.mtime(),
-            mtime_nsec: meta.mtime_nsec(),
-        })
+    fn loaded() -> io::Result<Self> {
+        crate::reuse::compiler_identity().map(Self)
+    }
+    /// The toolchain the executable's file holds now: a rebuilt or replaced
+    /// one has another, and a deleted one none.
+    fn on_disk() -> io::Result<Self> {
+        crate::reuse::executable_identity(&mut std::fs::File::open(std::env::current_exe()?)?)
+            .map(Self)
+    }
+    /// The name of its server's `suffix` file: 128 bits of the identity.
+    fn file(self, suffix: &str) -> String {
+        format!("{}.{suffix}", &crate::request::hex(self.0)[..32])
     }
 }
 
-/// The environment a request sees, without the variables a shell sets per
-/// command or directory. A server serves only its own.
+/// The user's directory of resident compiler sockets and locks, made private
+/// to the user; one that is not is refused.
+fn runtime_directory() -> io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    // SAFETY: getuid cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let directory = match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        Some(runtime) => PathBuf::from(runtime).join("hirsel"),
+        None => PathBuf::from(format!("/tmp/hirsel-{uid}")),
+    };
+    match std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
+    {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+        _ => {}
+    }
+    let meta = std::fs::symlink_metadata(&directory)?;
+    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        return Err(io::Error::other(format!(
+            "{} is not a directory private to this user",
+            directory.display()
+        )));
+    }
+    Ok(directory)
+}
+
+/// The path a law's stand-in server binds for this toolchain, under the
+/// runtime directory `runtime` (what `XDG_RUNTIME_DIR` names).
+#[cfg(test)]
+pub(crate) fn socket_under(runtime: &Path) -> PathBuf {
+    runtime
+        .join("hirsel")
+        .join(Toolchain::loaded().unwrap().file("sock"))
+}
+
+/// The process's whole environment, as a request carries it.
 fn environment() -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut env: Vec<_> = std::env::vars_os()
-        .filter(|(name, _)| !matches!(name.as_bytes(), b"_" | b"PWD" | b"OLDPWD" | b"SHLVL"))
+    std::env::vars_os()
         .map(|(name, value)| (name.into_vec(), value.into_vec()))
-        .collect();
-    env.sort();
-    env
+        .collect()
+}
+
+/// The digest of `env`'s [`STARTUP_VARIABLES`], set or unset.
+fn startup_digest(env: &[(Vec<u8>, Vec<u8>)]) -> ContentHash {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for name in STARTUP_VARIABLES {
+        parts.push(name.as_bytes());
+        match env.iter().find(|(n, _)| n == name.as_bytes()) {
+            Some((_, value)) => parts.extend([&[1u8][..], value]),
+            None => parts.push(&[0]),
+        }
+    }
+    ContentHash::of_parts("hirsel.resident-startup.v1", parts)
+}
+
+/// This process's umask.
+fn umask() -> u32 {
+    // SAFETY: umask only swaps the process's mask; the old one is restored.
+    unsafe {
+        let mask = libc::umask(0o022);
+        libc::umask(mask);
+        mask as u32
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -95,9 +174,8 @@ struct Request {
     toolchain: Toolchain,
     env: Vec<(Vec<u8>, Vec<u8>)>,
     cwd: Vec<u8>,
+    umask: u32,
     args: Vec<String>,
-    /// The client replaces a server that refuses it.
-    replace: bool,
     /// Stop the server instead (`hirsel serve --stop`).
     stop: bool,
 }
@@ -216,13 +294,12 @@ fn short_path(directory: &Path, name: &str) -> io::Result<(PathBuf, std::fs::Fil
 }
 
 struct Route {
-    store: PathBuf,
     resident: bool,
     retryable: bool,
     input: memo::Input,
 }
 
-/// Route a request to the resident compiler for its store.
+/// Route a request to the resident compiler of its toolchain.
 fn route(args: &[String]) -> Option<Route> {
     use crate::cli::OptionId as Opt;
     let crate::cli::Action::Invoke(invocation) = crate::cli::parse(args.iter().cloned()).ok()?
@@ -232,7 +309,6 @@ fn route(args: &[String]) -> Option<Route> {
     if !matches!(invocation.command.name, "build" | "run" | "test") {
         return None;
     }
-    let mut store = None;
     let mut resident = false;
     // A test session's launches may already have had effects.
     let mut retryable = invocation.command.name != "test";
@@ -241,7 +317,6 @@ fn route(args: &[String]) -> Option<Route> {
     let mut entry = None;
     for (option, value) in &invocation.options {
         match option {
-            Opt::Store => store = value.clone().map(PathBuf::from),
             Opt::Resident => resident = true,
             Opt::Inputs => manifest = value.as_deref().map(PathBuf::from),
             Opt::Recipe => recipe = value.clone(),
@@ -259,26 +334,24 @@ fn route(args: &[String]) -> Option<Route> {
             _ => {}
         }
     }
-    let package = PathBuf::from(invocation.positional.as_deref().unwrap_or("."));
-    let store = store.unwrap_or_else(|| crate::store::default_path(&package));
     let input = if let Some(recipe) = recipe {
         memo::Input::Recipe(recipe)
     } else if let Some(manifest) = manifest {
         memo::Input::Manifest(manifest, entry)
     } else {
+        let package = PathBuf::from(invocation.positional.as_deref().unwrap_or("."));
         memo::Input::Package(package, entry)
     };
     Some(Route {
-        store,
         resident,
         retryable,
         input,
     })
 }
 
-/// Submit a `build`, `run` or `test` request to the resident compiler serving its
-/// store, starting one first under `--resident`. The request's exit status
-/// when a server answered it; None when the caller runs it itself.
+/// Submit a `build`, `run` or `test` request to the resident compiler of its
+/// toolchain, starting one first under `--resident`. The request's exit
+/// status when a server answered it; None when the caller runs it itself.
 pub fn submit(args: &[String]) -> Option<i32> {
     let route = route(args)?;
     match try_submit(&route, args) {
@@ -290,31 +363,26 @@ pub fn submit(args: &[String]) -> Option<i32> {
     }
 }
 
-fn connect(store: &Path) -> io::Result<UnixStream> {
-    let (path, _held) = short_path(store, SOCKET)?;
+fn connect(toolchain: Toolchain) -> io::Result<UnixStream> {
+    let (path, _held) = short_path(&runtime_directory()?, &toolchain.file("sock"))?;
     UnixStream::connect(path)
 }
 
 fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
-    let Route {
-        store,
-        resident,
-        retryable,
-        ..
-    } = route;
-    let (resident, retryable) = (*resident, *retryable);
-    let (mut stream, mut started) = match connect(store) {
-        Ok(stream) => (stream, false),
-        Err(_) if resident => (start(store)?, true),
+    let (resident, retryable) = (route.resident, route.retryable);
+    let toolchain = Toolchain::loaded()?;
+    let mut stream = match connect(toolchain) {
+        Ok(stream) => stream,
+        Err(_) if resident => start(toolchain)?,
         Err(_) => return Ok(None),
     };
     let request = Request {
         protocol: PROTOCOL,
-        toolchain: Toolchain::current()?,
+        toolchain,
         env: environment(),
         cwd: std::env::current_dir()?.into_os_string().into_vec(),
+        umask: umask(),
         args: args.to_vec(),
-        replace: resident,
         stop: false,
     };
     let request = serde_json::to_vec(&request)?;
@@ -338,8 +406,7 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
             Ok(answer) => answer,
             Err(error) if connection_lost(&error) && retryable && resident && !retried => {
                 drop(stream);
-                stream = start(store)?;
-                started = true;
+                stream = start(toolchain)?;
                 retried = true;
                 continue;
             }
@@ -359,8 +426,8 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
             io::copy(output, &mut stdout)?;
             stdout.flush()?;
         }
-        match answer {
-            Answer::Exit(code) => return Ok(Some(code)),
+        return match answer {
+            Answer::Exit(code) => Ok(Some(code)),
             Answer::Launch { argv, env } => {
                 let argv: Vec<OsString> = argv.into_iter().map(OsString::from_vec).collect();
                 let env: Vec<(OsString, OsString)> = env
@@ -370,21 +437,14 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
                 let code = crate::request::Launch::execute(&argv, &env)
                     .map_err(|error| io::Error::other(error.to_string()));
                 drop(stream);
-                return code.map(Some);
+                code.map(Some)
             }
-            Answer::Refused(_) if resident && !started => {
-                // The refusing server exits; start this toolchain's own.
-                drop(stream);
-                wait_gone(store);
-                stream = start(store)?;
-                started = true;
-            }
-            Answer::Refused(reason) if resident => return Err(io::Error::other(reason)),
-            Answer::Refused(_) => return Ok(None),
+            // The server serves other clients; this one compiles itself.
+            Answer::Refused(_) => Ok(None),
             // A test request is not retryable, so its output is not held.
-            Answer::Session(plan) => return drive_session(&mut stream, &plan).map(Some),
-            Answer::Test(_) => return Err(io::Error::other("the server answered out of turn")),
-        }
+            Answer::Session(plan) => drive_session(&mut stream, &plan).map(Some),
+            Answer::Test(_) => Err(io::Error::other("the server answered out of turn")),
+        };
     }
 }
 
@@ -444,65 +504,64 @@ fn connection_lost(error: &io::Error) -> bool {
     )
 }
 
-/// Wait until no server holds the store's lock.
-fn wait_gone(store: &Path) {
+/// Wait until no server of `toolchain` holds its lock.
+fn wait_gone(toolchain: Toolchain) {
     for _ in 0..5000 {
-        match lock(store) {
+        match lock(toolchain) {
             Ok(Some(_)) => return,
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(1)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(1)),
             Err(_) => return,
         }
     }
 }
 
-/// Start a server for `store` and return the connection the request will use.
-fn start(store: &Path) -> io::Result<UnixStream> {
+/// Start a server of `toolchain` and return the connection the request will
+/// use. The server runs in `/`, so that it holds no client's directory.
+fn start(toolchain: Toolchain) -> io::Result<UnixStream> {
     use std::os::unix::process::CommandExt;
-    std::fs::create_dir_all(store)?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
         .arg("serve")
-        .arg("--store")
-        .arg(store)
+        .current_dir("/")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .process_group(0);
     let mut child = command.spawn()?;
     for _ in 0..10_000 {
-        if let Ok(stream) = connect(store) {
+        if let Ok(stream) = connect(toolchain) {
             return Ok(stream);
         }
         if let Some(status) = child.try_wait()? {
             // Another client's server may have taken the lock first.
-            if let Ok(stream) = connect(store) {
+            if let Ok(stream) = connect(toolchain) {
                 return Ok(stream);
             }
             if status.success() {
-                // The old server can relinquish the lock before its
-                // replacement binds, or while our child is exiting.
-                if lock(store)?.is_some() {
+                // An exiting server can relinquish the lock before its
+                // successor binds, or while our child is exiting.
+                if lock(toolchain)?.is_some() {
                     child = command.spawn()?;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
             return Err(io::Error::other(format!(
                 "the resident compiler exited at start: {status}"
             )));
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(1));
     }
     Err(io::Error::other("the resident compiler did not start"))
 }
 
-/// The store's server lock when no other process holds it.
-fn lock(store: &Path) -> io::Result<Option<std::fs::File>> {
+/// The server lock of `toolchain` when no other process holds it.
+fn lock(toolchain: Toolchain) -> io::Result<Option<std::fs::File>> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(store.join(LOCK))?;
+        .open(runtime_directory()?.join(toolchain.file("lock")))?;
     // SAFETY: flock takes the descriptor `file` owns.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let error = io::Error::last_os_error();
@@ -544,7 +603,6 @@ pub(crate) fn answer(outcome: &Outcome) {
 
 /// Options of `hirsel serve`.
 pub(crate) struct Serve {
-    store: PathBuf,
     max_memory: u64,
     stop: bool,
 }
@@ -553,12 +611,13 @@ impl Serve {
         invocation: crate::cli::Invocation,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         use crate::cli::OptionId as Opt;
-        let mut store = None;
+        if invocation.positional.is_some() {
+            return Err("serve takes no package: one server serves every directory".into());
+        }
         let mut max_memory = DEFAULT_MAX_MEMORY;
         let mut stop = false;
         for (option, value) in invocation.options {
             match option {
-                Opt::Store => store = value.map(PathBuf::from),
                 Opt::MaxMemory => {
                     max_memory = value
                         .unwrap_or_default()
@@ -566,75 +625,134 @@ impl Serve {
                         .map_err(|_| "--max-memory expects a byte count")?
                 }
                 Opt::Stop => stop = true,
-                _ => unreachable!("serve takes --store, --max-memory and --stop"),
+                _ => unreachable!("serve takes --max-memory and --stop"),
             }
         }
-        let store = store.unwrap_or_else(|| {
-            crate::store::default_path(Path::new(invocation.positional.as_deref().unwrap_or(".")))
-        });
-        Ok(Self {
-            store,
-            max_memory,
-            stop,
-        })
+        Ok(Self { max_memory, stop })
     }
 }
 
-/// `hirsel serve`: serve the store's requests until stopped, evicted by a
-/// client of another toolchain, or over its memory with its caches dropped.
-/// The exit status of the command.
+/// `hirsel serve`: serve this toolchain's requests until stopped, idle, over
+/// its memory with its caches dropped, or its executable replaced. The exit
+/// status of the command.
 pub(crate) fn run(serve: Serve) -> Result<i32, Box<dyn std::error::Error>> {
+    let toolchain = Toolchain::loaded()?;
     if serve.stop {
-        let Ok(mut stream) = connect(&serve.store) else {
+        let Ok(mut stream) = connect(toolchain) else {
             return Ok(0);
         };
         let request = Request {
             protocol: PROTOCOL,
-            toolchain: Toolchain::current()?,
+            toolchain,
             env: vec![],
             cwd: vec![],
+            umask: 0,
             args: vec![],
-            replace: false,
             stop: true,
         };
         write_message(&mut stream, &serde_json::to_vec(&request)?, &[])?;
         let _ = read_message(&mut stream);
-        wait_gone(&serve.store);
+        wait_gone(toolchain);
         return Ok(0);
     }
-    std::fs::create_dir_all(&serve.store)?;
-    let Some(_lock) = lock(&serve.store)? else {
-        // Another server holds the store.
+    let Some(_lock) = lock(toolchain)? else {
+        // Another server serves the toolchain.
         return Ok(0);
     };
-    let (socket, _held) = short_path(&serve.store, SOCKET)?;
+    let (socket, _held) = short_path(&runtime_directory()?, &toolchain.file("sock"))?;
     match std::fs::remove_file(&socket) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}
     }
     let listener = UnixListener::bind(&socket)?;
     SERVING.store(true, Ordering::Relaxed);
-    let served = serve_requests(&listener, serve.max_memory);
+    let served = serve_requests(&listener, toolchain, serve.max_memory);
     SERVING.store(false, Ordering::Relaxed);
     let _ = std::fs::remove_file(&socket);
     served
 }
 
+/// What a request takes from its client for its duration: the standard
+/// descriptors, working directory, environment and umask. Holds the server's
+/// own, which [`Own::restore`] puts back.
+struct Own {
+    fds: [OwnedFd; 3],
+    directory: PathBuf,
+    env: Vec<(Vec<u8>, Vec<u8>)>,
+    umask: u32,
+}
+impl Own {
+    fn save() -> io::Result<Self> {
+        Ok(Self {
+            fds: [0, 1, 2].map(|fd| {
+                // SAFETY: dup of a standard descriptor this process holds.
+                unsafe { OwnedFd::from_raw_fd(libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10)) }
+            }),
+            directory: std::env::current_dir()?,
+            env: environment(),
+            umask: umask(),
+        })
+    }
+
+    /// Take the client's: the directory is the caller's, since it can be gone.
+    fn take(fds: &[OwnedFd], env: &[(Vec<u8>, Vec<u8>)], mask: u32) {
+        for (fd, from) in fds.iter().enumerate() {
+            // SAFETY: dup2 onto this process's standard descriptors.
+            unsafe { libc::dup2(from.as_raw_fd(), fd as RawFd) };
+        }
+        set_environment(env);
+        // SAFETY: umask only sets the process's mask.
+        unsafe { libc::umask(mask as libc::mode_t) };
+    }
+
+    fn restore(&self) {
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        for (fd, from) in self.fds.iter().enumerate() {
+            // SAFETY: as above, restoring the server's own descriptors.
+            unsafe { libc::dup2(from.as_raw_fd(), fd as RawFd) };
+        }
+        let _ = std::env::set_current_dir(&self.directory);
+        set_environment(&self.env);
+        // SAFETY: as above.
+        unsafe { libc::umask(self.umask as libc::mode_t) };
+    }
+}
+
+/// Make `env` the process's whole environment.
+fn set_environment(env: &[(Vec<u8>, Vec<u8>)]) {
+    // SAFETY: only the serving thread reads or writes the environment between
+    // requests and during one: a request's own threads end with it, and the
+    // collector's sweep thread reads no variable.
+    unsafe {
+        for (name, _) in std::env::vars_os() {
+            std::env::remove_var(name);
+        }
+        for (name, value) in env {
+            if !name.is_empty()
+                && !name.contains(&b'=')
+                && !name.contains(&0)
+                && !value.contains(&0)
+            {
+                std::env::set_var(
+                    OsString::from_vec(name.clone()),
+                    OsString::from_vec(value.clone()),
+                );
+            }
+        }
+    }
+}
+
 fn serve_requests(
     listener: &UnixListener,
+    toolchain: Toolchain,
     max_memory: u64,
 ) -> Result<i32, Box<dyn std::error::Error>> {
-    let toolchain = Toolchain::current()?;
-    let env = environment();
-    let trace_phases = std::env::var_os("HIRSEL_TRACE_REQUEST_PHASES").is_some_and(|v| v == "1");
+    let startup = startup_digest(&environment());
     // A client that hangs up mid-answer is an error on the write, not a signal.
     // SAFETY: SIG_IGN installs no handler.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
-    let saved = [0, 1, 2].map(|fd| {
-        // SAFETY: dup of a standard descriptor this process holds.
-        unsafe { OwnedFd::from_raw_fd(libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10)) }
-    });
-    let home = std::env::current_dir()?;
+    let own = Own::save()?;
     // Launched programs' scratch directories, until their clients hang up.
     let mut launched: Vec<(UnixStream, Option<crate::store::Scratch>)> = Vec::new();
     let mut sets = memo::WorkingSets::default();
@@ -647,44 +765,45 @@ fn serve_requests(
             let _ = refuse(&mut stream, "the request does not decode");
             continue;
         };
-        let current = Toolchain::current().ok();
+        let replaced = Toolchain::on_disk().ok() != Some(toolchain);
         let route = route(&request.args);
         let refusal = if request.stop {
             Some("stopped")
-        } else if request.protocol != PROTOCOL
-            || request.toolchain != toolchain
-            || current != Some(toolchain)
-        {
+        } else if request.protocol != PROTOCOL || request.toolchain != toolchain || replaced {
             Some("the client runs another toolchain")
-        } else if request.env != env {
-            Some("the client's environment differs from the server's")
-        } else if fds.len() != 3 || route.is_none() {
+        } else if startup_digest(&request.env) != startup {
+            Some("the client's startup variables differ from the server's")
+        } else if fds.len() != 3 {
             Some("the request is not one a resident compiler serves")
         } else {
             None
         };
-        if let Some(reason) = refusal {
+        let (Some(route), None) = (route, refusal) else {
+            let reason = refusal.unwrap_or("the request is not one a resident compiler serves");
             let _ = refuse(&mut stream, reason);
-            if request.stop || request.replace || current != Some(toolchain) {
+            if request.stop || replaced {
                 return Ok(0);
             }
             continue;
-        }
-        for (fd, from) in fds.iter().enumerate() {
-            // SAFETY: dup2 onto this process's standard descriptors.
-            unsafe { libc::dup2(from.as_raw_fd(), fd as RawFd) };
-        }
+        };
+        Own::take(&fds, &request.env, request.umask);
         drop(fds);
         let cwd = PathBuf::from(OsString::from_vec(request.cwd));
         CLIENT.with_borrow_mut(|client| *client = stream.try_clone().ok());
-        if trace_phases {
+        if std::env::var_os("HIRSEL_TRACE_REQUEST_PHASES").is_some_and(|v| v == "1") {
             crate::meter::trace::begin();
         }
         let outcome = if std::env::set_current_dir(&cwd).is_ok() {
-            sets.begin(route.unwrap().input.absolute(&cwd));
+            sets.begin(route.input.absolute(&cwd));
             crate::meter::trace::mark("working set ready");
             let args = request.args;
-            std::panic::catch_unwind(move || crate::request::serve(args))
+            std::panic::catch_unwind(move || {
+                #[cfg(test)]
+                if std::env::var_os("HIRSEL_RESIDENT_LAW_PANIC").is_some() {
+                    panic!("the law's request panics");
+                }
+                crate::request::serve(args)
+            })
         } else {
             eprintln!("hirsel: the working directory {} is gone", cwd.display());
             Ok(Outcome::Exit(2))
@@ -697,19 +816,15 @@ fn serve_requests(
         if let Some(outcome) = &outcome {
             answer(outcome);
         }
-        let _ = io::stdout().flush();
-        let _ = io::stderr().flush();
-        for (fd, from) in saved.iter().enumerate() {
-            // SAFETY: as above, restoring the server's own descriptors.
-            unsafe { libc::dup2(from.as_raw_fd(), fd as RawFd) };
-        }
-        let _ = std::env::set_current_dir(&home);
+        own.restore();
         if let Some(Outcome::Launch(launch)) = outcome {
             launched.push((stream, launch.keep));
         }
         if panicked {
-            // The request's state may be torn; the next client starts afresh.
-            return Ok(101);
+            // The request fails alone; what it was deriving is dropped.
+            sets.forget();
+        } else {
+            sets.settle();
         }
         // A launched program's scratch must survive until its client is done.
         retire_when_idle = !sets.fit(max_memory);
@@ -719,8 +834,8 @@ fn serve_requests(
 
 /// Serve a test session on the connection of its request, under the
 /// client's descriptors and directory, until the client finishes it or hangs
-/// up (which drops it). False when a step panicked: the server's state may
-/// be torn, and the client is answered 101.
+/// up (which drops it). False when a step panicked: its client is answered
+/// 101, and the caller forgets what the session derived.
 fn serve_session(mut session: crate::TestSession) -> bool {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let Some(mut stream) = CLIENT.with_borrow_mut(Option::take) else {
@@ -773,16 +888,30 @@ fn refuse(stream: &mut UnixStream, reason: &str) -> io::Result<()> {
 }
 
 /// The next connection, releasing each launched program's scratch once its
-/// client has hung up.
+/// client has hung up. None once the server retires: over its memory, or
+/// [`IDLE_EXIT`] without a request, with no launched client left. A second
+/// without a request returns the allocator's free pages.
 fn accept(
     listener: &UnixListener,
     launched: &mut Vec<(UnixStream, Option<crate::store::Scratch>)>,
     retire_when_idle: bool,
 ) -> io::Result<Option<UnixStream>> {
+    let quiet = Instant::now();
+    let mut collected = false;
     loop {
-        if retire_when_idle && launched.is_empty() {
+        let idle = quiet.elapsed() >= IDLE_EXIT;
+        if (retire_when_idle || idle) && launched.is_empty() {
             return Ok(None);
         }
+        let timeout = if !collected {
+            COLLECT_AFTER
+        } else if idle {
+            // Launched clients keep the server until they hang up.
+            Duration::MAX
+        } else {
+            IDLE_EXIT - quiet.elapsed()
+        };
+        let timeout = i32::try_from(timeout.as_millis()).unwrap_or(-1);
         let mut polls: Vec<libc::pollfd> = std::iter::once(listener.as_raw_fd())
             .chain(launched.iter().map(|(stream, _)| stream.as_raw_fd()))
             .map(|fd| libc::pollfd {
@@ -792,12 +921,20 @@ fn accept(
             })
             .collect();
         // SAFETY: poll reads and writes the array it is given.
-        if unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as _, -1) } < 0 {
+        let ready = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as _, timeout) };
+        if ready < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
             return Err(error);
+        }
+        if ready == 0 {
+            if !collected {
+                memo::release_unused_pages();
+                collected = true;
+            }
+            continue;
         }
         let mut index = 0;
         launched.retain(|_| {

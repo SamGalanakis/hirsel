@@ -13,9 +13,13 @@
 //! The patch never pads or moves a section: the executable stays the one a
 //! full link of the same objects makes, so a build in an empty store and an
 //! incremental build deliver the same bytes.
+//!
+//! Each working set remembers one link. Together they keep at most
+//! [`IMAGE_BUDGET`] bytes of images and objects: past it, the sets that
+//! linked least recently forget theirs, and their next link is lld's.
 use hirsel_core_ids::ContentHash;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 /// One object a link reads, in link order: bytes made for this link, or
 /// checked bytes with the key they are a function of.
@@ -48,12 +52,18 @@ pub(crate) struct Incremental(Option<Previous>);
 pub(crate) static RESIDENT: crate::resident::WorkingMemo<(), Arc<Mutex<Incremental>>> =
     crate::resident::WorkingMemo::new();
 
+/// The bytes all sets' remembered links may hold together: a few 20-50 MB
+/// development executables with their objects.
+const IMAGE_BUDGET: u64 = 256 << 20;
+
+/// Every set's link, least recently used first.
+static LINKS: Mutex<Vec<Weak<Mutex<Incremental>>>> = Mutex::new(Vec::new());
+
 pub(crate) fn patch(frame: ContentHash, objects: &[Slot<'_>]) -> io::Result<Option<Arc<Vec<u8>>>> {
-    RESIDENT
-        .previous_or_default()
-        .lock()
-        .unwrap()
-        .patch(frame, objects)
+    let link = RESIDENT.previous_or_default();
+    let patched = link.lock().unwrap().patch(frame, objects);
+    bound(&link, IMAGE_BUDGET);
+    patched
 }
 
 pub(crate) fn remember(
@@ -61,14 +71,37 @@ pub(crate) fn remember(
     objects: &[Slot<'_>],
     image: &Arc<Vec<u8>>,
 ) -> io::Result<()> {
-    RESIDENT
-        .previous_or_default()
-        .lock()
-        .unwrap()
-        .remember(frame, objects, image)
+    let link = RESIDENT.previous_or_default();
+    let remembered = link.lock().unwrap().remember(frame, objects, image);
+    bound(&link, IMAGE_BUDGET);
+    remembered
+}
+
+/// Mark `link` the most recently used, then make the older links forget
+/// theirs once the newer ones hold `budget` bytes. `link` itself is kept.
+fn bound(link: &Arc<Mutex<Incremental>>, budget: u64) {
+    let mut links = LINKS.lock().unwrap_or_else(PoisonError::into_inner);
+    links.retain(|other| other.strong_count() > 0 && other.as_ptr() != Arc::as_ptr(link));
+    links.push(Arc::downgrade(link));
+    let mut held = 0;
+    for (n, other) in links.iter().rev().filter_map(Weak::upgrade).enumerate() {
+        let mut other = other.lock().unwrap_or_else(PoisonError::into_inner);
+        held += other.bytes();
+        if n > 0 && held > budget {
+            other.0 = None;
+        }
+    }
 }
 
 impl Incremental {
+    /// The bytes its remembered link holds.
+    fn bytes(&self) -> u64 {
+        self.0.as_ref().map_or(0, |previous| {
+            let objects: usize = previous.objects.iter().map(|o| o.bytes.len()).sum();
+            (previous.image.len() + objects) as u64
+        })
+    }
+
     /// The executable lld would make of `objects` under `frame`, written
     /// over the remembered one, when only patchable edits separate them.
     pub(crate) fn patch(

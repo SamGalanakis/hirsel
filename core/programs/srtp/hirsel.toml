@@ -17,3 +17,7 @@ limit = 16777216
 [tests.sources]
 "laws.hirsel" = "laws"
 "vectors.hirsel" = "laws"
+"replay_prop_laws.hirsel" = "srtp"
+
+[tests.runs."srtp@1/srtp/replay_reference_model"]
+grants = ["Env=HIRSEL_TEST_SIM_SEED"]

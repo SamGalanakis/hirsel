@@ -1,0 +1,49 @@
+// README §5: RTP timestamp to sender wall clock, anchored by the latest RTCP
+// sender report (RFC 3550 §6.4.1). Two streams of one sender share the NTP
+// clock, so their wall times line up audio and video.
+type Anchor {
+    ntp: u64,
+    rtp: u32
+}
+
+pub type Sync {
+    rate: u64,
+    anchor: Option[Anchor]
+}
+
+const NS: u64 = 1000000000
+
+pub fn new(rate: u64) -> Sync {
+    if rate == 0 {
+        fail("rtp_jitter sync needs a clock rate")
+    }
+    Sync(rate: rate, anchor: None)
+}
+
+// RFC 3550 §4: 32.32 fixed-point seconds since 1900, floored to nanoseconds.
+pub fn ntp_ns(ntp: u64) -> u64 {
+    (ntp >> 32) * NS + (((ntp & 0xffffffff) * NS) >> 32)
+}
+
+pub fn on_sr(mut s: Sync, ntp: u64, rtp_ts: u32) {
+    s.anchor = Some(Anchor(ntp: ntp, rtp: rtp_ts))
+}
+
+// Nanoseconds since the NTP epoch at which the sender sampled `ts`, an
+// extended RTP timestamp, floored. None before the first sender report.
+pub fn wall_ns(s: Sync, ts: i64) -> Option[i64] {
+    let Some(a) = s.anchor else {
+        return None
+    }
+    let delta = ts - rtp.seq.estimate32(ts, a.rtp)
+    let rate: i64 = int.narrow(s.rate)
+    let mut whole = delta / rate
+    let mut part = delta % rate
+    if part < 0 {
+        whole -= 1
+        part += rate
+    }
+    let base: i64 = int.narrow(ntp_ns(a.ntp))
+    let ns: i64 = int.narrow(NS)
+    Some(base + whole * ns + part * ns / rate)
+}

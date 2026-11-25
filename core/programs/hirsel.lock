@@ -107,6 +107,11 @@ source = "member:rtp"
 edges = ["std@1"]
 
 [[package]]
+id = "rtp_jitter@1"
+source = "member:rtp_jitter"
+edges = ["media_bits@1", "rtp@1", "std@1"]
+
+[[package]]
 id = "runner@1"
 source = "member:runner"
 edges = ["std@1", "store@1"]

@@ -1,0 +1,252 @@
+// Per-codec frame assembly over media_bits (README §3). Each function takes
+// the RTP payloads of one frame, in sequence order, and returns the frame's
+// key flag and data, or an error when the payloads do not form one frame.
+pub type Codec = Vp8 | Vp9 | H264 | Av1 | Opus
+
+pub type Assembled {
+    key: bool,
+    data: Bytes
+}
+
+// README §3.1: whether a packet's own payload proves it is the first packet
+// of a frame, without looking at the packet before it.
+pub fn starts(codec: Codec, payload: Bytes) -> bool {
+    match codec {
+        Vp8 => match media_bits.vp8.parse(payload) {
+            Ok(d) => d.first,
+            Error(_) => false
+        },
+        Vp9 => match media_bits.vp9.parse(payload) {
+            Ok(d) => d.first && base_layer(d.layer),
+            Error(_) => false
+        },
+        H264 => h264_starts(payload),
+        Av1 => match media_bits.av1.parse_rtp(payload) {
+            Ok(a) => a.starts_sequence,
+            Error(_) => false
+        },
+        Opus => true
+    }
+}
+
+pub fn assemble(codec: Codec, parts: List[Bytes]) -> Result[Assembled, ()] {
+    if list.len(parts) == 0 {
+        return Error(())
+    }
+    match codec {
+        Vp8 => vp8(parts),
+        Vp9 => vp9(parts),
+        H264 => h264(parts),
+        Av1 => av1(parts),
+        Opus => {
+            let mut data: Bytes = list.new()
+            list.append(mut data, parts[0])
+            Ok(Assembled(key: true, data: take data))
+        }
+    }
+}
+
+fn base_layer(layer: Option[media_bits.vp9.Layer]) -> bool {
+    match layer {
+        Some(l) => l.spatial == 0,
+        None => true
+    }
+}
+
+// RFC 7741 §4.1: the frame is the payloads after each descriptor. The first
+// packet carries S=1 and partition 0, and its first byte's P bit is 0 on a
+// keyframe (RFC 6386 §9.1).
+fn vp8(parts: List[Bytes]) -> Result[Assembled, ()] {
+    let mut data: Bytes = list.new()
+    let mut key = false
+    for i in 0u64 .. list.len(parts) {
+        let p = view parts[i]
+        let d = media_bits.vp8.parse(p) ?=> |_| ()
+        if i == 0 {
+            if !d.first {
+                return Error(())
+            }
+            key = d.keyframe
+        }
+        list.append(mut data, list.slice(p, d.payload_start, list.len(p)))
+    }
+    Ok(Assembled(key: key, data: take data))
+}
+
+// RFC 9628 §4.2: every spatial layer of one timestamp is one frame. The first
+// packet begins the base layer's picture (B=1, spatial 0); P=0 there marks a
+// keyframe.
+fn vp9(parts: List[Bytes]) -> Result[Assembled, ()] {
+    let mut data: Bytes = list.new()
+    let mut key = false
+    for i in 0u64 .. list.len(parts) {
+        let p = view parts[i]
+        let d = media_bits.vp9.parse(p) ?=> |_| ()
+        if i == 0 {
+            if !d.first || !base_layer(d.layer) {
+                return Error(())
+            }
+            key = !d.predicted
+        }
+        list.append(mut data, list.slice(p, d.payload_start, list.len(p)))
+    }
+    Ok(Assembled(key: key, data: take data))
+}
+
+// README §3.1: a first NAL that can only open an access unit. An access
+// unit delimiter (kind 9) is always first (H.264 §7.4.1.2.3). An SPS (7) or a
+// non-IDR slice with first_mb_in_slice 0 (1) opens one as libwebrtc sends
+// them. An IDR slice (5) does not: its SPS and PPS travel ahead of it, so it
+// proves nothing when the packet before it is lost.
+fn begins_unit(kind: u8, unit: Bytes) -> bool {
+    if kind == 1 {
+        return match media_bits.h264.slice_start(unit) {
+            Ok(s) => s.first_macroblock == 0,
+            Error(_) => false
+        }
+    }
+    kind == 7 || kind == 9
+}
+
+fn h264_starts(payload: Bytes) -> bool {
+    match media_bits.h264.parse_rtp(payload) {
+        Ok(Single(nal)) => begins_unit(nal.kind, payload),
+        Ok(StapA(_)) => {
+            let mut at: u64 = 1
+            match media_bits.h264.stap_next(payload, mut at) {
+                Ok(Some(unit)) => begins_unit(unit.nal.kind, list.slice(payload, unit.start, unit.end)),
+                _ => false
+            }
+        },
+        Ok(FuA(fragment)) => fragment.first && begins_unit(fragment.nal.kind, list.slice(payload, 1, list.len(payload))),
+        Error(_) => false
+    }
+}
+
+fn put_length(mut out: Bytes, at: u64) {
+    let size = list.len(out) - at - 4
+    let wide: u32 = option.unwrap(int.try_narrow(size))
+    list.set_word_be(mut out, at, wide)
+}
+
+// RFC 6184 §§5.6-5.8 into length-prefixed NAL units (ISO/IEC 14496-15
+// §5.3.3, four-byte lengths). A frame is a keyframe when it carries an IDR
+// slice (NAL kind 5). An FU-A must open, continue and close inside the frame.
+fn h264(parts: List[Bytes]) -> Result[Assembled, ()] {
+    let mut data: Bytes = list.new()
+    let mut key = false
+    let mut open: Option[u64] = None
+    for p in parts {
+        match media_bits.h264.parse_rtp(p) ?=> |_| () {
+            Single(nal) => {
+                if open != None {
+                    return Error(())
+                }
+                key = key || nal.idr
+                list.put_word_be(mut data, (int.narrow(list.len(p)) : u32))
+                list.append(mut data, p)
+            },
+            StapA(_) => {
+                if open != None {
+                    return Error(())
+                }
+                let mut at: u64 = 1
+                while let Some(unit) = media_bits.h264.stap_next(p, mut at) ?=> |_| () {
+                    key = key || unit.nal.idr
+                    list.put_word_be(mut data, (int.narrow(unit.end - unit.start) : u32))
+                    list.append(mut data, list.slice(p, unit.start, unit.end))
+                }
+            },
+            FuA(fragment) => {
+                if fragment.first {
+                    if open != None {
+                        return Error(())
+                    }
+                    open = Some(list.len(data))
+                    list.put_word_be(mut data, (0 : u32))
+                    list.push(mut data, fragment.reconstructed_header)
+                    key = key || fragment.nal.idr
+                } else if open == None {
+                    return Error(())
+                }
+                list.append(mut data, list.slice(p, 2, list.len(p)))
+                if fragment.last {
+                    put_length(mut data, option.unwrap(open))
+                    open = None
+                }
+            }
+        }
+    }
+    if open != None {
+        return Error(())
+    }
+    Ok(Assembled(key: key, data: take data))
+}
+
+fn put_leb128(mut out: Bytes, value: u64) {
+    let mut rest = value
+    while rest >= 128 {
+        list.push(mut out, (int.narrow(rest & 127) : u8) | 128)
+        rest = rest >> 7
+    }
+    list.push(mut out, (int.narrow(rest) : u8))
+}
+
+// AV1 §5.3.1 with the RTP payload format §4.5: write one reassembled OBU
+// element with obu_has_size_field set and its size, as a decoder reads a
+// low-overhead bitstream. Temporal delimiters (kind 2) and tile lists (kind 8)
+// are dropped, as §5 asks of receivers.
+fn put_obu(mut out: Bytes, element: Bytes) -> Result[(), ()] {
+    let obu = media_bits.av1.parse_obu(element, 0) ?=> |_| ()
+    if obu.kind == 2 || obu.kind == 8 {
+        return Ok(())
+    }
+    let header_end: u64 = if (element[0] & 4) != 0 {
+        2
+    } else {
+        1
+    }
+    list.push(mut out, element[0] | 2)
+    if header_end == 2 {
+        list.push(mut out, element[1])
+    }
+    put_leb128(mut out, obu.end - obu.payload_start)
+    list.append(mut out, list.slice(element, obu.payload_start, obu.end))
+    Ok(())
+}
+
+// AV1 RTP §4.4: elements continue across packets through Z (first element
+// continues the previous packet's last) and Y (last element continues into
+// the next). N on the first packet marks a new coded video sequence, which
+// begins with a keyframe.
+fn av1(parts: List[Bytes]) -> Result[Assembled, ()] {
+    let mut data: Bytes = list.new()
+    let mut element: Bytes = list.new()
+    let mut open = false
+    let mut key = false
+    for i in 0u64 .. list.len(parts) {
+        let p = view parts[i]
+        let aggregation = media_bits.av1.parse_rtp(p) ?=> |_| ()
+        if i == 0 {
+            key = aggregation.starts_sequence
+        }
+        let mut at: u64 = 1
+        let mut index: u64 = 0
+        while let Some(e) = media_bits.av1.rtp_next(p, mut at, index) ?=> |_| () {
+            if e.continues_previous != open {
+                return Error(())
+            }
+            list.append(mut element, list.slice(p, e.start, e.end))
+            open = e.continues_next
+            if !open {
+                put_obu(mut data, element)?
+                list.clear(mut element)
+            }
+            index += 1
+        }
+    }
+    if open {
+        return Error(())
+    }
+    Ok(Assembled(key: key, data: take data))
+}

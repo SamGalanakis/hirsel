@@ -1,0 +1,74 @@
+// README §6: an adaptive audio playout target in the manner of NetEQ's delay
+// manager, reduced to a fixed history. Each packet's transit is its arrival
+// time minus its RTP time; the delays are transits above the history's
+// smallest, counted in 1 ms buckets, and the target is the bucket holding the
+// 95th percentile, rounded up to its end and bounded.
+pub type Playout {
+    rate: u64,
+    history: u64,
+    min_us: u64,
+    max_us: u64,
+    transits: List[i64],
+    next: u64
+}
+
+pub fn new(rate: u64, history: u64, min_us: u64, max_us: u64) -> Playout {
+    if rate == 0 || history == 0 || min_us > max_us {
+        fail("rtp_jitter playout needs a rate, a history and min_us <= max_us")
+    }
+    Playout(rate: rate, history: history, min_us: min_us, max_us: max_us, transits: list.new(), next: 0)
+}
+
+// ts is the packet's extended RTP timestamp.
+pub fn observe(mut p: Playout, ts: i64, arrival_us: u64) {
+    let rate: i64 = int.narrow(p.rate)
+    let media_us = ts * 1000000 / rate
+    let arrival: i64 = int.narrow(arrival_us)
+    let transit = arrival - media_us
+    if list.len(p.transits) < p.history {
+        list.push(mut p.transits, transit)
+    } else {
+        let _ = list.set(mut p.transits, p.next, transit)
+    }
+    p.next = (p.next + 1) % p.history
+}
+
+pub fn target_us(p: Playout) -> u64 {
+    let n = list.len(p.transits)
+    if n == 0 {
+        return p.min_us
+    }
+    let mut least = p.transits[0]
+    for t in p.transits {
+        if t < least {
+            least = t
+        }
+    }
+    let top = p.max_us / 1000
+    let mut counts: List[u64] = list.new()
+    list.fill(mut counts, top + 1, 0)
+    for t in p.transits {
+        let delay: u64 = int.narrow(t - least)
+        let bucket = if delay / 1000 > top {
+            top
+        } else {
+            delay / 1000
+        }
+        counts[bucket] += 1
+    }
+    let need = (95 * n + 99) / 100
+    let mut seen: u64 = 0
+    let mut bucket: u64 = 0
+    while seen + counts[bucket] < need {
+        seen += counts[bucket]
+        bucket += 1
+    }
+    let target = (bucket + 1) * 1000
+    if target < p.min_us {
+        p.min_us
+    } else if target > p.max_us {
+        p.max_us
+    } else {
+        target
+    }
+}

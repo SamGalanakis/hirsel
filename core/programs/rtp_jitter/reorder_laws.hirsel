@@ -1,0 +1,543 @@
+// The reorder/loss law (README §7.2). A sender packetizes frames with each
+// codec's RTP payload format; the network drops and duplicates packets and
+// delays each by fewer than `window` packet slots. The model works from the
+// sender's frame boundaries, never from rtp_jitter's code.
+type SentPacket {
+    payload: Bytes,
+    marker: bool,
+    frame: u64
+}
+
+type SentFrame {
+    first: u64,
+    count: u64,
+    key: bool,
+    data: Bytes
+}
+
+type Plan {
+    codec: u64,
+    window: u64,
+    seq0: u16,
+    ts0: u32,
+    packets: List[SentPacket],
+    frames: List[SentFrame],
+    arrivals: List[u64]
+}
+
+fn codec_of(n: u64) -> depack.Codec {
+    if n == 0 {
+        Vp8
+    } else if n == 1 {
+        Vp9
+    } else if n == 2 {
+        H264
+    } else if n == 3 {
+        Av1
+    } else {
+        Opus
+    }
+}
+
+fn random_bytes(mut src: std.prop.Source, n: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    for _ in 0u64 .. n {
+        list.push(mut b, (int.narrow(std.prop.below(mut src, 256)) : u8))
+    }
+    b
+}
+
+fn add_packet(mut plan: Plan, take payload: Bytes, marker: bool) {
+    let frame = list.len(plan.frames)
+    list.push(mut plan.packets, SentPacket(payload: take payload, marker: marker, frame: frame))
+}
+
+// RFC 7741 §4.2: S=1 on the first packet; RFC 6386 §9.1: the frame tag's P
+// bit is 0 on a keyframe, which also needs ten data in its first packet.
+fn send_vp8(mut src: std.prop.Source, mut plan: Plan, key: bool, mtu: u64) -> Bytes {
+    let size = 10 + std.prop.below(mut src, 40)
+    let mut body = random_bytes(mut src, size)
+    let tag: u8 = if key {
+        0
+    } else {
+        1
+    }
+    body[0] = (body[0] & 254) | tag
+    let n = list.len(body)
+    let mut at: u64 = 0
+    while at < n {
+        let stop = if at + mtu < n {
+            at + mtu
+        } else {
+            n
+        }
+        let mut p: Bytes = list.new()
+        list.push(mut p, if at == 0 {
+            0x10
+        } else {
+            0
+        })
+        list.append(mut p, list.slice(body, at, stop))
+        add_packet(mut plan, take p, stop == n)
+        at = stop
+    }
+    body
+}
+
+// RFC 9628 §4.2 flexible-free, layerless descriptor: P on predicted frames,
+// B on the first packet, E on the last.
+fn send_vp9(mut src: std.prop.Source, mut plan: Plan, key: bool, mtu: u64) -> Bytes {
+    let size = 1 + std.prop.below(mut src, 50)
+    let body = random_bytes(mut src, size)
+    let n = list.len(body)
+    let mut at: u64 = 0
+    while at < n {
+        let stop = if at + mtu < n {
+            at + mtu
+        } else {
+            n
+        }
+        let mut flags: u8 = 0
+        if !key {
+            flags |= 0x40
+        }
+        if at == 0 {
+            flags |= 0x08
+        }
+        if stop == n {
+            flags |= 0x04
+        }
+        let mut p: Bytes = list.new()
+        list.push(mut p, flags)
+        list.append(mut p, list.slice(body, at, stop))
+        add_packet(mut plan, take p, stop == n)
+        at = stop
+    }
+    body
+}
+
+fn put_nal(mut out: Bytes, nal: Bytes) {
+    list.put_word_be(mut out, (int.narrow(list.len(nal)) : u32))
+    list.append(mut out, nal)
+}
+
+// RFC 6184 §§5.6-5.8: a keyframe sends SPS and PPS in one STAP-A, then the
+// IDR slice; a slice larger than the MTU goes as FU-A fragments. Slices
+// carry first_mb_in_slice 0 (H.264 §7.3.3).
+fn send_h264(mut src: std.prop.Source, mut plan: Plan, key: bool, mtu: u64) -> Bytes {
+    let mut expected: Bytes = list.new()
+    let mut slice: Bytes = if key {
+        b"\x65\xb8"
+    } else {
+        b"\x41\xe0"
+    }
+    let size = std.prop.below(mut src, 40)
+    list.append(mut slice, random_bytes(mut src, size))
+    if key {
+        let mut sps: Bytes = b"\x67"
+        list.append(mut sps, random_bytes(mut src, 3))
+        let mut pps: Bytes = b"\x68"
+        list.append(mut pps, random_bytes(mut src, 2))
+        let mut stap: Bytes = b"\x78"
+        list.put_word_be(mut stap, (int.narrow(list.len(sps)) : u16))
+        list.append(mut stap, sps)
+        list.put_word_be(mut stap, (int.narrow(list.len(pps)) : u16))
+        list.append(mut stap, pps)
+        add_packet(mut plan, take stap, false)
+        put_nal(mut expected, sps)
+        put_nal(mut expected, pps)
+    }
+    put_nal(mut expected, slice)
+    let n = list.len(slice)
+    if n <= mtu {
+        add_packet(mut plan, take slice, true)
+        return expected
+    }
+    let room = mtu - 2
+    let mut at: u64 = 1
+    while at < n {
+        let stop = if at + room < n {
+            at + room
+        } else {
+            n
+        }
+        let mut fu: u8 = slice[0] & 31
+        if at == 1 {
+            fu |= 0x80
+        }
+        if stop == n {
+            fu |= 0x40
+        }
+        let mut p: Bytes = list.new()
+        list.push(mut p, (slice[0] & 0xe0) | 28)
+        list.push(mut p, fu)
+        list.append(mut p, list.slice(slice, at, stop))
+        add_packet(mut plan, take p, stop == n)
+        at = stop
+    }
+    expected
+}
+
+fn leb128(mut out: Bytes, value: u64) {
+    let mut rest = value
+    while rest >= 128 {
+        list.push(mut out, (int.narrow(rest & 127) : u8) | 128)
+        rest = rest >> 7
+    }
+    list.push(mut out, (int.narrow(rest) : u8))
+}
+
+type Chunk {
+    data: Bytes,
+    opens: bool,
+    closes: bool
+}
+
+fn flush_av1(mut plan: Plan, mut items: List[Chunk], n_bit: bool, marker: bool) {
+    if list.len(items) == 0 {
+        return
+    }
+    let mut header: u8 = 0
+    if !items[0].opens {
+        header |= 0x80
+    }
+    if !items[list.len(items) - 1].closes {
+        header |= 0x40
+    }
+    if n_bit {
+        header |= 0x08
+    }
+    let mut p: Bytes = list.new()
+    list.push(mut p, header)
+    for c in items {
+        leb128(mut p, list.len(c.data))
+        list.append(mut p, c.data)
+    }
+    list.clear(mut items)
+    add_packet(mut plan, take p, marker)
+}
+
+// AV1 RTP §4.4 with W=0: OBUs sent without size fields, split into elements
+// of at most mtu data; whole small OBUs share a packet. N marks a keyframe's
+// first packet, which also carries a sequence header. The decoder-side form
+// has obu_has_size_field set (AV1 §5.3.1).
+fn send_av1(mut src: std.prop.Source, mut plan: Plan, key: bool, mtu: u64) -> Bytes {
+    let mut obus: List[Bytes] = list.new()
+    if key {
+        let mut seq: Bytes = b"\x08"
+        list.append(mut seq, random_bytes(mut src, 3))
+        list.push(mut obus, take seq)
+    }
+    let mut frame: Bytes = b"\x30"
+    let size = std.prop.below(mut src, 60)
+    list.append(mut frame, random_bytes(mut src, size))
+    list.push(mut obus, take frame)
+    let mut expected: Bytes = list.new()
+    let mut chunks: List[Chunk] = list.new()
+    for o in obus {
+        list.push(mut expected, o[0] | 2)
+        leb128(mut expected, list.len(o) - 1)
+        list.append(mut expected, list.slice(o, 1, list.len(o)))
+        let n = list.len(o)
+        let mut at: u64 = 0
+        while at < n {
+            let stop = if at + mtu < n {
+                at + mtu
+            } else {
+                n
+            }
+            let mut part: Bytes = list.new()
+            list.append(mut part, list.slice(o, at, stop))
+            list.push(mut chunks, Chunk(data: take part, opens: at == 0, closes: stop == n))
+            at = stop
+        }
+    }
+    let mut items: List[Chunk] = list.new()
+    let mut used: u64 = 0
+    let mut first_packet = true
+    let total = list.len(chunks)
+    for i in 0u64 .. total {
+        let c = list.set(mut chunks, i, Chunk(data: list.new(), opens: true, closes: true))
+        let length = list.len(c.data)
+        let joins = list.len(items) > 0 && items[list.len(items) - 1].closes && c.opens && c.closes && used + length <= mtu
+        if !joins {
+            let had = list.len(items) > 0
+            flush_av1(mut plan, mut items, key && first_packet, false)
+            if had {
+                first_packet = false
+            }
+            used = 0
+        }
+        used += length
+        list.push(mut items, take c)
+    }
+    flush_av1(mut plan, mut items, key && first_packet, true)
+    expected
+}
+
+fn plan_gen() -> std.prop.Gen[Plan] {
+    std.prop.make(fn(mut src: std.prop.Source) -> Plan {
+        let codec = std.prop.below(mut src, 5)
+        let window = 1 + std.prop.below(mut src, 12)
+        let seq0: u16 = if std.prop.weighted(mut src, 1, 3) {
+            int.narrow(65535 - std.prop.below(mut src, 8))
+        } else {
+            int.narrow(std.prop.below(mut src, 65536))
+        }
+        let ts0: u32 = if std.prop.weighted(mut src, 1, 3) {
+            int.narrow(4294967295 - std.prop.below(mut src, 9000))
+        } else {
+            int.narrow(std.prop.below(mut src, 4294967296))
+        }
+        let mtu = 10 + std.prop.below(mut src, 14)
+        let mut plan = Plan(codec: codec, window: window, seq0: seq0, ts0: ts0, packets: list.new(), frames: list.new(), arrivals: list.new())
+        let count = 1 + std.prop.below(mut src, 10)
+        for f in 0u64 .. count {
+            let key = if f == 0 {
+                std.prop.weighted(mut src, 3, 4)
+            } else {
+                std.prop.weighted(mut src, 1, 5)
+            }
+            let first = list.len(plan.packets)
+            let data = if codec == 0 {
+                send_vp8(mut src, mut plan, key, mtu)
+            } else if codec == 1 {
+                send_vp9(mut src, mut plan, key, mtu)
+            } else if codec == 2 {
+                send_h264(mut src, mut plan, key, mtu)
+            } else if codec == 3 {
+                send_av1(mut src, mut plan, key, mtu)
+            } else {
+                let size = 1 + std.prop.below(mut src, 20)
+                let b = random_bytes(mut src, size)
+                let mut p: Bytes = list.new()
+                list.append(mut p, b)
+                add_packet(mut plan, take p, true)
+                b
+            }
+            let sent = list.len(plan.packets) - first
+            list.push(mut plan.frames, SentFrame(first: first, count: sent, key: key || codec == 4, data: take data))
+        }
+        // Each copy of a packet arrives fewer than `window` slots after it was
+        // sent, or never. Ties go in reverse send order, so packet k can come
+        // after k + window - 1: the latest the window allows.
+        let loss = std.prop.below(mut src, 3)
+        let n = list.len(plan.packets)
+        let mut due: List[u64] = list.new()
+        let mut which: List[u64] = list.new()
+        for k in 0u64 .. n {
+            let copies: u64 = if std.prop.weighted(mut src, 1, 10) {
+                2
+            } else {
+                1
+            }
+            for _ in 0u64 .. copies {
+                let lost = loss > 0 && std.prop.weighted(mut src, 1, if loss == 1 {
+                    8
+                } else {
+                    3
+                })
+                let delay = std.prop.below(mut src, window)
+                if !lost {
+                    list.push(mut due, k + delay)
+                    list.push(mut which, k)
+                }
+            }
+        }
+        for t in 0u64 .. n + window {
+            let mut i = list.len(due)
+            while i > 0 {
+                i -= 1
+                if due[i] == t {
+                    list.push(mut plan.arrivals, which[i])
+                }
+            }
+        }
+        plan
+    }, fn(p: Plan, mut out: String) {
+        string.push(mut out, "Plan(codec: ")
+        string.push_u64(mut out, p.codec)
+        string.push(mut out, ", window: ")
+        string.push_u64(mut out, p.window)
+        string.push(mut out, ", seq0: ")
+        string.push_u64(mut out, int.widen(p.seq0))
+        string.push(mut out, ", ts0: ")
+        string.push_u64(mut out, int.widen(p.ts0))
+        string.push(mut out, ", packets: ")
+        string.push_u64(mut out, list.len(p.packets))
+        string.push(mut out, ", arrivals: [")
+        for a in p.arrivals {
+            string.push_u64(mut out, a)
+            string.push(mut out, " ")
+        }
+        string.push(mut out, "])")
+    })
+}
+
+fn sent_ts(p: Plan, frame: u64) -> u32 {
+    int.wrapping_add(p.ts0, (int.narrow(3000 * frame) : u32))
+}
+
+fn reorder_law(p: Plan) -> Result[(), String] {
+    let codec = codec_of(p.codec)
+    let video = p.codec != 4
+    let n = list.len(p.packets)
+    if list.len(p.arrivals) == 0 {
+        return Ok(())
+    }
+    // Model: a frame is delivered when all its packets arrived and its start
+    // is provable: the packet before it arrived, or its first packet says so
+    // (README §3.1; for AV1 only N does).
+    let mut arrived: List[bool] = list.new()
+    list.fill(mut arrived, n, false)
+    for a in p.arrivals {
+        arrived[a] = true
+    }
+    let mut delivered: List[bool] = list.new()
+    list.fill(mut delivered, n, false)
+    let mut expected: List[u64] = list.new()
+    for f in 0u64 .. list.len(p.frames) {
+        let fr = view p.frames[f]
+        let mut whole = true
+        for k in fr.first .. fr.first + fr.count {
+            whole = whole && arrived[k]
+        }
+        let provable = (fr.first > 0 && arrived[fr.first - 1]) || p.codec != 3 || fr.key
+        if whole && provable {
+            list.push(mut expected, f)
+            for k in fr.first .. fr.first + fr.count {
+                delivered[k] = true
+            }
+        }
+    }
+    // Receiver indices count from the first arrival, as 65536 + its sequence number.
+    let a0 = p.arrivals[0]
+    let first_seq: u16 = int.wrapping_add(p.seq0, (int.truncate(a0) : u16))
+    let base: u64 = 65536 + (int.widen(first_seq) : u64)
+    let mut lowest = n
+    let mut highest: u64 = 0
+    for a in p.arrivals {
+        if a < lowest {
+            lowest = a
+        }
+        if a > highest {
+            highest = a
+        }
+    }
+    let mut gaps: List[(u64, u64)] = list.new()
+    for k in lowest .. highest + 1 {
+        if !delivered[k] {
+            let at = base + k - a0
+            let g = list.len(gaps)
+            if g > 0 && gaps[g - 1].1 == at {
+                gaps[g - 1] = (gaps[g - 1].0, at + 1)
+            } else {
+                list.push(mut gaps, (at, at + 1))
+            }
+        }
+    }
+    let mut j = jitter.new(jitter.Config(codec: codec, window: p.window, max_wait_us: 18446744073709551615))
+    let mut out: List[jitter.Event] = list.new()
+    for a in p.arrivals {
+        let pk = view p.packets[a]
+        let seq: u16 = int.wrapping_add(p.seq0, (int.truncate(a) : u16))
+        let mut payload: Bytes = list.new()
+        list.append(mut payload, pk.payload)
+        jitter.push(mut j, seq, sent_ts(p, pk.frame), pk.marker, take payload, 0, mut out)
+    }
+    jitter.finish(mut j, mut out)
+    // NeedKeyframe (README §4): once after a gap, or before a non-key frame
+    // with no keyframe since the start or the last gap, until a keyframe.
+    let mut needs = true
+    let mut requested = false
+    let mut must = false
+    let mut got_gaps: List[(u64, u64)] = list.new()
+    let mut e_at: u64 = 0
+    let mut last_ts: i64 = 0
+    for e in out {
+        if must {
+            match e {
+                NeedKeyframe => {},
+                _ => return Error("no keyframe request right after a gap")
+            }
+        }
+        must = false
+        match e {
+            Gap(lo: lo, hi: hi) => {
+                let g = list.len(got_gaps)
+                if g > 0 && got_gaps[g - 1].1 == lo {
+                    got_gaps[g - 1] = (got_gaps[g - 1].0, hi)
+                } else {
+                    list.push(mut got_gaps, (lo, hi))
+                }
+                if video {
+                    needs = true
+                    must = !requested
+                }
+            },
+            NeedKeyframe => {
+                if !video || !needs || requested {
+                    return Error("unneeded keyframe request")
+                }
+                requested = true
+            },
+            Frame(ts: ts, key: key, data: data) => {
+                if e_at == list.len(expected) {
+                    return Error("a frame the model does not deliver")
+                }
+                let f = expected[e_at]
+                let want = view p.frames[f]
+                let low: u32 = int.truncate(ts)
+                if low != sent_ts(p, f) || key != want.key || data != want.data {
+                    return Error("frame timestamp, key flag or data")
+                }
+                if e_at > 0 {
+                    let step: i64 = int.narrow(3000 * (f - expected[e_at - 1]))
+                    if ts - last_ts != step {
+                        return Error("extended timestamp step")
+                    }
+                }
+                last_ts = ts
+                e_at += 1
+                if video {
+                    if key {
+                        needs = false
+                        requested = false
+                    } else if needs && !requested {
+                        return Error("non-key frame without a keyframe request")
+                    }
+                }
+            }
+        }
+    }
+    if must {
+        return Error("no keyframe request after the last gap")
+    }
+    if e_at != list.len(expected) {
+        return Error("a frame whose packets all arrived was not delivered")
+    }
+    if got_gaps != gaps {
+        return Error("gap ranges")
+    }
+    let _ = std.prop.sometimes("a frame lost", list.len(expected) < list.len(p.frames))
+    let _ = std.prop.sometimes("reordered", window_used(p))
+    Ok(())
+}
+
+fn window_used(p: Plan) -> bool {
+    for i in 1u64 .. list.len(p.arrivals) {
+        if p.arrivals[i] < p.arrivals[i - 1] {
+            return true
+        }
+    }
+    false
+}
+
+/// bug: Release a hole while a packet within the window can still fill it, deliver a frame with a missing packet or an unprovable start, drop a complete frame after a gap, misreport a gap's range, or send keyframe requests out of turn.
+/// oracle: the sender's own frame boundaries and payload data (RFC 7741, RFC 9628, RFC 6184, AV1 RTP §4.4, RFC 7587) and README §§2-4's delivery rule, applied to which packets arrived.
+@test
+fn reorder_and_loss_deliver_exactly_the_whole_frames() -> Result[(), ()] {
+    let mut config = std.prop.config()
+    config.cases = 400
+    std.prop.check(config, plan_gen(), reorder_law)
+}

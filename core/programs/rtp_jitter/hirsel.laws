@@ -1,0 +1,7 @@
+hirsel.laws 1
+rtp_jitter@1/laws/chromium_reassembly_matches_str0m src=3fe20710e569d1dd sig=bfa37630e16f7f46 run=c2c0c6612d4cbb79 bug=115c94991378a7fd oracle=2fd6da56cce1e974 rows=pending
+rtp_jitter@1/laws/holes_release_on_time src=188497f2d3c2263d sig=4359433969e07ea0 run=c2c0c6612d4cbb79 bug=292116ee34541516 oracle=05c4be7facd96556 rows=pending
+rtp_jitter@1/laws/playout_converges_to_p95 src=e2988bd1563ccc17 sig=ff17f7c68d810885 run=c2c0c6612d4cbb79 bug=a8256fbe1d61104b oracle=e5485051a4c0680d rows=pending
+rtp_jitter@1/laws/playout_target_by_hand src=acbce0cd5be8a57f sig=c36abc1273cb89c5 run=c2c0c6612d4cbb79 bug=7c9427ca8064fbda oracle=662a9a3de138bb89 rows=pending
+rtp_jitter@1/laws/reorder_and_loss_deliver_exactly_the_whole_frames src=a7d0fc53f1738466 sig=e9cc56d6e8703c3f run=c2c0c6612d4cbb79 bug=9cf74893c657785d oracle=d06a105914db6d6d rows=pending
+rtp_jitter@1/laws/sync_maps_sender_report_to_wall_clock src=05802fb64dbe917b sig=7d857f635e866c06 run=c2c0c6612d4cbb79 bug=02a44277d7724e8d oracle=f671f9c58016d923 rows=pending

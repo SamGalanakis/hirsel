@@ -1,0 +1,255 @@
+fn chromium_events(codec: depack.Codec, packets: List[Bytes], swap: bool) -> List[jitter.Event] {
+    let mut j = jitter.new(jitter.Config(codec: codec, window: 4, max_wait_us: 1000000000))
+    let mut out: List[jitter.Event] = list.new()
+    let n = list.len(packets)
+    for i in 0u64 .. n {
+        // swap feeds each pair of packets in reverse: a permutation within the window.
+        let k = if swap && i % 2 == 0 && i + 1 < n {
+            i + 1
+        } else if swap && i % 2 == 1 {
+            i - 1
+        } else {
+            i
+        }
+        let pkt = view packets[k]
+        let h = result.unwrap(rtp.header.parse(pkt))
+        let (at, size) = result.unwrap(rtp.header.payload(h, pkt))
+        let mut payload: Bytes = list.new()
+        list.append(mut payload, list.slice(pkt, at, at + size))
+        jitter.push(mut j, h.seq, h.ts, h.marker, take payload, 0, mut out)
+    }
+    jitter.finish(mut j, mut out)
+    out
+}
+
+fn digest_hex(b: Bytes) -> String {
+    let d = std.sha256.hash(b)
+    let mut raw: Bytes = list.new()
+    for i in 0u64 .. 32 {
+        list.push(mut raw, d[i])
+    }
+    std.hex.encode(raw)
+}
+
+fn check_stream(name: String, codec: depack.Codec, packets: List[Bytes], swap: bool) {
+    let wants = vectors.str0m_frames()
+    let events = chromium_events(codec, packets, swap)
+    let mut w: u64 = 0
+    while w < list.len(wants) && wants[w].stream != name {
+        w += 1
+    }
+    for e in events {
+        match e {
+            Frame(ts: ts, key: key, data: data) => {
+                if w == list.len(wants) || wants[w].stream != name {
+                    fail("a frame str0m did not pop")
+                }
+                let want = view wants[w]
+                let low: u32 = int.truncate(ts)
+                if low != want.ts || key != want.key || list.len(data) != want.size || digest_hex(data) != want.digest {
+                    let mut m = "frame differs from str0m: "
+                    string.push(mut m, name)
+                    string.push(mut m, " ")
+                    string.push_u64(mut m, w)
+                    string.push(mut m, " size ")
+                    string.push_u64(mut m, list.len(data))
+                    string.push(mut m, " key ")
+                    string.push(mut m, if key {
+                        "1"
+                    } else {
+                        "0"
+                    })
+                    fail(take m)
+                }
+                w += 1
+            },
+            Gap(lo: _, hi: _) => fail("gap in a complete capture"),
+            NeedKeyframe => fail("keyframe request on a stream that opens with one")
+        }
+    }
+    if w < list.len(wants) && wants[w].stream == name {
+        fail("str0m popped a frame rtp_jitter did not")
+    }
+}
+
+/// bug: Misassemble a VP8, VP9, H.264 (STAP-A, FU-A, AVCC lengths) or AV1 (Z/Y continuation, OBU size fields) frame, misflag a keyframe, or split or merge frames, in order or permuted within the window.
+/// oracle: str0m 2ada76a's DepacketizingBuffer output for the same Chromium 156 packets (vectors/chromium.hirsel).
+@test
+fn chromium_reassembly_matches_str0m() -> Result[(), ()] {
+    for swap in[false, true] {
+        check_stream("vp8_rid_h", Vp8, vectors.vp8_rid_h(), swap)
+        check_stream("h264_rid_h", H264, vectors.h264_rid_h(), swap)
+        check_stream("h264_rid_q", H264, vectors.h264_rid_q(), swap)
+        check_stream("vp9_l3t3", Vp9, vectors.vp9_l3t3(), swap)
+        check_stream("av1_l3t3_key", Av1, vectors.av1_l3t3_key(), swap)
+    }
+    Ok(())
+}
+
+fn vp8_packet(key: bool) -> Bytes {
+    // RFC 7741 §4.2: S=1, partition 0, then a frame tag whose P bit is 0 on a
+    // keyframe, padded to a keyframe's ten-byte minimum.
+    let tag: u8 = if key {
+        0
+    } else {
+        1
+    }
+    let mut p: Bytes = b"\x10"
+    list.push(mut p, tag)
+    for _ in 0u64 .. 9 {
+        list.push(mut p, 0x2a)
+    }
+    p
+}
+
+fn push_vp8(mut j: jitter.Jitter, seq: u16, key: bool, now: u64, mut out: List[jitter.Event]) {
+    let ts: u32 = 3000 * (int.widen(seq) : u32)
+    jitter.push(mut j, seq, ts, true, vp8_packet(key), now, mut out)
+}
+
+fn expect_count(out: List[jitter.Event], n: u64, take what: String) {
+    if list.len(out) != n {
+        fail(take what)
+    }
+}
+
+/// bug: Release a hole or the stream start before max_wait_us, hold it past max_wait_us, or misplace the Gap's range or the NeedKeyframe after it.
+/// oracle: README §2.2 by hand: packet 10 at 0 µs, 12 at 5000 µs, max_wait_us 30000, window 8.
+@test
+fn holes_release_on_time() -> Result[(), ()] {
+    let mut j = jitter.new(jitter.Config(codec: Vp8, window: 8, max_wait_us: 30000))
+    let mut out: List[jitter.Event] = list.new()
+    push_vp8(mut j, 10, true, 0, mut out)
+    push_vp8(mut j, 12, false, 5000, mut out)
+    jitter.poll(mut j, 29999, mut out)
+    expect_count(out, 0, "start fixed before max_wait_us")
+    jitter.poll(mut j, 30000, mut out)
+    expect_count(out, 1, "start not fixed at max_wait_us, or the hole at 11 released early")
+    match out[0] {
+        Frame(ts: _, key: true, data: _) => {},
+        _ => fail("first frame")
+    }
+    jitter.poll(mut j, 34999, mut out)
+    expect_count(out, 1, "hole released before 30000 µs past packet 12")
+    jitter.poll(mut j, 35000, mut out)
+    expect_count(out, 4, "hole not released at 30000 µs past packet 12")
+    match out[1] {
+        Gap(lo: 65547, hi: 65548) => {},
+        _ => fail("gap range for sequence 11")
+    }
+    match out[2] {
+        NeedKeyframe => {},
+        _ => fail("keyframe request after the gap")
+    }
+    match out[3] {
+        Frame(ts: ts, key: false, data: _) => {
+            if ts != 4294967296 + 36000 {
+                fail("extended timestamp of sequence 12")
+            }
+        },
+        _ => fail("frame after the gap")
+    }
+    push_vp8(mut j, 11, true, 36000, mut out)
+    expect_count(out, 4, "late packet accepted")
+    Ok(())
+}
+
+fn wall(s: sync.Sync, ts: i64) -> i64 {
+    option.unwrap(sync.wall_ns(s, ts))
+}
+
+/// bug: Truncate instead of flooring a timestamp before the sender report, lose the RTP wrap between report and frame, misconvert the NTP fraction, or skew audio against video.
+/// oracle: RFC 3550 §§4, 6.4.1 by hand: 0xe8b12345 seconds is 3903923013, fraction 0x80000000 is 500000000 ns, and 1/90000 s floors to -11112 ns.
+@test
+fn sync_maps_sender_report_to_wall_clock() -> Result[(), ()] {
+    if sync.ntp_ns(0x0000000510000000) != 5062500000 || sync.ntp_ns(0xffffffff) != 999999999 || sync.ntp_ns(1) != 0 {
+        fail("NTP fraction to nanoseconds")
+    }
+    let base: i64 = 3903923013500000000
+    let mut video = sync.new(90000)
+    if sync.wall_ns(video, 0) != None {
+        fail("wall clock before any sender report")
+    }
+    sync.on_sr(mut video, 0xe8b1234580000000, 1000)
+    let first: i64 = 4294967296
+    if wall(video, first + 1000) != base || wall(video, first + 91000) != base + 1000000000 {
+        fail("frame at or one second after the report")
+    }
+    if wall(video, first + 999) != base - 11112 || wall(video, first - 89000) != base - 1000000000 {
+        fail("frame before the report")
+    }
+    let mut audio = sync.new(48000)
+    sync.on_sr(mut audio, 0xe8b1234580000000, 4294967000)
+    if wall(audio, 2 * first + 296) != base + 12333333 {
+        fail("frame after the RTP timestamp wraps past the report")
+    }
+    // Lip sync: the video report is 0.25 s later than the audio report, so
+    // video 22500 ticks past it and audio 24000 ticks past its own (0.5 s)
+    // are the same instant.
+    sync.on_sr(mut video, 0xe8b12345c0000000, 7)
+    if wall(audio, first + 4294967000 + 24000) != wall(video, first + 7 + 22500) {
+        fail("audio and video of one instant")
+    }
+    Ok(())
+}
+
+/// bug: Take a percentile other than the 95th, count delay from a fixed origin instead of the history's smallest transit, keep packets past the history, or ignore the bounds.
+/// oracle: README §6 by hand: delays 0..99 ms once each put the 95th of 100 in the 94 ms bucket, target 95 ms.
+@test
+fn playout_target_by_hand() -> Result[(), ()] {
+    let mut p = playout.new(48000, 100, 0, 200000)
+    let mut low = playout.new(48000, 100, 120000, 200000)
+    let mut high = playout.new(48000, 100, 0, 60000)
+    for i in 0u64 .. 100 {
+        let jitter_ms = (37 * i) % 100
+        let ts: i64 = int.narrow(960 * i)
+        let arrival = 20000 * i + 5000 + jitter_ms * 1000
+        playout.observe(mut p, ts, arrival)
+        playout.observe(mut low, ts, arrival)
+        playout.observe(mut high, ts, arrival)
+    }
+    if playout.target_us(p) != 95000 || playout.target_us(low) != 120000 || playout.target_us(high) != 60000 {
+        fail("95th percentile of 0..99 ms, or its bounds")
+    }
+    for i in 100u64 .. 200 {
+        let ts: i64 = int.narrow(960 * i)
+        playout.observe(mut p, ts, 20000 * i + 5000)
+    }
+    if playout.target_us(p) != 1000 {
+        fail("history kept packets past its length")
+    }
+    Ok(())
+}
+
+fn converge(spike: bool) -> u64 {
+    let mut rng = std.rand.new(2641, 7)
+    let mut p = playout.new(48000, 1000, 0, 500000)
+    for i in 0u64 .. 4000 {
+        let jitter_us = if spike {
+            if std.rand.below(mut rng, 10) == 0 {
+                200000 + std.rand.below(mut rng, 10000)
+            } else {
+                std.rand.below(mut rng, 10000)
+            }
+        } else {
+            std.rand.below(mut rng, 100000)
+        }
+        let ts: i64 = int.narrow(960 * i)
+        playout.observe(mut p, ts, 20000 * i + jitter_us)
+    }
+    playout.target_us(p)
+}
+
+fn within(x: u64, centre: u64, slack: u64) -> bool {
+    x + slack >= centre && x <= centre + slack
+}
+
+/// bug: Track the mean or a low percentile, or forget too fast or too slowly, so the target drifts from the jitter distribution's 95th percentile.
+/// oracle: the distributions' 95th percentiles: 95 ms for uniform 0-100 ms, and 205 ms when a tenth of packets are late by 200-210 ms on top of 0-10 ms.
+@test
+fn playout_converges_to_p95() -> Result[(), ()] {
+    if !within(converge(false), 95000, 10000) || !within(converge(true), 205000, 10000) {
+        fail("target more than 10 ms from the 95th percentile")
+    }
+    Ok(())
+}

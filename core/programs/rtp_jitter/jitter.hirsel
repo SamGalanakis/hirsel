@@ -1,0 +1,312 @@
+// The receive pipeline of one RTP stream (README §§2-4): a reorder buffer
+// keyed by the extended sequence index, frame boundaries, and the events
+// Frame, Gap and NeedKeyframe. Sans-IO: the caller passes arrival times and
+// collects events.
+pub type Config {
+    codec: depack.Codec,
+    window: u64,
+    max_wait_us: u64
+}
+
+// ts is the extended RTP timestamp. Gap is a half-open range of extended
+// sequence indices that no Frame delivered.
+pub type Event = Frame(ts: i64, key: bool, data: Bytes) | Gap(lo: u64, hi: u64) | NeedKeyframe
+
+type Packet {
+    ts: u32,
+    marker: bool,
+    payload: Bytes
+}
+
+// Wanted holds the arrival time of the first packet seen past the index.
+type Slot = Wanted(u64) | Held(Packet)
+
+type Edge {
+    ts: u32,
+    marker: bool
+}
+
+pub type Jitter {
+    config: Config,
+    started: bool,
+    fixed: bool,
+    since: u64,
+    floor: u64,
+    highest: u64,
+    slots: List[Slot],
+    head: u64,
+    prev: Option[Edge],
+    gap_lo: u64,
+    gap_hi: u64,
+    ts_started: bool,
+    ts_high: i64,
+    needs_key: bool,
+    requested: bool
+}
+
+const FIRST_TS: i64 = 4294967296
+
+pub fn new(config: Config) -> Jitter {
+    if config.window == 0 || config.window > 32768 {
+        fail("rtp_jitter window must be 1 to 32768 packets")
+    }
+    Jitter(config: config, started: false, fixed: false, since: 0, floor: 0, highest: 0, slots: list.new(), head: 0, prev: None, gap_lo: 0, gap_hi: 0, ts_started: false, ts_high: 0, needs_key: true, requested: false)
+}
+
+fn video(j: Jitter) -> bool {
+    match j.config.codec {
+        Opus => false,
+        _ => true
+    }
+}
+
+// One past the highest index the buffer holds a slot for.
+fn end(j: Jitter) -> u64 {
+    j.floor + list.len(j.slots) - j.head
+}
+
+pub fn push(mut j: Jitter, seq: u16, ts: u32, marker: bool, take payload: Bytes, now_us: u64, mut out: List[Event]) {
+    if !j.started {
+        j.started = true
+        j.since = now_us
+        j.floor = 65536 + (int.widen(seq) : u64)
+        j.highest = j.floor
+    }
+    let index = match rtp.seq.estimate(j.highest, seq) {
+        Index(i) => i,
+        _ => return
+    }
+    if index < j.floor {
+        if j.fixed || j.highest - index >= j.config.window {
+            return
+        }
+        lower(mut j, index)
+    }
+    let mut last = end(j)
+    while last <= index {
+        list.push(mut j.slots, Wanted(now_us))
+        last += 1
+    }
+    let pos = j.head + index - j.floor
+    let duplicate = match j.slots[pos] {
+        Held(_) => true,
+        Wanted(_) => false
+    }
+    if duplicate {
+        return
+    }
+    let _ = list.set(mut j.slots, pos, Held(Packet(ts: ts, marker: marker, payload: take payload)))
+    if index > j.highest {
+        j.highest = index
+    }
+    advance(mut j, now_us, false, mut out)
+}
+
+pub fn poll(mut j: Jitter, now_us: u64, mut out: List[Event]) {
+    if j.started {
+        advance(mut j, now_us, false, mut out)
+    }
+}
+
+// End of stream: every hole is lost and a frame without its end is a gap.
+pub fn finish(mut j: Jitter, mut out: List[Event]) {
+    if j.started {
+        advance(mut j, 0, true, mut out)
+    }
+}
+
+// Before the start is fixed, a packet below the first one may still arrive;
+// the slots between it and the old floor wait from the first arrival.
+fn lower(mut j: Jitter, index: u64) {
+    let mut slots: List[Slot] = list.new()
+    for _ in index .. j.floor {
+        list.push(mut slots, Wanted(j.since))
+    }
+    for i in j.head .. list.len(j.slots) {
+        list.push(mut slots, list.set(mut j.slots, i, Wanted(0)))
+    }
+    j.slots = take slots
+    j.head = 0
+    j.floor = index
+}
+
+fn released(j: Jitter, index: u64, since: u64, now_us: u64, finishing: bool) -> bool {
+    finishing || j.highest - index >= j.config.window || int.saturating_sub(now_us, since) >= j.config.max_wait_us
+}
+
+fn pop(mut j: Jitter, n: u64) {
+    j.head += n
+    j.floor += n
+    if j.head >= 64 && j.head * 2 >= list.len(j.slots) {
+        let mut slots: List[Slot] = list.new()
+        for i in j.head .. list.len(j.slots) {
+            list.push(mut slots, list.set(mut j.slots, i, Wanted(0)))
+        }
+        j.slots = take slots
+        j.head = 0
+    }
+}
+
+fn add_gap(mut j: Jitter, lo: u64, hi: u64) {
+    if j.gap_hi == j.gap_lo {
+        j.gap_lo = lo
+    }
+    j.gap_hi = hi
+}
+
+fn flush_gap(mut j: Jitter, mut out: List[Event]) {
+    if j.gap_hi == j.gap_lo {
+        return
+    }
+    list.push(mut out, Gap(lo: j.gap_lo, hi: j.gap_hi))
+    j.gap_lo = 0
+    j.gap_hi = 0
+    if video(j) {
+        j.needs_key = true
+        if !j.requested {
+            list.push(mut out, NeedKeyframe)
+            j.requested = true
+        }
+    }
+}
+
+fn emit(mut j: Jitter, ts: u32, key: bool, take data: Bytes, mut out: List[Event]) {
+    flush_gap(mut j, mut out)
+    let extended = if j.ts_started {
+        rtp.seq.estimate32(j.ts_high, ts)
+    } else {
+        j.ts_started = true
+        let wide: i64 = int.widen(ts)
+        FIRST_TS + wide
+    }
+    if extended > j.ts_high {
+        j.ts_high = extended
+    }
+    if video(j) {
+        if key {
+            j.needs_key = false
+            j.requested = false
+        } else if j.needs_key && !j.requested {
+            list.push(mut out, NeedKeyframe)
+            j.requested = true
+        }
+    }
+    list.push(mut out, Frame(ts: extended, key: key, data: take data))
+}
+
+type Lead = Hole(u64) | Starts(u32)
+
+type Run {
+    count: u64,
+    complete: bool
+}
+
+// The packets from the floor that share its timestamp, up to the marker or
+// the next timestamp. None while the run's end is not yet decided.
+fn run(j: Jitter, ts: u32, now_us: u64, finishing: bool) -> Option[Run] {
+    let held = end(j) - j.floor
+    let mut k: u64 = 0
+    loop {
+        let marker = match j.slots[j.head + k] {
+            Held(p) => p.marker,
+            Wanted(_) => fail("run starts at a held packet")
+        }
+        let opus = match j.config.codec {
+            Opus => true,
+            _ => false
+        }
+        if marker || opus {
+            return Some(Run(count: k + 1, complete: true))
+        }
+        if k + 1 == held {
+            if finishing {
+                return Some(Run(count: k + 1, complete: false))
+            }
+            return None
+        }
+        match j.slots[j.head + k + 1] {
+            Held(q) => {
+                if q.ts != ts {
+                    return Some(Run(count: k + 1, complete: true))
+                }
+            },
+            Wanted(s) => {
+                if released(j, j.floor + k + 1, s, now_us, finishing) {
+                    return Some(Run(count: k + 1, complete: false))
+                }
+                return None
+            }
+        }
+        k += 1
+    }
+}
+
+fn advance(mut j: Jitter, now_us: u64, finishing: bool, mut out: List[Event]) {
+    loop {
+        if !j.fixed {
+            if finishing || j.highest + 1 - j.floor >= j.config.window || int.saturating_sub(now_us, j.since) >= j.config.max_wait_us {
+                j.fixed = true
+            } else {
+                break
+            }
+        }
+        if end(j) == j.floor {
+            break
+        }
+        let lead = match j.slots[j.head] {
+            Wanted(s) => Hole(s),
+            Held(p) => Starts(p.ts)
+        }
+        let ts = match lead {
+            Hole(s) => {
+                if !released(j, j.floor, s, now_us, finishing) {
+                    break
+                }
+                add_gap(mut j, j.floor, j.floor + 1)
+                j.prev = None
+                pop(mut j, 1)
+                continue
+            },
+            Starts(t) => t
+        }
+        let Some(r) = run(j, ts, now_us, finishing) else {
+            break
+        }
+        let opus = match j.config.codec {
+            Opus => true,
+            _ => false
+        }
+        let begins = match j.prev {
+            Some(e) => opus || e.ts != ts || e.marker,
+            None => match j.slots[j.head] {
+                Held(p) => depack.starts(j.config.codec, p.payload),
+                Wanted(_) => false
+            }
+        }
+        let mut parts: List[Bytes] = list.new()
+        let mut edge = Edge(ts: ts, marker: false)
+        for k in 0u64 .. r.count {
+            match list.set(mut j.slots, j.head + k, Wanted(0)) {
+                Held(Packet(ts: t, marker: m, payload: payload)) => {
+                    edge = Edge(ts: t, marker: m)
+                    list.push(mut parts, take payload)
+                },
+                Wanted(_) => fail("run holds every packet")
+            }
+        }
+        let lo = j.floor
+        pop(mut j, r.count)
+        j.prev = Some(edge)
+        if begins && r.complete {
+            match depack.assemble(j.config.codec, parts) {
+                Ok(depack.Assembled(key: key, data: data)) => {
+                    emit(mut j, ts, key, take data, mut out)
+                    continue
+                },
+                Error(_) => {}
+            }
+        }
+        add_gap(mut j, lo, lo + r.count)
+    }
+    flush_gap(mut j, mut out)
+}

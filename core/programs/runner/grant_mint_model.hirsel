@@ -422,3 +422,237 @@ fn grant_mints_v267_shared_fails() -> Result[(), ()] {
         Error(())
     }
 }
+
+// Trace conformance (lane 2563): the mints a built place's law saw, checked against this
+// model with std.model.conforms.
+//
+// A law logs, in the order it saw them: each mode token it sent a mint (kind, then 1 to
+// raise, 2 to loop, 3 to return Error(Capacity)); each mint's start record,
+// kind * 100 + serial, with kind 1 for call, 2 for attempt and 3 for bind; and what that
+// mint's asker then saw. The asks come from the tokens, which are the law's input, and the
+// observations from the build.
+//
+// A mint's resolution is observed as (use, serial, what its asker saw), and the end of a
+// served call or bind as SawDrop. Arrivals and the end of an attempt are internal: no law
+// sees them. Every use's room is its request count, so no allowance is ever full, as in
+// the laws, whose mint_bytes hold every G they mint.
+//
+// The model has no ask for a mint that returns Error(Capacity) with room left (token 3). Such
+// a request starts already failed and its entry is left out of the trace; `check_mints`
+// returns how many there were. Only its asker's answer is checked, against v2.67 item 3
+// (a call's is Failed(OutOfBytes)) and v2.70 F5 (a Hello closes 1013).
+pub type Saw: key = SawG | SawNoBytes | SawFault | SawSteps | SawClosed | SawDrop | SawOther
+
+pub type MintEvent = MintMode(u64, u64) | MintStart(u64) | MintAnswer(u64, Saw)
+
+type Step: key = Inside | MintStep | EndStep
+
+type Record: key {
+    use: Use,
+    serial: u64,
+    saw: Saw
+}
+
+fn serial_of(p: Place, i: u64) -> u64 {
+    let mut n: u64 = 1
+    for j in 0 .. i {
+        if p.requests[j].use == p.requests[i].use {
+            n += 1
+        }
+    }
+    n
+}
+
+// A failed bind mint closes its Hello 1013 whatever the cause (v2.70 F5).
+fn seen_mint(next: Place, i: u64) -> Option[Record] {
+    let saw = match next.requests[i].phase {
+        Holding => SawG,
+        Failed(cause) => if next.requests[i].use == Bind {
+            SawClosed
+        } else {
+            match cause {
+                OutOfBytes => SawNoBytes,
+                Raised => SawFault,
+                OutOfTime => SawSteps,
+            }
+        },
+        _ => return None,
+    }
+    Some(Record(use: next.requests[i].use, serial: serial_of(next, i), saw: saw))
+}
+
+fn observe_grant(prev: Place, action: GrantAction, next: Place) -> Option[Record] {
+    match action {
+        Mint(t) => seen_mint(next, prev.tasks[t].queue[0]),
+        Resolve(t) => match prev.tasks[t].busy {
+            Some(i) => seen_mint(next, i),
+            None => None,
+        },
+        Finish(i) => if next.requests[i].use == Attempt {
+            None
+        } else {
+            Some(Record(use: next.requests[i].use, serial: serial_of(next, i), saw: SawDrop))
+        },
+        _ => None,
+    }
+}
+
+fn step_of(action: GrantAction) -> Step {
+    match action {
+        Mint(_) => MintStep,
+        Resolve(_) => MintStep,
+        Finish(_) => EndStep,
+        _ => Inside,
+    }
+}
+
+fn show_record(hint: Step, seen: Record, mut out: String) {
+    string.push(mut out, match seen.use {
+        Attempt => "attempt ",
+        Call => "call ",
+        Claim => "claim ",
+        Bind => "bind ",
+    })
+    string.push_u64(mut out, seen.serial)
+    string.push(mut out, match seen.saw {
+        SawG => " served",
+        SawNoBytes => " out of bytes",
+        SawFault => " raised",
+        SawSteps => " out of time",
+        SawClosed => " closed 1013",
+        SawDrop => " ended",
+        SawOther => " answered otherwise",
+    })
+}
+
+fn grant_boundary() -> std.model.Boundary[Place, GrantAction, Step, Record] {
+    std.model.Boundary(label: step_of, observe: observe_grant, show: show_record)
+}
+
+fn kind_use(kind: u64) -> Use {
+    match kind {
+        1 => Call,
+        2 => Attempt,
+        3 => Bind,
+        _ => fail("grant model: a mint record names no kind"),
+    }
+}
+
+fn answer_for(events: List[MintEvent], record: u64) -> Saw {
+    for event in events {
+        if let MintAnswer(r, saw) = event {
+            if r == record {
+                return saw
+            }
+        }
+    }
+    SawOther
+}
+
+fn next_mode(mut modes: List[u64]) -> u64 {
+    if list.len(modes) == 0 {
+        0
+    } else {
+        list.remove(mut modes, 0)
+    }
+}
+
+type MintCase {
+    start: Place,
+    trace: List[std.model.Seen[Step, Record]],
+    unmodelled: u64
+}
+
+// modes and asks are indexed by kind - 1: call, attempt, bind.
+fn mint_case(shared: bool, events: List[MintEvent]) -> MintCase {
+    let mut modes: List[List[u64]] = list.new()
+    let mut asks: List[List[Ask]] = list.new()
+    for _ in 0u64 .. 3u64 {
+        list.push(mut modes, list.new())
+        list.push(mut asks, list.new())
+    }
+    let mut refused: List[u64] = list.new()
+    let mut trace: List[std.model.Seen[Step, Record]] = list.new()
+    for event in events {
+        match event {
+            MintMode(kind, mode) => {
+                let _ = kind_use(kind)
+                list.push(mut modes[kind - 1], mode)
+            },
+            MintStart(record) => {
+                let kind = record / 100
+                let u = kind_use(kind)
+                let mode = next_mode(mut modes[kind - 1])
+                let saw = answer_for(events, record)
+                list.push(mut asks[kind - 1], match mode {
+                    1 => Faults,
+                    2 => Loops,
+                    _ => Plain,
+                })
+                if mode == 3 {
+                    let answer = if kind == 3 {
+                        SawClosed
+                    } else {
+                        SawNoBytes
+                    }
+                    if saw != answer {
+                        fail("grant model: a mint's Error(Capacity) reached its asker as something else")
+                    }
+                    list.push(mut refused, kind * 1000 + list.len(asks[kind - 1]) - 1)
+                } else {
+                    list.push(mut trace, std.model.Seen(hint: MintStep, seen: Record(use: u, serial: record % 100, saw: saw)))
+                }
+            },
+            MintAnswer(record, saw) => {
+                if saw == SawG && record / 100 != 2 {
+                    list.push(mut trace, std.model.Seen(hint: EndStep, seen: Record(use: kind_use(record / 100), serial: record % 100, saw: SawDrop)))
+                }
+            },
+        }
+    }
+    let attempts = list.len(asks[1])
+    let calls = list.len(asks[0])
+    let mut rooms: List[u64] = list.new()
+    list.push(mut rooms, order.max(attempts, 1))
+    list.push(mut rooms, order.max(calls, 1))
+    list.push(mut rooms, 1u64)
+    list.push(mut rooms, order.max(list.len(asks[2]), 1))
+    let mut start = place(shared, rooms, clone(asks[1]), clone(asks[0]), list.new(), clone(asks[2]))
+    for entry in refused {
+        let index = match entry / 1000 {
+            2 => entry % 1000,
+            1 => attempts + entry % 1000,
+            _ => attempts + calls + entry % 1000,
+        }
+        start.requests[index].phase = Failed(OutOfBytes)
+    }
+    MintCase(start: take start, trace: take trace, unmodelled: list.len(refused))
+}
+
+/// Checks a law's mint log against the per-use mints, and returns how many of its mints
+/// returned Error(Capacity) with room left, which the model does not have.
+pub fn check_mints(events: List[MintEvent]) -> Result[u64, ()] {
+    let MintCase(start: take start, trace: take trace, unmodelled: unmodelled) = mint_case(false, events)
+    std.model.conforms_check(grant_model(take start, all_laws()), grant_bounds(), grant_boundary(), trace)?
+    Ok(unmodelled)
+}
+
+// The log of the v2.67 build (a332267e) under a faulting call mint, from a place with one
+// grant task and four granted calls: call 1 is served, call 2's mint faults and its asker
+// sees Failed(Gone), and calls 3 and 4 are answered Failed(Gone) with no mint started.
+/// bug: a build whose mint fault ends the grant task, as v2.67's does, passes the mint trace check (review 2486 F1).
+/// oracle: RUNNER-SPEC v2.69 CHANGES F1(b): a mint fault is `Raised` for its own request alone.
+@test
+fn grant_trace_v267_diverges() -> Result[(), ()] {
+    let mut events: List[MintEvent] = list.new()
+    list.push(mut events, MintStart(101))
+    list.push(mut events, MintAnswer(101, SawG))
+    list.push(mut events, MintMode(1, 1))
+    list.push(mut events, MintStart(102))
+    list.push(mut events, MintAnswer(102, SawOther))
+    let MintCase(start: take start, trace: take trace, unmodelled: _) = mint_case(false, events)
+    match std.model.conforms(grant_model(take start, all_laws()), grant_bounds(), grant_boundary(), trace) {
+        Diverged(2, _, NoTransition) => Ok(()),
+        _ => Error(()),
+    }
+}

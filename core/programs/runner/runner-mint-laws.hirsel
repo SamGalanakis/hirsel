@@ -288,12 +288,75 @@ fn mn_ended(take f: fixture.Fixture) -> bool waits {
     }
 }
 
+type MintLog = List[grant_mint_model.MintEvent]
+
+// A call's answer as its mint's asker saw it: a served call answers its own G's record.
+fn call_saw(got: u64, record: u64) -> grant_mint_model.Saw {
+    if got == record {
+        SawG
+    } else if got == 9001u64 {
+        SawNoBytes
+    } else if got == 9002u64 {
+        SawFault
+    } else if got == 9003u64 {
+        SawSteps
+    } else {
+        SawOther
+    }
+}
+
+// One unheld call and its mint's start record, logged in that order.
+fn logged_ask(mut log: MintLog, mut c: fixture.Client, clock: Clock, reports: Receiver[u64]) -> (u64, u64) waits {
+    let got = mn_ask(mut c, 0u64)
+    let record = next_report(clock, reports)
+    list.push(mut log, MintStart(record))
+    list.push(mut log, MintAnswer(record, call_saw(got, record)))
+    (got, record)
+}
+
+// The start record of a bind whose Hello was welcomed.
+fn logged_bind(mut log: MintLog, clock: Clock, reports: Receiver[u64]) -> u64 waits {
+    let record = next_report(clock, reports)
+    list.push(mut log, MintStart(record))
+    list.push(mut log, MintAnswer(record, SawG))
+    record
+}
+
+// An attempt mint's start record and its trigger run's report.
+fn logged_attempt(mut log: MintLog, clock: Clock, reports: Receiver[u64]) -> (u64, u64) waits {
+    let record = next_report(clock, reports)
+    list.push(mut log, MintStart(record))
+    let ran = next_report(clock, reports)
+    list.push(mut log, MintAnswer(record, if ran == 1000u64 + record {
+        SawG
+    } else {
+        SawOther
+    }))
+    (record, ran)
+}
+
+fn send_mode(mut log: MintLog, to: Sender[u64], kind: u64, mode: u64) -> () waits {
+    result.unwrap(channel.send(to, mode))
+    list.push(mut log, MintMode(kind, mode))
+}
+
+fn both_are(got: (u64, u64), a: u64, b: u64) -> bool {
+    got.0 == a && got.1 == b
+}
+
+fn arrived(go: Option[Sender[()]]) -> bool {
+    match go {
+        Some(_) => true,
+        None => false,
+    }
+}
+
 // mint_per_call (v2.69 F7), bind_mint_per_bind's wire half (v2.70 F4), mint_step_bound
 // (F3) and mint_allowance_apart's fault and capacity halves (F1): each bind and each
 // granted call has its own mint, held uses take serials 1 and 2 at once, and a mint's
 // loop, fault or Capacity fails only its own call while the next call and a due trigger
 // run.
-pub fn law_mint_per_use(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+pub fn law_mint_per_use(mut log: MintLog, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(64u64)
     let (arrive, arrivals): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(8u64)
     let (grants, modes) = mn_grants(report, arrive, Some(called_list()), true, true)
@@ -305,40 +368,62 @@ pub fn law_mint_per_use(clock: Clock, random: Random, tasks: Tasks, net: Net) ->
     // Two Hellos held in their binds at once: two bind mints, serials 1 and 2.
     let bind_a = next_arrival(clock, arrivals)
     let bind_b = next_arrival(clock, arrivals)
-    let binds_apart = both(next_report(clock, reports), next_report(clock, reports), 301u64, 302u64) && quiet(reports)
+    let bind_first = next_report(clock, reports)
+    let bind_second = next_report(clock, reports)
+    list.push(mut log, MintStart(bind_first))
+    list.push(mut log, MintStart(bind_second))
+    let binds_apart = both(bind_first, bind_second, 301u64, 302u64) && quiet(reports)
     let binds_go = mn_release(take bind_a) && mn_release(take bind_b)
     // Two granted calls held at once: two call mints, serials 1 and 2.
     let call_a = next_arrival(clock, arrivals)
     let call_b = next_arrival(clock, arrivals)
-    let calls_apart = both(next_report(clock, reports), next_report(clock, reports), 101u64, 102u64) && quiet(reports)
+    // Both sessions reached their held call, so both Hellos were welcomed; which first was
+    // not seen.
+    if arrived(call_a) && arrived(call_b) {
+        list.push(mut log, MintAnswer(bind_first, SawG))
+        list.push(mut log, MintAnswer(bind_second, SawG))
+    }
+    let call_first = next_report(clock, reports)
+    let call_second = next_report(clock, reports)
+    list.push(mut log, MintStart(call_first))
+    list.push(mut log, MintStart(call_second))
+    let calls_apart = both(call_first, call_second, 101u64, 102u64) && quiet(reports)
     let calls_go = mn_release(take call_a) && mn_release(take call_b)
-    let answered = both(next_report(clock, outs), next_report(clock, outs), 101u64, 102u64)
+    // A served held call answers its own G's record, which names its mint.
+    let answer_first = next_report(clock, outs)
+    let answer_second = next_report(clock, outs)
+    for held_answer in[answer_first, answer_second] {
+        if held_answer == call_first || held_answer == call_second {
+            list.push(mut log, MintAnswer(held_answer, SawG))
+        }
+    }
+    let answered = both(answer_first, answer_second, 101u64, 102u64)
     let _ = task.join(take first)
     let _ = task.join(take second)
     // A third session after both ended: bind serial 3; a transact call mints nothing.
     let mut c = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
-    let third_bound = next_report(clock, reports) == 303u64
+    let third_bound = logged_bind(mut log, clock, reports) == 303u64
     let pure = mn_ok(fixture.call(mut c, fixture.transact_entry(code.describe(write)), 5u64, 2000u32)) && quiet(reports)
     // The stored calls come before the granted ones: a granted call records no stream
     // position, and the store admits only latest + 1 (open red, RUNNER-SPEC v2.71).
     let armed = mn_ok(fixture.call(mut c, fixture.transact_entry(code.describe(mn_arm)), 3u64, 2000u32))
-    let attempted = next_report(clock, reports) == 201u64 && next_report(clock, reports) == 1201u64
-    let third_call = mn_ask(mut c, 0u64) == 103u64 && next_report(clock, reports) == 103u64
+    let attempted = both_are(logged_attempt(mut log, clock, reports), 201u64, 1201u64)
+    let third_call = both_are(logged_ask(mut log, mut c, clock, reports), 103u64, 103u64)
     // A looping mint fails only its call, with the mint's own step bound.
-    result.unwrap(channel.send(modes.calls, 2u64))
-    let looped = mn_ask(mut c, 0u64) == 9003u64 && next_report(clock, reports) == 104u64
-    let after_loop = mn_ask(mut c, 0u64) == 105u64 && next_report(clock, reports) == 105u64
-    result.unwrap(channel.send(modes.calls, 1u64))
-    let raised = mn_ask(mut c, 0u64) == 9002u64 && next_report(clock, reports) == 106u64
-    result.unwrap(channel.send(modes.calls, 3u64))
-    let full = mn_ask(mut c, 0u64) == 9001u64 && next_report(clock, reports) == 107u64
-    let after_faults = mn_ask(mut c, 0u64) == 108u64 && next_report(clock, reports) == 108u64 && quiet(reports)
+    send_mode(mut log, modes.calls, 1u64, 2u64)
+    let looped = both_are(logged_ask(mut log, mut c, clock, reports), 9003u64, 104u64)
+    let after_loop = both_are(logged_ask(mut log, mut c, clock, reports), 105u64, 105u64)
+    send_mode(mut log, modes.calls, 1u64, 1u64)
+    let raised = both_are(logged_ask(mut log, mut c, clock, reports), 9002u64, 106u64)
+    send_mode(mut log, modes.calls, 1u64, 3u64)
+    let full = both_are(logged_ask(mut log, mut c, clock, reports), 9001u64, 107u64)
+    let after_faults = both_are(logged_ask(mut log, mut c, clock, reports), 108u64, 108u64) && quiet(reports)
     fixture.close(take c)
     // The attempt mint still serves after the call mint's failures.
     let mut d = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
-    let fourth_bound = next_report(clock, reports) == 304u64
+    let fourth_bound = logged_bind(mut log, clock, reports) == 304u64
     let rearmed = mn_ok(fixture.call(mut d, fixture.transact_entry(code.describe(mn_arm)), 4u64, 2000u32))
-    let reattempted = next_report(clock, reports) == 202u64 && next_report(clock, reports) == 1202u64 && quiet(reports)
+    let reattempted = both_are(logged_attempt(mut log, clock, reports), 202u64, 1202u64) && quiet(reports)
     fixture.close(take d)
     let _ = take modes
     let stopped = mn_ended(take wired)
@@ -347,7 +432,7 @@ pub fn law_mint_per_use(clock: Clock, random: Random, tasks: Tasks, net: Net) ->
 
 // bind_mint_refused's wire half (v2.70 F5): a bind mint that returns Error(Capacity),
 // faults or loops closes the Hello 1013, never 1008, and the next Hello binds.
-pub fn law_bind_mint_refused(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+pub fn law_bind_mint_refused(mut log: MintLog, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(64u64)
     let (arrive, arrivals): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(8u64)
     let (grants, modes) = mn_grants(report, arrive, Some(called_list()), true, true)
@@ -356,17 +441,22 @@ pub fn law_bind_mint_refused(clock: Clock, random: Random, tasks: Tasks, net: Ne
     let mn_keys = result.unwrap(fixture.entry_keys(code.describe(mn_place)))
     let mut refused = true
     let mut serial = 1u64
-    for mode in [3u64, 1u64, 2u64] {
-        result.unwrap(channel.send(modes.binds, mode))
+    for mode in[3u64, 1u64, 2u64] {
+        send_mode(mut log, modes.binds, 3u64, mode)
         let closed = match wire_client.connect_for(tasks, net, address, clock, random, clone(mn_keys), Some(b"\x02"), runner.wire_defaults(65536u64).socket, 5000u64, 5000u64) {
-            Error(Protocol(1013u16)) => next_report(clock, reports) == 300u64 + serial && quiet(reports),
+            Error(Protocol(1013u16)) => {
+                let record = next_report(clock, reports)
+                list.push(mut log, MintStart(record))
+                list.push(mut log, MintAnswer(record, SawClosed))
+                record == 300u64 + serial && quiet(reports)
+            },
             _ => false,
         }
         refused = refused && closed
         serial += 1u64
     }
     let mut c = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
-    let session_bound = fixture.bound_caller(c).issuer == 2u8 && next_report(clock, reports) == 304u64
+    let session_bound = fixture.bound_caller(c).issuer == 2u8 && logged_bind(mut log, clock, reports) == 304u64
     fixture.close(take c)
     let _ = take modes
     let _ = take arrivals
@@ -378,7 +468,7 @@ pub fn law_bind_mint_refused(clock: Clock, random: Random, tasks: Tasks, net: Ne
 // bind mint refuses the open; with no wire the place opens and binds anonymously,
 // minting nothing. A call list naming an unregistered entry refuses the open; a wire
 // call to a granted entry the list does not name is refused before any mint.
-pub fn law_mint_scope(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+pub fn law_mint_scope(mut log: MintLog, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(64u64)
     let (arrive, arrivals): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(8u64)
     let (no_bind, _) = mn_grants(report, arrive, Some(called_list()), true, false)
@@ -400,7 +490,7 @@ pub fn law_mint_scope(clock: Clock, random: Random, tasks: Tasks, net: Net) -> b
         Ok(r) => answer_code(r.answer) == 9004u64 && quiet(reports),
         Error(_) => false,
     }
-    let listed = mn_ask(mut c, 0u64) == 101u64 && next_report(clock, reports) == 101u64 && quiet(reports)
+    let listed = both_are(logged_ask(mut log, mut c, clock, reports), 101u64, 101u64) && quiet(reports)
     fixture.close(take c)
     let _ = take arrivals
     let stopped = mn_ended(take open)
@@ -409,14 +499,14 @@ pub fn law_mint_scope(clock: Clock, random: Random, tasks: Tasks, net: Net) -> b
 
 // grants_without_triggers' call half (v2.69 F5): a place with a call mint and no trigger
 // config answers a granted call with the call mint's G.
-pub fn law_grants_without_triggers(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+pub fn law_grants_without_triggers(mut log: MintLog, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(64u64)
     let (arrive, arrivals): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(8u64)
     let (grants, _) = mn_grants(report, arrive, Some(called_list()), false, true)
     let wired = result.unwrap(fixture.start(mn_settings(clock, random, tasks, net, Memory, Some(take grants), true, false), 5000u64))
     let mut c = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
-    let session_bound = next_report(clock, reports) == 301u64
-    let called = mn_ask(mut c, 0u64) == 101u64 && next_report(clock, reports) == 101u64 && quiet(reports)
+    let session_bound = logged_bind(mut log, clock, reports) == 301u64
+    let called = both_are(logged_ask(mut log, mut c, clock, reports), 101u64, 101u64) && quiet(reports)
     fixture.close(take c)
     let _ = take arrivals
     let stopped = mn_ended(take wired)
@@ -466,7 +556,7 @@ fn mn_disk(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take 
 // trigger_no_grant_refuses (v2.69 F2): a store holds one pending granted row for mn_run.
 // Opened with mn_run listed and no attempt mint, operate refuses TriggerNoGrant(its path)
 // and the row is unchanged; reopened with an attempt mint, it runs once with that mint's G.
-fn trigger_no_grant_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+fn trigger_no_grant_case(mut log: MintLog, parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let id = mn_pending(dir, clock, random, tasks)
@@ -489,7 +579,7 @@ fn trigger_no_grant_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     }
     let (granting, _) = mn_grants(report, arrive, None, true, false)
     let (running, stop_to, _, _) = start_managed(tasks, mn_disk(dir, clock, random, tasks, net, take granting), false)
-    let ran = next_report(clock, reports) == 201u64 && next_report(clock, reports) == 1201u64
+    let ran = both_are(logged_attempt(mut log, clock, reports), 201u64, 1201u64)
     result.unwrap(channel.send(stop_to, ()))
     let stopped = match task.join(take running) {
         Ok(Ok(Stopped(_))) => true,
@@ -508,7 +598,9 @@ fn trigger_no_grant_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks
 
 @test
 fn test_mint_per_use(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_mint_per_use(clock, random, tasks, net) {
+    let mut log: MintLog = list.new()
+    if law_mint_per_use(mut log, clock, random, tasks, net) {
+        let _ = grant_mint_model.check_mints(log)?
         Ok(())
     } else {
         Error(())
@@ -517,7 +609,9 @@ fn test_mint_per_use(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Re
 
 @test
 fn test_bind_mint_refused(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_bind_mint_refused(clock, random, tasks, net) {
+    let mut log: MintLog = list.new()
+    if law_bind_mint_refused(mut log, clock, random, tasks, net) {
+        let _ = grant_mint_model.check_mints(log)?
         Ok(())
     } else {
         Error(())
@@ -526,7 +620,9 @@ fn test_bind_mint_refused(clock: Clock, random: Random, tasks: Tasks, net: Net) 
 
 @test
 fn test_mint_scope(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_mint_scope(clock, random, tasks, net) {
+    let mut log: MintLog = list.new()
+    if law_mint_scope(mut log, clock, random, tasks, net) {
+        let _ = grant_mint_model.check_mints(log)?
         Ok(())
     } else {
         Error(())
@@ -535,7 +631,9 @@ fn test_mint_scope(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Resu
 
 @test
 fn test_grants_without_triggers(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_grants_without_triggers(clock, random, tasks, net) {
+    let mut log: MintLog = list.new()
+    if law_grants_without_triggers(mut log, clock, random, tasks, net) {
+        let _ = grant_mint_model.check_mints(log)?
         Ok(())
     } else {
         Error(())
@@ -544,7 +642,9 @@ fn test_grants_without_triggers(clock: Clock, random: Random, tasks: Tasks, net:
 
 @test
 fn test_trigger_no_grant_refuses(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if trigger_no_grant_case(parent, clock, random, tasks, net) {
+    let mut log: MintLog = list.new()
+    if trigger_no_grant_case(mut log, parent, clock, random, tasks, net) {
+        let _ = grant_mint_model.check_mints(log)?
         Ok(())
     } else {
         Error(())

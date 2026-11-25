@@ -26,6 +26,9 @@ import time
 
 TRACE = re.compile(r"^trace (\S+)$", re.MULTILINE)
 REPLAY_VERDICT = re.compile(r"^replay: (\S+)", re.MULTILINE)
+# Every run of a law executable, fresh seed or replayed earlier red, gets this bound;
+# a run past it is a timeout red, and the night moves on.
+SEED_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -127,16 +130,18 @@ FAILURE_CLASSES = (("bounded progress:", "bounded_progress"),)
 
 
 def failure_class(row):
+    if row.get("timed_out"):
+        return "timeout"
     if row["status"] == 0:
         return None
     text = row["stdout"] + row["stderr"]
     return next((name for marker, name in FAILURE_CLASSES if marker in text), None)
 
 
-def run_timed(command, inputs):
+def run_timed(command, inputs, timeout=SEED_TIMEOUT_SECONDS):
     started = time.monotonic()
     try:
-        ran = subprocess.run(command, timeout=300, **inputs)
+        ran = subprocess.run(command, timeout=timeout, **inputs)
         return ran, time.monotonic() - started, False
     except subprocess.TimeoutExpired as expired:
         output = expired.output or b""
@@ -175,11 +180,11 @@ def run_tape_replay(executable, tape, directory):
     row = {"status": replay.returncode, "stdout": replay.stdout.decode(errors="replace"),
            "stderr": replay.stderr.decode(errors="replace"), "seconds": seconds}
     if timed_out:
-        row["stderr"] += "record-replay: replay timed out after 300s\n"
+        row["stderr"] += f"record-replay: replay timed out after {SEED_TIMEOUT_SECONDS}s\n"
     return row, replay_failure(tape, replay)
 
 
-def run_seed(executable, seed, diagnose_red=False, record_replay=False):
+def run_seed(executable, seed, diagnose_red=False, record_replay=False, seed_timeout=SEED_TIMEOUT_SECONDS):
     with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as root:
         root = Path(root)
         recording = root / "record"
@@ -190,18 +195,20 @@ def run_seed(executable, seed, diagnose_red=False, record_replay=False):
         if record_replay:
             env["HIRSEL_RECORD"] = str(tape)
         inputs = {"cwd": recording, "stdin": subprocess.DEVNULL, "env": env, "capture_output": True}
-        ran, seconds, timed_out = run_timed([executable], inputs)
+        ran, seconds, timed_out = run_timed([executable], inputs, seed_timeout)
         verdict = outcome(ran, observation)
         row = {"seed": seed, **verdict, "seconds": seconds}
         if timed_out:
-            row["stderr"] += "record-replay: recording run timed out after 300s\n"
+            row["stderr"] += f"record-replay: recording run timed out after {seed_timeout}s\n"
+            row["timed_out"] = True
         row["failure_class"] = failure_class(row)
         tape_failure = None
         if record_replay:
             row["tape_replay"], tape_failure = run_tape_replay(executable, tape, root / "replay")
             if tape_failure is not None:
                 row["tape_divergence"] = tape_failure
-                row["failure_class"] = f"record_replay:{tape_failure}"
+                if not timed_out:
+                    row["failure_class"] = f"record_replay:{tape_failure}"
                 if row["status"] == 0:
                     row["status"] = 1
         if diagnose_red and ran.returncode != 0:
@@ -475,7 +482,7 @@ def stale(entry, law):
     return None
 
 
-def reds_first(manifest, run, dry_run):
+def reds_first(manifest, run, dry_run, seed_timeout=SEED_TIMEOUT_SECONDS):
     """Re-run each earlier night's red sample seed before any fresh seed is allocated.
 
     Allocates no ledger range, so laws without a prior red get no extra seeds. A
@@ -496,7 +503,7 @@ def reds_first(manifest, run, dry_run):
                 continue
             verdict = None
             if law is not None:
-                verdict = (run_seed(law.binary, seed, record_replay=law.record_replay)
+                verdict = (run_seed(law.binary, seed, record_replay=law.record_replay, seed_timeout=seed_timeout)
                            if seed or law.seed_zero is None else law.seed_zero)
             row = {"replay_of": entry["group"], "night": entry["night"], "law": name, "seed": seed,
                    "stale": mark, "build": law and law.build, "digest": law and law.digest,

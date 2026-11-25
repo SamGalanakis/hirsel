@@ -1,7 +1,19 @@
 """Run with python3 core/tools/test_vopr_failure_groups.py."""
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from vopr_failure_groups import group
+
+
+SIM_CAMPAIGN_PATH = Path(__file__).resolve().parents[2] / "tools" / "sim-campaign"
+loader = importlib.machinery.SourceFileLoader("sim_campaign_tool", str(SIM_CAMPAIGN_PATH))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+sim_campaign = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sim_campaign)
 
 
 def red(stderr, law="store@1/store/law", status=101):
@@ -34,6 +46,41 @@ class FailureGroups(unittest.TestCase):
             self.assertEqual(len({group(row) for row in rows}), 1, rows)
         for rows in split:
             self.assertEqual(len({group(row) for row in rows}), len(rows), rows)
+
+    def test_a_replay_past_the_bound_is_a_timeout_and_the_night_moves_on(self):
+        with tempfile.TemporaryDirectory() as held:
+            root = Path(held)
+            prepared = root / "prepared"
+            prepared.mkdir()
+            slow = prepared / "slow-law"
+            fast = prepared / "fast-law"
+            slow.write_text("#!/bin/sh\nexec sleep 5\n")
+            fast.write_text("#!/bin/sh\nexit 0\n")
+            slow.chmod(0o755)
+            fast.chmod(0o755)
+            (prepared / "manifest.json").write_text(json.dumps([
+                {"law": "sim/slow", "executable": "slow-law", "seeds": 1},
+                {"law": "sim/fast", "executable": "fast-law", "seeds": 1},
+            ]))
+            prior = root / "nights" / "2026-11-24T000000Z-prior"
+            run = root / "nights" / "2026-11-25T000000Z-now"
+            prior.mkdir(parents=True)
+            run.mkdir()
+            (prior / "failure-groups.jsonl").write_text(
+                json.dumps({"group": ["sim/slow", "seed_red", "exit 1"], "seed": 7}) + "\n"
+                + json.dumps({"group": ["sim/fast", "seed_red", "exit 1"], "seed": 8}) + "\n")
+
+            # Returning at all is what lets the night go on to its fresh seeds.
+            still_red = sim_campaign.reds_first(prepared / "manifest.json", run, False, seed_timeout=0.2)
+
+            self.assertEqual(still_red, 1)
+
+            rows = [json.loads(line) for line in (run / "reds-first.jsonl").read_text().splitlines()]
+            self.assertEqual([row["seed"] for row in rows], [7, 8])
+            self.assertEqual(rows[0]["status"], 124)
+            self.assertEqual(rows[0]["timed_out"], True)
+            self.assertEqual(rows[0]["failure_class"], "timeout")
+            self.assertEqual(rows[1]["status"], 0)
 
 
 if __name__ == "__main__":

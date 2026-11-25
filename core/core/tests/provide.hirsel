@@ -1618,7 +1618,7 @@ fn resolve_client(take n: Net) -> bool waits {
         _ => false
     }
     let rule: Rule = Resolve(names: "beta.test")
-    let beta = result.unwrap(net.narrow(n, one_rule(rule)))
+    let beta = result.unwrap(net.narrow(n, one_rule(take rule)))
     let narrowed = match host.resolve(beta, string.from("alpha.test"), mut none, Never) {
         Error(Denied) => true,
         _ => false
@@ -1860,7 +1860,7 @@ fn ten_443(a: Addr) -> bool {
 // socket as beta.test.
 fn narrowed_client(take n: Net) -> bool waits {
     let ten: Rule = Rule(dir: Connect, prefix: V4(167772160), bits: 8, ports: (443, 443), reach: Any)
-    let near = result.unwrap(net.narrow(n, one_rule(ten)))
+    let near = result.unwrap(net.narrow(n, one_rule(take ten)))
     let refused = match host.connect(near, Addr(ip: V4(2130706433), port: 443), Never) {
         Ok(take s) => {
             let _ = take s

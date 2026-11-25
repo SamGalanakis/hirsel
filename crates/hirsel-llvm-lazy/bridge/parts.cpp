@@ -558,9 +558,11 @@ std::string machine_text(const TargetMachine &tm) {
 // lent bodies do too (`lent_bodies`), which would fold a placeholder.
 std::string unsplittable_content(const Module &m, bool shared);
 std::string unsplittable(const Module &m, bool shared) {
+    // The cut reads x86-64 ELF and arm64 Mach-O objects (`split_native_object`).
     Triple triple(m.getTargetTriple());
-    if (triple.getArch() != Triple::x86_64 || !triple.isOSBinFormatELF())
-        return "the object split is x86-64 ELF only";
+    bool elf = triple.getArch() == Triple::x86_64 && triple.isOSBinFormatELF();
+    bool macho = triple.getArch() == Triple::aarch64 && triple.isOSBinFormatMachO();
+    if (!elf && !macho) return "the object split is x86-64 ELF and arm64 Mach-O only";
     return unsplittable_content(m, shared);
 }
 
@@ -760,6 +762,28 @@ void part_options(TargetMachine &tm) {
     tm.Options.EnableMachineOutliner = false;
 }
 
+// A Mach-O object records neither an atom's alignment nor its size: an atom
+// runs to the next symbol, and its section takes its widest member's
+// alignment. So the cut (`split_native_object`) could give a part neighbour-
+// dependent bytes. A split module's definitions all align to 16, so each atom
+// runs to its own size rounded up to 16 whatever follows it; this lowers a hot
+// loop's 64 (`hirsel_llvm_align_release_functions`). Its switches lower to
+// branches: AArch64's printer labels a jump table with an assembler temporary,
+// which the object addresses from its section's start with no length. And
+// no code is outlined: a part generated on its own machine (`on_threads`),
+// which AArch64 builds with the outliner on, would call a local helper the
+// cut cannot give it. The parts' keys take all three.
+void macho_part_layout(Module &m) {
+    for (Function &f : m)
+        if (!f.isDeclaration()) {
+            f.addFnAttr("no-jump-tables", "true");
+            f.addFnAttr(Attribute::NoOutline);
+            f.setAlignment(Align(16));
+        }
+    for (GlobalVariable &g : m.globals())
+        if (!g.isDeclaration() && g.getAlign().valueOrOne() < Align(16)) g.setAlignment(Align(16));
+}
+
 // Generate every miss held in the composing context, on this thread, as
 // `generate_all` would on one.
 void generate_here(const TargetMachine &tm, std::vector<Miss> &misses) {
@@ -871,6 +895,7 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
     }
     name_from_content(m);
     bool whole = !unsplittable(m, /*shared=*/true).empty();
+    if (!whole && tm.getTargetTriple().isOSBinFormatMachO()) macho_part_layout(m);
     if (lend) {
         // A library that lends its bodies defines no placeholder (`weak`):
         // the program's link defines over it, and a lent copy of its contents

@@ -476,7 +476,9 @@ pub(crate) fn check_runtime(path: &Path, bytes: &[u8], recording: bool) -> io::R
     )))
 }
 
-/// Check whether a Unix static archive (`.a`) defines `symbol` in its symbol table.
+/// Check whether a Unix static archive (`.a`) defines `symbol` in its symbol
+/// table: the GNU `/` or `/SYM64/` member, or a BSD (Darwin) `__.SYMDEF`
+/// member, whose names carry Mach-O's leading underscore.
 pub(crate) fn archive_defines_symbol(bytes: &[u8], symbol: &[u8]) -> bool {
     if !bytes.starts_with(b"!<arch>\n") {
         return false;
@@ -495,6 +497,37 @@ pub(crate) fn archive_defines_symbol(bytes: &[u8], symbol: &[u8]) -> bool {
         let data_start = at + 60;
         let data_end = data_start.saturating_add(size).min(bytes.len());
         let data = &bytes[data_start..data_end];
+        // BSD: `#1/<n>` puts the member's name in its first n data bytes,
+        // then ranlib entries (strx, offset), each counted in bytes.
+        if let Some(n) = name.strip_prefix(b"#1/")
+            && let Some(n) = std::str::from_utf8(n)
+                .ok()
+                .and_then(|n| n.trim().parse::<usize>().ok())
+            && data.get(..n).is_some_and(|d| d.starts_with(b"__.SYMDEF"))
+        {
+            let wide = data[..n].starts_with(b"__.SYMDEF_64");
+            let word = if wide { 8 } else { 4 };
+            let read = |at: usize| {
+                let b = data.get(n + at..n + at + word)?;
+                Some(if wide {
+                    u64::from_le_bytes(b.try_into().unwrap()) as usize
+                } else {
+                    u32::from_le_bytes(b.try_into().unwrap()) as usize
+                })
+            };
+            let Some(entries) = read(0) else { return false };
+            let Some(size) = read(word + entries) else {
+                return false;
+            };
+            let start = n + 2 * word + entries;
+            return data
+                .get(start..start.saturating_add(size))
+                .is_some_and(|names| {
+                    names
+                        .split(|&b| b == 0)
+                        .any(|s| s.strip_prefix(b"_") == Some(symbol))
+                });
+        }
         if name.starts_with(b"/ ") && data.len() >= 4 {
             let count = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
             let strings_start = 4 + count * 4;
@@ -573,7 +606,13 @@ pub fn publish(
     ) -> io::Result<Option<(Vec<u8>, &'a str)>> {
         input
             .map(|(path, target)| {
-                if !["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"].contains(&target) {
+                if ![
+                    "x86_64-unknown-linux-gnu",
+                    "aarch64-unknown-linux-gnu",
+                    "aarch64-apple-darwin",
+                ]
+                .contains(&target)
+                {
                     return Err(io::Error::other("unsupported installed runtime target"));
                 }
                 let bytes = std::fs::read(path)?;

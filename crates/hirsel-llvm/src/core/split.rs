@@ -23,6 +23,7 @@ use object::elf;
 use object::read::elf::{FileHeader as _, Rela as _, SectionHeader as _, Sym as _};
 use std::collections::{HashMap, VecDeque};
 
+mod cut;
 mod macho;
 
 type Header = elf::FileHeader64<LE>;
@@ -90,18 +91,14 @@ pub fn split_native_object(
             coverage,
         )?]);
     }
-    match format(object)? {
-        ObjectFormat::Elf => {}
-        // The cut reads ELF sections, relocations and FDEs; a Mach-O cut is
-        // a slice of its own.
-        ObjectFormat::MachO => {
-            return Err("a Mach-O release object cannot be cut per part yet".into());
-        }
-    }
     // A coverage module's records are writable data in their own section,
     // so it is generated whole (`unsplittable_content`).
     if coverage.is_some() {
         return Err("a coverage object is cut per definition".into());
+    }
+    match format(object)? {
+        ObjectFormat::Elf => {}
+        ObjectFormat::MachO => return cut::split(object, parts, debug_lines),
     }
     let input = Input::parse(object)?;
     let debug = if debug_lines {
@@ -130,7 +127,9 @@ pub fn split_native_object(
                     value: 0,
                     size: 0,
                 });
-                Some(restrict(debug, indices, text, key)?)
+                let id = indices.iter().position(|&i| i == text);
+                let id = id.ok_or("release part has no debug code section")?;
+                Some(restrict(debug, id as u32, debug_symbol(key, 0))?)
             }
         };
         out.push(NativeObject {
@@ -932,19 +931,10 @@ fn uleb(bytes: &[u8], at: usize) -> Result<(u64, usize), String> {
 /// physical function scope carries its abstract origin's name and
 /// declaration, so it does not depend on whether another definition inlined
 /// the same function.
-fn restrict(
-    debug: &NativeDebug,
-    indices: &[usize],
-    text: usize,
-    key: ContentHash,
-) -> Result<NativeDebug, String> {
-    let id = indices
-        .iter()
-        .position(|&i| i == text)
-        .ok_or("release part has no debug code section")? as u32;
+fn restrict(debug: &NativeDebug, id: u32, symbol: String) -> Result<NativeDebug, String> {
     let mut out = NativeDebug {
         sections: vec![CodeSection {
-            symbol: debug_symbol(key, 0),
+            symbol,
             size: debug.sections[id as usize].size,
         }],
         ..NativeDebug::default()

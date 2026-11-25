@@ -892,11 +892,11 @@ fn finish(
         .filter(|name| !std::str::from_utf8(name).is_ok_and(|name| exports.contains(name)))
         .collect();
     if !part.name.is_empty() {
-        let debug = hirsel_core_ir::source::debug_symbol(key, 0).into_bytes();
-        let mut expected = BTreeSet::from([debug]);
-        if part.strong && !exports.contains(&part.name) {
-            expected.insert(part.name.clone().into_bytes());
-        }
+        // Rows name `debug_symbol` on ELF, the function itself on Mach-O.
+        let rows = object.debug.iter().flat_map(|d| &d.sections);
+        let named = (part.strong && !exports.contains(&part.name)).then_some(&part.name);
+        let names = rows.map(|s| &s.symbol).filter(|&s| *s != part.name);
+        let expected: BTreeSet<_> = names.chain(named).map(|s| s.as_bytes().to_vec()).collect();
         if own != expected {
             return Err(format!(
                 "release std part {} defines other strong symbols than its record names",

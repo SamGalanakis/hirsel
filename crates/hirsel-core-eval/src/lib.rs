@@ -18,12 +18,14 @@
 //! producer's code. Provider rows run against a modelled provider ([`World`]).
 
 mod argon2;
+mod blocks;
 mod chan;
 mod conn;
 mod crc;
 mod footprint;
 mod frame;
 mod rows;
+use blocks::{Blk, Blocks};
 use footprint::Footprint;
 mod host;
 mod key_share;
@@ -689,121 +691,6 @@ enum Stop {
 }
 type X<T> = Result<T, Stop>;
 
-struct Blk {
-    bytes: Vec<u8>,
-    align: u64,
-    live: bool,
-    /// The limit the block is charged to; None for frame slots and engine records.
-    limit: Option<Limit>,
-    charge: u64,
-    lent_size: Option<u64>,
-    res: Option<Res>,
-    /// A counted node's kind, fixed by its `alloc`; its operations must name it.
-    counted: Option<Counted>,
-    /// The cleanup class its `alloc` named (crate docs, "Cleanup classes"): `None`
-    /// for a block no `alloc` row made; `Some(None)` for region storage.
-    class: Option<Option<Cleanup>>,
-    /// Static data (`static dN`): read, never written or freed.
-    fixed: bool,
-    /// The liveness shadow of `mark` (crate docs, "Slot kernels"): each marked
-    /// slot's offset, whether it holds a value, and its size.
-    marks: BTreeMap<usize, (bool, usize)>,
-}
-// A pointer's upper word is a monotonically assigned block identity, not a
-// storage slot. Only live blocks occupy records. Absence is the tombstone.
-// Completed empty index chunks are discarded; the top directory is bounded by
-// the 32-bit identity space. One live block can pin one 4096-entry u32 chunk.
-const BLOCK_CHUNK: usize = 4096;
-struct BlockChunk {
-    slots: Box<[u32; BLOCK_CHUNK]>,
-    live: usize,
-}
-#[derive(Default)]
-struct Blocks {
-    next: usize,
-    chunks: Vec<Option<Box<BlockChunk>>>,
-    entries: Vec<(usize, Blk)>,
-}
-impl Blocks {
-    fn insert(&mut self, block: Blk) -> usize {
-        assert!(
-            self.next < u32::MAX as usize,
-            "evaluator block identity space exhausted (a run stop, not Capacity)"
-        );
-        let id = self.next;
-        self.next += 1;
-        let c = id / BLOCK_CHUNK;
-        if c == self.chunks.len() {
-            self.chunks.push(Some(Box::new(BlockChunk {
-                slots: Box::new([0; BLOCK_CHUNK]),
-                live: 0,
-            })));
-        }
-        let chunk = self.chunks[c].as_mut().unwrap();
-        chunk.slots[id % BLOCK_CHUNK] = (self.entries.len() + 1) as u32;
-        chunk.live += 1;
-        self.entries.push((id, block));
-        id
-    }
-    fn slot(&self, id: usize) -> Option<usize> {
-        let chunk = self.chunks.get(id / BLOCK_CHUNK)?.as_ref()?;
-        let slot = chunk.slots[id % BLOCK_CHUNK];
-        (slot != 0).then_some(slot.wrapping_sub(1) as usize)
-    }
-    fn remove(&mut self, id: usize) -> Blk {
-        let slot = self.slot(id).expect("free of a non-block");
-        let chunk = self.chunks[id / BLOCK_CHUNK].as_mut().unwrap();
-        chunk.slots[id % BLOCK_CHUNK] = 0;
-        chunk.live -= 1;
-        if chunk.live == 0 && id / BLOCK_CHUNK < self.next / BLOCK_CHUNK {
-            self.chunks[id / BLOCK_CHUNK] = None;
-        }
-        let (_, block) = self.entries.swap_remove(slot);
-        if let Some(&(moved, _)) = self.entries.get(slot) {
-            self.chunks[moved / BLOCK_CHUNK].as_mut().unwrap().slots[moved % BLOCK_CHUNK] =
-                (slot + 1) as u32;
-        }
-        // Bound record storage by current liveness, not the historical peak.
-        // Hysteresis keeps repeated allocation/free at the boundary amortized.
-        if self.entries.capacity() > 256 && self.entries.len() < self.entries.capacity() / 4 {
-            self.entries.shrink_to((2 * self.entries.len()).max(256));
-        }
-        block
-    }
-}
-// Absent blocks retain only their liveness fact. No diagnostic depends on the
-// retired bytes, size, limit or origin. Mutable indexing always follows a live
-// check, and cannot create an absent entry.
-static DEAD_BLOCK: Blk = Blk {
-    bytes: Vec::new(),
-    align: 8,
-    live: false,
-    limit: None,
-    charge: 0,
-    lent_size: None,
-    res: None,
-    counted: None,
-    class: None,
-    fixed: false,
-    marks: BTreeMap::new(),
-};
-impl std::ops::Index<usize> for Blocks {
-    type Output = Blk;
-    fn index(&self, id: usize) -> &Blk {
-        self.slot(id)
-            .map_or(&DEAD_BLOCK, |slot| &self.entries[slot].1)
-    }
-}
-impl std::ops::IndexMut<usize> for Blocks {
-    fn index_mut(&mut self, id: usize) -> &mut Blk {
-        let slot = self.slot(id).expect("use of a freed block");
-        &mut self.entries[slot].1
-    }
-}
-
-#[cfg(test)]
-mod block_table_tests;
-
 struct Res {
     grant: u64,
     creator: usize,
@@ -930,12 +817,27 @@ struct Task {
     reserved: Vec<Reservation>,
     /// The anchor each running activation of the task is at, innermost last, and
     /// whether its function inherits its caller's site (SITES.md 6(b)).
-    at: Vec<(Option<Anchor>, bool)>,
+    at: Vec<Here>,
     /// Its scheduler record: 0 for the root, `i + 1` for child `i`.
     k: usize,
     /// Cleanups running with cancellation shielded (CONC-8, CONC-9).
     shield: u32,
 }
+/// Where an activation of `f` is, for its sites (SITES.md): the instruction it
+/// runs or the block that raises, and whether `f` inherits its caller's site.
+#[derive(Clone, Copy)]
+struct Here {
+    f: FuncId,
+    at: Pos,
+    inherits: bool,
+}
+#[derive(Clone, Copy)]
+enum Pos {
+    Entry,
+    Inst(u32),
+    Block(u32),
+}
+
 struct Child {
     status: u8,
     result: u64,
@@ -975,6 +877,8 @@ struct Latest {
     handles: u64,
     limit: Option<Limit>,
 }
+
+type FieldSteps = (bool, Box<[Box<[(u64, At)]>]>);
 
 #[derive(Clone, Copy)]
 enum At {
@@ -1038,6 +942,14 @@ struct Machine<'m, H = WorldHost<'m>> {
     /// [`Core::checks`] and [`Core::activations`].
     checks: bool,
     activations: usize,
+    /// The results of the call that returned last, read by its caller at once.
+    results: Vec<u64>,
+    /// By type, whether it is a variant and, by case (0 for a record), each
+    /// field's offset and what it holds; made on the type's first field step.
+    field_steps: Vec<std::cell::OnceCell<FieldSteps>>,
+    /// Word and place buffers of ended frames, reused by the next.
+    words: Vec<Vec<u64>>,
+    places: Vec<Vec<(u64, At)>>,
     /// What the run sits on: the provider world and its scheduler, or [`Pure`].
     host: H,
 }
@@ -1928,7 +1840,9 @@ fn task_thread<'m>(
     mach.host.links[k] = Some(link);
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let root = if k == 0 {
-            let r = mach.call(&mut t, f, &args);
+            let r = mach
+                .call(&mut t, f, &args)
+                .map(|()| std::mem::take(&mut mach.results));
             // The root ends as every task does (native `start`): END, failed or not.
             mach.event(END, 0, u64::from(r.is_err()));
             if process_entry {
@@ -2029,6 +1943,10 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             maps,
             checks: input.checks,
             activations: input.activations,
+            results: Vec::new(),
+            field_steps: m.types.iter().map(|_| std::cell::OnceCell::new()).collect(),
+            words: Vec::new(),
+            places: Vec::new(),
             host,
         }
     }
@@ -2211,6 +2129,10 @@ impl<'m> Machine<'m> {
             maps: MapKeys::new([0; 16]),
             checks: self.checks,
             activations: 0,
+            results: Vec::new(),
+            field_steps: Vec::new(),
+            words: Vec::new(),
+            places: Vec::new(),
             host: WorldHost {
                 world: World::default(),
                 sched: Sched::default(),
@@ -3586,7 +3508,9 @@ impl Machine<'_> {
     /// and wake its joiner (native `start`).
     fn child_main(&mut self, t: &mut Task, f: FuncId, args: &[u64]) {
         let i = t.k - 1;
-        let returned = self.call(t, f, args);
+        let returned = self
+            .call(t, f, args)
+            .map(|()| std::mem::take(&mut self.results));
         let (rb, r) = (self.host.children[i].result, self.host.children[i].r);
         if let (Ok(values), Carried::Value(ty)) = (&returned, self.m.types[r.index()].carried) {
             self.store(rb, bytes_of(ty), values[0]);
@@ -4426,7 +4350,11 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     /// the read's end stops at the first slot that ends at or before its start.
     fn read_marked(&self, p: u64, n: usize) {
         let (b, o) = split(p);
-        for (&at, &(live, size)) in self.mem[b].marks.range(..o + n).rev() {
+        let marks = &self.mem[b].marks;
+        if marks.is_empty() {
+            return;
+        }
+        for (&at, &(live, size)) in marks.range(..o + n).rev() {
             if at + size <= o {
                 break;
             }
@@ -5503,7 +5431,8 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             }
         }
     }
-    fn call(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<Vec<u64>> {
+    /// Call `f`; its results are left in `results`.
+    fn call(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<()> {
         let frame = 0u8;
         let exhausted = TASK_STACK_ROOM.with(|room| {
             let (base, available) = room.get();
@@ -5603,16 +5532,22 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     /// would leave such a body and still find an anchor stops the run: no producer
     /// may emit one (SITES.md 6(b)).
     fn site(&self, t: &Task) -> Option<Anchor> {
-        let real = |a: &Option<Anchor>| {
-            a.filter(|a| !self.m.items[a.item.index()].package_is("core", "1"))
+        let real = |h: &Here| {
+            let b = self.m.functions[h.f.index()].body.as_ref().unwrap();
+            let anchor = match h.at {
+                Pos::Entry => None,
+                Pos::Inst(i) => b.inst_anchors[i as usize],
+                Pos::Block(k) => b.blocks[k as usize].anchor,
+            };
+            anchor.filter(|a| !self.m.items[a.item.index()].package_is("core", "1"))
         };
         let mut frames = t.at.iter().rev();
-        while let Some((at, inherits)) = frames.next() {
-            if let Some(a) = real(at) {
+        while let Some(here) = frames.next() {
+            if let Some(a) = real(here) {
                 return Some(a);
             }
-            if !inherits {
-                let beyond = frames.find_map(|(at, _)| real(at));
+            if !here.inherits {
+                let beyond = frames.find_map(real);
                 assert!(
                     beyond.is_none(),
                     "a site falls back through a body that does not inherit its caller's site"
@@ -5622,24 +5557,36 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         }
         None
     }
-    fn blocks(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<Vec<u64>> {
+    /// A pooled word buffer, empty.
+    fn take_words(&mut self) -> Vec<u64> {
+        let mut words = self.words.pop().unwrap_or_default();
+        words.clear();
+        words
+    }
+
+    fn blocks(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<()> {
         let depth = t.limits.len();
         let reserved = t.reserved.len();
-        let mut vals = vec![0u64; b.values.len()];
+        let mut vals = self.take_words();
+        vals.resize(b.values.len(), 0);
         let mut vectors = simd::Vectors::default();
-        let mut places = vec![(0u64, At::Other); b.addresses.len()];
+        let mut places = self.places.pop().unwrap_or_default();
+        places.clear();
+        places.resize(b.addresses.len(), (0u64, At::Other));
         let mut frame_charges = HashMap::new();
-        let pool = |r: PoolRange<ValueId>| r.get(&b.pools.values).unwrap().to_vec();
+        let pool = |r: PoolRange<ValueId>| r.get(&b.pools.values).unwrap();
         let mut block = BlockId(0);
-        let mut incoming = args.to_vec();
-        'blocks: loop {
+        let mut incoming = self.take_words();
+        incoming.extend_from_slice(args);
+        let mut outgoing = self.take_words();
+        let r = 'blocks: loop {
             assert!(
                 self.instructions != 0,
                 "evaluator instruction budget exhausted"
             );
             self.instructions -= 1;
             let blk = &b.blocks[block.index()];
-            vectors.unpack(b, &mut vals, &pool(blk.params), &incoming);
+            vectors.unpack(b, &mut vals, pool(blk.params), &incoming);
             let first = blk.insts.start as usize;
             for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
                 if matches!(inst, Inst::BuiltinUse { .. }) {
@@ -5663,7 +5610,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     "evaluator instruction budget exhausted"
                 );
                 self.instructions -= 1;
-                t.at.last_mut().unwrap().0 = b.inst_anchors[first + k];
+                t.at.last_mut().unwrap().at = Pos::Inst((first + k) as u32);
                 // Keep the large instruction dispatcher off the recursive call stack.
                 let r = match *inst {
                     Inst::Call { call } => self.call_inst(
@@ -5697,27 +5644,23 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     }
                     match inst.fail(b) {
                         Some(fb) => {
-                            (block, incoming) = (fb, Vec::new());
+                            block = fb;
+                            incoming.clear();
                             continue 'blocks;
                         }
-                        None => break 'blocks,
+                        None => break 'blocks Err(Stop::Chained),
                     }
                 }
             }
-            let take = |e: &EdgeId, vals: &[u64]| {
-                let e = &b.edges[e.index()];
-                (e.target, vectors.pack(b, vals, &pool(e.args)))
-            };
-            (block, incoming) = match &b.terminators[block.index()] {
-                Terminator::Jump(e) => take(e, &vals),
-                Terminator::Branch { condition, yes, no } => take(
+            let edge = match &b.terminators[block.index()] {
+                Terminator::Jump(e) => e,
+                Terminator::Branch { condition, yes, no } => {
                     if vals[condition.index()] != 0 {
                         yes
                     } else {
                         no
-                    },
-                    &vals,
-                ),
+                    }
+                }
                 Terminator::Switch {
                     value,
                     arms,
@@ -5725,23 +5668,27 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 } => {
                     let x = vals[value.index()];
                     let arms = arms.get(&b.pools.arms).unwrap();
-                    take(
-                        arms.iter()
-                            .find(|a| a.value == x)
-                            .map_or(otherwise, |a| &a.edge),
-                        &vals,
-                    )
+                    arms.iter()
+                        .find(|a| a.value == x)
+                        .map_or(otherwise, |a| &a.edge)
                 }
                 Terminator::Return(r) => {
                     assert_eq!(t.limits.len(), depth, "a return left a bound scope open");
                     assert_eq!(t.reserved.len(), reserved, "a return left an isolate open");
-                    return Ok(vectors.pack(b, &vals, &pool(*r)));
+                    self.results.clear();
+                    for &id in pool(*r) {
+                        vectors.push(b, &vals, id, &mut self.results);
+                    }
+                    break 'blocks Ok(());
                 }
                 Terminator::Raise { cause: c, cleanup } => {
                     let mut message = [0; 3];
                     match c {
                         RaiseCause::Fail(a) => {
-                            let (p, _) = self.address(b, slots, &vals, &places, *a)?;
+                            let (p, _) = match self.address(b, slots, &vals, &places, *a) {
+                                Ok(p) => p,
+                                Err(stop) => break 'blocks Err(stop),
+                            };
                             message = [0, 8, 16].map(|o| self.load(p + o, 8));
                         }
                         // `Capacity(c)`'s payload sits where `Fail`'s carrier does.
@@ -5751,7 +5698,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                         } => message = [vals[requested.index()], vals[available.index()], 0],
                         RaiseCause::Unwrap | RaiseCause::Bounds => {}
                     }
-                    t.at.last_mut().unwrap().0 = blk.anchor;
+                    t.at.last_mut().unwrap().at = Pos::Block(block.0);
                     let site = self.site(t);
                     let cause = Cause {
                         kind: cause(*c),
@@ -5760,17 +5707,32 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     };
                     self.record(t, cause);
                     match cleanup {
-                        Some(c) => (*c, Vec::new()),
-                        None => break 'blocks,
+                        Some(c) => {
+                            block = *c;
+                            incoming.clear();
+                            continue 'blocks;
+                        }
+                        None => break 'blocks Err(Stop::Chained),
                     }
                 }
-                Terminator::Propagate => break 'blocks,
+                Terminator::Propagate => break 'blocks Err(Stop::Chained),
                 Terminator::Unreachable => panic!("an unreachable point was reached"),
             };
+            let edge = &b.edges[edge.index()];
+            outgoing.clear();
+            for &id in pool(edge.args) {
+                vectors.push(b, &vals, id, &mut outgoing);
+            }
+            std::mem::swap(&mut incoming, &mut outgoing);
+            block = edge.target;
+        };
+        if r.is_err() {
+            assert_eq!(t.limits.len(), depth, "a failure left a bound scope open");
+            assert_eq!(t.reserved.len(), reserved, "a failure left an isolate open");
         }
-        assert_eq!(t.limits.len(), depth, "a failure left a bound scope open");
-        assert_eq!(t.reserved.len(), reserved, "a failure left an isolate open");
-        Err(Stop::Chained)
+        self.words.extend([vals, incoming, outgoing]);
+        self.places.push(places);
+        r
     }
 
     fn address(
@@ -5855,12 +5817,41 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             let At::Decl(t) = at else {
                 panic!("field of an untyped place")
             };
-            let off = self.fixed(t).offsets[case.unwrap_or(0) as usize][field as usize];
-            let fty = &self.shape(t).fields(case).unwrap()[field as usize].ty;
-            at = self.at_field(fty);
+            let off;
+            (off, at) = self.field_step(t, case, field);
             p += off;
         }
         Ok((p, at))
+    }
+
+    /// The offset of field `field` of `t` (of its case `case`, for a variant) and
+    /// what the field holds.
+    fn field_step(&self, t: TypeRef, case: Option<u32>, field: u32) -> (u64, At) {
+        let (variant, cases) = self.field_steps[t.index()].get_or_init(|| {
+            let (shape, fixed) = (self.shape(t), self.fixed(t));
+            let cases: Vec<Option<u32>> = match &shape.body {
+                Shaped::Record(_) => vec![None],
+                Shaped::Variant(c) => (0..c.len() as u32).map(Some).collect(),
+            };
+            let steps = cases
+                .iter()
+                .enumerate()
+                .map(|(k, &case)| {
+                    let fields = shape.fields(case).unwrap().iter();
+                    fields
+                        .enumerate()
+                        .map(|(i, f)| (fixed.offsets[k][i], self.at_field(&f.ty)))
+                        .collect()
+                })
+                .collect();
+            (matches!(shape.body, Shaped::Variant(_)), steps)
+        });
+        assert_eq!(
+            *variant,
+            case.is_some(),
+            "a field step names no case of its type"
+        );
+        cases[case.unwrap_or(0) as usize][field as usize]
     }
 
     fn load_vector(&self, ptr: u64, len: usize) -> [u8; 32] {
@@ -5882,7 +5873,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         site: &CallSite,
     ) -> X<()> {
         let args = site.args.get(&b.pools.args).unwrap();
-        let mut words = Vec::with_capacity(args.len());
+        let mut words = self.take_words();
         for arg in args {
             match *arg {
                 Arg::Value(v) => vectors.push(b, vals, v, &mut words),
@@ -5897,11 +5888,20 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         let r = match site.callee {
             Callee::Direct(f) => self.call(t, f, &args),
             Callee::Indirect(v) => self.call(t, FuncId((vals[v.index()] - FN_BASE) as u32), &args),
-            Callee::Runtime(op) => self.rt(t, op, &args),
+            Callee::Runtime(op) => self.rt(t, op, &args).map(|r| {
+                self.results.clear();
+                self.results.extend_from_slice(&r);
+            }),
         };
         self.frozen.truncate(held);
-        let r = r?;
-        vectors.unpack(b, vals, site.results.get(&b.pools.values).unwrap(), &r);
+        self.words.push(args);
+        r?;
+        vectors.unpack(
+            b,
+            vals,
+            site.results.get(&b.pools.values).unwrap(),
+            &self.results,
+        );
         Ok(())
     }
 

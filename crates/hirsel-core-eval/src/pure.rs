@@ -63,6 +63,7 @@ fn pure_root(m: &Module, f: FuncId, args: &[u64], limit: u64, core: &Core<'_>) -
     });
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         mach.call(&mut t, f, &arguments)
+            .map(|()| std::mem::take(&mut mach.results))
     }));
     let outcome = match run {
         Ok(Ok(r)) => Outcome::Returned(r),

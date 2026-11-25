@@ -4,31 +4,35 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     /// Run one activation of `f`. Its slots are frame memory: they end when the
     /// activation does, by return or by failure, so a later use of an address into
     /// them is a stop (crate docs, "Values, slots and addresses").
-    pub(super) fn activation(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<Vec<u64>> {
+    pub(super) fn activation(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<()> {
         let b = self.m.functions[f.index()]
             .body
             .as_ref()
             .expect("external functions do not run here");
-        let slots: Vec<u64> = b
-            .slots
-            .iter()
-            .map(|s| self.block(self.place_size(*s), None, 0, None))
-            .collect();
-        let r = self.frame(t, b, args, &slots, self.inherits[f.index()]);
-        for p in slots {
+        let mut slots = self.take_words();
+        for s in &b.slots {
+            slots.push(self.block(self.place_size(*s), None, 0, None));
+        }
+        let r = self.frame(t, f, b, args, &slots);
+        for &p in &slots {
             self.mem.remove(split(p).0);
         }
+        self.words.push(slots);
         r
     }
     pub(super) fn frame(
         &mut self,
         t: &mut Task,
+        f: FuncId,
         b: &Body,
         args: &[u64],
         slots: &[u64],
-        inherits: bool,
-    ) -> X<Vec<u64>> {
-        t.at.push((None, inherits));
+    ) -> X<()> {
+        t.at.push(Here {
+            f,
+            at: Pos::Entry,
+            inherits: self.inherits[f.index()],
+        });
         let r = self.blocks(t, b, args, slots);
         t.at.pop();
         r

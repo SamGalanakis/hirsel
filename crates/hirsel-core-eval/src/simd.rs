@@ -16,14 +16,6 @@ impl Vectors {
         self.0.insert(id, bytes);
     }
 
-    pub(super) fn pack(&self, b: &Body, vals: &[u64], ids: &[ValueId]) -> Vec<u64> {
-        let mut words = Vec::with_capacity(ids.len());
-        for &id in ids {
-            self.push(b, vals, id, &mut words);
-        }
-        words
-    }
-
     pub(super) fn push(&self, b: &Body, vals: &[u64], id: ValueId, words: &mut Vec<u64>) {
         if let Ty::Vector(shape) = b.values[id.index()] {
             let bytes = self.value(id);

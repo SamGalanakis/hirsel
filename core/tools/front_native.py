@@ -111,7 +111,7 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
                     assert (result.stderr or b'') == want_stderr, f'stderr {result.stderr!r} != {want_stderr!r}'
                 if name in ('host-read', 'host-close-cancel', 'host-wait-cancel'):
                     assert (grant / 'input').read_bytes() == b'hello'
-                elif host:
+                elif name.startswith('host') or name in ('mkdtemp', 'mkdtemp-bounds'):
                     assert not list(grant.iterdir()), 'granted directory has unexpected contents'
                 row['passed'] = True
             except (OSError, ValueError, AssertionError) as error:

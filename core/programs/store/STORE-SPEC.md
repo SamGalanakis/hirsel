@@ -1,4 +1,6 @@
-# STORE-SPEC v2.118: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.119: the M4 store library (lane store-spec-1001)
+
+v2.119 (keyed-l17-l21r-2608): built. `READER_PIN_MIN` = `VALUE_LIMIT` + 1 MiB names §13.4's least Reader `pin_bytes` on a Tiered open. The cache's admission check uses it, and so does every runner Reader, which asked for 0 and was refused `Missing("pin_bytes")` on a Tiered open.
 
 v2.118 (store-aggregate-2-1-2620; Store 2.1, D12): built. (1) **Aggregate indexes** (§1.2 "Aggregates"). `aggregate(mut d, mut t, name, by, key)` declares an index whose extractor gives each row `(G, u64)` parts; per group it keeps the count of rows and the sum of their values, maintained by every `put` and `delete` and built by the §1.2 builder through the same `Backfilling`, `Public` and `Failed` states. `totals(tx, a, g)` reads a group's `Totals(count, sum)`; `rebuild_aggregate(mut db, a)` demotes it. (2) **Format 9.** An index record's kind byte gains `2`, an aggregate. A format-8 store is `Unsupported(8)`, with no migration. Reversible: the format word is one way (a format-9 store does not open under format 8); the aggregate kind is code.
 
@@ -4701,6 +4703,7 @@ pub fn fetch_bytes[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[View[Byt
 pub type Accounts { logical: u64, exact: bool, frames: u64, journal: u64, resident: u64 }
 pub fn accounts(db: Db) -> Accounts
 pub const VALUE_LIMIT: u64 = 16711680
+pub const READER_PIN_MIN: u64 = VALUE_LIMIT + 1048576   // least Reader pin_bytes on a Tiered open (§13.4)
 pub const FRAME_LIMIT: u64 = 16777296                   // bytes of journal frames in flight (AP15)
 pub type Limit = Key | Value | Transaction | Name | Ids | Manifest
 pub type StoreCapacity = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)   // v2.40 ruling (b): the resource that refused

@@ -124,7 +124,7 @@ pub fn held_by(p: triggers.Pending, image: Bytes) -> HeldBy {
 /// `entries` element is unmatched.
 pub fn settle(db: store.Db, mut staged: store.StagedMigration, t: triggers.Tables, image: Bytes, registered: List[Bytes], f: Fates) -> Result[Option[HeldReport], store.Error] waits {
     let snap = store.staged_install_snapshot(db, staged)
-    settle_read(store.reader(db, 0u64)?, snap, mut staged, t, image, registered, f)
+    settle_read(store.reader(db, store.READER_PIN_MIN)?, snap, mut staged, t, image, registered, f)
 }
 
 /// `settle` over a reader and snapshot of the staged store, which the prepare

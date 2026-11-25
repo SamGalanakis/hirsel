@@ -582,7 +582,7 @@ fn done[R](take result: Result[store.Outcome[R, Error], store.Error]) -> store.D
 }
 
 fn first(db: store.Db, t: Tables) -> Option[Pending] waits {
-    result.unwrap(next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), t, fn(id: Id) -> bool {
+    result.unwrap(next_pending(result.unwrap(store.reader(db, store.READER_PIN_MIN)), store.snapshot(db), t, fn(id: Id) -> bool {
         false
     }))
 }

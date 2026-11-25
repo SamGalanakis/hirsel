@@ -224,3 +224,174 @@ fn quiet_reopen_recovers_bound_claims_once(d: Dir, random: Random, tasks: Tasks)
     result.unwrap(std.dir.remove_all(d, name))
     Ok(())
 }
+
+// L21r's resident limit: above two terminal reserves and the schema's rows.
+// At 36,000,000, K-7 gives n_max = 514,286, h = 20 and a page term of
+// 4 x 122 x 32768 = 15,990,784 per claim.
+const FRONT_LIMIT: u64 = 36000000u64
+
+// The front's rows: each charges at least 62 + 16 resident bytes (an empty
+// value under a 12-byte key, store `entry`) and 25 frame bytes (13 + 12), so
+// 500,000 of them charge at least 39,000,000, over FRONT_LIMIT alone, in a
+// 12,500,000-byte frame under the 16,777,280-byte transaction cap.
+const FRONT_ROWS: u64 = 500000u64
+
+// The keyed op of L21r: "big" writes FRONT_ROWS empty rows, so its commit is
+// refused for room every time; any other name is the shared counter's
+// increment.
+fn front_body(mut tx: store.Tx, h: HttpLawHandles, caller: Caller, take input: HttpOpInput) -> Result[u64, ()] {
+    if input.name != "big" {
+        return http_op_increment(mut tx, h, caller, take input)
+    }
+    for row in 0u64 .. FRONT_ROWS {
+        result.unwrap(store.put(mut tx, h.blobs, row, list.new()))
+    }
+    Ok(0u64)
+}
+
+fn front_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    transact(mut r, code.describe(front_body), 201326592u64, 2000000000u64)?
+    let mut binding = http_op_binding(r, "increment", "/old", 201u16)
+    binding.mode = Keyed
+    bind_keyed(mut r, take binding, KeyedRule(claim: keyed_http_law_claim(), retention_ms: 10000, keys_max: 4, principal_keys_max: 4))
+}
+
+// The front's client retry; the drive checks its status and flags.
+fn front_retry_post(take job: (Net, Clock, Addr, store.StreamId)) -> (u16, bool, bool, Bytes) waits {
+    let (net, time, address, stream) = take job
+    let reply = http_law_post(net, time, address, "/old", b"token", stream, 0u64, b"{\"name\":\"big\"}", 1000u32)
+    (reply.status, reply.committed, reply.replayed, clone(reply.body))
+}
+
+// Each step advances the manual clock to one recovery tick and lets the head
+// settle it before the next.
+fn front_tick(mut ticks: ClockHand, at_ns: u64) waits {
+    clock.advance_to(mut ticks, at_ns)
+    let _ = clock.idle(mut ticks)
+}
+
+fn front_drive(take job: KeyedHorizonDrive) waits {
+    let KeyedHorizonDrive(head: take head, publisher: take pub_to, clock: time, hand: take clock_hand, random, tasks, net) = take job
+    let mut ticks = take clock_hand
+    let birth = host.wall_ms(time)
+    // `clock.idle` waits for every other task to wait, which a live listener
+    // never reports, so the ticks run with no HTTP tasks alive. Tick 1 runs
+    // the front ("one" sorts before "other"): refusal 1, and it goes behind
+    // "other".
+    let _ = clock.idle(mut ticks)
+    front_tick(mut ticks, 1000000000u64)
+    let definition: HttpOpPlace = code.describe(front_place)
+    let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+    let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let (take relay, take relay_task) = result.unwrap(start_relay(reg, intercept, pub_to, time, tasks, RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 2u64, arg_max: 1024u64)))
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let server_job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock: time, random, tasks, place: definition, previous: None, retired: None, stage: 0u8, stop: None)
+    let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
+    // The client's retry runs the same body: refusal 2, answered 503, and the
+    // front goes behind "other" again.
+    let retry = task.spawn(tasks, bytes 1048576u64, (net, time, address, http_law_stream(birth, 0u32)), front_retry_post)
+    result.unwrap(channel.send(head, l15_head_request(waiting)))
+    let Ok((status, committed, replayed, body)) = task.join(take retry) else {
+        fail("the client retry of the refused front failed")
+    }
+    if status != 503u16 || committed || replayed {
+        let mut text = string.from("a client retry of the refused front was not an uncommitted 503: ")
+        string.push_uint(mut text, int.widen(status), 10u32, 0u64, '0')
+        if committed { string.push(mut text, " committed") }
+        if replayed { string.push(mut text, " replayed") }
+        string.push(mut text, " ")
+        if let Ok(shown) = string.from_utf8(take body) { string.push(mut text, shown) }
+        fail(take text)
+    }
+    let _ = std.task.cancel_join(take server)
+    let _ = std.task.cancel_join(take relay_task)
+    // Tick 2 recovers "other"; tick 3 takes refusal 3, which concludes the
+    // front Failed(OutOfBytes).
+    front_tick(mut ticks, 2000000000u64)
+    front_tick(mut ticks, 3000000000u64)
+    result.unwrap(channel.send(head, HeadFinish))
+    let _ = take ticks
+}
+
+fn front_admit(mut db: store.Db, entry: Bytes, policy: store.KeyedPolicy, key: Bytes, name: String) waits {
+    let inputs: std.codec.Codec[HttpOpInput] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(inputs, HttpOpInput(name: clone(name)), mut raw))
+    let claim = store.ClaimKey(op: b"increment", caller: store.Caller(issuer: 7u8, subject: b"law"), key: clone(key))
+    let Ok(Accepted(_)) = store.admit_claim(mut db, claim, store.request_digest(entry, raw), raw, Some(clone(policy))) else {
+        fail("an L21r claim did not admit")
+    }
+}
+
+fn front_reply(mut db: store.Db, entry: Bytes, key: Bytes, name: String) -> Outcome waits {
+    let inputs: std.codec.Codec[HttpOpInput] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(inputs, HttpOpInput(name: clone(name)), mut raw))
+    let claim = store.ClaimKey(op: b"increment", caller: store.Caller(issuer: 7u8, subject: b"law"), key: clone(key))
+    let no_policy: Option[store.KeyedPolicy] = None
+    let Ok(Duplicate(reply_bytes)) = store.admit_claim(mut db, claim, store.request_digest(entry, raw), raw, take no_policy) else {
+        fail("an L21r claim was not replied by the end of the open")
+    }
+    let outcomes: std.codec.Codec[Outcome] = std.codec.of()
+    result.unwrap(std.codec.decode(outcomes, reply_bytes))
+}
+
+// L21r refused front (http.md H9, K-8): two Admitted claims found at a quiet
+// reopen. The front's commit can never fit, so it is refused on tick 1 and
+// again by a client retry in the same open, which leaves it behind "other";
+// "other" recovers on tick 2, and tick 3's refusal is the front's third, so
+// the head commits its reserved Failed(OutOfBytes). With "other" replied, the
+// front is the only Admitted claim, so K-7 tests its commit against
+// resident_limit - (R_t - R_t) = FRONT_LIMIT, and the third refusal's Room
+// names exactly that as available.
+@test
+fn refused_front_fails_after_recover_max(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let (time, take clock_handle) = provide.clock(0u64, 100u64)
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let definition: HttpOpPlace = code.describe(front_place)
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    options.resident_limit = FRONT_LIMIT
+    let mut seeded = result.unwrap(store.open(tasks, dir, time, random, options))
+    let (take seed_reg, _, _, _) = result.unwrap(head_prepare(mut seeded, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let entry = http_law_key(seed_reg.exported[0u64])
+    let Some(KeyedRegistration(policy: Some(policy), ..)) = map.get(seed_reg.keyed, b"increment") else {
+        fail("the keyed op has no policy")
+    }
+    front_admit(mut seeded, entry, clone(policy), b"one", "big")
+    front_admit(mut seeded, entry, clone(policy), b"other", "saved")
+    result.unwrap(store.close(take seeded))
+    options.create = false
+    let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let mail = result.unwrap(mailbox(16u64))
+    let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock: time, hand: take clock_handle, random, tasks, net)
+    let work = task.spawn(tasks, bytes 16777216u64, take seed, front_drive)
+    if let Error(take problem) = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None) {
+        fail(start_text(Open(take problem)))
+    }
+    match task.join(take work) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+    let mut finished = result.unwrap(store.open(tasks, dir, time, random, options))
+    let Failed(OutOfBytes(refused)) = front_reply(mut finished, entry, b"one", "big") else {
+        fail("the refused front did not end Failed(OutOfBytes) after recover_max refusals")
+    }
+    // FRONT_ROWS rows of at least 78 resident bytes are live in the refused draft.
+    if refused.available != FRONT_LIMIT || refused.requested < FRONT_ROWS * 78u64 {
+        fail("the front's OutOfBytes did not name its own commit's room")
+    }
+    let Returned(value) = front_reply(mut finished, entry, b"other", "saved") else {
+        fail("the claim behind the refused front did not recover")
+    }
+    let results: std.codec.Codec[Result[u64, ()]] = std.codec.of()
+    let Ok(Ok(1u64)) = std.codec.decode(results, value) else {
+        fail("the recovered claim's body did not run once on an empty counter")
+    }
+    result.unwrap(store.close(take finished))
+    result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}

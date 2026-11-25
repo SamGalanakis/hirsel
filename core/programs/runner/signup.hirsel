@@ -104,7 +104,7 @@ pub fn enroll(mut tx: store.Tx, h: Tables, id: u64) -> Result[triggers.Id, Write
 
 pub fn active(db: store.Db, h: Tables, id: u64) -> Result[bool, store.Error] waits {
     let snapshot = store.snapshot(db)
-    let row = store.get(result.unwrap(store.reader(db, 0u64)), snapshot, h.accounts, id)?
+    let row = store.get(result.unwrap(store.reader(db, store.READER_PIN_MIN)), snapshot, h.accounts, id)?
     Ok(match row {
         Some(account) => account.active,
         None => false
@@ -367,7 +367,7 @@ fn exercise(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let snapshot = store.snapshot(db)
     let h = result.unwrap(store.bind_declaration(mut db, Open, schema))
-    let Some(Returned(take outcome)) = result.unwrap(triggers.outcome(result.unwrap(store.reader(db, 0u64)), snapshot, h.triggers, run_id)) else {
+    let Some(Returned(take outcome)) = result.unwrap(triggers.outcome(result.unwrap(store.reader(db, store.READER_PIN_MIN)), snapshot, h.triggers, run_id)) else {
         fail("sign-up: missing terminal outcome")
     }
     let result_codec: std.codec.Codec[RunResult] = std.codec.of()

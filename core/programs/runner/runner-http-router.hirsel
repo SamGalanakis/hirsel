@@ -60,7 +60,7 @@ fn previous_http_keys[G: send, H: shareable + inert + send](registered: Registry
 /// Reads the last activation in the store that owns the current place.
 pub fn http_previous(db: store.Db) -> Result[Option[Describe], store.Error] waits {
     let table = store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
-    let Some(raw) = store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), table, 1u8)? else {
+    let Some(raw) = store.get(result.unwrap(store.reader(db, store.READER_PIN_MIN)), store.snapshot(db), table, 1u8)? else {
         return Ok(None)
     }
     match decode_description(raw) {

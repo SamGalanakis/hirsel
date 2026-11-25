@@ -235,7 +235,7 @@ fn prepare_trigger_scan[G: send, H: shareable + inert + send](source: store.Prep
     let Some(table) = view tables else {
         return Ok(TriggerReport(rows: list.new(), unmatched: list.new()))
     }
-    let read_handle = prepare_open_result(store.staged_reader(source, 0u64))?
+    let read_handle = prepare_open_result(store.staged_reader(source, store.READER_PIN_MIN))?
     let cursor = prepare_open_result(triggers.scan_pending(read_handle, snapshot, table))?
     let rows = collect_trigger_scan(read_handle, take cursor, reg, choices, old, digest, f)?
     let mut registered: List[Bytes] = list.new()

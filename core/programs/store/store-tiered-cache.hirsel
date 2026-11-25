@@ -245,8 +245,11 @@ fn tiered_cache_admit(mut pager_cache: TieredCache, frame: Arc[TieredFrame]) {
     map.insert(mut pager_cache.entries, key, TieredCacheEntry(frame: arc.share(frame), frequency: 0))
 }
 
+// STORE-SPEC §13.4: the least pin_bytes a Reader may ask for on a Tiered open.
+pub const READER_PIN_MIN: u64 = VALUE_LIMIT + 1048576
+
 fn check_reader_pin_bytes(requested: u64) -> Result[(), Error] {
-    if requested < VALUE_LIMIT + 1048576 {
+    if requested < READER_PIN_MIN {
         return Error(Missing("pin_bytes"))
     }
     Ok(())

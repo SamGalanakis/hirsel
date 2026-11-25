@@ -198,3 +198,8 @@ limit = 1342177280
 
 [tests.runs."runner@1/runner/dev_identity_vectors"]
 grants = ["Stdout"]
+
+# L21r: the front's run holds n_e = 192 MiB beside a 36,000,000 B store and the
+# HTTP listener, relay and client tasks.
+[tests.runs."runner@1/runner/refused_front_fails_after_recover_max"]
+limit = 805306368

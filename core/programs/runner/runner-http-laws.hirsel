@@ -54,7 +54,9 @@ type HttpLawError: codec {
 }
 
 type HttpLawHandles: shareable + send {
-    counter: store.Table[u64, u64]
+    counter: store.Table[u64, u64],
+    // L21r's refused front writes its oversized rows here.
+    blobs: store.Table[u64, Bytes]
 }
 
 fn http_law_increment(mut tx: store.Tx, tables: HttpLawHandles, _author: Caller, take request: HttpLawArg) -> Result[u64, HttpLawError] {
@@ -75,7 +77,9 @@ fn http_law_query(_tx: store.Tx, _tables: HttpLawHandles, take _input: HttpLawAr
 
 fn http_law_schema(mut declared: store.Declare) -> Result[HttpLawHandles, store.Error] {
     let table = store.declare_table(mut declared, "counter", std.codec.key_u64(), std.codec.of_u64())?
-    Ok(HttpLawHandles(counter: store.finish(mut declared, take table)?))
+    let blobs = store.declare_table(mut declared, "blobs", std.codec.key_u64(), std.codec.of_bytes())?
+    let counter = store.finish(mut declared, take table)?
+    Ok(HttpLawHandles(counter: take counter, blobs: store.finish(mut declared, take blobs)?))
 }
 
 fn http_law_place(mut reg: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {

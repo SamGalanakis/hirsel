@@ -333,7 +333,7 @@ pub fn transaction[G: send, App: inert + send, A: codec, R: codec, E: codec](mut
 pub fn recorded[R: codec, E: codec](db: store.Db, t: Tables, id: StepId) -> Result[Option[Result[R, E]], store.Error] waits {
     let snapshot = store.snapshot(db)
     let index = encode(id)?
-    match store.get(result.unwrap(store.reader(db, 0u64)), snapshot, t.rows, index)? {
+    match store.get(result.unwrap(store.reader(db, store.READER_PIN_MIN)), snapshot, t.rows, index)? {
         Some(Finished(_, take raw)) => {
             let result: Result[R, E] = decode(raw)?
             Ok(Some(take result))

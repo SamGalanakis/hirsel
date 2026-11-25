@@ -96,7 +96,12 @@ type HttpOpListener: send {
 fn http_op_serve(take job: HttpOpListener) waits {
     let HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks, place: definition, previous: take previous, retired: take retired, stage, stop: take stop) = take job
     let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
-    let binds = ingress.bind_task(tasks)
+    // One grant task serves both unit mints: each HTTP bind takes a G from the
+    // bind mint, and each keyed request's claim function one from the claim
+    // mint (http.md K-2, RUNNER-SPEC v2.69). Without the claim mint every keyed
+    // request is 401 before its key is read.
+    let given: Grants[(), (), ()] = Grants(attempt: None, call: None, claim: Some(ingress.bind_mint()), bind: Some(ingress.bind_mint()))
+    let binds = grant_task(tasks, (), take given)
     let builder: std.router.Builder[HttpConnection[(), HttpLawHandles]] = std.router.builder()
     let (take generated_routes, take plans) = match take retired {
         Some(take rules) => result.unwrap(http_router_with_retirements(reg, previous, rules, take builder)),
@@ -120,6 +125,9 @@ fn http_op_serve(take job: HttpOpListener) waits {
             _ => grant_binds_of(binds, wire(code.describe(http_op_bind_original), 8192u64, DEFAULT_STEPS)),
         }
         let mut client_state = http_connection(take registry_copy, arc.share(plans), take supplied, relay_endpoint(endpoint), random, clock, tasks, 65536u64)
+        if let Some(take claims) = grant_claims_of(binds) {
+            http_grant_claims(mut client_state, take claims)
+        }
         http_enable_reads(mut client_state, http_read_endpoint(reads))
         take client_state
     }

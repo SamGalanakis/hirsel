@@ -969,7 +969,7 @@ pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: 
 
 fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] waits {
     match store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes()) {
-        Ok(take table) => store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), table, 0u8),
+        Ok(take table) => store.get(result.unwrap(store.reader(db, store.READER_PIN_MIN)), store.snapshot(db), table, 0u8),
         Error(Missing(_)) => Ok(None),
         Error(take problem) => Error(take problem),
     }
@@ -978,12 +978,12 @@ fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] waits
 fn activation_window(db: store.Db) -> Result[(u64, u64), store.Error] waits {
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     let table = store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), codec)?
-    let mut rows = store.scan(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), table, Unbounded, Unbounded)?
+    let mut rows = store.scan(result.unwrap(store.reader(db, store.READER_PIN_MIN)), store.snapshot(db), table, Unbounded, Unbounded)?
     let mut latest: u64 = 0
     let mut previous = 0u64
     let mut live = 0u64
     let first_record = int.saturating_add(store.retained_main_after(db), 1u64)
-    while let Some((version, _)) = store.next(result.unwrap(store.reader(db, 0u64)), mut rows)? {
+    while let Some((version, _)) = store.next(result.unwrap(store.reader(db, store.READER_PIN_MIN)), mut rows)? {
         previous = latest
         latest = version
         if version <= first_record {
@@ -1805,7 +1805,7 @@ fn finish_head[G: send, H: shareable + inert + send](take head: Head[G, H], take
 }
 
 fn next_trigger_due(db: store.Db, tables: triggers.Tables) -> Result[Option[u64], store.Error] waits {
-    let next = triggers.next_pending(store.reader(db, 0u64)?, store.snapshot(db), tables, fn(id: triggers.Id) -> bool {
+    let next = triggers.next_pending(store.reader(db, store.READER_PIN_MIN)?, store.snapshot(db), tables, fn(id: triggers.Id) -> bool {
         false
     })?
     Ok(match next {
@@ -2853,7 +2853,7 @@ fn open_trigger_drive[G: send, H: shareable + inert + send](db: store.Db, h: H, 
     let Some(take opened_tables) = take tables else {
         return Ok(None)
     }
-    let read_handle = store.reader(db, 0u64)?
+    let read_handle = store.reader(db, store.READER_PIN_MIN)?
     let mut remaining = triggers.scan_pending(read_handle, snapshot, opened_tables)?
     if let None = triggers.next_scanned(read_handle, mut remaining)? {
         return Ok(None)
@@ -3116,7 +3116,7 @@ fn finish_trigger[G: send, H: shareable + inert + send](mut hd: Head[G, H], driv
 
 fn advance_trigger[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut drive: Box[TriggerDrive[G]]) -> Result[bool, store.Error] waits {
     let snapshot = store.snapshot(hd.db)
-    let next = triggers.next_pending(store.reader(hd.db, 0u64)?, snapshot, drive.tables, scoped fn(id: triggers.Id) -> bool {
+    let next = triggers.next_pending(store.reader(hd.db, store.READER_PIN_MIN)?, snapshot, drive.tables, scoped fn(id: triggers.Id) -> bool {
         map.contains(drive.active, id)
     })?
     let Some(take p) = take next else {
@@ -3249,7 +3249,7 @@ fn answer_trigger[G: send, H: shareable + inert + send](mut hd: Head[G, H], driv
             let reply: Result[(), TriggerCallError] = if stopped {
                 Error(Closed)
             } else {
-                checked_boundary(triggers.boundary(store.reader(hd.db, 0u64)?, store.snapshot(hd.db), drive.tables, a))
+                checked_boundary(triggers.boundary(store.reader(hd.db, store.READER_PIN_MIN)?, store.snapshot(hd.db), drive.tables, a))
             }
             let _ = channel.send(answer, take reply)
         },

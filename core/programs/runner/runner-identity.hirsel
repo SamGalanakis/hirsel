@@ -54,7 +54,7 @@ pub type PlaceRead: codec + send {
 fn release_record(db: store.Db, version: u64) -> Result[Option[ReleaseRecord], store.Error] waits {
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     let table = store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), codec)?
-    store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), table, version)
+    store.get(result.unwrap(store.reader(db, store.READER_PIN_MIN)), store.snapshot(db), table, version)
 }
 
 // Call under the open store's lock. A failed capture leaves the refusal useful
@@ -104,7 +104,7 @@ fn read_follower_release(f: store.Follower, witness: u64) -> Result[(u64, PlaceR
     let current = store.follower_head(f)?
     let Some(main_branch) = store.follower_branch(f, "main") else { return Error(Missing("main")) }
     let captured = store.snapshot_follower(f, main_branch)?
-    let read_handle = store.follower_reader(f, 0u64)?
+    let read_handle = store.follower_reader(f, store.READER_PIN_MIN)?
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     let mut declaration = store.declare_follower(f)
     let releases = store.declare_release_table(mut declaration, codec)?

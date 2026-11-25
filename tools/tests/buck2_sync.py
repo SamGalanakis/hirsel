@@ -333,23 +333,34 @@ class CargoUnits(unittest.TestCase):
         self.assertEqual(selected['env']['OUT_DIR'], '$(location :' + r.names[keys[2]] + '[out_dir])')
         self.assertEqual(projected[r.names[keys[2]]]['buildscript_rule'], ':' + r.names[keys[1]])
 
-    def test_external_aliases_use_the_resolved_unit_and_drop_inactive_dependencies(self):
+    def test_external_aliases_prefer_features_and_align_shared_dependencies(self):
         from cargo_units import Resolution, calls, literal
         import ast
         r = Resolution.__new__(Resolution)
-        r.packages = {name: {'name': name, 'version': '1.0.0'} for name in ('external', 'leaf')}
+        r.packages = {name: {'name': name, 'version': '1.0.0'} for name in ('consumer', 'external', 'leaf')}
         r.members, r.units, r.names = set(), {}, {}
         keys = r.add({'units': [
             dict(pkg_id='leaf', target=dict(name='leaf', kind=['lib']), mode='build', features=[], dependencies=[]),
+            dict(pkg_id='leaf', target=dict(name='leaf', kind=['lib']), mode='build', features=['rc3'], dependencies=[]),
             dict(pkg_id='external', target=dict(name='external', kind=['lib']), mode='build', features=[],
-                 dependencies=[dict(index=0, extern_crate_name='renamed_leaf')])]})
+                 dependencies=[dict(index=0, extern_crate_name='renamed_leaf')]),
+            dict(pkg_id='external', target=dict(name='external', kind=['lib']), mode='build', features=['derive'],
+                 dependencies=[dict(index=1, extern_crate_name='renamed_leaf')]),
+            dict(pkg_id='consumer', target=dict(name='consumer', kind=['lib']), mode='build', features=[],
+                 dependencies=[dict(index=0, extern_crate_name='renamed_leaf')]),
+            dict(pkg_id='consumer', target=dict(name='consumer', kind=['lib']), mode='build', features=[],
+                 dependencies=[dict(index=1, extern_crate_name='renamed_leaf')])]})
         source = ''.join(sync.call('third_party_rust_library', name=name + '-1', features=['testing'], deps=[],
-                                  named_deps={'renamed_leaf': ':leaf-1', 'unused': ':leaf-1'} if name == 'external' else {},
+                                  named_deps={'renamed_leaf': ':leaf-1', 'unused': ':leaf-1'} if name != 'leaf' else {},
                                   env={'CARGO_PKG_NAME': name, 'CARGO_PKG_VERSION': '1.0.0'})
-                         for name in ('leaf', 'external'))
+                         for name in ('leaf', 'external', 'consumer'))
+        source += sync.call('alias', name='external', actual=':external-1', visibility=['PUBLIC'])
+        source += sync.call('alias', name='consumer', actual=':consumer-1', visibility=['PUBLIC'])
         projected = {literal(call, 'name'): attrs for _, call, attrs in calls(r.third_party(source))}
-        self.assertEqual(ast.literal_eval(projected[r.names[keys[1]]]['named_deps']),
+        self.assertEqual(ast.literal_eval(projected[r.names[keys[2]]]['named_deps']),
                          {'renamed_leaf': '//third-party:' + r.names[keys[0]]})
+        self.assertEqual(ast.literal_eval(projected['external']['actual']), ':' + r.names[keys[3]])
+        self.assertEqual(ast.literal_eval(projected['consumer']['actual']), ':' + r.names[keys[5]])
 
 
 

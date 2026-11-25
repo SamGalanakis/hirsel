@@ -1,18 +1,29 @@
 use super::*;
 use hirsel_core_net::ready::Event;
+use std::cell::RefCell;
+
+thread_local! {
+    /// The slot thread's event buffer. A wait reports the prefix it wrote,
+    /// so the buffer is filled once per thread, not on every poll: 256 packed
+    /// events are 3 KiB, about 600 stores per poll when built on the stack.
+    static EVENTS: RefCell<[Event; 256]> = const { RefCell::new([Event::EMPTY; 256]) };
+}
 
 /// Poll one slot and return the number of units queued by socket arrivals.
 /// `None` waits for an event and `Some(0)` is nonblocking.
 fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) -> usize {
+    EVENTS.with_borrow_mut(|evs| poll_slot_into(p, ix, timeout_ns, evs))
+}
+
+fn poll_slot_into(p: &Pool, ix: usize, timeout_ns: Option<u64>, evs: &mut [Event; 256]) -> usize {
     let slot = &p.slots[ix];
-    let mut evs = [Event::EMPTY; 256];
     bump(S_GPOLLS);
     if timeout_ns != Some(0) {
         bump(S_GPOLL_BLOCKS);
     }
     let n = if p.uring {
         slot.poller
-            .wait_slot(&mut evs, timeout_ns)
+            .wait_slot(evs, timeout_ns)
             .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
     } else {
         let timeout_ns = if slot.poller.udp_due() {

@@ -1,0 +1,247 @@
+// L-IX, catch-up (STORE-SPEC §3.5a "Catch-up"). A preparation declares its indexes at
+// an export, then follows OLD round by round: each round OLD writes, maybe
+// cuts, advances the lease, and the child replays the copied tail and brings
+// its new index ranges to the new head. After the install, OLD holds exactly
+// the entries a next_value extraction of its final rows gives: lix_expected for
+// by_v, and one (value, row) entry per row for the Unique by_id. The model is
+// the law's own copy of OLD's rows. Round codes: 's' a few single-row writes,
+// 'c' the same with two cuts between them (the tail crosses two rotations,
+// and the second cut used to delete it), 'w' one commit that swaps two rows'
+// values (a Unique key changes owner within the tail), 'b' a rewrite of every
+// row, a tail far over a hundredth of the store, which renews the export.
+const LCU_ROWS: u64 = 4000
+
+fn lcu_unique_expected(id: u32, model: List[Option[u64]]) -> Result[List[(Bytes, u64)], Error] {
+    let mut pairs: List[(u64, u64)] = list.new()
+    for k in 0u64 .. list.len(model) {
+        if let Some(v) = model[k] {
+            list.push(mut pairs, (v, k))
+        }
+    }
+    list.sort(mut pairs, fn(a: (u64, u64), b: (u64, u64)) -> Order {
+        order.compare(a.0, b.0)
+    })
+    let mut out: List[(Bytes, u64)] = list.new()
+    for (v, k) in pairs {
+        let mut logical = prefix(id)?
+        list.put_word_be(mut logical, v)
+        list.push(mut out, (take logical, k))
+    }
+    Ok(take out)
+}
+
+fn lcu_unique_entries(db: Db, id: u32) -> Result[List[(Bytes, u64)], Error] {
+    let s = snapshot(db)
+    let mut cursor = byte_cursor(s.roots.collections, Included(prefix(id)?), prefix(id + 1)?)?
+    let mut out: List[(Bytes, u64)] = list.new()
+    while let Some((take key, value)) = next_bytes(mut cursor)? {
+        let owner: u64 = list.word_be(value, 4)
+        list.push(mut out, (take key, owner))
+    }
+    Ok(take out)
+}
+
+fn lcu_public(db: Db, id: u32) -> Result[bool, Error] {
+    let mut records = byte_cursor(db.heads[0].roots.catalog, Included(index_prefix(0)?), index_prefix(4294967295u32)?)?
+    while let Some((_, raw)) = next_bytes(mut records)? {
+        let record = decode_catalog(raw)?
+        if record.id == id {
+            return Ok(record_public(raw))
+        }
+    }
+    Ok(false)
+}
+
+// The release the child prepares: rows with by_v (and by_id), and other.
+fn lcu_stage(source: Preparation, tasks: Tasks, unique: bool) -> Result[(StagedMigration, u32, u32), Error] waits {
+    let key = std.codec.key_u64()
+    let mut d = declare_export(source, tasks, None)?
+    let mut rows = declare_table(mut d, "rows", key, std.codec.of_u64())?
+    let by_v = index(mut d, mut rows, "by_v", Many, code.describe(lix_keys), key)?
+    let by_id = if unique {
+        let ix = index(mut d, mut rows, "by_id", Unique, code.describe(backfill_keys), key)?
+        ix.id
+    } else {
+        0u32
+    }
+    let _ = finish(mut d, take rows)?
+    let other = declare_table(mut d, "other", key, std.codec.of_u64())?
+    let _ = finish(mut d, take other)?
+    let staged = finish_export_declaration(source, take d)?
+    Ok((take staged, by_v.id, by_id))
+}
+
+fn lcu_swap(mut db: Db, t: Table[u64, u64], a: u64, b: u64, mut model: List[Option[u64]]) -> Result[(), Error] waits {
+    let (Some(va), Some(vb)) = (model[a], model[b]) else { return Ok(()) }
+    let ran = run(mut db, None, (copy_env(t), a, b, va, vb), fn(mut tx: Tx, input: (Table[u64, u64], u64, u64, u64, u64)) -> Result[(), Error] {
+        put(mut tx, input.0, input.1, input.4)?
+        put(mut tx, input.0, input.2, input.3)
+    })?
+    let Committed(_) = take ran else { return Error(MigrationFault) }
+    model[a] = Some(vb)
+    model[b] = Some(va)
+    Ok(())
+}
+
+// One round of OLD's writes. Fresh values are distinct, so only `duplicate`
+// makes two rows share a value.
+fn lcu_round(mut db: Db, t: Table[u64, u64], code_byte: u8, seed: u64, mut next_value: u64, mut model: List[Option[u64]]) -> Result[(), Error] waits {
+    let mut state = seed
+    if code_byte == 98u8 {
+        let ran = run(mut db, None, (copy_env(t), next_value), fn(mut tx: Tx, input: (Table[u64, u64], u64)) -> Result[(), Error] {
+            for k in 0u64 .. LCU_ROWS {
+                put(mut tx, input.0, k, input.1 + k)?
+            }
+            Ok(())
+        })?
+        let Committed(_) = take ran else { return Error(MigrationFault) }
+        for k in 0u64 .. LCU_ROWS {
+            model[k] = Some(next_value + k)
+        }
+        next_value += LCU_ROWS
+        return Ok(())
+    }
+    if code_byte == 119u8 {
+        state = lix_next(state)
+        let a = state % LCU_ROWS
+        state = lix_next(state)
+        let b = (a + 1 + state % (LCU_ROWS - 1)) % LCU_ROWS
+        return lcu_swap(mut db, t, a, b, mut model)
+    }
+    state = lix_next(state)
+    let writes = 3 + state % 4
+    for i in 0u64 .. writes {
+        if code_byte == 99u8 && i > 0 {
+            let _ = checkpoint(mut db)?
+        }
+        state = lix_next(state)
+        let k = state % list.len(model)
+        state = lix_next(state)
+        let v: Option[u64] = if state % 4 == 0 {
+            None
+        } else {
+            next_value += 1
+            Some(next_value)
+        }
+        lix_write(mut db, t, k, v)?
+        model[k] = v
+    }
+    Ok(())
+}
+
+fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String, unique: bool, backfilling: bool, duplicate: bool) -> Result[(), DeployError] waits {
+    let directory = disk_test_directory(d)
+    let scratch = disk_test_directory(d)
+    let options = disk_crash_options("install")
+    let mut db = deploy_result(open(tasks, directory, c, r, options))?
+    let mut staging = deploy_result(install_old(db))?
+    let description = install_fixture_bytes(32u64, 65u8)
+    deploy_result(stage_activation(mut staging, 1u64, None, description, std.codec.of_bytes(), description))?
+    deploy_result(install_activation(mut db, take staging))?
+    let key = std.codec.key_u64()
+    let t = deploy_result(table(mut db, "rows", key, std.codec.of_u64()))?
+    let mut model: List[Option[u64]] = list.new()
+    let filled = deploy_result(run(mut db, None, copy_env(t), fn(mut tx: Tx, rows_table: Table[u64, u64]) -> Result[(), Error] {
+        for k in 0u64 .. LCU_ROWS {
+            put(mut tx, rows_table, k, 3 * k)?
+        }
+        Ok(())
+    }))?
+    let Committed(_) = take filled else { return Error(Store(MigrationFault)) }
+    for k in 0u64 .. LCU_ROWS + 16 {
+        list.push(mut model, if k < LCU_ROWS { Some(3 * k) } else { None })
+    }
+    if backfilling {
+        // OLD's own by_v, left Backfilling part way: the child resumes it
+        // under the same id and ships the whole range.
+        let mut declaration = deploy_result(declare(db, Migrate))?
+        let mut rows_decl = deploy_result(declare_table(mut declaration, "rows", key, std.codec.of_u64()))?
+        let ix = deploy_result(index(mut declaration, mut rows_decl, "by_v", Many, code.describe(lix_keys), key))?
+        let _ = deploy_result(finish(mut declaration, take rows_decl))?
+        let other = deploy_result(declare_table(mut declaration, "other", key, std.codec.of_u64()))?
+        let _ = deploy_result(finish(mut declaration, take other))?
+        let _ = deploy_result(seal(mut db, take declaration))?
+        deploy_result(rebuild_index(mut db, ix))?
+        let _ = deploy_result(index_build_step(mut db, 1000))?
+    }
+    let _ = deploy_result(checkpoint(mut db))?
+    let attempt = install_fixture_bytes(16u64, 7u8)
+    let first = begin_export_copy(mut db, scratch, deploy_result(copied(attempt))?, 1u64)?
+    let mut exported = export_copy(take first)?
+    let mut source = open_export(exported.dir, c, attempt, options)?
+    let (take initial_staged, by_v, by_id) = deploy_result(lcu_stage(source, tasks, unique))?
+    let mut staged = take initial_staged
+    let mut state = seed
+    let mut next_value = 1000000u64
+    for code_byte in string.as_bytes(rounds) {
+        state = lix_next(state)
+        deploy_result(lcu_round(mut db, t, code_byte, state, mut next_value, mut model))?
+        match advance_export(mut db, scratch, attempt)? {
+            Tail(take tail) => {
+                if code_byte == 98u8 {
+                    fail("L-IX catch-up: a tail rewriting every row renews the export")
+                }
+                let from_segment = source.stamp.terminal
+                let _ = copy_export_tail(take tail, exported.dir)?
+                let _ = catch_up_export(exported.dir, mut source, mut staged)?
+                // Every checkpoint is a cut that rotates the journal, so a
+                // 'c' round's tail spans segments.
+                if code_byte == 99u8 && source.stamp.terminal <= from_segment {
+                    fail("L-IX catch-up: a checkpointed round crosses a rotation")
+                }
+            },
+            Full(take job) => {
+                if code_byte != 98u8 {
+                    fail("L-IX catch-up: a small tail catches up")
+                }
+                exported = export_copy(take job)?
+                source = open_export(exported.dir, c, attempt, options)?
+                let (take renewed, _, _) = deploy_result(lcu_stage(source, tasks, unique))?
+                staged = take renewed
+            },
+        }
+    }
+    if duplicate {
+        // Row 1 takes row 2's value: by_id has two owners for one key.
+        let Some(taken) = model[2] else { fail("L-IX catch-up: row 2 is present") }
+        deploy_result(lix_write(mut db, t, 1, Some(taken)))?
+        let Tail(take tail) = advance_export(mut db, scratch, attempt)? else {
+            fail("L-IX catch-up: one write catches up")
+        }
+        let _ = copy_export_tail(take tail, exported.dir)?
+        match catch_up_export(exported.dir, mut source, mut staged) {
+            Error(Store(Conflict(name))) => if name != "by_id" {
+                fail("L-IX catch-up: the conflict names by_id")
+            },
+            _ => fail("L-IX catch-up: a tail that repeats a Unique key fails as a full build does"),
+        }
+        release_export(mut db, attempt)
+        return deploy_result(close(take db))
+    }
+    let header = PreparedTarget(describe: install_fixture_bytes(32u64, 66u8), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: 16781392u64)
+    write_prepared(source, staged, exported.dir, take header)?
+    let checked = validate_prepared(exported.dir)?
+    let work = reserve_import(mut db, take checked)?
+    let assembled = import_trees(take work)?
+    let digest = imported_digest(assembled)
+    keep_import(mut db, take assembled)?
+    let _ = crash_apply(mut db, attempt, digest)?
+    if !deploy_result(lcu_public(db, by_v))? || deploy_result(lix_entries(db, by_v))? != deploy_result(lix_expected(by_v, model))? {
+        fail("L-IX catch-up: by_v differs from a next_value extraction of OLD's rows")
+    }
+    if unique && (!deploy_result(lcu_public(db, by_id))? || deploy_result(lcu_unique_entries(db, by_id))? != deploy_result(lcu_unique_expected(by_id, model))?) {
+        fail("L-IX catch-up: by_id differs from a next_value extraction of OLD's rows")
+    }
+    deploy_result(close(take db))
+}
+
+@test
+fn test_index_catch_up_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    for seed in 0u64 .. 3 {
+        lcu_case(d, c, r, tasks, seed * 7919 + 1, "ss", false, false, false)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 2, "scs", true, false, false)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 3, "swbs", true, false, false)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 4, "cs", false, true, false)?
+    }
+    lcu_case(d, c, r, tasks, 5, "s", true, false, true)
+}

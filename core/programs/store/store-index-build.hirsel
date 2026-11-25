@@ -185,6 +185,21 @@ fn building_index(db: Db) -> Result[Option[(Bytes, Catalog)], Error] {
     Ok(None)
 }
 
+// The name of the first index in `catalog` whose record is not Public.
+fn unready_index(catalog: PageTree) -> Result[Option[String], Error] {
+    let mut first_key: Bytes = list.new()
+    list.push(mut first_key, 2u8)
+    let mut end_key: Bytes = list.new()
+    list.push(mut end_key, 3u8)
+    let mut records = byte_cursor(catalog, Included(take first_key), end_key)?
+    while let Some((key, raw)) = next_bytes(mut records)? {
+        if !record_public(raw) {
+            return Ok(Some(declaration_index_name(key)?))
+        }
+    }
+    Ok(None)
+}
+
 fn bound_extractor(registry: IndexRegistry, record: Catalog) -> Option[View[RegisteredIndex]] in registry {
     for ((table_id, index_id, _), extractor) in registry.entries {
         if table_id == record.owner && index_id == record.id && extractor.by == record.by && extractor.key == record.key {

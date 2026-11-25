@@ -48,6 +48,10 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     planned_catalog(mut schema_change, staged.delta)?
     planned_ranges(mut schema_change, staged.ranges)?
     apply_import_rewrites(mut schema_change, staged.rewrites)?
+    // STORE-SPEC §1.2: a release activates only over Public indexes.
+    if let Some(take name) = deploy_result(unready_index(schema_change.roots.catalog))? {
+        return Error(Store(NotReady(take name)))
+    }
     schema_change.next_table = staged.meta.next_table
     schema_change.live = install_account(db, schema_change.roots)?
     deploy_result(over_ceiling(schema_change.live, disk_limit))?

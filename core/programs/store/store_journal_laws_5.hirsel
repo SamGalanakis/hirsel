@@ -203,7 +203,7 @@ fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], 
     disk_write_synced(d, "j-7", raw)?
     let mut input = journal_input(disk_io(host.open(d, "j-7", Read))?, false)?
     let mut events: List[JournalEvent] = list.new()
-    let scanned = journal_scan(mut input, "j-7", id, 7, boundary, final_item, mut events, scoped fn(mut observed: List[JournalEvent], take event: JournalEvent) -> Result[(), Error] {
+    let scanned = journal_scan(mut input, "j-7", id, 7, 72, boundary, final_item, mut events, scoped fn(mut observed: List[JournalEvent], take event: JournalEvent) -> Result[(), Error] {
         list.push(mut observed, take event)
         Ok(())
     })

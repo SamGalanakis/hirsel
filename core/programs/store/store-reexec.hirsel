@@ -65,7 +65,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
             None => true
         }
         let mut search: Option[JournalCommit] = None
-        let _ = journal_scan(mut source, path, db.store, seq, boundary, final_item, mut search, scoped fn(mut found: Option[JournalCommit], take event: JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, db.store, seq, 72, boundary, final_item, mut search, scoped fn(mut found: Option[JournalCommit], take event: JournalEvent) -> Result[(), Error] {
             let Commit(take commit) = take event else {
                 return Ok(())
             }
@@ -128,7 +128,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
             Some(_) => false,
             None => true
         }
-        let scanned = journal_scan(mut source, path, id, seq, boundary, final_item, mut held, scoped fn(mut at: BaseReplay, take event: JournalEvent) -> Result[(), Error] {
+        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut held, scoped fn(mut at: BaseReplay, take event: JournalEvent) -> Result[(), Error] {
             if at.stopped {
                 return Ok(())
             }

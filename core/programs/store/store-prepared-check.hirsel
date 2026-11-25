@@ -1,0 +1,89 @@
+// OLD's checks of a PREPARED file's catalog delta (STORE-SPEC §3.5a, M1-M3):
+// each changed record is well formed and keeps its identity, and only ids at
+// or above the export's next_table are new.
+fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
+    let prefix_tag = if c.kind == 2 {
+        2u8
+    } else {
+        1u8
+    }
+    if list.len(key) == 0 || key[0u64] != prefix_tag {
+        return false
+    }
+    let prefix_size = if c.kind == 2 {
+        5u64
+    } else {
+        1u64
+    }
+    if list.len(key) < prefix_size || list.len(key) - prefix_size > 255u64 {
+        return false
+    }
+    if c.kind == 2 {
+        let owner: u32 = list.word_be(key, 1u64)
+        if owner != c.owner {
+            return false
+        }
+    }
+    if c.kind != 2 {
+        let total_count = list.len(c.schemas)
+        if c.owner != 0 || c.next == 0 || total_count == 0 || c.schemas[total_count - 1u64].number != c.next - 1u16 {
+            return false
+        }
+        for i in 0u64 .. total_count {
+            let schema = c.schemas[i]
+            if (i > 0 && schema.number <= c.schemas[i - 1u64].number) || std.codec.fingerprint_of(schema.schema) != schema.fingerprint {
+                return false
+            }
+        }
+    } else if c.next != 0 || list.len(c.schemas) != 0 {
+        return false
+    }
+    let text = match copied(list.slice(key, prefix_size, list.len(key))) {
+        Ok(take b) => take b,
+        Error(_) => return false
+    }
+    match string.from_utf8(take text) {
+        Ok(name) => !std.string.starts_with(name, "hirsel."),
+        Error(_) => false,
+    }
+}
+
+fn validate_delta(change: CatalogChange, initial: u32) -> Result[(), DeployError] {
+    let old = match change.before {
+        Some(raw) => {
+            let c = deploy_result(decode_catalog(raw))?
+            if !validate_catalog_key(change.key, c) || c.id >= initial {
+                return Error(ImportMalformed)
+            }
+            Some(take c)
+        },
+        None => None,
+    }
+    if let Some(raw) = change.after {
+        let c = deploy_result(decode_catalog(raw))?
+        if !validate_catalog_key(change.key, c) {
+            return Error(ImportMalformed)
+        }
+        if let Some(before) = old {
+            if c.id == before.id {
+                if c.kind != before.kind || c.owner != before.owner || c.epoch < before.epoch || c.key != before.key || c.next < before.next || c.by != before.by || c.revision != before.revision || list.len(c.schemas) < list.len(before.schemas) {
+                    return Error(ImportMalformed)
+                }
+                for i in 0u64 .. list.len(before.schemas) {
+                    let left = before.schemas[i]
+                    let right = c.schemas[i]
+                    if left.number != right.number || left.fingerprint != right.fingerprint || left.schema != right.schema {
+                        return Error(ImportMalformed)
+                    }
+                }
+                return Ok(())
+            }
+        }
+        if c.id < initial {
+            return Error(ImportMalformed)
+        }
+    } else if let None = old {
+        return Error(ImportMalformed)
+    }
+    Ok(())
+}

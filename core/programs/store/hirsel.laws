@@ -132,7 +132,7 @@ store@1/store/journal_test_recorded_barrier src=51f7f7a6b7066685 sig=d99a6b5d727
 store@1/store/journal_test_recorded_fork src=bc317f5a6fc00980 sig=6fd85b216f5788ca run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_recovery src=c6456ace039ce6b0 sig=978ccb37e45e1ba7 run=aea7d2502fa22260 bug=- oracle=- rows=pending
 store@1/store/journal_test_rotation src=570288e02ef9d179 sig=353dea3a7842878a run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/journal_test_segment src=250f0847ffd92316 sig=92e3998218b9bb9f run=c44758d978325bd3 bug=- oracle=- rows=pending
+store@1/store/journal_test_segment src=bf11bc107c12c5be sig=e6757afbd1c79c37 run=c44758d978325bd3 bug=- oracle=- rows=pending
 store@1/store/journal_test_shared_segment_fences src=b1e80fca6135989e sig=3b28b071574f414c run=c44758d978325bd3 bug=- oracle=- rows=pending
 store@1/store/journal_test_step_stop src=232283126f8eb6e3 sig=3649f75f4c1fb9e6 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_streams src=fe6b89bc2faa2fba sig=69a30a6c1d4a4aea run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -190,6 +190,7 @@ store@1/store/test_fork_shared_head src=6ec999ebf833b1e2 sig=159b418510a18e14 ru
 store@1/store/test_frame_size src=b88fd42eacf70c23 sig=0595b0ee84e6694c run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frames src=ad2891d678e5d51a sig=f7f66add3c9762ca run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_build_law src=8e5a5ca8791ed210 sig=26f9e6c0a98e46f1 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_index_catch_up_law src=e844176bc26d1438 sig=a3221f0bcc445a90 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_index_declaration_laws src=4366f6dd9215be65 sig=5acf8f729662aa0e run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_drift_counted src=5e42bf24e3905c29 sig=2e875f2765e18764 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_refusal src=36fd8913bd0d171f sig=577c5c43618d8692 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

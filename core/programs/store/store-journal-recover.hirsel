@@ -46,7 +46,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, c: Clock, take initial: Jour
             None => true,
             Some(_) => false
         }
-        let scanned = journal_scan(mut source, path, id, seq, boundary, final_item, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+        let scanned = journal_scan(mut source, path, id, seq, 72, boundary, final_item, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
         })
         let JournalInput(file: take consumed_file, ..) = take source
@@ -261,7 +261,7 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay
         let path = journal_path(seq, "")?
         let mut source = journal_input(take opened, torn)?
         journal_refresh_size(mut source, boundary)?
-        let _ = journal_scan(mut source, path, id, seq, boundary, torn, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, id, seq, 72, boundary, torn, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
         })?
         let JournalInput(file: take consumed, ..) = take source

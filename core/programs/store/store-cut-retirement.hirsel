@@ -18,8 +18,10 @@ fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option
             list.push(mut packs, seq)
         }
     }
+    // A lease keeps every segment from its first on: a catch-up round copies
+    // the journal OLD wrote after the export, across any later cut (§3.5a "Catch-up").
     let range_lease = match lease {
-        Some(held) => Some((held.first, held.terminal)),
+        Some(held) => Some((held.first, 18446744073709551615u64)),
         None => None
     }
     let (before, after) = removal_spans(first, end, range_lease)

@@ -3083,9 +3083,13 @@ fn disk_publish_manifest(d: Dir, id: StoreId, m: PageManifest) -> Result[(), Err
     disk_io(host.sync_dir(d))
 }
 
-fn replay_export(d: Dir, id: StoreId, first: u64, terminal: u64, limit: u64, take initial: JournalReplay) -> Result[JournalReplay, Error] waits {
+// Replays the copied journal from offset `from` of segment `first` through
+// `limit` of `terminal`. A full open starts at 72; a catch-up round starts
+// where the previous round ended (STORE-SPEC §3.5a "Catch-up").
+fn replay_export(d: Dir, id: StoreId, first: u64, from: u64, terminal: u64, limit: u64, take initial: JournalReplay) -> Result[JournalReplay, Error] waits {
     let mut replay = take initial
     let mut seq = first
+    let mut start = from
     loop {
         let path = capacity(disk_path("j-", seq, ""))?
         let boundary = if seq == terminal {
@@ -3101,7 +3105,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, terminal: u64, limit: u64, tak
         if seq == terminal && source.size > boundary {
             return Error(disk_fault(path, boundary, Malformed))
         }
-        let _ = journal_scan(mut source, path, id, seq, Some(boundary), false, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, id, seq, start, Some(boundary), false, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
         })?
         let JournalInput(file: take file, ..) = take source
@@ -3110,6 +3114,7 @@ fn replay_export(d: Dir, id: StoreId, first: u64, terminal: u64, limit: u64, tak
             return Ok(take replay)
         }
         seq += 1
+        start = 72
     }
 }
 
@@ -3205,6 +3210,13 @@ fn changed_ranges(edits: List[CatalogChange], initial: u32, advanced: u32) -> Re
             None => 0u32
         }
         if old == new {
+            // An index OLD left Backfilling or Failed that the preparation
+            // finished under the same id: its entries ship as a replaced range.
+            if let (Some(before), Some(after)) = (change.before, change.after) {
+                if decode_catalog(after)?.kind == 2u8 && !record_public(before) {
+                    list.push(mut changes_by_id, RangeChange(id: new, catalog: Some(copied(after)?)))
+                }
+            }
             continue
         }
         if old != 0u32 {
@@ -3335,93 +3347,6 @@ pub fn write_prepared(source: Preparation, staged: StagedMigration, d: Dir, take
     scratch_result(disk_io(host.close(take file)))
 }
 
-fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
-    let prefix_tag = if c.kind == 2 {
-        2u8
-    } else {
-        1u8
-    }
-    if list.len(key) == 0 || key[0u64] != prefix_tag {
-        return false
-    }
-    let prefix_size = if c.kind == 2 {
-        5u64
-    } else {
-        1u64
-    }
-    if list.len(key) < prefix_size || list.len(key) - prefix_size > 255u64 {
-        return false
-    }
-    if c.kind == 2 {
-        let owner: u32 = list.word_be(key, 1u64)
-        if owner != c.owner {
-            return false
-        }
-    }
-    if c.kind != 2 {
-        let total_count = list.len(c.schemas)
-        if c.owner != 0 || c.next == 0 || total_count == 0 || c.schemas[total_count - 1u64].number != c.next - 1u16 {
-            return false
-        }
-        for i in 0u64 .. total_count {
-            let schema = c.schemas[i]
-            if (i > 0 && schema.number <= c.schemas[i - 1u64].number) || std.codec.fingerprint_of(schema.schema) != schema.fingerprint {
-                return false
-            }
-        }
-    } else if c.next != 0 || list.len(c.schemas) != 0 {
-        return false
-    }
-    let text = match copied(list.slice(key, prefix_size, list.len(key))) {
-        Ok(take b) => take b,
-        Error(_) => return false
-    }
-    match string.from_utf8(take text) {
-        Ok(name) => !std.string.starts_with(name, "hirsel."),
-        Error(_) => false,
-    }
-}
-
-fn validate_delta(change: CatalogChange, initial: u32) -> Result[(), DeployError] {
-    let old = match change.before {
-        Some(raw) => {
-            let c = deploy_result(decode_catalog(raw))?
-            if !validate_catalog_key(change.key, c) || c.id >= initial {
-                return Error(ImportMalformed)
-            }
-            Some(take c)
-        },
-        None => None,
-    }
-    if let Some(raw) = change.after {
-        let c = deploy_result(decode_catalog(raw))?
-        if !validate_catalog_key(change.key, c) {
-            return Error(ImportMalformed)
-        }
-        if let Some(before) = old {
-            if c.id == before.id {
-                if c.kind != before.kind || c.owner != before.owner || c.epoch < before.epoch || c.key != before.key || c.next < before.next || c.by != before.by || c.revision != before.revision || list.len(c.schemas) < list.len(before.schemas) {
-                    return Error(ImportMalformed)
-                }
-                for i in 0u64 .. list.len(before.schemas) {
-                    let left = before.schemas[i]
-                    let right = c.schemas[i]
-                    if left.number != right.number || left.fingerprint != right.fingerprint || left.schema != right.schema {
-                        return Error(ImportMalformed)
-                    }
-                }
-                return Ok(())
-            }
-        }
-        if c.id < initial {
-            return Error(ImportMalformed)
-        }
-    } else if let None = old {
-        return Error(ImportMalformed)
-    }
-    Ok(())
-}
-
 type ValidatedRange: send {
     id: u32,
     kind: u8,
@@ -3441,16 +3366,20 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
     if desc.id != expected.id {
         return Error(ImportMalformed)
     }
-    let (kind, schema_number) = match expected.catalog {
+    let (kind, schema_number, unique) = match expected.catalog {
         Some(raw) => {
             let meta = deploy_result(decode_catalog(raw))?
-            (meta.kind, meta.next)
+            let unique = match meta.shape {
+                Entries(Unique) => true,
+                _ => false,
+            }
+            (meta.kind, meta.next, unique)
         },
         None => {
             if desc.count != 0u64 {
                 return Error(ImportMalformed)
             }
-            (0u8, 0u16)
+            (0u8, 0u16, false)
         },
     }
     if (kind == 3 || kind == 4) && desc.count != 0 {
@@ -3471,6 +3400,15 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
         if kind == 1 {
             if list.len(encoded) < 2 || read_le(encoded, 0, 2) + 1 != int.widen(schema_number) {
                 return Error(ImportMalformed)
+            }
+        } else if kind == 2 {
+            // An index entry carries its payload: a Unique entry starts with
+            // its owner's primary, and either kind may carry a projection.
+            if unique {
+                let Ok(owner_end) = unique_owner_end(encoded) else { return Error(ImportMalformed) }
+                if owner_end == 4 {
+                    return Error(ImportMalformed)
+                }
             }
         } else if list.len(encoded) != 0 {
             return Error(ImportMalformed)
@@ -4916,7 +4854,7 @@ fn disk_stream_payload_counted(mut input: JournalInput, path: String, context: D
 
 // Middle segments stop at the next HEADER's prev_end. Only the last segment
 // reads beyond its durable boundary, stopping at the first physically bad frame.
-fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64, boundary: Option[u64], final_item: bool, mut destination: S, consume: scoped fn(mut S, take JournalEvent) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
+fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64, start: u64, boundary: Option[u64], final_item: bool, mut destination: S, consume: scoped fn(mut S, take JournalEvent) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
     let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 2, Some(seq), Some(id))?
     let durable_end = match boundary {
         Some(d) => d,
@@ -4930,7 +4868,11 @@ fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64,
     } else {
         durable_end
     }
-    let mut at = 72u64
+    // A catch-up resumes a segment at the end the previous round replayed.
+    if start < 72 || start > durable_end {
+        return Error(disk_fault(path, start, Truncated))
+    }
+    let mut at = start
     let mut accepted = 0u64
     while at < stop {
         let received = journal_read_frame(mut input, path, header.context, at)

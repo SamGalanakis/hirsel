@@ -1,0 +1,214 @@
+// Catch-up in the prepare child (STORE-SPEC §3.5a "Catch-up"). OLD advances the export
+// lease to its new head and appends the journal tail to the export directory
+// (`advance_export`, `copy_export_tail`). The child replays that tail from
+// where its last round ended, on the load it already holds, and brings each
+// index range the preparation ships to the new head from the rows the tail
+// changed. The preparation then writes PREPARED against the new head.
+
+// One shipped entry-index range: its catalog name, record and kind, and
+// the position of the extractor its declaration bound in the plan's bindings.
+type CatchUpIndex {
+    name: String,
+    record: Catalog,
+    kind: IndexKind,
+    binding: u64
+}
+
+// Replays the tail copied into `d` and brings `staged` to the new head.
+// Returns the number of rows the tail changed. Drift means this round cannot
+// catch up and the deploy needs a fresh full preparation: OLD's catalog moved,
+// the preparation carries activation rewrites computed at its base, or it
+// ships a populated table (a `migrate_table` copy, whose converter would have
+// to run on every caught-up row).
+pub fn catch_up_export(d: Dir, mut source: Preparation, mut staged: StagedMigration) -> Result[u64, DeployError] waits {
+    let stamp = read_export_stamp(d)?
+    let base: ExportStamp = clone(source.stamp)
+    if stamp.attempt != base.attempt || stamp.store_hi != base.store_hi || stamp.store_lo != base.store_lo || stamp.opened != base.opened || stamp.activation != base.activation {
+        return Error(ExportMismatch)
+    }
+    if stamp.terminal < base.terminal || (stamp.terminal == base.terminal && stamp.end < base.end) || stamp.head < base.head {
+        return Error(ExportMismatch)
+    }
+    if stamp.next_table != base.next_table || map.len(staged.rewrites) != 0 {
+        return Error(Drift)
+    }
+    let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
+    let before = share_roots(source.db.heads[0].roots)
+    let state = deploy_result(capacity(current_state(source.db)))?
+    let initial = deploy_result(journal_replay(take state, source.db.next_node))?
+    let replayed = deploy_result(replay_export(d, id, base.terminal, base.end, stamp.terminal, stamp.end, take initial))?
+    if replayed.state.tips[0].head != stamp.head {
+        return Error(ExportMismatch)
+    }
+    let moved = deploy_result(catalog_changes(before, replayed.state.tips[0].roots))?
+    if list.len(moved) != 0 {
+        return Error(Drift)
+    }
+    let delta = deploy_result(catalog_changes(before, staged.plan.roots))?
+    let ranges = deploy_result(changed_ranges(delta, base.next_table, staged.plan.next_table))?
+    let shipped = catch_up_indexes(staged.plan, delta, ranges)?
+    let tail = deploy_result(compare_page_collections(before.collections, replayed.state.tips[0].roots.collections))?
+    let next_node = order.max(staged.plan.next_node, replayed.next_node)
+    staged.plan.next_node = next_node
+    deploy_result(patch_index_ranges(mut staged.plan, before.collections, shipped, tail.rows))?
+    let live_bytes = deploy_result(journal_account(replayed))?
+    let JournalReplay(state: take advanced, ..) = take replayed
+    deploy_result(open_heads(mut source.db, take advanced))?
+    source.db.resident = live_bytes
+    source.db.next_node = staged.plan.next_node
+    source.stamp = take stamp
+    staged.base = declaration_base(source.db)
+    staged.base_rows = share_page_tree(source.db.heads[0].roots.collections)
+    Ok(list.len(tail.rows))
+}
+
+// The index ranges the preparation ships, each with the extractor its
+// declaration bound. A shipped table range with rows, or an index range
+// without a bound extractor, cannot be caught up from row changes.
+fn catch_up_indexes(plan: SchemaPlan, delta: List[CatalogChange], ranges: List[RangeChange]) -> Result[List[CatchUpIndex], DeployError] {
+    let mut found: List[CatchUpIndex] = list.new()
+    for shipped_range in ranges {
+        let Some(raw) = shipped_range.catalog else { continue }
+        let record = deploy_result(decode_catalog(raw))?
+        if record.kind != 2u8 {
+            let id_key = deploy_result(prefix(shipped_range.id))?
+            if let Some(root) = std.page.collection_child(plan.roots.collections.root, id_key) {
+                let (rows, _) = std.page.totals(root)
+                if rows != 0 {
+                    return Error(Drift)
+                }
+            }
+            continue
+        }
+        // An aggregate's group totals are not entries a row owns; a full
+        // preparation rebuilds them.
+        let Entries(kind) = record.shape else { return Error(Drift) }
+        let mut name: Option[String] = None
+        for change in delta {
+            if let Some(after) = change.after {
+                if after == raw {
+                    name = Some(deploy_result(declaration_index_name(change.key))?)
+                }
+            }
+        }
+        let Some(take index_name) = take name else { return Error(Drift) }
+        let mut found_at: Option[u64] = None
+        for i in 0u64 .. list.len(plan.bindings) {
+            let registration = view plan.bindings[i]
+            if registration.table == record.owner && registration.index.id == record.id && registration.index.by == record.by && registration.index.key == record.key {
+                found_at = Some(i)
+            }
+        }
+        let Some(slot) = found_at else { return Error(Drift) }
+        list.push(mut found, CatchUpIndex(name: take index_name, record: take record, kind: kind, binding: slot))
+    }
+    Ok(take found)
+}
+
+// Brings each shipped index range from the base rows to the new ones. Every
+// entry a changed row no longer yields is removed before any new entry is
+// written, so two rows that trade a Unique key do not collide on the way.
+// A Unique key two rows claim at the new head fails the round with Conflict,
+// as a full build of the same rows does.
+fn patch_index_ranges(mut plan: SchemaPlan, before: PageTree, shipped: List[CatchUpIndex], rows: List[Change]) -> Result[(), Error] {
+    if list.len(shipped) == 0 || list.len(rows) == 0 {
+        return Ok(())
+    }
+    let bindings = replace(mut plan.bindings, list.new())
+    let patched = patch_entries(plan, bindings, before, shipped, rows)
+    plan.bindings = take bindings
+    let (take roots, live_bytes, next_node) = patched?
+    plan.next_node = next_node
+    let next_table = plan.next_table
+    keep_schema(mut plan, take roots, live_bytes, next_table)
+}
+
+fn patch_entries(plan: SchemaPlan, bindings: List[IndexRegistration], before: PageTree, shipped: List[CatchUpIndex], rows: List[Change]) -> Result[(Roots, u64, u64), Error] {
+    let mut roots = share_roots(plan.roots)
+    let mut live_bytes = plan.live
+    let first = stamp_after(plan.next_node)?
+    let mut next_stamp = first
+    let mut additions: List[(u64, Bytes, Bytes, Bytes)] = list.new()
+    for i in 0u64 .. list.len(shipped) {
+        let target = view shipped[i]
+        let extractor = view bindings[target.binding].index
+        for row in rows {
+            if list.len(row.tree_key) < 4 {
+                continue
+            }
+            let owner: u32 = list.word_be(row.tree_key, 0)
+            if owner != target.record.owner {
+                continue
+            }
+            let primary = list.slice(row.tree_key, 4, list.len(row.tree_key))
+            let old_keys: List[Bytes] = match get_page_row(before, row.tree_key) {
+                Some(raw) => {
+                    let IndexValue(keys: take keys, ..) = (extractor.extract)(raw, primary)?
+                    take keys
+                },
+                None => list.new(),
+            }
+            let current: Option[IndexValue] = match row.value {
+                Some(raw) => Some((extractor.extract)(raw, primary)?),
+                None => None,
+            }
+            for key in old_keys {
+                let kept = match current {
+                    Some(value) => contains_bytes(value.keys, key),
+                    None => false,
+                }
+                if kept { continue }
+                let Some(charge) = owned_entry(roots.collections, key, target.kind, primary)? else { continue }
+                if !plan.retained {
+                    live_bytes = int.saturating_sub(live_bytes, charge)
+                }
+                let _ = remove_page_row(mut roots.collections, key, first, mut next_stamp)?
+            }
+            if let Some(take value) = take current {
+                let IndexValue(keys: take keys, payload: take payload, ..) = take value
+                for take key in take keys {
+                    list.push(mut additions, (i, take key, copied(payload)?, copied(primary)?))
+                }
+            }
+        }
+    }
+    for (i, key, payload, primary) in additions {
+        let target = view shipped[i]
+        if let Some(prior) = get_page_row(roots.collections, key) {
+            if let Unique = target.kind {
+                if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
+                    return Error(Conflict(named(target.name)?))
+                }
+            }
+            if !plan.retained {
+                live_bytes = int.saturating_sub(live_bytes, entry(key, prior))
+            }
+        }
+        live_bytes = int.saturating_add(live_bytes, entry(key, payload))
+        over_ceiling(live_bytes, plan.ceiling)?
+        put_page_row(mut roots.collections, key, payload, first, mut next_stamp)?
+    }
+    canonical_tree(mut roots.collections)?
+    Ok((take roots, live_bytes, next_stamp - 1))
+}
+
+// The charge of `key`'s entry when it belongs to `primary`. A Unique entry
+// another row holds is that row's, and stays.
+fn owned_entry(tree: PageTree, key: Bytes, kind: IndexKind, primary: Bytes) -> Result[Option[u64], Error] {
+    let Some(prior) = get_page_row(tree, key) else { return Ok(None) }
+    if let Unique = kind {
+        if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
+            return Ok(None)
+        }
+    }
+    Ok(Some(entry(key, prior)))
+}
+
+fn contains_bytes(keys: List[Bytes], key: Bytes) -> bool {
+    for candidate in keys {
+        if candidate == key {
+            return true
+        }
+    }
+    false
+}

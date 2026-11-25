@@ -235,6 +235,142 @@ pub fn release_export(mut db: Db, attempt: Bytes) {
     }
 }
 
+// A catch-up round's journal tail (STORE-SPEC §3.5a "Catch-up"): OLD's bytes after the
+// previous round's end, through the head this round's barrier made durable.
+pub opaque type ExportTail: send {
+    from: Dir,
+    stamp: ExportStamp,
+    terminal: u64,
+    end: u64
+}
+
+pub type ExportRound: send = Tail(ExportTail) | Full(ExportCopy)
+
+// One catch-up round on the leased attempt. The writer is held for one
+// durable barrier; the lease moves to the new head under the same attempt.
+// A tail over a hundredth of the resident bytes would touch more than about
+// N/100 leaves, where a fresh full export is cheaper than the replay (M5),
+// so the round releases the lease and begins a full copy instead.
+pub fn advance_export(mut db: Db, scratch: Dir, attempt: Bytes) -> Result[ExportRound, DeployError] waits {
+    deploy_result(healthy(db))?
+    if !is_disk(db) || object_writer_open(db) {
+        return Error(ExportMismatch)
+    }
+    let lease: Arc[ExportLease] = match disk_state(db).lease {
+        Some(held) => arc.share(held),
+        None => return Error(ExportMismatch),
+    }
+    if lease.attempt != attempt {
+        return Error(ExportMismatch)
+    }
+    let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    deploy_result(durable(mut db, final_item))?
+    if db.next_table != lease.next_table {
+        return Error(Drift)
+    }
+    let from = deploy_result(log_directory(db))?
+    let tail = deploy_result(tail_bytes(from, db.store, lease.terminal, lease.end, db.file_seq, db.file_end))?
+    if tail > db.resident / 100 {
+        release_export(mut db, attempt)
+        let renewed = begin_copy(mut db, Scratch(scratch), deploy_result(copied(attempt))?, Some(lease.activation))?
+        return Ok(Full(take renewed))
+    }
+    let stamp = ExportStamp(attempt: deploy_result(copied(attempt))?, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: lease.activation, terminal: db.file_seq, end: db.file_end)
+    let packs: List[u64] = clone(lease.packs)
+    let kept = ExportLease(attempt: deploy_result(copied(attempt))?, packs: take packs, collections: share_page_tree(db.heads[0].roots.collections), first: lease.first, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
+    write_disk(mut db.disk, arc.new(take kept), scoped fn(mut state: DiskState, take advanced: Arc[ExportLease]) {
+        state.lease = Some(take advanced)
+    })
+    Ok(Tail(ExportTail(from: from, stamp: take stamp, terminal: lease.terminal, end: lease.end)))
+}
+
+// The journal bytes from `end` of segment `terminal` through `final_end` of
+// segment `final_seq`. A rotated segment ends where its successor's header says.
+fn tail_bytes(from: Dir, id: StoreId, terminal: u64, end: u64, final_seq: u64, final_end: u64) -> Result[u64, Error] waits {
+    let mut total = 0u64
+    let mut seq = terminal
+    let mut start = end
+    loop {
+        let boundary = segment_boundary(from, id, seq, final_seq, final_end)?
+        if boundary < start {
+            return Error(disk_fault(journal_path(seq, "")?, start, Truncated))
+        }
+        total += boundary - start
+        if seq == final_seq {
+            return Ok(total)
+        }
+        seq += 1
+        start = 72
+    }
+}
+
+fn segment_boundary(from: Dir, id: StoreId, seq: u64, final_seq: u64, final_end: u64) -> Result[u64, Error] waits {
+    if seq == final_seq {
+        return Ok(final_end)
+    }
+    match journal_header(from, id, seq + 1, None)? {
+        Some(following) => Ok(following.prev_end),
+        None => Error(disk_fault(journal_path(seq + 1, "")?, 0, Header)),
+    }
+}
+
+// Appends the tail to the export directory, then rewrites EXPORT with the
+// round's stamp: the rest of the previous terminal segment, every segment a
+// rotation started, and the new terminal segment through its end.
+pub fn copy_export_tail(take tail: ExportTail, to: Dir) -> Result[u64, DeployError] waits {
+    let ExportTail(from: from, stamp: take stamp, terminal: terminal, end: end) = take tail
+    let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
+    let mut total = 0u64
+    let mut seq = terminal
+    loop {
+        let path = scratch_result(capacity(disk_path("j-", seq, "")))?
+        let boundary = scratch_result(segment_boundary(from, id, seq, stamp.terminal, stamp.end))?
+        if seq == terminal {
+            scratch_result(append_export_range(from, to, path, end, boundary))?
+            total += boundary - end
+        } else {
+            scratch_result(copy_export_file(from, to, path, Some(boundary)))?
+            total += boundary
+        }
+        if seq == stamp.terminal {
+            break
+        }
+        seq += 1
+    }
+    let raw_stamp = scratch_result(export_bytes(stamp))?
+    scratch_result(disk_write_synced(to, "EXPORT", raw_stamp))?
+    scratch_result(disk_io(host.sync_dir(to)))?
+    Ok(total)
+}
+
+// Appends bytes [low, high) of `name` in `from` to the copy of `name` in `to`,
+// which holds exactly `low` bytes.
+fn append_export_range(from: Dir, to: Dir, name: String, low: u64, high: u64) -> Result[(), Error] waits {
+    if low == high {
+        return Ok(())
+    }
+    let mut input = disk_io(host.open(from, name, Read))?
+    let mut output = disk_io(host.open(to, name, Append))?
+    let mut chunk: Bytes = list.with_capacity(65536)
+    let mut at = low
+    while at < high {
+        list.clear(mut chunk)
+        let read_size = disk_io(host.read_at(mut input, at, mut chunk))?
+        if read_size == 0 {
+            return Error(disk_fault(name, at, Truncated))
+        }
+        let written = order.min(read_size, high - at)
+        match host.write(mut output, list.slice(chunk, 0u64, written)) {
+            Ok(()) => (),
+            Error(e) => return Error(Io(e.error)),
+        }
+        at += written
+    }
+    disk_io(host.close(take input))?
+    disk_io(host.sync(mut output))?
+    disk_io(host.close(take output))
+}
+
 // R1 has no LOCK, cleanup, rotation or worker. Only this module has a Db
 // for the recovered export; callers can stage schema operations on it.
 pub opaque type Preparation {
@@ -265,7 +401,7 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     let initial = deploy_result(capacity(manifest_state(decoded_packs.manifest, decoded_packs.all)))?
     list.clear(mut decoded_packs.all)
     let replay = deploy_result(journal_replay(take initial, decoded_packs.manifest.next_stamp - 1))?
-    let replayed = deploy_result(replay_export(d, id, decoded_packs.manifest.first_live, stamp.terminal, stamp.end, take replay))?
+    let replayed = deploy_result(replay_export(d, id, decoded_packs.manifest.first_live, 72, stamp.terminal, stamp.end, take replay))?
     if replayed.state.tips[0].head != stamp.head {
         return Error(ExportMismatch)
     }

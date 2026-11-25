@@ -239,11 +239,11 @@ fn promotion_queue_root(source: TieredPageSource, row: DeferredFree, mut roots_f
 // a pack is the installed inventory's answer; the Snapshot's own inventory,
 // which its lease keeps readable, reads what it captured. A refusal here
 // refuses the cut: promotion is mandatory.
-fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], at: u64, queued: List[DeferredFree], mut next_stamp: u64) -> Result[bool, Error] waits {
+fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], at: u64, queued: List[DeferredFree], mut next_stamp: u64) -> Result[(bool, bool), Error] waits {
     let mut collections: List[(u32, std.page.Slot)] = list.new()
     promotion_tiered_collections(roots[at].collections.root, mut collections)?
     if list.len(collections) == 0 {
-        return Ok(false)
+        return Ok((false, false))
     }
     let Some(requests) = pager else {
         return Error(Io(Closed))
@@ -311,7 +311,7 @@ fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], m
         roots[at].collections.root = take map_root
     }
     let materialized = promotion_materialize(captured, source, captured_root, mut roots[at].collections, mut next_stamp)?
-    Ok(changed || materialized)
+    Ok((changed, materialized))
 }
 
 // §13.5 step 3 after step 2: a Snapshot's overlay is applied to its tree as

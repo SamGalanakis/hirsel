@@ -559,7 +559,10 @@ fn l87_reads_row(db: Db, s: Snapshot, rows: Table[u64, Bytes], edit: u8) -> Resu
 // of its own pages dead: `live[q2]` = 0, while `live[q1]` and `live[7]` stay
 // unchanged and the pin still reads edit 1, before and after reopen. Seeded
 // bug `reuse_materialization`: `beta` shares the pin's pages, so its kill
-// lowers `live[q1]`.
+// lowers `live[q1]`. Last, `gamma` forks the pin's own Snapshot and edits
+// row 0: its kill of the pin's pages leaves `live[q1]` (§13.6 "Holders",
+// v2.105). Seeded bug `pin_keeps_capture_watermark`: the pin's pages sit at
+// or above `gamma`'s origin, so they count as its own and `live[q1]` drops.
 @test
 fn test_l87_each_promoted_holder_materializes_once(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
@@ -611,5 +614,25 @@ fn test_l87_each_promoted_holder_materializes_once(d: Dir, c: Clock, r: Random, 
             db = open(tasks, d, c, r, l69_options(floor)?)?
         }
     }
+    // A fork of the pin's own Snapshot reaches pages of stamp ≥ the pin's
+    // watermark that the pin alone owns (§13.6 "Holders"). `gamma`'s kill of
+    // them must not leave `live[q1]` while the pin still reads them.
+    let Some(history) = pinned(db, "history") else {
+        fail("L87 (e2): the pin is published")
+    }
+    let (gamma, _) = fork(mut db, "gamma", history)?
+    l87_edit_on(mut db, rows, gamma.id, 3)?
+    let _ = checkpoint(mut db)?
+    if l69_pack_live(db, pin_pack) != pin_bytes {
+        fail("L87 (e2): a fork of the pin never kills the pin's own pages")
+    }
+    let Some(kept) = pinned(db, "history") else {
+        fail("L87 (e2): the pin is published")
+    }
+    l87_reads_row(db, kept, rows, 1)?
+    drop(take kept)
+    let edited = snapshot_of(db, gamma)?
+    l87_reads_row(db, edited, rows, 3)?
+    drop(take edited)
     close(take db)
 }

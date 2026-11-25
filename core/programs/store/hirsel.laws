@@ -248,7 +248,7 @@ store@1/store/test_l84_bucket_window src=2a2021efcec702af sig=229d7b3585beca0d r
 store@1/store/test_l84_pager_coalesces_sibling_demands src=b7c9d90435a13314 sig=cb6a13acdefb08fc run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l84_parallel_bucket_windows src=854c68b23ed37a87 sig=8fb425709177979b run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l87_cuts_drain_queued_pages src=c6928671a2e5349b sig=2bbcdceea340f3c2 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
-store@1/store/test_l87_each_promoted_holder_materializes_once src=803e07dc36df0522 sig=a083e3e97d135bf5 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_l87_each_promoted_holder_materializes_once src=dbe068d3aaf13661 sig=a083e3e97d135bf5 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l87_fold_cut_queues_detached_leaf src=e7e2d5eb0a6c5b23 sig=9b5bf6d5295d619c run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l87_live_trims_queue_detached_subtrees src=bd36e221a4bf5f86 sig=e2fdc0c64ecd6047 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l87_pin_materialization_adds_no_queue_row src=3c8d8ab45c54505e sig=f47ea4d249fdd641 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending

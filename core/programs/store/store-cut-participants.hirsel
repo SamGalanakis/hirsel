@@ -163,3 +163,25 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
     write_seal(mut raw, context, db.fence)?
     Ok(())
 }
+
+fn disk_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
+    let mut timing: Option[CutTiming] = None
+    disk_cut_timed(mut db, take delta, write_seal, mut timing)
+}
+
+// A pin's materialized pages are its own: its watermark rises above them,
+// so no holder reaches a frame at or above its watermark (§13.5 step 3).
+fn raise_materialized_pin(mut delta: HolderDelta, staged: TieredCutStage) {
+    if !staged.materialized {
+        return ()
+    }
+    match delta {
+        AddPin(mut added) => {
+            added.watermark = staged.stamp_end
+        },
+        ReplacePin(_, mut added) => {
+            added.watermark = staged.stamp_end
+        },
+        _ => (),
+    }
+}

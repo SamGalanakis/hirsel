@@ -4724,11 +4724,6 @@ type CutTiming {
     drain_groups: u64
 }
 
-fn disk_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
-    let mut timing: Option[CutTiming] = None
-    disk_cut_timed(mut db, take delta, write_seal, mut timing)
-}
-
 fn disk_cut_timed(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     let target = db_target(db)
     let pack_bytes = match target {
@@ -4739,7 +4734,8 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut
     disk_cut_with_limit(mut db, take delta, write_seal, target, pack_bytes, limit, mut timing)
 }
 
-fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
+fn disk_cut_with_limit(mut db: Db, take requested: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
+    let mut delta = take requested
     healthy(db)?
     if object_writer_open(db) {
         return object_cut_state(mut db, take delta, write_seal, target, pack_bytes, limit)
@@ -4776,6 +4772,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     let CutParticipants(holders: take participants_held, roots: take roots, branches: take branches, heads: heads, promote: promote) = take participants
     let mut staged = stage_tiered_cut(db, take roots, branches, heads, promote, pack_bytes)?
     db.next_node = staged.stamp_end - 1
+    raise_materialized_pin(mut delta, staged)
     let holders = sealed_cut_holders(take participants_held, staged)?
     let mut base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, staged.roots)?
     list_tiered_cut(mut base.locations, staged)?

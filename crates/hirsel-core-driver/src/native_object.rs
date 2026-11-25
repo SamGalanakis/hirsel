@@ -62,8 +62,8 @@ fn put_parts(
 }
 
 /// Store `fragment` as the map fragment of the coverage object named
-/// `identity`, which a link reading `store` joins ([`join_coverage`]).
-pub(crate) fn put_coverage(
+/// `identity`, beside the object ([`join_coverage`]).
+fn put_coverage(
     store: &Store,
     identity: ContentHash,
     fragment: &hirsel_core_ir::coverage::Fragment,
@@ -77,7 +77,7 @@ pub(crate) fn put_coverage(
 
 /// The map fragment stored with the coverage object named `identity`
 /// ([`crate::native::ObjectProduct::identity`]), when it checks.
-pub(crate) fn load_coverage(
+fn load_coverage(
     store: &Store,
     identity: ContentHash,
 ) -> io::Result<Option<hirsel_core_ir::coverage::Fragment>> {
@@ -87,19 +87,22 @@ pub(crate) fn load_coverage(
         .and_then(|(schema, fragment)| (schema == COVERAGE_SCHEMA).then_some(fragment)))
 }
 
-/// A coverage link's site map: the fragment of each linked object named in
-/// `identities`, in link order, keeping the first record of each id. Records
-/// of one id have the same sites; only the code variants' arm positions can
+/// A coverage link's site map: the fragment of each linked object, read
+/// from the store that holds it (`objects`: each object's store and
+/// identity), in link order, keeping the first record of each id. Records of
+/// one id have the same sites; only the code variants' arm positions can
 /// differ, so the first in link order is the one kept. An object with no
-/// fragment here (one from an image store) adds no record, and a raw record
-/// of its id is refused when the file is read.
-pub(crate) fn join_coverage(
-    store: &Store,
-    identities: impl Iterator<Item = ContentHash>,
+/// fragment in its store (a plain object, or one held in no store) adds no
+/// record, and a raw record of its id is refused when the file is read.
+pub(crate) fn join_coverage<'s>(
+    objects: impl Iterator<Item = (Option<&'s Store>, ContentHash)>,
 ) -> io::Result<hirsel_core_ir::coverage::Fragment> {
     let mut map = hirsel_core_ir::coverage::Fragment::default();
     let mut seen = std::collections::BTreeSet::new();
-    for identity in identities {
+    for (store, identity) in objects {
+        let Some(store) = store else {
+            continue;
+        };
         for record in load_coverage(store, identity)?
             .into_iter()
             .flat_map(|f| f.records)

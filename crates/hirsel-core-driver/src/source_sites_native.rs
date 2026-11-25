@@ -323,6 +323,7 @@ fn failure_sites_discarded_by_linker() {
         check: crate::store::checksum(&bytes),
         bytes: Some(bytes.into()),
         path,
+        store: None,
         debug: None,
         debug_record: None,
         compiled: true,

@@ -513,6 +513,61 @@ fn coverage_off_and_known_arms(backend: Backend, optimize: bool) -> BTreeMap<Str
     all
 }
 
+/// A pass after binding that moves a coverage unit's source decision to
+/// another block stops the release build with a coverage error naming the
+/// unit and the definition; it does not panic, and no flag is misattributed.
+fn reordered_blocks_refused() {
+    use hirsel_core_ir::Terminator;
+    // Swap each body's first source decision with a block that decides nothing.
+    fn reorder(module: &mut hirsel_core_ir::Module) {
+        for body in module.functions.iter_mut().filter_map(|f| f.body.as_mut()) {
+            let decides =
+                |t: &Terminator| matches!(t, Terminator::Branch { .. } | Terminator::Switch { .. });
+            let Some(i) = (0..body.blocks.len()).find(|&i| body.blocks[i].decision) else {
+                continue;
+            };
+            let Some(j) = (0..body.terminators.len()).find(|&j| !decides(&body.terminators[j]))
+            else {
+                continue;
+            };
+            body.blocks.swap(i, j);
+            body.terminators.swap(i, j);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default()
+        .check(
+            prog4_request(KNOWN_ARMS, dir.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let test = DefPath::from_full("app@1/main/arms").unwrap();
+    let options = NativeOptions {
+        optimize: true,
+        coverage: Some([package("app")].into()),
+        ..native_options(Backend::Llvm, dir.path())
+    };
+    crate::native::RELEASE_PASS.set(Some(reorder));
+    let built = product.build(&test, &options);
+    crate::native::RELEASE_PASS.set(None);
+    match built {
+        Err(NativeStop::Coverage(mismatch)) => {
+            assert!(mismatch.definition.starts_with("app@1/main/"), "{mismatch}");
+            assert!(
+                mismatch.unit.starts_with('h') && mismatch.unit.len() == 65,
+                "the unit's symbol: {mismatch}"
+            );
+        }
+        other => panic!("a reordered unit built: {:?}", other.map(|_| ())),
+    }
+}
+
 /// Each site key of a run's coverage, with whether the run reached it.
 fn coverage_reached(coverage: &crate::test_run::RunCoverage) -> BTreeMap<String, bool> {
     let crate::test_run::RunCoverage::Observed(records) = coverage else {
@@ -541,6 +596,7 @@ fn prog4_independent_runs_limits_and_outcomes_llvm() {
     let cranelift = coverage_off_and_known_arms(Backend::Cranelift, false);
     assert_eq!(coverage_off_and_known_arms(Backend::Llvm, false), cranelift);
     assert_eq!(coverage_off_and_known_arms(Backend::Llvm, true), cranelift);
+    reordered_blocks_refused();
 }
 
 #[test]

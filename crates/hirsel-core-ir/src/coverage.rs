@@ -23,9 +23,10 @@ pub type UnitDecisions = std::collections::BTreeMap<String, Decisions>;
 /// by unit symbol. A release unit's anchors name `source@1/unit/<symbol>/<n>`,
 /// a site of the unit at no offset, so the keys cannot be read off them; and
 /// binding drops the anchor of a decision whose place has no source position.
-/// Blocks keep their canonical order through binding, and every copy of a
-/// body (code variants, step versions) keeps its blocks, so a body's
-/// decisions are found by block.
+/// A body's decisions are found by block index, which holds only while a
+/// pass keeps the body's blocks in their canonical order; a body whose
+/// blocks no longer end with its source's decisions is refused
+/// ([`Mismatch`]).
 pub type Rebound = std::collections::BTreeMap<String, UnitDecisions>;
 
 /// The domain tag of a record id.
@@ -40,6 +41,32 @@ pub const SECTION: &str = "hirsel_cov";
 /// It names the map fragment's meaning too, so a fragment built under an
 /// earlier rule is never joined into a later map.
 pub const KEY_TAG: &str = "coverage.v2";
+
+/// A rebound body whose blocks are not its source's: a pass between the
+/// unit's materialisation and its emission changed the body's blocks, so its
+/// carried decisions ([`Rebound`]) would flag the wrong arms. The build stops
+/// with it, naming the unit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Mismatch {
+    /// The symbol of the unit the body's anchors were rebound to.
+    pub unit: String,
+    /// The body's definition.
+    pub definition: String,
+    /// What differs from the source.
+    pub reason: String,
+}
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "coverage: a body of {} in unit {} {}",
+            self.definition, self.unit, self.reason
+        )
+    }
+}
+
+impl std::error::Error for Mismatch {}
 
 /// An arm of a source decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -136,20 +163,28 @@ fn in_scope_of(module: &Module, function: FuncId, scope: &Scope) -> bool {
 /// `function`'s sites, or none when the module does not flag it
 /// ([`in_scope`]). Every instance and code variant of one item's body gives
 /// the same keys, since keys name the source item and offsets within it.
-pub fn sites(module: &Module, function: FuncId) -> Option<Sites> {
-    sites_of(module, function, module.coverage.as_ref()?)
+pub fn sites(module: &Module, function: FuncId) -> Result<Option<Sites>, Mismatch> {
+    match module.coverage.as_ref() {
+        Some(scope) => sites_of(module, function, scope),
+        None => Ok(None),
+    }
 }
 
 /// `function`'s decisions under `scope` by block, or none when `scope` does
 /// not flag it: what [`Rebound`] keeps of a body before its anchors are
 /// rebound.
-pub fn decisions(module: &Module, function: FuncId, scope: &Scope) -> Option<Decisions> {
-    let sites = sites_of(module, function, scope)?;
-    let blocks = module.functions[function.index()]
-        .body
-        .as_ref()?
-        .blocks
-        .len();
+pub fn decisions(
+    module: &Module,
+    function: FuncId,
+    scope: &Scope,
+) -> Result<Option<Decisions>, Mismatch> {
+    let Some(sites) = sites_of(module, function, scope)? else {
+        return Ok(None);
+    };
+    let Some(body) = module.functions[function.index()].body.as_ref() else {
+        return Ok(None);
+    };
+    let blocks = body.blocks.len();
     let mut decisions: Decisions = vec![None; blocks];
     for (site, row) in sites.sites.iter().zip(rows(module, function, &sites)) {
         if let Kind::Arm { block, .. } = site.kind {
@@ -158,15 +193,15 @@ pub fn decisions(module: &Module, function: FuncId, scope: &Scope) -> Option<Dec
                 .push(row);
         }
     }
-    Some(decisions)
+    Ok(Some(decisions))
 }
 
 /// The decisions of every body of a unit's materialised `module` that
 /// `scope` flags, by definition: what [`Rebound`] keeps of a unit.
-pub fn unit_decisions(module: &Module, scope: &Scope) -> UnitDecisions {
+pub fn unit_decisions(module: &Module, scope: &Scope) -> Result<UnitDecisions, Mismatch> {
     let mut unit = UnitDecisions::new();
     for (f, row) in module.functions.iter().enumerate() {
-        let Some(decisions) = decisions(module, FuncId(f as u32), scope) else {
+        let Some(decisions) = decisions(module, FuncId(f as u32), scope)? else {
             continue;
         };
         let definition = module.instances[row.instance.index()]
@@ -181,7 +216,7 @@ pub fn unit_decisions(module: &Module, scope: &Scope) -> UnitDecisions {
             );
         }
     }
-    unit
+    Ok(unit)
 }
 
 /// The arms of the decision `terminator` ends a block with, if it is one.
@@ -209,12 +244,14 @@ fn rebound_unit<'m>(module: &'m Module, body: &Body) -> Option<&'m str> {
         .map(|item| item.0.modules[1].as_str())
 }
 
-fn sites_of(module: &Module, function: FuncId, scope: &Scope) -> Option<Sites> {
+fn sites_of(module: &Module, function: FuncId, scope: &Scope) -> Result<Option<Sites>, Mismatch> {
     if !in_scope_of(module, function, scope) {
-        return None;
+        return Ok(None);
     }
     let row = &module.functions[function.index()];
-    let body = row.body.as_ref()?;
+    let Some(body) = row.body.as_ref() else {
+        return Ok(None);
+    };
     let definition = module.instances[row.instance.index()].definition.clone();
     let mut sites = vec![Site {
         anchor: None,
@@ -228,22 +265,33 @@ fn sites_of(module: &Module, function: FuncId, scope: &Scope) -> Option<Sites> {
         let definition = module.instances[row.instance.index()]
             .definition
             .to_string();
+        // A mismatch would misattribute flags, so it stops the build.
+        let mismatch = |reason: String| Mismatch {
+            unit: symbol.to_owned(),
+            definition: definition.clone(),
+            reason,
+        };
         let unit = (module.coverage_rebound.as_deref())
             .and_then(|rebound| rebound.get(symbol)?.get(&definition))
-            .unwrap_or_else(|| panic!("coverage: {definition} of unit {symbol} has no decisions"));
-        // A mismatch would misattribute flags, so it stops the build.
-        assert!(
-            unit.len() == body.blocks.len(),
-            "coverage: a body of {definition} in unit {symbol} does not have its source's blocks"
-        );
+            .ok_or_else(|| mismatch("has no decisions".into()))?;
+        if unit.len() != body.blocks.len() {
+            return Err(mismatch(format!(
+                "has {} blocks and its source {}",
+                body.blocks.len(),
+                unit.len()
+            )));
+        }
         for (index, rows) in unit.iter().enumerate() {
             let Some(rows) = rows else {
                 continue;
             };
             let arms = arms(&body.terminators[index]).filter(|arms| arms.len() == rows.len());
-            let arms = arms.unwrap_or_else(|| {
-                panic!("coverage: block {index} of {definition} in unit {symbol} does not match its source")
-            });
+            let arms = arms.ok_or_else(|| {
+                mismatch(format!(
+                    "does not end block {index} with its source's {}-arm decision",
+                    rows.len()
+                ))
+            })?;
             decisions[index] = Some(sites.len() as u32);
             for (arm, row) in arms.into_iter().zip(rows) {
                 sites.push(Site {
@@ -288,11 +336,11 @@ fn sites_of(module: &Module, function: FuncId, scope: &Scope) -> Option<Sites> {
         }
     }
     let id = ContentHash::of_parts(ID_TAG, sites.iter().map(|s| s.key.as_bytes()));
-    Some(Sites {
+    Ok(Some(Sites {
         sites,
         id,
         decisions,
-    })
+    }))
 }
 
 /// The edge an arm takes.
@@ -405,14 +453,16 @@ fn rows(module: &Module, function: FuncId, sites: &Sites) -> Vec<SiteRow> {
 /// The map fragment of an object `module` is emitted into whole, in a
 /// coverage build: each flagged function's record, in function order, as an
 /// engine that emits every body adds them.
-pub fn fragment(module: &Module) -> Option<Fragment> {
-    module.coverage.as_ref()?;
+pub fn fragment(module: &Module) -> Result<Option<Fragment>, Mismatch> {
+    if module.coverage.is_none() {
+        return Ok(None);
+    }
     let mut fragment = Fragment::default();
     for f in 0..module.functions.len() {
         let function = FuncId(f as u32);
-        if let Some(sites) = sites(module, function) {
+        if let Some(sites) = sites(module, function)? {
             fragment.add(module, function, &sites);
         }
     }
-    Some(fragment)
+    Ok(Some(fragment))
 }

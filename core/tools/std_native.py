@@ -3,6 +3,10 @@
 
 Example: std_native.py --compiler PATH --runtime PATH --filter file --backend both
 Confined filesystem cases run on the host, which needs openat2 (Linux >= 5.6).
+
+--engines-agree runs each selected law on Cranelift, LLVM dev and LLVM release
+with --coverage, and for each determined law requires the three profiles to
+reach the same sites (docs/coverage.md, "Engines agree").
 """
 import argparse
 import base64
@@ -497,6 +501,43 @@ def evaluator_observation(case, result):
     return True, None
 
 
+# The builds Engines agree compares, the first the reference.
+AGREE_BUILDS = (('cranelift', 'dev'), ('llvm', 'dev'), ('llvm', 'release'))
+
+
+def determined(case):
+    """Whether a law's run is a function of its program: no tasks, clock,
+    network, scripted schedule, sealed image or entry argv. Its coverage
+    profile is then the same on every engine (docs/coverage.md, "Engines agree")."""
+    return (case.argv is None and not case.schedule and not network_case(case) and case.package != 'runner'
+            and not any(word in case.call for word in ('tasks', 'clock', '(https)', '(exec', '(unix', '(granted')))
+
+
+def reached_sites(profile_path):
+    """Each site key of a written coverage profile, with whether a run reached it."""
+    profile = json.loads(profile_path.read_text())
+    return {row['site']: bool(row['passed_runs'] or row['failed_runs']) for row in profile['sites']}
+
+
+def engines_agree(agree, rows, output):
+    """One row per determined law and LLVM build: its reached sites equal Cranelift's."""
+    reference = AGREE_BUILDS[0]
+    for (test, file), builds in agree.items():
+        for build in AGREE_BUILDS[1:]:
+            row = dict(test=test, file=file, line=None, engine='engines-agree', profile='-'.join(build),
+                       ran=True, passed=False, applicable=True, cause=None, owner=None, native_only=False)
+            expected, actual = builds.get(reference), builds.get(build)
+            if expected is None or actual is None:
+                missing = reference if expected is None else build
+                row['cause'] = f"no coverage profile from {'-'.join(missing)}"
+            elif expected != actual:
+                differ = sorted(k for k in expected.keys() | actual.keys() if expected.get(k) != actual.get(k))
+                row['cause'] = (f"{len(differ)} sites differ from {'-'.join(reference)}, first {differ[0]}: "
+                                f"{'-'.join(reference)} {expected.get(differ[0])}, {'-'.join(build)} {actual.get(differ[0])}")
+            row['passed'] = row['cause'] is None
+            save_row(rows, row, output)
+
+
 def save_row(rows, row, output):
     rows.append(row)
     status = 'NOT APPLICABLE' if not row['applicable'] else 'PASS' if row['passed'] else 'FAIL' if row['ran'] else 'NOT RUN'
@@ -508,10 +549,12 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', schedule_runtime=None, record_runtime=None, llvm_profile='release', replay=False):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', schedule_runtime=None, record_runtime=None, llvm_profile='release', replay=False, agree=False):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
+    # Each determined law's reached sites, by (test, file) and build.
+    profiles = {}
     typescript_override = typescript
     typescript = typescript or root / 'crates/hirsel-core-driver/src/sdk_codec.js'
     frame_codegen = typescript_override is None and any(c.package == 'runner' and c.call.startswith('ts_frame_') for c in contracts)
@@ -528,7 +571,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
         work = Path(temporary)
         protocol_codec = None
         resident = processes.enter_context(Evaluator(evaluator)) if 'evaluator' in engines or frame_codegen else None
-        for engine in engines:
+        builds = AGREE_BUILDS if agree else [(e, None if e == 'evaluator' else llvm_profile if e == 'llvm' else 'dev') for e in engines]
+        for engine, profile in builds:
             started = time.monotonic()
             for index, case in enumerate(contracts):
                 active.close()
@@ -537,7 +581,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if engine == 'evaluator' and 'evaluator' not in requested_engines and not case.evaluator_only:
                     continue
                 row = dict(test=case.name, file=str(case.file.relative_to(root)), line=case.line,
-                           engine=engine, profile=None if engine == 'evaluator' else llvm_profile if engine == 'llvm' else 'dev',
+                           engine=engine, profile=profile,
                            call=case.call, expected=case.expected, ran=False, passed=False, applicable=True,
                            cause=None, owner=None, native_only=False)
                 if engine == 'evaluator' and case.native_only:
@@ -572,7 +616,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     continue
                 evaluating = engine == 'evaluator'
                 progress = active.enter_context(Case(case.name, engine))
-                scratch = work / f'{engine}-{index}'
+                scratch = work / f'{engine}-{profile}-{index}'
                 scratch.mkdir()
                 host = scratch / 'host'
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
@@ -746,8 +790,11 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--target', target])
                 if emulator:
                     command.extend(['--emulator', str(emulator), '--sysroot', str(sysroot)])
-                if engine == 'llvm' and llvm_profile == 'release':
+                if engine == 'llvm' and profile == 'release':
                     command.append('--release')
+                coverage_out = scratch / 'coverage.json' if agree and determined(case) else None
+                if coverage_out:
+                    command.extend(['--coverage-out', str(coverage_out)])
                 # All engines read this manifest's checkout sources, as the
                 # resident evaluator does, including temporary @test bodies.
                 command.append('--source-core')
@@ -835,17 +882,25 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                             row['cause'] = f'with {name}={value}: {cause}'
                             break
                 row['passed'] = row['cause'] is None
+                if coverage_out and row['passed'] and coverage_out.exists():
+                    profiles.setdefault((row['test'], row['file']), {})[(engine, profile)] = reached_sites(coverage_out)
+                elif coverage_out and row['passed']:
+                    profiles.setdefault((row['test'], row['file']), {})
                 if replay and row['passed']:
                     row['replay'] = 'Sealed'
                 if row['cause']:
                     row['owner'] = owner(row['cause'], owners)
                 save_row(rows, row, output)
                 shutil.rmtree(scratch / 'programs', ignore_errors=True)
-            selected = [r for r in rows if r['engine'] == engine]
+            selected = [r for r in rows if r['engine'] == engine and r['profile'] == profile]
             if compare_revisions and engine == 'evaluator':
                 applicable = [r for r in selected if r['applicable']]
                 print(f"revision law: {sum(r.get('revision_matches', False) for r in applicable)}/{len(applicable)} match", flush=True)
-            print(f"{engine}: {len(selected)} selected, {sum(r['ran'] for r in selected)} ran, {sum(bool(r['passed']) for r in selected)} passed, {sum(r['applicable'] and not r['ran'] for r in selected)} not run, {sum(not r['applicable'] for r in selected)} not applicable, {sum(r['native_only'] for r in selected)} native-only; {time.monotonic() - started:.3f}s", flush=True)
+            print(f"{engine}{'-' + profile if agree else ''}: {len(selected)} selected, {sum(r['ran'] for r in selected)} ran, {sum(bool(r['passed']) for r in selected)} passed, {sum(r['applicable'] and not r['ran'] for r in selected)} not run, {sum(not r['applicable'] for r in selected)} not applicable, {sum(r['native_only'] for r in selected)} native-only; {time.monotonic() - started:.3f}s", flush=True)
+    if agree:
+        engines_agree(profiles, rows, output)
+        agreed = [r for r in rows if r['engine'] == 'engines-agree']
+        print(f"engines agree: {sum(r['passed'] for r in agreed)}/{len(agreed)} agree", flush=True)
     return rows
 
 
@@ -860,6 +915,8 @@ def main():
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--backend', choices=['all', 'evaluator', 'both', 'cranelift', 'llvm'], default='both')
     parser.add_argument('--llvm-profile', choices=['dev', 'release'], default='release')
+    parser.add_argument('--engines-agree', action='store_true',
+                        help='run on Cranelift, LLVM dev and LLVM release with coverage; determined laws must reach the same sites')
     parser.add_argument('--filter', action='append', default=[])
     parser.add_argument('--report', type=Path)
     parser.add_argument('--typescript', type=Path, help='generated codec.js ES module; run its codec corpus partner')
@@ -878,6 +935,8 @@ def main():
     engines = ['evaluator', 'cranelift', 'llvm'] if args.backend == 'all' else ['cranelift', 'llvm'] if args.backend == 'both' else [args.backend]
     if args.backend != 'evaluator' and (args.compiler is None or args.runtime is None):
         parser.error('native backends require --compiler and --runtime')
+    if args.engines_agree and (args.replay or args.backend in ('all', 'evaluator')):
+        parser.error('--engines-agree runs the native engines without --replay')
     if args.replay:
         if args.backend in ('all', 'evaluator') or args.record_runtime is None or not args.filter:
             parser.error('--replay requires a native backend, --record-runtime and a filter')
@@ -889,7 +948,7 @@ def main():
                typescript=args.typescript, node=args.node,
                schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
                record_runtime=args.record_runtime.resolve() if args.record_runtime else None,
-               llvm_profile=args.llvm_profile, replay=args.replay)
+               llvm_profile=args.llvm_profile, replay=args.replay, agree=args.engines_agree)
     ran = {(row['test'], row['file']) for row in rows if row['ran']}
     empty = [selector for selector in args.filter
              if not any(matches_filter(root, case, selector) and

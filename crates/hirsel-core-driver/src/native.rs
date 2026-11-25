@@ -30,6 +30,14 @@ pub(crate) use link::command;
 pub(crate) use link::direct_link;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
+
+#[cfg(test)]
+std::thread_local! {
+    /// A pass the release image runs on its joined module after its own
+    /// passes, before it reads the module's coverage sites: a test stands in
+    /// for a later pass that changes a unit's blocks.
+    pub(crate) static RELEASE_PASS: std::cell::Cell<Option<fn(&mut Module)>> = const { std::cell::Cell::new(None) };
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum Backend {
     Cranelift,
@@ -191,6 +199,8 @@ pub enum NativeStop {
         message: String,
     },
     Link(String),
+    /// A coverage build's rebound body whose blocks are not its source's.
+    Coverage(hirsel_core_ir::coverage::Mismatch),
     Input(io::Error),
     /// The build succeeded and its executable is stored; writing it to the
     /// requested output failed.
@@ -212,6 +222,7 @@ impl fmt::Display for NativeStop {
                 message,
             } => write!(f, "emit {definition}: {message}"),
             Self::Link(s) => write!(f, "link: {s}"),
+            Self::Coverage(mismatch) => mismatch.fmt(f),
             Self::Input(e) => write!(f, "input: {e}"),
             Self::Output { error, .. } => f.write_str(&crate::executable::output_stop(error)),
         }
@@ -233,6 +244,10 @@ pub struct ObjectProduct {
     pub instance: Identity,
     pub identity: ContentHash,
     pub path: PathBuf,
+    /// The store that holds the object and, for a coverage object, its map
+    /// fragment, which the link joins from here; none for an object held
+    /// outside every store.
+    pub(crate) store: Option<Store>,
     /// The object's read check (`Bare::check`).
     pub(crate) check: u64,
     /// The bytes this request checked or wrote, which the link hands the
@@ -253,6 +268,7 @@ impl ObjectProduct {
             instance,
             identity: object.address,
             path: crate::native_object::path(store, object.address),
+            store: Some(store.clone()),
             check: object.check,
             bytes: None,
             debug: None,
@@ -293,6 +309,7 @@ impl ObjectProduct {
             instance,
             identity: object.address,
             path: crate::native_object::path(store, object.address),
+            store: Some(store.clone()),
             check: object.check,
             bytes: Some(bytes),
             debug,
@@ -414,7 +431,7 @@ fn emit_unit(
         )
         .map_err(|e| e.to_string())
         .and_then(|bytes| {
-            let coverage = hirsel_core_ir::coverage::fragment(module);
+            let coverage = hirsel_core_ir::coverage::fragment(module).map_err(|m| m.to_string())?;
             hirsel_llvm_lazy::core::finish_native_object(bytes, object_key, true, coverage)
         }),
     }
@@ -1571,7 +1588,11 @@ fn link_objects(
     let coverage = options
         .coverage
         .is_some()
-        .then(|| crate::native_object::join_coverage(&store, objects.iter().map(|o| o.identity)))
+        .then(|| {
+            crate::native_object::join_coverage(
+                objects.iter().map(|o| (o.store.as_ref(), o.identity)),
+            )
+        })
         .transpose()?
         .map(Arc::new);
     use crate::native_debug::NativeImage;

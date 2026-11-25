@@ -372,10 +372,10 @@ impl CheckProduct {
             // The materialised body is the unit's, before binding: it still
             // has its anchors.
             let coverage = match coverage {
-                Some(scope) => Some(hirsel_core_ir::coverage::unit_decisions(
-                    instance.ir()?,
-                    scope,
-                )),
+                Some(scope) => Some(
+                    hirsel_core_ir::coverage::unit_decisions(instance.ir()?, scope)
+                        .map_err(NativeStop::Coverage)?,
+                ),
                 None => None,
             };
             // The materialised module is `retain`'s canonical decoding of
@@ -1750,6 +1750,10 @@ impl Publication {
                         if let Some(decisions) = coverage {
                             let symbol = hirsel_core_ir::symbol(identity.digest());
                             module.coverage_rebound = Some(Arc::new([(symbol, decisions)].into()));
+                            // A body whose blocks are not its source's is
+                            // refused here, before any engine flags it.
+                            hirsel_core_ir::coverage::fragment(&module)
+                                .map_err(NativeStop::Coverage)?;
                         }
                         drop(annex);
                         let object_key = unit_object_key(emitter, &identity, &module, &builtins)?;

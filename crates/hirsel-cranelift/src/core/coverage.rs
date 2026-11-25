@@ -19,7 +19,7 @@ pub(super) fn declare(
     input: &c::Module,
     function: c::FuncId,
 ) -> Result<Option<Record>> {
-    let Some(sites) = c::coverage::sites(input, function) else {
+    let Some(sites) = c::coverage::sites(input, function).map_err(error)? else {
         return Ok(None);
     };
     let mut data = DataDescription::new();

@@ -1062,6 +1062,7 @@ impl StdSide {
                 private_variants: 0,
                 instance: instance.clone(),
                 path: crate::native_object::path(store, bare.address),
+                store: Some(store.clone()),
                 identity: bare.address,
                 check: bare.check,
                 bytes: Some(object.bytes.into()),

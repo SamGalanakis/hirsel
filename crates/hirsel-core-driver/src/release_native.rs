@@ -53,16 +53,21 @@ fn unit_key(
 /// (`generator`), the target machine's settings as libLLVM states them
 /// (`machine`: CPU, features, relocation and code model, codegen options), and
 /// the part's key (`ir`: what its bitcode records), which is all a part's
-/// object is a function of.
+/// object is a function of. A coverage part also takes its unit's map
+/// fragment (`coverage`), which the shared store keeps with the object: the
+/// bitcode names only the record ids, not the places a fragment gives its
+/// sites, so an edit can move a place and keep the part's bitcode.
 fn part_key(
     generator: &impl serde::Serialize,
     machine: &str,
     ir: &[u8; 32],
+    coverage: Option<ContentHash>,
 ) -> io::Result<ContentHash> {
-    crate::native::key(
-        "hirsel.core-release-part.v3",
-        &(generator, machine, ContentHash(*ir)),
-    )
+    let part = (generator, machine, ContentHash(*ir));
+    match coverage {
+        None => crate::native::key("hirsel.core-release-part.v3", &part),
+        Some(fragment) => crate::native::key("hirsel.core-release-part.v3", &(part, fragment)),
+    }
 }
 
 /// A release tail's key: the compiler, libLLVM and target
@@ -85,6 +90,8 @@ fn tail_key(
 /// program after generation; until then nothing more is loaded or kept.
 struct SharedParts<'a, G> {
     generator: &'a G,
+    /// The digest of a coverage unit's map fragment ([`part_key`]).
+    coverage: Option<ContentHash>,
     shared: &'a Store,
     parts: &'a mut Vec<ContentHash>,
     held: &'a mut Vec<Held>,
@@ -106,7 +113,7 @@ std::thread_local! {
 
 impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
     fn part(&mut self, _: &str, machine: &str, ir: &[u8; 32]) -> bool {
-        let loaded = part_key(self.generator, machine, ir).and_then(|key| {
+        let loaded = part_key(self.generator, machine, ir, self.coverage).and_then(|key| {
             self.parts.push(key);
             crate::native_object::load(self.shared, key)
         });
@@ -322,6 +329,10 @@ pub(super) fn emit_release_image(
         .keys()
         .filter(|f| joined.functions[f.index()].body.is_some())
         .count();
+    #[cfg(test)]
+    if let Some(pass) = super::RELEASE_PASS.get() {
+        pass(&mut joined);
+    }
     let modules = [joined];
     let refs = [&modules[0]];
     // The checked body keys identify the source-neutral published modules.
@@ -371,7 +382,7 @@ pub(super) fn emit_release_image(
     };
     drop(consumed_facts);
     // The map fragment of the module, which a coverage build generates whole.
-    let fragment = hirsel_core_ir::coverage::fragment(&modules[0]);
+    let fragment = hirsel_core_ir::coverage::fragment(&modules[0]).map_err(NativeStop::Coverage)?;
     drop(consumed);
     // The Core modules and facts are read only until the unit is lowered.
     let mut core = Some((modules, facts));
@@ -436,6 +447,9 @@ pub(super) fn emit_release_image(
         let mut failure = None;
         let mut reuse = SharedParts {
             generator: &generator,
+            coverage: (fragment.as_ref())
+                .map(|f| crate::native::key("hirsel.core-release-part-coverage.v1", f))
+                .transpose()?,
             shared: &shared,
             parts: &mut parts,
             held: &mut held,
@@ -514,21 +528,13 @@ pub(super) fn emit_release_image(
         record.debug_sites.clone_from(&debug_sites);
         store.put_keyed(unit, &encode(&record)?)?;
     }
-    // The parts live in the shared parts store and the link joins the site
-    // maps of the program's store, so each part's fragment, made or reused,
-    // is stored there: a coverage unit is one part, and its fragment is the
-    // unit's.
-    if let Some(fragment) = &fragment {
-        for (bare, _, _) in &held {
-            crate::native_object::put_coverage(store, bare.address, fragment)?;
-        }
-    }
     let objects = held
         .into_iter()
         .map(|(bare, object, compiled)| ObjectProduct {
             private_variants: std::mem::take(&mut private_variants),
             instance: instance.clone(),
             path: crate::native_object::path(&shared, bare.address),
+            store: Some(shared.clone()),
             identity: bare.address,
             check: bare.check,
             bytes: Some(object.bytes.into()),

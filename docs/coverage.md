@@ -688,7 +688,12 @@ Seed 0 runs at preparation under `hirsel test` and is not in the campaign's prof
   switch. Nothing it looks up or writes changes, and a `--coverage` run evicts nothing.
 - **Installed std.** Std is out of scope unless given as source, so the release std's key
   does not take the field. A coverage run over an installed std compiles only the program.
-- **Map fragments** are stored with each object, named by its identity.
+- **Map fragments** are stored with each object, in the store that holds it, named by its
+  identity. The link reads each object's fragment from that store: the program's store for a
+  development object, the shared parts store for a release part. A fragment is written once.
+  A release part's key takes its unit's fragment when coverage is on, since the part's bitcode
+  names only the record ids and not the places the fragment gives its sites, so a reused part's
+  fragment is always the current build's.
 - **Release units.** A release unit's body is rebound to unit-relative anchors
   (`source@1/unit/<symbol>/<n>`) before the joined module is built, so the joined module
   cannot derive item-relative keys from it. The release path computes each unit's decisions
@@ -696,9 +701,13 @@ Seed 0 runs at preparation under `hirsel test` and is not in the campaign's prof
   unit too), before binding, and carries them beside the unit by symbol and definition.
   Binding keeps the canonical block order but drops the anchor of a decision whose place has
   no source position, so a rebound body takes its decisions by block, not from its anchors.
-  The build panics if the blocks or a decision's arms differ from the source's, since a
-  mismatch would misattribute flags. The carried decisions join the unit's object key only
-  when coverage is on. Unit memos are off under coverage.
+  If a pass changes a rebound body so that its block count or a decision's arms differ from the
+  source's, the build stops with a coverage error naming the unit and the definition
+  (`coverage::Mismatch`, `NativeStop::Coverage`), since a mismatch would misattribute flags. A
+  reorder that keeps every decision's arm count at its index is not detected. Release builds of
+  the runner, dtls and postgres packages stop here today: a release pass rewrites some of their
+  bodies' blocks (open; the returnable rewrite is the lead). The carried decisions join the
+  unit's object key only when coverage is on. Unit memos are off under coverage.
 - **Library coverage on release.** When the scope names `core` or `std`, the release std side
   is empty and the program's own release build lowers every unit, so each unit gets records.
 - **Test passes.** The pass cache schema becomes 5. A cached pass gains its raw profile. A
@@ -720,7 +729,7 @@ named existing harnesses. None adds a new harness.
 | **Same observations** | a flag store moves a step-bound stop, a slice end, a `Capacity` value or output | the recording same-observation harness in `crates/hirsel-core-driver/src/recording_build_native.rs`, as one more build per engine and optimisation level. Its body prints what depends on the stop point: the iterations completed by a loop with a call in it before `bound steps n` stopped it, `Capacity.available` at a refusal after several admissions, and the output order of two tasks that each cross a slice end | the build without coverage |
 | **Tape crosses** | the coverage build schedules differently | record the two-task body above on the plain recording build, and replay it on the coverage recording build; it must end `Sealed`, not `Diverged` | the recorded tape |
 | **Identity** | the switch leaks into serialized IR or a revision | `crates/hirsel-core-driver/src/revision_native.rs` | `hirsel_code_revision` and test addresses of the plain build |
-| **Engines agree** | a missed block copy on LLVM, or the engines ordering sites differently | the contract corpus run by `core/tools/std_native.py`: for each determined law, the Cranelift and LLVM release profiles are equal | the other engine |
+| **Engines agree** | a missed block copy on LLVM, or the engines ordering sites differently | the Known arms package in `crates/hirsel-core-driver/src/test_run_native.rs`, and `core/tools/std_native.py --engines-agree` over the contract corpus: for each determined case, the sites reached on LLVM debug and LLVM release equal those reached on Cranelift | the other engine |
 | **Known arms** | an arm index off by one, or an `if` without `else` reported from its join block | one package in `crates/hirsel-core-driver/src/test_run_native.rs` with an `if` and no `else`, a three-arm `match` with one arm unreachable, and `&&` | keys derived by hand |
 | **Killed run** | a profile lost when the runner kills a test | the timeout case in `crates/hirsel-core-driver/src/test_run_native.rs` | the site before the hang is reached, and the run counts as failed |
 | **Round trip** | a profile field lost or misread between writer and reader | `coverage_profiles_merge_read_back_and_refuse_conflicts` in `crates/hirsel-core-driver/src/test_run_native.rs`: two profiles merged, and the report read back; `coverage_tool_diffs_merges_and_reads_raw_files`: one profile through `hirsel coverage merge` | counts and bitsets worked by hand |
@@ -732,6 +741,9 @@ named existing harnesses. None adds a new harness.
 Slice C3 runs "Same observations" and "Tape crosses" on Cranelift, LLVM debug and LLVM
 release. "Engines agree" runs in the Known arms package, through the runner: each site of
 its run on LLVM debug and on LLVM release is reached exactly when it is on Cranelift, and
-Known arms' keys and places hold on all three. The `std_native.py` corpus is not yet a case.
+Known arms' keys and places hold on all three. `core/tools/std_native.py --engines-agree`
+runs the same comparison over every determined corpus case (no tasks, clock, network, exec,
+Unix or granted calls, no argv or schedule); it reads the profile's `sites` rows, so it
+follows the C4 profile format.
 A red in any of them blocks a landing, since it means the coverage build is a different
 build.

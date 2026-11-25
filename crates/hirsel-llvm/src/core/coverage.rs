@@ -33,7 +33,9 @@ pub(super) fn records(
     let mut records = Vec::with_capacity(module.functions.len());
     let mut names = Vec::new();
     for f in 0..module.functions.len() {
-        let Some(sites) = hirsel_core_ir::coverage::sites(module, FuncId(f as u32)) else {
+        let sites = hirsel_core_ir::coverage::sites(module, FuncId(f as u32))
+            .map_err(|mismatch| Error::Llvm(mismatch.to_string()))?;
+        let Some(sites) = sites else {
             records.push(None);
             continue;
         };

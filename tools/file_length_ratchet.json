@@ -181,9 +181,9 @@
     "reason": "coverage-c4-tool-2604"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2822,
-    "raise_revision": 8,
-    "reason": "coverage-c3-2578"
+    "lines": 2843,
+    "raise_revision": 9,
+    "reason": "coverage-c3-followups-2623"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1126,
@@ -197,9 +197,9 @@
     "lines": 1001
   },
   "crates/hirsel-core-driver/src/recipe_native.rs": {
-    "lines": 1948,
-    "raise_revision": 3,
-    "reason": "coverage-c3-2578"
+    "lines": 1952,
+    "raise_revision": 4,
+    "reason": "coverage-c3-followups-2623"
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
     "lines": 4070,
@@ -221,17 +221,17 @@
     "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-driver/src/std_release.rs": {
-    "lines": 1166,
-    "raise_revision": 4,
-    "reason": "coverage-c3-2578"
+    "lines": 1167,
+    "raise_revision": 5,
+    "reason": "coverage-c3-followups-2623"
   },
   "crates/hirsel-core-driver/src/test_run.rs": {
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 3533,
-    "raise_revision": 18,
-    "reason": "coverage-c4-tool-2604"
+    "lines": 3589,
+    "raise_revision": 19,
+    "reason": "coverage-c3-followups-2623"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 4000,

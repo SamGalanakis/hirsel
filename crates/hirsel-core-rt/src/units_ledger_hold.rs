@@ -1,6 +1,9 @@
 //! The ledger's hold hook, driven a step at a time (RL8): hold what is
 //! published, let the oldest held arrival reach the unit, stop holding.
-use super::UnitCtx;
+//! Test builds and the `testing` feature only: a native law drives it
+//! through `hirsel_core_test_hold` (units_lang_hold.rs).
+use super::{Body, UnitCtx};
+use std::sync::Arc;
 
 impl UnitCtx {
     /// Test hook: when holding, what was published to the port is held.
@@ -40,5 +43,27 @@ impl UnitCtx {
     /// for a take. Unhooked units keep the port's own answer.
     pub(crate) fn has_reached(&self) -> bool {
         self.held.is_some() && !self.reached.is_empty()
+    }
+
+    /// Hooked, at the owner's own release of `conn`: its retirement notice
+    /// reaches the unit now, behind what had reached it already; other held
+    /// arrivals stay held.
+    pub(crate) fn reach_notice(&mut self, conn: usize) {
+        if self.held.is_none() {
+            return;
+        }
+        self.hold_published();
+        let held = self.held.as_mut().unwrap();
+        let notice = held.iter().position(
+            |a| matches!(&a.body, Body::LastRelease(_, c) if Arc::as_ptr(c).addr() == conn),
+        );
+        debug_assert!(
+            notice.is_some(),
+            "the retirement notice was not published here"
+        );
+        if let Some(i) = notice {
+            let a = held.remove(i).unwrap();
+            self.reached.push_back(a);
+        }
     }
 }

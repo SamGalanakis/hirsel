@@ -912,10 +912,6 @@ impl UnitCtx {
         if !c.owner.leads_to(&self.port) {
             return Vec::new();
         }
-        self.release_take(
-            Arc::as_ptr(c).addr(),
-            #[cfg(test)]
-            &c.label,
-        )
+        self.release_take(Arc::as_ptr(c).addr())
     }
 }

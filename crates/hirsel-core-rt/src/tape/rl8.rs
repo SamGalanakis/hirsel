@@ -271,8 +271,6 @@ fn rl8_pump_takes_between_receives() {
 #[test]
 fn rl8_release_takes_an_older_item_before_its_notice() {
     use Act::*;
-    // The hooked release reaches its notice by name.
-    crate::units::ledger::NAMING.store(true, std::sync::atomic::Ordering::Relaxed);
     let (got, frames) = record(
         2,
         &[

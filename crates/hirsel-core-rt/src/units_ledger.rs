@@ -43,7 +43,7 @@ pub(crate) mod abi;
 pub(crate) mod bench;
 #[path = "units_conn.rs"]
 pub(crate) mod conn;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 #[path = "units_ledger_hold.rs"]
 mod hold;
 #[cfg(test)]
@@ -1031,7 +1031,7 @@ pub(crate) struct UnitCtx {
     connections: HashMap<usize, Arc<ConnCore>>,
     /// Test hook: arrivals published to the unit wait here until the harness
     /// names the source whose oldest one reaches the unit next.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     held: Option<VecDeque<ArrivalRef>>,
     helpers: Vec<Option<Handle>>,
     helper: Option<HelperInfo>,
@@ -1070,7 +1070,7 @@ impl UnitCtx {
             books: Vec::new(),
             reached: VecDeque::new(),
             connections: HashMap::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             held: None,
             helpers: Vec::new(),
             helper: None,
@@ -1128,7 +1128,7 @@ impl UnitCtx {
         if !self.reached.is_empty() {
             return false;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         if self.hooked() {
             return false;
         }
@@ -1543,7 +1543,7 @@ impl UnitCtx {
         let old = h.port.fwd.swap(raw, Ordering::Release);
         debug_assert!(old.is_null());
         let mut rest = VecDeque::new();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         if let Some(held) = h.held.take() {
             rest.extend(held);
         }
@@ -1739,7 +1739,7 @@ impl UnitCtx {
 
     /// Where an arrival goes once it has reached this unit.
     fn layer(&mut self, a: ArrivalRef) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         if let Some(h) = self.held.as_mut() {
             h.push_back(a);
             return;
@@ -1803,12 +1803,12 @@ impl UnitCtx {
         Some(id)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn hook(&mut self) {
         self.held.get_or_insert_with(VecDeque::new);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn hooked(&self) -> bool {
         self.held.is_some()
     }
@@ -1817,9 +1817,9 @@ impl UnitCtx {
     /// into the language pump, its hot caller; `release_take` is cold.
     #[inline(always)]
     pub(crate) fn take(&mut self) -> Option<(Took, TakeInfo)> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         let hooked = self.held.is_some();
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "testing")))]
         let hooked = false;
         let arrival = match self.reached.pop_front() {
             Some(a) => a,
@@ -1901,14 +1901,9 @@ impl UnitCtx {
     /// for the caller to act on, as if it had taken them itself. A notice
     /// never jumps the queue; a peer's release waits for the next take.
     #[cold]
-    pub(crate) fn release_take(&mut self, conn: usize, #[cfg(test)] label: &str) -> Vec<Released> {
-        #[cfg(test)]
-        if self.held.is_some() {
-            // Hooked: the notice reaches the unit now, behind what had
-            // reached it already; other held arrivals stay held.
-            let r = self.reach(&format!("retire:{label}"));
-            debug_assert!(r.is_some(), "the retirement notice was not published here");
-        }
+    pub(crate) fn release_take(&mut self, conn: usize) -> Vec<Released> {
+        #[cfg(any(test, feature = "testing"))]
+        self.reach_notice(conn);
         let mut took = Vec::new();
         while let Some((t, info)) = self.take() {
             let done = t == Took::LastRelease && self.took_ident == conn;
@@ -1940,7 +1935,7 @@ impl UnitCtx {
             self.port.close_with(DEAD, &mut VecDeque::new());
         }
         self.reached.clear();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         {
             self.held = None;
         }

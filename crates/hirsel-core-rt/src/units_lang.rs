@@ -304,7 +304,7 @@ unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
             // SAFETY: as in `on_take`.
             unsafe { on_take(u, took, id, wake_inboxes) };
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         u.ctx.hold_published();
         if u.ctx.port.arm() {
             return;
@@ -849,9 +849,9 @@ unsafe fn conn_receive<const REC: bool>(
                 // A position whether or not anything is pending.
                 u.reach();
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             let pending = u.ctx.port.pending() || u.ctx.has_reached();
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "testing")))]
             let pending = u.ctx.port.pending();
             if c.side().taken.is_empty() && pending {
                 // A lone item for this inbox is all the port holds, so no
@@ -1564,6 +1564,6 @@ pub mod bench;
 #[path = "units_lang_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 #[path = "units_lang_hold.rs"]
 pub(crate) mod hold;

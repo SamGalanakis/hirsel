@@ -377,3 +377,5 @@ fn rl9_sent_items_match_their_takes() {
         );
     }
 }
+// RL8 natively, the ordering seam (feature `testing`).
+include!("recording_rl8_native.rs");

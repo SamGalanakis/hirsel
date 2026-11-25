@@ -6,9 +6,8 @@
 # Cargo build output
 /target/
 
-# Hirsel compiler stores, except the tracked measurement fixtures.
+# Hirsel compiler stores, at any depth.
 .hirsel-core/
-!/crates/hirsel-core-rt/measure/*/.hirsel-core/
 
 # Build inputs tools/buck2/sync.py derives (tools/buck2/generated.py): generated on
 # demand by bootstrap.py and every Buck2 entry point, never committed.

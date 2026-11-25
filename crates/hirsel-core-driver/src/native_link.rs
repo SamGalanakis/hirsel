@@ -52,7 +52,7 @@ pub(super) fn build_key(
     )
 }
 
-pub(super) fn direct_link(
+pub(crate) fn direct_link(
     recipe: &crate::tool_inputs::LinkRecipe,
     inputs: &[PathBuf],
     whole: Option<&Path>,
@@ -70,6 +70,15 @@ pub(super) fn direct_link(
     let directory = tempfile::tempdir_in(parent.unwrap_or(Path::new(".")))?;
     let mut process = crate::tool_inputs::tool_command(&recipe.linker);
     process.current_dir(directory.path());
+    let format = hirsel_core_layout::Target::from_triple(&recipe.target)
+        .ok_or_else(|| NativeStop::Link(format!("no link target {}", recipe.target)))?
+        .object_format();
+    match format {
+        hirsel_core_layout::ObjectFormat::Elf => {}
+        hirsel_core_layout::ObjectFormat::MachO => {
+            return macho_link(process, directory, recipe, inputs, whole, output, optimize);
+        }
+    }
     let _layout = if optimize {
         // Keep the executable's code revision even when no tape reads it.
         process.args([
@@ -126,6 +135,65 @@ pub(super) fn direct_link(
     if !optimize {
         process.arg("-O0");
     }
+    process.arg("-o").arg("program");
+    command(&mut process)?;
+    std::fs::rename(directory.path().join("program"), output)?;
+    Ok(())
+}
+
+/// The Mach-O link: ld64 takes its flavour first, the objects through a file
+/// list, the bundle with `-force_load`, and dead-strips per atom. It writes no
+/// debug map (`-S`): the detached debug file holds the image's DWARF. The
+/// fixed name "program" is also the code signature's identifier, so a cross
+/// and a native link sign alike. A dev link has no `LC_UUID`, a digest of
+/// the whole image, so the resident link may patch it and its debug file is
+/// keyed by the image digest, as an ELF dev link without a build ID is.
+fn macho_link(
+    mut process: std::process::Command,
+    directory: tempfile::TempDir,
+    recipe: &crate::tool_inputs::LinkRecipe,
+    inputs: &[PathBuf],
+    whole: Option<&Path>,
+    output: &Path,
+    optimize: bool,
+) -> Result<(), NativeStop> {
+    let mut inserted = false;
+    for argument in &recipe.args {
+        if argument == crate::tool_inputs::INPUT_MARKER {
+            let mut list = String::new();
+            for input in inputs {
+                // The bundle of the link's objects loads every member.
+                let bundle = whole == Some(input.as_path());
+                let input = std::path::absolute(input)?;
+                if bundle {
+                    process.arg("-force_load").arg(&input);
+                } else {
+                    let name = input.to_str().ok_or_else(|| {
+                        NativeStop::Link(format!("non-UTF-8 link input {}", input.display()))
+                    })?;
+                    list.push_str(name);
+                    list.push('\n');
+                }
+            }
+            let path = directory.path().join("inputs");
+            std::fs::write(&path, list)?;
+            process.arg("-filelist").arg(path);
+            inserted = true;
+        } else {
+            process.arg(argument);
+        }
+    }
+    if !inserted {
+        return Err(NativeStop::Link(
+            "direct link recipe has no input marker".into(),
+        ));
+    }
+    if optimize {
+        process.arg("-dead_strip");
+    } else {
+        process.arg("-no_uuid");
+    }
+    process.arg("-S");
     process.arg("-o").arg("program");
     command(&mut process)?;
     std::fs::rename(directory.path().join("program"), output)?;

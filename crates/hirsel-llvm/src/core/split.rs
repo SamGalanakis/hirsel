@@ -16,12 +16,27 @@
 //! keys a module it cannot cut as one whole part instead.
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::source::{CodeSection, NativeDebug, NativeObject, ScopeKind, debug_symbol};
+use hirsel_core_layout::ObjectFormat;
 use object::LittleEndian as LE;
 use object::elf;
 use object::read::elf::{FileHeader as _, Rela as _, SectionHeader as _, Sym as _};
 use std::collections::{HashMap, VecDeque};
 
+mod macho;
+
 type Header = elf::FileHeader64<LE>;
+
+/// The Hirsel object format of a 64-bit little-endian object LLVM emitted,
+/// by its magic.
+fn format(object: &[u8]) -> Result<ObjectFormat, String> {
+    match object.get(..5) {
+        // ELFCLASS64.
+        Some([0x7f, b'E', b'L', b'F', 2]) => Ok(ObjectFormat::Elf),
+        // MH_MAGIC_64, little-endian.
+        Some([0xcf, 0xfa, 0xed, 0xfe, _]) => Ok(ObjectFormat::MachO),
+        _ => Err("unsupported native object kind".to_owned()),
+    }
+}
 
 /// The ELF constants as the raw numbers the file holds.
 mod raw {
@@ -71,6 +86,14 @@ pub fn split_native_object(
             *key,
             debug_lines,
         )?]);
+    }
+    match format(object)? {
+        ObjectFormat::Elf => {}
+        // The cut reads ELF sections, relocations and FDEs; a Mach-O cut is
+        // a slice of its own.
+        ObjectFormat::MachO => {
+            return Err("a Mach-O release object cannot be cut per part yet".into());
+        }
     }
     let input = Input::parse(object)?;
     let debug = if debug_lines {
@@ -1012,6 +1035,12 @@ fn restrict(
 /// Weak definitions (shared constants, revision carriers a link overrides)
 /// are left out.
 pub fn strong_definitions(object: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    match format(object)? {
+        ObjectFormat::Elf => {}
+        ObjectFormat::MachO => {
+            return macho::strong_definitions(object);
+        }
+    }
     let header = Header::parse(object).map_err(error)?;
     let table = header.sections(LE, object).map_err(error)?;
     let symbols = table.symbols(LE, object, elf::SHT_SYMTAB).map_err(error)?;
@@ -1030,6 +1059,12 @@ pub fn strong_definitions(object: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 /// The symbols `object` names and does not define: what another object of
 /// its link defines for it.
 pub fn undefined_symbols(object: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    match format(object)? {
+        ObjectFormat::Elf => {}
+        ObjectFormat::MachO => {
+            return macho::undefined_symbols(object);
+        }
+    }
     let header = Header::parse(object).map_err(error)?;
     let table = header.sections(LE, object).map_err(error)?;
     let symbols = table.symbols(LE, object, elf::SHT_SYMTAB).map_err(error)?;
@@ -1053,6 +1088,10 @@ pub fn rewrite_std_symbols(
 ) -> Result<Vec<u8>, String> {
     use object::build::Id as _;
     use object::build::elf::{Builder, SectionData};
+    match format(object)? {
+        ObjectFormat::Elf => {}
+        ObjectFormat::MachO => return macho::rename(object, rename),
+    }
     let mut elf = Builder::read(object).map_err(error)?;
     let used: std::collections::HashSet<_> = elf
         .sections

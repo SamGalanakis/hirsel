@@ -7,7 +7,7 @@
 //! with the attribute and none without it.)
 use super::*;
 
-// The smallest page either target maps sets the minimum fiber guard size.
+// The smallest page an x86-64 target maps sets the minimum fiber guard size there.
 const MIN_GUARD_BYTES: usize = 4096;
 
 /// A frame several guards wide, a small frame and a declaration, whose attributes the IR
@@ -76,13 +76,17 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
     for target in [
         hirsel_core_layout::Target::X86_64Linux,
         hirsel_core_layout::Target::Aarch64Linux,
+        hirsel_core_layout::Target::Aarch64Darwin,
     ] {
         let machine = TargetMachine::core(target, true).unwrap();
         let context = Context::new();
         let module = Module::parse(&context, "probes", IR).unwrap();
         module.set_target(&machine);
         module.emit_object(&machine).unwrap();
-        assert_probes(&module.text(), target.triple(), &["wide", "narrow"]);
+        // The guard is one page of the target: probing at a smaller stride
+        // only costs, a larger one can step over the guard.
+        let page = 1usize << target.page_log2();
+        assert_probes_every(&module.text(), target.triple(), &["wide", "narrow"], page);
     }
     // The lazy C-ABI phase must probe just as the direct Rust phase does.
     // This live 256 KiB frame makes a missing or different probe interval
@@ -169,6 +173,10 @@ b0(v0: ptr):
 }
 
 fn assert_probes(text: &str, target: &str, required: &[&str]) {
+    assert_probes_every(text, target, required, MIN_GUARD_BYTES);
+}
+
+fn assert_probes_every(text: &str, target: &str, required: &[&str], stride: usize) {
     let kinds = defined_attribute(text, "probe-stack");
     let sizes = defined_attribute(text, "stack-probe-size");
     for required in required {
@@ -180,8 +188,8 @@ fn assert_probes(text: &str, target: &str, required: &[&str]) {
     for ((function, kind), (_, size)) in kinds.iter().zip(&sizes) {
         assert_eq!(kind.as_deref(), Some("inline-asm"), "{target} {function}");
         let size: usize = size.as_deref().unwrap().parse().unwrap();
-        assert!(
-            size <= MIN_GUARD_BYTES,
+        assert_eq!(
+            size, stride,
             "{target} {function}: probes every {size} bytes"
         );
     }

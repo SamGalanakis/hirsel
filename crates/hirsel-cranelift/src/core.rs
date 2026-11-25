@@ -57,12 +57,9 @@ impl std::error::Error for Error {}
 type Result<T> = std::result::Result<T, Error>;
 
 /// Whether this engine implements the requested target's native ABI and
-/// object format. Mach-O objects are not written yet (macOS slice S5).
+/// object format: every Hirsel target, ELF and Mach-O alike.
 pub fn supports_target(triple: &str) -> bool {
-    match hirsel_core_layout::Target::from_triple(triple).map(|t| t.object_format()) {
-        Some(hirsel_core_layout::ObjectFormat::Elf) => true,
-        Some(hirsel_core_layout::ObjectFormat::MachO) | None => false,
-    }
+    hirsel_core_layout::Target::from_triple(triple).is_some()
 }
 
 /// Target and optimization policy for CoreIR emission.
@@ -137,6 +134,10 @@ impl Tables<'_> {
 
 pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
+    let target = hirsel_core_layout::Target::from_triple(options.target)
+        .ok_or_else(|| refuse("not a Hirsel target".into()))?;
+    // Inline probes touch every page of a large frame; the stride is the page.
+    let probe = target.page_log2().to_string();
     let mut flags = settings::builder();
     for (name, value) in [
         ("is_pic", "true"),
@@ -153,21 +154,26 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
     .chain([
         ("enable_probestack", "true"),
         ("probestack_strategy", "inline"),
-        ("probestack_size_log2", "12"),
+        ("probestack_size_log2", probe.as_str()),
     ]) {
         flags.set(name, value).map_err(|e| refuse(e.to_string()))?;
     }
     let mut isa = cranelift_codegen::isa::lookup_by_name(options.target)
         .map_err(|e| refuse(e.to_string()))?;
-    let target = hirsel_core_layout::Target::from_triple(options.target)
-        .ok_or_else(|| refuse("not a Hirsel target".into()))?;
-    match target.arch() {
-        hirsel_core_layout::Arch::X86_64 => {
+    match target {
+        hirsel_core_layout::Target::X86_64Linux => {
             for feature in hirsel_core_layout::isa::X86_64_BASE.cranelift_features() {
                 isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
             }
         }
-        hirsel_core_layout::Arch::Aarch64 => {}
+        hirsel_core_layout::Target::Aarch64Linux => {}
+        // Every Apple Silicon Mac is at least an M1 (cpu `apple-m1`): LSE,
+        // FP16 and DotProd, no I8MM, and arm64 rather than arm64e (no PAuth).
+        hirsel_core_layout::Target::Aarch64Darwin => {
+            for feature in ["has_lse", "has_fp16", "has_dotprod"] {
+                isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
+            }
+        }
     }
     isa.finish(settings::Flags::new(flags))
         .map_err(|e| refuse(e.to_string()))
@@ -386,7 +392,8 @@ fn emit(
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
     if !supports_target(options.target) {
         return Err(refuse(
-            "CoreIR entry implements x86-64 and AArch64 Linux C ABIs".into(),
+            "CoreIR entry implements the x86-64 Linux, AArch64 Linux and AArch64 Darwin C ABIs"
+                .into(),
         ));
     }
     let isa = {
@@ -520,10 +527,13 @@ fn emit(
     let _write = observer.enter("object_write");
     tables.site_constants.borrow().define(&mut object)?;
     let mut product = object.finish();
-    tables.unwind.into_inner().write(&mut product)?;
+    let format = hirsel_core_layout::Target::from_triple(options.target)
+        .ok_or_else(|| refuse("not a Hirsel target".into()))?
+        .object_format();
+    tables.unwind.into_inner().write(&mut product, format)?;
     let debug = options
         .debug_lines
-        .then(|| debug::finish(input, &mut product, debug_functions, object_key));
+        .then(|| debug::finish(input, &mut product, debug_functions, object_key, format));
     Ok(Object {
         bytes: crate::object::finish(product).map_err(error)?,
         debug,

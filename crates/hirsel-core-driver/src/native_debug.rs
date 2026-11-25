@@ -4,9 +4,10 @@ use gimli::{EndianSlice, LittleEndian};
 #[cfg(test)]
 use object::{Object as _, ObjectSection as _};
 mod detached;
+mod dsym;
 mod elf;
 mod side;
-pub(crate) use detached::{ImageDigest, NativeImage, add_source_note};
+pub(crate) use detached::{ImageDigest, NativeImage, add_source_note, format as object_format};
 pub use detached::{SymbolSource, resolve_symbols};
 use elf::error;
 pub(crate) use side::bind as bind_side_products;

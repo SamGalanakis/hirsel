@@ -617,6 +617,9 @@ void registerReleasePasses(PassBuilder &builder, CounterRangeReport report, hirs
 extern "C" void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool frame_pointers) {
     Module &m = *unwrap(module);
     const bool x86 = m.getTargetTriple().getArch() == Triple::x86_64;
+    // Probe a page at a time: the fiber guard is one page of the target,
+    // 16 KiB on Darwin and 4 KiB on Linux (hirsel_core_layout::Target::page_log2).
+    const char *probe = m.getTargetTriple().isOSDarwin() ? "16384" : "4096";
     for (Function &f : m) {
         if (f.isDeclaration()) continue;
         // The v3 schedule reduces spills in packed floating-point code.
@@ -630,9 +633,8 @@ extern "C" void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool fra
         f.setUWTableKind(UWTableKind::Async);
         f.setDoesNotThrow();
         if (frame_pointers) f.addFnAttr("frame-pointer", "all");
-        // Probe at the smallest supported fiber guard size.
         f.addFnAttr("probe-stack", "inline-asm");
-        f.addFnAttr("stack-probe-size", "4096");
+        f.addFnAttr("stack-probe-size", probe);
     }
 }
 

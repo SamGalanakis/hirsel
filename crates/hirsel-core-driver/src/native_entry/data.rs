@@ -221,7 +221,16 @@ pub(super) fn write(
         .declare_data(SOURCE_FILES, Linkage::Local, false, false)
         .map_err(error)?;
     let mut files = description(files, 8);
-    files.set_custom_section(".rodata.hirsel_sites");
+    let triple = object.isa().triple().to_string();
+    files.set_custom_section(
+        match hirsel_core_layout::Target::from_triple(&triple)
+            .ok_or_else(|| error(format!("no Hirsel target {triple}")))?
+            .object_format()
+        {
+            hirsel_core_layout::ObjectFormat::Elf => ".rodata.hirsel_sites",
+            hirsel_core_layout::ObjectFormat::MachO => "__TEXT,__hirsel_sites",
+        },
+    );
     object.define_data(files_id, &files).map_err(error)?;
     // The decoder symbol binds the generated entry and Context ABI to the runtime.
     let decoder = object
@@ -334,7 +343,12 @@ pub(crate) fn source_site(binary: &std::path::Path, site: u64) -> Option<String>
     }
     let file = ReadCache::new(std::fs::File::open(binary).ok()?);
     let elf = object::File::parse(&file).ok()?;
-    let files = elf.symbol_by_name(SOURCE_FILES)?;
+    let files = match crate::native_debug::object_format(elf.format()).ok()? {
+        hirsel_core_layout::ObjectFormat::Elf => elf.symbol_by_name(SOURCE_FILES)?,
+        hirsel_core_layout::ObjectFormat::MachO => {
+            elf.symbol_by_name(&format!("_{SOURCE_FILES}"))?
+        }
+    };
     let section = elf.section_by_index(files.section_index()?).ok()?;
     let data = section.data_range(files.address(), files.size()).ok()??;
     let word = |row: &[u8], at| u64::from_le_bytes(row[at..at + 8].try_into().unwrap());

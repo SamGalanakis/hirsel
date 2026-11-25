@@ -7,15 +7,18 @@
 use crate::native::{AFTER_CHECK, BEFORE_OPEN};
 use crate::native::{NativeStop, ObjectProduct};
 use hirsel_core_ir::Identity;
+use hirsel_core_layout::ObjectFormat;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// A link's objects, in link order, as the members of a GNU archive without
-/// a symbol table, in a sealed memory file. The linker reads it under
-/// `--whole-archive` (`native_link::direct_link`), which loads every member
+/// A link's objects, in link order, as the members of an archive without a
+/// symbol table, in a sealed memory file: a GNU archive for ELF, and for
+/// Mach-O a BSD one whose `#1/N` names place each member's bytes on an
+/// 8-byte boundary, as ld64 reads them. The linker reads it under
+/// `--whole-archive` or `-force_load` (`native_link::direct_link`), which loads every member
 /// in order as if each were named alone, so the executable is the one a link
 /// of the separate objects makes. Only checked bytes are written into it, and
 /// once sealed nothing changes them.
@@ -37,8 +40,8 @@ impl Bundle {
         ))
     }
     /// The bundle of `members`, in order.
-    pub(crate) fn of(members: &[Arc<[u8]>]) -> io::Result<Self> {
-        let mut bundle = BundleWriter::new()?;
+    pub(crate) fn of(members: &[Arc<[u8]>], format: ObjectFormat) -> io::Result<Self> {
+        let mut bundle = BundleWriter::new(format)?;
         for member in members {
             bundle.push(member)?;
         }
@@ -58,19 +61,21 @@ impl Bundle {
 /// bundle is the link's second input, after the entry object.
 pub(crate) struct Members {
     members: Vec<Arc<[u8]>>,
+    format: ObjectFormat,
     bundle: std::cell::OnceCell<Bundle>,
 }
 
 impl Members {
-    pub(crate) fn new(members: Vec<Arc<[u8]>>) -> Self {
+    pub(crate) fn new(members: Vec<Arc<[u8]>>, format: ObjectFormat) -> Self {
         Self {
             members,
+            format,
             bundle: std::cell::OnceCell::new(),
         }
     }
     pub(crate) fn bundle(&self) -> io::Result<&Bundle> {
         if self.bundle.get().is_none() {
-            let _ = self.bundle.set(Bundle::of(&self.members)?);
+            let _ = self.bundle.set(Bundle::of(&self.members, self.format)?);
         }
         Ok(self.bundle.get().expect("set above"))
     }
@@ -88,37 +93,54 @@ pub(crate) struct BundleWriter {
     file: io::BufWriter<File>,
     at: u64,
     members: Vec<(u64, usize)>,
+    format: ObjectFormat,
 }
 
 impl BundleWriter {
-    pub(crate) fn new() -> io::Result<Self> {
+    pub(crate) fn new(format: ObjectFormat) -> io::Result<Self> {
         let mut file = io::BufWriter::with_capacity(1 << 20, memory_file()?);
         file.write_all(MAGIC)?;
         Ok(Self {
             file,
             at: MAGIC.len() as u64,
             members: Vec::new(),
+            format,
         })
     }
     /// Append checked `bytes` as the next member.
     pub(crate) fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
-        // The member's name is its index; `/` ends a GNU member name.
+        // The member's name is its index. `/` ends a GNU member name; a BSD
+        // name of N bytes follows the header, NUL-padded to the alignment.
+        let (name, inline) = match self.format {
+            ObjectFormat::Elf => (format!("{}/", self.members.len()), Vec::new()),
+            ObjectFormat::MachO => {
+                let mut inline = format!("{}.o", self.members.len()).into_bytes();
+                inline.resize(
+                    (self.at as usize + 60 + inline.len()).next_multiple_of(8)
+                        - self.at as usize
+                        - 60,
+                    0,
+                );
+                (format!("#1/{}", inline.len()), inline)
+            }
+        };
         let header = format!(
             "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
-            format!("{}/", self.members.len()),
+            name,
             0,
             0,
             0,
             644,
-            bytes.len()
+            inline.len() + bytes.len()
         );
         debug_assert_eq!(header.len(), 60);
         self.file.write_all(header.as_bytes())?;
-        self.at += 60;
+        self.file.write_all(&inline)?;
+        self.at += 60 + inline.len() as u64;
         self.members.push((self.at, bytes.len()));
         self.file.write_all(bytes)?;
         self.at += bytes.len() as u64;
-        if bytes.len() % 2 == 1 {
+        if (inline.len() + bytes.len()) % 2 == 1 {
             self.file.write_all(b"\n")?;
             self.at += 1;
         }

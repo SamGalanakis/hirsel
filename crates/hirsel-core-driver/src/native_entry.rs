@@ -350,7 +350,10 @@ impl<'a> Plan<'a> {
             descriptors,
         )?;
         let mut product = object.finish();
-        unwind.write(&mut product).map_err(error)?;
+        let format = hirsel_core_layout::Target::from_triple(target)
+            .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?
+            .object_format();
+        unwind.write(&mut product, format).map_err(error)?;
         crate::native_debug::add_source_note(&mut product.object, source_identity);
         sites::define(&mut product.object, sources)?;
         sites::define_release(&mut product.object, sources, self.release_sites)?;
@@ -359,6 +362,10 @@ impl<'a> Plan<'a> {
 }
 
 fn object(target: &str) -> Result<ObjectModule> {
+    let page = hirsel_core_layout::Target::from_triple(target)
+        .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?
+        .page_log2()
+        .to_string();
     let mut flags = settings::builder();
     for (name, value) in [
         ("is_pic", "true"),
@@ -367,7 +374,7 @@ fn object(target: &str) -> Result<ObjectModule> {
         ("regalloc_algorithm", "single_pass"),
         ("enable_probestack", "true"),
         ("probestack_strategy", "inline"),
-        ("probestack_size_log2", "12"),
+        ("probestack_size_log2", page.as_str()),
     ] {
         flags.set(name, value).map_err(error)?;
     }

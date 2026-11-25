@@ -19,6 +19,8 @@ mod split;
 mod step_free;
 pub use split::{rewrite_std_symbols, split_native_object, strong_definitions, undefined_symbols};
 mod empty;
+mod engine;
+pub use engine::{NO_FACTS_VARIABLE, facts_enabled, supports_target};
 mod expose;
 mod fast;
 mod flow;
@@ -165,25 +167,6 @@ fn carriers(
         }
     }
     out
-}
-
-/// Whether to use the producer's optimization facts. Setting the diagnostic
-/// switch suppresses every emitter-supplied fact, while retaining ABI attributes
-/// and stack probes. Drivers include this choice in native object cache keys,
-/// and the variable is on the driver's keyed environment list.
-pub fn facts_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os(NO_FACTS_VARIABLE).is_none())
-}
-/// The diagnostic switch [`facts_enabled`] reads.
-pub const NO_FACTS_VARIABLE: &str = "HIRSEL_LLVM_NO_FACTS";
-
-/// Whether this engine implements the target's ABI and object format (Mach-O: macOS S5).
-pub fn supports_target(triple: &str) -> bool {
-    match Target::from_triple(triple).map(Target::object_format) {
-        Some(hirsel_core_layout::ObjectFormat::Elf) => true,
-        Some(hirsel_core_layout::ObjectFormat::MachO) | None => false,
-    }
 }
 
 /// Emit x86-64 System V LLVM IR directly from CoreIR.

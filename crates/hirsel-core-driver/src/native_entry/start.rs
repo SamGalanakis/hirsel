@@ -49,7 +49,16 @@ pub(super) fn emit(
     let message = f.string(b"run stop: HostMemory\n")?;
     let stderr = f
         .object
-        .declare_data("stderr", Linkage::Import, true, false)
+        .declare_data(
+            // libSystem names its stderr stream `__stderrp`.
+            match target.os() {
+                hirsel_core_layout::Os::Linux => "stderr",
+                hirsel_core_layout::Os::Macos => "__stderrp",
+            },
+            Linkage::Import,
+            true,
+            false,
+        )
         .map_err(error)?;
     let stderr_address = f.address(stderr);
     let stderr = f.load(I64, stderr_address, 0);

@@ -181,9 +181,9 @@
     "reason": "macos-s9-target-consts-2508"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2796,
-    "raise_revision": 6,
-    "reason": "coverage-c2-runner-2577"
+    "lines": 2811,
+    "raise_revision": 7,
+    "reason": "macos-s5-macho-2582"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1126,
@@ -239,9 +239,9 @@
     "reason": "cs-store-split-1935"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
-    "lines": 2534,
-    "raise_revision": 2,
-    "reason": "macos-s2-target-2570"
+    "lines": 2587,
+    "raise_revision": 3,
+    "reason": "macos-s5-macho-2582"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2602,
@@ -531,9 +531,9 @@
     "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-llvm/src/core/split.rs": {
-    "lines": 1082,
-    "raise_revision": 1,
-    "reason": "coverage-c1-2551"
+    "lines": 1121,
+    "raise_revision": 2,
+    "reason": "macos-s5-macho-2582"
   },
   "crates/hirsel-llvm/src/core/steps.rs": {
     "lines": 1728

@@ -1,4 +1,5 @@
 use hirsel_core_ids::ContentHash;
+use hirsel_core_layout::ObjectFormat;
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 use sha2::{Digest, Sha256};
 use std::{
@@ -8,6 +9,7 @@ use std::{
 };
 
 const IMAGE_NOTE: &str = ".note.hirsel.image-digest";
+const UUID_NOTE: &str = ".note.hirsel.image-uuid";
 const OWNER: &[u8] = b"Hirsel\0";
 
 pub(crate) enum ImageDigest {
@@ -33,28 +35,50 @@ impl ImageDigest {
 
 pub(super) enum Identity<'a> {
     BuildId(&'a [u8]),
+    /// A Mach-O release image's `LC_UUID`, which ld64 derives from its
+    /// content as a GNU build ID is derived.
+    Uuid([u8; 16]),
     ImageDigest(ContentHash),
+}
+
+/// The Hirsel object format of a native image or object.
+pub(crate) fn format(format: object::BinaryFormat) -> io::Result<ObjectFormat> {
+    match format {
+        object::BinaryFormat::Elf => Ok(ObjectFormat::Elf),
+        object::BinaryFormat::MachO => Ok(ObjectFormat::MachO),
+        other => Err(io::Error::other(format!(
+            "no native image format {other:?}"
+        ))),
+    }
+}
+
+fn build_id_path(bytes: &[u8]) -> PathBuf {
+    let id = hex(bytes);
+    Path::new(".build-id")
+        .join(&id[..2])
+        .join(format!("{}.debug", &id[2..]))
 }
 
 impl<'a> Identity<'a> {
     pub(super) fn of(file: &object::File<'a>, image: &[u8]) -> io::Result<Self> {
-        Ok(match file.build_id().map_err(io::Error::other)? {
-            Some(id) if !id.is_empty() => Self::BuildId(id),
-            _ => Self::ImageDigest(ImageDigest::Detached.hash(image)),
-        })
+        let recorded = match format(file.format())? {
+            ObjectFormat::Elf => file
+                .build_id()
+                .map_err(io::Error::other)?
+                .filter(|id| !id.is_empty())
+                .map(Self::BuildId),
+            ObjectFormat::MachO => file.mach_uuid().map_err(io::Error::other)?.map(Self::Uuid),
+        };
+        Ok(recorded.unwrap_or_else(|| Self::ImageDigest(ImageDigest::Detached.hash(image))))
     }
 
-    fn path(&self) -> PathBuf {
+    /// Where the debug file of the image at `image` lives.
+    fn path(&self, image: &Path) -> PathBuf {
         match self {
-            Self::BuildId(bytes) => {
-                let id = hex(bytes);
-                Path::new(".build-id")
-                    .join(&id[..2])
-                    .join(format!("{}.debug", &id[2..]))
-            }
-            Self::ImageDigest(hash) => {
-                Path::new(".hirsel-debug").join(format!("{}.debug", hex(&hash.0)))
-            }
+            Self::BuildId(bytes) => image.with_file_name(build_id_path(bytes)),
+            Self::Uuid(_) => super::dsym::path(image),
+            Self::ImageDigest(hash) => image
+                .with_file_name(Path::new(".hirsel-debug").join(format!("{}.debug", hex(&hash.0)))),
         }
     }
 
@@ -67,6 +91,7 @@ impl<'a> Identity<'a> {
                 object::elf::NT_GNU_BUILD_ID.0,
                 id,
             ),
+            Self::Uuid(uuid) => note(object, UUID_NOTE, OWNER, 3, uuid),
             Self::ImageDigest(hash) => note(object, IMAGE_NOTE, OWNER, 1, &hash.0),
         }
     }
@@ -79,11 +104,17 @@ impl<'a> Identity<'a> {
         {
             return Ok(Some(Self::BuildId(id)));
         }
+        let header = note_bytes(OWNER, 1, &[]).len();
+        if let Some(section) = debug.section_by_name(UUID_NOTE) {
+            let data = section.data().map_err(io::Error::other)?;
+            return Ok(data
+                .get(header..header + 16)
+                .map(|uuid| Self::Uuid(uuid.try_into().unwrap())));
+        }
         let Some(section) = debug.section_by_name(IMAGE_NOTE) else {
             return Ok(None);
         };
         let data = section.data().map_err(io::Error::other)?;
-        let header = note_bytes(OWNER, 1, &[]).len();
         Ok(data
             .get(header..header + 32)
             .map(|hash| Self::ImageDigest(ContentHash(hash.try_into().unwrap()))))
@@ -92,6 +123,7 @@ impl<'a> Identity<'a> {
     fn matches(&self, file: &object::File<'_>) -> bool {
         match self {
             Self::BuildId(id) => file.build_id().is_ok_and(|actual| actual == Some(*id)),
+            Self::Uuid(uuid) => file.mach_uuid().is_ok_and(|actual| actual == Some(*uuid)),
             Self::ImageDigest(hash) => file
                 .section_by_name(IMAGE_NOTE)
                 .and_then(|section| section.data().ok())
@@ -129,7 +161,23 @@ fn note(object: &mut object::write::Object<'_>, name: &str, owner: &[u8], kind: 
 // Equal code can bind to different source coordinates. Include the binding
 // identity in the linker build ID even when only the side product holds DWARF.
 pub(crate) fn add_source_note(object: &mut object::write::Object<'_>, source: ContentHash) {
-    note(object, ".note.hirsel.source", OWNER, 2, &source.0);
+    match format(object.format()).expect("Hirsel writes ELF and Mach-O objects") {
+        ObjectFormat::Elf => note(object, ".note.hirsel.source", OWNER, 2, &source.0),
+        // Mach-O has no notes; ld64's LC_UUID digests the image, so the
+        // identity is image bytes ld64 must keep without a reference.
+        ObjectFormat::MachO => {
+            let section = object.add_section(
+                b"__TEXT".to_vec(),
+                b"__hirsel_source".to_vec(),
+                object::SectionKind::ReadOnlyData,
+            );
+            object.section_mut(section).flags = object::SectionFlags::MachO {
+                flags: object::macho::S_REGULAR | object::macho::S_ATTR_NO_DEAD_STRIP,
+                reserved2: 0,
+            };
+            object.append_section_data(section, &source.0, 1);
+        }
+    }
 }
 
 fn deliver(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
@@ -143,7 +191,10 @@ fn deliver(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
             image,
         )?,
     };
-    let target = path.with_file_name(identity.path());
+    let target = identity.path(path);
+    if let Identity::Uuid(_) = identity {
+        return super::dsym::write(&target, image, debug);
+    }
     let parent = target.parent().unwrap();
     std::fs::create_dir_all(parent)?;
     let mut staged = tempfile::NamedTempFile::new_in(parent)?;
@@ -233,10 +284,9 @@ pub fn resolve_symbols(
     let candidates = if let Some(path) = debug_path {
         vec![path.to_owned()]
     } else {
-        let relative = identity.path();
-        let mut paths = vec![image_path.with_file_name(&relative)];
-        if matches!(identity, Identity::BuildId(_)) {
-            paths.push(Path::new("/usr/lib/debug").join(&relative));
+        let mut paths = vec![identity.path(image_path)];
+        if let Identity::BuildId(id) = identity {
+            paths.push(Path::new("/usr/lib/debug").join(build_id_path(id)));
         }
         paths
     };

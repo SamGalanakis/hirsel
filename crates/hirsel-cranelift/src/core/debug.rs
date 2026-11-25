@@ -101,6 +101,7 @@ pub(super) fn finish(
     product: &mut cranelift_object::ObjectProduct,
     functions: Vec<FunctionRows>,
     object_key: ContentHash,
+    format: hirsel_core_layout::ObjectFormat,
 ) -> NativeDebug {
     let mut debug = NativeDebug {
         items: input.items.clone(),
@@ -112,27 +113,44 @@ pub(super) fn finish(
             .object
             .symbol(product.function_symbol(function.function));
         let section = symbol.section.id().unwrap();
-        let begin = symbol.value;
-        let section_index = *sections.entry(section).or_insert_with(|| {
-            let index = debug.sections.len() as u32;
-            let name = c::source::debug_symbol(object_key, index);
-            let size = product.object.section(section).data().len() as u64;
-            product.object.add_symbol(Symbol {
-                name: name.as_bytes().to_vec(),
-                value: 0,
-                size: 0,
-                kind: object::SymbolKind::Text,
-                scope: object::SymbolScope::Linkage,
-                weak: false,
-                section: SymbolSection::Section(section),
-                flags: object::SymbolFlags::Elf {
-                    st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
-                    st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
-                },
-            });
-            debug.sections.push(CodeSection { symbol: name, size });
-            index
-        });
+        let begin = match format {
+            hirsel_core_layout::ObjectFormat::Elf => symbol.value,
+            // ld64 places each Mach-O function on its own, so each is a piece
+            // of its own, named by its symbol as the linked image reads it.
+            hirsel_core_layout::ObjectFormat::MachO => 0,
+        };
+        let section_index = match format {
+            hirsel_core_layout::ObjectFormat::Elf => {
+                *sections.entry(section).or_insert_with(|| {
+                    let index = debug.sections.len() as u32;
+                    let name = c::source::debug_symbol(object_key, index);
+                    let size = product.object.section(section).data().len() as u64;
+                    product.object.add_symbol(Symbol {
+                        name: name.as_bytes().to_vec(),
+                        value: 0,
+                        size: 0,
+                        kind: object::SymbolKind::Text,
+                        scope: object::SymbolScope::Linkage,
+                        weak: false,
+                        section: SymbolSection::Section(section),
+                        flags: object::SymbolFlags::Elf {
+                            st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
+                            st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
+                        },
+                    });
+                    debug.sections.push(CodeSection { symbol: name, size });
+                    index
+                })
+            }
+            hirsel_core_layout::ObjectFormat::MachO => {
+                let name = String::from_utf8_lossy(&symbol.name).into_owned();
+                debug.sections.push(CodeSection {
+                    symbol: name,
+                    size: function.size,
+                });
+                debug.sections.len() as u32 - 1
+            }
+        };
         let range = CodeRange {
             section: section_index,
             begin,

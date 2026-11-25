@@ -6,9 +6,22 @@ use hirsel_core_ir::source::{site_item_symbol, site_symbol};
 use object::ObjectSection as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+/// Whether `section` is loaded with the image: every Mach-O section but the
+/// debug ones is.
 fn allocatable<'data>(section: &impl object::ObjectSection<'data>) -> bool {
-    matches!(section.flags(), object::SectionFlags::Elf { sh_flags, .. }
-        if sh_flags.0 & object::elf::SHF_ALLOC.0 != 0)
+    match section.flags() {
+        object::SectionFlags::Elf { sh_flags, .. } => sh_flags.0 & object::elf::SHF_ALLOC.0 != 0,
+        object::SectionFlags::MachO { flags, .. } => flags.0 & object::macho::S_ATTR_DEBUG.0 == 0,
+        _ => false,
+    }
+}
+
+/// `name` as Hirsel defines it: a Mach-O object's names carry a leading `_`.
+fn link_name(format: hirsel_core_layout::ObjectFormat, name: &[u8]) -> &[u8] {
+    match format {
+        hirsel_core_layout::ObjectFormat::Elf => name,
+        hirsel_core_layout::ObjectFormat::MachO => name.strip_prefix(b"_").unwrap_or(name),
+    }
 }
 
 /// Keep the runtime binders used by the actual link inputs and report whether
@@ -225,11 +238,13 @@ fn referenced(input: &[u8]) -> std::io::Result<Referenced> {
     let mut items = HashSet::new();
     let mut spawns_units = false;
     let object = object::File::parse(input).map_err(std::io::Error::other)?;
+    let format = crate::native_debug::object_format(object.format())?;
     let mut descriptors = BTreeSet::new();
     for symbol in object.symbols() {
         if symbol.is_definition()
             && symbol.is_global()
             && let Ok(name) = symbol.name_bytes()
+            && let name = link_name(format, name)
             && name.ends_with(b"$static")
         {
             descriptors.insert(name.to_vec());
@@ -247,7 +262,7 @@ fn referenced(input: &[u8]) -> std::io::Result<Referenced> {
             let symbol = object
                 .symbol_by_index(index)
                 .map_err(std::io::Error::other)?;
-            let name = symbol.name_bytes().map_err(std::io::Error::other)?;
+            let name = link_name(format, symbol.name_bytes().map_err(std::io::Error::other)?);
             spawns_units |= name == b"hirsel_core_spawn_unit";
             if let Some(item) = site_item_symbol(name)
                 && !items.contains(item)
@@ -352,9 +367,13 @@ fn absolute(object: &mut object::write::Object<'_>, name: String, value: u64) {
         scope: object::SymbolScope::Linkage,
         weak: false,
         section: object::write::SymbolSection::Absolute,
-        flags: object::SymbolFlags::Elf {
-            st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
-            st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
+        // A Mach-O linkage-scope symbol is private extern already.
+        flags: match object.format() {
+            object::BinaryFormat::MachO => object::SymbolFlags::None,
+            _ => object::SymbolFlags::Elf {
+                st_info: object::elf::SymbolInfo(object::elf::STB_GLOBAL.0 << 4),
+                st_other: object::elf::SymbolOther(object::elf::STV_HIDDEN.0),
+            },
         },
     });
 }

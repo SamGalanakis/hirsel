@@ -318,9 +318,12 @@ pub(crate) fn bind<'a>(
     let architecture = match hirsel_core_layout::Target::from_triple(target) {
         Some(hirsel_core_layout::Target::X86_64Linux) => object::Architecture::X86_64,
         Some(hirsel_core_layout::Target::Aarch64Linux) => object::Architecture::Aarch64,
-        // A dSYM-shaped Mach-O debug file (macOS slice S5).
+        // ld64 copies no DWARF into an image, so a Mach-O image's rows bind
+        // once it is linked ([`bind_linked`]), into its detached debug file.
         Some(hirsel_core_layout::Target::Aarch64Darwin) => {
-            return Err(format!("no Mach-O detached debug info for {target} yet"));
+            return Err(format!(
+                "a {target} image cannot embed DWARF; its detached debug file (a .dSYM for a release link) holds the rows"
+            ));
         }
         None => return Err(format!("no native debug target {target}")),
     };
@@ -378,14 +381,37 @@ pub(crate) fn bind_linked<'a>(
 ) -> Result<Vec<u8>, String> {
     use object::{Object as _, ObjectSymbol as _};
     let file = object::File::parse(image).map_err(error)?;
-    let symbols = file
-        .symbols()
-        .filter_map(|symbol| {
-            let name = symbol.name().ok()?;
-            (name.starts_with("__hirsel_debug_") && symbol.section_index().is_some())
-                .then_some((name, symbol.address()))
-        })
-        .collect::<FxHashMap<_, _>>();
+    let symbols = match super::detached::format(file.format()).map_err(error)? {
+        hirsel_core_layout::ObjectFormat::Elf => file
+            .symbols()
+            .filter_map(|symbol| {
+                let name = symbol.name().ok()?;
+                (name.starts_with("__hirsel_debug_") && symbol.section_index().is_some())
+                    .then_some((name, symbol.address()))
+            })
+            .collect::<FxHashMap<_, _>>(),
+        // ld64 places Mach-O code function by function, so a Mach-O code
+        // piece is a function, named by its symbol without the leading `_`.
+        // A name two local symbols share binds no rows.
+        hirsel_core_layout::ObjectFormat::MachO => {
+            let mut named = FxHashMap::default();
+            for symbol in file.symbols() {
+                let Some(name) = symbol.name().ok().and_then(|name| name.strip_prefix('_')) else {
+                    continue;
+                };
+                if symbol.section_index().is_some() {
+                    named
+                        .entry(name)
+                        .and_modify(|address| *address = None)
+                        .or_insert(Some(symbol.address()));
+                }
+            }
+            named
+                .into_iter()
+                .filter_map(|(name, address)| Some((name, address?)))
+                .collect()
+        }
+    };
     let products = products
         .into_iter()
         .map(|product| (&**product, Some(product)));

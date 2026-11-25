@@ -5,7 +5,7 @@
 use crate::native::Link;
 use crate::{PackageProduct, Store};
 use hirsel_core_ids::ContentHash;
-use hirsel_core_layout::Target;
+use hirsel_core_layout::{ObjectFormat, Os, Target};
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::io;
@@ -111,6 +111,7 @@ impl LinkRecipe {
                                     | "librt.so.1"
                                     | "libutil.so.1"
                                     | "libresolv.so.2"
+                                    | "libSystem.tbd"
                             )
                         )
             })
@@ -252,12 +253,15 @@ const INSTALLED_RECIPE_SCHEMA: u32 = 2;
 /// The link editor's place in an installation.
 pub(crate) const INSTALLED_LINKER: &str = "bin/ld.lld";
 
-fn installed_interpreter(target: &str) -> io::Result<&'static str> {
+/// The arguments an installed link starts with: an ELF link's interpreter, or
+/// the flavour ld.lld must be told first to link Mach-O. The second names the
+/// recipe in its identity.
+fn installed_prefix(target: &str) -> io::Result<[&'static str; 2]> {
     match Target::from_triple(target) {
-        Some(Target::X86_64Linux) => Ok("/lib64/ld-linux-x86-64.so.2"),
-        Some(Target::Aarch64Linux) => Ok("/lib/ld-linux-aarch64.so.1"),
-        // A Mach-O link has no interpreter; its recipe is macOS slice S5.
-        Some(Target::Aarch64Darwin) | None => Err(io::Error::other("no installed link target")),
+        Some(Target::X86_64Linux) => Ok(["-dynamic-linker", "/lib64/ld-linux-x86-64.so.2"]),
+        Some(Target::Aarch64Linux) => Ok(["-dynamic-linker", "/lib/ld-linux-aarch64.so.1"]),
+        Some(Target::Aarch64Darwin) => Ok(["-flavor", "darwin"]),
+        None => Err(io::Error::other("no installed link target")),
     }
 }
 
@@ -287,6 +291,13 @@ pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Resul
         nonshared: String,
         end: Vec<String>,
     }
+    /// A Mach-O row: the macOS floor and the text stubs of the system's
+    /// libraries; libSystem carries the C runtime and the unwinder.
+    #[derive(serde::Deserialize)]
+    struct DarwinTarget {
+        floor: String,
+        libraries: Vec<String>,
+    }
     // Rows differ in shape (Darwin's has no CRT files); read only the requested one.
     #[derive(serde::Deserialize)]
     struct KitManifest {
@@ -296,20 +307,6 @@ pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Resul
         .map_err(io::Error::other)?;
     let row = manifest.targets.get(target).cloned();
     let row = row.ok_or_else(|| io::Error::other("link kit has no installed target"))?;
-    let inputs = &serde_json::from_value::<KitTarget>(row).map_err(io::Error::other)?;
-    let mut args = [
-        "-pie",
-        "--eh-frame-hdr",
-        "--hash-style=gnu",
-        "-z",
-        "noexecstack",
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    match Target::from_triple(target) {
-        Some(Target::Aarch64Linux) => args.push("--fix-cortex-a53-843419".into()),
-        Some(Target::X86_64Linux | Target::Aarch64Darwin) | None => {}
-    }
     let placed = format!("link/kit/{target}");
     let copy = |path: &str| -> io::Result<String> {
         let source = kit.join(target).join(kit_path(path)?);
@@ -317,20 +314,57 @@ pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Resul
         crate::installation::install_file(&std::fs::read(source)?, &root.join(&relative), 0o644)?;
         Ok(relative)
     };
-    for path in &inputs.start {
-        args.push(copy(path)?);
-    }
-    args.push(INPUT_MARKER.into());
-    copy(&inputs.unwind)?;
-    args.push(copy(&inputs.unwind_script)?);
-    args.push("--as-needed".into());
-    for path in &inputs.libraries {
-        args.push(copy(path)?);
-    }
-    args.push(copy(&inputs.nonshared)?);
-    for path in &inputs.end {
-        args.push(copy(path)?);
-    }
+    let target_os = Target::from_triple(target)
+        .ok_or_else(|| io::Error::other("no installed link target"))?
+        .os();
+    let args = match target_os {
+        Os::Linux => {
+            let inputs = &serde_json::from_value::<KitTarget>(row).map_err(io::Error::other)?;
+            let mut args = [
+                "-pie",
+                "--eh-frame-hdr",
+                "--hash-style=gnu",
+                "-z",
+                "noexecstack",
+            ]
+            .map(str::to_owned)
+            .to_vec();
+            match Target::from_triple(target) {
+                Some(Target::Aarch64Linux) => args.push("--fix-cortex-a53-843419".into()),
+                Some(Target::X86_64Linux | Target::Aarch64Darwin) | None => {}
+            }
+            for path in &inputs.start {
+                args.push(copy(path)?);
+            }
+            args.push(INPUT_MARKER.into());
+            copy(&inputs.unwind)?;
+            args.push(copy(&inputs.unwind_script)?);
+            args.push("--as-needed".into());
+            for path in &inputs.libraries {
+                args.push(copy(path)?);
+            }
+            args.push(copy(&inputs.nonshared)?);
+            for path in &inputs.end {
+                args.push(copy(path)?);
+            }
+            args
+        }
+        // The image's minimum and SDK versions are both the floor; ld64
+        // signs an arm64 image ad hoc, which macOS requires to run it.
+        Os::Macos => {
+            let inputs = &serde_json::from_value::<DarwinTarget>(row).map_err(io::Error::other)?;
+            let mut args = ["-arch", "arm64", "-platform_version", "macos"]
+                .map(str::to_owned)
+                .to_vec();
+            args.extend([inputs.floor.clone(), inputs.floor.clone()]);
+            args.push("-adhoc_codesign".into());
+            args.push(INPUT_MARKER.into());
+            for path in &inputs.libraries {
+                args.push(copy(path)?);
+            }
+            args
+        }
+    };
     crate::installation::install_file(
         &std::fs::read(kit.join("ld.lld"))?,
         &root.join(INSTALLED_LINKER),
@@ -419,8 +453,8 @@ fn installed_toolchain(
             linker.display()
         )));
     }
-    let interpreter = installed_interpreter(target)?;
-    let mut args = vec!["-dynamic-linker".to_owned(), interpreter.to_owned()];
+    let [flag, interpreter] = installed_prefix(target)?;
+    let mut args = vec![flag.to_owned(), interpreter.to_owned()];
     for arg in &installed.args {
         if arg.starts_with("link/kit/") {
             let path = root.join(kit_path(arg)?);
@@ -433,8 +467,27 @@ fn installed_toolchain(
             args.push(arg.clone());
         }
     }
-    let closure = crate::link_closure::closure(&args, INPUT_MARKER, true)
-        .map_err(|error| refused(error.to_string()))?;
+    let format = Target::from_triple(target)
+        .ok_or_else(|| refused("names no target".into()))?
+        .object_format();
+    let closure = match format {
+        ObjectFormat::Elf => crate::link_closure::closure(&args, INPUT_MARKER, true)
+            .map_err(|error| refused(error.to_string()))?,
+        // ld64 searches nothing for this recipe: its files are its operands.
+        ObjectFormat::MachO => {
+            let files: Vec<PathBuf> = installed
+                .args
+                .iter()
+                .filter(|arg| arg.starts_with("link/kit/"))
+                .map(|arg| root.join(arg))
+                .collect();
+            crate::link_closure::Closure {
+                binaries: files.clone(),
+                files,
+                absent: Vec::new(),
+            }
+        }
+    };
     let mut paths = closure.files;
     paths.push(linker.clone());
     let real_root = root.canonicalize()?;

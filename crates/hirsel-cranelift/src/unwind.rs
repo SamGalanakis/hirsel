@@ -76,7 +76,11 @@ impl Unwind {
         Ok(())
     }
 
-    pub fn write(self, product: &mut ObjectProduct) -> Result<(), Error> {
+    pub fn write(
+        self,
+        product: &mut ObjectProduct,
+        format: hirsel_core_layout::ObjectFormat,
+    ) -> Result<(), Error> {
         if self.functions.is_empty() {
             return Ok(());
         }
@@ -99,10 +103,33 @@ impl Unwind {
             let symbol = product.function_symbol(self.functions[index]);
             // Weak function symbols can resolve to a definition in another object.
             // An FDE describes the code at this definition's section offset.
-            let (symbol, code_offset) = product
-                .object
-                .symbol_section_and_offset(symbol)
-                .expect("unwind function has a definition in this object");
+            let (symbol, code_offset) = match format {
+                hirsel_core_layout::ObjectFormat::Elf => product
+                    .object
+                    .symbol_section_and_offset(symbol)
+                    .expect("unwind function has a definition in this object"),
+                // A Mach-O section relocation stores its addend in place and
+                // resolves to the section's address, so the FDE names the
+                // definition by a local symbol of its own at the function.
+                hirsel_core_layout::ObjectFormat::MachO => {
+                    let defined = product.object.symbol(symbol);
+                    let (section, value) = match defined.section {
+                        object::write::SymbolSection::Section(section) => (section, defined.value),
+                        _ => return Err(backend("unwind function has no section")),
+                    };
+                    let local = product.object.add_symbol(object::write::Symbol {
+                        name: format!("hirsel.fde.{index}").into_bytes(),
+                        value,
+                        size: 0,
+                        kind: object::SymbolKind::Text,
+                        scope: object::SymbolScope::Compilation,
+                        weak: false,
+                        section: object::write::SymbolSection::Section(section),
+                        flags: object::SymbolFlags::None,
+                    });
+                    (local, 0)
+                }
+            };
             // ELF applies S + A - P, with P the address of the encoded field.
             product
                 .object

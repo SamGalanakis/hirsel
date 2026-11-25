@@ -14,7 +14,7 @@ hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 hirsel-core-ir = { path = "../hirsel-core-ir" }
 gimli = { version = "=0.33.0", default-features = false, features = ["read", "std"] }
-object = { version = "=0.40.0", default-features = false, features = ["elf", "read_core", "std", "write", "build"] }
+object = { version = "=0.40.0", default-features = false, features = ["elf", "macho", "read_core", "std", "write", "build"] }
 llvm-sys = { version = "=231.0.1", default-features = false, features = ["strict-versioning", "force-dynamic"] }
 
 [dev-dependencies]

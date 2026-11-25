@@ -465,6 +465,64 @@ fn llvm_unwind_covers_live_whole_split_and_reused_code() {
             }
         }
     }
+    // Mach-O: LLVM gives each function a compact unwind entry of its own
+    // (§5.4), never a DWARF-mode one, in an image the driver links.
+    let ir = "define i64 @hirsel_entry(ptr %p) {
+                %v = call i64 @hirsel_live(ptr %p)
+                ret i64 %v
+            }
+            define i64 @hirsel_live(ptr %p) noinline {
+                %v = load volatile i64, ptr %p
+                ret i64 %v
+            }
+            define i64 @hirsel_dead() { ret i64 7 }";
+    let exports = [
+        "hirsel_entry".into(),
+        "hirsel_live".into(),
+        "hirsel_dead".into(),
+    ];
+    let emitted = emit_program_parts(
+        &[Unit::Text(ir)],
+        &exports,
+        Target::Aarch64Darwin,
+        0,
+        &mut Parts::default(),
+        Lend::None,
+    )
+    .unwrap();
+    let objects = emitted
+        .objects
+        .iter()
+        .flat_map(|whole| {
+            core::split_native_object(whole, &[("", ContentHash::of_bytes(b"whole"))], false)
+                .unwrap()
+        })
+        .map(|object| object.bytes.into())
+        .collect();
+    let image = dir.path().join("darwin");
+    link_macho(&linker, objects, "_hirsel_entry", &image);
+    let bytes = std::fs::read(&image).unwrap();
+    macho_structure(&bytes);
+    let macho = object::File::parse(bytes.as_slice()).unwrap();
+    assert!(macho.symbol_by_name("_hirsel_dead").is_none());
+    let (entries, dump) = compact_unwind(linker.parent().unwrap(), &image);
+    let text = macho
+        .segments()
+        .find(|segment| object::ObjectSegment::name(segment) == Ok(Some("__TEXT")))
+        .map(|segment| object::ObjectSegment::address(&segment))
+        .unwrap();
+    for name in ["_hirsel_entry", "_hirsel_live"] {
+        let offset = macho.symbol_by_name(name).unwrap().address() - text;
+        // The entry covering a function is the last one at or before it:
+        // ld64 folds a run of functions with one encoding into its first.
+        let (_, encoding) = entries.range(..=offset).next_back().unwrap();
+        // UNWIND_ARM64_MODE_FRAMELESS or _FRAME (compact_unwind_encoding.h).
+        let mode = encoding & 0x0f00_0000;
+        assert!(
+            [0x0200_0000, 0x0400_0000].contains(&mode),
+            "{name}:\n{dump}"
+        );
+    }
 }
 
 #[test]
@@ -596,8 +654,8 @@ fn cranelift_unwind_links_into_pie_from_whole_and_cached_objects() {
     use gimli::{BaseAddresses, EhFrame, LittleEndian, UnwindSection as _};
     use hirsel_core_ids::ContentHash;
     use hirsel_core_ir::text;
-    use hirsel_core_layout::Target;
-    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    use hirsel_core_layout::{ObjectFormat, Target};
+    use object::{Object as _, ObjectSection as _, ObjectSegment as _, ObjectSymbol as _};
     use std::{path::PathBuf, process::Command};
 
     let dir = tempfile::tempdir().unwrap();
@@ -607,9 +665,21 @@ fn cranelift_unwind_links_into_pie_from_whole_and_cached_objects() {
     let live = "fn f0 = n0 g0 {\nb0():\n  v0: u64 = const 11\n  return v0\n}\n";
     let dead = "fn f1 = n1 g0 {\nb0():\n  v0: u64 = const 29\n  return v0\n}\n";
     let whole = text::parse(&format!("{header}{live}{dead}")).unwrap();
-    let live_name = whole.identity(whole.functions[0].instance).symbol();
-    let dead_name = whole.identity(whole.functions[1].instance).symbol();
-    for target in [Target::X86_64Linux, Target::Aarch64Linux] {
+    for target in [
+        Target::X86_64Linux,
+        Target::Aarch64Linux,
+        Target::Aarch64Darwin,
+    ] {
+        // The linked image names a C symbol with the target's prefix.
+        let linked_name = |instance| {
+            format!(
+                "{}{}",
+                target.symbol_prefix(),
+                whole.identity(instance).symbol()
+            )
+        };
+        let live_name = linked_name(whole.functions[0].instance);
+        let dead_name = linked_name(whole.functions[1].instance);
         let options = hirsel_cranelift::core::Options {
             target: target.triple(),
             optimize: false,
@@ -648,48 +718,275 @@ fn cranelift_unwind_links_into_pie_from_whole_and_cached_objects() {
                 .collect::<Vec<_>>();
             for paths in [cold, warm] {
                 let executable = dir.path().join("image");
-                let linked = Command::new(bin.join("ld.lld"))
-                    .args([
-                        "-pie",
-                        "--gc-sections",
-                        "--eh-frame-hdr",
-                        "-e",
+                match target.object_format() {
+                    ObjectFormat::Elf => {
+                        let linked = Command::new(bin.join("ld.lld"))
+                            .args(["-pie", "--gc-sections", "--eh-frame-hdr"])
+                            .args(["-e", &live_name, "-o"])
+                            .arg(&executable)
+                            .args(paths)
+                            .output()
+                            .unwrap();
+                        assert!(
+                            linked.status.success(),
+                            "{}",
+                            String::from_utf8_lossy(&linked.stderr)
+                        );
+                    }
+                    // The driver's own Mach-O link of its BSD bundle.
+                    ObjectFormat::MachO => link_macho(
+                        &bin.join("ld.lld"),
+                        paths
+                            .iter()
+                            .map(|path| std::fs::read(path).unwrap().into())
+                            .collect(),
                         &live_name,
-                        "-o",
-                    ])
-                    .arg(&executable)
-                    .args(paths)
-                    .output()
-                    .unwrap();
-                assert!(
-                    linked.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&linked.stderr)
+                        &executable,
+                    ),
+                }
+                let bytes = std::fs::read(&executable).unwrap();
+                let image = object::File::parse(bytes.as_slice()).unwrap();
+                assert_eq!(
+                    image.kind(),
+                    match target.object_format() {
+                        // A PIE is ET_DYN; a Mach-O executable is MH_EXECUTE.
+                        ObjectFormat::Elf => object::ObjectKind::Dynamic,
+                        ObjectFormat::MachO => object::ObjectKind::Executable,
+                    }
                 );
-                let bytes = std::fs::read(executable).unwrap();
-                let elf = object::File::parse(bytes.as_slice()).unwrap();
-                assert_eq!(elf.kind(), object::ObjectKind::Dynamic);
-                let frame = elf.section_by_name(".eh_frame").unwrap();
+                let frame = image
+                    .section_by_name(match target.object_format() {
+                        ObjectFormat::Elf => ".eh_frame",
+                        ObjectFormat::MachO => "__eh_frame",
+                    })
+                    .unwrap();
                 let base = BaseAddresses::default().set_eh_frame(frame.address());
                 let eh = EhFrame::new(frame.data().unwrap(), LittleEndian);
-                assert_eq!(elf.symbol_by_name(&dead_name).is_none(), split);
-                let names: &[&str] = if split {
+                // ELF collects whole sections; Mach-O objects are split into
+                // atoms at every symbol, so the unreferenced one goes either way.
+                let stripped = match target.object_format() {
+                    ObjectFormat::Elf => split,
+                    ObjectFormat::MachO => true,
+                };
+                assert_eq!(image.symbol_by_name(&dead_name).is_none(), stripped);
+                let names: &[&str] = if stripped {
                     &[&live_name]
                 } else {
                     &[&live_name, &dead_name]
                 };
+                let text = image.section_by_name(match target.object_format() {
+                    ObjectFormat::Elf => ".text",
+                    ObjectFormat::MachO => "__text",
+                });
                 for name in names {
-                    let symbol = elf.symbol_by_name(name).unwrap();
+                    let symbol = image.symbol_by_name(name).unwrap();
+                    // Mach-O records no symbol sizes; a function runs to the
+                    // next symbol or the end of its section.
+                    let size = match target.object_format() {
+                        ObjectFormat::Elf => symbol.size(),
+                        ObjectFormat::MachO => {
+                            let text = text.as_ref().unwrap();
+                            image
+                                .symbols()
+                                .map(|other| other.address())
+                                .filter(|&address| address > symbol.address())
+                                .min()
+                                .unwrap_or(text.address() + text.size())
+                                .min(text.address() + text.size())
+                                - symbol.address()
+                        }
+                    };
                     let fde = eh
                         .fde_for_address(&base, symbol.address(), EhFrame::cie_from_offset)
                         .unwrap();
                     assert_eq!(
                         (fde.initial_address(), fde.len()),
-                        (symbol.address(), symbol.size())
+                        (symbol.address(), size),
+                        "{target:?} {name}"
                     );
                     assert_eq!(fde.cie().fde_address_encoding().unwrap().0, 0x1b);
+                }
+                match target.object_format() {
+                    ObjectFormat::Elf => {}
+                    ObjectFormat::MachO => macho_structure(&bytes),
+                }
+                match target.object_format() {
+                    ObjectFormat::Elf => {}
+                    // The §5.4 oracle: lld gives each function a DWARF-mode
+                    // compact unwind entry (mode 3) whose low 24 bits are the
+                    // offset of that function's FDE in __eh_frame.
+                    ObjectFormat::MachO => {
+                        let (entries, dump) = compact_unwind(&bin, &executable);
+                        let text_base = image
+                            .segments()
+                            .find(|segment| segment.name() == Ok(Some("__TEXT")))
+                            .unwrap()
+                            .address();
+                        for name in names {
+                            let address = image.symbol_by_name(name).unwrap().address();
+                            let encoding = entries[&(address - text_base)];
+                            assert_eq!(encoding & 0x0f00_0000, 0x0300_0000, "{name}:\n{dump}");
+                            let fde = eh
+                                .fde_from_offset(
+                                    &base,
+                                    gimli::EhFrameOffset((encoding & 0x00ff_ffff) as usize),
+                                    EhFrame::cie_from_offset,
+                                )
+                                .unwrap();
+                            assert_eq!(fde.initial_address(), address, "{name}");
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+/// Each function's compact unwind encoding in the Mach-O image at `image`,
+/// by its offset from `__TEXT`, as `llvm-objdump --unwind-info` prints the
+/// second-level rows ("[k]: function offset=F, encoding[i]=E" or
+/// "encoding=E"); and the dump.
+fn compact_unwind(
+    bin: &std::path::Path,
+    image: &std::path::Path,
+) -> (std::collections::BTreeMap<u64, u64>, String) {
+    let dump = std::process::Command::new(bin.join("llvm-objdump"))
+        .args(["--macho", "--unwind-info"])
+        .arg(image)
+        .output()
+        .unwrap();
+    let dump = String::from_utf8(dump.stdout).unwrap();
+    let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).unwrap();
+    let common = dump
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("encoding["))
+        .map(|rest| hex(rest.split_once("]: ").unwrap().1))
+        .collect::<Vec<_>>();
+    let entries = dump
+        .lines()
+        .filter_map(|line| {
+            let (_, row) = line.split_once("]: function offset=")?;
+            let (function, encoding) = row.split_once(", encoding")?;
+            let encoding = match encoding.strip_prefix('=') {
+                Some(direct) => hex(direct),
+                None => {
+                    common
+                        [hex(encoding.trim_start_matches('[').split_once(']').unwrap().0) as usize]
+                }
+            };
+            Some((hex(function), encoding))
+        })
+        .collect();
+    (entries, dump)
+}
+
+/// Link `objects` into `executable` with the driver's Mach-O link of its
+/// bundle, with no libSystem, entering at `entry`.
+fn link_macho(
+    linker: &std::path::Path,
+    objects: Vec<std::sync::Arc<[u8]>>,
+    entry: &str,
+    executable: &std::path::Path,
+) {
+    use hirsel_core_layout::{ObjectFormat, Target};
+    let held = crate::native::link_input::Bundle::of(&objects, ObjectFormat::MachO).unwrap();
+    let bundle = held.path();
+    let recipe = crate::tool_inputs::LinkRecipe {
+        schema: 0,
+        target: Target::Aarch64Darwin.triple().into(),
+        linker: linker.to_owned(),
+        args: ["-flavor", "darwin", "-arch", "arm64", "-platform_version"]
+            .into_iter()
+            .chain(["macos", "26.0", "26.0", "-adhoc_codesign", "-e"])
+            .chain([entry, crate::tool_inputs::INPUT_MARKER])
+            .map(str::to_owned)
+            .collect(),
+        files: Vec::new(),
+        source_files: Vec::new(),
+        absent: Vec::new(),
+        identity: hirsel_core_ids::ContentHash::of_bytes(b"recipe"),
+    };
+    crate::native::direct_link(
+        &recipe,
+        std::slice::from_ref(&bundle),
+        Some(&bundle),
+        executable,
+        true,
+        false,
+        false,
+    )
+    .unwrap();
+}
+
+/// The §8.1 structure laws of a Mach-O arm64 executable, from Apple's
+/// <mach-o/loader.h>: a 64-bit arm64 MH_EXECUTE header, a macOS
+/// LC_BUILD_VERSION whose minimum is the 26.0 floor, an LC_UUID (a release
+/// link's), an ad hoc LC_CODE_SIGNATURE, and no library but the system's; and its dSYM ([`super::dsym`]) is an MH_DSYM of the
+/// same arm64 CPU carrying the image's UUID.
+fn macho_structure(bytes: &[u8]) {
+    use object::{Object as _, ObjectSection as _};
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    // MH_MAGIC_64, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, MH_EXECUTE.
+    assert_eq!(
+        [word(0), word(4), word(8), word(12)],
+        [0xfeed_facf, 0x0100_000c, 0, 2]
+    );
+    let (mut build, mut uuid, mut signed) = (None, None, false);
+    let mut at = 32;
+    for _ in 0..word(16) {
+        match word(at) {
+            // LC_BUILD_VERSION: platform, minos.
+            0x32 => build = Some((word(at + 8), word(at + 12))),
+            0x1b => uuid = Some(<[u8; 16]>::try_from(&bytes[at + 8..at + 24]).unwrap()),
+            // LC_CODE_SIGNATURE: dataoff, datasize.
+            0x1d => signed = word(at + 12) > 0,
+            // LC_LOAD_DYLIB, _WEAK_DYLIB, _REEXPORT_DYLIB: only the system's.
+            0xc | 0x8000_0018 | 0x8000_001f => {
+                let name = &bytes[at + word(at + 8) as usize..at + word(at + 4) as usize];
+                let name = std::str::from_utf8(name).unwrap().trim_end_matches('\0');
+                assert!(
+                    [
+                        "/usr/lib/libSystem.B.dylib",
+                        "/System/Library/Frameworks/Security.framework/Versions/A/Security",
+                        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+                    ]
+                    .contains(&name),
+                    "{name}"
+                );
+            }
+            _ => {}
+        }
+        at += word(at + 4) as usize;
+    }
+    // PLATFORM_MACOS; 26.0 as xxxx.yy.zz nibbles.
+    assert_eq!(build, Some((1, 26 << 16)));
+    assert!(signed, "no LC_CODE_SIGNATURE");
+    let uuid = uuid.expect("no LC_UUID");
+    let dsym = super::dsym::file(bytes, &elf_debug_object()).unwrap();
+    let dword = |at: usize| u32::from_le_bytes(dsym[at..at + 4].try_into().unwrap());
+    // MH_DSYM of the image's CPU.
+    assert_eq!(
+        [dword(0), dword(4), dword(12)],
+        [0xfeed_facf, 0x0100_000c, 0xa]
+    );
+    let parsed = object::File::parse(dsym.as_slice()).unwrap();
+    assert_eq!(parsed.mach_uuid().unwrap(), Some(uuid));
+    let line = parsed.section_by_name("__debug_line").unwrap();
+    assert_eq!(line.data().unwrap(), b"line rows");
+}
+
+/// A detached debug object with one `.debug_line` section.
+fn elf_debug_object() -> Vec<u8> {
+    let mut object = object::write::Object::new(
+        object::BinaryFormat::Elf,
+        object::Architecture::Aarch64,
+        object::Endianness::Little,
+    );
+    let section = object.add_section(
+        Vec::new(),
+        b".debug_line".to_vec(),
+        object::SectionKind::Debug,
+    );
+    object.append_section_data(section, b"line rows", 1);
+    object.write().unwrap()
 }

@@ -88,6 +88,8 @@ pub opaque type Db {
     stream_sweep_after: Option[StreamSweepCursor],
     // Index drift seen since this open (§I.3 step one), one entry per index.
     drift: List[IndexDrift],
+    // `attention_mark`'s own part (store-attention.hirsel).
+    attention_seq: u64,
 }
 
 pub type Branch {
@@ -605,7 +607,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None, drift: list.new())
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None, drift: list.new(), attention_seq: 0)
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -2126,10 +2128,6 @@ fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -
             }
         }
     }
-}
-
-fn named(s: String) -> Result[String, Error] {
-    Ok(string.from(s))
 }
 
 fn table_key(name: String) -> Result[Bytes, Error] {

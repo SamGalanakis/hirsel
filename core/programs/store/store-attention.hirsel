@@ -38,37 +38,84 @@ fn memory_page_images(db: Db) -> u64 {
 /// An index whose write found an entry missing that the row's old value
 /// implies: the index and its table disagree (§I.3). `count` is the number of
 /// writes since this open that found it so. Each such write fails with
-/// `Drift(name)`, and the index is demoted until it is rebuilt (§1.2).
-pub type IndexDrift {
+/// `Drift(name)`. `demoted` is the number of times since this open that the
+/// writer demoted the index for it, to Backfilling(None) until it is rebuilt
+/// (§1.2). A drift found while the index was already Backfilling(None), or
+/// on a branch, demotes nothing, so `demoted` can be less than `count`.
+pub type IndexDrift: shareable + send {
     table: u32,
     id: u32,
     index: String,
-    count: u64
+    count: u64,
+    demoted: u64
+}
+
+/// One declared index on main's head and its build state, read from its
+/// catalog record.
+pub type IndexReport: shareable + send {
+    table: u32,
+    id: u32,
+    index: String,
+    state: IndexState
 }
 
 /// Conditions a working store reports to its operator (§II.3), unlike
 /// `Health`, which signals once when the store stops working.
 ///
+/// `indexes` lists every index on main's head in catalog order (table id,
+/// then name), with its state.
+///
 /// `reclaim_failures` counts Bucket reclaim passes since this open that failed
 /// with an error other than a fence. Each failed pass stays pending and runs
-/// again on a later journal turn (§II.4); it is 0 off Bucket.
-pub type Attention {
+/// again on a later journal turn (§II.4); `reclaim_pending` is true from a
+/// failure until a pass succeeds. Both are 0 and false off Bucket.
+pub type Attention: shareable + send {
+    indexes: List[IndexReport],
     drift: List[IndexDrift],
-    reclaim_failures: u64
+    reclaim_failures: u64,
+    reclaim_pending: bool
 }
 
 pub fn attention(db: Db) -> Result[Attention, Error] {
     let mut drift: List[IndexDrift] = list.new()
     capacity(list.try_reserve(mut drift, list.len(db.drift)))?
     for seen in db.drift {
-        list.push(mut drift, IndexDrift(table: seen.table, id: seen.id, index: named(seen.index)?, count: seen.count))
+        list.push(mut drift, IndexDrift(table: seen.table, id: seen.id, index: named(seen.index)?, count: seen.count, demoted: seen.demoted))
     }
-    Ok(Attention(drift: take drift, reclaim_failures: reclaim_failures(db)))
+    let reclaims = reclaim_state(db)
+    Ok(Attention(indexes: index_reports(db)?, drift: take drift, reclaim_failures: reclaims.count, reclaim_pending: reclaims.pending))
+}
+
+// `Db.attention_seq` moves on every schema commit and every drift or demotion
+// counted; the reclaim counters come from the journal task (§II.3).
+/// Changes whenever `attention(db)` may answer differently, so a caller can
+/// read it often and call `attention` only on a change. Equal marks give
+/// equal answers.
+pub fn attention_mark(db: Db) -> (u64, u64, bool) {
+    let reclaims = reclaim_state(db)
+    (db.attention_seq, reclaims.count, reclaims.pending)
+}
+
+fn index_reports(db: Db) -> Result[List[IndexReport], Error] {
+    let mut first_key: Bytes = list.new()
+    list.push(mut first_key, 2u8)
+    let mut end_key: Bytes = list.new()
+    list.push(mut end_key, 3u8)
+    let mut out: List[IndexReport] = list.new()
+    let mut records = byte_cursor(db.heads[0].roots.catalog, Included(take first_key), end_key)?
+    while let Some((take key, raw)) = next_bytes(mut records)? {
+        let record = decode_catalog(raw)?
+        let state = copied_state(record.state)?
+        capacity(list.try_reserve(mut out, 1))?
+        list.push(mut out, IndexReport(table: record.owner, id: record.id, index: declaration_index_name(key)?, state: take state))
+    }
+    Ok(take out)
 }
 
 // Counts the drift a staged draft saw, by index, under the names its base
 // catalog gives them.
 fn count_drift(mut db: Db, catalog: PageTree, seen: List[(u32, u32)]) -> Result[(), Error] {
+    db.attention_seq = int.saturating_add(db.attention_seq, 1)
     for (owner, id) in seen {
         let mut found = false
         for at in 0u64 .. list.len(db.drift) {
@@ -81,7 +128,7 @@ fn count_drift(mut db: Db, catalog: PageTree, seen: List[(u32, u32)]) -> Result[
         if !found {
             let name = find_index_name(catalog, owner, id)?
             capacity(list.try_reserve(mut db.drift, 1))?
-            list.push(mut db.drift, IndexDrift(table: owner, id: id, index: take name, count: 1))
+            list.push(mut db.drift, IndexDrift(table: owner, id: id, index: take name, count: 1, demoted: 0))
         }
     }
     Ok(())
@@ -96,4 +143,23 @@ fn trip_drift(mut db: Db, i: u64, seen: List[(u32, u32)]) -> Result[(), Error] w
         return Ok(())
     }
     demote_drifted(mut db, seen)
+}
+
+// Counts one demotion for each index a drift demoted; count_drift has
+// already made its entry.
+fn count_demotions(mut db: Db, demoted: List[(u32, u32)]) -> Result[(), Error] {
+    db.attention_seq = int.saturating_add(db.attention_seq, 1)
+    for (owner, id) in demoted {
+        for at in 0u64 .. list.len(db.drift) {
+            if db.drift[at].table == owner && db.drift[at].id == id {
+                db.drift[at].demoted = int.saturating_add(db.drift[at].demoted, 1)
+                break
+            }
+        }
+    }
+    Ok(())
+}
+
+fn named(s: String) -> Result[String, Error] {
+    Ok(string.from(s))
 }

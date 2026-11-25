@@ -152,7 +152,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         Ok((journal_channels(int.widen(options.group_commits)), take startup, take live_health, take signal, take idle))
     })?
     let reclaims_state = disk_allocation(scoped fn() -> Result[Latest[ReclaimFailures], Error] {
-        Ok(latest.new(arc.new(ReclaimFailures(count: 0))))
+        Ok(latest.new(arc.new(ReclaimFailures(count: 0, pending: false))))
     })?
     let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, ..) = take channels
     let idle_ns = int.saturating_mul(options.head_poll_ms, 1000000)

@@ -696,10 +696,27 @@ fn lix_entries(db: Db, id: u32) -> Result[List[Bytes], Error] {
     Ok(take out)
 }
 
-// Whether `ix` is Public, after checking that it serves reads exactly then.
-fn lix_serves[J, K, V, P](db: Db, ix: Index[J, K, V, P]) -> Result[bool, Error] waits {
-    let record = catalog_entry_in(db.heads[0].roots.catalog, ix.catalog_key)?
-    let public = match record.state {
+// The state `attention` reports for the index named `name`; an operator
+// reads it there (§II.3).
+fn lix_state(db: Db, name: String) -> Result[IndexState, Error] {
+    let seen = attention(db)?
+    let mut found: Option[IndexState] = None
+    for report in seen.indexes {
+        if report.index == name {
+            if let Some(_) = found { fail("L-IX: attention reports an index twice") }
+            found = Some(copied_state(report.state)?)
+        }
+    }
+    match take found {
+        Some(take state) => Ok(take state),
+        None => fail("L-IX: attention omits a declared index"),
+    }
+}
+
+// Whether `ix` is Public, as attention reports it, after checking that it
+// serves reads exactly then.
+fn lix_serves[J, K, V, P](db: Db, ix: Index[J, K, V, P], name: String) -> Result[bool, Error] waits {
+    let public = match lix_state(db, name)? {
         Public => true,
         _ => false,
     }
@@ -753,7 +770,7 @@ fn lix_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
     rebuild_index(mut db, ix)?
     let mut state = seed
     let mut rounds = 0u64
-    while !lix_serves(db, ix)? {
+    while !lix_serves(db, ix, "by_v")? {
         rounds += 1
         if rounds > 2000 {
             fail("L-IX: the build made no progress")
@@ -810,12 +827,25 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
         return Error(MigrationFault)
     }
     rebuild_index(mut db, ix)?
-    if let Some(d) = duplicate {
-        lix_write(mut db, t, 0, Some(d))?
+    if let Some(d) = duplicate { lix_write(mut db, t, 0, Some(d))? }
+    if let Backfilling(None) = lix_state(db, "unique")? {} else { fail("L-IX: a rebuilt index reports Backfilling before its first chunk") }
+    // The first chunk reads rows 0 to 4095: it fails on a pair inside it,
+    // ends the build when no row follows, and otherwise leaves the cursor
+    // at row 4095, the last key it covered.
+    let _ = index_build_step(mut db, INDEX_CHUNK)?
+    let first_chunk = match lix_state(db, "unique")? {
+        Public => 0u64,
+        Backfilling(Some(cursor)) => if list.len(cursor) == 8 && list.word_be(cursor, 0) == INDEX_CHUNK - 1 { 1u64 } else { 9u64 },
+        Failed(_, _) => 2u64,
+        Backfilling(None) => 9u64,
     }
+    let expected_chunk = match duplicate {
+        Some(d) if d < INDEX_CHUNK => 2u64,
+        _ => if rows > INDEX_CHUNK { 1u64 } else { 0u64 },
+    }
+    if first_chunk != expected_chunk { fail("L-IX: attention reports the first chunk's state and cursor") }
     while let Some(_) = index_build_step(mut db, INDEX_CHUNK)? {}
-    let record = catalog_entry_in(db.heads[0].roots.catalog, ix.catalog_key)?
-    let failed = match record.state {
+    let failed = match lix_state(db, "unique")? {
         Failed(first, second) => {
             let owner: u64 = list.word_be(first, 0)
             let other: u64 = list.word_be(second, 0)
@@ -827,12 +857,8 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
         Some(d) => Some((0u64, d)),
         None => None,
     }
-    if failed != expected_failure {
-        fail("L-IX: a duplicate fails the build at the row that repeats it")
-    }
-    if lix_serves(db, ix)? == (duplicate != None) {
-        fail("L-IX: a failed index refuses reads")
-    }
+    if failed != expected_failure { fail("L-IX: a duplicate fails the build at the row that repeats it") }
+    if lix_serves(db, ix, "unique")? == (duplicate != None) { fail("L-IX: a failed index refuses reads") }
     if let None = duplicate {
         let found = lix_entries(db, ix.id)?
         if list.len(found) != rows {
@@ -916,12 +942,12 @@ fn index_build_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Er
 fn index_build_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
     let (take opened, t, take ix) = index_build_open(d, c, r, tasks, false)?
     let mut db = take opened
-    let mut good = lix_serves(db, ix)? || !required_new
+    let mut good = lix_serves(db, ix, "by_v")? || !required_new
     for k in 0u64 .. 96 {
         lix_write(mut db, t, k, Some(k + 2000))?
     }
     while let Some(_) = index_build_step(mut db, 16)? {}
-    good = good && lix_serves(db, ix)?
+    good = good && lix_serves(db, ix, "by_v")?
     let mut expected: List[Bytes] = list.new()
     for k in 0u64 .. 96 {
         let mut logical = prefix(ix.id)?

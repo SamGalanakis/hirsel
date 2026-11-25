@@ -173,11 +173,11 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     result.unwrap(channel.send(head_to, HeadContinue))
     // The serving loop dispatches due rows before it receives HeadClose.
     result.unwrap(channel.send(head_to, HeadClose))
-    if let Ok(Settled) = channel.receive(events) {} else {
+    if let Ok(Settled) = next_life_event(events) {} else {
         fail("L40: serving head did not settle")
     }
     result.unwrap(channel.send(head_to, HeadFinish))
-    if let Ok(HeadEnded(Ok(None))) = channel.receive(events) {} else {
+    if let Ok(HeadEnded(Ok(None))) = next_life_event(events) {} else {
         fail("L40: serving head did not close")
     }
     result.unwrap(task.join(take server))
@@ -188,5 +188,17 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
         Ok(())
     } else {
         fail("L40: Gone did not survive reopen")
+    }
+}
+
+// The head's next life event, past the store sections it reports to Status
+// (RUNNER-SPEC CHANGES-v2.75), which this law does not observe.
+fn next_life_event(events: Receiver[LifeEvent]) -> Result[LifeEvent, Closed[()]] waits {
+    loop {
+        match channel.receive(events) {
+            Ok(StoreAttention(_)) => continue,
+            Ok(take other) => return Ok(take other),
+            Error(e) => return Error(e),
+        }
     }
 }

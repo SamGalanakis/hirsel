@@ -454,6 +454,11 @@ startup, or `Forced(n)` at the deadline. With `PlaceConfig.idle = Some(ms)`,
 the runner starts a drain with admission closed after both supervisors
 confirm the place has been idle for the interval. The place serves `GET /hirsel/status`, a raw route that answers 200
 only when `Ready`, with the launch identity and `release_digest`.
+`Status.store` is the store's `store.attention` answer: each index with its
+state (`Backfilling(cursor)`, `Public` or `Failed(first, second)`), each index's
+drift and demotions since the open, and Bucket reclaim failures and whether one is
+pending. The head refreshes it between its turns when it changes; it is empty
+until the head first serves. The status route does not carry it.
 The `fixture` module starts a place through `operate` on a memory or temporary
 store, with typed calls whose replies are durable, `seen_at` for the first
 batch at or after a version, relative bounds on the place's clock, and release

@@ -93,7 +93,8 @@ pub type Status: shareable + send {
     activation: u64,
     store_id: (u64, u64),
     retain_from: u64,
-    addr: Option[Addr]
+    addr: Option[Addr],
+    store: store.Attention
 }
 
 pub type Stop: codec + send {
@@ -169,7 +170,7 @@ fn launch_target(a: Args) -> String {
 
 pub fn status_root() -> Result[Latest[Status], Capacity] {
     let launch = launch_env()
-    let initial = Status(phase: Starting(Recovering), digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, release: list.new(), activation: 0u64, store_id: (0u64, 0u64), retain_from: 0u64, addr: None)
+    let initial = Status(phase: Starting(Recovering), digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, release: list.new(), activation: 0u64, store_id: (0u64, 0u64), retain_from: 0u64, addr: None, store: store.Attention(indexes: list.new(), drift: list.new(), reclaim_failures: 0u64, reclaim_pending: false))
     let shared = arc.new(take initial)
     Ok(latest.new(take shared))
 }
@@ -245,10 +246,6 @@ fn publish_phase(status: Latest[Status], watch: Option[Sender[Phase]], mut curre
         let _ = channel.try_send(to, phase)
     }
     Ok(())
-}
-
-fn copy_status(value: Status) -> Status {
-    clone(value)
 }
 
 fn status_watch(take watch: Option[Sender[Receiver[Phase]]]) -> Result[Option[Sender[Phase]], StartError] {
@@ -594,6 +591,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
                     let _ = channel.try_send(head_to, HeadContinue)
                 }
             },
+            StoreAttention(take seen) => publish_store(status, mut current, take seen)?,
             Published(take pub_to) => if place_stopping(phase) {
                 let _ = channel.try_send(head_to, HeadClose)
             } else {
@@ -1840,7 +1838,7 @@ type DrainWindow: shareable + send {
     deadline: u64
 }
 
-type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64), u64, Bytes) | Published(Sender[PubIn]) | ServePrepared | StoreAccepted | Settled | HeadEnded(Result[Option[u64], StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError]) | WritesPaused | WritesResumed | RetirePlace | IdleDeadline(u64) | HeadIdle(bool) | ServeIdle(bool) | HeadIdleChecked(Option[Sender[()]]) | ServeIdleChecked(Option[Sender[()]])
+type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64), u64, Bytes) | StoreAttention(store.Attention) | Published(Sender[PubIn]) | ServePrepared | StoreAccepted | Settled | HeadEnded(Result[Option[u64], StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError]) | WritesPaused | WritesResumed | RetirePlace | IdleDeadline(u64) | HeadIdle(bool) | ServeIdle(bool) | HeadIdleChecked(Option[Sender[()]]) | ServeIdleChecked(Option[Sender[()]])
 
 // The owner parks while operate accepts or declines its idle vote. The sender
 // stays with operate until the drain window is published or the vote is refused.

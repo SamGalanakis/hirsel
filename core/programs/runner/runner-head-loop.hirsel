@@ -8,8 +8,10 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
     let mut idle = false
     // The forwarded request channel closed (InboxEnded); the head ends once idle.
     let mut ended = false
+    let mut reported: Option[(u64, u64, bool)] = None
     loop {
         check_store_health(head.db)?
+        report_attention(head.db, drain, mut reported)
         if head.cut { return Ok(false) }
         if let Some(control) = drain {
             if let Ok(()) = channel.try_receive(control.finish) { release_held(mut head, true)?; return Ok(false) }
@@ -196,4 +198,32 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
         if ended && list.len(head.parked) == 0u64 { return Ok(false) }
         match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(false) }
     }
+}
+
+// Sends the store's attention to Status when its mark moved since the last
+// report (RUNNER-SPEC CHANGES-v2.75). An answer that cannot be allocated keeps the last
+// one, and the next turn tries again.
+fn report_attention(db: store.Db, drain: Option[HeadDrain], mut reported: Option[(u64, u64, bool)]) {
+    let Some(control) = view drain else { return }
+    let mark = store.attention_mark(db)
+    if reported == Some(mark) { return }
+    if let Ok(take seen) = store.attention(db) {
+        if let Ok(()) = channel.try_send(control.events, StoreAttention(take seen)) {
+            reported = Some(mark)
+        }
+    }
+}
+
+// `Status.store` is what the store reports to its operator (`store.attention`):
+// each index's state, drift and demotions, and Bucket reclaim failures. It is
+// empty until the head's first turn. Republished at the current phase, so the
+// watch channel gets no send.
+fn publish_store(status: Latest[Status], mut current: Status, take seen: store.Attention) -> Result[(), StartError] {
+    current.store = take seen
+    let now = current.phase
+    publish_phase(status, None, mut current, now)
+}
+
+fn copy_status(value: Status) -> Status {
+    clone(value)
 }

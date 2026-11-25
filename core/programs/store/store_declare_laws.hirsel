@@ -634,6 +634,18 @@ fn test_migration_preview_conflict(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     Ok(())
 }
 
+// What attention reports for the one index "bucket": 0 for Public, 1 for
+// Backfilling(None), as a demotion leaves it, and 2 for anything else.
+fn bucket_reported(db: Db) -> Result[u8, Error] {
+    let reported = attention(db)?.indexes
+    if list.len(reported) != 1 || reported[0].index != "bucket" { return Ok(2) }
+    Ok(match reported[0].state {
+        Public => 0u8,
+        Backfilling(None) => 1u8,
+        _ => 2u8,
+    })
+}
+
 // §I.3: a raw delete removes row 7's one "bucket" entry (6 % 4 = 2); writing
 // 5 moves the row to bucket 1, so the old entry's remove finds no target. The
 // write fails with Drift, attention counts it, and the index is demoted:
@@ -675,14 +687,14 @@ fn test_index_drift_counted(c: Clock) -> Result[(), Error] waits {
         },
         _ => return Error(Foreign),
     }
-    if list.len(attention(db)?.drift) != 0 { return Error(Foreign) }
+    if list.len(attention(db)?.drift) != 0 || bucket_reported(db)? != 0 { return Error(Foreign) }
     let moved = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] { put(mut tx, t, 7, 5) })?
     match take moved {
         Failed(Drift(name)) if name == "bucket" => (),
         _ => return Error(Foreign),
     }
     let seen = attention(db)?.drift
-    if list.len(seen) != 1 || seen[0].index != "bucket" || seen[0].count != 1 || typed_value(snapshot(db), rows, 7) != 6 {
+    if list.len(seen) != 1 || seen[0].index != "bucket" || seen[0].count != 1 || seen[0].demoted != 1 || typed_value(snapshot(db), rows, 7) != 6 || bucket_reported(db)? != 1 {
         return Error(Foreign)
     }
     match find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Unbounded, Unbounded) {
@@ -690,6 +702,8 @@ fn test_index_drift_counted(c: Clock) -> Result[(), Error] waits {
         _ => return Error(Foreign),
     }
     while let Some(_) = index_build_step(mut db, 16)? {}
+    let rebuilt_seen = attention(db)?.drift
+    if bucket_reported(db)? != 0 || list.len(rebuilt_seen) != 1 || rebuilt_seen[0].count != 1 || rebuilt_seen[0].demoted != 1 { return Error(Foreign) }
     if !typed_put(mut db, rows, 7, 5) || typed_value(snapshot(db), rows, 7) != 5 { return Error(Foreign) }
     let mut rebuilt = find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Included(1), Included(1))?
     if next(law_reader(rebuilt.capture), mut rebuilt)? != Some((7u64, 5u64)) { return Error(Foreign) }

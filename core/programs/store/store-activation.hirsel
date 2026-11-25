@@ -255,6 +255,7 @@ fn publish_schema_plan_binding(mut db: Db, take prepared: SchemaPlan, activation
     }
     let commit_ticket = cut_install(mut db, ReplaceMain(take replacement, None))?
     publish(take publication)
+    db.attention_seq = int.saturating_add(db.attention_seq, 1)
     Ok(commit_ticket)
 }
 

@@ -270,15 +270,23 @@ fn object_reclaim_retry_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim, o
     if !journal_turn(writer)? {
         fail("the journal dropped a reclaim whose delete failed")
     }
-    if attention(writer)?.reclaim_failures != 1 {
+    let failed = attention(writer)?
+    if failed.reclaim_failures != 1 {
         fail("the failed reclaim pass was not counted once")
+    }
+    if !failed.reclaim_pending {
+        fail("attention did not report the failed reclaim as pending")
     }
     result.unwrap(std.sim.s3.requested(sim.endpoint, "DELETE", orphan, RECLAIM_DELETE_ATTEMPTS + 1))
     if journal_turn(writer)? {
         fail("the retried reclaim stayed pending")
     }
-    if attention(writer)?.reclaim_failures != 1 {
+    let retried = attention(writer)?
+    if retried.reclaim_failures != 1 {
         fail("the retried reclaim pass was counted as a failure")
+    }
+    if retried.reclaim_pending {
+        fail("attention still reports the retried reclaim as pending")
     }
     let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
     let current = history_decode_head(workspace.witness)?

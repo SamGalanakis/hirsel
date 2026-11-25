@@ -37,6 +37,22 @@ fn idle_place(mut r: runner.Registry[IdleGrant, Hd]) -> Result[(), runner.Regist
     runner.granted(mut r, code.describe(idle_body), 65536u64, runner.DEFAULT_STEPS)
 }
 
+// The store section the head reports to Status once it serves: the trigger
+// tables declare the index "due", every index of a fresh store is built at its
+// declaration, so all are Public, and nothing has drifted or failed.
+fn idle_store_reported(seen: store.Attention) -> bool {
+    let mut due = 0u64
+    for report in seen.indexes {
+        if let Public = report.state {} else {
+            return false
+        }
+        if report.index == "due" {
+            due += 1
+        }
+    }
+    due == 1u64 && list.len(seen.drift) == 0u64 && seen.reclaim_failures == 0u64 && !seen.reclaim_pending
+}
+
 // A listener with no clients keeps each accept pending until withdrawn.
 fn idle_net(take seed: (Sender[()], Served[NetOp])) waits {
     let (accepts, take port) = take seed
@@ -138,6 +154,7 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
         clock.set_wall(mut ticks, 1000u64 + now / 1000000u64)
         let _ = clock.idle(mut ticks)
     }
+    want(idle_store_reported(latest.read(status).store), "idle: Status does not report the store's indexes, all Public, and no drift or reclaim failure")
     if !at_idle_deadline {
         if let Ok(()) = channel.try_receive(observed_accepts) {} else {
             fail("idle: the listener never armed")

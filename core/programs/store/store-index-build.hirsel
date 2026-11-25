@@ -237,9 +237,10 @@ fn put_index_record(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> Result
 // Demotes an index to Backfilling(None) over an empty collection (§I.3), so
 // reads refuse it and the builder rebuilds it from the table's first row.
 // An index already Backfilling(None) is left as it is.
-fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[(), Error] {
+// Answers whether the record changed.
+fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[bool, Error] {
     let mut record = catalog_entry_in(plan.roots.catalog, key)?
-    if let Backfilling(None) = record.state { return Ok(()) }
+    if let Backfilling(None) = record.state { return Ok(false) }
     let mut roots = share_roots(plan.roots)
     let charge = remove_store_collection(mut roots.collections, record.id, mut plan.next_node)?
     define_store_collection(mut roots.collections, record.id, 2, mut plan.next_node)?
@@ -251,22 +252,29 @@ fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[(), Error] {
     let next_table = plan.next_table
     keep_schema(mut plan, take roots, live_bytes, next_table)?
     record.state = Backfilling(None)
-    put_index_record(mut plan, key, record)
+    put_index_record(mut plan, key, record)?
+    Ok(true)
 }
 
 // Demotes each index a failed transaction proved wrong, in one schema
 // commit on main. A crash before it commits loses nothing: the next write
 // to the row fails the same way.
+// Each index whose record this commit changes counts one demotion
+// (`attention`); one already Backfilling(None) counts none.
 fn demote_drifted(mut db: Db, seen: List[(u32, u32)]) -> Result[(), Error] waits {
     let mut plan = schema_plan(db)
+    let mut demoted: List[(u32, u32)] = list.new()
     for (owner, id) in seen {
         let name = find_index_name(plan.roots.catalog, owner, id)?
-        demote_index(mut plan, catalog_index_key(owner, name)?)?
+        if demote_index(mut plan, catalog_index_key(owner, name)?)? {
+            capacity(list.try_reserve(mut demoted, 1))?
+            list.push(mut demoted, (owner, id))
+        }
     }
     if plan.changed {
         let _ = publish_schema_plan(mut db, take plan)?
     }
-    Ok(())
+    count_demotions(mut db, demoted)
 }
 
 // Starts an in-place rebuild of a declared index: demotes it, and
@@ -277,7 +285,7 @@ pub fn rebuild_index[J, K, V, P](mut db: Db, ix: Index[J, K, V, P]) -> Result[()
     let mut plan = schema_plan(db)
     let record = catalog_entry_in(plan.roots.catalog, ix.catalog_key)?
     if record.id != ix.id { return Error(Stale(ix.id)) }
-    demote_index(mut plan, ix.catalog_key)?
+    let _ = demote_index(mut plan, ix.catalog_key)?
     if plan.changed {
         let _ = publish_schema_plan(mut db, take plan)?
     }
@@ -311,7 +319,7 @@ fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, nam
         roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
         keep_schema(mut plan, take roots, live_bytes, next_table)?
     } else if let Failed(_, _) = proposed.state {
-        demote_index(mut plan, key)?
+        let _ = demote_index(mut plan, key)?
     }
     let current = catalog_entry_in(plan.roots.catalog, key)?
     let preview = if let Some(_) = plan.preview { true } else { false }

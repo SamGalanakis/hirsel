@@ -2,8 +2,10 @@ pub type Health = status.Health
 
 // The object journal's count of failed reclaim passes, published to
 // `attention` (§II.4).
+// `pending` holds from a failed reclaim pass until a pass succeeds.
 type ReclaimFailures: send {
-    count: u64
+    count: u64,
+    pending: bool
 }
 
 type ObjectHealthSignal: send {
@@ -45,13 +47,14 @@ fn emit_health(signal: ObjectHealthSignal, take value: Health) {
     }
 }
 
-fn reclaim_failures(db: Db) -> u64 {
+fn reclaim_state(db: Db) -> ReclaimFailures {
     if let Some(connection) = db.disk {
         if let Some(writer) = connection.object {
-            return latest.read(writer.reclaims).count
+            let current = latest.read(writer.reclaims)
+            return ReclaimFailures(count: current.count, pending: current.pending)
         }
     }
-    0
+    ReclaimFailures(count: 0, pending: false)
 }
 
 pub fn health(db: Db) -> Health {

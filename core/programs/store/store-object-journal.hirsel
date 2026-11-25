@@ -110,6 +110,8 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
     // taken a message (a write, the idle check, a pause), never back to back.
     let mut reclaim_due = true
     let mut failed_reclaims = 0u64
+    // The pending reclaim failed and waits for a retry (`attention`).
+    let mut reclaim_failed = false
     loop {
         if let Some(terminal) = lane.register.terminal {
             return match terminal {
@@ -125,14 +127,20 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     if reclaim_due {
                         if let Some(take pending_reclaim) = replace(mut lane.reclaim, None) {
                             match history_execute_reclaim(mut lane, pending_reclaim) {
-                                Ok(()) => {},
+                                Ok(()) => if reclaim_failed {
+                                    reclaim_failed = false
+                                    if let Some(shared) = input.reclaims {
+                                        latest.publish(shared, arc.new(ReclaimFailures(count: failed_reclaims, pending: false)))
+                                    }
+                                },
                                 Error(Fenced(e)) => return Error(Fenced(e)),
                                 Error(_) => {
                                     lane.reclaim = Some(take pending_reclaim)
                                     reclaim_due = false
                                     failed_reclaims = int.saturating_add(failed_reclaims, 1)
+                                    reclaim_failed = true
                                     if let Some(shared) = input.reclaims {
-                                        latest.publish(shared, arc.new(ReclaimFailures(count: failed_reclaims)))
+                                        latest.publish(shared, arc.new(ReclaimFailures(count: failed_reclaims, pending: true)))
                                     }
                                 },
                             }

@@ -222,7 +222,7 @@ fn reaping_counts_every_completion() {
     let pending = || ring.ring.cq_len();
     for initial in [129, 100] {
         for submitted in 1..=129 {
-            ring.push(PollRemove::new(1).build().user_data(REMOVED), None);
+            ring.push(PollRemove::new(0).build().user_data(REMOVED), None);
             if submitted <= initial && (submitted % 64 == 0 || submitted == initial) {
                 ring.enter(Some(0));
             }
@@ -496,6 +496,20 @@ fn a_completion_overflow_burst_loses_no_completion() {
     let (socket, _) = listener.accept().unwrap();
     socket.set_nonblocking(true).unwrap();
     socket.set_nodelay(true).unwrap();
+    let reading = std::thread::spawn(move || -> io::Result<(usize, usize)> {
+        use std::io::Read;
+        let mut got = vec![0; SENDS];
+        let mut read = 0;
+        while read < SENDS {
+            match peer.read(&mut got[read..]) {
+                Ok(0) => break,
+                Ok(n) => read += n,
+                Err(error) => return Err(error),
+            }
+        }
+        let wrong = got[..read].iter().filter(|&&b| b != b'a').count();
+        Ok((read, wrong))
+    });
     let mut sockets = Sockets::default();
     sockets.poller = Some(poller.clone());
     let key = sockets.insert(socket.into()).unwrap();
@@ -542,7 +556,12 @@ fn a_completion_overflow_burst_loses_no_completion() {
     assert_eq!(completion.dropped(), 0);
     // SAFETY: the registry still owns the socket.
     assert_eq!(unsafe { libc::shutdown(sockets.fd(key), libc::SHUT_WR) }, 0);
-    read_all_a(&mut peer, SENDS);
+    let (received, wrong) = reading.join().unwrap().unwrap();
+    assert_eq!(received, SENDS);
+    assert_eq!(
+        wrong, 0,
+        "{wrong} of {SENDS} bytes the peer read are not the sent bytes"
+    );
 }
 
 unsafe fn count(context: *const (), _: i32) {

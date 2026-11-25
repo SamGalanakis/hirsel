@@ -612,7 +612,7 @@ The harness gateway runs one place per conversation in its own process, and §14
 | 2 | Unload on request | **NEW: `platform.unload`** | §14.4 "Unload". An operator can ask a live group's serving child to stop by the idle stop's drain; the row then goes `Clean` or `Dirty` by the clean-report rule, so an unload never loses a wake. | the gateway closes a session |
 | 3 | The store's identity in `Status` | **NEW: `Status.store_id`, `Status.retain_from`** | §12.1. `operate` publishes the store's identity and retention start at activation, so an in-process launcher can report `PlaceOpened` as a process child does through its control socket. | §14.9 |
 | 4 | Directory laws | **PORTED: PD1 to PD4 as `local_*`** | §14.9 laws. Same properties, stated against host groups. | §14.8 row 9 |
-| 5 | The harness gateway | **MOVED: sessions are host groups** | The gateway (programs/harness) runs each session as a `local` group. Its catalog keeps only key and id; the wake row, due wakes and retries are the host's. A create seeds the store, adds the group and then commits the row; a delete removes the row and then the group; a start removes groups no row names and adds a group for each row without one. | v2.30 row 6 |
+| 5 | The harness gateway | **MOVED: sessions are host groups** | The gateway (the harness, now in [lash-hirsel](https://github.com/SamGalanakis/lash-hirsel)) runs each session as a `local` group. Its catalog keeps only key and id; the wake row, due wakes and retries are the host's. A create seeds the store, adds the group and then commits the row; a delete removes the row and then the group; a start removes groups no row names and adds a group for each row without one. | v2.30 row 6 |
 | 6 | Reads during a run | **NEW: the host sets `max_sessions`** | §14.9. `local` sets every place's wire session count, as it sets the idle time, and the gateway sets 4: a front's following stream holds one session while a run is busy, so a page, a status read, a message or a decision needs another, and none waits for the run. | h-ts-client-1887: a mid-run page took 1,056 ms with 1 session, 3 ms with 4 |
 | 7 | The directory | **DELETED: §13, `places`** | The place directory, its laws PD1 to PD4 (now `local_*`, §14.9) and its §8 rows are gone, with no compatibility path. CHANGES rows of v2.21 to v2.30 that cite §13 refer to the v2.30 text (git `8e515e1b^`). | §14.8 row 9 |
 
@@ -635,7 +635,7 @@ Reversible: both are additive. A directory built with every name and `Some(idle_
 
 ## CHANGES-v2.29 (a granted run reads a fenced snapshot; the harness is one session per place; lane harness-core-1806)
 
-A granted run had no read of its store. It could change rows only through `trigger_call`, so a worker that has to build a large outside request, such as a model call over a conversation, had to receive the request as a trigger argument or a step result. That copies the body into the journal on every round. The harness (`programs/harness`) needs the worker to read the entries itself, off the write lock.
+A granted run had no read of its store. It could change rows only through `trigger_call`, so a worker that has to build a large outside request, such as a model call over a conversation, had to receive the request as a trigger argument or a step result. That copies the body into the journal on every round. The harness ([lash-hirsel](https://github.com/SamGalanakis/lash-hirsel)) needs the worker to read the entries itself, off the write lock.
 
 | # | Point | Decision | What v2.29 says | Basis |
 |---|---|---|---|---|

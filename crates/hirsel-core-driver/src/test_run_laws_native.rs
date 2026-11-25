@@ -217,9 +217,9 @@ fn law_lock_of_a_package_stays_beside_its_manifest() {
 
 #[test]
 fn laws_check_dot_inside_a_package_matches_the_path_form() {
-    // bug: `hirsel laws check .` inside core/programs/harness read no lock and
-    // reported every test missing, while `hirsel laws check core/programs/harness`
-    // from the repository root passed.
+    // bug: `hirsel laws check .` inside a workspace member read no lock and
+    // reported every test missing, while `hirsel laws check <member>` from the
+    // workspace root passed.
     let law = PackageLaw::new();
     law.write("work/hirsel.toml", "[workspace]\nmembers = [\"app\"]\n");
     law.app("work/app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"main\"");

@@ -57,8 +57,8 @@ with an IR-instrumented library,
 `engine_llvm.py train`, which builds the training programs through it (the LangArena
 suite, every M1 program and the documents layout family, all generated from the
 repository's own input helpers), and the profile-guided link with relocations.
-`bolt.py` instruments that link, merges profiles from the release std, cold
-LangArena and Gateway builds, then rewrites the original library using rustc's
+`bolt.py` instruments that link, merges profiles from the release std and cold
+LangArena builds, then rewrites the original library using rustc's
 x86-64 opt-dist layout options. Both instrumentation and rewriting use the
 linked symbols and relocations. The engine collects counters in 16 MiB text
 regions to fit the 8 GiB cap and uses one merged profile for the rewrite.

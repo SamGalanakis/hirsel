@@ -122,8 +122,6 @@ First-party packages in this repository (bind locally with `path = "..."` in `[d
 - [mcp](core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
 - [search](core/programs/search/) — BM25 full-text search over a `store` table, callable from a transaction.
 - [vector](core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
-- [harness](core/programs/harness/) — durable agent sessions, tools, approvals, and model calls.
-- [notes](core/programs/notes/) — offline notes agent with tools and an approval step.
 - [checkbox](core/programs/checkbox/) — shared board of one million checkboxes.
 - [platform](core/programs/platform/) — deployed place management, cutovers, and recovery.
 - [tz](core/programs/tz/) — IANA time zones and instant/local-time conversion.
@@ -132,9 +130,12 @@ First-party packages in this repository (bind locally with `path = "..."` in `[d
 - [image_core](core/programs/image_core/), [image_jpeg](core/programs/image_jpeg/), [image_webp](core/programs/image_webp/) — image probing, transforms, PNG, QOI, GIF, AVIF, JPEG, and WebP codecs.
 - [av1](core/programs/av1/), [h264](core/programs/h264/), [opus](core/programs/opus/), [media_bits](core/programs/media_bits/), [media_container](core/programs/media_container/), [video_packager](core/programs/video_packager/), [video_yuv](core/programs/video_yuv/) — audio/video codecs, MP4/WebM/Ogg containers, YUV conversion, and CMAF/HLS/DASH packaging.
 
+The durable LLM agent harness and its notes example app live in their own repository,
+[lash-hirsel](https://github.com/SamGalanakis/lash-hirsel), and build against an installed toolchain.
+
 Internal verification harnesses and benchmarks (`m1`, `m2b`, `ffi_laws`, `store-crash`,
-`harness_dev_serve`, `harness_ts_gateway`, `observe`, `wire`, `omap`, `sha256`) also live
-under [core/programs/](core/programs/) for compiler and runtime testing.
+`observe`, `wire`, `omap`, `sha256`) also live under [core/programs/](core/programs/) for
+compiler and runtime testing.
 
 ## Runnable examples
 

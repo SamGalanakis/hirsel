@@ -10,11 +10,6 @@
     "raise_revision": 1,
     "reason": "net18-s2-2481"
   },
-  "core/programs/harness/laws.hirsel": {
-    "lines": 1901,
-    "raise_revision": 2,
-    "reason": "m3-s3-slots-2010"
-  },
   "core/programs/platform/platform.hirsel": {
     "lines": 3851,
     "raise_revision": 1,

@@ -27,21 +27,6 @@ source = "member:h264"
 edges = ["media_bits@1", "std@1"]
 
 [[package]]
-id = "harness@1"
-source = "member:harness"
-edges = ["mcp@1", "platform@1", "runner@1", "search@1", "std@1", "store@1"]
-
-[[package]]
-id = "harness_dev_serve@1"
-source = "member:harness/serve"
-edges = ["harness@1", "notes@1", "platform@1", "runner@1", "std@1", "store@1"]
-
-[[package]]
-id = "harness_ts_gateway@1"
-source = "member:harness/ts-client/gateway"
-edges = ["harness@1", "notes@1", "platform@1", "runner@1", "std@1", "store@1"]
-
-[[package]]
 id = "image_core@1"
 source = "member:image_core"
 edges = ["media_bits@1", "media_container@1", "std@1"]
@@ -85,11 +70,6 @@ edges = ["media_bits@1", "std@1"]
 id = "media_record@1"
 source = "member:media_record"
 edges = ["media_bits@1", "media_container@1", "rtp@1", "rtp_jitter@1", "std@1", "webrtc_sfu@1"]
-
-[[package]]
-id = "notes@1"
-source = "member:notes"
-edges = ["harness@1", "runner@1", "std@1", "store@1"]
 
 [[package]]
 id = "opus@1"

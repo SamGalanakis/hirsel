@@ -17,13 +17,12 @@ import std_native
 ROOT = std_native.ROOT
 SEED = 'HIRSEL_TEST_SIM_SEED'
 DEFAULT_SEEDS = 32
-PACKAGE_LAWS = ('store', 'harness', 'platform', 'runner', 'dtls', 'turn')
+PACKAGE_LAWS = ('store', 'platform', 'runner', 'dtls', 'turn')
 SEEDED_TEST = re.compile(r'^@test\s+fn (\w+)\(([^)]*)\)', re.M)
-# Keep the 10,000-frame floods and the real-time hedge deadlines intact.
+# Keep the 10,000-frame floods intact.
 FLOOD_SEEDS = {
     'runner@1/runner_calls/law_calls_refusals': 2,
     'runner@1/runner_calls/law_calls_session_charge': 2,
-    'harness@1/provider_laws/test_warm_and_hedge': 3,
 }
 TRACE_FLOORS = {'store@1/store/bucket_test_m2_register_fence': 2}
 REACH_WITNESSES = {

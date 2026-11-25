@@ -47,8 +47,6 @@ First-party packages in this repository (bind locally with `path = "..."` in `[d
 - [mcp](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
 - [search](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/search/) — BM25 full-text search over a `store` table, callable from a transaction.
 - [vector](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/vector/) — exact top-k nearest neighbours over a `store` table, read from a transaction.
-- [harness](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/harness/) — durable agent sessions, tools, approvals, and model calls.
-- [notes](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/notes/) — offline notes agent with tools and an approval step.
 - [checkbox](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/checkbox/) — shared board of one million checkboxes.
 - [platform](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/platform/) — deployed place management, cutovers, and recovery.
 - [tz](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/tz/) — IANA time zones and instant/local-time conversion.
@@ -57,9 +55,12 @@ First-party packages in this repository (bind locally with `path = "..."` in `[d
 - [image_core](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/image_core/), [image_jpeg](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/image_jpeg/), [image_webp](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/image_webp/) — image probing, transforms, PNG, QOI, GIF, AVIF, JPEG, and WebP codecs.
 - [av1](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/av1/), [h264](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/h264/), [opus](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/opus/), [media_bits](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/media_bits/), [media_container](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/media_container/), [video_packager](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/video_packager/), [video_yuv](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/video_yuv/) — audio/video codecs, MP4/WebM/Ogg containers, YUV conversion, and CMAF/HLS/DASH packaging.
 
+The durable LLM agent harness and its notes example app live in their own repository,
+[lash-hirsel](https://github.com/SamGalanakis/lash-hirsel), and build against an installed toolchain.
+
 Internal verification harnesses and benchmarks (`m1`, `m2b`, `ffi_laws`, `store-crash`,
-`harness_dev_serve`, `harness_ts_gateway`, `observe`, `wire`, `omap`, `sha256`) also live
-under [core/programs/](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/) for compiler and runtime testing.
+`observe`, `wire`, `omap`, `sha256`) also live under [core/programs/](https://github.com/SamGalanakis/hirsel/tree/main/core/programs/) for
+compiler and runtime testing.
 
 ## Runnable examples
 

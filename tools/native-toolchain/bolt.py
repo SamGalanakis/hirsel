@@ -20,7 +20,7 @@ OBJCOPY = CC.with_name('llvm-objcopy')
 # BOLT keeps the disassembled functions and their instrumentation tables in
 # memory. Profile 16 MiB of the engine's text at a time under the 8 GiB cap.
 ENGINE_SHARD_BYTES = 16 << 20
-WORKLOADS = {'release std', 'cold LangArena', 'Gateway'}
+WORKLOADS = {'release std', 'cold LangArena'}
 # rustc src/tools/opt-dist/src/bolt.rs, on x86-64.
 OPTIMIZE = [
     '-reorder-blocks=ext-tsp', '-reorder-functions=cdsort',
@@ -68,18 +68,6 @@ def train(compiler, runtime, work, profile):
 
     package = workload('release std', lambda: publish_std(compiler, work, env))
     workload('cold LangArena', lambda: build_program('arena', arena(work)))
-    # Manifest builds may write a workspace lock. Keep it with the training
-    # inputs, including the Gateway's path dependencies.
-    programs = work / 'programs'
-    shutil.copytree(ROOT / 'core/programs', programs, symlinks=True)
-    gateway = programs / 'harness/ts-client/gateway'
-    gateway_data = work / 'gateway-host'
-    gateway_data.mkdir()
-    grants = ['Stdin', 'Stdout', 'Clock', 'Random', 'Tasks',
-              'Net=Listen 127.0.0.0/8 1-65535;Connect 127.0.0.0/8 1-65535']
-    arguments = [gateway, '--dir', gateway_data, '--limit', str(512 << 20),
-                 *(argument for grant in grants for argument in ('--grant', grant))]
-    workload('Gateway', lambda: build_program('gateway', arguments))
     return recorded
 
 

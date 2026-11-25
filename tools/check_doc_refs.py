@@ -19,7 +19,6 @@ DOCS = (
     'docs/COOKBOOK.md',
     'core/programs/store/STORE-SPEC.md',
     'core/programs/runner/RUNNER-SPEC.md',
-    'core/programs/harness/README.md',
 )
 DRIVER = 'crates/hirsel-core-driver/src/cli.rs'
 EXEMPT = r'<!-- doc-ref: (historical|planned|external) -->'

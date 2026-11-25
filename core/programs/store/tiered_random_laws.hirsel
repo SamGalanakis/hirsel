@@ -178,9 +178,11 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             match edit {
                 Some(e) => {
                     map.insert(mut changed, key, e)
+                    let _ = std.prop.sometimes("edit", true)
                 },
                 None => {
                     let _ = map.remove(mut changed, key)
+                    let _ = std.prop.sometimes("delete a key", true)
                 },
             }
             map.insert(mut model.heads, id, take changed)
@@ -195,6 +197,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             }
             let (child, _) = fork(mut db, random_branch_name(model.forks), from)?
             model.forks += 1
+            let _ = std.prop.sometimes("fork", true)
             map.insert(mut model.heads, child.id, take snap_model)
         } else if op == 7 && map.len(model.pins) < 3 {
             let name = random_pin_name(model.pinned_count)
@@ -211,6 +214,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                 let _ = pin(mut db, name, s)?
                 map.insert(mut model.pins, take key, take snap_model)
                 let _ = checkpoint(mut db)?
+                let _ = std.prop.sometimes("pin a head", true)
             }
             model.pinned_count += 1
         } else if op == 8 {
@@ -223,6 +227,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                         clone(main_model)
                     }
                     history = Some((snapshot(db), take snap_model))
+                    let _ = std.prop.sometimes("capture history", true)
                 },
                 Some((take s, take snap_model)) => {
                     let name = random_pin_name(model.pinned_count)
@@ -236,6 +241,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                             Ok(_) => {
                                 map.insert(mut model.pins, take key, take snap_model)
                                 let _ = checkpoint(mut db)?
+                                let _ = std.prop.sometimes("pin history", true)
                             },
                             Error(Reclaimed(_)) => (),
                             Error(e) => return Error(e),
@@ -252,6 +258,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                 let _ = unpin(mut db, name)?
                 let _ = map.remove(mut model.pins, name)
                 let _ = checkpoint(mut db)?
+                let _ = std.prop.sometimes("unpin", true)
             }
         } else if op == 10 && list.len(db.heads) > 1 {
             let slot = 1 + std.rand.below(mut g, list.len(db.heads) - 1)
@@ -259,9 +266,11 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             let gone = Branch(store: db.store, id)
             let _ = delete_branch(mut db, gone)?
             let _ = map.remove(mut model.heads, id)
+            let _ = std.prop.sometimes("delete a branch", true)
         } else if op == 11 {
             let _ = checkpoint(mut db)?
             random_check(d, db, rows, model)?
+            let _ = std.prop.sometimes("cut", true)
         } else if op >= 12 {
             if let Some((take s, _)) = take history {
                 drop(take s)
@@ -271,6 +280,8 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             let crashing = take db
             db = random_crash(d, c, r, tasks, take crashing, renamed, clone(options))?
             crashes += 1
+            let _ = std.prop.sometimes("crash before the rename", !renamed)
+            let _ = std.prop.sometimes("crash after the rename", renamed)
             let _ = checkpoint(mut db)?
             random_check(d, db, rows, model)?
         }

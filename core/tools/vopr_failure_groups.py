@@ -8,13 +8,34 @@ import re
 import sys
 
 
+# The runtime's cause line (crates/hirsel-core-rt/src/abi_host.rs format_cause_at):
+# `Kind("message") at site` or `Kind at site`. The message is Rust `{:?}` output,
+# so it may itself contain quotes, `)` or ` at `; the site is the last token.
+CAUSE = re.compile(r'^(Overflow|Bounds|Division|Unwrap|Fail|Cancelled|Capacity|OutOfTime)'
+                   r'(?:\(".*"\))? at (\S+)$')
+# Keep path:line:col sites; blank quoted values and every other digit run.
+TAIL = re.compile(r'(\S+:\d+:\d+\b)|"(?:[^"\\]|\\.)*"|\d+')
+
+
+def blank(text):
+    return TAIL.sub(lambda part: part[1] or ('"_"' if part[0][0] == '"' else 'N'), text)
+
+
+def site_detail(row):
+    """Return the failure site: the runtime cause when one is reported, else the first line, blanked."""
+    lines = (row["stderr"].strip() or row["stdout"].strip()).splitlines()
+    for line in (row["stderr"] + "\n" + row["stdout"]).splitlines():
+        cause = CAUSE.match(line.strip())
+        if cause:
+            return f"{cause[1]} at {cause[2]}"
+    return blank(lines[0]) if lines else ""
+
+
 def group(row):
     kind = row.get("kind", "seed_red")
     detail = row.get("label") or row.get("failure_class")
     if detail is None and kind in ("seed_red", "deterministic_red"):
-        diagnostic = (row["stderr"].strip() or row["stdout"].strip()).splitlines()
-        first_line = re.sub(r":\d+:\d+\b", "", diagnostic[0]) if diagnostic else ""
-        detail = f"exit {row['status']} {first_line}".rstrip()
+        detail = f"exit {row['status']} {site_detail(row)}".rstrip()
     return row["law"], kind, detail
 
 

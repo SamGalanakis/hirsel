@@ -1,6 +1,7 @@
 hirsel.laws 1
 rtp@1/bwe/aimd_steps src=7d67c168247e5369 sig=15c810127a30cc1d run=c2c0c6612d4cbb79 bug=c0320e00415bfaa3 oracle=d46f4d3dac0401fa rows=pending
-rtp@1/bwe/probe_result src=cf2174ada7a916de sig=e5c7a3b2d62fe30e run=c2c0c6612d4cbb79 bug=691186325244b5e7 oracle=d99171d4613f5d5b rows=pending
+rtp@1/bwe/loss_vector src=b20af3a2e9fc3baf sig=f7dbe4e6eb925750 run=c2c0c6612d4cbb79 bug=a804148346a31c56 oracle=1e37ecbea6532655 rows=pending
+rtp@1/bwe/probe_result src=38ee338c7f4e84c0 sig=dbed5f7f4956ea37 run=c2c0c6612d4cbb79 bug=27a617b25088ced1 oracle=8b47b79523c0e831 rows=pending
 rtp@1/bwe/trendline_flat src=dab3e92f9afa3835 sig=79c6d44486d1af44 run=c2c0c6612d4cbb79 bug=c4d7d149fa80523a oracle=e571d6e10abcd9f1 rows=pending
 rtp@1/bwe/trendline_overuse src=e87e1f1727b8e258 sig=fa5b56e470fae007 run=c2c0c6612d4cbb79 bug=a7fdc063ba1076d4 oracle=67f7a08a08084569 rows=pending
 rtp@1/laws/bounded_views src=428d9bc253332764 sig=5aa3113a6eb25a05 run=c2c0c6612d4cbb79 bug=67cd72d855126d45 oracle=04d23f904e0ec381 rows=pending
@@ -25,5 +26,7 @@ rtp@1/laws/simulcast_switch src=3bf3884c2c5d8bad sig=a4dd4d4a670eefca run=c2c0c6
 rtp@1/laws/svc_masks src=51803d707b54c48a sig=0c80bbe53afcd650 run=c2c0c6612d4cbb79 bug=97d1f95781f408bc oracle=d058b06600bf4bf2 rows=pending
 rtp@1/laws/twcc_chunks src=45ecbd1b76160ff4 sig=93d9d0113f3cb9de run=c2c0c6612d4cbb79 bug=1a61c5072fb2babb oracle=e747f10f97c62930 rows=pending
 rtp@1/laws/twcc_report_bytes src=b93a137d82151607 sig=9ce45535d1c0be67 run=c2c0c6612d4cbb79 bug=7ad8cd5ac94e9d69 oracle=31c9563c2e41242b rows=pending
-rtp@1/net/congestion_backoff src=edc94571898b614e sig=c2e031e65f31ec7e run=c7b2a52baff70a63 bug=df3fe147860eaa9f oracle=f81128d7e2680dad rows=pending
+rtp@1/net/congestion_backoff src=74ba1c440d798dc5 sig=c2e031e65f31ec7e run=c7b2a52baff70a63 bug=df3fe147860eaa9f oracle=f81128d7e2680dad rows=pending
+rtp@1/net/inherent_loss_does_not_collapse src=013d7833ca94a028 sig=db0fd87380e2d6be run=c7b2a52baff70a63 bug=00216c77c2454291 oracle=792f976da61fc557 rows=pending
 rtp@1/net/nack_recovery_under_loss src=d84136faf490b0f5 sig=1d08a7f74701ba99 run=c7b2a52baff70a63 bug=3f81871bad776d65 oracle=b9967398ff74d81c rows=pending
+rtp@1/net/policer_converges_to_policed_rate src=9140ed933f8dc6f9 sig=158bd7c15b1bebe9 run=c7b2a52baff70a63 bug=49b4ae918a4f979b oracle=6a752119d7b325c5 rows=pending

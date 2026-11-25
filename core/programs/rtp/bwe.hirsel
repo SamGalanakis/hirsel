@@ -80,13 +80,8 @@ pub opaque type Bwe {
     avg: Option[f64],
     var: f64,
     // Loss.
-    l: f64,
-    reported: u64,
-    lost: u64,
-    lowered: Option[u64],
-    raised: Option[u64],
+    loss: LossBwe,
     first: Option[u64],
-    lossy: bool,
     // Probing.
     next_id: u32,
     probing: Option[Probing],
@@ -133,25 +128,36 @@ pub fn bwe(c: Config) -> Bwe {
     let min: f64 = float.from_int(c.min_bps)
     let max: f64 = float.from_int(c.max_bps)
     let start: f64 = float.from_int(c.start_bps)
-    Bwe(min: min, max: max, origin: None, current: None, previous: None, seen: 0, accumulated: 0.0, smoothed: 0.0, zero: None, points: list.with_capacity(WINDOW + 1), gamma: 12.5, trend: 0.0, over: None, stamped: None, usage: Normal, window: list.new(), state: Increase, a: clamp(start, min, max), changed: None, rtt: None, avg: None, var: 0.4, l: clamp(start, min, max), reported: 0, lost: 0, lowered: None, raised: None, first: None, lossy: false, next_id: 0, probing: None, members: list.new())
+    Bwe(min: min, max: max, origin: None, current: None, previous: None, seen: 0, accumulated: 0.0, smoothed: 0.0, zero: None, points: list.with_capacity(WINDOW + 1), gamma: 12.5, trend: 0.0, over: None, stamped: None, usage: Normal, window: list.new(), state: Increase, a: clamp(start, min, max), changed: None, rtt: None, avg: None, var: 0.4, loss: loss_bwe(int.narrow(c.min_bps), int.narrow(c.max_bps), int.narrow(order.min(order.max(c.start_bps, c.min_bps), c.max_bps))), first: None, next_id: 0, probing: None, members: list.new())
+}
+
+// The delay estimate as whole bit/s.
+fn delay_bps(b: Bwe) -> u64 {
+    result.unwrap(float.to_int(b.a))
 }
 
 pub fn target(b: Bwe) -> u64 {
-    result.unwrap(float.to_int(fmin(b.a, b.l)))
+    let a = delay_bps(b)
+    match b.loss.state {
+        DelayBased => a,
+        _ => {
+            let l: u64 = int.narrow(b.loss.estimate)
+            order.min(a, l)
+        },
+    }
 }
 
 pub fn on_acked(mut b: Bwe, acked: View[List[twcc.Acked]], now_ns: u64, rtt_ns: Option[u64]) {
     if let Some(r) = rtt_ns {
         b.rtt = Some(r)
     }
+    let mut lost = 0u64
     let mut i = 0u64
     while i < list.len(acked) {
         let p = acked[i]
-        b.reported += 1
         match p.arrived_us {
             None => {
-                b.lost += 1
-                b.lossy = true
+                lost += 1
             }
             Some(at) => {
                 arrive(mut b, at, p.size)
@@ -161,19 +167,6 @@ pub fn on_acked(mut b: Bwe, acked: View[List[twcc.Acked]], now_ns: u64, rtt_ns: 
         member(mut b, p)
         i += 1
     }
-    loss(mut b, now_ns)
-    let usage = b.usage
-    let rate = acked_rate(mut b)
-    if let Some(r) = rate {
-        control(mut b, usage, r, now_ns)
-    }
-    measure(mut b, now_ns)
-    start_phase(mut b, now_ns)
-}
-
-// The start phase (RTP-9): until 2 s after the first `on_acked`, while no
-// packet has been reported lost, the loss estimate trusts the delay estimate.
-fn start_phase(mut b: Bwe, now_ns: u64) {
     let first = match b.first {
         Some(t) => t,
         None => {
@@ -181,9 +174,27 @@ fn start_phase(mut b: Bwe, now_ns: u64) {
             now_ns
         }
     }
-    if !b.lossy && now_ns >= first && now_ns - first < START_NS {
-        b.l = fmax(b.l, b.a)
+    let usage = b.usage
+    let rate = acked_rate(mut b)
+    if let Some(r) = rate {
+        control(mut b, usage, r, now_ns)
     }
+    let probed = measure(mut b, now_ns)
+    let Some(r) = rate else {
+        return
+    }
+    // Loss (RTP-9), as str0m's SendSideBandwidthEstimator composes it.
+    let a: i64 = int.narrow(delay_bps(b))
+    if now_ns >= first && now_ns - first <= START_NS && 1000 * lost <= list.len(acked) {
+        loss_set(mut b.loss, a)
+        return
+    }
+    if probed {
+        loss_set(mut b.loss, a)
+    }
+    let acked_bps: u64 = result.unwrap(float.to_int(r))
+    b.loss.acked = Some(int.narrow(acked_bps))
+    loss_update(mut b.loss, acked, a)
 }
 
 const START_NS: u64 = 2000000000
@@ -506,40 +517,6 @@ fn set(mut b: Bwe, a: f64, now_ns: u64) {
     b.changed = Some(now_ns)
 }
 
-// Loss (RTP-9): the GCC draft's classic rule.
-fn loss(mut b: Bwe, now_ns: u64) {
-    if b.reported < 20 {
-        return
-    }
-    let lost: f64 = float.from_int(b.lost)
-    let reported: f64 = float.from_int(b.reported)
-    let p = lost / reported
-    b.reported = 0
-    b.lost = 0
-    let rtt = match b.rtt {
-        Some(t) => t,
-        None => 0,
-    }
-    if float.gt(p, 0.10) {
-        if since(b.lowered, now_ns, 300 * MS_NS + rtt) {
-            b.l = clamp(b.l * (1.0 - 0.5 * p), b.min, b.max)
-            b.lowered = Some(now_ns)
-        }
-    } else if lt(p, 0.02) {
-        if since(b.raised, now_ns, 1000 * MS_NS) {
-            b.l = clamp(1.05 * b.l, b.min, b.max)
-            b.raised = Some(now_ns)
-        }
-    }
-}
-
-fn since(last: Option[u64], now_ns: u64, gap: u64) -> bool {
-    match last {
-        None => true,
-        Some(t) => now_ns >= t && now_ns - t >= gap,
-    }
-}
-
 // Probing (RTP-9).
 const PROBE_PACKETS: u32 = 5
 
@@ -559,6 +536,11 @@ pub fn probe(mut b: Bwe, want_bps: u64, now_ns: u64) -> Option[Cluster] {
         b.probing = None
     }
     if b.probing != None {
+        return None
+    }
+    // As str0m's and libwebrtc's ProbeController: no probe while the loss
+    // estimate is decreasing, since a probe result resets it to A (RTP-9).
+    if b.loss.state == Decreasing {
         return None
     }
     let t = target(b)
@@ -639,9 +621,10 @@ fn member(mut b: Bwe, a: twcc.Acked) {
 // members. The cluster's last member is the first that is at least its
 // packets-th and was sent at least min_ns after the first, as the pacer
 // ends it (RTP-10).
-fn measure(mut b: Bwe, now_ns: u64) {
+// It answers whether the cluster gave a result.
+fn measure(mut b: Bwe, now_ns: u64) -> bool {
     let Some(p) = b.probing else {
-        return
+        return false
     }
     let c = p.cluster
     let mut n = 0u64
@@ -662,7 +645,7 @@ fn measure(mut b: Bwe, now_ns: u64) {
         if expired(b, now_ns) {
             b.probing = None
         }
-        return
+        return false
     }
     b.probing = None
     let mut received = 0u64
@@ -699,7 +682,7 @@ fn measure(mut b: Bwe, now_ns: u64) {
         j += 1
     }
     if 5 * received < 4 * n || last_send <= first_send || last_arrival <= first_arrival {
-        return
+        return false
     }
     let sent_bits: f64 = float.from_int((total - last_size) * 8)
     let send_span: f64 = float.from_int(last_send - first_send)
@@ -709,4 +692,5 @@ fn measure(mut b: Bwe, now_ns: u64) {
     if float.gt(measured, b.a) {
         set(mut b, measured, now_ns)
     }
+    true
 }

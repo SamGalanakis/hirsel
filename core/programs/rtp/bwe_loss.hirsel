@@ -1,0 +1,419 @@
+// The loss-based estimate of RTP-9: libwebrtc's LossBasedBweV2 as str0m
+// 2ada76a ports it (src/bwe/loss_controller.rs), in exact integer arithmetic.
+// Rates are whole bit/s, times ns, sizes bytes; probabilities, weights and
+// logarithms are Q16 (value x 65536). Every `/` truncates toward zero.
+pub type LossState: key = Increasing | Decreasing | DelayBased
+
+// One complete observation: its bytes, lost bytes, sending rate in bit/s, and
+// its number in the order observations completed.
+type Observation {
+    size: i64,
+    lost: i64,
+    rate: i64,
+    id: i64
+}
+
+type LossBwe {
+    min: i64,
+    max: i64,
+    state: LossState,
+    // The partial observation.
+    part_size: i64,
+    part_lost: i64,
+    // The last send time of the most recent observation, None until the first
+    // feedback.
+    last: Option[i64],
+    count: i64,
+    window: List[Observation],
+    upper: Option[i64],
+    reduced: Option[i64],
+    recovering: Option[i64],
+    limit: Option[i64],
+    bw: i64,
+    inherent: i64,
+    estimate: i64,
+    acked: Option[i64],
+    delay: Option[i64],
+    hold_at: Option[i64],
+    hold_ns: i64,
+    hold_rate: Option[i64]
+}
+
+const Q: i64 = 65536
+
+const OBSERVATIONS: i64 = 15
+
+// 0.9^i in Q16, rounded, for i from 0 to 14.
+const WEIGHTS: Inline[i64, 15] =[65536, 58982, 53084, 47776, 42998, 38698, 34829, 31346, 28211, 25390, 22851, 20566, 18509, 16658, 14993]
+
+// ln 2 in Q16.
+const LN2: i64 = 45426
+
+// 0.05, 0.2 and 0.001 in Q16.
+const LOSS_OFFSET: i64 = 3277
+
+const PREFERENCE: i64 = 13107
+
+const INHERENT_FLOOR: i64 = 66
+
+const INITIAL_INHERENT: i64 = 655
+
+const BALANCE_BPS: i64 = 100000
+
+const OBSERVATION_NS: i64 = 250000000
+
+const DELAYED_NS: i64 = 300000000
+
+const HOLD_NS: i64 = 300000000
+
+const MAX_HOLD_NS: i64 = 60000000000
+
+const RAMPUP_NS: i64 = 60000000000
+
+const FLOOR_BPS: i64 = 5000
+
+fn lmin(a: i64, b: i64) -> i64 {
+    if b < a {
+        b
+    } else {
+        a
+    }
+}
+
+fn lmax(a: i64, b: i64) -> i64 {
+    if b > a {
+        b
+    } else {
+        a
+    }
+}
+
+fn loss_bwe(min: i64, max: i64, start: i64) -> LossBwe {
+    LossBwe(min: min, max: max, state: DelayBased, part_size: 0, part_lost: 0, last: None, count: 0, window: list.with_capacity(15), upper: None, reduced: None, recovering: None, limit: None, bw: start, inherent: INITIAL_INHERENT, estimate: start, acked: None, delay: None, hold_at: None, hold_ns: HOLD_NS, hold_rate: None)
+}
+
+// str0m's set_bandwidth_estimate.
+fn loss_set(mut l: LossBwe, bps: i64) {
+    l.bw = bps
+    l.estimate = bps
+}
+
+// ln(x / 65536) in Q16 for x > 0: the integer part from the highest set bit,
+// then 16 fraction bits of log2 by repeated squaring, times ln 2.
+fn ln_q16(x: i64) -> i64 {
+    let ux: u64 = int.narrow(x)
+    let top: i64 = int.widen(option.unwrap(int.ilog2(ux)))
+    let mut y = if top >= 16 {
+        x >> (top - 16)
+    } else {
+        x << (16 - top)
+    }
+    let mut f = 0i64
+    let mut i = 0i64
+    while i < 16 {
+        y = (y * y) >> 16
+        f = f << 1
+        if y >= 2 * Q {
+            y = y >> 1
+            f = f | 1
+        }
+        i += 1
+    }
+    ((top - 16) * Q + f) * LN2 / Q
+}
+
+// x * w / 65536 without forming x * w.
+fn weigh(x: i64, w: i64) -> i64 {
+    x / Q * w + x % Q * w / Q
+}
+
+fn weight(l: LossBwe, o: Observation) -> i64 {
+    let at: u64 = int.narrow(l.count - 1 - o.id)
+    WEIGHTS[at]
+}
+
+fn loss_limited(l: LossBwe) -> bool {
+    l.state != DelayBased
+}
+
+fn instant_upper(l: LossBwe) -> i64 {
+    match l.upper {
+        Some(u) => u,
+        None => l.max,
+    }
+}
+
+// The weighted share of bytes lost over the window, in Q16.
+fn average_loss(l: LossBwe) -> i64 {
+    let mut total = 0i64
+    let mut lost = 0i64
+    for o in l.window {
+        let w = weight(l, o)
+        total += w * o.size
+        lost += w * o.lost
+    }
+    if total == 0 {
+        return 0
+    }
+    lost * Q / total
+}
+
+fn feasible(inherent: i64, bw: i64) -> i64 {
+    let upper = if bw == 0 {
+        Q
+    } else {
+        lmin(LOSS_OFFSET + BALANCE_BPS * Q / bw, Q)
+    }
+    lmin(lmax(inherent, INHERENT_FLOOR), upper)
+}
+
+fn loss_probability(inherent: i64, bw: i64, rate: i64) -> i64 {
+    let h = lmin(lmax(inherent, 0), Q)
+    let mut p = h
+    if rate > bw {
+        p += (Q - h) * ((rate - bw) * Q / rate) / Q
+    }
+    lmin(lmax(p, 1), Q - 1)
+}
+
+// One Newton step on the inherent loss, at step size 0.75.
+fn newton(l: LossBwe, inherent: i64, bw: i64) -> i64 {
+    let mut first = 0i64
+    let mut second = 0i64
+    for o in l.window {
+        let w = weight(l, o)
+        let p = loss_probability(inherent, bw, o.rate)
+        let q = Q - p
+        let received = o.size - o.lost
+        let a = o.lost * Q / p
+        let b = received * Q / q
+        first += weigh(a - b, w)
+        second += weigh(a * Q / p + b * Q / q, w)
+    }
+    if second <= 0 {
+        second = 1
+    }
+    feasible(inherent + 3 * first * Q / 4 / second, bw)
+}
+
+// The bias toward a higher bandwidth, in Q16, with str0m's factor
+// f * (d / 0.002 + |d|) and the bandwidth in bit/s.
+fn bias(l: LossBwe, bw: i64) -> i64 {
+    let d = PREFERENCE - average_loss(l)
+    let g = d * 500 + int.abs(d)
+    g * bw / 5000 + g * ln_q16((bw + 1) * Q) / Q / 50
+}
+
+fn objective(l: LossBwe, inherent: i64, bw: i64) -> i64 {
+    let b = bias(l, bw)
+    let mut total = 0i64
+    for o in l.window {
+        let p = loss_probability(inherent, bw, o.rate)
+        let term = o.lost * ln_q16(p) + (o.size - o.lost) * ln_q16(Q - p) + b * o.size
+        total += weight(l, o) * (term / 1000000)
+    }
+    total
+}
+
+fn candidate_upper(l: LossBwe) -> i64 {
+    let mut upper = l.max
+    if loss_limited(l) {
+        if let Some(w) = l.limit {
+            upper = lmin(upper, w)
+        }
+    }
+    upper = lmin(upper, instant_upper(l))
+    if let Some(d) = l.delay {
+        upper = lmin(upper, d)
+    }
+    let Some(acked) = l.acked else {
+        return upper
+    }
+    if let (Some(last), Some(reduced)) = (l.last, l.reduced) {
+        let since = lmin(RAMPUP_NS, lmax(last - reduced, 0))
+        upper += acked * (since / 1000) / 1000000
+    }
+    upper
+}
+
+fn increasing(l: LossBwe, current: i64, candidate: i64) -> bool {
+    loss_limited(l) && (current < candidate || (current == candidate && l.state == Increasing))
+}
+
+// Fold one feedback's packets into the partial observation; answer whether
+// that completed an observation (more than 250 ms of send time since the last).
+fn loss_observe(mut l: LossBwe, acked: View[List[twcc.Acked]]) -> bool {
+    let mut newest = 0i64
+    let mut i = 0u64
+    while i < list.len(acked) {
+        let p = acked[i]
+        let size: i64 = int.widen(p.size)
+        l.part_size += size
+        if p.arrived_us == None {
+            l.part_lost += size
+        }
+        let sent: i64 = int.narrow(p.sent_ns)
+        if i == 0 || sent > newest {
+            newest = sent
+        }
+        i += 1
+    }
+    let last = match l.last {
+        Some(t) => t,
+        None => {
+            l.last = Some(newest)
+            newest
+        }
+    }
+    let span = newest - last
+    if span <= OBSERVATION_NS {
+        return false
+    }
+    l.last = Some(newest)
+    let o = Observation(size: l.part_size, lost: l.part_lost, rate: l.part_size * 8 * 1000000000 / span, id: l.count)
+    if l.count < OBSERVATIONS {
+        list.push(mut l.window, o)
+    } else {
+        let at: u64 = int.narrow(l.count % OBSERVATIONS)
+        l.window[at] = o
+    }
+    l.count += 1
+    l.part_size = 0
+    l.part_lost = 0
+    let avg = average_loss(l)
+    l.upper = Some(if avg > LOSS_OFFSET {
+        BALANCE_BPS * Q / (avg - LOSS_OFFSET)
+    } else {
+        l.max
+    })
+    true
+}
+
+// str0m's update_bandwidth_estimate, with delay the delay-based estimate.
+fn loss_update(mut l: LossBwe, acked: View[List[twcc.Acked]], delay: i64) {
+    l.delay = Some(delay)
+    if list.len(acked) == 0 || !loss_observe(mut l, acked) {
+        return
+    }
+    let Some(last) = l.last else {
+        return
+    }
+    let current = l.bw
+    let upper = candidate_upper(l)
+    let mut bws: Inline[i64, 6] =[current * 102 / 100, current, current * 95 / 100, 0, 0, 0]
+    let mut n = 3u64
+    if delay > current {
+        bws[n] = delay
+        n += 1
+    }
+    if let Some(a) = l.acked {
+        bws[n] = a
+        n += 1
+    }
+    if delay > current {
+        bws[n] = delay
+        n += 1
+    }
+    let mut best_bw = current
+    let mut best_inherent = l.inherent
+    let mut best: Option[i64] = None
+    let mut k = 0u64
+    while k < n {
+        let bw = lmin(bws[k], lmax(current, upper))
+        let inherent = newton(l, feasible(l.inherent, bw), bw)
+        let value = objective(l, inherent, bw)
+        let better = match best {
+            None => true,
+            Some(v) => value > v,
+        }
+        if better {
+            best = Some(value)
+            best_bw = bw
+            best_inherent = inherent
+        }
+        k += 1
+    }
+    if best_bw < current {
+        l.reduced = Some(last)
+    }
+    if average_loss(l) > best_inherent && current < best_bw {
+        best_bw = current
+    }
+    if loss_limited(l) {
+        if let (Some(r), Some(w)) = (l.recovering, l.limit) {
+            if r + DELAYED_NS > last && best_bw > w {
+                best_bw = w
+            }
+        }
+        if increasing(l, current, best_bw) {
+            if let Some(a) = l.acked {
+                let held = match l.hold_rate {
+                    Some(h) => a * 10 < h * 13,
+                    None => false,
+                }
+                let ramp = if held {
+                    a * 12 / 10
+                } else {
+                    a * 15 / 10
+                }
+                best_bw = lmax(current, lmin(best_bw, ramp))
+                if l.state == Decreasing && best_bw == current {
+                    best_bw = current + 1
+                }
+            }
+        }
+    }
+    let lower = match l.acked {
+        Some(a) => lmax(l.min, a),
+        None => l.min,
+    }
+    let bounded = lmax(lmin(lmin(best_bw, delay), instant_upper(l)), lower)
+    if bounded < best_bw {
+        l.bw = bounded
+        l.inherent = 0
+    } else {
+        l.bw = lmax(best_bw, lower)
+        l.inherent = best_inherent
+    }
+    if l.state == Decreasing && bounded < delay {
+        if let Some(h) = l.hold_at {
+            if h > last {
+                if let Some(r) = l.hold_rate {
+                    l.hold_rate = Some(lmax(r, lower))
+                }
+                l.estimate = match l.hold_rate {
+                    Some(r) => lmin(bounded, r),
+                    None => bounded,
+                }
+                return
+            }
+        }
+    }
+    let next = if increasing(l, l.estimate, bounded) && bounded < delay && bounded < l.max {
+        Increasing
+    } else if bounded < delay && bounded < l.max {
+        if l.state != Decreasing {
+            l.hold_at = Some(last + l.hold_ns)
+            l.hold_ns = lmin(MAX_HOLD_NS, l.hold_ns * 2)
+            l.hold_rate = Some(bounded)
+        }
+        Decreasing
+    } else {
+        l.hold_at = None
+        l.hold_ns = HOLD_NS
+        l.hold_rate = None
+        DelayBased
+    }
+    l.state = next
+    l.estimate = bounded
+    if loss_limited(l) {
+        let open = match l.recovering {
+            None => true,
+            Some(r) => r + DELAYED_NS < last,
+        }
+        if open {
+            l.limit = Some(lmax(FLOOR_BPS, l.bw * 13 / 10))
+            l.recovering = Some(last)
+        }
+    }
+}

@@ -838,8 +838,9 @@ pub fn probe_sent(mut b: Bwe, id: u32, index: u64)
 The estimator is Google congestion control's delay-based controller
 ([draft-ietf-rmcat-gcc-02](https://datatracker.ietf.org/doc/html/draft-ietf-rmcat-gcc-02)),
 with the trendline detector and constants of libwebrtc as `str0m` carries them
-(`src/bwe/delay/` at `2ada76a`), a classic loss rule, and probing. Floats are SEM-2 floats:
-every expression below is evaluated as written, so two runs give the same bits. `exp` is
+(`src/bwe/delay/` at `2ada76a`), libwebrtc's loss-based estimator v2 in exact integers, and
+probing. Floats are SEM-2 floats: every expression below is evaluated as written, so two
+runs give the same bits. `exp` is
 `std.float.exp`. Times inside the estimator are `f64` milliseconds.
 
 **Arrival groups.** Acked packets with an arrival time, in sequence order, form groups
@@ -910,25 +911,100 @@ value.) The cap applies after the increase, so it may lower `A`, as in str0m.
 - `A` stays within `[min_bps, max_bps]`, and every change of `A` moves the time of the last
   change to now.
 
-**Loss.** A second estimate `L`, starting at `start_bps`, follows the classic loss rule of
-the GCC draft (§6). With `p` the fraction of packets reported lost since the last update, and
-at least 20 reported (counts carry across `on_acked` calls until they reach 20, then
-restart): `p > 0.10` gives `L = L · (1 − 0.5·p)`, at most once per 300 ms plus
-the round-trip time; `p < 0.02` gives `L = 1.05 · L`, at most once per second; otherwise `L`
-holds. The round-trip time is the last given, 0 before any, the waits run on `now_ns`, and
-`L` stays within `[min_bps, max_bps]`. A start phase lets the target leave `start_bps`
-before loss has spoken: until 2 s after the first `on_acked`, while no packet has yet been
-reported lost, the end of each `on_acked` sets `L = max(L, A)` (after the probe measurement
-above, so a probe's raise carries into `L`). Without it, `L` rises 5% a second and a
-300 kbit/s start needs 25 s to reach 1 Mbit/s whatever the delay estimate sees; libwebrtc's
-send-side estimator trusts the delay-based estimate the same way during its first 2 s
-(`IsInStartPhase`), there while the last loss fraction is zero. `target()` is `min(A, L)`,
-truncated to an integer.
+**Loss.** A second estimate `L` is libwebrtc's loss-based estimator v2 (`LossBasedBweV2`) as
+`str0m` ports it (`src/bwe/loss_controller.rs` at `2ada76a`), in exact integers. Rates are
+whole bit/s, times nanoseconds and sizes bytes. Probabilities, weights and logarithms are Q16,
+a value `x` held as `x · 65536`. Every `/` truncates toward zero. `ln(x)` for `x > 0` in Q16
+is computed as follows: take `top = ⌊log2 x⌋`, normalize `y = x >> (top − 16)` (or
+`x << (16 − top)`), take 16 fraction bits of `log2` by squaring (`y = y·y >> 16`, and if
+`y >= 2·65536` halve it and set the next bit), and return `((top − 16)·65536 + bits) ·
+45426 / 65536`, where 45426 is `ln 2` in Q16. The constants in Q16 are 0.05 = 3277,
+0.2 = 13107, 0.001 = 66 and 0.01 = 655.
+
+- **Observations.** Each `on_acked` that reaches the loss estimate adds its packets' bytes,
+  and the bytes of those reported lost, to a partial observation. The first such call
+  records its newest send time as the last observation's end. An observation completes
+  once the newest send time in a call is more than 250 ms past that end. It then holds the
+  partial bytes, the lost bytes, and the sending rate `bytes · 8 · 10⁹ / span`, and the
+  newest send time becomes the end. The window keeps the last 15 observations. The
+  observation `i` places from the newest weighs `0.9^i`, from the table `65536, 58982,
+  53084, 47776, 42998, 38698, 34829, 31346, 28211, 25390, 22851, 20566, 18509, 16658,
+  14993`. A call that completes no observation leaves `L` as it is.
+- **Average loss and the instant bound.** The average loss is `Σ w·lost · 65536 / Σ w·bytes`
+  over the window (0 when there are no bytes), recomputed when an observation completes.
+  Above 0.05, the instant upper bound is `100,000 · 65536 / (avg − 3277)`. Otherwise it
+  is `max_bps`.
+- **Loss probability.** For inherent loss `h` (clamped to `[0, 65536]`), candidate rate
+  `c` and an observation sent at rate `s`, `p = h`, plus `(65536 − h) · ((s − c) · 65536 /
+  s) / 65536` when `s > c`. `p` is then clamped to `[1, 65535]`.
+- **Feasible inherent loss.** `h` is clamped to `[66, min(3277 + 100,000 · 65536 / c,
+  65536)]` (upper 65536 when `c = 0`).
+- **Newton step.** From `h₀ = feasible(h, c)`, over the window, with `q = 65536 − p`,
+  `a = lost · 65536 / p` and `b = (bytes − lost) · 65536 / q`, it sums `first = Σ (a − b)·w
+  / 65536` and `second = Σ (a·65536/p + b·65536/q)·w / 65536`. Each weighted term is
+  computed as `x / 65536 · w + x % 65536 · w / 65536`. A `second` at or below 0 becomes 1.
+  The estimate is `feasible(h₀ + 3·first·65536 / 4 / second, c)`: one iteration at step
+  0.75.
+- **Objective.** The high-bandwidth bias is `g · c / 5000 + g · ln((c + 1)·65536) / 65536 /
+  50`, where `d = 13107 − avg` and `g = 500·d + |d|`. This is `str0m`'s `f · (d / 0.002 +
+  |d|)` with `f = 0.0002` on `c` and `0.02` on `ln(1 + c)`, `c` in bit/s. The objective is
+  `Σ w · ((lost · ln p + (bytes − lost) · ln q + bias · bytes) / 1,000,000)`.
+- **Candidates.** The candidate rates are `current · 102 / 100`, `current` and `current ·
+  95 / 100`. Then come `A` if it is above `current`, the acked rate if one is known, and
+  `A` again if it is above `current`. Here `current` is the loss estimator's working rate.
+  Each candidate is capped at `max(current, upper)`, where `upper` is the least of
+  `max_bps`, the recovery limit (while loss-limited), the instant bound and `A`. The
+  acked rate times the whole milliseconds since the last reduction, capped at 60 s,
+  divided by 1000, is added to `upper`. For each candidate, the Newton step gives its
+  inherent loss and the objective its value. The first candidate with the greatest value
+  wins.
+- **The best candidate's bounds.** A winner below `current` marks a reduction at the
+  observation's end. While the average loss is above the winner's inherent loss, the
+  winner cannot rise above `current`. While loss-limited, within 300 ms of the recovery
+  window's start, the winner is capped at the window's limit. When the estimate would
+  increase while loss-limited and an acked rate is known, the winner is capped at
+  `max(current, acked · 15 / 10)`. The factor is `12 / 10` while a hold rate exists and
+  the acked rate is below 1.3 times it (`acked · 10 < hold · 13`). A winner equal to
+  `current` in Decreasing becomes `current + 1`.
+- **Bounding.** `lower = max(min_bps, acked)`, or `min_bps` before any acked rate.
+  `bounded = max(min(winner, A, instant bound), lower)`. When `bounded` is below the
+  winner, `current` becomes `bounded` and the inherent loss resets to 0. Otherwise
+  `current` becomes `max(winner, lower)` and the inherent loss becomes the winner's.
+- **Hold.** In Decreasing with `bounded < A`, while the hold has not expired at the
+  observation's end, the hold rate rises to at least `lower` and `L = min(bounded, hold
+  rate)`. The state stays.
+- **State.** When the estimate increases while loss-limited (`L < bounded`, or equal while
+  Increasing), and `bounded < A` and `bounded < max_bps`, the state becomes Increasing.
+  Otherwise, when `bounded < A` and `bounded < max_bps`, it becomes Decreasing. Entering
+  Decreasing from another state starts a hold: it expires at the observation's end plus
+  the hold time, the hold time doubles up to 60 s (from 300 ms), and the hold rate is
+  `bounded`. Otherwise the state becomes DelayBased and the hold clears (hold time back
+  to 300 ms). Then `L = bounded`.
+- **Recovery window.** Loss-limited means Increasing or Decreasing. While loss-limited,
+  when no window is open or the last opened more than 300 ms before the observation's
+  end, a window opens there with limit `max(5000, current · 13 / 10)`. This is libwebrtc's
+  `MaxIncreaseFactor` of 1.3.
+
+**Composition with `A`.** `L` starts at `start_bps` (clamped to `[min_bps, max_bps]`) in
+DelayBased, with inherent loss 0.01. In each `on_acked`, after rate control and the probe
+measurement, and only once an acked rate exists:
+
+1. Within 2 s of the first `on_acked` (on `now_ns`), when at most one in a thousand of the
+   call's packets were reported lost, `L` and `current` are set to `A` and the call ends.
+   libwebrtc's send-side estimator trusts the delay-based estimate the same way during
+   its first 2 s (`IsInStartPhase`).
+2. A probe result measured in this call sets `L` and `current` to `A`.
+3. The acked rate is recorded and the update above runs with the call's packets and `A`.
+
+`target()` is `A` in DelayBased and `min(A, L)` otherwise, truncated to an integer. The
+classic loss rule of the GCC draft (§6) is gone: under steady random loss it lowers the
+target whatever the link's capacity (3% loss on a 4 Mbit/s path holds it near 0.8 Mbit/s).
 
 **Probing.** A sender that sends less than it could cannot see more capacity: the increase
 is capped at 1.5 times the acked rate. A forwarder that wants a higher layer must raise the
-estimate first. `probe(want, now)` answers a cluster to send when `want > target()` and no
-cluster is outstanding: `Cluster(id, rate, 5, 15 ms)` with `rate = min(2·target(), want)`
+estimate first. `probe(want, now)` answers a cluster to send when `want > target()`, no
+cluster is outstanding and the loss estimate is not Decreasing (a probe result resets `L` to
+`A`, so libwebrtc's and `str0m`'s probe controllers do not probe then): `Cluster(id, rate, 5, 15 ms)` with `rate = min(2·target(), want)`
 and `id` counting up from 0. The pacer sends at least 5 probes and keeps going until one is
 sent at least 15 ms after the first ([RTP-10](#rtp-10-pacer)), so the cluster spans 15 ms
 whatever the probe size. The caller hands it to the pacer
@@ -967,13 +1043,14 @@ lost; the cluster is measured then, once, and is no longer outstanding. The 1 s 
 `probe` for the most probes a cluster can hold (`rate · 15 ms / 1,600 + 2`, since a probe is
 at least 200 bytes); a `probe_sent` past it is ignored. `bwe` admits no charge
 (it answers a `Bwe`, not a `Result`), so this per-cluster reserve is the probe's only growth,
-and no per-packet operation allocates. The estimate a probe raises is the delay estimate `A`; the public
-`target()` is still `min(A, L)`, so a binding loss limit keeps the target at `L`.
+and no per-packet operation allocates. The estimate a probe raises is the delay estimate `A`, and a measured
+result also sets `L` to `A` (composition step 2), so the target rises to `A`.
 
 Law: on a link whose queue grows, the detector answers `Overuse` and the target falls; on an
 idle link the threshold decays to its floor; on a link with spare capacity a probe raises
-`A` to what the link delivered, and the target to `min(A, L)`. The arithmetic is the text
-above, to the bit.
+`A` to what the link delivered, and the target with it; under a policer with no queue the
+loss estimate settles near the policed rate; under steady random loss on a link with room
+it stays at the offered rate. The arithmetic is the text above, to the bit.
 
 ## RTP-10: Pacer
 
@@ -1377,7 +1454,8 @@ Goose (`/tmp/ref-goose` at `d5ae5bb`) is the language peer. `str0m` (`/tmp/ref-s
 | str0m `src/rtp/rtcp/twcc.rs` | TWCC register and wire format, with deltas from quantized absolute times | ADOPTED | the format and the no-drift quantization; padding is zero bytes in the FCI with `P` clear |
 | str0m `src/bwe/delay/` | GCC arrival groups, trendline, detector, AIMD | ADOPTED | the constants and the arithmetic, written out in RTP-9 |
 | str0m `src/bwe/acked_bitrate_estimator.rs` | Bayesian acked-rate estimate | REPLACED | a 500 ms window rate, which is enough for the decrease and the increase cap |
-| str0m `src/bwe/loss_controller.rs` | libwebrtc's loss-based estimator v2 | NOT TAKEN | the GCC draft's classic loss rule is enough for Wave 1 |
+| str0m `src/bwe/loss_controller.rs` | libwebrtc's loss-based estimator v2 | ADOPTED | RTP-9's loss estimate, in Q16 integers, checked against the file by `loss_vector`. Two places where str0m differs from libwebrtc are kept, because str0m is the oracle: the bias reads `f · (d / 0.002 + \|d\|)` where libwebrtc's `AdjustBiasFactor` is `f · d / (0.002 + \|d\|)`, and the bandwidth enters it in bit/s where libwebrtc uses kbit/s. Together they weigh rate about 10⁵ times more. With libwebrtc's form, a fluid model of 3% random loss collapsed the estimate. |
+| str0m `src/bwe/probe/control.rs` `can_probe` | no probe while loss-limited and decreasing | ADOPTED | `probe` answers no cluster while `L` is Decreasing |
 | str0m `src/pacer/leaky.rs` | leaky-bucket pacer with debt and padding | ADAPTED | strict classes with audio never held, an explicit full answer, and removal by stream |
 | LiveKit `pkg/sfu/rtpmunger.go:135-274` | range map of sequence offsets, drop close-up, NACK gate after a keyframe switch | ADAPTED | the same model, with a bounded ring of ranges per source generation and a `Late` answer, because a TLS-8 sealer cannot seal a reordered index |
 | LiveKit `pkg/sfu/codecmunger/vp8.go:130-145,238-290` | VP8 picture ID and TL0PICIDX munging that closes up dropped pictures | ADAPTED | `Counter`'s `Compact` mode, keyed per picture so every fragment maps alike; `Translate` for codecs whose references are picture differences |
@@ -1579,10 +1657,22 @@ written here and repeated in the law's comment.
   slot. On the 13 received members, `bytes = 3,250`, the send span 15 ms and the arrival span
   18.75 ms: send rate `(3,250 − 250) · 8 / 0.015 = 1,600,000`, receive rate
   `(3,250 − 250) · 8 / 0.01875 = 1,280,000`, so `A = 1,280,000` and `target() = 1,280,000`. A
-  variant with `L = 1,100,000`, a binding loss limit, runs the same cluster and ends with
-  `A = 1,280,000` and `target() = 1,100,000`. With only 12 received (75%), there is no
-  result.
+  variant puts the loss estimate in Decreasing at 900,000 once the cluster is out. The probe
+  result sets `L` to `A`, and this first feedback only opens an observation, so it ends with
+  `A = 1,280,000` and `target() = 1,280,000` (3 of 16 lost is above the start phase's 0.1%).
+  With only 12 received (75%), there is no result.
   *Oracle:* RTP-9's rate arithmetic, by hand.
+- **`loss_vector` (RTP-9).** The loss estimate alone (`min_bps` 30,000, `max_bps`
+  10,000,000, start 3,000,000), fed 110 feedback steps of 100 ms in five phases. Each phase
+  gives its packets per step, packet size, loss per mille, `A` and acked rate: 20 steps of
+  40 × 1,000 bytes at 1%, `A` 4 Mbit/s, acked 1.5 Mbit/s; 20 at 8%; 20 at 30%; 30 at 0%;
+  and 20 steps of 60 packets at 3% with `A` 6 Mbit/s and acked 2 Mbit/s. Packet `g`, counted
+  over the run, is sent in step `k` at `k · 100 ms + j · 100 ms / n` and lost when
+  `(g · 7919) mod 1000` is below the per mille. After each step, the state must equal the
+  oracle's, the estimate must be within 0.1% or 2 bit/s, and the inherent loss within 33 in
+  Q16. *Oracle:* `str0m` `2ada76a` `src/bwe/loss_controller.rs` in `f64`, run over the same
+  packets by `core/programs/rtp/vectors/loss_vector.py`. The script clones `str0m` into
+  `/tmp`, builds the file standalone and prints the tables.
 - **`pacer_spacing` (RTP-10).** Target 400 kbit/s, factor 2.5 (pacing 1 Mbit/s, 125 bytes per
   ms), queue limit 100 ms. *Scenario 1:* three 1,250-byte video packets queued at 0 leave at
   0, 10 and 20 ms. *Scenario 2:* the same three, and a 250-byte audio packet queued at 5 ms.
@@ -1670,6 +1760,21 @@ written here and repeated in the law's comment.
   and stays there; the receiver's goodput over the last 5 s is at least 0.7 Mbit/s; at least
   1,000 queue-delay samples are taken in the last 5 s, and their 95th percentile is below
   200 ms. *Oracle:* the scenario's capacity, with 10 s and 200 ms as acceptance thresholds.
+- **`policer_converges_to_policed_rate` (RTP-9).** *Harness:* `std.sim.udp`, a token-bucket
+  policer at `R` = 1.5 Mbit/s with no queue (four 1,220-byte packets deep; a packet the
+  bucket cannot pay for is dropped). The sender offers 3 Mbit/s for 30 s. From 10 s on, no
+  target is below `0.85 R` and the median target is at most `1.3 R`. A probe still lifts the
+  target to `A` for a moment while `L` is Increasing, so single targets above `1.3 R` are
+  allowed. *Oracle:* `R` and RTP-9's constants: 0.85 is the delay estimate's decrease
+  factor and 1.3 the loss estimate's `MaxIncreaseFactor`. A fluid model of `str0m`'s
+  controller settles at 1.05 to 1.2 `R` with about 9% loss, not the `[0.85 R, R]` with at
+  most 1% loss once planned: the acked-rate floor and the 1.2× hold ramp keep the estimate
+  probing above `R`.
+- **`inherent_loss_does_not_collapse` (RTP-9).** *Harness:* `std.sim.udp`, 3% independent
+  loss each way and no bottleneck. The sender offers 4 Mbit/s for 30 s. From 10 s on, every
+  target is at least 0.9 times the offered rate. *Oracle:* the configured source rate, with
+  0.9 and 10 s as acceptance thresholds. The classic loss rule settles near 0.8 Mbit/s
+  here.
 - **`parse_rewrite_cost` (RTP-12).** The cost path of RTP-12: at most 80 ns, 0 allocations. Passing since
   rtp-s11b-ext-2501: 74.6 ns median (p99 78.7), 304.5 cycles and 1,530 instructions per packet
   on shielded CPU 16 at 4.1 GHz, against 92.8 ns and 1,966 instructions for its parent.
@@ -1691,11 +1796,11 @@ package. Each law is carried by exactly one slice.
 | **S3** statistics and requests | RTP-5, RTP-6: modules `stats` and `loss` | S2 | `rtt_example`, `reception_report`, `keyframe_coalesce`, the packing half of `nack_pairs` | M | Sol |
 | **S4** history and RTX | RTP-7: modules `history` and `rtx`, plaintext layout and the per-leg contract | S1 | `history_lookup`, `rtx_layout`, the RTX case of `bounded_views` | S | Sol |
 | **S5** TWCC | RTP-8: module `twcc` | S2 | `twcc_report_bytes`, `twcc_chunks` | M | Sol |
-| **S6** bandwidth estimation | RTP-9: module `bwe` | S5 | `trendline_flat`, `trendline_overuse`, `aimd_steps` | M | Sol |
+| **S6** bandwidth estimation | RTP-9: module `bwe` | S5 | `trendline_flat`, `trendline_overuse`, `aimd_steps`, `loss_vector` | M | Sol |
 | **S7** pacer and probing | RTP-10 and RTP-9's probe | S4, S6 | `pacer_spacing`, `probe_result` | S | Sol |
 | **S8** rewriting | RTP-11, RTP-12: modules `rewrite` and `counter`, and the close operations | S1, S4, S7 | `rewrite_continuity`, `rewrite_late`, `simulcast_switch`, `svc_masks`, `codec_counter_continuity`, `close_leaves_nothing` | L | Opus |
 | **S9** unit adapter in `media_bits` | a `vp8` module (RFC 7741 descriptor: picture ID, TL0PICIDX, TID, `Y`, `S`, `PID`, keyframe from `P`, in-place rewrite of picture ID and TL0PICIDX at the output width), and the `Unit` adapter for VP8, VP9, H.264 and AV1. The one owner of the VP8 parser and descriptor laws; WebRTC slice S2 consumes them at egress | nothing | `unit_adapter` | M | Opus |
-| **S10** network laws | the two `sim.udp` laws | S4 to S7, `std.sim.udp` (media-w0-sim-udp-2324) | `nack_recovery_under_loss`, `congestion_backoff` | M | Sol |
+| **S10** network laws | the four `sim.udp` laws | S4 to S7, `std.sim.udp` (media-w0-sim-udp-2324) | `nack_recovery_under_loss`, `congestion_backoff`, `policer_converges_to_policed_rate`, `inherent_loss_does_not_collapse` | M | Sol |
 | **S11** cost | the RTP-12 cost path; the only slice with a cost target and the only one that runs a benchmark | S1, S3, S8 | `parse_rewrite_cost`: [`python3 bench/rtp/cost.py <scratch-dir>`](../../bench/rtp/cost.py) checks 0 allocations per packet (the default mode), reports instructions (mode `instructions`) and times the path on a shielded CPU (mode `time`) | S | Sol |
 | **S12** protected RTX | the SRTP wire case of RTP-7, in `core/programs/srtp/` | S4, DTLS slice S5 | `rtx_protected` in `core/programs/srtp/laws.hirsel` | S | Devin |
 

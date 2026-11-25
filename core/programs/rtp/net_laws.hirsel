@@ -394,7 +394,12 @@ fn numbered(m: ext.ExtMap, number: u16) -> ext.ExtWriter {
 
 type CcSender: send {
     socket: UdpSocket,
-    clock: Clock
+    clock: Clock,
+    // Where media goes, the source's packet interval, the rate probes ask for, and the end.
+    to: Addr,
+    offer_ns: u64,
+    want_bps: u64,
+    run_ns: u64
 }
 
 pub type Targets: send {
@@ -402,10 +407,10 @@ pub type Targets: send {
     bps: List[u64]
 }
 
-// The sender: a source that offers 3 Mbit/s and admits what the target allows,
+// The sender: a source that offers one packet every offer_ns and admits what the target allows,
 // the TWCC send log, the estimator, and the pacer with its probes.
 fn cc_sender(take end: CcSender) -> Targets waits {
-    let CcSender(socket: take owned, clock) = take end
+    let CcSender(socket: take owned, clock, to, offer_ns, want_bps, run_ns) = take end
     let mut socket = take owned
     let m = transport_map()
     let mut log = result.unwrap(twcc.send_log(8192))
@@ -424,7 +429,7 @@ fn cc_sender(take end: CcSender) -> Targets waits {
     let mut packets: List[UdpPacket] = list.with_capacity(8)
     loop {
         let now = host.mono_ns(clock)
-        if now >= RUN_NS {
+        if now >= run_ns {
             break
         }
         while offer <= now {
@@ -438,12 +443,12 @@ fn cc_sender(take end: CcSender) -> Targets waits {
                 }
                 frame += 1
             }
-            offer += OFFER_NS
+            offer += offer_ns
         }
-        if let Some(c) = bwe.probe(mut b, 3000000, now) {
+        if let Some(c) = bwe.probe(mut b, want_bps, now) {
             pacer.probe(mut p, c, now)
         }
-        let mut wake = order.min(offer, RUN_NS)
+        let mut wake = order.min(offer, run_ns)
         loop {
             match pacer.poll(mut p, now) {
                 Send(index) => {
@@ -453,7 +458,7 @@ fn cc_sender(take end: CcSender) -> Targets waits {
                     let mut out: Bytes = list.with_capacity(PACKET)
                     let head = result.unwrap(header.write(header.Fields(marker: false, pt: 96, seq: int.truncate(index), ts: int.truncate(index * 3000), ssrc: MEDIA_SSRC), view w, mut out))
                     list.fill(mut out, PACKET - head, 0u8)
-                    send_one(mut socket, RELAY, out)
+                    send_one(mut socket, to, out)
                 },
                 Probe(id, pad) => {
                     let size: u64 = HEADER + int.widen(pad)
@@ -464,7 +469,7 @@ fn cc_sender(take end: CcSender) -> Targets waits {
                     let mut out: Bytes = list.with_capacity(size)
                     let _ = result.unwrap(rtx.write_probe(header.Fields(marker: false, pt: 97, seq: rtx_seq, ts: 0, ssrc: RTX_SSRC), view w, pad, mut out))
                     rtx_seq += 1
-                    send_one(mut socket, RELAY, out)
+                    send_one(mut socket, to, out)
                 },
                 Wait(at) => {
                     wake = order.min(wake, at)
@@ -573,13 +578,14 @@ fn bottleneck(take end: Bottleneck) -> List[u64] waits {
 
 type CcReceiver: send {
     socket: UdpSocket,
-    clock: Clock
+    clock: Clock,
+    run_ns: u64
 }
 
 // The receiver: the TWCC receive log, feedback every 100 ms, and the media
 // bytes that arrive in the last 5 s.
 fn cc_receiver(take end: CcReceiver) -> u64 waits {
-    let CcReceiver(socket: take owned, clock) = take end
+    let CcReceiver(socket: take owned, clock, run_ns) = take end
     let mut socket = take owned
     let m = transport_map()
     let mut log = result.unwrap(twcc.recv_log(8192))
@@ -588,7 +594,7 @@ fn cc_receiver(take end: CcReceiver) -> u64 waits {
     let mut data: Bytes = list.with_capacity(65536)
     let mut packets: List[UdpPacket] = list.with_capacity(64)
     loop {
-        let got = host.udp_recv(mut socket, mut data, mut packets, At(clock, order.min(feedback, RUN_NS)))
+        let got = host.udp_recv(mut socket, mut data, mut packets, At(clock, order.min(feedback, run_ns)))
         let now = host.mono_ns(clock)
         match got {
             Ok(_) => {
@@ -610,7 +616,7 @@ fn cc_receiver(take end: CcReceiver) -> u64 waits {
         }
         list.clear(mut data)
         list.clear(mut packets)
-        if now >= RUN_NS {
+        if now >= run_ns {
             break
         }
         if now >= feedback {
@@ -647,9 +653,9 @@ fn congestion_backoff(tasks: Tasks) -> Result[(), ()] waits {
     let (take send_socket, _) = result.unwrap(host.udp_bind(network, SENDER, wide))
     let (take relay_socket, _) = result.unwrap(host.udp_bind(network, RELAY, wide))
     let (take receive_socket, _) = result.unwrap(host.udp_bind(network, RECEIVER, wide))
-    let sending = task.spawn(tasks, bytes 16777216, CcSender(socket: take send_socket, clock), cc_sender)
+    let sending = task.spawn(tasks, bytes 16777216, CcSender(socket: take send_socket, clock, to: RELAY, offer_ns: OFFER_NS, want_bps: 3000000, run_ns: RUN_NS), cc_sender)
     let relaying = task.spawn(tasks, bytes 8388608, Bottleneck(socket: take relay_socket, clock), bottleneck)
-    let receiving = task.spawn(tasks, bytes 8388608, CcReceiver(socket: take receive_socket, clock), cc_receiver)
+    let receiving = task.spawn(tasks, bytes 8388608, CcReceiver(socket: take receive_socket, clock, run_ns: RUN_NS), cc_receiver)
     let targets = result.unwrap(task.join(take sending))
     let delays = result.unwrap(task.join(take relaying))
     let goodput = result.unwrap(task.join(take receiving))
@@ -668,6 +674,132 @@ fn congestion_backoff(tasks: Tasks) -> Result[(), ()] waits {
     }
     let mut sorted: List[u64] = clone(delays)
     if held == 0 || goodput * 8 / 5 < 700000 || list.len(delays) < 1000 || p95(mut sorted) >= 200 * MS {
+        return Error(())
+    }
+    Ok(())
+}
+
+type Policer: send {
+    socket: UdpSocket,
+    clock: Clock,
+    rate_bps: u64,
+    run_ns: u64
+}
+
+// A policer at rate_bps with no queue: a token bucket four 1,220-byte packets
+// deep forwards a packet at once if it holds the packet's bits and drops it
+// otherwise.
+fn policer(take end: Policer) waits {
+    let Policer(socket: take owned, clock, rate_bps, run_ns) = take end
+    let mut socket = take owned
+    // Bits times 10^9, so a nanosecond adds rate_bps.
+    let depth = 4 * 8 * (PACKET + HEADER) * 1000000000
+    let mut tokens = depth
+    let mut last = 0u64
+    let mut data: Bytes = list.with_capacity(65536)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    loop {
+        let got = host.udp_recv(mut socket, mut data, mut packets, At(clock, run_ns))
+        let now = host.mono_ns(clock)
+        if let Ok(_) = got {
+            tokens = order.min(tokens + (now - last) * rate_bps, depth)
+            last = now
+            for d in packets {
+                let UdpPacket(at: start, len: size, ..) = d
+                let cost = 8 * size * 1000000000
+                if tokens >= cost {
+                    tokens -= cost
+                    send_one(mut socket, RECEIVER, clone(list.slice(data, start, start + size)))
+                }
+            }
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+        if now >= run_ns {
+            break
+        }
+    }
+}
+
+// The targets the sender set from `from` on, in increasing order.
+fn settled(targets: Targets, from: u64) -> List[u64] {
+    let mut late: List[u64] = list.new()
+    let mut i = 0u64
+    while i < list.len(targets.at) {
+        if targets.at[i] >= from {
+            list.push(mut late, targets.bps[i])
+        }
+        i += 1
+    }
+    list.sort_stable(mut late, order.compare)
+    late
+}
+
+const POLICED_BPS: u64 = 1500000
+
+const POLICED_RUN_NS: u64 = 30000000000
+
+/// bug: A loss estimate that never limits the target (loss ignored, so the target follows the delay estimate, which a policer with no queue never stops), a probe sent while the loss estimate is decreasing (its result resets the estimate to A), or an estimate that sinks below the acknowledged rate under the loss the policer causes.
+/// oracle: The configured policer rate R = 1.5 Mbit/s and RTP-9's constants: 0.85 R is the delay estimate's decrease factor applied to R, 1.3 R is the loss estimate's MaxIncreaseFactor over R; 10 s is the settle threshold.
+@test
+fn policer_converges_to_policed_rate(tasks: Tasks) -> Result[(), ()] waits {
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 20 * MS
+    let (network, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(2636, 0, 0)
+    let server = std.sim.udp.Server(config, plan: std.sim.world.plan(2636), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take server, std.sim.udp.serve)
+    let wide = UdpOptions(slots: 1024, slot_bytes: 1536)
+    let (take send_socket, _) = result.unwrap(host.udp_bind(network, SENDER, wide))
+    let (take relay_socket, _) = result.unwrap(host.udp_bind(network, RELAY, wide))
+    let (take receive_socket, _) = result.unwrap(host.udp_bind(network, RECEIVER, wide))
+    let sending = task.spawn(tasks, bytes 16777216, CcSender(socket: take send_socket, clock, to: RELAY, offer_ns: OFFER_NS, want_bps: 3000000, run_ns: POLICED_RUN_NS), cc_sender)
+    let relaying = task.spawn(tasks, bytes 8388608, Policer(socket: take relay_socket, clock, rate_bps: POLICED_BPS, run_ns: POLICED_RUN_NS), policer)
+    let receiving = task.spawn(tasks, bytes 8388608, CcReceiver(socket: take receive_socket, clock, run_ns: POLICED_RUN_NS), cc_receiver)
+    let targets = result.unwrap(task.join(take sending))
+    result.unwrap(task.join(take relaying))
+    let _ = result.unwrap(task.join(take receiving))
+    result.unwrap(task.join(take served))
+    // The targets from 10 s on, in order: none below 0.85 R, and the median
+    // at most 1.3 R. A probe still lifts the estimate to A for a moment
+    // while it is loss-limited and increasing, so single targets above
+    // 1.3 R are allowed.
+    let late = settled(targets, 10000000000)
+    let n = list.len(late)
+    if n == 0 || late[0] < POLICED_BPS * 85 / 100 || late[n / 2] > POLICED_BPS * 13 / 10 {
+        return Error(())
+    }
+    Ok(())
+}
+
+const LOSSY_RUN_NS: u64 = 30000000000
+
+// 1,200-byte packets at 4 Mbit/s: one every 2.4 ms.
+const LOSSY_OFFER_NS: u64 = 2400000
+
+/// bug: A loss estimate that treats steady random loss as congestion, so the target sinks below what the source offers on a link with room: an instant upper bound that applies below the 5% loss offset, or a rule that lowers the target whenever a share of packets is lost (the classic rule RTP-9 replaced, which settles near 0.8 Mbit/s here).
+/// oracle: The configured source rate, 4 Mbit/s, on a link with no bottleneck and 3% independent loss each way; 0.9 of the source rate and the 10 s settle time are acceptance thresholds.
+@test
+fn inherent_loss_does_not_collapse(tasks: Tasks) -> Result[(), ()] waits {
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 20 * MS
+    config.loss = std.sim.udp.Loss(good_to_bad: 0, bad_to_good: 0, good_loss: 30000, bad_loss: 0)
+    let (network, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(2636, 0, 0)
+    let server = std.sim.udp.Server(config, plan: std.sim.world.plan(2636), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take server, std.sim.udp.serve)
+    let wide = UdpOptions(slots: 1024, slot_bytes: 1536)
+    let (take send_socket, _) = result.unwrap(host.udp_bind(network, SENDER, wide))
+    let (take receive_socket, _) = result.unwrap(host.udp_bind(network, RECEIVER, wide))
+    let sending = task.spawn(tasks, bytes 16777216, CcSender(socket: take send_socket, clock, to: RECEIVER, offer_ns: LOSSY_OFFER_NS, want_bps: 6000000, run_ns: LOSSY_RUN_NS), cc_sender)
+    let receiving = task.spawn(tasks, bytes 8388608, CcReceiver(socket: take receive_socket, clock, run_ns: LOSSY_RUN_NS), cc_receiver)
+    let targets = result.unwrap(task.join(take sending))
+    let _ = result.unwrap(task.join(take receiving))
+    result.unwrap(task.join(take served))
+    let offered = 8 * PACKET * 1000000000 / LOSSY_OFFER_NS
+    let late = settled(targets, 10000000000)
+    let n = list.len(late)
+    if n == 0 || late[0] < offered * 9 / 10 {
         return Error(())
     }
     Ok(())

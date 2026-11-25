@@ -1,5 +1,4 @@
 // The RTP-5 and RTP-6 laws of build slice S3, and the packing half of nack_pairs.
-
 const MS: u64 = 1000000
 
 fn nack_config(window: u32) -> loss.NackConfig {

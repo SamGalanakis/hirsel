@@ -15,6 +15,7 @@ std = { major = 1 }
 "rtx.hirsel" = "rtx"
 "twcc.hirsel" = "twcc"
 "bwe.hirsel" = "bwe"
+"bwe_loss.hirsel" = "bwe"
 "pacer.hirsel" = "pacer"
 "stats.hirsel" = "stats"
 "loss.hirsel" = "loss"

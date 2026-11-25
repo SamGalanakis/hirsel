@@ -2,7 +2,6 @@
 // membership on a hirsel.4 session (wire_client), the roster as the relay tells it, and the
 // RoomIn and RoomOut the signaling adapter reads and writes. The roster follows the SDK's
 // (sdk/client/room.ts, docs/spec/sdk.md#rooms), so both clients agree on every Part.
-
 // One life of a room's roster: the 16 bytes the relay drew, in order.
 pub type Incarnation: key + send = Incarnation(Inline[u8, 16])
 
@@ -269,6 +268,24 @@ pub fn next[M: codec](mut room: Room[M], mut into: List[RoomIn[M]]) -> Result[bo
     }
     let frame = wire_client.next(conn)
     room.conn = Some(take conn)
+    took(mut room, take frame, mut into)
+}
+
+// `next` without waiting for a frame: true with nothing appended when none has come. A
+// service that drives the room from a media loop polls it once a turn (RTC-8, S7).
+pub fn try_next[M: codec](mut room: Room[M], mut into: List[RoomIn[M]]) -> Result[bool, RoomError] waits {
+    let Some(conn) = replace(mut room.conn, None) else {
+        return Ok(false)
+    }
+    let frame = wire_client.try_next(conn)
+    room.conn = Some(take conn)
+    if let Error(Empty) = frame {
+        return Ok(true)
+    }
+    took(mut room, take frame, mut into)
+}
+
+fn took[M: codec](mut room: Room[M], take frame: Result[runner.Frame, ReceiveError], mut into: List[RoomIn[M]]) -> Result[bool, RoomError] waits {
     let parts = match take frame {
         Ok(Live(take parts)) => take parts,
         Ok(Ended(sub, _)) => {

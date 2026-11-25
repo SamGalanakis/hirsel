@@ -1,4 +1,4 @@
-pub type Policy {
+pub type Policy: cross {
     audio: List[Codec],
     video: List[Codec],
     exts: List[Ext],

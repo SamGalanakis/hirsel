@@ -18,7 +18,7 @@ pub type Embed[M] {
 /// (version `version`, SDP `offer`), for router participant `who`. `publish` is the
 /// application's answer for the peer: without it, every section the peer sends on is
 /// answered `inactive` (RTC-2, receive-only participants).
-pub type Build {
+pub type Build: cross {
     who: peer.Participant,
     home: u16,
     peer: u32,
@@ -29,7 +29,7 @@ pub type Build {
 
 /// What the home unit made of a `Build`: the answer's SDP text, the sections the peer
 /// sends on (publications) and the sections the server may send on, with their kind.
-pub type Built {
+pub type Built: cross {
     answer: Bytes,
     recvs: List[u8],
     sends: List[(u8, sdp.Media)]

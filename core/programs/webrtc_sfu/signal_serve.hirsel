@@ -1,0 +1,342 @@
+// ---- The service (RTC-8, S7) ----
+// The process entry. Unit 0 runs in the caller's task with the adapter and the room
+// client; each other unit runs in its own unit task (CONC-15). Each unit binds its own
+// socket and makes its own inboxes, since neither may move between units, and reports
+// its doors to the entry. The entry hands every unit all units' doors in unit order,
+// then each runs `units.turn` and builds the sessions the adapter homes on it.
+/// The service's settings. `binds` names one address per unit (port 0 takes any free
+/// port; the bound address is the one sessions advertise); `until` is the monotonic
+/// time every unit stops at (`u64` max in a service that runs until killed).
+pub type Service[M] {
+    tasks: Tasks,
+    net: Net,
+    clock: Clock,
+    random: Random,
+    dial: runner.room_client.Dial,
+    room: peer.RoomId,
+    limits: router.RoomLimits,
+    embed: Embed[M],
+    binds: List[Addr],
+    policy: sdp.Policy,
+    session: peer.PeerLimits,
+    unit_bytes: u64,
+    until: u64
+}
+
+pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units
+
+/// A unit's turn when nothing is due sooner: the bound on how long a build or a room
+/// entry waits for its unit.
+pub const SERVE_TICK_NS: u64 = 5000000
+
+/// After a failed join or rejoin, the room client tries again this much later.
+pub const REJOIN_NS: u64 = 1000000000
+
+const OUT_BYTES: u64 = 1048576
+
+const OUT_PACKETS: u64 = 1024
+
+const SOCKET: UdpOptions = UdpOptions(slots: 256, slot_bytes: 1536)
+
+// What the entry moves into unit `index`'s task.
+type Start: cross {
+    index: u16,
+    units: u16,
+    bind: Addr,
+    net: Net,
+    clock: Clock,
+    random: Random,
+    hello: Client[Hello],
+    policy: sdp.Policy,
+    session: peer.PeerLimits,
+    until: u64
+}
+
+// A unit, once bound: its doors, where it takes the other units' doors, and where it
+// takes builds.
+type Hello: cross {
+    index: u16,
+    doors: units.Doors,
+    roster: Client[Sibling],
+    builds: Client[Build]
+}
+
+// One unit's doors, and where a build's outcome goes (unit 0).
+type Sibling: cross {
+    index: u16,
+    doors: units.Doors,
+    done: Client[Finished]
+}
+
+// A build's outcome from another unit: the built session, or the error's `Refused`
+// code (`code`), since a `RouterError` may not cross units.
+type Finished: cross {
+    who: peer.Participant,
+    built: Result[Built, u32]
+}
+
+// The error a code stands for, for the adapter, which only reads its code. A peer or
+// capacity error is answered as a peer error.
+fn uncode(c: u32) -> router.RouterError {
+    match c {
+        1 => NoRoom,
+        2 => NoParticipant,
+        3 => NoPublication,
+        4 => Fenced,
+        5 => Suspended,
+        6 => Exists,
+        7 => Limit(0),
+        8 => Unrepresentable,
+        _ => Peer(Closed),
+    }
+}
+
+fn dup(d: units.Doors) -> units.Doors {
+    units.Doors(control: conn.client(d.control), media: conn.client(d.media), addr: d.addr)
+}
+
+// A unit's self-signed certificate (RFC 8827 section 6.5: WebRTC pins it by its
+// fingerprint in the answer, so it names no host).
+fn unit_identity(r: Random, clock: Clock) -> Result[dtls.Identity, ServeError] {
+    let mut point: Bytes = list.with_capacity(65)
+    let key = secret.p256_key(r, "sign(p256)", mut point) ?=> |_| Identity
+    let now: i64 = int.narrow(host.wall_ms(clock) / 1000)
+    let Some(start) = std.time.from_unix(now - 86400, 0) else {
+        return Error(Identity)
+    }
+    let Some(end) = std.time.from_unix(now + 30 * 86400, 0) else {
+        return Error(Identity)
+    }
+    let der = std.x509_build.self_signed_p256(key, r, point, 1, "hirsel-sfu", start, end) ?=> |_| Identity
+    Ok(dtls.identity(take key, take der, r) ?=> |_| Identity)
+}
+
+// Build `b` on unit `u` and park its session there.
+fn build_on(mut u: units.Unit, h: Home, r: Random, b: Build) -> Result[Built, router.RouterError] {
+    let (take session, take made) = build(h, r, b)?
+    units.park(mut u, take session)?
+    Ok(take made)
+}
+
+fn wait_until(wake: Option[u64], now: u64) -> u64 {
+    let cap = now + SERVE_TICK_NS
+    match wake {
+        Some(t) if t < cap => t,
+        _ => cap,
+    }
+}
+
+// Unit `s.index` (not 0): bind, report, take the roster, then turn and build until
+// `s.until`.
+fn unit_task(take s: Start) -> Result[(), ServeError] waits {
+    let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, until: until) = take s
+    let (take opened, at) = host.udp_bind(net, bind, SOCKET) ?=> |e| Bind(e)
+    let (doors, take control, take media) = units.inboxes(at) ?=> |take e| Router(e)
+    let rc: Result[(Client[Sibling], Inbox[Sibling]), Capacity] = conn.new(64, bytes 65536)
+    let (roster, take siblings) = rc ?=> |c| Router(Capacity(c))
+    let bc: Result[(Client[Build], Inbox[Build]), Capacity] = conn.new(64, bytes 4194304)
+    let (builds, take wanted) = bc ?=> |c| Router(Capacity(c))
+    if let Error(_) = conn.send(hello, Hello(index: index, doors: take doors, roster: take roster, builds: take builds)) {
+        return Error(Units)
+    }
+    let mut all: List[units.Doors] = list.new()
+    let mut done: Option[Client[Finished]] = None
+    for _ in 0u16 .. n {
+        let Ok(sib) = conn.receive(siblings) else {
+            return Error(Units)
+        }
+        let Sibling(index: _, doors: take d, done: take c) = take sib
+        list.push(mut all, take d)
+        done = Some(take c)
+    }
+    let Some(take report) = done else {
+        return Error(Units)
+    }
+    let mut u = units.unit(random, index, all, take control, take media, OUT_BYTES, OUT_PACKETS) ?=> |take e| Router(e)
+    let home = Home(id: unit_identity(random, clock)?, at: at, policy: take policy, limits: session)
+    let mut sock = take opened
+    let mut wake: Option[u64] = None
+    while true {
+        let now = host.mono_ns(clock)
+        if now >= until {
+            break
+        }
+        wake = units.turn(mut u, clock, mut sock, wait_until(wake, now)) ?=> |take e| Router(e)
+        while let Ok(b) = conn.try_receive(wanted) {
+            let who: peer.Participant = b.who
+            let outcome: Result[Built, u32] = match build_on(mut u, home, random, b) {
+                Ok(take made) => Ok(take made),
+                Error(e) => Error(code(e)),
+            }
+            let _ = conn.try_send(report, Finished(who: who, built: take outcome))
+        }
+    }
+    Ok(())
+}
+
+/// Run the service until `s.until`: units 1 and up in unit tasks, unit 0, the adapter
+/// and the room client here. The room client is polled once a turn (`try_next`); on
+/// `Lost` the adapter suspends the room and the client rejoins, every `REJOIN_NS` until
+/// it gets a session, while unit 0 keeps turning.
+pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
+    let Service(tasks: tasks, net: net, clock: clock, random: random, dial: take dial, room: room_id, limits: limits, embed: take embed, binds: binds, policy: policy, session: session, unit_bytes: unit_bytes, until: until) = take s
+    let n: u16 = int.narrow(list.len(binds))
+    if n == 0 {
+        return Error(Units)
+    }
+    let (take opened, at) = host.udp_bind(net, binds[0], SOCKET) ?=> |e| Bind(e)
+    let (doors0, take control, take media) = units.inboxes(at) ?=> |take e| Router(e)
+    let hc: Result[(Client[Hello], Inbox[Hello]), Capacity] = conn.new(64, bytes 65536)
+    let (hello, take hellos) = hc ?=> |c| Router(Capacity(c))
+    let dc: Result[(Client[Finished], Inbox[Finished]), Capacity] = conn.new(1024, bytes 4194304)
+    let (done, take finished) = dc ?=> |c| Router(Capacity(c))
+    let mut running: List[Task[Result[(), ServeError]]] = list.new()
+    for k in 1u16 .. n {
+        let terms: sdp.Policy = clone(policy)
+        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, until: until)
+        match task.spawn_unit(tasks, bytes unit_bytes, take start, unit_task) {
+            Ok(take t) => list.push(mut running, take t),
+            Error(_) => return Error(Spawn),
+        }
+    }
+    // Every unit's doors in unit order, then the roster to each other unit.
+    let mut met: List[Option[Hello]] = list.new()
+    for _ in 0u16 .. n {
+        list.push(mut met, None)
+    }
+    for _ in 1u16 .. n {
+        let Ok(h) = conn.receive(hellos) else {
+            return Error(Units)
+        }
+        let slot: u64 = int.widen(h.index)
+        if slot == 0 || slot >= list.len(met) {
+            return Error(Units)
+        }
+        met[slot] = Some(take h)
+    }
+    let mut all: List[units.Doors] = list.new()
+    list.push(mut all, take doors0)
+    let mut rosters: List[Client[Sibling]] = list.new()
+    let mut builders: List[Client[Build]] = list.new()
+    for k in 1u64 .. list.len(met) {
+        let Some(take h) = replace(mut met[k], None) else {
+            return Error(Units)
+        }
+        let Hello(index: _, doors: take d, roster: take r, builds: take b) = take h
+        list.push(mut all, take d)
+        list.push(mut rosters, take r)
+        list.push(mut builders, take b)
+    }
+    for r in rosters {
+        for k in 0u64 .. list.len(all) {
+            if let Error(_) = conn.send(r, Sibling(index: int.narrow(k), doors: dup(all[k]), done: conn.client(done))) {
+                return Error(Units)
+            }
+        }
+    }
+    let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS) ?=> |take e| Router(e)
+    let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
+    let mut a = adapter(room_id, limits, take embed, n)
+    let mut sock = take opened
+    let mut wake: Option[u64] = None
+    let mut out: List[runner.room_client.RoomOut[M]] = list.new()
+    let mut joined: Option[runner.room_client.Room[M]] = None
+    let mut pending_dial: Option[runner.room_client.Dial] = Some(take dial)
+    let mut need_rejoin = false
+    let mut retry_at = 0u64
+    while true {
+        let now = host.mono_ns(clock)
+        if now >= until {
+            break
+        }
+        wake = units.turn(mut u, clock, mut sock, wait_until(wake, now)) ?=> |take e| Router(e)
+        let after = host.mono_ns(clock)
+        // The room: join, rejoin after Lost, or take what has come.
+        if let Some(take d) = replace(mut pending_dial, None) {
+            let mut entered = false
+            if after >= retry_at {
+                let first: runner.room_client.Dial = clone(d)
+                let entry: Result[runner.room_client.Room[M], runner.room_client.RoomError] = runner.room_client.join(take first)
+                match take entry {
+                    Ok(take r) => {
+                        joined = Some(take r)
+                        entered = true
+                    },
+                    Error(_) => {
+                        retry_at = after + REJOIN_NS
+                    },
+                }
+            }
+            if !entered {
+                pending_dial = Some(take d)
+            }
+        }
+        if let Some(take r) = replace(mut joined, None) {
+            let mut joined_room = take r
+            if need_rejoin && after >= retry_at {
+                match runner.room_client.rejoin(mut joined_room) {
+                    Ok(_) => {
+                        need_rejoin = false
+                    },
+                    Error(_) => {
+                        retry_at = after + REJOIN_NS
+                    },
+                }
+            }
+            let mut into: List[runner.room_client.RoomIn[M]] = list.new()
+            if !need_rejoin {
+                match runner.room_client.try_next(mut joined_room, mut into) {
+                    Ok(true) => (),
+                    _ => {
+                        need_rejoin = true
+                    },
+                }
+            }
+            you(mut a, runner.room_client.member(joined_room).you)
+            for take e in into {
+                room_in(mut a, take e, mut out)
+            }
+            joined = Some(take joined_room)
+        }
+        while let Ok(f) = conn.try_receive(finished) {
+            let Finished(who: who, built: take outcome) = take f
+            let result: Result[Built, router.RouterError] = match take outcome {
+                Ok(take b) => Ok(take b),
+                Error(c) => Error(uncode(c)),
+            }
+            built(mut a, who, take result, mut out)
+        }
+        step(mut a, mut u, after, mut out) ?=> |take e| Router(e)
+        for take b in take_builds(mut a) {
+            let who = b.who
+            if b.home == 0 {
+                let made = build_on(mut u, home, random, b)
+                built(mut a, who, take made, mut out)
+            } else {
+                let k: u64 = int.widen(b.home)
+                if k > list.len(builders) {
+                    built(mut a, who, Error(Limit(int.widen(n))), mut out)
+                } else if let Error(_) = conn.try_send(builders[k - 1], take b) {
+                    built(mut a, who, Error(Limit(64)), mut out)
+                }
+            }
+        }
+        units.send(mut u, clock, mut sock, after)
+        if let Some(take r) = replace(mut joined, None) {
+            let mut joined_room = take r
+            for take o in replace(mut out, list.new()) {
+                let _ = runner.room_client.send(mut joined_room, take o)
+            }
+            joined = Some(take joined_room)
+        } else {
+            list.clear(mut out)
+        }
+    }
+    if let Some(take r) = replace(mut joined, None) {
+        let _ = runner.room_client.leave(take r)
+    }
+    for take t in running {
+        let _ = task.join(take t)
+    }
+    Ok(())
+}

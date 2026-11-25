@@ -1,0 +1,141 @@
+// ---- The S7 service end to end (RTC-8 over the runner's room relay) ----
+// The service (`signal.serve`, two units on loopback) and a browser's signaling, both
+// `runner.room_client[signal.Signal]` sessions of one room in a running place.
+fn sfu_admit(tx: store.Tx, unused: (), author: runner.Caller, take argument: ()) -> Result[runner.Answer[runner.Grant], Capacity] {
+    Ok(runner.Answer(value: Join, covers: runner.covers()))
+}
+
+fn sfu_room(mut reg: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
+    let state: std.codec.Codec[List[Bytes]] = std.codec.of()
+    let message: std.codec.Codec[signal.Signal] = std.codec.of()
+    runner.room(mut reg, code.describe(sfu_admit), runner.slots(), state, message, runner.RoomBounds(peers: 9u32, state: runner.STATE_MAX, message: runner.MESSAGE_MAX), 4096u64, 1024u64, runner.DEFAULT_STEPS)
+}
+
+fn sfu_schema(mut d: store.Declare) -> Result[(), store.Error] {
+    Ok(())
+}
+
+fn sfu_place(c: Clock, random: Random, tasks: Tasks, net: Net) -> runner.PlaceConfig[(), (), ()] {
+    let mut config = runner.wire_defaults(262144u64)
+    config.n_pool = 33554432u64
+    config.n_relay = 4194304u64
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(sfu_room), n_place: 1048576u64, on_migrate: None, schema: code.describe(sfu_schema), session: config, max_sessions: 4u64, proxies: list.new(), n_publisher: 4194304u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net, tasks, clock: c, random, stop: runner.Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+}
+
+fn sfu_dial(tasks: Tasks, net: Net, c: Clock, random: Random, address: Addr) -> runner.room_client.Dial {
+    let keys = result.unwrap(runner.fixture.entry_keys(code.describe(sfu_room)))
+    runner.room_client.Dial(tasks, net, address, clock: c, random, keys, token: None, socket: runner.wire_defaults(262144u64).socket, entry: 0u32, arg: list.new(), within_ms: 5000u64, idle_ms: 3000u64)
+}
+
+type Browser: send {
+    tasks: Tasks,
+    net: Net,
+    clock: Clock,
+    random: Random,
+    address: Addr,
+    until: u64
+}
+
+// The browser joins, offers to the room once the service is in it, and returns the
+// answer's SDP text.
+fn browse(take b: Browser) -> Option[Bytes] waits {
+    let Browser(tasks: tasks, net: net, clock: clock, random: random, address: address, until: until) = take b
+    let entry: Result[runner.room_client.Room[signal.Signal], runner.room_client.RoomError] = runner.room_client.join(sfu_dial(tasks, net, clock, random, address))
+    let mut room = match take entry {
+        Ok(take r) => take r,
+        Error(_) => return None,
+    }
+    let mut into: List[runner.room_client.RoomIn[signal.Signal]] = list.new()
+    let mut offered = false
+    let mut answer: Option[Bytes] = None
+    let mut answered = false
+    while host.mono_ns(clock) < until && !answered {
+        match runner.room_client.next(mut room, mut into) {
+            Ok(true) => (),
+            _ => break,
+        }
+        let m = runner.room_client.member(room)
+        if !offered && m.you != None && list.len(m.roster.peers) >= 2 {
+            let _ = runner.room_client.send(mut room, ToRoom(Offer(1, unit_offer(2, b"96", b"97", b"1", b"3"))))
+            offered = true
+        }
+        for take e in replace(mut into, list.new()) {
+            if let Message(_, Answer(1, take text)) = take e {
+                answer = Some(take text)
+                answered = true
+            }
+        }
+    }
+    let _ = runner.room_client.leave(take room)
+    answer
+}
+
+fn loopback(port: u16) -> Addr {
+    Addr(ip: V4(0x7f000001u32), port: port)
+}
+
+/// bug: the service never joins the room, drops the browser's offer, builds the session
+/// on no unit, or answers with an address or certificate that is not a unit's.
+/// oracle: RTC-8 and RTC-3 by hand: the browser's `Offer(1, sdp)` through the relay is
+/// answered `Answer(1, sdp)`, whose SDP is ICE-Lite, `a=setup:passive`, names a 32-byte
+/// SHA-256 fingerprint other than zero, and one host candidate on 127.0.0.1 at a
+/// nonzero port: a bound unit's, since the binds ask port 0.
+@test
+fn service_answers_over_the_room(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let running = runner.fixture.start(sfu_place(c, random, tasks, net), 5000u64) ?=> |_| 1u64
+    let address = option.unwrap(runner.fixture.status(running).addr)
+    let start = host.mono_ns(c)
+    let until = start + 4000 * MS
+    let browser = task.spawn(tasks, bytes 16777216, Browser(tasks: tasks, net: net, clock: c, random: random, address: address, until: until), browse)
+    let embed = signal.Embed(wrap: fn(take s: signal.Signal) -> signal.Signal {
+        take s
+    }, unwrap: fn(take s: signal.Signal) -> Option[signal.Signal] {
+        Some(take s)
+    }, publish: fn(n: u32) -> bool {
+        true
+    })
+    let mut binds: List[Addr] = list.new()
+    list.push(mut binds, loopback(0))
+    list.push(mut binds, loopback(0))
+    let service = signal.Service(tasks: tasks, net: net, clock: c, random: random, dial: sfu_dial(tasks, net, c, random, address), room: room_id(), limits: revoke_limits(), embed: take embed, binds: binds, policy: sdp.default_policy(), session: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64), unit_bytes: 16777216, until: until)
+    let served = signal.serve(take service)
+    let answer = result.unwrap(task.join(take browser))
+    let _ = runner.fixture.end(take running, 5000u64)
+    if let Error(_) = served {
+        return Error(2u64)
+    }
+    let Some(text) = answer else {
+        return Error(3u64)
+    }
+    let mut d = sdp.description()
+    sdp.parse(text, mut d) ?=> |_| 4u64
+    let mut printed = false
+    for b in d.fingerprint {
+        if b != 0 {
+            printed = true
+        }
+    }
+    if !d.ice_lite || d.setup != Passive || !printed || list.len(d.candidates) != 1 {
+        return Error(5u64)
+    }
+    // "1 1 udp 2130706431 127.0.0.1 <port> typ host"
+    let words = sdp_words(d.candidates[0])
+    if list.len(words) != 8 || !same(words[4], b"127.0.0.1") || same(words[5], b"0") || !same(words[7], b"host") {
+        return Error(6u64)
+    }
+    Ok(())
+}
+
+fn sdp_words(b: Bytes) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    let mut cur: Bytes = list.new()
+    for x in b {
+        if x == b' ' {
+            list.push(mut out, replace(mut cur, list.new()))
+        } else {
+            list.push(mut cur, x)
+        }
+    }
+    list.push(mut out, take cur)
+    out
+}

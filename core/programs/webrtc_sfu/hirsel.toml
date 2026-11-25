@@ -12,6 +12,7 @@ srtp = { major = 1, path = "../srtp" }
 stun_ice = { major = 1, path = "../stun_ice" }
 turn = { major = 1, path = "../turn" }
 runner = { major = 1, path = "../runner" }
+store = { major = 1, path = "../store" }
 
 [sources]
 "sdp.hirsel" = "sdp"
@@ -29,10 +30,11 @@ runner = { major = 1, path = "../runner" }
 "signal.hirsel" = "signal"
 "signal_turn.hirsel" = "signal"
 "signal_build.hirsel" = "signal"
+"signal_serve.hirsel" = "signal"
 
 [tests]
 limit = 67108864
-grants = ["Tasks", "Clock", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8 0-65535"]
+grants = ["Tasks", "Clock", "Random", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8 0-65535;Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
 
 [tests.sources]
 "laws.hirsel" = "laws"
@@ -45,6 +47,7 @@ grants = ["Tasks", "Clock", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8
 "units_net_laws.hirsel" = "laws"
 "units_revoke_laws.hirsel" = "laws"
 "signal_laws.hirsel" = "laws"
+"signal_serve_laws.hirsel" = "laws"
 "units_fanout_laws.hirsel" = "laws"
 "speaker_laws.hirsel" = "laws"
 "dynacast_laws.hirsel" = "laws"
@@ -52,3 +55,6 @@ grants = ["Tasks", "Clock", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"
 "vectors/chromium_rtp.hirsel" = "vectors"
+
+[tests.runs."webrtc_sfu@1/laws/service_answers_over_the_room"]
+limit = 1342177280

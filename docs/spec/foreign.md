@@ -193,9 +193,11 @@ The member, symbol, feature, prefix and ABI rows of the table are written for an
 (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`). The other rows, and the import
 check, apply to every target.
 
-**Mach-O members** (`aarch64-apple-darwin`; macOS decision D1, not yet built). For a Mach-O
+**Mach-O members** (`aarch64-apple-darwin`; macOS decision D1). For a Mach-O
 target the ELF rows are replaced by these, with the same diagnostics. Names are LLVM's
-`BinaryFormat/MachO.h`. The target's **floor** is macOS 26.0 (macOS decision D2), the first
+`BinaryFormat/MachO.h`. A symbol `S` in a diagnostic is its C name, without the leading `_`,
+and a feature `X` is the first in load-command order (a segment's sections where its command
+stands), then in symbol order. The target's **floor** is macOS 26.0 (macOS decision D2), the first
 release whose kernel enforces `O_RESOLVE_BENEATH`; a Mac law that shows an earlier release
 enforcing it lowers the floor to that release.
 
@@ -212,12 +214,14 @@ A section-boundary symbol (`section$start$SEG$SECT`, `segment$start$SEG`) is the
 way of letting code iterate a section, as `__start_` is on ELF. A member that imports one is
 refused by the import check, because no admitted input defines it.
 
-**Imports** (every target; not yet built). Before the linker runs, every symbol a member
-leaves undefined must be defined by another member of the same archive, another admitted
+**Imports** (every target). Before the linker runs, every symbol a member leaves undefined
+(an ELF global or weak symbol in `SHN_UNDEF`; a Mach-O external `N_UNDF` symbol with no
+size, or an `N_PBUD` one), weak or not, must be defined by another member of the same archive, another admitted
 archive, the runtime, the program's generated objects, or another link input of the image
 (the libc and the system libraries the toolchain links, as the collision row reads them),
 and nothing else. Otherwise: `FFI-3: archive F of P for T: member N imports S, which no
-admitted input defines`. On `aarch64-apple-darwin` the only system library is the libSystem
+admitted input defines`, for the first such import in ascending order of module definition
+identity, then member, then symbol table order. On `aarch64-apple-darwin` the only system library is the libSystem
 stub, generated from the Hirsel-owned libSystem allowlist
 (macOS decision D3). The Security and CoreFoundation stubs that the runtime links for
 `Trust.System` define nothing an archive may import.
@@ -670,7 +674,8 @@ module `native` binds an **adapter**. This is the C file `hirsel_sqlite.c`, with
 together with the SQLite amalgamation into one static archive per target. The adapter is the audited
 code: it calls the SQLite API and gives each call the FFI-5 shape. The interface is
 `pub opaque type Sqlite {}` in module `sqlite`, and the kinds are `DbHandle` and `StmtHandle`
-there. The first archive row is `x86_64-unknown-linux-gnu`.
+there. Its archive rows are `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and
+`aarch64-apple-darwin`.
 
 **The pinned build.** The archive is rebuilt from the text below and from nothing else, and
 the package's directory holds the adapter source, the build script `build.sh` that runs these
@@ -683,17 +688,29 @@ steps, and the pinned archive:
   publishes it. `build.sh` downloads it, checks that digest before unpacking, and uses its
   `sqlite3.c` and `sqlite3.h`. The amalgamation is not vendored.
 - **Tools.** The repository's pinned LLVM 23.1.5 tree (`tools/buck2/bootstrap_llvm.py`): its
-  `clang`, `ld.lld`, `llvm-objcopy` and `llvm-ar`, and no host compiler.
+  `clang`, `ld.lld`, `llvm-objcopy` and `llvm-ar`, and no host compiler. The
+  `aarch64-unknown-linux-gnu` row reads the pinned Arm sysroot's glibc headers
+  (`HIRSEL_AARCH64_SYSROOT`); the `aarch64-apple-darwin` row reads the pinned Zig's Darwin
+  headers (`lib/libc/include/any-darwin-any` at the link kit's Zig commit,
+  `ZIG_DARWIN_INCLUDE`).
 - **Options.** `-DSQLITE_OS_OTHER=1 -DSQLITE_THREADSAFE=1 -DSQLITE_TEMP_STORE=3
   -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DESERIALIZE -DSQLITE_OMIT_LOCALTIME
   -DSQLITE_USE_URI=0 -DSQLITE_DQS=0 -DSQLITE_DEFAULT_FOREIGN_KEYS=1`, and no other
   `SQLITE_` option and no extension.
-- **Steps.** For each of `sqlite3.c`, `hirsel_sqlite.c` and `hirsel_sqlite_os.c`: `clang --target=T -std=c11 -O2
+- **Steps.** For each ELF row `T`, and each of `sqlite3.c`, `hirsel_sqlite.c` and `hirsel_sqlite_os.c`: `clang --target=T -std=c11 -O2
   -fPIC -fno-ident -ffile-prefix-map=$PWD=. OPTIONS -c F.c -o F.o`. Then `ld.lld -r sqlite3.o
   hirsel_sqlite.o hirsel_sqlite_os.o -o hsq.o`; `llvm-objcopy --wildcard --keep-global-symbol='hsq_*' hsq.o`,
   which makes every SQLite symbol local so the one member's global definitions all carry the
   prefix (FFI-3); and `llvm-ar rcs libhirsel_sqlite.a hsq.o`, which writes no timestamps or
-  owners. The build is byte-reproducible: two runs give one SHA-256, and the pin is that
+  owners. The `aarch64-unknown-linux-gnu` row is `libhirsel_sqlite-aarch64-unknown-linux-gnu.a`,
+  built alike with `--sysroot`. ld64 has no relocatable link that makes symbols local, so the
+  `aarch64-apple-darwin` row compiles one unit that includes the three files with
+  `SQLITE_API`, and the OS layer's shared names, `static`: `clang
+  --target=arm64-apple-macos26.0 -nostdlibinc -isystem DARWIN -std=c11 -O2 -fno-ident
+  -D_FORTIFY_SOURCE=0 -DSQLITE_WITHOUT_ZONEMALLOC OPTIONS`, then `llvm-ar --format=darwin rcs
+  libhirsel_sqlite-aarch64-apple-darwin.a`. On Darwin the adapter syncs with
+  `fcntl(F_FULLFSYNC)`, never `fsync`, and opens beneath its directory with `openat` and
+  `O_RESOLVE_BENEATH | O_NOFOLLOW_ANY`. The build is byte-reproducible: two runs give one SHA-256, and the pin is that
   digest. The adapter includes the header that `hirsel inspect --foreign-header
   sqlite@1/native` prints, and expands `HIRSEL_ABI_TEXT` once (FFI-3).
 - **Native laws.** `build.sh --test DIR` builds no archive: it links `native_laws.c` against

@@ -346,9 +346,10 @@ pub(crate) fn header(inputs: CorpusManifest, module: &DefPath, prefix: &str) -> 
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n");
+    // Mach-O names a section by segment and section (FFI-3).
     write!(
         prototypes,
-        "\n#define HIRSEL_ABI_TEXT \\\n    static const char hirsel_abi[sizeof(\"{escaped}\") - 1] \\\n        __attribute__((used, section(\".hirsel_abi\"))) = \"{escaped}\";\n"
+        "\n#ifdef __APPLE__\n#define HIRSEL_ABI_SECTION \"__TEXT,__hirsel_abi\"\n#else\n#define HIRSEL_ABI_SECTION \".hirsel_abi\"\n#endif\n#define HIRSEL_ABI_TEXT \\\n    static const char hirsel_abi[sizeof(\"{escaped}\") - 1] \\\n        __attribute__((used, section(HIRSEL_ABI_SECTION))) = \"{escaped}\";\n"
     ).unwrap();
     Ok(prototypes)
 }

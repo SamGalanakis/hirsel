@@ -783,7 +783,7 @@ impl CheckProduct {
             )?;
             selected.insert(object.hash, row);
         }
-        let symbols = sealed.definitions(&Debit::unlimited())?;
+        let mut symbols = sealed.definitions(&Debit::unlimited())?;
         if let Some((runtime, link)) = link {
             symbols.check_tool_inputs(runtime, link)?;
         }

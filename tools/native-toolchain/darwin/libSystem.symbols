@@ -87,6 +87,7 @@ _log
 _lseek
 _lstat
 _malloc
+_memchr
 _memcmp
 _memcpy
 _memmove
@@ -98,6 +99,7 @@ _mkdtemp
 _mmap
 _mprotect
 _munmap
+_nanosleep
 _open
 _openat
 _opendir
@@ -139,6 +141,7 @@ _pthread_mutex_unlock
 _pthread_mutexattr_destroy
 _pthread_mutexattr_init
 _pthread_mutexattr_settype
+_pthread_once
 _pthread_self
 _pthread_setname_np
 _pthread_sigmask
@@ -170,11 +173,20 @@ _sigdelset
 _sigemptyset
 _sigfillset
 _signal
+_snprintf
 _socket
 _stat
 _statfs
+_strcasecmp
+_strchr
+_strcmp
+_strcspn
 _strerror_r
 _strlen
+_strncmp
+_strnlen
+_strrchr
+_strspn
 _sysconf
 _sysctlbyname
 _unlink

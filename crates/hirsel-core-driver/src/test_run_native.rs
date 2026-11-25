@@ -2559,7 +2559,7 @@ fn sqlite_directory_recovery_locking_and_sync() {
     let manifest = fs::read_to_string(fixture.join("hirsel.toml")).unwrap()
         .replace("\"native.hirsel\" = \"native\"", "\"native.hirsel\" = \"native\"\n\"boundary.hirsel\" = \"boundary\"");
     law.write("core/programs/sqlite/hirsel.toml", manifest);
-    for file in ["sqlite.hirsel", "native.hirsel", "libhirsel_sqlite.a", "tests.hirsel", "error_buffer_test.hirsel", "example.hirsel"] {
+    for file in ["sqlite.hirsel", "native.hirsel", "libhirsel_sqlite.a", "libhirsel_sqlite-aarch64-unknown-linux-gnu.a", "libhirsel_sqlite-aarch64-apple-darwin.a", "tests.hirsel", "error_buffer_test.hirsel", "example.hirsel"] {
         law.write(&format!("core/programs/sqlite/{file}"), fs::read(fixture.join(file)).unwrap());
     }
     law.write("core/programs/sqlite/boundary.hirsel", r#"
@@ -2962,6 +2962,19 @@ __attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
             row["definition"] == "ffi_laws@1/tests/ungranted" && row["passed"] == true
         }));
         fs::remove_file(&called).unwrap();
+    }
+    // FFI-3 Imports: an undefined symbol that no admitted input defines (the archives, the
+    // runtime, the link closure's libraries) is refused before the linker runs; zlib's
+    // deflate is in none of them.
+    fs::write(dir.join("imports.c"), "extern int deflate(void *, int);\nint hfl_import(void) { return deflate(0, 0); }\n").unwrap();
+    command(Command::new(&cc).current_dir(&dir).args(["-target", TARGET, "-fPIC", "-c", "imports.c", "-o", "imports.o"])).unwrap();
+    fs::write(dir.join("candidate.a"), &pinned).unwrap();
+    command(Command::new(&ar).current_dir(&dir).args(["rcs", "candidate.a", "imports.o"])).unwrap();
+    let importing = fs::read(dir.join("candidate.a")).unwrap();
+    fs::remove_file(dir.join("candidate.a")).unwrap();
+    for engine in ["cranelift", "llvm"] {
+        pin_bytes(importing.clone());
+        fail_build(engine, TARGET, &format!("{PREFIX}: member imports.o imports deflate, which no admitted input defines"));
     }
     // The non-foreign control runs last, so the refusal rows above run even when it fails.
     for engine in ["cranelift", "llvm"] {

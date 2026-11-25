@@ -132,13 +132,13 @@ static int temp_reserved(sqlite3_file *base, int *held) {
     return SQLITE_OK;
 }
 
-int temp_control(sqlite3_file *base, int op, void *arg) {
+HSQ_SHARED int temp_control(sqlite3_file *base, int op, void *arg) {
     (void)base; (void)op; (void)arg;
     return SQLITE_NOTFOUND;
 }
 
-int temp_sector(sqlite3_file *base) { (void)base; return 512; }
-int temp_characteristics(sqlite3_file *base) { (void)base; return 0; }
+HSQ_SHARED int temp_sector(sqlite3_file *base) { (void)base; return 512; }
+HSQ_SHARED int temp_characteristics(sqlite3_file *base) { (void)base; return 0; }
 
 static const sqlite3_io_methods temp_methods = {
     .iVersion = 1,
@@ -156,7 +156,7 @@ static const sqlite3_io_methods temp_methods = {
     .xDeviceCharacteristics = temp_characteristics,
 };
 
-int no_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *file, int flags, int *out) {
+HSQ_SHARED int no_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *file, int flags, int *out) {
     (void)vfs;
     file->pMethods = NULL;
     if (name || (flags & SQLITE_OPEN_SUPER_JOURNAL)) return SQLITE_CANTOPEN;
@@ -203,7 +203,7 @@ static int no_clock64(sqlite3_vfs *vfs, sqlite3_int64 *out) {
     return SQLITE_ERROR;
 }
 
-sqlite3_vfs no_files = {
+HSQ_SHARED sqlite3_vfs no_files = {
     .iVersion = 2,
     .szOsFile = sizeof(TempFile),
     .mxPathname = 1,
@@ -218,10 +218,10 @@ sqlite3_vfs no_files = {
     .xCurrentTimeInt64 = no_clock64,
 };
 
-int sqlite3_os_init(void) { return sqlite3_vfs_register(&no_files, 1); }
-int sqlite3_os_end(void) { return SQLITE_OK; }
+SQLITE_API int sqlite3_os_init(void) { return sqlite3_vfs_register(&no_files, 1); }
+SQLITE_API int sqlite3_os_end(void) { return SQLITE_OK; }
 
-int os_initialize(void) {
+HSQ_SHARED int os_initialize(void) {
     sqlite3_mutex_methods methods = {
         .xMutexInit = mutex_init,
         .xMutexEnd = mutex_end,

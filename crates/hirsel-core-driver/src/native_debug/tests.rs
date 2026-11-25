@@ -1,3 +1,4 @@
+mod darwin;
 mod macho_cut;
 
 #[test]

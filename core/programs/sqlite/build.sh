@@ -41,6 +41,12 @@ if [ -n "$test_root" ]; then
     exit
 fi
 cp hirsel_sqlite.c hirsel_sqlite_os.c hirsel_sqlite_os.h "$stage"
+# The ELF rows: three objects, one relocatable link, every non-hsq_ symbol
+# made local. The aarch64 row reads the pinned Arm glibc headers.
+sysroot=${HIRSEL_AARCH64_SYSROOT:?set HIRSEL_AARCH64_SYSROOT to the pinned Arm sysroot}
+# The Darwin row reads the pinned Zig's Darwin headers: lib/libc/include/any-darwin-any
+# at Zig commit bff490a23889750de7096d9057c0a432efc929a8, the link kit's pin.
+darwin=${ZIG_DARWIN_INCLUDE:?set ZIG_DARWIN_INCLUDE to the pinned Zig Darwin headers}
 (
     cd "$stage"
     for file in sqlite3 hirsel_sqlite hirsel_sqlite_os; do
@@ -54,5 +60,41 @@ cp hirsel_sqlite.c hirsel_sqlite_os.c hirsel_sqlite_os.h "$stage"
     "$llvm/bin/ld.lld" -r sqlite3.o hirsel_sqlite.o hirsel_sqlite_os.o -o hsq.o
     "$llvm/bin/llvm-objcopy" --wildcard --keep-global-symbol='hsq_*' hsq.o
     "$llvm/bin/llvm-ar" rcs libhirsel_sqlite.a hsq.o
+    mkdir aarch64
+    for file in sqlite3 hirsel_sqlite hirsel_sqlite_os; do
+        "$llvm/bin/clang" --target=aarch64-unknown-linux-gnu "--sysroot=$sysroot" -std=c11 -O2 \
+            -fPIC -fno-ident "-ffile-prefix-map=$PWD=." "-ffile-prefix-map=$sysroot=sysroot" \
+            -DSQLITE_OS_OTHER=1 -DSQLITE_THREADSAFE=1 -DSQLITE_TEMP_STORE=3 \
+            -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DESERIALIZE -DSQLITE_OMIT_LOCALTIME \
+            -DSQLITE_USE_URI=0 -DSQLITE_DQS=0 -DSQLITE_DEFAULT_FOREIGN_KEYS=1 \
+            -c "$file.c" -o "aarch64/$file.o"
+    done
+    "$llvm/bin/ld.lld" -r aarch64/sqlite3.o aarch64/hirsel_sqlite.o aarch64/hirsel_sqlite_os.o \
+        -o aarch64/hsq.o
+    "$llvm/bin/llvm-objcopy" --wildcard --keep-global-symbol='hsq_*' aarch64/hsq.o
+    (cd aarch64 && "$llvm/bin/llvm-ar" rcs ../libhirsel_sqlite-aarch64-unknown-linux-gnu.a hsq.o)
+    # The Darwin row: ld64 has no relocatable link that makes symbols local, so
+    # the three files are one unit, with SQLite's API and the OS layer's shared
+    # names static; only the hsq_ functions stay external.
+    cat > hsq.c <<'UNIT'
+#define SQLITE_API static
+#define SQLITE_EXTERN
+#define HSQ_SHARED static
+#define HSQ_SHARED_DATA static
+#include "sqlite3.c"
+#include "hirsel_sqlite_os.c"
+#include "hirsel_sqlite.c"
+UNIT
+    "$llvm/bin/clang" --target=arm64-apple-macos26.0 -nostdlibinc -isystem "$darwin" \
+        -std=c11 -O2 -fno-ident "-ffile-prefix-map=$PWD=." "-ffile-prefix-map=$darwin=darwin" \
+        -D_FORTIFY_SOURCE=0 -DSQLITE_WITHOUT_ZONEMALLOC \
+        -DSQLITE_OS_OTHER=1 -DSQLITE_THREADSAFE=1 -DSQLITE_TEMP_STORE=3 \
+        -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DESERIALIZE -DSQLITE_OMIT_LOCALTIME \
+        -DSQLITE_USE_URI=0 -DSQLITE_DQS=0 -DSQLITE_DEFAULT_FOREIGN_KEYS=1 \
+        -c hsq.c -o hsq-darwin.o
+    "$llvm/bin/llvm-ar" --format=darwin rcs libhirsel_sqlite-aarch64-apple-darwin.a hsq-darwin.o
 )
-cp "$stage/libhirsel_sqlite.a" libhirsel_sqlite.a
+for row in libhirsel_sqlite.a libhirsel_sqlite-aarch64-unknown-linux-gnu.a \
+    libhirsel_sqlite-aarch64-apple-darwin.a; do
+    cp "$stage/$row" "$row"
+done

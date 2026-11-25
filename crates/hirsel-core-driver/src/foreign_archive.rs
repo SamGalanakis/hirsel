@@ -17,9 +17,14 @@ use std::path::{Path, PathBuf};
 const AR: &[u8] = b"!<arch>\n";
 const THIN: &[u8] = b"!<thin>\n";
 const LLVM_ADDRSIG: elf::SectionType = elf::SectionType(0x6fff_4c03);
+const TBD: &[u8] = b"--- !tapi-tbd";
+
+mod macho;
 
 pub(crate) struct SealedArchive {
     file: File,
+    /// Its members are Mach-O objects, whose symbols carry a leading `_`.
+    macho: bool,
     indexed: BTreeMap<Vec<u8>, IndexedSymbol>,
     members: Vec<Member>,
 }
@@ -102,7 +107,7 @@ impl LinkArchives {
         if self.0.is_empty() {
             return Ok(());
         }
-        let symbols = self.definitions(&Debit::unlimited())?;
+        let mut symbols = self.definitions(&Debit::unlimited())?;
         symbols.check_tool_inputs(runtime, recipe)?;
         for input in inputs.iter() {
             symbols.check_link_input(&std::fs::read(input)?, "the generated code")?;
@@ -110,6 +115,7 @@ impl LinkArchives {
         for member in members {
             symbols.check_link_input(member, "the generated code")?;
         }
+        symbols.check_imports(&recipe.target)?;
         let pid = std::process::id();
         inputs.extend(
             self.0.values().map(|row| {
@@ -130,6 +136,8 @@ struct IndexedSymbol {
 struct Member {
     name: String,
     symbols: Vec<Symbol>,
+    /// The global and weak symbols the member leaves undefined, in symbol order.
+    imports: Vec<Vec<u8>>,
     abi: Vec<Option<Vec<u8>>>,
     bad_feature: Option<String>,
 }
@@ -157,19 +165,43 @@ impl ArchiveOrigin<'_> {
     }
 }
 
-pub(crate) struct ForeignDefinitions<'a>(BTreeMap<&'a [u8], ArchiveOrigin<'a>>);
+/// What the admitted archives define, and what they import that no archive
+/// defines. Symbol names are the object file's own: on Mach-O they carry the
+/// platform's leading `_`, which diagnostics leave out.
+pub(crate) struct ForeignDefinitions<'a> {
+    defined: BTreeMap<&'a [u8], ArchiveOrigin<'a>>,
+    /// Each archive's imports that no archive defines, in module, member and
+    /// symbol order.
+    imports: Vec<(ArchiveOrigin<'a>, &'a str, &'a [u8])>,
+    /// The imports no input read so far defines.
+    unresolved: BTreeSet<&'a [u8]>,
+    macho: bool,
+}
+
+/// `symbol` as C names it: Mach-O symbols carry a leading `_`.
+fn c_name(symbol: &[u8], macho: bool) -> std::borrow::Cow<'_, str> {
+    let symbol = if macho {
+        symbol.strip_prefix(b"_").unwrap_or(symbol)
+    } else {
+        symbol
+    };
+    String::from_utf8_lossy(symbol)
+}
 
 pub(crate) fn check_distinct_definitions<'a>(
     archives: impl IntoIterator<Item = (&'a SealedArchive, ArchiveOrigin<'a>)>,
     budget: &Debit<'_>,
 ) -> Result<ForeignDefinitions<'a>, AdmissionError> {
     let mut seen = BTreeSet::new();
+    let mut distinct = Vec::new();
     let mut definitions = BTreeMap::<&[u8], ArchiveOrigin<'_>>::new();
     for (archive, origin) in archives {
         budget.check()?;
         if !seen.insert(origin.object.hash) {
             continue;
         }
+        budget.reserve(&mut distinct, 1)?;
+        distinct.push((archive, origin));
         for member in &archive.members {
             for symbol in member.symbols.iter().filter(|symbol| symbol.definition) {
                 budget.charge_slots(1)?;
@@ -182,34 +214,73 @@ pub(crate) fn check_distinct_definitions<'a>(
                     std::collections::btree_map::Entry::Occupied(entry) => {
                         let previous = *entry.get();
                         if previous.object.hash != origin.object.hash {
-                            return Err(collision(name, previous, &origin.label()));
+                            return Err(collision(name, previous, &origin.label(), archive.macho));
                         }
                     }
                 }
             }
         }
     }
-    Ok(ForeignDefinitions(definitions))
+    let mut imports = Vec::new();
+    let mut unresolved = BTreeSet::new();
+    for &(archive, origin) in &distinct {
+        for member in &archive.members {
+            for symbol in &member.imports {
+                if definitions.contains_key(symbol.as_slice()) {
+                    continue;
+                }
+                budget.charge_slots(1)?;
+                budget.reserve(&mut imports, 1)?;
+                imports.push((origin, member.name.as_str(), symbol.as_slice()));
+                if unresolved.insert(symbol.as_slice()) {
+                    budget.charge_bytes(size_of::<&[u8]>().saturating_mul(2))?;
+                }
+            }
+        }
+    }
+    Ok(ForeignDefinitions {
+        defined: definitions,
+        imports,
+        unresolved,
+        macho: distinct.iter().any(|(archive, _)| archive.macho),
+    })
 }
 
-fn collision(symbol: &[u8], archive: ArchiveOrigin<'_>, other: &str) -> AdmissionError {
+fn collision(
+    symbol: &[u8],
+    archive: ArchiveOrigin<'_>,
+    other: &str,
+    macho: bool,
+) -> AdmissionError {
     AdmissionError::Refused(format!(
         "FFI-3: symbol {} is defined by {} and by {other}",
-        String::from_utf8_lossy(symbol),
+        c_name(symbol, macho),
         archive.label()
     ))
 }
 
 impl ForeignDefinitions<'_> {
+    /// Read the runtime and the toolchain's own link inputs: the libc and system
+    /// libraries of an ELF recipe's closure, or a Mach-O recipe's text stubs,
+    /// which are its files besides the linker.
     pub(crate) fn check_tool_inputs(
-        &self,
+        &mut self,
         runtime: &Path,
         recipe: &crate::tool_inputs::LinkRecipe,
     ) -> Result<(), AdmissionError> {
         self.check_link_input(&std::fs::read(runtime)?, "the runtime")?;
-        let closure =
-            crate::link_closure::closure(&recipe.args, crate::tool_inputs::INPUT_MARKER, true)?;
-        for input in closure.binaries {
+        let binaries = if self.macho {
+            recipe
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .filter(|path| *path != recipe.linker)
+                .collect()
+        } else {
+            crate::link_closure::closure(&recipe.args, crate::tool_inputs::INPUT_MARKER, true)?
+                .binaries
+        };
+        for input in binaries {
             self.check_link_input(
                 &std::fs::read(&input)?,
                 &format!("link input {}", input.display()),
@@ -218,54 +289,153 @@ impl ForeignDefinitions<'_> {
         Ok(())
     }
 
-    pub(crate) fn check_link_input(&self, bytes: &[u8], label: &str) -> Result<(), AdmissionError> {
+    /// Refuse a symbol `bytes` defines that an archive also defines, and count
+    /// the archives' imports it defines as resolved.
+    pub(crate) fn check_link_input(
+        &mut self,
+        bytes: &[u8],
+        label: &str,
+    ) -> Result<(), AdmissionError> {
         let unsupported =
             || AdmissionError::Refused(format!("FFI-3: cannot read symbol definitions of {label}"));
-        let check = |bytes: &[u8]| -> Result<(), AdmissionError> {
-            let file = ElfFile64::<LittleEndian>::parse(bytes).map_err(|_| unsupported())?;
-            let sections = file.elf_section_table();
-            let endian = LittleEndian;
-            for (index, section) in sections.enumerate() {
-                if !matches!(section.sh_type(endian), elf::SHT_SYMTAB | elf::SHT_DYNSYM) {
-                    continue;
-                }
-                let table = sections
-                    .symbol_table_by_index(endian, bytes, index)
-                    .map_err(|_| unsupported())?;
-                for symbol in table.iter() {
-                    if !matches!(
-                        symbol.st_bind(),
-                        elf::STB_GLOBAL | elf::STB_WEAK | elf::STB_GNU_UNIQUE
-                    ) || symbol.st_shndx(endian) == elf::SHN_UNDEF
-                    {
-                        continue;
-                    }
-                    let name = table
-                        .symbol_name(endian, symbol)
-                        .map_err(|_| unsupported())?;
-                    let base = name.split(|byte| *byte == b'@').next().unwrap();
-                    if let Some(&archive) = self.0.get(base) {
-                        return Err(collision(base, archive, label));
-                    }
-                }
+        let macho = self.macho;
+        let defined = &self.defined;
+        let unresolved = &mut self.unresolved;
+        input_definitions(bytes, &mut |name| {
+            let base = name.split(|byte| *byte == b'@').next().unwrap();
+            if let Some(&archive) = defined.get(base) {
+                return Err(collision(base, archive, label, macho));
             }
+            unresolved.remove(base);
             Ok(())
+        })
+        .ok_or_else(unsupported)?
+    }
+
+    /// Refuse the first import, in module, member and symbol order, that no
+    /// archive and no input read since defines.
+    pub(crate) fn check_imports(&self, target: &str) -> Result<(), AdmissionError> {
+        let Some(&(origin, member, symbol)) = self
+            .imports
+            .iter()
+            .find(|(_, _, symbol)| self.unresolved.contains(symbol))
+        else {
+            return Ok(());
         };
-        if bytes.starts_with(AR) {
-            let archive = ArchiveFile::parse(bytes).map_err(|_| unsupported())?;
-            for member in archive.members() {
-                check(
-                    member
-                        .map_err(|_| unsupported())?
-                        .data(bytes)
-                        .map_err(|_| unsupported())?,
-                )?;
+        Err(refuse(
+            &context(origin.object, origin.module, target, origin.path),
+            format!(
+                ": member {member} imports {}, which no admitted input defines",
+                c_name(symbol, self.macho)
+            ),
+        ))
+    }
+}
+
+/// Visit each global or weak symbol `bytes` defines: an ELF object or shared
+/// object, a Mach-O object, an `ar` archive of objects, or a TBD text stub.
+/// `None` when the bytes are none of these.
+fn input_definitions(
+    bytes: &[u8],
+    defined: &mut dyn FnMut(&[u8]) -> Result<(), AdmissionError>,
+) -> Option<Result<(), AdmissionError>> {
+    if bytes.starts_with(AR) {
+        let archive = ArchiveFile::parse(bytes).ok()?;
+        for member in archive.members() {
+            let data = member.ok()?.data(bytes).ok()?;
+            if let Err(error) = input_definitions(data, defined)? {
+                return Some(Err(error));
             }
-            Ok(())
-        } else {
-            check(bytes)
+        }
+        return Some(Ok(()));
+    }
+    if bytes.starts_with(TBD) {
+        return tbd_definitions(std::str::from_utf8(bytes).ok()?, defined);
+    }
+    if bytes.starts_with(&macho::MH_MAGIC_64.to_le_bytes()) {
+        return macho::definitions(bytes, defined);
+    }
+    let file = ElfFile64::<LittleEndian>::parse(bytes).ok()?;
+    let sections = file.elf_section_table();
+    let endian = LittleEndian;
+    for (index, section) in sections.enumerate() {
+        if !matches!(section.sh_type(endian), elf::SHT_SYMTAB | elf::SHT_DYNSYM) {
+            continue;
+        }
+        let table = sections.symbol_table_by_index(endian, bytes, index).ok()?;
+        for symbol in table.iter() {
+            if !matches!(
+                symbol.st_bind(),
+                elf::STB_GLOBAL | elf::STB_WEAK | elf::STB_GNU_UNIQUE
+            ) || symbol.st_shndx(endian) == elf::SHN_UNDEF
+            {
+                continue;
+            }
+            if let Err(error) = defined(table.symbol_name(endian, symbol).ok()?) {
+                return Some(Err(error));
+            }
         }
     }
+    Some(Ok(()))
+}
+
+/// The symbols a TBD stub exports: each `symbols`, `weak-symbols` and
+/// `thread-local-symbols` list in its `exports` and `reexports`.
+fn tbd_definitions(
+    text: &str,
+    defined: &mut dyn FnMut(&[u8]) -> Result<(), AdmissionError>,
+) -> Option<Result<(), AdmissionError>> {
+    // A top-level key starts a line; `undefineds` lists what the stub imports.
+    let mut blocks = Vec::new();
+    let mut start = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.starts_with([' ', '\t', '-']) && !line.trim().is_empty() {
+            if let Some(start) = start.take() {
+                blocks.push(&text[start..offset]);
+            }
+            if line.starts_with("exports:") || line.starts_with("reexports:") {
+                start = Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    blocks.extend(start.map(|start| &text[start..]));
+    for block in blocks {
+        if let Err(error) = tbd_block(block, defined)? {
+            return Some(Err(error));
+        }
+    }
+    Some(Ok(()))
+}
+
+fn tbd_block(
+    text: &str,
+    defined: &mut dyn FnMut(&[u8]) -> Result<(), AdmissionError>,
+) -> Option<Result<(), AdmissionError>> {
+    let mut rest = text;
+    while let Some(at) = rest.find("symbols:") {
+        let key_start = rest[..at]
+            .rfind(|c: char| c.is_whitespace())
+            .map_or(0, |at| at + 1);
+        let key = &rest[key_start..at];
+        rest = rest[at + "symbols:".len()..].trim_start();
+        if !matches!(key, "" | "weak-" | "thread-local-") {
+            continue;
+        }
+        let list = rest.strip_prefix('[')?;
+        let end = list.find(']')?;
+        for name in list[..end].split(',') {
+            let name = name.trim().trim_matches('\'');
+            if !name.is_empty() {
+                if let Err(error) = defined(name.as_bytes()) {
+                    return Some(Err(error));
+                }
+            }
+        }
+        rest = &list[end + 1..];
+    }
+    Some(Ok(()))
 }
 
 fn refuse(context: &str, problem: impl std::fmt::Display) -> AdmissionError {
@@ -422,6 +592,7 @@ impl SealedArchive {
         }
         Ok(Self {
             file,
+            macho: is_macho(target),
             indexed: symbols,
             members,
         })
@@ -435,11 +606,13 @@ impl SealedArchive {
         path: Option<&str>,
     ) -> Result<(), AdmissionError> {
         let context = context(archive, &leaf.module, target, path);
+        // Mach-O names a C symbol with a leading `_`.
+        let mangle = if self.macho { "_" } else { "" };
         for function in &leaf.functions {
             let symbol = format!("{}{}", leaf.symbols, function.identity.definition.0.name);
             let defines = self
                 .indexed
-                .get(symbol.as_bytes())
+                .get(format!("{mangle}{symbol}").as_bytes())
                 .is_some_and(|row| row.definition_matches == Some(true));
             if !defines {
                 let site = function.identity.definition.definition_identity();
@@ -460,13 +633,14 @@ impl SealedArchive {
                 ));
             }
         }
+        let prefix = format!("{mangle}{}", leaf.symbols);
         for member in &self.members {
             if let Some(symbol) = member
                 .symbols
                 .iter()
-                .find(|s| s.definition && !s.name.starts_with(leaf.symbols.as_bytes()))
+                .find(|s| s.definition && !s.name.starts_with(prefix.as_bytes()))
             {
-                let symbol = String::from_utf8_lossy(&symbol.name);
+                let symbol = c_name(&symbol.name, self.macho);
                 return Err(refuse(
                     &context,
                     format!(
@@ -567,8 +741,10 @@ fn parse_member(
             elf::SHT_AARCH64_ATTRIBUTES,
             elf::R_AARCH64_IRELATIVE,
         ),
-        // Mach-O member admission is macOS slice S10.
-        Some(hirsel_core_layout::Target::Aarch64Darwin) | None => return Ok(None),
+        Some(hirsel_core_layout::Target::Aarch64Darwin) => {
+            return macho::parse_member(bytes, name, budget);
+        }
+        None => return Ok(None),
     };
     let endian = LittleEndian;
     let file = or_none!(ElfFile64::<LittleEndian>::parse(bytes));
@@ -586,6 +762,7 @@ fn parse_member(
     let mut member = Member {
         name: name.into(),
         symbols: vec![],
+        imports: vec![],
         abi: vec![],
         bad_feature: None,
     };
@@ -661,8 +838,13 @@ fn parse_member(
                         ));
                     }
                 }
-                let definition = matches!(bind, elf::STB_GLOBAL | elf::STB_WEAK)
-                    && symbol.st_shndx(endian) != elf::SHN_UNDEF;
+                let external = matches!(bind, elf::STB_GLOBAL | elf::STB_WEAK);
+                if external && symbol.st_shndx(endian) == elf::SHN_UNDEF && !name.is_empty() {
+                    budget.charge_bytes(name.len())?;
+                    budget.reserve(&mut member.imports, 1)?;
+                    member.imports.push(name.clone());
+                }
+                let definition = external && symbol.st_shndx(endian) != elf::SHN_UNDEF;
                 let strong_function = bind == elf::STB_GLOBAL
                     && symbol.st_type() == elf::STT_FUNC
                     && symbol.st_visibility() == elf::STV_DEFAULT
@@ -723,4 +905,14 @@ fn forbidden_section(name: &[u8]) -> bool {
             name.strip_prefix(*prefix)
                 .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(b"."))
         })
+}
+
+fn is_macho(target: &str) -> bool {
+    use hirsel_core_layout::ObjectFormat;
+    hirsel_core_layout::Target::from_triple(target).is_some_and(|target| {
+        match target.object_format() {
+            ObjectFormat::MachO => true,
+            ObjectFormat::Elf => false,
+        }
+    })
 }

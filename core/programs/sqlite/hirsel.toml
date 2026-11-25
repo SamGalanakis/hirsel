@@ -11,6 +11,8 @@ charge = "charge-v1"
 symbols = "hsq_"
 archives = [
   { target = "x86_64-unknown-linux-gnu", file = "libhirsel_sqlite.a", sha256 = "23e2bd8e0605b46b404f3dd69c301f12085ab6457caed59ff2f64862a04f1601" },
+  { target = "aarch64-unknown-linux-gnu", file = "libhirsel_sqlite-aarch64-unknown-linux-gnu.a", sha256 = "75389df091f89ece76a57c1da23b0b28184429be23e6a498e44f40afae030b78" },
+  { target = "aarch64-apple-darwin", file = "libhirsel_sqlite-aarch64-apple-darwin.a", sha256 = "33ddd92e48eb5307fb74ae065e7b4c333d54e231accfea2f45db00fe7fbd09cb" },
 ]
 
 [tests]

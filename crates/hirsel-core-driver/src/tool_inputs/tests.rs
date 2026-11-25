@@ -130,7 +130,7 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
         path: None,
     };
     let first_row = (&valid, origin);
-    let definitions = check_distinct_definitions(
+    let mut definitions = check_distinct_definitions(
         [
             first_row,
             (

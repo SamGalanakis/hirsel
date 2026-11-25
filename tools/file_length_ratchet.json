@@ -225,9 +225,9 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 3589,
-    "raise_revision": 19,
-    "reason": "coverage-c3-followups-2623"
+    "lines": 3602,
+    "raise_revision": 20,
+    "reason": "macos-s10-foreign-2615"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 3936,

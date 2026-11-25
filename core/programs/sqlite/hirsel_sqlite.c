@@ -5,7 +5,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <linux/openat2.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -15,7 +14,9 @@
 #include <strings.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#ifndef __APPLE__
 #include <sys/syscall.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -87,14 +88,37 @@ static FileKind file_kind(const DirVfs *dir, const char *name) {
     return INVALID;
 }
 
+#ifdef __APPLE__
+/* Darwin (design 6.3): O_RESOLVE_BENEATH refuses an escape with ENOTCAPABLE,
+   O_NOFOLLOW_ANY refuses a symlink anywhere on the path, and Darwin has no
+   magic links. A leaf opened only to fstat takes O_EVTONLY|O_NONBLOCK. */
+#define PATH_ONLY (O_EVTONLY | O_NONBLOCK)
+static int beneath(const DirVfs *dir, const char *leaf, int flags) {
+    return openat(dir->root, leaf, flags | O_CLOEXEC | O_RESOLVE_BENEATH | O_NOFOLLOW_ANY,
+                  (flags & O_CREAT) ? 0600 : 0);
+}
+
+/* fsync on Darwin leaves the data in the drive's cache; F_FULLFSYNC is the
+   durable sync, for files and directories alike. */
+static int durable_sync(int fd) { return fcntl(fd, F_FULLFSYNC); }
+#else
+#define PATH_ONLY O_PATH
+/* Linux UAPI <linux/openat2.h>: the pinned Arm sysroot's kernel headers (4.20)
+   predate openat2, whose number is 437 on x86_64 and aarch64 alike. */
+struct open_how { uint64_t flags, mode, resolve; };
+enum { OPENAT2 = 437, RESOLVE_NO_MAGICLINKS = 0x02, RESOLVE_NO_SYMLINKS = 0x04,
+       RESOLVE_BENEATH = 0x08 };
 static int beneath(const DirVfs *dir, const char *leaf, int flags) {
     struct open_how how = {
         .flags = (uint64_t)(flags | O_CLOEXEC),
         .mode = (flags & O_CREAT) ? 0600 : 0,
         .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
     };
-    return (int)syscall(SYS_openat2, dir->root, leaf, &how, sizeof how);
+    return (int)syscall(OPENAT2, dir->root, leaf, &how, sizeof how);
 }
+
+static int durable_sync(int fd) { return fsync(fd); }
+#endif
 
 static int set_lock(int fd, short type, off_t at, off_t len, int error) {
     struct flock lock = {
@@ -150,7 +174,7 @@ static int disk_truncate(sqlite3_file *base, sqlite3_int64 size) {
 
 static int disk_sync(sqlite3_file *base, int flags) {
     (void)flags;
-    return fsync(((DirFile *)base)->fd) == 0 ? SQLITE_OK : SQLITE_IOERR_FSYNC;
+    return durable_sync(((DirFile *)base)->fd) == 0 ? SQLITE_OK : SQLITE_IOERR_FSYNC;
 }
 
 static int disk_size(sqlite3_file *base, sqlite3_int64 *size) {
@@ -425,7 +449,7 @@ static int dir_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *base, int 
         DirFile candidate = {.fd = fd};
         rc = reject_super_journal(&candidate, stat.st_size);
     }
-    if (rc == SQLITE_OK && created && (kind == JOURNAL || kind == WAL) && fsync(dir->root) != 0)
+    if (rc == SQLITE_OK && created && (kind == JOURNAL || kind == WAL) && durable_sync(dir->root) != 0)
         rc = SQLITE_IOERR_DIR_FSYNC;
     if (rc != SQLITE_OK) {
         close(fd);
@@ -441,7 +465,7 @@ static int dir_access(sqlite3_vfs *vfs, const char *name, int flags, int *out) {
     *out = 0;
     if (file_kind(dir, name) == INVALID || (flags == SQLITE_ACCESS_READWRITE && !dir->writable))
         return SQLITE_OK;
-    int fd = beneath(dir, name + 1, O_PATH);
+    int fd = beneath(dir, name + 1, PATH_ONLY);
     if (fd < 0) return SQLITE_OK;
     struct stat stat;
     *out = fstat(fd, &stat) == 0 && S_ISREG(stat.st_mode);
@@ -455,7 +479,7 @@ static int dir_delete(sqlite3_vfs *vfs, const char *name, int sync_dir) {
     if (!dir->writable || kind == INVALID) return SQLITE_IOERR_DELETE;
     if (unlinkat(dir->root, name + 1, 0) != 0)
         return errno == ENOENT ? SQLITE_IOERR_DELETE_NOENT : SQLITE_IOERR_DELETE;
-    if ((sync_dir || kind == JOURNAL || kind == WAL) && fsync(dir->root) != 0)
+    if ((sync_dir || kind == JOURNAL || kind == WAL) && durable_sync(dir->root) != 0)
         return SQLITE_IOERR_DIR_FSYNC;
     return SQLITE_OK;
 }

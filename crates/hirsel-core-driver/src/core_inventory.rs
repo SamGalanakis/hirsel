@@ -142,8 +142,7 @@ mod tests {
     /// core or std as installed, by the driver's own library discovery.
     fn installed(root: &Path, name: &str) -> PackageManifest {
         let mut manifest =
-            PackageManifest::directory(&root.join("core").join(name), package(name), true)
-                .unwrap();
+            PackageManifest::directory(&root.join("core").join(name), package(name), true).unwrap();
         if name != "core" {
             manifest.dependencies.push(package("core"));
         }

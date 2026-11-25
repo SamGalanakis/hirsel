@@ -133,6 +133,15 @@ static void schedule_event(void *state,HirselCoreEvent event) {
  * parked across exactly one scheduler turn of the other tasks. Counted in
  * turns, not time: an expired Until re-runs wait at the next turn. */
 static struct { int enabled, schedule_probe, child_probe; uint64_t token[64], calls[64]; } hold;
+/* follower-restart (BL9 (iii)): the read phase's new owner is held at step 8's
+ * Direct create of its segment until the follower main writes RELEASE; the
+ * main's WAIT is held until the owner has reached that create. */
+static struct { int enabled, reached, released, early; } gate;
+static int segment_path(const uint8_t *path,size_t len) {
+    if(len<3 || memcmp(path,"j-",2)) return 0;
+    for(size_t i=2;i<len;i++) if(path[i]<'0' || path[i]>'9') return 0;
+    return 1;
+}
 static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t token) {
     /* SleepUntil and SleepUntilWall (the runner's deadline and trigger timers) wait on
      * host time and never reach the W2 filesystem; their deadlines are far, so a timer
@@ -141,6 +150,16 @@ static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t 
      * schedule past the write's completion. */
     if(request->operation==15 || request->operation==77)
         return store_crash_late_polls(state) ? (HirselCoreWait){0} : (HirselCoreWait){1,UINT64_MAX};
+    if(gate.enabled) {
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
+        const HirselCoreWait turn={1,(uint64_t)now.tv_sec*1000000000u+(uint64_t)now.tv_nsec};
+        if(request->operation==12 && request->buffer.len==4 && !memcmp(request->buffer.data,"WAIT",4) && !gate.reached)
+            return turn;
+        if(request->operation==0 && request->mode==6 && segment_path(request->path,request->path_len)) {
+            gate.reached=1;
+            if(!gate.released) return turn;
+        }
+    }
     const int probe=hold.schedule_probe && request->operation==12 &&
         request->buffer.len==8 && !memcmp(request->buffer.data,"SCHEDULE",8);
     const int child=hold.child_probe && (request->operation==2 || request->operation==38) && request->buffer.len>=20 &&
@@ -164,6 +183,10 @@ static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token)
     if(window.enabled && window.phase==1 && r->operation==12 &&
         r->buffer.len==5 && !memcmp(r->buffer.data,"ISSUE",5)) window.issuing=1;
     if(r->operation==15 || r->operation==77) return (HirselCoreStep){0};
+    if(gate.enabled && r->operation==12 && r->buffer.len==7 && !memcmp(r->buffer.data,"RELEASE",7)) {
+        if(!gate.reached) gate.early=1;
+        gate.released=1;
+    }
     if(park_wall_ms && r->operation==10) return (HirselCoreStep){.outcome.value=park_wall_ms};
     const uint64_t scratch_handle=UINT64_C(1)<<48;
     if(r->operation==7) {
@@ -268,7 +291,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         !strcmp(scenario,"journal-place-short")?SECOND_SEGMENT_SHORT_WRITE:
         !strcmp(scenario,"window-chunk-failure")?WINDOW_CHUNK_FAILURE:
         !strcmp(scenario,"window-sync-failure")?WINDOW_SYNC_FAILURE:
-        !strcmp(scenario,"follower-poison")?POISON_GROUP:
+        (!strcmp(scenario,"follower-poison") || !strcmp(scenario,"follower-restart"))?POISON_GROUP:
         recovery_failure?ORPHAN_END_SYNC_FAILURE:open_sync_failure?OPEN_MANIFEST_SYNC_FAILURE:0;
     int orphan_end=recovery_failure || !strcmp(scenario,"orphan-end");
     if((failure && failure!=5) || cancellation.enabled || parked.enabled || orphan_end) cut=UINT64_MAX;
@@ -319,7 +342,9 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         park_wall_ms=!strcmp(scenario,"steps-park")?1000+phase*UINT64_C(43200000):0;
         parked.phase=phase; parked.worker=0;
         /* follower-poison: each parked Direct write lets the writer refill the queue. */
-        hold.enabled=phase==1 && (!strcmp(scenario,"journal-ack") || !strcmp(scenario,"follower-poison"));
+        hold.enabled=phase==1 && (!strcmp(scenario,"journal-ack") || !strcmp(scenario,"follower-poison") || !strcmp(scenario,"follower-restart"));
+        gate.enabled=phase==2 && !strcmp(scenario,"follower-restart");
+        gate.reached=gate.released=gate.early=0;
         hold.child_probe=phase==1 && fork_image==5;
         hold.schedule_probe=seed && phase==1 &&
             (!strcmp(scenario,"journal-group") || !strcmp(scenario,"journal-rotate"));
@@ -356,6 +381,9 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         if(phase==1 && (failure==5 || failure==SECOND_SEGMENT_SHORT_WRITE) && store_crash_failed_syncs(state) &&
             (store_crash_floor(state)!=2 || !store_crash_acked(state))) {
             fprintf(stderr,"byte split did not settle A as durable and B as failed\n");status=120;break;
+        }
+        if(gate.enabled && (!gate.reached || !gate.released || gate.early)) {
+            fprintf(stderr,"BL9: the new owner was not held at step 8 until RELEASE\n");status=120;break;
         }
         if(phase==1 && parked.enabled && !uncut && !parked.fired) {
             fprintf(stderr,"journal worker sync %llu was not issued\n",(unsigned long long)parked.target);status=120;break;

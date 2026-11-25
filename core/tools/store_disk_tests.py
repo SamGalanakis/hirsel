@@ -28,7 +28,7 @@ LAWS = ('frames', 'paged_manifest', 'page_emission', 'paged_inventory', 'page_lo
 ASSEMBLY_OWNER = 'core-ops-914'
 # Log@1 live reads: one uncut run each, the adapter staging the writer.
 LIVE_READ_SCENARIOS = ('follower-durable', 'follower-boundary', 'read-only-durable', 'read-only-creation', 'follower-polls',
-                       'follower-poison')
+                       'follower-poison', 'follower-restart')
 KNOWN_ASSEMBLY = frozenset({'opening', 'db', 'db_refusal', 'schema_refusal', 'pack_bound'})
 
 

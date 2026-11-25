@@ -11,6 +11,8 @@ fn disk_crash_live_read_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Ar
             disk_crash_follower_polls(d, c, r, tasks, out) ?=> |_| Exit(status: 32)
         } else if scenario == "follower-poison" {
             disk_crash_follower_poison(d, c, r, tasks, out) ?=> |_| Exit(status: 32)
+        } else if scenario == "follower-restart" {
+            disk_crash_restart_write(d, c, r, tasks, out) ?=> |_| Exit(status: 32)
         } else {
             disk_crash_live_read_write(d, c, tasks, out, scenario) ?=> |_| Exit(status: 32)
         }
@@ -18,6 +20,10 @@ fn disk_crash_live_read_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Ar
         string.push_u64(mut ack, published)
         let _ = stdout.write(out, ack)
         let _ = stdout.write(out, "DONE")
+        return Ok(())
+    }
+    if scenario == "follower-restart" {
+        disk_crash_restart_read(d, c, r, tasks, out) ?=> |_| Exit(status: 33)
         return Ok(())
     }
     let raw_floor = option.unwrap(args.get(argv, 3))
@@ -207,6 +213,162 @@ fn disk_crash_follower_poison(d: Dir, c: Clock, r: Random, tasks: Tasks, out: St
         _ => fail("BL5: the poisoned writer closed cleanly"),
     }
     Ok(top)
+}
+
+// BL9 (iii) (2249 B1, row 33): the restart trace. The write phase forks
+// "side" from main's head; the fork waits for its own ticket, so the journal
+// writes END at the fork's end before the next frame. After ARM it alternates
+// 64 pipelined commits between main and side, BL5's setup: 63 are acked past
+// that END before the 64th group fails and the writer exits. The tips of
+// both branches come from the acked tickets and go to a synced file for the
+// read phase.
+fn disk_crash_restart_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[u64, Error] waits {
+    let mut options = disk_crash_options("checkpoint")
+    options.group_commits = 1
+    let mut writer = open(tasks, d, c, r, options)?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let base = version(snapshot(writer))
+    let trunk = main_branch(writer)
+    let at = snapshot(writer)
+    let (side, _) = fork(mut writer, "side", at)?
+    let fork_end = writer.file_end
+    let _ = stdout.write(out, "ARM")
+    let mut tickets: List[Ticket] = list.new()
+    for k in 0u64 .. 64 {
+        let onto = if k % 2 == 0 {
+            trunk
+        } else {
+            side
+        }
+        match run_on(mut writer, onto, None, (copy_env(rows), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, 2000 + call_env.1, call_env.1)
+        }) {
+            Ok(Committed(done)) => list.push(mut tickets, done.ticket),
+            Error(Poisoned(_)) => break,
+            _ => fail("BL9: a pipelined commit was refused"),
+        }
+    }
+    if list.len(tickets) != 64 {
+        fail("BL9: the journal failed before the 64th group was queued")
+    }
+    match durable(mut writer, tickets[63u64]) {
+        Error(Poisoned(Other(28))) => (),
+        _ => fail("BL9: the 64th group did not poison the store"),
+    }
+    let mut acked = 0u64
+    for t in tickets {
+        if covered(writer, t.mark) {
+            acked += 1
+        }
+    }
+    // Commits k = 0 .. 62 are acked: 32 on main (k even) and 31 on side,
+    // which the fork started at main's head.
+    let Journal(_, _, main_top) = tickets[62u64].mark else {
+        fail("BL9: a journal commit without a journal mark")
+    }
+    let Journal(_, _, side_top) = tickets[61u64].mark else {
+        fail("BL9: a journal commit without a journal mark")
+    }
+    if acked != 63 || main_top != base + 32 || side_top != base + 31 {
+        fail("BL9: the writer did not ack 63 commits over both branches")
+    }
+    let fork_ending = journal_end_bytes(writer.store, writer.file_seq, fork_end)
+    let ending = capacity(disk_path("j-", writer.file_seq, ".end"))?
+    if disk_read_file(d, ending, list.len(fork_ending))? != fork_ending {
+        fail("BL9: the END is not the fork's; the acks are not past d")
+    }
+    let mut tips: Bytes = list.new()
+    capacity(le(mut tips, main_top, 8))?
+    capacity(le(mut tips, side_top, 8))?
+    disk_write_synced(d, string.from("bl9-tips"), tips)?
+    disk_io(host.sync_dir(d))?
+    match close(take writer) {
+        Error(Poisoned(Other(28))) => (),
+        _ => fail("BL9: the poisoned writer closed cleanly"),
+    }
+    Ok(main_top)
+}
+
+type RestartOwner: send {
+    tasks: Tasks,
+    d: Dir,
+    c: Clock,
+    r: Random,
+    opened: Sender[u64],
+    stop: Receiver[()]
+}
+
+fn disk_crash_restart_owner(take job: RestartOwner) -> Result[(), Error] waits {
+    let db = open(job.tasks, job.d, job.c, job.r, disk_crash_options("checkpoint"))?
+    result.unwrap(channel.send(job.opened, version(snapshot(db))))
+    let _ = channel.receive(job.stop)
+    close(take db)
+}
+
+fn restart_tips(f: Follower, main_top: u64, side_top: u64) -> bool {
+    let Some(side) = follower_branch(f, string.from("side")) else {
+        return false
+    }
+    result.unwrap(applied(f, follower_main(f))).version == main_top && result.unwrap(applied(f, side)).version == side_top
+}
+
+fn restart_follower(tasks: Tasks, d: Dir, c: Clock, plan: FollowerPlan, main_top: u64, side_top: u64) -> Result[(FollowerService, Follower), Error] waits {
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let f = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(d), c, None)?
+    if !restart_tips(f, main_top, side_top) {
+        fail("BL9: a first capture missed the acked tips")
+    }
+    Ok((service, f))
+}
+
+// The read phase, after the power cut. Followers run one at a time (two
+// slots exceed the crash binary's limit). `early` attaches to the dead
+// writer's store and reads to the torn tail. A new owner then opens; the
+// adapter holds it at step 8's create (after step 5 released its fences)
+// until "RELEASE". While it holds LOCK, early's key is unchanged, so its
+// catch_up reuses the capture with no sync. `held` starts beside the held
+// owner and still reads to the torn tail, because the terminal fence is free.
+// After step 8, `held` keeps both tips and `rotated`, started then, finds
+// them through the new HEADER's prev_end.
+fn disk_crash_restart_read(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[(), Error] waits {
+    let raw = disk_read_file(d, string.from("bl9-tips"), 16)?
+    let main_top = read_le(raw, 0, 8)
+    let side_top = read_le(raw, 8, 8)
+    let forever = 18446744073709551615u64
+    let plan = follower_law_plan(Directory, disk_crash_options("checkpoint"))
+    let (take first, take early_start) = restart_follower(tasks, d, c, plan, main_top, side_top)?
+    let mut early = take early_start
+    let (opened_by, opened): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let (stop, stopped): (Sender[()], Receiver[()]) = channel.new(1)
+    let job = RestartOwner(tasks, d, c, r, opened: take opened_by, stop: take stopped)
+    let owner = task.spawn(tasks, bytes 25165824, take job, disk_crash_restart_owner)
+    let _ = stdout.write(out, "WAIT")
+    let _ = stdout.write(out, "SYNCS")
+    let _ = catch_up(mut early, forever)?
+    let _ = stdout.write(out, "SYNCS 0 0")
+    if !restart_tips(early, main_top, side_top) {
+        fail("BL9: a branch moved while the new owner held LOCK")
+    }
+    close_follower_service(take first)?
+    let (take second, take held_start) = restart_follower(tasks, d, c, plan, main_top, side_top)?
+    let mut held = take held_start
+    let _ = stdout.write(out, "RELEASE")
+    if result.unwrap(channel.receive(opened)) != main_top {
+        fail("BL9: the new owner did not recover exactly the acked commits")
+    }
+    for _ in 0u64 .. 2 {
+        let _ = catch_up(mut held, forever)?
+    }
+    if !restart_tips(held, main_top, side_top) {
+        fail("BL9: a branch moved after the new owner's rotation")
+    }
+    close_follower_service(take second)?
+    let (take third, _) = restart_follower(tasks, d, c, plan, main_top, side_top)?
+    close_follower_service(take third)?
+    result.unwrap(channel.send(stop, ()))
+    result.unwrap(task.join(take owner))?
+    Ok(())
 }
 
 // BL7 part 2 (2284 N1): a cut has created j-(seq + 1) but its creation

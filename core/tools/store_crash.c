@@ -137,6 +137,11 @@ static struct { int enabled, schedule_probe, child_probe; uint64_t token[64], ca
  * Direct create of its segment until the follower main writes RELEASE; the
  * main's WAIT is held until the owner has reached that create. */
 static struct { int enabled, reached, released, early; } gate;
+/* follower-cut (BL7 part 1, 2249 M1): the write main's WAIT is held until the
+ * reader's "BL7" open; that open until the cut's Direct open of a segment; the
+ * creator's try_lock of it until the reader's first shared fence take; and
+ * that take, issued, until RELEASE. A refused creator try_lock is the bug. */
+static struct { int enabled, armed, created, fenced, released, early; uint64_t segment, token; HirselCoreHostOutcome out; } bl7;
 static int segment_path(const uint8_t *path,size_t len) {
     if(len<3 || memcmp(path,"j-",2)) return 0;
     for(size_t i=2;i<len;i++) if(path[i]<'0' || path[i]>'9') return 0;
@@ -150,6 +155,17 @@ static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t 
      * schedule past the write's completion. */
     if(request->operation==15 || request->operation==77)
         return store_crash_late_polls(state) ? (HirselCoreWait){0} : (HirselCoreWait){1,UINT64_MAX};
+    if(bl7.enabled) {
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
+        const HirselCoreWait turn={1,(uint64_t)now.tv_sec*1000000000u+(uint64_t)now.tv_nsec};
+        if(request->operation==12 && request->buffer.len==4 && !memcmp(request->buffer.data,"WAIT",4) && !bl7.armed)
+            return turn;
+        if(request->operation==0 && request->path_len==3 && !memcmp(request->path,"BL7",3)) {
+            bl7.armed=1;
+            if(!bl7.created) return turn;
+        }
+        if(request->operation==4 && bl7.created && request->handle==bl7.segment && !bl7.fenced) return turn;
+    }
     if(gate.enabled) {
         struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
         const HirselCoreWait turn={1,(uint64_t)now.tv_sec*1000000000u+(uint64_t)now.tv_nsec};
@@ -213,6 +229,26 @@ static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token)
         if(r->operation==1 || r->operation==37) r->buffer.len+=(size_t)out.value;
         if(r->operation==18) r->buffer.len+=(size_t)out.written;
     }
+    if(bl7.enabled) {
+        if(r->operation==12 && r->buffer.len==7 && !memcmp(r->buffer.data,"RELEASE",7)) {
+            bl7.released=1;
+            if(bl7.token) hirsel_core_ready(bl7.token);
+        }
+        if(r->operation==0 && r->mode==6 && bl7.armed && !bl7.created && !out.error.tag && segment_path(r->path,r->path_len)) {
+            bl7.created=1; bl7.segment=out.value;
+        }
+        /* The suspended reader never lets go, so the creator would poll forever. */
+        if(r->operation==4 && bl7.created && r->handle==bl7.segment && !out.value) {
+            fprintf(stderr,"BL7: a reader's fence refused the cut's try_lock of its new segment\n");
+            fflush(stderr);
+            _exit(120);
+        }
+        if(r->operation==172 && bl7.created && !bl7.fenced) {
+            bl7.fenced=1; bl7.token=token; bl7.out=out;
+            if(bl7.released) hirsel_core_ready(token);
+            return (HirselCoreStep){.kind=1};
+        }
+    }
     if(parked.enabled && (r->operation==17 || store_crash_syncs(state,r->operation,r->handle))) {
         if(parked.phase==1 && parked.worker && parked.issued++==parked.target && !parked.fired) {
             parked.fired=1;
@@ -232,6 +268,11 @@ static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token)
 }
 static HirselCoreStep resume(void *state,HirselCoreHostRequest *r,uint64_t token) {
     (void)state; (void)r;
+    if(bl7.enabled && bl7.token==token) {
+        if(!bl7.released) bl7.early=1;
+        bl7.token=0;
+        return (HirselCoreStep){.outcome=bl7.out};
+    }
     if(!parked.enabled || parked.token[token%64]!=token) abort();
     parked.token[token%64]=0;
     return (HirselCoreStep){.outcome=parked.out[token%64]};
@@ -345,6 +386,8 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         hold.enabled=phase==1 && (!strcmp(scenario,"journal-ack") || !strcmp(scenario,"follower-poison") || !strcmp(scenario,"follower-restart"));
         gate.enabled=phase==2 && !strcmp(scenario,"follower-restart");
         gate.reached=gate.released=gate.early=0;
+        memset(&bl7,0,sizeof bl7);
+        bl7.enabled=phase==1 && !strcmp(scenario,"follower-cut");
         hold.child_probe=phase==1 && fork_image==5;
         hold.schedule_probe=seed && phase==1 &&
             (!strcmp(scenario,"journal-group") || !strcmp(scenario,"journal-rotate"));
@@ -384,6 +427,9 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         }
         if(gate.enabled && (!gate.reached || !gate.released || gate.early)) {
             fprintf(stderr,"BL9: the new owner was not held at step 8 until RELEASE\n");status=120;break;
+        }
+        if(bl7.enabled && (!bl7.armed || !bl7.created || !bl7.fenced || !bl7.released || bl7.early || bl7.token)) {
+            fprintf(stderr,"BL7: the reader was not suspended at its fence across the cut\n");status=120;break;
         }
         if(phase==1 && parked.enabled && !uncut && !parked.fired) {
             fprintf(stderr,"journal worker sync %llu was not issued\n",(unsigned long long)parked.target);status=120;break;

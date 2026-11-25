@@ -13,6 +13,8 @@ fn disk_crash_live_read_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Ar
             disk_crash_follower_poison(d, c, r, tasks, out) ?=> |_| Exit(status: 32)
         } else if scenario == "follower-restart" {
             disk_crash_restart_write(d, c, r, tasks, out) ?=> |_| Exit(status: 32)
+        } else if scenario == "follower-cut" {
+            disk_crash_follower_cut(d, c, r, tasks, out) ?=> |_| Exit(status: 32)
         } else {
             disk_crash_live_read_write(d, c, tasks, out, scenario) ?=> |_| Exit(status: 32)
         }
@@ -398,6 +400,69 @@ fn disk_crash_creation_read(d: Dir, c: Clock, out: Stdout, id: StoreId, seq: u64
         fail("a read across a creation and a cut missed the recovered head")
     }
     Ok(head)
+}
+
+// BL7 part 1 (2249 M1, row 35): a reader walks between the cut's Direct open
+// of j-(n + 1) and its try_lock, then stays suspended right after its fence
+// take while the cut and the commits queued behind it complete. The adapter
+// holds the reader's first open ("BL7") until the creator's open, holds the
+// creator's try_lock until the reader's first shared fence take, and holds
+// that take until RELEASE. A reader that fenced the empty j-(n + 1) would
+// refuse the creator's try_lock, which the adapter fails. The walk ends
+// before j-(n + 1) (no END, no HEADER). The cut's MANIFEST lands while the
+// reader is suspended, so after its fence take the reader finds MANIFEST
+// changed and walks again: j-(n + 1) is then terminal under the live writer,
+// whose idle END covers every commit, so the capture is END-bounded at top.
+type CutReader: send {
+    d: Dir,
+    c: Clock
+}
+
+fn disk_crash_cut_reader(take job: CutReader) -> Result[u64, Error] waits {
+    match host.open(job.d, "BL7", Read) {
+        Error(NotFound) => (),
+        _ => fail("BL7: the reader's start marker opened"),
+    }
+    let mut progress = LogCaptureProgress(next_id: 1, last: None)
+    let forever = 18446744073709551615u64
+    let Some(captured) = log_follow_capture(job.d, job.c, forever, mut progress, None, forever, None)? else {
+        fail("BL7: the suspended reader captured nothing")
+    }
+    Ok(captured.state.tips[0u64].head)
+}
+
+fn disk_crash_follower_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[u64, Error] waits {
+    let mut writer = open(tasks, d, c, r, disk_crash_options("checkpoint"))?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let base = version(snapshot(writer))
+    let walker = task.spawn(tasks, bytes 8388608, CutReader(d: d, c: c), disk_crash_cut_reader)
+    let _ = stdout.write(out, "WAIT")
+    let _ = checkpoint(mut writer)?
+    let mut newest: Option[Ticket] = None
+    for k in 0u64 .. 4 {
+        match run(mut writer, None, (copy_env(rows), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, 3000 + call_env.1, call_env.1)
+        })? {
+            Committed(done) => {
+                newest = Some(done.ticket)
+            },
+            _ => fail("BL7: a commit behind the cut was refused"),
+        }
+    }
+    let Some(final_ticket) = newest else {
+        fail("BL7: no commit followed the cut")
+    }
+    durable(mut writer, final_ticket)?
+    let top = version(snapshot(writer))
+    if top != base + 4 {
+        fail("BL7: the commits behind the cut did not all land")
+    }
+    let _ = stdout.write(out, "RELEASE")
+    if result.unwrap(task.join(take walker))? != top {
+        fail("BL7: the resumed reader's capture missed the commits behind the cut")
+    }
+    close(take writer)?
+    Ok(top)
 }
 
 // BL10 (2284 G2): a candidate the caller dropped at its deadline leaves the

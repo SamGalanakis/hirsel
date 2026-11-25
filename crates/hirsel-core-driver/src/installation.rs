@@ -254,12 +254,44 @@ fn hex(hash: ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+pub const DOCS_URL: &str = "https://hirsel.ai";
+pub const REPOSITORY_URL: &str = "https://github.com/SamGalanakis/hirsel-lang";
+
+/// Full release or pre-release version of this compiler binary.
+pub fn version() -> &'static str {
+    resolve_version(
+        option_env!("HIRSEL_RELEASE_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
+pub(crate) fn resolve_version<'a>(release: Option<&'a str>, pkg: &'a str) -> &'a str {
+    release
+        .map(|value| value.trim().strip_prefix('v').unwrap_or(value.trim()))
+        .filter(|value| !value.is_empty())
+        .unwrap_or(pkg)
+}
+
+/// Canonical URL for a specification rule anchor matching this binary's release tag (or `main`).
+pub fn spec_url(spec_file: &str, anchor: &str) -> String {
+    spec_url_for(option_env!("HIRSEL_RELEASE_VERSION"), spec_file, anchor)
+}
+
+pub(crate) fn spec_url_for(release: Option<&str>, spec_file: &str, anchor: &str) -> String {
+    let git_ref = release
+        .map(|value| value.trim().strip_prefix('v').unwrap_or(value.trim()))
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| "main".to_owned(), |value| format!("v{value}"));
+    format!("{REPOSITORY_URL}/blob/{git_ref}/{spec_file}#{anchor}")
+}
+
 pub(crate) fn print_version() -> io::Result<()> {
     let executable = std::env::current_exe()?;
     let installed = Installed::discover(&executable)?;
     let compiler = crate::reuse::compiler_identity()?;
-    println!("hirsel {}", env!("CARGO_PKG_VERSION"));
+    println!("hirsel {}", version());
     println!("compiler {}", hex(compiler));
+    println!("docs {DOCS_URL}");
     if let Some(installed) = installed {
         for (mode, runtimes) in [
             ("runtime", &installed.registration.runtimes),
@@ -301,6 +333,8 @@ pub struct ProductEnvironment {
 }
 #[derive(Serialize)]
 pub struct Environment {
+    pub version: &'static str,
+    pub docs: &'static str,
     pub executable: PathBuf,
     pub installed_root: Option<PathBuf>,
     pub package_cache: PathBuf,
@@ -312,6 +346,53 @@ pub struct Environment {
     pub prof_recording_runtime: Option<PathBuf>,
     pub observed_runtime: Option<PathBuf>,
     pub observed_recording_runtime: Option<PathBuf>,
+}
+pub(crate) fn print_environment(report: &Environment) {
+    println!("version: {}", report.version);
+    println!("docs: {}", report.docs);
+    println!("compiler: {}", report.executable.display());
+    println!(
+        "installed root: {}",
+        report
+            .installed_root
+            .as_ref()
+            .map_or_else(|| "none".to_owned(), |p| p.display().to_string())
+    );
+    println!("package cache: {}", report.package_cache.display());
+    println!("target: {}", report.target);
+    println!(
+        "runtime: {}",
+        report.runtime.as_ref().map_or_else(
+            || "none; select --runtime".to_owned(),
+            |p| p.display().to_string()
+        )
+    );
+    println!(
+        "recording runtime: {}",
+        report.recording_runtime.as_ref().map_or_else(
+            || "none; select --runtime".to_owned(),
+            |p| p.display().to_string()
+        )
+    );
+    for (label, archive) in [
+        ("profiling runtime", &report.prof_runtime),
+        (
+            "profiling recording runtime",
+            &report.prof_recording_runtime,
+        ),
+        ("charge observation runtime", &report.observed_runtime),
+        (
+            "charge observation recording runtime",
+            &report.observed_recording_runtime,
+        ),
+    ] {
+        println!(
+            "{label}: {}",
+            archive
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), |p| p.display().to_string())
+        );
+    }
 }
 pub fn environment(
     executable: &Path,
@@ -349,6 +430,8 @@ pub fn environment(
         );
     }
     Ok(Environment {
+        version: version(),
+        docs: DOCS_URL,
         executable: executable.to_owned(),
         installed_root: installed.map(|i| i.root.clone()),
         package_cache: crate::product::normalized(cache),

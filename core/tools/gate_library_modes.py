@@ -366,7 +366,7 @@ def main():
 
             net = explain('net')
             self.assertEqual(net.returncode, 0, net.stderr)
-            self.assertIn('hirsel inspect --core --interface', net.stdout)
+            self.assertIn('hirsel inspect --core --module net --interface', net.stdout)
             listen = explain('net.listen')
             self.assertEqual(listen.returncode, 2)
             self.assertIn('the socket operation is `host.listen`', listen.stderr)

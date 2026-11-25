@@ -46,6 +46,16 @@ fn package(root: &Path, symbol: &str, generated: &mut String) -> [u8; 32] {
     hash.finalize().into()
 }
 fn main() {
+    println!("cargo:rerun-if-env-changed=RELEASE_TAG");
+    println!("cargo:rerun-if-env-changed=HIRSEL_RELEASE_VERSION");
+    if let Some(version) = env::var("HIRSEL_RELEASE_VERSION")
+        .ok()
+        .or_else(|| env::var("RELEASE_TAG").ok())
+        .map(|v| v.trim().strip_prefix('v').unwrap_or(v.trim()).to_owned())
+        .filter(|v| !v.is_empty())
+    {
+        println!("cargo:rustc-env=HIRSEL_RELEASE_VERSION={version}");
+    }
     let root = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../core");
     let mut generated = String::new();
     let core = package(&root.join("core"), "SOURCES", &mut generated);

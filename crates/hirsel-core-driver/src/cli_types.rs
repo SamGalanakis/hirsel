@@ -42,6 +42,8 @@ pub enum OptionId {
     InspectLibrary,
     InspectStd,
     InspectCore,
+    InspectModule,
+    InspectFilter,
     TestTimeout,
     Rerun,
     PropertyCorpus,

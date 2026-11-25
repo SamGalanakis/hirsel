@@ -139,8 +139,9 @@ pub fn explain(
             }
             println!("{}", serde_json::to_string(&Explanation { rule, example })?);
         } else {
+            let spec_url = crate::installation::spec_url(rule.spec_file, rule.anchor);
             println!(
-                "{}: {}\n\n{}\n\n{}#{}",
+                "{}: {}\n\n{}\n\n{}#{}\n{spec_url}",
                 rule.id, rule.title, rule.statement, rule.spec_file, rule.anchor
             );
             if let Some(example) = example {
@@ -166,25 +167,43 @@ fn explain_library(name: &str, json: bool) -> Result<(), Box<dyn std::error::Err
         )
     {
         return Err(format!(
-            "unknown rule `{name}`; the socket operation is `host.{operation}`. See `hirsel inspect --core --interface` or `hirsel explain NET-1`"
+            "unknown rule `{name}`; the socket operation is `host.{operation}`. See `hirsel inspect --core --module host --interface` or `hirsel explain NET-1`"
         ).into());
     }
 
-    let module = match name {
-        "Args" => "args",
-        "Bytes" => "core",
-        _ => name.strip_prefix("std.").unwrap_or(name),
+    let normalized = match name {
+        "Args" => "args".to_owned(),
+        "Bytes" => "core".to_owned(),
+        _ => name
+            .strip_prefix("std.")
+            .or_else(|| name.strip_prefix("std/"))
+            .or_else(|| name.strip_prefix("core."))
+            .or_else(|| name.strip_prefix("core/"))
+            .unwrap_or(name)
+            .replace('.', "/"),
     };
-    let core = SOURCES.iter().any(|(path, _)| *path == module);
-    let std = STD_SOURCES.iter().any(|(path, _)| *path == module);
+    let module = normalized.as_str();
+    let prefix = format!("{module}/");
+    let core = SOURCES
+        .iter()
+        .any(|(path, _)| *path == module || path.starts_with(&prefix));
+    let std = STD_SOURCES
+        .iter()
+        .any(|(path, _)| *path == module || path.starts_with(&prefix));
     if !core && !std {
         return Err(format!(
-            "unknown rule `{name}`; use `hirsel explain --list` for rule IDs or `hirsel inspect --core --interface` and `hirsel inspect --std --interface` for declarations"
+            "unknown rule `{name}`; use `hirsel explain --list` for rule IDs or `hirsel inspect --core --interface` and `hirsel inspect --std --module <name> --interface` (or `--filter <text>`) for declarations"
         ).into());
     }
-    let commands: Vec<_> = [
-        (core, "hirsel inspect --core --interface"),
-        (std, "hirsel inspect --std --interface"),
+    let commands: Vec<String> = [
+        (
+            core,
+            format!("hirsel inspect --core --module {module} --interface"),
+        ),
+        (
+            std,
+            format!("hirsel inspect --std --module {module} --interface"),
+        ),
     ]
     .into_iter()
     .filter_map(|(present, command)| present.then_some(command))
@@ -211,13 +230,53 @@ fn explain_library(name: &str, json: bool) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Refuse to replace an existing directory, even when it contains no sources.
+const SCAFFOLD_GITIGNORE: &str = "program\n.hirsel-core/\n.hirsel-debug/\n";
+
+const SCAFFOLD_AGENTS_MD: &str = "\
+# Hirsel project
+
+Hirsel is a new language—do not guess Rust, Zig, or Go syntax.
+
+## Before editing
+
+- Run `hirsel primer` for the full language primer matching this installed binary (trust it over web docs).
+- Never guess library names or signatures; query them with:
+  - `hirsel inspect --std --module <name> --interface` (or `--filter <text>`)
+  - `hirsel inspect --core --interface`
+
+## Edit and verify loop
+
+1. Check with `hirsel check --json` (returns rule IDs, spans, causal sites, and machine-applicable `fixes`).
+2. Read the exact rule with `hirsel explain <RULE>` (or `hirsel explain --list`); fix to the rule, not the message wording.
+3. Format with `hirsel fmt .`, test with `hirsel test`, and run with `hirsel run` (pass `--grant KIND` / `--dir PATH` for capabilities).
+
+## Key language rules
+
+- No imports, methods, traits, or turbofish: call modules by path (`list.push(mut xs, 1)`).
+- Repeat `mut` and `take` modes at call sites; unmarked parameters are views.
+- Annotate `let` bindings of literals or generic calls (`let n: u64 = 0`); never shadow names.
+- Pass capabilities (`Stdout`, `Clock`, `Dir`, `Net`) as parameters; mark functions `waits` iff they call something that waits.
+";
+
+/// Scaffold a Hirsel package into a new or existing directory without clobbering existing files.
 pub fn scaffold(directory: &Path, library: bool) -> std::io::Result<()> {
     use std::io::Write;
-    if let Some(parent) = directory.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
+    match std::fs::metadata(directory) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} already exists and is not a directory",
+                    directory.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(directory)?;
+        }
+        Err(error) => return Err(error),
     }
-    std::fs::create_dir(directory)?;
     let main = if library {
         "pub fn main() -> Result[(), Exit] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(Exit(status: 1))\n    }\n}\n"
     } else {
@@ -233,19 +292,67 @@ pub fn scaffold(directory: &Path, library: bool) -> std::io::Result<()> {
         .into_iter()
         .chain(library.then_some("lib.hirsel"));
     let manifest = crate::package_dir::scaffold_manifest(sources);
-    for (name, source) in [
+    let required: Vec<(&str, &str)> = [
+        (crate::package_dir::MANIFEST, manifest.as_str()),
         ("main.hirsel", main),
         ("tests.hirsel", test),
-        (crate::package_dir::MANIFEST, &manifest),
     ]
     .into_iter()
     .chain(library.then_some(("lib.hirsel", lib)))
-    {
+    .collect();
+    for (name, _) in &required {
+        if directory.join(name).exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "refusing to overwrite existing `{name}` in {}",
+                    directory.display()
+                ),
+            ));
+        }
+    }
+    for (name, source) in required {
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(directory.join(name))?
             .write_all(source.as_bytes())?;
     }
+    for (name, content) in [
+        (".gitignore", SCAFFOLD_GITIGNORE),
+        ("AGENTS.md", SCAFFOLD_AGENTS_MD),
+    ] {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join(name))
+        {
+            Ok(mut file) => file.write_all(content.as_bytes())?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
     Ok(())
 }
+
+pub(crate) fn print_scaffold_summary(directory: &str, library: bool) {
+    println!(
+        "Created {} at {directory}",
+        if library {
+            "library with example main"
+        } else {
+            "application"
+        }
+    );
+    println!("\nNext steps:");
+    if directory != "." && directory != "./" {
+        println!("  cd {directory}");
+    }
+    println!("  hirsel check");
+    println!("  hirsel run");
+    println!("  hirsel test");
+}
+
+#[cfg(test)]
+#[path = "cli_dx_tests.rs"]
+mod cli_dx_tests;

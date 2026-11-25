@@ -1,6 +1,6 @@
 [package]
 name = "hirsel-core-driver"
-version.workspace = true
+version = "0.1.0-pre"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

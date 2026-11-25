@@ -3,7 +3,7 @@ use crate::cli::{Invocation, OptionId};
 use crate::{CheckProduct, reuse};
 use hirsel_core_ids::{DefPath, PackageId};
 use hirsel_core_resolve::{DefinitionId, DefinitionKind};
-use hirsel_core_syntax::{Item, NodeKind};
+use hirsel_core_syntax::{Item, NodeKind, TokenKind};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -20,6 +20,8 @@ pub(crate) struct Inspection {
     query: Query,
     transitive: bool,
     library: bool,
+    module: Option<String>,
+    filter: Option<String>,
     pub(crate) source_library: Option<&'static str>,
 }
 
@@ -29,6 +31,8 @@ impl Inspection {
         let mut queries = Vec::new();
         let mut transitive = false;
         let mut library = false;
+        let mut module = None;
+        let mut filter = None;
         let mut source_library = None;
         for (option, value) in invocation.options.extract_if(.., |(option, _)| {
             matches!(
@@ -42,6 +46,8 @@ impl Inspection {
                     | InspectLibrary
                     | InspectStd
                     | InspectCore
+                    | InspectModule
+                    | InspectFilter
             )
         }) {
             match option {
@@ -63,6 +69,16 @@ impl Inspection {
                         return Err("inspect takes one library selector: --core or --std".into());
                     }
                 }
+                InspectModule => {
+                    if module.replace(value.unwrap()).is_some() {
+                        return Err("inspect takes at most one --module".into());
+                    }
+                }
+                InspectFilter => {
+                    if filter.replace(value.unwrap()).is_some() {
+                        return Err("inspect takes at most one --filter".into());
+                    }
+                }
                 _ => unreachable!("only inspect options are extracted"),
             }
         }
@@ -74,6 +90,12 @@ impl Inspection {
         let json = invocation.options.iter().any(|(id, _)| *id == Json);
         if json && !matches!(query, Query::Interface) {
             return Err("inspect --json requires --interface".into());
+        }
+        if module.is_some() && !matches!(query, Query::Interface) {
+            return Err("inspect --module requires --interface".into());
+        }
+        if filter.is_some() && !matches!(query, Query::Interface) {
+            return Err("inspect --filter requires --interface".into());
         }
         if transitive && !matches!(query, Query::Dependents(_)) {
             return Err("--transitive requires --dependents".into());
@@ -106,6 +128,8 @@ impl Inspection {
             query,
             transitive,
             library,
+            module,
+            filter,
             source_library,
         })
     }
@@ -133,7 +157,13 @@ impl Inspection {
                 |path| path.0.package.clone(),
             );
             if matches!(self.query, Query::Interface) {
-                return interface(product, package).write(json);
+                return interface(
+                    product,
+                    package,
+                    self.module.as_deref(),
+                    self.filter.as_deref(),
+                )?
+                .write(json);
             }
             let graph = Definitions::new(product, package);
             let paths = match self.query {
@@ -173,6 +203,8 @@ struct Declaration<'a> {
     name: String,
     kind: &'static str,
     signature: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    doc: Option<String>,
 }
 
 impl Interface<'_> {
@@ -183,6 +215,15 @@ impl Interface<'_> {
             for module in self.modules {
                 for item in module.items {
                     println!("{}\t{}", item.definition, item.signature);
+                    if let Some(doc) = item.doc {
+                        for line in doc.lines() {
+                            if line.is_empty() {
+                                println!("  ///");
+                            } else {
+                                println!("  /// {line}");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -190,11 +231,64 @@ impl Interface<'_> {
     }
 }
 
-fn interface(product: &CheckProduct, package: PackageId) -> Interface<'_> {
+fn module_matches(path: &[String], requested: &[&str], package_name: &str) -> bool {
+    let matches_prefix = |target: &[&str]| {
+        !target.is_empty()
+            && path.len() >= target.len()
+            && path
+                .iter()
+                .map(String::as_str)
+                .zip(target)
+                .all(|(a, b)| a == *b)
+    };
+    if matches_prefix(requested) {
+        return true;
+    }
+    if requested.len() > 1 && requested[0] == package_name {
+        return matches_prefix(&requested[1..]);
+    }
+    false
+}
+
+fn declaration_matches_filter(item: &Declaration<'_>, needle: &str) -> bool {
+    item.definition.to_ascii_lowercase().contains(needle)
+        || item.name.to_ascii_lowercase().contains(needle)
+        || item.signature.to_ascii_lowercase().contains(needle)
+        || item
+            .doc
+            .as_deref()
+            .is_some_and(|doc| doc.to_ascii_lowercase().contains(needle))
+}
+
+fn interface<'a>(
+    product: &'a CheckProduct,
+    package: PackageId,
+    module_filter: Option<&str>,
+    text_filter: Option<&str>,
+) -> io::Result<Interface<'a>> {
+    let requested_module: Option<Vec<&str>> = module_filter.map(|value| {
+        value
+            .split(['/', '.'])
+            .filter(|segment| !segment.is_empty())
+            .collect()
+    });
+    if let Some(segments) = &requested_module
+        && segments.is_empty()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inspect --module requires a non-empty module name",
+        ));
+    }
     let mut modules = BTreeMap::new();
     for file in &product.files {
         let path = product.index.module_path(file.module);
         if path.package != package {
+            continue;
+        }
+        if let Some(requested) = &requested_module
+            && !module_matches(&path.modules, requested, &package.name)
+        {
             continue;
         }
         let module = modules
@@ -232,14 +326,67 @@ fn interface(product: &CheckProduct, package: PackageId) -> Interface<'_> {
                 name: path.0.name,
                 kind,
                 signature: signature(item, definition.kind, definition.opaque),
+                doc: doc_comment(item),
             });
         }
     }
-    Interface {
+    if let Some(requested) = module_filter
+        && modules.is_empty()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "unknown module `{requested}` in {}@{}",
+                package.name, package.version
+            ),
+        ));
+    }
+    let mut modules: Vec<_> = modules.into_values().collect();
+    if let Some(filter) = text_filter {
+        let needle = filter.to_ascii_lowercase();
+        for module in &mut modules {
+            module
+                .items
+                .retain(|item| declaration_matches_filter(item, &needle));
+        }
+        modules.retain(|module| !module.items.is_empty());
+    }
+    Ok(Interface {
         version: 1,
         package,
-        modules: modules.into_values().collect(),
+        modules,
+    })
+}
+
+pub(crate) fn doc_comment(item: Item<'_>) -> Option<String> {
+    let leading: Vec<_> = item
+        .range
+        .tokens
+        .clone()
+        .map(|index| item.tree.tokens[index as usize])
+        .take_while(|token| token.span.end <= item.file_offset)
+        .collect();
+    let mut lines = Vec::new();
+    let mut next_start = item.file_offset as usize;
+    for token in leading.into_iter().rev() {
+        if token.kind != TokenKind::DocLine {
+            break;
+        }
+        let gap = &item.text[token.span.end as usize..next_start];
+        if gap.bytes().filter(|&b| b == b'\n').count() > 1 {
+            break;
+        }
+        let raw = &item.text[token.span.start as usize..token.span.end as usize];
+        let body = raw.strip_prefix("///").unwrap_or(raw);
+        let body = body.strip_prefix(' ').unwrap_or(body);
+        lines.push(body);
+        next_start = token.span.start as usize;
     }
+    if lines.is_empty() {
+        return None;
+    }
+    lines.reverse();
+    Some(lines.join("\n"))
 }
 
 pub(crate) fn signature(item: Item<'_>, kind: DefinitionKind, opaque: bool) -> &str {

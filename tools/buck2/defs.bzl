@@ -41,6 +41,7 @@ BIN_EXE_DIR = "buck-out/tmp/cargo-bin-exe"
 # `-c hirsel.tests=host` explicitly opts into execution on the invoking host;
 # `-c hirsel.tests=focus` uses one CPU unless a target requires an exact count.
 TESTS_ON_HOST = read_root_config("hirsel", "tests", "pool") == "host"
+RELEASE_VERSION = read_root_config("hirsel", "release_version", "")
 DIST_BOLT = read_root_config("hirsel", "dist_bolt", "off")
 if DIST_BOLT not in ["off", "link", "use"]:
     fail("hirsel.dist_bolt must be off, link or use")
@@ -155,6 +156,8 @@ def _flags(manifest_dir, extra = [], host_code = False, target = None):
 
 def _compile_env(package_name, crate, version, build_script):
     env = _cargo_env(package_name, crate, version)
+    if package_name == "hirsel-core-driver" and RELEASE_VERSION:
+        env["HIRSEL_RELEASE_VERSION"] = RELEASE_VERSION
     if package_name == "hirsel-llvm-lazy":
         env["OUT_DIR"] = "$(location //crates/hirsel-llvm-lazy/bridge:image)"
     if build_script != None:

@@ -77,8 +77,10 @@ def check_glibc(prefix):
 
 
 def build_targets(mode, options, *targets, bolt='off'):
+    release_tag = os.environ.get('RELEASE_TAG', '').strip()
+    version_args = ['-c', 'hirsel.release_version=' + release_tag.removeprefix('v')] if release_tag else []
     done = subprocess.run([str(BUCK), 'build', '--target-platforms', '//tools/buck2:dist',
-                           *options, '-c', 'hirsel.dist_pgo=' + mode, '-c', 'hirsel.dist_bolt=' + bolt,
+                           *options, *version_args, '-c', 'hirsel.dist_pgo=' + mode, '-c', 'hirsel.dist_bolt=' + bolt,
                            *targets, '--show-json-output'],
                           cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
     outputs = json.loads(done.stdout)

@@ -205,14 +205,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             &Path::new(directory).join("hirsel.lock"),
             crate::package_lock::scaffold().as_bytes(),
         )?;
-        println!(
-            "Created {} at {directory}",
-            if library {
-                "library with example main"
-            } else {
-                "application"
-            }
-        );
+        crate::cli_tools::print_scaffold_summary(directory, library);
         return conclude(Outcome::Exit(0));
     }
     if command == "primer" {
@@ -447,6 +440,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::InspectLibrary
             | Opt::InspectStd
             | Opt::InspectCore
+            | Opt::InspectModule
+            | Opt::InspectFilter
             | Opt::CoreIr
             | Opt::IncludeCredentials
             | Opt::Lib
@@ -762,44 +757,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         if json {
             println!("{}", serde_json::to_string(&report)?);
         } else {
-            println!("compiler: {}", report.executable.display());
-            println!(
-                "installed root: {}",
-                report
-                    .installed_root
-                    .as_ref()
-                    .map_or_else(|| "none".to_owned(), |p| p.display().to_string())
-            );
-            println!("package cache: {}", report.package_cache.display());
-            println!("target: {}", report.target);
-            println!(
-                "runtime: {}",
-                report.runtime.as_ref().map_or_else(
-                    || "none; select --runtime".to_owned(),
-                    |p| p.display().to_string()
-                )
-            );
-            println!(
-                "recording runtime: {}",
-                report.recording_runtime.as_ref().map_or_else(
-                    || "none; select --runtime".to_owned(),
-                    |p| p.display().to_string()
-                )
-            );
-            for (label, archive) in [
-                ("profiling runtime", report.prof_runtime),
-                ("profiling recording runtime", report.prof_recording_runtime),
-                ("charge observation runtime", report.observed_runtime),
-                (
-                    "charge observation recording runtime",
-                    report.observed_recording_runtime,
-                ),
-            ] {
-                println!(
-                    "{label}: {}",
-                    archive.map_or_else(|| "none".to_owned(), |p| p.display().to_string())
-                );
-            }
+            crate::installation::print_environment(&report);
         }
         return conclude(Outcome::Exit(0));
     }

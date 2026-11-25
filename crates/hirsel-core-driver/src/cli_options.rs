@@ -9,6 +9,20 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Print public declarations."
     ),
     option!(
+        InspectModule,
+        ["--module"],
+        Some("MODULE"),
+        ["inspect"],
+        "Restrict --interface to declarations in MODULE (for example json or sim/fs)."
+    ),
+    option!(
+        InspectFilter,
+        ["--filter"],
+        Some("TEXT"),
+        ["inspect"],
+        "Restrict --interface to declarations whose path, signature or doc contains TEXT."
+    ),
+    option!(
         ForeignHeader,
         ["--foreign-header"],
         Some("MODULE"),

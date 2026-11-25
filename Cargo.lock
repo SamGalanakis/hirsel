@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "hirsel-core-driver"
-version = "0.1.0"
+version = "0.1.0-pre"
 dependencies = [
  "bytes",
  "cranelift-codegen",

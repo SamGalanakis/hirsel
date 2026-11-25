@@ -370,3 +370,309 @@ fn l63_revoke_race(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
 fn test_l63_revocation_races_pager_wake(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     l63_call_fixture(d, c, tasks, l63_revoke_race)
 }
+
+// Rows 1, 3, 5 in a Tiered `rows` table and a Hot `marks` table on a
+// Directory store, reopened so that `rows` is Cold with the pager running.
+fn l63_directory_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Dir, Options, Db, Table[u64, u32], Table[u64, u32]), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = l70_open_options(300000000u64)?
+    {
+        let mut db = open(tasks, directory, c, r, options)?
+        let (rows, _) = law_pair(mut db, "rows", std.codec.key_u64(), std.codec.of_u32(), "marks", std.codec.key_u64(), std.codec.of_u32())?
+        set_residency(mut db, rows.id, Tiered)?
+        let Committed(_) = run(mut db, Some(100000), copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+            put(mut tx, handle, 1u64, 10u32)?
+            put(mut tx, handle, 3u64, 30u32)?
+            put(mut tx, handle, 5u64, 50u32)
+        })? else {
+            fail("L63: the Directory fixture rows commit")
+        }
+        let cut = checkpoint(mut db)?
+        durable(mut db, cut)?
+        close(take db)?
+    }
+    let mut db = open(tasks, directory, c, r, options)?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let marks = table(mut db, "marks", std.codec.key_u64(), std.codec.of_u32())?
+    match std.page.collection_slot(db.heads[0].roots.collections.root, prefix(rows.id)?) {
+        Some((ColdPage(_), _)) => (),
+        _ => fail("L63: the reopened Tiered root is Cold"),
+    }
+    Ok((directory, options, take db, take rows, take marks))
+}
+
+// Reads row 4 of `rows`, writes it back as one more, and replies with what it
+// read: key_word(v) for Some(v), key_word(0) for None. A missed attempt's
+// write and reply are discarded with it.
+fn l63_prior_body(mut tx: Tx, rows: Table[u64, u32]) -> Result[Bytes, Bytes] {
+    match fetch(tx, rows, 4u64) {
+        Ok(Some(v)) => {
+            result.unwrap(put(mut tx, rows, 4u64, v + 1))
+            Ok(key_word(int.widen(v)))
+        },
+        Ok(None) => {
+            result.unwrap(put(mut tx, rows, 4u64, 1u32))
+            Ok(key_word(0))
+        },
+        Error(_) => Ok(key_word(9999)),
+    }
+}
+
+// (d) The Tiered prior through a parked call. Rows 1, 3, 5 are Tiered and,
+// after a reopen, Cold. A served call A misses key 4 and parks; an inline
+// call B inserts 4 = 40 and commits. A reruns at B's head, reads 40 and puts
+// 41, and its put carries prior 1 + |v| of B's stored value: an of_u32 value
+// is stored as a 2-byte schema number and 4 bytes, so 7. Replay then holds
+// B's put in the overlay when it checks A's prior, and the reopened account
+// equals the live one. Seeded bug `stale_prior` (the rerun takes the prior
+// from the parked attempt's root, where 4 is absent): A's prior is 0 and the
+// reopen is `Corrupt(Malformed)`.
+fn l63_parked_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let (directory, options, take opened, take rows, _) = l63_directory_fixture(d, c, r, tasks)?
+    let mut db = take opened
+    let stream = law_stream_bytes(key_word(41), keyed_time(db))
+    let request = request_digest(stream, stream)
+    let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
+    let Admitted(take first) = admit_law_stream(mut db, stream, 0, request)? else {
+        fail("L63 (d): A is admitted")
+    }
+    let Ok(Parked(take a)) = serve(mut db, take first, plan, None, copy_env(rows), l63_prior_body) else {
+        fail("L63 (d): A's miss of Cold key 4 parks it")
+    }
+    let Committed(inserted) = run(mut db, Some(100000), copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 4u64, 40u32)
+    })? else {
+        fail("L63 (d): B's insert commits while A is parked")
+    }
+    durable(mut db, inserted.ticket)?
+    let seq = db.file_seq
+    let start = db.file_end
+    let Ok(Committed(receipt)) = l63_settle(mut db, Ok(Parked(take a)), copy_env(rows), l63_prior_body) else {
+        fail("L63 (d): A commits after B moved the head")
+    }
+    durable(mut db, receipt.ticket)?
+    if receipt.reply != key_word(40) || version(snapshot(db)) != inserted.info.id.version + 1 {
+        fail("L63 (d): A reruns at B's head, reads 40 and commits once")
+    }
+    let path = capacity(disk_path("j-", seq, ""))?
+    let wire = read_journal_prefix(directory, path, db.file_end)?
+    let frame = journal_decode_commit(path, copied(list.slice(wire, start + 16, db.file_end))?)?
+    let k = logical_key(rows.id, key_word(4))?
+    let mut prior: Option[u32] = None
+    for op in frame.data {
+        if op.key == k { prior = Some(op.prior) }
+    }
+    if prior != Some(7) {
+        fail("L63 (d): A's put of key 4 carries prior 1 + |40|, the moved head's value")
+    }
+    let live_account = db.resident
+    close(take db)?
+    let replayed = open(tasks, directory, c, r, options)?
+    if replayed.resident != live_account {
+        fail("L63 (d): replay's account equals the live one")
+    }
+    close(take replayed)
+}
+
+@test
+fn test_l63_parked_rerun_takes_moved_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    l63_parked_prior(d, c, r, tasks)
+}
+
+// TURSO #2: one seeded call's body. It reads Cold row `env.2` and mark
+// `env.3`, adds the row (absent is 0) plus 1 to the mark, and replies with
+// the mark it read * 1000000 + the row + 1. A missed attempt replies 0.
+fn l63_schedule_body(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32], u64, u64)) -> Result[Bytes, Bytes] {
+    let Ok(seen) = fetch(tx, env.0, env.2) else { return Ok(key_word(0)) }
+    let old = match fetch(tx, env.1, env.3) {
+        Ok(Some(m)) => m,
+        _ => 0u32,
+    }
+    let add = match seen { Some(v) => v, None => 0u32 }
+    result.unwrap(put(mut tx, env.1, env.3, old + add + 1))
+    Ok(schedule_reply(old, add))
+}
+
+fn schedule_reply(old: u32, add: u32) -> Bytes {
+    let read: u64 = int.widen(old)
+    let row: u64 = int.widen(add)
+    key_word(read * 1000000 + row + 1)
+}
+
+// The ordered-map model of `rows` and `marks`, and the head it is current at.
+type ScheduleModel {
+    rows: Map[u64, u32],
+    marks: Map[u64, u32],
+    head: u64
+}
+
+// A call committed at the model's head: it read the model there (L62), so its
+// reply is the model's, its one write lands, and the head moves by one (L63).
+fn schedule_commit(db: Db, mut model: ScheduleModel, env: (Table[u64, u32], Table[u64, u32], u64, u64), answer: Bytes) {
+    let old = match option.copied(map.get(model.marks, env.3)) { Some(m) => m, None => 0u32 }
+    let add = match option.copied(map.get(model.rows, env.2)) { Some(v) => v, None => 0u32 }
+    if answer != schedule_reply(old, add) {
+        fail("L63 schedule: a call's reply is the model's at the head it commits on")
+    }
+    map.insert(mut model.marks, env.3, old + add + 1)
+    schedule_moved(db, mut model)
+}
+
+fn schedule_moved(db: Db, mut model: ScheduleModel) {
+    model.head += 1
+    if version(snapshot(db)) != model.head {
+        fail("L63 schedule: each commit moves the head by exactly one")
+    }
+}
+
+// A seeded, bounded schedule over valid call operations: serve a call (it
+// parks on a Cold miss or commits), a Hot write that moves the head, an
+// inline Cold write that enters held mode and revokes every parked call,
+// one poll and resume, settling a call to its decision, and cancelling one.
+// The rest settle in order at the end. Every commit is checked against the
+// model, a cancelled call writes nothing, and the parked queue ends empty,
+// so every call's pins are released. Seeded bug `cancel_keeps_entry`
+// (cancel_parked hands the position back but leaves its entry queued): the
+// queue does not end empty.
+fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u64) -> Result[(), Error] waits {
+    let mut g = std.rand.new(seed, 2609)
+    let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
+    let mut model = ScheduleModel(rows: map.new(), marks: map.new(), head: version(snapshot(db)))
+    map.insert(mut model.rows, 1u64, 10u32)
+    map.insert(mut model.rows, 3u64, 30u32)
+    map.insert(mut model.rows, 5u64, 50u32)
+    let mut parked: List[(Parked, (Table[u64, u32], Table[u64, u32], u64, u64))] = list.new()
+    let mut streams = 0u64
+    for _ in 0u64 .. 40 {
+        let op = std.rand.below(mut g, 6)
+        if op == 0 && list.len(parked) < 3 {
+            let row_key: u64 = 1 + std.rand.below(mut g, 6)
+            let mark_key: u64 = std.rand.below(mut g, 4)
+            let env: (Table[u64, u32], Table[u64, u32], u64, u64) = (copy_env(handles.0), copy_env(handles.1), row_key, mark_key)
+            let stream = law_stream_bytes(key_word(1000 + streams), keyed_time(db))
+            streams += 1
+            let Admitted(take first) = admit_law_stream(mut db, stream, 0, request_digest(stream, stream))? else {
+                fail("L63 schedule: a fresh stream is admitted")
+            }
+            // Admission records the stream at most once; the call's own
+            // commit is counted from the head after it.
+            let admitted = version(snapshot(db))
+            if admitted != model.head && admitted != model.head + 1 {
+                fail("L63 schedule: admission writes at most one version")
+            }
+            model.head = admitted
+            match serve(mut db, take first, plan, None, copy_env(env), l63_schedule_body) {
+                Ok(Parked(take p)) => {
+                    let _ = std.prop.sometimes("park", true)
+                    list.push(mut parked, (take p, take env))
+                },
+                Ok(Committed(receipt)) => {
+                    let _ = std.prop.sometimes("commit without parking", true)
+                    schedule_commit(db, mut model, env, receipt.reply)
+                },
+                _ => fail("L63 schedule: a served call parks or commits"),
+            }
+        } else if op == 1 {
+            let key = std.rand.below(mut g, 4)
+            let value: u32 = int.truncate(1 + std.rand.below(mut g, 1000))
+            let Committed(_) = run(mut db, Some(100000), (copy_env(handles.1), key, value), fn(mut tx: Tx, env: (Table[u64, u32], u64, u32)) -> Result[(), Error] {
+                put(mut tx, env.0, env.1, env.2)
+            })? else {
+                fail("L63 schedule: a Hot write commits")
+            }
+            let _ = std.prop.sometimes("head move", true)
+            map.insert(mut model.marks, key, value)
+            schedule_moved(db, mut model)
+        } else if op == 2 {
+            let key = 1 + std.rand.below(mut g, 6)
+            let value: Option[u32] = if std.rand.below(mut g, 3) == 0 { None } else { Some(int.truncate(1 + std.rand.below(mut g, 1000))) }
+            let Committed(_) = run(mut db, Some(100000), (copy_env(handles.0), key, value), fn(mut tx: Tx, env: (Table[u64, u32], u64, Option[u32])) -> Result[(), Error] {
+                match env.2 {
+                    Some(v) => put(mut tx, env.0, env.1, v),
+                    None => {
+                        let _ = delete(mut tx, env.0, env.1)?
+                        Ok(())
+                    },
+                }
+            })? else {
+                fail("L63 schedule: an inline Cold write commits")
+            }
+            let _ = std.prop.sometimes("held write", true)
+            match value {
+                Some(v) => map.insert(mut model.rows, key, v),
+                None => { let _ = map.remove(mut model.rows, key) },
+            }
+            schedule_moved(db, mut model)
+        } else if op == 3 && list.len(parked) != 0 {
+            let ready = poll_parked(mut db)?
+            let at = std.rand.below(mut g, list.len(parked))
+            let (take p, take env) = list.remove(mut parked, at)
+            let was_ready = list.contains(ready, park_id(p))
+            match resume_parked(mut db, take p, copy_env(env), l63_schedule_body) {
+                Ok(Parked(take again)) => {
+                    if was_ready { let _ = std.prop.sometimes("resume parks again", true) }
+                    list.push(mut parked, (take again, take env))
+                },
+                Ok(Committed(receipt)) => {
+                    let _ = std.prop.sometimes("resume commits", true)
+                    schedule_commit(db, mut model, env, receipt.reply)
+                },
+                _ => fail("L63 schedule: a resumed call parks or commits"),
+            }
+        } else if op == 4 && list.len(parked) != 0 {
+            let at = std.rand.below(mut g, list.len(parked))
+            let (take p, take env) = list.remove(mut parked, at)
+            let Ok(Committed(receipt)) = l63_settle(mut db, Ok(Parked(take p)), copy_env(env), l63_schedule_body) else {
+                fail("L63 schedule: a settled call commits")
+            }
+            let _ = std.prop.sometimes("settle", true)
+            schedule_commit(db, mut model, env, receipt.reply)
+        } else if op == 5 && list.len(parked) != 0 {
+            let at = std.rand.below(mut g, list.len(parked))
+            let (take p, _) = list.remove(mut parked, at)
+            let _ = cancel_parked(mut db, take p)
+            let _ = std.prop.sometimes("cancel", true)
+            if version(snapshot(db)) != model.head {
+                fail("L63 schedule: a cancelled call commits nothing")
+            }
+        }
+    }
+    while list.len(parked) != 0 {
+        let (take p, take env) = list.remove(mut parked, 0)
+        let Ok(Committed(receipt)) = l63_settle(mut db, Ok(Parked(take p)), copy_env(env), l63_schedule_body) else {
+            fail("L63 schedule: every remaining call commits")
+        }
+        schedule_commit(db, mut model, env, receipt.reply)
+    }
+    if list.len(db.parked.entries) != 0 {
+        fail("L63 schedule: no call stays queued, so every call's pins are released")
+    }
+    for key in 0u64 .. 4 {
+        if l63_mark(mut db, handles.1, key)? != option.copied(map.get(model.marks, key)) {
+            fail("L63 schedule: each mark is the model's")
+        }
+    }
+    for key in 1u64 .. 7 {
+        let Committed(read) = run(mut db, Some(100000), (copy_env(handles.0), key), fn(mut tx: Tx, env: (Table[u64, u32], u64)) -> Result[Option[u32], Error] {
+            fetch(tx, env.0, env.1)
+        })? else {
+            fail("L63 schedule: reading a row commits")
+        }
+        if read.value != option.copied(map.get(model.rows, key)) {
+            fail("L63 schedule: each row is the model's")
+        }
+    }
+    Ok(())
+}
+
+@test
+fn test_l63_seeded_call_schedule(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = match std.sim.world.test_seed(seed_grant) {
+        Some(active) => active,
+        None => 1u64,
+    }
+    let (_, _, take opened, take rows, take marks) = l63_directory_fixture(d, c, r, tasks)?
+    let mut db = take opened
+    l63_schedule(mut db, (take rows, take marks), seed)?
+    close(take db)
+}

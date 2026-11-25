@@ -5,6 +5,20 @@
 
 type Slot: codec + key = Present(u64) | Masked
 
+// Readers' pin partition and the fixture's own write bound: on a store with a
+// Tiered collection a call is retry-capable, so every write is bounded and a
+// Cold source read needs room for its pins (§13.3).
+const PROJECTOR_READ_PINS: u64 = VALUE_LIMIT + 1048576
+const PROJECTOR_LAW_STEPS: u64 = 16777216
+
+fn projector_reader(db: Db) -> Result[Reader, Error] waits {
+    let pins = match db.pager {
+        Some(_) => PROJECTOR_READ_PINS,
+        None => 0,
+    }
+    reader(db, pins)
+}
+
 type ProjectorFixture {
     decl: ProjectionDecl,
     oracle: ProjectionDecl,
@@ -127,6 +141,7 @@ fn projector_refusal(take problem: ProjectError[Error]) -> Error {
     match take problem {
         Store(take error) => take error,
         Apply(take error) => take error,
+        Stopped(_) => MigrationFault,
     }
 }
 
@@ -145,7 +160,7 @@ fn project_until_idle(mut p: Projector[u64, u64], mut db: Db, fixture: Projector
 // A key as a reader of `generations` reads it: its newest mention wins, and a
 // mask reads as absent.
 fn projected_row(db: Db, images: Table[(u32, u64), Slot], generations: List[Generation], key: u64) -> Result[Option[u64], Error] waits {
-    let r = reader(db, 0)?
+    let r = projector_reader(db)?
     let here = snapshot(db)
     for j in 0u64 .. list.len(generations) {
         let generation = generations[list.len(generations) - 1 - j].id
@@ -164,7 +179,7 @@ fn tail_rows(db: Db, fixture: ProjectorFixture, slot: u8) -> Result[Map[u64, Opt
     let mut rows: Map[u64, Option[u64]] = map.new()
     let Some(take base) = owned_pin(db, ProjectorPin, projector_pin_name(fixture.decl.name, slot)) else { return Error(MigrationFault) }
     let source: Table[u64, u64] = clone(fixture.source_table)
-    let page = changes_page(reader(db, 0)?, Some(base), snapshot(db), prefix(source.id)?, prefix(source.id + 1)?,
+    let page = changes_page(projector_reader(db)?, Some(base), snapshot(db), prefix(source.id)?, prefix(source.id + 1)?,
         Limits(rows: 4096, byte_limit: 1048576))?
     if page.next != None { return Error(MigrationFault) }
     for change in page.changes {
@@ -187,8 +202,8 @@ fn live_view(db: Db, fixture: ProjectorFixture, decl: ProjectionDecl) -> Result[
 
 // The oracle folds the whole source at the head into one generation.
 fn oracle_view(mut db: Db, fixture: ProjectorFixture) -> Result[Live, Error] waits {
-    let mut oracle = tuned(projector(fixture.oracle, fixture.source_table, Local, reader(db, 0)?),
-        Cadence(tail: 18446744073709551615u64, ratio: 0))
+    let mut oracle = with_steps(tuned(projector(fixture.oracle, fixture.source_table, Local, projector_reader(db)?),
+        Cadence(tail: 18446744073709551615u64, ratio: 0)), PROJECTOR_LAW_STEPS)
     let _ = rebuild(mut oracle, mut db)?
     for _ in 0u64 .. 256 {
         let stepped = step(mut oracle, mut db, Limits(rows: 64, byte_limit: 65536), oracle_fold(fixture)) ?=> projector_refusal
@@ -222,7 +237,7 @@ fn projection_matches_rebuild(mut db: Db, fixture: ProjectorFixture, keys: u64) 
     for k in 0u64 .. list.len(row.retiring) { list.push(mut known, row.retiring[k]) }
     if let Some(merge) = row.merge { list.push(mut known, merge.into) }
     if let Some(pass) = row.pass { list.push(mut known, pass.generation) }
-    let r = reader(db, 0)?
+    let r = projector_reader(db)?
     let mut rows = scan(r, snapshot(db), fixture.image_table, Unbounded, Unbounded)?
     loop {
         let Some(((generation, _), _)) = next(r, mut rows)? else { break }
@@ -235,7 +250,7 @@ fn projection_matches_rebuild(mut db: Db, fixture: ProjectorFixture, keys: u64) 
 // sequence, so deltas mask rows of the oldest generation and of other deltas.
 fn churn(mut db: Db, t: Table[u64, u64], round: u64) -> Result[(), Error] waits {
     let input: (Table[u64, u64], u64) = (clone(t), round)
-    let ran = run(mut db, None, input, fn(mut tx, env) -> Result[(), Error] {
+    let ran = run(mut db, Some(PROJECTOR_LAW_STEPS), input, fn(mut tx, env) -> Result[(), Error] {
         let mut x = env.1
         for _ in 0u64 .. 3u64 {
             x = splitmix64(x)
@@ -249,6 +264,13 @@ fn churn(mut db: Db, t: Table[u64, u64], round: u64) -> Result[(), Error] waits 
     if let Committed(_) = ran { Ok(()) } else { Error(MigrationFault) }
 }
 
+fn bounded_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> Result[(), Error] waits {
+    let ran = run(mut db, Some(PROJECTOR_LAW_STEPS), (copy_env(t), k, v), fn(mut tx, env) -> Result[(), Error] {
+        put(mut tx, env.0, env.1, env.2)
+    })?
+    if let Committed(_) = ran { Ok(()) } else { Error(MigrationFault) }
+}
+
 fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
     let mut db = test_db(c, 1073741824)
     let fixture = projector_fixture(mut db, Migrate)?
@@ -257,7 +279,7 @@ fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
         if !typed_put(mut db, fixture.source_table, key, key * 10) { return Error(MigrationFault) }
     }
     let narrow = Limits(rows: 2, byte_limit: 1024)
-    let mut original = tuned(projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?), Cadence(tail: 1, ratio: 1))
+    let mut original = tuned(projector(fixture.decl, fixture.source_table, Local, projector_reader(db)?), Cadence(tail: 1, ratio: 1))
     if let Reloaded = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
     if let Paged(2) = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
     if let Some(_) = live(read_projection(db, fixture.decl)?, source_binding) { return Error(MigrationFault) }
@@ -283,7 +305,7 @@ fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
     if !merged || !opened { return Error(MigrationFault) }
 
     // Below t a step leaves the changes in the tail, and the tail reads them.
-    let mut lazy = tuned(projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?), Cadence(tail: 4, ratio: 1))
+    let mut lazy = tuned(projector(fixture.decl, fixture.source_table, Local, projector_reader(db)?), Cadence(tail: 4, ratio: 1))
     let before = live_view(db, fixture, fixture.decl)?.position
     let _ = run(mut db, None, fixture.source_table, fn(mut tx, input) -> Result[(), Error] {
         let _ = delete(mut tx, input, 3)?
@@ -304,7 +326,7 @@ fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
     if !typed_put(mut db, fixture.second_table, 4, 44) { return Error(MigrationFault) }
     let second_binding = binding(fixture.second_table, main_branch(db))
     if let Some(_) = live(read_projection(db, fixture.decl)?, second_binding) { return Error(MigrationFault) }
-    let mut second = projector(fixture.decl, fixture.second_table, Local, reader(db, 0)?)
+    let mut second = projector(fixture.decl, fixture.second_table, Local, projector_reader(db)?)
     project_until_idle(mut second, mut db, fixture, narrow)?
     let Some(shown) = live(read_projection(db, fixture.decl)?, second_binding) else { return Error(MigrationFault) }
     if projected_row(db, fixture.image_table, shown.generations, 4)? != Some(44u64) ||
@@ -316,20 +338,22 @@ fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
 
 // A Directory store closed with a merge open, and again with a delta pass
 // open, reopens to the same rows, finishes both, and leaks no generation and
-// no pin.
-fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    disk_io(host.mkdir(d, "projector-cuts"))?
-    let directory = disk_io(host.open_dir(d, "projector-cuts"))?
-    let options = result.unwrap(sized(Directory, 2147483648u64))
+// no pin. With `tiered` the source table is moved to Tiered before the first
+// pass, so every pass, merge and the oracle's rebuild read it through the
+// pager, and after each reopen its rows are Cold.
+fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks, tiered: bool) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = if tiered { l70_open_options(300000000u64)? } else { result.unwrap(sized(Directory, 2147483648u64)) }
     let narrow = Limits(rows: 1, byte_limit: 4096)
     let quick = Cadence(tail: 1, ratio: 1)
     {
         let mut db = open(tasks, directory, c, r, options)?
         let fixture = projector_fixture(mut db, Migrate)?
         for key in 0u64 .. 6 {
-            if !typed_put(mut db, fixture.source_table, key, key) { return Error(MigrationFault) }
+            bounded_put(mut db, fixture.source_table, key, key)?
         }
-        let mut worker = tuned(projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?), quick)
+        if tiered { set_residency(mut db, fixture.source_table.id, Tiered)? }
+        let mut worker = with_steps(tuned(projector(fixture.decl, fixture.source_table, Local, projector_reader(db)?), quick), PROJECTOR_LAW_STEPS)
         project_until_idle(mut worker, mut db, fixture, narrow)?
         let mut open_merge = false
         for round in 0u64 .. 16 {
@@ -350,11 +374,11 @@ fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
         let fixture = projector_fixture(mut db, Open)?
         if !projection_matches_rebuild(mut db, fixture, 32)? { return Error(MigrationFault) }
         churn(mut db, fixture.source_table, 99)?
-        let _ = run(mut db, None, fixture.source_table, fn(mut tx, input) -> Result[(), Error] {
+        let _ = run(mut db, Some(PROJECTOR_LAW_STEPS), fixture.source_table, fn(mut tx, input) -> Result[(), Error] {
             for key in 40u64 .. 44 { put(mut tx, input, key, key)? }
             Ok(())
         })?
-        let mut worker = tuned(projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?), quick)
+        let mut worker = with_steps(tuned(projector(fixture.decl, fixture.source_table, Local, projector_reader(db)?), quick), PROJECTOR_LAW_STEPS)
         if let Paged(1) = project_step_law(mut worker, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
         let Some(pass) = read_projection(db, fixture.decl)?.pass else { return Error(MigrationFault) }
         if !pass.delta { return Error(MigrationFault) }
@@ -362,7 +386,10 @@ fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     }
     let mut reopened = open(tasks, directory, c, r, options)?
     let loaded = projector_fixture(mut reopened, Open)?
-    let mut resumed = tuned(projector(loaded.decl, loaded.source_table, Local, reader(reopened, 0)?), quick)
+    if tiered && residency_mode(reopened, loaded.source_table.id)? != (1u8, 1u8) {
+        fail("projector: the source stays Tiered across reopens")
+    }
+    let mut resumed = with_steps(tuned(projector(loaded.decl, loaded.source_table, Local, projector_reader(reopened)?), quick), PROJECTOR_LAW_STEPS)
     project_until_idle(mut resumed, mut reopened, loaded, narrow)?
     let settled = read_projection(reopened, loaded.decl)?
     if settled.merge != None || settled.pass != None || list.len(settled.retiring) != 0 { return Error(MigrationFault) }
@@ -381,7 +408,8 @@ fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
 @test
 fn test_local_projector_laws(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     law_projector_memory(c)?
-    law_projector_disk(d, c, r, tasks)
+    law_projector_disk(d, c, r, tasks, false)?
+    law_projector_disk(d, c, r, tasks, true)
 }
 
 @test
@@ -396,7 +424,7 @@ fn test_local_projector_pin_ownership(d: Dir, c: Clock, r: Random, tasks: Tasks)
         let app = snapshot(db)
         let _ = pin(mut db, name, app)?
         if !typed_put(mut db, fixture.source_table, 3, 30) { return Error(MigrationFault) }
-        let mut worker = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
+        let mut worker = projector(fixture.decl, fixture.source_table, Local, projector_reader(db)?)
         if let Reloaded = project_step_law(mut worker, mut db, fixture, limits)? {} else { return Error(MigrationFault) }
         let target = version(snapshot(db))
         project_until_idle(mut worker, mut db, fixture, limits)?
@@ -406,22 +434,22 @@ fn test_local_projector_pin_ownership(d: Dir, c: Clock, r: Random, tasks: Tasks)
     let mut db = open(tasks, directory, c, r, options)?
     let fixture = projector_fixture(mut db, Open)?
     let Some(app) = pinned(db, name) else { fail("the application pin must survive projector publication and reopen") }
-    if version(app) != app_version || get(reader(db, 0)?, app, fixture.source_table, 3)? != None {
+    if version(app) != app_version || get(projector_reader(db)?, app, fixture.source_table, 3)? != None {
         fail("projector publication replaced the application pin")
     }
     let _ = unpin(mut db, name)?
-    let mut worker = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
+    let mut worker = projector(fixture.decl, fixture.source_table, Local, projector_reader(db)?)
     let source = binding(fixture.source_table, main_branch(db))
     let row = read_projection(db, fixture.decl)?
     let Some(image) = row.image else { return Error(MigrationFault) }
     let Some(base) = borrowed_projection_base(mut worker, db, source, image)? else { fail("application unpin removed the projector base") }
-    if version(base) != projector_version || get(reader(db, 0)?, base, fixture.source_table, 3)? != Some(30u64) {
+    if version(base) != projector_version || get(projector_reader(db)?, base, fixture.source_table, 3)? != Some(30u64) {
         fail("the projector pin must retain the published source root")
     }
     let _ = pin(mut db, name, base)?
     let _ = remove_pin(mut db, ProjectorPin, name)?
     let Some(retained) = pinned(db, name) else { fail("projector unpin removed the application pin") }
-    if version(retained) != projector_version || get(reader(db, 0)?, retained, fixture.source_table, 3)? != Some(30u64) {
+    if version(retained) != projector_version || get(projector_reader(db)?, retained, fixture.source_table, 3)? != Some(30u64) {
         fail("the application pin must retain the shared root after projector unpin")
     }
     let _ = close(take db)?

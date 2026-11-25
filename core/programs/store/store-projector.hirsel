@@ -86,6 +86,8 @@ pub opaque type Projector[K, V] {
     from: Source,
     reads: Reader,
     cadence: Cadence,
+    // The step bound of each commit that runs the fold (§1.14 "The bound").
+    steps: Option[u64],
     base: Option[Snapshot],
     target: Option[Snapshot],
     observed: Option[Projection]
@@ -111,7 +113,7 @@ pub type Fold[E: inert, K, V, A] {
 }
 
 pub type Stepped = Folded(u64) | Paged(u64) | Published(u64) | Merging | Merged(u32) | Dropped(u32) | Reloaded | Idle
-pub type ProjectError[A] = Store(Error) | Apply(A)
+pub type ProjectError[A] = Store(Error) | Apply(A) | Stopped(OutOfTime)
 
 fn projection_empty() -> Projection {
     Projection(binding: None, image: None, generations: list.new(), pass: None, merge: None, retiring: list.new(), next: 0,
@@ -143,13 +145,22 @@ pub fn projection(mut d: Declare, name: String) -> Result[ProjectionDecl, Error]
 }
 
 pub fn projector[K, V](decl: ProjectionDecl, input: Table[K, V], take from: Source, take r: Reader) -> Projector[K, V] {
-    Projector(decl: clone(decl), input: clone(input), from: take from, reads: take r, cadence: cadence(), base: None, target: None,
-        observed: None)
+    Projector(decl: clone(decl), input: clone(input), from: take from, reads: take r, cadence: cadence(), steps: None, base: None,
+        target: None, observed: None)
 }
 
 pub fn tuned[K, V](take p: Projector[K, V], c: Cadence) -> Projector[K, V] {
     let mut out = take p
     out.cadence = c
+    take out
+}
+
+// Bounds every commit that runs `apply`, `merge` or `drop` at `steps`, as
+// `run(.., Some(steps), ..)`. Unbounded, a step over a store with a Tiered
+// collection is `Store(Missing("steps"))`, as `run` is (§13.3).
+pub fn with_steps[K, V](take p: Projector[K, V], steps: u64) -> Projector[K, V] {
+    let mut out = take p
+    out.steps = Some(steps)
     take out
 }
 
@@ -172,9 +183,11 @@ pub fn projection_row(tx: Tx, decl: ProjectionDecl) -> Result[Projection, Error]
     }
 }
 
+// The row is read from the projection's Memory table, so this reader needs
+// no pager pool (§1.14 "The row").
 fn read_projection(db: Db, decl: ProjectionDecl) -> Result[Projection, Error] waits {
     let current = snapshot(db)
-    match get(reader(db, 0)?, current, decl.rows, decl.name)? {
+    match get(make_reader(db.store, open_number(db), None)?, current, decl.rows, decl.name)? {
         Some(take row) => Ok(take row),
         None => Ok(projection_empty()),
     }
@@ -396,7 +409,7 @@ fn project_commit[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, expecte
     take action: ProjectionAction, fold: Fold[E, K, V, A]) -> Result[bool, ProjectError[A]] waits {
     let work: ProjectionWork[K, V, E, A] = ProjectionWork(decl: clone(p.decl), input: clone(p.input), expected: clone(expected),
         replacement: take replacement, action: take action, fold: clone(fold))
-    let outcome = run(mut db, None, work, write_projection) ?=> Store
+    let outcome = run(mut db, p.steps, work, write_projection) ?=> Store
     match take outcome {
         Committed(Done(value: take current, ..)) => {
             p.observed = Some(take current)
@@ -409,6 +422,7 @@ fn project_commit[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, expecte
         Aborted(Undone(value: ProjectionFailed(take problem), ..)) => Error(take problem),
         Failed(Conflict(take name)) => Error(Store(Conflict(take name))),
         Refused(problem) => Error(Store(Full(problem))),
+        Stopped(limit) => Error(Stopped(limit)),
         _ => Error(Store(MigrationFault)),
     }
 }
@@ -631,11 +645,16 @@ pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error
         return Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0].head)))
     }
     let request_env: (ProjectionDecl, Projection) = (clone(p.decl), row)
-    let requested = run(mut db, None, request_env, fn(mut tx, input) -> Result[Projection, Error] {
-        let mut updated = projection_row(tx, input.0)?
-        if updated != input.1 { return Error(Foreign) }
+    // The store's own body: it reads and writes only the projection's row,
+    // so it runs unbounded on every store.
+    journal_poll(mut db)?
+    healthy(db)?
+    let keep: Option[fn(Error) -> bool] = None
+    let requested = store_body_on(mut db, 0, None, keep, scoped fn(mut tx: Tx) -> Result[Projection, Error] {
+        let mut updated = projection_row(tx, request_env.0)?
+        if updated != request_env.1 { return Error(Foreign) }
         updated.again = true
-        put(mut tx, input.0.rows, input.0.name, updated)?
+        put(mut tx, request_env.0.rows, request_env.0.name, updated)?
         Ok(take updated)
     })?
     match take requested {

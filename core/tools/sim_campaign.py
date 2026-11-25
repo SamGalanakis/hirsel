@@ -33,6 +33,11 @@ REACH_WITNESSES = {
         'edit', 'delete a key', 'fork', 'pin a head', 'capture history', 'pin history', 'unpin',
         'delete a branch', 'cut', 'crash before the rename', 'crash after the rename',
     ],
+    # Each L63 schedule move, counted where it takes effect; seeds 0-23 reach all of them.
+    'store@1/store/test_l63_seeded_call_schedule': [
+        'park', 'commit without parking', 'head move', 'held write', 'resume parks again',
+        'resume commits', 'settle', 'cancel',
+    ],
 }
 POSTGRES = (
     'fragmented_startup_error', 'eof_in_error_response',

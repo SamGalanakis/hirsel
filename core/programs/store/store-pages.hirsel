@@ -717,17 +717,21 @@ type ChangeOutput {
     bounds: List[Bytes],
     remaining: u64,
     limits: Option[Limits],
-    next: Option[Bytes]
+    next: Option[Bytes],
+    // Items an earlier part of the same page already admitted.
+    carried: u64,
+    // A collection whose rows `walk_page_changes` left for a Tiered read.
+    deferred: Option[TieredRowDiff]
 }
 
 fn change_output(limits: Option[Limits]) -> ChangeOutput {
     let remaining = match limits { Some(l) => l.byte_limit, None => 0u64 }
-    ChangeOutput(rows: list.new(), trimmed: list.new(), bounds: list.new(), remaining, limits, next: None)
+    ChangeOutput(rows: list.new(), trimmed: list.new(), bounds: list.new(), remaining, limits, next: None, carried: 0, deferred: None)
 }
 
 fn admit_change(mut out: ChangeOutput, key: Bytes, width: u64) -> Result[bool, Error] {
     if let Some(limits) = out.limits {
-        let filled = list.len(out.rows) + list.len(out.trimmed) + list.len(out.bounds)
+        let filled = out.carried + list.len(out.rows) + list.len(out.trimmed) + list.len(out.bounds)
         if filled == limits.rows || (filled != 0 && width > out.remaining) {
             out.next = Some(copied(key)?)
             return Ok(false)
@@ -861,6 +865,14 @@ fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page.Walk, right
 }
 
 fn collection_row_changes(mut out: ChangeOutput, id: u32, left: std.page.Walk, right: std.page.Walk, comparison: Order, start: Option[Bytes], stop: Option[Bytes]) -> Result[bool, Error] {
+    // A Tiered side's Cold pages need the pager, which waits, so the walk
+    // stops here and `tiered_changes` diffs these rows outside it.
+    let before = comparison != Greater
+    let after = comparison != Less
+    if (before && option.unwrap(std.page.walk_value(left))[53u64] != 0) || (after && option.unwrap(std.page.walk_value(right))[53u64] != 0) {
+        out.deferred = Some(TieredRowDiff(id, start: clone(start), stop: clone(stop), before, after))
+        return Ok(false)
+    }
     let mut from = if comparison == Greater {
         std.page.walk_empty()
     } else {
@@ -941,6 +953,11 @@ pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: 
     if let Some(base) = a {
         if !same(base.store, b.store) || base.open != b.open {
             return Error(Foreign)
+        }
+        if snapshot_paged(base) || snapshot_paged(b) {
+            let out = tiered_changes(r, base, b, Some(clone(lo)), Some(clone(hi)), Some(l))?
+            let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume, ..) = take out
+            return Ok(ChangePage(changes: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume))
         }
     } else if lo < hi {
         if let Some(inventory) = view b.roots.collections.paging {

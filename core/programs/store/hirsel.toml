@@ -37,6 +37,7 @@ std = { major = 1 }
 "store-tiered-span.hirsel" = "store"
 "store-tiered-tx-read.hirsel" = "store"
 "store-tiered-initial-changes.hirsel" = "store"
+"store-tiered-changes.hirsel" = "store"
 "store-tiered-pins.hirsel" = "store"
 "store-tiered-overlay.hirsel" = "store"
 "store-tiered-replay.hirsel" = "store"
@@ -413,6 +414,15 @@ limit = 268435456
 
 [tests.runs."store@1/store/test_l69_random_arm"]
 limit = 268435456
+
+[tests.runs."store@1/store/test_local_projector_laws"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l63_parked_rerun_takes_moved_prior"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l63_seeded_call_schedule"]
+limit = 536870912
 
 [tests.runs."store@1/store/test_l69_pin_after_its_pack_retires"]
 limit = 268435456

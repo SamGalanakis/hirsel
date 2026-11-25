@@ -2610,7 +2610,7 @@ pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] wa
     if !same(a.store, b.store) || a.open != b.open {
         return Error(Foreign)
     }
-    compare_page_collections(a.roots.collections, b.roots.collections)
+    snapshot_changes(r, a, b)
 }
 
 pub opaque scoped type TxRows[K, V] {

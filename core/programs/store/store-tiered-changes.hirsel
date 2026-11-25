@@ -1,0 +1,160 @@
+// A collection's row diff that `walk_page_changes` deferred because one side
+// is Tiered: `start` and `stop` are suffixes within the collection, and
+// `before` and `after` say which snapshot holds it.
+type TieredRowDiff {
+    id: u32,
+    start: Option[Bytes],
+    stop: Option[Bytes],
+    before: bool,
+    after: bool
+}
+
+// Rows each side reads per pager attempt while two Tiered sides are merged.
+const TIERED_DIFF_BATCH: u64 = 256
+
+fn snapshot_paged(s: Snapshot) -> bool {
+    match s.roots.collections.paging { Some(_) => true, None => false }
+}
+
+// `changes` between two Snapshots of one open (§1.5).
+fn snapshot_changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] waits {
+    if !snapshot_paged(a) && !snapshot_paged(b) {
+        return compare_page_collections(a.roots.collections, b.roots.collections)
+    }
+    if tree_stamp(a.roots.collections) == tree_stamp(b.roots.collections) {
+        return Ok(Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()))
+    }
+    let out = tiered_changes(r, a, b, None, None, None)?
+    let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, ..) = take out
+    Ok(Changes(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds))
+}
+
+// The base diff over stores with a pager. The page walk diffs every Memory
+// collection and every Log's bounds and trims by subtree stamps, as without
+// a pager, and stops at a collection whose descriptor changed and that is
+// Tiered on either side. Those rows are merged here from both Snapshots'
+// key-ordered rows, each read through its own pin root, and the walk resumes
+// at the next collection. A Tiered collection whose descriptor is unchanged
+// is skipped by its stamp, so the merge costs O(rows) only in a collection
+// that changed (§1.5).
+fn tiered_changes(r: Reader, a: Snapshot, b: Snapshot, take lo: Option[Bytes], hi: Option[Bytes], limits: Option[Limits]) -> Result[ChangeOutput, Error] waits {
+    let mut out = change_output(limits)
+    let mut low = take lo
+    loop {
+        let part = disk_allocation(scoped fn() -> Result[ChangeOutput, Error] {
+            let mut part = change_output(out.limits)
+            part.remaining = out.remaining
+            part.carried = out.carried + list.len(out.rows) + list.len(out.trimmed) + list.len(out.bounds)
+            walk_page_changes(mut part, Some(view a.roots.collections), b.roots.collections, clone(low), clone(hi))?
+            Ok(take part)
+        })?
+        let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, remaining, next: take resume, deferred: take deferred, ..) = take part
+        capacity(list.try_reserve(mut out.rows, list.len(rows)))?
+        for take row in take rows { list.push(mut out.rows, take row) }
+        capacity(list.try_reserve(mut out.trimmed, list.len(trimmed)))?
+        for take span in take trimmed { list.push(mut out.trimmed, take span) }
+        capacity(list.try_reserve(mut out.bounds, list.len(changed_bounds)))?
+        for take edge in take changed_bounds { list.push(mut out.bounds, take edge) }
+        out.remaining = remaining
+        out.next = take resume
+        let Some(take diff) = take deferred else { break }
+        let next_collection = prefix(diff.id + 1)?
+        if !tiered_row_changes(r, a, b, mut out, take diff)? { break }
+        if let Some(end) = view hi {
+            if next_collection >= end { break }
+        }
+        low = Some(take next_collection)
+    }
+    Ok(take out)
+}
+
+// Merges one collection's rows from both sides into `out`: a key only the
+// base holds is a deletion, and a key the target holds with no equal base row
+// is a put. False when the page filled.
+fn tiered_row_changes(r: Reader, a: Snapshot, b: Snapshot, mut out: ChangeOutput, take diff: TieredRowDiff) -> Result[bool, Error] waits {
+    let collection = prefix(diff.id)?
+    let low = match diff.start { Some(suffix) => logical_key(diff.id, suffix)?, None => copied(collection)? }
+    let high = match diff.stop { Some(suffix) => logical_key(diff.id, suffix)?, None => prefix(diff.id + 1)? }
+    let mut left = TieredDiffSide(rows: list.new(), at: 0, from: copied(low)?, done: !diff.before)
+    let mut right = TieredDiffSide(rows: list.new(), at: 0, from: copied(low)?, done: !diff.after)
+    loop {
+        tiered_diff_fill(r, a, diff.id, mut left, high)?
+        tiered_diff_fill(r, b, diff.id, mut right, high)?
+        let old_key: Option[View[Bytes]] = if left.at < list.len(left.rows) { Some(view left.rows[left.at].0) } else { None }
+        let new_key: Option[View[Bytes]] = if right.at < list.len(right.rows) { Some(view right.rows[right.at].0) } else { None }
+        let comparison = match (old_key, new_key) {
+            (None, None) => return Ok(true),
+            (None, Some(_)) => Greater,
+            (Some(_), None) => Less,
+            (Some(x), Some(y)) => list.compare_bytes(x, y),
+        }
+        if comparison == Less {
+            let key = copied(left.rows[left.at].0)?
+            if !admit_change(mut out, key, list.len(key))? { return Ok(false) }
+            list.push(mut out.rows, Change(tree_key: take key, value: None))
+        } else if comparison == Greater || left.rows[left.at].1 != right.rows[right.at].1 {
+            let key = copied(right.rows[right.at].0)?
+            let value = arc.share(right.rows[right.at].1)
+            if !admit_change(mut out, key, int.saturating_add(list.len(key), list.len(value)))? { return Ok(false) }
+            list.push(mut out.rows, Change(tree_key: take key, value: Some(take value)))
+        }
+        if comparison != Greater { left.at = left.at + 1 }
+        if comparison != Less { right.at = right.at + 1 }
+    }
+}
+
+// One side's buffered rows: `rows[at..]` are unread, and `from` is where the
+// next batch starts.
+type TieredDiffSide {
+    rows: List[(Bytes, Arc[Bytes])],
+    at: u64,
+    from: Bytes,
+    done: bool
+}
+
+fn tiered_diff_fill(r: Reader, s: Snapshot, id: u32, mut side: TieredDiffSide, high: Bytes) -> Result[(), Error] waits {
+    if side.done || side.at < list.len(side.rows) { return Ok(()) }
+    let batch = snapshot_collection_rows(r, s, id, side.from, high)?
+    side.done = list.len(batch) < TIERED_DIFF_BATCH
+    if let Some(final_row) = list.last(batch) {
+        side.from = scan_page_after(final_row.0)?
+    }
+    side.rows = take batch
+    side.at = 0
+    Ok(())
+}
+
+// Up to TIERED_DIFF_BATCH rows of collection `id` in [low, high) at `s`, in
+// key order, read through `s`'s own pin root when the collection is Tiered.
+fn snapshot_collection_rows(r: Reader, s: Snapshot, id: u32, low: Bytes, high: Bytes) -> Result[List[(Bytes, Arc[Bytes])], Error] waits {
+    let tree = view s.roots.collections
+    let key = prefix(id)?
+    let Some((_, descriptor)) = std.page.collection_slot(tree.root, key) else { return Ok(list.new()) }
+    if let Some(inventory) = view tree.paging {
+        if descriptor[53u64] != 0 {
+            let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
+            let empty_hint: Bytes = list.new()
+            return retry_tiered_read(source, grant, root, empty_hint, None, TieredForward,
+                scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[List[(Bytes, Arc[Bytes])], Error] {
+                    let (edge, slot_descriptor) = option.unwrap(std.page.collection_slot(tree.root, key))
+                    let mut rows: List[(Bytes, Arc[Bytes])] = list.new()
+                    let mut start = copied(low)?
+                    while list.len(rows) < TIERED_DIFF_BATCH {
+                        let Some((take row_key, take value)) = tiered_span_collection(attempt, visible, s.roots.collections, edge, slot_descriptor, id, start, high)? else { break }
+                        start = scan_page_after(row_key)?
+                        list.push(mut rows, (take row_key, take value))
+                    }
+                    Ok(take rows)
+                })
+        }
+    }
+    disk_allocation(scoped fn() -> Result[List[(Bytes, Arc[Bytes])], Error] {
+        let mut rows: List[(Bytes, Arc[Bytes])] = list.new()
+        let mut cursor = byte_cursor(s.roots.collections, Included(copied(low)?), high)?
+        while list.len(rows) < TIERED_DIFF_BATCH {
+            let Some((take row_key, take value)) = next_bytes(mut cursor)? else { break }
+            list.push(mut rows, (take row_key, take value))
+        }
+        Ok(take rows)
+    })
+}

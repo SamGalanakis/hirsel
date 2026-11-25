@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Check, seed, or compare the core workspace's generated law locks."""
+"""Check, seed, or compare the core workspace's generated law locks.
+
+`check` covers every workspace member and every directory with a tracked
+`hirsel.laws` (the `*/vectors` test packages). `check --changed-since BASE`
+checks only those whose lock could move: a package is selected when a path
+changed since BASE (worktree and untracked files included) lies in it or in a
+package it reaches through `path` dependencies (a vectors package reaches its
+parent). A change under any of ALL_TRIGGERS selects every package: std, the
+core library, the workspace manifest and lock, the lock writer and this file."""
 
 import argparse
 from contextlib import ExitStack
@@ -25,11 +33,72 @@ FOREIGN_GRANTS = {
     ),
     "sqlite": ("Foreign=sqlite@1/sqlite/Sqlite",),
 }
+# A full check is about 400 s cold, so a general compiler change does not select
+# everything; only the code that computes the lock columns does. A compiler change
+# that moves digests elsewhere is caught by the next check that selects the package.
+ALL_TRIGGERS = (
+    "core/std/", "core/core/",
+    "core/programs/hirsel.toml", "core/programs/hirsel.lock",
+    "crates/hirsel-core-driver/src/law_lock.rs", "core/tools/law_board.py",
+)
 
 
 def manifest(directory):
     with (directory / "hirsel.toml").open("rb") as source:
         return tomllib.load(source)
+
+
+def package_manifest(directory):
+    for name in ("hirsel.toml", "test.toml"):
+        if (directory / name).is_file():
+            with (directory / name).open("rb") as source:
+                return tomllib.load(source)
+    return {}
+
+
+def lock_packages():
+    """Workspace members and every directory holding a tracked hirsel.laws."""
+    members = set(manifest(WORKSPACE)["workspace"]["members"])
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "-z", "--", "core/programs/**/hirsel.laws"], cwd=ROOT, text=True)
+    members.update((ROOT / path).parent.relative_to(WORKSPACE).as_posix()
+                   for path in tracked.split("\0") if path)
+    return sorted(members)
+
+
+def reached_directories(member):
+    """The package directory and every directory it reaches by path dependency."""
+    start = (WORKSPACE / member).resolve()
+    seen, pending = set(), [start]
+    while pending:
+        directory = pending.pop()
+        if directory in seen:
+            continue
+        seen.add(directory)
+        if (directory / "test.toml").is_file() and (directory.parent / "hirsel.toml").is_file():
+            pending.append(directory.parent)
+        for binding in package_manifest(directory).get("dependencies", {}).values():
+            if isinstance(binding, dict) and "path" in binding:
+                pending.append((directory / binding["path"]).resolve())
+    return [directory.relative_to(ROOT).as_posix() + "/" for directory in seen]
+
+
+def changed_paths(base):
+    merge_base = subprocess.check_output(["git", "merge-base", "HEAD", base], cwd=ROOT, text=True).strip()
+    diff = subprocess.check_output(
+        ["git", "diff", "--name-only", "--no-renames", "-z", merge_base], cwd=ROOT, text=True)
+    untracked = subprocess.check_output(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=ROOT, text=True)
+    return {path for path in (diff + "\0" + untracked).split("\0") if path}
+
+
+def selected_packages(base):
+    packages = lock_packages()
+    changed = changed_paths(base)
+    if any(path.startswith(ALL_TRIGGERS) for path in changed):
+        return packages
+    return [member for member in packages
+            if any(path.startswith(tuple(reached_directories(member))) for path in changed)]
 
 
 def baseline_for(commit, package, destination):
@@ -93,11 +162,15 @@ def main():
     parser.add_argument("--compiler", type=Path, required=True)
     parser.add_argument("--commit")
     parser.add_argument("--logs", type=Path)
+    parser.add_argument("--changed-since", metavar="BASE",
+                        help="check: only packages whose lock a change since merge-base(HEAD, BASE) can move")
     parser.add_argument("--compiler-scratch", type=Path,
                         help="Parent directory for build stores and caches. Test directories still use TMPDIR.")
     args = parser.parse_args()
     if args.mode != "check" and args.logs is None:
         parser.error("--logs is required for seed and nightly")
+    if args.changed_since and args.mode != "check":
+        parser.error("--changed-since is for check")
     args.compiler = args.compiler.absolute()
     if args.logs is not None:
         args.logs = args.logs.absolute()
@@ -115,7 +188,15 @@ def main():
                 prefix="hirsel-law-builds-", dir=args.compiler_scratch.absolute())))
         cache = (compiler_scratch or Path(temp)) / "cache"
         env = os.environ | {"TMPDIR": temp, "XDG_CACHE_HOME": str(cache)}
-        for member in manifest(WORKSPACE)["workspace"]["members"]:
+        if args.mode != "check":
+            members = manifest(WORKSPACE)["workspace"]["members"]
+        elif args.changed_since:
+            members = selected_packages(args.changed_since)
+        else:
+            members = lock_packages()
+        if args.mode == "check":
+            print(f"laws check: {len(members)} package(s)", flush=True)
+        for member in members:
             status |= int(run_package(args, member, env, commit, compiler_scratch) != 0)
     return status
 

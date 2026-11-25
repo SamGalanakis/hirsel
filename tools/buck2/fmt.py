@@ -5,7 +5,9 @@
 rustfmt starts from each target's root file and follows its modules.
 Changed new-language sources are checked, never rewritten, and the primer's copies
 (tools/site_sync.py --check) must match docs/PRIMER.md. Documentation references
-and the std operation index must match the code. Package law locks must be current.
+and the std operation index must match the code. Package law locks must be current:
+`hirsel laws check`, with the compiler built from this tree and std from core/, runs on
+each lock package a change since origin/main can move (core/tools/law_board.py).
 Changed source files must fit
 their line limits, production sources must keep test code out, and platform decisions
 must be exhaustive on the target with host `cfg`s only in host seams. The editor
@@ -115,7 +117,8 @@ def check_compiler_metadata():
         [sys.executable, str(ROOT / 'core/tools/check_std_api_recipes.py'), '--compiler', str(compiler)],
         cwd=ROOT)
     return recipes.returncode or subprocess.run(
-        [sys.executable, str(ROOT / 'core/tools/law_board.py'), 'check', '--compiler', str(compiler)],
+        [sys.executable, str(ROOT / 'core/tools/law_board.py'), 'check', '--compiler', str(compiler),
+         '--changed-since', 'origin/main'],
         cwd=ROOT).returncode
 
 

@@ -42,9 +42,18 @@ and rows and comparisons are runner output, never failures.
 `hirsel test --locked` keeps its meaning: it requires a current workspace lock
 ([packages](spec/packages.md)). Nothing in this document adds to it.
 
-Version note (2026-11-24, verify-observer-2037): land lint checks each package
-in `core/programs/hirsel.toml`. The nightly runs those packages and reports law
-regressions in its run log, with per-package results under `laws/`.
+Version note (2026-11-25, laws-land-lint-2703): land lint is
+`tools/buck2/fmt.py --check`. It builds the compiler from the tree being checked
+and runs `core/tools/law_board.py check --changed-since origin/main`, which runs
+`hirsel laws check PKG --libraries core` on each lock package (a member of
+`core/programs/hirsel.toml` or a directory with a tracked `hirsel.laws`, such as
+the `*/vectors` packages) that a change since the merge base can move: a changed
+path inside the package or inside a package it reaches through `path`
+dependencies. A change to `core/std`, `core/core`, the workspace manifest or
+lock, `law_lock.rs` or `law_board.py` checks every lock package. Without
+`--changed-since`, `law_board.py check` checks them all. The nightly runs the
+members and reports law regressions in its run log, with per-package results
+under `laws/`.
 
 ## Pass and fail are unchanged
 

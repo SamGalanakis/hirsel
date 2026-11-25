@@ -24,6 +24,7 @@ use crate::unix_net::{
     UnixRequest,
 };
 use crate::{Context, causes, provider::*};
+use hirsel_core_ids::dir_port::DirOp;
 use hirsel_core_layout::charge::PROVIDE_CELL;
 use hirsel_core_net::{
     exec::{ExecRules, served as exec},
@@ -152,11 +153,6 @@ impl Handle {
 
 /// A live handle record's share of the room, with its release notice.
 const HANDLE_ROOM: u64 = 32;
-/// DirOp variants in declaration order (core.md, Provide).
-const DIR_CLOSE: u64 = 18;
-const DIR_RELEASED: u64 = 20;
-const DIR_MKSTEMP: u64 = 21;
-const DIR_ZERO_EXTENSION: u64 = 22;
 /// NetOp variants in declaration order.
 const NET_CONNECT: u64 = 0;
 const NET_RESOLVE: u64 = 1;
@@ -171,17 +167,12 @@ const NET_RELEASED: u64 = 8;
 const NET_READY: u64 = 18;
 const NET_LOCAL_ADDR: u64 = 19;
 const NET_PEER_ADDR: u64 = 20;
-/// DirReply and StreamReply variants as `Reply[Op]` tags.
-const R_DONE: u64 = 0;
-const R_FAILED: u64 = 1;
-const R_WRITE_FAILED: u64 = 2;
-const R_COUNT: u64 = 3;
-const R_LOCKED: u64 = 4;
-const R_STAT: u64 = 5;
-const R_FILE: u64 = 6;
-const R_DIR: u64 = 7;
-const R_ENTRIES: u64 = 8;
-const R_ZERO_EXTENSION: u64 = 9;
+/// DirReply and StreamReply variants as `Reply[Op]` tags; NetReply shares
+/// Done, Failed and Count.
+use hirsel_core_ids::dir_port::reply::{
+    COUNT as R_COUNT, DIR as R_DIR, DONE as R_DONE, ENTRIES as R_ENTRIES, FAILED as R_FAILED,
+    FILE as R_FILE, LOCKED as R_LOCKED, STAT as R_STAT, WRITE_FAILED as R_WRITE_FAILED,
+};
 /// NetReply's own variants after the shared Done, Failed and Count.
 const R_SOCKET: u64 = 9;
 const R_LISTENER: u64 = 10;
@@ -233,7 +224,7 @@ fn notice(vocab: Vocab, id: u64, part: u64) -> [u64; 9] {
     match vocab {
         Vocab::Net => words[..3].copy_from_slice(&[NET_RELEASED, id, part]),
         Vocab::Exec => words[..3].copy_from_slice(&[exec::RELEASED, id, part]),
-        _ => words[..2].copy_from_slice(&[DIR_RELEASED, id]),
+        _ => words[..2].copy_from_slice(&[DirOp::Released.word(), id]),
     }
     words
 }
@@ -241,7 +232,7 @@ fn notice(vocab: Vocab, id: u64, part: u64) -> [u64; 9] {
 fn is_notice(vocab: Vocab, op: u64) -> bool {
     match vocab {
         Vocab::Stream => false,
-        Vocab::Dir => op == DIR_RELEASED,
+        Vocab::Dir => op == DirOp::Released.word(),
         Vocab::Net => op == NET_RELEASED,
         Vocab::Exec => op == exec::RELEASED,
     }
@@ -278,7 +269,7 @@ impl Port {
         let Some(call) = self.calls.get(&id) else {
             return;
         };
-        if self.vocab != Vocab::Dir || call.words[0] != DIR_CLOSE {
+        if self.vocab != Vocab::Dir || call.words[0] != DirOp::Close.word() {
             return;
         }
         let (taken, file) = (call.taken, call.words[1]);
@@ -426,46 +417,39 @@ impl Port {
         let b = request.buffer;
         let spare = (b.capacity.saturating_sub(b.len)) as u64;
         let path = request.path_len as u64;
-        let mut w = [0; 9];
-        let (kind, fields): (Kind, &[u64]) = match request.operation {
-            OPEN => (Kind::Dir, &[0, h, path, request.mode as u64]),
-            OPEN_DIR => (Kind::Dir, &[1, h, path]),
-            MKDTEMP => (Kind::Dir, &[2, h, b.len as u64, spare]),
-            STAT => (Kind::Dir, &[3, h, path]),
-            MKDIR => (Kind::Dir, &[4, h, path]),
-            REMOVE => (Kind::Dir, &[5, h, path]),
-            REMOVE_TREE => (Kind::Dir, &[6, h, path]),
-            RENAME => {
+        let op = DirOp::from_host(request.operation)?;
+        let (kind, fields) = match op {
+            DirOp::Open => (Kind::Dir, [h, path, request.mode as u64]),
+            DirOp::OpenDir
+            | DirOp::Stat
+            | DirOp::Mkdir
+            | DirOp::Remove
+            | DirOp::RemoveTree
+            | DirOp::Entries => (Kind::Dir, [h, path, 0]),
+            DirOp::Mkdtemp | DirOp::Mkstemp => (Kind::Dir, [h, b.len as u64, spare]),
+            DirOp::Rename => {
                 let split = rename_split(request) as u64;
-                w[..4].copy_from_slice(&[7, h, split, path.saturating_sub(split + 1)]);
-                (Kind::Dir, &[])
+                (Kind::Dir, [h, split, path.saturating_sub(split + 1)])
             }
-            SYNC_DIR => (Kind::Dir, &[8, h]),
-            ZERO_EXTENSION => (Kind::Dir, &[DIR_ZERO_EXTENSION, h]),
-            ENTRIES => (Kind::Dir, &[9, h, path]),
-            MKSTEMP => (Kind::Dir, &[DIR_MKSTEMP, h, b.len as u64, spare]),
-            READ => (Kind::File, &[10, h, spare]),
-            READ_AT => {
-                w[..4].copy_from_slice(&[11, h, request.offset(), spare]);
-                (Kind::File, &[])
-            }
-            WRITE => (Kind::File, &[12, h, b.len as u64]),
-            WRITE_AT => {
-                w[..4].copy_from_slice(&[13, h, request.offset(), b.len as u64]);
-                (Kind::File, &[])
-            }
-            STAT_FILE => (Kind::File, &[14, h]),
-            SYNC => (Kind::File, &[15, h]),
-            TRY_LOCK => (Kind::File, &[16, h]),
-            TRY_LOCK_SHARED => (Kind::File, &[23, h]),
-            ZERO_AT => (Kind::File, &[24, h, request.offset(), request.zero_len()]),
-            UNLOCK => (Kind::File, &[17, h]),
-            CLOSE => (Kind::File, &[DIR_CLOSE, h]),
-            NEXT_ENTRIES => (Kind::Entries, &[19, h, spare]),
-            _ => return None,
+            DirOp::SyncDir | DirOp::ZeroExtension => (Kind::Dir, [h, 0, 0]),
+            DirOp::Read => (Kind::File, [h, spare, 0]),
+            DirOp::ReadAt => (Kind::File, [h, request.offset(), spare]),
+            DirOp::Write => (Kind::File, [h, b.len as u64, 0]),
+            DirOp::WriteAt => (Kind::File, [h, request.offset(), b.len as u64]),
+            DirOp::ZeroAt => (Kind::File, [h, request.offset(), request.zero_len()]),
+            DirOp::StatFile
+            | DirOp::Sync
+            | DirOp::TryLock
+            | DirOp::TryLockShared
+            | DirOp::Unlock
+            | DirOp::Close => (Kind::File, [h, 0, 0]),
+            DirOp::NextEntries => (Kind::Entries, [h, spare, 0]),
+            // A notice is queued at a drop, never issued by a caller.
+            DirOp::Released => return None,
         };
-        w[..fields.len()].copy_from_slice(fields);
-        self.live(h, kind).then_some(w)
+        let [f1, f2, f3] = fields;
+        self.live(h, kind)
+            .then_some([op.word(), f1, f2, f3, 0, 0, 0, 0, 0])
     }
 }
 
@@ -504,17 +488,30 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
                 _ => &[],
             };
         }
-        let path = if vocab == Vocab::Dir {
-            request_bytes(r.path, r.path_len)
-        } else {
-            &[]
-        };
+        if vocab == Vocab::Dir {
+            let path = request_bytes(r.path, r.path_len);
+            return match (DirOp::from_word(call.words[0]), field) {
+                (
+                    Some(
+                        DirOp::Open
+                        | DirOp::OpenDir
+                        | DirOp::Stat
+                        | DirOp::Mkdir
+                        | DirOp::Remove
+                        | DirOp::RemoveTree
+                        | DirOp::Entries,
+                    ),
+                    1,
+                ) => path,
+                (Some(DirOp::Mkdtemp | DirOp::Write | DirOp::Mkstemp), 1)
+                | (Some(DirOp::WriteAt), 2) => buffer,
+                (Some(DirOp::Rename), 1) => &path[..call.words[2] as usize],
+                (Some(DirOp::Rename), 2) => &path[call.words[2] as usize + 1..],
+                _ => &[],
+            };
+        }
         match (vocab, call.words[0], field) {
             (Vocab::Stream, 0, 0) => buffer,
-            (Vocab::Dir, 0 | 1 | 3 | 4 | 5 | 6 | 9, 1) => path,
-            (Vocab::Dir, 2 | 12 | DIR_MKSTEMP, 1) | (Vocab::Dir, 13, 2) => buffer,
-            (Vocab::Dir, 7, 1) => &path[..call.words[2] as usize],
-            (Vocab::Dir, 7, 2) => &path[call.words[2] as usize + 1..],
             (Vocab::Net, NET_RESOLVE, 0) => {
                 crate::tls::bytes(&(*r.path.cast::<crate::resolve::ResolveRequest>()).raw_name)
             }
@@ -550,9 +547,14 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
 
 /// The spare capacity a call offers for reply bytes.
 fn call_room(vocab: Vocab, words: &[u64; 9]) -> u64 {
+    if vocab == Vocab::Dir {
+        return match DirOp::from_word(words[0]) {
+            Some(DirOp::Read | DirOp::NextEntries) => words[2],
+            Some(DirOp::Mkdtemp | DirOp::ReadAt | DirOp::Mkstemp) => words[3],
+            _ => 0,
+        };
+    }
     match (vocab, words[0]) {
-        (Vocab::Dir, 10 | 19) => words[2],
-        (Vocab::Dir, 2 | 11 | DIR_MKSTEMP) => words[3],
         (Vocab::Exec, exec::RECV) => words[2].min(words[3]),
         (Vocab::Net, NET_RECV | NET_RESOLVE | SERVED_DATAGRAM_RECV | udp::RECV) => words[2],
         _ => 0,
@@ -931,7 +933,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
             } else if let Some(words) = words {
                 // Scalars are copied now; the bytes stay the caller's until
                 // `payload` copies them out of an unsettled call (NOTES 15).
-                if p.vocab == Vocab::Dir && words[0] == DIR_CLOSE {
+                if p.vocab == Vocab::Dir && words[0] == DirOp::Close.word() {
                     if let Some(h) = p.handles.get_mut(&words[1]) {
                         h.state = State::Closing;
                     }
@@ -1918,10 +1920,8 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
     let c = &p.calls[&id];
     if !c.staged.is_empty()
         && !((p.vocab == Vocab::Exec
-            || matches!(
-                (p.vocab, c.words[0]),
-                (Vocab::Net, SERVED_DATAGRAM_RECV) | (Vocab::Dir, DIR_MKSTEMP)
-            ))
+            || (p.vocab, c.words[0]) == (Vocab::Net, SERVED_DATAGRAM_RECV)
+            || (p.vocab, c.words[0]) == (Vocab::Dir, DirOp::Mkstemp.word()))
             && outcome.error != IoError::OK)
     {
         // The commit copies the staged bytes into the caller's spare

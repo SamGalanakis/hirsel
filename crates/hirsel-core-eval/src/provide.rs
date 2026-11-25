@@ -101,80 +101,59 @@ impl Machine<'_> {
             }
         }
         let path = |m: &Self, i: usize| m.carrier_bytes(a[i]).to_vec();
-        let (kind, words, fields, out): (u8, Vec<u64>, Vec<Vec<u8>>, Option<u64>) = match op {
-            HostOp::Open => {
+        let dir_op = DirOp::from_host(op.code()).expect("a Dir, file or listing operation");
+        let (kind, fields, payload, out): (u8, [u64; 3], Vec<Vec<u8>>, Option<u64>) = match dir_op {
+            DirOp::Open => {
                 let p = path(self, 1);
-                (0, vec![0, h, p.len() as u64, a[2]], vec![vec![], p], None)
+                (0, [h, p.len() as u64, a[2]], vec![vec![], p], None)
             }
-            HostOp::OpenDir
-            | HostOp::Stat
-            | HostOp::Mkdir
-            | HostOp::Remove
-            | HostOp::RemoveTree => {
-                let tag = match op {
-                    HostOp::OpenDir => 1,
-                    HostOp::Stat => 3,
-                    HostOp::Mkdir => 4,
-                    HostOp::Remove => 5,
-                    _ => 6,
-                };
+            DirOp::OpenDir | DirOp::Stat | DirOp::Mkdir | DirOp::Remove | DirOp::RemoveTree => {
                 let p = path(self, 1);
-                (0, vec![tag, h, p.len() as u64], vec![vec![], p], None)
+                (0, [h, p.len() as u64, 0], vec![vec![], p], None)
             }
-            HostOp::Mkdtemp | HostOp::Mkstemp => {
+            DirOp::Mkdtemp | DirOp::Mkstemp => {
                 let (prefix, ..) = self.carrier(a[1]);
                 let room = spare(self, a[1]);
-                let tag = if op == HostOp::Mkstemp {
-                    DIR_MKSTEMP
-                } else {
-                    2
-                };
                 (
                     0,
-                    vec![tag, h, prefix.len() as u64, room],
+                    [h, prefix.len() as u64, room],
                     vec![vec![], prefix],
                     Some(a[1]),
                 )
             }
-            HostOp::Rename => {
+            DirOp::Rename => {
                 let (from, to) = (path(self, 1), path(self, 2));
                 (
                     0,
-                    vec![7, h, from.len() as u64, to.len() as u64],
+                    [h, from.len() as u64, to.len() as u64],
                     vec![vec![], from, to],
                     None,
                 )
             }
-            HostOp::SyncDir => (0, vec![8, h], vec![], None),
-            HostOp::ZeroExtension => (0, vec![DIR_ZERO_EXTENSION, h], vec![], None),
-            HostOp::Entries => {
+            DirOp::SyncDir | DirOp::ZeroExtension => (0, [h, 0, 0], vec![], None),
+            DirOp::Entries => {
                 let p = if a[1] == 0 { vec![] } else { path(self, 1) };
-                (0, vec![9, h, p.len() as u64], vec![vec![], p], None)
+                (0, [h, p.len() as u64, 0], vec![vec![], p], None)
             }
-            HostOp::Read => (1, vec![10, h, spare(self, a[1])], vec![], Some(a[1])),
-            HostOp::ReadAt => (1, vec![11, h, a[1], spare(self, a[2])], vec![], Some(a[2])),
-            HostOp::Write => {
+            DirOp::Read => (1, [h, spare(self, a[1]), 0], vec![], Some(a[1])),
+            DirOp::ReadAt => (1, [h, a[1], spare(self, a[2])], vec![], Some(a[2])),
+            DirOp::Write => {
                 let (b, ..) = self.carrier(a[1]);
-                (1, vec![12, h, b.len() as u64], vec![vec![], b], None)
+                (1, [h, b.len() as u64, 0], vec![vec![], b], None)
             }
-            HostOp::WriteAt => {
+            DirOp::WriteAt => {
                 let (b, ..) = self.carrier(a[2]);
-                (
-                    1,
-                    vec![13, h, a[1], b.len() as u64],
-                    vec![vec![], vec![], b],
-                    None,
-                )
+                (1, [h, a[1], b.len() as u64], vec![vec![], vec![], b], None)
             }
-            HostOp::StatFile => (1, vec![14, h], vec![], None),
-            HostOp::Sync => (1, vec![15, h], vec![], None),
-            HostOp::TryLock => (1, vec![16, h], vec![], None),
-            HostOp::TryLockShared => (1, vec![23, h], vec![], None),
-            HostOp::ZeroAt => (1, vec![24, h, a[1], a[2]], vec![], None),
-            HostOp::Unlock => (1, vec![17, h], vec![], None),
-            HostOp::Close => (1, vec![DIR_CLOSE, h], vec![], None),
-            HostOp::NextEntries => (2, vec![19, h, spare(self, a[1])], vec![], Some(a[1])),
-            _ => unreachable!("a Dir, file or listing operation"),
+            DirOp::ZeroAt => (1, [h, a[1], a[2]], vec![], None),
+            DirOp::StatFile
+            | DirOp::Sync
+            | DirOp::TryLock
+            | DirOp::TryLockShared
+            | DirOp::Unlock
+            | DirOp::Close => (1, [h, 0, 0], vec![], None),
+            DirOp::NextEntries => (2, [h, spare(self, a[1]), 0], vec![], Some(a[1])),
+            DirOp::Released => unreachable!("a notice is queued at a drop"),
         };
         let VirtualCell::Port { handles, .. } = &self.host.world.cells[c] else {
             unreachable!()
@@ -183,8 +162,9 @@ impl Machine<'_> {
             handle.kind == kind && handle.state == PortState::Live && handle.write.is_none()
         });
         let mut w = [0; 9];
-        w[..words.len()].copy_from_slice(&words);
-        let mut answer = self.port_call(t, c, w, fields, out, live)?;
+        w[0] = dir_op.word();
+        w[1..4].copy_from_slice(&fields);
+        let mut answer = self.port_call(t, c, w, payload, out, live)?;
         if answer[1] == 0 {
             let narrow = a[0] & DIR_READ_ONLY != 0;
             if op == HostOp::Open {

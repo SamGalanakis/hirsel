@@ -1004,6 +1004,12 @@ A `provide.net` port also answers the Unix operations ([NET-14](net.md#net-14-un
 `provide.exec` makes an `Exec` answered on a `Served[ExecOp]` port
 ([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
 
+Version note (2026-11-25, served-reply-table-2694): `DirOp` gains `ZeroExtension`,
+`TryLockShared` and `ZeroAt` and `DirReply` gains `ZeroExtensionSupported`, as
+[core.hirsel](../../core/core/core.hirsel) already declared them, and **Handles** now lists
+the reply each operation takes. Before this note the runtime refused `Locked` for
+`TryLockShared`, so a served port's server failed on the only reply it could give.
+
 ```hirsel core
 pub opaque resource type Served[Op]
 pub opaque resource type Call[Op]
@@ -1012,8 +1018,8 @@ pub opaque resource type ClockHand
 pub opaque resource type StopTrigger
 pub type Withdrawn = Withdrawn()
 pub type Part = Whole | Read | Write
-pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, path: u64) | Mkdtemp(dir: u64, prefix: u64, room: u64) | Stat(dir: u64, path: u64) | Mkdir(dir: u64, path: u64) | Remove(dir: u64, path: u64) | RemoveTree(dir: u64, path: u64) | Rename(dir: u64, from: u64, to: u64) | SyncDir(dir: u64) | Entries(dir: u64, path: u64) | Read(file: u64, room: u64) | ReadAt(file: u64, at: u64, room: u64) | Write(file: u64, len: u64) | WriteAt(file: u64, at: u64, len: u64) | StatFile(file: u64) | Sync(file: u64) | TryLock(file: u64) | Unlock(file: u64) | Close(file: u64) | NextEntries(entries: u64, room: u64) | Released(id: u64) | Mkstemp(dir: u64, prefix: u64, room: u64)
-pub type DirReply = Done | Failed(IoError) | WriteFailed(WriteError) | Count(u64) | Locked(bool) | Stat(Stat) | File(u64) | Dir(u64) | Entries(u64)
+pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, path: u64) | Mkdtemp(dir: u64, prefix: u64, room: u64) | Stat(dir: u64, path: u64) | Mkdir(dir: u64, path: u64) | Remove(dir: u64, path: u64) | RemoveTree(dir: u64, path: u64) | Rename(dir: u64, from: u64, to: u64) | SyncDir(dir: u64) | Entries(dir: u64, path: u64) | Read(file: u64, room: u64) | ReadAt(file: u64, at: u64, room: u64) | Write(file: u64, len: u64) | WriteAt(file: u64, at: u64, len: u64) | StatFile(file: u64) | Sync(file: u64) | TryLock(file: u64) | Unlock(file: u64) | Close(file: u64) | NextEntries(entries: u64, room: u64) | Released(id: u64) | Mkstemp(dir: u64, prefix: u64, room: u64) | ZeroExtension(dir: u64) | TryLockShared(file: u64) | ZeroAt(file: u64, at: u64, len: u64)
+pub type DirReply = Done | Failed(IoError) | WriteFailed(WriteError) | Count(u64) | Locked(bool) | Stat(Stat) | File(u64) | Dir(u64) | Entries(u64) | ZeroExtensionSupported(bool)
 pub type NetOp = Connect(addr: Addr, public: bool) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, wire: u64, secrets: u64, marks: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64) | Ready(socket: u64) | LocalAddr(id: u64) | PeerAddr(socket: u64)
 pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake) | UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool) | Address(Addr)
 pub type StreamOp = Write(len: u64)
@@ -1067,7 +1073,13 @@ pub fn trigger(take t: StopTrigger)
   handle of another provider or another port given to an operation is refused before it
   reaches the server (`Denied`). A port's ids are one space, since `Released(id)` names no
   kind. Each issued id holds 32 bytes of the port's room until the server receives its
-  `Released`; a `Dir` id, plain like the capability, holds them until the run ends. A reply
+  `Released`; a `Dir` id, plain like the capability, holds them until the run ends. A
+  `DirOp` is answered by `Failed` or by its own variants: `File` for `Open` and `Mkstemp`;
+  `Dir` for `OpenDir` and `Mkdtemp`; `Stat` for `Stat` and `StatFile`; `Entries` for
+  `Entries`; `Count` for `Read`, `ReadAt` and `NextEntries`; `Done` or `WriteFailed` for
+  `Write` and `WriteAt`; `Locked` for `TryLock` and `TryLockShared`;
+  `ZeroExtensionSupported` for `ZeroExtension`; and `Done` for every other operation, `ZeroAt`
+  included. `Released` takes no reply. A reply
   that issues id 0, an id already live, or a variant that does not answer the call's
   operation fails the server with `Fail`, and a reply that issues an id when the room is
   short raises `Capacity` in the server; either way the call is settled as for a sealed

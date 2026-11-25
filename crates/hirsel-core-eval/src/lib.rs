@@ -65,6 +65,7 @@ pub use pure::{Engine, PureInput, PureModule, PureRun, run_pure};
 hirsel_guard::install!();
 
 use hirsel_core_ids::ContentHash;
+use hirsel_core_ids::dir_port::{DirOp, reply};
 use hirsel_core_ids::host_op::{DIR_READ_ONLY, needs_writable_dir};
 use hirsel_core_ids::host_op::{DIRECT_ALIGNMENT, MODE_DIRECT, MODE_DURABLE};
 use hirsel_core_ir::*;
@@ -303,10 +304,6 @@ enum Queued {
     Call(u64),
     Released(u64, bool),
 }
-const DIR_CLOSE: u64 = 18;
-const DIR_RELEASED: u64 = 20;
-const DIR_MKSTEMP: u64 = 21;
-const DIR_ZERO_EXTENSION: u64 = 22;
 const NET_RELEASED: u64 = 8;
 const NET_UNIX_CONNECT: u64 = 9;
 const NET_UNIX_LISTEN: u64 = 10;
@@ -338,7 +335,7 @@ struct DatagramState {
 fn is_notice(vocab: Vocab, op: u64) -> bool {
     match vocab {
         Vocab::Stream => false,
-        Vocab::Dir => op == DIR_RELEASED,
+        Vocab::Dir => op == DirOp::Released.word(),
         Vocab::Net => op == NET_RELEASED,
         Vocab::Exec => op == exec::RELEASED,
     }
@@ -441,7 +438,7 @@ impl VirtualCell {
         let Some(call) = calls.get(&id) else {
             return;
         };
-        if vocab != Vocab::Dir || call.words[0] != DIR_CLOSE {
+        if vocab != Vocab::Dir || call.words[0] != DirOp::Close.word() {
             return;
         }
         let file = call.words[1];
@@ -488,7 +485,9 @@ fn port_closed(vocab: Vocab, op: u64) -> [u64; 5] {
 /// a Stat's carries the kind, a Net Listen's or Accept's an address.
 fn port_outcome(vocab: Vocab, op: u64, v: [u64; 5]) -> Vec<u64> {
     match (vocab, op) {
-        (Vocab::Dir, 3 | 14) => v.to_vec(),
+        (Vocab::Dir, op) if matches!(DirOp::from_word(op), Some(DirOp::Stat | DirOp::StatFile)) => {
+            v.to_vec()
+        }
         (Vocab::Net, 2 | 3 | 6 | NET_LOCAL_ADDR | NET_PEER_ADDR) => [&v[..4], &[0; 4]].concat(),
         (Vocab::Exec, exec::SPAWN) => [&v[..4], &[0; 3]].concat(),
         _ => v[..4].to_vec(),
@@ -2340,7 +2339,7 @@ impl Machine<'_> {
         else {
             unreachable!()
         };
-        if vocab == Vocab::Dir && words[0] == DIR_CLOSE {
+        if vocab == Vocab::Dir && words[0] == DirOp::Close.word() {
             if let Some(h) = handles.get_mut(&words[1]) {
                 h.state = PortState::Closing;
             }
@@ -2511,7 +2510,7 @@ impl Machine<'_> {
                         match *vocab {
                             Vocab::Net => words[..3].copy_from_slice(&[NET_RELEASED, h, part]),
                             Vocab::Exec => words[..3].copy_from_slice(&[exec::RELEASED, h, part]),
-                            _ => words[..2].copy_from_slice(&[DIR_RELEASED, h]),
+                            _ => words[..2].copy_from_slice(&[DirOp::Released.word(), h]),
                         }
                         calls.insert(
                             id,
@@ -2620,32 +2619,21 @@ impl Machine<'_> {
         let answers = if !dir {
             matches!(tag, 0 | 2)
         } else {
-            (tag == 1 && op != DIR_RELEASED)
-                || match op {
-                    0 | DIR_MKSTEMP => tag == 6,
-                    1 | 2 => tag == 7,
-                    3 | 14 => tag == 5,
-                    9 => tag == 8,
-                    10 | 11 | 19 => tag == 3,
-                    12 | 13 => matches!(tag, 0 | 2),
-                    16 => tag == 4,
-                    DIR_ZERO_EXTENSION => tag == 9,
-                    _ => tag == 0,
-                }
+            hirsel_core_ids::dir_port::answers(op, tag)
         };
         if !answers
             || (dir
-                && op == DIR_MKSTEMP
-                && tag == 6
+                && op == DirOp::Mkstemp.word()
+                && tag == reply::FILE
                 && !hirsel_core_ids::host_op::valid_temp_suffix(&call.staged))
         {
             return None;
         }
         let io = |t: u64| (1..=5).contains(&t).then_some(t);
-        let len = match (dir, op) {
+        let len = match (dir, DirOp::from_word(op)) {
             (false, _) => call.words[1],
-            (true, 12) => call.words[2],
-            (true, 13) => call.words[3],
+            (true, Some(DirOp::Write)) => call.words[2],
+            (true, Some(DirOp::WriteAt)) => call.words[3],
             _ => 0,
         };
         Some(match tag {
@@ -2658,7 +2646,7 @@ impl Machine<'_> {
                 ([0, io(w[1])?, w[2] & 0xffff_ffff, w[0], 0], None)
             }
             3 => {
-                if op != 19 && w[0] != call.staged.len() as u64 {
+                if !(dir && op == DirOp::NextEntries.word()) && w[0] != call.staged.len() as u64 {
                     return None;
                 }
                 ([w[0], 0, 0, 0, 0], None)
@@ -2898,10 +2886,8 @@ impl Machine<'_> {
         let call = &calls[&id];
         if let (Some(out), false) = (call.out, call.staged.is_empty())
             && !((vocab == Vocab::Exec
-                || matches!(
-                    (vocab, op),
-                    (Vocab::Net, NET_DATAGRAM_RECV) | (Vocab::Dir, DIR_MKSTEMP)
-                ))
+                || (vocab, op) == (Vocab::Net, NET_DATAGRAM_RECV)
+                || (vocab, op) == (Vocab::Dir, DirOp::Mkstemp.word()))
                 && answer[1] != 0)
         {
             // The commit copies the staged bytes into the caller's capacity.
@@ -3158,11 +3144,15 @@ impl Machine<'_> {
                 if call.finished || call.answer.is_some() {
                     return Some(Ok(ok(0, 0)));
                 }
+                let dir = (*vocab == Vocab::Dir)
+                    .then(|| DirOp::from_word(call.words[0]))
+                    .flatten();
                 let offer = match (*vocab, call.words[0]) {
-                    (Vocab::Dir, 10 | 19) | (Vocab::Net, 1 | 4 | NET_DATAGRAM_RECV) => {
-                        call.words[2]
+                    _ if matches!(dir, Some(DirOp::Read | DirOp::NextEntries)) => call.words[2],
+                    _ if matches!(dir, Some(DirOp::Mkdtemp | DirOp::ReadAt | DirOp::Mkstemp)) => {
+                        call.words[3]
                     }
-                    (Vocab::Dir, 2 | 11 | DIR_MKSTEMP) => call.words[3],
+                    (Vocab::Net, 1 | 4 | NET_DATAGRAM_RECV) => call.words[2],
                     (Vocab::Exec, exec::RECV) => call.words[2].min(call.words[3]),
                     _ => 0,
                 };

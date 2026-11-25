@@ -5,20 +5,7 @@ pub(super) fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
     match vocab {
         Vocab::Exec => unreachable!("Exec replies use their own matrix"),
         Vocab::Stream => matches!(reply, R_DONE | R_WRITE_FAILED),
-        Vocab::Dir => {
-            (reply == R_FAILED && op != DIR_RELEASED)
-                || match op {
-                    0 | DIR_MKSTEMP => reply == R_FILE,
-                    1 | 2 => reply == R_DIR,
-                    3 | 14 => reply == R_STAT,
-                    9 => reply == R_ENTRIES,
-                    10 | 11 | 19 => reply == R_COUNT,
-                    12 | 13 => matches!(reply, R_DONE | R_WRITE_FAILED),
-                    16 | 23 => reply == R_LOCKED,
-                    DIR_ZERO_EXTENSION => reply == R_ZERO_EXTENSION,
-                    _ => reply == R_DONE,
-                }
-        }
+        Vocab::Dir => hirsel_core_ids::dir_port::answers(op, reply),
         Vocab::Net => {
             (reply == R_FAILED && op != NET_RELEASED)
                 || match op {
@@ -68,7 +55,7 @@ pub(super) fn answer(
     ) {
         return None;
     }
-    if (p.vocab, op, tag) == (Vocab::Dir, DIR_MKSTEMP, R_FILE)
+    if (p.vocab, op, tag) == (Vocab::Dir, DirOp::Mkstemp.word(), R_FILE)
         && !hirsel_core_ids::host_op::valid_temp_suffix(&call.staged)
     {
         return None;
@@ -78,16 +65,15 @@ pub(super) fn answer(
     match tag {
         R_DONE => {
             out.written = match (p.vocab, op) {
-                (Vocab::Stream, _) | (Vocab::Dir, 12) => {
-                    call.words[2 - (p.vocab == Vocab::Stream) as usize]
-                }
-                (Vocab::Dir, 13) => call.words[3],
+                (Vocab::Stream, _) => call.words[1],
+                (Vocab::Dir, op) if op == DirOp::Write.word() => call.words[2],
+                (Vocab::Dir, op) if op == DirOp::WriteAt.word() => call.words[3],
                 _ => 0,
             }
         }
         R_FAILED => out.error = io(w[0], w[1])?,
         R_WRITE_FAILED => {
-            let len = if op == 13 {
+            let len = if p.vocab == Vocab::Dir && op == DirOp::WriteAt.word() {
                 call.words[3]
             } else {
                 call.words[2 - (p.vocab == Vocab::Stream) as usize]
@@ -116,12 +102,16 @@ pub(super) fn answer(
         }
         R_COUNT => {
             // A read's count is the bytes it staged; a listing's, its entries.
-            if op != 19 && w[0] != call.staged.len() as u64 {
+            if !(p.vocab == Vocab::Dir && op == DirOp::NextEntries.word())
+                && w[0] != call.staged.len() as u64
+            {
                 return None;
             }
             out.value = w[0];
         }
-        R_ZERO_EXTENSION if p.vocab == Vocab::Dir => out.value = u64::from(w[0] != 0),
+        hirsel_core_ids::dir_port::reply::ZERO_EXTENSION if p.vocab == Vocab::Dir => {
+            out.value = u64::from(w[0] != 0)
+        }
         R_SOCKET | R_LISTENER | R_ADDRESS => {
             let v4 = w[1] == 0 && w[2] == 0 && w[3] <= u64::from(u32::MAX);
             if !(v4 || w[1] == 1) || w[4] > 0xffff {

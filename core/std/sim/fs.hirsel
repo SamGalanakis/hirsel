@@ -814,6 +814,10 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
                 let _ = answer(mut s, take c, Failed(Denied))
             } else if file.direct && (at % 4096 != 0 || len % 4096 != 0) {
                 let _ = answer(mut s, take c, Failed(Other(22)))
+            } else if len > 9223372036854775807 || at > 9223372036854775807 - len {
+                // Past the largest file offset: EFBIG, as the host answers.
+                // ZeroAt has no WriteFailed reply, so write() never sees it.
+                let _ = answer(mut s, take c, Failed(Other(27)))
             } else {
                 let mut zeros: Bytes = list.with_capacity(len)
                 list.fill(mut zeros, len, 0u8)

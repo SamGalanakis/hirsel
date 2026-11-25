@@ -1,0 +1,182 @@
+// Every DirOp through a served Dir port answered by std.sim.fs (core.md,
+// Provide: Handles). A reply that does not answer its call's operation fails
+// the server, so each caller result below holds only when the runtime accepts
+// the reply std.sim.fs gives, which is the reply the host gives (CAP-5). The
+// expected results are the host operations' contracts (core.md, Host), worked
+// by hand for the steps in order.
+type Mount: send {
+    fs: sim.fs.Fs,
+    port: Served[DirOp],
+    clock: Clock
+}
+
+fn serve(take mount: Mount) -> sim.fs.Fs waits {
+    let Mount(fs: take image, port: take port, clock) = take mount
+    let mut fs = take image
+    let mut plan = sim.world.plan(0)
+    sim.fs.serve(mut fs, mut plan, clock, take port)
+    take fs
+}
+
+fn done(r: Result[(), IoError]) -> bool {
+    match r {
+        Ok(()) => true,
+        Error(_) => false
+    }
+}
+
+fn wrote(r: Result[(), WriteError]) -> bool {
+    match r {
+        Ok(()) => true,
+        Error(_) => false
+    }
+}
+
+// The file a/f after its writes: "hello" at 0, "xy" at 8 (5 to 7 zero filled),
+// then three zeros at 2: h e 0 0 0 0 0 0 x y.
+fn written(b: Bytes) -> bool {
+    list.len(b) == 10 && b[0] == b'h' && b[1] == b'e' && b[2] == 0 && b[3] == 0 && b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 && b[8] == b'x' && b[9] == b'y'
+}
+
+// The first step whose result differs from its contract, numbered in the
+// comments by the DirOp it issues, or 0 when every step holds.
+fn every_op(d: Dir) -> u64 waits {
+    // Mkdir (4), Open (0) CreateNew.
+    if !done(host.mkdir(d, "a")) {
+        return 1
+    }
+    let mut f = match host.open(d, "a/f", CreateNew) {
+        Ok(take f) => take f,
+        Error(_) => return 2
+    }
+    // Write (12), WriteAt (13), ZeroAt (24).
+    if !wrote(host.write(mut f, string.as_bytes("hello"))) {
+        return 3
+    }
+    if !wrote(host.write_at(mut f, 8, string.as_bytes("xy"))) {
+        return 4
+    }
+    if !done(host.zero_at(mut f, 2, 3)) {
+        return 5
+    }
+    // TryLock (16), Unlock (17), TryLockShared (23): no other holder, so held.
+    match host.try_lock(mut f) {
+        Ok(true) => (),
+        _ => return 6
+    }
+    if !done(host.unlock(mut f)) {
+        return 7
+    }
+    match host.try_lock_shared(mut f) {
+        Ok(true) => (),
+        _ => return 8
+    }
+    // StatFile (14), Sync (15), Close (18).
+    match host.stat_file(mut f) {
+        Ok(s) if s.size == 10 => (),
+        _ => return 9
+    }
+    if !done(host.sync(mut f)) {
+        return 10
+    }
+    if !done(host.close(take f)) {
+        return 11
+    }
+    // Read (10) and ReadAt (11) on a fresh read handle.
+    let mut r = match host.open(d, "a/f", Read) {
+        Ok(take r) => take r,
+        Error(_) => return 12
+    }
+    let mut all: Bytes = list.with_capacity(16)
+    match host.read(mut r, mut all) {
+        Ok(10) => (),
+        _ => return 13
+    }
+    if !written(all) {
+        return 14
+    }
+    let mut tail: Bytes = list.with_capacity(4)
+    match host.read_at(mut r, 8, mut tail) {
+        Ok(2) => (),
+        _ => return 15
+    }
+    if tail[0] != b'x' || tail[1] != b'y' {
+        return 16
+    }
+    // Released (20): the read handle is dropped, not closed.
+    let _ = take r
+    // Stat (3), OpenDir (1), Entries (9), NextEntries (19): a holds only f.
+    match host.stat(d, "a/f") {
+        Ok(s) if s.size == 10 => (),
+        _ => return 17
+    }
+    let sub = match host.open_dir(d, "a") {
+        Ok(sub) => sub,
+        Error(_) => return 18
+    }
+    let mut listing = match host.entries(sub, None) {
+        Ok(take h) => take h,
+        Error(_) => return 19
+    }
+    let mut encoded: Bytes = list.with_capacity(258)
+    match host.next_entries(mut listing, mut encoded) {
+        Ok(1) => (),
+        _ => return 20
+    }
+    let _ = take listing
+    // Mkdtemp (2) and Mkstemp (21) each create a new name.
+    let mut dir_name = string.with_capacity(33)
+    string.push(mut dir_name, "t")
+    if !done(match host.mkdtemp(d, mut dir_name) {
+        Ok(_) => Ok(()),
+        Error(e) => Error(e)
+    }) {
+        return 21
+    }
+    let mut file_name = string.with_capacity(33)
+    string.push(mut file_name, "s")
+    let temp = match host.mkstemp(d, mut file_name) {
+        Ok(take t) => take t,
+        Error(_) => return 22
+    }
+    if !done(host.close(take temp)) {
+        return 23
+    }
+    // Rename (7), SyncDir (8), ZeroExtension (22).
+    if !done(host.rename(d, "a/f", "a/g")) {
+        return 24
+    }
+    if !done(host.sync_dir(d)) {
+        return 25
+    }
+    match host.zero_extension(d) {
+        Ok(_) => (),
+        Error(_) => return 26
+    }
+    // Remove (5), then a Failed answer (NotFound), then RemoveTree (6).
+    if !done(host.remove(d, "a/g")) {
+        return 27
+    }
+    match host.stat(d, "a/g") {
+        Error(NotFound) => (),
+        _ => return 28
+    }
+    if !done(host.remove_tree(d, "a")) {
+        return 29
+    }
+    0
+}
+
+// The served port's server must also end cleanly: one that failed on a reply
+// the runtime refused ends its task in failure (100).
+// expect: run sim_served_dir_every_op(tasks) = 0
+fn sim_served_dir_every_op(tasks: Tasks) -> u64 waits {
+    let (c, _hand) = provide.clock(0, 0)
+    let (d, port) = provide.dir(bytes 4096)
+    let server = task.spawn(tasks, bytes 65536, Mount(fs: sim.fs.new(), port: take port, clock: c), serve)
+    let first = every_op(d)
+    match task.join(take server) {
+        Ok(_) => first,
+        Error(_) => 100
+    }
+}

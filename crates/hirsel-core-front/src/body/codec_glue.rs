@@ -482,7 +482,8 @@ impl Derive<'_> {
             let function = row(self.module, self.of, self.rows, op);
             let result = c.value(Ty::Ptr);
             // A `StaticFn` (PROG-9), so the codec's revision covers this glue.
-            let instance = &self.module.instances[self.module.functions[function.index()].instance.index()];
+            let instance =
+                &self.module.instances[self.module.functions[function.index()].instance.index()];
             let mut bytes = vec![1];
             bytes.extend(instance.definition.to_string().into_bytes());
             let identity = hirsel_core_ir::StaticId(self.module.statics.len() as u32);

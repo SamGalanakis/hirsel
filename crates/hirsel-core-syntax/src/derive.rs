@@ -8,7 +8,10 @@
 //! The text is generated from the syntax alone: field and payload types, default literals
 //! and the declared bounds are copied as written, and each codec a field needs comes from a
 //! typed `let` of `codec.of()`.
+mod least;
+
 use crate::*;
+use least::Least;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
@@ -1370,7 +1373,9 @@ impl<'a> Gen<'a> {
         let (lets, least) = self.least_body();
         let header = format!("fn {name}$codec{generics}() -> {c}Codec[{ty}]");
         let empty = self.empty_body();
-        let args = format!("code.describe({name}$encode), code.describe({name}$decode), code.describe({name}$schema), {least}");
+        let args = format!(
+            "code.describe({name}$encode), code.describe({name}$decode), code.describe({name}$schema), {least}"
+        );
         let make = match empty {
             Some(empty) => format!("{c}make_derived({args}, {empty})"),
             None => format!("{c}make({args})"),
@@ -1686,30 +1691,4 @@ fn reject_empty(test: Option<&str>, start: &str) -> String {
     test.map_or_else(String::new, |test| {
         format!("if {test} {{ return Error(Invalid({start})) }}\n")
     })
-}
-
-/// A LEAST: a constant plus `least` calls.
-struct Least {
-    fixed: u64,
-    calls: Vec<String>,
-}
-impl Least {
-    fn fixed(n: u64) -> Self {
-        Least {
-            fixed: n,
-            calls: vec![],
-        }
-    }
-    fn plus(mut self, other: Least) -> Self {
-        self.fixed += other.fixed;
-        self.calls.extend(other.calls);
-        self
-    }
-    fn text(self) -> String {
-        let mut terms = self.calls;
-        if self.fixed > 0 || terms.is_empty() {
-            terms.insert(0, self.fixed.to_string());
-        }
-        terms.join(" + ")
-    }
 }

@@ -4,6 +4,8 @@ use hirsel_core_resolve::{CausalRole, ModulePath, Namespace, RefusalDetail};
 use hirsel_core_syntax::Span;
 
 mod name_candidates;
+mod ownership_fixes;
+mod refusal_fixes;
 
 #[derive(Debug, Serialize)]
 pub struct SourceSite {
@@ -96,13 +98,19 @@ pub(crate) fn render_suggestions(
     fixes: &[Fix],
     members: &[AvailableMember],
 ) -> impl Iterator<Item = String> {
-    let edits = fixes.iter().flat_map(|fix| {
-        fix.edits.iter().map(|edit| {
-            let description = edit.description();
-            match &fix.signature {
-                Some(signature) => format!("{description} ({signature})"),
-                None => description,
-            }
+    let edits = fixes.iter().filter_map(|fix| {
+        if fix.edits.is_empty() {
+            return None;
+        }
+        let description = fix
+            .edits
+            .iter()
+            .map(Edit::description)
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(match &fix.signature {
+            Some(signature) => format!("{description} ({signature})"),
+            None => description,
         })
     });
     edits.chain(
@@ -411,7 +419,7 @@ impl CheckProduct {
             None
         };
         let Some((applicability, span, text)) = edit else {
-            return Ok(vec![]);
+            return Ok(self.refusal_fixes(r, file));
         };
         let module = source_name(file.name.as_deref(), &self.index.module_path(file.module));
         Ok(vec![Fix {

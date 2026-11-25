@@ -1998,16 +1998,7 @@ fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[List[(u64, Catalog)], Error]
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
-    let records = index_catalog_in(tx.roots.catalog, t.id)?
-    let mut indexes: List[(u64, Catalog)] = list.new()
-    for take record in take records {
-        let bound_index = registered_index(tx, t.id, t.readers.current, record)?
-        list.push(mut indexes, (bound_index.ordinal, take record))
-    }
-    list.sort(mut indexes, fn(a: (u64, Catalog), b: (u64, Catalog)) -> Order {
-        order.compare(a.0, b.0)
-    })
-    Ok(take indexes)
+    bound_indexes(tx, t.id, t.readers.current)
 }
 
 /// Borrow the stored schema tag and codec bytes, including any staged write.
@@ -2616,7 +2607,7 @@ pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
     }
     let indexes = writable(tx, t)?
     let key = encode_key(t.key, k)?
-    delete_impl(mut tx, t, indexes, key)
+    delete_impl(mut tx, t.id, t.readers.current, indexes, key)
 }
 
 type OldAccount {
@@ -3405,7 +3396,9 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
             // An index entry carries its payload: a Unique entry starts with
             // its owner's primary, and either kind may carry a projection.
             if unique {
-                let Ok(owner_end) = unique_owner_end(encoded) else { return Error(ImportMalformed) }
+                let Ok(owner_end) = unique_owner_end(encoded) else {
+                    return Error(ImportMalformed)
+                }
                 if owner_end == 4 {
                     return Error(ImportMalformed)
                 }

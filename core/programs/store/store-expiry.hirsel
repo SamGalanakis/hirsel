@@ -1,0 +1,168 @@
+// Row expiry (STORE-SPEC §1.2 "Expiry", Store 4.1). A table declares an
+// expiry extractor; the store keeps it as an ordinary Many index on the
+// expiry time, named `hirsel.expiry`, so the index states, the builder, the
+// walker and catch-up treat it as any other index. A row with no expiry has
+// no entry. The runner's head deletes due rows with `sweep_expired`, in
+// bounded commits on the head's clock. No read consults a clock: an expired
+// row is visible until the commit that deletes it.
+const EXPIRY_INDEX: String = "hirsel.expiry"
+
+type ExpiryExtractor[K, V]: send {
+    table: Table[K, V],
+    id: u32,
+    by: StaticFn[fn(K, V) -> Option[u64]]
+}
+
+/// Declares that `t`'s rows expire: `by` gives a row its expiry time in
+/// keyed-time milliseconds, or None for a row that never expires. A row is
+/// deleted by the first sweep at or after that time. Under Migrate a new or
+/// changed declaration is built from the table's rows; until it is Public the
+/// sweep skips the table. A table has at most one expiry.
+pub fn expire_rows[K, V](mut d: Declare, mut t: TableDecl[K, V], by: StaticFn[fn(K, V) -> Option[u64]]) -> Result[(), Error] {
+    active_table(d, t)?
+    d.failed = true
+    let key = std.codec.key_u64()
+    let lookup_key = catalog_index_key(t.handle.id, EXPIRY_INDEX)?
+    let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: index_revision(d.versioned, by, t.handle, key, std.codec.of_unit())?, shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Backfilling(None))
+    let existing = existing_index_record(d, lookup_key, EXPIRY_INDEX)?
+    let needs_rebuild = settle_index_record(mut d, lookup_key, EXPIRY_INDEX, take existing, mut proposed)?
+    let schema_binding = expiry_binding(t.handle, proposed, by)
+    build_declared_record(mut d, t.handle, lookup_key, EXPIRY_INDEX, proposed, schema_binding.index, needs_rebuild)?
+    if let Follower = d.mode {} else {
+        list.push(mut d.plan.bindings, take schema_binding)
+    }
+    map.insert(mut d.indexes, proposed.id, ())
+    d.failed = false
+    Ok(())
+}
+
+fn expiry_binding[K, V](t: Table[K, V], record: Catalog, by: StaticFn[fn(K, V) -> Option[u64]]) -> IndexRegistration {
+    let extractor: ExpiryExtractor[K, V] = ExpiryExtractor(table: clone(t), id: record.id, by: by)
+    let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
+        extract_expiry(extractor, raw, primary)
+    }
+    index_registration(t, record, take extract, entry_key_end(std.codec.key_u64()))
+}
+
+// A row's one entry `id ‖ at u64 BE ‖ primary`, or none.
+fn extract_expiry[K, V](extractor: ExpiryExtractor[K, V], raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
+    let t = view extractor.table
+    let k = decoded(std.codec.decode_key(t.key, primary))?
+    let v = row_value(t.readers, t.id, raw)?
+    let mut keys: List[Bytes] = list.new()
+    if let Some(at) = (code.callable(extractor.by))(k, v) {
+        let mut row = prefix(extractor.id)?
+        std.codec.encode_key(std.codec.key_u64(), at, mut row)
+        list.append(mut row, primary)
+        if list.len(row) > 4096 {
+            return Error(Limit(Key))
+        }
+        list.push(mut keys, take row)
+    }
+    Ok(IndexValue(keys: take keys, payload: list.new(), sums: list.new()))
+}
+
+/// What one sweep did: the rows it deleted, and its commit when it made one.
+pub type Swept {
+    rows: u64,
+    ticket: Option[Ticket]
+}
+
+// One due row: its table, the value schema its extractors are bound for,
+// and its primary key.
+type DueRow {
+    table: u32,
+    schema: u16,
+    primary: Bytes
+}
+
+/// Deletes rows whose expiry is at or before keyed time, in one commit of at
+/// most `limits.rows` rows and `limits.byte_limit` row bytes (at least one
+/// row, so a row larger than the byte limit still goes). Rows go in
+/// (table, expiry, key) order through the ordinary delete, so every index,
+/// aggregate and change feed sees an ordinary delete. Only Public expiry
+/// indexes this release binds are swept. An entry whose row is absent proves
+/// the index wrong: the commit stops with Drift and the index is demoted and
+/// rebuilt, as for any write. Not built: Tiered stores (`Missing("steps")`).
+pub fn sweep_expired(mut db: Db, limits: Limits) -> Result[Swept, Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    if limits.rows == 0 {
+        return Error(Limit(Transaction))
+    }
+    if tiered_collections(db.heads[0].roots.collections.root) {
+        return Error(Missing("steps"))
+    }
+    let now = keyed_time(db)
+    let due = due_rows(db, now, limits)?
+    if list.len(due) == 0 {
+        return Ok(Swept(rows: 0, ticket: None))
+    }
+    let no_reply: Option[fn(Error) -> bool] = None
+    let settled = store_body_at(mut db, 0u64, now, None, no_reply, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        for row in due {
+            let indexes = bound_indexes(tx, row.table, row.schema)?
+            if !delete_impl(mut tx, row.table, row.schema, indexes, row.primary)? {
+                return Error(expiry_drift(mut tx, row.table)?)
+            }
+        }
+        Ok(())
+    })?
+    match take settled {
+        Committed(take done) => Ok(Swept(rows: list.len(due), ticket: Some(done.ticket))),
+        Failed(Drift(_)) => Ok(Swept(rows: 0, ticket: None)),
+        Refused(c) => Error(Full(c)),
+        Aborted(Undone(value: take e, ..)) => Error(take e),
+        _ => Error(Missing("expiry sweep")),
+    }
+}
+
+// The expiry index of `owner` names a row it does not have.
+fn expiry_drift(mut tx: Tx, owner: u32) -> Result[Error, Error] {
+    let record = catalog_entry_in(tx.roots.catalog, catalog_index_key(owner, EXPIRY_INDEX)?)?
+    let mut seen: List[(u32, u32)] = list.new()
+    list.push(mut seen, (owner, record.id))
+    Ok(drift_stop(mut tx, take seen))
+}
+
+// The due rows of the first expiry indexes in catalog order, up to the limits.
+fn due_rows(db: Db, now: u64, limits: Limits) -> Result[List[DueRow], Error] {
+    let mut out: List[DueRow] = list.new()
+    let mut taken = 0u64
+    let mut low: Bytes = list.new()
+    list.push(mut low, 2u8)
+    let mut end_key: Bytes = list.new()
+    list.push(mut end_key, 3u8)
+    let roots = view db.heads[0].roots
+    let mut records = byte_cursor(roots.catalog, Included(take low), end_key)?
+    while let Some((take key, raw)) = next_bytes(mut records)? {
+        if !record_public(raw) || declaration_index_name(key)? != EXPIRY_INDEX {
+            continue
+        }
+        let record = decode_catalog(raw)?
+        let Some(extractor) = bound_extractor(db.indexes, record) else {
+            continue
+        }
+        let high = if now == 18446744073709551615u64 {
+            prefix(record.id + 1)?
+        } else {
+            let mut k = prefix(record.id)?
+            std.codec.encode_key(std.codec.key_u64(), now + 1, mut k)
+            take k
+        }
+        let mut due = byte_cursor(roots.collections, Included(prefix(record.id)?), high)?
+        while let Some((take entry_key, _)) = next_bytes(mut due)? {
+            let primary = copied(list.slice(entry_key, 12, list.len(entry_key)))?
+            let size = match get_page_row(roots.collections, logical_key(record.owner, primary)?) {
+                Some(row) => list.len(row),
+                None => 0u64,
+            }
+            if list.len(out) != 0 && (list.len(out) == limits.rows || int.saturating_add(taken, size) > limits.byte_limit) {
+                return Ok(take out)
+            }
+            taken = int.saturating_add(taken, size)
+            list.push(mut out, DueRow(table: record.owner, schema: extractor.schema, primary: take primary))
+        }
+    }
+    Ok(take out)
+}

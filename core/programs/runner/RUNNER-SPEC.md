@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.76: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.77: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,10 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.77 (the head sweeps expired rows; lane store-ttl-4-1-2666, Store 4.1)
+
+Built: §12.5 gains job 2, Sweep. On an idle turn the head runs one `sweep_expired` of at most 1,024 rows and 1 MiB (STORE-SPEC v2.125), seals its commit as a group with no calls and releases it once durable. It runs while an export lease is held, since catch-up replays data commits. No timer wakes a quiet head for expiry. Scrub and Walk become jobs 3 and 4. No wire, API or format change. Reversible: code and text only.
 
 ## CHANGES-v2.76 (the head drives the store's upkeep; lane store-head-driver-1-3-2618, Store 1.3)
 
@@ -2407,20 +2411,22 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 - **`Overloaded` for drain refusals** is decided here. A `Draining` refusal would append tag 8 and change frame-vectors.json, and it would ask the client for the same action. Reversible until a client needs to tell the two apart.
 - **The manifest from the build** is decided here, and extends D1. Reversible: the manifest is one file that one command writes.
 
-### 12.5 The head's upkeep (v2.76, Store 1.3)
+### 12.5 The head's upkeep (v2.76, Store 1.3; sweep v2.77, Store 4.1)
 
 The head task owns the Db, so it drives the store's upkeep itself, one bounded slice per turn. No caller of `index_build_step`, `scrub_step` or `verify_step` is needed in a program.
 
 - **When.** An idle turn: the inbox is empty, no group is open, no release is held, no write pause is active, the head is not closed, and its inbox has not ended. Each turn runs one slice of the first job that has work, then reads the inbox again, so a request waits for at most one slice.
 - **Jobs, in priority order.**
   1. **Build.** One `index_build_step(mut db, 1024)` while an index is `Backfilling`. When the step reports nothing left and a chunk committed since the head last released, the head releases its current snapshot, so readers serve the rebuilt index.
-  2. **Scrub.** One `scrub_step` of 1 MiB of the current tour (STORE-SPEC §11.17). A tour starts at the first idle turn at or after its start time, and its end sets the next start time one hour after it on the store clock (`keyed_time`). A store without a directory has nothing to scrub.
-  3. **Walk.** One `verify_step(mut db, mut walk, 1024)` (STORE-SPEC §1.2, the index walker), with the same rest of one hour after each finished walk. A slice that demotes an index releases the head's snapshot, so readers stop serving that index.
+  2. **Sweep (Store 4.1).** One `sweep_expired(mut db, Limits(rows: 1024, byte_limit: 1 MiB))` while a row is due (STORE-SPEC §1.2 "Expiry"). Its commit is a data commit: the head seals it as a group with no calls and releases it once its sync covers it, behind any held group, so readers see the rows gone only when they are durable. A sweep that proved its expiry index wrong demoted that index; the head then releases its snapshot, as for a walker's demotion. The sweep reads the head's own clock (`keyed_time`), so under sim@1 a law drives expiry with the simulated clock.
+  3. **Scrub.** One `scrub_step` of 1 MiB of the current tour (STORE-SPEC §11.17). A tour starts at the first idle turn at or after its start time, and its end sets the next start time one hour after it on the store clock (`keyed_time`). A store without a directory has nothing to scrub.
+  4. **Walk.** One `verify_step(mut db, mut walk, 1024)` (STORE-SPEC §1.2, the index walker), with the same rest of one hour after each finished walk. A slice that demotes an index releases the head's snapshot, so readers stop serving that index.
 - **Idle turns only (the kill rule, measured once).** Under steady load an idle turn may never come, and then no slice runs: a build stays `Backfilling` and its index answers `NotReady` until the load drops. A build chunk after every 16th group was measured and refused. On a Directory store, 4,000 one-row commits had a p99 of 31 µs alone, and 19.5 ms when a 1,024-row chunk ran after every 16th (each chunk is a checkpoint: p50 14 ms, p99 24 ms). That is far past the 10% the plan allows. The operator's request (Store 1.4's `hirsel store verify` <!-- doc-ref: planned -->, and a build command) is the other way to run a job.
-- **Export leases.** A build chunk and a walker's demotion each commit. While an export lease is held (§12.1 deploys), neither commits: each is a catalog change, and Store 1.2's catch-up refuses a catalog change on OLD as `Drift` (STORE-SPEC §3.5a "Catch-up"). Scrub never writes and runs regardless.
+- **Export leases.** A sweep is a data commit like a user's delete, and catch-up replays it (STORE-SPEC §3.5a), so it runs while a lease is held. A build chunk and a walker's demotion each commit. While an export lease is held (§12.1 deploys), neither commits: each is a catalog change, and Store 1.2's catch-up refuses a catalog change on OLD as `Drift` (STORE-SPEC §3.5a "Catch-up"). Scrub never writes and runs regardless.
 - **Refusals.** `Poisoned` ends the head as any store fault does. Any other refusal of a job turns that job off until the place reopens, so a failing job never spins the head.
-- **Upkeep keeps no place awake.** `head_is_idle` (§14.4) does not look at it, so a cold place stops as before. A build resumes from its committed cursor at the next open, and a scrub tour or walk starts over.
-- **Counts.** The head keeps the tours and walks finished, scrub faults and walk findings since it opened; status will surface them (Store 1.8).
+- **Upkeep keeps no place awake.** `head_is_idle` (§14.4) does not look at it, so a cold place stops as before. No timer wakes a quiet head for a row's expiry: a due row goes at the head's next idle turn after any input, or at the next open. A row is never deleted before its time, and may outlive it while the place is quiet. A build resumes from its committed cursor at the next open, and a scrub tour or walk starts over.
+- **Counts.** The head keeps the rows swept, the tours and walks finished, scrub faults and walk findings since it opened; status will surface them (Store 1.8).
+- **Law (Store 4.1).** `schedule_laws.hirsel`, on the simulated clock. `expiry_sweep_keeps_time_and_limits`: before a sweep every expired row is visible by scan and point read; each sweep deletes exactly the hand-named rows its row or byte limit allows, in (time, key) order; a row is never deleted one ms before its time and is gone after the first sweep at it; a row with no expiry stays; afterwards a second index agrees and a full walk finds nothing. `head_sweeps_expired_rows`: the head, with nothing calling the sweep, publishes one release per sweep at walls 1199, 1200 and 5000, each serving exactly the rows not yet due. Red on a read-time filter and on a sweep that ignores its limits.
 - **Law.** `test_head_builds_demoted_index` (runner-upkeep-law.hirsel): an index demoted before the head serves is `Public` again after the head runs, with no call of the build step in the law, and the head's last release serves it (429 rows under value 3 of 3,000 rows k ↦ k mod 7, by hand). The walker's laws are STORE-SPEC L41 (viii) and `test_index_walker_*` (location_laws.hirsel); the interleaved tour is `disk_test_scrub_interleaved`.
 
 ## 14. Cold places under the platform host (new in v2.26)

@@ -112,8 +112,7 @@ fn extract_declared[J, K, V, P](extractor: DeclaredExtractor[J, K, V, P], raw: B
     Ok(IndexValue(keys: take keys, payload: take payload, sums: list.new()))
 }
 
-fn declare_binding[J, K, V, P](t: Table[K, V], record: Catalog, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], key: std.codec.Key[J],
-    take project: Option[IndexProjection[K, V, P]], cover_row: bool) -> IndexRegistration {
+fn declare_binding[J, K, V, P](t: Table[K, V], record: Catalog, kind: IndexKind, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], key: std.codec.Key[J], take project: Option[IndexProjection[K, V, P]], cover_row: bool) -> IndexRegistration {
     let extractor: DeclaredExtractor[J, K, V, P] = DeclaredExtractor(table: clone(t), kind: kind, id: record.id, key: key, by: by, project: take project, cover_row: cover_row)
     let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
         extract_declared(extractor, raw, primary)
@@ -153,8 +152,7 @@ fn unique_owner_end(raw: Bytes) -> Result[u64, Error] {
     Ok(at + width)
 }
 
-fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes,
-    old_keys: List[Bytes], take incoming: IndexValue) -> Result[(), Error] {
+fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes, old_keys: List[Bytes], take incoming: IndexValue) -> Result[(), Error] {
     let IndexValue(keys: take keys, payload: take payload, ..) = take incoming
     let mut old = 0u64
     for take key in take keys {
@@ -170,7 +168,9 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
             list.push(mut edits.probes, (record.id, copied(key)?))
         }
         if let Some(prior) = stored {
-            if prior == payload { continue }
+            if prior == payload {
+                continue
+            }
         }
         frame = put_frame(tx, key, payload, frame)?
         push_index_edit(mut edits, StoreRow(take key, copied(payload)?))
@@ -215,7 +215,9 @@ fn preflight_index_edits(tx: Tx, edits: IndexEdits, primary: Bytes) -> Result[()
     for edit in edits.rest {
         stamps = int.saturating_add(stamps, edit_stamp_cost(tx, edit)?)
     }
-    if let None = int.checked_add(tx.ids, stamps) { return Error(Limit(Ids)) }
+    if let None = int.checked_add(tx.ids, stamps) {
+        return Error(Limit(Ids))
+    }
     Ok(())
 }
 
@@ -383,7 +385,11 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
         }
         // An aggregate's rows carry totals, never a payload.
         if let Sums = shape {
-            let projected = if let Some(_) = projection_record { true } else { false }
+            let projected = if let Some(_) = projection_record {
+                true
+            } else {
+                false
+            }
             if payload_count != 0 || projected {
                 return Error(malformed(at))
             }
@@ -614,18 +620,39 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
     Ok(())
 }
 
-fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], key: Bytes) -> Result[bool, Error] {
-    let p = logical_key(t.id, key)?
+// Every index on table `table_id`, with the extractors bound for value
+// schema `schema`, in declaration order.
+fn bound_indexes(tx: Tx, table_id: u32, schema: u16) -> Result[List[(u64, Catalog)], Error] {
+    let records = index_catalog_in(tx.roots.catalog, table_id)?
+    let mut indexes: List[(u64, Catalog)] = list.new()
+    for take record in take records {
+        let bound_index = registered_index(tx, table_id, schema, record)?
+        list.push(mut indexes, (bound_index.ordinal, take record))
+    }
+    list.sort(mut indexes, fn(a: (u64, Catalog), b: (u64, Catalog)) -> Order {
+        order.compare(a.0, b.0)
+    })
+    Ok(take indexes)
+}
+
+// `schema` is the table's current value schema, which names the extractors
+// bound for it. The expiry sweep deletes through here by table id (§1.2).
+fn delete_impl(mut tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catalog)], key: Bytes) -> Result[bool, Error] {
+    let p = logical_key(table_id, key)?
     let mut frame = tx.frame_bytes
     let (take edits, refund) = {
         let Some(old) = transaction_row(tx, p)? else {
             return Ok(false)
         }
         let previous = memory_data_charge(tx, p, old)
-        let refund = if tx.retain_old { 0u64 } else { previous }
+        let refund = if tx.retain_old {
+            0u64
+        } else {
+            previous
+        }
         let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
         for (_, ix) in indexes {
-            let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
+            let bound_index = registered_index(tx, table_id, schema, ix)?
             let removed = (bound_index.extract)(old, key)?
             if let Sums = ix.shape {
                 plan_aggregate_edit(tx, mut pending, mut frame, ix, key, Some(take removed), None)?
@@ -643,7 +670,9 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], 
         return Error(drift_stop(mut tx, take seen))
     }
     frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame)?
-    if list.len(indexes) > 0 { preflight_index_edits(tx, edit_plan, p)? }
+    if list.len(indexes) > 0 {
+        preflight_index_edits(tx, edit_plan, p)?
+    }
     apply_edits(mut tx, take edit_plan)?
     apply_delete(mut tx, take p, refund)?
     tx.frame_bytes = frame

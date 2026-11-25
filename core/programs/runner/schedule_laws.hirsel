@@ -1,6 +1,9 @@
 // A pending run spans anchor 2. Its typed refusal commits an outcome, so
 // anchor 3 must dispatch. The next tick and the history survive reopening.
-type ScheduleLaw: shareable + send { triggers: triggers.Tables, schedules: schedule.Tables }
+type ScheduleLaw: shareable + send {
+    triggers: triggers.Tables,
+    schedules: schedule.Tables
+}
 
 fn schedule_law_schema(mut d: store.Declare) -> Result[ScheduleLaw, store.Error] {
     let triggers = triggers.declare_tables(mut d)?
@@ -36,7 +39,7 @@ fn schedule_law_commit[R, E](take run: Result[store.Outcome[R, E], store.Error])
 fn schedule_law_first(mut db: store.Db, h: ScheduleLaw, period: u64) -> store.Done[triggers.Id] waits {
     let made = store.run(mut db, None, (store.copy_env(h), period), fn(mut tx, env) -> Result[triggers.Id, schedule.Error] {
         let (take wiring, take work) = schedule_law_wiring()
-        schedule.every(mut tx, env.0.schedules, wiring, "job", env.1, work)
+        schedule.every(mut tx, env.0 .schedules, wiring, "job", env.1, work)
     })
     let commit = schedule_law_commit(take made)
     result.unwrap(store.durable(mut db, commit.ticket))
@@ -53,8 +56,9 @@ fn schedule_law_status(mut db: store.Db, h: ScheduleLaw) -> schedule.Status wait
 }
 
 fn schedule_law_fire(mut db: store.Db, h: ScheduleLaw, id: triggers.Id, tick: bool) -> () waits {
-    let pend = option.unwrap(result.unwrap(triggers.next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.triggers,
-        scoped fn(current: triggers.Id) -> bool { current != id })))
+    let pend = option.unwrap(result.unwrap(triggers.next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.triggers, scoped fn(current: triggers.Id) -> bool {
+        current != id
+    })))
     let done = store.run(mut db, None, (store.copy_env(h), store.copy_env(pend), tick), fn(mut tx, env) -> Result[(), triggers.Error] {
         let caller = law_caller(0u64)
         let mut payload: Bytes = list.new()
@@ -69,7 +73,7 @@ fn schedule_law_fire(mut db: store.Db, h: ScheduleLaw, id: triggers.Id, tick: bo
             let outcome = schedule_law_run(mut tx, env.0, caller, take arg)
             result.unwrap(std.codec.encode(reply, outcome, mut payload))
         }
-        triggers.finish_transact(mut tx, env.0.triggers, env.1, Returned(take payload))
+        triggers.finish_transact(mut tx, env.0 .triggers, env.1, Returned(take payload))
     })
     let commit = result.unwrap(trigger_commit(take done))
     result.unwrap(store.durable(mut db, commit.ticket))
@@ -87,26 +91,43 @@ fn every_no_double_no_gap(d: Dir, random: Random, tasks: Tasks) -> Result[(), ()
     clock.set_wall(mut time, base + 1000u64)
     schedule_law_fire(mut db, h, first.value, true)
     let prior = schedule_law_status(mut db, h)
-    let Some(first_run) = prior.last_run else { return Error(()) }
-    if prior.next != base + 2000u64 { return Error(()) }
+    let Some(first_run) = prior.last_run else {
+        return Error(())
+    }
+    if prior.next != base + 2000u64 {
+        return Error(())
+    }
     result.unwrap(store.close(take db))
-
     let mut reopened = result.unwrap(store.open(tasks, dir, c, random, triggers.law_options()))
     let h2 = result.unwrap(store.bind_declaration(mut reopened, Open, schedule_law_schema))
     clock.set_wall(mut time, base + 2000u64)
     schedule_law_fire(mut reopened, h2, prior.tick, true)
     let skipped = schedule_law_status(mut reopened, h2)
-    if skipped.next != base + 3000u64 || skipped.last_run != Some(first_run) { return Error(()) }
+    if skipped.next != base + 3000u64 || skipped.last_run != Some(first_run) {
+        return Error(())
+    }
     schedule_law_fire(mut reopened, h2, first_run, false)
     clock.set_wall(mut time, base + 3500u64)
     schedule_law_fire(mut reopened, h2, skipped.tick, true)
     let resumed = schedule_law_status(mut reopened, h2)
-    if resumed.next != base + 4000u64 || list.len(resumed.history) != 3u64 { return Error(()) }
-    let Ran(one, id) = resumed.history[0u64] else { return Error(()) }
-    let Skipped(two) = resumed.history[1u64] else { return Error(()) }
-    let Ran(three, next_run) = resumed.history[2u64] else { return Error(()) }
-    if id != first_run || resumed.last_run != Some(next_run) || first_run == next_run { return Error(()) }
-    if one != base + 1000u64 || two != base + 2000u64 || three != base + 3000u64 { return Error(()) }
+    if resumed.next != base + 4000u64 || list.len(resumed.history) != 3u64 {
+        return Error(())
+    }
+    let Ran(one, id) = resumed.history[0u64] else {
+        return Error(())
+    }
+    let Skipped(two) = resumed.history[1u64] else {
+        return Error(())
+    }
+    let Ran(three, next_run) = resumed.history[2u64] else {
+        return Error(())
+    }
+    if id != first_run || resumed.last_run != Some(next_run) || first_run == next_run {
+        return Error(())
+    }
+    if one != base + 1000u64 || two != base + 2000u64 || three != base + 3000u64 {
+        return Error(())
+    }
     // 2024-02-29 00:15 at UTC+01:00 is 2024-02-28 23:15 UTC.
     let added = store.run(mut reopened, None, store.copy_env(h2), fn(mut tx, handles) -> Result[triggers.Id, schedule.Error] {
         let (take wiring, take work) = schedule_law_wiring()
@@ -115,7 +136,202 @@ fn every_no_double_no_gap(d: Dir, random: Random, tasks: Tasks) -> Result[(), ()
     let replacement = schedule_law_commit(take added)
     result.unwrap(store.durable(mut reopened, replacement.ticket))
     let cron = schedule_law_status(mut reopened, h2)
-    if cron.next != 1709162100000u64 || cron.tick != replacement.value || cron.last_run != Some(next_run) { return Error(()) }
+    if cron.next != 1709162100000u64 || cron.tick != replacement.value || cron.last_run != Some(next_run) {
+        return Error(())
+    }
     result.unwrap(store.close(take reopened))
     Ok(())
+}
+
+// Store 4.1, TTL (STORE-SPEC §1.2 "Expiry", RUNNER-SPEC §12.5). A row's
+// value is its expiry time in keyed ms; 0 never expires. Oracle: each case's
+// rows and clock are chosen by hand, so the rows left are those whose time is
+// 0 or after the clock, taken in (time, key) order up to each sweep's limits.
+fn expiry_law_at(_k: u64, v: u64) -> Option[u64] {
+    if v == 0u64 {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+fn expiry_law_parity(k: u64, _v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, k % 2u64)
+    Ok(take keys)
+}
+
+type ExpiryLaw: shareable + send {
+    rows: store.Table[u64, u64],
+    parity: store.Index[u64, u64, u64, ()]
+}
+
+// A memory store whose "sessions" rows k in 1..7 expire at times[k - 1],
+// with a parity index beside the expiry.
+fn expiry_law_store(time: Clock, random: Random, times: Inline[u64, 7]) -> Result[(store.Db, ExpiryLaw), store.Error] waits {
+    let mut db = store.memory(time, random, result.unwrap(store.sized(Memory, 1073741824u64)))
+    let mut d = store.declare(db, Migrate)?
+    let mut decl = store.declare_table(mut d, "sessions", std.codec.key_u64(), std.codec.of_u64())?
+    store.expire_rows(mut d, mut decl, code.describe(expiry_law_at))?
+    let parity = store.index(mut d, mut decl, "parity", Many, code.describe(expiry_law_parity), std.codec.key_u64())?
+    let rows = store.finish(mut d, take decl)?
+    let _ = store.seal(mut db, take d)?
+    for i in 0u64 .. 7u64 {
+        let filled = store.run(mut db, None, (store.copy_env(rows), i + 1u64, times[i]), fn(mut tx, env) -> Result[(), store.Error] {
+            store.put(mut tx, env.0, env.1, env.2)
+        })?
+        if let Committed(_) = filled {} else {
+            fail("expiry law: a fixture row did not commit")
+        }
+    }
+    Ok((take db, ExpiryLaw(rows: rows, parity: parity)))
+}
+
+// The keys in `s`, in order, as the digits of one number: keys 3, 4 and 6
+// read 346.
+fn expiry_law_keys(db: store.Db, s: store.Snapshot, t: store.Table[u64, u64]) -> Result[u64, store.Error] waits {
+    let r = store.reader(db, 0u64)?
+    let mut rows = store.scan(r, s, t, Unbounded, Unbounded)?
+    let mut keys = 0u64
+    while let Some((k, _)) = store.next(r, mut rows)? {
+        keys = keys * 10u64 + k
+    }
+    Ok(keys)
+}
+
+fn expiry_law_sweep(mut db: store.Db, rows: u64, cap: u64) -> Result[u64, store.Error] waits {
+    let swept = store.sweep_expired(mut db, store.Limits(rows: rows, byte_limit: cap))?
+    if (swept.rows == 0u64) != none(swept.ticket) {
+        fail("expiry law: a sweep's commit and its count disagree")
+    }
+    Ok(swept.rows)
+}
+
+@test
+fn expiry_sweep_keeps_time_and_limits(random: Random) -> Result[(), store.Error] waits {
+    let (time, take control) = provide.clock(0u64, 1000u64)
+    let mut wall_hand = take control
+    // Rows 1..7 expire at 1500, 1200, never, 2000, 1200, 1800, 1500.
+    let (take made, h) = expiry_law_store(time, random,[1500u64, 1200u64, 0u64, 2000u64, 1200u64, 1800u64, 1500u64])?
+    let mut db = take made
+    let big = 1073741824u64
+    clock.set_wall(mut wall_hand, 1600u64)
+    // Rows 2, 5, 1 and 7 are due, and no read consults the clock: before a
+    // sweep every row is visible, by scan and by point read.
+    if expiry_law_keys(db, store.snapshot(db), h.rows)? != 1234567u64 {
+        fail("an expired row was hidden before the sweep")
+    }
+    if store.get(store.reader(db, 0u64)?, store.snapshot(db), h.rows, 2u64)? != Some(1200u64) {
+        fail("an expired row was hidden from a point read")
+    }
+    // A byte limit of 1 takes one row, the first due: (1200, 2).
+    if expiry_law_sweep(mut db, 100u64, 1u64)? != 1u64 {
+        fail("the sweep ignored its byte limit")
+    }
+    if expiry_law_keys(db, store.snapshot(db), h.rows)? != 134567u64 {
+        fail("the first sweep took the wrong row")
+    }
+    // Two rows: (1200, 5) and (1500, 1).
+    if expiry_law_sweep(mut db, 2u64, big)? != 2u64 {
+        fail("the sweep ignored its row limit")
+    }
+    if expiry_law_keys(db, store.snapshot(db), h.rows)? != 3467u64 {
+        fail("the second sweep took the wrong rows")
+    }
+    if expiry_law_sweep(mut db, 100u64, big)? != 1u64 {
+        fail("the third sweep missed row 7")
+    }
+    if expiry_law_sweep(mut db, 100u64, big)? != 0u64 {
+        fail("a sweep deleted a row before its time")
+    }
+    // One ms before row 4's time, only row 6 (1800) is due.
+    clock.set_wall(mut wall_hand, 1999u64)
+    if expiry_law_sweep(mut db, 100u64, big)? != 1u64 {
+        fail("row 6 was not swept past its time")
+    }
+    if expiry_law_keys(db, store.snapshot(db), h.rows)? != 34u64 {
+        fail("a row went before its time")
+    }
+    clock.set_wall(mut wall_hand, 2000u64)
+    if expiry_law_sweep(mut db, 100u64, big)? != 1u64 {
+        fail("row 4 was not swept at its time")
+    }
+    clock.set_wall(mut wall_hand, 1000000000000u64)
+    if expiry_law_sweep(mut db, 100u64, big)? != 0u64 {
+        fail("a row with no expiry was swept")
+    }
+    if expiry_law_keys(db, store.snapshot(db), h.rows)? != 3u64 {
+        fail("the rows left are not the unexpired ones")
+    }
+    // The sweep deletes through the ordinary path: the parity index holds
+    // row 3 alone, and a full walk of both indexes finds nothing.
+    let r = store.reader(db, 0u64)?
+    for (p, want) in[(0u64, 0u64), (1u64, 1u64)] {
+        let mut found = store.find(r, store.snapshot(db), h.parity, Included(p), Included(p))?
+        let mut n = 0u64
+        while let Some(_) = store.next(r, mut found)? {
+            n += 1u64
+        }
+        if n != want {
+            fail("the parity index disagrees with the swept table")
+        }
+    }
+    let mut walk = store.begin_verify()
+    loop {
+        let report = store.verify_step(mut db, mut walk, 1024u64)?
+        if list.len(report.findings) != 0u64 {
+            fail("the walker found the swept indexes wrong")
+        }
+        if report.done {
+            break
+        }
+    }
+    store.close(take db)
+}
+
+// Lets the head go idle at each wall time in turn, waking it after each
+// change, then finishes it.
+fn expiry_law_drive(take job: (ClockHand, Sender[HeadInput])) waits {
+    let (take handed, take to) = take job
+    let mut ticks = take handed
+    for wall in[1199u64, 1200u64, 5000u64] {
+        let _ = clock.idle(mut ticks)
+        clock.set_wall(mut ticks, wall)
+        let _ = channel.send(to, HeadContinue)
+    }
+    let _ = clock.idle(mut ticks)
+    let _ = channel.send(to, HeadFinish)
+}
+
+@test
+fn head_sweeps_expired_rows(random: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let (time, take control) = provide.clock(0u64, 1000u64)
+    // Rows 1..7 expire at 1100, 1200, never, 1200, 1300, never, never.
+    // Nothing is due at 1000; at 1199 row 1 is; at 1200 rows 2 and 4 are; at
+    // 5000 row 5.
+    let (take made, h) = expiry_law_store(time, random,[1100u64, 1200u64, 0u64, 1200u64, 1300u64, 0u64, 0u64])?
+    let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let Mailbox(to: take out, from: take published, ..) = result.unwrap(mailbox(8u64))
+    let entries: Registry[(), ()] = registry()
+    let mut hd = Head(db: take made, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let driving = task.spawn(tasks, bytes 65536u64, (take control, take to_head), expiry_law_drive)
+    let mut no_triggers: Option[triggers.Tables] = None
+    let _ = serve_head(mut hd, take from_head, None, mut no_triggers)?
+    let _ = task.join(take driving)
+    let Head(db: take kept, ..) = take hd
+    let db = take kept
+    // One release per sweep commit, in order, each serving the rows left.
+    let mut served: List[u64] = list.new()
+    while let Ok(PubIn(e: take event)) = channel.try_receive(published) {
+        if let Released(Release(snapshot: Some(take at), ..)) = take event {
+            list.push(mut served, expiry_law_keys(db, at, h.rows)?)
+        }
+    }
+    if list.len(served) != 3u64 || served[0u64] != 234567u64 || served[1u64] != 3567u64 || served[2u64] != 367u64 {
+        fail("the head's releases are not one per sweep past each time")
+    }
+    if expiry_law_keys(db, store.snapshot(db), h.rows)? != 367u64 {
+        fail("the head did not sweep the expired rows")
+    }
+    store.close(take db)
 }

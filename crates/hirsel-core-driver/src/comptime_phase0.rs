@@ -184,8 +184,10 @@ fn comptime_g7_sequence() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let main = "pub fn main() -> Result[(), Exit] { Error(Exit(status: b.read() + 10u8)) }";
     let reader = "pub fn read() -> u8 { a.X }\npub fn other() -> u8 { 7u8 }";
-    let steps: [(&str, &str, &str); 4] = [
+    // A, A' (the harness's priming pair), then the three edits.
+    let steps: [(&str, &str, &str); 5] = [
         ("base", "pub fn f()->u8{1u8}\npub const X:u8=f()", reader),
+        ("base again", "pub fn f()->u8{1u8}\npub const X:u8=f()", reader),
         ("f returns 2u8", "pub fn f()->u8{2u8}\npub const X:u8=f()", reader),
         ("f returns 0u8+1u8", "pub fn f()->u8{0u8 + 1u8}\npub const X:u8=f()", reader),
         (

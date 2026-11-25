@@ -3,7 +3,7 @@
   "baseline": "Production and package-test compilation units resolve independently; no production exceptions.",
   "features": {
     "hirsel-core-front/cost-profile": "test-only",
-    "hirsel-core-ir/eval": "test-only",
+    "hirsel-core-ir/eval": "runtime-option",
     "hirsel-core-ir/map-observation": "test-only",
     "hirsel-core-rt/testing": "test-only",
     "hirsel-core-rt/memcheck": "test-only",

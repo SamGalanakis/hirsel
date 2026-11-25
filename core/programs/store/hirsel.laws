@@ -144,6 +144,7 @@ store@1/store/log_changes_and_tail_window src=17ed4efb7b796d0f sig=e77a204562e95
 store@1/store/log_dense_and_append_fill src=f87123bd2e998fbe sig=1a0505b8458c7988 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_follower_dropped_candidate src=4ad6aa74640a6492 sig=eaee4e1a620ebaff run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_follower_refuses_expired_catch_up src=79ee902d999f1751 sig=4d1a7b85871b7316 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/log_follower_unreadable_end src=789405aeae1768c6 sig=c618e8b2755b1950 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_level_uses_host_barrier src=01bebd20fb174a03 sig=04062be97fee22c6 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/log_trim_bounded_and_dense src=22d9efa86366f26f sig=0613b4e6c8fcb93d run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/migrate_workspace_ceiling src=62d6fc9f71c24f26 sig=64d77fe409d00ae1 run=c9049a952ba23a49 bug=- oracle=- rows=pending
@@ -188,7 +189,7 @@ store@1/store/test_fork_settle src=bfacba733f2069a6 sig=8aa471124490fb73 run=aff
 store@1/store/test_fork_shared_head src=6ec999ebf833b1e2 sig=159b418510a18e14 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frame_size src=b88fd42eacf70c23 sig=0595b0ee84e6694c run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frames src=ad2891d678e5d51a sig=f7f66add3c9762ca run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_index_build_law src=4c97e26d246bc640 sig=26f9e6c0a98e46f1 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_index_build_law src=8e5a5ca8791ed210 sig=26f9e6c0a98e46f1 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_declaration_laws src=4366f6dd9215be65 sig=5acf8f729662aa0e run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_drift_counted src=5e42bf24e3905c29 sig=2e875f2765e18764 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_refusal src=36fd8913bd0d171f sig=577c5c43618d8692 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

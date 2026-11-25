@@ -43,6 +43,34 @@ def run_cuts(executable, engine, env=None, scenarios=SCENARIOS):
     return rows
 
 
+LATE_SCENARIOS = ('late-group', 'late-group-failed', 'late-follow', 'late-follow-failed', 'late-cut', 'late-genesis')
+NO_CUT = 2**64 - 1
+
+
+def late_writes(executable, engine, env):
+    """BL12/BL13, BL14 and G1: the dead writer's held group write (a creation
+    block for late-cut and late-genesis) becomes readable at
+    r and complete (or failed) at c, over the P schedule points of the new
+    owner's open and first commit, or of a follower's capture. Sweep r with c just after it or after the run, and
+    a power cut at r (before the bytes are readable) and every later point."""
+    rows = []
+    for scenario in LATE_SCENARIOS:
+        result = checked([str(executable), scenario, 'count'], env, engine=engine)
+        match = re.fullmatch(r'points ([0-9]+)\n', result.stdout)
+        if match is None or int(match[1]) < 2:
+            raise RuntimeError(f'{scenario}: no schedule points: {result.stdout!r}')
+        points = int(match[1])
+        schedules = 0
+        for readable in range(1, points + 1):
+            for complete in sorted({readable + 1, points + 1}):
+                for power_cut in (*range(readable, points + 2), NO_CUT):
+                    checked([str(executable), scenario, f'{readable}:{complete}:{power_cut}'], env, engine=engine)
+                    schedules += 1
+        rows.append(dict(scenario=scenario, points=points, schedules=schedules, passed=True))
+        print(f'{engine} {scenario}: {schedules} schedules over {points} points passed', flush=True)
+    return rows
+
+
 def count_cuts(executable, scenario, engine, env):
     result = checked([str(executable), scenario, 'count'], env, engine=engine)
     match = re.fullmatch(r'cuts ([0-9]+)\n', result.stdout)

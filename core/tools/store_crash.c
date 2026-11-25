@@ -30,6 +30,9 @@ extern void store_crash_journal_fork(void *, uint8_t);
 extern void store_crash_armed_io(void *, uint64_t *);
 extern void store_crash_window(void *);
 extern uint8_t store_crash_syncs(void *, uint8_t, uint64_t);
+extern void store_crash_late_write(void *, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t store_crash_late_points(const void *);
+extern uint8_t store_crash_late_polls(const void *);
 
 static struct {
     uint64_t phase, issued;
@@ -133,8 +136,11 @@ static struct { int enabled, schedule_probe, child_probe; uint64_t token[64], ca
 static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t token) {
     /* SleepUntil and SleepUntilWall (the runner's deadline and trigger timers) wait on
      * host time and never reach the W2 filesystem; their deadlines are far, so a timer
-     * ends only by being dropped. */
-    if(request->operation==15 || request->operation==77) return (HirselCoreWait){1,UINT64_MAX};
+     * ends only by being dropped. A late-write case's new owner is the
+     * exception: its sleeps end at once, so its lock polls advance the late
+     * schedule past the write's completion. */
+    if(request->operation==15 || request->operation==77)
+        return store_crash_late_polls(state) ? (HirselCoreWait){0} : (HirselCoreWait){1,UINT64_MAX};
     const int probe=hold.schedule_probe && request->operation==12 &&
         request->buffer.len==8 && !memcmp(request->buffer.data,"SCHEDULE",8);
     const int child=hold.child_probe && (request->operation==2 || request->operation==38) && request->buffer.len>=20 &&
@@ -227,6 +233,15 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     char scenario[64]={0};
     if(input->args[0].len>=sizeof scenario) return 120;
     memcpy(scenario,input->args[0].data,input->args[0].len);
+    /* BL12/BL13 (d1)/(d2), BL14 (d3) and G1: the cut argument is readable:complete:power_cut,
+     * schedule points of the new owner's or follower's run; count takes 1:2 and no cut. */
+    int late_failed=!strcmp(scenario,"late-group-failed") || !strcmp(scenario,"late-follow-failed");
+    int late_creation=!strcmp(scenario,"late-cut") || !strcmp(scenario,"late-genesis");
+    int late=late_failed || late_creation || !strcmp(scenario,"late-group") || !strcmp(scenario,"late-follow");
+    unsigned long long readable=1,complete=2,power_cut=UINT64_MAX;
+    if(late && strcmp(raw_cut,"count") &&
+        (sscanf(raw_cut,"%llu:%llu:%llu",&readable,&complete,&power_cut)!=3 || !readable || complete<=readable)) return 120;
+    if(late) cut=UINT64_MAX;
     uint64_t seed=0;
     if(input->args_len>=3) {
         char raw_seed[32]={0};
@@ -277,6 +292,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     int fork_image=!strcmp(scenario,"journal-fork")?0:!strcmp(scenario,"journal-fork-ack-cut")?1:
         !strcmp(scenario,"journal-fork-complete")?2:!strcmp(scenario,"journal-fork-torn")?3:
         !strcmp(scenario,"journal-fork-bad-end")?4:!strcmp(scenario,"journal-fork-child-unwritten")?5:-1;
+    if(late) store_crash_late_write(state,(uint8_t)late_creation,(uint8_t)late_failed,readable,complete,power_cut);
     if(fork_image>=0) {
         store_crash_journal_fork(state,(uint8_t)fork_image);
     }
@@ -288,7 +304,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     }
     static const char *phases[]={"init","write","read","reopen"};
     static const uint64_t reopen_order[]={0,1,3,2};
-    int reopen=orphan_end || checkpoint_reopen;
+    int reopen=orphan_end || checkpoint_reopen || late;
     int read_only=!strcmp(scenario,"read-only");
     uint64_t original_manifest=0;
     uint8_t status=0;
@@ -351,6 +367,9 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         if(orphan_end && (phase==1 || (phase==3 && !recovery_failure)) && !store_crash_crashed(state)) {
             fprintf(stderr,"orphan END crash was not reached in phase %s\n",phases[phase]);status=120;break;
         }
+        if(late && phase==1 && !store_crash_crashed(state)) {
+            fprintf(stderr,"late group write was not held\n");status=120;break;
+        }
         if(checkpoint_reopen && (phase==1 || (phase==3 && !open_sync_failure)) && !store_crash_crashed(state)) {
             fprintf(stderr,"checkpoint double crash was not reached in phase %s\n",phases[phase]);status=120;break;
         }
@@ -369,7 +388,8 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
             fprintf(stderr,"uncut store run did not acknowledge its checkpoint\n");status=120;break;
         }
     }
-    if(!status) printf("cuts %llu\n",(unsigned long long)(cancellation.enabled?cancellation.events:parked.enabled?parked.issued:store_crash_events(state)));
+    if(!status && late) printf("points %llu\n",(unsigned long long)store_crash_late_points(state));
+    else if(!status) printf("cuts %llu\n",(unsigned long long)(cancellation.enabled?cancellation.events:parked.enabled?parked.issued:store_crash_events(state)));
     if(!status && seed) printf("events %llu\n",(unsigned long long)schedule_hash);
     store_crash_free(state);
     return status;

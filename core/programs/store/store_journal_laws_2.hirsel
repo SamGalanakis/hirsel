@@ -828,21 +828,6 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     Ok(true)
 }
 
-fn journal_crash_retry(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Exit] waits {
-    let mut options = journal_crash_options()
-    options.create = false
-    match open(tasks, d, c, r, options) {
-        Error(Io(Other(125))) => (),
-        _ => return Error(Exit(status: 35))
-    }
-    // Both attempts share a provider and process. The failed open must
-    // release the lock before the exact predecessor can be read again.
-    match journal_crash_read(d, c, r, tasks, 2, "orphan-end") {
-        Ok(true) => Ok(()),
-        _ => Error(Exit(status: 36))
-    }
-}
-
 // Test-only entry: the existing W2 adapter runs init, a cut/failure, then an
 // independent prefix oracle whose minimum comes only from returned durable.
 pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
@@ -865,6 +850,9 @@ pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
             Error(Poisoned(_)) if phase == "write" => Ok(()),
             Error(_) => Error(Exit(status: 32)),
         }
+    }
+    if string.starts_with(scenario, "late-") {
+        return journal_late_main(d, c, r, tasks, argv, out, phase, scenario)
     }
     let recovery_sync = scenario == "orphan-end-recovery-sync"
     let orphan_end = recovery_sync || scenario == "orphan-end"

@@ -131,3 +131,25 @@ pub unsafe extern "C" fn store_crash_late_write(
         pending: None,
     });
 }
+
+/// The new owner of a late-write case runs. Its lock polls' sleeps end at
+/// once, so the polls advance the schedule to the write's completion and the
+/// poll after it.
+///
+/// # Safety
+/// `p` is the live bridge, accessed only by the serialized provider callbacks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_late_polls(p: *const c_void) -> u8 {
+    let bridge = unsafe { &*p.cast::<Bridge>() };
+    u8::from(bridge.phase == 3 && bridge.late.is_some())
+}
+
+/// The schedule points the new owner's run reached.
+///
+/// # Safety
+/// `p` is live, and no provider callback is active.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_late_points(p: *const c_void) -> u64 {
+    let bridge = unsafe { &*p.cast::<Bridge>() };
+    bridge.late.as_ref().map_or(0, |late| late.point)
+}

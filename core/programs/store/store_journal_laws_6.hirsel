@@ -310,3 +310,157 @@ fn journal_test_shared_segment_fences(d: Dir) -> Result[(), ()] waits {
     result.unwrap(host.close(take first))
     Ok(())
 }
+
+fn journal_crash_retry(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Exit] waits {
+    let mut options = journal_crash_options()
+    options.create = false
+    match open(tasks, d, c, r, options) {
+        Error(Io(Other(125))) => (),
+        _ => return Error(Exit(status: 35))
+    }
+    // Both attempts share a provider and process. The failed open must
+    // release the lock before the exact predecessor can be read again.
+    match journal_crash_read(d, c, r, tasks, 2, "orphan-end") {
+        Ok(true) => Ok(()),
+        _ => Error(Exit(status: 36))
+    }
+}
+
+// BL12/BL13 (d1)/(d2): the writer acks key 0, then dies with key 1's group
+// write issued. The bridge lands that write as readable and later as complete
+// (or failed) during the new owner's open and first commit, and a power cut
+// falls at any point. The read checks the commit law against every ack, the
+// new owner's included, and that recovery answers no Corrupt.
+//
+// BL14 (d3) holds a creation block instead: `late-cut` a checkpoint cut's new
+// segment, `late-genesis` the first segment of a store's genesis. The new owner
+// then re-creates that segment, and the dead block must not land over it.
+fn journal_late_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, phase: String, scenario: String) -> Result[(), Exit] waits {
+    let genesis = scenario == "late-genesis"
+    if phase == "init" && genesis {
+        return Ok(())
+    }
+    if phase == "init" {
+        let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
+        result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+        result.unwrap(close(take db))
+        return Ok(())
+    }
+    if phase == "read" {
+        let text = option.unwrap(args.get(argv, 3))
+        let mut floor = 0u64
+        for digit in string.as_bytes(text) {
+            floor = floor * 10 + int.widen(digit - b'0')
+        }
+        return match journal_late_read(d, c, r, tasks, floor) {
+            Ok(true) => Ok(()),
+            _ => Error(Exit(status: 33)),
+        }
+    }
+    let written = if phase == "write" && genesis {
+        journal_late_genesis(d, c, r, tasks, out)
+    } else if phase == "write" {
+        journal_late_write(d, c, r, tasks, out, scenario == "late-cut")
+    } else if scenario == "late-follow" || scenario == "late-follow-failed" {
+        journal_late_follow(d, c, out)
+    } else {
+        journal_late_owner(d, c, r, tasks, out, genesis)
+    }
+    match written {
+        Error(Io(_)) => Ok(()),
+        Error(Poisoned(_)) => Ok(()),
+        Ok(()) if phase == "reopen" => Ok(()),
+        _ => Error(Exit(status: 32)),
+    }
+}
+
+fn journal_late_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, cut: bool) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, journal_crash_options())?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let acked = journal_put_ticket(mut db, t, 0)?
+    durable(mut db, acked)?
+    journal_note(out, db.heads[0].head)
+    result.unwrap(stdout.write(out, "ARM"))
+    if cut {
+        let rotated = checkpoint(mut db)?
+        durable(mut db, rotated)?
+        fail("the held creation block was acknowledged")
+    }
+    let held = journal_put_ticket(mut db, t, 1)?
+    durable(mut db, held)?
+    fail("the held group write was acknowledged")
+}
+
+fn journal_late_genesis(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[(), Error] waits {
+    result.unwrap(stdout.write(out, "ARM"))
+    let db = open(tasks, d, c, r, journal_crash_options())?
+    close(take db)?
+    fail("the held genesis opened")
+}
+
+fn journal_late_owner(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, genesis: bool) -> Result[(), Error] waits {
+    let mut options = journal_crash_options()
+    options.create = genesis
+    let mut db = open(tasks, d, c, r, options)?
+    if genesis {
+        let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    }
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let key = db.heads[0].head - 1
+    let owned = journal_put_ticket(mut db, t, key)?
+    durable(mut db, owned)?
+    journal_note(out, db.heads[0].head)
+    close(take db)
+}
+
+// G1 (2284): a follower in place of the new owner. Its torn-tail capture
+// fences the dead writer's segment and syncs it before reading, so the head it
+// publishes survives the power cut; the read phase checks it as the floor.
+fn journal_late_follow(d: Dir, c: Clock, out: Stdout) -> Result[(), Error] waits {
+    let mut progress = LogCaptureProgress(next_id: 1, last: None)
+    let forever = 18446744073709551615u64
+    let Some(captured) = log_follow_capture(d, c, forever, mut progress, None, forever, None)? else {
+        fail("G1: the follower captured nothing")
+    }
+    journal_note(out, captured.state.tips[0u64].head)
+    Ok(())
+}
+
+// Head 1 is the table; each later head h put key h - 2. The writer issued at
+// most head 3, and the new owner adds one commit (a genesis owner: the table
+// and key 0).
+fn journal_late_read(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[bool, Error] waits {
+    let mut options = journal_crash_options()
+    options.create = false
+    if floor == 0 {
+        // Only a genesis has no ack before the cut: it may leave no store or
+        // no table, never a damaged one.
+        return match open(tasks, d, c, r, options) {
+            Ok(take db) => {
+                close(take db)?
+                Ok(true)
+            }
+            Error(Corrupt(_)) => Ok(false),
+            Error(_) => Ok(true),
+        }
+    }
+    let mut db = open(tasks, d, c, r, options)?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let sh = view t
+    let head = db.heads[0].head
+    if head < 2 || head < floor || head > 4 {
+        return Ok(false)
+    }
+    for k in 0u64 .. 4 {
+        let expected = if k + 2 <= head {
+            Some(k + 10)
+        } else {
+            None
+        }
+        if get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, k)? != expected {
+            return Ok(false)
+        }
+    }
+    close(take db)?
+    Ok(true)
+}

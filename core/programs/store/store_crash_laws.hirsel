@@ -470,7 +470,7 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
         disk_crash_read_only(d, c, published) ?=> |_| Exit(status: 33)
         return Ok(())
     }
-    if scenario == "follower-durable" || scenario == "follower-boundary" || scenario == "read-only-durable" {
+    if scenario == "follower-durable" || scenario == "follower-boundary" || scenario == "read-only-durable" || scenario == "read-only-creation" || scenario == "follower-polls" {
         return disk_crash_live_read_main(d, c, r, tasks, argv, out, scenario)
     }
     if scenario == "watermark-absent" || scenario == "watermark-torn" {
@@ -703,7 +703,9 @@ fn lix_state(db: Db, name: String) -> Result[IndexState, Error] {
     let mut found: Option[IndexState] = None
     for report in seen.indexes {
         if report.index == name {
-            if let Some(_) = found { fail("L-IX: attention reports an index twice") }
+            if let Some(_) = found {
+                fail("L-IX: attention reports an index twice")
+            }
             found = Some(copied_state(report.state)?)
         }
     }
@@ -827,23 +829,37 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
         return Error(MigrationFault)
     }
     rebuild_index(mut db, ix)?
-    if let Some(d) = duplicate { lix_write(mut db, t, 0, Some(d))? }
-    if let Backfilling(None) = lix_state(db, "unique")? {} else { fail("L-IX: a rebuilt index reports Backfilling before its first chunk") }
+    if let Some(d) = duplicate {
+        lix_write(mut db, t, 0, Some(d))?
+    }
+    if let Backfilling(None) = lix_state(db, "unique")? {} else {
+        fail("L-IX: a rebuilt index reports Backfilling before its first chunk")
+    }
     // The first chunk reads rows 0 to 4095: it fails on a pair inside it,
     // ends the build when no row follows, and otherwise leaves the cursor
     // at row 4095, the last key it covered.
     let _ = index_build_step(mut db, INDEX_CHUNK)?
     let first_chunk = match lix_state(db, "unique")? {
         Public => 0u64,
-        Backfilling(Some(cursor)) => if list.len(cursor) == 8 && list.word_be(cursor, 0) == INDEX_CHUNK - 1 { 1u64 } else { 9u64 },
+        Backfilling(Some(cursor)) => if list.len(cursor) == 8 && list.word_be(cursor, 0) == INDEX_CHUNK - 1 {
+            1u64
+        } else {
+            9u64
+        },
         Failed(_, _) => 2u64,
         Backfilling(None) => 9u64,
     }
     let expected_chunk = match duplicate {
         Some(d) if d < INDEX_CHUNK => 2u64,
-        _ => if rows > INDEX_CHUNK { 1u64 } else { 0u64 },
+        _ => if rows > INDEX_CHUNK {
+            1u64
+        } else {
+            0u64
+        },
     }
-    if first_chunk != expected_chunk { fail("L-IX: attention reports the first chunk's state and cursor") }
+    if first_chunk != expected_chunk {
+        fail("L-IX: attention reports the first chunk's state and cursor")
+    }
     while let Some(_) = index_build_step(mut db, INDEX_CHUNK)? {}
     let failed = match lix_state(db, "unique")? {
         Failed(first, second) => {
@@ -857,8 +873,12 @@ fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(),
         Some(d) => Some((0u64, d)),
         None => None,
     }
-    if failed != expected_failure { fail("L-IX: a duplicate fails the build at the row that repeats it") }
-    if lix_serves(db, ix, "unique")? == (duplicate != None) { fail("L-IX: a failed index refuses reads") }
+    if failed != expected_failure {
+        fail("L-IX: a duplicate fails the build at the row that repeats it")
+    }
+    if lix_serves(db, ix, "unique")? == (duplicate != None) {
+        fail("L-IX: a failed index refuses reads")
+    }
     if let None = duplicate {
         let found = lix_entries(db, ix.id)?
         if list.len(found) != rows {

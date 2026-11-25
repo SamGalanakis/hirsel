@@ -41,6 +41,41 @@ impl StagedCommit {
     }
 }
 
+/// N1: a writer's creation of `segment` that lands just after a reader read
+/// its HEADER short, followed by a second cut creating `successor`. Each
+/// image is a whole 72-byte HEADER, written and synced.
+pub(super) struct StagedCut {
+    pub(super) segment: String,
+    pub(super) header: Vec<u8>,
+    pub(super) successor: String,
+    pub(super) successor_header: Vec<u8>,
+    pub(super) landed: bool,
+}
+
+impl StagedCut {
+    pub(super) fn parse(raw: &[u8]) -> Self {
+        let mut at = 0;
+        let mut image = || {
+            let name_len = raw[at] as usize;
+            let name = std::str::from_utf8(&raw[at + 1..at + 1 + name_len])
+                .unwrap()
+                .to_owned();
+            let header = raw[at + 1 + name_len..at + 73 + name_len].to_vec();
+            at += 73 + name_len;
+            (name, header)
+        };
+        let (segment, header) = image();
+        let (successor, successor_header) = image();
+        StagedCut {
+            segment,
+            header,
+            successor,
+            successor_header,
+            landed: false,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ForkObservation {
     pub(super) image: u8,
@@ -73,6 +108,25 @@ pub(super) fn fork_frame_start(frames: &[u8]) -> Option<usize> {
 }
 
 impl Bridge {
+    /// Lands the staged cut once, after the first read of its segment.
+    pub(super) fn land_cut(&mut self, name: &str) {
+        let Some(cut) = self.staged_cut.as_mut() else {
+            return;
+        };
+        if cut.segment != name || cut.landed {
+            return;
+        }
+        cut.landed = true;
+        let (segment, header) = (cut.segment.clone(), cut.header.clone());
+        let (successor, successor_header) = (cut.successor.clone(), cut.successor_header.clone());
+        assert!(self.apply(Op::Write(&segment, &header)));
+        assert!(self.apply(Op::Sync(&segment)));
+        assert!(self.apply(Op::Create(&successor)));
+        assert!(self.apply(Op::Write(&successor, &successor_header)));
+        assert!(self.apply(Op::Sync(&successor)));
+        assert!(self.apply(Op::SyncDir));
+    }
+
     /// Lands the staged COMMIT at the first fence take on its segment. The
     /// frame overwrites the segment from the recovered end: a direct
     /// segment is padded past its frames.

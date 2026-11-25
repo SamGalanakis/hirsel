@@ -14,7 +14,7 @@ import tempfile
 
 from std_native import ROOT, Evaluator
 from store_tests import crash_inputs
-from store_crash_tests import JOURNAL_SCENARIOS as SCENARIOS, checked, run_crashes, sector_images
+from store_crash_tests import JOURNAL_SCENARIOS as SCENARIOS, checked, late_writes, run_crashes, sector_images
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_514_238_519
@@ -143,6 +143,8 @@ def main():
                                    manifest, work, engine, entry='store@1/store/journal_crash_main',
                                    scenarios=(*SCENARIOS, 'journal-keyed'), environment=env, count_only=('orphan-end', *FORK_IMAGES))
                 rows.append(dict(engine=engine, passed=True, crashes=cuts))
+                late = late_writes(work / (engine + '-crash') / 'store', engine, env)
+                rows.append(dict(engine=engine, passed=True, late_writes=late))
                 checks = provider_checks(work / (engine + '-crash') / 'store', engine, env)
                 rows.append(dict(engine=engine, passed=True, providers=checks))
                 step_work = work / 'steps'

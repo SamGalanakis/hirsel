@@ -7,7 +7,11 @@ fn disk_crash_live_read_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Ar
         return Ok(())
     }
     if phase == "write" {
-        let published = disk_crash_live_read_write(d, c, tasks, out, scenario) ?=> |_| Exit(status: 32)
+        let published = if scenario == "follower-polls" {
+            disk_crash_follower_polls(d, c, r, tasks, out) ?=> |_| Exit(status: 32)
+        } else {
+            disk_crash_live_read_write(d, c, tasks, out, scenario) ?=> |_| Exit(status: 32)
+        }
         let mut ack = string.from("ACK ")
         string.push_u64(mut ack, published)
         let _ = stdout.write(out, ack)
@@ -38,6 +42,9 @@ fn disk_crash_live_read_write(d: Dir, c: Clock, tasks: Tasks, out: Stdout, scena
     let initial = read_only_checkpoint(d, id, take manifest)?
     let JournalRecovered(replay: take known, seq: seq, end: end, ..) = journal_recover(d, id, first, c, take initial)?
     let wanted = known.state.tips[0u64].head + 1
+    if scenario == "read-only-creation" {
+        return disk_crash_creation_read(d, c, out, id, seq, end, wanted - 1)
+    }
     let segment = journal_path(seq, "")?
     let frame = journal_empty_commit(DiskContext(store: id, role: 2, seq: seq), end, wanted)
     let mut message: Bytes = list.new()
@@ -83,6 +90,77 @@ fn disk_crash_live_read_write(d: Dir, c: Clock, tasks: Tasks, out: Stdout, scena
     Ok(published)
 }
 
+// BL10 (2249 M2): ten polls over a live store whose capture key is
+// unchanged issue no sync. An END rewritten past a new durable commit then
+// costs one sync_dir and no segment sync: the END bound needs no flush.
+// The bridge checks its reader sync counts at each "SYNCS a b".
+fn disk_crash_follower_polls(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[u64, Error] waits {
+    let options = disk_crash_options("checkpoint")
+    let mut writer = open(tasks, d, c, r, options)?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let mut replica = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(d), c, None)?
+    let trunk = follower_main(replica)
+    let seen = applied(replica, trunk)?.version
+    let forever = 18446744073709551615u64
+    let _ = stdout.write(out, "SYNCS")
+    for _ in 0u64 .. 10 {
+        if catch_up(mut replica, forever)?.version != seen {
+            fail("BL10: an unchanged store moved the follower")
+        }
+    }
+    let _ = stdout.write(out, "SYNCS 0 0")
+    let outcome = run(mut writer, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 500, 1)
+    })?
+    let Committed(done) = outcome else {
+        fail("BL10: the new row was not committed")
+    }
+    durable(mut writer, done.ticket)?
+    let head = version(snapshot(writer))
+    let end = journal_end_bytes(writer.store, writer.file_seq, writer.file_end)
+    disk_write_synced(d, capacity(disk_path("j-", writer.file_seq, ".end"))?, end)?
+    let _ = stdout.write(out, "SYNCS")
+    if catch_up(mut replica, forever)?.version != head {
+        fail("BL10: the changed END did not move the follower")
+    }
+    let _ = stdout.write(out, "SYNCS 0 1")
+    close_follower_service(take service)?
+    close(take writer)?
+    Ok(head)
+}
+
+// BL7 part 2 (2284 N1): a cut has created j-(seq + 1) but its creation
+// block has not landed, so the reader reads that HEADER short. The adapter
+// then lands the block and a second cut's j-(seq + 2) before the reader
+// checks for a successor. No damage is injected, so the open must restart
+// its walk and publish the recovered head, never answer Corrupt(Header).
+fn disk_crash_creation_read(d: Dir, c: Clock, out: Stdout, id: StoreId, seq: u64, end: u64, head: u64) -> Result[u64, Error] waits {
+    disk_write_synced(d, journal_path(seq + 1, "")?, list.new())?
+    let mut message: Bytes = list.new()
+    list.append(mut message, string.into_bytes(string.from("STAGE")))
+    list.push(mut message, 3u8)
+    for ahead in 1u64 .. 3 {
+        let name = journal_path(seq + ahead, "")?
+        capacity(le(mut message, string.byte_len(name), 1))?
+        list.append(mut message, string.into_bytes(take name))
+        let prev_end = if ahead == 1 {
+            end
+        } else {
+            72u64
+        }
+        list.append(mut message, capacity(disk_header_bytes(DiskContext(store: id, role: 2, seq: seq + ahead), prev_end, 0))?)
+    }
+    let _ = stdout.write_bytes(out, message)
+    let captured = open_read_only(d, c, disk_crash_options("checkpoint"))?
+    if version(captured.snapshot) != head {
+        fail("a read across a creation and a cut missed the recovered head")
+    }
+    Ok(head)
+}
+
 // BL10 (2284 G2): a candidate the caller dropped at its deadline leaves the
 // published capture P in place. The next attempt sees the same key, but it
 // names P, not the dropped candidate, so it must capture the writer's acked
@@ -121,4 +199,75 @@ fn log_follower_dropped_candidate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         let _ = take candidate
     }
     Ok(())
+}
+
+// BL9 (i) (2284 G3): MANIFEST holds main at m and side at v; the terminal
+// segment holds only side's commit v + 1. A live writer keeps LOCK, so an
+// unreadable END bounds the capture at the segment header: main stays at m
+// and only side moves back to v. The monotone rule keeps the published
+// capture, so no call returns Diverged and neither branch's applied position
+// moves. A main-only comparison publishes side at v.
+@test
+fn log_follower_unreadable_end(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut writer = open(tasks, directory, c, r, options)?
+    let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut writer, rows, 1, 10) {
+        fail("G3: the main row was refused")
+    }
+    let base = snapshot(writer)
+    let (side, _) = fork(mut writer, "side", base)?
+    let _ = checkpoint(mut writer)?
+    let main_tip = version(snapshot(writer))
+    let held = version(snapshot_of(writer, side)?)
+    let outcome = run_on(mut writer, side, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 2, 20)
+    })?
+    let Committed(done) = outcome else {
+        fail("G3: the side write was not committed")
+    }
+    durable(mut writer, done.ticket)?
+    let side_tip = version(snapshot_of(writer, side)?)
+    if side_tip != held + 1 || version(snapshot(writer)) != main_tip {
+        fail("G3: the side write did not move side alone")
+    }
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let mut replica = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, log_authority(directory), c, None)?
+    let Some(mirror) = follower_branch(replica, "side") else {
+        fail("G3: the follower did not see side")
+    }
+    let trunk = follower_main(replica)
+    if applied(replica, trunk)?.version != main_tip || applied(replica, mirror)?.version != side_tip {
+        fail("G3: the first capture missed a branch tip")
+    }
+    let mut garbage: Bytes = list.new()
+    for _ in 0u64 .. 96 {
+        list.push(mut garbage, 255u8)
+    }
+    disk_write_synced(directory, capacity(disk_path("j-", writer.file_seq, ".end"))?, garbage)?
+    let forever = 18446744073709551615u64
+    let wanted = applied(replica, mirror)?
+    for call in 0u64 .. 3 {
+        let answer = if call == 0 {
+            catch_up(mut replica, forever)?.version
+        } else if call == 1 {
+            version(at_least(mut replica, wanted, forever)?)
+        } else {
+            version(fresh(mut replica, forever)?)
+        }
+        let expected = if call == 1 {
+            side_tip
+        } else {
+            main_tip
+        }
+        if answer != expected || applied(replica, trunk)?.version != main_tip || applied(replica, mirror)?.version != side_tip {
+            fail("G3: an unreadable END moved a published branch back")
+        }
+    }
+    close_follower_service(take service)?
+    close(take writer)
 }

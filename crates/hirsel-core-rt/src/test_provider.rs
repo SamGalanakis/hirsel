@@ -236,6 +236,10 @@ pub mod crash {
         pub fn restart(&mut self) {
             self.live_names = self.durable_names.clone();
             self.live_data = self.durable_data.clone();
+            // A file whose name is durable and whose bytes never were is empty.
+            for &inode in self.durable_names.values() {
+                self.live_data.entry(inode).or_default();
+            }
             self.pending_names.clear();
             self.pending_truncations.clear();
         }

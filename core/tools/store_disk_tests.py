@@ -27,7 +27,7 @@ LAWS = ('frames', 'paged_manifest', 'page_emission', 'paged_inventory', 'page_lo
 # Execute and report every law; only this exact failure family is nonblocking.
 ASSEMBLY_OWNER = 'core-ops-914'
 # Log@1 live reads: one uncut run each, the adapter staging the writer.
-LIVE_READ_SCENARIOS = ('follower-durable', 'follower-boundary', 'read-only-durable')
+LIVE_READ_SCENARIOS = ('follower-durable', 'follower-boundary', 'read-only-durable', 'read-only-creation', 'follower-polls')
 KNOWN_ASSEMBLY = frozenset({'opening', 'db', 'db_refusal', 'schema_refusal', 'pack_bound'})
 
 

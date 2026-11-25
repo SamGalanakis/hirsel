@@ -21,7 +21,7 @@ mod window;
 use late::LateWriteSchedule;
 #[path = "store_crash_staged.rs"]
 mod staged;
-use staged::{ForkObservation, StagedCommit, fork_frame_start};
+use staged::{ForkObservation, StagedCommit, StagedCut, fork_frame_start};
 use window::{WINDOW_SYNC_FAILURE, WindowObservation};
 
 #[repr(C)]
@@ -90,6 +90,7 @@ struct Bridge {
     fork_observation: Option<ForkObservation>,
     read_only: Option<Snapshot>,
     staged: Option<StagedCommit>,
+    staged_cut: Option<StagedCut>,
     window: Option<WindowObservation>,
 }
 
@@ -181,14 +182,36 @@ impl Bridge {
         // The out-of-process witness records returned durability even when a
         // different task has just encountered the simulated filesystem cut.
         if op == 12 {
-            if self.phase == 1 {
+            // The late-write cases' new owner acknowledges its own commits.
+            if self.phase == 1 || (self.phase == 3 && self.late.is_some()) {
                 if &data[..len] == b"DONE" {
                     self.acked = true;
                 } else if let Some(raw) = data[..len].strip_prefix(b"STAGE") {
-                    assert!(self.staged.is_none(), "one staged COMMIT");
-                    self.staged = Some(StagedCommit::parse(raw));
+                    if raw[0] == 3 {
+                        assert!(self.staged_cut.is_none(), "one staged cut");
+                        self.staged_cut = Some(StagedCut::parse(&raw[1..]));
+                    } else {
+                        assert!(self.staged.is_none(), "one staged COMMIT");
+                        self.staged = Some(StagedCommit::parse(raw));
+                    }
                 } else if &data[..len] == b"ARM" {
                     self.armed = true;
+                } else if let Some(expected) = data[..len].strip_prefix(b"SYNCS") {
+                    // BL10: reader segment syncs and directory syncs since
+                    // the last SYNCS; with counts, they must match.
+                    if let Some(counts) = expected.strip_prefix(b" ") {
+                        let counts: Vec<u64> = std::str::from_utf8(counts)
+                            .expect("SYNCS is ASCII")
+                            .split(' ')
+                            .map(|count| count.parse().expect("SYNCS count"))
+                            .collect();
+                        assert_eq!(
+                            self.reader_syncs[..],
+                            counts[..],
+                            "reader segment and directory syncs"
+                        );
+                    }
+                    self.reader_syncs = [0; 2];
                 } else if &data[..len] == b"CHILD RETURNED" {
                     if let Some(fork) = &mut self.fork_observation {
                         fork.child_returned = true;
@@ -225,7 +248,9 @@ impl Bridge {
         if self.phase == 3 {
             self.advance_late_write();
         }
-        if self.crashed {
+        // A late case's power cut ends the filesystem, not the entropy source:
+        // the owner's next file operation is the one that fails.
+        if self.crashed && !(op == 18 && self.late.is_some()) {
             return Self::error(5);
         }
         if self.phase == 1 && self.armed {
@@ -303,6 +328,8 @@ impl Bridge {
                 if op == 1 {
                     file.cursor += count;
                 }
+                let name = file.name.clone();
+                self.land_cut(&name);
                 Outcome {
                     value: count as u64,
                     ..Outcome::default()
@@ -649,6 +676,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         fork_observation: None,
         read_only: None,
         staged: None,
+        staged_cut: None,
         window: None,
     }))
     .cast()
@@ -721,6 +749,13 @@ pub unsafe extern "C" fn store_crash_phase(p: *mut c_void, phase: u64) {
         }
         if phase != 3 || bridge.late.is_none() {
             bridge.locks.clear();
+        }
+        // The read phase starts after a power cut: a group write still in
+        // flight is lost with the page cache.
+        if phase == 2 {
+            if let Some(late) = &mut bridge.late {
+                late.pending = None;
+            }
         }
         bridge.crashed = false;
     }
@@ -822,6 +857,9 @@ pub unsafe extern "C" fn store_crash_free(p: *mut c_void) {
             staged.takes_until_commit, 0,
             "the staged COMMIT was never applied"
         );
+    }
+    if let Some(cut) = &bridge.staged_cut {
+        assert!(cut.landed, "the staged cut was never applied");
     }
     if let Some(before) = &bridge.read_only {
         assert_eq!(*before, bridge.fs.snapshot(), "read-only directory changed");

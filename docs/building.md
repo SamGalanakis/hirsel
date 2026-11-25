@@ -29,10 +29,11 @@ missing, Hirsel names the first missing input before invoking the linker.
 
 The toolchain packages are package archives in `core-packages/<name>-<major>.hpkg`: `store@1`
 and `runner@1`, and the WebRTC stack, `webrtc_sfu@1` with `turn@1`, `dtls@1`, `srtp@1`,
-`rtp@1`, `stun_ice@1` and `media_bits@1`. A program binds one by major alone, for example
-`webrtc_sfu = { major = 1 }` in its `[dependencies]`. The toolchain supplies it with every
-toolchain package it binds, so a program outside the repository builds against the WebRTC
-SFU and TURN from the installed prefix and nothing else
+`rtp@1`, `stun_ice@1`, `media_bits@1` and `rtp_jitter@1`, and `platform@1`, `search@1` and
+`mcp@1`. A program binds one by major alone, for example `webrtc_sfu = { major = 1 }` in its
+`[dependencies]`. The toolchain supplies it with every toolchain package it binds, so a program
+outside the repository builds against the WebRTC SFU, TURN, the platform, search and MCP from
+the installed prefix and nothing else
 ([Packages](spec/packages.md), section 2). `buck2 build //:hirsel-toolchain` packs each one
 from its directory under `core/programs/`, binding its dependencies by major.
 

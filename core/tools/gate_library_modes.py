@@ -313,9 +313,10 @@ def main():
                 refused = invoke('build', str(app), '--release', '-o', str(work / 'gone'), expected=2)
                 self.assertIn(str(linker), refused.stderr)
 
-        def test_a_copied_bundle_supplies_the_webrtc_packages_to_a_program_outside_the_repo(self):
-            # The shipped toolchain supplies webrtc_sfu@1 and turn@1, with every package they
-            # bind, from core-packages/: a program bound to them by toolchain major builds
+        def test_a_copied_bundle_supplies_the_toolchain_packages_to_a_program_outside_the_repo(self):
+            # The shipped toolchain supplies webrtc_sfu@1, turn@1, platform@1, search@1 and mcp@1,
+            # with every package they bind, from core-packages/: a program bound to them by
+            # toolchain major builds
             # natively from a copied prefix with no checkout, no environment variable and no
             # tool on PATH.
             bundle = Path(os.environ['HIRSEL_TOOLCHAIN_BUNDLE']).resolve()
@@ -340,12 +341,26 @@ def main():
                 app.mkdir()
                 (app / 'hirsel.toml').write_text(
                     '[package]\nname = "call"\nmajor = 1\ncharge = "charge-v1"\n\n'
-                    '[dependencies]\nstd = { major = 1 }\nwebrtc_sfu = { major = 1 }\nturn = { major = 1 }\n\n'
+                    '[dependencies]\nstd = { major = 1 }\nwebrtc_sfu = { major = 1 }\nturn = { major = 1 }\n'
+                    'platform = { major = 1 }\nsearch = { major = 1 }\nmcp = { major = 1 }\n\n'
                     '[sources]\n"main.hirsel" = "main"\n')
                 (app / 'main.hirsel').write_text(
                     'pub fn main() -> Result[(), Exit] {\n'
                     '    if webrtc_sfu.signal.code(Suspended) != 5 || list.len(turn.offered_algorithms()) == 0 {\n'
                     '        return Error(Exit(status: 3))\n'
+                    '    }\n'
+                    '    if !platform.launcher.grants_empty(platform.launcher.no_grants()) || list.len(mcp.client.versions()) == 0 {\n'
+                    '        return Error(Exit(status: 4))\n'
+                    '    }\n'
+                    '    let mut texts: List[String] = list.new()\n'
+                    '    list.push(mut texts, string.from("red fox"))\n'
+                    '    list.push(mut texts, string.from("blue whale"))\n'
+                    '    let mut keys = 0u64\n'
+                    '    for hit in search.rank(texts, string.from("whale")) {\n'
+                    '        keys = keys + hit.key + 1u64\n'
+                    '    }\n'
+                    '    if keys != 2u64 {\n'
+                    '        return Error(Exit(status: 5))\n'
                     '    }\n'
                     '    Ok(())\n'
                     '}\n')

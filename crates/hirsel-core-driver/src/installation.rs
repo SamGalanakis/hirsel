@@ -12,8 +12,9 @@
 //! ROOT/link/kit/                   the startup objects and link-only libraries
 //! ROOT/runtime/<target>/<hash>/     runtime archives
 //! ROOT/core-packages/               core and std images
-//! ROOT/core-packages/<name>-1.hpkg  toolchain package sources: store, runner and
-//!                                   the WebRTC stack (package_content::TOOLCHAIN)
+//! ROOT/core-packages/<name>-1.hpkg  toolchain package sources: store, runner, the
+//!                                   WebRTC stack, platform, search and mcp
+//!                                   (package_content::TOOLCHAIN)
 //! ROOT/hirsel-core-toolchain.json   this selection
 //! ```
 //!

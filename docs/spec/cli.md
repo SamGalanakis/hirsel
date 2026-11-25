@@ -102,6 +102,23 @@ fixed for the session.
 | `--status` | a loop answered | — | usage | no loop |
 | `--stop` | the loop stopped | — | usage | no loop |
 
+## Store backup and restore
+
+`hirsel store`<!-- doc-ref: planned --> commands operate on the directory of a log@1 store. They run in the
+installation's `libexec/hirsel/store_tool`, which is granted only the two directories the driver
+passes it. [STORE-SPEC §15](../../core/programs/store/STORE-SPEC.md) has the full contract.
+
+| Form | Does |
+|---|---|
+| `hirsel store backup DIR TARGET`<!-- doc-ref: planned --> | copies the store at `DIR` into the empty directory `TARGET`, which it creates if absent, at the head it leases; prints `backup <store id> head <H>` |
+| `hirsel store restore BACKUP DIR`<!-- doc-ref: planned --> | makes a store at the empty directory `DIR` from a backup; prints `restored <store id> head <H>` |
+
+A backup opens the store as its writer, so a store another process holds exits 75 and is not
+changed. A store a place serves is backed up through its host, which is not built yet. A
+restored store keeps its source's identity: restore replaces a lost store and does not clone one.
+An interrupted restore leaves a directory that no `open` accepts; remove it and run the restore
+again. Exit status: 0 done, 1 refused (the refusal is on stderr), 2 usage, 75 held.
+
 ## Coverage
 
 *Specified, not built; [coverage](../coverage.md) is the full text.* A coverage build adds

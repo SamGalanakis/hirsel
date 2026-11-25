@@ -1,4 +1,6 @@
-# STORE-SPEC v2.105: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.106: the M4 store library (lane store-spec-1001)
+
+v2.106 (store-backup-restore-2549; Store 1.5): §15 specifies backup and restore. A backup is an export that no prepare child consumes, written into an empty target directory. A restore copies a backup with `EXPORT` first, validates it with the prepare opener, and removes `EXPORT` last, so an interrupted restore never opens. The restored store keeps the source's identity. The CLI is `hirsel store backup`<!-- doc-ref: planned --> and `hirsel store restore`<!-- doc-ref: planned -->, run by `libexec/hirsel/store_tool`. The served-store route through the host is specified and not built. Law L89. No format change. Reversible: a backup is the existing export image.
 
 v2.105 (tiered-activate-2490): built. (1) §13.5 steps 2 and 3 run in the spec's order: a promoted holder's overlay is materialized after its resolution and records no fold effect, because its branch's fold already queued and filed them (L87 (e2)). (2) A pin whose cut materializes it takes that cut's stamp counter as its watermark, so no holder reaches a frame at or above its watermark, and a fork of the pin's Snapshot inherits the materialized pages below its origin. (3) A Tiered load checks stamp < the generation's `next_stamp` (M6), never a holder's watermark. No format change. Reversible: the watermark rule only moves bytes later out of `live`.
 
@@ -6885,3 +6887,108 @@ Harness: `cell_log_laws.hirsel`<!-- doc-ref: planned --> over a `memory` store, 
 | **L81 `trimmed_changes`** | `changes(a, b)` and every `changes_page` sequence over it, with a and b on one branch and on two forks, equal the model's diff in which the keys a trim removed form one `Trimmed` per Log, every Log whose (first, next) differs gives one bounds item, and every other key is a row. v2.61: a page request inside a trimmed span, and one that clips it and resumes at a later insertion (#3); bounds items for an empty Log moving from empty to empty, for a one-sided Log, and on a page boundary (#2) | per-key deletions for a trim (`trim_as_rows`); a span ending at f_b where n_a < f_b (`span_past_next`: a span covering keys a never held); a page that drops a span outside its range (`unclipped_span`); no bounds item for an empty-to-empty move (`rows_only_bounds`) |
 | **L82 `tail_window`** | For random appends and trims between a and b and t ∈ {1, 10, larger than next}, `window_changes(a, b, l, t)` equals the model's diff of the two windows, and `tail_window` equals [n − min(t, n − f), n) (v2.61, #4). Also: a tail whose t shrinks and grows between reruns because a Cell the query reads changed, with the Log unwritten, and a tail that becomes a fixed range; an old-schema Log row entering a larger tail is published through `published_log` (#11) | a window computed from b's bounds alone (`one_sided_window`: removals missing after a trim); appends outside the window sent (`unwindowed_inserts`); a rerun diffed under the new registration on both sides (`new_cover_both`: a shrink sends nothing) |
 | **L83 `append_fill`** | After m appends of equal-size rows to an empty Log, every leaf but the rightmost holds the most entries the page target allows. The independent oracle (v2.61, astra 1998 #13) advances in seq order: for each candidate append it computes the canonical leaf size with the longest common prefix of its 8-byte seq keys (AP5, collection id stripped), freezes the previous leaf exactly when the candidate would not fit, and at each branch overflow applies (n − 2, 2), moving up the right piece's first stored divider (AP3, v2.69 A). Every boundary and level count equals the oracle's. Cases: 317 appends of 30-byte stored values give leaves [0, 106), [106, 212), [212, 316), [316, 317) (the third has a 6-byte prefix and 24 + 6 + 104 × 39 = 4,086 bytes; a 105th entry would make 4,125), and the next wider prefix transition at seq 65,536 | N6 used for appends (`n6_append`: leaves half full, about twice the pages); a count from the first leaf's capacity (`first_leaf_capacity`: three leaves at 317) |
+
+## 15. Backup and restore (Store 1.5, v2.106)
+
+Source: OPTIMAL-STORE-ENDSTATE §II.6 and Part IV row 1.5. A backup is a consistent copy of a store taken while its writer keeps serving. A restore makes a store from a backup. Both are built on the export of §3.5a E1–E3 and §12.7.
+
+### 15.0 Scope and the choices that shape it
+
+1. **A backup is an export that no prepare child consumes.** It has the same lease, the same copy and the same image: packs, `MANIFEST`, the journal through the leased end, then the `EXPORT` stamp, written last. The one difference is where the image goes. An export makes a fresh scratch subdirectory. A backup writes into the empty directory its caller names. *Wholehog:* one image format and one copier, because a backup is a deploy export with no consumer. A second format would need a second opener and a second set of checks.
+2. **A restore keeps the store's identity.** Every frame is sealed under the `StoreId` (§2.1, §2.3), and a host checks a store's identity before it serves it (RUNNER §14.5). So a restored store is the same store, recovered, and a host accepts it for the group that ran it. A copy with a new identity is a different operation: the standalone import of §12.7, which reseals everything. It is not part of this section. *Wholehog:* restore means "this store again". A clone is its own operation with its own name, not a flag on restore.
+3. **Not built here:** incremental backup (a follower that catches up to a target is the natural form), restore into a bucket, and a backup of a store with a Tiered collection, which waits for M3b like every export (D6, §13.10).
+
+### 15.1 What a backup captures
+
+A backup holds the store at its **leased head**: the main branch at the version H that the lease records, with everything the MANIFEST and journal describe at H:
+
+- every table's rows and every index's entries, as stored;
+- the catalog: tables, indexes with their kinds and revisions, Cells and Logs;
+- streams, call records, branches, forks and pins.
+
+Index entries are copied as stored and never rebuilt. The catalog's revisions travel with them, so a release opening the restored store gets the same answer as on the source: `Changed` for an index whose extractor differs (§I.2 of the design, D1), and the entries otherwise.
+
+**Files.** As E1–E3:
+- the live packs the lease lists;
+- the `MANIFEST` bytes captured under the lease, after the journal settled every acknowledged commit;
+- segments `first_live` through the terminal segment. Each middle segment is copied through its successor's `prev_end`, and the terminal segment through the lease's `end`;
+- `EXPORT`, last.
+
+Nothing else is copied: no `LOCK`, no `END` file, no `.tmp` file, no retired pack, no segment before `first_live`. The terminal segment ends exactly at `end`, so recovery's torn-tail rule (§3.4 step 5, which applies when a segment has no `END` file) reads exactly to H.
+
+**Tiered.** A store holding a Tiered collection is refused `Store(Tiered(Export))` before any lease, as every export is, until M3b.
+
+**objects@1.** `begin_backup` on a Bucket holder takes §12.7's object export path. It writes the same log@1 directory image, so the backup of a Bucket store is a directory, and restoring it gives a log@1 directory store with the same identity. Restoring into a bucket is not provided. The standalone import of §12.7 is the operation for that, and it is not built.
+
+### 15.2 Consistency under concurrent writes
+
+- **The lease is taken on the writer, at a durable point.** `begin_backup` waits until the journal has synced every acknowledged commit (`durable` on the last frame), then captures the `MANIFEST` bytes, the main head H, the terminal segment and its acknowledged `end`, and leases the listed packs and journal prefix. That is E1. It does not pause the writer beyond this wait, and the lease holds no lock.
+- **The copy runs while the writer serves.** `export_copy` reads only immutable bytes:
+  - leased packs, which a cut keeps in `retired` and `prev_first` while the lease is held (§3.5a);
+  - segments the writer no longer appends to;
+  - the terminal segment's prefix through `end`. A commit after the lease writes past `end`, or into a later segment, so it is never in the image.
+  
+  The image is therefore exactly the store at H, whatever the writer commits during the copy.
+- **One lease per Db.** A backup and a deploy export share the lease. While either is held, the other is refused `AttemptBusy` and nothing changes, so the caller retries later. A deploy is never delayed by a backup it did not start, and a backup never moves a deploy's base.
+- **The lease ends with `release_export(mut db, attempt)`.** The caller calls it after the copy returns, whether the copy succeeded, failed or was cancelled. As for an export, the caller joins or cancels the copy task first.
+- **Head movement does not matter to a backup.** A deploy refuses `Drift` when the head moved after its export, because it must install on exactly that base. A backup has no install, so nothing it does depends on the head staying at H. OPTIMAL-STORE-ENDSTATE §II.2 holds a maintenance driver's committing slices while an export lease is held. That rule exists for deploy drift. Once the driver is built, it applies only to a deploy's lease and does not wait for a backup's.
+
+### 15.3 API (built in `store-export.hirsel`)
+
+```hirsel
+pub fn begin_backup(mut db: Db, target: Dir, take attempt: Bytes) -> Result[ExportCopy, DeployError] waits
+pub fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits     // unchanged entry; also copies a backup
+pub fn release_export(mut db: Db, attempt: Bytes)                                   // unchanged
+pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportStamp, DeployError] waits
+```
+
+**`begin_backup`** makes the checks and the lease of `begin_export_copy`, in the same order:
+- a Tiered store is refused `Store(Tiered(Export))`;
+- an unhealthy store is refused with its error;
+- a store that is not on disk, or an `attempt` that is not 16 bytes, is refused `ExportMismatch`;
+- a store that already holds a lease is refused `AttemptBusy`.
+
+`target` must be empty. A target with any entry is refused `Scratch(Exists("backup target"))`, and nothing is leased. The stamp's `activation` is 0: the store knows no activation, and a restore ignores the field. The returned `ExportCopy` writes into `target` itself, and its `Exported.name` is empty. An `ExportCopy` from `begin_export_copy` still makes a scratch subdirectory, unchanged.
+
+**`restore(from, to, c, options)`** reads `from` and never writes to it. It writes `to` in five steps:
+
+| Step | What it does | Refusals; what `to` holds afterwards |
+|---|---|---|
+| R1 | Checks that `to` is empty | `Scratch(Exists("restore target"))`; `to` unchanged |
+| R2 | Reads `from/EXPORT` with the prepare opener's stamp check (`read_export_stamp`) | missing: `Scratch(Io(NotFound))`. Bad header, frame or fields: `Store(Corrupt(_))` or `ExportMismatch`. `to` unchanged. A directory with no good stamp is not a backup: `EXPORT` is written last, so an interrupted backup has none |
+| R3 | Copies `EXPORT` first, synced, then `sync_dir`. Then `MANIFEST`, every pack the `MANIFEST` lists, and the segments `first_live` through `terminal`, each copied whole (they are already cut at their ends) and synced, then `sync_dir` | an I/O error: `Scratch(e)`. `to` holds `EXPORT`, so it never opens (below) |
+| R4 | Validates the copy with the prepare opener's recovery (`open_export` on `to`, with the stamp's own attempt). The identity must equal the stamp's. Every listed pack must decode, the journal must replay through `end`, and the replayed main head must equal the stamp's `head`. The resident account must fit `options.resident_limit` | `ExportMismatch`, `Store(Corrupt(_))` or `Store(Full(_))`; `to` holds `EXPORT` |
+| R5 | Removes `to/EXPORT`, then `sync_dir`. This is the commit point. Returns the stamp | an I/O error: `Scratch(e)`. If the removal is not durable, `to` still holds `EXPORT` |
+
+**Crash safety.** An ordinary open refuses a directory that contains `EXPORT` with `ExportDirectory` (§3.5a R1). From R3 until R5's `sync_dir`, `to` contains it. So a restore interrupted at any point, or refused at R4, leaves a directory that never opens. It can never open as a store at an earlier head, which a partly copied journal would otherwise give, because the torn-tail rule cannot tell a missing tail from a torn one. The operator removes `to` and runs the restore again. After R5, an ordinary `open` of `to` recovers to exactly H. As on any open, it takes `LOCK`, finds no `END` file and reads the terminal segment to its end, then rotates to a new segment.
+
+**Identity (choice 2).** The restored store has the source's `StoreId`. On log@1, nothing fences two directories that hold one identity, just as with a byte copy of a stopped store. Restore exists to replace a lost or damaged store. Serving the restored copy beside a live source is outside the contract: both would claim the store's identity, and their histories diverge from H. The CLI prints the identity and H so that the operator can tell which store this is.
+
+### 15.4 `hirsel store backup`<!-- doc-ref: planned --> and `hirsel store restore`<!-- doc-ref: planned -->
+
+These commands sit beside the `inspect`, `stats` and `verify` commands that row 1.4 adds. Every `hirsel store`<!-- doc-ref: planned --> command names the directory of a log@1 store as an operand, and every one runs in `libexec/hirsel/store_tool`, an executable of the platform package built with the installation, as `pin_reader` is (launch.md). The driver opens the directories and passes them to the tool as descriptors 3 and 4. The tool's two `Dir` grants are `/proc/self/fd/3` and `/proc/self/fd/4`, so it reaches nothing else on the file system.
+
+| Form | Does |
+|---|---|
+| `hirsel store backup DIR TARGET`<!-- doc-ref: planned --> | Creates `TARGET` if it is absent. `TARGET` must be empty. Opens `DIR` as its writer (`create` false), then makes the backup (`begin_backup`, `export_copy`, `release_export`), closes the store and prints `backup <store id> head <H>` |
+| `hirsel store restore BACKUP DIR`<!-- doc-ref: planned --> | Creates `DIR` if it is absent. `DIR` must be empty. Restores (§15.3) and prints `restored <store id> head <H>` |
+
+- **Served stores.** `backup` opens the store as its writer. If another process holds `LOCK`, the command exits 75 and changes nothing: "the store is held by a writer". Backing up a store that a place serves goes through the place's head, which already holds the `Db`, and the consistency of §15.2 is the library's. The operator route is `hirsel store backup --state S --group G TARGET`<!-- doc-ref: planned -->: the host asks the place's head for a backup lease over the control socket, as a deploy asks for an export (`HostExport`), copies the image to `TARGET` and releases the lease. It is specified here and **not built**.
+- **Exit status.** 0: done. 1: refused, with the refusal's name on stderr: `AttemptBusy`, `ExportMismatch`, `Exists`, `Corrupt`, `Full`, `Tiered`, or an I/O error. 2: usage. 75: the store is held.
+- **Memory.** The tool opens the store with the resident limit compiled into it, the platform host's `store.sized(Directory, 2 GiB)`. A larger store is refused `Full`.
+
+### 15.5 Law L89 `backup_restore`
+
+Harness: `store_journal_laws.hirsel`, beside the export cases (`journal_test_fork_exports`). The oracle is the source store itself, read through a snapshot taken at the leased head.
+
+The case uses a log@1 store with two tables, one of them with a `Many` index. It checkpoints part of the rows, so the image holds both packs and journal-only commits. Then:
+1. It takes a snapshot S and `begin_backup`.
+2. It commits more puts, overwrites and deletes after the lease and before the copy runs.
+3. It copies, releases, closes the source, restores into a fresh directory and opens the restored store with an ordinary `open`.
+4. It checks every table, row by row in key order, against the same table in S, both ways: no row is missing, extra or different. The post-lease commits are therefore absent. It also checks that one index lookup answers as in S, and that the restored head equals the stamp's `head`.
+5. It checks the refusals. A second `begin_backup` while the lease is held is `AttemptBusy`. A non-empty target is `Exists`. A restore from a directory whose `EXPORT` is removed is `Scratch(Io(NotFound))`. An ordinary `open` of the backup itself, which holds `EXPORT` as a restore does before R5, is refused `ExportDirectory`.
+
+| Seeded bug | What the law shows |
+|---|---|
+| The copy reads the terminal segment to its file size instead of `end` | post-lease rows appear |
+| The `MANIFEST` is captured after the copy instead of under the lease | missing or extra rows, or a `Corrupt` pack |

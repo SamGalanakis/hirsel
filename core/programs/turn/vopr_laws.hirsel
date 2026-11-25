@@ -1,0 +1,221 @@
+// TURN-7 seeded law: the relay driven directly by a random walk over five 5-tuples.
+const VT_STEPS: u64 = 240
+
+const VT_ORIGINS: u64 = 5
+
+const VT_POOL: u64 = 5
+
+const VT_PEERS: u64 = 6
+
+/// The five client sides: two sharing an IP, two sharing a port, and HOST_A again on the
+/// server's second listening port.
+fn vt_origin(i: u64) -> turn.Origin {
+    let other = Addr(ip: V4(0xc0000264), port: 3479)
+    match i {
+        0 => turn.Origin(ingress: Udp(SERVER), client: Addr(ip: V4(0xc0000201), port: 40000)),
+        1 => turn.Origin(ingress: Udp(SERVER), client: Addr(ip: V4(0xc0000201), port: 40001)),
+        2 => turn.Origin(ingress: Udp(SERVER), client: Addr(ip: V4(0xcb007105), port: 40000)),
+        3 => turn.Origin(ingress: Udp(SERVER), client: Addr(ip: V4(0xcb007106), port: 40000)),
+        _ => turn.Origin(ingress: Udp(other), client: Addr(ip: V4(0xc0000201), port: 40000)),
+    }
+}
+
+fn vt_pool_addr(i: u64) -> Addr {
+    let port: u16 = int.narrow(50000 + 2 * i)
+    Addr(ip: V4(0xc0000264), port: port)
+}
+
+/// Three peer IPs, two ports each: a permission is per IP (RFC 8656 section 9).
+fn vt_peer(i: u64) -> Addr {
+    let ip: u32 = int.narrow(0xc6336401 + i / 2)
+    let port: u16 = int.narrow(9000 + i % 2)
+    Addr(ip: V4(ip), port: port)
+}
+
+/// splitmix64 of the seed and a draw counter.
+fn vt_draw(seed: u64, mut count: u64, below: u64) -> u64 {
+    count += 1
+    let mut z = int.wrapping_add(seed, int.wrapping_mul(count, 0x9e3779b97f4a7c15))
+    z = int.wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9)
+    z = int.wrapping_mul(z ^ (z >> 27), 0x94d049bb133111eb)
+    (z ^ (z >> 31)) % below
+}
+
+/// The model: per 5-tuple, its relayed address and the peer IPs it permitted.
+type VtHold {
+    relayed: Option[Addr],
+    permitted: List[Ip]
+}
+
+fn vt_permits(h: VtHold, ip: Ip) -> bool {
+    for i in 0u64 .. list.len(h.permitted) {
+        if h.permitted[i] == ip {
+            return true
+        }
+    }
+    false
+}
+
+fn vt_payload(step: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(4)
+    let n: u32 = int.narrow(step)
+    list.put_word_be(mut b, n)
+    b
+}
+
+fn vt_code(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin, packet: Bytes) -> (u16, Bytes) {
+    let reply = exchange(mut rl, now, rnd, o, packet)
+    (code_of(reply), reply)
+}
+
+/// bug: key an allocation or permission by user, client IP or client port instead of the
+/// whole 5-tuple, so one client's Allocate, CreatePermission or Refresh acts on another's
+/// allocation, a Send leaves through another client's relayed address, or a peer datagram
+/// reaches a client that did not permit the peer (RFC 8656 sections 2.2, 7, 9 and 10).
+/// oracle: an independent model of RFC 8656 by hand: each of five 5-tuples (two sharing a
+/// client IP, two sharing a client port, one differing only in the server port), all one
+/// user, holds at most one relayed address and its own set of permitted peer IPs. A second
+/// Allocate, or a Refresh or CreatePermission without an allocation, is 437; Refresh 0
+/// ends the allocation and its permissions. A Send leaves from the sender's relayed address
+/// only if it permitted the peer's IP, and a peer datagram to a relayed address reaches its
+/// holder only if the holder permitted the peer's IP. The seed picks 240 such steps,
+/// within one permission lifetime.
+@test
+fn vopr_allocations_keep_their_tuple(seed_grant: Env) -> Result[(), turn.TurnError] {
+    let seed = match std.sim.world.test_seed(seed_grant) {
+        Some(active) => active,
+        None => 5,
+    }
+    let mut draws = 0u64
+    let rnd = provide.random(seed * 4 + 1001)
+    let mut pool: List[Addr] = list.new()
+    for i in 0u64 .. VT_POOL {
+        list.push(mut pool, vt_pool_addr(i))
+    }
+    let mut rl = new_relay(relay_config(), take pool, seed * 4 + 1002)
+    let mut nonces: List[Bytes] = list.new()
+    let mut model: List[VtHold] = list.new()
+    for i in 0u64 .. VT_ORIGINS {
+        list.push(mut nonces, nonce_for(mut rl, at(1000), rnd, vt_origin(i)))
+        list.push(mut model, VtHold(relayed: None, permitted: list.new()))
+    }
+    for step in 1u64 .. VT_STEPS + 1 {
+        let now = at(1000 + step * 10)
+        let low = step + 100
+        let k = vt_draw(seed, mut draws, VT_ORIGINS)
+        let o = vt_origin(k)
+        let peer = vt_peer(vt_draw(seed, mut draws, VT_PEERS))
+        let n = copy_of(nonces[k])
+        match vt_draw(seed, mut draws, 5) {
+            0 => {
+                let (code, reply) = vt_code(mut rl, now, rnd, o, alice(stun_ice.ALLOCATE, low, n, list_of1(udp_transport())))
+                if let Some(_) = model[k].relayed {
+                    if code != 437 {
+                        fail("a second Allocate on a 5-tuple was not 437")
+                    }
+                } else {
+                    if code != 0 {
+                        fail("Allocate on a free 5-tuple refused")
+                    }
+                    let relayed = relayed_in(reply)
+                    for j in 0u64 .. VT_ORIGINS {
+                        if model[j].relayed == Some(relayed) {
+                            fail("one relayed address granted to two 5-tuples")
+                        }
+                    }
+                    model[k].relayed = Some(relayed)
+                }
+            },
+            1 => {
+                let (code, _) = vt_code(mut rl, now, rnd, o, alice(stun_ice.CREATE_PERMISSION, low, n, list_of1(Xor(stun_ice.XOR_PEER_ADDRESS, peer))))
+                if let Some(_) = model[k].relayed {
+                    if code != 0 {
+                        fail("CreatePermission on an allocation refused")
+                    }
+                    if !vt_permits(model[k], peer.ip) {
+                        list.push(mut model[k].permitted, peer.ip)
+                    }
+                } else if code != 437 {
+                    fail("CreatePermission without an allocation was not 437")
+                }
+            },
+            2 => {
+                let payload = vt_payload(step)
+                let sent = relayed_to(mut rl, now, rnd, o, send_indication(peer, payload, low))
+                match (model[k].relayed, sent) {
+                    (Some(mine), Some((from, to, data))) => {
+                        if !vt_permits(model[k], peer.ip) {
+                            fail("a Send to a peer this 5-tuple did not permit was relayed")
+                        }
+                        if from != mine || to != peer || list.compare_bytes(data, payload) != Equal {
+                            fail("a Send left through another relayed address, peer or payload")
+                        }
+                    },
+                    (Some(_), None) => {
+                        if vt_permits(model[k], peer.ip) {
+                            fail("a Send to a permitted peer was dropped")
+                        }
+                    },
+                    (None, Some(_)) => fail("a Send from a 5-tuple without an allocation was relayed"),
+                    (None, None) => {},
+                }
+            },
+            3 => {
+                let target = vt_pool_addr(vt_draw(seed, mut draws, VT_POOL))
+                let payload = vt_payload(step)
+                let mut holder: Option[u64] = None
+                for j in 0u64 .. VT_ORIGINS {
+                    if model[j].relayed == Some(target) {
+                        holder = Some(j)
+                    }
+                }
+                let got = from_peer_bytes(mut rl, now, target, peer, payload)
+                let wanted = match holder {
+                    Some(j) => vt_permits(model[j], peer.ip),
+                    None => false,
+                }
+                match got {
+                    Some((to, framed)) => {
+                        let Some(j) = holder else {
+                            fail("a datagram to an unallocated relayed address was delivered")
+                        }
+                        if !wanted {
+                            fail("a datagram from a peer the holder did not permit was delivered")
+                        }
+                        let (from, data) = data_indication_of(framed)
+                        if to != vt_origin(j) || from != peer || list.compare_bytes(data, payload) != Equal {
+                            fail("a peer datagram reached another 5-tuple, peer or payload")
+                        }
+                    },
+                    None => {
+                        if wanted {
+                            fail("a datagram from a permitted peer was dropped")
+                        }
+                    },
+                }
+            },
+            _ => {
+                let (code, _) = vt_code(mut rl, now, rnd, o, alice(stun_ice.REFRESH, low, n, list_of1(lifetime_attr(0))))
+                if let Some(_) = model[k].relayed {
+                    if code != 0 {
+                        fail("Refresh 0 on an allocation refused")
+                    }
+                    model[k] = VtHold(relayed: None, permitted: list.new())
+                } else if code != 437 {
+                    fail("Refresh without an allocation was not 437")
+                }
+            },
+        }
+    }
+    let mut held = 0u64
+    for j in 0u64 .. VT_ORIGINS {
+        if let Some(_) = model[j].relayed {
+            held += 1
+        }
+    }
+    let counts = turn.relay_counts(rl)
+    if counts.allocations != held || counts.pool_free != VT_POOL - held {
+        fail("the relay's allocations differ from the model's")
+    }
+    Ok(())
+}

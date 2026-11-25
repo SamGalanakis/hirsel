@@ -13,3 +13,4 @@ turn@1/laws/retransmit_schedule src=68b7ed256c9b9203 sig=cf99a4861c8bb657 run=c2
 turn@1/laws/revoke_drops_paths src=7014122fe7140836 sig=4c7710b495109098 run=c2c0c6612d4cbb79 bug=2f79ff85d4769471 oracle=0ea7df8f89c46f29 rows=pending
 turn@1/laws/unsupported_answers src=c7e126c47db34285 sig=4c1574d4c5485c0c run=c2c0c6612d4cbb79 bug=d6737bfeb078ac88 oracle=74fe3c35bad9f67a rows=pending
 turn@1/laws/userhash_vector src=a490089ca9be6563 sig=051cd476abc5c155 run=c2c0c6612d4cbb79 bug=3242c69d6fc5b466 oracle=1c949b07f68d020c rows=pending
+turn@1/laws/vopr_allocations_keep_their_tuple src=982fb0943225a89c sig=f971b667ec99830a run=579dcac8588fe904 bug=6788082c0a2f2e1c oracle=9ca7108d7db21e5b rows=pending

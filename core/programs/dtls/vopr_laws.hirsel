@@ -1,0 +1,724 @@
+// Adversarial DTLS VOPR over std.sim.udp (verification lane 5). Each end is a
+// task that drives one dtls.Endpoint over the virtual network. In the attack
+// arm the receiving task also stands in for an attacker on the path: for each
+// honest datagram it injects field-mutated copies of it and of an earlier one.
+const VOPR_MS: u64 = 1000000
+
+const VOPR_NONE: u64 = 0xffffffffffffffff
+
+// Past every end DTLS-5 allows: a server Timeout is at most t_s + 60 s, and t_s
+// is at most the client's last ClientHello resend at 31 s plus the link.
+const VOPR_END: u64 = 100000000000
+
+const VOPR_SOCKET: UdpOptions = UdpOptions(slots: 256, slot_bytes: 1536)
+
+const VOPR_CLIENT: Addr = Addr(ip: V4(0x0a000001), port: 5000)
+
+const VOPR_SERVER: Addr = Addr(ip: V4(0x0a000002), port: 5000)
+
+// The server withholds `expect` this long after the client's ChangeCipherSpec,
+// so injected copies reach it past that ChangeCipherSpec and before Connected.
+const VOPR_PIN_DELAY: u64 = 300000000
+
+type Field = MessageSeq | Epoch | RecordLength | FragmentOffset | FragmentLength | Truncate
+
+type Value = Set(u64) | Plus | Minus | Half
+
+type Mutation {
+    field: Field,
+    value: Value
+}
+
+/// Every field the brief names over its range ends, 0 and 0xFFFF included.
+fn vopr_mutations() -> List[Mutation] {
+    let mut m: List[Mutation] = list.with_capacity(32)
+    for v in[Set(0), Set(1), Set(0xfffe), Set(0xffff), Plus, Minus] {
+        list.push(mut m, Mutation(field: MessageSeq, value: v))
+    }
+    for v in[Set(0), Set(1), Set(2), Set(0xffff)] {
+        list.push(mut m, Mutation(field: Epoch, value: v))
+    }
+    for v in[Set(0), Set(1), Set(0xffff), Plus, Minus] {
+        list.push(mut m, Mutation(field: RecordLength, value: v))
+    }
+    for v in[Set(0), Set(1), Set(0xffff), Set(0xffffff), Plus] {
+        list.push(mut m, Mutation(field: FragmentOffset, value: v))
+    }
+    for v in[Set(0), Set(1), Set(0xffff), Set(0xffffff), Plus, Minus] {
+        list.push(mut m, Mutation(field: FragmentLength, value: v))
+    }
+    for v in[Set(1), Set(13), Minus, Half] {
+        list.push(mut m, Mutation(field: Truncate, value: v))
+    }
+    m
+}
+
+fn vopr_get(d: Bytes, at: u64, width: u64) -> u64 {
+    let mut v = 0u64
+    for i in 0u64 .. width {
+        let b: u64 = int.widen(d[at + i])
+        v = (v << 8) | b
+    }
+    v
+}
+
+fn vopr_put(mut d: Bytes, at: u64, width: u64, value: u64) {
+    for i in 0u64 .. width {
+        d[at + i] = int.truncate((value >> (8 * (width - 1 - i))) & 0xff)
+    }
+}
+
+fn vopr_value(v: Value, orig: u64, width: u64) -> u64 {
+    let mask = (1u64 << (8 * width)) - 1
+    match v {
+        Set(x) => x & mask,
+        Plus => (orig + 1) & mask,
+        Minus => (orig + mask) & mask,
+        Half => orig / 2,
+    }
+}
+
+fn vopr_set(mut d: Bytes, at: u64, width: u64, v: Value) {
+    let orig = vopr_get(d, at, width)
+    vopr_put(mut d, at, width, vopr_value(v, orig, width))
+}
+
+/// `d` with `m` applied at every site the original datagram's framing gives:
+/// each record header, and each fragment header of an epoch-0 handshake record.
+fn vopr_mutate(d: Bytes, m: Mutation) -> Bytes {
+    let n = list.len(d)
+    let mut out: Bytes = list.with_capacity(n)
+    list.append(mut out, d)
+    if let Truncate = m.field {
+        let keep = match m.value {
+            Set(k) => order.min(k, n),
+            Minus => if n == 0 {
+                0
+            } else {
+                n - 1
+            },
+            _ => n / 2,
+        }
+        list.truncate(mut out, keep)
+        return out
+    }
+    let mut at = 0u64
+    while at + 13 <= n {
+        let kind = d[at]
+        let epoch = vopr_get(d, at + 3, 2)
+        let length = vopr_get(d, at + 11, 2)
+        let end = at + 13 + length
+        match m.field {
+            Epoch => vopr_set(mut out, at + 3, 2, m.value),
+            RecordLength => vopr_set(mut out, at + 11, 2, m.value),
+            _ => (),
+        }
+        if end > n {
+            break
+        }
+        if kind == 22u8 && epoch == 0 {
+            let mut f = at + 13
+            while f + 12 <= end {
+                match m.field {
+                    MessageSeq => vopr_set(mut out, f + 4, 2, m.value),
+                    FragmentOffset => vopr_set(mut out, f + 6, 3, m.value),
+                    FragmentLength => vopr_set(mut out, f + 9, 3, m.value),
+                    _ => (),
+                }
+                f = f + 12 + vopr_get(d, f + 9, 3)
+            }
+        }
+        at = end
+    }
+    out
+}
+
+fn vopr_has_cipher_spec(d: Bytes) -> bool {
+    let n = list.len(d)
+    let mut at = 0u64
+    while at + 13 <= n {
+        if d[at] == 20u8 {
+            return true
+        }
+        at = at + 13 + vopr_get(d, at + 11, 2)
+    }
+    false
+}
+
+// The end's state, as a send-able code: 0 Handshaking, 1 Connected, then the closes.
+const OPEN: u64 = 0
+
+const CONNECTED: u64 = 1
+
+const TIMEOUT: u64 = 2
+
+const SENT_ALERT: u64 = 3
+
+const PEER_ALERT: u64 = 4
+
+const OTHER_CLOSE: u64 = 5
+
+fn vopr_class(e: dtls.Endpoint) -> (u64, u8) {
+    match dtls.state(e) {
+        Handshaking => (OPEN, 0),
+        Connected => (CONNECTED, 0),
+        Closed(Timeout) => (TIMEOUT, 0),
+        Closed(SentAlert(code)) => (SENT_ALERT, code),
+        Closed(PeerAlert(code)) => (PEER_ALERT, code),
+        Closed(_) => (OTHER_CLOSE, 0),
+    }
+}
+
+/// The DTLS-5 Failures table.
+fn vopr_listed_alert(code: u8) -> bool {
+    code == 40u8 || code == 47u8 || code == 10u8 || code == 42u8 || code == 51u8 || code == 70u8
+}
+
+pub type Outcome: send {
+    class: u64,
+    alert: u8,
+    // The end's first send (client) or first accepted datagram (server).
+    first: u64,
+    // When the state became Closed, or VOPR_NONE.
+    closed_at: u64,
+    // Application data crossed both ways: the ping arrived (server) or the pong did (client).
+    crossed: bool,
+    // The final poll answered Idle.
+    idle: bool,
+    // Datagrams injected while the end was past the peer's ChangeCipherSpec.
+    strict_injections: u64,
+    violation: String
+}
+
+pub type Settings: send {
+    seed: u64,
+    client: bool,
+    clock: Clock,
+    small: bool,
+    attack: bool,
+    // Inject before the receiving end is past the peer's ChangeCipherSpec too.
+    early: bool,
+    mutation: u64
+}
+
+pub type Plan: send {
+    s: Settings,
+    socket: UdpSocket
+}
+
+type End {
+    e: Option[dtls.Endpoint],
+    // A Cookie server's identity until `admit` lets it build the endpoint.
+    id: Option[dtls.Identity],
+    r: Random,
+    pins: List[dtls.Fingerprint],
+    pin_at: u64,
+    strict: bool,
+    out: Outcome
+}
+
+fn vopr_config(small: bool) -> dtls.Config {
+    if small {
+        small_mtu()
+    } else {
+        dtls.defaults()
+    }
+}
+
+fn vopr_transmit(mut socket: UdpSocket, to: Addr, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn: 0))
+    if result.unwrap(host.udp_send(mut socket, data, tx, Never)) != 1 {
+        fail("sim.udp did not commit the datagram")
+    }
+}
+
+fn vopr_violate(mut end: End, what: String) {
+    if string.byte_len(end.out.violation) == 0 {
+        end.out.violation = clone(what)
+    }
+}
+
+fn vopr_note_close(mut end: End, now: u64) {
+    if end.out.closed_at != VOPR_NONE {
+        return
+    }
+    if let Some(e) = end.e {
+        if let Closed(_) = dtls.state(e) {
+            end.out.closed_at = now
+        }
+    }
+}
+
+/// Send everything queued at `now`; then the endpoint's next wake, or VOPR_NONE.
+fn vopr_pump(mut end: End, mut socket: UdpSocket, to: Addr, now: u64) -> u64 waits {
+    let Some(take found) = replace(mut end.e, None) else {
+        return VOPR_NONE
+    }
+    let mut e = take found
+    let wake = vopr_pump_endpoint(mut e, mut end, mut socket, to, now)
+    end.e = Some(take e)
+    wake
+}
+
+fn vopr_pump_endpoint(mut e: dtls.Endpoint, mut end: End, mut socket: UdpSocket, to: Addr, now: u64) -> u64 waits {
+    loop {
+        let mut d: Bytes = list.with_capacity(70000)
+        match dtls.poll(mut e, now, end.r, mut d) {
+            Ok(Send(_)) => {
+                if end.out.first == VOPR_NONE {
+                    end.out.first = now
+                }
+                vopr_transmit(mut socket, to, d)
+            },
+            Ok(WakeAt(at)) => {
+                end.out.idle = false
+                return at
+            },
+            Ok(Idle) => {
+                end.out.idle = true
+                return VOPR_NONE
+            },
+            _ => {
+                end.out.idle = false
+                return VOPR_NONE
+            },
+        }
+    }
+    VOPR_NONE
+}
+
+/// Deliver one injected datagram. Past the peer's ChangeCipherSpec it must be a
+/// pure discard (DTLS-4 Replay, DTLS-5 Final flights, DTLS-6): no data, no state
+/// change and nothing to send.
+fn vopr_inject(mut end: End, now: u64, d: Bytes) {
+    let Some(take found) = replace(mut end.e, None) else {
+        return
+    }
+    let mut e = take found
+    vopr_inject_endpoint(mut e, mut end, now, d)
+    end.e = Some(take e)
+}
+
+fn vopr_inject_endpoint(mut e: dtls.Endpoint, mut end: End, now: u64, d: Bytes) {
+    let strict = end.strict
+    let before = vopr_class(e)
+    let mut data: Bytes = list.new()
+    let got = dtls.receive(mut e, now, end.r, d, mut data)
+    if !strict {
+        return
+    }
+    end.out.strict_injections += 1
+    match got {
+        Ok(0) => (),
+        _ => vopr_violate(mut end, "an injected datagram past ChangeCipherSpec was not a quiet discard"),
+    }
+    if vopr_class(e) != before {
+        vopr_violate(mut end, "an injected datagram past ChangeCipherSpec changed the state")
+    }
+    let mut probe: Bytes = list.with_capacity(70000)
+    if let Ok(Send(_)) = dtls.poll(mut e, now, end.r, mut probe) {
+        vopr_violate(mut end, "an injected datagram past ChangeCipherSpec made the endpoint send")
+    }
+}
+
+/// A Cookie server with no endpoint yet runs `admit` (DTLS-5 Admission), on honest and
+/// injected datagrams alike.
+fn vopr_admit(mut end: End, mut socket: UdpSocket, s: Settings, d: Bytes) waits {
+    if let Some(_) = end.e {
+        return
+    }
+    let mut reply: Bytes = list.with_capacity(64)
+    match dtls.admit(cookie_key(), VOPR_CLIENT, d, mut reply) {
+        Reply(_) => vopr_transmit(mut socket, VOPR_CLIENT, reply),
+        Admitted => {
+            let Some(take id) = replace(mut end.id, None) else {
+                fail("a Cookie server without its identity")
+            }
+            end.e = Some(result.unwrap(dtls.server(take id, vopr_config(s.small), VOPR_CLIENT, Cookie(cookie_key()))))
+        },
+        Discard => (),
+    }
+}
+
+/// An honest datagram from the peer.
+fn vopr_honest(mut end: End, mut socket: UdpSocket, s: Settings, now: u64, d: Bytes) waits {
+    vopr_admit(mut end, mut socket, s, d)
+    let Some(take found) = replace(mut end.e, None) else {
+        return
+    }
+    let mut e = take found
+    vopr_honest_endpoint(mut e, mut end, mut socket, s, now, d)
+    end.e = Some(take e)
+}
+
+fn vopr_honest_endpoint(mut e: dtls.Endpoint, mut end: End, mut socket: UdpSocket, s: Settings, now: u64, d: Bytes) waits {
+    let strict = end.strict
+    if end.out.first == VOPR_NONE && !s.client {
+        end.out.first = now
+    }
+    let overflow = dtls.discards(e).overflow
+    let mut data: Bytes = list.new()
+    let _ = dtls.receive(mut e, now, end.r, d, mut data)
+    let mut past = strict
+    let mut pin = false
+    // The server is past the client's ChangeCipherSpec once one arrived in order.
+    if !s.client && !strict && vopr_has_cipher_spec(d) && dtls.discards(e).overflow == overflow {
+        if let Handshaking = dtls.state(e) {
+            past = true
+            pin = s.attack
+        }
+    }
+    if let Connected = dtls.state(e) {
+        past = true
+    }
+    let mut reply: Bytes = list.new()
+    let mut crossed = false
+    let mut altered = false
+    if list.len(data) != 0 {
+        let want = if s.client {
+            b"pong"
+        } else {
+            b"ping"
+        }
+        // Pings sent while the server waited for its pins are held and delivered together (DTLS-3).
+        altered = list.len(data) % 4 != 0
+        for i in 0u64 .. list.len(data) / 4 {
+            if list.compare_bytes(list.slice(data, 4 * i, 4 * i + 4), want) != Equal {
+                altered = true
+            }
+        }
+        crossed = true
+        if !s.client {
+            let mut wire: Bytes = list.with_capacity(1200)
+            if let Ok(_) = dtls.send(mut e, b"pong", mut wire) {
+                reply = take wire
+            }
+        }
+    }
+    end.strict = past
+    if pin {
+        end.pin_at = now + VOPR_PIN_DELAY
+    }
+    if crossed {
+        end.out.crossed = true
+    }
+    if altered {
+        vopr_violate(mut end, "application data arrived altered")
+    }
+    if list.len(reply) != 0 {
+        vopr_transmit(mut socket, VOPR_CLIENT, reply)
+    }
+}
+
+fn vopr_feed_injected(mut end: End, mut socket: UdpSocket, s: Settings, now: u64, d: Bytes) waits {
+    vopr_admit(mut end, mut socket, s, d)
+    vopr_inject(mut end, now, d)
+}
+
+fn vopr_start(s: Settings) -> End {
+    let me = party(if s.client {
+        s.seed
+    } else {
+        s.seed + 1
+    })
+    let other = party(if s.client {
+        s.seed + 1
+    } else {
+        s.seed
+    })
+    let Party(id: take id, ..) = take me
+    let Party(certificate: peer_certificate, ..) = take other
+    let r = provide.random(if s.client {
+        s.seed + 2
+    } else {
+        s.seed + 3
+    })
+    let out = Outcome(class: OPEN, alert: 0, first: VOPR_NONE, closed_at: VOPR_NONE, crossed: false, idle: false, strict_injections: 0, violation: "")
+    let c = vopr_config(s.small)
+    if s.client {
+        let mut e = result.unwrap(dtls.client(take id, c, VOPR_SERVER))
+        result.unwrap(dtls.expect(mut e, pin_list(peer_certificate)))
+        return End(e: Some(take e), id: None, r, pins: list.new(), pin_at: VOPR_NONE, strict: false, out: take out)
+    }
+    if s.attack {
+        // A Cookie server, pinned only VOPR_PIN_DELAY after the client's ChangeCipherSpec.
+        return End(e: None, id: Some(take id), r, pins: pin_list(peer_certificate), pin_at: VOPR_NONE, strict: false, out: take out)
+    }
+    let mut e = result.unwrap(dtls.server(take id, c, VOPR_CLIENT, Verified))
+    result.unwrap(dtls.expect(mut e, pin_list(peer_certificate)))
+    End(e: Some(take e), id: None, r, pins: list.new(), pin_at: VOPR_NONE, strict: false, out: take out)
+}
+
+fn vopr_end(take plan: Plan) -> Outcome waits {
+    let Plan(s, socket: take given) = take plan
+    let mut socket = take given
+    let peer = if s.client {
+        VOPR_SERVER
+    } else {
+        VOPR_CLIENT
+    }
+    let mut end = vopr_start(s)
+    let table = vopr_mutations()
+    let kinds = list.len(table)
+    let mut history: List[Bytes] = list.new()
+    let mut honest = 0u64
+    let mut next_ping = VOPR_NONE
+    let mut data: Bytes = list.with_capacity(65536)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    loop {
+        let now = host.mono_ns(s.clock)
+        if now >= VOPR_END {
+            break
+        }
+        if end.pin_at != VOPR_NONE && now >= end.pin_at {
+            end.pin_at = VOPR_NONE
+            let pins = replace(mut end.pins, list.new())
+            if let Some(take found) = replace(mut end.e, None) {
+                let mut e = take found
+                result.unwrap(dtls.expect(mut e, take pins))
+                end.e = Some(take e)
+            }
+        }
+        if s.client && !end.out.crossed {
+            let mut wire: Bytes = list.with_capacity(1200)
+            let mut sent = false
+            if let Some(take found) = replace(mut end.e, None) {
+                let mut e = take found
+                if is_connected(e) && (next_ping == VOPR_NONE || now >= next_ping) {
+                    sent = true
+                    let _ = dtls.send(mut e, b"ping", mut wire)
+                }
+                end.e = Some(take e)
+            }
+            if sent {
+                next_ping = now + 200 * VOPR_MS
+                if list.len(wire) != 0 {
+                    vopr_transmit(mut socket, peer, wire)
+                }
+            }
+        }
+        let wake = vopr_pump(mut end, mut socket, peer, now)
+        vopr_note_close(mut end, now)
+        let mut deadline = order.min(wake, VOPR_END)
+        deadline = order.min(deadline, end.pin_at)
+        if s.client && !end.out.crossed {
+            deadline = order.min(deadline, next_ping)
+        }
+        match host.udp_recv(mut socket, mut data, mut packets, At(s.clock, deadline)) {
+            Ok(_) => {
+                let at = host.mono_ns(s.clock)
+                for p in packets {
+                    let UdpPacket(at: start, len: size, ..) = p
+                    let mut d: Bytes = list.with_capacity(size)
+                    list.append(mut d, list.slice(data, start, start + size))
+                    let m = table[s.mutation % kinds]
+                    if s.attack && s.early && !end.strict {
+                        // Raced ahead of the honest copy: only before the peer's ChangeCipherSpec,
+                        // since after it a copy that keeps a genuine epoch-1 record is that record.
+                        let ahead = vopr_mutate(d, m)
+                        if ahead != d {
+                            vopr_feed_injected(mut end, mut socket, s, at, ahead)
+                        }
+                    }
+                    vopr_honest(mut end, mut socket, s, at, d)
+                    let _ = vopr_pump(mut end, mut socket, peer, at)
+                    vopr_note_close(mut end, at)
+                    if s.attack && (s.early || end.strict) {
+                        let behind = vopr_mutate(d, m)
+                        if behind != d {
+                            vopr_feed_injected(mut end, mut socket, s, at, behind)
+                        }
+                        if list.len(history) != 0 {
+                            let old = history[(s.seed + honest * 7) % list.len(history)]
+                            let stale = vopr_mutate(old, table[(s.mutation + 1 + honest * 7) % kinds])
+                            if stale != old {
+                                vopr_feed_injected(mut end, mut socket, s, at, stale)
+                            }
+                        }
+                        let _ = vopr_pump(mut end, mut socket, peer, at)
+                        vopr_note_close(mut end, at)
+                    }
+                    honest += 1
+                    if list.len(history) == 8 {
+                        let _ = list.remove(mut history, 0)
+                    }
+                    list.push(mut history, take d)
+                }
+            },
+            Error(TimedOut) => (),
+            Error(_) => fail("receive over sim.udp"),
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+    }
+    if let Some(e) = end.e {
+        let (class, alert) = vopr_class(e)
+        end.out.class = class
+        end.out.alert = alert
+    }
+    let End(out: take out, ..) = take end
+    out
+}
+
+fn vopr_seed(e: Env, fallback: u64) -> u64 {
+    match std.sim.world.test_seed(e) {
+        Some(active) => active,
+        None => fallback,
+    }
+}
+
+fn vopr_pair(tasks: Tasks, seed: u64, config: std.sim.udp.Config, small: bool, attack: bool, early: bool) -> (Outcome, Outcome) waits {
+    let (vnet, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(seed, 0, 0)
+    let sim_server = std.sim.udp.Server(config, plan: std.sim.world.plan(seed), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take sim_server, std.sim.udp.serve)
+    let (take client_socket, _) = result.unwrap(host.udp_bind(vnet, VOPR_CLIENT, VOPR_SOCKET))
+    let (take server_socket, _) = result.unwrap(host.udp_bind(vnet, VOPR_SERVER, VOPR_SOCKET))
+    let mutation = seed % list.len(vopr_mutations())
+    let base = seed * 16 + 16
+    let client_task = task.spawn(tasks, bytes 16777216, Plan(s: Settings(seed: base, client: true, clock, small, attack, early, mutation), socket: take client_socket), vopr_end)
+    let server_end = task.spawn(tasks, bytes 16777216, Plan(s: Settings(seed: base, client: false, clock, small, attack, early, mutation), socket: take server_socket), vopr_end)
+    let c = match task.join(take client_task) {
+        Ok(take o) => take o,
+        Error(_) => fail("the client end faulted"),
+    }
+    let s = match task.join(take server_end) {
+        Ok(take o) => take o,
+        Error(_) => fail("the server end faulted"),
+    }
+    result.unwrap(task.join(take served))
+    (take c, take s)
+}
+
+fn vopr_clean(o: Outcome) {
+    if string.byte_len(o.violation) != 0 {
+        fail(clone(o.violation))
+    }
+}
+
+/// DTLS-5's exhaustive list of ends under loss, duplication and reorder.
+fn vopr_listed_end(c: Outcome, s: Outcome, lossless: bool) {
+    vopr_clean(c)
+    vopr_clean(s)
+    let limit = 60 * SECOND
+    if c.class == CONNECTED {
+        // (1): the client connects only after a verified flight 6, so the server is too.
+        if s.class != CONNECTED {
+            fail("client connected without the server")
+        }
+        if !c.crossed || !s.crossed {
+            fail("application data did not cross both ways")
+        }
+        return
+    }
+    if lossless {
+        fail("a handshake without loss did not connect")
+    }
+    if c.class != TIMEOUT || c.closed_at != c.first + limit {
+        fail("client neither connected nor timed out at t_c + 60 s")
+    }
+    if s.class == CONNECTED {
+        // (3): flight 5 arrived and every flight 6 was lost.
+        return
+    }
+    if s.first == VOPR_NONE {
+        // (4): no ClientHello reached the server.
+        if s.class != OPEN || !s.idle {
+            fail("server left Handshaking or kept a timer with no ClientHello")
+        }
+        return
+    }
+    // (2)
+    if s.class != TIMEOUT || s.closed_at != s.first + limit {
+        fail("server neither connected nor timed out at t_s + 60 s")
+    }
+}
+
+fn vopr_link(loss_ppm: u64) -> std.sim.udp.Config {
+    let mut c = std.sim.udp.defaults()
+    c.delay_ns = 10 * VOPR_MS
+    c.jitter_ns = 2 * VOPR_MS
+    c.loss = std.sim.udp.Loss(good_to_bad: 0, bad_to_good: 0, good_loss: loss_ppm, bad_loss: 0)
+    c.duplicate = 50000
+    c.reorder = 200000
+    c.reorder_ns = 3 * VOPR_MS
+    c
+}
+
+/// bug: lost, duplicated or reordered datagrams strand or wrongly close a handshake: an
+/// early ChangeCipherSpec refused with 10 when flight 5 spans datagrams (attack 2434 F3), a
+/// resend not scheduled, a duplicate flight refused.
+/// oracle: DTLS-5's exhaustive list of ends, by hand from RFC 6347 section 4.2.4 (see
+/// dtls.md law handshake_survives_loss); with no loss every seed connects. One sim.udp seed
+/// per run: 20% loss, then none, each with 5% duplication and 20% reorder; mtu 300 on even
+/// seeds so flight 5 spans datagrams.
+@test
+fn vopr_handshake_under_loss(tasks: Tasks, seed_grant: Env) -> Result[(), ()] waits {
+    let seed = vopr_seed(seed_grant, 2)
+    let small = seed % 2 == 0
+    let (c, s) = vopr_pair(tasks, seed, vopr_link(200000), small, false, false)
+    vopr_listed_end(c, s, false)
+    let (c0, s0) = vopr_pair(tasks, seed, vopr_link(0), small, false, false)
+    vopr_listed_end(c0, s0, true)
+    Ok(())
+}
+
+fn vopr_connected_and_crossed(c: Outcome, s: Outcome) {
+    vopr_clean(c)
+    vopr_clean(s)
+    if c.class != CONNECTED || s.class != CONNECTED {
+        fail("injection past ChangeCipherSpec changed the honest end")
+    }
+    if !c.crossed || !s.crossed {
+        fail("application data did not cross both ways")
+    }
+}
+
+/// bug: an injected copy of an observed datagram with one field mutated faults an end or
+/// changes the honest end: a cookie ClientHello with message_seq 0xFFFF admitted and
+/// flight 4's numbering overflowing u16 (attack 2434 F1); an epoch-0 handshake record acted
+/// on after the peer's ChangeCipherSpec, closing the server with 10 (F2).
+/// oracle: RFC 6347 sections 4.1 and 4.2.2 and DTLS-4/5/6 by hand. A Cookie server, pinned
+/// 300 ms after the client's ChangeCipherSpec, over a lossless link with duplication and
+/// reorder; each received datagram is followed by mutated copies of it and of one of the last
+/// eight. First the attacker injects only into an end past the peer's ChangeCipherSpec (the
+/// server once one arrived in order, the client once Connected): there every copy is a quiet
+/// discard (no data, no state change, nothing sent) and the honest end stands: both
+/// Connected (DTLS-5), with application data crossing. Then it also races a copy ahead of
+/// each datagram from the start. Before the ChangeCipherSpec a path attacker may close a
+/// handshake (DTLS-4 Alerts), so an end may then also be Timeout or an alert from DTLS-5's
+/// Failures table, or a server that admitted nothing; whether that class matches OpenSSL's is lane T2d's. No end may fault,
+/// and the client never connects without the server. The seed picks one mutation of
+/// message_seq, epoch, record length, fragment offset or length (0, 1, 0xFFFF, the 24-bit
+/// end, the original plus or minus one) or a truncation; mtu 300 on even seeds.
+@test
+fn vopr_attacker_never_interferes(tasks: Tasks, seed_grant: Env) -> Result[(), ()] waits {
+    let seed = vopr_seed(seed_grant, 4)
+    let small = seed % 2 == 0
+    let (c, s) = vopr_pair(tasks, seed, vopr_link(0), small, true, false)
+    vopr_connected_and_crossed(c, s)
+    let (c0, s0) = vopr_pair(tasks, seed, vopr_link(0), small, true, true)
+    vopr_clean(c0)
+    vopr_clean(s0)
+    if c0.class == CONNECTED {
+        if s0.class != CONNECTED {
+            fail("client connected without the server")
+        }
+        if !c0.crossed || !s0.crossed {
+            fail("application data did not cross both ways")
+        }
+        return Ok(())
+    }
+    // A Cookie server that admitted no ClientHello holds no state (DTLS-5's fourth end).
+    if s0.class == OPEN && s0.first != VOPR_NONE {
+        fail("the server kept a handshake open")
+    }
+    for (class, alert) in[(c0.class, c0.alert), (s0.class, s0.alert)] {
+        let listed = class == OPEN || class == CONNECTED || class == TIMEOUT || ((class == SENT_ALERT || class == PEER_ALERT) && vopr_listed_alert(alert))
+        if !listed {
+            fail("an end outside DTLS-5 under injection")
+        }
+    }
+    Ok(())
+}

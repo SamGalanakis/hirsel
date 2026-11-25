@@ -17,7 +17,7 @@ import std_native
 ROOT = std_native.ROOT
 SEED = 'HIRSEL_TEST_SIM_SEED'
 DEFAULT_SEEDS = 32
-PACKAGE_LAWS = ('store', 'harness', 'platform', 'runner')
+PACKAGE_LAWS = ('store', 'harness', 'platform', 'runner', 'dtls', 'turn')
 SEEDED_TEST = re.compile(r'^@test\s+fn (\w+)\(([^)]*)\)', re.M)
 # Keep the 10,000-frame floods and the real-time hedge deadlines intact.
 FLOOD_SEEDS = {

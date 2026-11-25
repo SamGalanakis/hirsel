@@ -600,7 +600,7 @@ fn report(i: u64) -> rtcp.Block {
 }
 
 /// bug: Accept a datagram RFC 3550 or RFC 5506 refuses, misplace padding, or write feedback or report bytes that a receiver misreads.
-/// oracle: RFC 3550 sections 6.1, 6.4, 6.5 and A.2, RFC 4585 sections 6.2.1 and 6.3.1, RFC 5104 section 4.3.1.1, RFC 5506 section 3, RFC 5761 section 4, by hand. The SDES chunk is 4 + 2 + 3 + 1 = 10 bytes, nulls to 12, then 4 bytes of padding; 32 blocks are 8 + 24 * 31 = 752 bytes (length 187), then 8 + 24 = 32 (length 7).
+/// oracle: RFC 3550 sections 6.1, 6.4, 6.5 and A.2, RFC 4585 sections 6.2.1 and 6.3.1, RFC 5104 section 4.3.1.1, RFC 5506 sections 3.4.2 and 4.1, RFC 5761 section 4, by hand. The SDES chunk is 4 + 2 + 3 + 1 = 10 bytes, nulls to 12, then 4 bytes of padding; 32 blocks are 8 + 24 * 31 = 752 bytes (length 187), then 8 + 24 = 32 (length 7).
 @test
 fn rtcp_compound_rules() -> Result[(), ()] {
     let mut padded = sr_sdes(false)
@@ -640,7 +640,11 @@ fn rtcp_compound_rules() -> Result[(), ()] {
     }
     refused(sr_sdes(true), Compound, Padding)
     refused(b"\x80\xc9\x00\x01\x11\x22\x33\x44", Compound, NoCname)
-    refused(b"\x80\xc9\x00\x01\x11\x22\x33\x44", Reduced, NoCname)
+    // RFC 5506 section 4.1: a reduced-size datagram need not hold an SDES,
+    // even when it begins with an RR; libwebrtc sends its NACKs as RR + NACK.
+    accepted(b"\x80\xc9\x00\x01\x11\x22\x33\x44", Reduced, 1)
+    accepted(b"\x81\xc9\x00\x07\x11\x22\x33\x44\x55\x66\x77\x88\x00\x00\x00\x00\x00\x00\x00\x64\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x81\xcd\x00\x03\x11\x22\x33\x44\x55\x66\x77\x88\x00\x64\x00\x00", Reduced, 2)
+    refused(b"\x81\xc9\x00\x07\x11\x22\x33\x44\x55\x66\x77\x88\x00\x00\x00\x00\x00\x00\x00\x64\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x81\xcd\x00\x03\x11\x22\x33\x44\x55\x66\x77\x88\x00\x64\x00\x00", Compound, NoCname)
     refused(b"\x80\xc9\x00\x01\x11\x22\x33\x44\x81\xca\x00\x03\x55\x66\x77\x88\x01\x03abc\x00\x00\x00", Compound, NoCname)
     refused(pli(), Compound, NotCompound)
     refused(b"\x81\xce\x00\x03\x00\x00\x00\x01\x00\x00\x00\x02", Reduced, Length)

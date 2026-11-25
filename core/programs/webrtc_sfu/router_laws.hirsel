@@ -1,4 +1,4 @@
-// ---- RTC-5 and RTC-6 router laws (W6, W7, W10, W18) ----
+// ---- RTC-5 and RTC-6 router laws (W6, W7, W10, W18, W27) ----
 const ROOM: u64 = 7
 
 fn room_id() -> peer.RoomId {
@@ -440,5 +440,93 @@ fn pacer_holds_back_a_burst() -> Result[(), router.RouterError] {
         paced_out(mut r, (10 + 8 * at) * MS, mut s, seqs, mut out, "the pacer did not let out the next queued packet on time")
     }
     paced_out(mut r, 60 * MS, mut s, none, mut out, "the refused packet went out")
+    Ok(())
+}
+
+// W27. A subscriber's NACK as libwebrtc sends it on an rtcp-rsize session: an RR with
+// one report block for the down-track, then the NACK, and no SDES (2689: the shape
+// of every NACK Chromium sent in N1, about 70 a second, each 72 to 88 bytes).
+fn rsize_nack(mut cs: srtp.Session, media_ssrc: u32, highest: u16, pairs: List[(u16, u16)]) -> Bytes {
+    let mut b: Bytes = list.with_capacity(1500)
+    let mut blocks: List[rtp.rtcp.Block] = list.new()
+    list.push(mut blocks, rtp.rtcp.Block(ssrc: media_ssrc, fraction: 96, lost: 3, highest: int.widen(highest), jitter: 0, lsr: 0, dlsr: 0))
+    let _ = result.unwrap(rtp.rtcp.write_rr(CLIENT_SSRC, view blocks, mut b))
+    let _ = result.unwrap(rtp.rtcp.write_nack(CLIENT_SSRC, media_ssrc, view pairs, mut b))
+    sealed_rtcp(mut cs, take b)
+}
+
+/// bug: refuse a reduced-size RTCP datagram that begins with an RR but holds no SDES, so every NACK a Chromium subscriber sends (RR + NACK, no SDES, on its rtcp-rsize session) is dropped as malformed, no RTX repair ever goes out, and its decoder stalls on the first loss until a PLI (2689: N1 spike control with drops and no FEC, 1401 NACKs, zero repairs, 39 frames decoded in 30 s).
+/// oracle: RFC 5506 sections 3.4.2 and 4.1 (a reduced-size datagram need not follow the compound rules), the NACK shape captured from Chromium at the SFU in 2689, RFC 4585 section 6.2.1 (PID and BLP: bit 0 asks for PID + 1), and RFC 4588 section 4 (OSN first in the RTX payload, the original timestamp and payload after) by hand. The subscriber took source packets 300 to 307 as n0 to n0 + 7 at timestamps t0 + 3000 k and lost n0 + 2, n0 + 5 and n0 + 6; its NACK names (n0 + 2, BLP 0) and (n0 + 5, BLP 1). The sim has no wire delay, so one RTT is 0 and the deadline is the pacing time: at RTP-10's 750 kbps start rate an RTX of at most 100 bytes holds the pacer at most 100 * 8 / 750,000 s, 1.07 ms, so the third answer is out by 2.14 ms, within the 3 ms polled.
+@test
+fn rsize_nack_is_answered_with_rtx() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(150))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut pub_ = admit(mut r, 151, session_offer(), 1)
+    let mut offer = minimal_head(b" d")
+    recv_section(mut offer, b"d", b"96", b"97", b"1", b"3")
+    list.append(mut offer, b"a=rtcp-rsize\n")
+    let mut s = admit(mut r, 153, offer, 2)
+    let room = room_id()
+    let pa = result.unwrap(router.publish(mut r, room, pub_.who, 0))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 0, mut out))
+    let (m, x) = option.unwrap(router.track_ssrcs(r, room, s.who, pa))
+    if x == 0 {
+        fail("the subscriber's leg has no RTX SSRC")
+    }
+    peer.clear_outbox(mut out)
+    let mut now = 10 * MS
+    let mut n0 = 0u16
+    let mut t0 = 0u32
+    for k in 0u16 .. 8u16 {
+        let ts: u32 = int.widen(k)
+        let packet = media_carrying(mut pub_.cs, MEDIA_SSRC, 300 + k, 3000 * ts, b"a", 96, vp8_key())
+        feed(mut r, now, pub_.who, pub_.at, packet, mut out)
+        let g = one(received(mut s, out), "the subscriber gets each source packet once")
+        if k == 0 {
+            n0 = g.h.seq
+            t0 = g.h.ts
+        }
+        expect_media(g, m, plus(n0, k), later(t0, 3000 * ts), 96, "the down-track numbering")
+        peer.clear_outbox(mut out)
+        now += MS
+    }
+    let mut pairs: List[(u16, u16)] = list.new()
+    list.push(mut pairs, (plus(n0, 2), 0))
+    list.push(mut pairs, (plus(n0, 5), 1))
+    let request = rsize_nack(mut s.cs, m, plus(n0, 7), pairs)
+    feed(mut r, now, s.who, s.at, request, mut out)
+    let mut got = received(mut s, out)
+    for ms in 1u64 .. 4u64 {
+        peer.clear_outbox(mut out)
+        let _ = router.poll(mut r, now + ms * MS, mut out)
+        for g in received(mut s, out) {
+            if g.h.ssrc == x {
+                list.push(mut got, clone(g))
+            }
+        }
+    }
+    for lost in[2u16, 5u16, 6u16] {
+        let mut count = 0u64
+        for g in got {
+            if g.h.ssrc != x {
+                continue
+            }
+            let body = payload_of(g)
+            let osn: u16 = list.word_be(body, 0)
+            if osn != plus(n0, lost) {
+                continue
+            }
+            let step: u32 = int.widen(lost)
+            if g.h.pt != 97 || g.h.ts != later(t0, 3000 * step) || !same(list.slice(body, 2, list.len(body)), vp8_key()) {
+                fail("an RTX answer does not carry the lost packet's timestamp and payload")
+            }
+            count += 1
+        }
+        if count != 1 {
+            fail("a lost packet was not answered by exactly one RTX within one RTT plus the pacing time")
+        }
+    }
     Ok(())
 }

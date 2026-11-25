@@ -27,6 +27,7 @@ webrtc_sfu@1/laws/rotation_survives_a_layer_switch src=28770fbb49432022 sig=d70f
 webrtc_sfu@1/laws/router_fills_units src=bd72479280499034 sig=90a024445cd9b9e9 run=c2c0c6612d4cbb79 bug=7989206a12ea29b1 oracle=31daf208a5c62e43 rows=pending
 webrtc_sfu@1/laws/router_maps_av1_targets src=bb9d68d0e7df04e9 sig=c23d9d0d3ce00ab1 run=c2c0c6612d4cbb79 bug=bd88b6333830eaa5 oracle=2385ed2fc06f0a60 rows=pending
 webrtc_sfu@1/laws/router_maps_vp9_layers src=81215dad2ecce6e9 sig=08b96610d0bdb2b8 run=c2c0c6612d4cbb79 bug=1a110adf7c82b9d8 oracle=104353da13ae6b67 rows=pending
+webrtc_sfu@1/laws/rsize_nack_is_answered_with_rtx src=f6d7bd82e1cdb389 sig=3bf796d24451bf64 run=c2c0c6612d4cbb79 bug=467321c16cbdfadd oracle=ba5ca1cd2bdcea5f rows=pending
 webrtc_sfu@1/laws/sdp_browser_offers src=06e1bac42f31c65c sig=27a8867defd021ce run=c2c0c6612d4cbb79 bug=bcd1fc3864a5e468 oracle=4db7b7146b92e029 rows=pending
 webrtc_sfu@1/laws/sdp_descriptor_on_av1_only src=0df0cee9a7b3a9c0 sig=7267b87330500111 run=c2c0c6612d4cbb79 bug=e5d7cadead6878b7 oracle=c5946798397dcf06 rows=pending
 webrtc_sfu@1/laws/sdp_refusals src=3ddf011a8a38e14b sig=761d96d0c07b43f9 run=c2c0c6612d4cbb79 bug=c5d4fb3e5b1de441 oracle=9b65796e47db47a5 rows=pending

@@ -17,6 +17,11 @@ first step, so the budget lowers a down-track to its lowest encoding but never p
 (LiveKit's default, `allow_pause` off). The bandwidth pause turned a leg whose base layer
 measured above the 300 kbps start estimate `Off` about 1 s into a call, and with no probing
 and nothing sent on the leg no estimate could rise to resume it.
+Amended 2026-11-25 (webrtc-nack-rtx-repair-2689): a session that negotiated `rtcp-rsize`
+now takes an RR-led datagram without an SDES (rtp.md RTP-4, RFC 5506 §4.1). libwebrtc sends
+every NACK on such a session as an RR with its report blocks followed by the NACK and no
+SDES, and the check refused each one as `NoCname`, so no NACK reached RTC-4's history and no
+loss was ever repaired. W27 `rsize_nack_is_answered_with_rtx` is the law.
 Amended 2026-11-25 (webrtc-bwe-probe-2669): RTC-6 probes. A subscriber whose estimate
 leaves a video down-track below its target's encoding asks rtp's `bwe.probe` (RTP-9) for
 the rate that carries every target plus a quarter, and the session's pacer sends the
@@ -1635,6 +1640,15 @@ unless named otherwise.
   carries the current rotation, the delay only while set, and the capture time unchanged.
   Red on a router that forwards CVO only when the source packet has it, on a leg that drops
   the playout delay, and on one that drops the capture time.
+- **W27 `rsize_nack_is_answered_with_rtx`.** *Harness:* `core/programs/webrtc_sfu/router_laws.hirsel`.
+  A subscriber on an `rtcp-rsize` session takes source packets 300 to 307, loses three and
+  sends one NACK as libwebrtc does: an RR with one report block, then the NACK with
+  (n0 + 2, BLP 0) and (n0 + 5, BLP 1), and no SDES. *Oracle:* RFC 5506 §4.1, RFC 4585
+  §6.2.1 and RFC 4588 §4 by hand: each of n0 + 2, n0 + 5 and n0 + 6 comes back exactly once
+  on the leg's RTX SSRC and type, with its OSN, its timestamp t0 + 3000 k and the
+  publisher's payload, within one RTT (0 in the sim) plus the pacing time of three answers
+  at the 750 kbps start rate (at most 2.14 ms, 3 ms polled). Red on main: the check refused
+  the datagram as `NoCname` and nothing was answered.
 
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.
@@ -1679,7 +1693,7 @@ W19, blocks, because those are soundness reds.
 | **S1** SDP | the package skeleton (`webrtc_sfu` with `sdp`, `peer`, `router`, `signal`); RTC-1 `parse` and `write` with port kinds, `tls-id`, per-direction RIDs and simulcast, extmap direction and `vad`; RTC-2 `answer`, `offer`, `accept_answer` with association reuse and answer validation, glare state; captured browser offers committed as vectors | nothing | W1, W2, W3, W5 |
 | **S2** VP8 descriptor | `media_bits` gains `target_layers` for AV1 (RTC-6) and VP8 (RFC 7741): payload descriptor parse (`X`, `I`, `L`, `T`, `K`, `PictureID`, `TL0PICIDX`, `TID`, `Y`, `KEYIDX`, `S` and partition index), keyframe detection from the payload header's `P` bit, and the rewrites of `PictureID` and `TL0PICIDX` | nothing | in `media_bits`'s own laws: RFC 7741 §4's examples, and captured Chromium VP8 packets, by hand |
 | **S3** PeerSession | RTC-3 over `stun_ice` Lite, the dtls lane's server, the srtp lane's contexts and the rtp lane's parsing; prefix `classify`; authenticated MID, SSRC and payload-type binding; inbound RTX; the 5-tuple table; the `Tag`ged outbox; RTC-4's SSRC generator, sealers, collision recovery, late-packet RTX, per-down-track egress history and NACK answers, per-down-track SRs | S1; dtls, srtp and rtp lanes' first slices; the rtp amend's RTP-7 history record and RTP-11 switch timeline | W4, W19 |
-| **S4** One-unit router | RTC-5 on a single unit: rooms, publications, down-tracks, fan-out in the subscriber's wire identity, transport sequence numbers at send, bounds and fence capacity; RTC-6's stable target maps, current and pending presentation, switch timeline, and negotiated keyframe requests with in-place intervals | S2, S3; the rtp amend's in-place `Keyframes` interval | W6, W7, W9, W10, W18 (W6 and W7 need the router's down-tracks and switches) |
+| **S4** One-unit router | RTC-5 on a single unit: rooms, publications, down-tracks, fan-out in the subscriber's wire identity, transport sequence numbers at send, bounds and fence capacity; RTC-6's stable target maps, current and pending presentation, switch timeline, and negotiated keyframe requests with in-place intervals | S2, S3; the rtp amend's in-place `Keyframes` interval | W6, W7, W9, W10, W18, W27 (W6 and W7 need the router's down-tracks and switches) |
 | **S5** Units and fence | the control order, doorbells, `Media`, `RepairAsk` and `RepairReply` messages with tags, the uncommitted suffix; RTC-7 with its test seam, `suspend` and `resume` | S4 | W8, W14, W15 |
 | **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target with probing and the room's opt-in `pause`, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S5 (remote units' masks); rtp's RTP-9 probe, RTP-10 `cluster` and RTP-11 `pad` | W11, W12, W13, W24 |
 | **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness in its laws and by `room_client` (F1) in service | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
@@ -1984,11 +1998,19 @@ W12 and W13 in `speaker_laws.hirsel`):
   leaves that state by probing, and since 2669 so does the SFU: a leg short of its target
   asks for a cluster and sends the pacer's `Probe` and `Pad` answers (RTC-6 **Probing.**,
   W24), so the second question is now one for N1 on an unloaded host.
-- **Open: RTCP the session still drops.** Firefox sends lone RRs, with no SDES, which
-  rtp.md's check refuses as `NoCname` in either mode, so that leg has no RTT. Chromium's
-  sender reports for its simulcast SSRCs carry a zero-length CNAME, which is
-  `Body(SDES)`, so those SRs give no lip-sync or RTT. Neither blocks the estimate, since
-  TWCC arrives alone.
+- **NACKs never reached the history (2689).** With drops and no FEC in N1, a Chromium
+  subscriber sent about 1,400 NACKs in 30 s and the SFU answered none: its decoder stalled
+  at each loss until a PLI. A trace of `rtcp_in` showed every NACK datagram refused before
+  parsing. On its `rtcp-rsize` session libwebrtc sends an RR (with report blocks) and the
+  NACK in one datagram with no SDES, and rtp.md's check required a CNAME whenever an SR or
+  RR came first, in either mode. RFC 5506 §4.1 lets a reduced-size datagram skip the
+  compound rules, so in `Reduced` mode the check no longer asks for one. With that change,
+  N1 traces show each dropped packet NACKed, found in the history (locally or through a
+  unit's `RepairAsk`) and sent as RTX with its rewritten number as OSN. Firefox's lone RRs
+  pass for the same reason, so RR RTT reaches RTP-9 on both browsers. W27 is the law.
+- **Open: RTCP the session still drops.** Chromium's sender reports for its simulcast SSRCs
+  carry a zero-length CNAME and are refused as `Body(SDES)`, so those SRs give no lip-sync
+  and no RTT. They do not block the estimate, because TWCC arrives alone.
 - **Open.** After a real `Lost` the service rejoins with a new peer number, but a page
   learns the service's number once, from `Servers`, so its later signals go to the old
   number. A page that joins after a publication is published learns it only from the

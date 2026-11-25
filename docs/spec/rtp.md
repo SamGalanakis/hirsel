@@ -436,15 +436,19 @@ length computed in 64-bit arithmetic:
   before the padding ([RTP-8](#rtp-8-transport-wide-sequence-numbers-and-feedback)). Every
   body check below is on the **unpadded** body.
 - `Body(pt)`: the unpadded body breaks its table row below.
-- `NotCompound`: in `Compound` mode, the first packet is not SR or RR. In either mode, a
-  datagram whose first packet is SR or RR is an ordinary compound packet, and must hold an
-  SDES whose chunks include the first packet's sender SSRC with a CNAME
-  ([RFC 3550 §6.1](https://www.rfc-editor.org/rfc/rfc3550#section-6.1)); otherwise `NoCname`.
-  A lone RR is `NoCname`.
+- `NotCompound`: in `Compound` mode, the first packet is not SR or RR.
+- `NoCname`: in `Compound` mode, the datagram holds no SDES whose chunks include the first
+  packet's sender SSRC with a CNAME
+  ([RFC 3550 §6.1](https://www.rfc-editor.org/rfc/rfc3550#section-6.1)). A lone RR is
+  `NoCname` in `Compound` mode.
 
-`Reduced` is passed when the session negotiated `a=rtcp-rsize`. Then a datagram that does
-not begin with SR or RR is reduced-size ([RFC 5506 §3](https://www.rfc-editor.org/rfc/rfc5506#section-3))
-and may hold any packets in any order.
+`Reduced` is passed when the session negotiated `a=rtcp-rsize`. Then every datagram may be
+reduced-size ([RFC 5506 §4.1](https://www.rfc-editor.org/rfc/rfc5506#section-4.1)): it
+need not follow the compound rules, so it may hold any packets in any order, and an SR or
+RR first does not ask for an SDES or a CNAME. libwebrtc sends its NACKs and transport-wide
+feedback this way, as an RR with its report blocks followed by the feedback and no SDES;
+refusing that would drop every NACK such a peer sends. Every other check holds in both
+modes.
 
 | type, format | item | unpadded body |
 |---|---|---|
@@ -490,7 +494,7 @@ with `a=rtcp-rsize`, feedback that should go at once (NACK, PLI, FIR, TWCC) may 
 reduced-size.
 
 Law: `check` accepts exactly the compound datagrams RFC 3550 §6.1 and A.2 allow and, with
-`Reduced`, the reduced-size ones RFC 5506 §3 allows, and nothing reaches a stateful operation
+`Reduced`, the reduced-size ones RFC 5506 §4.1 allows, and nothing reaches a stateful operation
 before it does. Every view is bounded by its packet. Each writer's output parses back to its
 inputs, and a refusal appends nothing.
 
@@ -1696,7 +1700,9 @@ written here and repeated in the law's comment.
   SDES and a count of 4; with `Reduced`, the lone PLI `81 CE 00 02 00 00 00 01 00 00 00 02`
   (sender 1, media 2), the NACK `81 CD 00 03 00 00 00 01 00 00 00 02 FF 9C 80 09` and the FIR
   `84 CE 00 04 00 00 00 01 00 00 00 00 00 00 00 02 07 00 00 00` (target 2, sequence 7,
-  reserved 0). *Refused:* `P` on the SR (`Padding`); a lone RR, and an RR with an SDES whose
+  reserved 0); with `Reduced`, a lone RR (count 1) and an RR with one report block followed
+  by a NACK and no SDES (count 2), the shape libwebrtc sends. *Refused:* `P` on the SR
+  (`Padding`); without `Reduced`, a lone RR, that RR + NACK, and an RR with an SDES whose
   CNAME belongs to another SSRC (`NoCname`); the lone PLI without `Reduced` (`NotCompound`); a
   length word one past the datagram (`Length`); an SDES with `SC = 2` whose second chunk is
   cut (`Body(202)`); a BYE whose reason length runs past its body (`Body(203)`); a PLI with 4

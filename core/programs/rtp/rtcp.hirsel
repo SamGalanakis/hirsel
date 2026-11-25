@@ -280,12 +280,12 @@ pub fn check(pkt: Bytes, mode: Mode) -> Result[u64, Error] {
                 return Error(Body(RTPFB))
             }
         }
-        if packets == 0 {
+        // RFC 5506 §4.1: a reduced-size datagram need not follow the
+        // compound rules, so only Compound mode asks for a CNAME.
+        if packets == 0 && mode == Compound {
             sender = sender_ssrc(p.item)
-            if mode == Compound {
-                if let None = sender {
-                    return Error(NotCompound)
-                }
+            if let None = sender {
+                return Error(NotCompound)
             }
         }
         if let Some(ssrc) = sender {

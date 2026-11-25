@@ -528,6 +528,72 @@ fn source_position_changes_only_the_matching_annex() {
     );
 }
 
+/// A memoized unit's annex is read back by `Annex::decode`, so every annex
+/// the writer emits must decode against its own body. A decision whose
+/// anchor resolves to no site (its item is not in the build's source map, as
+/// for a std unit of a copied install) is no coverage site: the writer drops
+/// it rather than storing a decision the reader refuses.
+#[test]
+fn every_written_annex_decodes_with_or_without_its_sources() {
+    let mut module = checked(
+        "core v1
+            sig g0 = (bool) -> (u64)
+            inst n0 = app@1/main/pick [] []
+            fn f0 = n0 g0 {
+            b0(v0: bool):
+                branch v0, b1, b2
+            b1:
+                v1: u64 = const 1
+                return v1
+            b2:
+                v2: u64 = const 2
+                return v2
+            }
+        ",
+    );
+    let root = DefPath::from_full("app@1/main/pick").unwrap();
+    module.items = vec![root.clone()];
+    let block = &mut module.functions[0].body.as_mut().unwrap().blocks[0];
+    block.anchor = Some(Anchor {
+        item: ItemId(0),
+        start: 0,
+        end: 1,
+    });
+    block.decision = true;
+    wf::module(&module).unwrap();
+    let bound = SourceMap {
+        points: Default::default(),
+        files: vec![crate::source::SourceFile {
+            path: "main.hirsel".into(),
+            text: "if a".into(),
+        }],
+        items: [(
+            root,
+            crate::source::ItemSource {
+                file: 0,
+                file_offset: 0,
+            },
+        )]
+        .into(),
+    };
+    for (sources, decided) in [(bound, true), (SourceMap::default(), false)] {
+        let sources = sources.positions();
+        let (body, written) = encode_with_annex(&module, FuncId(0), &sources);
+        let (_, retained) = retain(&module, FuncId(0));
+        let decoded = round_trip(&body);
+        for annex in [
+            written,
+            retained_annex(&retained, &sources),
+            RetainedSites::take(retained).annex(&sources),
+        ] {
+            let read = Annex::decode(&annex.encode(), &decoded, &Debit::unlimited())
+                .expect("the writer's annex decodes against its body");
+            let function = read.0[0].as_ref().unwrap();
+            assert_eq!(function.decisions[0], decided, "a decision needs a site");
+        }
+    }
+}
+
 #[test]
 fn logical_admission_is_in_the_body() {
     let before = "core v1

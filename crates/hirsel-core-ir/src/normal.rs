@@ -955,7 +955,7 @@ fn annex_in_order(
     callable_parameters.sort_unstable();
     callable_parameters.dedup();
     let blocks = blocks.map(|row| &body.blocks[row]);
-    FunctionAnnex {
+    retained::decided(FunctionAnnex {
         instructions: blocks
             .clone()
             .flat_map(|block| {
@@ -972,7 +972,7 @@ fn annex_in_order(
         cold_calls: calls.map(|row| body.calls[row].cold).collect(),
         cold_edges: edges.map(|row| body.edges[row].cold).collect(),
         callable_parameters,
-    }
+    })
 }
 
 /// Decode a body with canonical IDs and empty source and optimisation fields.

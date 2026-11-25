@@ -121,7 +121,7 @@ impl RetainedSites {
             .iter()
             .map(|rows| {
                 let rows = rows.as_ref()?;
-                Some(FunctionAnnex {
+                Some(decided(FunctionAnnex {
                     instructions: rows.instructions.iter().map(site).collect(),
                     terminators: rows.terminators.iter().map(site).collect(),
                     decisions: rows.decisions.clone(),
@@ -132,7 +132,7 @@ impl RetainedSites {
                         .iter()
                         .map(|parameter| parameter.0)
                         .collect(),
-                })
+                }))
             })
             .collect();
         Annex(functions, None)
@@ -235,4 +235,15 @@ pub(super) fn resolve_site(
     let anchor = anchor?;
     let (file, line, column) = sources.annex_position(&items[anchor.item.index()], anchor.start)?;
     Some(Site { file, line, column })
+}
+
+/// `annex` with a decision only where its terminator's site resolved. A
+/// decision is a coverage site and a site needs a position, so one whose
+/// anchor's item is not in the build's sources is none: the front drops a
+/// decision without an anchor, and `Annex::decode` refuses one without a site.
+pub(super) fn decided(mut annex: FunctionAnnex) -> FunctionAnnex {
+    for (decision, site) in annex.decisions.iter_mut().zip(&annex.terminators) {
+        *decision &= site.is_some();
+    }
+    annex
 }

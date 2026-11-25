@@ -349,3 +349,105 @@ fn audio_forward_gate() -> Result[(), router.RouterError] {
     }
     Ok(())
 }
+
+// `quiet_speakers_fill_free_slots`: participant `p + 1` publishes in order loud (1),
+// silent (2), faint (3) and quiet (4); per round they send in the order 1, 4, 3, 2.
+// The loud one talks at -10 dBov until round 40 and is silent (127) after; the
+// silent one is muted throughout; the faint one is background noise at -80 dBov and
+// the quiet one a talker at -45 dBov, under the -35 dBov speaking bar.
+fn quiet_level(p: u64, k: u64) -> u8 {
+    if p == 0 {
+        return if k < 40 {
+            10
+        } else {
+            127
+        }
+    }
+    if p == 1 {
+        return 127
+    }
+    if p == 2 {
+        return 80
+    }
+    45
+}
+
+// Whether the listener hears participant `p + 1`'s packet of round `k`, by hand from
+// RTC-6 with `audio_forward = 2` (worked in the law's oracle).
+fn quiet_heard(p: u64, k: u64) -> bool {
+    if p == 0 {
+        return k >= 20 && k < 60
+    }
+    if p == 2 {
+        return k >= 60
+    }
+    if p == 3 {
+        return k >= 20
+    }
+    false
+}
+
+/// bug: hold every publication under the -35 dBov speaking bar even while `audio_forward` has slots no speaker takes, so a quiet talker is never heard in a room of fewer speakers than slots; fill the free slots in id order rather than by loudness, so a lower-id muted or background-noise publication takes the quiet talker's slot; forward a muted publication; or forward more than `audio_forward` publications.
+/// oracle: RTC-6 by hand, and Jitsi's loudest-N routing (DominantSpeakerIdentification.updateLoudestList ranks every endpoint by smoothed energy, with no speaking threshold). Windows of 20 packets of 960 ticks close at rounds 20, 40 and 60; the first packet adds no duration, so each window counts 19,200 ticks against the 7,680 floor. Window 1: the loud one's score 2/3 of amp(10) = 13,816 (speaking); the quiet one's murmur 2/3 of amp(45) = 246 and the faint one's 2/3 of amp(80) = 4 (scores 0: not speaking); the silent one's 0 (level 127 is not audible). So from round 20 the loud one takes one slot and the free one goes to the quiet one (246 > 4); the silent one never has a slot. Window 2 keeps the loud one speaking (19 of 20 packets at -10 dBov: 19,687, score 17,730). Window 3 has no active packet, so its score is 0 at its own round-60 packet, which is held: two slots are free from round 60, for the quiet (328) and the faint (6) one. The listener never hears more than two.
+@test
+fn quiet_speakers_fill_free_slots() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(170))
+    result.unwrap(router.open_room(mut r, room_id(), speaker_limits(2)))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut talkers: List[Client] = list.new()
+    let mut ps: List[router.PublicationId] = list.new()
+    for p in 0u64 .. 4u64 {
+        list.push(mut talkers, admit(mut r, 171 + p, speaker_offer(b" vad=on"), p + 1))
+        list.push(mut ps, result.unwrap(router.publish(mut r, room_id(), talkers[p].who, 0)))
+    }
+    let mut l = admit(mut r, 176, listener_offer(b"3", b" vad=on"), 6)
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let mut ssrcs: Inline[u32, 4] =[0u32; 4]
+    for p in 0u64 .. 4u64 {
+        result.unwrap(router.subscribe(mut r, room_id(), l.who, ps[p], int.narrow(p), base, 0, mut out))
+        let (m, _) = option.unwrap(router.track_ssrcs(r, room_id(), l.who, ps[p]))
+        ssrcs[p] = m
+    }
+    peer.clear_outbox(mut out)
+    let order: Inline[u64, 4] =[0u64, 3u64, 2u64, 1u64]
+    for k in 0u64 .. 80u64 {
+        let now = round_at(k)
+        let _ = router.poll(mut r, now, mut out)
+        peer.clear_outbox(mut out)
+        let mut heard = 0u64
+        for i in 0u64 .. 4u64 {
+            let p = order[i]
+            let packet = voiced(mut talkers[p].cs, k, quiet_level(p, k), false)
+            feed(mut r, now, talkers[p].who, talkers[p].at, packet, mut out)
+            let got = received(mut l, out)
+            peer.clear_outbox(mut out)
+            if !quiet_heard(p, k) {
+                if list.len(got) != 0 {
+                    if p == 3 || p == 2 {
+                        fail("a quiet publication was forwarded before a slot was free for it")
+                    }
+                    fail("a muted or no-longer-speaking publication was forwarded")
+                }
+                continue
+            }
+            if list.len(got) == 0 {
+                if p == 3 {
+                    fail("the quiet talker was held while a slot was free")
+                }
+                if p == 2 {
+                    fail("the faint publication was held while two slots were free")
+                }
+                fail("a speaker was held")
+            }
+            let g = one(got, "a forwarded publication arrives once")
+            if g.h.ssrc != ssrcs[p] {
+                fail("a publication arrives on another down-track")
+            }
+            heard += 1
+        }
+        if heard > 2 {
+            fail("the listener heard more publications than audio_forward allows")
+        }
+    }
+    Ok(())
+}

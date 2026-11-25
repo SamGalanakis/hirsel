@@ -622,11 +622,12 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
             list.push(mut r.notices, Layers(publication: publication, mask: mask))
             Ok(())
         },
-        Score(room: room, publication: publication, src: src, score: score) => {
+        Score(room: room, publication: publication, src: src, score: score, murmur: murmur) => {
             let Some(pi) = live(mut r, room, publication, src) else {
                 return Ok(())
             }
             r.publications[pi].voice.score = score
+            r.publications[pi].voice.murmur = murmur
             heard(mut r, room, now)
             gate(mut r, room, now, mut out)
         },

@@ -20,6 +20,7 @@ webrtc_sfu@1/laws/probe_padding_stays_in_budget src=03bb5d7004dc7934 sig=9fc6c12
 webrtc_sfu@1/laws/probe_pads_media_without_rtx src=19350d8fe9bca809 sig=9fc6c122d940c018 run=c2c0c6612d4cbb79 bug=7ee07bf080b3db94 oracle=b695048da4a0be3e rows=pending
 webrtc_sfu@1/laws/probe_ramps_to_top_layer src=7df22a0929e7c800 sig=37779fd9f152e078 run=c2c0c6612d4cbb79 bug=c6a97a5268015a26 oracle=261414b481a8de6d rows=pending
 webrtc_sfu@1/laws/probe_resumes_paused_leg src=2c4489e0eb8b497d sig=30e4fa09719ea44a run=c2c0c6612d4cbb79 bug=ff4c748775f4b754 oracle=37bb8fd6125eb11c rows=pending
+webrtc_sfu@1/laws/quiet_speakers_fill_free_slots src=27f1a971f570d23f sig=59f1038065b3e559 run=c2c0c6612d4cbb79 bug=9e3abe047e02c357 oracle=2610257fde701e43 rows=pending
 webrtc_sfu@1/laws/red_recovers_bursty_loss_10 src=7a98e54f49171d9d sig=374bd3375527ad6e run=c7b2a52baff70a63 bug=513bd4978f532620 oracle=30a91c9f8d207370 rows=pending
 webrtc_sfu@1/laws/red_recovers_bursty_loss_20 src=e6906a4552818a31 sig=374bd3375527ad6e run=c7b2a52baff70a63 bug=e0eb19fd67a493c8 oracle=d8746b772842d1dc rows=pending
 webrtc_sfu@1/laws/red_steps_down_on_a_clean_leg src=7834afcc17a3f6a4 sig=86550b3b98e62c3a run=c2c0c6612d4cbb79 bug=ec31ef3d23898fc9 oracle=cdb21342e05c7c2f rows=pending

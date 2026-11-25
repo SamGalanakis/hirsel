@@ -57,7 +57,9 @@ RTC-4 draws a FlexFEC SSRC per video down-track and re-offers its `FEC-FR` pair;
 protects keyframes and base-layer frames per leg, paced behind the group. Law W30, N1
 `flexfec_per_leg`.
 Amended 2026-11-25 (webrtc-dynacast-rtx-polish-2717): RTC-3's `PeerLimits` gains
-`start_bps`, the estimate a session starts from. In RTC-6, an encoding the publisher
+`start_bps`, the estimate a session starts from. RTC-6's audio gate gives the
+slots no speaker takes to quiet publications by a second score over every audible level.
+In RTC-6, an encoding the publisher
 stops without a layers allocation, by sending nothing for two rate windows, is dropped like
 one its allocation stops. Allocation steps over dropped encodings and never prices a step
 below 0, so a silent or cheaper stream can neither freeze a leg nor pay for another
@@ -1130,16 +1132,28 @@ negotiated `vad=off`, and the score never reads it in any case.
   `10^(-(loudest - 20·log10(active / interval)) / 20)` with `interval` 400 ms, which equals
   `amp(loudest) · active / interval`;
 - a publication with no packet for 800 ms has score 0;
-- a publication is **speaking** when `score ≥ amp(35)`.
+- a publication is **speaking** when `score ≥ amp(35)`;
+- beside the score, the home unit keeps a **murmur** by the same steps over every audible
+  level, `l ≤ 102` (the faintest level whose `amp` is not 0), in place of `l ≤ 35`: its
+  own counted duration and loudest level, the same 160 ms floor and the same smoothing.
+  It reads no `V` bit either, and an 800 ms expiry sets it to 0 with the score. A muted
+  leg (level 127) or one without the extension has murmur 0. The murmur ranks only the
+  audio gate's free slots (below); speakers, `Event.Speakers` and `V` read the score
+  alone.
 
 The speakers are the speaking publications ranked by these integer scores, then by lower
 participant ID. Q16 quantization can tie two scores that LiveKit's floats would order, and
 the tie-break then decides. That is the specified rank. Each 400 ms in which the top 8
 changed, the control unit emits `Event.Speakers(room, top, count)`.
 
-**Audio forwarding.** With `audio_forward = n > 0`, each subscriber's audio down-tracks
-forward only the `n` highest-ranked speakers, excluding the subscriber itself. Other audio
-down-tracks are held at `Off` until they rank again. Opus needs no keyframe, so the gate
+**Audio forwarding.** With `audio_forward = n > 0`, each subscriber has `n` slots. The
+highest-ranked speakers, excluding the subscriber itself, take them first. When fewer than
+`n` speak, the slots left free go to the subscriber's other audio publications that are not
+speaking and have a murmur above 0, by murmur, then lower participant ID, then lower
+publication ID, as Jitsi's loudest-N routing ranks every endpoint by its smoothed energy
+with no speaking threshold. So a quiet talker under −35 dBov is heard while a slot is free,
+and a muted one never is. No subscriber hears more than `n`. Other audio down-tracks are
+held at `Off` until they take a slot again. Opus needs no keyframe, so the gate
 switches at the next packet. The RFC 6464 extension is forwarded with the subscriber's ID and
 the seven level bits unchanged ([RFC 6464](https://www.rfc-editor.org/rfc/rfc6464) §3).
 The `V` bit follows each leg's negotiated `vad` (RTC-2 step 4). On a subscriber leg with
@@ -1625,7 +1639,13 @@ unless named otherwise.
   ID. *Oracle:* by hand. Each subscriber gets exactly the top two other speakers, at the next
   packet after a rank change, with continuous outbound sequence numbers per down-track. The
   seven level bits arrive unchanged, `V` follows RTC-6's rule per leg, and the absent leg
-  carries no extension.
+  carries no extension. `quiet_speakers_fill_free_slots` (`speaker_laws.hirsel`,
+  `audio_forward = 2`): a loud talker, a muted publication, background noise at −80 dBov
+  and a quiet talker at −45 dBov, the quiet one with the highest ID. *Oracle:* by hand from
+  the murmur's windows and Jitsi's ranking. From the first window the loud talker and the
+  quiet one are heard, and once the loud talker stops, the quiet one and the noise; the
+  muted publication never is, and the listener never hears more than two. It was red on
+  main, which held the quiet talker.
 - **W14 `revoke_fence_schedules`.** *Model:* a control unit and two media units. Steps: unit 0
   takes a datagram, routes it locally and posts `Media` to unit 1; unit 1's subscriber NACKs
   a packet and unit 0 posts a `RepairReply`; unit 0's `udp_send` commits only a prefix of its
@@ -2040,7 +2060,8 @@ W12 and W13 in `speaker_laws.hirsel`):
   publication, named by its owner's participant ID. Equal score and participant fall back to
   the lower publication ID.
 - **Opus.** An Opus down-track that the gate releases asks for no keyframe.
-- **Fence.** `Wanted`, `Layers` and `Score` carry the publisher's generation. A message
+- **Fence.** `Wanted`, `Layers` and `Score` carry the publisher's generation. `Score`
+  carries the murmur beside the score, so a remote unit's gate fills the same free slots. A message
   whose publisher is fenced or no longer owns the publication is dropped and counted
   `stale`. The state lives in `Publication` and `Down`, so leaving a seat or ending a
   down-track removes it.

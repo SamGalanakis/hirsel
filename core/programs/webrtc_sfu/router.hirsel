@@ -88,18 +88,6 @@ type Encoding {
     last_marker: bool
 }
 
-// RTC-6's speaker score of an audio publication, in Q16, and its open window, in
-// RTP ticks of the publication's clock (home unit). Every other unit keeps `score`
-// as the home unit posted it.
-type Voice {
-    score: i64,
-    observed: u64,
-    active: u64,
-    loudest: u8,
-    highest: Option[i64],
-    last: u64
-}
-
 type Publication {
     id: PublicationId,
     owner: peer.Gen,
@@ -246,7 +234,7 @@ pub type Control: cross = Order(seq: u64, change: Change) | Ack(seq: u64, unit: 
 /// - `Shut`: a refused re-offer closed the session.
 /// - `Answer`: the participant's answer to it, from the control unit to the home unit,
 ///   its SDP in `packet`.
-pub type Carry: cross = Media(room: peer.RoomId, publication: PublicationId, src: peer.Gen, m: peer.MediaIn, handle: u64, speaking: bool, rate: u64, dropped: u8) | Wanted(room: peer.RoomId, publication: PublicationId, src: peer.Gen, unit: u16, mask: u8) | Layers(room: peer.RoomId, publication: PublicationId, src: peer.Gen, mask: u8) | Score(room: peer.RoomId, publication: PublicationId, src: peer.Gen, score: i64) | Ask(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Reply(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Key(room: peer.RoomId, publication: PublicationId, encoding: u8, why: rtp.loss.Why) | Sender(room: peer.RoomId, publication: PublicationId, owner: peer.Gen, source: u32, info: rtp.rtcp.SenderInfo) | Offer(room: peer.RoomId, src: peer.Gen, version: u64) | Shut(room: peer.RoomId, src: peer.Gen) | Answer(room: peer.RoomId, dst: peer.Gen, version: u64)
+pub type Carry: cross = Media(room: peer.RoomId, publication: PublicationId, src: peer.Gen, m: peer.MediaIn, handle: u64, speaking: bool, rate: u64, dropped: u8) | Wanted(room: peer.RoomId, publication: PublicationId, src: peer.Gen, unit: u16, mask: u8) | Layers(room: peer.RoomId, publication: PublicationId, src: peer.Gen, mask: u8) | Score(room: peer.RoomId, publication: PublicationId, src: peer.Gen, score: i64, murmur: i64) | Ask(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Reply(room: peer.RoomId, publication: PublicationId, src: peer.Gen, dst: peer.Gen, ask: peer.RepairAsk) | Key(room: peer.RoomId, publication: PublicationId, encoding: u8, why: rtp.loss.Why) | Sender(room: peer.RoomId, publication: PublicationId, owner: peer.Gen, source: u32, info: rtp.rtcp.SenderInfo) | Offer(room: peer.RoomId, src: peer.Gen, version: u64) | Shut(room: peer.RoomId, src: peer.Gen) | Answer(room: peer.RoomId, dst: peer.Gen, version: u64)
 
 /// One media-inbox message: what it is, and the plaintext it carries (empty for
 /// `Ask`, `Key` and `Sender`).

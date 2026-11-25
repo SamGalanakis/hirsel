@@ -8,6 +8,9 @@ const AMP: Inline[i64, 128] =[65536, 58409, 52057, 46396, 41350, 36854, 32846, 2
 // The loudest level that counts as active, -35 dBov.
 const ACTIVE_LEVEL: u8 = 35
 
+// The faintest level `AMP` gives a nonzero value, -102 dBov: what `murmur` counts.
+const AUDIBLE_LEVEL: u8 = 102
+
 const WINDOW_MS: u64 = 400
 
 const ACTIVE_MS: u64 = 160
@@ -26,8 +29,24 @@ const TOP: u64 = 8
 
 const MS_NS: u64 = 1000000
 
+// RTC-6's speaker score of an audio publication, in Q16, and its open window, in
+// RTP ticks of the publication's clock (home unit). `murmur`, the same score over every
+// audible level, ranks the publications not speaking for the audio gate's free slots.
+// Every other unit keeps `score` and `murmur` as the home unit posted them.
+type Voice {
+    score: i64,
+    murmur: i64,
+    observed: u64,
+    active: u64,
+    loudest: u8,
+    audible: u64,
+    peak: u8,
+    highest: Option[i64],
+    last: u64
+}
+
 fn quiet() -> Voice {
-    Voice(score: 0, observed: 0, active: 0, loudest: 127, highest: None, last: 0)
+    Voice(score: 0, murmur: 0, observed: 0, active: 0, loudest: 127, audible: 0, peak: 127, highest: None, last: 0)
 }
 
 fn speaking(v: Voice) -> bool {
@@ -661,28 +680,43 @@ fn observe(mut r: Router, pi: u64, m: peer.MediaIn, now: u64, mut out: peer.Outb
             r.publications[pi].voice.loudest = l
         }
     }
+    if l <= AUDIBLE_LEVEL {
+        r.publications[pi].voice.audible += d
+        if l < r.publications[pi].voice.peak {
+            r.publications[pi].voice.peak = l
+        }
+    }
     let clock: u64 = int.widen(r.publications[pi].clock)
     let window = clock * WINDOW_MS / 1000
     if r.publications[pi].voice.observed < window {
         return Ok(())
     }
-    let before = r.publications[pi].voice.score
     let v = r.publications[pi].voice
-    if v.active >= clock * ACTIVE_MS / 1000 {
-        let loudest: u64 = int.widen(v.loudest)
-        let active: i64 = int.narrow(v.active)
-        let lin = AMP[loudest] * active / int.narrow(window)
-        r.publications[pi].voice.score = v.score + floor_div((lin - v.score) * 2, 3)
-    } else {
-        r.publications[pi].voice.score = 0
-    }
+    let floor = clock * ACTIVE_MS / 1000
+    r.publications[pi].voice.score = smoothed(v.score, v.active, v.loudest, floor, window)
+    r.publications[pi].voice.murmur = smoothed(v.murmur, v.audible, v.peak, floor, window)
     r.publications[pi].voice.observed = 0
     r.publications[pi].voice.active = 0
     r.publications[pi].voice.loudest = 127
-    if r.publications[pi].voice.score != before {
+    r.publications[pi].voice.audible = 0
+    r.publications[pi].voice.peak = 127
+    if r.publications[pi].voice.score != v.score || r.publications[pi].voice.murmur != v.murmur {
         scored(mut r, pi, now, mut out)?
     }
     Ok(())
+}
+
+// One closed window of a score: with at least `floor` ticks counted in it, the
+// score moves two thirds of the way to amp(loudest) times the counted share of the
+// window; otherwise it is 0 (RTC-6).
+fn smoothed(score: i64, counted: u64, loudest: u8, floor: u64, window: u64) -> i64 {
+    if counted < floor {
+        return 0
+    }
+    let at: u64 = int.widen(loudest)
+    let share: i64 = int.narrow(counted)
+    let lin = AMP[at] * share / int.narrow(window)
+    score + floor_div((lin - score) * 2, 3)
 }
 
 // Publication `pi`'s score changed on its home unit: every other unit of the room
@@ -692,6 +726,7 @@ fn scored(mut r: Router, pi: u64, now: u64, mut out: peer.Outbox) -> Result[(), 
     let id = r.publications[pi].id
     let owner = r.publications[pi].owner
     let score = r.publications[pi].voice.score
+    let murmur = r.publications[pi].voice.murmur
     let mut units = 1u64
     for s in r.roster {
         if s.who.room == room {
@@ -701,7 +736,7 @@ fn scored(mut r: Router, pi: u64, now: u64, mut out: peer.Outbox) -> Result[(), 
     let here: u64 = int.widen(r.unit)
     for u in 0u64 .. 64 {
         if (units >> u) & 1 == 1 && u != here {
-            post_bare(mut r, int.narrow(u), Score(room: room, publication: id, src: owner, score: score))
+            post_bare(mut r, int.narrow(u), Score(room: room, publication: id, src: owner, score: score, murmur: murmur))
         }
     }
     heard(mut r, room, now)
@@ -723,11 +758,14 @@ fn heard(mut r: Router, room: peer.RoomId, now: u64) {
     }
 }
 
-// Whether publication `a` ranks above `b`: by score, then by lower participant id,
-// then by lower publication id.
-fn above(r: Router, a: u64, b: u64) -> bool {
-    let sa = r.publications[a].voice.score
-    let sb = r.publications[b].voice.score
+// Whether publication `a` ranks above `b`: by score (`murmur` when `faint`), then
+// by lower participant id, then by lower publication id.
+fn above(r: Router, a: u64, b: u64, faint: bool) -> bool {
+    let (sa, sb) = if faint {
+        (r.publications[a].voice.murmur, r.publications[b].voice.murmur)
+    } else {
+        (r.publications[a].voice.score, r.publications[b].voice.score)
+    }
     if sa != sb {
         return sa > sb
     }
@@ -739,23 +777,32 @@ fn above(r: Router, a: u64, b: u64) -> bool {
     id_of(r.publications[a].id) < id_of(r.publications[b].id)
 }
 
-// The `n`-th best speaking publication of `room` (from 0), leaving out `skip`'s.
-fn ranked(r: Router, room: peer.RoomId, skip: Option[peer.Gen], n: u64) -> Option[u64] {
+// The `n`-th best speaking publication of `room` (from 0), leaving out `skip`'s; with
+// `faint`, the `n`-th best by `murmur` of those audible but not speaking.
+fn ranked(r: Router, room: peer.RoomId, skip: Option[peer.Gen], n: u64, faint: bool) -> Option[u64] {
     let mut last: Option[u64] = None
     for _ in 0u64 .. n + 1 {
         let mut best: Option[u64] = None
         for pi in 0u64 .. list.len(r.publications) {
             let p = r.publications[pi]
-            if p.room != room || p.codec != Opus || !speaking(p.voice) || skip == Some(p.owner) {
+            if p.room != room || p.codec != Opus || skip == Some(p.owner) {
+                continue
+            }
+            let fits = if faint {
+                !speaking(p.voice) && p.voice.murmur > 0
+            } else {
+                speaking(p.voice)
+            }
+            if !fits {
                 continue
             }
             if let Some(l) = last {
-                if !above(r, l, pi) {
+                if !above(r, l, pi, faint) {
                     continue
                 }
             }
             best = match best {
-                Some(b) if above(r, b, pi) => Some(b),
+                Some(b) if above(r, b, pi, faint) => Some(b),
                 _ => Some(pi),
             }
         }
@@ -767,10 +814,22 @@ fn ranked(r: Router, room: peer.RoomId, skip: Option[peer.Gen], n: u64) -> Optio
     last
 }
 
-// Whether publication `pi` is among the `n` best speakers its subscriber `sub` hears.
+// Whether publication `pi` takes one of the `n` slots of its subscriber `sub`: the
+// best speakers other than `sub`'s own take them first, and the slots they leave
+// free go to the publications that are audible but not speaking, by `murmur`.
 fn forwarded(r: Router, room: peer.RoomId, sub: peer.Gen, pi: u64, n: u64) -> bool {
-    for k in 0u64 .. n {
-        match ranked(r, room, Some(sub), k) {
+    let mut taken = 0u64
+    while taken < n {
+        match ranked(r, room, Some(sub), taken, false) {
+            Some(x) if x == pi => return true,
+            Some(_) => {
+                taken += 1
+            },
+            None => break,
+        }
+    }
+    for k in 0u64 .. n - taken {
+        match ranked(r, room, Some(sub), k, true) {
             Some(x) if x == pi => return true,
             Some(_) => (),
             None => return false,
@@ -780,7 +839,8 @@ fn forwarded(r: Router, room: peer.RoomId, sub: peer.Gen, pi: u64, n: u64) -> bo
 }
 
 // RTC-6's `audio_forward = n`: each local audio down-track of the room forwards only
-// the `n` best speakers other than its subscriber, and is held at `Off` otherwise.
+// the publications that take its subscriber's `n` slots (`forwarded`), and is held at
+// `Off` otherwise.
 // Opus switches at the next packet.
 fn gate(mut r: Router, room: peer.RoomId, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
     let Some(ri) = room_at(r, room) else {
@@ -824,9 +884,9 @@ fn dynamics(mut r: Router, now: u64, mut out: peer.Outbox) -> Result[Option[u64]
             wake = earliest(wake, Some(quiet_at))
             continue
         }
-        let before = r.publications[pi].voice.score
+        let before = r.publications[pi].voice
         r.publications[pi].voice = quiet()
-        if before != 0 {
+        if before.score != 0 || before.murmur != 0 {
             scored(mut r, pi, now, mut out)?
         }
     }
@@ -862,7 +922,7 @@ fn dynamics(mut r: Router, now: u64, mut out: peer.Outbox) -> Result[Option[u64]
         let mut count = 0u64
         let mut same = true
         for k in 0u64 .. TOP {
-            let Some(pi) = ranked(r, room, None, k) else {
+            let Some(pi) = ranked(r, room, None, k, false) else {
                 break
             }
             let Gen(id: id, epoch: _) = r.publications[pi].owner

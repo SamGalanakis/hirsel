@@ -25,7 +25,8 @@ pub fn fenced(r: Router, room: peer.RoomId, g: peer.Gen) -> bool {
     }
 }
 
-fn suspended(r: Router, room: peer.RoomId) -> bool {
+/// Whether `room` is suspended on this router (RTC-7 `Suspend`).
+pub fn suspended(r: Router, room: peer.RoomId) -> bool {
     match room_at(r, room) {
         Some(ri) => r.rooms[ri].suspended,
         None => false,

@@ -1,0 +1,576 @@
+// ---- RTC-8 signaling adapter over real units on sim.udp (W16) ----
+// The harness is the room: it feeds the adapter `RoomIn` entries, reads its `RoomOut`
+// and plays every browser, whose sessions it builds on the unit the adapter names.
+const YOU: u32 = 9
+
+const MARK_BASE: u8 = 0xe0
+
+/// W16's cases, (a) to (g).
+type Loss: key = Continued | Image | LeftInSnapshot | Stale | Incarnation | Headless | Unheralded
+
+/// A browser of the room: its peer number, hall index, home unit and admission.
+type Member {
+    peer: u32,
+    index: u64,
+    home: u16,
+    gen: peer.Gen
+}
+
+type Sig {
+    h: Hall,
+    a: signal.Adapter[signal.Signal],
+    out: List[runner.room_client.RoomOut[signal.Signal]],
+    members: List[Member],
+    // Published (peer, publication), Fenced (peer, epoch, capture index when sent),
+    // Refused (peer, code) and the peers sent an Answer.
+    pubs: List[(u32, u64)],
+    fenced: List[(u32, u64, u64)],
+    refused: List[(u32, u32)],
+    answered: List[u32],
+    // The case run, and the admissions its oracle revokes: no unit may route the room
+    // while one of them is not fenced there.
+    loss: Loss,
+    revoking: List[peer.Gen]
+}
+
+fn inc_of(b: u8) -> runner.room_client.Incarnation {
+    let mut raw: Inline[u8, 16] =[0u8; 16]
+    raw[0] = b
+    Incarnation(raw)
+}
+
+fn mark_for(p: u32) -> u8 {
+    MARK_BASE + int.narrow(p)
+}
+
+fn seat_of_peer(r: Sig, p: u32) -> Member {
+    for m in r.members {
+        if m.peer == p {
+            return m
+        }
+    }
+    fail("a peer has no session")
+}
+
+fn pub_for(r: Sig, p: u32) -> router.PublicationId {
+    for (q, id) in r.pubs {
+        if q == p {
+            return PublicationId(id)
+        }
+    }
+    fail("a peer has no publication")
+}
+
+fn read_room_out(mut r: Sig) {
+    let at = list.len(r.h.seen)
+    for take o in replace(mut r.out, list.new()) {
+        match take o {
+            ToRoom(take s) => match take s {
+                Fenced(p, e) => list.push(mut r.fenced, (int.narrow(p), e, at)),
+                Published(p, id, _, _) => list.push(mut r.pubs, (int.narrow(p), id)),
+                _ => (),
+            },
+            ToPeer(p, take s) => match take s {
+                Refused(c) => list.push(mut r.refused, (p, c)),
+                Answer(_, _) => list.push(mut r.answered, p),
+                _ => (),
+            },
+        }
+    }
+}
+
+fn enter_room(mut r: Sig, take e: runner.room_client.RoomIn[signal.Signal]) {
+    signal.room_in(mut r.a, take e, mut r.out)
+    read_room_out(mut r)
+}
+
+fn say_as(mut r: Sig, p: u32, take s: signal.Signal) {
+    let e: runner.room_client.RoomIn[signal.Signal] = Message(p, take s)
+    enter_room(mut r, take e)
+}
+
+// Build each session the adapter asked for on its home unit, as the unit-side driver
+// does: the browser end, the server session parked there, and the outcome.
+fn serve_builds(mut r: Sig) waits {
+    for take b in signal.take_builds(mut r.a) {
+        let signal.Build(who: who, home: home, peer: p, version: _, offer: take offer, publish: _) = take b
+        let mut ufrag: Bytes = list.new()
+        list.append(mut ufrag, b"ufrags")
+        let digit: u8 = int.narrow(p)
+        list.push(mut ufrag, 0x30 + digit)
+        let at = addr_of(p)
+        let (take sock, local_at) = result.unwrap(host.udp_bind(r.h.net, at, SOCK))
+        let wide: u64 = int.widen(p)
+        let Rig(p: take session, c: _, cs: take cs, out: _) = established_as(16000 + wide, offer, who, local_at, 64, ufrag)
+        if home == 0 {
+            result.unwrap(units.park(mut r.h.w.u0, take session))
+        } else if home == 1 {
+            result.unwrap(units.park(mut r.h.w.u1, take session))
+        } else {
+            result.unwrap(units.park(mut r.h.w.u2, take session))
+        }
+        let index = list.len(r.h.peers)
+        let small: u16 = int.narrow(p)
+        list.push(mut r.h.peers, Peer(c: Client(who: who.gen, at: local_at, cs: take cs), sock: take sock, home: r.h.addrs[home], ssrc: 0x51000000 + p, seq: 1000 * small, mark: mark_for(p)))
+        list.push(mut r.members, Member(peer: p, index: index, home: home, gen: who.gen))
+        let mut recvs: List[u8] = list.new()
+        list.push(mut recvs, 0)
+        let mut sends: List[(u8, sdp.Media)] = list.new()
+        list.push(mut sends, (1u8, Video))
+        list.push(mut sends, (2u8, Video))
+        signal.built(mut r.a, who, Ok(signal.Built(answer: b"answer", recvs: take recvs, sends: take sends)), mut r.out)
+    }
+    read_room_out(mut r)
+}
+
+/// Every unit turns once, the adapter steps the control order on unit 0 and the
+/// builds it asked for are served, then 5 ms pass.
+fn turn_all(mut r: Sig) waits {
+    step_unit(mut r.h, 1)
+    step_unit(mut r.h, 2)
+    step_unit(mut r.h, 0)
+    let now = host.mono_ns(r.h.clock)
+    result.unwrap(signal.step(mut r.a, mut r.h.w.u0, now, mut r.out))
+    read_room_out(mut r)
+    serve_builds(mut r)
+    for k in 0u16 .. 3u16 {
+        if router.suspended(router_on(r.h, k), room_id()) {
+            continue
+        }
+        for g in r.revoking {
+            if !router.fenced(router_on(r.h, k), room_id(), g) {
+                fail_in(r.loss, "a unit routed the room before a revoked admission's fence held there")
+            }
+        }
+    }
+    host.sleep_until(r.h.clock, now + 5 * MS)
+}
+
+/// Every browser speaks every 20 ms (each fourth tick) for `ticks` ticks.
+fn chatter_all(mut r: Sig, ticks: u64) waits {
+    for t in 0u64 .. ticks {
+        if t % 4 == 0 {
+            for i in 0u64 .. list.len(r.h.peers) {
+                speak(mut r.h, i)
+            }
+        }
+        turn_all(mut r)
+    }
+}
+
+fn until_idle(mut r: Sig) waits {
+    for _ in 0u64 .. 64 {
+        if signal.idle(r.a) {
+            return
+        }
+        turn_all(mut r)
+    }
+    fail("the control order did not drain")
+}
+
+fn base_layer() -> router.Target {
+    Layer(encoding: 0, spatial: 0, temporal: 0)
+}
+
+// The room at revision 5 of incarnation 1: the service (9) and peers 1 to 3, each
+// publishing one video section and subscribed to the other two. Peers offer in the
+// order 3, 2, 1, and the adapter homes sessions on units 0 and 1 only, so peers 3
+// and 1 share unit 0 and peer 2 is on unit 1; unit 2 hosts no session but takes every
+// control call and fence.
+fn opened_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
+    let h = hall(net, clock, seed)
+    // The application message is the signal itself, and every peer may publish.
+    let embed = signal.Embed(wrap: fn(take s: signal.Signal) -> signal.Signal {
+        take s
+    }, unwrap: fn(take s: signal.Signal) -> Option[signal.Signal] {
+        Some(take s)
+    }, publish: fn(n: u32) -> bool {
+        n != YOU
+    })
+    let mut a = signal.adapter(room_id(), revoke_limits(), take embed, 2)
+    signal.you(mut a, Some(YOU))
+    let mut r = Sig(h: take h, a: take a, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), loss: loss, revoking: list.new())
+    enter_room(mut r, Part(inc_of(1), 5, true, true))
+    enter_room(mut r, Joined(YOU))
+    for p in 1u32 .. 4u32 {
+        enter_room(mut r, Joined(p))
+    }
+    enter_room(mut r, PartEnd)
+    for p in[3u32, 2u32, 1u32] {
+        say_as(mut r, p, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    }
+    until_idle(mut r)
+    if list.len(r.answered) != 3 || list.len(r.pubs) != 3 {
+        fail("the peers were not admitted and published")
+    }
+    for p in 1u32 .. 4u32 {
+        for q in 1u32 .. 4u32 {
+            if p != q {
+                let PublicationId(id) = pub_for(r, q)
+                say_as(mut r, p, Subscribe(id, base_layer()))
+            }
+        }
+    }
+    until_idle(mut r)
+    if list.len(r.refused) != 0 {
+        fail("a subscription was refused")
+    }
+    take r
+}
+
+fn seam_on(mut h: Hall, k: u16, limit: u64) {
+    if k == 0 {
+        units.seam(mut h.w.u0, limit, true)
+    } else if k == 1 {
+        units.seam(mut h.w.u1, limit, true)
+    } else {
+        units.seam(mut h.w.u2, limit, true)
+    }
+}
+
+fn queued_on(h: Hall, k: u16) -> u64 {
+    if k == 0 {
+        list.len(units.queued(h.w.u0).pkts)
+    } else if k == 1 {
+        list.len(units.queued(h.w.u1).pkts)
+    } else {
+        list.len(units.queued(h.w.u2).pkts)
+    }
+}
+
+// The service takes an entry and steps the control order at once, before any unit
+// turns again.
+fn step_now(mut r: Sig) {
+    let now = host.mono_ns(r.h.clock)
+    result.unwrap(signal.step(mut r.a, mut r.h.w.u0, now, mut r.out))
+    read_room_out(mut r)
+}
+
+/// Every browser keeps speaking until the control order has drained, then 200 ms more.
+fn talk_through(mut r: Sig) waits {
+    let mut t = 0u64
+    while !signal.idle(r.a) {
+        if t >= 256 {
+            fail("the control order did not drain")
+        }
+        if t % 4 == 0 {
+            for i in 0u64 .. list.len(r.h.peers) {
+                speak(mut r.h, i)
+            }
+        }
+        turn_all(mut r)
+        t += 1
+    }
+    chatter_all(mut r, 40)
+}
+
+fn router_on(h: Hall, k: u16) -> View[router.Router] in h {
+    if k == 0 {
+        units.router_of(h.w.u0)
+    } else if k == 1 {
+        units.router_of(h.w.u1)
+    } else {
+        units.router_of(h.w.u2)
+    }
+}
+
+// The down-track SSRCs subscriber `p` receives publisher `q` on.
+fn down_track(r: Sig, p: u32, q: u32) -> (u32, u32) {
+    let m = seat_of_peer(r, p)
+    option.unwrap(router.track_ssrcs(router_on(r.h, m.home), room_id(), m.gen, pub_for(r, q)))
+}
+
+fn reaches_from(h: Hall, from: u64, p: u32, ssrc: u32, q: u32) -> bool {
+    for i in from .. list.len(h.seen) {
+        let s = h.seen[i]
+        if s.to == addr_of(p) && s.kind == KIND_RTP && s.ssrc == ssrc && s.mark == mark_for(q) {
+            return true
+        }
+    }
+    false
+}
+
+fn revoked_in(loss: Loss) -> List[u32] {
+    let mut out: List[u32] = list.new()
+    match loss {
+        Stale => (),
+        Unheralded => (),
+        Incarnation => {
+            list.push(mut out, 1)
+            list.push(mut out, 2)
+            list.push(mut out, 3)
+        },
+        Headless => {
+            list.push(mut out, 1)
+            list.push(mut out, 2)
+            list.push(mut out, 3)
+        },
+        _ => list.push(mut out, 1),
+    }
+    out
+}
+
+fn holds_peer(xs: List[u32], v: u32) -> bool {
+    for x in xs {
+        if x == v {
+            return true
+        }
+    }
+    false
+}
+
+fn fail_in(loss: Loss, take what: String) -> Never {
+    let mut m = string.from(match loss {
+        Continued => "(a) ",
+        Image => "(b) ",
+        LeftInSnapshot => "(c) ",
+        Stale => "(d) ",
+        Incarnation => "(e) ",
+        Headless => "(f) ",
+        Unheralded => "(g) ",
+    })
+    string.push(mut m, what)
+    fail(take m)
+}
+
+fn loss_run(net: Net, clock: Clock, loss: Loss) waits {
+    let mut r = opened_room(net, clock, 16000, loss)
+    let room = room_id()
+    let first_peer = seat_of_peer(r, 1)
+    let second_peer = seat_of_peer(r, 2)
+    // Every peer's media reaches both its subscribers before the loss.
+    chatter_all(mut r, 20)
+    for p in 1u32 .. 4u32 {
+        for q in 1u32 .. 4u32 {
+            if p != q {
+                let (ssrc, _) = down_track(r, p, q)
+                if !reaches_from(r.h, 0, p, ssrc, q) {
+                    fail_in(loss, "media did not reach every subscriber before the loss")
+                }
+            }
+        }
+    }
+    let mut before: List[(u32, u32, u32)] = list.new()
+    for p in 1u32 .. 4u32 {
+        for q in 1u32 .. 4u32 {
+            if p != q {
+                let (ssrc, _) = down_track(r, p, q)
+                list.push(mut before, (p, q, ssrc))
+            }
+        }
+    }
+    // The held suffix on peer 1's unit, whose writer then commits one datagram a turn,
+    // so media to peer 1 waits there; and a repair of peer 1's packet for peer 2: peer
+    // 2's unit asks peer 1's, which answers, and the reply waits in peer 2's unit's
+    // media inbox when the loss comes. Each peer's held window of source sequence
+    // numbers is [from, to).
+    let (two_one, two_one_rtx) = down_track(r, 2, 1)
+    let mut held: List[(u32, u16, u16)] = list.new()
+    for p in 1u32 .. 4u32 {
+        let m = seat_of_peer(r, p)
+        list.push(mut held, (p, r.h.peers[m.index].seq, 0u16))
+    }
+    seam_on(mut r.h, first_peer.home, 1)
+    for _ in 0u64 .. 4 {
+        for _ in 0u64 .. 2 {
+            for i in 0u64 .. 3 {
+                speak(mut r.h, i)
+            }
+        }
+        tick(mut r.h)
+    }
+    let ask = nack(mut r.h.peers[second_peer.index].c.cs, two_one, last_seq(r.h, addr_of(2), two_one))
+    send_from(mut r.h, second_peer.index, ask)
+    step_unit(mut r.h, second_peer.home)
+    for i in 0u64 .. 3 {
+        speak(mut r.h, i)
+    }
+    step_unit(mut r.h, first_peer.home)
+    for k in 0u64 .. 3 {
+        let (p, from, _) = held[k]
+        let m = seat_of_peer(r, p)
+        held[k] = (p, from, r.h.peers[m.index].seq)
+    }
+    if queued_on(r.h, first_peer.home) == 0 {
+        fail_in(loss, "peer 1's unit held nothing at the loss")
+    }
+    if unit_router(r.h, first_peer.home).ring_misses != 0 {
+        fail_in(loss, "the held repair missed the publisher's ring")
+    }
+    let lost_at = list.len(r.h.seen)
+    let fenced_from = list.len(r.fenced)
+    for p in revoked_in(loss) {
+        let m = seat_of_peer(r, p)
+        list.push(mut r.revoking, m.gen)
+    }
+    if loss != Unheralded {
+        enter_room(mut r, Lost)
+        step_now(mut r)
+    }
+    match loss {
+        Continued => {
+            enter_room(mut r, Part(inc_of(1), 6, false, false))
+            enter_room(mut r, Left(1))
+            enter_room(mut r, PartEnd)
+            chatter_all(mut r, 8)
+            enter_room(mut r, Part(inc_of(1), 7, false, true))
+            enter_room(mut r, PartEnd)
+        },
+        Image => {
+            enter_room(mut r, Part(inc_of(1), 6, true, true))
+            enter_room(mut r, Joined(YOU))
+            enter_room(mut r, Joined(2))
+            enter_room(mut r, Joined(3))
+            enter_room(mut r, PartEnd)
+        },
+        LeftInSnapshot => {
+            enter_room(mut r, Part(inc_of(1), 6, false, true))
+            enter_room(mut r, Left(1))
+            enter_room(mut r, PartEnd)
+        },
+        Stale => {
+            enter_room(mut r, Part(inc_of(1), 4, false, true))
+            enter_room(mut r, PartEnd)
+            chatter_all(mut r, 40)
+            if !signal.lost(r.a) {
+                fail_in(loss, "a stale snapshot resumed the room")
+            }
+            enter_room(mut r, Part(inc_of(1), 6, false, true))
+            enter_room(mut r, PartEnd)
+        },
+        Incarnation => {
+            enter_room(mut r, Part(inc_of(2), 1, true, true))
+            enter_room(mut r, Joined(YOU))
+            for p in 1u32 .. 4u32 {
+                enter_room(mut r, Joined(p))
+            }
+            enter_room(mut r, PartEnd)
+        },
+        Headless => {
+            enter_room(mut r, Joined(4))
+            enter_room(mut r, Part(inc_of(1), 6, false, true))
+            enter_room(mut r, PartEnd)
+        },
+        Unheralded => {
+            enter_room(mut r, Part(inc_of(1), 6, true, true))
+            step_now(mut r)
+            let PublicationId(gone) = pub_for(r, 1)
+            say_as(mut r, 2, Unsubscribe(gone))
+            enter_room(mut r, Joined(YOU))
+            for p in 1u32 .. 4u32 {
+                enter_room(mut r, Joined(p))
+            }
+            enter_room(mut r, PartEnd)
+            let mut suspended = false
+            for (p, c) in r.refused {
+                if p == 2 && c == signal.code(Suspended) {
+                    suspended = true
+                }
+            }
+            if !suspended {
+                fail_in(loss, "an entry of an unheralded complete Part was applied before the room suspended")
+            }
+        },
+    }
+    if signal.lost(r.a) {
+        fail_in(loss, "a current snapshot did not resume the room")
+    }
+    let resumed_at = list.len(r.h.seen)
+    seam_on(mut r.h, first_peer.home, 0)
+    talk_through(mut r)
+    let revoked = revoked_in(loss)
+    // Fenced for exactly the revoked admissions, at their pre-gap epochs, each fence
+    // holding on every unit before the first packet forwarded after the loss.
+    let mut first = list.len(r.h.seen)
+    for i in lost_at .. list.len(r.h.seen) {
+        if r.h.seen[i].kind == KIND_RTP && first == list.len(r.h.seen) {
+            first = i
+        }
+    }
+    if first < resumed_at {
+        fail_in(loss, "a packet was forwarded between the loss and the resume")
+    }
+    for p in 1u32 .. 4u32 {
+        let m = seat_of_peer(r, p)
+        let Gen(id: _, epoch: epoch) = m.gen
+        let mut sent = false
+        for i in fenced_from .. list.len(r.fenced) {
+            let (q, e, at) = r.fenced[i]
+            if q == p {
+                if e != epoch || at > first || sent {
+                    fail_in(loss, "Fenced was sent at the wrong epoch, twice, or after media resumed")
+                }
+                sent = true
+            }
+        }
+        if sent != holds_peer(revoked, p) {
+            fail_in(loss, "Fenced was not sent for exactly the revoked admissions")
+        }
+        if sent {
+            for k in 0u16 .. 3u16 {
+                if !router.fenced(router_on(r.h, k), room, m.gen) {
+                    fail_in(loss, "a revoked admission was not fenced on every unit")
+                }
+            }
+        } else if signal.participant(r.a, p) != Some(m.gen) {
+            fail_in(loss, "an unchanged peer did not resume with its id and epoch")
+        }
+    }
+    for i in lost_at .. list.len(r.h.seen) {
+        let s = r.h.seen[i]
+        if s.kind != KIND_RTP {
+            continue
+        }
+        if s.ssrc == two_one_rtx {
+            fail_in(loss, "the repair held at the loss left")
+        }
+        for (p, from, to) in held {
+            if s.mark == mark_for(p) && int.wrapping_sub(s.n, from) < int.wrapping_sub(to, from) {
+                fail_in(loss, "media held in a suffix at the loss left")
+            }
+        }
+        for p in revoked {
+            if s.mark == mark_for(p) {
+                fail_in(loss, "a revoked peer's media was forwarded after the loss")
+            }
+        }
+    }
+    // Every continued peer's media reaches every continued subscriber again, on the
+    // down-track it had before the loss.
+    for (p, q, ssrc) in before {
+        if !holds_peer(revoked, p) && !holds_peer(revoked, q) && !reaches_from(r.h, resumed_at, p, ssrc, q) {
+            fail_in(loss, "a continued peer's media did not resume on its down-track")
+        }
+    }
+    let Sig(h: take h, ..) = take r
+    close_hall(take h)
+}
+
+/// bug: the adapter forwards anything between `Lost` and resume, lets media or a
+/// repair queued at the loss leave, resumes from a roster it has not proven (a stale
+/// snapshot, a scratch roster seeded from the pre-gap one under a new membership, a
+/// comparison made at the Part head before the Part's own entries, entries with no
+/// head, or a different incarnation's wrap_signal-numbered peer), resumes before a gone
+/// peer's revoke returns, or applies an entry of an unheralded `complete` Part
+/// before suspending.
+/// oracle: RTC-8 by hand, from captures at each unit's writer read by the browsers'
+/// own SRTP ends and from each unit's router after every turn. From `Lost` no RTP is
+/// captured until the snapshot's `PartEnd`; the held repair's RTX SSRC and the held
+/// suffix's source sequence numbers never appear. The revoked set is {1} in (a), (b)
+/// and (c), {} in (d) and (g), and {1, 2, 3} in (e) and (f): no unit routes the room
+/// (it is not suspended there) while one of them is unfenced there; exactly those get
+/// `Fenced` at their pre-gap epoch before the first forwarded packet; and their mark
+/// never appears after the loss. Every other peer keeps its id and epoch and its
+/// media reaches its continued subscribers on the same down-track SSRC. In (d) the
+/// room is still suspended 200 ms after the stale snapshot; in (g) a message in the
+/// Part is `Refused(Suspended)`. Seeded: (b) is red on a scratch roster seeded from
+/// the pre-gap one, (c) on a comparison made at the Part head.
+@test
+fn signaling_loss_fails_closed(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    for loss in[Continued, Image, LeftInSnapshot, Stale, Incarnation, Headless, Unheralded] {
+        let (net, clock, take served) = sim_net(tasks, 16000)
+        loss_run(net, clock, loss)
+        result.unwrap(task.join(take served))
+    }
+    Ok(())
+}

@@ -17,7 +17,7 @@ pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspend
 
 pub type PublicationId: key = PublicationId(u64)
 
-pub type Target: key = Off | Layer(encoding: u8, spatial: u8, temporal: u8)
+pub type Target: key + codec = Off | Layer(encoding: u8, spatial: u8, temporal: u8)
 
 /// Router counters: keyframe requests the publisher's negotiation could not carry
 /// (RTC-6: the down-track waits for the next independent frame), and repair asks

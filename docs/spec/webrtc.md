@@ -950,15 +950,20 @@ per peer plus addressed `Message M`. The room's types are the application's, so 
 generic over them:
 
 ```hirsel unbuilt
-pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, Target) | Target(u64, Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(Inline[u64, 8], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
+pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, Target) | Target(u64, Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
 pub type Incarnation = Incarnation(Inline[u8, 16])
 pub type RoomIn[M] = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32) | Left(u32) | Message(u32, M) | Lost
 pub type RoomOut[M] = ToPeer(u32, M) | ToRoom(M)
-pub type Embed[M] = Embed(wrap: own[send] fn(Signal) -> M, unwrap: own[send] fn(M) -> Option[Signal], publish: own[send] fn(u32) -> bool)
+pub type Embed[M] { wrap: own[send] fn(take Signal) -> M, unwrap: own[send] fn(take M) -> Option[Signal], publish: own[send] fn(u32) -> bool }
+pub type Build { who: Participant, home: u16, peer: u32, version: u64, offer: Bytes, publish: bool }
+pub type Built { answer: Bytes, recvs: List[u8], sends: List[(u8, Media)] }
 
-pub fn adapter[M: codec](room: RoomId, limits: RoomLimits, take embed: Embed[M]) -> Adapter[M]
-pub fn room_in[M: codec](mut a: Adapter[M], mut r: Router, input: RoomIn[M], mut out: List[RoomOut[M]]) -> Result[(), RouterError] waits
-pub fn events[M: codec](mut a: Adapter[M], events: List[Event], mut out: List[RoomOut[M]])
+pub fn adapter[M: codec](room: RoomId, limits: RoomLimits, take embed: Embed[M], units: u16) -> Adapter[M]
+pub fn you[M](mut a: Adapter[M], peer: Option[u32])
+pub fn room_in[M: codec](mut a: Adapter[M], take input: RoomIn[M], mut out: List[RoomOut[M]])
+pub fn step[M: codec](mut a: Adapter[M], mut u: Unit, now: u64, mut out: List[RoomOut[M]]) -> Result[(), RouterError]
+pub fn take_builds[M](mut a: Adapter[M]) -> List[Build]
+pub fn built[M](mut a: Adapter[M], who: Participant, take result: Result[Built, RouterError], mut out: List[RoomOut[M]])
 ```
 
 The service itself is one room peer, admitted by the application's room admission like any
@@ -1448,7 +1453,7 @@ W19, blocks, because those are soundness reds.
 - **Sessions.** An opened `PeerSession` is parked on its home unit (`units.park`), and
   `Admit` moves it into the room. An admission that is refused, for example `Fenced`,
   unparks the session, so a refused join holds nothing. S6 and S7 build sessions inside
-  their unit from cross-unit inputs. Join-from-offer has no owner yet: S7 decides it.
+  their unit from cross-unit inputs. S7 owns join-from-offer (S7 decisions, Sessions).
 - **One outbox, no separate suffix.** A unit keeps one persistent outbox. `udp_send`
   commits a prefix, and the rest stays queued as the uncommitted suffix. A purge runs at
   `apply`, at the control drain and at `ready` (the send step). Every queued datagram's tag is
@@ -1511,6 +1516,43 @@ W12 and W13 in `speaker_laws.hirsel`):
   down-track removes it.
 - **Laws on one router.** W12 and W13 run on one router. The `Score` message and the gate
   on a remote unit are covered by no law yet.
+
+**S7 decisions.** Gaps the spec left open, decided while S7 was built
+(`core/programs/webrtc_sfu/signal.hirsel`, W16 in `signal_laws.hirsel`):
+
+- **Sans-IO adapter on the control unit.** The adapter holds no router. `room_in` takes
+  the room client's entries in order and answers with `RoomOut`. `step` drives the control
+  order on unit 0, one call in flight (S5): it answers the call that finished, turns each
+  `Event.Fenced` into the `Fenced` signal, and begins the next call. The service calls
+  `step` after every `room_in` and every unit turn. `you` names the service's own peer
+  (`room_client.member(room).you`), which is never admitted.
+- **Sessions.** An `Offer` from an admitted peer with no session asks for a `Build` on its
+  home unit, the unit with the fewest sessions, ties to the lowest. The home unit opens
+  the session from the offer (with `Build.publish` from `Embed.publish`), parks it, and
+  reports `built`. The adapter then queues `Admit`. Once it returns, `Answer` goes to the
+  peer and one `Publish` is queued for each section the peer sends on. Each publication
+  goes to the room as `Published(peer, id, kind, encodings)`. A refused build or
+  admission is sent to the peer as `Refused`, and the peer may offer again.
+- **Ending an admission.** An admission with no session is fenced at once. One whose
+  session is being built is admitted and revoked when the build reports. Otherwise
+  `Revoke` is queued, and `Fenced(peer, epoch)` goes to the room when `Event.Fenced`
+  says the fence holds, or at once if the router had nothing to fence.
+- **Signals.** A `Candidate` or `EndOfCandidates` changes nothing, because the server is
+  ICE-Lite (RTC-3). `Subscribe` takes the peer's first free send section of the
+  publication's kind, and is refused `Limit` when there is none. A server-only signal from
+  a peer is answered `Refused(0)`. Otherwise a `Refused` code is the `RouterError` tag,
+  counted from 1 (`signal.code`).
+- **Loss.** `Lost` puts `Suspend` ahead of every waiting call and drops a waiting resume.
+  Every `Message` from then until resume is answered `Refused(Suspended)`. The comparison
+  runs at the `PartEnd` of the first Part with `snapshot` set. A stale snapshot leaves the
+  room suspended. Revokes are queued before the resume, so each fence holds on every unit
+  before the room routes again.
+- **Layers and Speakers.** `step` sends `Event.Layers(publication, mask)` to the publication's
+  owner as `Layers(publication, mask)`, and `Event.Speakers` to the room as
+  `Speakers(peers, count)`, each router id replaced by its seat's peer number. `Speakers`
+  carries a `List[u64]`, because `Inline` is not `codec`.
+- **Embed callables.** In the native build, a named function converted to an `Embed`
+  field crashes (SIGSEGV). Closures do not, so W16 uses closures.
 
 **Follow-ups this spec names.**
 

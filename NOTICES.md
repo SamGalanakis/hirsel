@@ -162,6 +162,7 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | toml-0.8.23 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362` |
 | toml_datetime-0.6.11 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c` |
 | toml_edit-0.22.27 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a` |
+| toml_write-0.1.2 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801` |
 | twox-hash-2.1.5 | MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2` |
 | typenum-1.20.1 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20` |
 | unicode-bidi-0.3.18 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5` |
@@ -197,7 +198,7 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 
 ### `bin/ld.lld`
 
-llvm-23.lock `static_lld`: `ld.lld-23.1.5-static-pie-manylinux_2_28-x86_64`, 79508536 bytes, SHA-256 `ac8db179571813f67e823c6ebf69a9ed8f5eeae941546cc0a74fea2b22a2d679`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: glibc, gcc. A static PIE built in manylinux_2_28. It includes AlmaLinux's static glibc and GCC Toolset 14 libstdc++, libgcc and libgcc_eh.
+llvm-23.lock `static_lld`: `ld.lld-23.1.5-elf-macho-static-pie-manylinux_2_28-x86_64`, 80753904 bytes, SHA-256 `b4b18b795ed21524950815860c7351ebbaf0ce4fd0ef4599d75b25ccc96904df`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: glibc, gcc. A static PIE built in manylinux_2_28. It includes AlmaLinux's static glibc and GCC Toolset 14 libstdc++, libgcc and libgcc_eh.
 
 | Source file | SHA-256 |
 |---|---|
@@ -1394,6 +1395,15 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    ]
   },
   {
+   "checksum": "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801",
+   "crate": "toml_write-0.1.2",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2",
    "crate": "twox-hash-2.1.5",
    "license": "MIT",
@@ -1770,12 +1780,12 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
  },
  "native": [
   {
-   "asset": "ld.lld-23.1.5-static-pie-manylinux_2_28-x86_64",
+   "asset": "ld.lld-23.1.5-elf-macho-static-pie-manylinux_2_28-x86_64",
    "lock": "static_lld",
    "note": "A static PIE built in manylinux_2_28. It includes AlmaLinux's static glibc and GCC Toolset 14 libstdc++, libgcc and libgcc_eh.",
    "path": "bin/ld.lld",
-   "sha256": "ac8db179571813f67e823c6ebf69a9ed8f5eeae941546cc0a74fea2b22a2d679",
-   "size": 79508536,
+   "sha256": "b4b18b795ed21524950815860c7351ebbaf0ce4fd0ef4599d75b25ccc96904df",
+   "size": 80753904,
    "source": {
     "sha256": "51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5",
     "url": "https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz"

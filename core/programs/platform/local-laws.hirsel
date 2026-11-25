@@ -43,14 +43,15 @@ fn start_local(parent: Dir, make: fn(take local.Supplied) -> Result[runner.Place
 
 fn start_local_in(dir: Dir, take dir_name: String, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
     let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
+    // One child's charge (RUNNER-SPEC §13.4 row 7: runner.operate_bytes is what operate
+    // spends): operate_bytes of the factory's own config, the Directory writer, the 1 MiB
+    // main keeps and 1 MiB of slack for the child task's own bytes.
+    let sized = result.unwrap(make(local.Supplied(name: string.from("a"), tasks: tasks, clock: clock, random: random, net: net)))
+    let operate = result.unwrap(runner.operate_bytes(sized))
     let making: local.Factory[()] = local.factory(make)
     let options = disk_options()
     let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options)))
-    // One serving owner, the head's Registry and publisher, a 2 MiB head,
-    // 256 KiB for operate, a 1 MiB keep and 1 MiB of fixture slack. The owner
-    // also holds its hello's bind child: 4096 + ingress's 4096 bind_bytes.
-    let serving = result.unwrap(runner.serving_bytes(local_wire(), 1u64, N_PLACE)) + 8192u64
-    let place_bytes = writer + serving + N_PLACE + 1048576u64 + 2097152u64 + 262144u64 + 2 * 1048576u64
+    let place_bytes = operate + writer + 1048576u64 + 1048576u64
     let config = local.Config(root: dir, options: take options, factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms, place_bytes: place_bytes, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
     let made = match local.local(local.doorway(), take config) {
         Ok(take made) => take made,
@@ -552,7 +553,7 @@ fn unit_grant(seed: (), unused_handles: Hd, context: runner.TriggerContext) -> R
 }
 
 fn ping_call(client: runner.wire_client.Conn, ping_keys: List[Bytes], key: Bytes, position: u64, arg: u64) -> u64 waits {
-    runner.wire_client.send_frame(client, Call(store.StreamId(t: 0u64, n: 0u64), position, runner.wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
+    runner.wire_client.send_frame(client, Call(client.stream, position, runner.wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
     loop {
         match runner.wire_client.next(client) {
             Ok(Batch(_, _, _, done)) => for item in done {

@@ -212,6 +212,7 @@ pub(crate) fn serve(args: Vec<String>) -> Outcome {
     match super::run(args) {
         Ok(outcome) => outcome,
         Err(e) => {
+            crate::store::remote::finish(); // No session outlives its request.
             let outcome = Outcome::Exit(report_request_error(e.as_ref()));
             crate::resident::answer(&outcome);
             outcome

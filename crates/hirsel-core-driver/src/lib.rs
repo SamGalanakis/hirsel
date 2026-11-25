@@ -112,6 +112,8 @@ hirsel_guard::install!();
 mod closure_laws;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod comptime_phase0;
 
 pub fn package(name: &str) -> PackageId {
     PackageId {

@@ -22,7 +22,8 @@ type ObjectJournalTask: send {
     group_bytes: u64,
     group_commits: u64,
     idle: Option[Sender[()]],
-    health_signal: Option[ObjectHealthSignal]
+    health_signal: Option[ObjectHealthSignal],
+    reclaims: Option[Latest[ReclaimFailures]]
 }
 
 fn history_group_context(head: HistoryHead) -> Result[DiskContext, Error] {
@@ -82,10 +83,11 @@ fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Resu
     let next_position = history_next_id(candidate.entry.seq)?
     candidate.entry = history_new_ref(next_position, candidate.pair.epoch, lane.buffers.packet)
     let weak_barrier = view lane.weak
-    let advanced = history_register_publish(mut lane.client, mut lane.register, candidate, lane.authority, mut lane.buffers, due,
-        scoped fn(created: u64) {
-            if let Some(publisher) = weak_barrier { weak_publish(publisher, candidate, created, sequence) }
-        })
+    let advanced = history_register_publish(mut lane.client, mut lane.register, candidate, lane.authority, mut lane.buffers, due, scoped fn(created: u64) {
+        if let Some(publisher) = weak_barrier {
+            weak_publish(publisher, candidate, created, sequence)
+        }
+    })
     match take advanced {
         Ok(HistoryApplied(_)) => Ok(()),
         Error(take e) => Error(take e),
@@ -104,6 +106,10 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
     let mut written = 0u64
     let mut deferred: Option[JournalMsg] = None
     let mut idle_position: Option[u64] = None
+    // A failed reclaim stays pending and runs again only after the loop has
+    // taken a message (a write, the idle check, a pause), never back to back.
+    let mut reclaim_due = true
+    let mut failed_reclaims = 0u64
     loop {
         if let Some(terminal) = lane.register.terminal {
             return match terminal {
@@ -116,15 +122,28 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
             None => match channel.try_receive(input.receive) {
                 Ok(take queued) => take queued,
                 Error(Empty) => {
-                    if let Some(pending_reclaim) = replace(mut lane.reclaim, None) {
-                        if let Error(Fenced(e)) = history_execute_reclaim(mut lane, pending_reclaim) {
-                            return Error(Fenced(e))
+                    if reclaim_due {
+                        if let Some(take pending_reclaim) = replace(mut lane.reclaim, None) {
+                            match history_execute_reclaim(mut lane, pending_reclaim) {
+                                Ok(()) => {},
+                                Error(Fenced(e)) => return Error(Fenced(e)),
+                                Error(_) => {
+                                    lane.reclaim = Some(take pending_reclaim)
+                                    reclaim_due = false
+                                    failed_reclaims = int.saturating_add(failed_reclaims, 1)
+                                    if let Some(shared) = input.reclaims {
+                                        latest.publish(shared, arc.new(ReclaimFailures(count: failed_reclaims)))
+                                    }
+                                },
+                            }
+                            continue
                         }
-                        continue
                     }
                     if idle_position == None {
                         if let Some(timer) = input.idle {
-                            if let Ok(()) = channel.try_send(timer, ()) { idle_position = Some(written) }
+                            if let Ok(()) = channel.try_send(timer, ()) {
+                                idle_position = Some(written)
+                            }
                         }
                     }
                     match channel.receive(input.receive) {
@@ -135,6 +154,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 Error(Closed) => return Ok(()),
             },
         }
+        reclaim_due = true
         match take selected {
             Frame(take raw, sequence) => {
                 let ctx = history_group_context(lane.register.head)?
@@ -168,11 +188,15 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 if let Error(_) = channel.send(input.acks, ObjectJournaled(last_sequence, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq)) {
                     return Ok(())
                 }
-                if let Some(publisher) = lane.weak { weak_notify_strong(publisher.notices) }
+                if let Some(publisher) = lane.weak {
+                    weak_notify_strong(publisher.notices)
+                }
                 let _ = channel.try_send(input.synced, ())
                 if lane.failed_polls != 0 {
                     lane.failed_polls = 0
-                    if let Some(signal) = input.health_signal { emit_health(signal, Ok(0)) }
+                    if let Some(signal) = input.health_signal {
+                        emit_health(signal, Ok(0))
+                    }
                 }
             },
             Barrier => {
@@ -180,25 +204,38 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
             },
             IdleCheck => {
                 let armed_at = replace(mut idle_position, None)
-                if armed_at != None && armed_at != Some(written) { continue }
+                if armed_at != None && armed_at != Some(written) {
+                    continue
+                }
                 let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
                 let observed = history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
                 let previous = lane.failed_polls
                 match take observed {
-                    Ok(()) => { lane.failed_polls = 0 },
+                    Ok(()) => {
+                        lane.failed_polls = 0
+                    },
                     Error(Fenced(e)) => return Error(Fenced(e)),
-                    Error(_) => { lane.failed_polls = int.saturating_add(lane.failed_polls, 1) },
+                    Error(_) => {
+                        lane.failed_polls = int.saturating_add(lane.failed_polls, 1)
+                    },
                 }
                 if previous != lane.failed_polls {
-                    if let Some(signal) = input.health_signal { emit_health(signal, Ok(lane.failed_polls)) }
+                    if let Some(signal) = input.health_signal {
+                        emit_health(signal, Ok(lane.failed_polls))
+                    }
                 }
             },
             ObjectFresh(take destination, deadline) => {
                 let due = order.min(deadline, std.object.deadline_after_ms(lane.client, lane.op_ms))
                 let observed = history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
-                let terminal = match observed { Error(Fenced(e)) => Some(e), _ => None }
+                let terminal = match observed {
+                    Error(Fenced(e)) => Some(e),
+                    _ => None
+                }
                 let _ = channel.send(destination, take observed)
-                if let Some(e) = terminal { return Error(Fenced(e)) }
+                if let Some(e) = terminal {
+                    return Error(Fenced(e))
+                }
             },
             ObjectExportRead(take request) => {
                 let ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet) = take request
@@ -211,7 +248,9 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     return Ok(())
                 }
                 match channel.receive(resuming) {
-                    Ok(take restored) => { lane = object_journal_begin(take restored) },
+                    Ok(take restored) => {
+                        lane = object_journal_begin(take restored)
+                    },
                     _ => return Ok(()),
                 }
             },
@@ -234,7 +273,9 @@ fn object_journal_worker(take input: ObjectJournalTask) -> Result[(), Error] wai
     let weak_wakes = weak_notice_senders(initial.weak)
     let failure = object_journal_loop(take input, take initial)
     if let Error(problem) = failure {
-        if let Some(signal) = signals { emit_health(signal, health_failure(problem)) }
+        if let Some(signal) = signals {
+            emit_health(signal, health_failure(problem))
+        }
         let _ = channel.send(acks, ObjectBroken(clone(problem)))
         weak_notify_strong(weak_wakes)
         let _ = channel.try_send(synced, ())

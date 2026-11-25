@@ -1,5 +1,11 @@
 pub type Health = status.Health
 
+// The object journal's count of failed reclaim passes, published to
+// `attention` (§II.4).
+type ReclaimFailures: send {
+    count: u64
+}
+
 type ObjectHealthSignal: send {
     value: Latest[Health],
     terminal: Sender[()]
@@ -17,7 +23,11 @@ fn health_failure(problem: Error) -> Health {
 }
 
 fn health_is_working(value: Health) -> bool {
-    if let Ok(_) = value { true } else { false }
+    if let Ok(_) = value {
+        true
+    } else {
+        false
+    }
 }
 
 fn copy_health(value: Health) -> Health {
@@ -33,6 +43,15 @@ fn emit_health(signal: ObjectHealthSignal, take value: Health) {
             let _ = channel.try_send(signal.terminal, ())
         }
     }
+}
+
+fn reclaim_failures(db: Db) -> u64 {
+    if let Some(connection) = db.disk {
+        if let Some(writer) = connection.object {
+            return latest.read(writer.reclaims).count
+        }
+    }
+    0
 }
 
 pub fn health(db: Db) -> Health {
@@ -62,10 +81,14 @@ fn wait_unhealthy[M: send](take notice: HealthNotice[M]) waits {
 }
 
 pub fn on_unhealthy[M: send](mut db: Db, take to: Sender[M], take m: M) -> Result[(), Error] {
-    if !object_writer_open(db) { return Error(Missing("head")) }
+    if !object_writer_open(db) {
+        return Error(Missing("head"))
+    }
     write_disk(mut db.disk, (take to, take m), scoped fn(mut state: DiskState, take supplied: (Sender[M], M)) -> Result[(), Error] {
         if let Some(mut writer) = state.object {
-            let Some(take ready) = replace(mut writer.unhealthy, None) else { return Error(Held) }
+            let Some(take ready) = replace(mut writer.unhealthy, None) else {
+                return Error(Held)
+            }
             let (take destination, take message) = take supplied
             let notice = HealthNotice(ready: take ready, output: take destination, message: take message)
             match task.try_spawn(writer.tasks, bytes 4096, take notice, wait_unhealthy) {

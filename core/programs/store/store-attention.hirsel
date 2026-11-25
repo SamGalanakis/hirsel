@@ -1,5 +1,4 @@
 // What a working store reports to its operator (§II.3).
-
 pub type Accounts {
     logical: u64,
     tiered: u64,
@@ -14,7 +13,11 @@ pub fn accounts(db: Db) -> Accounts {
         Some(state) => (state.inflight, state.uncovered),
         None => (0u64, 0u64)
     }
-    let resident = if is_disk(db) { db.page_resident } else { memory_page_images(db) }
+    let resident = if is_disk(db) {
+        db.page_resident
+    } else {
+        memory_page_images(db)
+    }
     Accounts(logical: int.saturating_add(int.saturating_add(db.resident, db.tiered), db.keyed_credit.padding), tiered: db.tiered, exact: !retaining(db) || db.changes == db.settled, frames: frames, journal: journal, resident: resident)
 }
 
@@ -45,8 +48,13 @@ pub type IndexDrift {
 
 /// Conditions a working store reports to its operator (§II.3), unlike
 /// `Health`, which signals once when the store stops working.
+///
+/// `reclaim_failures` counts Bucket reclaim passes since this open that failed
+/// with an error other than a fence. Each failed pass stays pending and runs
+/// again on a later journal turn (§II.4); it is 0 off Bucket.
 pub type Attention {
-    drift: List[IndexDrift]
+    drift: List[IndexDrift],
+    reclaim_failures: u64
 }
 
 pub fn attention(db: Db) -> Result[Attention, Error] {
@@ -55,7 +63,7 @@ pub fn attention(db: Db) -> Result[Attention, Error] {
     for seen in db.drift {
         list.push(mut drift, IndexDrift(table: seen.table, id: seen.id, index: named(seen.index)?, count: seen.count))
     }
-    Ok(Attention(drift: take drift))
+    Ok(Attention(drift: take drift, reclaim_failures: reclaim_failures(db)))
 }
 
 // Counts the drift a staged draft saw, by index, under the names its base

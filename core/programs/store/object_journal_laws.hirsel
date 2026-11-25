@@ -10,7 +10,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     let (acks, delivered): (Sender[Ack], Receiver[Ack]) = channel.new(4)
     let (notices, _observed): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(1)
     let (synced, _woken): (Sender[()], Receiver[()]) = channel.new(1)
-    let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None, health_signal: None)
+    let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None, health_signal: None, reclaims: None)
     let actor = task.spawn(tasks, bytes 1048576, take actor_input, object_journal_worker)
     let mut expected_bytes = 0u64
     for n in 1u64 .. 3 {
@@ -42,7 +42,11 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     }
     let stopped = result.unwrap(task.join(take actor))
     let _ = take lifetime
-    if let Error(Fenced(1)) = stopped { Ok(()) } else { fail("fenced worker did not exit") }
+    if let Error(Fenced(1)) = stopped {
+        Ok(())
+    } else {
+        fail("fenced worker did not exit")
+    }
 }
 
 @test
@@ -65,7 +69,9 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     let outcome = run(mut incumbent, None, (copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env.0, 7, call_env.1)
     })?
-    let Committed(first_write) = outcome else { fail("the first writer could not commit") }
+    let Committed(first_write) = outcome else {
+        fail("the first writer could not commit")
+    }
     durable(mut incumbent, first_write.ticket)?
     let saved = position(mut incumbent, first_write.ticket)?
     let _ = checkpoint(mut incumbent)?
@@ -75,7 +81,9 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     let late = run(mut incumbent, None, (copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env.0, 8, call_env.1)
     })?
-    let Committed(losing) = late else { fail("the losing write could not be staged") }
+    let Committed(losing) = late else {
+        fail("the losing write could not be staged")
+    }
     let next_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
     options.create = false
     options.expect = Some(saved.store)
@@ -124,16 +132,24 @@ fn object_fresh_holder_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) ->
     on_unhealthy(mut writer, take notify, 17u64)?
     let deadline = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
     let initial = fresh_snapshot(mut writer, deadline)?
-    if version(initial) != 0 { fail("304 altered the holder's durable snapshot") }
-    if let Ok(0) = health(writer) {} else { fail("unchanged HEAD altered writer health") }
+    if version(initial) != 0 {
+        fail("304 altered the holder's durable snapshot")
+    }
+    if let Ok(0) = health(writer) {} else {
+        fail("unchanged HEAD altered writer health")
+    }
     let successor_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
     let successor = open_authority(tasks, object_authority(take successor_client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     if let Error(Fenced(1)) = fresh_snapshot(mut writer, deadline) {} else {
         fail("fresh holder query accepted a new claim")
     }
     let notice = result.unwrap(channel.receive(notifications))
-    if notice != 17 { fail("the terminal health notice changed its payload") }
-    if let Fenced(1) = health(writer) {} else { fail("the notified fence was not published") }
+    if notice != 17 {
+        fail("the terminal health notice changed its payload")
+    }
+    if let Fenced(1) = health(writer) {} else {
+        fail("the notified fence was not published")
+    }
     if let Error(Fenced(1)) = close(take writer) {} else {
         fail("holder close lost the fresh query fence")
     }
@@ -188,10 +204,12 @@ fn object_reclaim_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     reclaim_barrier(writer)?
     let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
     let current = history_decode_head(workspace.witness)?
-    if current.head.entry.seq != 3 || current.head.floor != 3 { fail("retain-one cut did not move the floor to three") }
+    if current.head.entry.seq != 3 || current.head.floor != 3 {
+        fail("retain-one cut did not move the floor to three")
+    }
     let obsolete_checkpoint = history_key("e-", old.head.checkpoint)
     let obsolete_manifest = history_key("m-", initial_mark.manifest)
-    for name in [obsolete_checkpoint, obsolete_manifest, orphan] {
+    for name in[obsolete_checkpoint, obsolete_manifest, orphan] {
         if let Error(Remote(NotFound)) = history_fetch(mut witness, name, mut workspace.compare, deadline) {} else {
             fail("reclaim left a dead key from the captured history")
         }
@@ -199,7 +217,9 @@ fn object_reclaim_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let _ = history_fetch(mut witness, future, mut workspace.compare, deadline)?
     let mut cold = history_reader(take witness, deadline)
     let restored = history_paged_capture(mut cold, current.head, 1048576)?
-    if restored.state.tips[0].head != 1 { fail("reclaim removed part of the current checkpoint") }
+    if restored.state.tips[0].head != 1 {
+        fail("reclaim removed part of the current checkpoint")
+    }
     close(take writer)
 }
 
@@ -209,6 +229,92 @@ fn bucket_test_m2_reclaim_execution(c: Clock, r: Random, tasks: Tasks) -> Result
     let reclaimed = object_reclaim_law(c, r, tasks, sim)
     let _ = bucket_law_finish(take sim)
     reclaimed
+}
+
+// Hands the journal one message and returns its lane unchanged. The pause
+// is ordered after any reclaim pass the loop had already started.
+fn journal_turn(db: Db) -> Result[bool, Error] waits {
+    let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    result.unwrap(channel.send(disk_state(db).journal, ObjectPause(take handover, take resuming)))
+    let parked = result.unwrap(channel.receive(paused))
+    let pending = if let Some(_) = parked.reclaim {
+        true
+    } else {
+        false
+    }
+    result.unwrap(channel.send(resume, take parked))
+    Ok(pending)
+}
+
+// The bucket drops every attempt of the first DELETE of a dead entry, so
+// the first reclaim pass fails. The pass must stay pending and run again on
+// the journal's next turn, without another cut.
+fn object_reclaim_retry_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim, orphan: String) -> Result[(String, String), Error] waits {
+    let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
+    let mut witness = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    options.retain = 1
+    let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
+    let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
+    let mut workspace = history_buffers(65536)?
+    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
+    let old = history_decode_head(workspace.witness)?
+    let (take initial_mark, _) = history_checkpoint(mut witness, old.head, deadline)?
+    let mut candidate = string.into_bytes(string.from("x"))
+    history_create(mut witness, orphan, mut candidate, mut workspace.compare, deadline)?
+    let _ = create_table(mut writer, spec("kept", std.codec.key_u64(), std.codec.of_u64()))?
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "DELETE", orphan, RECLAIM_DELETE_ATTEMPTS))
+    if !journal_turn(writer)? {
+        fail("the journal dropped a reclaim whose delete failed")
+    }
+    if attention(writer)?.reclaim_failures != 1 {
+        fail("the failed reclaim pass was not counted once")
+    }
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "DELETE", orphan, RECLAIM_DELETE_ATTEMPTS + 1))
+    if journal_turn(writer)? {
+        fail("the retried reclaim stayed pending")
+    }
+    if attention(writer)?.reclaim_failures != 1 {
+        fail("the retried reclaim pass was counted as a failure")
+    }
+    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
+    let current = history_decode_head(workspace.witness)?
+    if current.head.entry.seq != 3 || current.head.floor != 3 {
+        fail("the retry ran after another cut, not on its own")
+    }
+    let dead_checkpoint = history_key("e-", old.head.checkpoint)
+    let dead_manifest = history_key("m-", initial_mark.manifest)
+    close(take writer)?
+    Ok((take dead_checkpoint, take dead_manifest))
+}
+
+const RECLAIM_DELETE_ATTEMPTS: u64 = 5
+
+@test
+fn bucket_test_m2_reclaim_retry(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let orphan = history_key("e-", HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
+    let mut holds: List[std.sim.s3.Hold] = list.new()
+    list.push(mut holds, std.sim.s3.Hold(method: "DELETE", key: clone(orphan), from: 1, count: RECLAIM_DELETE_ATTEMPTS, until: At(0), then: Drop))
+    let sim = bucket_law_sim_holds(tasks, c, 535, None, list.new(), take holds, std.sim.world.plan(535))
+    let outcome = object_reclaim_retry_law(c, r, tasks, sim, orphan)
+    let report = bucket_law_finish(take sim)
+    let (dead_checkpoint, dead_manifest) = outcome?
+    // The oracle is the bucket's own history: every DELETE the sim applied.
+    let mut deleted: List[String] = list.new()
+    for request in report.requests {
+        if request.method == "DELETE" && request.applied {
+            list.push(mut deleted, clone(request.key))
+        }
+    }
+    for name in[orphan, dead_checkpoint, dead_manifest] {
+        if !list.contains(deleted, name) || map.contains(report.objects, name) {
+            fail("a dead object of the failed pass survived its retry")
+        }
+    }
+    Ok(())
 }
 
 fn sweep_fixture_name(epoch: u64, digest: u64) -> String {
@@ -296,7 +402,9 @@ fn object_reclaim_upload_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     let _ = std.object.upload(mut pending, pending_pack_name(21, 3), NoClobber, deadline) ?=> Remote
     let current_client = bucket_law_client_lanes(sim, tasks, "s3.test", 3, true, 1)?
     let mut writer = open_authority(tasks, object_authority(take current_client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
-    if claim_of(writer)?.epoch != 2 { fail("multipart fixture has the wrong holder") }
+    if claim_of(writer)?.epoch != 2 {
+        fail("multipart fixture has the wrong holder")
+    }
     let _ = checkpoint(mut writer)?
     reclaim_barrier(writer)?
     close(take writer)
@@ -308,8 +416,7 @@ fn bucket_test_m2_reclaim_uploads(c: Clock, r: Random, tasks: Tasks) -> Result[(
     let outcome = object_reclaim_upload_law(c, r, tasks, sim)
     let report = bucket_law_finish(take sim)
     outcome?
-    if list.len(report.pending) != 18 || list.contains(report.pending, pending_pack_name(20, 1)) ||
-        !list.contains(report.pending, pending_pack_name(21, 3)) {
+    if list.len(report.pending) != 18 || list.contains(report.pending, pending_pack_name(20, 1)) || !list.contains(report.pending, pending_pack_name(21, 3)) {
         fail("upload reclaim applied the wrong epoch rule or stopped on the first page")
     }
     Ok(())
@@ -342,7 +449,6 @@ fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim, options
     if version(saved) != 1 || captured.head.checkpoint.seq != 3 {
         fail("L59: the initial follower did not load the schema checkpoint")
     }
-
     bucket_law_round(mut writer, 7)?
     match std.object.erase(mut inspector, missing, due) {
         Ok(()) => (),
@@ -352,7 +458,6 @@ fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim, options
         Error(Corrupt(Fault(file: name, why: Absent, ..))) if name == missing => (),
         _ => fail("L59: a missing retained MANIFEST did not report corruption"),
     }
-
     bucket_law_round(mut writer, 8)?
     let HistoryEvicted(newer) = history_witness(mut inspector, captured.head, None, missing, None, mut scratch.witness, due)? else {
         fail("L59: a missing MANIFEST was still counted as live after eviction")
@@ -396,7 +501,7 @@ fn bucket_test_m2_retention_witness(d: Dir, c: Clock, r: Random, tasks: Tasks, s
         follower_heal_reads(report, "L59 evicted MANIFEST")
         let directory = disk_test_directory(d)
         bucket_m2_seed_checkpoint(directory, c, r, tasks)?
-        let cases: Inline[RetentionCase, 5] = [ReclaimedPack, RetainedPack, DeletedAfterCut, LostWitness, RetryCold]
+        let cases: Inline[RetentionCase, 5] =[ReclaimedPack, RetainedPack, DeletedAfterCut, LostWitness, RetryCold]
         for case in cases {
             retention_case_run(directory, c, r, tasks, seed, case, case_plan)?
         }
@@ -438,12 +543,18 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
         let mut raw = disk_read_paged_file(d, path, 1048576)?
         bucket_m2_object_header(mut raw, id, 3, seq)?
         let item = history_new_ref(seq, 1, raw)
-        if pack.class == 1 { victim = history_key("p-", item) }
+        if pack.class == 1 {
+            victim = history_key("p-", item)
+        }
         list.push(mut objects, (item, take raw))
         list.push(mut refs, item)
     }
-    if victim == "" { fail("L59: the fixture needs a class-1 pack") }
-    list.sort(mut refs, fn(a: HistoryRef, b: HistoryRef) -> Order { order.compare(a.seq, b.seq) })
+    if victim == "" {
+        fail("L59: the fixture needs a class-1 pack")
+    }
+    list.sort(mut refs, fn(a: HistoryRef, b: HistoryRef) -> Order {
+        order.compare(a.seq, b.seq)
+    })
     let mut raw_manifest = disk_page_manifest_bytes(id, manifest)?
     bucket_m2_object_header(mut raw_manifest, id, 1, manifest.generation)?
     let base = history_new_ref(manifest.generation, 1, raw_manifest)
@@ -465,12 +576,15 @@ fn retention_base(id: StoreId) -> Result[WitnessCut, Error] {
     let mut raw_entry: Bytes = list.with_capacity(1024)
     let entry_ref = history_genesis_packet(mut raw_entry, id, 1, base, HistoryLocateRoot(depth: 0, rows: list.new()))?
     let pair = HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18))
-    let selected = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding: [0; 32])
+    let selected = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32])
     Ok(WitnessCut(head: selected, manifest: base, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }
 
 fn retention_case_is_cold(case: RetentionCase) -> bool {
-    match case { RetryCold => true, _ => false }
+    match case {
+        RetryCold => true,
+        _ => false
+    }
 }
 
 fn retention_case_holds(case: RetentionCase, old: RetentionFixture) -> List[std.sim.s3.Hold] {
@@ -509,8 +623,7 @@ type RetentionReader: send {
 
 fn retention_reader_bytes(lanes: std.object.LaneConfig) -> u64 {
     let task_bytes = option.unwrap(charge.task(bytes[()], lanes.lane_bytes))
-    let lane_tasks = option.unwrap(std.object.lane_reservation(std.object.LaneConfig(
-        requested_lanes: lanes.requested_lanes, lane_bytes: task_bytes)))
+    let lane_tasks = option.unwrap(std.object.lane_reservation(std.object.LaneConfig(requested_lanes: lanes.requested_lanes, lane_bytes: task_bytes)))
     // The capture and heal marker each hold their own lane tasks and one
     // resolver. Allow a lane grant per lane for their owner-side setup.
     let setup = option.unwrap(std.object.lane_reservation(lanes))
@@ -539,7 +652,9 @@ fn retention_reader(take m: RetentionReader) -> Result[(), Error] waits {
         let line = follower_main(opened)
         let current = snapshot_follower(opened, line)?
         follower_heal_end(mut marker, m.time, healed_ns, m.wanted, law, follower_snapshot_position(current))
-        if version(current) != 3 { fail("L59: the second cold open did not reach the new checkpoint") }
+        if version(current) != 3 {
+            fail("L59: the second cold open did not reach the new checkpoint")
+        }
         return Ok(())
     }
     let mut mirror = retention_open(m, mut ids, 91)?
@@ -560,7 +675,9 @@ fn retention_reader(take m: RetentionReader) -> Result[(), Error] waits {
         fail("L59: a failed read changed its previously published Snapshot")
     }
     // A pack that is still retained must stay refused as corruption.
-    if let RetainedPack = m.case { return Ok(()) }
+    if let RetainedPack = m.case {
+        return Ok(())
+    }
     result.unwrap(channel.receive(m.healed))
     let mut marker = retention_marker(m)?
     let healed_ns = follower_heal_start(mut marker, m.time)
@@ -570,7 +687,9 @@ fn retention_reader(take m: RetentionReader) -> Result[(), Error] waits {
     }
     follower_heal_end(mut marker, m.time, healed_ns, m.wanted, law, reached)
     let visible = snapshot_follower(mirror, line)?
-    if version(visible) != 3 { fail("L59: catch_up did not reach the successor's version") }
+    if version(visible) != 3 {
+        fail("L59: catch_up did not reach the successor's version")
+    }
     match m.case {
         ReclaimedPack => retention_rows(mirror, visible, saved)?,
         DeletedAfterCut => retention_rows(mirror, visible, saved)?,
@@ -593,14 +712,20 @@ fn retention_rows(mirror: Follower, visible: Snapshot, saved: Snapshot) -> Resul
         fail("L59: catch_up resurrected the row removed before the cut")
     }
     let old = changes(reading, saved, saved)?
-    if list.len(old.rows) != 0 { fail("L59: the saved Snapshot no longer reads") }
+    if list.len(old.rows) != 0 {
+        fail("L59: the saved Snapshot no longer reads")
+    }
     Ok(())
 }
 
 fn retention_writes(mut client: std.object.Client, fixture: RetentionFixture, declaration: Bytes, tag: std.object.ETag, due: u64, omit_manifest: bool) -> Result[std.object.ETag, Error] waits {
-    for (item, raw) in fixture.packs { let _ = witness_create(mut client, history_key("p-", item), raw, due)? }
+    for (item, raw) in fixture.packs {
+        let _ = witness_create(mut client, history_key("p-", item), raw, due)?
+    }
     let old = view fixture.selected
-    if !omit_manifest { return witness_install_cut(mut client, old, declaration, Match(tag), due) }
+    if !omit_manifest {
+        return witness_install_cut(mut client, old, declaration, Match(tag), due)
+    }
     let _ = witness_create(mut client, history_key("e-", old.head.entry), old.entry_bytes, due)?
     witness_publish(mut client, old.head, declaration, Match(tag), due)
 }
@@ -608,11 +733,19 @@ fn retention_writes(mut client: std.object.Client, fixture: RetentionFixture, de
 fn retention_writer(sim: BucketSim, tasks: Tasks, r: Random, case: RetentionCase, pack_name: String, mut witness: std.object.Client, until: u64) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 93, true)?
     let mut opts = bucket_order_options(false)
-    opts.retain = match case { ReclaimedPack => 1, _ => 2 }
+    opts.retain = match case {
+        ReclaimedPack => 1,
+        _ => 2
+    }
     let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), sim.time, r, opts) ?=> |Refusal(error: take reason, ..)| take reason
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_bytes())?
-    let changed = run(mut writer, None, rows, fn(mut tx, handle) -> Result[(), Error] { let _ = delete(mut tx, handle, 7u64)?; Ok(()) })?
-    let Committed(done) = changed else { fail("L59: the successor did not delete row 7") }
+    let changed = run(mut writer, None, rows, fn(mut tx, handle) -> Result[(), Error] {
+        let _ = delete(mut tx, handle, 7u64)?;
+        Ok(())
+    })?
+    let Committed(done) = changed else {
+        fail("L59: the successor did not delete row 7")
+    }
     durable(mut writer, done.ticket)?
     bucket_law_checkpoint(mut writer)?
     match case {
@@ -629,7 +762,11 @@ fn retention_writer(sim: BucketSim, tasks: Tasks, r: Random, case: RetentionCase
 }
 
 fn retention_is_pack_case(case: RetentionCase) -> bool {
-    match case { LostWitness => false, RetryCold => false, _ => true }
+    match case {
+        LostWitness => false,
+        RetryCold => false,
+        _ => true
+    }
 }
 
 fn retention_join_reader(take trial: Task[Result[(), Error]]) -> Result[(), Error] waits {
@@ -669,9 +806,7 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
     let (from_reader, reader_ready): (Sender[()], Receiver[()]) = channel.new(1)
     let (go, advancing): (Sender[()], Receiver[()]) = channel.new(1)
     let (healed, after_heal): (Sender[()], Receiver[()]) = channel.new(1)
-    let actor = RetentionReader(case, endpoint: sim.endpoint, time: sim.time, tasks, owner: take owner, plan: clone(plan),
-        ready: take from_reader, go: take advancing, healed: take after_heal,
-        wanted: Position(store: id, branch: 0, version: 3), victim: clone(fixture.pack_name))
+    let actor = RetentionReader(case, endpoint: sim.endpoint, time: sim.time, tasks, owner: take owner, plan: clone(plan), ready: take from_reader, go: take advancing, healed: take after_heal, wanted: Position(store: id, branch: 0, version: 3), victim: clone(fixture.pack_name))
     let trial = task.spawn(tasks, bytes retention_reader_bytes(bucket_law_lanes(0)), take actor, retention_reader)
     if !cold_first {
         if let Error(_) = channel.receive(reader_ready) {
@@ -686,25 +821,41 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
         result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", fixture.pack_name, 1))
         retention_writer(sim, tasks, r, case, fixture.pack_name, mut inspector, due)?
     } else {
-        result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", marker, if cold_first { 1 } else { 2 }))
+        result.unwrap(std.sim.s3.requested(sim.endpoint, "GET", marker, if cold_first {
+            1
+        } else {
+            2
+        }))
         let replacement = witness_cut(id, base.head.pair, 3, fixture.selected.head.entry, 3, 3)?
         let _ = witness_install_cut(mut inspector, replacement, metadata, Match(tag), due)?
         std.object.erase(mut inspector, marker, due) ?=> Remote
     }
     // The replacement is published and the delete released the held GET.
     // The writer is done before the reader starts counting its own GETs.
-    if let RetainedPack = case {} else { result.unwrap(channel.send(healed, ())) }
+    if let RetainedPack = case {} else {
+        result.unwrap(channel.send(healed, ()))
+    }
     retention_join_reader(take trial)?
     close_follower_service(take service)?
     let _ = take inspector
     let report = bucket_law_finish(take sim)
-    if let RetainedPack = case {} else { follower_heal_reads(report, retention_case_label(case)) }
-    let target = if stages_pack { string.from(fixture.pack_name) } else { take marker }
+    if let RetainedPack = case {} else {
+        follower_heal_reads(report, retention_case_label(case))
+    }
+    let target = if stages_pack {
+        string.from(fixture.pack_name)
+    } else {
+        take marker
+    }
     let mut erased = false
     for req in report.requests {
-        if req.method == "DELETE" && req.key == target && req.applied { erased = true }
+        if req.method == "DELETE" && req.key == target && req.applied {
+            erased = true
+        }
         if req.method == "GET" && req.key == target && req.status == 404 {
-            if !erased { fail("L59: the missing object was decided before the delete") }
+            if !erased {
+                fail("L59: the missing object was decided before the delete")
+            }
             return Ok(())
         }
     }

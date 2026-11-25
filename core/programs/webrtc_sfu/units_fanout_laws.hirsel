@@ -212,7 +212,7 @@ fn fanout_run(net: Net, clock: Clock) waits {
             if s.to == h.peers[leg.i].c.at && s.kind == KIND_RTP && s.ssrc == leg.ssrc {
                 let g = got_of(s)
                 packets += 1
-                let body: u32 = int.truncate(list.len(g.pkt) - g.h.end)
+                let body: u32 = int.narrow(list.len(g.pkt) - g.h.end)
                 octets += body
                 last_ts = g.h.ts
                 last_at = s.at
@@ -223,7 +223,7 @@ fn fanout_run(net: Net, clock: Clock) waits {
                 let count: u32 = list.word_be(s.pkt, 20)
                 let size: u32 = list.word_be(s.pkt, 24)
                 let d = s.at - last_at
-                let elapsed: u32 = int.truncate((d / 1000000000) * 90000 + ((d % 1000000000) * 90000) / 1000000000)
+                let elapsed: u32 = int.narrow((d / 1000000000) * 90000 + ((d % 1000000000) * 90000) / 1000000000)
                 if ntp != ntp_of(s.at) || ts != later(last_ts, elapsed) || count != packets || size != octets {
                     fail("a down-track's SR does not match the media its leg was sent")
                 }

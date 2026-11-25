@@ -1326,9 +1326,9 @@ pub enum Terminator {
     },
     /// The signature's results, in order.
     Return(PoolRange<ValueId>),
-    /// FORM v1a: the point after a call whose signature is `never`, which is its
-    /// block's last instruction; such a call only fails. FORM #31a: also the point
-    /// after a read of a binder whose type has no values (`Never`). Nothing reaches it.
+    /// FORM v1a: the point after a call whose signature is `never` (its block's last
+    /// instruction), a read of a `Never` binder (FORM #31a), or an instruction that
+    /// always fails (a failing narrow's overflowing add). Nothing reaches it.
     Unreachable,
     /// Record a cause in the chain (FAIL-10), then continue at `cleanup`, or
     /// propagate when there is none.

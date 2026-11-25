@@ -1,6 +1,6 @@
 hirsel.laws 1
 webrtc_sfu@1/laws/demux_prefix src=53e426639f6adbb0 sig=742212a82a7360cd run=c2c0c6612d4cbb79 bug=274d143e0a1ab832 oracle=5aa9732b60953b5a rows=pending
-webrtc_sfu@1/laws/fanout_across_units src=d5bb904c3566c402 sig=319405adcd4b8e08 run=c7b2a52baff70a63 bug=c998b5664139cd3a oracle=e7efc77afeb879ea rows=pending
+webrtc_sfu@1/laws/fanout_across_units src=54dc49fd22f711a8 sig=319405adcd4b8e08 run=c7b2a52baff70a63 bug=c998b5664139cd3a oracle=e7efc77afeb879ea rows=pending
 webrtc_sfu@1/laws/forward_allocates_nothing src=b508b74913cc0df9 sig=a7885eda6635c121 run=c2c0c6612d4cbb79 bug=e98263cf14d24b42 oracle=f3ed3a7cbf0bfdf1 rows=pending
 webrtc_sfu@1/laws/glare_settles_in_one_round src=110aaa2076c0fece sig=35f36e5aede5eff7 run=c2c0c6612d4cbb79 bug=5bb9015e28ddca38 oracle=4c240daa0eae4636 rows=pending
 webrtc_sfu@1/laws/keyframe_request_coalesces_across_subscribers src=129391304453808a sig=7fcedc56e5ede836 run=c2c0c6612d4cbb79 bug=68f7cda61498ca81 oracle=5a452fa691864cc9 rows=pending

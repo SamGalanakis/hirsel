@@ -310,7 +310,8 @@ pub(super) fn inline(module: &Module, body: &mut Body, sites: &[Site]) {
                         },
                         anchors[i],
                     );
-                    body.terminators[no.index()] = Terminator::Propagate;
+                    // The add always fails through `fail`; nothing falls through.
+                    body.terminators[no.index()] = Terminator::Unreachable;
                 }
                 current = continuation;
             }

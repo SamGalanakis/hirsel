@@ -58,11 +58,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(no);
         // FORM records Overflow on scalar arithmetic. This failing arithmetic is
         // the narrow operation's failure edge, with the narrow call's source anchor.
+        // It always fails, through the cleanup of its `fail` block, so nothing
+        // reaches the end of this block; an exit here would skip that cleanup.
         let ty = Ty::Scalar(Scalar::U8);
         let max = self.konst(ty, 255, n).unwrap();
         let one = self.konst(ty, 1, n).unwrap();
         let _ = self.numeric_binary(ty, BinaryOp::Add, max, one, n);
-        self.end(Terminator::Propagate, Some(n));
+        self.end(Terminator::Unreachable, Some(n));
         self.start(yes);
     }
 }

@@ -10,10 +10,12 @@
 // expect: run narrow(255) = 255
 // expect: run try_narrow(-1) = 77
 // expect: run try_narrow(255) = 255
-// expect: run abs_i64(-9223372036854775808) = fail Overflow@58:5
-// expect: run abs_i32(-2147483648) = fail Overflow@62:5
+// expect: run abs_i64(-9223372036854775808) = fail Overflow@60:5
+// expect: run abs_i32(-2147483648) = fail Overflow@64:5
 // expect: run abs_i32(-7) = 7
 // expect: run abs_u64(18446744073709551615) = 18446744073709551615
+// expect: run narrow_kept(200) = 400
+// expect: run narrow_kept(256) = fail Overflow@75:17
 fn add(a: u8, b: u8) -> u8 {
     match int.checked_add(a, b) {
         Some(x) => x,
@@ -64,4 +66,12 @@ fn abs_i32(a: i32) -> i32 {
 
 fn abs_u64(a: u64) -> u64 {
     int.abs(a)
+}
+
+// A narrow's failure edge cleans up a frame-backed list (MEM-32), like any failure.
+fn narrow_kept(a: u64) -> u64 {
+    let mut kept: List[u64] = list.new()
+    list.push(mut kept, a)
+    let n: u8 = int.narrow(a)
+    kept[0] + int.widen(n)
 }

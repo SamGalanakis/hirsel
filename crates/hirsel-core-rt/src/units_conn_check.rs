@@ -636,12 +636,15 @@ fn socket_crosses_pending_readiness() {
     peer.write_all(b"x").unwrap();
 
     let moving = sender.detach(key).unwrap();
+    // epoll's removal drops the queued edge; an io_uring batch may still
+    // carry it from the retired watch (net.md, Watch identity). Either way
+    // it must not ready the socket that reuses the slot.
     let old = source.poll(0).unwrap().unwrap();
-    assert_eq!(sender.dispatch_polled(old, |_| unreachable!()), 0);
 
     let (replacement, _peer) = UnixStream::pair().unwrap();
     let replacement = sender.insert(replacement.into()).unwrap();
     sender.arm(replacement, false, 2).unwrap();
+    sender.dispatch_polled(old, |_| panic!("a retired watch's edge reached the sender"));
     sender.dispatch(stale, hirsel_core_net::ready::Ready::READABLE, |_| {
         panic!("stale readiness reached the sender")
     });

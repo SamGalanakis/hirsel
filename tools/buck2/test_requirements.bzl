@@ -30,6 +30,7 @@ OPENAT2_TEST_CASES = {
         "provider_tests::files_deliver_committed_prefixes_and_all_open_modes",
         "host_file_tests::slot_ring_open_stat_and_close_need_no_helper",
         "host_file_tests::slot_ring_writes_report_progress_and_preserve_positioned_cursor",
+        "host_file_tests::slot_ring_reads_preserve_prefix_cursor_and_errors",
         "host_file_tests::units_on_every_slot_share_one_provider_handle_table",
         "provider_tests::rule_provider_tests::cap7_temporary_dir_never_widens_its_parent_authority",
         "provider_tests::guarded_root_routes_real_os_calls_through_the_separate_host_stack",

@@ -5,6 +5,8 @@ use hirsel_core_ir::{FuncId, eval};
 mod diagnostic_fixes;
 #[path = "encoding_laws.rs"]
 mod encoding_laws;
+#[path = "poison_laws.rs"]
+mod poison_laws;
 
 pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
@@ -137,7 +139,7 @@ fn run_runner_launch(
         n_place,
         describe,
     );
-    eval::run_launch(&module, entry, &[0, 1], 64 * 1024 * 1024, &[], &launch)
+    eval::run_launch(&module, entry, &[0, 1, 2], 64 * 1024 * 1024, &[], &launch)
 }
 
 #[test]
@@ -216,6 +218,7 @@ fn runner_describe_capture_matches_reply_schema() {
         1024 * 1024
     );
     wire = &wire[8..];
+    assert!(bytes(&mut wire).is_empty()); // The evaluator fixture has no release revision.
     assert_eq!(count(&mut wire), 2);
     assert_eq!(count(&mut wire), 0); // Described.kind = Compute.
     assert!(bytes(&mut wire).starts_with(b"\x01runner@1/runner_launch/echo("));
@@ -228,6 +231,8 @@ fn runner_describe_capture_matches_reply_schema() {
     assert_eq!(&wire[8..16], &U64_FP.to_le_bytes());
     wire = &wire[16..];
     assert!(bytes(&mut wire).is_empty()); // The evaluator fixture has no code revision.
+    assert_eq!(count(&mut wire), 0); // A call declares no slots...
+    assert!(bytes(&mut wire).is_empty()); // ...and no query value.
     assert_eq!(count(&mut wire), 1); // Transact.
     assert!(bytes(&mut wire).starts_with(b"\x01runner@1/runner_launch/transaction("));
     assert_eq!(bytes(&mut wire), &[3, 0, 0, 0, 0, 6]);
@@ -237,6 +242,10 @@ fn runner_describe_capture_matches_reply_schema() {
     assert_eq!(&wire[8..16], &0xebc2239a2dc21ea8u64.to_le_bytes());
     wire = &wire[16..];
     assert!(bytes(&mut wire).is_empty());
+    assert_eq!(count(&mut wire), 0);
+    assert!(bytes(&mut wire).is_empty());
+    assert_eq!(count(&mut wire), 0); // No declared tables.
+    assert_eq!(count(&mut wire), 0); // No HTTP bindings.
     assert!(wire.is_empty());
 }
 
@@ -383,7 +392,7 @@ fn a_body_record_reads_back_only_whole() {
     let (head, ir) = (b"a head".as_slice(), b"the module bytes".as_slice());
     let ir_hash = ContentHash::of_parts("hirsel.core-ir.v1", [ir]);
     let mut expected = b"HBODY\0\0\0".to_vec();
-    expected.extend(42u32.to_le_bytes());
+    expected.extend(crate::store::VERSION.to_le_bytes());
     expected.extend((head.len() as u64).to_le_bytes());
     expected.extend((ir.len() as u64).to_le_bytes());
     expected.extend(head);
@@ -503,7 +512,7 @@ fn damaged_disk_bytes_are_a_miss() {
     let store = Store::new(dir.path()).unwrap();
     let payload = b"published payload";
     let mut record = b"HCORE\0\0\0".to_vec();
-    record.extend(39u32.to_le_bytes());
+    record.extend(crate::store::VERSION.to_le_bytes());
     record.extend(payload);
     record.extend((payload.len() as u64).to_le_bytes());
     let key = ContentHash(sha2::Sha256::digest(&record).into());
@@ -2916,96 +2925,6 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
             });
     }
     req
-}
-
-#[test]
-fn refused_callee_results_stop_emission_on_cold_cached_and_edited_requests() {
-    for body in [
-        "match broken() { Yes(n) => n, No => 0u64 }",
-        "let f = broken; match f() { Yes(n) => n, No => 0u64 }",
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let bad = format!(
-            "type Choice = Yes(u64) | No\nfn broken() -> Choice {{ let mut bytes: u64 = 0; Yes(0u64) }}\nfn answer() -> u64 {{ {body} }}\n"
-        );
-        let good = bad.replace("bytes", "enc");
-        for source in [&bad, &bad, &good, &good, &bad, &good] {
-            let product = Driver::default()
-                .check(request(source, dir.path()), &mut Meter::new(false))
-                .unwrap();
-            let refused = source == &bad;
-            assert_eq!(product.accepted(), !refused, "{:?}", product.diagnostics);
-            assert_eq!(
-                product
-                    .definitions
-                    .values()
-                    .find(|d| d.definition.0.name == "answer")
-                    .unwrap()
-                    .check
-                    .function
-                    .is_none(),
-                refused
-            );
-            if refused {
-                assert!(product.diagnostics.iter().any(|r| r.rule == "LANG-2"));
-            }
-        }
-    }
-}
-
-#[test]
-fn unresolved_closure_patterns_do_not_emit_or_use_undeclared_binders() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = "fn nested() { let f = scoped fn(o: Option[(u64, u64)]) -> u64 { match o { Some((x, _)) => x } } }\nfn captured(x: Missing) -> u64 { match x { Some(y) => { let f = scoped fn() -> u64 { y }; f() } } }\nfn flags(a: bool) -> u64 { 0u64 }\nfn missing_args(a: List[u64], b: List[u64]) -> u64 { flags(a == b) }\nfn peek(h: Missing) -> u64 { flags(h) }\n";
-    for _ in 0..2 {
-        let product = Driver::default()
-            .check(request(source, dir.path()), &mut Meter::new(false))
-            .unwrap();
-        assert!(!product.accepted());
-        assert!(product.diagnostics.iter().any(|r| r.rule == "LANG-7"));
-        assert!(
-            product
-                .definitions
-                .values()
-                .filter(|d| d.definition.0.name != "flags")
-                .all(|d| d.check.function.is_none())
-        );
-    }
-}
-
-#[test]
-fn unresolved_bodies_suppress_cascades_without_hiding_independent_errors() {
-    let dir = tempfile::tempdir().unwrap();
-    // The refused body's own independent error (`let k`) is reported cold, from
-    // its record when warm, and follows a change to the signature it reads (PROG-8
-    // poison).
-    let source = |other: &str| {
-        format!(
-            "type Choice = Yes | No(u64)\nfn other() -> {other} {{ {other}_value() }}\nfn pattern(x: Choice) -> u64 {{ let k: u64 = other(); match x {{ Yes => 1u64, Missing(_) => 0u64 }} }}\nfn bool_value() -> bool {{ true }}\nfn u64_value() -> u64 {{ 0u64 }}\n"
-        )
-    };
-    for (attempt, other, expected) in [
-        (0, "bool", &[("LANG-11", 2), ("LANG-7", 2)][..]),
-        (1, "bool", &[("LANG-11", 2), ("LANG-7", 2)][..]),
-        (2, "u64", &[("LANG-7", 2)][..]),
-    ] {
-        let product = Driver::default()
-            .check(request(&source(other), dir.path()), &mut Meter::new(false))
-            .unwrap();
-        assert!(!product.accepted());
-        let mut rules: Vec<_> = product
-            .diagnostics
-            .iter()
-            .map(|r| (r.rule.as_str(), r.primary.item))
-            .collect();
-        rules.sort_unstable();
-        assert_eq!(
-            rules, expected,
-            "attempt {attempt}: {:?}",
-            product.diagnostics
-        );
-        assert!(product.incomplete.is_empty());
-    }
 }
 
 #[test]

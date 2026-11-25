@@ -215,7 +215,7 @@ fn macho_llvm_release_parts_cut_link_and_stand_alone() {
     let ir = |neighbour: &str| {
         format!(
             r#"
-            @hirsel_zero = linkonce_odr constant [61 x i8] zeroinitializer, align 8
+            @hirsel_zero = linkonce_odr hidden constant [61 x i8] zeroinitializer, align 8
             @hirsel_ptrs = private constant [2 x ptr] [ptr @hirsel_zero, ptr @hirsel_live], align 8
             @hirsel_msg = private unnamed_addr constant [3 x i8] c"hi\00"
             @hirsel_odd = private unnamed_addr constant [13 x i8] c"abcdefghijkl\01"
@@ -290,6 +290,11 @@ fn macho_llvm_release_parts_cut_link_and_stand_alone() {
                 %r = zext i8 %b to i64
                 ret i64 %r
             }}
+            define i32 @hirsel_clamp(i32 %a, i32 %b) noinline {{
+                %c = icmp slt i32 %a, 7
+                %r = select i1 %c, i32 %a, i32 %b
+                ret i32 %r
+            }}
             define i64 @hirsel_sum(ptr %p, i64 %n) hot noinline {{
             top:
                 br label %loop
@@ -360,8 +365,9 @@ fn macho_llvm_release_parts_cut_link_and_stand_alone() {
             .collect();
         named
     };
-    // Each part generated alone on its own thread's machine, as the release
-    // std's are (`generate_parts`), and cut alone.
+    // The release std's route: a library lends its bodies and defers its
+    // parts, each generated from its bitcode alone on its own thread's
+    // machine (`generate_parts`), and cut alone.
     let threaded = |ir: &str, names: &[&str]| {
         let exports: Vec<String> = names.iter().map(|n| format!("hirsel_{n}")).collect();
         let program = emit_program_parts(
@@ -370,13 +376,18 @@ fn macho_llvm_release_parts_cut_link_and_stand_alone() {
             Target::Aarch64Darwin,
             2,
             &mut Unheld,
-            Lend::None,
+            Lend::Lend {
+                limit: 0,
+                namespace: hirsel_llvm_lazy::LENT_NAMESPACE,
+            },
         )
         .unwrap();
+        let codes: Vec<&[u8]> = program.deferred.iter().map(|p| p.code.as_slice()).collect();
+        let objects = hirsel_llvm_lazy::generate_parts(&codes, Target::Aarch64Darwin, 2).unwrap();
         let named: std::collections::BTreeMap<String, Vec<u8>> = program
-            .parts
+            .deferred
             .iter()
-            .zip(&program.objects)
+            .zip(&objects)
             .map(|(part, object)| {
                 let key = ContentHash::of_bytes(part.name.as_bytes());
                 let cut = hirsel_llvm_lazy::core::split_native_object(
@@ -391,19 +402,21 @@ fn macho_llvm_release_parts_cut_link_and_stand_alone() {
             .collect();
         named
     };
-    let names = ["live", "pick", "peek", "sum", "entry"];
-    let with = ["live", "pick", "peek", "sum", "other", "entry"];
+    let names = ["live", "pick", "peek", "clamp", "sum", "entry"];
+    let with = ["live", "pick", "peek", "clamp", "sum", "other", "entry"];
     let alone = cut(&ir(""), &names);
     let beside = cut(&ir(neighbour), &with);
     let lent = threaded(&ir(""), &names);
     let lent_beside = threaded(&ir(neighbour), &with);
     // `peek`'s one constant, 13 bytes, ends its section alone and runs into
     // the neighbour's padding beside; `sum`, hot and looping, is aligned past
-    // 16 by the release pipeline unless the split lowers it.
+    // 16 by the release pipeline unless the split lowers it; `clamp`'s
+    // 32-bit compare and select are a pair Apple tuning aligns to 64.
     for name in [
         "hirsel_live",
         "hirsel_pick",
         "hirsel_peek",
+        "hirsel_clamp",
         "hirsel_sum",
         "hirsel_entry",
     ] {

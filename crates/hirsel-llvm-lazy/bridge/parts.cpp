@@ -772,12 +772,18 @@ void part_options(TargetMachine &tm) {
 // which the object addresses from its section's start with no length. And
 // no code is outlined: a part generated on its own machine (`on_threads`),
 // which AArch64 builds with the outliner on, would call a local helper the
-// cut cannot give it. The parts' keys take all three.
+// cut cannot give it. And no fused compare-select pair is aligned: Apple
+// tuning (`align-cmp-csel-pairs`, AArch64CodeLayoutOpt) puts a 32-bit CMP
+// and its CSEL at a 64-byte boundary and raises the function to 64 with
+// them, past what the cut can place. The parts' keys take all four.
 void macho_part_layout(Module &m) {
     for (Function &f : m)
         if (!f.isDeclaration()) {
             f.addFnAttr("no-jump-tables", "true");
             f.addFnAttr(Attribute::NoOutline);
+            StringRef features = f.getFnAttribute("target-features").getValueAsString();
+            f.addFnAttr("target-features", features.empty() ? std::string("-align-cmp-csel-pairs")
+                                                            : (features + ",-align-cmp-csel-pairs").str());
             f.setAlignment(Align(16));
         }
     for (GlobalVariable &g : m.globals())

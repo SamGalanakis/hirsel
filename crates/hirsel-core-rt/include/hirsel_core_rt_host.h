@@ -266,7 +266,7 @@ HirselCoreHostOutcome hirsel_core_host_connect_datagram(HirselCoreContext *, uin
 HirselCoreHostOutcome hirsel_core_host_send_datagram(HirselCoreContext *, uint64_t, const HirselCoreBuffer *bytes, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_host_send_to(HirselCoreContext *, uint64_t, const HirselCoreBuffer *root, const HirselCoreBuffer *path, const HirselCoreBuffer *bytes, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_host_recv_datagram(HirselCoreContext *, uint64_t, HirselCoreBuffer *bytes, uint8_t, uint64_t, uint64_t, uint64_t);
-HirselCoreHostOutcome hirsel_core_net_narrow_unix(HirselCoreContext *, uint64_t net, uint8_t direction, const HirselCoreBuffer *root, const HirselCoreBuffer *path, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_narrow_unix(HirselCoreContext *, uint64_t builder, uint8_t direction, const HirselCoreBuffer *root, const HirselCoreBuffer *path, uint64_t);
 /* UDP: bind (family, hi, lo, port, slots, slot_bytes[, members, steer, out]). */
 HirselCoreHostOutcome hirsel_core_host_udp_open(HirselCoreContext *, uint64_t net, bool v6, uint32_t slots, uint32_t slot_bytes, uint64_t);
 HirselCoreAddressOutcome hirsel_core_host_udp_bind(HirselCoreContext *, uint64_t net, uint8_t, uint64_t, uint64_t, uint16_t, uint32_t, uint32_t, uint64_t);

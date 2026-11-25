@@ -1206,12 +1206,12 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
     }
 }
 /// # Safety
-/// Live run, typed Net grant and pinned pattern and digest carriers.
+/// Live `net_narrow_begin` builder and pinned pattern and digest carriers.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_net_narrow_tls(
     _context: *mut Context,
-    n: u64,
+    builder: u64,
     patterns: *const Buffer,
     first: u16,
     last: u16,
@@ -1224,25 +1224,25 @@ pub unsafe extern "C" fn hirsel_core_net_narrow_tls(
             0 => TlsTrust::System,
             1 => match crate::tls::bytes(&*digest).try_into() {
                 Ok(digest) => TlsTrust::Roots(digest),
-                Err(_) => return narrow_add(n, None),
+                Err(_) => return narrow_add(builder, None),
             },
-            _ => return narrow_add(n, None),
+            _ => return narrow_add(builder, None),
         };
         let Ok(patterns) = std::str::from_utf8(crate::tls::bytes(&*patterns)) else {
-            return narrow_add(n, None);
+            return narrow_add(builder, None);
         };
         narrow_add(
-            n,
+            builder,
             TlsRule::new(patterns, first, last, trust).map(GrantRule::Tls),
         )
     }
 }
 /// # Safety
-/// Live run, typed Net grant and its pinned pattern carrier.
+/// Live `net_narrow_begin` builder and its pinned pattern carrier.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_net_narrow_resolve(
     _context: *mut Context,
-    net: u64,
+    builder: u64,
     patterns: *const Buffer,
     _site: u64,
 ) -> Outcome {
@@ -1251,7 +1251,7 @@ pub unsafe extern "C" fn hirsel_core_net_narrow_resolve(
     let rule = std::str::from_utf8(patterns)
         .ok()
         .and_then(ResolveRule::new);
-    unsafe { narrow_add(net, rule.map(GrantRule::Resolve)) }
+    unsafe { narrow_add(builder, rule.map(GrantRule::Resolve)) }
 }
 
 /// `net.narrow`'s list in progress (NET-6): the parent Net, the rules read so

@@ -258,12 +258,13 @@ pub(crate) unsafe fn denial(request: &Request) -> Option<u8> {
 }
 
 /// # Safety
-/// Live run and typed Net grant. Rule scalars come from the caller's Rule.
+/// Live list narrow `builder` from `hirsel_core_net_narrow_begin`. Rule scalars
+/// come from the caller's Rule.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_net_narrow(
     _context: *mut Context,
-    n: u64,
+    builder: u64,
     dir: u8,
     family: u8,
     hi: u64,
@@ -286,5 +287,5 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
             last,
         })
         .filter(|rule| rule.valid());
-    unsafe { narrow_add(n, rule.map(GrantRule::Address)) }
+    unsafe { narrow_add(builder, rule.map(GrantRule::Address)) }
 }

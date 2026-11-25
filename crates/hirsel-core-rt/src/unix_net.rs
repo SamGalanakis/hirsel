@@ -239,11 +239,12 @@ unsafe fn call(
 }
 
 /// # Safety
-/// Live run and typed Net with borrowed UTF-8 operands.
+/// Live list narrow `builder` from `hirsel_core_net_narrow_begin`, with
+/// borrowed UTF-8 operands.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_net_narrow_unix(
     _context: *mut Context,
-    net: u64,
+    builder: u64,
     direction: u8,
     root: *const Buffer,
     path: *const Buffer,
@@ -253,7 +254,7 @@ pub unsafe extern "C" fn hirsel_core_net_narrow_unix(
     unsafe {
         let rule = UnixDirection::from_tag(direction)
             .and_then(|direction| UnixRule::new(direction, str_operand(root)?, str_operand(path)?));
-        net::narrow_add(net, rule.map(GrantRule::Unix))
+        net::narrow_add(builder, rule.map(GrantRule::Unix))
     }
 }
 

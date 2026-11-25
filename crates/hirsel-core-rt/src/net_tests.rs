@@ -186,25 +186,20 @@ fn net_narrow_retains_charge_until_run_end_and_refuses_invalid_or_capacity() {
     let mut context = Context::new(40);
     context.host_files = &mut files;
     unsafe {
-        let invalid = hirsel_core_net_narrow(&mut context, n, 0, 0, 0, 0x7f000001, 8, 0, 1, 80, 1);
+        let narrow = |context: &mut Context, net, bits, first| {
+            let b = hirsel_core_net_narrow_begin(context, net, 1).value;
+            let add =
+                hirsel_core_net_narrow(context, b, 0, 0, 0, 0x7f000001, bits, 0, first, 80, 1);
+            assert_eq!(add.error, IoError::OK);
+            hirsel_core_net_narrow_end(context, b, 1)
+        };
+        let invalid = narrow(&mut context, n, 8, 1);
         assert_eq!(invalid.error.tag, 1);
         assert_eq!(context.available(), 40);
-        let good = hirsel_core_net_narrow(&mut context, n, 0, 0, 0, 0x7f000001, 32, 0, 80, 80, 1);
+        let good = narrow(&mut context, n, 32, 80);
         assert_eq!(good.error, IoError::OK);
         assert_eq!(context.available(), 0);
-        let refused = hirsel_core_net_narrow(
-            &mut context,
-            good.value,
-            0,
-            0,
-            0,
-            0x7f000001,
-            32,
-            0,
-            80,
-            80,
-            1,
-        );
+        let refused = narrow(&mut context, good.value, 32, 80);
         assert_eq!(refused.error.tag, 2);
         assert_eq!(refused.value, 40);
         assert_eq!(refused.written, 0);
@@ -1302,7 +1297,9 @@ fn resolve_only_checks_names_and_grants_no_connect_authority() {
     })));
     // SAFETY: the fixture pins the provider, grants and both borrowed carriers.
     unsafe {
-        let child = hirsel_core_net_narrow_resolve(&mut context, net, &name_buffer("*.test"), 1);
+        let builder = hirsel_core_net_narrow_begin(&mut context, net, 1).value;
+        hirsel_core_net_narrow_resolve(&mut context, builder, &name_buffer("*.test"), 1);
+        let child = hirsel_core_net_narrow_end(&mut context, builder, 1);
         assert_eq!(child.error, IoError::OK);
         let mut addresses = [localhost.into(); 4];
         let mut out = ip_buffer(&mut addresses, 0);

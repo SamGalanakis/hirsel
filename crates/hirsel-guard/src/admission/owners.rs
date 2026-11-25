@@ -185,7 +185,11 @@ impl Tag {
         if bytes == 0 {
             return;
         }
-        if !host_budget().0.retain_owner(self.kind(), bytes as u64) {
+        let admitted = {
+            let _uncharged = Uncharged::enter();
+            host_budget().0.retain_owner(self.kind(), bytes as u64)
+        };
+        if !admitted {
             crate::owner_exhausted(self.kind(), bytes);
         }
         if let Self::Owner(owner) = self {
@@ -200,7 +204,25 @@ impl Tag {
             let before = owner.bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
             assert!(before >= bytes as u64, "live allocation owns its charge");
         }
+        let _uncharged = Uncharged::enter();
         host_budget().0.release_owner(self.kind(), bytes as u64);
+    }
+}
+/// The ledger's own locks run unscoped. On Apple hosts a std `Mutex` or
+/// `Condvar` is a pthread object that allocates its state on first use; under
+/// a charged scope that allocation would reserve through the very lock it is
+/// creating, and recurse until the stack overflows.
+struct Uncharged(u32);
+impl Uncharged {
+    fn enter() -> Self {
+        let previous = mode();
+        crate::thread::set_mode(UNSCOPED);
+        Self(previous)
+    }
+}
+impl Drop for Uncharged {
+    fn drop(&mut self) {
+        crate::thread::set_mode(self.0);
     }
 }
 pub(crate) struct Record {

@@ -349,6 +349,7 @@ fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecor
     match take finished {
         RolledBack(take outcome) => Ok(RolledBack(take outcome)),
         DraftFault(take problem) => Ok(DraftFault(take problem)),
+        Drifted(take name, take seen) => Ok(Drifted(take name, take seen)),
         Prepared(take ready) => {
             let mut prepared = take ready
             if is_disk(db) {
@@ -372,6 +373,7 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
     match take finished {
         RolledBack(take outcome) => Ok(RolledBack(take outcome)),
         DraftFault(take problem) => Ok(DraftFault(take problem)),
+        Drifted(take name, take seen) => Ok(Drifted(take name, take seen)),
         Prepared(take staged) => {
             let mut prepared = take staged
             let first = prepared.first_stamp

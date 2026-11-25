@@ -1,0 +1,350 @@
+// The index builder (STORE-SPEC §1.2). An index record is Backfilling while
+// its entries are incomplete. A chunk reads up to INDEX_CHUNK rows after the
+// record's cursor at the current head, writes their entries and moves the
+// cursor in the same schema plan, so the cursor never commits apart from
+// its entries. The chunk that reaches the table's end publishes the index.
+// Every write maintains a Backfilling index as it maintains a Public one, so
+// a row written after the record exists is right on either side of the cursor.
+
+// The rows one chunk reads: STORE-SPEC §1.2 says why 4,096.
+const INDEX_CHUNK: u64 = 4096
+
+// Up to `limit` rows of table `table_id` after `cursor`, read from resident
+// roots. The flag says the table has no rows past the last one returned.
+fn resident_rows_after(roots: Roots, table_id: u32, cursor: Option[Bytes], limit: u64) -> Result[(List[(Bytes, Bytes)], bool), Error] {
+    let start = match cursor {
+        Some(final_key) => {
+            let mut k = prefix(table_id)?
+            list.append(mut k, final_key)
+            Excluded(take k)
+        },
+        None => Included(prefix(table_id)?),
+    }
+    let mut rows = byte_cursor(roots.collections, take start, prefix(table_id + 1)?)?
+    let mut out: List[(Bytes, Bytes)] = list.new()
+    while list.len(out) < limit {
+        let Some((take key, raw)) = next_bytes(mut rows)? else {
+            return Ok((take out, true))
+        }
+        list.push(mut out, (take key, copied(raw)?))
+    }
+    let done = match next_bytes(mut rows)? {
+        Some(_) => false,
+        None => true,
+    }
+    Ok((take out, done))
+}
+
+// The same rows on main's head when the table is Tiered: each is read
+// through the pager under a reader's pin extractor, as a snapshot scan reads.
+fn tiered_rows_after(db: Db, table_id: u32, cursor: Option[Bytes], limit: u64) -> Result[(List[(Bytes, Bytes)], bool), Error] waits {
+    let s = snapshot(db)
+    let r = reader(db, db.writer_pin_bytes)?
+    let Some(inventory) = view s.roots.collections.paging else {
+        return resident_rows_after(s.roots, table_id, cursor, limit)
+    }
+    let low = prefix(table_id)?
+    let high = prefix(table_id + 1)?
+    let mut previous: Option[Bytes] = match cursor {
+        Some(final_key) => {
+            let mut k = prefix(table_id)?
+            list.append(mut k, final_key)
+            Some(take k)
+        },
+        None => None,
+    }
+    let mut out: List[(Bytes, Bytes)] = list.new()
+    while list.len(out) <= limit {
+        let Some((take key, value, take resume)) = snapshot_tiered_span_step(r, s, inventory, low, high, previous)? else {
+            return Ok((take out, true))
+        }
+        if list.len(out) == limit {
+            return Ok((take out, false))
+        }
+        list.push(mut out, (take key, copied(value)?))
+        previous = Some(take resume)
+    }
+    Ok((take out, false))
+}
+
+// One chunk over `rows`, which follow the record's cursor in key order. It
+// returns the first two primary keys found under one Unique key. Outside a
+// preview that ends the chunk with `plan` untouched; a preview skips the
+// later row and keeps building, as the scratch index keeps one row per key.
+fn index_chunk(mut plan: SchemaPlan, key: Bytes, take chunk_record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], done: bool,
+    preview: bool) -> Result[Option[(Bytes, Bytes)], Error] {
+    let mut record = take chunk_record
+    let mut roots = share_roots(plan.roots)
+    let mut live_bytes = plan.live
+    let first = stamp_after(plan.next_node)?
+    let mut next_stamp = first
+    let mut duplicate: Option[(Bytes, Bytes)] = None
+    let mut cursor: Option[Bytes] = None
+    for (logical, raw) in rows {
+        let primary = list.slice(logical, 4, list.len(logical))
+        let values = (extractor.extract)(raw, primary)?
+        for row in values.keys {
+            if list.len(row) > 4096 { return Error(Limit(Key)) }
+            if let Some(prior) = get_page_row(roots.collections, row) {
+                if let Unique = record.index_kind {
+                    let owner = list.slice(prior, 4, unique_owner_end(prior)?)
+                    if owner != primary {
+                        if let None = duplicate {
+                            duplicate = Some((copied(owner)?, copied(primary)?))
+                        }
+                        if !preview { return Ok(take duplicate) }
+                        continue
+                    }
+                }
+                if !plan.retained {
+                    live_bytes = int.saturating_sub(live_bytes, entry(row, prior))
+                }
+            }
+            live_bytes = int.saturating_add(live_bytes, entry(row, values.payload))
+            over_ceiling(live_bytes, plan.ceiling)?
+            put_page_row(mut roots.collections, row, values.payload, first, mut next_stamp)?
+        }
+        cursor = Some(copied(primary)?)
+    }
+    canonical_tree(mut roots.collections)?
+    plan.next_node = next_stamp - 1
+    if done {
+        record.state = Public
+    } else if let Some(take final_key) = take cursor {
+        record.state = Backfilling(Some(take final_key))
+    }
+    let raw = encode_catalog(record)?
+    live_bytes = catalog_recharge(live_bytes, roots, key, raw, plan.retained)
+    roots = catalog_insert(mut plan.next_node, roots, key, raw)?
+    let next_table = plan.next_table
+    keep_schema(mut plan, take roots, live_bytes, next_table)?
+    Ok(take duplicate)
+}
+
+// A declaration's build: every chunk runs inside the declaration's plan,
+// so the index publishes with the schema commit that declares it. A
+// preview reports the rows it read and wrote.
+fn build_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog, extractor: RegisteredIndex, preview: bool) -> Result[(Option[(Bytes, Bytes)], u64, u64), Error] {
+    let mut current = copied_record(record)?
+    let mut read = 0u64
+    let mut duplicate: Option[(Bytes, Bytes)] = None
+    loop {
+        let cursor = match current.state {
+            Backfilling(Some(final_key)) => Some(copied(final_key)?),
+            _ => None,
+        }
+        let (take rows, done) = resident_rows_after(plan.roots, current.owner, cursor, INDEX_CHUNK)?
+        read += list.len(rows)
+        let found = index_chunk(mut plan, key, copied_record(current)?, extractor, rows, done, preview)?
+        if let Some(take pair) = take found {
+            if !preview { return Ok((Some(take pair), read, 0)) }
+            if let None = duplicate { duplicate = Some(take pair) }
+        }
+        current = catalog_entry_in(plan.roots.catalog, key)?
+        if let Public = current.state { break }
+    }
+    let written = match std.page.collection_child(plan.roots.collections.root, prefix(record.id)?) {
+        Some(root) => {
+            let (rows, _) = std.page.totals(root)
+            rows
+        },
+        None => 0u64,
+    }
+    Ok((take duplicate, read, written))
+}
+
+fn copied_record(record: Catalog) -> Result[Catalog, Error] {
+    decode_catalog(encode_catalog(record)?)
+}
+
+// The first index on main's head whose record is Backfilling and whose
+// extractor this release binds, with its catalog key and record. An index
+// this release does not bind waits for the release that declares it.
+fn building_index(db: Db) -> Result[Option[(Bytes, Catalog)], Error] {
+    let mut first_key: Bytes = list.new()
+    list.push(mut first_key, 2u8)
+    let mut end_key: Bytes = list.new()
+    list.push(mut end_key, 3u8)
+    let mut records = byte_cursor(db.heads[0].roots.catalog, Included(take first_key), end_key)?
+    while let Some((take key, raw)) = next_bytes(mut records)? {
+        if record_public(raw) { continue }
+        let record = decode_catalog(raw)?
+        if let Backfilling(_) = record.state {
+            if let Some(_) = bound_extractor(db.indexes, record) {
+                return Ok(Some((take key, take record)))
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn bound_extractor(registry: IndexRegistry, record: Catalog) -> Option[View[RegisteredIndex]] in registry {
+    for ((table_id, index_id, _), extractor) in registry.entries {
+        if table_id == record.owner && index_id == record.id && extractor.by == record.by && extractor.key == record.key {
+            return Some(extractor)
+        }
+    }
+    None
+}
+
+// One chunk of the first Backfilling index on main, in one schema commit
+// read from and published at main's current head. Returns the index's name,
+// or None when no index is building. A Unique key found under two primary
+// keys moves the index to Failed instead, and no entry of that chunk commits.
+// The chunk reads a Tiered table through the pager, so in-place repair needs
+// no Migrate on a Tiered store (STORE-SPEC §13.10).
+pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error] waits {
+    healthy(db)?
+    if limit == 0 { return Error(Limit(Transaction)) }
+    let Some((take key, take record)) = building_index(db)? else {
+        return Ok(None)
+    }
+    let name = declaration_index_name(key)?
+    let cursor = match record.state {
+        Backfilling(Some(final_key)) => Some(copied(final_key)?),
+        _ => None,
+    }
+    let (take rows, done) = tiered_rows_after(db, record.owner, cursor, limit)?
+    let mut plan = schema_plan(db)
+    let found = {
+        let Some(extractor) = bound_extractor(db.indexes, record) else { return Error(Stale(record.id)) }
+        index_chunk(mut plan, key, copied_record(record)?, extractor, rows, done, false)?
+    }
+    if let Some((take first, take second)) = take found {
+        let mut failed = copied_record(record)?
+        failed.state = Failed(take first, take second)
+        put_index_record(mut plan, key, failed)?
+    }
+    let _ = publish_schema_plan(mut db, take plan)?
+    Ok(Some(take name))
+}
+
+fn put_index_record(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> Result[(), Error] {
+    let raw = encode_catalog(record)?
+    let live_bytes = catalog_recharge(plan.live, plan.roots, key, raw, plan.retained)
+    let roots = catalog_insert(mut plan.next_node, plan.roots, key, raw)?
+    let next_table = plan.next_table
+    keep_schema(mut plan, take roots, live_bytes, next_table)
+}
+
+// Demotes an index to Backfilling(None) over an empty collection (§I.3), so
+// reads refuse it and the builder rebuilds it from the table's first row.
+// An index already Backfilling(None) is left as it is.
+fn demote_index(mut plan: SchemaPlan, key: Bytes) -> Result[(), Error] {
+    let mut record = catalog_entry_in(plan.roots.catalog, key)?
+    if let Backfilling(None) = record.state { return Ok(()) }
+    let mut roots = share_roots(plan.roots)
+    let charge = remove_store_collection(mut roots.collections, record.id, mut plan.next_node)?
+    define_store_collection(mut roots.collections, record.id, 2, mut plan.next_node)?
+    let mut live_bytes = plan.live
+    if !plan.retained {
+        live_bytes = int.saturating_sub(live_bytes, charge)
+    }
+    live_bytes = int.saturating_add(live_bytes, 126)
+    let next_table = plan.next_table
+    keep_schema(mut plan, take roots, live_bytes, next_table)?
+    record.state = Backfilling(None)
+    put_index_record(mut plan, key, record)
+}
+
+// Demotes each index a failed transaction proved wrong, in one schema
+// commit on main. A crash before it commits loses nothing: the next write
+// to the row fails the same way.
+fn demote_drifted(mut db: Db, seen: List[(u32, u32)]) -> Result[(), Error] waits {
+    let mut plan = schema_plan(db)
+    for (owner, id) in seen {
+        let name = find_index_name(plan.roots.catalog, owner, id)?
+        demote_index(mut plan, catalog_index_key(owner, name)?)?
+    }
+    if plan.changed {
+        let _ = publish_schema_plan(mut db, take plan)?
+    }
+    Ok(())
+}
+
+// Starts an in-place rebuild of a declared index: demotes it, and
+// `index_build_step` then rebuilds it while every other index serves.
+pub fn rebuild_index[J, K, V, P](mut db: Db, ix: Index[J, K, V, P]) -> Result[(), Error] waits {
+    healthy(db)?
+    if !same(db.store, ix.store) { return Error(Foreign) }
+    let mut plan = schema_plan(db)
+    let record = catalog_entry_in(plan.roots.catalog, ix.catalog_key)?
+    if record.id != ix.id { return Error(Stale(ix.id)) }
+    demote_index(mut plan, ix.catalog_key)?
+    if plan.changed {
+        let _ = publish_schema_plan(mut db, take plan)?
+    }
+    Ok(())
+}
+
+// A declaration's index build in its plan. A new index (`new_index`) gets its
+// record as Backfilling(None) over an empty collection; an existing record
+// resumes from its cursor, and a Failed one restarts from an empty index.
+fn stage_index_build[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, take record: Catalog, extractor: RegisteredIndex, new_index: bool) -> Result[(), Error] {
+    if !same(plan.store, t.store) {
+        return Error(Foreign)
+    }
+    let mut proposed = take record
+    if new_index {
+        let mut meta = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
+        if meta.id != t.id {
+            return Error(Stale(t.id))
+        }
+        let Some(next_table) = int.checked_add(proposed.id, 1u32) else { return Error(Limit(Ids)) }
+        proposed.state = Backfilling(None)
+        let raw = encode_catalog(proposed)?
+        let mut live_bytes = int.saturating_add(126, catalog_recharge(plan.live, plan.roots, key, raw, plan.retained))
+        meta.epoch += 1
+        let changed = encode_catalog(meta)?
+        live_bytes = catalog_recharge(live_bytes, plan.roots, t.catalog_key, changed, plan.retained)
+        over_ceiling(live_bytes, plan.ceiling)?
+        let mut roots = share_roots(plan.roots)
+        define_store_collection(mut roots.collections, proposed.id, 2, mut plan.next_node)?
+        roots = catalog_insert(mut plan.next_node, roots, key, raw)?
+        roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
+        keep_schema(mut plan, take roots, live_bytes, next_table)?
+    } else if let Failed(_, _) = proposed.state {
+        demote_index(mut plan, key)?
+    }
+    let current = catalog_entry_in(plan.roots.catalog, key)?
+    let preview = if let Some(_) = plan.preview { true } else { false }
+    let (take duplicate, read, written) = build_declared_index(mut plan, key, current, extractor, preview)?
+    let outcome: BackfillOutcome = match take duplicate {
+        Some((take first, take second)) => {
+            if !preview { return Error(Conflict(named(name)?)) }
+            Conflict(ConflictKeys(first: take first, second: take second))
+        },
+        None => Filled,
+    }
+    if let Some(mut backfills) = plan.preview {
+        let table_name = catalog_collection_name(t.catalog_key, 1u8)?
+        list.push(mut backfills, MigrationBackfill(table: take table_name, index: Some(clone(name)), read: read, written: written, outcome: take outcome))
+    }
+    Ok(())
+}
+
+// A Unique key two rows claim, or an index a remove proved wrong (§I.3).
+type IndexStop: send = Duplicate(String) | Drifted(String)
+
+fn index_stop_error(stop: IndexStop) -> Result[Error, Error] {
+    match stop {
+        Duplicate(name) => Ok(Conflict(named(name)?)),
+        Drifted(name) => Ok(Drift(named(name)?)),
+    }
+}
+
+// The drift that fails a transaction, with the (table, index) pairs its
+// removes proved wrong, or None when no remove did. A Duplicate stays.
+fn take_drift(mut tx: Tx) -> Option[(String, List[(u32, u32)])] {
+    let drifted = match tx.index_conflict {
+        Some(Drifted(_)) => true,
+        _ => false,
+    }
+    if !drifted { return None }
+    let Some(Drifted(take name)) = replace(mut tx.index_conflict, None) else { return None }
+    let evidence = match replace(mut tx.drift, None) {
+        Some(take seen) => take seen,
+        None => list.new(),
+    }
+    Some((take name, take evidence))
+}

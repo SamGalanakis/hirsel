@@ -16,7 +16,7 @@ type Drafted[R, E] {
     resident: u64,
     frame_tail: u64,
     refusal: Option[Capacity],
-    index_conflict: Option[String],
+    index_conflict: Option[IndexStop],
     drift: Option[List[(u32, u32)]],
     frame_bytes: Option[u64],
     wrote: bool,
@@ -150,9 +150,11 @@ fn install[R, E](mut tx: Tx, take d: Drafted[R, E]) -> Result[R, E] {
         tx.resident = resident
         tx.frame_bytes = frame_bytes
         tx.wrote = wrote
-        if let Some(take seen) = take drift {
-            stage_drift(mut tx.drift, take seen)
-        }
+    }
+    // The evidence of a proven-wrong index stays however the callback
+    // ended, as its abort-only flag does.
+    if let Some(take seen) = take drift {
+        stage_drift(mut tx.drift, take seen)
     }
     take result
 }

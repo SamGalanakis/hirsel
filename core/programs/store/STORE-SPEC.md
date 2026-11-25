@@ -1,4 +1,6 @@
-# STORE-SPEC v2.114: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.115: the M4 store library (lane store-spec-1001)
+
+v2.115 (store-index-states-2559; Store 1.1): built. (1) **Format 8.** An index's catalog record ends with its build state: `Backfilling(cursor)`, `Public` or `Failed(first, second)` (§1.2 "Index states"). A format-7 store is `Unsupported(7)`, with no migration. (2) **The chunked resumable builder** replaces the one-shot backfill: each chunk reads the table at the current head and commits its entries and its cursor in one schema commit, and a read of an index that is not `Public` is `NotReady(name)`. `index_build_step` and `rebuild_index` are new. (3) **Drift, step two (§I.3).** A remove whose index entry is absent, on a row the index claims to cover, fails the transaction with `Drift(name)` and demotes the index to `Backfilling(None)`. Step one's counter (`store.attention`) still counts it. (4) **§13.10.** `Tiered(Migrate)` does not refuse in-place index repair: `index_build_step` reads a Tiered table through the pager. A schema-changing deploy of a Tiered store is still refused. Reversible: the format word is one way (a format-8 store does not open under format 7); the builder and the drift rule are code.
 
 v2.114 (tiered-activate-2596): built. **Tiered is active:** `set_residency` (§13.8) is public store API on Directory (log@1) stores, so a program moves a Table or Log to Tiered and back. The refusals §13.10 names stay (`migrate`, `export` and `install` until M3b; `Tiered(Memory)` on a memory store); Tiered on objects@1 and sim@1 is not built, and `set_residency` there is refused `Tiered(Install)` before anything changes. **T8's two retries are named apart (closing v2.111's open item).** The *mandatory-only cut* is a cut whose Tiered compaction step (AP16 item 3's T3 part) was refused: it publishes T8 steps 1, 2, 3 and 5, every added row with its own value. AP16's *redo*, after a later item or step 3 is refused with relocation in the candidate, restores the retry base. On a Tiered store that base already holds the staged Tiered steps (T2's emission, T3's moves, the queue rewrites, the drain and the retirements), so the redo carries them unchanged and drops only the class 1, 0 and 2 relocation. This is correct because the staged steps are a value built before the first attempt, which the first attempt reads and never edits: the redo writes the same class-4 and class-3 packs at the same seqs, and every rewritten queue row names a frame in a pack the same MANIFEST lists. It is simpler than re-staging, which would draw a second set of Tiered stamps and lay out the Tiered packs again. L87 (c) gains a crash after the redo's rename. No format change. Reversible: spec text and the `pub` only.
 
@@ -1589,6 +1591,8 @@ pub type Error =
     | Schema(u64)                  // codec.resolve: the stored writer schema does not resolve; offset into it (SEM-10)
     | Stale(u32)                   // a handle's id is not live in the catalog it reads (I3), or the write Tx's registry lacks the table id (§1.2)
     | Conflict(String)             // v2.57 DX Q3: a Unique index entry is owned by another key (index name); the Tx is abort-only after it (§1.2)
+    | NotReady(String)             // v2.115: a read of an index whose record is not Public (index name) (§1.2 "Index states")
+    | Drift(String)                // v2.115: a remove found its index entry absent on a row the index covers; the index is demoted (index name) (§1.2)
     | Changed(String)              // v2.57 DX Q1: Open or Follower: an index's kind or its extractor's or projection's revision differs from the catalog's (index name)
     | Undeclared(String)           // v2.57 DX Q1: a catalog table or index that the declaration does not name (§1.2)
     | Decode(codec.DecodeError)    // a stored row failed its codec: only a schema bug in user code
@@ -1707,7 +1711,25 @@ Then, for each `Unique` index in declaration order and each J in the new set but
 - Delete and re-insert in one Tx is not a conflict, because the probe reads the staged view. To swap two rows' unique keys, delete one row, put the other, then put the first.
 - `Stop` gains `Conflict(String)`. Re-execution compares it like any `Failed` reply.
 
-**Backfill (Fable 12).** `Migrate` builds a created or rebuilt index from the table's rows at the seal's base. It reads the table in key order in chunks of at most 4,096 rows. It extracts each chunk into a sorted run charged to the migration's allowance, and merges the runs into a bottom-up build (§11.9). For a `Unique` index, the merge compares adjacent J and refuses the first duplicate with `Conflict(name)`. The build is admitted against `resident_limit` before it starts (§1.11), and every refusal leaves the old catalog and rows. The whole migration commits in its one cut. `migrate_table`'s rows are built the same way, and the indexes the declaration names for the target are built from the new rows. No extractor of the old table is applied to a new value (AB1).
+**Index states (v2.115, Store 1.1).** Every index record carries a build state:
+
+```hirsel
+type IndexState = Backfilling(Option[Bytes]) | Public | Failed(Bytes, Bytes)
+```
+
+- **`Backfilling(cursor)`.** The index is being built. `cursor` is the last primary key whose entries are complete; `None` means no row is done yet. Every read of the index (`find`, `find_page`, `lookup`, the `Reader` forms) is `NotReady(name)`, with nothing read. Writes maintain it as they maintain a `Public` index, ahead of the cursor too, so a chunk that later re-extracts a row only overwrites entries the write already made.
+- **`Public`.** The index is complete and serves reads.
+- **`Failed(first, second)`.** The builder found one `Unique` key under two primary keys, `first` (the entry's owner) and `second` (the row that repeats it). Reads are `NotReady(name)`. `rebuild_index`, or a `Migrate` declaration of the index, restarts it from an empty index.
+
+**The builder.** An index is built in chunks of `INDEX_CHUNK` = 4,096 rows, in primary-key order after the cursor.
+- **Each chunk reads the current head.** The chunk's rows come from main's roots at the moment it runs, never from the roots the build started at, so a row written between chunks is extracted as it now is.
+- **A chunk commits atomically with its cursor.** The chunk's entries and the record's new state (`Backfilling(last key)`, or `Public` when the table has no row after the chunk) publish in one schema commit. A crash therefore loses at most the chunk in flight, and a reopened build resumes at the committed cursor.
+- **Two paths run it.** `seal` in `Migrate` builds a created or rebuilt index inside the declaration's plan, chunk by chunk until `Public`, so the declaration commits the finished index in its one cut. A `Unique` duplicate there is `Conflict(name)` and the declaration commits nothing, as before. On a serving store, `index_build_step(mut db, limit)` runs one chunk of at most `limit` rows of the first `Backfilling` index this release binds, as one schema commit, and returns its name (`None` when nothing builds). A duplicate found there moves the index to `Failed` and commits no entry of that chunk.
+- **`rebuild_index(mut db, ix)`** demotes a declared index to `Backfilling(None)` over an empty collection in one schema commit; `index_build_step` then rebuilds it while every other index serves.
+- **Cost.** Each step is a schema commit, so one checkpoint per chunk (7 syncs, §3.2). The chunk bounds the step's memory and the work a crash loses.
+- **Not here.** Catching a building index up with the journal suffix of its own build (Store 1.2), surfacing states in status (1.3), and the runner's driver of `index_build_step` (1.8).
+
+**Drift (§I.3).** A remove (an overwrite's old key or a delete) whose index entry is absent, on a row the index claims (`Public`, or `Backfilling(Some(c))` with the row's key at or before `c`), proves the index wrong. The transaction fails with `Drift(name)` and commits nothing; `run` answers `Failed(StoreFailure.Drift(name))` and `serve` refuses it before execution. The writer then counts the drift (`store.attention`, step one) and demotes the index to `Backfilling(None)` in one schema commit, so its reads refuse until a rebuild. A crash before the demotion loses nothing: the next write of that row fails the same way. An absent entry on a row the index does not yet claim is not drift.
 
 **Read handles (I3).** A table or index id names one incarnation: ids come from the `next_table` counter and are never reused, so a table recreated after `drop_table`, or migrated, has a new id.
 - Every read (`fetch`, `range`, `count`, `lookup`, `entries`, the prefix forms, and the `Reader` forms of §1.5, also inside `look`) first looks up the handle's catalog key in the catalog tree of the roots it reads: the Tx's roots, or the Snapshot's. If the key is absent, or holds another id, the read is `Stale(id)`, with nothing read and nothing recorded. A catalog root byte-identical to the one-leaf root the handle was resolved against answers without the lookup (I3).
@@ -1726,18 +1748,19 @@ Then, for each `Unique` index in declaration order and each J in the new set but
 - The key schema must be byte-equal to the stored one. A change of key order is always `Schema`, and only `migrate_table` fixes it.
 - `migrate_table` writes every row as one new number and retires all older ones. It is the only way to drop an old schema. It gives the table, and each of its indexes, a new id (I3).
 
-**Schema commits.** `seal` in `Migrate` is the only schema commit. A checkpoint makes it (§3.5), never a journal frame.
+**Schema commits.** `seal` in `Migrate` is the only declaration commit. The index builder (`index_build_step`, `rebuild_index`) and a drift demotion are the other schema commits (v2.115). A checkpoint makes each (§3.5), never a journal frame.
 - It advances the branch version by one, so an unchanged version means nothing was committed (K1). A `seal` that finds nothing to change commits nothing and leaves the version unchanged. The runner's rule 12 relies on this.
 - The catalog therefore changes only at a manifest swap, and every journal suffix is decoded under one catalog.
 - `seal` admits its new trees against `resident_limit` before building them, using their accounted size (§1.11), else `Full`.
 - Cost: a schema commit costs one checkpoint, which is 7 syncs (§3.2). Schema commits are rare.
 - **Format.** The index kind, payload schema list and revisions are catalog fields of Format 5 (STORE-SPEC M3). A store whose catalog lacks them is `Unsupported(format)`, with no migration.
+- **Format 8 (v2.115).** An index record (catalog kind 2) ends with its state after the projection: `0` Public; `1` Backfilling(None); `blob(cursor) ‖ 2` Backfilling(Some(cursor)); `blob(first) ‖ blob(second) ‖ 3` Failed. A blob is `u32 LE len ‖ bytes`. The tag is the record's last byte, so a reader can tell Public without decoding the rest. Any other tag, or bytes between the projection and the state, is `Corrupt(Malformed)`.
 
 ### 1.3 Transactions
 
 ```hirsel
 pub opaque scoped type Tx                // VERIFY-5 B2: opaque (PROG-2). Base roots (views), working roots, op list, read Log view, scope, CallInfo
-pub type StoreFailure = Raised(Causes) | Conflict(String)
+pub type StoreFailure = Raised(Causes) | Conflict(String) | Drift(String)   // Drift: v2.115, §1.2
 pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(StoreFailure) | Refused(Capacity) | Stopped(core.OutOfTime)   // AC1
 pub type Undone[A] { value: A, ticket: Option[Ticket] }   // F2: the ticket of the kept reply commit, if any
 pub type Done[R] { value: R, ticket: Ticket, info: CallInfo, reads: List[Read] }
@@ -2284,6 +2307,7 @@ Columns: the law, its oracle (where the expected value comes from), the wrong im
 | **L74 `unique_conflict_atomic`** | Over a table with two Unique indexes and one Many index, random `put`/`delete` sequences in one Tx, some colliding: a `put` that collides returns `Conflict(first colliding index in declaration order)` and the staged state, the read log, the frame and the resident charge equal those before the call; every later write in the Tx returns that `Conflict`; a body returning `Error` commits only its reply; a body returning `Ok` is `Failed` with cause `Conflict(name)` and commits nothing; a put that re-puts a row's own unique keys, and a delete-then-put of a key in one Tx, are not conflicts | M: unique entries derived from the model rows | probes made after staging (`probe_after_apply`: the primary row or a Many entry stays staged after the conflict); the row's own entry treated as a conflict (`owner_conflicts`); `Ok` after a conflict committing earlier writes (`ok_after_conflict_commits`) | **PARTIAL.** `test_unique_conflict_atomic` runs one fixed sequence through a draft, `run` and `serve`: `Conflict` names the first colliding index in declaration order, the frame bytes, ids, rows and resident charge are unchanged, later writes return the same `Conflict`, an `Error` body commits only its reply, an `Ok` body is `Failed`, and a re-put and a delete-then-put are not conflicts. Not built: random sequences |
 | **L75 `unique_backfill`** | `Migrate` adding a Unique index to a table of n rows (n ∈ {0, 1, 4,095, 4,096, 4,097, 3 × 4,096 + 1}) with one duplicate J placed at each chunk boundary and inside a chunk: `seal` is `Conflict(name)`, the version, catalog and rows equal those before, and with no duplicate the index equals M | M | a duplicate across two chunks missed by a per-chunk check (`chunk_local_unique`); a partial index published before the duplicate is found | **BUILT.** `test_index_declaration_laws`: all six n, with the duplicate at each chunk boundary and inside a chunk |
 | **L76 `extractor_revision`** | Declaring an index whose extractor body changed but whose `code.identity` did not: `Open` is `Changed(name)`, `Follower` is `Changed(name)`, and `Migrate` rebuilds the index so it equals M under the new body; the same with the projection of a covering index; a value-only edit of a covered field rewrites the covering entry at an unchanged J (`ix` entry bytes equal M's payload) | M: entries computed by applying the new body to the model rows | a check by identity alone (`identity_only`: the stale index is kept); an unchanged-key test that ignores the payload (`key_only_skip`: a covering entry keeps the old payload) | **BUILT.** `test_index_declaration_laws`: a changed key extractor revision and a changed projection revision are `Changed` under `Open` and `Follower`, `Migrate` rebuilds, and a covered-value edit rewrites the entry at an unchanged J |
+| **L-IX `index_build`** | (v2.115) For random interleavings of puts, overwrites and deletes (ahead of the cursor and behind it) with `index_build_step` chunks of 1, 3 and 5 rows after `rebuild_index`, and under every W2 cut of a 16-row-chunk build with a write between chunks: the index serves reads exactly when its record is `Public`, and when `Public` its entries equal a fresh extraction of the rows. The chunk-boundary duplicates of L75 built by the step leave the index `Failed(0, d)` and refusing reads | the law's model of the rows; at the cuts, rows k + 2000 written after recovery | extracting a chunk from the build's starting roots (`stale_chunk_base`); committing the cursor before the chunk's entries (`cursor_separate_commit`); serving reads before `Public` (`read_before_public`) | **BUILT.** `test_index_build_law`, crash scenario `index-build` (`core/tools/store_crash_tests.py`) |
 
 L16, L17, L31 and L38 are restated in place in §5 and §11 for the v2.57 handles.
 
@@ -2338,7 +2362,7 @@ objects@1 has its own names (§12.2): entries (role 2), MANIFESTs (role 1), pack
 | Off | Size | Field | Rule |
 |---|---|---|---|
 | 0 | 8 | magic | `HIRSTORE`, else `Header` |
-| 8 | 4 | format u32 | 7 (v2.100); any other value is `Unsupported(format)` |
+| 8 | 4 | format u32 | 8 (v2.115); any other value is `Unsupported(format)` |
 | 12 | 1 | role u8 | 1 manifest, 2 journal segment (and an objects@1 entry), 3 pack, 4 end file, 7 the objects@1 `head` (v2.46), 8 an objects@1 locator chunk (v2.47); must match the file's or object's name |
 | 13 | 1 | authority u8 | 0 = log (unchanged for every existing directory store), 1 = objects, 2 = sim (§12.1), the same in every file of the store; a memory store writes no file. 3–255 are `Unsupported` |
 | 14 | 2 | zero | |
@@ -6537,6 +6561,7 @@ pub type TieredRefusal = Memory | Migrate | Export | Install | Authority
 ```
 
 - `migrate_table`, `drop_named_table`, `rename_table` and `list_collections` in a `Migration` (§1.2), `export` (§3.5a) and `install` (§12.7) on a store whose catalog holds a Tiered collection return `Tiered(Migrate)`, `Tiered(Export)` or `Tiered(Install)`. This is checked first, before any staging, catalog scan, upload, journal write or head write, and every byte is left unchanged. Building the Tiered versions is M3b.
+- **In-place index repair is not refused (v2.115, D6 narrow lift).** `rebuild_index`, `index_build_step` and a drift demotion run on a store with Tiered collections: the builder reads a Tiered table through the pager (`snapshot_tiered_span_step`), one chunk per schema commit. A `Migrate` declaration that changes a schema on such a store is still `Tiered(Migrate)`.
 - `Tiered(Memory)` is the answer for Tiered residency on a memory store.
 - `set_residency` on an objects@1 store is `Tiered(Install)`, before any admission or change, until Tiered is built on the bucket (v2.114).
 - `Tiered(Authority)` is the answer for `archive` on log@1 or memory.

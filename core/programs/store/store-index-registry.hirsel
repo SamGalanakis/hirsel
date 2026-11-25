@@ -171,116 +171,19 @@ fn stage_versioned_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: St
         return Error(Exists(named(name)?))
     }
     let record = Catalog(kind: 2, id: plan.next_table, owner: t.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)),
-        schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision, index_kind: Many, payload_schemas: list.new(), projection: None)
+        schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision, index_kind: Many, payload_schemas: list.new(), projection: None, state: Backfilling(None))
     let schema_binding = bind_index(t, record, by, key)
-    stage_index_backfill(mut plan, t, k, name, record, schema_binding.index)?
+    stage_index_build(mut plan, t, k, name, take record, schema_binding.index, true)?
     Ok(take schema_binding)
 }
 
-fn stage_index_backfill[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, record: Catalog, schema_binding: RegisteredIndex) -> Result[(), Error] {
-    if !same(plan.store, t.store) {
-        return Error(Foreign)
-    }
-    let mut meta = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
-    if meta.id != t.id {
-        return Error(Stale(t.id))
-    }
-    let Some(next_table) = int.checked_add(record.id, 1u32) else { return Error(Limit(Ids)) }
-    let raw = encode_catalog(record)?
-    let mut live_bytes = int.saturating_add(126, catalog_recharge(plan.live, plan.roots, key, raw, plan.retained))
-    meta.epoch += 1
-    let changed = encode_catalog(meta)?
-    live_bytes = catalog_recharge(live_bytes, plan.roots, t.catalog_key, changed, plan.retained)
-    over_ceiling(live_bytes, plan.ceiling)?
-    let source = match std.page.collection_child(plan.roots.collections.root, prefix(t.id)?) {
-        Some(root) => arc.share(root),
-        None => return Error(Stale(t.id)),
-    }
-    let (read, _) = std.page.totals(source)
-    let mut rows = std.page.cursor_open(source, None, true, false)
-    let mut runs: List[List[std.page.Row]] = list.new()
-    let mut done = false
-    while !done {
-        let mut chunk: List[std.page.Row] = list.new()
-        for _ in 0u64 .. 4096 {
-            let Some(item) = std.page.cursor_next(mut rows) else {
-                done = true
-                break
-            }
-            let values = (schema_binding.extract)(item.value, item.key)?
-            for row in values.keys {
-                if list.len(row) > 4096 { return Error(Limit(Key)) }
-                let charge = entry(row, values.payload)
-                live_bytes = int.saturating_add(live_bytes, charge)
-                over_ceiling(live_bytes, plan.ceiling)?
-                list.push(mut chunk, std.page.Row(key: copied(list.slice(row, 4, list.len(row)))?, value: copied(values.payload)?, charge: charge))
-            }
-        }
-        if list.len(chunk) > 0 {
-            sort_bulk_rows(mut chunk)?
-            list.push(mut runs, take chunk)
-        }
-    }
-    let mut outcome: BackfillOutcome = Filled
-    let preview = if let Some(_) = plan.preview { true } else { false }
-    let backfill = merge_index_runs(take runs, record.index_kind, name, preview, mut outcome, mut live_bytes)?
-    let written = list.len(backfill)
-    let mut roots = share_roots(plan.roots)
-    bulk_store_collection(mut roots.collections, record.id, 2, backfill, mut plan.next_node)?
-    roots = catalog_insert(mut plan.next_node, roots, key, raw)?
-    roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
-    keep_schema(mut plan, take roots, live_bytes, next_table)?
-    if let Some(mut backfills) = plan.preview {
-        let table_name = catalog_collection_name(t.catalog_key, 1u8)?
-        list.push(mut backfills, MigrationBackfill(table: take table_name, index: Some(clone(name)), read: read, written: written, outcome: take outcome))
-    }
-    Ok(())
-}
-
-fn merge_index_runs(take runs: List[List[std.page.Row]], kind: IndexKind, name: String, preview: bool,
-    mut outcome: BackfillOutcome, mut live_bytes: u64) -> Result[List[std.page.Row], Error] {
-    let mut sorted = take runs
-    let mut pending_rows: Heap[(Bytes, u64, u64)] = heap.new()
-    for i in 0u64 .. list.len(sorted) {
-        heap.push(mut pending_rows, (copied(sorted[i][0u64].key)?, i, 0u64))
-    }
-    let mut out: List[std.page.Row] = list.new()
-    while let Some((take key, chunk, at)) = heap.pop(mut pending_rows) {
-        let written = list.len(out)
-        let duplicate = match kind {
-            Unique => written > 0 && out[written - 1].key == key,
-            Many => false,
-        }
-        if duplicate && !preview { return Error(Conflict(named(name)?)) }
-        let row = list.set(mut sorted[chunk], at, std.page.Row(key: list.new(), value: list.new(), charge: 0))
-        let following = at + 1
-        if following < list.len(sorted[chunk]) {
-            heap.push(mut pending_rows, (copied(sorted[chunk][following].key)?, chunk, following))
-        }
-        if duplicate {
-            if let Filled = outcome {
-                let prior = out[written - 1].value
-                let first = copied(list.slice(prior, 4, unique_owner_end(prior)?))?
-                let second = copied(list.slice(row.value, 4, unique_owner_end(row.value)?))?
-                outcome = Conflict(ConflictKeys(first: take first, second: take second))
-            }
-            // The scratch index retains one row per index key so the next
-            // declaration can still run and report its own conflict.
-            live_bytes -= row.charge
-            continue
-        }
-        list.push(mut out, take row)
-    }
-    Ok(take out)
-}
-
-fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog,
+fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes,
     old_keys: List[Bytes], take incoming: IndexValue) -> Result[(), Error] {
     let IndexValue(keys: take keys, payload: take payload) = take incoming
     let mut old = 0u64
     for take key in take keys {
         while old < list.len(old_keys) && old_keys[old] < key {
-            append_index_remove(tx, mut edits, record, copied(old_keys[old])?, mut frame)?
+            append_index_remove(tx, mut edits, record, primary, copied(old_keys[old])?, mut frame)?
             old += 1
         }
         let unchanged = old < list.len(old_keys) && old_keys[old] == key
@@ -297,7 +200,7 @@ fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record:
         push_index_edit(mut edits, StoreRow(take key, copied(payload)?))
     }
     while old < list.len(old_keys) {
-        append_index_remove(tx, mut edits, record, copied(old_keys[old])?, mut frame)?
+        append_index_remove(tx, mut edits, record, primary, copied(old_keys[old])?, mut frame)?
         old += 1
     }
     Ok(())
@@ -368,7 +271,29 @@ type Catalog {
     revision: Bytes,
     index_kind: IndexKind,
     payload_schemas: List[Bytes],
-    projection: Option[(Bytes, Bytes)]
+    projection: Option[(Bytes, Bytes)],
+    // An index record's build state (§1.2); table, cell and log records keep Public.
+    state: IndexState
+}
+
+// Backfilling's cursor is the last primary key whose entries are complete,
+// None before the first chunk. Failed keeps the two primary keys a chunk
+// found under one Unique key. Only Public serves reads.
+type IndexState: send = Backfilling(Option[Bytes]) | Public | Failed(Bytes, Bytes)
+
+// The state tag is an index record's last byte, so a read checks Public
+// without decoding the record.
+fn copied_state(state: IndexState) -> Result[IndexState, Error] {
+    Ok(match state {
+        Public => Public,
+        Backfilling(None) => Backfilling(None),
+        Backfilling(Some(cursor)) => Backfilling(Some(copied(cursor)?)),
+        Failed(first, second) => Failed(copied(first)?, copied(second)?),
+    })
+}
+
+fn record_public(raw: Bytes) -> bool {
+    list.len(raw) > 0 && raw[list.len(raw) - 1] == 0u8
 }
 
 fn malformed(at: u64) -> Error {
@@ -428,6 +353,7 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
     let mut index_kind: IndexKind = Many
     let mut payload_schemas: List[Bytes] = list.new()
     let mut projection_record: Option[(Bytes, Bytes)] = None
+    let mut state: IndexState = Public
     if kind == 2 {
         index_kind = match take_le(raw, mut at, 1)? {
             0 => Many,
@@ -445,11 +371,29 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
         } else if list.len(project_revision) > 0 {
             return Error(malformed(at))
         }
+        if at >= list.len(raw) {
+            return Error(malformed(at))
+        }
+        let tag_at = list.len(raw) - 1
+        state = match raw[tag_at] {
+            0 => Public,
+            1 => Backfilling(None),
+            2 => Backfilling(Some(take_blob(raw, mut at)?)),
+            3 => {
+                let first = take_blob(raw, mut at)?
+                Failed(take first, take_blob(raw, mut at)?)
+            },
+            _ => return Error(malformed(tag_at)),
+        }
+        if at != tag_at {
+            return Error(malformed(at))
+        }
+        at += 1
     }
     if at != list.len(raw) {
         return Error(malformed(at))
     }
-    Ok(Catalog(kind: kind, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision, index_kind: index_kind, payload_schemas: take payload_schemas, projection: take projection_record))
+    Ok(Catalog(kind: kind, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision, index_kind: index_kind, payload_schemas: take payload_schemas, projection: take projection_record, state: take state))
 }
 
 fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
@@ -482,6 +426,19 @@ fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
             },
             None => capacity(le(mut raw, 0, 8))?,
         }
+        match c.state {
+            Public => capacity(le(mut raw, 0, 1))?,
+            Backfilling(None) => capacity(le(mut raw, 1, 1))?,
+            Backfilling(Some(cursor)) => {
+                capacity(blob(mut raw, cursor))?
+                capacity(le(mut raw, 2, 1))?
+            },
+            Failed(first, second) => {
+                capacity(blob(mut raw, first))?
+                capacity(blob(mut raw, second))?
+                capacity(le(mut raw, 3, 1))?
+            },
+        }
     }
     if list.len(raw) > 1048576 {
         return Error(Limit(Value))
@@ -506,18 +463,40 @@ fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
     }
 }
 
-// Every declared index is complete, so an absent target is drift (§I.3 step
-// one): the write proceeds and the store counts it.
-fn append_index_remove(tx: Tx, mut edits: IndexEdits, record: Catalog, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
+// An absent target is drift (§I.3) where the index claims the row's
+// entries: a Public index, or a Backfilling one at or before its cursor.
+// A building index has no entries past its cursor yet, and a Failed one
+// is incomplete, so a remove there may find nothing.
+fn append_index_remove(tx: Tx, mut edits: IndexEdits, record: Catalog, primary: Bytes, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
     if let Some(refund) = delete_refund(tx, key)? {
         frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame)?
         push_index_edit(mut edits, RemoveRow(take key, refund))
-    } else {
+        return Ok(())
+    }
+    let claimed = match record.state {
+        Public => true,
+        Backfilling(Some(cursor)) => primary <= cursor,
+        _ => false,
+    }
+    if claimed {
         let mut seen: List[(u32, u32)] = list.new()
         list.push(mut seen, (record.owner, record.id))
         stage_drift(mut edits.drift, take seen)
     }
     Ok(())
+}
+
+// Makes the transaction abort-only with `Drift`, keeping the evidence its
+// driver counts and demotes by.
+fn drift_stop(mut tx: Tx, take seen: List[(u32, u32)]) -> Error {
+    let (owner, id) = seen[0u64]
+    let name = match find_index_name(tx.roots.catalog, owner, id) {
+        Ok(take name) => take name,
+        Error(take problem) => return take problem,
+    }
+    tx.index_conflict = Some(Drifted(clone(name)))
+    stage_drift(mut tx.drift, take seen)
+    Drift(take name)
 }
 
 fn stage_drift(mut into: Option[List[(u32, u32)]], take seen: List[(u32, u32)]) {
@@ -538,10 +517,7 @@ fn apply_edit(mut tx: Tx, take edit: DataEdit) -> Result[(), Error] {
 }
 
 fn apply_edits(mut tx: Tx, take edits: IndexEdits) -> Result[(), Error] {
-    let IndexEdits(probes: take probes, drift: take drift, first: take first, rest: take rest) = take edits
-    if let Some(take seen) = take drift {
-        stage_drift(mut tx.drift, take seen)
-    }
+    let IndexEdits(probes: take probes, first: take first, rest: take rest, ..) = take edits
     if let Some(take edit) = take first {
         apply_edit(mut tx, take edit)?
     }
@@ -574,7 +550,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
     if list.len(indexes) == 0 {
         apply_put(mut tx, take p, take raw, tail)?
     } else {
-        let edits = {
+        let mut edits = {
             let previous = transaction_row(tx, p)?
             let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
             let primary = list.slice(p, 4, list.len(p))
@@ -588,9 +564,12 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
                     },
                     None => list.new(),
                 }
-                plan_index_put(tx, mut pending, mut frame, ix, old_keys, take incoming)?
+                plan_index_put(tx, mut pending, mut frame, ix, primary, old_keys, take incoming)?
             }
             take pending
+        }
+        if let Some(take seen) = replace(mut edits.drift, None) {
+            return Error(drift_stop(mut tx, take seen))
         }
         preflight_index_edits(tx, edits, p)?
         let probed = {
@@ -599,7 +578,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
         }
         match take probed {
             Error(Conflict(take name)) => {
-                tx.index_conflict = Some(clone(name))
+                tx.index_conflict = Some(Duplicate(clone(name)))
                 return Error(Conflict(take name))
             },
             Error(take problem) => return Error(take problem),
@@ -626,14 +605,18 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], 
             let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
             let IndexValue(keys: take keys, ..) = (bound_index.extract)(old, key)?
             for take row in take keys {
-                append_index_remove(tx, mut pending, ix, take row, mut frame)?
+                append_index_remove(tx, mut pending, ix, key, take row, mut frame)?
             }
         }
         (take pending, refund)
     }
+    let mut edit_plan = take edits
+    if let Some(take seen) = replace(mut edit_plan.drift, None) {
+        return Error(drift_stop(mut tx, take seen))
+    }
     frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame)?
-    if list.len(indexes) > 0 { preflight_index_edits(tx, edits, p)? }
-    apply_edits(mut tx, take edits)?
+    if list.len(indexes) > 0 { preflight_index_edits(tx, edit_plan, p)? }
+    apply_edits(mut tx, take edit_plan)?
     apply_delete(mut tx, take p, refund)?
     tx.frame_bytes = frame
     Ok(true)

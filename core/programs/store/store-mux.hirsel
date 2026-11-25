@@ -398,6 +398,10 @@ fn decide_served(mut db: Db, take complete: Completion, take rec: Option[CallRec
     match take draft {
         Ran(take staged) => finish_served(mut db, take pending_run, take staged, false),
         DraftError(take problem) => Error(Before(take problem, None)),
+        DriftStop(take name, take seen) => {
+            serve_before(trip_drift(mut db, 0, take seen))?
+            Error(Before(Drift(take name), None))
+        },
         Over(Stopped(limit)) => Ok(stopped_pending(take pending_run, OutOfSteps(limit.steps))),
         Over(Failed(Raised(causes))) => Ok(stopped_pending(take pending_run, Raised(cause_number(causes)))),
         Over(Failed(Conflict(take name))) => Ok(stopped_pending(take pending_run, Conflict(take name))),

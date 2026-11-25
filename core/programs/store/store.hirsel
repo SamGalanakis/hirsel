@@ -29,7 +29,7 @@ pub type Fault: send {
 
 pub type StoreCapacity: send = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity) | Cache(Capacity)
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal)
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Endpoint(EndpointRefusal) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Retired | Remote(std.object.Error) | Missed | Tiered(TieredRefusal) | NotReady(String) | Drift(String)
 
 type Roots = PageRoots
 
@@ -348,7 +348,7 @@ pub type Ticket {
 
 pub type Read: shareable + send = Point(Bytes) | Span(Bytes, Bytes)
 
-pub type StoreFailure = Raised(Causes) | Conflict(String)
+pub type StoreFailure = Raised(Causes) | Conflict(String) | Drift(String)
 
 pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(StoreFailure) | Refused(StoreCapacity) | Stopped(OutOfTime)
 
@@ -506,8 +506,10 @@ pub opaque scoped type Tx {
     attempt: View[Option[core.Cell[TieredTouchSet]]],
     pins: View[Map[TieredCacheKey, Arc[TieredFrame]]],
     refusal: Option[Capacity],
-    index_conflict: Option[String],
-    // (table, index) of each staged index remove whose target was absent (§I.3).
+    // The index error that makes this transaction abort-only.
+    index_conflict: Option[IndexStop],
+    // (table, index) of each remove whose absent target proved an index
+    // wrong (§I.3). The transaction fails, and the index is demoted.
     drift: Option[List[(u32, u32)]],
     frame_bytes: Option[u64],
     wrote: bool,
@@ -939,8 +941,10 @@ fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_
     }
     let (success, take output) = match take returned {
         Ok(take payload) => {
-            if let Some(name) = tx.index_conflict {
-                return Error(BodyStop(Conflict(clone(name))))
+            match tx.index_conflict {
+                Some(Duplicate(name)) => return Error(BodyStop(Conflict(clone(name)))),
+                Some(Drifted(name)) => return Error(StoreFailure(Drift(clone(name)))),
+                None => (),
             }
             (true, take payload)
         },
@@ -1106,6 +1110,10 @@ fn append_transaction_at[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64]
         Ran(take ran) => settle_admit(mut db, i, take ran),
         DraftError(take problem) => Error(take problem),
         Latched => fail("store: a decided stage is latched"),
+        DriftStop(take name, take seen) => {
+            trip_drift(mut db, i, take seen)?
+            Ok(Failed(Drift(take name)))
+        },
     }
     handoff(mut db)?
     take outcome
@@ -1162,9 +1170,11 @@ type Ran[R, A] {
 
 // Latched: the attempt's latch was set, so its result, writes, reads and
 // issued ids are discarded and the driver serves or refuses the stop.
-type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R, A]) | DraftError(Error) | Latched
+type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R, A]) | DraftError(Error) | Latched | DriftStop(String, List[(u32, u32)])
 
-type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(Prepared[R, A]) | DraftFault(Error)
+// Drifted: a remove proved an index wrong; the call fails with `Drift`
+// and its driver counts and demotes the indexes (§I.3).
+type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(Prepared[R, A]) | DraftFault(Error) | Drifted(String, List[(u32, u32)])
 
 // A successful body or an application error with a reply to commit.
 type Prepared[R, A] {
@@ -1178,7 +1188,6 @@ type Prepared[R, A] {
     frame_tail: u64,
     stream_ops: DataRows,
     keyed: Option[KeyedDraft],
-    drift: Option[List[(u32, u32)]],
     first_stamp: u64,
     prepared_roots: bool,
     call: Option[CallSection]
@@ -1239,17 +1248,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
             None => Over(Failed(Raised(take cs))),
         },
         Ok(Ok(Error(e))) => Over(Stopped(e)),
-        Ok(Ok(Ok(take f))) => {
-            if let Prepared(staged) = f {
-                if let Some(drifted) = staged.drift {
-                    let catalog = share_page_tree(db.heads[i].roots.catalog)
-                    if let Error(take problem) = count_drift(mut db, catalog, drifted) {
-                        return DraftError(take problem)
-                    }
-                }
-            }
-            finish_stage(ci, take f, take seen)
-        },
+        Ok(Ok(Ok(take f))) => finish_stage(ci, take f, take seen),
     }
 }
 
@@ -1266,9 +1265,13 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
     if let Some(c) = tx.refusal {
         return RolledBack(Refused(Allocation(c)))
     }
+    // A proven-wrong index fails the call however the body ended (§I.3).
+    if let Some((take name, take evidence)) = take_drift(mut tx) {
+        return Drifted(take name, take evidence)
+    }
     let value: Result[R, A] = match take outcome {
         Ok(take v) => {
-            if let Some(take name) = replace(mut tx.index_conflict, None) {
+            if let Some(Duplicate(take name)) = replace(mut tx.index_conflict, None) {
                 return RolledBack(Failed(Conflict(take name)))
             }
             Ok(take v)
@@ -1291,7 +1294,6 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
             tx.roots.collections = share_page_tree(base.collections)
             tx.roots.catalog = share_page_tree(base.catalog)
             tx.ops = empty_ops()
-            tx.drift = None
             tx.rows = 0
             tx.frame_tail = NO_FRAME_TAIL
             Error(take a)
@@ -1306,7 +1308,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
     if let Some(keyed) = tx.keyed {
         tx.resident = keyed_draft_live(base, keyed.edits, tx.retain_old, tx.resident)
     }
-    let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, drift: take drift, ..) = take tx
+    let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, ..) = take tx
     let DataOps(cells: take cells, ..) = take ops
     seal_cell_edits(mut rows, cells)
     let DataOps(rows: take stream_rows, ..) = take stream_ops
@@ -1314,13 +1316,14 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => Some(db.tiered),
         None => None,
     }
-    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, drift: take drift, first_stamp: first_stamp, prepared_roots: false, call: take call))
+    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, call: take call))
 }
 
 fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: List[Read]) -> Stage[R, A] {
     let prepared = match take finished {
         RolledBack(take o) => return Over(take o),
         DraftFault(take problem) => return DraftError(take problem),
+        Drifted(take name, take evidence) => return DriftStop(take name, take evidence),
         Prepared(take tx) => take tx,
     }
     let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, frame_tail: _, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, ..) = take prepared
@@ -1869,7 +1872,9 @@ pub opaque type Index[J, K, V, P]: shareable + send {
     readers: Arc[Readers[V]],
     kind: IndexKind,
     payload: Option[Arc[Readers[P]]],
-    payload_codec: std.codec.Codec[P]
+    payload_codec: std.codec.Codec[P],
+    // The record was Public in the catalog root page `catalog_page` names.
+    public: bool
 }
 
 // AB1: a table declared whole, for create_table and migrate. Each index keeps
@@ -2253,7 +2258,7 @@ fn stage_create_table[K, V](mut plan: SchemaPlan, take s: TableSpec[K, V]) -> Re
     let fp = std.codec.fingerprint_of(schema)
     list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))
     let id = plan.next_table
-    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(s.key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None)
+    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(s.key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public)
     let raw = encode_catalog(c)?
     let mut live_bytes = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
     let base = share_roots(plan.roots)
@@ -2263,7 +2268,7 @@ fn stage_create_table[K, V](mut plan: SchemaPlan, take s: TableSpec[K, V]) -> Re
     let mut index_id = id + 1
     for ix in s.indexes {
         let ik = catalog_index_key(id, ix.name)?
-        let entry_raw = encode_catalog(Catalog(kind: 2, id: index_id, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None))?
+        let entry_raw = encode_catalog(Catalog(kind: 2, id: index_id, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public))?
         live_bytes = catalog_recharge(live_bytes, plan.roots, ik, entry_raw, plan.retained)
         roots = catalog_insert(mut plan.next_node, roots, ik, entry_raw)?
         define_store_collection(mut roots.collections, index_id, 2, mut plan.next_node)?
@@ -2438,8 +2443,12 @@ fn read_catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, t: Table[K,
 
 fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J],
     take payload: Option[Arc[Readers[P]]], payload_codec: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
+    let public = match get_page_row(catalog, k) {
+        Some(raw) => record_public(raw),
+        None => false,
+    }
     Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?,
-        table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: c.index_kind, payload: take payload, payload_codec: payload_codec))
+        table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: c.index_kind, payload: take payload, payload_codec: payload_codec, public: public))
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
@@ -2576,13 +2585,13 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
     let fp = std.codec.fingerprint_of(schema)
     let mut schemas: List[ValueSchema] = list.new()
     list.push(mut schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
-    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to.key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None))?
+    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to.key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public))?
     let mut edits: List[CatalogWrite] = list.new()
     list.push(mut edits, CatalogWrite(key: copied(target)?, value: take table_raw))
     let mut slot_order = 1u32
     for ix in to.indexes {
         let ik = catalog_index_key(id, ix.name)?
-        let raw = encode_catalog(Catalog(kind: 2, id: id + slot_order, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None))?
+        let raw = encode_catalog(Catalog(kind: 2, id: id + slot_order, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public))?
         list.push(mut edits, CatalogWrite(key: take ik, value: take raw))
         slot_order += 1
     }
@@ -2783,7 +2792,7 @@ fn typed_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
 
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     check_write_attempt(tx)?
-    if let Some(name) = tx.index_conflict { return Error(Conflict(clone(name))) }
+    if let Some(stop) = tx.index_conflict { return Error(index_stop_error(stop)?) }
     let indexes = writable(tx, t)?
     let tail = tx.frame_tail == OPEN_FRAME_TAIL
     let mut p = prefixed(t.id, 8, tail)?
@@ -2793,7 +2802,7 @@ pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
 
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
     check_write_attempt(tx)?
-    if let Some(name) = tx.index_conflict { return Error(Conflict(clone(name))) }
+    if let Some(stop) = tx.index_conflict { return Error(index_stop_error(stop)?) }
     let indexes = writable(tx, t)?
     let key = encode_key(t.key, k)?
     delete_impl(mut tx, t, indexes, key)
@@ -2832,47 +2841,6 @@ pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] wa
         return Error(Foreign)
     }
     compare_page_collections(a.roots.collections, b.roots.collections)
-}
-
-fn catalog_key_handle(take key: Bytes) -> Result[Arc[Bytes], Error] {
-    Ok(arc.new(take key))
-}
-
-// The catalog root page bytes a handle resolved against, for `readable`: empty
-// when the root is a branch or holds a BLOB cell, whose lookup reads more than
-// the root's bytes.
-fn catalog_page(catalog: PageTree) -> Result[Arc[Bytes], Error] {
-    let image = std.page.image_of(catalog.root)
-    if std.page.level(image) != 0 {
-        return Ok(arc.new(list.new()))
-    }
-    if let Some(_) = std.page.body(catalog.root, 0) {
-        return Ok(arc.new(list.new()))
-    }
-    Ok(arc.new(copied(std.page.payload(image))?))
-}
-
-// I3's catalog check. `page` is the catalog root page the handle was resolved
-// against when that root was one leaf without BLOB cells, and empty otherwise.
-// A lookup in such a leaf reads only its bytes, so a root with the same bytes
-// lists the handle's id under its key and the lookup is skipped.
-fn readable(roots: Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), Error] {
-    if std.page.payload(std.page.image_of(roots.catalog.root)) == page {
-        return Ok(())
-    }
-    match get_page_row(roots.catalog, key) {
-        Some(raw) => {
-            if list.len(raw) < 5 {
-                return Error(malformed(0))
-            }
-            if read_le(raw, 1, 4) == int.widen(id) {
-                Ok(())
-            } else {
-                Error(Stale(id))
-            }
-        },
-        None => Error(Stale(id))
-    }
 }
 
 pub opaque scoped type TxRows[K, V] {
@@ -2947,7 +2915,7 @@ fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, ret
 }
 
 // Store disk format. STORE-SPEC §2.3 and §11.10.
-const DISK_FORMAT: u64 = 7
+const DISK_FORMAT: u64 = 8
 
 type DiskContext {
     store: StoreId,

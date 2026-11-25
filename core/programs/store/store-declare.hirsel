@@ -299,7 +299,7 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
     let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1,
         key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0,
         by: copied(code.identity(by))?, revision: index_revision(d.versioned, by, t.handle, key, codec)?,
-        index_kind: kind, payload_schemas: list.new(), projection: None)
+        index_kind: kind, payload_schemas: list.new(), projection: None, state: Backfilling(None))
     let existing = match get_page_row(d.plan.roots.catalog, lookup_key) {
         Some(raw) => Some(decode_catalog(raw)?),
         None => None,
@@ -352,13 +352,21 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
                 }
             } else {
                 proposed.id = old.id
+                proposed.state = copied_state(old.state)?
                 false
             }
         },
     }
+    // Migrate finishes an index left building or failed by an earlier build;
+    // Open and Follower accept it, and its reads refuse until it is Public.
+    let migrating = if let Migrate = d.mode { true } else { false }
+    let resume = match proposed.state {
+        Public => false,
+        _ => !needs_rebuild && migrating,
+    }
     let schema_binding = declare_binding(t.handle, proposed, by, key, take extractor_project, cover_row)
-    if needs_rebuild {
-        match stage_index_backfill(mut d.plan, t.handle, lookup_key, name, proposed, schema_binding.index) {
+    if needs_rebuild || resume {
+        match stage_index_build(mut d.plan, t.handle, lookup_key, name, copied_record(proposed)?, schema_binding.index, needs_rebuild) {
             Error(Conflict(take conflict)) => {
                 d.conflict = Some(clone(conflict))
                 return Error(Conflict(take conflict))

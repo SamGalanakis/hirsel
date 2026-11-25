@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 from case_progress import run_case
 
-SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches', 'migrate', 'install', 'read-only', 'window')
+SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches', 'migrate', 'install', 'read-only', 'window', 'index-build')
 WINDOW_FAILURES = ('window-chunk-failure', 'window-sync-failure')
 JOURNAL_SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place-split',
                      'journal-place-idle', 'journal-fork')

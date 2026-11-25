@@ -1,0 +1,68 @@
+// I3's read-handle checks (STORE-SPEC §1.2 "Read handles"): a handle's
+// catalog key must still name its id in the roots a read sees, and an index
+// handle's record must also be Public.
+
+fn catalog_key_handle(take key: Bytes) -> Result[Arc[Bytes], Error] {
+    Ok(arc.new(take key))
+}
+
+// The catalog root page bytes a handle resolved against, for `readable`: empty
+// when the root is a branch or holds a BLOB cell, whose lookup reads more than
+// the root's bytes.
+fn catalog_page(catalog: PageTree) -> Result[Arc[Bytes], Error] {
+    let image = std.page.image_of(catalog.root)
+    if std.page.level(image) != 0 {
+        return Ok(arc.new(list.new()))
+    }
+    if let Some(_) = std.page.body(catalog.root, 0) {
+        return Ok(arc.new(list.new()))
+    }
+    Ok(arc.new(copied(std.page.payload(image))?))
+}
+
+// I3's catalog check. `page` is the catalog root page the handle was resolved
+// against when that root was one leaf without BLOB cells, and empty otherwise.
+// A lookup in such a leaf reads only its bytes, so a root with the same bytes
+// lists the handle's id under its key and the lookup is skipped.
+// An index read also needs its record Public (§1.2). On the fast path the
+// record is the one the handle saw, so the handle's flag answers.
+fn index_readable(roots: Roots, key: Bytes, page: Bytes, id: u32, public: bool) -> Result[(), Error] {
+    if std.page.payload(std.page.image_of(roots.catalog.root)) == page {
+        if public {
+            return Ok(())
+        }
+        return Error(NotReady(declaration_index_name(key)?))
+    }
+    let Some(raw) = get_page_row(roots.catalog, key) else {
+        return Error(Stale(id))
+    }
+    if list.len(raw) < 5 {
+        return Error(malformed(0))
+    }
+    if read_le(raw, 1, 4) != int.widen(id) {
+        return Error(Stale(id))
+    }
+    if !record_public(raw) {
+        return Error(NotReady(declaration_index_name(key)?))
+    }
+    Ok(())
+}
+
+fn readable(roots: Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), Error] {
+    if std.page.payload(std.page.image_of(roots.catalog.root)) == page {
+        return Ok(())
+    }
+    match get_page_row(roots.catalog, key) {
+        Some(raw) => {
+            if list.len(raw) < 5 {
+                return Error(malformed(0))
+            }
+            if read_le(raw, 1, 4) == int.widen(id) {
+                Ok(())
+            } else {
+                Error(Stale(id))
+            }
+        },
+        None => Error(Stale(id))
+    }
+}

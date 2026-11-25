@@ -1085,6 +1085,14 @@ fn push_store_error(mut line: String, problem: store.Error) {
             string.push(mut line, "unique index conflict: ");
             string.push(mut line, name)
         },
+        NotReady(name) => {
+            string.push(mut line, "index is still building: ");
+            string.push(mut line, name)
+        },
+        Drift(name) => {
+            string.push(mut line, "index drifted from its table and was demoted: ");
+            string.push(mut line, name)
+        },
         Undeclared(name) => push_undeclared_schema(mut line, name),
         NoLevel(name) => {
             string.push(mut line, "unknown durability level ");
@@ -3000,6 +3008,7 @@ fn invoke_trigger_transaction[G: send, H: shareable + inert + send](mut db: stor
             Ok(Aborted(store.Undone(value: Store(take problem), ..))) => return Error(trigger_store_error(take problem)),
             Ok(Failed(Raised(causes))) => Raised(raised(causes)),
             Ok(Failed(Conflict(take name))) => return Error(Conflict(take name)),
+            Ok(Failed(Drift(take name))) => return Error(Drift(take name)),
             Ok(Stopped(limit)) => OutOfTime(limit.steps),
             Ok(Refused(cause)) => {
                 let cap = store_capacity(cause)
@@ -3303,6 +3312,7 @@ fn trigger_effect[G: send, H: shareable + inert + send](mut hd: Head[G, H], trig
         Ok(Aborted(store.Undone(value: Refusal(take problem), ..))) => Ok(Error(take problem)),
         Ok(Failed(Raised(causes))) => Ok(Ok(Failed(Raised(raised(causes))))),
         Ok(Failed(Conflict(take name))) => Error(Conflict(take name)),
+        Ok(Failed(Drift(take name))) => Error(Drift(take name)),
         Ok(Stopped(limit)) => Ok(Ok(Failed(OutOfTime(limit.steps)))),
         Ok(Refused(cap)) => Ok(Error(Capacity(store_capacity(cap)))),
         Error(take problem) => Error(take problem),

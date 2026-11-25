@@ -248,12 +248,12 @@ fn format3_end() -> Bytes {
 }
 
 // Wire vectors derived from the spec tables with libxxhash.
-fn format7_manifest() -> Bytes {
+fn format8_manifest() -> Bytes {
     let words: Inline[u64, 86] =[
         0x0000003800010001,
-        0x54948937a11c7520,
+        0x387e81c410b2bab6,
         0x45524f5453524948,
-        0x0000000100000007,
+        0x0000000100000008,
         0x0000000000000001,
         0x0000000000000002,
         0x0000000000000000,
@@ -641,7 +641,7 @@ fn format4_manifest_law() -> Result[(), Error] {
     m.sweep = SweepCursor(position: 88, epoch: 99, digest: 101)
     let roots: LocatedRoots = clone(m.branches[0].roots)
     list.push(mut m.pins, LocatedPin(owner: ProjectorPin, name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
-    let oracle = format7_manifest()
+    let oracle = format8_manifest()
     if disk_page_manifest_bytes(id, m)? != oracle {
         return Error(Foreign)
     }
@@ -659,10 +659,10 @@ fn format4_manifest_law() -> Result[(), Error] {
         return Error(Foreign)
     }
     let mut old_header = copied(list.slice(oracle, 0, 72))?
-    list.set_word_le(mut old_header, 24, 6u32)
-    list.set_word_le(mut old_header, 8, 0x564e0135196906feu64)
+    list.set_word_le(mut old_header, 24, 7u32)
+    list.set_word_le(mut old_header, 8, 0x54948937a11c7520u64)
     match disk_read_header(path, old_header, 1, Some(1), Some(id)) {
-        Error(Unsupported(6)) => (),
+        Error(Unsupported(7)) => (),
         _ => return Error(Foreign),
     }
     let mut overflow = copied(payload)?

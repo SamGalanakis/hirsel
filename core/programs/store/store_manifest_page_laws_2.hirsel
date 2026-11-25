@@ -426,13 +426,13 @@ fn page_old_end_vector() -> Bytes {
     take raw
 }
 
-// Format-7 HEADERs and the retired payload kinds, bound with §2.1 and libxxhash.
+// Format-8 HEADERs and the retired payload kinds, bound with §2.1 and libxxhash.
 fn page_retired_manifest_vector() -> Bytes {
     let words: Inline[u64, 29] =[
         0x0000003800010001,
-        0x54948937a11c7520,
+        0x387e81c410b2bab6,
         0x45524f5453524948,
-        0x0000000100000007,
+        0x0000000100000008,
         0x0000000000000001,
         0x0000000000000002,
         0x0000000000000000,
@@ -470,9 +470,9 @@ fn page_retired_manifest_vector() -> Bytes {
 fn page_retired_node_vector() -> Bytes {
     let words: Inline[u64, 12] =[
         0x0000003800010001,
-        0x3eae8f5ea6f128d4,
+        0x738ee36ad95a588c,
         0x45524f5453524948,
-        0x0000000300000007,
+        0x0000000300000008,
         0x0000000000000001,
         0x0000000000000002,
         0x0000000000000000,
@@ -492,7 +492,7 @@ fn page_retired_node_vector() -> Bytes {
 fn check_paged_manifest() -> Result[(), Error] {
     let id = StoreId(hi: 1, lo: 2)
     let encoded = disk_page_manifest_bytes(id, page_manifest_empty())?
-    if list.len(encoded) != 551 || std.check.xxh3(encoded, 0, 551) != 0x251308236d1a79efu64 {
+    if list.len(encoded) != 551 || std.check.xxh3(encoded, 0, 551) != 0xd6c0142da73158d1u64 {
         return Error(Foreign)
     }
     match disk_read_page_manifest("MANIFEST", page_old_manifest_vector()) {

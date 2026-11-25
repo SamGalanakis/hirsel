@@ -526,6 +526,28 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
             _ => Error(Exit(status: 63u8))
         }
     }
+    if scenario == "index-build" {
+        if phase == "init" {
+            index_build_init(d, c, r, tasks) ?=> |_| Exit(status: 71u8)
+            return Ok(())
+        }
+        if phase == "write" {
+            return match index_build_write(d, c, r, tasks) {
+                Ok(()) => {
+                    let _ = stdout.write(out, "DONE");
+                    Ok(())
+                },
+                Error(Io(_)) => Ok(()),
+                Error(Poisoned(_)) => Ok(()),
+                Error(_) => Error(Exit(status: 72u8)),
+            }
+        }
+        let required_new = option.unwrap(args.get(argv, 2u64)) == "new"
+        return match index_build_read(d, c, r, tasks, required_new) {
+            Ok(true) => Ok(()),
+            _ => Error(Exit(status: 73u8)),
+        }
+    }
     if phase == "init" {
         if scenario == "genesis" {
             return Ok(())
@@ -628,373 +650,249 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     Ok(())
 }
 
-// AD1 (vi): the hand-written revision 0x00, 0x01, ..., 0x1f.
-fn code_vector() -> Bytes {
-    let mut raw: Bytes = list.new()
-    list.fill(mut raw, 48, 9u8)
-    raw
+// L-IX (STORE-SPEC §1.2). For any interleaving of writes with build chunks,
+// an index that reaches Public holds exactly the entries a fresh extraction
+// of the rows gives, and every read of it before then refuses NotReady. The
+// oracle is the law's own model of the rows; the "index-build" scenario
+// below holds the same law at every W2 cut.
+fn lix_keys(key: u64, value: u64) -> Result[List[u64], Capacity] {
+    let a = value % 7
+    let b = (value / 2) % 7
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, if a <= b { a } else { b })
+    list.push(mut keys, if a <= b { b } else { a })
+    Ok(take keys)
 }
 
-fn revision_vector() -> Bytes {
-    let mut r: Bytes = list.with_capacity(32)
-    for i in 0u64 .. 32 {
-        list.push(mut r, int.truncate(i))
-    }
-    r
+fn lix_next(seed: u64) -> u64 {
+    (seed * 1103515245 + 12345) % 2147483648
 }
 
-fn revision_is_vector(got: Option[Bytes]) -> bool {
-    match got {
-        Some(r) => r == revision_vector(),
-        None => false
-    }
-}
-
-fn revision_is_none(got: Option[Bytes]) -> bool {
-    match got {
-        Some(_) => false,
-        None => true
-    }
-}
-
-// L10/L12/L29: hand-laid payload with data followed by a Replied stream op and its CALL.
-pub fn journal_law_payload() -> bool {
-    let mut payload: Bytes = list.new()
-    result.unwrap(le(mut payload, 3, 4))
-    result.unwrap(le(mut payload, 257, 8))
-    result.unwrap(le(mut payload, 1234, 8))
-    result.unwrap(le(mut payload, 2, 1))
-    result.unwrap(le(mut payload, 0, 1))
-    result.unwrap(le(mut payload, 2, 4))
-    result.unwrap(le(mut payload, 1, 1))
-    result.unwrap(blob(mut payload, string.as_bytes("key")))
-    result.unwrap(le(mut payload, 0, 4))
-    result.unwrap(blob(mut payload, string.as_bytes("value")))
-    result.unwrap(le(mut payload, 2, 1))
-    result.unwrap(blob(mut payload, string.as_bytes("gone")))
-    result.unwrap(le(mut payload, 10, 4))
-    result.unwrap(le(mut payload, 1, 1))
-    result.unwrap(le(mut payload, 1, 4))
-    result.unwrap(le(mut payload, 3, 1))
-    let stream = journal_vector_stream()
-    result.unwrap(blob(mut payload, stream))
-    let mut replied: Bytes = list.new()
-    list.fill(mut replied, 40, 0u8)
-    list.push(mut replied, 2u8)
-    list.append(mut replied, string.as_bytes("reply"))
-    result.unwrap(blob(mut payload, replied))
-    result.unwrap(blob(mut payload, string.as_bytes("entry")))
-    result.unwrap(blob(mut payload, string.as_bytes("arguments")))
-    result.unwrap(blob(mut payload, revision_vector()))
-    result.unwrap(blob(mut payload, code_vector()))
-    result.unwrap(le(mut payload, 0, 1))
-    let got = result.unwrap(journal_decode_commit("j-7", payload))
-    if got.branch != 3 || got.version != 257 || got.at != 1234 || list.len(got.data) != 2 || list.len(got.streams) != 1 {
-        return false
-    }
-    if got.data[0].key != string.as_bytes("key") || got.data[0].prior != 0 {
-        return false
-    }
-    match got.data[0].value {
-        Some(v) => if v != string.as_bytes("value") {
-            return false
-        },
-        None => return false
-    }
-    if got.data[1].key != string.as_bytes("gone") || got.data[1].value != None || got.data[1].prior != 10 {
-        return false
-    }
-    if got.streams[0].key != stream {
-        return false
-    }
-    match got.streams[0].value {
-        Some(v) => if v != replied {
-            return false
-        },
-        None => return false
-    }
-    match got.call {
-        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream != journal_vector_stream_name() || !revision_is_vector(c.record.revision) {
-            return false
-        },
-        None => return false
-    }
-    // The 21-byte fixed header, 39-byte data section, 84-byte streams prefix,
-    // 9-byte entry key and 13-byte args place revision at [166, 202).
-    for size in 0u64 .. 2 {
-        let mut other: Bytes = result.unwrap(copied(list.slice(payload, 0, 166)))
-        result.unwrap(le(mut other, size, 4))
-        if size == 1 {
-            list.push(mut other, 0u8)
+fn lix_expected(id: u32, model: List[Option[u64]]) -> Result[List[Bytes], Error] {
+    let mut out: List[Bytes] = list.new()
+    for j in 0u64 .. 7 {
+        for k in 0u64 .. list.len(model) {
+            let Some(v) = model[k] else { continue }
+            let keys = capacity(lix_keys(k, v))?
+            if keys[0] == j || keys[1] == j {
+                let mut logical = prefix(id)?
+                list.put_word_be(mut logical, j)
+                list.put_word_be(mut logical, k)
+                list.push(mut out, take logical)
+            }
         }
-        list.append(mut other, list.slice(payload, 202, list.len(payload)))
-        let read_back = journal_decode_commit("j-7", other)
-        if size == 1 {
-            match read_back {
-                Error(Corrupt(fault)) => match fault.why {
-                    Malformed => {},
-                    _ => return false
-                },
-                _ => return false
+    }
+    Ok(take out)
+}
+
+fn lix_entries(db: Db, id: u32) -> Result[List[Bytes], Error] {
+    let s = snapshot(db)
+    let mut cursor = byte_cursor(s.roots.collections, Included(prefix(id)?), prefix(id + 1)?)?
+    let mut out: List[Bytes] = list.new()
+    while let Some((take key, _)) = next_bytes(mut cursor)? {
+        list.push(mut out, take key)
+    }
+    Ok(take out)
+}
+
+// Whether `ix` is Public, after checking that it serves reads exactly then.
+fn lix_serves[J, K, V, P](db: Db, ix: Index[J, K, V, P]) -> Result[bool, Error] waits {
+    let record = catalog_entry_in(db.heads[0].roots.catalog, ix.catalog_key)?
+    let public = match record.state {
+        Public => true,
+        _ => false,
+    }
+    let served = match find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Unbounded, Unbounded) {
+        Ok(_) => true,
+        Error(NotReady(_)) => false,
+        Error(take problem) => return Error(take problem),
+    }
+    if served != public {
+        fail("L-IX: an index serves reads exactly when it is Public")
+    }
+    Ok(public)
+}
+
+fn lix_write(mut db: Db, t: Table[u64, u64], k: u64, v: Option[u64]) -> Result[(), Error] waits {
+    let ran = run(mut db, None, (copy_env(t), k, v), fn(mut tx, input) -> Result[(), Error] {
+        match input.2 {
+            Some(value) => put(mut tx, input.0, input.1, value),
+            None => {
+                let _ = delete(mut tx, input.0, input.1)?
+                Ok(())
+            },
+        }
+    })?
+    match take ran {
+        Committed(_) => Ok(()),
+        _ => Error(MigrationFault),
+    }
+}
+
+fn lix_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let mut declaration = declare(db, Migrate)?
+    let mut rows_decl = declare_table(mut declaration, "rows", key, std.codec.of_u64())?
+    let ix = index(mut declaration, mut rows_decl, "by_v", Many, code.describe(lix_keys), key)?
+    let t = finish(mut declaration, take rows_decl)?
+    let _ = seal(mut db, take declaration)?
+    let mut model: List[Option[u64]] = list.new()
+    for k in 0u64 .. 40 {
+        let v = if k < initial { Some(k * 3) } else { None }
+        if let Some(_) = v { lix_write(mut db, t, k, v)? }
+        list.push(mut model, v)
+    }
+    rebuild_index(mut db, ix)?
+    let mut state = seed
+    let mut rounds = 0u64
+    while !lix_serves(db, ix)? {
+        rounds += 1
+        if rounds > 2000 { fail("L-IX: the build made no progress") }
+        state = lix_next(state)
+        let pick = state % 8
+        state = lix_next(state)
+        let k = state % 40
+        state = lix_next(state)
+        if pick < 3 {
+            match index_build_step(mut db, 2 * pick + 1)? {
+                Some(name) => if name != "by_v" { fail("L-IX: the step built another index") },
+                None => fail("L-IX: the step found nothing building"),
             }
         } else {
-            match result.unwrap(take read_back).call {
-                Some(c) => if !revision_is_none(c.record.revision) {
-                    return false
-                },
-                None => return false
+            let v = if pick < 6 { Some(state % 1000) } else { None }
+            lix_write(mut db, t, k, v)?
+            model[k] = v
+        }
+    }
+    if lix_entries(db, ix.id)? != lix_expected(ix.id, model)? {
+        fail("L-IX: the Public index differs from a fresh extraction of the rows")
+    }
+    if let Some(_) = index_build_step(mut db, 1)? { fail("L-IX: a Public index still builds") }
+    Ok(())
+}
+
+// law_unique_backfill's chunk boundaries, built by the step. Row 0 takes
+// row d's value while the index is empty, so only the chunk holding row d
+// finds the pair; the index then fails and keeps refusing reads.
+fn lix_duplicate_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let mut declaration = declare(db, Migrate)?
+    let mut rows_decl = declare_table(mut declaration, "rows", key, std.codec.of_u64())?
+    let ix = index(mut declaration, mut rows_decl, "unique", Unique, code.describe(backfill_keys), key)?
+    let t = finish(mut declaration, take rows_decl)?
+    let _ = seal(mut db, take declaration)?
+    let filled = run(mut db, None, (copy_env(t), rows), fn(mut tx, input) -> Result[(), Error] {
+        for i in 0u64 .. input.1 {
+            put(mut tx, input.0, i, i)?
+        }
+        Ok(())
+    })?
+    if let Committed(_) = filled {} else { return Error(MigrationFault) }
+    rebuild_index(mut db, ix)?
+    if let Some(d) = duplicate { lix_write(mut db, t, 0, Some(d))? }
+    while let Some(_) = index_build_step(mut db, INDEX_CHUNK)? {}
+    let record = catalog_entry_in(db.heads[0].roots.catalog, ix.catalog_key)?
+    let failed = match record.state {
+        Failed(first, second) => {
+            let owner: u64 = list.word_be(first, 0)
+            let other: u64 = list.word_be(second, 0)
+            Some((owner, other))
+        },
+        _ => None,
+    }
+    let expected_failure = match duplicate {
+        Some(d) => Some((0u64, d)),
+        None => None,
+    }
+    if failed != expected_failure { fail("L-IX: a duplicate fails the build at the row that repeats it") }
+    if lix_serves(db, ix)? == (duplicate != None) { fail("L-IX: a failed index refuses reads") }
+    if let None = duplicate {
+        let found = lix_entries(db, ix.id)?
+        if list.len(found) != rows { fail("L-IX: the unique index holds one entry per row") }
+        for i in 0u64 .. rows {
+            let j: u64 = list.word_be(found[i], 4)
+            if j != i { fail("L-IX: the unique index holds one entry per row") }
+        }
+    }
+    Ok(())
+}
+
+@test
+fn test_index_build_law(c: Clock) -> Result[(), Error] waits {
+    let initials: Inline[u64, 4] = [0, 1, 17, 40]
+    for initial in initials {
+        for seed in 0u64 .. 8 {
+            lix_case(c, seed * 7919 + initial, initial)?
+        }
+    }
+    let sizes: Inline[u64, 6] = [0, 1, 4095, 4096, 4097, 12289]
+    let duplicates: Inline[u64, 10] = [1, 4095, 4096, 4097, 8191, 8192, 8193, 12287, 12288, 2]
+    for rows in sizes {
+        lix_duplicate_case(c, rows, None)?
+        for duplicate in duplicates {
+            if duplicate < rows {
+                lix_duplicate_case(c, rows, Some(duplicate))?
             }
         }
     }
-    for i in 0u64 .. list.len(payload) {
-        if !disk_corrupt(journal_decode_commit("j-7", list.slice(payload, 0, i))) {
-            return false
-        }
-    }
-    let mut trailing = result.unwrap(copied(payload))
-    list.push(mut trailing, 0u8)
-    if !disk_corrupt(journal_decode_commit("j-7", trailing)) {
-        return false
-    }
-    // The CALL's stream op must have state Replied. The value starts at 98.
-    let mut no_reply = result.unwrap(copied(payload))
-    let _ = list.set(mut no_reply, 138, 1u8)
-    if !disk_corrupt(journal_decode_commit("j-7", no_reply)) {
-        return false
-    }
-    // A second op, put or delete, cannot overwrite the CALL's stream op.
-    for tag in 1u64 .. 3 {
-        let mut repeated: Bytes = result.unwrap(copied(payload))
-        list.set_word_le(mut repeated, 61, 2u32)
-        result.unwrap(le(mut repeated, tag, 1))
-        result.unwrap(blob(mut repeated, stream))
-        if tag == 1 {
-            result.unwrap(blob(mut repeated, replied))
-        }
-        if !disk_corrupt(journal_decode_commit("j-7", repeated)) {
-            return false
-        }
-    }
-    let mut two_calls: Bytes = result.unwrap(copied(payload))
-    list.set_word_le(mut two_calls, 61, 2u32)
-    list.append(mut two_calls, list.slice(payload, 65, list.len(payload)))
-    let _ = list.set(mut two_calls, list.len(payload) + 7, b'x')
-    if !disk_corrupt(journal_decode_commit("j-7", two_calls)) {
-        return false
-    }
-    // The stream section cannot precede data. Format 6 tag 2 accepts only control.
-    let mut reversed: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
-    list.append(mut reversed, list.slice(payload, 60, list.len(payload)))
-    list.append(mut reversed, list.slice(payload, 21, 60))
-    if !disk_corrupt(journal_decode_commit("j-7", reversed)) {
-        return false
-    }
-    let mut control: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
-    let _ = list.set(mut control, 20, 1u8)
-    result.unwrap(le(mut control, 2, 1))
-    list.append(mut control, list.slice(payload, 61, list.len(payload)))
-    if !disk_corrupt(journal_decode_commit("j-7", control)) {
-        return false
-    }
-    // Two sections with the same tag are malformed, including an empty one.
-    let mut duplicate: Bytes = list.new()
-    result.unwrap(le(mut duplicate, 0, 4))
-    result.unwrap(le(mut duplicate, 1, 8))
-    result.unwrap(le(mut duplicate, 2, 8))
-    result.unwrap(le(mut duplicate, 2, 1))
-    for i in 0u64 .. 2 {
-        result.unwrap(le(mut duplicate, 0, 1))
-        result.unwrap(le(mut duplicate, 0, 4))
-    }
-    disk_corrupt(journal_decode_commit("j-7", duplicate))
+    Ok(())
 }
 
-@test
-fn journal_test_payload() -> Result[(), ()] {
-    if journal_law_payload() {
-        Ok(())
-    } else {
-        Error(())
-    }
+fn index_build_open(d: Dir, c: Clock, r: Random, tasks: Tasks, create: bool) -> Result[(Db, Table[u64, u64], Index[u64, u64, u64, ()]), Error] waits {
+    let mut options = disk_crash_options("index-build")
+    options.create = create
+    let mut db = open(tasks, d, c, r, options)?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let ix = bind_table_index(mut db, t, "by_v", code.describe(crash_value), std.codec.key_u64())?
+    Ok((take db, t, take ix))
 }
 
-fn journal_empty_commit(ctx: DiskContext, offset: u64, head: u64) -> Bytes {
-    let mut payload: Bytes = list.new()
-    result.unwrap(le(mut payload, 0, 4))
-    result.unwrap(le(mut payload, head, 8))
-    result.unwrap(le(mut payload, head + 100, 8))
-    result.unwrap(le(mut payload, 1, 1))
-    result.unwrap(le(mut payload, 0, 1))
-    result.unwrap(le(mut payload, 0, 4))
-    result.unwrap(disk_seal(ctx, offset, 0x0011, 1, payload))
+fn index_build_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    disk_crash_init(d, c, r, tasks, "index-build")?
+    let mut db = open(tasks, d, c, r, disk_crash_options("index-build"))?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = create_index(mut db, t, "by_v", code.describe(crash_value), std.codec.key_u64())?
+    let _ = checkpoint(mut db)?
+    close(take db)
 }
 
-fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], final_item: bool) -> Result[(u64, u64, List[JournalEvent]), Error] waits {
-    disk_write_synced(d, "j-7", raw)?
-    let mut input = journal_input(disk_io(host.open(d, "j-7", Read))?, false)?
-    let mut events: List[JournalEvent] = list.new()
-    let scanned = journal_scan(mut input, "j-7", id, 7, boundary, final_item, mut events, scoped fn(mut observed: List[JournalEvent], take event: JournalEvent) -> Result[(), Error] {
-        list.push(mut observed, take event)
-        Ok(())
-    })
-    let JournalInput(file: take opened_file, ..) = take input
-    disk_io(host.close(take opened_file))?
-    let (end, accepted) = scanned?
-    Ok((end, accepted, take events))
+// Demotes by_v and rebuilds it in chunks of 16 rows, one row changing
+// between chunks (behind the cursor or ahead of it).
+fn index_build_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let (take opened, t, take ix) = index_build_open(d, c, r, tasks, true)?
+    let mut db = take opened
+    rebuild_index(mut db, ix)?
+    let mut round = 0u64
+    while let Some(_) = index_build_step(mut db, 16)? {
+        let k = (round * 37) % 96
+        lix_write(mut db, t, k, Some(k + 500))?
+        round += 1
+    }
+    close(take db)
 }
 
-// L3/L10/L11/L12: the fixture's two COMMIT frames are 42 bytes each.
-// Every short prefix of the second frame is a torn tail at d=114
-// and corruption at d=156.
-fn journal_law_segment_boundaries(d: Dir) -> bool waits {
-    let id = StoreId(hi: 1, lo: 2)
-    let ctx = DiskContext(store: id, role: 2, seq: 7)
-    let header = result.unwrap(disk_header_bytes(ctx, 0, 0))
-    let first = journal_empty_commit(ctx, 72, 1)
-    let second = journal_empty_commit(ctx, 114, 2)
-    let mut raw = result.unwrap(copied(header))
-    list.append(mut raw, first)
-    list.append(mut raw, second)
-    if list.len(raw) != 156 {
-        return false
+// After any cut: by_v serves only if Public (and must be Public once the
+// write phase finished). Every row then changes, the build finishes, and
+// the index must equal by_v over the rows, k + 2000 for row k.
+fn index_build_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
+    let (take opened, t, take ix) = index_build_open(d, c, r, tasks, false)?
+    let mut db = take opened
+    let mut good = lix_serves(db, ix)? || !required_new
+    for k in 0u64 .. 96 {
+        lix_write(mut db, t, k, Some(k + 2000))?
     }
-    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(114), true))
-    if end != 156 || accepted != 84 || list.len(events) != 2 {
-        return false
+    while let Some(_) = index_build_step(mut db, 16)? {}
+    good = good && lix_serves(db, ix)?
+    let mut expected: List[Bytes] = list.new()
+    for k in 0u64 .. 96 {
+        let mut logical = prefix(ix.id)?
+        list.put_word_be(mut logical, k + 2000)
+        list.put_word_be(mut logical, k)
+        list.push(mut expected, take logical)
     }
-    let (Commit(left), Commit(right)) = (events[0], events[1]) else {
-        return false
-    }
-    if left.version != 1 || right.version != 2 {
-        return false
-    }
-    let (middle_end, middle_bytes, take middle) = result.unwrap(journal_scan_fixture(d, id, raw, Some(114), false))
-    if middle_end != 114 || middle_bytes != 42 || list.len(middle) != 1 {
-        return false
-    }
-    // D3: the segment length survives, but every byte past the durable frame is zero.
-    let mut zeroed = result.unwrap(copied(list.slice(raw, 0, 114)))
-    list.fill(mut zeroed, 42, 0u8)
-    let (zeroed_end, zeroed_bytes, take zeroed_events) = result.unwrap(journal_scan_fixture(d, id, zeroed, Some(114), true))
-    if zeroed_end != 114 || zeroed_bytes != 42 || list.len(zeroed_events) != 1 {
-        return false
-    }
-    let Commit(first_commit) = zeroed_events[0] else {
-        return false
-    }
-    if first_commit.version != 1 || first_commit.at != 101 {
-        return false
-    }
-    for n in 114u64 .. 156 {
-        let tail = list.slice(raw, 0, n)
-        let (partial_end, partial_bytes, take partial) = result.unwrap(journal_scan_fixture(d, id, tail, Some(114), true))
-        if partial_end != 114 || partial_bytes != 42 || list.len(partial) != 1 {
-            return false
-        }
-        if !disk_corrupt(journal_scan_fixture(d, id, tail, Some(156), true)) {
-            return false
-        }
-    }
-    for n in 72u64 .. 114 {
-        let mut broken = result.unwrap(copied(raw))
-        let changed = broken[n] ^ 1u8
-        let _ = list.set(mut broken, n, changed)
-        if !disk_corrupt(journal_scan_fixture(d, id, broken, Some(114), true)) {
-            return false
-        }
-        let (torn_end, torn_bytes, take torn) = result.unwrap(journal_scan_fixture(d, id, broken, None, true))
-        if torn_end != 72 || torn_bytes != 0 || list.len(torn) != 0 {
-            return false
-        }
-    }
-    if !disk_corrupt(journal_scan_fixture(d, id, raw, Some(115), true)) {
-        return false
-    }
-    let empty: Bytes = list.new()
-    let optional = result.unwrap(disk_seal(ctx, 72, 0x7ffe, 0, empty))
-    let shifted = journal_empty_commit(ctx, 88, 1)
-    let mut extended = result.unwrap(copied(header))
-    list.append(mut extended, optional)
-    list.append(mut extended, shifted)
-    let (future_end, future_bytes, take future) = result.unwrap(journal_scan_fixture(d, id, extended, None, true))
-    if future_end != 130 || future_bytes != 42 || list.len(future) != 1 {
-        return false
-    }
-    // PRINCIPAL is a MUST kind no reader builds yet.
-    let required = result.unwrap(disk_seal(ctx, 156, 0x0060, 1, empty))
-    list.append(mut raw, required)
-    match journal_scan_fixture(d, id, raw, Some(114), true) {
-        Error(Unsupported(0x0060)) => true,
-        _ => false
-    }
-}
-
-fn journal_law_segment_fork(d: Dir) -> bool waits {
-    let id = StoreId(hi: 1, lo: 2)
-    let ctx = DiskContext(store: id, role: 2, seq: 7)
-    let mut raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
-    list.append(mut raw, journal_empty_commit(ctx, 72, 64))
-    list.append(mut raw, fork_frame_bytes())
-    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(160), true))
-    if end != 160 || accepted != 88 || list.len(events) != 2 {
-        return false
-    }
-    let (Commit(previous), Fork(read_fork)) = (events[0], events[1]) else {
-        return false
-    }
-    previous.version == 64 && fork_frame_fields(read_fork)
-}
-
-fn journal_law_chunked_segment(d: Dir) -> bool waits {
-    let id = StoreId(hi: 1, lo: 2)
-    let context = DiskContext(store: id, role: 2, seq: 7)
-    let mut raw = result.unwrap(disk_header_bytes(context, 0, 0))
-    // Optional extension: offset 72, length 16 + 65,536, ending at 65,624.
-    // Checksums are libxxhash over the independent wire layout and binding.
-    result.unwrap(le(mut raw, 0x7ffe, 2))
-    result.unwrap(le(mut raw, 0, 2))
-    result.unwrap(le(mut raw, 65536, 4))
-    result.unwrap(le(mut raw, 17032182677987914202, 8))
-    list.fill(mut raw, 65536, 9u8)
-    // One COMMIT: 42 + put (9 + key 12 + prior length 4 + value 65,536) = 65,603.
-    result.unwrap(le(mut raw, 0x0011, 2))
-    result.unwrap(le(mut raw, 1, 2))
-    result.unwrap(le(mut raw, 65587, 4))
-    result.unwrap(le(mut raw, 3906595394227617390, 8))
-    result.unwrap(le(mut raw, 0, 4))
-    result.unwrap(le(mut raw, 1, 8))
-    result.unwrap(le(mut raw, 100, 8))
-    result.unwrap(le(mut raw, 1, 1))
-    result.unwrap(le(mut raw, 0, 1))
-    result.unwrap(le(mut raw, 1, 4))
-    result.unwrap(le(mut raw, 1, 1))
-    result.unwrap(le(mut raw, 12, 4))
-    result.unwrap(append_be(mut raw, 1, 4))
-    result.unwrap(append_be(mut raw, 7, 8))
-    result.unwrap(le(mut raw, 0, 4))
-    result.unwrap(le(mut raw, 65536, 4))
-    list.fill(mut raw, 65536, 17u8)
-    list.fill(mut raw, 11, 0u8)
-    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(131227), true))
-    if end != 131227 || accepted != 65603 || list.len(events) != 1 {
-        return false
-    }
-    let Commit(commit) = events[0] else {
-        return false
-    }
-    commit.version == 1
-}
-
-pub fn journal_law_segment(d: Dir) -> bool waits {
-    let child = disk_test_directory(d)
-    journal_law_segment_boundaries(child) && journal_law_segment_fork(child) && journal_law_chunked_segment(child)
-}
-
-@test
-fn journal_test_segment(d: Dir) -> Result[(), ()] waits {
-    if journal_law_segment(d) {
-        Ok(())
-    } else {
-        Error(())
-    }
+    good = good && lix_entries(db, ix.id)? == expected
+    close(take db)?
+    Ok(good)
 }

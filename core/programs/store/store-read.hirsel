@@ -282,7 +282,7 @@ pub fn find[J, K, V, P](r: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound
     if !same(s.store, ix.store) {
         return Error(Foreign)
     }
-    readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?
+    index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)?
     let captured: Snapshot = clone(s)
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
@@ -484,7 +484,7 @@ fn check_index_read[J, K, V, P](tx: Tx, ix: Index[J, K, V, P]) -> Result[(), Err
     if !same(tx.store, ix.store) {
         return Error(Foreign)
     }
-    readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id)
+    index_readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)
 }
 
 pub fn lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {

@@ -26,7 +26,7 @@ pub fn find_page[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V
     if !same(s.store, ix.store) {
         return Error(Foreign)
     }
-    readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?
+    index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     let start = index_bound(ix.id, ix.key, lo, false)?
     read_snapshot_collection_page(read_handle, s, ix.id, index_decoder(ix), Included(take start), take high, l)
@@ -61,6 +61,7 @@ pub fn find_next[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V
     if !resume_here(s, ix.store, ix.id, ix.catalog_key, ix.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
+    index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)?
     let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take final_item) = take r
     Ok(Paged(read_snapshot_collection_page(read_handle, s, ix.id, index_decoder(ix), Excluded(take final_item), take high, l)?))
 }

@@ -110,7 +110,9 @@ def fetch(pin: dict, directory: pathlib.Path) -> pathlib.Path:
     path = directory / pin["name"]
     for url in pin["urls"]:
         try:
-            with urllib.request.urlopen(url, timeout=120) as response, path.open("wb") as out:
+            # archive.ubuntu.com answers 403 to urllib's default Python-urllib agent.
+            request = urllib.request.Request(url, headers={"User-Agent": "hirsel-bootstrap"})
+            with urllib.request.urlopen(request, timeout=120) as response, path.open("wb") as out:
                 shutil.copyfileobj(response, out)
         except OSError as error:
             print(f"{url}: {error}", file=sys.stderr)

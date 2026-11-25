@@ -5,6 +5,7 @@ llvm=$(realpath "$1")
 arm=$(realpath "$2")
 qemu=$(realpath "$3")
 valgrind=$(realpath "$4")
+kit=$(realpath "$5")
 export LD_LIBRARY_PATH="$llvm/lib"
 export VALGRIND_LIB="$valgrind/libexec/valgrind"
 build=$(mktemp -d)
@@ -12,7 +13,7 @@ trap 'rm -rf "$build"' EXIT
 fail() { echo "native toolchain proof: $*" >&2; exit 1; }
 version=$("$llvm/bin/llvm-config" --version)
 clang_version=$("$llvm/bin/clang" --version)
-[[ "$clang_version" == *"clang version $version "* ]] || fail "clang version differs from the pinned LLVM"
+[[ "${clang_version%%$'\n'*} " == *"clang version $version "* ]] || fail "clang version differs from the pinned LLVM"
 printf '%s\n' "$clang_version"
 lld_version=$("$llvm/bin/ld.lld" --version)
 [[ "$lld_version" == *"LLD $version "* ]] || fail "lld version differs from the pinned LLVM"
@@ -58,4 +59,31 @@ status=0
 grep -Fq 'definitely lost: 32 bytes in 1 blocks' "$build/leak.err" || { cat "$build/leak.err" >&2; fail "Valgrind did not find the planted 32-byte leak"; }
 grep -Eq 'ERROR SUMMARY: [1-9][0-9]* errors' "$build/leak.err" || fail "Valgrind did not count the planted leak as an error"
 cat "$build/leak.err"
-echo 'native toolchain proof: clang, lld, cross gcc, qemu and Valgrind passed; planted leak refused with exit 97'
+# Mach-O: link for aarch64-apple-darwin against the kit's generated libSystem.tbd with
+# the same ld.lld (§4.2 of the macOS design; nothing runs, there is no Mac here).
+cat > "$build/darwin.c" <<'C'
+void *malloc(unsigned long); void free(void *); long write(int, const void *, unsigned long); int fsync(int);
+int main(void) { void *p = malloc(32); free(p); write(1, "darwin\n", 7);
+#ifdef PROOF_FSYNC
+  fsync(1);
+#endif
+  return 0; }
+C
+floor=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["targets"]["aarch64-apple-darwin"]["floor"])' "$kit/manifest.json")
+link_darwin() {
+  "$llvm/bin/clang" --target="arm64-apple-macos$floor" -c "$build/darwin.c" -o "$build/darwin.o" "$@"
+  "$kit/ld.lld" -flavor darwin -arch arm64 -platform_version macos "$floor" "$floor" -dead_strip -dead_strip_dylibs \
+    -adhoc_codesign "$build/darwin.o" "$kit/aarch64-apple-darwin/libSystem.tbd" -o "$build/darwin"
+}
+link_darwin
+headers=$("$llvm/bin/llvm-objdump" --macho --private-headers "$build/darwin")
+[[ "$(grep -E '^ +minos ' <<< "$headers" | awk '{print $2}')" == "$floor" ]] || fail "LC_BUILD_VERSION minos is not the floor $floor"
+[[ "$(grep -E '^ +name /' <<< "$headers" | awk '{print $2}' | sort | tr '\n' ' ')" == "/usr/lib/dyld /usr/lib/libSystem.B.dylib " ]] || fail "the Mach-O loads something besides libSystem"
+grep -q 'cmd LC_CODE_SIGNATURE' <<< "$headers" || fail "the Mach-O is not ad-hoc signed"
+[[ "$("$llvm/bin/llvm-nm" -u "$build/darwin" | awk '{print $NF}' | tr '\n' ' ')" == "_free _malloc _write " ]] || fail "the Mach-O imports differ from free, malloc and write"
+echo "aarch64-apple-darwin: linked against libSystem.tbd, minos $floor, ad-hoc signed, imports free malloc write"
+status=0
+link_darwin -DPROOF_FSYNC 2> "$build/fsync.err" || status=$?
+[[ "$status" != 0 ]] && grep -q 'undefined symbol: _fsync' "$build/fsync.err" || { cat "$build/fsync.err" >&2; fail "a Darwin program importing fsync linked"; }
+echo 'aarch64-apple-darwin: a program importing fsync is refused at link time'
+echo 'native toolchain proof: clang, lld (ELF and Mach-O), cross gcc, qemu and Valgrind passed; planted leak refused with exit 97'

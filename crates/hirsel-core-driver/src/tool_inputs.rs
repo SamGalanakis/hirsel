@@ -287,16 +287,16 @@ pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Resul
         nonshared: String,
         end: Vec<String>,
     }
+    // Rows differ in shape (Darwin's has no CRT files); read only the requested one.
     #[derive(serde::Deserialize)]
     struct KitManifest {
-        targets: std::collections::BTreeMap<String, KitTarget>,
+        targets: std::collections::BTreeMap<String, serde_json::Value>,
     }
     let manifest: KitManifest = serde_json::from_slice(&std::fs::read(kit.join("manifest.json"))?)
         .map_err(io::Error::other)?;
-    let inputs = manifest
-        .targets
-        .get(target)
-        .ok_or_else(|| io::Error::other("link kit has no installed target"))?;
+    let row = manifest.targets.get(target).cloned();
+    let row = row.ok_or_else(|| io::Error::other("link kit has no installed target"))?;
+    let inputs = &serde_json::from_value::<KitTarget>(row).map_err(io::Error::other)?;
     let mut args = [
         "-pie",
         "--eh-frame-hdr",

@@ -4,8 +4,8 @@
 #   build-static-lld DIR [package]   build and package DIR/ld.lld, or package an
 #                                   already-built linker, and print its lock record
 #
-# The result is ld.lld only: the ELF port (static-lld-elf-only.patch), X86 and
-# AArch64, Release without assertions, linked -static-pie and stripped. A static PIE
+# The result is ld.lld only: the ELF and Mach-O ports (static-lld-elf-macho.patch;
+# `ld.lld -flavor darwin` is ld64.lld), X86 and AArch64, Release without assertions, linked -static-pie and stripped. A static PIE
 # finds unwind tables through PT_GNU_EH_FRAME; a plain -static binary's crtbeginT
 # registers .eh_frame instead and libgcc then classifies every FDE at start-up
 # (about 10 M instructions per run). A static PIE also refuses DT_RUNPATH, so the
@@ -41,7 +41,7 @@ if (( $# == 1 )); then
   rm -rf "$dir/src" "$dir/build"
   mkdir "$dir/src"
   tar xf "$archive" --strip-components=1 -C "$dir/src"
-  patch -d "$dir/src" -p1 < "$here/static-lld-elf-only.patch"
+  patch -d "$dir/src" -p1 < "$here/static-lld-elf-macho.patch"
 
   cmake -S "$dir/src/llvm" -B "$dir/build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=OFF \
@@ -60,4 +60,5 @@ strip --strip-all -o "$dir/ld.lld" "$dir/build/bin/lld"
 ! readelf -d "$dir/ld.lld" | grep -q '(NEEDED)\|(RUNPATH)' || fail "ld.lld loads a library"
 ! readelf -l "$dir/ld.lld" | grep -q INTERP || fail "ld.lld needs an interpreter"
 [[ "$("$dir/ld.lld" --version)" == *" $version "* ]] || fail "ld.lld does not report $version"
-echo "static_lld $(sha256sum "$dir/ld.lld" | cut -d ' ' -f 1) $(stat -c %s "$dir/ld.lld") ld.lld-$version-static-pie-manylinux_2_28-x86_64"
+[[ "$("$dir/ld.lld" -flavor darwin --version)" == *" $version"* ]] || fail "ld.lld has no Mach-O port"
+echo "static_lld $(sha256sum "$dir/ld.lld" | cut -d ' ' -f 1) $(stat -c %s "$dir/ld.lld") ld.lld-$version-elf-macho-static-pie-manylinux_2_28-x86_64"

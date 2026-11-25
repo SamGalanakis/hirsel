@@ -14,6 +14,12 @@ its library with its kind, size, binding and default version, so a symbol that
 became compat-only (`matherr` in 2.27) cannot bind a new link. Zig's pinned
 `abilists` at 2.28 must name exactly the same versioned symbols, and the linked
 stub must define exactly them.
+
+The Darwin kit is one text stub: `libSystem.tbd` (TBD v4, install name
+/usr/lib/libSystem.B.dylib) generated from Hirsel's own allowlist,
+tools/native-toolchain/darwin/libSystem.symbols, so a name off the list is
+unlinkable. No Apple file is copied: every name must be exported for arm64
+macOS by Zig's pinned libSystem.tbd, and `fsync`/`fdatasync` are refused.
 """
 from pathlib import Path
 import argparse
@@ -68,6 +74,14 @@ TARGETS = {
 # abilists records when a symbol appeared, not when it went away. glibc 2.26
 # stopped exporting `__libc_memalign` from the loader.
 REMOVED = {("ld", "__libc_memalign")}
+
+# aarch64-apple-darwin: the macOS floor (docs/spec/reserved.md R5) and the names the
+# allowlist may never carry, because plain fsync does not flush the drive cache on
+# Darwin (STORE-SPEC §3.3c: F_FULLFSYNC).
+DARWIN = "aarch64-apple-darwin"
+DARWIN_FLOOR = "26.0"
+DARWIN_LIBSYSTEM = "/usr/lib/libSystem.B.dylib"
+DARWIN_BANNED = {"_fsync": "fcntl(F_FULLFSYNC)", "_fdatasync": "fcntl(F_FULLFSYNC)"}
 
 CRT_FLAGS = ["-std=c11", "-O2", "-fPIC", "-DCRT_HAS_INITFINI_ARRAY", "-Wno-pedantic"]
 # LLVM's own static libunwind configuration (libunwind/CMakeLists.txt defaults
@@ -223,6 +237,37 @@ def cross_check(abilists, zig, index, ours, name):
         raise SystemExit("\n".join(problems))
 
 
+def tbd_exports(text, arches=("arm64", "arm64e")):
+    """Every symbol a TBD v4 file (all its documents) exports for macOS on `arches`."""
+    found = set()
+    item = re.compile(r"-\s*targets:\s*\[([^\]]*)\]((?:\s*[a-z-]+:\s*\[[^\]]*\])*)")
+    for targets, lists in item.findall(text):
+        if not {t.strip() for t in targets.split(",")} & {f"{arch}-macos" for arch in arches}:
+            continue
+        for kind, names in re.findall(r"([a-z-]+):\s*\[([^\]]*)\]", lists):
+            if kind in ("symbols", "weak-symbols", "thread-local-symbols"):
+                found.update(name.strip().strip("'\"") for name in names.split(",") if name.strip())
+    return found
+
+
+def darwin_libsystem(allowlist, zig_tbd):
+    """The kit's libSystem.tbd text from the allowlist, refusing a banned name, a
+    name Zig's libSystem.tbd does not export for arm64 macOS, and an unsorted list."""
+    names = [line.strip() for line in allowlist.splitlines() if line.strip() and not line.startswith("#")]
+    problems = [f"{name}: never importable on Darwin; use {use}" for name, use in DARWIN_BANNED.items() if name in names]
+    if names != sorted(set(names)):
+        problems.append("libSystem.symbols is not sorted and unique")
+    exported = tbd_exports(zig_tbd)
+    problems += [f"{name}: not exported by libSystem for arm64 macOS (Zig's libSystem.tbd)"
+                 for name in names if name not in exported]
+    if problems:
+        raise SystemExit("\n".join(problems))
+    listed = ", ".join(f"'{name}'" for name in names)
+    return ("--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\n"
+            f"install-name: '{DARWIN_LIBSYSTEM}'\ncurrent-version: 1\nexports:\n"
+            f"  - targets: [ arm64-macos ]\n    symbols: [ {listed} ]\n...\n"), len(names)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--llvm", type=Path, required=True)
@@ -230,6 +275,8 @@ def main():
     parser.add_argument("--abilists", type=Path, required=True)
     parser.add_argument("--libunwind", type=Path, required=True)
     parser.add_argument("--compiler-rt", type=Path, required=True)
+    parser.add_argument("--darwin-symbols", type=Path, required=True, help="the libSystem allowlist")
+    parser.add_argument("--zig-libsystem", type=Path, required=True, help="Zig's libSystem.tbd")
     parser.add_argument("--deb", action="append", default=[], help="<role>:<arch>=<deb>")
     parser.add_argument("--pins", type=Path, required=True, help="the lock naming each input's URL")
     parser.add_argument("--output", type=Path, required=True)
@@ -396,6 +443,19 @@ def main():
                 },
                 "files": files,
             }
+    # aarch64-apple-darwin: one generated text stub; S5's recipe links it with
+    # `ld.lld -flavor darwin -platform_version macos <floor> <floor>`.
+    tbd, count = darwin_libsystem(args.darwin_symbols.read_text(), args.zig_libsystem.read_text())
+    (output / DARWIN).mkdir()
+    (output / DARWIN / "libSystem.tbd").write_text(tbd)
+    manifest["targets"][DARWIN] = {
+        "floor": DARWIN_FLOOR,
+        "libraries": ["libSystem.tbd"],
+        "files": {"libSystem.tbd": {
+            "sha256": sha256(output / DARWIN / "libSystem.tbd"), "symbols": count,
+            "source": "tools/native-toolchain/darwin/libSystem.symbols",
+            "checked": "exported for arm64 macOS by Zig's libSystem.tbd; no fsync or fdatasync"}},
+    }
     text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     (output / "manifest.json").write_text(text)
     (output / "digest").write_text(hashlib.sha256(text.encode()).hexdigest() + "\n")

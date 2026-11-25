@@ -33,6 +33,11 @@
       "sha256": "9327bdbeae15b383481c7a821f58d3ade9d2c6745ff19bb8b646df4c7a953037",
       "size": 253117
     },
+    "libSystem-tbd": {
+      "url": "https://raw.githubusercontent.com/ziglang/zig/bff490a23889750de7096d9057c0a432efc929a8/lib/libc/darwin/libSystem.tbd",
+      "sha256": "01089e97e7372fdda64ef480f2c99d483daf0c7fc99298a137425ee3230588ab",
+      "size": 347931
+    },
     "libunwind": {
       "url": "https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz",
       "sha256": "51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5",

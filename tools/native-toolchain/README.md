@@ -19,16 +19,18 @@ https://github.com/SamGalanakis/hirsel-lang/releases/tag/toolchain-llvm-23.1.5.
 - `fixtures/`: `version.c` for `check`; `smoke.ll`, `smoke_harness.c` and `smoke.expected`,
   the FFI smoke that `crates/hirsel-llvm/tests/it/native.rs` compiles, links and runs.
 
-- `build-static-lld DIR`, `static-lld-elf-only.patch`: build the toolchain image's
+- `build-static-lld DIR`, `static-lld-elf-macho.patch`: build the toolchain image's
   `bin/ld.lld` (the lock's `static_lld` record). See below.
+- `darwin/libSystem.symbols`: every libSystem symbol a program may import on
+  `aarch64-apple-darwin`; the link kit turns it into `libSystem.tbd`. See Link kit.
 - `build-libllvm DIR ARTIFACTS`, `engine_llvm.py`: build the compiler's engine libLLVM
   (the lock's `engine_llvm` record) and guard it. See below.
 
 ## Static ld.lld
 
 The toolchain image's `bin/ld.lld` is built once per pin
-from the locked source archive by `build-static-lld`: the ELF port only
-(`static-lld-elf-only.patch`), targets X86 and AArch64, Release without assertions,
+from the locked source archive by `build-static-lld`: the ELF and Mach-O ports only
+(`static-lld-elf-macho.patch`; `ld.lld -flavor darwin` is `ld64.lld`), targets X86 and AArch64, Release without assertions,
 linked `-static-pie` and stripped. It loads no library, so each link skips
 the dynamic loader's work for libLLVM (about 18 M instructions per run). It is a static
 PIE rather than plain `-static` because a `-static` binary's start-up registers
@@ -119,7 +121,7 @@ which every executable links with instead of a compiler driver:
 - Debian's glibc 2.28-10+deb10u1 `libc6` and `libc6-dev` and Linux 4.19
   `linux-libc-dev` for amd64 and arm64 (archive.debian.org);
 - LLVM 23.1.5's `libunwind` and `compiler-rt` from its combined source archive;
-- Zig's `lib/libc/glibc/abilists` at `bff490a2`.
+- Zig's `lib/libc/glibc/abilists` and `lib/libc/darwin/libSystem.tbd` at `bff490a2`.
 
 Per target the kit holds `Scrt1.o`, `crti.o`, `crtn.o` and `libc_nonshared.a`
 from glibc 2.28 unchanged; stub DSOs for libc, libm, libpthread, libdl, librt,
@@ -132,7 +134,16 @@ records each file's SHA-256, source and flags, the clang and lld versions and
 the SHA-256 of `ld.lld` and libLLVM; `digest` (the manifest's SHA-256) is the
 kit's identity and enters every build ID. The runtime archive's own
 `compiler_builtins` provides every compiler builtin, so the kit carries no
-compiler-rt builtins. `:glibc_floor` unpacks the same `libc6` packages as
+compiler-rt builtins.
+
+For `aarch64-apple-darwin` the kit holds one file, `libSystem.tbd`: a TBD v4 text
+stub with install name `/usr/lib/libSystem.B.dylib` that exports exactly the names
+in `darwin/libSystem.symbols`, so an import off the list fails the link with its
+name. The kit refuses `fsync` and `fdatasync` in the list (Darwin durability is
+`fcntl(F_FULLFSYNC)`, STORE-SPEC §3.3c), and every name must be exported for arm64
+macOS by Zig's `lib/libc/darwin/libSystem.tbd` at the abilists commit. Adding a
+name is a reviewed one-line change. No Apple file is shipped. The manifest row
+records the macOS floor (26.0). `:glibc_floor` unpacks the same `libc6` packages as
 `<triple>/` loader and library directories for running executables at the
 floor through that loader (never a link input).
 
@@ -142,7 +153,8 @@ floor through that loader (never a link input).
 
 The proof runs clang's version command, links and runs C with the pinned lld,
 builds a static AArch64 executable and runs it directly with the input qemu
-(no binfmt), then checks the C executable with the input Valgrind and
+(no binfmt), links an arm64 Mach-O against the kit's `libSystem.tbd` and checks its
+floor, load commands, signature and imports (and that an `fsync` import fails to link), then checks the C executable with the input Valgrind and
 `VALGRIND_LIB`. It checks the pinned clang/lld versions, requires output markers from both
 executables and an explicit zero-error Valgrind summary, then requires
 Valgrind to refuse a planted 32-byte leak with exit 97. A skipped step fails.

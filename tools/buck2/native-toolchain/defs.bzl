@@ -39,6 +39,8 @@ def _link_kit(ctx):
         "--arm-sysroot", cmd_args(ctx.attrs.arm[DefaultInfo].default_outputs[0], "/aarch64-none-linux-gnu/libc", delimiter = ""),
         "--libunwind", source("libunwind"),
         "--compiler-rt", source("compiler-rt"),
+        "--zig-libsystem", source("libSystem-tbd"),
+        "--darwin-symbols", ctx.attrs._darwin_symbols,
         "--pins", pins,
         "--output", output.as_output(),
     )
@@ -56,6 +58,7 @@ link_kit = rule(impl = _link_kit, attrs = {
     "sources": attrs.dict(attrs.string(), attrs.dep()),
     "pins": attrs.dict(attrs.string(), attrs.dict(attrs.string(), attrs.any())),
     "_script": attrs.source(default = "//tools/buck2/native-toolchain:link_kit.py"),
+    "_darwin_symbols": attrs.source(default = "root//:darwin-libsystem-symbols"),
 })
 
 def _proof(ctx):

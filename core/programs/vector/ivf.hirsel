@@ -89,6 +89,7 @@ pub opaque type Ivf[K, V]: shareable + send {
     source: store.Table[K, V],
     decl: store.ProjectionDecl,
     extract: StaticFn[fn(K, V) -> Result[List[i8], Capacity]],
+    ordinal: StaticFn[fn(K) -> u64],
     metric: Metric,
     dims: u64,
     padded: u64,
@@ -113,10 +114,11 @@ fn sub_table[K, V](mut d: store.Declare, name: String, suffix: String, take key:
 
 // Declares form B over `source`: a projection `name` and its tables, and
 // registers the projector that the store's head steps. `code` returns a
-// row's vector, which must have `shape.dims` elements. Every commit that
+// row's vector, which must have `shape.dims` elements, and `ordinal` a
+// row's position in a query's prefilter bitset. Every commit that
 // folds rows is bounded at `shape.steps`, the training commit included; a
 // fold that overruns it stops, and the store's head turns the projector off.
-pub fn declare_ivf[K, V](mut d: store.Declare, source: store.Table[K, V], name: String, metric: Metric, extract: StaticFn[fn(K, V) -> Result[List[i8], Capacity]], shape: Shape) -> Result[Ivf[K, V], Error] {
+pub fn declare_ivf[K, V](mut d: store.Declare, source: store.Table[K, V], name: String, metric: Metric, extract: StaticFn[fn(K, V) -> Result[List[i8], Capacity]], ordinal: StaticFn[fn(K) -> u64], shape: Shape) -> Result[Ivf[K, V], Error] {
     if shape.dims == 0 || padded_dims(shape.dims) > MAX_PADDED || shape.clusters == 0 {
         return Error(Shape(shape))
     }
@@ -129,7 +131,7 @@ pub fn declare_ivf[K, V](mut d: store.Declare, source: store.Table[K, V], name: 
     let lineages: store.Table[u32, Lineage] = sub_table(mut d, name, ".lineages", std.codec.key_u32(), std.codec.of()) ?=> |e| Store(e)
     let rotated: store.Table[(u32, u32), List[i64]] = sub_table(mut d, name, ".rotated", std.codec.key_of(), std.codec.of_list()) ?=> |e| Store(e)
     let tables = IvfTables(blocks: take blocks, mentions: take mentions, fill: take fill, gens: take gens, lineages: take lineages, rotated: take rotated)
-    let v: Ivf[K, V] = Ivf(tables: take tables, source: clone(source), decl: clone(decl), extract: extract, metric: metric, dims: shape.dims, padded: padded, clusters: shape.clusters, name: clone(name))
+    let v: Ivf[K, V] = Ivf(tables: take tables, source: clone(source), decl: clone(decl), extract: extract, ordinal: ordinal, metric: metric, dims: shape.dims, padded: padded, clusters: shape.clusters, name: clone(name))
     let fold: store.Fold[Ivf[K, V], K, V, store.Error] = store.Fold(env: clone(v), apply: code.describe(ivf_apply), merge: code.describe(ivf_merge), drop: code.describe(ivf_drop))
     store.projector(mut d, decl, source, Local, fold, store.cadence(), shape.steps) ?=> |e| Store(e)
     Ok(take v)

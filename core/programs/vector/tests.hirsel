@@ -16,12 +16,16 @@ fn row_code(_key: u64, value: List[i8]) -> Result[List[i8], Capacity] {
     Ok(clone(value))
 }
 
+fn row_ordinal(key: u64) -> u64 {
+    key
+}
+
 fn open_points(clock: Clock, random: Random, metric: vector.Metric) -> (store.Db, Points, Near) waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let mut d = result.unwrap(store.declare(db, Migrate))
     let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
     let mut decl = result.unwrap(store.declare_table(mut d, "points", std.codec.key_u64(), codes))
-    let near = result.unwrap(vector.declare(mut d, mut decl, "near", metric, code.describe(row_code)))
+    let near = result.unwrap(vector.declare(mut d, mut decl, "near", metric, code.describe(row_code), code.describe(row_ordinal)))
     let points = result.unwrap(store.finish(mut d, take decl))
     let _ = result.unwrap(store.seal(mut db, take d))
     (take db, points, take near)
@@ -39,7 +43,7 @@ fn run_query(mut db: store.Db, points: Points, near: Near, take steps: List[Step
                 },
             }
         }
-        Ok(vector.query(tx, input.1, input.3, input.4))
+        Ok(vector.query(tx, input.1, input.3, input.4, Every))
     }))
     match take ran {
         Committed(take done) => clone(done.value),
@@ -50,7 +54,7 @@ fn run_query(mut db: store.Db, points: Points, near: Near, take steps: List[Step
 fn look_query(db: store.Db, near: Near, q: List[i8], k: u64) -> Found waits {
     let read_handle = result.unwrap(store.reader(db, 0u64))
     let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(near), store.copy_env(q), k), fn(tx, input) -> Found {
-        vector.query(tx, input.0, input.1, input.2)
+        vector.query(tx, input.0, input.1, input.2, Every)
     }))
     match take looked {
         Seen(take seen) => clone(seen.value),
@@ -323,15 +327,15 @@ type Far = vector.Ivf[u64, List[i8]]
 
 type Model = List[Option[List[i8]]]
 
-fn open_far(clock: Clock, random: Random, metric: vector.Metric) -> (store.Db, Points, Near, Far) waits {
+fn open_far(clock: Clock, random: Random, metric: vector.Metric, ordinal: StaticFn[fn(u64) -> u64]) -> (store.Db, Points, Near, Far) waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let mut d = result.unwrap(store.declare(db, Migrate))
     let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
     let mut decl = result.unwrap(store.declare_table(mut d, "points", std.codec.key_u64(), codes))
-    let near = result.unwrap(vector.declare(mut d, mut decl, "near", metric, code.describe(row_code)))
+    let near = result.unwrap(vector.declare(mut d, mut decl, "near", metric, code.describe(row_code), ordinal))
     let points = result.unwrap(store.finish(mut d, take decl))
     let shape = vector.Shape(dims: IVF_DIMS, clusters: 16, steps: 1099511627776u64)
-    let far = result.unwrap(vector.declare_ivf(mut d, points, "far", metric, code.describe(row_code), shape))
+    let far = result.unwrap(vector.declare_ivf(mut d, points, "far", metric, code.describe(row_code), ordinal, shape))
     let _ = result.unwrap(store.seal(mut db, take d))
     (take db, points, take near, take far)
 }
@@ -346,7 +350,7 @@ fn far_run(mut db: store.Db, points: Points, far: Far, take steps: List[Step], q
                 },
             }
         }
-        Ok(vector.query_ivf(tx, input.1, input.3, input.4, IVF_PROBES))
+        Ok(vector.query_ivf(tx, input.1, input.3, input.4, IVF_PROBES, Every))
     }))
     match take ran {
         Committed(take done) => clone(done.value),
@@ -357,7 +361,7 @@ fn far_run(mut db: store.Db, points: Points, far: Far, take steps: List[Step], q
 fn far_look(db: store.Db, far: Far, q: List[i8], k: u64) -> Found waits {
     let read_handle = result.unwrap(store.reader(db, 0u64))
     let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(far), store.copy_env(q), k), fn(tx, input) -> Found {
-        vector.query_ivf(tx, input.0, input.1, input.2, IVF_PROBES)
+        vector.query_ivf(tx, input.0, input.1, input.2, IVF_PROBES, Every)
     }))
     match take looked {
         Seen(take seen) => clone(seen.value),
@@ -504,7 +508,7 @@ fn recall_line(found: u64) {
 fn ivf_recall(clock: Clock, random: Random) -> Result[(), ()] waits {
     let metrics: Inline[vector.Metric, 2] =[L2, Dot]
     for metric in metrics {
-        let (take opened, points, near, far) = open_far(clock, random, metric)
+        let (take opened, points, near, far) = open_far(clock, random, metric, code.describe(row_ordinal))
         let mut db = take opened
         let mut model: Model = list.new()
         for _ in 0u64 .. IVF_ROWS + 64 {
@@ -556,6 +560,204 @@ fn ivf_recall(clock: Clock, random: Random) -> Result[(), ()] waits {
         }
         recall_line(far_state(mut db, points, near, far, metric, model, false))
         result.unwrap(store.close(take db))
+    }
+    Ok(())
+}
+
+// Prefilters (Store 3.3) on both forms of one table: 512 rows of 32
+// dimensions around 16 centres. Every query reads all 16 clusters and asks
+// for at most 10 hits, so form B prunes nothing while the rows a filter
+// allows number at most 10 * k: its scan is exhaustive.
+const PF_ROWS: u64 = 512
+
+const PF_PROBES: u32 = 16
+
+const PF_ALL: u64 = 1024
+
+const PF_BITS: u64 = 1000
+
+type Both = (Found, Found)
+
+// Not the identity, so a filter that confused a key with its ordinal
+// selects other rows. Keys above 332 map past PF_BITS.
+fn spread(key: u64) -> u64 {
+    key * 3 + 1
+}
+
+fn member(bits: std.bitset.BitSet, key: u64) -> bool {
+    let at = spread(key)
+    at < std.bitset.len(bits) && std.bitset.get(bits, at)
+}
+
+// Keys 5, 18, 31, .. below 333: 26 rows. Bits 0, 3 and 999 are no row's
+// ordinal, and keys 343, 356, .. would match but map past the bitset.
+fn selective() -> std.bitset.BitSet {
+    let mut bits = std.bitset.new(PF_BITS)
+    for key in 0u64 .. PF_ROWS + 64 {
+        if key % 13 == 5 && spread(key) < PF_BITS {
+            std.bitset.set(mut bits, spread(key))
+        }
+    }
+    std.bitset.set(mut bits, 0)
+    std.bitset.set(mut bits, 3)
+    std.bitset.set(mut bits, 999)
+    take bits
+}
+
+fn both_queries(tx: store.Tx, near: Near, far: Far, q: List[i8], k: u64, filter: vector.Filter) -> (Both, Both) {
+    let all: Both = (vector.query(tx, near, q, PF_ALL, Every), vector.query_ivf(tx, far, q, PF_ALL, PF_PROBES, Every))
+    let only: Both = (vector.query(tx, near, q, k, filter), vector.query_ivf(tx, far, q, k, PF_PROBES, filter))
+    (take all, take only)
+}
+
+fn both_run(mut db: store.Db, points: Points, near: Near, far: Far, take steps: List[Step], q: List[i8], k: u64, filter: vector.Filter) -> (Both, Both) waits {
+    let ran = result.unwrap(store.run(mut db, None, (store.copy_env(points), store.copy_env(near), store.copy_env(far), take steps, store.copy_env(q), k, store.copy_env(filter)), fn(mut tx, input) -> Result[(Both, Both), store.Error] {
+        for step in input.3 {
+            match step {
+                Put(key, c) => store.put(mut tx, input.0, key, clone(c))?,
+                Delete(key) => {
+                    let _ = store.delete(mut tx, input.0, key)?
+                },
+            }
+        }
+        Ok(both_queries(tx, input.1, input.2, input.4, input.5, input.6))
+    }))
+    match take ran {
+        Committed(take done) => clone(done.value),
+        _ => fail("prefilter law: the transaction did not commit"),
+    }
+}
+
+fn both_look(db: store.Db, near: Near, far: Far, q: List[i8], k: u64, filter: vector.Filter) -> (Both, Both) waits {
+    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(near), store.copy_env(far), store.copy_env(q), k, store.copy_env(filter)), fn(tx, input) -> (Both, Both) {
+        both_queries(tx, input.0, input.1, input.2, input.3, input.4)
+    }))
+    match take looked {
+        Seen(take seen) => clone(seen.value),
+        _ => fail("prefilter law: the look did not run"),
+    }
+}
+
+fn hits_or_fail(take found: Found) -> List[vector.Hit[u64]] {
+    match take found {
+        Ok(take hits) => take hits,
+        Error(_) => fail("prefilter law: a query refused"),
+    }
+}
+
+// The unfiltered list without the rows outside `bits`, cut at k.
+fn without(all: List[vector.Hit[u64]], bits: std.bitset.BitSet, k: u64) -> List[vector.Hit[u64]] {
+    let mut out: List[vector.Hit[u64]] = list.new()
+    for h in all {
+        if list.len(out) == k {
+            break
+        }
+        if member(bits, h.key) {
+            list.push(mut out, vector.Hit(key: h.key, score: h.score))
+        }
+    }
+    take out
+}
+
+// The law on one query: both forms' unfiltered lists over every row agree,
+// and each form's filtered list is its unfiltered list with the rows outside
+// the filter removed. Returns whether the unfiltered top k held a row
+// outside the filter, so that a filter applied after the cut would fail.
+fn law_case(take answers: (Both, Both), bits: std.bitset.BitSet, k: u64) -> bool {
+    let (take all, take only) = take answers
+    let (take all_a, take all_b) = take all
+    let (take only_a, take only_b) = take only
+    let a = hits_or_fail(take all_a)
+    let b = hits_or_fail(take all_b)
+    if !same_hits(a, b) {
+        fail("prefilter law: exhaustive form B differs from form A")
+    }
+    let want = without(a, bits, k)
+    if !same_hits(hits_or_fail(take only_a), want) {
+        fail("prefilter law: form A's filtered list is not its unfiltered list without the rows outside the filter")
+    }
+    if !same_hits(hits_or_fail(take only_b), want) {
+        fail("prefilter law: form B's filtered list is not its unfiltered list without the rows outside the filter")
+    }
+    for i in 0u64 .. list.len(a) {
+        if i == k {
+            break
+        }
+        if !member(bits, a[i].key) {
+            return true
+        }
+    }
+    false
+}
+
+// Every query of one store state through a look, for the selective filter
+// and for one that allows nothing, at k 4 and 10. Returns how many cases
+// had a row outside the filter in the unfiltered top k.
+fn pf_state(db: store.Db, near: Near, far: Far) -> u64 waits {
+    let mut outside = 0u64
+    let ks: Inline[u64, 2] =[4, 10]
+    for i in 0u64 .. 4 {
+        let q = far_query(i)
+        for k in ks {
+            let bits = selective()
+            if law_case(both_look(db, near, far, q, k, Only(clone(bits))), bits, k) {
+                outside += 1
+            }
+            let none = std.bitset.new(0)
+            let _ = law_case(both_look(db, near, far, q, k, Only(clone(none))), none, k)
+        }
+    }
+    outside
+}
+
+/// bug: a filter applied after form A's or form B's top-k cut, or after form
+/// B's 10 * k candidate cut, returns fewer or other rows than the unfiltered
+/// list without the rows outside the filter; so does a filter that reads a
+/// key as its ordinal, lets a tail row or an ordinal past the bitset
+/// through, or drops a tail key from the generations' mask.
+@test
+fn prefilter(clock: Clock, random: Random) -> Result[(), ()] waits {
+    let metrics: Inline[vector.Metric, 2] =[L2, Dot]
+    let mut outside = 0u64
+    for metric in metrics {
+        let (take opened, points, near, far) = open_far(clock, random, metric, code.describe(spread))
+        let mut db = take opened
+        let mut steps: List[Step] = list.new()
+        for r in 0u64 .. PF_ROWS {
+            list.push(mut steps, Put(r, near_centre(r % IVF_CENTRES, r + 1)))
+        }
+        write_rows(mut db, points, far, take steps)
+        // Before the first publication form B scans every row exactly.
+        outside += pf_state(db, near, far)
+        let _ = settle(mut db, far)
+        outside += pf_state(db, near, far)
+        // The tail, in the writing transaction and after it: the filtered
+        // best row deleted, another allowed row and a row past the bitset
+        // moved onto the query.
+        let q = far_query(0)
+        let bits = selective()
+        let (_, take only) = both_look(db, near, far, q, 1, Only(clone(bits)))
+        let (take first, _) = take only
+        let top = hits_or_fail(take first)[0].key
+        let moved = if top == 5 {
+            18u64
+        } else {
+            5u64
+        }
+        let mut tail: List[Step] = list.new()
+        list.push(mut tail, Delete(top))
+        list.push(mut tail, Put(moved, clone(q)))
+        list.push(mut tail, Put(343, clone(q)))
+        list.push(mut tail, Put(1, clone(q)))
+        if law_case(both_run(mut db, points, near, far, take tail, q, 10, Only(clone(bits))), bits, 10) {
+            outside += 1
+        }
+        outside += pf_state(db, near, far)
+        result.unwrap(store.close(take db))
+    }
+    if outside == 0 {
+        fail("prefilter law: no unfiltered top k held a row outside the filter")
     }
     Ok(())
 }

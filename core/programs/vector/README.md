@@ -4,16 +4,19 @@
 vector. Vectors are `List[i8]` codes. It has two forms. Form A is an exact
 flat scan for small tables, up to about 10,000 rows. Form B is an IVF index
 with RaBitQ codes for larger tables. It is read through a projector and
-reranks its candidates exactly (Store 3.2).
+reranks its candidates exactly (Store 3.2). Both forms take a prefilter
+bitset that restricts a query to some rows before it scores them
+(Store 3.3).
 
 ## Form A
 
 ### Declaring
 
-Call `vector.declare(mut d, mut t, name, metric, code)` between
+Call `vector.declare(mut d, mut t, name, metric, code, ordinal)` between
 `store.declare_table` and `store.finish`. `code` is a described function
 `fn(K, V) -> Result[List[i8], Capacity]` that returns a row's vector. Every
-row of the table has a vector.
+row of the table has a vector. `ordinal` is a described function
+`fn(K) -> u64` that gives a row's bit in a prefilter (see Filtering).
 
 The index is a store covering index named `name` on the table. Its payload
 is the row's code. It changes in the same transaction as the row, and a
@@ -25,8 +28,8 @@ for store operations such as `store.rebuild_index`.
 
 ### Querying
 
-Call `vector.query(tx, v, query, k)` with a `store.Tx` from `store.run` or
-`store.look`. It returns at most `k` hits, nearest first. Each hit holds the
+Call `vector.query(tx, v, query, k, filter)` with a `store.Tx` from
+`store.run` or `store.look`, and `Every` or a prefilter. It returns at most `k` hits, nearest first. Each hit holds the
 row's key and its exact integer score. A larger score is nearer:
 
 | Metric | Score |
@@ -41,8 +44,8 @@ code)` is the same function.
 Equal scores rank in increasing primary key order, the table's key codec
 order. One store state therefore gives one result.
 
-Every code must have the query's length. A row whose code does not refuses
-the query with `Dimensions(query length, code length)`.
+Every allowed row's code must have the query's length. One whose code does
+not refuses the query with `Dimensions(query length, code length)`.
 
 ### Cost
 
@@ -56,7 +59,7 @@ conflicts with any concurrent write to the table.
 
 ### Declaring
 
-Call `vector.declare_ivf(mut d, source, name, metric, code, shape)` after
+Call `vector.declare_ivf(mut d, source, name, metric, code, ordinal, shape)` after
 `store.finish`, with the finished source `Table`. `shape` is
 `Shape{dims, clusters, steps}`: every code has `dims` elements, the index
 trains `clusters` centroids, and every commit that folds rows is bounded at
@@ -92,7 +95,7 @@ does not retrain as the data drifts.
 
 ### Querying
 
-Call `vector.query_ivf(tx, v, query, k, probes)`. It returns the same kind
+Call `vector.query_ivf(tx, v, query, k, probes, filter)`. It returns the same kind
 of hits as form A: exact scores, nearest first, with equal scores in
 increasing primary key order. The query:
 
@@ -129,6 +132,35 @@ the read of the projection row and of the tail's span. Its result is
 approximate: rows outside the probed clusters are not seen. The kill-check
 numbers are in the lane report (store-vector-b-3-2-2774).
 
+## Filtering
+
+A query's `filter` is `Every`, or `Only(bits)` with a `std.bitset.BitSet`.
+A row is allowed when its ordinal, `ordinal(key)` as declared, is below
+`std.bitset.len(bits)` and its bit is set. An ordinal past the end is not
+allowed, so an empty bitset allows no row. The ordinal reads only the key:
+a row keeps its ordinal across overwrites, the tail and every generation,
+and nothing stores it. A changed `ordinal` function applies to the next
+query, with no rebuild.
+
+The filter applies before scoring, not after the cut:
+
+- Form A skips a disallowed entry before it checks or scores its code.
+- Form B skips a disallowed tail row before it scores it. The key still
+  masks the generations, so the row's old codes are not read either. A
+  generation's slot is tested after its 1-bit bound and before the masks,
+  the 4-bit estimate and admission, so the `10 · k` candidates and the
+  exact rerank are all allowed rows. With no image, the exact scan skips a
+  disallowed row before it reads its code.
+
+When the scan is exhaustive, a filtered result is therefore the unfiltered
+result with the disallowed rows removed. Form A is always exhaustive. Form
+B is exhaustive with no image, or when it probes every cluster and the
+allowed rows number at most `10 · k`. Otherwise a selective filter only
+improves form B's recall, since the candidates it would have spent on
+disallowed rows go to allowed ones. There is no index per filter value.
+A filtered form B query still reads every probed block: the cost of a
+query does not fall with the filter's selectivity.
+
 ## Laws
 
 - `exact_top_k` runs seeded histories of puts, overwrites with the same
@@ -149,3 +181,13 @@ numbers are in the lane report (store-vector-b-3-2-2774).
   at its exact score, in rank order. Recall@10 against form A's k-th score
   is at least 0.95. Before publication, the list is form A's exactly. In
   the tail state, the moved row is first under L2.
+- `prefilter` puts both forms on a 512-row table with the non-identity
+  ordinal `3 · key + 1` and a 1,000-bit filter that allows 26 rows (keys
+  that would match past the bitset's end are not allowed). Every query
+  probes all 16 clusters. Under L2 and Dot, before publication, after it,
+  and in a run whose own writes delete the filtered best row and move an
+  allowed row, a disallowed row and a row past the bitset onto the query:
+  both forms' unfiltered lists over every row agree, and each form's
+  filtered top 4 and top 10 equal its unfiltered list without the
+  disallowed rows. The same holds for an empty filter. The law fails if no
+  unfiltered top k held a disallowed row.

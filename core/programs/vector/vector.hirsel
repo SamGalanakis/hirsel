@@ -13,9 +13,27 @@ pub type Hit[K] {
     score: i64
 }
 
+// A prefilter (Store 3.3): Every row, or Only the rows whose ordinal is a
+// set bit. A row's ordinal is the index's declared `ordinal(key)`; an
+// ordinal at or past the bitset's length is not in the filter.
+pub type Filter = Every | Only(std.bitset.BitSet)
+
 pub opaque type Vectors[K, V]: shareable + send {
     index: store.Index[(), K, V, List[i8]],
-    metric: Metric
+    metric: Metric,
+    ordinal: StaticFn[fn(K) -> u64]
+}
+
+// Whether the row at `key` is in the filter. Every query applies it before
+// it checks or scores the row's code.
+fn allows[K](filter: Filter, ordinal: StaticFn[fn(K) -> u64], key: K) -> bool {
+    match filter {
+        Every => true,
+        Only(bits) => {
+            let at = (code.callable(ordinal))(key)
+            at < std.bitset.len(bits) && std.bitset.get(bits, at)
+        },
+    }
 }
 
 // Every row has one entry under the same index key, so the entries scan
@@ -26,11 +44,11 @@ fn every_row[K, V](_key: K, _value: V) -> Result[List[()], Capacity] {
     Ok(take keys)
 }
 
-pub fn declare[K, V](mut d: store.Declare, mut t: store.TableDecl[K, V], name: String, metric: Metric, extract: StaticFn[fn(K, V) -> Result[List[i8], Capacity]]) -> Result[Vectors[K, V], store.Error] {
+pub fn declare[K, V](mut d: store.Declare, mut t: store.TableDecl[K, V], name: String, metric: Metric, extract: StaticFn[fn(K, V) -> Result[List[i8], Capacity]], ordinal: StaticFn[fn(K) -> u64]) -> Result[Vectors[K, V], store.Error] {
     let keys: StaticFn[fn(K, V) -> Result[List[()], Capacity]] = code.describe(every_row)
     let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
     let index = store.covering(mut d, mut t, name, Many, keys, std.codec.key_of(), extract, codes)?
-    Ok(Vectors(index: take index, metric: metric))
+    Ok(Vectors(index: take index, metric: metric, ordinal: ordinal))
 }
 
 // The store's handle on the entry index, for the store's own index
@@ -77,11 +95,12 @@ fn keep[K](mut best: List[Hit[K]], k: u64, take hit: Hit[K]) {
     }
 }
 
-// The k nearest rows to `q` among the rows `tx` sees, nearest first.
-// Equal scores rank in increasing primary key order. Every row's code must
-// have the query's length; a row that does not refuses the query with
-// Dimensions(query length, code length).
-pub fn query[K, V](tx: store.Tx, v: Vectors[K, V], q: List[i8], k: u64) -> Result[List[Hit[K]], Error] {
+// The k nearest rows to `q` among the rows `tx` sees that `filter`
+// allows, nearest first. Equal scores rank in increasing primary key
+// order. Every allowed row's code must have the query's length; one that
+// does not refuses the query with Dimensions(query length, code length). A
+// row outside the filter is skipped before its code is checked or scored.
+pub fn query[K, V](tx: store.Tx, v: Vectors[K, V], q: List[i8], k: u64, filter: Filter) -> Result[List[Hit[K]], Error] {
     let mut best: List[Hit[K]] = list.new()
     let mut entries = store.entries(tx, v.index, Unbounded, Unbounded) ?=> |e| Store(e)
     if k == 0 {
@@ -89,6 +108,9 @@ pub fn query[K, V](tx: store.Tx, v: Vectors[K, V], q: List[i8], k: u64) -> Resul
     }
     let width = list.len(q)
     while let Some((_, take key, take code)) = (store.next_entry(mut entries) ?=> |e| Store(e)) {
+        if !allows(filter, v.ordinal, key) {
+            continue
+        }
         if list.len(code) != width {
             return Error(Dimensions(width, list.len(code)))
         }

@@ -71,10 +71,13 @@ fn exact_code[K, V](v: Ivf[K, V], key: K, value: V) -> Result[List[i8], Error] {
 
 // Every row the Tx sees, scored exactly: the answer when the projection has
 // no image to read, or the Tx no pin at it.
-fn exact_scan[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64) -> Result[List[Hit[K]], Error] {
+fn exact_scan[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64, filter: Filter) -> Result[List[Hit[K]], Error] {
     let mut best: List[Hit[K]] = list.new()
     let mut rows = store.range(tx, v.source, Unbounded, Unbounded) ?=> |e| Store(e)
     while let Some((take key, take value)) = (store.next_in(tx, mut rows) ?=> |e| Store(e)) {
+        if !allows(filter, v.ordinal, key) {
+            continue
+        }
         let raw = exact_code(v, key, value)?
         keep(mut best, k, Hit(key: take key, score: score(v.metric, q, raw)))
     }
@@ -232,6 +235,15 @@ fn nearest_clusters(metric: Metric, t: Trained, dims: u64, q: List[i8], probes: 
     take out
 }
 
+// The filter's verdict on a generation's key, decoded from its bytes.
+fn allowed_bytes[K, V](v: Ivf[K, V], filter: Filter, key: Bytes) -> Result[bool, Error] {
+    if let Every = filter {
+        return Ok(true)
+    }
+    let decoded = std.codec.decode_key(store.key_codec(v.source), key) ?=> |e| Store(Decode(e))
+    Ok(allows(filter, v.ordinal, decoded))
+}
+
 // Whether a generation newer than position `from` of `ids` mentions `key`.
 fn shadowed[K, V](tx: store.Tx, v: Ivf[K, V], ids: List[u32], from: u64, key: Bytes) -> Result[bool, store.Error] {
     for j in from + 1 .. list.len(ids) {
@@ -249,8 +261,10 @@ fn shadowed[K, V](tx: store.Tx, v: Ivf[K, V], ids: List[u32], from: u64, key: By
 // upper bound prunes it against the 10 * k best extended estimates, and
 // those 10 * k are reranked exactly from their rows through fetch_many.
 // With no image to read, every row is scored exactly. A Tiered source is
-// refused with Store(Tiered(Tail)).
-pub fn query_ivf[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64, probes: u32) -> Result[List[Hit[K]], Error] {
+// refused with Store(Tiered(Tail)). A row `filter` does not allow is
+// skipped before it is admitted or scored exactly, so the 10 * k candidates
+// are all allowed rows (Store 3.3).
+pub fn query_ivf[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64, probes: u32, filter: Filter) -> Result[List[Hit[K]], Error] {
     if list.len(q) != v.dims {
         return Error(Dimensions(list.len(q), v.dims))
     }
@@ -260,11 +274,15 @@ pub fn query_ivf[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64, probes: 
     loop {
         let read = store.read_tail(tx, v.decl, v.source, take resume, store.Limits(rows: READ_ROWS, byte_limit: READ_BYTES)) ?=> |e| Store(e)
         let Some(take page) = take read else {
-            return exact_scan(tx, v, q, k)
+            return exact_scan(tx, v, q, k, filter)
         }
         let store.Tail(rows: take found, next: take after) = take page
         for (key, value) in found {
             let encoded = key_bytes(v, key)
+            if !allows(filter, v.ordinal, key) {
+                list.push(mut changed, take encoded)
+                continue
+            }
             if let Some(present) = view value {
                 let raw = exact_code(v, key, present)?
                 list.push(mut cands, Cand(key: clone(encoded), score: score(v.metric, q, raw)))
@@ -332,6 +350,9 @@ pub fn query_ivf[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64, probes: 
                         continue
                     }
                     let key = view block.keys[slot]
+                    if !allowed_bytes(v, filter, key)? {
+                        continue
+                    }
                     if holds(changed, key) || (shadowed(tx, v, ids, gi, key) ?=> |e| Store(e)) {
                         continue
                     }

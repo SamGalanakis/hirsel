@@ -37,8 +37,6 @@ pub(crate) use reply::{Reply, file_request, uses_file_ring};
 mod report;
 #[path = "units_sync.rs"]
 pub(crate) mod sync;
-#[path = "units_sync_cells.rs"]
-mod sync_cells;
 use hirsel_core_net::ready::Ready;
 use std::{
     cell::Cell,
@@ -47,7 +45,6 @@ use std::{
     sync::{Arc, OnceLock, atomic::Ordering},
 };
 use sync::{AtomicU64, Mutex};
-pub(crate) use sync_cells::{track_sync, untrack_sync};
 
 /// The running pool unit's id, or NONE outside the pool.
 #[inline(never)]
@@ -92,7 +89,7 @@ pub(crate) fn spin() -> bool {
 // Idle workers: a searcher watches the queued count for a few microseconds,
 // then parks on its own handle. A wake hands one parked worker the searching
 // role, so a burst of newly runnable units wakes one worker at a time.
-use std::cell::{RefCell as URefCell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::collections::BTreeSet;
 use sync::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
 
@@ -260,7 +257,6 @@ pub(crate) struct Unit {
     state: AtomicU8,
     inside: AtomicBool,
     after: Cell<After>,
-    sync_cells: URefCell<Vec<*mut crate::os_sync::SyncCell>>,
     /// Readiness for this unit's keys, as (reactor identity, conditions):
     /// crossing events and the shared poller's socket edges. The unit's
     /// scheduler takes them at its next turn, in this order.
@@ -515,7 +511,6 @@ fn new_unit(id: u32, helper: bool) -> Box<Unit> {
         state: AtomicU8::new(QUEUED),
         inside: AtomicBool::new(false),
         after: Cell::new(After::Run),
-        sync_cells: URefCell::new(Vec::new()),
         xready: Mutex::new(Vec::new()),
         xpending: AtomicBool::new(false),
         xspare: UnsafeCell::new(Vec::new()),
@@ -1206,11 +1201,6 @@ unsafe fn run_unit(p: &'static Pool, ix: usize, up: UP, host: &mut *mut u8) {
             After::Done => {
                 WORST.fetch_max(u.status.load(Ordering::Relaxed), Ordering::Relaxed);
                 u.state.store(DONE, Ordering::SeqCst);
-                for cell in u.sync_cells.borrow_mut().drain(..) {
-                    // SAFETY: unit has ended; detach any sync still in flight so
-                    // the helper frees the cell on completion and delivers nothing.
-                    unsafe { crate::os_sync::SyncCell::detach(cell) };
-                }
                 // The terminal switch returned to the host stack. DONE
                 // rejects further wakes, and nothing can resume this stack.
                 p.memory.put_unit_stack((*u.stack.get()).take().unwrap());

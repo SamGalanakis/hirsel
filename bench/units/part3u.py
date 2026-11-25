@@ -49,7 +49,7 @@ def log(*a):
 
 def side_cmd(side, par, rec, k=None):
     """(argv, env, cpus, nports) for a server side."""
-    env = {"HIRSEL_SYNC_HELPERS": str(SYNCS)}
+    env = {}
     exe = f"{BIN}/session_rec" if rec else f"{BIN}/session"
     base = [str(PORT), str(SESSIONS), str(PARTITIONS), str(par), str(TOOL_PORT)]
     if side.startswith("S3"):

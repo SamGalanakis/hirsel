@@ -214,7 +214,7 @@ class Runner:
                 stop_owned(proc, pidfile, {"toolsrv"})
 
     def server_cmd(self, side, cell):
-        env = {"HIRSEL_SYNC_HELPERS": str(SYNCS)}
+        env = {}
         total_clients = cell["sessions"] + int(cell.get("churn_per_s", 0) * RUN["dur"])
         base = [PORT, total_clients, PARTITIONS, int(cell["par"]), TOOL_PORT]
         recorded = cell["rec"]

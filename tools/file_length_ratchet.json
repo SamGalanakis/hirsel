@@ -449,9 +449,9 @@
     "lines": 2258
   },
   "crates/hirsel-core-rt/src/tape/tests.rs": {
-    "lines": 2504,
-    "raise_revision": 2,
-    "reason": "net18-s3-2482"
+    "lines": 2517,
+    "raise_revision": 3,
+    "reason": "store-ring-build-2293: the parked-SYNC case parks on a test host now that the OS syncs inside issue"
   },
   "crates/hirsel-core-rt/src/task_heap.rs": {
     "lines": 2650

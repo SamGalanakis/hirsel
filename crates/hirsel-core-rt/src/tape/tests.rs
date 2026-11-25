@@ -3,6 +3,7 @@
 use super::*;
 use crate::os::OsProvider;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::{cell::Cell as Shared, io::Read};
 #[path = "aead_tests.rs"]
 mod aead;
@@ -1505,19 +1506,28 @@ unsafe extern "C" fn other(context: *mut crate::Context, _: *mut u8, input: *mut
         // the spawner's back.
         let spawner = TASK.replace(context);
         *job.seen = Some(plain(job.clock, WALL_MS, 0, &[]));
-        crate::os_sync::hold(false);
+        release_parked_sync();
         TASK.set(spawner);
     }
     0
 }
 
+/// The sync `Syncs::Parked` holds, or `SYNC_RELEASED`: later ones ready at once.
+static PARKED_SYNC: AtomicU64 = AtomicU64::new(0);
+const SYNC_RELEASED: u64 = u64::MAX;
+fn release_parked_sync() {
+    let held = PARKED_SYNC.swap(SYNC_RELEASED, SeqCst);
+    if held != 0 && held != SYNC_RELEASED {
+        crate::tasks::hirsel_core_ready(held);
+    }
+}
+
 /// How the host answers SYNC and SYNC_DIR.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Syncs {
-    /// The OS: parked while the helper syncs.
+    /// Parked until the other task has run, then synced on the OS at resume.
     Parked,
-    /// The OS, finished inside issue: the tape records OP, as every tape
-    /// before the sync helper did.
+    /// The OS, finished inside issue: the tape records OP.
     Blocking,
     /// The file's SYNC parks and fails with EIO; no syscall.
     Failing,
@@ -1531,19 +1541,18 @@ impl SyncHost {
         }
         unsafe extern "C" fn issue(s: *mut u8, r: *mut Request, t: u64) -> Step {
             let SyncHost(p, syncs) = unsafe { &*s.cast::<SyncHost>() };
-            if *syncs == Syncs::Failing && unsafe { (*r).operation } == SYNC {
-                crate::tasks::hirsel_core_ready(t);
+            let operation = unsafe { (*r).operation };
+            let parked = *syncs == Syncs::Parked && matches!(operation, SYNC | SYNC_DIR);
+            if parked || (*syncs == Syncs::Failing && operation == SYNC) {
+                if !parked || PARKED_SYNC.compare_exchange(0, t, SeqCst, SeqCst).is_err() {
+                    crate::tasks::hirsel_core_ready(t);
+                }
                 return Step {
                     kind: STEP_PENDING,
                     ..Step::default()
                 };
             }
-            let mut step = unsafe { (p.issue)(p.state, r, t) };
-            while *syncs == Syncs::Blocking && step.kind == STEP_PENDING {
-                std::thread::sleep(std::time::Duration::from_micros(100));
-                step = unsafe { (p.resume)(p.state, r, t) };
-            }
-            step
+            unsafe { (p.issue)(p.state, r, t) }
         }
         unsafe extern "C" fn resume(s: *mut u8, r: *mut Request, t: u64) -> Step {
             let SyncHost(p, syncs) = unsafe { &*s.cast::<SyncHost>() };
@@ -1556,6 +1565,9 @@ impl SyncHost {
                     },
                     deadline_ns: 0,
                 };
+            }
+            if *syncs == Syncs::Parked && matches!(unsafe { (*r).operation }, SYNC | SYNC_DIR) {
+                return unsafe { (p.issue)(p.state, r, t) };
             }
             unsafe { (p.resume)(p.state, r, t) }
         }
@@ -1582,7 +1594,7 @@ impl SyncHost {
 /// whose Replay reaches the host, or whose recorded answer (value, error,
 /// written, carrier bytes) is lost; a parked SYNC whose ISSUE and DONE do not
 /// replay around another task's frame; a tape recorded with SYNC as one OP
-/// (before the sync helper) that no longer replays.
+/// (the OS host, which syncs inside issue) that no longer replays.
 #[test]
 fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     crate::openat2_required::require();
@@ -1694,12 +1706,11 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     for syncs in [Syncs::Parked, Syncs::Blocking, Syncs::Failing] {
         let host = Counted::new(Some(real));
         let answers = SyncHost(host.provider(), syncs);
-        // The helper holds a parked SYNC until the other task has taken its
-        // frame, so that frame falls between the SYNC's ISSUE and DONE.
+        // A parked SYNC is held until the other task has taken its frame, so
+        // that frame falls between the SYNC's ISSUE and DONE.
         let _ = std::fs::remove_file(store_dir.join("t"));
-        crate::os_sync::hold(syncs == Syncs::Parked);
+        PARKED_SYNC.store(0, SeqCst);
         let recorded = taped(Mode::Record, answers.provider(), wd);
-        crate::os_sync::hold(false);
         let kinds: std::collections::BTreeSet<u8> = recorded.iter().map(|o| o.op).collect();
         assert_eq!(kinds, (OPEN..=SYNC_DIR).collect(), "every S1 op kind");
         assert_eq!(
@@ -1793,7 +1804,9 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
         obs
     };
     let _ = std::fs::remove_file(store_dir.join("t"));
-    let recorded = bare(Mode::Record, real, wd);
+    PARKED_SYNC.store(SYNC_RELEASED, SeqCst); // no other task: ready in issue
+    let parked = SyncHost(real, Syncs::Parked);
+    let recorded = bare(Mode::Record, parked.provider(), wd);
     assert!(
         recorded
             .iter()
@@ -1814,7 +1827,7 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
             )
         })
         .count();
-    assert_eq!(issued, 2, "both syncs parked on the helper");
+    assert_eq!(issued, 2, "both syncs parked");
     let refuse = Counted::new(None);
     assert_eq!(bare(Mode::Replay, refuse.provider(), 0), recorded);
     assert_eq!(refuse.calls.get(), 0);

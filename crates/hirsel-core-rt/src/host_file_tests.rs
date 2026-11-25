@@ -353,13 +353,21 @@ fn slot_file_fixture<T: Send>(
 
 fn check_file_backend() {
     let expected_helper = hirsel_core_net::reactor().unwrap() == hirsel_core_net::Reactor::Epoll;
-    let helper = std::fs::read_dir("/proc/self/task").unwrap().any(|task| {
-        std::fs::read_to_string(task.unwrap().path().join("comm"))
-            .is_ok_and(|comm| comm.trim_end() == "hirsel-host")
-    });
+    let threads: Vec<String> = std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter_map(|task| std::fs::read_to_string(task.unwrap().path().join("comm")).ok())
+        .map(|comm| comm.trim_end().to_owned())
+        .collect();
     assert_eq!(
-        helper, expected_helper,
+        threads.iter().any(|comm| comm == "hirsel-host"),
+        expected_helper,
         "file operations used the wrong backend"
+    );
+    // §3.3b: syncs take the one file seam (the ring, or `off_slot` on a
+    // helper host); no backend starts a separate sync thread.
+    assert!(
+        !threads.iter().any(|comm| comm == "hirsel-sync"),
+        "a sync ran on a dedicated sync thread"
     );
 }
 
@@ -428,10 +436,13 @@ fn slot_ring_writes_report_progress_and_preserve_positioned_cursor() {
             )
             .0;
         let cursor = f.call(WRITE, file, b"", 0, &mut cursor_bytes, 2).0;
+        let sync = f.simple(SYNC, file, b"", 0);
+        let sync_dir = f.simple(SYNC_DIR, f.dir, b"", 0);
         let _ = f.simple(CLOSE, file, b"", 0);
         let readonly = f.open(b"file", 0);
         let refusal = f.call(WRITE, readonly, b"", 0, &mut refusal_bytes, 4).0;
         let _ = f.simple(CLOSE, readonly, b"", 0);
+        assert_eq!((sync.error, sync_dir.error), (IoError::OK, IoError::OK));
         (at, cursor, refusal)
     });
     assert_eq!((at.error, at.written), (IoError::OK, 3));

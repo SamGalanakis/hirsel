@@ -30,7 +30,7 @@
 //! `wake`, `notify_worker`, `add_timer`, `fire_timers`, `check_slot` and
 //! `poll_slot`, with units that switch onto their own stacks and call
 //! `park`, `wake_id`, `maybe_yield` and `take_xready` as the task scheduler
-//! does. A sync completion goes through its real cell (`os_sync`) and the
+//! does. An outside completion goes through its real `Outside` and the
 //! unit's waiter (`tasks::Readies`), whose state also passes the seam. Every
 //! worker is a real OS thread, but only one runs at a time: each call
 //! through the seam is a scheduling point where a seeded scheduler (uniform,
@@ -685,11 +685,20 @@ fn producer_wait_flag(f: usize) {
     }
 }
 
-/// The requeue case's sync: its ready token and its completion cell (handed
-/// to the helper; not a pool object, so not a scheduling point).
+/// The requeue case's outside work: its ready token and the issuing unit's
+/// `Outside`, handed to the helper (not a pool object, so not a scheduling
+/// point).
 const SYNC_TOKEN: u64 = 0x5ec0;
-static SYNC_CELL: std::sync::atomic::AtomicPtr<crate::os_sync::SyncCell> =
+static SYNC_OUTSIDE: std::sync::atomic::AtomicPtr<crate::tasks::Outside> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// The helper's completion of the outside work its unit handed over: push the
+/// ready, then release the unit's outside count.
+fn complete_outside() {
+    let outside = SYNC_OUTSIDE.swap(std::ptr::null_mut(), Ordering::SeqCst);
+    // SAFETY: the unit published this box once, and only the helper takes it.
+    unsafe { Box::from_raw(outside) }.complete(SYNC_TOKEN);
+}
 
 /// Iterations of the looping unit in the stale-bound case.
 const TICKS: u32 = 40;
@@ -806,10 +815,10 @@ pub(super) static CASES: &[Case] = &[
         pct: None,
     },
     // 3. Requeue without notification (lens-sleep/VERIFY.md M4 variant 2).
-    // Unit 0 wakes unit 1, submits a file sync to a helper thread (not a
+    // Unit 0 wakes unit 1, hands outside work to a helper thread (not a
     // worker) and waits for it; the helper finishes a few microseconds later
-    // and completes the sync through the real completion path (the sync's
-    // cell, the unit's waiter, the pool wake). Unit 1 blocks in a host write
+    // and completes it through the real completion path (the unit's
+    // `Outside`, its waiter, the pool wake). Unit 1 blocks in a host write
     // that never returns (stalled standard output). Unit 0 must run again.
     Case {
         name: "requeue_without_notification",
@@ -821,24 +830,18 @@ pub(super) static CASES: &[Case] = &[
                     compute_until(t0() + param(0));
                     FLAG[0].store(true, Ordering::SeqCst);
                     wake_id(1);
-                    // Submit, as os_sync::submit does: a completion cell
-                    // holding the unit's outside-work count.
+                    // Hand over the unit's outside-work count.
                     let readies = crate::tasks::Readies::for_unit(0);
                     let outside = crate::tasks::Outside::for_readies(readies.clone());
-                    let cell = crate::os_sync::SyncCell::for_check(SYNC_TOKEN, outside);
                     name_object(std::sync::Arc::as_ptr(&readies), "unit 0 waiter");
-                    name_object(cell, "sync cell");
-                    SYNC_CELL.store(cell, Ordering::SeqCst);
+                    SYNC_OUTSIDE.store(Box::into_raw(Box::new(outside)), Ordering::SeqCst);
                     FLAG[2].store(true, Ordering::SeqCst);
                     // Wait as the task scheduler's block does: take the
-                    // ready, else park; then take the result from the cell.
+                    // ready, else park.
                     while !readies.take_for_test(SYNC_TOKEN) {
                         unit_park(None);
                     }
-                    // SAFETY: the issuer's handle, taken once after its ready.
-                    if unsafe { crate::os_sync::SyncCell::take_for_check(cell) } == Some(0) {
-                        served(0, "unit 0 ran after its sync completed");
-                    }
+                    served(0, "unit 0 ran after its outside work completed");
                 }
                 _ => {
                     wait_flag(0);
@@ -850,10 +853,7 @@ pub(super) static CASES: &[Case] = &[
         producers: &[("helper", || {
             producer_wait_flag(2);
             sleep_producer(now() + param(1));
-            // SAFETY: the helper's handle on the cell unit 0 submitted.
-            unsafe {
-                crate::os_sync::SyncCell::complete_for_check(SYNC_CELL.load(Ordering::SeqCst), 0)
-            };
+            complete_outside();
         })],
         goals: 0b1,
         params: |r| {
@@ -865,8 +865,8 @@ pub(super) static CASES: &[Case] = &[
         },
         pct: None,
     },
-    // 3b. Quiescence after a sync (sim-idle-hang-1854). Unit 0 submits a
-    // sync, takes its ready and its result, then decides quiescence as the
+    // 3b. Quiescence after outside work (sim-idle-hang-1854). Unit 0 hands
+    // outside work to a helper, takes its ready, then decides quiescence as the
     // task scheduler's idle does: while outside work is counted it parks,
     // and once none is it may stop with Deadlock or wake its idle waits.
     // The helper pushes the ready before it drops the count, so the unit
@@ -879,17 +879,11 @@ pub(super) static CASES: &[Case] = &[
         body: |_| {
             let readies = crate::tasks::Readies::for_unit(0);
             let outside = crate::tasks::Outside::for_readies(readies.clone());
-            let cell = crate::os_sync::SyncCell::for_check(SYNC_TOKEN, outside);
             name_object(std::sync::Arc::as_ptr(&readies), "unit 0 waiter");
-            name_object(cell, "sync cell");
-            SYNC_CELL.store(cell, Ordering::SeqCst);
+            SYNC_OUTSIDE.store(Box::into_raw(Box::new(outside)), Ordering::SeqCst);
             FLAG[2].store(true, Ordering::SeqCst);
             while !readies.take_for_test(SYNC_TOKEN) {
                 unit_park(None);
-            }
-            // SAFETY: the issuer's handle, taken once after its ready.
-            if unsafe { crate::os_sync::SyncCell::take_for_check(cell) } != Some(0) {
-                return 0;
             }
             while readies.has_outside() {
                 unit_park(None);
@@ -900,10 +894,7 @@ pub(super) static CASES: &[Case] = &[
         producers: &[("helper", || {
             producer_wait_flag(2);
             sleep_producer(now() + param(0));
-            // SAFETY: the helper's handle on the cell unit 0 submitted.
-            unsafe {
-                crate::os_sync::SyncCell::complete_for_check(SYNC_CELL.load(Ordering::SeqCst), 0)
-            };
+            complete_outside();
         })],
         goals: 0b1,
         params: |r| {

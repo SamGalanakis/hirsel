@@ -169,7 +169,6 @@ pub(crate) struct Memory {
 /// The storage operations a running task can request from its unit pool.
 pub(crate) trait SharedMemory: Sync {
     fn native_metadata(&self, target: &str, n_place: u64, describe: bool) -> Metadata;
-    fn start_sync(&self, start: fn() -> Result<(), i32>) -> Result<(), i32>;
     fn take_task_stack(&self) -> Stack;
     fn put_task_stack(&self, stack: Stack);
     fn take_slab(&self) -> Option<Slab>;
@@ -352,10 +351,6 @@ impl SharedMemory for Memory {
                 })
                 .clone()
         })
-    }
-
-    fn start_sync(&self, start: fn() -> Result<(), i32>) -> Result<(), i32> {
-        self.map(start)
     }
 
     fn take_task_stack(&self) -> Stack {

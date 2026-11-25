@@ -2,7 +2,7 @@
 //! P partition committers with group commit, and the shared service are
 //! tasks; nothing runs on the main thread (it only waits). The partition
 //! write runs on the committer's worker; fdatasync runs on one of `syncs`
-//! dedicated threads, as HIRSEL_SYNC_HELPERS does for hirsel.
+//! dedicated threads.
 //! Usage: twin PORT SESSIONS PARTITIONS PAR TOOL_PORT WORKERS SYNCS DIR [READY_ACK [TIMED_COMMIT]]
 //!        twin synccost DIR N SIZE   (cost of write+fdatasync alone)
 use std::io::Write;

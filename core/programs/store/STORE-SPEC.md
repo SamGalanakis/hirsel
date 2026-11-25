@@ -2766,7 +2766,7 @@ and recovered is a prefix of issued in commit order. Acked means `Synced` covere
 - `OPENAT2` with O_CREAT or O_TRUNC always (`io_uring/openclose.c:42-50`). Other opens try inline first.
 - Buffered reads complete inline from the page cache, or through task_work (K3).
 
-**Helper deletion.** `crates/hirsel-core-rt/src/os_sync.rs` is deleted, along with `HIRSEL_SYNC_HELPERS` (read at `os_sync.rs:194`) and its uses in `bench/units/scale.py:211`, `bench/units/part3u.py:52` and `bench/units/rust/src/bin/twin.rs:5`.
+**Helper deletion.** The runtime's `os_sync.rs` is deleted, along with `HIRSEL_SYNC_HELPERS` (read at `os_sync.rs:194`) and its uses in `bench/units/scale.py:211`, `bench/units/part3u.py:52` and `bench/units/rust/src/bin/twin.rs:5`.
 - On a ring host, SYNC and SYNC_DIR are ring `FSYNC`s.
 - On a helper host, they take `off_slot` like every other file op, so there is one helper seam, not two.
 - The `SyncCell` cases in `units_check.rs` go with the machinery they checked.

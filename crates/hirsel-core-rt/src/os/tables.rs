@@ -13,7 +13,6 @@ pub(super) struct Tables {
     pub(super) directories: BTreeMap<u64, OwnedFd>,
     pub(super) files: BTreeMap<u64, OwnedFd>,
     pub(super) listings: BTreeMap<u64, Listing>,
-    pub(super) in_flight_syncs: Vec<*mut crate::os_sync::SyncCell>,
 }
 
 impl OsProvider {

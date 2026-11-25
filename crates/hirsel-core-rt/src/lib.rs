@@ -53,7 +53,6 @@ pub mod net;
 pub mod os;
 mod os_net;
 mod os_resolve;
-mod os_sync;
 mod os_tls;
 pub use os_tls::packet_cipher::PacketCipher;
 mod os_unix;

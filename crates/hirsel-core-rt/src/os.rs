@@ -34,9 +34,6 @@ pub(crate) use write::write_all_from;
 use write::write_request;
 
 pub(crate) type IssueFile = unsafe extern "C" fn(*mut u8, *mut Request) -> Outcome;
-/// Queue a SYNC or SYNC_DIR on the sync helper; None for a handle this
-/// provider does not own.
-pub(crate) type SyncFile = unsafe fn(*mut u8, *mut Request, u64) -> Option<Step>;
 
 /// Operations required by an OS directory grant. The generated launcher
 /// names this table only when it supplies directory paths.
@@ -44,9 +41,6 @@ pub struct DirectoryOperations {
     pub(crate) grant: fn(&mut OsProvider, &Path) -> io::Result<u64>,
     pub(crate) probe: fn(&OsProvider, u64) -> io::Result<()>,
     pub(crate) issue: IssueFile,
-    pub(crate) sync: SyncFile,
-    resume: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step,
-    abort: unsafe extern "C" fn(*mut u8, *mut Request, u64, u8) -> Outcome,
 }
 
 #[unsafe(no_mangle)]
@@ -54,14 +48,10 @@ pub static hirsel_core_os_directory_ops: DirectoryOperations = DirectoryOperatio
     grant: OsProvider::grant,
     probe: OsProvider::probe_directory,
     issue: issue_file,
-    sync: sync_file,
-    resume: resume_with_directory,
-    abort: abort_with_directory,
 };
 
 pub struct OsProvider {
     issue_file: Option<IssueFile>,
-    sync_file: Option<SyncFile>,
     /// Host CLOCK_MONOTONIC at construction: mono_ns and sleep deadlines count from it.
     epoch: u64,
     /// Units on every slot thread issue file operations on this one provider
@@ -80,16 +70,6 @@ pub struct OsProvider {
     pub(crate) operator: Mutex<Option<(u64, u32)>>,
     stdout: Option<OwnedFd>,
     stderr: Option<OwnedFd>,
-}
-impl Drop for OsProvider {
-    fn drop(&mut self) {
-        let tables = self.tables.get_mut().unwrap_or_else(|e| e.into_inner());
-        for cell in tables.in_flight_syncs.drain(..) {
-            // SAFETY: provider is ending with a sync still in flight; detach
-            // its issuer handle so the helper frees the cell on completion.
-            unsafe { crate::os_sync::SyncCell::detach(cell) };
-        }
-    }
 }
 impl OsProvider {
     #[cfg(test)]
@@ -116,7 +96,6 @@ impl OsProvider {
         }
         Self {
             issue_file: None,
-            sync_file: None,
             epoch,
             tables: Mutex::default(),
             unix_roots: BTreeMap::new(),
@@ -161,13 +140,12 @@ impl OsProvider {
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub(crate) fn provider_with(&mut self, directory: Option<&DirectoryOperations>) -> Provider {
         self.issue_file = directory.map(|ops| ops.issue);
-        self.sync_file = directory.map(|ops| ops.sync);
         Provider {
             state: (self as *mut Self).cast(),
             wait,
             issue,
-            resume: directory.map_or(resume, |ops| ops.resume),
-            abort: directory.map_or(abort, |ops| ops.abort),
+            resume,
+            abort,
             deliver,
         }
     }
@@ -395,11 +373,10 @@ impl OsProvider {
                 };
             }
             SYNC => {
-                let fd = self.file(request.handle);
                 // fdatasync makes file contents and the metadata required to
                 // read them back durable. A refusal is delivered as a host
                 // error; the store owns the poison/recovery policy.
-                syscall(crate::host::sync::sync_data(fd) as isize)?;
+                sync(self.file(request.handle), false)?;
             }
             ZERO_EXTENSION => {
                 let fd = self.directory(request.handle);
@@ -407,9 +384,8 @@ impl OsProvider {
                 out.value = u64::from(zero_extension(unsafe { BorrowedFd::borrow_raw(fd) })?);
             }
             SYNC_DIR => {
-                let fd = self.directory(request.handle);
                 // fsync on a directory persists its entry updates.
-                syscall(crate::host::sync::sync_directory(fd) as isize)?;
+                sync(self.directory(request.handle), true)?;
             }
             _ => unreachable!(),
         }
@@ -610,8 +586,8 @@ pub(crate) unsafe fn duplicate_file(provider: &Provider, handle: u64) -> Option<
     // SAFETY: a fresh descriptor nothing else owns.
     (dup >= 0).then(|| unsafe { OwnedFd::from_raw_fd(dup) })
 }
-/// Clocks and files finish immediately, except SYNC and SYNC_DIR, which park while
-/// the sync helper runs them; sockets may park after a not-ready attempt.
+/// Clocks and files finish inside issue (a file op parks its unit on the slot
+/// ring or an off-slot helper); sockets may park after a not-ready attempt.
 /// Never inlined, so `ISSUE` has one address (`provider::deliver`).
 /// # Safety
 /// As `wait`.
@@ -702,13 +678,6 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
         probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
         return step;
     }
-    if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) }
-        && let Some(sync) = unsafe { (*state.cast::<OsProvider>()).sync_file }
-        // SAFETY: the directory provider owns the request's handle.
-        && let Some(step) = unsafe { sync(state, request, token) }
-    {
-        return step;
-    }
     let outcome = unsafe { crate::tasks::host_operation(state, request, issue_on_stack) };
     #[cfg(test)]
     probe::note(probe::ISSUE, request, probe::answer(&outcome));
@@ -769,40 +738,6 @@ unsafe extern "C" fn abort(
         }
     }
 }
-unsafe extern "C" fn resume_with_directory(
-    state: *mut u8,
-    request: *mut Request,
-    token: u64,
-) -> Step {
-    // SAFETY: the scheduler pins the pending request through resume.
-    if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) } {
-        let (step, consumed) = unsafe { crate::os_sync::resume(request) };
-        if let Some(cell) = consumed {
-            // SAFETY: state is this run's live OsProvider.
-            let os = unsafe { &*state.cast::<OsProvider>() };
-            let mut tables = os.tables();
-            if let Some(i) = tables.in_flight_syncs.iter().position(|&c| c == cell) {
-                tables.in_flight_syncs.swap_remove(i);
-            }
-        }
-        return step;
-    }
-    // SAFETY: only sync or socket requests reach this callback.
-    unsafe { resume(state, request, token) }
-}
-unsafe extern "C" fn abort_with_directory(
-    state: *mut u8,
-    request: *mut Request,
-    token: u64,
-    reason: u8,
-) -> Outcome {
-    // SAFETY: the scheduler pins the pending request through abort.
-    if unsafe { matches!((*request).operation, SYNC | SYNC_DIR) } {
-        return crate::os_sync::abort();
-    }
-    // SAFETY: only sync or socket requests reach this callback.
-    unsafe { abort(state, request, token, reason) }
-}
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the request during issue.
     match unsafe { (*request).operation } {
@@ -814,7 +749,7 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
             return unsafe { issue_now(state, request) };
         }
         OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE | READ | READ_AT | WRITE | WRITE_AT
-        | ZERO_AT
+        | ZERO_AT | SYNC | SYNC_DIR
             if crate::units::uses_file_ring() =>
         {
             // SAFETY: the request is pinned until the CQE completes.
@@ -852,60 +787,6 @@ unsafe fn issue_now(state: *mut u8, request: *mut Request) -> Outcome {
     }
 }
 
-// The token `submit_on_stack` queues for, and the step it answers. Moved:
-// the submit can park the unit on the memory thread's reply.
-crate::units::moved_tls! {
-    static SUBMIT: (u64, Option<Step>) = (0, None);
-}
-
-/// SYNC and SYNC_DIR park while the helper syncs a duplicate of the handle's
-/// descriptor (`os_sync`). Submission runs on the host stack, because the
-/// first one starts the helper thread.
-unsafe fn sync_file(state: *mut u8, request: *mut Request, token: u64) -> Option<Step> {
-    // SAFETY: forwarded caller contract.
-    let (os, operation, handle) = unsafe {
-        let request = &*request;
-        (
-            &*state.cast::<OsProvider>(),
-            request.operation,
-            request.handle,
-        )
-    };
-    let tables = os.tables();
-    let live = if operation == SYNC_DIR {
-        tables.directories.contains_key(&handle)
-    } else {
-        tables.files.contains_key(&handle)
-    };
-    drop(tables);
-    if !live {
-        return None;
-    }
-    SUBMIT.set((token, None));
-    // SAFETY: as `issue`.
-    unsafe { crate::tasks::host_operation(state, request, submit_on_stack) };
-    Some(SUBMIT.take().1.unwrap_or_default())
-}
-
-unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
-    // SAFETY: forwarded caller contract; `sync_file` checked the handle.
-    let (os, req) = unsafe { (&*state.cast::<OsProvider>(), &*request) };
-    let directory = req.operation == SYNC_DIR;
-    let fd = if directory {
-        os.directory(req.handle)
-    } else {
-        os.file(req.handle)
-    };
-    let token = SUBMIT.get().0;
-    // SAFETY: pinned SYNC/SYNC_DIR request.
-    let (step, untracked) = unsafe { crate::os_sync::submit(fd, directory, token, request) };
-    if let Some(cell) = untracked {
-        os.tables().in_flight_syncs.push(cell);
-    }
-    SUBMIT.set((token, Some(step)));
-    Outcome::default()
-}
-
 unsafe extern "C" fn issue_file(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: forwarded caller contract.
     request_outcome(unsafe { (*state.cast::<OsProvider>()).execute_file(&mut *request) })
@@ -916,6 +797,32 @@ fn request_outcome(result: io::Result<Outcome>) -> Outcome {
         error: IoError::from_errno(error.raw_os_error().unwrap_or(libc::EIO)),
         ..Outcome::default()
     })
+}
+
+/// One sync of `fd`, never retried (§3.3b): a ring host issues one ring FSYNC
+/// from the unit's slot (data-only for a file, as `fdatasync`; full for a
+/// directory, as `fsync`), and a helper host makes the call off the slot.
+fn sync(fd: i32, directory: bool) -> io::Result<()> {
+    if crate::units::uses_file_ring() {
+        let flags = if directory {
+            io_uring::types::FsyncFlags::empty()
+        } else {
+            io_uring::types::FsyncFlags::DATASYNC
+        };
+        let entry = io_uring::opcode::Fsync::new(io_uring::types::Fd(fd))
+            .flags(flags)
+            .build();
+        // SAFETY: the issuing unit stays parked, with fd held by this provider,
+        // until the call's CQE.
+        unsafe { crate::units::file_request(entry) }?;
+        return Ok(());
+    }
+    let rc = if directory {
+        crate::host::sync::sync_directory(fd)
+    } else {
+        crate::host::sync::sync_data(fd)
+    };
+    syscall(rc as isize).map(drop)
 }
 
 fn syscall(rc: isize) -> io::Result<isize> {

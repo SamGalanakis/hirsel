@@ -2462,7 +2462,8 @@ impl Operation {
             match step.kind {
                 STEP_DONE => Next::Done(Some(step.outcome)),
                 STEP_PENDING => {
-                    // Sync disables cancellation after issue. A submitted
+                    // An issued sync is not cancellable (a provider that
+                    // parks one, or its replay from a tape). A submitted
                     // foreign call decides the race with cancellation when
                     // its helper takes custody of the pinned frame.
                     if matches!(
@@ -2546,8 +2547,6 @@ unsafe fn alone(
     token: u64,
 ) -> Option<crate::provider::Outcome> {
     let p = provider;
-    // Before WAITERS, which a fork may have copied while held.
-    crate::os_sync::check_fork();
     // This thread's waiter is registered before the first callback, so a ready
     // from inside `wait` or `issue` is not lost. The token is fresh, so the
     // stale tokens cleared here are other operations'.
@@ -3785,7 +3784,6 @@ pub(crate) unsafe fn run_root_with_unit(
     unit: Option<&mut crate::units_lang::LangUnit>,
     group: UnitGroup,
 ) -> u8 {
-    crate::os_sync::check_fork();
     #[cfg(feature = "prof")]
     let _worker_profile = prof::Worker::enter();
     crate::fiber::arm();

@@ -245,7 +245,10 @@ fn settle_fault_at(mut tx: Tx, attempted_at: u64) -> Result[Bytes, Bytes] {
 }
 
 // L33/AM6. Two intervening commits put the attempted base three versions
-// behind the settle frame. Set the previous times to known wall-clock floors.
+// behind the settle frame. Set the previous times to known wall-clock floors,
+// one minute ahead of the open's keyed time: far enough to dominate the wall
+// clock, and well inside stream retention, so the stream born at the open
+// does not age (§1.8: it ages when t ≤ at − retention_ms).
 pub fn law_settled_callinfo(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     settled_callinfo_case(d, c, r, tasks, false) && settled_callinfo_case(d, c, r, tasks, true)
 }
@@ -265,7 +268,7 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     let admission = result.unwrap(admit_law_stream(mut db, stream, 0, request))
     let Admitted(take complete) = take admission else { return false }
     result.unwrap(durable(mut db, ticket(complete)))
-    let original_at = 0x8000_0000_0000_0000u64
+    let original_at = keyed_time(db) + 60000u64
     db.heads[0].at = original_at
     let plan = Plan(n_e: 8192, s_e: 8192, reply_max: 4096)
     if room_refusal { db.ceiling = db.resident }
@@ -273,11 +276,13 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     let tried = serve(mut db, take complete, plan, Some(take rec), fault_at, fn(mut tx, call_env) -> Result[Bytes, Bytes] {settle_fault_at(mut tx, call_env) })
     let (take stopped, way) = match take tried {
         Ok(Failed(take pending_run, Raised(2u32))) if !room_refusal => (take pending_run, 1u8),
-        // The admitted row costs 118 (62 + 8 + 48). The replied row costs
-        // 126 (62 + 8 + 56, its value 41 + 8 rounded up). Its frame uses
-        // journal credit, so the resident refusal requests 126.
-        Ok(NoRoom(take pending_run, Resident(reason))) if room_refusal && reason.requested == 126 &&
-            reason.available == 118 => (take pending_run, 2u8),
+        // entry(k, v) = 62 + r8(k) + r8(v) (§1.11). The 26-byte stream row
+        // costs 142 admitted (value 41) and 150 replied (value 41 + 8). The
+        // admit also wrote the 10-byte caller row (value 9), 94, and the
+        // Place control row (empty key, value 17), 86 (§1.8). The streams
+        // hold 142 + 94 + 86 = 322 and the reply needs 150 + 94 + 86 = 330.
+        // Its frame uses journal credit, so the resident refusal requests 330.
+        Ok(NoRoom(take pending_run, Resident(reason))) if room_refusal && reason.requested == 330 && reason.available == 322 => (take pending_run, 2u8),
         _ => return false,
     }
     if version(snapshot(db)) != 1 || stream_now(db, stream) != (0u64, 1u64) {

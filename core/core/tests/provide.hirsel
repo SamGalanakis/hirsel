@@ -804,7 +804,7 @@ fn net_connect(mut s: Served[NetOp], id: u64, port: u16) -> bool waits {
     match provide.next(mut s) {
         Some(take call) => {
             let op = match provide.net_op(call) {
-                Connect(addr, _) => loopback(addr, port),
+                Connect(addr, ..) => loopback(addr, port),
                 _ => false
             }
             op && net_answer(mut s, take call, Socket(id, Addr(ip: V4(2130706433), port: port)))
@@ -1868,7 +1868,7 @@ fn narrowed_net(tasks: Tasks) -> bool waits {
     let dialed = match provide.next(mut served) {
         Some(take call) => {
             let op = match provide.net_op(call) {
-                Connect(addr, _) => ten_443(addr),
+                Connect(addr, ..) => ten_443(addr),
                 _ => false
             }
             op && net_answer(mut served, take call, Socket(8, ten))
@@ -1879,7 +1879,7 @@ fn narrowed_net(tasks: Tasks) -> bool waits {
     let redialed = match provide.next(mut served) {
         Some(take call) => {
             let op = match provide.net_op(call) {
-                Connect(addr, _) => ten_443(addr),
+                Connect(addr, ..) => ten_443(addr),
                 _ => false
             }
             op && net_answer(mut served, take call, Socket(9, ten))

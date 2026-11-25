@@ -620,7 +620,8 @@ fn schedule_moved(db: Db, mut model: ScheduleModel) {
 // parks on a Cold miss or commits), a Hot write that moves the head, an
 // inline Cold write that enters held mode and revokes every parked call,
 // one poll and resume, settling a call to its decision, and cancelling one.
-// The rest settle in order at the end. Every commit is checked against the
+// The first move is a serve on the Cold root, which must park. The rest
+// settle in order at the end. Every commit is checked against the
 // model, a cancelled call writes nothing, and the parked queue ends empty,
 // so every call's pins are released. Seeded bug `cancel_keeps_entry`
 // (cancel_parked hands the position back but leaves its entry queued): the
@@ -634,8 +635,15 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
     map.insert(mut model.rows, 5u64, 50u32)
     let mut parked: List[(Parked, (Table[u64, u32], Table[u64, u32], u64, u64))] = list.new()
     let mut streams = 0u64
-    for _ in 0u64 .. 40 {
-        let op = std.rand.below(mut g, 6)
+    for step in 0u64 .. 40 {
+        // The first move serves a call on the reopened Cold root, so every
+        // seed parks at least once before a Cold write or a delivery makes
+        // the leaf resident.
+        let op = if step == 0 {
+            0u64
+        } else {
+            std.rand.below(mut g, 6)
+        }
         if op == 0 && list.len(parked) < 3 {
             let row_key: u64 = 1 + std.rand.below(mut g, 6)
             let mark_key: u64 = std.rand.below(mut g, 4)
@@ -658,6 +666,9 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
                     list.push(mut parked, (take p, take env))
                 },
                 Ok(Committed(receipt)) => {
+                    if step == 0 {
+                        fail("L63 schedule: the first serve misses the Cold root and parks")
+                    }
                     let _ = std.prop.sometimes("commit without parking", true)
                     schedule_commit(db, mut model, env, receipt.reply)
                 },

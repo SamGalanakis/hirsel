@@ -231,7 +231,7 @@ store@1/store/test_l63_pinned_row_edit_discards_a_missed_candidate src=7415f28bd
 store@1/store/test_l63_plan_prior_uses_deciding_leaf src=0f2090f10a752b4d sig=3b648e86327b0c52 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l63_resolved_edits_follow_candidate_neighbors src=e3e748a2c24ca807 sig=41800bd65a93b632 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l63_revocation_races_pager_wake src=24c1f10765b339d3 sig=14bf14ac0c52cd07 run=a6b003f729117be3 bug=- oracle=- rows=pending
-store@1/store/test_l63_seeded_call_schedule src=127a36e7e2d72818 sig=2a28d3cb85ae8b50 run=8c5b8346c5814fa7 bug=- oracle=- rows=pending
+store@1/store/test_l63_seeded_call_schedule src=7a892e04c51db65d sig=2a28d3cb85ae8b50 run=8c5b8346c5814fa7 bug=- oracle=- rows=pending
 store@1/store/test_l63_served_miss_reruns_and_commits_once src=d3027e314a37b7ef sig=e1af145deae01d75 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l63_tiered_plan_writes_deciding_priors src=2838d18a6d0e2395 sig=a5e43d119a95baa4 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l65_pager_directory src=f9d6225cbf04e41f sig=cad0021ff2970197 run=722e0e8306f441ca bug=- oracle=- rows=pending

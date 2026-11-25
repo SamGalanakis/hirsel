@@ -24,7 +24,7 @@ allowances, so the full identity includes `n_place` independently of the digest.
 Both native and evaluator launchers supply it, and describe reports it. Bindings
 record the allowance of the described launch.
 
-`revision` (RUNNER-SPEC v2.42, Spec Q5; not yet built) is the 32-byte `code.revision` of the
+`revision` is the 32-byte `code.revision` of the
 program's entry ([PROG-9](programs.md#prog-9-code-descriptors)), the value a recording's admission
 already compares ([recording](../recording.md#what-a-recording-holds)), or unavailable for a
 program assembled without revisions. It names the code, not the bytes: the same program built by
@@ -1154,23 +1154,23 @@ answered `Error(Protocol)` and closes only that exchange.
 
 | Operator → host | Payload and rule |
 |---|---|
-| 0 Begin(D, G, input, foreign, exec, held) | `input` is `launcher.Input`: 0 Attested(bytes), 1 Publication(H), 2 Source(tree). `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source that is not a tree within 4 MiB is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
-| 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. |
+| 0 Begin(D, G, input, foreign, exec, held, gate) | `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(manifest), a source named by content ("Self-editing" below; planned<!-- doc-ref: planned -->, replacing the inline `Source(tree)` on this wire). `gate` (planned<!-- doc-ref: planned -->) asks for the law gate ("Self-editing"); `true` with any input but a source is `Invalid`. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source manifest whose files exceed 4 MiB in all is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
+| 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. For a source it is the needed blobs' bytes ("Self-editing"). |
 | 2 EndInput(D, A) | Ends that stream. A publication needs neither Data nor EndInput. |
 | 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
 | 4 Status(D) | Returns State, or `Error(UnknownRequest)`. Does no work. |
 | 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
 | 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, listen, store, memory, args, record), with `memory` an `Option[u64]` in bytes and `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
-| 8 Decide(D, grants, approve) | A person's decision on D, which must be in AwaitDecision on exactly this grant diff ("Deploy preview"); anything else is `Error(Denied)`. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
+| 8 Decide(D, decision, fates, approve) | The operator's decision on D, which must be in AwaitDecision on exactly this `decision` ("Self-editing"); anything else is `Error(Denied)`. Only this socket accepts Decide. Planned shape (launch.md "Self-editing"; built: `Decide(D, grants, approve)`). `fates` settles the held runs the decision shows and is `Fates(all: None, entries: [])` when it shows none. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
 
 | Host → operator | Payload and rule |
 |---|---|
-| 0 State(D, G, input, phase) | A committed snapshot. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(grants). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A known D keeps the same G and input for its whole life. |
-| 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool). |
+| 0 State(D, G, input, phase) | A committed snapshot. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision), with `decision` the settler's `Decision` ("Self-editing"; planned, built: `AwaitDecision(grants)`). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A known D keeps the same G and input for its whole life. |
+| 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool), or, for a source, of the blobs the group's blob set lacks (`Wanted` gains 4 BlobKey(H)<!-- doc-ref: planned -->). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
-| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Unsettled. Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Unsettled is a deploy whose trigger report has a held run with no fate, or an `entries` path that is the entry path of no pending run and of no entry OLD or NEW registers; its report names them. Failed uses the same classes. An exchange error never changes another request's outcome. |
+| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Red (planned; built: 13 Unsettled). Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Red is a gated source whose tests were not all green; its detail names each test that failed, stopped, did not start or had not ended by the admission deadline, with its outcome ("Self-editing"). A trigger report with a held run that has no fate, or with an `entries` path that is the entry path of no pending run and of no entry OLD or NEW registers, holds the request for a decision and fails nothing; the former class 13 `Unsettled` is deleted. Failed uses the same classes. An exchange error never changes another request's outcome. |
 | 5 GroupInfo(G) | A group lookup's result. |
 | 6 Part(total, offset, bytes) | One in-order chunk of an encoded reply larger than one frame, from offset zero, contiguous, ending exactly at total. |
 
@@ -1260,7 +1260,7 @@ activation, assembly and report.
   [--held-entry PATH=release|cancel]... [--request-id HEX]` resolves G with LookupGroup, or with
   `--request-id` from the request's own Status, then sends Begin. When the request awaits a decision on exactly
   the diff its `--approve-grant` lines name (`+` for a line gained, `-` for one lost), it
-  sends Decide approving it and goes on; otherwise it prints the state, with the diff, and
+  sends Decide approving it, with the fates its `--held` and `--held-entry` options name, and goes on; otherwise it prints the state, with the decision and its trigger report, and
   exits 2. `--held` sets `held.all`, and each `--held-entry` adds an element of `held.entries`, where PATH is the entry path as the trigger report prints it. Without either option, `held` is `Fates(all: None, entries: [])`. `hirsel deploy --state S --request-id D --refuse-grants` refuses the diff D
   awaits a decision on. `hirsel deploy --state S --status D` sends only Status.
 
@@ -1268,7 +1268,7 @@ Register and deploy stream the admission input on AwaitInput, answer each Need w
 and on Display check that the text is the one their own approvals produce, print it, and
 send Confirm with its SHA-256. `Error(Busy)` is retried with the same D for up to 60 s.
 Their exit status is 0 for `Installed` (1 when the pause report is `StartFailed`), 2 for a
-local refusal, a `Failed(Denied)` that is a policy refusal (FFI or Exec), or a `Failed(Unsettled)`, which prints the trigger report so that the operator can choose the fates for a new request, 1 for any other
+local refusal, a `Failed(Denied)` that is a policy refusal (FFI or Exec), or (planned) an AwaitDecision its options do not decide, which prints the decision and its trigger report so that the operator can choose the grants and fates and decide it with `--request-id`, 1 for any other
 `Failed`, and 75 for `Undecided`, for no host listening, or for a connection lost before a
 terminal phase, which prints `outcome unknown: request D`.
 
@@ -1293,28 +1293,350 @@ builds it; the agent or person who proposed the release holds no deploy authorit
   trigger report"), which the launcher relays as that child's answer when it exits 0. A
   prepare child that exits 0 without one fails the deploy. Each `held` group shows the fate
   the activation gives it. A report with a `held` group that has no fate, or with an
-  `unmatched` path, fails the deploy `Unsettled`: OLD's export is aborted once, and OLD
-  keeps serving with its store unchanged (RUNNER-SPEC §14.6 "The activation fate").
+  `unmatched` path, holds the request for a decision ("Self-editing" below): OLD's export
+  is aborted once, and OLD keeps serving with its store unchanged (RUNNER-SPEC §14.6 "The
+  activation fate").
 
 The report of every terminal phase carries the preview as far as it was computed.
 
-**Activation.** A deploy whose grant diff is empty assembles and cuts over with no further
-step. A nonempty diff waits for a person's decision, before `Assemble`, because every
+**Activation.** An operator's deploy whose grant diff is empty and whose trigger report is
+settled assembles and cuts over with no further step; an editor's deploy cuts over alone
+only under the settler's rule ("Self-editing" below). A nonempty diff waits for a person's decision, before `Assemble`, because every
 child's authority, the preview child's included, comes from the group's approved bindings
 ("Child modes"). The host releases the attempt and records the diff in the request's row,
-in one transaction, and the request's phase is `AwaitDecision(diff)`. The hold has no
+in one transaction, and the request's phase is `AwaitDecision(decision)` ("Self-editing"). The hold has no
 attempt and no deadline, survives its connection and the host's restart, and ends at a
 `Decide` or when a later Begin of the group supersedes it (`Failed(Denied)`). A Decide must
 name exactly the held diff: an approval records it as the request's approved diff and
 repeats the admission under a fresh attempt and deadline, owned by the deciding connection,
 and that admission passes the gate only when it finds the same diff; a refusal fails the
-request `Denied`. Approval comes through the operator client (`--approve-grant`) or any
-caller the gateway lets decide, under the same Caller rules.
+request `Denied`. Approval comes only from the operator, through the operator client
+(`--approve-grant`, `--held`, `--held-entry`) on `operator.sock`. No entry of any group
+decides, because NEW's code could rewrite that entry's Caller check. "Self-editing" below
+widens the hold and the Decide from the grant diff to every fact of the settler.
 
 Laws: L48 `deploy_admission_policy` (the hold and the decision) and L54 `deploy_preview`
 (the entry diff and the trigger report), in RUNNER-SPEC §14.3; `grant_diff_names_each_authority`
 in the launcher. The candidate re-run on a store fork that reports prompt-cache diffs
 is separate from publishing.
+
+### Self-editing: the editor, the law gate and the settler
+
+*Specified 2026-11-25 (self-edit-gate-spec-2794, with RUNNER-SPEC v2.81). Not built: every
+socket, ask field, phase, class and law in this section is planned.*
+
+An agent edits a running group's program by submitting source. This section says who may
+submit it, what runs before the new revision serves, when a person must decide, and how the
+cutover commits exactly what was checked. Everything not named here is the deploy path
+above.
+
+**Two principals.** The UID of the connecting peer is the only credential. A name, PID,
+tenant, request ID or Caller carried in a frame or by a program conveys no authority.
+
+- The **operator** is the peer whose effective UID is the configured operator UID, on
+  `STATE/operator.sock` ("The operator socket"). It is the only principal that approves
+  authority, confirms approval text, supplies fates or decides a hold.
+- An **editor** is a group's editing principal. Each group's catalog row gains
+  `editor: Option[UID]`, which only the operator sets, through Register's `registration`
+  (a planned field) or a later operator ask. A group with no editor cannot be edited. The
+  operator's own group, the platform host, never has one. An editor connects to the
+  **editor socket**. `hirsel host --editor-listen PATH`<!-- doc-ref: planned --> makes the
+  launcher bind that second Unix stream listener under its lifetime lock and pass it only to
+  the host, as it passes the operator listener. Without the option there is no editor
+  socket. The frames are the operator socket's.
+- Before it decodes a byte, the host checks the peer's effective UID (`SO_PEERCRED`). A peer
+  whose UID is no group's editor is closed. An editor's Begin may name only a group whose
+  `editor` is its UID; any other group is `Error(Denied)`, and its LookupGroup answers
+  `UnknownGroup`. So an editor edits only the groups the operator gave it, and never another
+  tenant's group.
+- An `editor` equal to the operator UID, or to the UID that the host, launcher and children
+  run as, is `Invalid`. With equal UIDs the editor's own processes could open
+  `operator.sock`, read `STATE` or signal the launcher. Who can open the editor socket's
+  node is the operator's filesystem choice. The peer-UID check is the authority.
+- A self-editing agent, and the harness publisher that relays its proposals ("Publishing a
+  harness proposal"), run as the editor UID.
+- No entry of any group decides, the edited group's included. NEW's code could rewrite that
+  entry's Caller check.
+
+**What editing delegates.** Giving a group an editor delegates the group's approved bindings
+to code the editor writes. The settler stops the editor from widening those bindings, and
+never stops it from using them. NEW's serving child runs as the launcher's user, under
+bindings that OLD's operator approved. So the host refuses to set `editor` on a group, and
+refuses an editor's admission, with `Denied`, when any of the group's `Dir` bindings
+resolves to a path at, above or below `STATE`, the launcher's state directory, its code,
+image and compiler stores, or the editor socket's directory. The same refusal applies to an
+`Exec` or `Foreign` binding in the approved recipe, and an editor's NEW cannot gain one
+without a decision.
+
+**What the editor may ask.** On the editor socket the host accepts Begin, Data, EndInput,
+Status and LookupGroup. It answers Confirm, Decide, Register and ResolvePin with
+`Error(Denied)`. An editor Begin must carry:
+
+- a `Source` input;
+- empty `foreign` and `exec`;
+- `held` equal to `Fates(all: None, entries: [])`;
+- `gate` equal to `true`.
+
+Anything else is `Error(Denied)` before anything compiles. So the editor never approves an
+authority, never confirms an approval text, never chooses a run's fate, and never skips the
+gate. The author-class rules still apply first: an untrusted author's source that grants
+`Foreign` or `Exec` is `Denied` as above, whoever sends it.
+
+**The principal is part of D.** D's `requests` row records the principal whose socket sent
+its first Begin, as part of its canonical bytes. On the other principal's socket, a Begin
+for a known D is `Error(Conflict)`, and Data and EndInput for it are `Error(Protocol)`. The
+editor's Status of an operator's D is `Error(UnknownRequest)`. The operator may read any D's
+Status, because it must see a decision to make it. So the editor cannot attach to an
+operator's request, take its upload or answer its Display. An editor request needs no
+connection once its input is complete:
+
+- it never waits for Confirm, because approval text holds it for a decision instead;
+- the admission that a Decide repeats is owned by the deciding operator connection;
+- like any complete input, it goes on without its connection.
+
+While the group has an operator request that is active or held, an editor Begin for the
+group is `Error(Busy)`. An editor Begin supersedes only an editor's hold, so an agent cannot
+cancel the operator's pending deploy by sending source.
+
+**The law gate.** Begin's `gate: bool` asks for it. It is valid only with a source input
+(otherwise `Invalid`). The operator may set it, and the editor must. A gated source is
+admitted as `Source(tree, gate: true)`. The launcher's step 1 ("Publish and assemble")
+runs these steps after `hirsel publish PACKAGE --frozen` gives H in its scratch, and before
+it admits `Publication(H)`:
+
+1. **The authority check, before any test runs.** Gate tests run as the launcher's OS user.
+   The gate first reads every test's run configuration from the tree's `[tests]`
+   (packages.md). A test may be granted only `Clock`, `Random`, `Stdout`, `Stderr`, `Tasks`,
+   and `Dir` with a relative path that has no `..` component, which resolves inside the
+   test's own fresh working directory (PROG-4). The gate stops with `Denied`, naming the test
+   and the grant, and runs no test, when any of these holds:
+   - the tree grants any test anything else (`Net`, `Env`, `Exec`, `Process`, `Secret`,
+     `Cred`, `Foreign`, an absolute `Dir`);
+   - a test's reach holds a foreign function, as `hirsel test` reports it;
+   - the configuration names a property corpus or a recording.
+
+   This is the gate's own rule, beside the group's approved bindings. A test's authority is
+   never approved by a decision, because a test runs before any decision.
+2. **The run.** `hirsel test PACKAGE --frozen` runs as the launcher's child in the same
+   scratch, on the same files and `hirsel.lock`. It uses the launcher's compiler store,
+   package store and pass cache, the toolchain's memory limit and no test filter, so it runs
+   every test of the package (PROG-4). Tests run in the `hirsel test` client, never in the
+   compiler (cli.md "Resident compiler"). When the launcher user's resident compiler serves
+   (lane cas-s4-shared-daemon-2781: one per user per toolchain), the session goes through
+   it.
+3. **Reuse is PROG-4's and no wider.** A test whose program and run configuration are
+   unchanged since a recorded pass reports that pass (`Source::Cached`) without running. Only
+   a pass is reused, only for a test without parameters, and never for one whose reach holds a
+   foreign function. The pass cache is the launcher user's, under the launcher's state. The
+   editor cannot write it, because its UID differs. The resident compiler only speeds the
+   gate up: a one-shot `test` gives the same rows, verdicts and cache writes (cli.md), so the
+   verdict never depends on whether a daemon served.
+4. **The verdict.**
+   - **Green**: every test passes, whether executed or reused. A package with no tests is
+     green.
+   - **Red**: any test fails, stops or does not start, or the request's admission deadline
+     passes while a test runs. The launcher stops the test child and answers
+     `AdmissionFailed(Red(rows))`, and the host fails D `Red` (class 13). The detail names
+     each such test and its outcome.
+
+   No `--laws` strength row is read: a row is never an input to acceptance (R28,
+   [laws](../laws.md)). The gate runs inside the admission deadline (600 s from D's first
+   Begin; a fresh one for each repeated admission) and holds one of the launcher's four
+   admission slots while it runs.
+5. **The binding.** `Admitted`'s summary gains `gate: Option[Green(tree, H)]`. Here `tree`
+   is the SHA-256 of the assembled `launcher.Tree` codec bytes, and the host records both
+   in D's row. The tests and the publication are built from the same scratch files under
+   `--frozen`, and one tree always gives one H, so the green verdict is the verdict of the
+   code H publishes.
+
+The gate filters correctness. It is not an authority boundary. The tree decides which tests
+exist, so each settler claim below holds even when the gate is vacuous.
+
+**The settler.** The host evaluates five facts for each request. A fact is **clear** when
+it needs no person. Each fact is read from bytes that the cutover names or is bound to:
+
+| Fact | Known at | Clear when | Read from, and bound at the cutover by |
+|---|---|---|---|
+| gate | before `Admitted` | `Green(tree, H)` | the launcher's summary. The cutover installs H's recipe R, its assembly record, the Describe and release that the preview reported for that record, and PREPARED for that release |
+| grants | `Admitted` | the grant diff is empty | R's grant bindings against OLD's approved recipe. The cutover installs R |
+| approvals | `Admitted` | R declares no Foreign definition and no Exec request | R, and the display that is bound to it |
+| migration | prepare | the catalog delta (PREPARED kind 0x0082) and replacement inventory (0x0083) are both empty, so PREPARED carries no row (0x0084) | the prepare child's staged frames, which it reports beside TRIGGERS whether or not it writes PREPARED. At the cutover the fact is the frames of the PREPARED whose SHA-256 OLD binds (STORE-SPEC §3.5a M1–M3) and the cutover names |
+| runs | prepare | TRIGGERS has no `held` group and no `unmatched` path | TRIGGERS, and PREPARED's activation rewrites (0x0085) under the same digest |
+
+- **Editor requests.** The cutover is automatic only when all five facts are clear. Then
+  the request assembles, prepares and cuts over with no person. A red gate fails D `Red`. Any
+  other fact that is not clear holds D for the operator. So any grant diff, any Foreign or
+  Exec, any schema change and any held run goes to a person. An editor supplies no fates, so
+  for an editor "runs" is clear only when nothing is held.
+- **Operator requests.** The operator's Begin is the operator's decision on its approvals
+  (through Confirm), its migration and the fates it names. A grant diff holds the request,
+  as above. A held group that its fates leave unsettled, or an `unmatched` path, also holds
+  the request. A gated operator request with a red gate fails `Red`.
+- **"Migration clear" is exact.** Migrate stages nothing (STORE-SPEC §1.2):
+  - no table is created, gets a new schema, or is migrated, renamed or dropped;
+  - no index is created, rebuilt or dropped.
+
+  An index rebuilt because its extractor's composite revision changed is a migration, and
+  so is a `migrate_table` that keeps the name and codecs but rewrites rows: either one
+  ships a replaced range. A release whose code changes but whose staged catalog is OLD's
+  ships nothing, and its activation writes only the activation pair and release row.
+
+**Holds and decisions.** A hold is the AwaitDecision of "Deploy preview", widened to every
+fact. Its phase is `AwaitDecision(decision)`, with
+
+```text
+Decision { stage: Stage, grants: Grants, approvals: Option[Approvals], migration: Option[Migration], triggers: TriggerReport }
+Stage = Admission | Prepared
+Approvals { r: H, foreign: List[String], exec: List[String], text: String }
+Migration { digest: H, changes: List[String] }
+```
+
+`stage` says which facts are computed. At `Admission`, `migration` is `None` and `triggers`
+is empty because prepare has not run. At `Prepared`, every fact is computed, and an empty
+part means that fact is clear. `approvals` holds R's Foreign and Exec lines and the exact
+display text, as "Publish and assemble" step 3 makes them. The migration `digest` is the SHA-256 of the 0x0082 frames' payloads, in
+order, followed by the 0x0083 inventory's sorted (id, kind) list. Neither frame carries the
+export's head or version, which are in 0x0081, so the digest moves only when OLD's catalog
+moves, and only a deploy moves it. Kind is one of replaced, empty or
+dropped, and row counts and row digests are left out, so a change of OLD's data alone never
+changes the digest. `changes` names each collection that the delta creates, gives a schema,
+rebuilds, migrates, renames or drops, for display.
+
+- **Where a hold happens.** Admission-time facts (grants, approvals) hold before
+  `Assemble`, as in "Deploy preview". Every child's authority comes from the group's approved
+  bindings ("Child modes"), so no preview or prepare child runs under an unapproved grant.
+  Prepare-time facts (migration, runs) hold after prepare. The host aborts OLD's export
+  once, as for L54's missing report, then releases the attempt and records the hold in one
+  transaction, and OLD keeps serving with its store unchanged. The prepare child reports the
+  migration even when an unsettled report stops it from writing PREPARED, so the migration
+  and the runs hold together. A request therefore holds at most twice, once at each stage,
+  until a fact changes under it. No hold keeps an attempt, an export lease, a write pause or an assembly
+  reservation. A hold has no deadline and survives its connection and the host's restart.
+- **Decide(D, decision, fates, approve).** The operator sends it, only on `operator.sock`.
+  Its `decision` must equal the held one byte for byte, or the Decide is `Error(Denied)`.
+  When the decision shows a held group or an unmatched path, `fates` replaces D's recorded
+  fates. Otherwise it must be `Fates(all: None, entries: [])`. An approval adds the decision
+  to D's **approved set**, which holds the approved grant diff, display, migration digest
+  and fates, and then repeats the admission under a fresh attempt and deadline, owned by the
+  deciding connection. The repeated `Admit` carries the approved `foreign` and `exec` lines
+  as its approvals. When the display it produces equals the approved `text` byte for byte,
+  the Decide stands for its Confirm, and no Display or Confirm is exchanged. Any other display
+  holds D again. A refusal fails D `Denied`.
+- **Each repeated admission derives every fact again.** It publishes the tree again and
+  continues only when it gets the recorded H. Any other H (for example after a host
+  toolchain change) fails D `Invalid` with `republished root differs`. The recorded verdict
+  for that H stands, so the gate does not run again. A fact passes when it is clear, or when
+  it equals the approved value (the grant diff, the display text, the migration digest), or,
+  for runs, when the approved fates give every held group a fate and leave no unmatched
+  path. For approvals the approved value is the whole `Approvals`. A fact that differs, or that newly needs a person, holds D again with the new
+  decision. Approval of one value never carries over to another.
+- **Drift retry.** The settler evaluates the retry's own PREPARED and TRIGGERS before it
+  sends the retry's cutover. Any fact that fails the previous bullet aborts the retry's
+  export once and holds D.
+- **Supersession.** A hold ends at a Decide, or when a later Begin of the group supersedes
+  it (`Failed(Denied)`), subject to the editor's limit above.
+
+**From check to cutover.** Once a fact is checked, nothing that commits can differ from it:
+
+1. **Code.** D's canonical Begin bytes fix the manifest, so they fix every file by content.
+   One tree gives one H, the gate's verdict is H's, and a repeated admission must give H
+   again. R is H's recipe. The preview, the prepare child and the cutover all use the
+   attempt's one assembly record of R. Before it accepts the import, the host checks that
+   PREPARED's target Describe and release are the ones the preview reported for that record
+   ("Hot deploy"). So the revision that cuts over is the revision that was tested.
+2. **Grants and approvals.** The cutover installs R, whose bindings are the ones that were
+   diffed. OLD's approved recipe changes only through another deploy that installs, which
+   needs the group's `active` row, and D holds that row. So OLD is the same at `Admitted`
+   and at the cutover.
+3. **Schema.** The migration fact is a function of the PREPARED bytes whose digest OLD
+   binds and the cutover names. The cutover is refused `Drift` unless OLD's head is the
+   exported base. A catch-up round patches only the ranges that PREPARED ships, and a clear
+   migration ships none.
+4. **Runs.** The prepare child writes PREPARED only when every held row of its scan has a
+   fate (RUNNER-SPEC §14.6). The rewrites that settle those rows are in PREPARED, under the
+   digest that the cutover names. The settler never releases or cancels a run without a fate
+   the operator gave. A run that the scan did not see stays parked by NEW's head under the
+   identity guard (RUNNER-SPEC §14.6 "The identity guard"), and the next report shows it as
+   held.
+
+**Source by content.** A source is sent as a manifest, not inline:
+
+```text
+Manifest { package, grants, dirs, required_entries, files: List[ManifestFile] }
+ManifestFile { path: String, digest: H, len: u64 }
+```
+
+`package`, `grants`, `dirs` and `required_entries` are the Tree's fields. `files` is sorted
+by path with no repeats. Paths follow the Tree's rules, and the lengths add up to at most
+4 MiB. This one form replaces the inline `Source(tree)` on the operator and editor sockets.
+The launcher still receives a whole `launcher.Tree`, which the host assembles.
+
+- **The group's blob set.** Each group has one set of blobs, kept in a host catalog table
+  `blobs` keyed by (group incarnation, digest). It holds the blobs named by the manifest of
+  the group's installed source and by every request of the group that is not terminal.
+  Presence is per group. A digest that another group holds is still Needed, and its bytes
+  must still be sent, so Need tells no group about another's content. Groups share nothing
+  ("Authority groups").
+- **The exchange.** After Begin, the host answers `Need(D, A, keys, last)` with
+  `BlobKey(digest)` for each file whose digest the group's set lacks, in manifest order. A
+  Need whose last part names no key means the input is complete, and no Data or EndInput
+  follows. Otherwise Data carries the needed blobs' bytes back to back, in Need order, each
+  exactly its manifest `len`, and EndInput ends them. The host hashes each blob. A digest
+  that does not match, a short blob or an extra byte fails D `Invalid`, naming the path.
+- **No path trust.** A blob is stored, found and compared only by its SHA-256. A path is a
+  name in the manifest and nothing else. The host never opens a file by a submitted path,
+  and the same bytes under two paths are one blob. The launcher writes the assembled tree
+  into fresh scratch, as it did before.
+- **Rooting.** D's row roots the blobs D received until D is terminal. The transaction that
+  records D `Installed` makes D's manifest the group's installed manifest. The transaction
+  that makes D terminal deletes every blob of the group that no remaining manifest names. A
+  held request keeps its blobs, so the admission that a Decide repeats, on the operator's
+  connection, reads every file from the host. An identical Begin after a lost upload Needs
+  only what the set still lacks. The group's removal deletes its blobs with its rows.
+- **The request row** stores the manifest in place of the files. The rule that two trees fit
+  one stored value no longer constrains `TREE_BYTES`.
+
+**Laws** (planned, platform host suite unless noted). Each names the bug it catches:
+
+- `editor_cannot_decide`. On the editor socket, Decide, Confirm and Register are `Denied`.
+  So is a Begin with Foreign or Exec lines, with a fate, or with `gate: false`. A host
+  set to the operator UID is `Invalid`, and an editor's Begin for a group whose `editor` is
+  another UID is `Denied`. Bug: an agent approves its own grant diff or fates, or edits a
+  group it was not given.
+- `principal_bound_to_request`. An editor Begin repeating an operator D's bytes is
+  `Conflict`, and the editor's Status of that D is `UnknownRequest`. An editor Begin while
+  an operator deploy of the group is held is `Busy`. Bug: the editor takes over an
+  approved re-admission, or supersedes the operator's hold.
+- `gate_tests_exact_revision`. A green gated tree installs a NEW whose release identity's
+  revision is the entry revision of the recorded H. A repeated admission whose publish gives
+  another H fails `Invalid`. Bug: the tests checked other code than the code that cut over.
+- `gate_red_never_cuts_over`. A tree with one failing test fails `Red` naming it, no
+  `Assemble` is sent, and OLD serves unchanged. Bug: a red gate is skipped or ignored.
+- `gate_test_authority_closed` (launcher). A tree whose `[tests]` grants a test `Net`,
+  `Exec` or an absolute `Dir` fails `Denied`, and no test child starts. Bug: agent-written
+  test code runs with the launcher user's ambient reach.
+- `settler_holds_each_fact`. Five editor trees each change one fact: a grant, a Foreign
+  approval, an added table, a rebuilt index, and a held run. Each ends in AwaitDecision
+  showing exactly that fact. A sixth tree, which edits one function body and changes no
+  fact, installs without a Decide. Bug: the settler misses a fact, or holds a clean edit.
+- `decide_rederives`. After an approved migration, the repeated admission derives another
+  migration digest and holds again, and does not install. Bug: an approval carries over to
+  a value nobody saw.
+- `blob_presence_per_group`. Group B's manifest names a digest that only group A holds, so
+  B gets `Need` for it. A blob whose bytes hash to another digest fails `Invalid`. Bug: a
+  group probes or borrows another group's source.
+
+L48 `deploy_admission_policy` keeps its hold and decision cases, which now use the
+`Decision` value.
+
+**Prior art** (from the projects' documentation as known to this lane; not re-opened here):
+
+- **ADOPTED:** GitHub branch protection's rule that the last pusher's approval does not count.
+  Here the editor never decides.
+- **ADAPTED:** Bazel's remote-execution `FindMissingBlobs` and upload by digest. Here presence
+  is per group, not per instance, so Need cannot be used to probe across groups.
+- **NOT TAKEN:** Kubernetes admission webhooks, where a policy service that a workload could
+  reach decides. Here no entry of any group decides.
 
 ### Publishing a harness proposal
 
@@ -1322,12 +1644,14 @@ An app that enables `harness.release` exposes WIRE queries for the pending propo
 its source, and a transact entry to settle it. Each checks the publisher's authenticated
 Caller before forwarding to `release.pending_cover`, `release.source_cover` or
 `release.settle`.
-The publisher is an operator-side application with a connection to those entries and
-the operator socket. The app's tools propose the source rows and their build settings
-(`package`, `grants` and `dirs`). The publisher supplies no Foreign or Exec approvals, and no fates for held runs (`held` is
-`Fates(all: None, entries: [])`). A proposal deploy that would hold a run therefore fails
-`Unsettled`, and the publisher settles it as Rejected. Whether a run's recorded steps are still
-valid on new code is the operator's decision.
+The publisher is an editor-side application with a connection to those entries and
+the editor socket ("Self-editing" below); it runs as the editor UID and never opens
+`operator.sock`. The app's tools propose the source rows and their build settings
+(`package`, `grants` and `dirs`). Its Begin is an editor's: gated, with no Foreign or Exec
+approvals and no fates for held runs (`held` is `Fates(all: None, entries: [])`). A proposal
+whose settler finds a grant diff, approval text, a migration or a held run waits in
+AwaitDecision for the operator, and the publisher keeps it outstanding. Whether a run's recorded
+steps are still valid on new code is the operator's decision.
 
 Run one `harness.release_publish.Publisher` per group incarnation. Drive `poll` when
 work is available and while a request is outstanding. Reconnect the app client when
@@ -1339,12 +1663,12 @@ envelope.
 
 The publisher derives D from the group name, incarnation and proposal ID. It asks
 Status before reading the named tree. An unknown D submits the unchanged tree through
-a Source Begin. The workspace must include its `hirsel.lock` and its pinned packages
+a Source Begin, as a manifest, and uploads only the blobs the host's Need names. The workspace must include its `hirsel.lock` and its pinned packages
 must be in the host's package store. A source tree that moves or fails the frozen
 check is rejected. After a restart, a known D uses its recorded input and phase. A completed request therefore cannot deploy again
-even if the source rows have since changed. A Source replacement uses OLD's verified recipe memory and place allowances. A
-grant difference follows the ordinary AwaitDecision and Decide exchange. The publisher settles Installed as Published and a
-failed request as Rejected, retaining the failure text. The app's settle entry can
+even if the source rows have since changed. A Source replacement uses OLD's verified recipe memory and place allowances. Every hold
+follows the ordinary AwaitDecision and Decide exchange, which only the operator answers. The publisher settles Installed as Published and a
+failed request (a refused decision included) as Rejected, retaining the failure text. The app's settle entry can
 receive the same decision again after a lost reply.
 
 The source request names the required entry kinds and keys (identity and both codec
@@ -1389,7 +1713,9 @@ child endpoints, pidfds and cgroup population changes.
      sees only publications. A refused check is `Uncompiled` with the checker's
      diagnostics (at most 64 KiB); a compiler out of memory is `Exhausted`. Neither
      records a recipe. The same tree always gives the same H as `hirsel publish` of the
-     same files.
+     same files. A gated source (`Source(tree, gate: true)`<!-- doc-ref: planned -->) runs the law
+     gate in the same scratch after the publish and before it admits H ("Self-editing"
+     below); a red gate is `AdmissionFailed(Red(rows))` and records no recipe.
   2. For an attested input the host sends the exchange bytes of "Admission" above (the
      request frame, then object frames) in bounded `AdmitData` chunks and closes them
      with `AdmitEnd`. The launcher feeds them to the verifier unchanged and answers each
@@ -1407,7 +1733,8 @@ child endpoints, pidfds and cgroup population changes.
      memory limit, or the host answers `Refused(Memory)`, which releases the attempt. A
      nonempty grant diff the operator has not approved releases the attempt and holds the
      request for a decision ("Deploy preview"). Nonempty
-     approval text waits for the operator to confirm exactly that text. An untrusted
+     approval text waits for the operator to confirm exactly that text; an editor's request
+     holds for a decision instead ("Self-editing"). An untrusted
      author's deploy is source only, without Foreign or `Exec` grants, and is refused
      before `Admit`. The host checks NEW's preview against the target and allowance, and records its identity digest.
   4. `Assemble(attempt)` builds and syncs the image and its assembly record, and
@@ -1602,8 +1929,10 @@ rollback to the code that started it. The fate is one per entry path; `hold` inf
 each `entries` path that is the entry path of no pending row and of no entry OLD or NEW
 registers. When every held group has a fate and `unmatched`
 is empty, the child writes PREPARED with one activation rewrite per held row (STORE-SPEC v2.103
-§3.5a; when NEW's migration replaces `store.triggers.pending`, the scan reads the staged range and the settled rows travel in that range instead); a rewrite list that does not fit fails prepare with `Limit(triggers)`. Otherwise it writes TRIGGERS and no PREPARED, and exits 0; the host fails the deploy
-`Unsettled`. A report above the prepare child's bound fails
+§3.5a; when NEW's migration replaces `store.triggers.pending`, the scan reads the staged range and the settled rows travel in that range instead); a rewrite list that does not fit fails prepare with `Limit(triggers)`. Otherwise it writes TRIGGERS and no PREPARED, and exits 0; the host holds the request for
+a decision ("Self-editing"). Either way (planned) the child also reports the migration, the
+0x0082 payloads and the 0x0083 (id, kind) list it staged, beside TRIGGERS, so the settler
+reads the migration fact even when no PREPARED is written. A report above the prepare child's bound fails
 prepare with `Limit(triggers)`. The guard on started granted runs uses the identity digest,
 whose entry revision covers changes in `handles` such as table names, bindings and key codecs,
 and which a rebuild of the same code by another backend leaves equal.

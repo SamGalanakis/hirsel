@@ -23,6 +23,7 @@ import time
 import arena
 import awfy_measure
 import board_baseline
+import board_host
 import board_size
 import build
 import comparison
@@ -74,7 +75,7 @@ NOTES = (
     "Checkbox runs use the same checked wire driver and durable workload on both servers. "
     "Throughput is toggles/s including connection and convergence time; higher is better. "
     "Throughput is reported as a trend. The board flags RSS per live session rising by more "
-    "than 10%. Goose has no compile or checkbox peer here.",
+    "than 10%. Goose has no compile or checkbox peer here.", board_host.NOTE,
 )
 
 
@@ -193,7 +194,7 @@ class Board:
         )
         write_json(self.out / "board.json", self.report)
         lines = ["# Hirsel goal board", "",
-                 "Complete" if self.report["complete"] else "Incomplete", "", *NOTES, "",
+                 "Complete" if self.report["complete"] else "Incomplete", "", *NOTES, "", *board_host.markdown(self.report.get("host")),
                  "| Goal | Row | Metric | H/R | H/G | Commit |",
                  "| --- | --- | --- | ---: | ---: | --- |"]
         for row in self.report["rows"]:
@@ -1103,8 +1104,7 @@ def run_board(board, args):
     env = build.capped_env(out, "8G", "2")
     artifact_file = out / "toolchain.json"
     artifacts, tools = prepare_toolchain(artifact_file, env, jobs=2)
-    board.report["toolchain"] = artifacts
-    board.report["compiler_versions"] = compiler_versions()
+    board.report.update(toolchain=artifacts, compiler_versions=compiler_versions(), host=board_host.facts(args.measure_cpus))
     goose = prepare_goose(out, args, env, jobs=2)
     awfy = out / "awfy"
     awfy_ready = board.attempt("AWFY build", lambda: prepare_awfy(

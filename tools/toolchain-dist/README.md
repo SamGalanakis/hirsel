@@ -35,7 +35,13 @@ compiler's DWARF is decompressed for the rewrite and compressed again for
 the distribution. When
 combined with `--pgo`, BOLT runs after the PGO-use link. The work directory
 (`--work`, default `OUTPUT-work`) keeps `bolt/hirsel` (BOLT's input),
-`bolt/merged.fdata` (its profile) and `bolt/hirsel.bolt` (its output). The
+`bolt/merged.fdata` (its profile), `bolt/hirsel.bolt` (its output) and
+`bolt/held-out.json`. Before the rewrite is kept, BOLT's input and output each
+build every M1 program, which the profile never sees (it trains on the release
+std and cold LangArena only); the build fails unless each program's `.text` is
+byte-identical, and `held-out.json` records both sides' user CPU time, ungated.
+The nightly board builds with `DIST_BOLT=off`, so it never measures this
+compiler; the benchmarks page says so. The
 compiler is rewritten with `--bolt-info=0`: BOLT's note records its command
 line, which names temporary directories. Given one input and one profile, the
 rewrite is byte-identical at four threads. BOLT's own training is not: its

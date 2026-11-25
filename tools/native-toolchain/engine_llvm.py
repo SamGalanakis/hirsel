@@ -73,7 +73,12 @@ def arena(out):
 
 def training(out):
     """(tag, build arguments) for each training program; inputs are written under OUT."""
-    jobs = [('arena', arena(out))]
+    return [('arena', arena(out)), *m1_programs(out), layout(out, 'documents')]
+
+
+def m1_programs(out):
+    """(tag, build arguments) for every M1 program; inputs are written under OUT."""
+    jobs = []
     manifest = m1.load_manifest(ROOT / 'core/programs/m1/manifest.json')
     for e in manifest['entries']:
         tag = f"{e['workload']}-{e['variant']}"
@@ -81,7 +86,6 @@ def training(out):
         file.write_text(json.dumps(m1.inputs_for(manifest, e, ROOT)))
         jobs.append((tag, ['--inputs', str(file), '--entry', f"{e['package']['name']}@1/{e['module']}/{e['function']}",
                            *m1.grant_args(e)]))
-    jobs.append(layout(out, 'documents'))
     return jobs
 
 

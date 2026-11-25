@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Instrument, train and optimize the release compiler or its libLLVM with BOLT."""
+"""Instrument, train and optimize the release compiler or its libLLVM with BOLT.
+
+A BOLTed compiler must emit what its input emits on programs its profile never saw:
+every M1 program, outside WORKLOADS. Both compilers build each as a release executable
+and every .text section must be byte-identical; the builds' total user CPU time on each
+side is printed, not gated.
+"""
 
 import argparse
 from collections import Counter
@@ -11,7 +17,7 @@ import shutil
 import subprocess
 import tempfile
 
-from engine_llvm import CC, ROOT, arena, shadow, shadow_engine, shadow_environment
+from engine_llvm import CC, ROOT, arena, m1_programs, shadow, shadow_engine, shadow_environment
 
 ENGINE = 'libLLVM.so.23.1'
 TARGET = 'x86_64-unknown-linux-gnu'
@@ -21,6 +27,7 @@ OBJCOPY = CC.with_name('llvm-objcopy')
 # memory. Profile 16 MiB of the engine's text at a time under the 8 GiB cap.
 ENGINE_SHARD_BYTES = 16 << 20
 WORKLOADS = {'release std', 'cold LangArena'}
+HELD_OUT = 'M1'
 # rustc src/tools/opt-dist/src/bolt.rs, on x86-64.
 OPTIMIZE = [
     '-reorder-blocks=ext-tsp', '-reorder-functions=cdsort',
@@ -69,6 +76,32 @@ def train(compiler, runtime, work, profile):
     package = workload('release std', lambda: publish_std(compiler, work, env))
     workload('cold LangArena', lambda: build_program('arena', arena(work)))
     return recorded
+
+
+def held_out(compilers, runtime, work):
+    """Build the HELD_OUT programs with each compiler; fail unless their .text sections are identical."""
+    text, seconds = {}, {}
+    for side, compiler in compilers.items():
+        folder = work / f'held-out-{side}'
+        folder.mkdir()
+        exe = shadow(LLVM.parent, compiler, folder / 'shadow')
+        env = shadow_environment(exe) | dict(XDG_CACHE_HOME=str(folder / 'cache'),
+                                             XDG_DATA_HOME=str(folder / 'data'))
+        package = publish_std(exe, folder, env)
+        before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_utime
+        text[side] = {}
+        for tag, arguments in m1_programs(folder):
+            run(release(exe, runtime, package, arguments, folder, tag + '-store', tag), folder, env)
+            section = folder / f'{tag}.text'
+            run([OBJCOPY, f'--dump-section=.text={section}', folder / tag, folder / f'{tag}.copy'], folder)
+            text[side][tag] = section.read_bytes()
+        seconds[side] = resource.getrusage(resource.RUSAGE_CHILDREN).ru_utime - before
+        shutil.rmtree(folder)
+    print(f"bolt: held-out {HELD_OUT} build user CPU {seconds['input']:.2f} s input, "
+          f"{seconds['bolt']:.2f} s BOLTed", flush=True)
+    if differing := sorted(tag for tag in text['input'] if text['input'][tag] != text['bolt'][tag]):
+        raise RuntimeError(f'the BOLTed compiler emits different .text on held-out {", ".join(differing)}')
+    return seconds
 
 
 def engine_shards(source, work):
@@ -151,6 +184,9 @@ def optimize(kind, compiler, library, runtime, output, keep=None):
             run([*tool, source, '-data', profile, *OPTIMIZE, *note, '-o', candidate], work)
             if kind == 'compiler':
                 run([OBJCOPY, '--compress-debug-sections=zlib', candidate], work)
+                seconds = held_out({'input': compiler, 'bolt': candidate}, runtime, work)
+                if keep is not None:
+                    (keep / 'held-out.json').write_text(json.dumps(dict(workload=HELD_OUT, user_seconds=seconds)))
             candidate.replace(output)
 
 

@@ -20,10 +20,11 @@ stun_ice = { major = 1, path = "../stun_ice" }
 
 [tests]
 limit = 67108864
-grants = ["Env=HIRSEL_TEST_SIM_SEED"]
+grants = ["Env=HIRSEL_TEST_SIM_SEED", "Tasks"]
 
 [tests.sources]
 "laws.hirsel" = "laws"
 "relay_laws.hirsel" = "laws"
 "policy_laws.hirsel" = "laws"
 "vopr_laws.hirsel" = "laws"
+"stream_laws.hirsel" = "laws"

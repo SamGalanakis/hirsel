@@ -644,6 +644,19 @@ answered.
   then `WakeAt` or `Idle`.
 - `connected`'s address parameter is named `source` in the code, because `client` is the
   package's client constructor.
+- The `Framer` checks a STUN header's length and cookie together, once 8 bytes are
+  buffered. Before that it answers `Pending`. Only a first byte 0x80 to 0xFF fails at once.
+- `stream_framing` runs all 1,000 seeds in one law, about 10 s on Cranelift. Its
+  `std.sim.net` link has 64-byte pipes and commits at most 16 bytes per send or receive,
+  so every message is split and receives join messages. The law also requires every
+  payload to the bound peer to arrive at the relay as ChannelData, so the stream padding
+  is exercised.
+- `sim_relay_loss` runs 16 seeds of 45 simulated seconds each, about 12 s. That is past
+  the client's 39.5 s Allocate transaction time, so "the allocation completes" is checked
+  against the client's own deadline, not a shorter window. With a 12 s window, seed 5 lost
+  five Allocate answers in a row under the bursty loss and was cut off before its 15.5 s
+  retransmission. The law also fails unless some run lost a payload, some run's mapping
+  rebound before allocating, and echoes arrived.
 
 **Decisions made building U4.** Each is reversible inside the package.
 

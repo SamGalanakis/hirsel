@@ -1,0 +1,627 @@
+// TURN-8 laws (slice U5): the framer at both ends over std.sim.net, stream connections,
+// and client, relay and an echoing peer over std.sim.udp under loss and rebinding.
+const LOOPBACK: Ip = V4(0x7f000001)
+
+const CONN: u64 = 1
+
+/// Payload lengths: every length mod 4 twice over, and lengths past a fragment and a pipe.
+fn lengths() -> List[u64] {
+    let mut xs: List[u64] = list.new()
+    for n in 0u64 .. 9 {
+        list.push(mut xs, n)
+    }
+    list.push(mut xs, 37)
+    list.push(mut xs, 130)
+    list.push(mut xs, 1001)
+    xs
+}
+
+/// Payload k of length n: bytes k * 31 + 1 + j * 7, modulo 256.
+fn pattern(k: u64, n: u64) -> Bytes {
+    let mut p: Bytes = list.with_capacity(n)
+    for j in 0u64 .. n {
+        list.push(mut p, int.truncate((k * 31 + j * 7 + 1) & 0xff))
+    }
+    p
+}
+
+/// A slot holding p at HEADROOM, with 3 spare bytes after it.
+fn slot_of(p: Bytes) -> Bytes {
+    let n = list.len(p)
+    let mut s = buffer(turn.HEADROOM + n + 3)
+    for j in 0u64 .. n {
+        s[turn.HEADROOM + j] = p[j]
+    }
+    s
+}
+
+fn same(a: Bytes, b: Bytes) -> bool {
+    list.compare_bytes(a, b) == Equal
+}
+
+// The framer's refusals, fed one byte at a time.
+/// How many bytes were buffered when the framer answered Framing; fails on a Message.
+fn framing_at(input: Bytes) -> u64 {
+    let mut f = turn.framer()
+    let mut buf: Bytes = list.new()
+    for i in 0u64 .. list.len(input) {
+        list.push(mut buf, input[i])
+        match turn.frame_next(mut f, buf) {
+            Ok(Pending) => (),
+            Ok(Message(_)) => fail("the framer framed bytes that start no message"),
+            Error(Framing) => return i + 1,
+            Error(_) => fail("the framer answered another error"),
+        }
+    }
+    fail("the framer never answered Framing")
+}
+
+// The stream run: the relay's side.
+type StreamRelay: send {
+    listener: Listener,
+    local: Addr,
+    seed: u64
+}
+
+/// What the relay sent on to peers, in order.
+type Relayed: send {
+    channel_data: u64,
+    peers: List[Addr],
+    payloads: List[Bytes]
+}
+
+fn send_all(mut writer: WriteHalf, data: Bytes, who: String) waits {
+    let end = list.len(data)
+    let mut pos = 0u64
+    while pos < end {
+        let Ok(count) = host.send_pair(mut writer, list.slice(data, pos, end), b"", Never) else {
+            fail(clone(who))
+        }
+        if count == 0 {
+            fail("a stream send committed nothing")
+        }
+        pos += count
+    }
+}
+
+/// The relay end: one connection, framed, each ToPeer echoed back as from the peer.
+fn stream_relay(take end: StreamRelay) -> Relayed waits {
+    let StreamRelay(listener: take owned, local, seed) = take end
+    let mut listener = take owned
+    let (socket, source) = result.unwrap(host.accept(mut listener, Never))
+    let (r, w) = net.split(take socket)
+    let mut reader = take r
+    let mut writer = take w
+    let rnd = provide.random(seed)
+    let mut rl = new_relay(relay_config(), list_of1(POOL_1), seed)
+    let now = ns(0)
+    result.unwrap(turn.connected(mut rl, CONN, local, source, now))
+    let o = turn.Origin(ingress: Stream(CONN), client: source)
+    let mut seen = Relayed(channel_data: 0, peers: list.new(), payloads: list.new())
+    let mut f = turn.framer()
+    let mut buf: Bytes = list.new()
+    loop {
+        loop {
+            let Ok(next) = turn.frame_next(mut f, buf) else {
+                fail("the relay's framer refused the client's stream")
+            }
+            let Message(range) = next else {
+                break
+            }
+            if buf[range.lo] >= 0x40 {
+                seen.channel_data += 1
+            }
+            let mut packet = copy_of(list.slice(buf, range.lo, range.hi))
+            let mut out = buffer(0)
+            match result.unwrap(turn.from_client(mut rl, now, rnd, o, mut packet, mut out)) {
+                Reply(to, n) => {
+                    if to != o {
+                        fail("a reply to another origin")
+                    }
+                    send_all(mut writer, list.slice(out, 0, n), "relay reply")
+                },
+                ToPeer(relayed, peer, data) => {
+                    let p = copy_of(list.slice(packet, data.lo, data.hi))
+                    let mut slot = slot_of(p)
+                    let lo = turn.HEADROOM
+                    let ToClient(back, framed) = result.unwrap(turn.from_peer(mut rl, now, relayed, peer, mut slot, lo, lo + list.len(p))) else {
+                        fail("an echo from a permitted peer was not relayed")
+                    }
+                    if back != o {
+                        fail("an echo to another origin")
+                    }
+                    list.push(mut seen.peers, peer)
+                    list.push(mut seen.payloads, take p)
+                    send_all(mut writer, list.slice(slot, framed.lo, framed.hi), "relay echo")
+                },
+                _ => fail("the relay discarded a client message"),
+            }
+        }
+        turn.frame_consumed(mut f, mut buf)
+        list.reserve(mut buf, 4096)
+        match host.recv_bounded(mut reader, mut buf, 4096, Never) {
+            Ok(0) => break,
+            Ok(_) => (),
+            Error(_) => fail("the relay's receive failed"),
+        }
+    }
+    seen
+}
+
+// The stream run: the client's side.
+type Burst: send {
+    writer: WriteHalf,
+    data: Bytes
+}
+
+fn write_burst(take b: Burst) waits {
+    let Burst(writer: take owned, data: take burst_data) = take b
+    let mut writer = take owned
+    send_all(mut writer, burst_data, "burst")
+}
+
+/// The next whole message on the stream, copied out.
+fn next_message(mut reader: ReadHalf, mut buf: Bytes, mut f: turn.Framer) -> Bytes waits {
+    loop {
+        match result.unwrap(turn.frame_next(mut f, buf)) {
+            Message(range) => return copy_of(list.slice(buf, range.lo, range.hi)),
+            Pending => {
+                turn.frame_consumed(mut f, mut buf)
+                list.reserve(mut buf, 4096)
+                match host.recv_bounded(mut reader, mut buf, 4096, Never) {
+                    Ok(0) => fail("the stream ended before a whole message"),
+                    Ok(_) => (),
+                    Error(_) => fail("the client's receive failed"),
+                }
+            },
+        }
+    }
+}
+
+/// Each request the client has to send, and the relay's answer to it, until it has none.
+fn stream_rounds(mut cl: turn.Client, rnd: Random, mut reader: ReadHalf, mut writer: WriteHalf, mut buf: Bytes, mut f: turn.Framer) waits {
+    loop {
+        let mut out = buffer(512)
+        let Send(n) = result.unwrap(turn.poll(mut cl, ns(0), rnd, mut out)) else {
+            return
+        }
+        send_all(mut writer, list.slice(out, 0, n), "client send")
+        let mut reply = next_message(mut reader, mut buf, mut f)
+        let Control = result.unwrap(turn.receive(mut cl, ns(0), rnd, mut reply)) else {
+            fail("the client did not take the relay's response")
+        }
+    }
+}
+
+/// One seed: allocate, permit PEER_1, bind PEER_2, then every payload in one burst to both
+/// peers (Send indications to PEER_1, ChannelData to PEER_2) while the echoes are read.
+fn stream_seed(tasks: Tasks, seed: u64) waits {
+    let (initial, clock) = std.sim.world.new(seed, 0, 0)
+    let mut world = take initial
+    let plan = std.sim.world.detach(mut world)
+    let timer = task.spawn(tasks, bytes 65536, take world, sim_clock)
+    let (network, port) = provide.net(bytes 4096)
+    let link = task.spawn(tasks, bytes 4194304, SimLink(port: take port, clock: clock, plan: take plan), sim_link)
+    let (listener, address) = result.unwrap(host.listen(network, Addr(ip: LOOPBACK, port: 0), 1))
+    let relay_task = task.spawn(tasks, bytes 8388608, StreamRelay(listener: take listener, local: address, seed: seed), stream_relay)
+    let rnd = provide.random(seed + 1)
+    let mut c = turn.client_defaults()
+    c.transport = Stream
+    let mut cl = result.unwrap(turn.client(c, address, username(), user_password()))
+    let socket = result.unwrap(host.connect(network, address, Never))
+    let (r, w) = net.split(take socket)
+    let mut reader = take r
+    let mut writer = take w
+    let mut f = turn.framer()
+    let mut buf: Bytes = list.new()
+    // 401, then the authenticated Allocate.
+    stream_rounds(mut cl, rnd, mut reader, mut writer, mut buf, mut f)
+    let Allocated(_) = turn.client_state(cl) else {
+        fail("the allocation over a stream did not complete")
+    }
+    result.unwrap(turn.permit(mut cl, PEER_1, ns(0)))
+    stream_rounds(mut cl, rnd, mut reader, mut writer, mut buf, mut f)
+    let _ = result.unwrap(turn.bind(mut cl, PEER_2, ns(0)))
+    stream_rounds(mut cl, rnd, mut reader, mut writer, mut buf, mut f)
+    let lens = lengths()
+    let mut peers: List[Addr] = list.new()
+    let mut sent: List[Bytes] = list.new()
+    let mut burst: Bytes = list.new()
+    for i in 0u64 .. 2 * list.len(lens) {
+        let peer = if i % 2 == 0 {
+            PEER_1
+        } else {
+            PEER_2
+        }
+        let p = pattern(i, lens[i / 2])
+        let mut slot = slot_of(p)
+        let lo = turn.HEADROOM
+        let framed = result.unwrap(turn.send_to(mut cl, peer, mut slot, lo, lo + list.len(p)))
+        list.append(mut burst, list.slice(slot, framed.lo, framed.hi))
+        list.push(mut peers, peer)
+        list.push(mut sent, take p)
+    }
+    let writing = task.spawn(tasks, bytes 1048576, Burst(writer: take writer, data: take burst), write_burst)
+    for i in 0u64 .. list.len(sent) {
+        let mut m = next_message(mut reader, mut buf, mut f)
+        let Data(from, range) = result.unwrap(turn.receive(mut cl, ns(0), rnd, mut m)) else {
+            fail("an echo was not data")
+        }
+        if from != peers[i] || !same(list.slice(m, range.lo, range.hi), sent[i]) {
+            fail("an echo arrived out of order or not byte-exact")
+        }
+    }
+    result.unwrap(task.join(take writing))
+    let relayed = result.unwrap(task.join(take relay_task))
+    if list.len(relayed.payloads) != list.len(sent) {
+        fail("the relay did not pass each payload once")
+    }
+    // Every payload to PEER_2 went as ChannelData, each padded on the stream.
+    if relayed.channel_data != list.len(lens) {
+        fail("the payloads to the bound peer did not go as ChannelData")
+    }
+    for i in 0u64 .. list.len(sent) {
+        if relayed.peers[i] != peers[i] || !same(relayed.payloads[i], sent[i]) {
+            fail("the relay passed a payload out of order or not byte-exact")
+        }
+    }
+    let _ = take reader
+    result.unwrap(task.join(take link))
+    result.unwrap(task.join(take timer))
+}
+
+type SimLink: send {
+    port: Served[NetOp],
+    clock: Clock,
+    plan: std.sim.world.Plan
+}
+
+fn sim_clock(take input: std.sim.world.World) waits {
+    let mut world = take input
+    std.sim.world.run(mut world)
+}
+
+/// Pipes of 64 bytes, at most 16 bytes per committed send or receive: every message is
+/// split, and a receive joins the end of one message to the start of the next.
+fn sim_link(take input: SimLink) waits {
+    let SimLink(port: take port, clock: clock, plan: take initial) = take input
+    let mut plan = take initial
+    let link = std.sim.net.new(std.sim.net.Config(queue_bytes: 64, fragment_bytes: 16, latency_ns: 0))
+    let _ = std.sim.net.serve(link, mut plan, clock, take port)
+}
+
+/// bug: a framer that frames ChannelData without its stream padding, takes the PROXY v2
+/// signature, a bad length or a bad cookie for a STUN header and waits for up to 65,552
+/// bytes, or loses a message split across or joined within receives; a relay that never
+/// closes a stream with no allocation.
+/// oracle: RFC 8656 section 12.5 (ChannelData padded to 4 on a stream), RFC 8489 section 5
+/// (length a multiple of 4, cookie 0x2112A442), the PROXY v2 signature
+/// 0D 0A 0D 0A 00 0D 0A 51 55 49 54 0A, and TURN-7's stream_allocate_s, by hand.
+@test
+fn stream_framing(tasks: Tasks) -> Result[(), turn.TurnError] waits {
+    if framing_at(b"\x80") != 1 {
+        fail("first byte 0x80 was not Framing at once")
+    }
+    let proxy = b"\x0d\x0a\x0d\x0a\x00\x0d\x0a\x51\x55\x49\x54\x0a\x21\x11\x00\x0c"
+    let bad_length = b"\x00\x01\x0d\x0a\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+    let bad_cookie = b"\x00\x01\x00\x00\x21\x12\xa4\x43\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+    if framing_at(proxy) != 8 || framing_at(bad_length) != 8 || framing_at(bad_cookie) != 8 {
+        fail("a STUN-shaped refusal was not Framing at 8 bytes")
+    }
+    for seed in 0u64 .. 1000 {
+        stream_seed(tasks, seed)
+    }
+    // A stream connected at 5 s and silent: Close at exactly 65 s, then unknown.
+    let mut rl = new_relay(relay_config(), list_of1(POOL_1), 9)
+    turn.connected(mut rl, 7, SERVER, HOST_C, ns(5 * S))?
+    if wake_of(turn.relay_poll(mut rl, ns(65 * S - 1))) != 65 * S {
+        fail("the idle stream's time is not stream_allocate_s after connected")
+    }
+    let Close(7) = turn.relay_poll(mut rl, ns(65 * S)) else {
+        fail("the idle stream was not closed at stream_allocate_s")
+    }
+    if let Idle = turn.relay_poll(mut rl, ns(65 * S)) {} else {
+        fail("Close was answered twice")
+    }
+    let o = turn.Origin(ingress: Stream(7), client: HOST_C)
+    let mut out = buffer(0)
+    let Nothing = offer(mut rl, ns(66 * S), provide.random(1), o, bare(3), mut out) else {
+        fail("a forgotten stream was served")
+    }
+    let d = turn.relay_discards(rl)
+    if d.idle_stream != 1 || d.unknown_stream != 1 {
+        fail("the idle stream was not counted idle_stream")
+    }
+    Ok(())
+}
+
+// sim_relay_loss: UDP under std.sim.udp.
+/// Past the client's last Allocate retransmission and its 39.5 s transaction time (RFC
+/// 8489 section 6.2.1), so a seed's allocation ends Allocated or Closed, never cut short.
+const END_NS: u64 = 45000000000
+
+/// How long payloads go out, every 20 ms, once the channel is asked for.
+const SEND_NS: u64 = 10000000000
+
+const UDP_PAYLOAD: u64 = 100
+
+const LOSS_SOCKET: UdpOptions = UdpOptions(slots: 256, slot_bytes: 1536)
+
+/// UDP payload k: k in its first 8 bytes, then payload k's pattern.
+fn numbered(k: u64) -> Bytes {
+    let mut p: Bytes = list.with_capacity(UDP_PAYLOAD)
+    list.put_word_le(mut p, k)
+    list.append(mut p, pattern(k, UDP_PAYLOAD - 8))
+    p
+}
+
+fn transmit(mut socket: UdpSocket, to: Addr, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn: 0))
+    if result.unwrap(host.udp_send(mut socket, data, tx, Never)) != 1 {
+        fail("sim.udp did not commit the datagram")
+    }
+}
+
+fn at_clock(clock: Clock) -> turn.Now {
+    ns(host.mono_ns(clock))
+}
+
+type LossRelay: send {
+    server: UdpSocket,
+    pool: UdpSocket,
+    clock: Clock,
+    seed: u64
+}
+
+/// Whether the client's source changed before its first allocation.
+type RelayLog: send {
+    rebound_early: bool
+}
+
+/// The relay: the client-facing socket and the pool socket, each read in turn for 1 ms.
+fn loss_relay(take end: LossRelay) -> RelayLog waits {
+    let LossRelay(server: take s, pool: take p, clock, seed) = take end
+    let mut server = take s
+    let mut pool = take p
+    let rnd = provide.random(seed)
+    let mut rl = new_relay(relay_config(), list_of1(POOL_1), seed)
+    let mut first: Option[Addr] = None
+    let mut rebound_early = false
+    let mut data: Bytes = list.with_capacity(16384)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    loop {
+        let now = host.mono_ns(clock)
+        if now >= END_NS {
+            break
+        }
+        match host.udp_recv(mut server, mut data, mut packets, At(clock, order.min(now + MS, END_NS))) {
+            Ok(_) => {
+                for d in packets {
+                    let UdpPacket(peer: source, at: start, len: size, ..) = d
+                    if turn.relay_counts(rl).allocations == 0 {
+                        match first {
+                            None => {
+                                first = Some(source)
+                            },
+                            Some(a) => if a != source {
+                                rebound_early = true
+                            },
+                        }
+                    }
+                    let mut packet = copy_of(list.slice(data, start, start + size))
+                    let mut out = buffer(0)
+                    let o = turn.Origin(ingress: Udp(SERVER), client: source)
+                    match result.unwrap(turn.from_client(mut rl, at_clock(clock), rnd, o, mut packet, mut out)) {
+                        Reply(to, n) => transmit(mut server, to.client, list.slice(out, 0, n)),
+                        ToPeer(_, to, range) => transmit(mut pool, to, list.slice(packet, range.lo, range.hi)),
+                        _ => (),
+                    }
+                }
+            },
+            Error(TimedOut) => (),
+            Error(_) => fail("relay receive"),
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+        match host.udp_recv(mut pool, mut data, mut packets, At(clock, order.min(host.mono_ns(clock) + MS, END_NS))) {
+            Ok(_) => {
+                for d in packets {
+                    let UdpPacket(peer: source, at: start, len: size, ..) = d
+                    let mut slot = slot_of(list.slice(data, start, start + size))
+                    let lo = turn.HEADROOM
+                    if let ToClient(o, range) = result.unwrap(turn.from_peer(mut rl, at_clock(clock), POOL_1, source, mut slot, lo, lo + size)) {
+                        transmit(mut server, o.client, list.slice(slot, range.lo, range.hi))
+                    }
+                }
+            },
+            Error(TimedOut) => (),
+            Error(_) => fail("relay pool receive"),
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+    }
+    RelayLog(rebound_early: rebound_early)
+}
+
+type EchoPeer: send {
+    socket: UdpSocket,
+    clock: Clock
+}
+
+fn echo_peer(take end: EchoPeer) waits {
+    let EchoPeer(socket: take s, clock) = take end
+    let mut socket = take s
+    let mut data: Bytes = list.with_capacity(16384)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    loop {
+        match host.udp_recv(mut socket, mut data, mut packets, At(clock, END_NS)) {
+            Ok(_) => {
+                for d in packets {
+                    let UdpPacket(peer: source, at: start, len: size, ..) = d
+                    transmit(mut socket, source, list.slice(data, start, start + size))
+                }
+            },
+            Error(TimedOut) => break,
+            Error(_) => fail("peer receive"),
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+    }
+}
+
+/// One run: the capture is each echo's arrival time and index, and the counts.
+type LossRun {
+    allocated: bool,
+    sent: u64,
+    echoed: u64,
+    rebound_early: bool,
+    capture: Bytes
+}
+
+fn loss_run(tasks: Tasks, seed: u64) -> LossRun waits {
+    let mut cfg = std.sim.udp.defaults()
+    // Gilbert-Elliott: stationary P(bad) = 0.1 / (0.1 + 0.4) = 20%, every bad-state datagram lost.
+    cfg.loss = std.sim.udp.Loss(good_to_bad: 100000, bad_to_good: 400000, good_loss: 0, bad_loss: 1000000)
+    cfg.delay_ns = 10 * MS
+    cfg.rebind = 30000
+    let (network, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(seed, 0, 0)
+    let server = std.sim.udp.Server(config: cfg, plan: std.sim.world.plan(seed), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take server, std.sim.udp.serve)
+    let (take server_socket, _) = result.unwrap(host.udp_bind(network, SERVER, LOSS_SOCKET))
+    let (take pool_socket, _) = result.unwrap(host.udp_bind(network, POOL_1, LOSS_SOCKET))
+    let (take peer_socket, _) = result.unwrap(host.udp_bind(network, PEER_1, LOSS_SOCKET))
+    let relaying = task.spawn(tasks, bytes 8388608, LossRelay(server: take server_socket, pool: take pool_socket, clock, seed: seed), loss_relay)
+    let echoing = task.spawn(tasks, bytes 1048576, EchoPeer(socket: take peer_socket, clock), echo_peer)
+    let mut socket = result.unwrap(host.udp_open(network, false, LOSS_SOCKET))
+    let rnd = provide.random(seed + 1)
+    let mut cl = result.unwrap(turn.client(turn.client_defaults(), SERVER, username(), user_password()))
+    let mut allocated = false
+    let mut binding_sent = false
+    let mut send_until = 0u64
+    let mut sending = true
+    let mut next_send = 0u64
+    let mut sent = 0u64
+    let mut last = 0u64
+    let mut echoed = 0u64
+    let mut capture: Bytes = list.new()
+    let mut data: Bytes = list.with_capacity(16384)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    loop {
+        let now = host.mono_ns(clock)
+        if now >= END_NS {
+            break
+        }
+        if let Allocated(_) = turn.client_state(cl) {
+            allocated = true
+            if !binding_sent {
+                let _ = result.unwrap(turn.bind(mut cl, PEER_1, at_clock(clock)))
+                binding_sent = true
+                next_send = now
+                send_until = now + SEND_NS
+            }
+        }
+        if binding_sent && sending && now >= next_send && now < send_until {
+            let p = numbered(sent)
+            let mut slot = slot_of(p)
+            let lo = turn.HEADROOM
+            match turn.send_to(mut cl, PEER_1, mut slot, lo, lo + UDP_PAYLOAD) {
+                Ok(range) => {
+                    transmit(mut socket, SERVER, list.slice(slot, range.lo, range.hi))
+                    sent += 1
+                },
+                Error(Unpermitted(_)) => (),
+                Error(_) => {
+                    sending = false
+                },
+            }
+            next_send = now + 20 * MS
+        }
+        let mut wake = END_NS
+        loop {
+            let mut out = buffer(512)
+            match turn.poll(mut cl, at_clock(clock), rnd, mut out) {
+                Ok(Send(n)) => transmit(mut socket, SERVER, list.slice(out, 0, n)),
+                Ok(WakeAt(t)) => {
+                    wake = order.min(wake, t)
+                    break
+                },
+                _ => break,
+            }
+        }
+        if binding_sent && sending && next_send < send_until {
+            wake = order.min(wake, order.max(next_send, now + 1))
+        }
+        match host.udp_recv(mut socket, mut data, mut packets, At(clock, order.min(wake, END_NS))) {
+            Ok(_) => {
+                for d in packets {
+                    let UdpPacket(at: start, len: size, ..) = d
+                    let mut m = copy_of(list.slice(data, start, start + size))
+                    if let Ok(Data(from, range)) = turn.receive(mut cl, at_clock(clock), rnd, mut m) {
+                        let echo = list.slice(m, range.lo, range.hi)
+                        if from != PEER_1 || list.len(echo) != UDP_PAYLOAD {
+                            fail("an echo from another peer or of another length")
+                        }
+                        // Its first 8 bytes name k; each echo's k is above the last one's.
+                        let k: u64 = list.word_le(echo, 0)
+                        if k >= sent || echoed > 0 && k <= last || !same(echo, numbered(k)) {
+                            fail("an echo that is not a later payload, byte-exact")
+                        }
+                        last = k
+                        echoed += 1
+                        list.put_word_le(mut capture, host.mono_ns(clock))
+                        list.put_word_le(mut capture, k)
+                    }
+                }
+            },
+            Error(TimedOut) => (),
+            Error(_) => fail("client receive"),
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+    }
+    let _ = take socket
+    let log = result.unwrap(task.join(take relaying))
+    result.unwrap(task.join(take echoing))
+    result.unwrap(task.join(take served))
+    list.put_word_le(mut capture, sent)
+    LossRun(allocated: allocated, sent: sent, echoed: echoed, rebound_early: log.rebound_early, capture: take capture)
+}
+
+/// bug: a relay or client that loses the allocation to loss or a rebound mapping (a
+/// retransmitted Allocate answered 437, no retry after the 438 a rebound source draws),
+/// relays a payload altered, twice or out of order, or a run that a seed does not fix.
+/// oracle: invariants: every seed's allocation completes; echoes are a byte-exact,
+/// increasing subsequence of the payloads sent; one seed twice gives equal captures.
+@test
+fn sim_relay_loss(tasks: Tasks) -> Result[(), turn.TurnError] waits {
+    let mut lost = false
+    let mut rebound = false
+    let mut echoes = 0u64
+    for seed in 1u64 .. 17 {
+        let run = loss_run(tasks, seed)
+        if !run.allocated {
+            fail("an allocation did not complete under loss and rebinding")
+        }
+        lost = lost || run.echoed < run.sent
+        rebound = rebound || run.rebound_early
+        echoes += run.echoed
+        if seed == 1 {
+            let again = loss_run(tasks, seed)
+            if !same(run.capture, again.capture) {
+                fail("one seed gave two different captures")
+            }
+        }
+    }
+    if echoes == 0 {
+        fail("the runs relayed nothing")
+    }
+    if !lost {
+        fail("the runs lost nothing")
+    }
+    if !rebound {
+        fail("no run rebound before allocating")
+    }
+    Ok(())
+}

@@ -40,7 +40,9 @@ fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schem
         Some(raw) => {
             let existing = decode_catalog(raw)?
             if existing.kind != kind {
-                if let Migrate = d.mode { return Error(Exists(named(name)?)) }
+                if let Migrate = d.mode {
+                    return Error(Exists(named(name)?))
+                }
                 return Error(Changed(named(name)?))
             }
             if map.contains(d.tables, existing.id) {
@@ -49,7 +51,9 @@ fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schem
             (take existing, false)
         },
         None => {
-            let Migrate = d.mode else { return Error(Missing(named(name)?)) }
+            let Migrate = d.mode else {
+                return Error(Missing(named(name)?))
+            }
             let initial = Catalog(kind: kind, id: d.plan.next_table, owner: 0, epoch: 1, key: copied(key_schema)?, schemas: list.new(), next: 0, by: list.new(), revision: list.new(), shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Public)
             (take initial, true)
         },
@@ -62,7 +66,9 @@ fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schem
         }
     }
     if number == catalog.next {
-        let Migrate = d.mode else { return Error(Missing("schema")) }
+        let Migrate = d.mode else {
+            return Error(Missing("schema"))
+        }
         if number == 65535 {
             return Error(Limit(Ids))
         }
@@ -171,19 +177,23 @@ fn owned_cell(root: Arc[std.page.Page], descriptor: Bytes) -> Option[Arc[Bytes]]
         return Some(arc.new(result.unwrap(copied(raw))))
     }
     let mut rows = std.page.cursor_open(root, None, true, false)
-    let Some(take item) = std.page.cursor_next(mut rows) else { return None }
+    let Some(take item) = std.page.cursor_next(mut rows) else {
+        return None
+    }
     let std.page.CursorRow(value: take raw, ..) = take item
     Some(take raw)
 }
 
-fn cell_walk_value(walking: std.page.Walk) -> Option[Arc[Bytes]] {
-    let descriptor = option.unwrap(std.page.walk_value(walking))
-    owned_cell(std.page.walk_collection(walking), descriptor)
+fn cell_walk_value(walking: std.page_walk.Walk) -> Option[Arc[Bytes]] {
+    let descriptor = option.unwrap(std.page_walk.value(walking))
+    owned_cell(std.page_walk.collection(walking), descriptor)
 }
 
 fn apply_cell(mut tree: PageTree, key: Bytes, raw: Option[View[Bytes]], shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), Error] {
     let mut root = {
-        let Some(empty) = view tree.empty_collection else { fail("store: missing empty collection page") }
+        let Some(empty) = view tree.empty_collection else {
+            fail("store: missing empty collection page")
+        }
         arc.share(empty)
     }
     let inline = match raw {
@@ -265,15 +275,31 @@ fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Err
         Some(raw) => (17 + list.len(raw), 70 + round8(list.len(raw))),
         None => (13u64, 0u64),
     }
-    let effective_width = if reverts { 0u64 } else { new_width }
-    let old_count = if old_width == 0 { 0u64 } else { 1u64 }
-    let new_count = if effective_width == 0 { 0u64 } else { 1u64 }
+    let effective_width = if reverts {
+        0u64
+    } else {
+        new_width
+    }
+    let old_count = if old_width == 0 {
+        0u64
+    } else {
+        1u64
+    }
+    let new_count = if effective_width == 0 {
+        0u64
+    } else {
+        1u64
+    }
     let cell_rows = tx.cell_rows - old_count + new_count
     let frame: Option[u64] = match tx.frame_bytes {
         None => None,
         Some(current) => {
             let after = current - old_width + effective_width
-            let data_head = if tx.streams != 0 && tx.rows + cell_rows + tx.trim_rows == 0 { 5u64 } else { 0u64 }
+            let data_head = if tx.streams != 0 && tx.rows + cell_rows + tx.trim_rows == 0 {
+                5u64
+            } else {
+                0u64
+            }
             if int.saturating_add(after, tx.extra_bytes) - 16 - data_head > 16777280 {
                 return Error(Limit(Transaction))
             }
@@ -291,7 +317,11 @@ fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Err
         }
         map.insert(mut tx.ops.cells, id, take edit)
     }
-    let added = if tx.retain_old && reverts { 0u64 } else { new_charge }
+    let added = if tx.retain_old && reverts {
+        0u64
+    } else {
+        new_charge
+    }
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), added)
     tx.frame_bytes = frame
     tx.cell_rows = cell_rows
@@ -302,7 +332,9 @@ fn remove_cell_edit(mut cells: Map[u32, CellEdit], layers: List[Arc[Staged]], id
     match lower_cell_edit(layers, id) {
         Some(CellPut(_)) => map.insert(mut cells, id, CellRevert),
         Some(CellDelete) => map.insert(mut cells, id, CellRevert),
-        _ => { let _ = map.remove(mut cells, id) },
+        _ => {
+            let _ = map.remove(mut cells, id)
+        },
     }
 }
 

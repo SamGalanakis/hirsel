@@ -1,0 +1,387 @@
+// Locate the next leaf pair in range, skipping matching subtrees before descent.
+fn diff_position(mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, high: Option[Bytes]) -> Option[(Bytes, Order)] {
+    loop {
+        let old_key = std.page_walk.key(left)
+        let new_key = std.page_walk.key(right)
+        let comparison = match (view old_key, view new_key) {
+            (None, None) => return None,
+            (None, Some(_)) => Greater,
+            (Some(_), None) => Less,
+            (Some(a), Some(b)) => list.compare_bytes(a, b),
+        }
+        let key = if comparison == Greater {
+            option.unwrap(take new_key)
+        } else {
+            option.unwrap(take old_key)
+        }
+        if let Some(end) = high {
+            if key >= end {
+                return None
+            }
+        }
+        let old_span = std.page_walk.subtree(left)
+        let new_span = std.page_walk.subtree(right)
+        if comparison == Equal {
+            if let (Some(a), Some(b)) = (old_span, new_span) {
+                if a.stamp == b.stamp {
+                    std.page_walk.next(mut left)
+                    std.page_walk.next(mut right)
+                } else if a.level >= b.level {
+                    std.page_walk.expand(mut left)
+                } else {
+                    std.page_walk.expand(mut right)
+                }
+                continue
+            }
+        }
+        if comparison != Greater {
+            if let Some(_) = old_span {
+                std.page_walk.expand(mut left)
+                continue
+            }
+        }
+        if comparison != Less {
+            if let Some(_) = new_span {
+                std.page_walk.expand(mut right)
+                continue
+            }
+        }
+        return Some((take key, comparison))
+    }
+}
+
+fn diff_advance(mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, comparison: Order) {
+    if comparison != Greater {
+        std.page_walk.next(mut left)
+    }
+    if comparison != Less {
+        std.page_walk.next(mut right)
+    }
+}
+
+type ChangeOutput {
+    rows: List[Change],
+    trimmed: List[Trimmed],
+    bounds: List[Bytes],
+    remaining: u64,
+    limits: Option[Limits],
+    next: Option[Bytes],
+    // Items an earlier part of the same page already admitted.
+    carried: u64,
+    // A collection whose rows `walk_page_changes` left for a Tiered read.
+    deferred: Option[TieredRowDiff]
+}
+
+fn change_output(limits: Option[Limits]) -> ChangeOutput {
+    let remaining = match limits {
+        Some(l) => l.byte_limit,
+        None => 0u64
+    }
+    ChangeOutput(rows: list.new(), trimmed: list.new(), bounds: list.new(), remaining, limits, next: None, carried: 0, deferred: None)
+}
+
+fn admit_change(mut out: ChangeOutput, key: Bytes, width: u64) -> Result[bool, Error] {
+    if let Some(limits) = out.limits {
+        let filled = out.carried + list.len(out.rows) + list.len(out.trimmed) + list.len(out.bounds)
+        if filled == limits.rows || (filled != 0 && width > out.remaining) {
+            out.next = Some(copied(key)?)
+            return Ok(false)
+        }
+        out.remaining = int.saturating_sub(out.remaining, width)
+    }
+    Ok(true)
+}
+
+fn page_change_rows(mut out: ChangeOutput, id: u32, mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, high: Option[Bytes]) -> Result[bool, Error] {
+    while let Some((take key, comparison)) = diff_position(mut left, mut right, high) {
+        if comparison != Equal || compare_row_versions(left, right) != Equal {
+            let logical = logical_key(id, key)?
+            let value_width = if comparison == Less {
+                0u64
+            } else {
+                list.len(option.unwrap(std.page_walk.value(right)))
+            }
+            if !admit_change(mut out, logical, int.saturating_add(list.len(logical), value_width))? {
+                return Ok(false)
+            }
+            let replacement: Option[Arc[Bytes]] = if comparison == Less {
+                None
+            } else {
+                std.page_walk.owned_value(right)
+            }
+            list.push(mut out.rows, Change(tree_key: take logical, value: take replacement))
+        }
+        diff_advance(mut left, mut right, comparison)
+    }
+    Ok(true)
+}
+
+fn page_change_cell(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, right: std.page_walk.Walk, comparison: Order, low: Option[Bytes]) -> Result[bool, Error] {
+    if let Some(lower) = low {
+        if key < lower {
+            return Ok(true)
+        }
+    }
+    let before: Option[Arc[Bytes]] = if comparison == Greater {
+        None
+    } else {
+        cell_walk_value(left)
+    }
+    let after: Option[Arc[Bytes]] = if comparison == Less {
+        None
+    } else {
+        cell_walk_value(right)
+    }
+    if before == after {
+        return Ok(true)
+    }
+    let width = match after {
+        Some(raw) => list.len(raw),
+        None => 0u64
+    }
+    if !admit_change(mut out, key, 4 + width)? {
+        return Ok(false)
+    }
+    list.push(mut out.rows, Change(tree_key: copied(key)?, value: take after))
+    Ok(true)
+}
+
+fn start_diff(root: Option[View[Arc[std.page.Page]]], low: Option[Bytes]) -> std.page_walk.Walk {
+    let Some(page) = root else {
+        return std.page_walk.empty()
+    }
+    match low {
+        None => std.page_walk.begin(page),
+        Some(key) => std.page_walk.seek(page, key),
+    }
+}
+
+fn diff_bound(boundary: Option[Bytes], collection: Bytes) -> Option[Bytes] {
+    if let Some(key) = boundary {
+        if list.len(key) > 4 && list.slice(key, 0, 4) == collection {
+            return Some(clone(list.slice(key, 4, list.len(key))))
+        }
+    }
+    None
+}
+
+fn change_in_range(key: Bytes, low: Option[Bytes], high: Option[Bytes]) -> bool {
+    if let Some(lower) = low {
+        if key < lower {
+            return false
+        }
+    }
+    if let Some(upper) = high {
+        if key >= upper {
+            return false
+        }
+    }
+    true
+}
+
+fn page_change_trim(mut out: ChangeOutput, take first: Bytes, take end: Bytes, low: Option[Bytes], high: Option[Bytes]) -> Result[bool, Error] {
+    let lo = match low {
+        Some(edge) if first < edge => copied(edge)?,
+        _ => take first
+    }
+    let hi = match high {
+        Some(edge) if edge < end => copied(edge)?,
+        _ => take end
+    }
+    if hi <= lo {
+        return Ok(true)
+    }
+    if !admit_change(mut out, lo, list.len(lo) + list.len(hi))? {
+        return Ok(false)
+    }
+    list.push(mut out.trimmed, Trimmed(lo: take lo, hi: take hi))
+    Ok(true)
+}
+
+fn page_change_log(mut out: ChangeOutput, key: Bytes, left: std.page_walk.Walk, right: std.page_walk.Walk, comparison: Order, low: Option[Bytes], high: Option[Bytes]) -> Result[bool, Error] {
+    let before: Option[View[Bytes]] = if comparison == Greater {
+        None
+    } else {
+        std.page_walk.value(left)
+    }
+    let after: Option[View[Bytes]] = if comparison == Less {
+        None
+    } else {
+        std.page_walk.value(right)
+    }
+    let old_bounds = match before {
+        Some(raw) => Some(descriptor_bounds(raw)),
+        None => None
+    }
+    let new_bounds = match after {
+        Some(raw) => Some(descriptor_bounds(raw)),
+        None => None
+    }
+    let bounds_changed = match (old_bounds, new_bounds) {
+        (Some(a), Some(b)) => a.first != b.first || a.next != b.next,
+        _ => true,
+    }
+    if bounds_changed && change_in_range(key, low, high) {
+        if !admit_change(mut out, key, 4)? {
+            return Ok(false)
+        }
+        list.push(mut out.bounds, copied(key)?)
+    }
+    if let (Some(a), Some(b)) = (before, after) {
+        let old_stamp: u64 = list.word_le(a, 28)
+        let new_stamp: u64 = list.word_le(b, 28)
+        if old_stamp == new_stamp {
+            return Ok(true)
+        }
+    }
+    let id: u32 = list.word_be(key, 0)
+    let mut start = diff_bound(low, key)
+    if let Some(old) = old_bounds {
+        let end = match new_bounds {
+            Some(new) => order.min(old.next, new.first),
+            None => old.next
+        }
+        if old.first < end {
+            if !page_change_trim(mut out, log_key(id, old.first)?, log_key(id, end)?, low, high)? {
+                return Ok(false)
+            }
+            let suffix = key_word(end)
+            if change_in_range(suffix, start, None) {
+                start = Some(take suffix)
+            }
+        }
+    }
+    if comparison == Less {
+        return Ok(true)
+    }
+    let stop = diff_bound(high, key)
+    if let (Some(lower), Some(upper)) = (view start, view stop) {
+        if lower >= upper {
+            return Ok(true)
+        }
+    }
+    collection_row_changes(mut out, id, left, right, comparison, start, stop)
+}
+
+fn collection_row_changes(mut out: ChangeOutput, id: u32, left: std.page_walk.Walk, right: std.page_walk.Walk, comparison: Order, start: Option[Bytes], stop: Option[Bytes]) -> Result[bool, Error] {
+    // A Tiered side's Cold pages need the pager, which waits, so the walk
+    // stops here and `tiered_changes` diffs these rows outside it.
+    let before = comparison != Greater
+    let after = comparison != Less
+    if (before && option.unwrap(std.page_walk.value(left))[53u64] != 0) || (after && option.unwrap(std.page_walk.value(right))[53u64] != 0) {
+        out.deferred = Some(TieredRowDiff(id, start: clone(start), stop: clone(stop), before, after))
+        return Ok(false)
+    }
+    let mut from = if comparison == Greater {
+        std.page_walk.empty()
+    } else {
+        let root = std.page_walk.collection(left)
+        start_diff(Some(view root), start)
+    }
+    let mut until = if comparison == Less {
+        std.page_walk.empty()
+    } else {
+        let root = std.page_walk.collection(right)
+        start_diff(Some(view root), start)
+    }
+    page_change_rows(mut out, id, mut from, mut until, stop)
+}
+
+fn walk_page_changes(mut out: ChangeOutput, before: Option[View[PageTree]], after: PageTree, low: Option[Bytes], high: Option[Bytes]) -> Result[(), Error] {
+    let low_id: Option[Bytes] = match low {
+        None => None,
+        Some(key) => Some(clone(list.slice(key, 0, order.min(4, list.len(key))))),
+    }
+    let mut left = match before {
+        None => std.page_walk.empty(),
+        Some(tree) => start_diff(Some(view tree.root), low_id)
+    }
+    let mut right = start_diff(Some(view after.root), low_id)
+    while let Some((take key, comparison)) = diff_position(mut left, mut right, high) {
+        let kind = {
+            let descriptor = if comparison == Less {
+                std.page_walk.value(left)
+            } else {
+                std.page_walk.value(right)
+            }
+            option.unwrap(descriptor)[52]
+        }
+        let more = match kind {
+            3 => page_change_cell(mut out, key, left, right, comparison, low)?,
+            4 => page_change_log(mut out, key, left, right, comparison, low, high)?,
+            _ => if comparison != Equal || compare_row_versions(left, right) != Equal {
+                collection_row_changes(mut out, list.word_be(key, 0), left, right, comparison, diff_bound(low, key), diff_bound(high, key))?
+            } else {
+                true
+            },
+        }
+        if !more {
+            break
+        }
+        diff_advance(mut left, mut right, comparison)
+    }
+    Ok(())
+}
+
+fn compare_page_collections(before: PageTree, after: PageTree) -> Result[Changes, Error] {
+    if tree_stamp(before) == tree_stamp(after) {
+        return Ok(Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()))
+    }
+    let mut out = change_output(None)
+    walk_page_changes(mut out, Some(view before), after, None, None)?
+    let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, ..) = take out
+    Ok(Changes(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds))
+}
+
+pub type Trimmed {
+    lo: Bytes,
+    hi: Bytes
+}
+
+pub type Changes {
+    rows: List[Change],
+    trimmed: List[Trimmed],
+    bounds: List[Bytes]
+}
+
+pub type ChangePage {
+    changes: List[Change],
+    trimmed: List[Trimmed],
+    bounds: List[Bytes],
+    next: Option[Bytes]
+}
+
+pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: Bytes, l: Limits) -> Result[ChangePage, Error] waits {
+    read_access(r, b)?
+    if let Some(before) = a {
+        read_access(r, before)?
+    }
+    page_limits(l)?
+    if let Some(base) = a {
+        if !same(base.store, b.store) || base.open != b.open {
+            return Error(Foreign)
+        }
+        if snapshot_paged(base) || snapshot_paged(b) {
+            let out = tiered_changes(r, base, b, Some(clone(lo)), Some(clone(hi)), Some(l))?
+            let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume, ..) = take out
+            return Ok(ChangePage(changes: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume))
+        }
+    } else if lo < hi {
+        if let Some(inventory) = view b.roots.collections.paging {
+            return snapshot_tiered_initial_changes(r, b, inventory, lo, hi, l)
+        }
+    }
+    disk_allocation(scoped fn() -> Result[ChangePage, Error] {
+        let mut out = change_output(Some(l))
+        if lo < hi {
+            let low: Option[Bytes] = Some(clone(lo))
+            let high: Option[Bytes] = Some(clone(hi))
+            match a {
+                None => walk_page_changes(mut out, None, b.roots.collections, low, high)?,
+                Some(base) => walk_page_changes(mut out, Some(view base.roots.collections), b.roots.collections, low, high)?,
+            }
+        }
+        let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume, ..) = take out
+        Ok(ChangePage(changes: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume))
+    })
+}

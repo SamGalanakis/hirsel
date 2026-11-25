@@ -5,8 +5,9 @@ fn sealed_tiered_root(root: Arc[std.page.Page], locate: scoped[view] fn(u64) -> 
     if std.page.count(image) == 0 {
         return Ok(arc.share(root))
     }
-    let mut sealed: Bytes = list.with_capacity(std.page.sealed_size(image))
-    page_result(std.page.seal_located(mut sealed, root, locate))?
+    let size = std.page.sealed_size(image)
+    let mut sealed: Bytes = list.with_capacity(size)
+    page_result(std.page.seal_located(mut sealed, root, size, locate))?
     let ready = page_result(std.page.decode(take sealed, Collection))?
     page_result(std.page.attach_cold(take ready))
 }
@@ -26,6 +27,7 @@ type BranchReplacements: send {
 // len u32, stamp u64`) and each dropped-list row one 48-byte slot, with the
 // dirty Tiered bytes.
 const REPLACED_ROW: u64 = 24
+
 const DROPPED_ROW: u64 = 48
 
 // The live replaced and dropped lists since the installed cut (§13.6a T8).

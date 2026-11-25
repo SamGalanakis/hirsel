@@ -125,7 +125,7 @@ fn emit_located_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, lo
         },
         PageBody(page) => {
             // The pack buffer already has room for the planned PAGE.
-            page_result(std.page.seal_located(mut out, page, locate))?
+            page_result(std.page.seal_located(mut out, page, frame.size, locate))?
             // The PAGE stamp follows the first eight bytes of its payload.
             list.set_word_le(mut out, offset + 24, frame.stamp)
             std.check.xxh3(out, offset + 16, list.len(out))

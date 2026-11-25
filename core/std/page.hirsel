@@ -950,11 +950,6 @@ fn compressed(sum: u64, keys: u64, p: u64) -> u64 {
 
 /// Canonical size for layout planning without allocating a canonical image.
 pub fn sealed_size(image: Image) -> u64 {
-    let (size, _) = sealed_shape(image)
-    size
-}
-
-fn sealed_shape(image: Image) -> (u64, u64) {
     let n = count(image)
     let first = first_key_slot(level(image))
     let p = u16_at(image.raw, 4)
@@ -964,12 +959,21 @@ fn sealed_shape(image: Image) -> (u64, u64) {
         sum += entry_size(image, slot)
     }
     if keyed == 0 {
-        return (HEADER + sum, 0)
+        return HEADER + sum
+    }
+    compressed(sum, keyed, p + sealed_extension(image))
+}
+
+// The bytes the first and last keyed suffixes share, which sealing adds to the prefix.
+fn sealed_extension(image: Image) -> u64 {
+    let n = count(image)
+    let first = first_key_slot(level(image))
+    if n <= first {
+        return 0
     }
     let left = entry_at(image, first)
     let right = entry_at(image, n - 1)
-    let extension = common_prefix(list.slice(image.raw, left + 2, left + 2 + u16_at(image.raw, left)), list.slice(image.raw, right + 2, right + 2 + u16_at(image.raw, right)))
-    (compressed(sum, keyed, p + extension), extension)
+    common_prefix(list.slice(image.raw, left + 2, left + 2 + u16_at(image.raw, left)), list.slice(image.raw, right + 2, right + 2 + u16_at(image.raw, right)))
 }
 
 fn pack_entries(rows: List[Entry], lvl: u8, id: u64, domain: Domain) -> Result[Image, Error] {
@@ -1192,16 +1196,15 @@ fn write_sealed(mut raw: Bytes, image: Image, size: u64, extension: u64, patch: 
     }
 }
 
-fn checked_sealed_shape(image: Image) -> Result[(u64, u64), Error] {
+fn checked_extension(image: Image, size: u64) -> Result[u64, Error] {
     let n = count(image)
     if stamp(image) == 0 || n == 0 || n > (PAGE_MAX - HEADER) / 7 {
         return Error(MalformedPage)
     }
-    let (size, extension) = sealed_shape(image)
     if !legal(level(image), n, size) {
         return Error(PageLimit)
     }
-    Ok((size, extension))
+    Ok(sealed_extension(image))
 }
 
 /// Write a fresh canonical image and return the old body indices in disk order.
@@ -1210,7 +1213,8 @@ pub fn seal(page: Arc[Page]) -> Result[(Image, List[u16]), Error] {
 }
 
 fn sealed_image(image: Image, bodies_held: u64) -> Result[(Image, List[u16]), Error] {
-    let (size, extension) = checked_sealed_shape(image)?
+    let size = sealed_size(image)
+    let extension = checked_extension(image, size)?
     let mut raw: Bytes = list.with_capacity(size)
     let mut bodies: List[u16] = list.with_capacity(bodies_held)
     let is_leaf = level(image) == 0
@@ -1301,10 +1305,11 @@ fn canonical_page(mut page: Page) -> Result[(), Error] {
 }
 
 /// Append a canonical PAGE with intact Cold edges and locations for Hot
-/// children. Number its blob references in slot order.
-pub fn seal_located(mut raw: Bytes, page: Arc[Page], locate: scoped[view] fn(u64) -> PagePtr) -> Result[(), Error] {
+/// children. Number its blob references in slot order. `size` is the page's
+/// sealed_size, which the caller already took to lay out the PAGE.
+pub fn seal_located(mut raw: Bytes, page: Arc[Page], size: u64, locate: scoped[view] fn(u64) -> PagePtr) -> Result[(), Error] {
     let image = view page.image
-    let (size, extension) = checked_sealed_shape(image)?
+    let extension = checked_extension(image, size)?
     let branch = level(image) != 0
     let collection_map = image.domain == CollectionMap
     let mut attached_slot = 0u64
@@ -2247,7 +2252,8 @@ fn build_pieces(items: List[PageSlot], domain: Domain, lvl: u8, rightmost: bool,
     Ok(take parts)
 }
 
-fn extreme_key(root: Arc[Page], right: bool) -> Bytes {
+/// The first or last key under a resident page.
+pub fn extreme_key(root: Arc[Page], right: bool) -> Bytes {
     let i = if right {
         count(root.image) - 1
     } else {
@@ -3366,179 +3372,6 @@ pub fn cursor_read[T](mut cursor: Cursor, visit: scoped[view] fn(Bytes, Bytes) -
     }
     list.append(mut cursor.key_buffer, raw_suffix)
     Some(visit(cursor.key_buffer, raw))
-}
-
-type WalkFrame: send {
-    page: Arc[Page],
-    slot: u64,
-    whole: bool
-}
-
-/// A sorted walk that can consume a complete remaining subtree at once.
-pub opaque type Walk: send {
-    path: List[WalkFrame]
-}
-
-pub type Subtree {
-    stamp: u64,
-    level: u8
-}
-
-pub fn walk_begin(root: Arc[Page]) -> Walk {
-    let mut path: List[WalkFrame] = list.new()
-    if count(root.image) != 0 {
-        list.push(mut path, WalkFrame(page: arc.share(root), slot: 0, whole: true))
-    }
-    Walk(path: take path)
-}
-
-/// Seek to the inclusive lower bound, retaining whole subtrees after the seek path.
-pub fn walk_from(root: Arc[Page], low: Bytes) -> Walk {
-    let mut walk = walk_begin(root)
-    while let Some(key) = walk_key(walk) {
-        if key >= low {
-            break
-        }
-        if let Some(high) = walk_subtree_high(walk) {
-            if high >= low {
-                walk_expand(mut walk)
-                continue
-            }
-        }
-        walk_next(mut walk)
-    }
-    take walk
-}
-
-/// The child named by a collection-map row.
-pub fn walk_collection(walk: Walk) -> Arc[Page] {
-    let top = option.unwrap(list.last(walk.path))
-    arc.share(hot_child(top.page.kids[top.slot]))
-}
-
-pub fn walk_empty() -> Walk {
-    Walk(path: list.new())
-}
-
-pub fn walk_key(walk: Walk) -> Option[Bytes] {
-    let Some(top) = list.last(walk.path) else {
-        return None
-    }
-    if top.whole {
-        return Some(extreme_key(top.page, false))
-    }
-    key_at(top.page.image, top.slot)
-}
-
-pub fn walk_subtree(walk: Walk) -> Option[Subtree] {
-    let Some(top) = list.last(walk.path) else {
-        return None
-    }
-    if !top.whole {
-        return None
-    }
-    Some(Subtree(stamp: stamp(top.page.image), level: level(top.page.image)))
-}
-
-pub fn walk_subtree_high(walk: Walk) -> Option[Bytes] {
-    let Some(top) = list.last(walk.path) else {
-        return None
-    }
-    if top.whole {
-        Some(extreme_key(top.page, true))
-    } else {
-        None
-    }
-}
-
-pub fn walk_subtree_charge(walk: Walk) -> u64 {
-    let Some(top) = list.last(walk.path) else {
-        return 0
-    }
-    let (_, charge) = totals(top.page)
-    charge
-}
-
-pub fn walk_value(walk: Walk) -> Option[View[Bytes]] in walk {
-    let Some(top) = list.last(walk.path) else {
-        return None
-    }
-    if top.whole {
-        None
-    } else {
-        value_at(top.page, top.slot)
-    }
-}
-
-pub fn walk_blob_stamp(walk: Walk) -> u64 {
-    let Some(top) = list.last(walk.path) else {
-        return 0
-    }
-    if top.whole {
-        return 0
-    }
-    if let Some(BlobEdge(edge)) = owning_edge(top.page.image, top.slot) {
-        edge.stamp
-    } else {
-        0
-    }
-}
-
-pub fn walk_owned_value(walk: Walk) -> Option[Arc[Bytes]] {
-    let Some(top) = list.last(walk.path) else {
-        return None
-    }
-    if top.whole {
-        return None
-    }
-    if let Some(BlobEdge(edge)) = owning_edge(top.page.image, top.slot) {
-        return body(top.page, edge.body)
-    }
-    let Some(value) = value_at(top.page, top.slot) else {
-        return None
-    }
-    let owned: Bytes = clone(value)
-    Some(arc.new(take owned))
-}
-
-pub fn walk_expand(mut walk: Walk) {
-    let n = list.len(walk.path)
-    if n == 0 {
-        return
-    }
-    let top = n - 1
-    walk.path[top].whole = false
-    if level(walk.path[top].page.image) != 0 {
-        let first = arc.share(hot_child(walk.path[top].page.kids[0u64]))
-        walk.path[top].slot = 1
-        list.push(mut walk.path, WalkFrame(page: take first, slot: 0, whole: true))
-    }
-}
-
-pub fn walk_next(mut walk: Walk) {
-    let n = list.len(walk.path)
-    if n == 0 {
-        return
-    }
-    let top = n - 1
-    if !walk.path[top].whole {
-        walk.path[top].slot += 1
-        if walk.path[top].slot < count(walk.path[top].page.image) {
-            return
-        }
-    }
-    let _ = list.pop(mut walk.path)
-    while list.len(walk.path) != 0 {
-        let parent = list.len(walk.path) - 1
-        let slot = walk.path[parent].slot
-        if slot < count(walk.path[parent].page.image) {
-            let descendant = arc.share(hot_child(walk.path[parent].page.kids[slot]))
-            walk.path[parent].slot += 1
-            list.push(mut walk.path, WalkFrame(page: take descendant, slot: 0, whole: true))
-            return ()
-        }
-        let _ = list.pop(mut walk.path)
-    }
 }
 
 fn one_trim_piece(root: Arc[Page]) -> List[PagePiece] {

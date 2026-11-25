@@ -1,0 +1,178 @@
+// A sorted walk over a resident page tree (STORE-SPEC AP3) that can take a
+// complete remaining subtree at once. It reads pages through std.page only.
+type WalkFrame: send {
+    page: Arc[page.Page],
+    slot: u64,
+    whole: bool
+}
+
+pub opaque type Walk: send {
+    path: List[WalkFrame]
+}
+
+pub type Subtree {
+    stamp: u64,
+    level: u8
+}
+
+fn kid(frame: WalkFrame, slot: u64) -> Arc[page.Page] {
+    option.unwrap(page.child(frame.page, slot))
+}
+
+pub fn begin(root: Arc[page.Page]) -> Walk {
+    let mut path: List[WalkFrame] = list.new()
+    if page.count(page.image_of(root)) != 0 {
+        list.push(mut path, WalkFrame(page: arc.share(root), slot: 0, whole: true))
+    }
+    Walk(path: take path)
+}
+
+/// Seek to the inclusive lower bound, retaining whole subtrees after the seek path.
+pub fn seek(root: Arc[page.Page], low: Bytes) -> Walk {
+    let mut walk = begin(root)
+    while let Some(at) = key(walk) {
+        if at >= low {
+            break
+        }
+        if let Some(high) = subtree_high(walk) {
+            if high >= low {
+                expand(mut walk)
+                continue
+            }
+        }
+        next(mut walk)
+    }
+    take walk
+}
+
+/// The child named by a collection-map row.
+pub fn collection(walk: Walk) -> Arc[page.Page] {
+    let top = option.unwrap(list.last(walk.path))
+    kid(top, top.slot)
+}
+
+pub fn empty() -> Walk {
+    Walk(path: list.new())
+}
+
+pub fn key(walk: Walk) -> Option[Bytes] {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if top.whole {
+        return Some(page.extreme_key(top.page, false))
+    }
+    page.key_at(page.image_of(top.page), top.slot)
+}
+
+pub fn subtree(walk: Walk) -> Option[Subtree] {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if !top.whole {
+        return None
+    }
+    let image = page.image_of(top.page)
+    Some(Subtree(stamp: page.stamp(image), level: page.level(image)))
+}
+
+pub fn subtree_high(walk: Walk) -> Option[Bytes] {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if top.whole {
+        Some(page.extreme_key(top.page, true))
+    } else {
+        None
+    }
+}
+
+pub fn subtree_charge(walk: Walk) -> u64 {
+    let Some(top) = list.last(walk.path) else {
+        return 0
+    }
+    let (_, charge) = page.totals(top.page)
+    charge
+}
+
+pub fn value(walk: Walk) -> Option[View[Bytes]] in walk {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if top.whole {
+        None
+    } else {
+        page.value_at(top.page, top.slot)
+    }
+}
+
+pub fn blob_stamp(walk: Walk) -> u64 {
+    let Some(top) = list.last(walk.path) else {
+        return 0
+    }
+    if top.whole {
+        return 0
+    }
+    if let Some(BlobEdge(edge)) = page.owning_edge(page.image_of(top.page), top.slot) {
+        edge.stamp
+    } else {
+        0
+    }
+}
+
+pub fn owned_value(walk: Walk) -> Option[Arc[Bytes]] {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if top.whole {
+        return None
+    }
+    if let Some(BlobEdge(edge)) = page.owning_edge(page.image_of(top.page), top.slot) {
+        return page.body(top.page, edge.body)
+    }
+    let Some(held) = page.value_at(top.page, top.slot) else {
+        return None
+    }
+    let owned: Bytes = clone(held)
+    Some(arc.new(take owned))
+}
+
+pub fn expand(mut walk: Walk) {
+    let n = list.len(walk.path)
+    if n == 0 {
+        return
+    }
+    let top = n - 1
+    walk.path[top].whole = false
+    if page.level(page.image_of(walk.path[top].page)) != 0 {
+        let first = kid(walk.path[top], 0)
+        walk.path[top].slot = 1
+        list.push(mut walk.path, WalkFrame(page: take first, slot: 0, whole: true))
+    }
+}
+
+pub fn next(mut walk: Walk) {
+    let n = list.len(walk.path)
+    if n == 0 {
+        return
+    }
+    let top = n - 1
+    if !walk.path[top].whole {
+        walk.path[top].slot += 1
+        if walk.path[top].slot < page.count(page.image_of(walk.path[top].page)) {
+            return
+        }
+    }
+    let _ = list.pop(mut walk.path)
+    while list.len(walk.path) != 0 {
+        let parent = list.len(walk.path) - 1
+        let slot = walk.path[parent].slot
+        if slot < page.count(page.image_of(walk.path[parent].page)) {
+            let descendant = kid(walk.path[parent], slot)
+            walk.path[parent].slot += 1
+            list.push(mut walk.path, WalkFrame(page: take descendant, slot: 0, whole: true))
+            return ()
+        }
+        let _ = list.pop(mut walk.path)
+    }
+}

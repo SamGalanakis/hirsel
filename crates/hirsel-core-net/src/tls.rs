@@ -45,7 +45,10 @@ pub fn peer_words(digest: [u8; 32]) -> [u64; 4] {
     std::array::from_fn(|i| u64::from_be_bytes(words[i]))
 }
 
-/// The largest Certificate message body `tls.connect` reads (TLS-9, check 2).
+/// The largest Certificate message body `tls.connect` reads (TLS-9, check 2):
+/// its unbuffered rustls client joins a handshake body of at most 0xffff
+/// bytes. rustls's buffered connection, which `tls.connect` does not use,
+/// caps its join buffer at 0xffff record bytes and so reads less.
 pub const CHAIN_MESSAGE_MAX: usize = 65_535;
 
 /// TLS-9 check 2: 1 to 8 entries, each exactly one DER `Certificate`

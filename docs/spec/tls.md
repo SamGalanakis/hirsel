@@ -2139,7 +2139,7 @@ other than an IP literal is refused inside `hello`, as rustls 0.23.46 does (F1).
 default session cache and tickets are named and TL23 checks for no `NewSessionTicket` (F2).
 The RSA size bound is ring's, and TL19 gains a P-384 key that only the provider's kind check
 refuses (F3). The chain has a byte cap equal to the largest Certificate message
-`tls.connect` reads (F4). The provider loads the key with ring itself, so a host randomness
+body `tls.connect` reads (F4; restated by tls-accept-followups-2762 with its reason in check 2). The provider loads the key with ring itself, so a host randomness
 failure is a terminal provider failure and never `Tls(Key)` (F5). TL21 pins the empty
 `secrets` case and `scram_final_len` (F6). TLS-5's closed list names the `Tls(Key)` verdict
 (F7). `hello` takes only a socket from a host TCP listener (F8). TL18 serves Ed25519 and
@@ -2286,8 +2286,13 @@ the connection, and has no other host effect:
 1. `key`'s policy does not hold `tls_serve`: `Denied`.
 2. `chain` is empty, has more than 8 entries, has an entry that is not exactly one DER
    X.509 `Certificate` (RFC 5280 §4.1, with no trailing bytes), or 4 plus the sum over the
-   entries of the DER length plus 5 is more than 65,535, the largest Certificate message
-   `tls.connect` reads: `Tls(Chain)`. With 8 entries that is 65,491 bytes of DER. The
+   entries of the DER length plus 5 is more than 65,535: `Tls(Chain)`. That sum is the
+   Certificate message body (RFC 8446 §4.4.2), and 65,535 is the largest body `tls.connect`
+   reads: it runs rustls's unbuffered client, which joins a handshake message body of at
+   most 0xffff bytes and refuses a longer one with `Tls(Protocol)`. rustls's buffered
+   connection caps its join buffer at 0xffff bytes of records instead, so it reads about
+   230 bytes less, but `tls.connect` does not use it. With 8 entries that is 65,491 bytes
+   of DER. The
    runtime parses the outer structure only. It checks no signature.
 3. `alpn` breaks TLS-1's limits: `Tls(Alpn)`.
 

@@ -15,9 +15,18 @@
 // order, so a waiting mint delays the next one, and charges every G to one `bytes`.
 // Claims mint from `call` (item 4), and there is no bind mint. Its mint runs outside `isolate`, so a fault ends
 // the task (v2.69 F1(b)). v2.67 states no step bound, so its runs use no looping mint.
+//
+// A mint asked to Refuse returns Error(c) with room left in its own allowance (RUNNER-SPEC
+// v2.71 §12.1 "Mint tasks", Outcomes, line 2153: "`Error(c)` from the mint, or an allocation
+// refused by the mint's `mint_bytes`, fails that request with `Failed(OutOfBytes(room))`
+// ... The mint task keeps serving the next request"). So it fails its own request as
+// OutOfBytes, takes no room, and its task goes on. Its asker sees what a full allowance
+// gives: a wire call `Failed(OutOfBytes)` with no body run, and a bind Close 1013 with no
+// binding run (v2.70 F5, line 58; v2.71 B4, line 37; §3 "Binding", line 1418: each bind
+// first asks the bind mint, and a failed bind mint is not a credential failure).
 type Use: key = Attempt | Call | Claim | Bind
 
-type Ask: key = Plain | Faults | Loops
+type Ask: key = Plain | Faults | Loops | Refuses
 
 type Cause: key = OutOfBytes | Raised | OutOfTime
 
@@ -138,6 +147,9 @@ fn resolve(mut p: Place, t: u64, i: u64) {
         Loops => {
             p.requests[i].phase = Failed(OutOfTime)
         },
+        Refuses => {
+            p.requests[i].phase = Failed(OutOfBytes)
+        },
         Plain => {
             if p.tasks[t].held + 1 > p.tasks[t].room {
                 p.requests[i].phase = Failed(OutOfBytes)
@@ -204,7 +216,7 @@ fn newly_failed(prev: Place, next: Place, i: u64) -> Option[Cause] {
     }
 }
 
-// F1/F3: a fault or step overrun fails its own request, and its mint task keeps
+// F1/F3: a fault, step overrun or refusal fails its own request, and its mint task keeps
 // serving the requests queued behind it.
 fn fault_contained(prev: Place, action: GrantAction, next: Place) -> bool {
     for t in 0 .. list.len(prev.tasks) {
@@ -217,7 +229,7 @@ fn fault_contained(prev: Place, action: GrantAction, next: Place) -> bool {
             None => true,
             Some(Raised) => next.requests[i].ask == Faults,
             Some(OutOfTime) => next.requests[i].ask == Loops,
-            Some(OutOfBytes) => next.requests[i].ask == Plain,
+            Some(OutOfBytes) => next.requests[i].ask == Plain || next.requests[i].ask == Refuses,
         }
         if !own {
             return false
@@ -237,7 +249,8 @@ fn holding(p: Place, u: Use) -> u64 {
 }
 
 // F1/F3: a due attempt never queues behind a call or claim, never waits on their
-// mint, and is refused for bytes only when attempts' own allowance is full.
+// mint, and is refused for bytes only when attempts' own allowance is full or its own
+// mint returned Error(c).
 fn attempt_unblocked(prev: Place, action: GrantAction, next: Place) -> bool {
     for task in next.tasks {
         if let Some(i) = task.busy {
@@ -259,7 +272,7 @@ fn attempt_unblocked(prev: Place, action: GrantAction, next: Place) -> bool {
     for i in 0 .. list.len(next.requests) {
         if next.requests[i].use == Attempt {
             if let Some(OutOfBytes) = newly_failed(prev, next, i) {
-                if holding(prev, Attempt) < next.own_bytes[0] {
+                if next.requests[i].ask == Plain && holding(prev, Attempt) < next.own_bytes[0] {
                     return false
                 }
             }
@@ -274,7 +287,7 @@ fn attempt_while_calls_saturate(p: Place) -> bool {
 
 fn call_out_of_own_bytes(p: Place) -> bool {
     for r in p.requests {
-        if r.use == Call && r.phase == Failed(OutOfBytes) {
+        if r.use == Call && r.ask == Plain && r.phase == Failed(OutOfBytes) {
             return true
         }
     }
@@ -289,6 +302,20 @@ fn served_after_contained_failure(p: Place) -> bool {
             _ => false,
         }
         if contained {
+            for j in i + 1 .. list.len(p.requests) {
+                if p.requests[j].use == p.requests[i].use && p.requests[j].phase == Holding {
+                    return true
+                }
+            }
+        }
+    }
+    false
+}
+
+// A mint that returned Error(c) with room left, and a later request of its use served.
+fn served_after_refusal(p: Place) -> bool {
+    for i in 0 .. list.len(p.requests) {
+        if p.requests[i].ask == Refuses && p.requests[i].phase == Failed(OutOfBytes) {
             for j in i + 1 .. list.len(p.requests) {
                 if p.requests[j].use == p.requests[i].use && p.requests[j].phase == Holding {
                     return true
@@ -327,6 +354,7 @@ fn grant_model(take start: Place, laws: List[Law]) -> std.model.Model[Place, Gra
     list.push(mut sometimes, std.model.Sometimes(label: string.from("attempt_runs_while_calls_saturate"), holds: attempt_while_calls_saturate))
     list.push(mut sometimes, std.model.Sometimes(label: string.from("call_out_of_own_bytes"), holds: call_out_of_own_bytes))
     list.push(mut sometimes, std.model.Sometimes(label: string.from("served_after_contained_failure"), holds: served_after_contained_failure))
+    list.push(mut sometimes, std.model.Sometimes(label: string.from("served_after_refusal"), holds: served_after_refusal))
     std.model.Model(
         init: take init,
         start: Open,
@@ -343,84 +371,11 @@ fn grant_bounds() -> std.model.Bounds {
     std.model.Bounds(depth: 64, states: 200000, step_steps: 100000, step_bytes: 1048576)
 }
 
-fn one_each() -> List[u64] {
-    let mut room: List[u64] = list.new()
-    list.push(mut room, 1u64)
-    list.push(mut room, 1u64)
-    list.push(mut room, 1u64)
-    list.push(mut room, 1u64)
-    take room
-}
-
-fn three(a: Ask, b: Ask, c: Ask) -> List[Ask] {
-    let mut out: List[Ask] = list.new()
-    list.push(mut out, a)
-    list.push(mut out, b)
-    list.push(mut out, c)
-    take out
-}
-
-fn one(a: Ask) -> List[Ask] {
-    let mut out: List[Ask] = list.new()
-    list.push(mut out, a)
-    take out
-}
-
-fn two(a: Ask, b: Ask) -> List[Ask] {
-    let mut out: List[Ask] = list.new()
-    list.push(mut out, a)
-    list.push(mut out, b)
-    take out
-}
-
 fn all_laws() -> List[Law] {
     let mut laws: List[Law] = list.new()
     list.push(mut laws, Contained)
     list.push(mut laws, Unblocked)
     take laws
-}
-
-fn just(law: Law) -> List[Law] {
-    let mut laws: List[Law] = list.new()
-    list.push(mut laws, law)
-    take laws
-}
-
-/// bug: wire calls starve the attempt mint, or a mint fault or step overrun ends the mint task (review 2486 F1, F3).
-/// oracle: RUNNER-SPEC v2.69 CHANGES F1, F3, F5, v2.70 F4, F5 and §12.1 "Mint tasks": one task, queue and `bytes` per use; isolate around bound steps.
-@test
-fn grant_mints_v269_closed() -> Result[(), ()] {
-    let mut calls = three(Plain, Faults, Plain)
-    list.push(mut calls, Loops)
-    let start = place(false, one_each(), two(Plain, Plain), calls, two(Faults, Plain), one(Plain))
-    std.model.check(grant_model(take start, all_laws()), grant_bounds())
-}
-
-fn failed_as(take outcome: std.model.Outcome, expected: std.model.Kind) -> bool {
-    match outcome {
-        Failed(f) => std.model.kind(f) == expected,
-        _ => false,
-    }
-}
-
-fn v267_place() -> Place {
-    place(true, one_each(), two(Plain, Plain), three(Plain, Faults, Plain), two(Faults, Plain), list.new())
-}
-
-// Each law runs alone, so each shows its own counterexample: explore stops at the
-// shallowest failure.
-/// bug: v2.67's one grant task, queue and allowance pass for a bulkhead (review 2486 F1, F3).
-/// oracle: CHANGES-v2.67 item 1 (one task, arrival order, a waiting mint delays the next, one `bytes`) against v2.69 F1 and F3.
-@test
-fn grant_mints_v267_shared_fails() -> Result[(), ()] {
-    let contained = failed_as(std.model.explore(grant_model(v267_place(), just(Contained)), grant_bounds()), Violated(string.from("mint_fault_fails_only_its_own_request")))
-    let unblocked = failed_as(std.model.explore(grant_model(v267_place(), just(Unblocked)), grant_bounds()), Violated(string.from("due_attempt_never_blocked_by_call")))
-    let stuck = failed_as(std.model.explore(grant_model(v267_place(), list.new()), grant_bounds()), Stuck)
-    if contained && unblocked && stuck {
-        Ok(())
-    } else {
-        Error(())
-    }
 }
 
 // Trace conformance (lane 2563): the mints a built place's law saw, checked against this
@@ -437,10 +392,7 @@ fn grant_mints_v267_shared_fails() -> Result[(), ()] {
 // sees them. Every use's room is its request count, so no allowance is ever full, as in
 // the laws, whose mint_bytes hold every G they mint.
 //
-// The model has no ask for a mint that returns Error(Capacity) with room left (token 3). Such
-// a request starts already failed and its entry is left out of the trace; `check_mints`
-// returns how many there were. Only its asker's answer is checked, against v2.67 item 3
-// (a call's is Failed(OutOfBytes)) and v2.70 F5 (a Hello closes 1013).
+// Token 3 is the Refuses ask, so every mint a law starts is in the walk.
 pub type Saw: key = SawG | SawNoBytes | SawFault | SawSteps | SawClosed | SawDrop | SawOther
 
 pub type MintEvent = MintMode(u64, u64) | MintStart(u64) | MintAnswer(u64, Saw)
@@ -559,8 +511,7 @@ fn next_mode(mut modes: List[u64]) -> u64 {
 
 type MintCase {
     start: Place,
-    trace: List[std.model.Seen[Step, Record]],
-    unmodelled: u64
+    trace: List[std.model.Seen[Step, Record]]
 }
 
 // modes and asks are indexed by kind - 1: call, attempt, bind.
@@ -571,7 +522,6 @@ fn mint_case(shared: bool, events: List[MintEvent]) -> MintCase {
         list.push(mut modes, list.new())
         list.push(mut asks, list.new())
     }
-    let mut refused: List[u64] = list.new()
     let mut trace: List[std.model.Seen[Step, Record]] = list.new()
     for event in events {
         match event {
@@ -582,26 +532,13 @@ fn mint_case(shared: bool, events: List[MintEvent]) -> MintCase {
             MintStart(record) => {
                 let kind = record / 100
                 let u = kind_use(kind)
-                let mode = next_mode(mut modes[kind - 1])
-                let saw = answer_for(events, record)
-                list.push(mut asks[kind - 1], match mode {
+                list.push(mut asks[kind - 1], match next_mode(mut modes[kind - 1]) {
                     1 => Faults,
                     2 => Loops,
+                    3 => Refuses,
                     _ => Plain,
                 })
-                if mode == 3 {
-                    let answer = if kind == 3 {
-                        SawClosed
-                    } else {
-                        SawNoBytes
-                    }
-                    if saw != answer {
-                        fail("grant model: a mint's Error(Capacity) reached its asker as something else")
-                    }
-                    list.push(mut refused, kind * 1000 + list.len(asks[kind - 1]) - 1)
-                } else {
-                    list.push(mut trace, std.model.Seen(hint: MintStep, seen: Record(use: u, serial: record % 100, saw: saw)))
-                }
+                list.push(mut trace, std.model.Seen(hint: MintStep, seen: Record(use: u, serial: record % 100, saw: answer_for(events, record))))
             },
             MintAnswer(record, saw) => {
                 if saw == SawG && record / 100 != 2 {
@@ -610,49 +547,16 @@ fn mint_case(shared: bool, events: List[MintEvent]) -> MintCase {
             },
         }
     }
-    let attempts = list.len(asks[1])
-    let calls = list.len(asks[0])
     let mut rooms: List[u64] = list.new()
-    list.push(mut rooms, order.max(attempts, 1))
-    list.push(mut rooms, order.max(calls, 1))
+    list.push(mut rooms, order.max(list.len(asks[1]), 1))
+    list.push(mut rooms, order.max(list.len(asks[0]), 1))
     list.push(mut rooms, 1u64)
     list.push(mut rooms, order.max(list.len(asks[2]), 1))
-    let mut start = place(shared, rooms, clone(asks[1]), clone(asks[0]), list.new(), clone(asks[2]))
-    for entry in refused {
-        let index = match entry / 1000 {
-            2 => entry % 1000,
-            1 => attempts + entry % 1000,
-            _ => attempts + calls + entry % 1000,
-        }
-        start.requests[index].phase = Failed(OutOfBytes)
-    }
-    MintCase(start: take start, trace: take trace, unmodelled: list.len(refused))
+    MintCase(start: place(shared, rooms, clone(asks[1]), clone(asks[0]), list.new(), clone(asks[2])), trace: take trace)
 }
 
-/// Checks a law's mint log against the per-use mints, and returns how many of its mints
-/// returned Error(Capacity) with room left, which the model does not have.
-pub fn check_mints(events: List[MintEvent]) -> Result[u64, ()] {
-    let MintCase(start: take start, trace: take trace, unmodelled: unmodelled) = mint_case(false, events)
-    std.model.conforms_check(grant_model(take start, all_laws()), grant_bounds(), grant_boundary(), trace)?
-    Ok(unmodelled)
-}
-
-// The log of the v2.67 build (a332267e) under a faulting call mint, from a place with one
-// grant task and four granted calls: call 1 is served, call 2's mint faults and its asker
-// sees Failed(Gone), and calls 3 and 4 are answered Failed(Gone) with no mint started.
-/// bug: a build whose mint fault ends the grant task, as v2.67's does, passes the mint trace check (review 2486 F1).
-/// oracle: RUNNER-SPEC v2.69 CHANGES F1(b): a mint fault is `Raised` for its own request alone.
-@test
-fn grant_trace_v267_diverges() -> Result[(), ()] {
-    let mut events: List[MintEvent] = list.new()
-    list.push(mut events, MintStart(101))
-    list.push(mut events, MintAnswer(101, SawG))
-    list.push(mut events, MintMode(1, 1))
-    list.push(mut events, MintStart(102))
-    list.push(mut events, MintAnswer(102, SawOther))
-    let MintCase(start: take start, trace: take trace, unmodelled: _) = mint_case(false, events)
-    match std.model.conforms(grant_model(take start, all_laws()), grant_bounds(), grant_boundary(), trace) {
-        Diverged(2, _, NoTransition) => Ok(()),
-        _ => Error(()),
-    }
+/// Checks a law's mint log against the per-use mints.
+pub fn check_mints(events: List[MintEvent]) -> Result[(), ()] {
+    let MintCase(start: take start, trace: take trace) = mint_case(false, events)
+    std.model.conforms_check(grant_model(take start, all_laws()), grant_bounds(), grant_boundary(), trace)
 }

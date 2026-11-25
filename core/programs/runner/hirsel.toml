@@ -71,6 +71,7 @@ store = { major = 1, path = "../store" }
 "fixture.hirsel" = "fixture"
 "wire_client.hirsel" = "wire_client"
 "room_client.hirsel" = "room_client"
+"grant_mint_model.hirsel" = "grant_mint_model"
 
 [tests]
 limit = 67108864
@@ -134,7 +135,7 @@ dirs = ["."]
 "runner_owner_laws.hirsel" = "runner"
 "runner_room_client_law.hirsel" = "runner"
 "triggers_journal_laws.hirsel" = "triggers"
-"grant_mint_model.hirsel" = "grant_mint_model"
+"grant_mint_model_laws.hirsel" = "grant_mint_model"
 
 [tests.runs."runner@1/runner_calls/test_fixture_granted"]
 limit = 1342177280

@@ -1,0 +1,131 @@
+// The grant mint model's own laws and its trace mutants (grant_mint_model.hirsel holds the
+// model and `check_mints`, which runner's L36 laws and jwtbind call).
+fn one_each() -> List[u64] {
+    let mut room: List[u64] = list.new()
+    list.push(mut room, 1u64)
+    list.push(mut room, 1u64)
+    list.push(mut room, 1u64)
+    list.push(mut room, 1u64)
+    take room
+}
+
+fn three(a: Ask, b: Ask, c: Ask) -> List[Ask] {
+    let mut out: List[Ask] = list.new()
+    list.push(mut out, a)
+    list.push(mut out, b)
+    list.push(mut out, c)
+    take out
+}
+
+fn one(a: Ask) -> List[Ask] {
+    let mut out: List[Ask] = list.new()
+    list.push(mut out, a)
+    take out
+}
+
+fn two(a: Ask, b: Ask) -> List[Ask] {
+    let mut out: List[Ask] = list.new()
+    list.push(mut out, a)
+    list.push(mut out, b)
+    take out
+}
+
+fn just(law: Law) -> List[Law] {
+    let mut laws: List[Law] = list.new()
+    list.push(mut laws, law)
+    take laws
+}
+
+/// bug: wire calls starve the attempt mint, or a mint fault or step overrun ends the mint task (review 2486 F1, F3).
+/// oracle: RUNNER-SPEC v2.69 CHANGES F1, F3, F5, v2.70 F4, F5 and §12.1 "Mint tasks": one task, queue and `bytes` per use; isolate around bound steps; a mint's Error(c) fails only its own request (v2.71 §12.1 Outcomes).
+@test
+fn grant_mints_v269_closed() -> Result[(), ()] {
+    let mut calls = three(Plain, Faults, Plain)
+    list.push(mut calls, Loops)
+    let start = place(false, one_each(), two(Plain, Plain), calls, two(Faults, Plain), two(Refuses, Plain))
+    std.model.check(grant_model(take start, all_laws()), grant_bounds())
+}
+
+fn failed_as(take outcome: std.model.Outcome, expected: std.model.Kind) -> bool {
+    match outcome {
+        Failed(f) => std.model.kind(f) == expected,
+        _ => false,
+    }
+}
+
+fn v267_place() -> Place {
+    place(true, one_each(), two(Plain, Plain), three(Plain, Faults, Plain), two(Faults, Plain), list.new())
+}
+
+// Each law runs alone, so each shows its own counterexample: explore stops at the
+// shallowest failure.
+/// bug: v2.67's one grant task, queue and allowance pass for a bulkhead (review 2486 F1, F3).
+/// oracle: CHANGES-v2.67 item 1 (one task, arrival order, a waiting mint delays the next, one `bytes`) against v2.69 F1 and F3.
+@test
+fn grant_mints_v267_shared_fails() -> Result[(), ()] {
+    let contained = failed_as(std.model.explore(grant_model(v267_place(), just(Contained)), grant_bounds()), Violated(string.from("mint_fault_fails_only_its_own_request")))
+    let unblocked = failed_as(std.model.explore(grant_model(v267_place(), just(Unblocked)), grant_bounds()), Violated(string.from("due_attempt_never_blocked_by_call")))
+    let stuck = failed_as(std.model.explore(grant_model(v267_place(), list.new()), grant_bounds()), Stuck)
+    if contained && unblocked && stuck {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// The log of the v2.67 build (a332267e) under a faulting call mint, from a place with one
+// grant task and four granted calls: call 1 is served, call 2's mint faults and its asker
+// sees Failed(Gone), and calls 3 and 4 are answered Failed(Gone) with no mint started.
+/// bug: a build whose mint fault ends the grant task, as v2.67's does, passes the mint trace check (review 2486 F1).
+/// oracle: RUNNER-SPEC v2.69 CHANGES F1(b): a mint fault is `Raised` for its own request alone.
+@test
+fn grant_trace_v267_diverges() -> Result[(), ()] {
+    let mut events: List[MintEvent] = list.new()
+    list.push(mut events, MintStart(101))
+    list.push(mut events, MintAnswer(101, SawG))
+    list.push(mut events, MintMode(1, 1))
+    list.push(mut events, MintStart(102))
+    list.push(mut events, MintAnswer(102, SawOther))
+    let MintCase(start: take start, trace: take trace) = mint_case(false, events)
+    match std.model.conforms(grant_model(take start, all_laws()), grant_bounds(), grant_boundary(), trace) {
+        Diverged(2, _, NoTransition) => Ok(()),
+        _ => Error(()),
+    }
+}
+
+// A call mint asked to return Error(Capacity), after a served call: per RUNNER-SPEC v2.71
+// §12.1 "Mint tasks" (Outcomes, line 2153) its asker is answered Failed(OutOfBytes) and the
+// call mint goes on serving. A build that answers it Failed(Gone), as if the mint were
+// missing, must diverge at that mint, entry 2 (call 1 served, call 1 ended, call 2).
+fn refused_log(answer: Saw) -> List[MintEvent] {
+    let mut events: List[MintEvent] = list.new()
+    list.push(mut events, MintStart(101))
+    list.push(mut events, MintAnswer(101, SawG))
+    list.push(mut events, MintMode(1, 3))
+    list.push(mut events, MintStart(102))
+    list.push(mut events, MintAnswer(102, answer))
+    list.push(mut events, MintStart(103))
+    list.push(mut events, MintAnswer(103, SawG))
+    take events
+}
+
+/// bug: a build answers a mint's Error(Capacity) with room left as Gone, or the model has no such refusal and rejects a conforming build (lane 2563's skips).
+/// oracle: RUNNER-SPEC v2.71 §12.1 "Mint tasks", Outcomes: Error(c) from the mint fails that request with Failed(OutOfBytes) and the task keeps serving; §12.1 "Mint tasks (M)": no request is answered Failed(Gone) for a missing mint before Forced.
+@test
+fn grant_trace_refused_as_gone_diverges() -> Result[(), ()] {
+    let MintCase(start: take start, trace: take trace) = mint_case(false, refused_log(SawNoBytes))
+    let conforms = match std.model.conforms(grant_model(take start, all_laws()), grant_bounds(), grant_boundary(), trace) {
+        Conforms(_, _) => true,
+        _ => false,
+    }
+    let MintCase(start: take gone_start, trace: take gone_trace) = mint_case(false, refused_log(SawOther))
+    let diverges = match std.model.conforms(grant_model(take gone_start, all_laws()), grant_bounds(), grant_boundary(), gone_trace) {
+        Diverged(2, _, NoTransition) => true,
+        _ => false,
+    }
+    if conforms && diverges {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

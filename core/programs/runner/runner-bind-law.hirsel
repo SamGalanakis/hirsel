@@ -1,41 +1,61 @@
 // bind_granted (RUNNER-SPEC §3 "Binding", L36 v2.70): a place whose G holds a Sender, so
 // is not plain, binds each session with a G its bind mint makes and mints G for calls
 // and attempts from its `Grants`. The test chose seed 7 and subject byte 2 for credential
-// [2], so a bound session is Caller(2, [2]). Each mint reports its kind on the test's
-// channel: 1 for a call, 2 for a trigger attempt, 3 for a bind. The granted trigger run
-// reports seed * 10 + kind.
+// [2], so a bound session is Caller(2, [2]). Each mint reports the mint trace's start
+// record (runner-mint-laws.hirsel) on the test's channel: kind * 100 + serial, kind 1 for a
+// call, 2 for a trigger attempt, 3 for a bind, and serials 1, 2, .. per mint. The granted
+// trigger run reports 1000 + its G's record.
 type Probe: send {
     seed: u64,
     kind: u64,
+    serial: u64,
     report: Sender[u64]
 }
 
 type ProbeSeed: send {
     seed: u64,
+    serials: Receiver[u64],
     report: Sender[u64]
 }
 
 type ProbeReply: codec + send {
     seed: u64,
     kind: u64,
+    serial: u64,
     caller: runner.Caller
+}
+
+fn probe_seed(report: Sender[u64]) -> ProbeSeed {
+    let (serial_to, serials): (Sender[u64], Receiver[u64]) = channel.new(MN_SERIALS)
+    let mut n = 1u64
+    while n <= MN_SERIALS {
+        result.unwrap(channel.try_send(serial_to, n))
+        n += 1u64
+    }
+    ProbeSeed(seed: 7u64, serials: take serials, report: channel.sender(report))
 }
 
 // A mint cannot wait (RUNNER-SPEC v2.69), so it reports with try_send on a channel
 // the test sized for every report.
+fn probe_make(s: ProbeSeed, kind: u64) -> Result[Probe, Capacity] {
+    let serial = match channel.try_receive(s.serials) {
+        Ok(n) => n,
+        Error(_) => 0u64,
+    }
+    result.unwrap(channel.try_send(s.report, kind * 100u64 + serial))
+    Ok(Probe(seed: s.seed, kind: kind, serial: serial, report: channel.sender(s.report)))
+}
+
 fn probe_call(s: ProbeSeed, unused_handles: Hd, _call: ()) -> Result[Probe, Capacity] {
-    result.unwrap(channel.try_send(s.report, 1u64))
-    Ok(Probe(seed: s.seed, kind: 1u64, report: channel.sender(s.report)))
+    probe_make(s, 1u64)
 }
 
 fn probe_bind(s: ProbeSeed, unused_handles: Hd, _bind: ()) -> Result[Probe, Capacity] {
-    result.unwrap(channel.try_send(s.report, 3u64))
-    Ok(Probe(seed: s.seed, kind: 3u64, report: channel.sender(s.report)))
+    probe_make(s, 3u64)
 }
 
 fn probe_attempt(s: ProbeSeed, unused_handles: Hd, _context: runner.TriggerContext) -> Result[Probe, Capacity] {
-    result.unwrap(channel.try_send(s.report, 2u64))
-    Ok(Probe(seed: s.seed, kind: 2u64, report: channel.sender(s.report)))
+    probe_make(s, 2u64)
 }
 
 // A call list naming one granted entry.
@@ -46,11 +66,11 @@ fn granted_list[G, A: codec, R](f: StaticFn[fn(G, runner.Caller, take A) -> Resu
 }
 
 fn probed(g: Probe, caller: runner.Caller, take unused: u64) -> Result[ProbeReply, Capacity] {
-    Ok(ProbeReply(seed: g.seed, kind: g.kind, caller: clone(caller)))
+    Ok(ProbeReply(seed: g.seed, kind: g.kind, serial: g.serial, caller: clone(caller)))
 }
 
 fn probed_run(g: Probe, caller: runner.Caller, take k: u64) -> Result[u64, Capacity] waits {
-    result.unwrap(channel.send(g.report, g.seed * 10u64 + g.kind))
+    result.unwrap(channel.send(g.report, 1000u64 + g.kind * 100u64 + g.serial))
     Ok(k)
 }
 
@@ -96,10 +116,10 @@ fn probe_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, report: 
     session.n_pool = 4194304u64
     session.n_granted = 131072u64
     let binding: runner.Wire[Probe] = runner.wire(code.describe(chosen_caller), 4096u64, 65536u64)
-    let bind_mint = runner.Mint(seed: ProbeSeed(seed: 7u64, report: channel.sender(report)), mint: probe_bind, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)
-    let attempt = runner.Mint(seed: ProbeSeed(seed: 7u64, report: channel.sender(report)), mint: probe_attempt, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)
+    let bind_mint = runner.Mint(seed: probe_seed(report), mint: probe_bind, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)
+    let attempt = runner.Mint(seed: probe_seed(report), mint: probe_attempt, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)
     let grants: runner.Grants[Probe, Hd, ProbeSeed] = if call {
-        let calls = runner.Mint(seed: ProbeSeed(seed: 7u64, report: channel.sender(report)), mint: probe_call, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)
+        let calls = runner.Mint(seed: probe_seed(report), mint: probe_call, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)
         runner.Grants(attempt: Some(take attempt), call: Some(runner.CallMint(mint: take calls, entries: granted_list(code.describe(probed)))), claim: None, bind: Some(take bind_mint))
     } else {
         runner.Grants(attempt: Some(take attempt), call: None, claim: None, bind: Some(take bind_mint))
@@ -131,7 +151,11 @@ fn next_report(clock: Clock, reports: Receiver[u64]) -> u64 waits {
     }
 }
 
+// Each place's mint log is checked against grant_mint_model; the second place's mints
+// start their serials again, so it has its own log.
 pub fn law_bind_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let mut log: MintLog = list.new()
+    let mut bare_log: MintLog = list.new()
     let put_entry = fixture.transact_entry(code.describe(write))
     let arm_entry = fixture.transact_entry(code.describe(arm_probe))
     let probe_entry = fixture.granted_entry(code.describe(probed))
@@ -140,7 +164,7 @@ pub fn law_bind_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) ->
     let mut c = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
     let welcome = fixture.bound_caller(c)
     // (5) The bind mint made this session's G once, before the binding read it.
-    let welcomed = welcome.issuer == 2u8 && welcome.subject == b"\x02" && next_report(clock, reports) == 3u64
+    let welcomed = welcome.issuer == 2u8 && welcome.subject == b"\x02" && logged_bind(mut log, clock, reports) == 301u64
     // (2) A pure call commits and mints nothing.
     let pure = match result.unwrap(fixture.call(mut c, put_entry, 5u64, 2000u32)).answer {
         Returned(Ok(_)) => quiet(reports),
@@ -151,20 +175,28 @@ pub fn law_bind_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) ->
         Returned(Ok(_)) => true,
         _ => false
     }
-    let attempted = next_report(clock, reports) == 2u64 && next_report(clock, reports) == 72u64
+    let attempted = both_are(logged_attempt(mut log, clock, reports), 201u64, 1201u64)
     // A granted call records no stream position, so it comes after the stored calls: the
     // store admits only latest + 1 and would hold a later stored call behind it.
     // (1) A granted call runs with a call-minted G and the bound Caller.
     let called = match result.unwrap(fixture.call(mut c, probe_entry, 0u64, 2000u32)).answer {
-        Returned(r) => r.seed == 7u64 && r.kind == 1u64 && r.caller.issuer == 2u8 && r.caller.subject == b"\x02",
+        Returned(r) => r.seed == 7u64 && r.kind == 1u64 && r.serial == 1u64 && r.caller.issuer == 2u8 && r.caller.subject == b"\x02",
         _ => false,
     }
-    let call_minted = next_report(clock, reports) == 1u64 && quiet(reports)
-    // (3) A rejected credential closes 1008 before any entry runs; its bind still minted.
+    let call_record = next_report(clock, reports)
+    list.push(mut log, MintStart(call_record))
+    list.push(mut log, MintAnswer(call_record, if called {
+        SawG
+    } else {
+        SawOther
+    }))
+    let call_minted = call_record == 101u64 && quiet(reports)
+    // (3) A rejected credential closes 1008 before any entry runs; its bind still minted
+    // and served the binding its G (v2.71 B6).
     let probe_keys = result.unwrap(fixture.entry_keys(code.describe(probe_place)))
     let address = option.unwrap(fixture.status(wired).addr)
     let rejected = match wire_client.connect_for(tasks, net, address, clock, random, probe_keys, Some(b"\x02\x02"), runner.wire_defaults(65536u64).socket, 5000u64, 5000u64) {
-        Error(Protocol(1008u16)) => next_report(clock, reports) == 3u64 && quiet(reports),
+        Error(Protocol(1008u16)) => logged_bind(mut log, clock, reports) == 302u64 && quiet(reports),
         _ => false,
     }
     fixture.close(take c)
@@ -175,7 +207,7 @@ pub fn law_bind_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) ->
     // (4) Without a call mint the granted call is refused and nothing is minted.
     let bare = result.unwrap(fixture.start(probe_settings(clock, random, tasks, net, report, false), 5000u64))
     let mut d = result.unwrap(fixture.client(bare, Some(b"\x02"), 5000u64))
-    let bare_bound = next_report(clock, reports) == 3u64
+    let bare_bound = logged_bind(mut bare_log, clock, reports) == 301u64
     let refused = match result.unwrap(fixture.call(mut d, probe_entry, 0u64, 2000u32)).answer {
         Refused(NotAllowed) => quiet(reports),
         _ => false
@@ -185,7 +217,11 @@ pub fn law_bind_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) ->
         Ok(Stopped(None)) => true,
         _ => false
     }
-    welcomed && pure && called && call_minted && armed && attempted && rejected && stopped && bare_bound && refused && bare_stopped
+    let traced = match (grant_mint_model.check_mints(log), grant_mint_model.check_mints(bare_log)) {
+        (Ok(()), Ok(())) => true,
+        _ => false,
+    }
+    welcomed && pure && called && call_minted && armed && attempted && rejected && stopped && bare_bound && refused && bare_stopped && traced
 }
 
 @test

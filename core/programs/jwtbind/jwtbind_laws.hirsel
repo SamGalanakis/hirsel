@@ -409,7 +409,54 @@ type MacGrant: send {
     jwt: Grant
 }
 
-fn mac_bind_mint(s: MacGrant, _h: (), _bind: ()) -> Result[MacGrant, Capacity] {
+// A bind mint's seed: the Grant it shares into each bind, and the mint trace's report
+// channel (runner's grant_mint_model): each mint sends 300 + its serial, 1, 2, .., before
+// it makes its G.
+type JwtSeed: send {
+    jwt: Grant,
+    serials: Receiver[u64],
+    report: Sender[u64]
+}
+
+fn jwt_seed(take jwt: Grant, report: Sender[u64]) -> JwtSeed {
+    let (serial_to, serials): (Sender[u64], Receiver[u64]) = channel.new(4u64)
+    for n in 1u64 .. 5u64 {
+        result.unwrap(channel.try_send(serial_to, n))
+    }
+    JwtSeed(jwt: take jwt, serials: take serials, report: channel.sender(report))
+}
+
+// A mint cannot wait (RUNNER-SPEC v2.69), so it reports with try_send.
+fn mint_record(s: JwtSeed) {
+    let serial = match channel.try_receive(s.serials) {
+        Ok(n) => n,
+        Error(_) => 0u64,
+    }
+    result.unwrap(channel.try_send(s.report, 300u64 + serial))
+}
+
+// The mint reports before the binding runs, so a welcomed Hello's record is already sent.
+// One welcomed, then ended, bind 1, checked against grant_mint_model.
+fn one_bind_traced(reports: Receiver[u64]) -> bool {
+    let record = match channel.try_receive(reports) {
+        Ok(r) => r,
+        Error(_) => 0u64,
+    }
+    let mut log: List[runner.grant_mint_model.MintEvent] = list.new()
+    list.push(mut log, MintStart(record))
+    list.push(mut log, MintAnswer(record, SawG))
+    let quiet = match channel.try_receive(reports) {
+        Error(Empty) => true,
+        _ => false,
+    }
+    record == 301u64 && quiet && match runner.grant_mint_model.check_mints(log) {
+        Ok(()) => true,
+        Error(()) => false,
+    }
+}
+
+fn mac_bind_mint(s: JwtSeed, _h: (), _bind: ()) -> Result[MacGrant, Capacity] {
+    mint_record(s)
     Ok(MacGrant(jwt: share(s.jwt)))
 }
 
@@ -444,10 +491,11 @@ fn jwt_hmac_bind(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     check(rejected(try_bind(g2, H_NO_KID)), "L71: no kid with two keys is Rejected (AmbiguousKey)")
     check(rejected(try_bind(g2, H_K3)), "L71: an unknown kid at a Mac issuer is Rejected, never Unavailable")
     // The place runs on the virtual clock, so the runner's expiry test reads the wall the bind read.
-    let given: runner.Grants[MacGrant, (), MacGrant] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: MacGrant(jwt: grant(two)), mint: mac_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
+    let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(4u64)
+    let given: runner.Grants[MacGrant, (), JwtSeed] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: jwt_seed(grant(two), report), mint: mac_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
     let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[MacGrant, (), MacGrant] = runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(mac_place), n_place: 1048576u64, on_migrate: None, schema: code.describe(no_schema), session: session, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.wire(code.describe(mac_bound), BIND_BYTES, BIND_STEPS)), grants: Some(take given), triggers: None, idle: None)
+    let settings: runner.PlaceConfig[MacGrant, (), JwtSeed] = runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(mac_place), n_place: 1048576u64, on_migrate: None, schema: code.describe(no_schema), session: session, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.wire(code.describe(mac_bound), BIND_BYTES, BIND_STEPS)), grants: Some(take given), triggers: None, idle: None)
     let Ok(place) = runner.fixture.start(take settings, 5000u64) else {
         fail("L71: the Mac place did not start")
     }
@@ -456,6 +504,7 @@ fn jwt_hmac_bind(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     }
     let welcome = runner.fixture.bound_caller(client)
     check(welcome.issuer == 9u8 && welcome.subject == b"user-42", "L71: a Hello binds Caller(9, user-42) through the bind mint's shared key")
+    check(one_bind_traced(reports), "L71: the Hello's bind mint started once, as bind 1, and its trace conforms to grant_mint_model")
     runner.fixture.close(take client)
     check(match runner.fixture.end(take place, 5000u64) {
         Ok(Stopped(None)) => true,
@@ -640,7 +689,8 @@ type DefaultGrant: send {
     jwt: Grant
 }
 
-fn default_bind_mint(s: DefaultGrant, _h: (), _bind: ()) -> Result[DefaultGrant, Capacity] {
+fn default_bind_mint(s: JwtSeed, _h: (), _bind: ()) -> Result[DefaultGrant, Capacity] {
+    mint_record(s)
     Ok(DefaultGrant(jwt: share(s.jwt)))
 }
 
@@ -670,8 +720,9 @@ fn jwt_default_place(clock: Clock, r: Random, tasks: Tasks, n: Net) -> Result[()
     // wire_defaults but for the pool, which the test's limit cannot hold; n_granted stays 0.
     let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
-    let given: runner.Grants[DefaultGrant, (), DefaultGrant] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: DefaultGrant(jwt: grant(v)), mint: default_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
-    let settings: runner.PlaceConfig[DefaultGrant, (), DefaultGrant] = runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(default_place), n_place: 1048576u64, on_migrate: None, schema: code.describe(no_schema), session: session, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: clock, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.wire(code.describe(default_bound), BIND_BYTES, BIND_STEPS)), grants: Some(take given), triggers: None, idle: None)
+    let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(4u64)
+    let given: runner.Grants[DefaultGrant, (), JwtSeed] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: jwt_seed(grant(v), report), mint: default_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
+    let settings: runner.PlaceConfig[DefaultGrant, (), JwtSeed] = runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(default_place), n_place: 1048576u64, on_migrate: None, schema: code.describe(no_schema), session: session, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: clock, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.wire(code.describe(default_bound), BIND_BYTES, BIND_STEPS)), grants: Some(take given), triggers: None, idle: None)
     let Ok(place) = runner.fixture.start(take settings, 5000u64) else {
         fail("the default place did not start")
     }
@@ -680,6 +731,7 @@ fn jwt_default_place(clock: Clock, r: Random, tasks: Tasks, n: Net) -> Result[()
     }
     let welcome = runner.fixture.bound_caller(client)
     check(welcome.issuer == 9u8 && welcome.subject == b"user-42", "the default place welcomes Caller(9, user-42)")
+    check(one_bind_traced(reports), "the default place's bind mint started once, as bind 1, and its trace conforms to grant_mint_model")
     runner.fixture.close(take client)
     check(match runner.fixture.end(take place, 5000u64) {
         Ok(Stopped(None)) => true,

@@ -500,7 +500,8 @@ fn emit_module(
     // the linker keeps one per program, as it keeps one body. `revision`
     // addresses its revision root's carrier (`Module::revision_root`): an
     // item's is defined here plain weak as `{0, 0, 0}` so that a link that
-    // knows the reach defines over it; an intrinsic's holds its revision.
+    // knows the reach defines over it (a library that lends its bodies
+    // declares it); an intrinsic's holds its revision, weak_odr.
     let mut described = BTreeSet::new();
     let mut revisions = BTreeSet::new();
     for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
@@ -519,8 +520,8 @@ fn emit_module(
             let root = module.revision_root(function);
             let revision = hirsel_core_ir::revision_symbol(root.identity().digest());
             if revisions.insert(revision.clone()) {
-                let init = match &root {
-                    hirsel_core_ir::RevisionRoot::Item(_) => Value::Zero,
+                let (linkage, init) = match &root {
+                    hirsel_core_ir::RevisionRoot::Item(_) => (Linkage::Weak, Value::Zero),
                     hirsel_core_ir::RevisionRoot::Intrinsic(identity) => {
                         let bytes = format!("{revision}.bytes");
                         sink.global(&Global {
@@ -535,19 +536,23 @@ fn emit_module(
                             align: 1,
                             absolute_symbol: false,
                         });
-                        Value::Struct {
-                            packed: false,
-                            fields: vec![
-                                (Type::Ptr, Value::global(bytes)),
-                                (Type::I64, Value::Int(32)),
-                                (Type::I64, Value::Int(0)),
-                            ],
-                        }
+                        let fields = vec![
+                            (Type::Ptr, Value::global(bytes)),
+                            (Type::I64, Value::Int(32)),
+                            (Type::I64, Value::Int(0)),
+                        ];
+                        (
+                            Linkage::WeakOdr,
+                            Value::Struct {
+                                packed: false,
+                                fields,
+                            },
+                        )
                     }
                 };
                 sink.global(&Global {
                     name: revision.clone().into(),
-                    linkage: Linkage::Weak,
+                    linkage,
                     constant: true,
                     externally_initialized: false,
                     ty: Type::structure([Type::Ptr, Type::I64, Type::I64]),

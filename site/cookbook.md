@@ -223,7 +223,7 @@ fn account_schema(mut s: std.codec.Schema, dict: std.codec.Codec[Account]) -> Re
 }
 
 fn account_codec() -> std.codec.Codec[Account] {
-  std.codec.make(account_put, account_take, account_schema, 16)
+  std.codec.make(code.describe(account_put), code.describe(account_take), code.describe(account_schema), 16)
 }
 
 fn account_tiers(key: u64, a: Account) -> Result[List[u64], Capacity] {

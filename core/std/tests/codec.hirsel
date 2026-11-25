@@ -357,7 +357,7 @@ fn mix_schema(mut s: codec.Schema, c: codec.Codec[Mix]) -> Result[(), codec.Enco
 }
 
 fn mixes() -> codec.Codec[Mix] {
-    codec.make(mix_encode, mix_decode, mix_schema, 20)
+    codec.make(code.describe(mix_encode), code.describe(mix_decode), code.describe(mix_schema), 20)
 }
 
 // tag Some("a"), res Error("b"), m {"k": 5}, xs [-1], pair (9, true), by hand.
@@ -468,7 +468,7 @@ fn row_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.Enco
 }
 
 fn rows() -> codec.Codec[Row] {
-    codec.make(row_encode, row_decode, row_schema, 20)
+    codec.make(code.describe(row_encode), code.describe(row_decode), code.describe(row_schema), 20)
 }
 
 // Version 1: `{ id: u64, name: String }`.
@@ -491,7 +491,7 @@ fn v1_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.Encod
 }
 
 fn rows_v1() -> codec.Codec[Row] {
-    codec.make(v1_encode, row_decode, v1_schema, 12)
+    codec.make(code.describe(v1_encode), code.describe(row_decode), code.describe(v1_schema), 12)
 }
 
 // `{ name: String, id: u64 }`: the same fields, reordered.
@@ -515,7 +515,7 @@ fn swapped_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.
 }
 
 fn rows_swapped() -> codec.Codec[Row] {
-    codec.make(swapped_encode, row_decode, swapped_schema, 12)
+    codec.make(code.describe(swapped_encode), code.describe(row_decode), code.describe(swapped_schema), 12)
 }
 
 // `{ id: u64, note: String, name: String }`: note is "n" in every value written.
@@ -541,7 +541,7 @@ fn noted_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.En
 }
 
 fn rows_noted() -> codec.Codec[Row] {
-    codec.make(noted_encode, row_decode, noted_schema, 16)
+    codec.make(code.describe(noted_encode), code.describe(row_decode), code.describe(noted_schema), 16)
 }
 
 // A type with a tombstone: `type Row codec { id: u64, removed note: String,
@@ -599,7 +599,7 @@ fn renoted_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.
 }
 
 fn rows_tomb() -> codec.Codec[Row] {
-    codec.make(row_encode, row_decode, tomb_schema, 20)
+    codec.make(code.describe(row_encode), code.describe(row_decode), code.describe(tomb_schema), 20)
 }
 
 // Writers no evolution admits: id retyped to i64; a field `extra: bool` the reader
@@ -643,8 +643,8 @@ fn short_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), codec.En
     Ok(())
 }
 
-fn schema_bytes(w: fn(mut codec.Schema, codec.Codec[Row]) -> Result[(), codec.EncodeError]) -> Bytes {
-    result.unwrap(codec.schema(codec.make(row_encode, row_decode, w, 20)))
+fn schema_bytes(w: StaticFn[fn(mut codec.Schema, codec.Codec[Row]) -> Result[(), codec.EncodeError]]) -> Bytes {
+    result.unwrap(codec.schema(codec.make(code.describe(row_encode), code.describe(row_decode), w, 20)))
 }
 
 fn row(id: u64, name: String) -> Row {
@@ -682,7 +682,7 @@ fn refusal[T](c: codec.Codec[T], writer: Bytes, b: Bytes) -> u64 {
 // the definition inline fails it.
 // expect: run schema_by_hand() = true
 fn schema_by_hand() -> bool {
-    schema_bytes(v1_schema) == unhex("03 01000000 05000000 742e526f77 00000000 00 02000000 00 02000000 6964 06 00 04000000 6e616d65 0d 13 00000000")
+    schema_bytes(code.describe(v1_schema)) == unhex("03 01000000 05000000 742e526f77 00000000 00 02000000 00 02000000 6964 06 00 04000000 6e616d65 0d 13 00000000")
 }
 
 // A tombstone is in the schema (1, the name, its type) where its field was; so it is in
@@ -690,7 +690,7 @@ fn schema_by_hand() -> bool {
 // is there to resolve a writer's field against.
 // expect: run tombstone_in_schema() = true
 fn tombstone_in_schema() -> bool {
-    schema_bytes(tomb_schema) == unhex("03 01000000 05000000 742e526f77 00000000 00 04000000 00 02000000 6964 06 01 04000000 6e6f7465 0d 00 04000000 6e616d65 0d 00 05000000 73636f7265 0a 13 00000000")
+    schema_bytes(code.describe(tomb_schema)) == unhex("03 01000000 05000000 742e526f77 00000000 00 04000000 00 02000000 6964 06 01 04000000 6e6f7465 0d 00 04000000 6e616d65 0d 00 05000000 73636f7265 0a 13 00000000")
 }
 
 // CRC-64-AVRO (the Avro specification's Rabin fingerprint; reference values from its
@@ -766,10 +766,10 @@ fn fingerprint_step_bound() -> bool {
 // order or keeps the dropped field's bytes fails it.
 // expect: run evolution_reads_old_rows() = ((5, 2, 7), (6, 3, 7), (8, 1, 7), (9, 2, 3))
 fn evolution_reads_old_rows() -> ((u64, u64, i64), (u64, u64, i64), (u64, u64, i64), (u64, u64, i64)) {
-    let a = row_through(rows(), schema_bytes(v1_schema), enc(rows_v1(), row(5, "ab")))
-    let b = row_through(rows(), schema_bytes(swapped_schema), enc(rows_swapped(), row(6, "abc")))
-    let c = row_through(rows_tomb(), schema_bytes(noted_schema), enc(rows_noted(), row(8, "x")))
-    let d = row_through(rows(), schema_bytes(row_schema), enc(rows(), row(9, "yz")))
+    let a = row_through(rows(), schema_bytes(code.describe(v1_schema)), enc(rows_v1(), row(5, "ab")))
+    let b = row_through(rows(), schema_bytes(code.describe(swapped_schema)), enc(rows_swapped(), row(6, "abc")))
+    let c = row_through(rows_tomb(), schema_bytes(code.describe(noted_schema)), enc(rows_noted(), row(8, "x")))
+    let d = row_through(rows(), schema_bytes(code.describe(row_schema)), enc(rows(), row(9, "yz")))
     (a, b, c, d)
 }
 
@@ -784,12 +784,12 @@ fn evolution_reads_old_rows() -> ((u64, u64, i64), (u64, u64, i64), (u64, u64, i
 // expect: run evolution_refused() = (6030, 6041, 6005, 6005, 6001, 6040)
 fn evolution_refused() -> (u64, u64, u64, u64, u64, u64) {
     let none = unhex("")
-    let a = refusal(rows(), schema_bytes(retyped_schema), none)
-    let b = refusal(rows(), schema_bytes(extra_schema), none)
-    let c = refusal(rows(), schema_bytes(short_schema), none)
-    let d = refusal(codec.make(row_encode, row_decode, renoted_schema, 20), schema_bytes(tomb_schema), none)
+    let a = refusal(rows(), schema_bytes(code.describe(retyped_schema)), none)
+    let b = refusal(rows(), schema_bytes(code.describe(extra_schema)), none)
+    let c = refusal(rows(), schema_bytes(code.describe(short_schema)), none)
+    let d = refusal(codec.make(code.describe(row_encode), code.describe(row_decode), code.describe(renoted_schema), 20), schema_bytes(code.describe(tomb_schema)), none)
     let e = refusal(rows(), unhex("03 05"), none)
-    let f = refusal(codec.make(row_encode, row_decode, tomb_u64_schema, 20), schema_bytes(noted_schema), none)
+    let f = refusal(codec.make(code.describe(row_encode), code.describe(row_decode), code.describe(tomb_u64_schema), 20), schema_bytes(code.describe(noted_schema)), none)
     (a, b, c, d, e, f)
 }
 
@@ -799,9 +799,9 @@ fn evolution_refused() -> (u64, u64, u64, u64, u64, u64) {
 // is dropped, at its byte (12).
 // expect: run resolution_checks_writer_bytes() = (1008, 5014, 3012)
 fn resolution_checks_writer_bytes() -> (u64, u64, u64) {
-    let a = refusal(rows(), schema_bytes(v1_schema), unhex("0500000000000000 02000000 61"))
-    let b = refusal(rows(), schema_bytes(v1_schema), unhex("0500000000000000 02000000 6162 00"))
-    let c = refusal(rows_tomb(), schema_bytes(noted_schema), unhex("0500000000000000 01000000 ff 01000000 61"))
+    let a = refusal(rows(), schema_bytes(code.describe(v1_schema)), unhex("0500000000000000 02000000 61"))
+    let b = refusal(rows(), schema_bytes(code.describe(v1_schema)), unhex("0500000000000000 02000000 6162 00"))
+    let c = refusal(rows_tomb(), schema_bytes(code.describe(noted_schema)), unhex("0500000000000000 01000000 ff 01000000 61"))
     (a, b, c)
 }
 
@@ -855,7 +855,7 @@ fn shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), codec.
 }
 
 fn shapes() -> codec.Codec[Shape] {
-    codec.make(shape_encode, shape_decode, shape_schema, 4)
+    codec.make(code.describe(shape_encode), code.describe(shape_decode), code.describe(shape_schema), 4)
 }
 
 fn old_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), codec.EncodeError] {
@@ -927,8 +927,8 @@ fn renamed_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[()
     Ok(())
 }
 
-fn shape_schema_bytes(w: fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), codec.EncodeError]) -> Bytes {
-    result.unwrap(codec.schema(codec.make(shape_encode, shape_decode, w, 4)))
+fn shape_schema_bytes(w: StaticFn[fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), codec.EncodeError]]) -> Bytes {
+    result.unwrap(codec.schema(codec.make(code.describe(shape_encode), code.describe(shape_decode), w, 4)))
 }
 
 fn shape_code(x: Shape) -> u64 {
@@ -939,7 +939,7 @@ fn shape_code(x: Shape) -> u64 {
     }
 }
 
-fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), codec.EncodeError], b: Bytes) -> u64 {
+fn shape_through(reader: codec.Codec[Shape], w: StaticFn[fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), codec.EncodeError]], b: Bytes) -> u64 {
     match through(reader, shape_schema_bytes(w), b) {
         Ok(x) => shape_code(x),
         Error(k) => k
@@ -961,16 +961,16 @@ fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema, codec.Codec
 fn variant_evolution() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
     let circle = unhex("01000000 000000000000f03f")
     let rect = unhex("02000000 0100000000000000 0200000000000000")
-    let a = shape_through(shapes(), old_shape_schema, circle)
-    let cut = codec.make(shape_encode, cut_shape_decode, cut_shape_schema, 4)
-    let b = shape_through(cut, shape_schema, circle)
-    let c = shape_through(cut, shape_schema, rect)
-    let d = shape_through(shapes(), cut_shape_schema, circle)
-    let e = shape_through(shapes(), cut_shape_schema, rect)
-    let reader_old = codec.make(shape_encode, shape_decode, old_shape_schema, 4)
-    let f = shape_through(reader_old, shape_schema, circle)
-    let g = shape_through(shapes(), renamed_shape_schema, circle)
-    let h = shape_through(codec.make(shape_encode, cut_shape_decode, cut_i64_shape_schema, 4), shape_schema, circle)
+    let a = shape_through(shapes(), code.describe(old_shape_schema), circle)
+    let cut = codec.make(code.describe(shape_encode), code.describe(cut_shape_decode), code.describe(cut_shape_schema), 4)
+    let b = shape_through(cut, code.describe(shape_schema), circle)
+    let c = shape_through(cut, code.describe(shape_schema), rect)
+    let d = shape_through(shapes(), code.describe(cut_shape_schema), circle)
+    let e = shape_through(shapes(), code.describe(cut_shape_schema), rect)
+    let reader_old = codec.make(code.describe(shape_encode), code.describe(shape_decode), code.describe(old_shape_schema), 4)
+    let f = shape_through(reader_old, code.describe(shape_schema), circle)
+    let g = shape_through(shapes(), code.describe(renamed_shape_schema), circle)
+    let h = shape_through(codec.make(code.describe(shape_encode), code.describe(cut_shape_decode), code.describe(cut_i64_shape_schema), 4), code.describe(shape_schema), circle)
     (a, b, c, d, e, f, g, h)
 }
 
@@ -1030,7 +1030,7 @@ fn pair_u64_schema(mut s: codec.Schema, c: codec.Codec[Pair[u64]]) -> Result[(),
 }
 
 fn pairs_u64() -> codec.Codec[Pair[u64]] {
-    codec.make(pair_u64_encode, pair_u64_decode, pair_u64_schema, 16)
+    codec.make(code.describe(pair_u64_encode), code.describe(pair_u64_decode), code.describe(pair_u64_schema), 16)
 }
 
 fn pair_string_encode(x: Pair[String], mut out: Bytes) -> Result[(), codec.EncodeError] {
@@ -1046,7 +1046,7 @@ fn pair_string_schema(mut s: codec.Schema, c: codec.Codec[Pair[String]]) -> Resu
 }
 
 fn pairs_string() -> codec.Codec[Pair[String]] {
-    codec.make(pair_string_encode, pair_string_decode, pair_string_schema, 8)
+    codec.make(code.describe(pair_string_encode), code.describe(pair_string_decode), code.describe(pair_string_schema), 8)
 }
 
 // Pair[u64]'s schema by hand: one definition "t.Pair" with one argument (u64), two u64
@@ -1121,7 +1121,7 @@ fn tree_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), codec.En
 }
 
 fn trees() -> codec.Codec[Tree] {
-    codec.make(tree_encode, tree_decode, tree_schema, 12)
+    codec.make(code.describe(tree_encode), code.describe(tree_decode), code.describe(tree_schema), 12)
 }
 
 // An earlier Tree with its fields the other way round, as a writer.
@@ -1145,7 +1145,7 @@ fn swapped_tree_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), 
 }
 
 fn swapped_trees() -> codec.Codec[Tree] {
-    codec.make(swapped_tree_encode, tree_decode, swapped_tree_schema, 12)
+    codec.make(code.describe(swapped_tree_encode), code.describe(tree_decode), code.describe(swapped_tree_schema), 12)
 }
 
 // Labels in preorder as digits, iteratively, taking the tree apart as it goes.
@@ -1314,7 +1314,7 @@ fn failure_schema(mut s: codec.Schema, c: codec.Codec[Failure]) -> Result[(), co
 }
 
 fn failures() -> codec.Codec[Failure] {
-    codec.make(failure_encode, failure_decode, failure_schema, 20)
+    codec.make(code.describe(failure_encode), code.describe(failure_decode), code.describe(failure_schema), 20)
 }
 
 // Failure(at: 3, why: Utf8(9)) is 3, tag 2, 9; the schema holds both definitions, the
@@ -1379,7 +1379,7 @@ fn range_wire_schema(mut s: codec.Schema, c: codec.Codec[RangeWire]) -> Result[(
 }
 
 fn range_wires() -> codec.Codec[RangeWire] {
-    codec.make(range_wire_encode, range_wire_decode, range_wire_schema, 16)
+    codec.make(code.describe(range_wire_encode), code.describe(range_wire_decode), code.describe(range_wire_schema), 16)
 }
 
 fn range_encode(x: Range, mut out: Bytes) -> Result[(), codec.EncodeError] {
@@ -1401,7 +1401,7 @@ fn range_schema(mut s: codec.Schema, c: codec.Codec[Range]) -> Result[(), codec.
 }
 
 fn ranges() -> codec.Codec[Range] {
-    codec.make(range_encode, range_decode, range_schema, 16)
+    codec.make(code.describe(range_encode), code.describe(range_decode), code.describe(range_schema), 16)
 }
 
 fn range_at(b: Bytes, start: u64) -> u64 {
@@ -1544,7 +1544,7 @@ fn tk_schema(mut s: codec.Schema) -> Result[(), codec.EncodeError] {
 }
 
 fn tuple_keys() -> codec.Key[(Bytes, i32)] {
-    codec.key_make(tk_put, tk_take, tk_schema)
+    codec.key_make(code.describe(tk_put), code.describe(tk_take), code.describe(tk_schema))
 }
 
 // Key order is value order: on 3000 random pairs each of i64, u16, Bytes and the tuple
@@ -1704,10 +1704,10 @@ fn chain_bytes(depth: u64) -> Bytes {
 // that ignores start, or reports offsets from it, fails.
 // expect: run shared_reader_reads_in_place() = ((5, 2, 7), (9, 2, 3), (1010, 5016, 3014), (1010, 1001))
 fn shared_reader_reads_in_place() -> ((u64, u64, i64), (u64, u64, i64), (u64, u64, u64), (u64, u64)) {
-    let old = arc.new(sendable(resolved_rows(rows(), schema_bytes(v1_schema))))
+    let old = arc.new(sendable(resolved_rows(rows(), schema_bytes(code.describe(v1_schema)))))
     let held = arc.share(old)
-    let same = arc.new(sendable(resolved_rows(rows(), schema_bytes(row_schema))))
-    let tomb = resolved_rows(rows_tomb(), schema_bytes(noted_schema))
+    let same = arc.new(sendable(resolved_rows(rows(), schema_bytes(code.describe(row_schema)))))
+    let tomb = resolved_rows(rows_tomb(), schema_bytes(code.describe(noted_schema)))
     let a = row_at(old, behind(enc(rows_v1(), row(5, "ab"))))
     let b = row_at(same, behind(enc(rows(), row(9, "yz"))))
     let c = row_at(held, behind(unhex("0500000000000000 02000000 61")))
@@ -1814,14 +1814,14 @@ fn derived_record() -> (bool, bool, u64, (u64, u64, i64), (u64, u64, i64), (u64,
     let c: codec.Codec[DRow] = codec.of()
     let t: codec.Codec[DTomb] = codec.of()
     let written = enc(c, DRow(id: 5, name: "ab", score: 3)) == enc(rows(), row(5, "ab"))
-    let schemas = same_schema(c, schema_bytes(row_schema), "std.tests.codec.DRow") && same_schema(t, schema_bytes(tomb_schema), "std.tests.codec.DTomb")
-    let a = drow_through(schema_bytes(v1_schema), enc(rows_v1(), row(5, "ab")))
-    let b = drow_through(schema_bytes(swapped_schema), enc(rows_swapped(), row(6, "abc")))
-    let d = dtomb_through(schema_bytes(noted_schema), enc(rows_noted(), row(8, "x")))
-    let v1 = at_path(schema_bytes(v1_schema), "std.tests.codec.DRow")
+    let schemas = same_schema(c, schema_bytes(code.describe(row_schema)), "std.tests.codec.DRow") && same_schema(t, schema_bytes(code.describe(tomb_schema)), "std.tests.codec.DTomb")
+    let a = drow_through(schema_bytes(code.describe(v1_schema)), enc(rows_v1(), row(5, "ab")))
+    let b = drow_through(schema_bytes(code.describe(swapped_schema)), enc(rows_swapped(), row(6, "abc")))
+    let d = dtomb_through(schema_bytes(code.describe(noted_schema)), enc(rows_noted(), row(8, "x")))
+    let v1 = at_path(schema_bytes(code.describe(v1_schema)), "std.tests.codec.DRow")
     let e = refusal(c, v1, unhex("0500000000000000 02000000 61"))
     let f = refusal(c, v1, unhex("0500000000000000 02000000 6162 00"))
-    let g = refusal(t, at_path(schema_bytes(noted_schema), "std.tests.codec.DTomb"), unhex("0500000000000000 01000000 ff 01000000 61"))
+    let g = refusal(t, at_path(schema_bytes(code.describe(noted_schema)), "std.tests.codec.DTomb"), unhex("0500000000000000 01000000 ff 01000000 61"))
     (written, schemas, codec.least(c), a, b, d, (e, f, g))
 }
 
@@ -1857,14 +1857,14 @@ fn derived_sum() -> (bool, bool, u64, (u64, u64, u64, bool), u64, bool, (u64, u6
     let rect = unhex("02000000 0100000000000000 0200000000000000")
     let r: DShape = Rect(1, 2)
     let written = enc(c, r) == rect
-    let schema = same_schema(c, shape_schema_bytes(shape_schema), "std.tests.codec.DShape")
+    let schema = same_schema(c, shape_schema_bytes(code.describe(shape_schema)), "std.tests.codec.DShape")
     let tags = (outcome(c, unhex("03000000")), outcome(c, unhex("00000001")), outcome(c, unhex("0000000000000000")), prefixes(c, rect))
-    let old = match through(c, at_path(shape_schema_bytes(old_shape_schema), "std.tests.codec.DShape"), circle) {
+    let old = match through(c, at_path(shape_schema_bytes(code.describe(old_shape_schema)), "std.tests.codec.DShape"), circle) {
         Ok(x) => dshape_code(x),
         Error(k) => k
     }
-    let cut_schema = same_schema(cut, shape_schema_bytes(cut_shape_schema), "std.tests.codec.DCut")
-    let writer = at_path(shape_schema_bytes(shape_schema), "std.tests.codec.DCut")
+    let cut_schema = same_schema(cut, shape_schema_bytes(code.describe(cut_shape_schema)), "std.tests.codec.DCut")
+    let writer = at_path(shape_schema_bytes(code.describe(shape_schema)), "std.tests.codec.DCut")
     let a = match through(cut, writer, circle) {
         Ok(x) => dcut_code(x),
         Error(k) => k
@@ -2013,7 +2013,7 @@ fn derived_tree() -> (bool, u64, bool, u64, u64, u64, u64, bool) {
         Error(k) => k
     }
     let lying = outcome(c, unhex("0100000000000000 ffffffff"))
-    let oversized = codec.make(tree_encode, tree_decode, oversized_schema, 12)
+    let oversized = codec.make(code.describe(tree_encode), code.describe(tree_decode), code.describe(oversized_schema), 12)
     let refused = match codec.schema(oversized) {
         Error(CountOverflow(n)) => n == 0x100000000,
         Ok(_) => false

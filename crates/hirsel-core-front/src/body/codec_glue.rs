@@ -406,7 +406,8 @@ impl Derive<'_> {
         self.call(c, Callee::Direct(maker), signature, &[Arg::Address(at)]);
         Ok(at)
     }
-    /// The function field `field` (0 encoder, 1 decoder, 2 describer) of the codec at `at`.
+    /// The code of function field `field` (0 encoder, 1 decoder, 2 describer) of the
+    /// codec at `at`: the field is a `StaticFn`, its descriptor's first word the code.
     fn field_fn(c: &mut Code, at: AddressId, field: u32) -> ValueId {
         let f = Self::address(
             c,
@@ -414,13 +415,14 @@ impl Derive<'_> {
             &[Step::Field(field)],
             PlaceTy::Value(Ty::Ptr),
         );
-        let result = c.value(Ty::Ptr);
-        c.inst(Inst::Read {
-            result,
-            address: f,
-            mode: ReadMode::Bits,
-        });
-        result
+        let descriptor = c.read_at(f, Ty::Ptr);
+        let code = Self::address(
+            c,
+            AddressBase::Value(descriptor),
+            &[],
+            PlaceTy::Value(Ty::Ptr),
+        );
+        c.read_at(code, Ty::Ptr)
     }
     fn part_signature(&mut self, i: usize, op: CodecOp) -> SigId {
         let p = self.rows.parts[i];
@@ -479,7 +481,19 @@ impl Derive<'_> {
         {
             let function = row(self.module, self.of, self.rows, op);
             let result = c.value(Ty::Ptr);
-            c.inst(Inst::FunctionRef { result, function });
+            // A `StaticFn` (PROG-9), so the codec's revision covers this glue.
+            let instance = &self.module.instances[self.module.functions[function.index()].instance.index()];
+            let mut bytes = vec![1];
+            bytes.extend(instance.definition.to_string().into_bytes());
+            let identity = hirsel_core_ir::StaticId(self.module.statics.len() as u32);
+            self.module
+                .statics
+                .push(hirsel_core_ir::Static::Bytes { align: 1, bytes });
+            c.inst(Inst::DescriptorRef {
+                result,
+                function,
+                identity,
+            });
             let at = Self::address(
                 c,
                 AddressBase::Address(to),

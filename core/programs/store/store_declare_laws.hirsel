@@ -284,13 +284,64 @@ fn assert_cover_bytes(db: Db, index_id: u32, key: u64, expected: u64) -> Result[
     Ok(())
 }
 
-fn covering_revision_case(c: Clock, change_project: bool) -> Result[(), Error] waits {
+// What changed between the release that built the index and this one.
+type Drift = DriftExtractor | DriftProjection | DriftDefault | DriftFrom
+
+// A u64 on the wire as `{v, w: u64 = 7}`, read back as v + w: a row codec
+// whose default and `via`-style `from` are the parts each drift changes.
+fn drift_put(x: u64, mut out: Bytes) -> Result[(), std.codec.EncodeError] {
+    std.codec.put_u64(x, mut out)
+    std.codec.put_u64(0, mut out)
+    Ok(())
+}
+
+fn drift_take(b: Bytes, mut at: u64) -> Result[u64, std.codec.DecodeError] {
+    let v = std.codec.take_u64(b, mut at)?
+    Ok(v + std.codec.take_u64(b, mut at)?)
+}
+
+fn drift_take_shifted(b: Bytes, mut at: u64) -> Result[u64, std.codec.DecodeError] {
+    Ok(drift_take(b, mut at)? + 1000)
+}
+
+fn drift_schema(mut s: std.codec.Schema, c: std.codec.Codec[u64]) -> Result[(), std.codec.EncodeError] {
+    drift_fields(mut s, 7)
+}
+
+fn drift_schema_eight(mut s: std.codec.Schema, c: std.codec.Codec[u64]) -> Result[(), std.codec.EncodeError] {
+    drift_fields(mut s, 8)
+}
+
+fn drift_fields(mut s: std.codec.Schema, w: u64) -> Result[(), std.codec.EncodeError] {
+    std.codec.define(mut s, "store.Drift", 0)?
+    if std.codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    std.codec.field(mut s, "v")?
+    std.codec.schema_u64(mut s)
+    std.codec.field_default(mut s, "w", std.codec.of_u64(), w)?
+    std.codec.close(mut s)
+    Ok(())
+}
+
+fn drift_codec(drift: Drift) -> std.codec.Codec[u64] {
+    match drift {
+        DriftDefault => std.codec.make(code.describe(drift_put), code.describe(drift_take), code.describe(drift_schema_eight), 16),
+        DriftFrom => std.codec.make(code.describe(drift_put), code.describe(drift_take_shifted), code.describe(drift_schema), 16),
+        _ => std.codec.make(code.describe(drift_put), code.describe(drift_take), code.describe(drift_schema), 16),
+    }
+}
+
+fn covering_revision_case(c: Clock, drift: Drift) -> Result[(), Error] waits {
     let mut db = test_db(c, 1073741824)
     let key = std.codec.key_u64()
-    let value = std.codec.of_u64()
+    let value = drift_codec(DriftExtractor)
+    let payload = std.codec.of_u64()
+    // Each declaration records revisions, as one over a disk store does.
     let mut initial = declare(db, Migrate)?
+    initial.versioned = true
     let mut first_decl = declare_table(mut initial, "rows", key, value)?
-    let ix = covering(mut initial, mut first_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), value)?
+    let ix = covering(mut initial, mut first_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), payload)?
     let primary_table = finish(mut initial, take first_decl)?
     let _ = seal(mut db, take initial)?
     if !typed_put(mut db, primary_table, 5, 7) { return Error(MigrationFault) }
@@ -299,15 +350,17 @@ fn covering_revision_case(c: Clock, change_project: bool) -> Result[(), Error] w
     assert_cover_bytes(db, ix.id, 5, 13)?
 
     // Use the catalog bytes a previous release would leave. Its function names
-    // match and one revision differs. Give its entry a different payload too.
+    // match and one revision differs: forged for the extractor or projection,
+    // the row codec's own for a default or `from` this release changes. Give
+    // its entry a different payload too.
     let mut prior = schema_plan(db)
     let mut record = catalog_entry_in(prior.roots.catalog, ix.catalog_key)?
     let mut prior_revision: Bytes = list.new()
     list.fill(mut prior_revision, 32, 1u8)
-    if change_project {
-        record.projection = Some((copied(code.identity(code.describe(cover_sum)))?, take prior_revision))
-    } else {
-        record.revision = take prior_revision
+    match drift {
+        DriftExtractor => { record.revision = take prior_revision },
+        DriftProjection => { record.projection = Some((copied(code.identity(code.describe(cover_sum)))?, take prior_revision)) },
+        _ => (),
     }
     let raw = encode_catalog(record)?
     prior.roots = catalog_insert(mut prior.next_node, share_roots(prior.roots), ix.catalog_key, raw)?
@@ -320,30 +373,37 @@ fn covering_revision_case(c: Clock, change_project: bool) -> Result[(), Error] w
     let _ = put_page_row(mut prior.roots.collections, fake_key, fake_payload, prior.next_node + 1, mut prior.next_node)?
     prior.changed = true
     let _ = publish_schema_plan(mut db, take prior)?
+    let now = drift_codec(drift)
     let read_modes: Inline[Mode, 2] = [Open, Follower]
     for mode in read_modes {
         let mut opened = declare(db, Open)?
         opened.mode = mode
-        let mut open_decl = declare_table(mut opened, "rows", key, value)?
-        match covering(mut opened, mut open_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), value) {
+        opened.versioned = true
+        let mut open_decl = declare_table(mut opened, "rows", key, now)?
+        match covering(mut opened, mut open_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), payload) {
             Error(Changed(name)) if name == "cover" => (),
             _ => return Error(MigrationFault),
         }
     }
     let mut migration = declare(db, Migrate)?
-    let mut rebuilt_decl = declare_table(mut migration, "rows", key, value)?
-    let rebuilt = covering(mut migration, mut rebuilt_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), value)?
+    migration.versioned = true
+    let mut rebuilt_decl = declare_table(mut migration, "rows", key, now)?
+    let rebuilt = covering(mut migration, mut rebuilt_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), payload)?
     let _ = finish(mut migration, take rebuilt_decl)?
     let _ = seal(mut db, take migration)?
     if rebuilt.id == ix.id { return Error(MigrationFault) }
-    assert_cover_bytes(db, rebuilt.id, 5, 13)
+    // The rebuild reads row 5 = 8 through this release's codec.
+    let expected = match drift { DriftFrom => 1013u64, _ => 13u64 }
+    assert_cover_bytes(db, rebuilt.id, 5, expected)
 }
 
 @test
 fn test_index_declaration_laws(c: Clock) -> Result[(), Error] waits {
     law_unique_backfill(c)?
-    covering_revision_case(c, false)?
-    covering_revision_case(c, true)
+    covering_revision_case(c, DriftExtractor)?
+    covering_revision_case(c, DriftProjection)?
+    covering_revision_case(c, DriftDefault)?
+    covering_revision_case(c, DriftFrom)
 }
 
 fn conflict_first(key: u64, value: (u64, u64)) -> Result[List[u64], Capacity] {

@@ -3,7 +3,9 @@
 [API overview](../API.md).
 
 `std.codec.Codec[T]` is SEM-10's codec: a plain record of an encoder, a decoder, a schema
-writer, a lower bound on the encoded length, and whether its encoding set is empty. `of[T]()` is the only way a program
+writer (each a described function, `StaticFn`), a lower bound on the encoded length, and whether its encoding set is empty.
+`revision(c)` and `key_revision(k)` return the three parts' code revisions (PROG-9), 96 bytes,
+which change with any default literal or `via` body decoding reads. `of[T]()` is the only way a program
 names one. The checker resolves it per instance:
 
 | T | `of[T]()` is |
@@ -91,7 +93,7 @@ u32 decode sample was 66.74M (Rust 55.74M, 1.20x); this encode-only fix leaves d
 unchanged. See
 [the twin measurement](../../twins/codec/MEASURE.md) for the before/after results.
 
-**Writing a codec by hand.** `make(e, d, w, n)` supplies the parts of a hand-written codec. `put_X`/`take_X`,
+**Writing a codec by hand.** `make(code.describe(e), code.describe(d), code.describe(w), n)` supplies the parts of a hand-written codec, and `key_make(code.describe(e), code.describe(d), code.describe(w))` those of a key codec. `put_X`/`take_X`,
 `put_with`/`take_with`, `take_via`, and `define`, `record`, `sum`, `via`, `field`,
 `removed_field`, `variant`, `removed_variant` and `close` for the schema are its protocol.
 `need` checks that bytes remain, `take_count` bounds a count by the bytes left, `room`

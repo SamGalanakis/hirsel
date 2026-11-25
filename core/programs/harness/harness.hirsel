@@ -333,7 +333,7 @@ fn inbox_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
 }
 
 fn inbox_key() -> std.codec.Key[InboxKey] {
-    std.codec.key_make(put_inbox_key, take_inbox_key, inbox_schema)
+    std.codec.key_make(code.describe(put_inbox_key), code.describe(take_inbox_key), code.describe(inbox_schema))
 }
 
 fn put_effect_key(k: EffectKey, mut out: Bytes) {
@@ -361,7 +361,7 @@ fn quad_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
 }
 
 fn effect_key() -> std.codec.Key[EffectKey] {
-    std.codec.key_make(put_effect_key, take_effect_key, quad_schema)
+    std.codec.key_make(code.describe(put_effect_key), code.describe(take_effect_key), code.describe(quad_schema))
 }
 
 fn put_wait_key(k: WaitKey, mut out: Bytes) {
@@ -380,7 +380,7 @@ pub fn take_wait_key(raw: Bytes, mut at: u64) -> Result[WaitKey, std.codec.Decod
 }
 
 pub fn wait_key() -> std.codec.Key[WaitKey] {
-    std.codec.key_make(put_wait_key, take_wait_key, quad_schema)
+    std.codec.key_make(code.describe(put_wait_key), code.describe(take_wait_key), code.describe(quad_schema))
 }
 
 // Re-running the migration on a migrated store is a no-op, as for the

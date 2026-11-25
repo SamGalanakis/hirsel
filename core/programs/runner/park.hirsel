@@ -29,7 +29,7 @@ fn id_schema(mut schema: std.codec.Schema) -> Result[(), std.codec.EncodeError] 
     Ok(())
 }
 
-pub fn key() -> std.codec.Key[ParkId] { std.codec.key_make(put_id, read_id, id_schema) }
+pub fn key() -> std.codec.Key[ParkId] { std.codec.key_make(code.describe(put_id), code.describe(read_id), code.describe(id_schema)) }
 
 fn named(prefix: String, suffix: String) -> String {
     let mut name: String = clone(prefix)

@@ -843,8 +843,8 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
         string.push_i64(mut name, i)
         let _ = result.unwrap(store.create_table(mut db, store.spec(take name, std.codec.key_u64(), std.codec.of_u64())))
     }
-    let oc: std.codec.Codec[Old] = std.codec.make(old_put, old_take, old_schema, 8u64)
-    let nc: std.codec.Codec[New] = std.codec.make(new_put, new_take, new_schema, 16u64)
+    let oc: std.codec.Codec[Old] = std.codec.make(code.describe(old_put), code.describe(old_take), code.describe(old_schema), 8u64)
+    let nc: std.codec.Codec[New] = std.codec.make(code.describe(new_put), code.describe(new_take), code.describe(new_schema), 16u64)
     let _ = result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), oc)))
     let old = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), oc))
     let first = store.run(mut db, None, old, fn(mut tx, call_env) -> Result[(), store.Error] {
@@ -901,8 +901,8 @@ fn projection_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
 
 fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let oc: std.codec.Codec[Old] = std.codec.make(old_put, old_take, old_schema, 8u64)
-    let nc: std.codec.Codec[New] = std.codec.make(new_put, faulting_new_take, new_schema, 16u64)
+    let oc: std.codec.Codec[Old] = std.codec.make(code.describe(old_put), code.describe(old_take), code.describe(old_schema), 8u64)
+    let nc: std.codec.Codec[New] = std.codec.make(code.describe(new_put), code.describe(faulting_new_take), code.describe(new_schema), 16u64)
     let _ = result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), oc)))
     let old = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), oc))
     let _ = result.unwrap(store.run(mut db, None, (store.copy_env(balance), store.copy_env(old)), fn(mut tx, call_env) -> Result[(), store.Error] {

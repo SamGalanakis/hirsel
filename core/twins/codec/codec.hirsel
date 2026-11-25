@@ -29,7 +29,7 @@ fn floats_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[f64]]) -> Resu
 }
 
 fn floats() -> std.codec.Codec[List[f64]] {
-    std.codec.make(floats_encode, floats_decode, floats_schema, 4)
+    std.codec.make(code.describe(floats_encode), code.describe(floats_decode), code.describe(floats_schema), 4)
 }
 
 fn strings_encode(x: List[String], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
@@ -45,7 +45,7 @@ fn strings_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[String]]) -> 
 }
 
 fn strings() -> std.codec.Codec[List[String]] {
-    std.codec.make(strings_encode, strings_decode, strings_schema, 4)
+    std.codec.make(code.describe(strings_encode), code.describe(strings_decode), code.describe(strings_schema), 4)
 }
 
 // Owner k: "owner-" then k's decimal digits, 7 to 11 bytes.

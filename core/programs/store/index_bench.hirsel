@@ -34,7 +34,7 @@ fn account_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Account])
 }
 
 fn accounts() -> std.codec.Codec[Account] {
-    std.codec.make(account_put, account_take, account_schema, 24)
+    std.codec.make(code.describe(account_put), code.describe(account_take), code.describe(account_schema), 24)
 }
 
 fn bucket(a: Account) -> Result[u64, Capacity] {

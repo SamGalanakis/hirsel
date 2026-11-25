@@ -229,6 +229,27 @@ fn declaration_revision[F](versioned: bool, f: StaticFn[F]) -> Result[Bytes, Err
     Ok(list.new())
 }
 
+// An index's composite revision: its extractor's code revision, then the
+// codec revisions of K, V, J and P, which cover what decoding reads (defaults,
+// `via` bodies). A change to any of them changes what the index holds.
+fn index_revision[F, J, K, V, P](versioned: bool, by: StaticFn[F], t: Table[K, V],
+    key: std.codec.Key[J], codec: std.codec.Codec[P]) -> Result[Bytes, Error] {
+    let mut out = declaration_revision(versioned, by)?
+    if versioned {
+        codec_revision(mut out, std.codec.key_revision(t.key))?
+        codec_revision(mut out, std.codec.revision(t.readers.codec))?
+        codec_revision(mut out, std.codec.key_revision(key))?
+        codec_revision(mut out, std.codec.revision(codec))?
+    }
+    Ok(take out)
+}
+
+fn codec_revision(mut out: Bytes, take revision: Option[Bytes]) -> Result[(), Error] {
+    let Some(part) = revision else { return Error(Missing("revision")) }
+    list.append(mut out, part)
+    Ok(())
+}
+
 pub fn declare_single_index[J, K, V](mut d: Declare, t: TableDecl[K, V], name: String,
     by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
     active_table(d, t)?
@@ -277,7 +298,7 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
     let lookup_key = catalog_index_key(t.handle.id, name)?
     let mut proposed = Catalog(kind: 2, id: d.plan.next_table, owner: t.handle.id, epoch: 1,
         key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0,
-        by: copied(code.identity(by))?, revision: declaration_revision(d.versioned, by)?,
+        by: copied(code.identity(by))?, revision: index_revision(d.versioned, by, t.handle, key, codec)?,
         index_kind: kind, payload_schemas: list.new(), projection: None)
     let existing = match get_page_row(d.plan.roots.catalog, lookup_key) {
         Some(raw) => Some(decode_catalog(raw)?),

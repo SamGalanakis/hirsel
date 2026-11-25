@@ -21,7 +21,7 @@ fn activation_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeErro
 }
 
 fn activation_key() -> std.codec.Key[(u64, u64)] {
-    std.codec.key_make(put_activation, take_activation, activation_schema)
+    std.codec.key_make(code.describe(put_activation), code.describe(take_activation), code.describe(activation_schema))
 }
 
 fn status_text(s: launcher.Status) -> String {

@@ -368,7 +368,7 @@ fn due_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
 }
 
 fn due_key() -> std.codec.Key[DueKey] {
-    std.codec.key_make(put_due, take_due, due_schema)
+    std.codec.key_make(code.describe(put_due), code.describe(take_due), code.describe(due_schema))
 }
 
 fn created(take r: Result[store.Ticket, store.Error]) -> Result[(), store.Error] {

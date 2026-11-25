@@ -1366,7 +1366,7 @@ impl<'a> Gen<'a> {
         let (lets, least) = self.least_body();
         let header = format!("fn {name}$codec{generics}() -> {c}Codec[{ty}]");
         let empty = self.empty_body();
-        let args = format!("{name}$encode, {name}$decode, {name}$schema, {least}");
+        let args = format!("code.describe({name}$encode), code.describe({name}$decode), code.describe({name}$schema), {least}");
         let make = match empty {
             Some(empty) => format!("{c}make_derived({args}, {empty})"),
             None => format!("{c}make({args})"),

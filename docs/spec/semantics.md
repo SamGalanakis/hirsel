@@ -355,6 +355,18 @@ migration program. No other codec form exists, and no owner writes bytes. A type
 validates after a derived decode is written `via` a private record that derives its codec,
 as `Range` below.
 
+**Revision.** A codec's encoder, decoder and describer are described functions
+([PROG-9](programs.md#prog-9-code-descriptors)): a hand-made codec is
+`codec.make(code.describe(e), code.describe(d), code.describe(w), least)`, a key codec
+`codec.key_make(code.describe(e), code.describe(d), code.describe(w))`, and a generated one
+describes the functions its declaration generates. So `codec.revision(c)` (and
+`codec.key_revision(k)`) returns the three parts' code revisions in that order, 96 bytes, or
+None when the program was assembled without revisions. A part's code address
+([PROG-10](programs.md#prog-10-code-addresses)) covers every default literal, every `via`
+`to` and `from` body and the codec of every field type the part reaches, so a change to any of
+them changes the revision even where the schema, which holds no default and no body, stays
+equal. A store keys an index on the revisions of the codecs it reads through for this reason.
+
 **Old data.** Bytes are decoded against the **writer's schema**, the schema of the
 declaration that encoded them, which the library keeps with them. Decoding resolves the
 writer's schema against the reading declaration's, matching fields and variants by name,

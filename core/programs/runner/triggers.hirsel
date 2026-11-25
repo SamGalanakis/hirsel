@@ -109,7 +109,7 @@ fn id_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
 }
 
 fn id_key() -> std.codec.Key[Id] {
-    std.codec.key_make(put_id, take_id, id_schema)
+    std.codec.key_make(code.describe(put_id), code.describe(take_id), code.describe(id_schema))
 }
 
 fn row_due(row: SubRow) -> Result[u64, Capacity] {

@@ -872,6 +872,19 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
     name_from_content(m);
     bool whole = !unsplittable(m, /*shared=*/true).empty();
     if (lend) {
+        // A library that lends its bodies defines no placeholder (`weak`):
+        // the program's link defines over it, and a lent copy of its contents
+        // would fold. Every other constant the link keeps one of is lent.
+        for (GlobalVariable &g : m.globals()) {
+            if (g.isDeclaration() || !g.isConstant() || g.hasSection() || g.hasComdat()) continue;
+            if (g.hasWeakAnyLinkage()) {
+                g.setInitializer(nullptr);
+                g.setLinkage(GlobalValue::ExternalLinkage);
+            } else if (g.hasWeakODRLinkage()) {
+                g.setLinkage(GlobalValue::LinkOnceODRLinkage);
+                g.setVisibility(GlobalValue::HiddenVisibility);
+            }
+        }
         // A library whose target alone has no split (AArch64) is lent from
         // and generated whole: its local functions become hidden globals, as
         // its parts' are, so the names the lent bodies call are the names the

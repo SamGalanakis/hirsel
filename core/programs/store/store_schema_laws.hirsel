@@ -218,11 +218,11 @@ fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[NewAccount]) 
 }
 
 fn old_codec() -> std.codec.Codec[OldAccount] {
-    std.codec.make(old_put, old_take, old_schema, 8)
+    std.codec.make(code.describe(old_put), code.describe(old_take), code.describe(old_schema), 8)
 }
 
 fn new_codec() -> std.codec.Codec[NewAccount] {
-    std.codec.make(new_put, new_take, new_schema, 16)
+    std.codec.make(code.describe(new_put), code.describe(new_take), code.describe(new_schema), 16)
 }
 
 fn schema_zero_bytes(balance: u64) -> Bytes {
@@ -862,7 +862,7 @@ fn validation_refusal[K, V](mut tx: Tx, t: Table[K, V], key: K, value: V, expect
 
 pub fn law_put_validation(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    let refusing = std.codec.make(write_validation_encode, write_validation_decode, write_validation_schema, 8)
+    let refusing = std.codec.make(code.describe(write_validation_encode), code.describe(write_validation_decode), code.describe(write_validation_schema), 8)
     result.unwrap(create_table(mut db, spec("refusing", std.codec.key_u64(), refusing)))
     let mut t = result.unwrap(table(mut db, "refusing", std.codec.key_u64(), refusing))
     result.unwrap(create_index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))

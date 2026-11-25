@@ -457,7 +457,9 @@ function value and each descriptor (`code.describe`) in a block the body keeps, 
 function the compiler implements that such a block uses (below), and the finalizer of every
 type that a value in that code can hold, through fields and cases included. A hook that only
 describes a type, such as a codec maker no retained code calls, is metadata in its shape and
-never a slot. One inventory serves every consumer: the slots a body lists are the ones its
+never a slot. A codec maker that code calls is a slot, and the codec it returns holds its
+parts as descriptors, each a slot of the maker, so the parts' revisions cover the default
+literals and `via` bodies their decoding reads ([SEM-10](semantics.md#sem-10-codecs)). One inventory serves every consumer: the slots a body lists are the ones its
 group binds, the ones its program links, and the only places a revision root of a described
 function is looked for.
 

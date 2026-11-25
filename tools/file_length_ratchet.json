@@ -480,9 +480,9 @@
     "lines": 1978
   },
   "crates/hirsel-core-syntax/src/derive.rs": {
-    "lines": 1711,
-    "raise_revision": 1,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 1715,
+    "raise_revision": 2,
+    "reason": "census-compiler-reds-2567"
   },
   "crates/hirsel-core-syntax/src/parser.rs": {
     "lines": 1546,

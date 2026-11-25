@@ -1,0 +1,34 @@
+// A type named only by its own tombstone is no recursive group: a removed field or variant
+// is never decoded, so the derive writes a plain codec. DSelf(n: 9) is n's 8 bytes
+// (09 then seven 00) and DSelfCut's Leaf(3) is tag 0 (four 00) then 3's 8 bytes; each
+// reads back; least 8 and 12. A derive that took a tombstone's type for a recursion edge
+// built a frame loop with no resume point and panicked at checking.
+type DSelf: codec {
+    removed old: List[DSelf],
+    n: u64
+}
+
+type DSelfCut: codec = Leaf(u64) | removed Old(List[DSelfCut])
+
+fn bytes_of[T](c: codec.Codec[T], x: T) -> Bytes {
+    let mut out: Bytes = list.new()
+    result.unwrap(codec.encode(c, x, mut out))
+    take out
+}
+
+// expect: run derived_self_tombstone() = (8, 9, 12, 0, 3, 9, 3, 8, 12)
+pub fn derived_self_tombstone() -> (u64, u8, u64, u8, u8, u64, u64, u64, u64) {
+    let c: codec.Codec[DSelf] = codec.of()
+    let s: codec.Codec[DSelfCut] = codec.of()
+    let one = bytes_of(c, DSelf(n: 9))
+    let two = bytes_of(s, Leaf(3))
+    let n = match codec.decode(c, one) {
+        Ok(x) => x.n,
+        Error(_) => 0
+    }
+    let leaf = match codec.decode(s, two) {
+        Ok(Leaf(v)) => v,
+        Error(_) => 0
+    }
+    (list.len(one), one[0], list.len(two), two[0], two[4], n, leaf, codec.least(c), codec.least(s))
+}

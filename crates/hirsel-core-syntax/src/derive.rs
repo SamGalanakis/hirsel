@@ -325,8 +325,8 @@ struct Decl<'a> {
     body: Body<'a>,
     /// `via R (to: .., from: ..)`: the codec is R's, through the two functions.
     via: Option<Via<'a>>,
-    /// The bare names of this module's types its codec mentions: its field and payload
-    /// types, or a via type's R.
+    /// The bare names of this module's types its decode reads: its live fields' and
+    /// variants' payload types (a removed one is never decoded), or a via type's R.
     mentions: BTreeSet<&'a str>,
 }
 struct Via<'a> {
@@ -483,7 +483,9 @@ impl<'a> File<'a> {
                 NodeKind::Fields => {
                     let entries = self.children(c).iter().map(|&f| {
                         let fc = self.children(f);
-                        self.mentions(item, fc[0], &mut mentions);
+                        if self.kind(f) != NodeKind::RemovedField {
+                            self.mentions(item, fc[0], &mut mentions);
+                        }
                         Entry {
                             name: self.name(f),
                             source: self.text(item, f),
@@ -504,7 +506,9 @@ impl<'a> File<'a> {
                             .iter()
                             .map(|&p| {
                                 let t = self.children(p)[0];
-                                self.mentions(item, t, &mut mentions);
+                                if self.kind(v) != NodeKind::RemovedVariant {
+                                    self.mentions(item, t, &mut mentions);
+                                }
                                 Payload {
                                     label: self.syntax.tree.node(p).token.map(|_| self.name(p)),
                                     source: self.text(item, p),

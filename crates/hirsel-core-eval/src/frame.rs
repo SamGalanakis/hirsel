@@ -14,11 +14,63 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             .body
             .as_ref()
             .expect("external functions do not run here");
+        let l = self.lowered(f, b);
         let mut slots = self.take_words();
-        for s in &b.slots {
-            slots.push(self.block(self.place_size(*s), None, 0, None));
+        match &l {
+            Some(l) => self.frame_slots(&mut slots, l.slot_sizes()),
+            None => {
+                for s in &b.slots {
+                    slots.push(self.block(self.place_size(*s), None, 0, None));
+                }
+            }
         }
-        let r = self.frame(t, f, b, args, &slots);
+        self.enter_frame(t, f);
+        let r = match l {
+            Some(l) => self.flat_blocks(t, &l, b, &slots, flat::Args::Words(args)),
+            None => self.blocks(t, b, args, &slots),
+        };
+        t.at.pop();
+        self.free_slots(slots);
+        r
+    }
+
+    /// An activation is entered: FAIL-15 when the task's stack has no room left
+    /// and the activation limit end the entire run, bypassing every program
+    /// cleanup; then the host's `enter_call`.
+    #[inline(always)]
+    pub(super) fn enter(&mut self, t: &Task) {
+        let frame = 0u8;
+        let exhausted = TASK_STACK_ROOM.with(|room| {
+            let (base, available) = room.get();
+            base.abs_diff(&frame as *const u8 as usize) > available
+        });
+        if exhausted {
+            std::panic::resume_unwind(Box::new(RunStop("Stack")));
+        }
+        if t.at.len() >= self.activations {
+            std::panic::resume_unwind(Box::new(RunStop("Activations")));
+        }
+        H::enter_call(self, t, &frame as *const u8 as usize);
+    }
+
+    /// A frame slot of each size, pushed to `slots`.
+    pub(super) fn frame_slots(&mut self, slots: &mut Vec<u64>, sizes: &[u64]) {
+        for &size in sizes {
+            slots.push(self.block(size, None, 0, None));
+        }
+    }
+
+    /// `f`'s activation's site record, popped when it ends.
+    pub(super) fn enter_frame(&self, t: &mut Task, f: FuncId) {
+        t.at.push(Here {
+            f,
+            at: Pos::Entry,
+            inherits: self.inherits[f.index()],
+        });
+    }
+
+    /// An activation's slots end with it.
+    pub(super) fn free_slots(&mut self, slots: Vec<u64>) {
         for &p in &slots {
             let bytes = self.mem.remove(split(p).0).bytes;
             if bytes.capacity() <= SPARE_BYTES && self.spare.len() < SPARE_BUFFERS {
@@ -26,27 +78,6 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             }
         }
         self.words.push(slots);
-        r
-    }
-    pub(super) fn frame(
-        &mut self,
-        t: &mut Task,
-        f: FuncId,
-        b: &Body,
-        args: &[u64],
-        slots: &[u64],
-    ) -> X<()> {
-        t.at.push(Here {
-            f,
-            at: Pos::Entry,
-            inherits: self.inherits[f.index()],
-        });
-        let r = match self.lowered(f, b) {
-            Some(l) => self.flat_blocks(t, &l, b, args, slots),
-            None => self.blocks(t, b, args, slots),
-        };
-        t.at.pop();
-        r
     }
     pub(super) fn blocks(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<()> {
         let depth = t.limits.len();

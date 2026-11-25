@@ -1,5 +1,6 @@
 //! Lowering a body for the flat engine: its addresses resolved, its integer
-//! operations' widths and its calls' registers.
+//! operations' widths, its calls' registers, its terminators and its runs'
+//! instruction charges; and the verifier its register access rests on.
 use super::*;
 
 /// `int_binary` of integers of `width` bits, on u64 or i64, with its results
@@ -75,6 +76,130 @@ fn int_bits(op: BinaryOp, width: u32, a: u64, c: u64) -> Option<u64> {
     }
 }
 
+impl Lowered {
+    /// Count the runs of the block whose operations start at `start` and end
+    /// with the last one lowered, from each operation's instruction count in
+    /// `rest`: each operation's `rest`, and each call's and generic
+    /// instruction's `then`. What the block's first run charges.
+    fn runs(&mut self, start: usize) -> u32 {
+        // The instructions after `pc` to the end of its run.
+        let mut after = 0;
+        for pc in (start..self.ops.len()).rev() {
+            if let Op::Call { then, .. } | Op::Generic { then, .. } = &mut self.ops[pc] {
+                *then = after;
+                after = 0;
+            }
+            let count = std::mem::replace(&mut self.rest[pc], after);
+            after += count;
+        }
+        after
+    }
+}
+
+/// Prove every register, place and slot index `l` names below its body's
+/// counts, which `flat`'s unchecked register access rests on. A body that fails
+/// is a lowering bug.
+pub(super) fn verify(l: &Lowered) {
+    let Counts {
+        values,
+        addresses,
+        slots,
+    } = l.counts;
+    let value = |i: u32| assert!((i as usize) < values, "flat: value {i} of {values}");
+    let place = |i: u32| assert!((i as usize) < addresses, "flat: place {i} of {addresses}");
+    let slot = |i: u32| assert!((i as usize) < slots, "flat: slot {i} of {slots}");
+    for op in &l.ops {
+        match *op {
+            Op::Generic { .. }
+            | Op::Call { .. }
+            | Op::Step { .. }
+            | Op::Jump { .. }
+            | Op::Return { .. }
+            | Op::Exit { .. } => {}
+            Op::Int {
+                result,
+                left,
+                right,
+                ..
+            }
+            | Op::Wide {
+                result,
+                left,
+                right,
+                ..
+            }
+            | Op::Compare {
+                result,
+                left,
+                right,
+                ..
+            }
+            | Op::CompareBranch {
+                result,
+                left,
+                right,
+                ..
+            } => [result, left, right].into_iter().for_each(value),
+            Op::Slot { address, slot: s } => (place(address), slot(s)).1,
+            Op::Value { address, value: v } => (place(address), value(v)).1,
+            Op::Field {
+                address, place: p, ..
+            } => (place(address), place(p)).1,
+            Op::Address { address, .. } | Op::Unresolved { address, .. } => place(address),
+            Op::Read {
+                result, address, ..
+            }
+            | Op::Pointer { result, address } => (value(result), place(address)).1,
+            Op::Convert {
+                result,
+                flag,
+                operand,
+                ..
+            } => {
+                value(result);
+                value(operand);
+                if flag != NO_FLAG {
+                    value(flag);
+                }
+            }
+            Op::Store {
+                address, value: v, ..
+            } => (place(address), value(v)).1,
+            Op::Live { slot: s, .. } | Op::Dead { slot: s } => slot(s),
+            Op::Branch { condition, .. } => value(condition),
+        }
+    }
+    for &(d, s) in &l.moves {
+        value(d);
+        value(s);
+    }
+    for &(base, _) in &l.addresses {
+        match base {
+            Base::Slot(s) => slot(s),
+            Base::Value(v) => value(v),
+            Base::Place(x) => place(x),
+        }
+    }
+    for piece in &l.pieces {
+        match *piece {
+            Piece::Element { index, .. } | Piece::Scaled { index, .. } => value(index),
+            Piece::Offset(_) | Piece::Deref { .. } => {}
+        }
+    }
+    for c in &l.calls {
+        if let Callee::Indirect(v) = c.callee {
+            value(v.0);
+        }
+    }
+    for s in &l.args {
+        match *s {
+            Source::Value(v) => value(v),
+            Source::Place(a) => place(a),
+        }
+    }
+    l.results.iter().chain(&l.params).copied().for_each(value);
+}
+
 fn add_offset(pieces: &mut Vec<Piece>, off: u64) {
     match pieces.last_mut() {
         Some(Piece::Offset(o)) => *o += off,
@@ -89,7 +214,9 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         }
         let ty = |v: ValueId| b.values[v.index()];
         let mut l = Lowered {
-            ops: Vec::with_capacity(b.insts.len()),
+            ops: Vec::with_capacity(b.insts.len() + b.blocks.len()),
+            rest: Vec::with_capacity(b.insts.len() + b.blocks.len()),
+            init: vec![0; b.values.len()],
             blocks: Vec::with_capacity(b.blocks.len()),
             edges: Vec::with_capacity(b.edges.len()),
             moves: Vec::new(),
@@ -99,6 +226,19 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             calls: Vec::new(),
             args: Vec::new(),
             results: Vec::new(),
+            params: b.blocks[0]
+                .params
+                .get(&b.pools.values)
+                .unwrap()
+                .iter()
+                .map(|v| v.0)
+                .collect(),
+            sizes: b.slots.iter().map(|&s| self.place_size(s)).collect(),
+            counts: Counts {
+                values: b.values.len(),
+                addresses: b.addresses.len(),
+                slots: b.slots.len(),
+            },
         };
         let mut resolved = vec![None; b.addresses.len()];
         for a in 0..b.addresses.len() {
@@ -108,8 +248,11 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             .iter()
             .map(|r| r.flatten().map_or(At::Other, |(at, _)| at))
             .collect();
-        for blk in &b.blocks {
-            let start = l.ops.len() as u32;
+        for (k, blk) in b.blocks.iter().enumerate() {
+            let start = l.ops.len();
+            // The instructions since the last operation that are not one: the
+            // next operation counts them.
+            let mut pending = 0;
             let first = blk.insts.start;
             for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
                 let at = first + k as u32;
@@ -136,13 +279,18 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                         Op::Call {
                             at,
                             call: l.calls.len() as u32 - 1,
+                            then: 0,
                         }
                     }
                     Inst::Step { .. } => Op::Step { at },
-                    Inst::Const { result, bits } => Op::Const {
-                        result: result.0,
-                        bits,
-                    },
+                    // A value is defined once (wf), and a constant's register
+                    // holds nothing before its definition is read: the frame's
+                    // registers start with it.
+                    Inst::Const { result, bits } => {
+                        l.init[result.index()] = bits;
+                        pending += 1;
+                        continue;
+                    }
                     Inst::Binary {
                         result,
                         op,
@@ -236,11 +384,16 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                         value: value.0,
                         ty: ty(value),
                     },
-                    _ => Op::Generic { at },
+                    _ => Op::Generic { at, then: 0 },
                 };
                 l.ops.push(op);
+                l.rest.push(1 + pending);
+                pending = 0;
             }
-            l.blocks.push((start, l.ops.len() as u32));
+            let terminator = self.lower_terminator(b, k, start, pending, &mut l);
+            l.ops.push(terminator);
+            let charge = 1 + l.runs(start);
+            l.blocks.push((start as u32, charge));
         }
         for e in &b.edges {
             let params = b.blocks[e.target.index()]
@@ -255,13 +408,71 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
             let overlap = these
                 .iter()
                 .any(|&(d, _)| these.iter().any(|&(_, s)| s == d));
+            let (target, charge) = l.blocks[e.target.index()];
             l.edges.push(Edge {
-                target: e.target.0,
+                start: target,
+                charge,
                 moves: (start, l.moves.len() as u32),
                 overlap,
             });
         }
+        verify(&l);
         Some(l)
+    }
+
+    /// Block `k`'s terminator, whose block's operations start at `start`, after
+    /// `pending` instructions that are not operations; a branch on the block's
+    /// last operation's comparison takes it in. Its own one is the block entry's.
+    fn lower_terminator(
+        &self,
+        b: &Body,
+        k: usize,
+        start: usize,
+        pending: u32,
+        l: &mut Lowered,
+    ) -> Op {
+        l.rest.push(pending);
+        match b.terminators[k] {
+            Terminator::Jump(e) => Op::Jump { edge: e.0 },
+            Terminator::Branch { condition, yes, no } => match l.ops[start..].last() {
+                Some(&Op::Compare {
+                    result,
+                    op,
+                    signed,
+                    shift,
+                    left,
+                    right,
+                }) if result == condition.0 => {
+                    l.ops.pop();
+                    let compare = l.rest.pop().unwrap();
+                    *l.rest.last_mut().unwrap() += compare;
+                    Op::CompareBranch {
+                        op,
+                        signed,
+                        shift,
+                        left,
+                        right,
+                        result,
+                        yes: yes.0,
+                        no: no.0,
+                    }
+                }
+                _ => Op::Branch {
+                    condition: condition.0,
+                    yes: yes.0,
+                    no: no.0,
+                },
+            },
+            Terminator::Return(r) => {
+                let first = l.results.len() as u32;
+                let values = r.get(&b.pools.values).unwrap();
+                l.results.extend(values.iter().map(|v| v.0));
+                Op::Return {
+                    results: (first, l.results.len() as u32),
+                }
+            }
+            _ => Op::Exit { block: k as u32 },
+        }
     }
 
     /// Resolve address `a`, and the addresses it is based on, as `address` walks

@@ -4325,8 +4325,9 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     }
     fn check_write(&self, p: u64, len: usize) -> (usize, usize) {
         let (b, o) = split(p);
-        assert!(self.mem[b].live, "use of a freed block");
-        assert!(!self.mem[b].fixed, "a store into static data");
+        let blk = &self.mem[b];
+        assert!(blk.live, "use of a freed block");
+        assert!(!blk.fixed, "a store into static data");
         if let Some(&(_, at, n)) = self
             .frozen
             .iter()
@@ -5462,19 +5463,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     }
     /// Call `f`; its results are left in `results`.
     fn call(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<()> {
-        let frame = 0u8;
-        let exhausted = TASK_STACK_ROOM.with(|room| {
-            let (base, available) = room.get();
-            base.abs_diff(&frame as *const u8 as usize) > available
-        });
-        if exhausted {
-            // FAIL-15 bypasses every program cleanup and ends the entire run.
-            std::panic::resume_unwind(Box::new(RunStop("Stack")));
-        }
-        if t.at.len() >= self.activations {
-            std::panic::resume_unwind(Box::new(RunStop("Activations")));
-        }
-        H::enter_call(self, t, &frame as *const u8 as usize);
+        self.enter(t);
         let m = self.m;
         if let Some(facts) = &self.facts {
             let roles = self.roles[f.index()]

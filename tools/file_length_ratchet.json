@@ -234,9 +234,9 @@
     "reason": "coverage-c3-followups-2623"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
-    "lines": 4000,
-    "raise_revision": 2,
-    "reason": "comptime-eval-split-2612"
+    "lines": 3939,
+    "raise_revision": 3,
+    "reason": "comptime-e3c-dispatch-2663"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
     "lines": 2587,

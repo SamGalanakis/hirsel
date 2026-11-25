@@ -5,6 +5,8 @@
 ;   i0  fn count(n: u64) -> u64 { let mut i = 0; while i < n { i += 1 }; i }
 ;   i1  fn bounded(n: u64, k: u64) -> bool { bound steps k { count's loop over n } }
 ;   i2  fn calls(n: u64, k: u64) -> bool { bound steps k { count(n) } }
+;   i3  fn guarded(n: u64, k: u64) -> bool { bound steps k { let mut i = 0; while i < n { i += 1 } } }
+;       with the loop's step taken before its test, on every test (n + 1 of them)
 ; Each loop iteration takes one step. `bounded` and `calls` return whether the
 ; bound's OutOfTime was caught.
 ;
@@ -17,10 +19,14 @@
 ; run: f1(1, 0) -> true              ; a zero bound stops the first step
 ; run: f2(4, 4) -> false             ; the callee's four steps are charged to the caller's bound
 ; run: f2(9, 4) -> true              ; the callee's fifth step fails; the caller catches it
+; run: f3(4, 5) -> false             ; five tests, five steps: the last one takes the last step
+; run: f3(5, 5) -> true              ; the sixth test's step finds none left, before its compare
+; run: f3(0, 0) -> true              ; a zero bound stops the first test's step
 core v1
 item i0 = samples@0/steps/count
 item i1 = samples@0/steps/bounded
 item i2 = samples@0/steps/calls
+item i3 = samples@0/steps/guarded
 sig g0 = (u64) -> (u64)
 sig g1 = (u64, u64) -> (bool)
 sig g2 = (u64) -> (bool)
@@ -29,6 +35,7 @@ sig g4 = () -> (bool)
 inst n0 = samples@0/steps/count [] []
 inst n1 = samples@0/steps/bounded [] []
 inst n2 = samples@0/steps/calls [] []
+inst n3 = samples@0/steps/guarded [] []
 fn f0 = n0 g0 {
 b0(v0: u64):
   v1: u64 = const 0
@@ -90,5 +97,33 @@ b3:
 b4:
   return v2
 b5:
+  propagate
+}
+fn f3 = n3 g1 {
+b0(v0: u64, v1: u64):
+  v2: u64 = const 0
+  v3: u64 = const 1
+  v4: bool = const false
+  v5: bool = const true
+  v6: bool = call rt.step_enter g2 (v1)
+  branch v6, b1(v2), b5
+b1(v7: u64):
+  step fail b3
+  v8: bool = lt v7, v0
+  branch v8, b2, b4
+b2:
+  v9: u64 = add v7, v3
+  jump b1(v9)
+b3:
+  v10: bool = call rt.step_catch g4 ()
+  branch v10, b6, b7
+b4:
+  call rt.step_leave g3 ()
+  return v4
+b5:
+  return v4
+b6:
+  return v5
+b7:
   propagate
 }

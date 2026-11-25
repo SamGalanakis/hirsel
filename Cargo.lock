@@ -659,6 +659,7 @@ dependencies = [
  "hirsel-core-layout",
  "hirsel-core-net",
  "hirsel-guard",
+ "hirsel-intern",
  "serde_json",
  "twox-hash",
  "zeroize",

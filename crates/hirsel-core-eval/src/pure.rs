@@ -17,6 +17,9 @@ pub struct PureRun {
     /// The failure's chain, primary first: each cause's kind, message words and
     /// site.
     pub chain: Vec<String>,
+    /// The host instructions the pure thread retired running it (G1).
+    #[cfg(feature = "host-instructions")]
+    pub host: u64,
 }
 
 /// What a pure run executes on.
@@ -108,6 +111,12 @@ fn pure_root(
     limit: u64,
     core: &Core<'_>,
 ) -> PureRun {
+    #[cfg(feature = "host-instructions")]
+    let (counter, before) = {
+        let counter = hirsel_intern::instructions::InstructionCounter::open().unwrap();
+        let before = counter.read().unwrap();
+        (counter, before)
+    };
     let m = prepared.module.as_ref();
     let recipes = std::borrow::Cow::Borrowed(prepared.recipes.as_slice());
     let mut mach = Machine::with_host(m, recipes, limit, core, Pure);
@@ -136,7 +145,11 @@ fn pure_root(
         }
         Err(payload) => std::panic::resume_unwind(payload),
     };
+    #[cfg(feature = "host-instructions")]
+    let host = counter.read().unwrap() - before;
     PureRun {
+        #[cfg(feature = "host-instructions")]
+        host,
         outcome,
         destination: destination.map(|at| mach.mem[split(at).0].bytes.clone()),
         used: mach.root().used(),

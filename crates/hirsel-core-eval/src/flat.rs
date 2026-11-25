@@ -18,6 +18,22 @@
 //! - An integer `Binary` or `Compare` runs on u64 or i64; a `Binary` of another
 //!   type keeps the tree walker's i128 arithmetic.
 //! - A call's argument and result registers.
+//! - Terminators are operations, the last of their block's; a `Compare` whose
+//!   result a block's `Branch` tests is fused into it.
+//!
+//! A constant is not an operation: a frame's registers start with every
+//! constant's (a value is defined once, wf), and the operation after it counts
+//! its instruction.
+//!
+//! The executed-instruction count is charged by run: on entry to a block, the
+//! block's terminator and its instructions up to and including its first call
+//! or generic instruction; after each of those returns, the instructions up to
+//! the next. A run is what the tree walker charges unless an operation in it
+//! stops, and then the rest of the run is given back (`Lowered::rest`). A run stop
+//! unwinding out of a call or a generic instruction ends its run, so the count
+//! it leaves is the tree walker's too. One difference: an exhausted budget
+//! panics at the start of the run it falls in, the tree walker at the
+//! instruction; no pure run sets a budget.
 //!
 //! The activation's site is written before the operations that read it (a call,
 //! a generic instruction, a step under a bound) and when an operation stops.
@@ -28,9 +44,14 @@ use super::*;
 
 /// One body lowered.
 pub(super) struct Lowered {
-    /// Every block's operations, block after block.
+    /// Every block's operations, block after block, its terminator last.
     ops: Vec<Op>,
-    /// By block, its operations' range in `ops`.
+    /// By operation, the instructions after it to the end of its run: what is
+    /// given back when it stops.
+    rest: Vec<u32>,
+    /// The registers a frame starts with: each constant's, and 0.
+    init: Vec<u64>,
+    /// By block, its first operation and what its entry charges.
     blocks: Vec<(u32, u32)>,
     edges: Vec<Edge>,
     /// Edge moves as (destination, source) value registers.
@@ -44,14 +65,30 @@ pub(super) struct Lowered {
     calls: Vec<Call>,
     /// The calls' arguments.
     args: Vec<Source>,
-    /// The calls' result registers.
+    /// The calls' and returns' result registers.
     results: Vec<u32>,
+    /// Block 0's parameter registers.
+    params: Vec<u32>,
+    /// By slot, its size (`place_size`).
+    sizes: Vec<u64>,
+    /// The body's value, address and slot counts, which [`lower::verify`] proved
+    /// every register, place and slot index of the operations below.
+    counts: Counts,
 }
 
-/// An edge's target and its moves' range in `moves`, and whether a destination
-/// is also a source, so the moves go through a buffer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Counts {
+    values: usize,
+    addresses: usize,
+    slots: usize,
+}
+
+/// An edge's target block's first operation and entry charge, its moves' range
+/// in `moves`, and whether a destination is also a source, so the moves go
+/// through a buffer.
 struct Edge {
-    target: u32,
+    start: u32,
+    charge: u32,
     moves: (u32, u32),
     overlap: bool,
 }
@@ -95,30 +132,47 @@ struct Call {
 }
 
 #[derive(Clone, Copy)]
-enum Source {
+pub(super) enum Source {
     Value(u32),
     Place(u32),
 }
 
+impl Source {
+    /// The word this argument passes, from the caller's registers and places.
+    #[inline(always)]
+    fn of(self, vals: &[u64], places: &[(u64, At)]) -> u64 {
+        match self {
+            Source::Value(v) => get(vals, v),
+            Source::Place(a) => get(places, a).0,
+        }
+    }
+}
+
+/// A frame's arguments: words, or a direct call's sources in its caller's
+/// registers and places.
+pub(super) enum Args<'a> {
+    Words(&'a [u64]),
+    Caller(&'a [Source], &'a [u64], &'a [(u64, At)]),
+}
+
 /// An operation. One that can stop, or reads the site, carries `at`, the
-/// instruction it runs.
+/// instruction it runs. One that ends a run carries `then`, what the next run
+/// charges.
 #[derive(Clone, Copy)]
 enum Op {
     /// The tree walker's instruction `at`.
     Generic {
         at: u32,
+        then: u32,
     },
     /// `call` indexes `Lowered::calls`.
     Call {
         at: u32,
         call: u32,
+        then: u32,
     },
     Step {
         at: u32,
-    },
-    Const {
-        result: u32,
-        bits: u64,
     },
     /// A `Binary` over integers of `width` bits.
     Int {
@@ -209,6 +263,34 @@ enum Op {
     Dead {
         slot: u32,
     },
+    /// `jump`; `edge` indexes `Lowered::edges`, as do the branches' edges.
+    Jump {
+        edge: u32,
+    },
+    Branch {
+        condition: u32,
+        yes: u32,
+        no: u32,
+    },
+    /// A `Compare` and the `Branch` that tests its result, which is written too.
+    CompareBranch {
+        op: CompareOp,
+        signed: bool,
+        shift: u8,
+        left: u32,
+        right: u32,
+        result: u32,
+        yes: u32,
+        no: u32,
+    },
+    /// `return` of the registers `results` ranges over in `Lowered::results`.
+    Return {
+        results: (u32, u32),
+    },
+    /// Block `block`'s `switch`, `raise`, `propagate` or `unreachable`.
+    Exit {
+        block: u32,
+    },
 }
 
 const NO_FLAG: u32 = u32::MAX;
@@ -221,7 +303,7 @@ impl Op {
     /// The instruction a stop is at; only operations that can stop are asked.
     fn at(self) -> u32 {
         match self {
-            Op::Generic { at }
+            Op::Generic { at, .. }
             | Op::Call { at, .. }
             | Op::Step { at }
             | Op::Int { at, .. }
@@ -231,6 +313,26 @@ impl Op {
             _ => unreachable!("this operation does not stop"),
         }
     }
+}
+
+/// The register `i` of `regs`.
+#[inline(always)]
+fn get<T: Copy>(regs: &[T], i: u32) -> T {
+    debug_assert!((i as usize) < regs.len(), "register {i} of {}", regs.len());
+    // SAFETY: every register, place and slot index an operation, edge, call,
+    // piece or return names is below its body's count (`lower::verify`, run on
+    // each lowered body), and `flat_blocks` asserts its register, place and
+    // slot files are those counts long before it runs an operation.
+    unsafe { *regs.get_unchecked(i as usize) }
+}
+
+/// Write register `i` of `regs`.
+#[inline(always)]
+fn set<T>(regs: &mut [T], i: u32, x: T) {
+    debug_assert!((i as usize) < regs.len(), "register {i} of {}", regs.len());
+    // SAFETY: as `get`'s: `lower::verify` proved `i` below the count `flat_blocks`
+    // asserted `regs`' length equals.
+    unsafe { *regs.get_unchecked_mut(i as usize) = x }
 }
 
 /// The per-function lowering cache of a flat run.
@@ -246,6 +348,12 @@ pub(super) fn cache(m: &Module) -> Cache {
 mod lower;
 use lower::int_fast;
 
+/// An operation's stop or the activation's end.
+enum Flow {
+    Stop(Stop),
+    Done(X<()>),
+}
+
 impl<'m, H: Host<'m>> Machine<'m, H> {
     /// `f`'s body lowered, when this run is flat and the body can be.
     pub(super) fn lowered(&self, f: FuncId, b: &Body) -> Option<Arc<Lowered>> {
@@ -256,6 +364,49 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         self.flat.as_ref()?[f.index()]
             .get_or_init(|| self.lower(b).map(Arc::new))
             .clone()
+    }
+
+    /// Charge `n` executed instructions.
+    #[inline(always)]
+    fn charge(&mut self, n: u32) {
+        let n = u64::from(n);
+        assert!(
+            self.instructions >= n,
+            "evaluator instruction budget exhausted"
+        );
+        self.instructions -= n;
+    }
+
+    /// `Op::Store` of `x`.
+    #[inline(always)]
+    fn flat_store(&mut self, places: &[(u64, At)], address: u32, mut x: u64, ty: Ty) {
+        if let Some(k) = self.scrambled.as_mut()
+            && ty.is_float()
+            && float(ty, x).is_nan()
+        {
+            x = scrambled(ty, *k);
+            *k += 1;
+        }
+        let (p, held) = get(places, address);
+        let n = bytes_of(ty);
+        self.touch(AddressId(address), p, n, true);
+        self.store(p, n, x);
+        if let At::Word(w, size) = held {
+            self.check_carrier(p - w.offset(), size, Some(w));
+        }
+    }
+
+    /// `inst`'s `StorageLive` of a slot of `size` bytes at `p`, or with none its
+    /// `StorageDead`.
+    #[inline(never)]
+    fn storage(&mut self, p: u64, size: Option<u64>) {
+        let blk = &mut self.mem[split(p).0];
+        blk.bytes.clear();
+        blk.marks.clear();
+        blk.live = size.is_some();
+        if let Some(size) = size {
+            blk.bytes.resize(size as usize, 0);
+        }
     }
 
     /// The pointer of resolved address `r`, as `address` computes it.
@@ -269,9 +420,9 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
     ) -> X<u64> {
         let (base, (start, end)) = l.addresses[r as usize];
         let mut p = match base {
-            Base::Slot(s) => slots[s as usize],
-            Base::Value(v) => vals[v as usize],
-            Base::Place(x) => places[x as usize].0,
+            Base::Slot(s) => get(slots, s),
+            Base::Value(v) => get(vals, v),
+            Base::Place(x) => get(places, x).0,
         };
         for &piece in &l.pieces[start as usize..end as usize] {
             match piece {
@@ -279,13 +430,13 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                 Piece::Deref { counted: false } => p = self.load(p, 8),
                 Piece::Deref { counted: true } => p = self.load(p, 8) + 8,
                 Piece::Element { index, len, stride } => {
-                    let i = vals[index as usize];
+                    let i = get(vals, index);
                     if i >= len {
                         return Err(Stop::Cause("Bounds"));
                     }
                     p += i * stride;
                 }
-                Piece::Scaled { index, size } => p += vals[index as usize] * size,
+                Piece::Scaled { index, size } => p += get(vals, index) * size,
             }
         }
         Ok(p)
@@ -300,22 +451,23 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         vals: &mut [u64],
         places: &[(u64, At)],
     ) -> X<()> {
+        let sources = &l.args[c.args.0 as usize..c.args.1 as usize];
+        if let Callee::Direct(f) = c.callee
+            && !self.checks
+            && let Some(r) = self.flat_direct(t, f, sources, vals, places)
+        {
+            r?;
+            return self.flat_results(l, c, vals);
+        }
         let mut args = self.take_words();
-        args.extend(
-            l.args[c.args.0 as usize..c.args.1 as usize]
-                .iter()
-                .map(|&s| match s {
-                    Source::Value(v) => vals[v as usize],
-                    Source::Place(a) => places[a as usize].0,
-                }),
-        );
+        args.extend(sources.iter().map(|s| s.of(vals, places)));
         let held = self.frozen.len();
         if self.checks {
             self.lend(&self.m.signatures[c.signature.index()], &args);
         }
         let r = match c.callee {
             Callee::Direct(f) => self.call(t, f, &args),
-            Callee::Indirect(v) => self.call(t, FuncId((vals[v.index()] - FN_BASE) as u32), &args),
+            Callee::Indirect(v) => self.call(t, FuncId((get(vals, v.0) - FN_BASE) as u32), &args),
             Callee::Runtime(op) => self.rt(t, op, &args).map(|r| {
                 self.results.clear();
                 self.results.extend_from_slice(&r);
@@ -324,11 +476,134 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         self.frozen.truncate(held);
         self.words.push(args);
         r?;
+        self.flat_results(l, c, vals)
+    }
+
+    /// Call `c`'s results, from `results`, to its registers.
+    #[inline(always)]
+    fn flat_results(&mut self, l: &Lowered, c: &Call, vals: &mut [u64]) -> X<()> {
         let results = &l.results[c.results.0 as usize..c.results.1 as usize];
         for (&d, &w) in results.iter().zip(&self.results) {
-            vals[d as usize] = w;
+            set(vals, d, w);
         }
         Ok(())
+    }
+
+    /// A direct call of lowered `f` when checks are off: `call` and
+    /// `activation`, with the arguments read from the caller's registers into
+    /// the callee's. None when `f` is not lowered (or this run is observed).
+    fn flat_direct(
+        &mut self,
+        t: &mut Task,
+        f: FuncId,
+        sources: &[Source],
+        vals: &[u64],
+        places: &[(u64, At)],
+    ) -> Option<X<()>> {
+        let m = self.m;
+        let b = m.functions[f.index()]
+            .body
+            .as_ref()
+            .expect("external functions do not run here");
+        let callee = self.lowered(f, b)?;
+        self.enter(t);
+        let mut slots = self.take_words();
+        self.frame_slots(&mut slots, callee.slot_sizes());
+        self.enter_frame(t, f);
+        let r = self.flat_blocks(t, &callee, b, &slots, Args::Caller(sources, vals, places));
+        t.at.pop();
+        self.free_slots(slots);
+        Some(r)
+    }
+
+    /// The operation at `pc` stopped: its run's rest is given back, the cause
+    /// recorded at its site, and the run goes on at its failure edge's block,
+    /// whose first operation this returns.
+    #[cold]
+    #[inline(never)]
+    fn flat_stop(
+        &mut self,
+        t: &mut Task,
+        l: &Lowered,
+        b: &Body,
+        pc: usize,
+        stop: Stop,
+    ) -> Option<usize> {
+        let at = l.ops[pc].at();
+        self.instructions += u64::from(l.rest[pc]);
+        t.at.last_mut().unwrap().at = Pos::Inst(at);
+        self.stopped(t, stop);
+        let fb = b.insts[at as usize].fail(b)?;
+        let (start, charge) = l.blocks[fb.index()];
+        self.charge(charge);
+        Some(start as usize)
+    }
+
+    /// Block `block`'s terminator when it is not a jump, branch or return: the
+    /// first operation of the block it goes on in, or the activation's end.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn flat_exit(
+        &mut self,
+        t: &mut Task,
+        l: &Lowered,
+        b: &Body,
+        block: u32,
+        slots: &[u64],
+        vals: &mut [u64],
+        places: &[(u64, At)],
+    ) -> Result<usize, X<()>> {
+        match &b.terminators[block as usize] {
+            Terminator::Switch {
+                value,
+                arms,
+                otherwise,
+            } => {
+                let x = vals[value.index()];
+                let arms = arms.get(&b.pools.arms).unwrap();
+                let edge = arms
+                    .iter()
+                    .find(|a| a.value == x)
+                    .map_or(otherwise, |a| &a.edge);
+                Ok(self.flat_edge(l, edge.0, vals))
+            }
+            Terminator::Raise { cause: c, cleanup } => {
+                match self.raise(t, b, slots, vals, places, BlockId(block), c, *cleanup) {
+                    Ok(c) => {
+                        let (start, charge) = l.blocks[c.index()];
+                        self.charge(charge);
+                        Ok(start as usize)
+                    }
+                    Err(stop) => Err(Err(stop)),
+                }
+            }
+            Terminator::Propagate => Err(Err(Stop::Chained)),
+            Terminator::Unreachable => panic!("an unreachable point was reached"),
+            _ => unreachable!("lowered to its own operation"),
+        }
+    }
+
+    /// Take edge `edge`: its moves, then its target's entry; the target's first
+    /// operation.
+    #[inline(always)]
+    fn flat_edge(&mut self, l: &Lowered, edge: u32, vals: &mut [u64]) -> usize {
+        let e = &l.edges[edge as usize];
+        let moves = &l.moves[e.moves.0 as usize..e.moves.1 as usize];
+        if e.overlap {
+            let mut words = self.take_words();
+            words.extend(moves.iter().map(|&(_, s)| get(vals, s)));
+            for (&(d, _), &w) in moves.iter().zip(&words) {
+                set(vals, d, w);
+            }
+            self.words.push(words);
+        } else {
+            for &(d, s) in moves {
+                set(vals, d, get(vals, s));
+            }
+        }
+        self.charge(e.charge);
+        e.start as usize
     }
 
     /// The tree walker's `blocks`, run over `l`.
@@ -337,306 +612,285 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         t: &mut Task,
         l: &Lowered,
         b: &Body,
-        args: &[u64],
         slots: &[u64],
+        args: Args,
     ) -> X<()> {
         let depth = t.limits.len();
         let reserved = t.reserved.len();
         let mut vals = self.take_words();
-        vals.resize(b.values.len(), 0);
+        vals.extend_from_slice(&l.init);
         let mut vectors = simd::Vectors::default();
         let mut places = self.places.pop().unwrap_or_default();
         places.clear();
         places.resize(b.addresses.len(), (0u64, At::Other));
+        // What `get` and `set` rely on: the files are the verified counts long.
+        assert_eq!(
+            l.counts,
+            Counts {
+                values: vals.len(),
+                addresses: places.len(),
+                slots: slots.len(),
+            },
+            "a flat frame differs from its lowered body"
+        );
         let mut frame_charges = HashMap::new();
-        let pool = |r: PoolRange<ValueId>| r.get(&b.pools.values).unwrap();
-        for (p, &a) in pool(b.blocks[0].params).iter().zip(args) {
-            vals[p.index()] = a;
-        }
-        let site = |t: &mut Task, at: u32| t.at.last_mut().unwrap().at = Pos::Inst(at);
-        let mut block = 0usize;
-        let r = 'blocks: loop {
-            assert!(
-                self.instructions != 0,
-                "evaluator instruction budget exhausted"
-            );
-            self.instructions -= 1;
-            let (start, end) = l.blocks[block];
-            for &op in &l.ops[start as usize..end as usize] {
-                assert!(
-                    self.instructions != 0,
-                    "evaluator instruction budget exhausted"
-                );
-                self.instructions -= 1;
-                let r = match op {
-                    Op::Const { result, bits } => {
-                        vals[result as usize] = bits;
-                        continue;
-                    }
-                    Op::Int {
-                        result,
-                        op,
-                        signed,
-                        width,
-                        left,
-                        right,
-                        ..
-                    } => {
-                        let (a, c) = (vals[left as usize], vals[right as usize]);
-                        match int_fast(op, signed, u32::from(width), a, c) {
-                            Some(x) => {
-                                vals[result as usize] = x;
-                                continue;
-                            }
-                            None => Err(Stop::Cause(
-                                if matches!(op, BinaryOp::Div | BinaryOp::Rem) && c == 0 {
-                                    "Division"
-                                } else {
-                                    "Overflow"
-                                },
-                            )),
-                        }
-                    }
-                    Op::Wide {
-                        result,
-                        op,
-                        ty,
-                        left,
-                        right,
-                        ..
-                    } => {
-                        let (a, c) = (vals[left as usize], vals[right as usize]);
-                        match int_binary(ty, op, a, c) {
-                            Some(x) => {
-                                vals[result as usize] = x;
-                                continue;
-                            }
-                            None => Err(Stop::Cause(
-                                if matches!(op, BinaryOp::Div | BinaryOp::Rem) && c == 0 {
-                                    "Division"
-                                } else {
-                                    "Overflow"
-                                },
-                            )),
-                        }
-                    }
-                    Op::Compare {
-                        result,
-                        op,
-                        signed,
-                        shift,
-                        left,
-                        right,
-                    } => {
-                        let (a, c) = (vals[left as usize], vals[right as usize]);
-                        let ord = if signed {
-                            ((a << shift) as i64).cmp(&((c << shift) as i64))
-                        } else {
-                            a.cmp(&c)
-                        };
-                        use std::cmp::Ordering::*;
-                        vals[result as usize] = u64::from(match op {
-                            CompareOp::Eq => ord == Equal,
-                            CompareOp::Ne => ord != Equal,
-                            CompareOp::Lt => ord == Less,
-                            CompareOp::Le => ord != Greater,
-                            CompareOp::Gt => ord == Greater,
-                            CompareOp::Ge => ord != Less,
-                        });
-                        continue;
-                    }
-                    Op::Slot { address, slot } => {
-                        let a = address as usize;
-                        places[a] = (slots[slot as usize], l.ats[a]);
-                        continue;
-                    }
-                    Op::Value { address, value } => {
-                        let a = address as usize;
-                        places[a] = (vals[value as usize], l.ats[a]);
-                        continue;
-                    }
-                    Op::Field {
-                        address,
-                        place,
-                        offset,
-                    } => {
-                        let a = address as usize;
-                        places[a] = (places[place as usize].0 + offset, l.ats[a]);
-                        continue;
-                    }
-                    Op::Address {
-                        address, resolved, ..
-                    } => self
-                        .place_of(l, resolved, slots, &vals, &places)
-                        .map(|p| places[address as usize] = (p, l.ats[address as usize])),
-                    Op::Unresolved { address, .. } => self
-                        .address(b, slots, &vals, &places, AddressId(address))
-                        .map(|place| places[address as usize] = place),
-                    Op::Read { result, address, n } => {
-                        let (p, held) = places[address as usize];
-                        self.touch(AddressId(address), p, n as usize, false);
-                        vals[result as usize] = self.read_scalar(p, n as usize);
-                        if let At::Word(w, size) = held {
-                            self.check_carrier(p - w.offset(), size, None);
-                        }
-                        continue;
-                    }
-                    Op::Pointer { result, address } => {
-                        vals[result as usize] = places[address as usize].0;
-                        continue;
-                    }
-                    Op::Convert {
-                        result,
-                        flag,
-                        operand,
-                        mode,
-                        from,
-                        to,
-                    } => {
-                        let (r, fl) = convert(mode, from, to, vals[operand as usize]);
-                        vals[result as usize] = r;
-                        if flag != NO_FLAG {
-                            vals[flag as usize] = fl;
-                        }
-                        continue;
-                    }
-                    Op::Store { address, value, ty } => {
-                        let mut x = vals[value as usize];
-                        if let Some(k) = self.scrambled.as_mut()
-                            && ty.is_float()
-                            && float(ty, x).is_nan()
-                        {
-                            x = scrambled(ty, *k);
-                            *k += 1;
-                        }
-                        let (p, held) = places[address as usize];
-                        let n = bytes_of(ty);
-                        self.touch(AddressId(address), p, n, true);
-                        self.store(p, n, x);
-                        if let At::Word(w, size) = held {
-                            self.check_carrier(p - w.offset(), size, Some(w));
-                        }
-                        continue;
-                    }
-                    // `inst`'s `StorageLive` and `StorageDead`.
-                    Op::Live { slot, size } => {
-                        let blk = &mut self.mem[split(slots[slot as usize]).0];
-                        blk.bytes.clear();
-                        blk.bytes.resize(size as usize, 0);
-                        blk.marks.clear();
-                        blk.live = true;
-                        continue;
-                    }
-                    Op::Dead { slot } => {
-                        let blk = &mut self.mem[split(slots[slot as usize]).0];
-                        blk.live = false;
-                        blk.bytes.clear();
-                        blk.marks.clear();
-                        continue;
-                    }
-                    Op::Step { at } => {
-                        if t.step_bounds.is_empty() {
-                            self.steps = self.steps.saturating_add(1);
-                            continue;
-                        }
-                        site(t, at);
-                        self.take_steps(t, 1)
-                    }
-                    Op::Call { at, call } => {
-                        site(t, at);
-                        self.flat_call(t, l, &l.calls[call as usize], &mut vals, &places)
-                    }
-                    Op::Generic { at } => {
-                        site(t, at);
-                        self.inst(
-                            t,
-                            b,
-                            slots,
-                            &mut vals,
-                            &mut vectors,
-                            &mut places,
-                            &mut frame_charges,
-                            &b.insts[at as usize],
-                        )
-                    }
-                };
-                if let Err(stop) = r {
-                    let at = op.at();
-                    site(t, at);
-                    self.stopped(t, stop);
-                    match b.insts[at as usize].fail(b) {
-                        Some(fb) => {
-                            block = fb.index();
-                            continue 'blocks;
-                        }
-                        None => break 'blocks Err(Stop::Chained),
-                    }
+        match args {
+            Args::Words(args) => {
+                for (&p, &a) in l.params.iter().zip(args) {
+                    set(&mut vals, p, a);
                 }
             }
-            let edge = match &b.terminators[block] {
-                Terminator::Jump(e) => e,
-                Terminator::Branch { condition, yes, no } => {
-                    if vals[condition.index()] != 0 {
-                        yes
-                    } else {
-                        no
+            Args::Caller(sources, from, places) => {
+                for (&p, &s) in l.params.iter().zip(sources) {
+                    set(&mut vals, p, s.of(from, places));
+                }
+            }
+        }
+        let site = |t: &mut Task, at: u32| t.at.last_mut().unwrap().at = Pos::Inst(at);
+        let (start, charge) = l.blocks[0];
+        self.charge(charge);
+        let mut pc = start as usize;
+        let r = loop {
+            let r = match l.ops[pc] {
+                Op::Int {
+                    result,
+                    op,
+                    signed,
+                    width,
+                    left,
+                    right,
+                    ..
+                } => {
+                    let (a, c) = (get(&vals, left), get(&vals, right));
+                    match int_fast(op, signed, u32::from(width), a, c) {
+                        Some(x) => {
+                            set(&mut vals, result, x);
+                            pc += 1;
+                            continue;
+                        }
+                        None => Flow::Stop(Stop::Cause(arithmetic(op, c))),
                     }
                 }
-                Terminator::Switch {
-                    value,
-                    arms,
-                    otherwise,
+                Op::Wide {
+                    result,
+                    op,
+                    ty,
+                    left,
+                    right,
+                    ..
                 } => {
-                    let x = vals[value.index()];
-                    let arms = arms.get(&b.pools.arms).unwrap();
-                    arms.iter()
-                        .find(|a| a.value == x)
-                        .map_or(otherwise, |a| &a.edge)
+                    let (a, c) = (get(&vals, left), get(&vals, right));
+                    match int_binary(ty, op, a, c) {
+                        Some(x) => {
+                            set(&mut vals, result, x);
+                            pc += 1;
+                            continue;
+                        }
+                        None => Flow::Stop(Stop::Cause(arithmetic(op, c))),
+                    }
                 }
-                Terminator::Return(r) => {
-                    assert_eq!(t.limits.len(), depth, "a return left a bound scope open");
-                    assert_eq!(t.reserved.len(), reserved, "a return left an isolate open");
-                    self.results.clear();
-                    self.results
-                        .extend(pool(*r).iter().map(|id| vals[id.index()]));
-                    break 'blocks Ok(());
+                Op::Compare {
+                    result,
+                    op,
+                    signed,
+                    shift,
+                    left,
+                    right,
+                } => {
+                    let x = compare(op, signed, shift, get(&vals, left), get(&vals, right));
+                    set(&mut vals, result, u64::from(x));
+                    pc += 1;
+                    continue;
                 }
-                Terminator::Raise { cause: c, cleanup } => {
-                    match self.raise(
+                Op::Slot { address, slot } => {
+                    set(
+                        &mut places,
+                        address,
+                        (get(slots, slot), l.ats[address as usize]),
+                    );
+                    pc += 1;
+                    continue;
+                }
+                Op::Value { address, value } => {
+                    set(
+                        &mut places,
+                        address,
+                        (get(&vals, value), l.ats[address as usize]),
+                    );
+                    pc += 1;
+                    continue;
+                }
+                Op::Field {
+                    address,
+                    place,
+                    offset,
+                } => {
+                    let p = get(&places, place).0 + offset;
+                    set(&mut places, address, (p, l.ats[address as usize]));
+                    pc += 1;
+                    continue;
+                }
+                Op::Address {
+                    address, resolved, ..
+                } => match self.place_of(l, resolved, slots, &vals, &places) {
+                    Ok(p) => {
+                        set(&mut places, address, (p, l.ats[address as usize]));
+                        pc += 1;
+                        continue;
+                    }
+                    Err(stop) => Flow::Stop(stop),
+                },
+                Op::Unresolved { address, .. } => {
+                    match self.address(b, slots, &vals, &places, AddressId(address)) {
+                        Ok(place) => {
+                            set(&mut places, address, place);
+                            pc += 1;
+                            continue;
+                        }
+                        Err(stop) => Flow::Stop(stop),
+                    }
+                }
+                Op::Read { result, address, n } => {
+                    let (p, held) = get(&places, address);
+                    self.touch(AddressId(address), p, n as usize, false);
+                    set(&mut vals, result, self.read_scalar(p, n as usize));
+                    if let At::Word(w, size) = held {
+                        self.check_carrier(p - w.offset(), size, None);
+                    }
+                    pc += 1;
+                    continue;
+                }
+                Op::Pointer { result, address } => {
+                    set(&mut vals, result, get(&places, address).0);
+                    pc += 1;
+                    continue;
+                }
+                Op::Convert {
+                    result,
+                    flag,
+                    operand,
+                    mode,
+                    from,
+                    to,
+                } => {
+                    let (r, fl) = convert(mode, from, to, get(&vals, operand));
+                    set(&mut vals, result, r);
+                    if flag != NO_FLAG {
+                        set(&mut vals, flag, fl);
+                    }
+                    pc += 1;
+                    continue;
+                }
+                Op::Store { address, value, ty } => {
+                    self.flat_store(&places, address, get(&vals, value), ty);
+                    pc += 1;
+                    continue;
+                }
+                Op::Live { slot, size } => {
+                    self.storage(get(slots, slot), Some(size));
+                    pc += 1;
+                    continue;
+                }
+                Op::Dead { slot } => {
+                    self.storage(get(slots, slot), None);
+                    pc += 1;
+                    continue;
+                }
+                Op::Step { at } => {
+                    if t.step_bounds.is_empty() {
+                        self.steps = self.steps.saturating_add(1);
+                        pc += 1;
+                        continue;
+                    }
+                    site(t, at);
+                    match self.take_steps(t, 1) {
+                        Ok(()) => {
+                            pc += 1;
+                            continue;
+                        }
+                        Err(stop) => Flow::Stop(stop),
+                    }
+                }
+                Op::Call { at, call, then } => {
+                    site(t, at);
+                    match self.flat_call(t, l, &l.calls[call as usize], &mut vals, &places) {
+                        Ok(()) => {
+                            self.charge(then);
+                            pc += 1;
+                            continue;
+                        }
+                        Err(stop) => Flow::Stop(stop),
+                    }
+                }
+                Op::Generic { at, then } => {
+                    site(t, at);
+                    match self.inst(
                         t,
                         b,
                         slots,
-                        &vals,
-                        &places,
-                        BlockId(block as u32),
-                        c,
-                        *cleanup,
+                        &mut vals,
+                        &mut vectors,
+                        &mut places,
+                        &mut frame_charges,
+                        &b.insts[at as usize],
                     ) {
-                        Ok(c) => {
-                            block = c.index();
-                            continue 'blocks;
+                        Ok(()) => {
+                            self.charge(then);
+                            pc += 1;
+                            continue;
                         }
-                        Err(stop) => break 'blocks Err(stop),
+                        Err(stop) => Flow::Stop(stop),
                     }
                 }
-                Terminator::Propagate => break 'blocks Err(Stop::Chained),
-                Terminator::Unreachable => panic!("an unreachable point was reached"),
+                Op::Jump { edge } => {
+                    pc = self.flat_edge(l, edge, &mut vals);
+                    continue;
+                }
+                Op::Branch { condition, yes, no } => {
+                    let edge = if get(&vals, condition) != 0 { yes } else { no };
+                    pc = self.flat_edge(l, edge, &mut vals);
+                    continue;
+                }
+                Op::CompareBranch {
+                    op,
+                    signed,
+                    shift,
+                    left,
+                    right,
+                    result,
+                    yes,
+                    no,
+                } => {
+                    let x = compare(op, signed, shift, get(&vals, left), get(&vals, right));
+                    set(&mut vals, result, u64::from(x));
+                    pc = self.flat_edge(l, if x { yes } else { no }, &mut vals);
+                    continue;
+                }
+                Op::Return { results } => {
+                    assert_eq!(t.limits.len(), depth, "a return left a bound scope open");
+                    assert_eq!(t.reserved.len(), reserved, "a return left an isolate open");
+                    self.results.clear();
+                    let results = &l.results[results.0 as usize..results.1 as usize];
+                    self.results.extend(results.iter().map(|&v| get(&vals, v)));
+                    Flow::Done(Ok(()))
+                }
+                Op::Exit { block } => {
+                    match self.flat_exit(t, l, b, block, slots, &mut vals, &places) {
+                        Ok(next) => {
+                            pc = next;
+                            continue;
+                        }
+                        Err(done) => Flow::Done(done),
+                    }
+                }
             };
-            let e = &l.edges[edge.index()];
-            let moves = &l.moves[e.moves.0 as usize..e.moves.1 as usize];
-            if e.overlap {
-                let mut words = self.take_words();
-                words.extend(moves.iter().map(|&(_, s)| vals[s as usize]));
-                for (&(d, _), &w) in moves.iter().zip(&words) {
-                    vals[d as usize] = w;
-                }
-                self.words.push(words);
-            } else {
-                for &(d, s) in moves {
-                    vals[d as usize] = vals[s as usize];
-                }
+            match r {
+                Flow::Stop(stop) => match self.flat_stop(t, l, b, pc, stop) {
+                    Some(next) => pc = next,
+                    None => break Err(Stop::Chained),
+                },
+                Flow::Done(r) => break r,
             }
-            block = e.target as usize;
         };
         if r.is_err() {
             assert_eq!(t.limits.len(), depth, "a failure left a bound scope open");
@@ -645,5 +899,40 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
         self.words.push(vals);
         self.places.push(places);
         r
+    }
+}
+
+impl Lowered {
+    /// By slot, its size: what `place_size` gives for its type.
+    pub(super) fn slot_sizes(&self) -> &[u64] {
+        &self.sizes
+    }
+}
+
+/// A failed integer `Binary`'s cause.
+fn arithmetic(op: BinaryOp, right: u64) -> &'static str {
+    if matches!(op, BinaryOp::Div | BinaryOp::Rem) && right == 0 {
+        "Division"
+    } else {
+        "Overflow"
+    }
+}
+
+/// `Op::Compare`'s result.
+#[inline(always)]
+fn compare(op: CompareOp, signed: bool, shift: u8, a: u64, c: u64) -> bool {
+    let ord = if signed {
+        ((a << shift) as i64).cmp(&((c << shift) as i64))
+    } else {
+        a.cmp(&c)
+    };
+    use std::cmp::Ordering::*;
+    match op {
+        CompareOp::Eq => ord == Equal,
+        CompareOp::Ne => ord != Equal,
+        CompareOp::Lt => ord == Less,
+        CompareOp::Le => ord != Greater,
+        CompareOp::Gt => ord == Greater,
+        CompareOp::Ge => ord != Less,
     }
 }

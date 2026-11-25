@@ -9,8 +9,12 @@ rust-version.workspace = true
 [features]
 # Record each map operation's probes for the map-observation harness.
 map-observation = []
+# PureRun::host: the pure thread's retired host instructions, for the G1 probe
+# (hirsel-core-driver's `comptime-g1` feature).
+host-instructions = ["dep:hirsel-intern"]
 
 [dependencies]
+hirsel-intern = { path = "../hirsel-intern", optional = true }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-ir = { path = "../hirsel-core-ir" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }

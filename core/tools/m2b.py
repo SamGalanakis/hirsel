@@ -41,6 +41,7 @@ import sys
 import tempfile
 
 from case_progress import Case, run_case
+from std_native import library_sources
 
 ROOT = Path(__file__).resolve().parents[2]
 ENGINES = ('evaluator', 'cranelift', 'llvm')
@@ -53,8 +54,7 @@ def inputs(root, manifest, workload):
     for name in ('core', 'std'):
         packages.append({'package': core if name == 'core' else {'name': 'std', 'version': '1'},
                          'dependencies': [] if name == 'core' else [core],
-                         'sources': [{'file': str(p.resolve()), 'modules': [p.stem], 'signatures': True}
-                                     for p in sorted((root / 'core' / name).glob('*.hirsel'))]})
+                         'sources': library_sources(root / 'core' / name, True)})
     entry = next(e for e in manifest['entries'] if e['workload'] == workload)
     by_name = {p.get('id', p['package']['name']): p for p in manifest['packages']}
     use = entry.get('use', {})

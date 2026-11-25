@@ -14,6 +14,8 @@ is infallible (`extend_from_slice` aborts on OOM) where std.codec returns Capaci
 import argparse, fcntl, json, os, statistics, subprocess, sys, time
 from pathlib import Path
 
+from std_native import library_sources
+
 ROOT = Path(__file__).resolve().parents[2]
 CEILING = {'rows': 2.80, 'strings': 2.20}
 WORKS = {'rows': 0, 'strings': 2}
@@ -37,15 +39,11 @@ def wait_load():
         time.sleep(15)
 
 
-def sources(folder, signatures):
-    return [{'file': str(f), 'modules': [f.stem], 'signatures': signatures} for f in sorted(folder.glob('*.hirsel'))]
-
-
 core, std, app = ({'name': n, 'version': '1'} for n in ('core', 'std', 'app'))
 manifest = out / 'inputs.json'
 manifest.write_text(json.dumps({'core': core, 'packages': [
-    {'package': core, 'sources': sources(ROOT / 'core/core', True), 'dependencies': []},
-    {'package': std, 'sources': sources(ROOT / 'core/std', False), 'dependencies': [core]},
+    {'package': core, 'sources': library_sources(ROOT / 'core/core', True), 'dependencies': []},
+    {'package': std, 'sources': library_sources(ROOT / 'core/std', False), 'dependencies': [core]},
     {'package': app, 'sources': [{'file': str(ROOT / 'core/twins/codec/codec.hirsel'), 'modules': ['main'], 'signatures': False}],
      'dependencies': [core, std]}]}))
 hirsel = out / 'codec-hirsel'

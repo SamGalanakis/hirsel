@@ -84,7 +84,7 @@ BUILD_SCRIPT_SOURCES = {
 
 BUILD_SCRIPT_INPUTS = {
     "hirsel-core-diag": ["docs/spec/*.md", "core/front/cases/**/*.hirsel"],
-    "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel", "core/std/sim/*.hirsel",
+    "hirsel-core-driver": ["core/core/**", "core/std/**/*.hirsel",
                           "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/programs/runner/frame-schema.bin"],
 }
 
@@ -488,7 +488,7 @@ def first_party(meta: dict) -> str:
         'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_toolchain_packages", "hirsel_test", "hirsel_toolchain_bundle", "hirsel_dev_fixture_cache")\n',
     ]
 
-    out.append("\n" + "\n".join(call("export_file", name=f"darwin-{library.lower()}-symbols", src=f"tools/native-toolchain/darwin/{library}.symbols", visibility=["PUBLIC"]) for library in ("libSystem", "CoreFoundation", "Security")) + "\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/*.hirsel", "core/std/sim/*.hirsel"])')))
+    out.append("\n" + "\n".join(call("export_file", name=f"darwin-{library.lower()}-symbols", src=f"tools/native-toolchain/darwin/{library}.symbols", visibility=["PUBLIC"]) for library in ("libSystem", "CoreFoundation", "Security")) + "\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/**/*.hirsel"], exclude = ["core/std/tests/**"])')))
     out.append("\n" + call("hirsel_script_test", name="test-fmt", script="tools/tests/fmt.py", host=True,
                            data=["//tools/buck2:fmt.py"],
                            files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
@@ -568,7 +568,7 @@ def first_party(meta: dict) -> str:
                 crate_root=relative(src),
                 srcs=Raw(f"glob({starlark(BUILD_SCRIPT_SOURCES[name], 4)})") if name in BUILD_SCRIPT_SOURCES else [relative(src)],
                 deps=sorted(deps["build"]),
-                inputs=Raw(f"glob({starlark(BUILD_SCRIPT_INPUTS[name], 4)})"),
+                inputs=Raw(f"glob({starlark(BUILD_SCRIPT_INPUTS[name], 4)}, exclude = {starlark(['core/std/tests/**'] if name == 'hirsel-core-driver' else [], 4)})"),
                 features=features,
                 **common,
             ))

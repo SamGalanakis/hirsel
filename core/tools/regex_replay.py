@@ -59,8 +59,8 @@ def run(compiler, runtime, recording_runtime, evaluator):
         libraries = work / "libraries"
         (libraries / "std").mkdir(parents=True)
         (libraries / "core").symlink_to(ROOT / "core/core", target_is_directory=True)
-        for module in (ROOT / "core/std").glob("*.hirsel"):
-            shutil.copyfile(module, libraries / "std" / module.name)
+        shutil.copytree(ROOT / "core/std", libraries / "std", dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("tests"))
         body = libraries / "std/regex.hirsel"
         finalizers = law.with_name("regex_finalizer.hirsel").read_text()
         bounded_search = finalizers[finalizers.index("resource type BoundedSearch"):].replace("regex.", "")

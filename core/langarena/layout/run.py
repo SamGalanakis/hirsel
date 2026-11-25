@@ -11,7 +11,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'core/tools'))
-from std_native import wait_load, first_stop
+from std_native import first_stop, library_sources, wait_load
 
 
 def toolchain_identity(compiler, runtime, compiler_profile):
@@ -29,14 +29,11 @@ def manifest(module):
     core = {'name': 'core', 'version': '1'}
     std = {'name': 'std', 'version': '1'}
     app = {'name': 'layout', 'version': '1'}
-    def sources(where, signatures):
-        return [{'file': str(p.resolve()), 'modules': [p.stem], 'signatures': signatures}
-                for p in sorted(where.glob('*.hirsel'))]
     generated = ([{'file': str(Path(__file__).with_name('graph_inputs.hirsel')), 'modules': ['graph_inputs'], 'signatures': False}] if module == 'graph' else [])
     return {'core': core, 'packages': [
-        {'package': core, 'sources': sources(ROOT / 'core/core', True), 'dependencies': []},
+        {'package': core, 'sources': library_sources(ROOT / 'core/core', True), 'dependencies': []},
         # std by signature, like core: an installed build takes both from the package product.
-        {'package': std, 'sources': sources(ROOT / 'core/std', True), 'dependencies': [core]},
+        {'package': std, 'sources': library_sources(ROOT / 'core/std', True), 'dependencies': [core]},
         {'package': app, 'sources': [{'file': str(Path(__file__).with_name(module + '.hirsel')),
                                     'modules': [module], 'signatures': False}, *generated], 'dependencies': [core, std]}]}
 

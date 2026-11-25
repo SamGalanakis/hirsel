@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
-from std_native import wait_load
+from std_native import library_sources, wait_load
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -23,12 +23,12 @@ def inputs(root, module, source=None):
                  'signatures': directory.name in ('core', 'std')}
                 for p in sorted(directory.rglob('*.hirsel')) if 'tests' not in p.relative_to(directory).parts or directory.name == 'langarena']
     # core and std by signature: both come from the package product, as an installed build gets them.
-    libraries = files(root / 'core/std')
+    libraries = library_sources(root / 'core/std', True)
     ports = files(root / 'core/langarena')
     if source:
         next(p for p in ports if p['modules'] == module.split('/'))['file'] = str(source)
     return {'core': core, 'packages': [
-        {'package': core, 'sources': files(root / 'core/core'), 'dependencies': []},
+        {'package': core, 'sources': library_sources(root / 'core/core', True), 'dependencies': []},
         {'package': std, 'sources': libraries, 'dependencies': [core]},
         {'package': app, 'sources': ports, 'dependencies': [core, std]}]}
 

@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 
 from case_progress import Case, run_case
+from std_native import library_sources
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -42,8 +43,7 @@ def installed(root, core, name):
     """An installed package: its root sources, excluding contract tests, as the bundle holds them."""
     return {'package': core if name == 'core' else {'name': 'std', 'version': '1'},
             'dependencies': [] if name == 'core' else [core],
-            'sources': [{'file': str(path.resolve()), 'modules': [path.stem], 'signatures': True}
-                        for path in sorted((root / 'core' / name).glob('*.hirsel'))]}
+            'sources': library_sources(root / 'core' / name, True)}
 
 
 def library_inputs(root, core):

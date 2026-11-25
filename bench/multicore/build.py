@@ -10,9 +10,13 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 
 BENCH = Path(__file__).resolve().parent
 ROOT = BENCH.parents[1]
+sys.path.insert(0, str(ROOT / "core" / "tools"))
+from std_native import library_sources
+
 GAME_REV = "40296663ed350d5fe4a6ab5e367bab61cb77c219"
 GAME_ROWS = {
     "mandelbrot": (4, 4),
@@ -195,12 +199,7 @@ def hirsel_inputs(src):
         return {"file": str(file), "modules": modules, "signatures": signatures}
 
     def library(name):
-        directory = ROOT / "core" / name
-        return [
-            unit(file, list(relative.with_suffix("").parts), True)
-            for file in sorted(directory.rglob("*.hirsel"))
-            if (relative := file.relative_to(directory)).parts[0] != "tests"
-        ]
+        return library_sources(ROOT / "core" / name, True)
 
     sources = [unit(src, [src.stem], False)]
     if src.stem == "matmul_t16":

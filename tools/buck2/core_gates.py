@@ -3,7 +3,7 @@
 
 def core_gates(out, call, Raw):
     out.append("\n" + call("hirsel_script_test", name="test-core-m1-runner", script="core/tools/test_m1.py",
-                            data=["core/tools/m1.py", "core/tools/case_progress.py"]))
+                            data=["core/tools/m1.py", "core/tools/std_native.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/tools/case_progress.py"]))
     # host: the installed-prefix case runs a program that opens a Dir, which needs the host's openat2.
     out.append("\n" + call("hirsel_script_test", name="core-library-modes", script="core/tools/gate_library_modes.py", host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-library-modes/hirsel"],
@@ -21,7 +21,7 @@ def core_gates(out, call, Raw):
                                 args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/core-m1-" + engine + "/hirsel"],
                                 bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/case_progress.py"]')))
+                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/tools/case_progress.py"]')))
     # core-m2b-host runs the workloads with a spool directory on the invoking host.
     for name, host in (("core-m2b", False), ("core-m2b-host", True)):
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/m2b.py",
@@ -31,7 +31,7 @@ def core_gates(out, call, Raw):
                                 bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                           "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m2b/**", "core/corpus/m2b/**", "crates/hirsel-core-rt/include/**"]) + ["core/front/cases/body/callable-generic-fit.hirsel", "core/front/cases/body/callable-static-mut.hirsel", "core/front/cases/body/type-recursion-finite.hirsel"] + ["core/tools/case_progress.py"]')))
+                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m2b/**", "core/corpus/m2b/**", "crates/hirsel-core-rt/include/**"]) + ["core/front/cases/body/callable-generic-fit.hirsel", "core/front/cases/body/callable-static-mut.hirsel", "core/front/cases/body/type-recursion-finite.hirsel"] + ["core/tools/std_native.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-recursive-instances", script="core/tools/recursive_instances.py", host=True, production=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-recursive-instances/hirsel"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
@@ -40,7 +40,7 @@ def core_gates(out, call, Raw):
     out.append("\n" + call("hirsel_script_test", name="core-check-cost", script="crates/hirsel-core-front/check-cost.py", host=True, production=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel", "--request-compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core-request-cost"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel", "hirsel-core-request-cost": "//:hirsel-core-driver-bin-hirsel-core-request-cost"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**"]) + ["core/tools/measure.py", "core/tools/m1.py", "tools/capped", "crates/hirsel-core-front/cost-ceilings.json"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**"]) + ["core/tools/measure.py", "core/tools/m1.py", "core/tools/std_native.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "tools/capped", "crates/hirsel-core-front/cost-ceilings.json"] + ["core/tools/case_progress.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-front-cost", script="crates/hirsel-core-front/front-cost.py", host=True, production=True, native_tools=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel", "--image-profiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel-core-observed", "--buck-tool-inputs"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},

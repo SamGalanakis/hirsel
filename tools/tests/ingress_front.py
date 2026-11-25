@@ -14,6 +14,7 @@ from pathlib import Path
 import queue
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,6 +23,9 @@ import tomllib
 from wire_process import stop_process
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'core/tools'))
+from std_native import library_sources
+
 INGRESS = ROOT / 'deploy/ingress'
 HAPROXY = 'haproxy:3.2.27-alpine'
 NGINX = 'nginx:1.31.4-alpine'
@@ -36,10 +40,7 @@ def build(compiler, runtime, work):
     core, std = {'name': 'core', 'version': '1'}, {'name': 'std', 'version': '1'}
     packages = [{
         'package': package, 'dependencies': dependencies,
-        'sources': [{'file': str(path), 'modules': list(path.relative_to(ROOT / 'core' / package['name']).with_suffix('').parts),
-                     'signatures': package is core}
-                    for path in sorted((ROOT / 'core' / package['name']).glob('*.hirsel'))
-                    + (sorted((ROOT / 'core/std/sim').glob('*.hirsel')) if package is std else [])],
+        'sources': library_sources(ROOT / 'core' / package['name'], package is core),
     } for package, dependencies in [(core, []), (std, [core])]]
     for name in ('store', 'runner', 'platform'):
         directory = ROOT / 'core/programs' / name

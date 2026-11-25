@@ -18,7 +18,7 @@ import sys
 import subprocess
 import time
 
-from std_native import ROOT, wait_load
+from std_native import ROOT, library_sources, wait_load
 
 DEPENDENCIES = [
     ('typenum', '1.20.1', [], []),
@@ -35,8 +35,7 @@ def inputs(source):
     core, std, app = [dict(name=n, version='1') for n in ('core', 'std', 'omap_bench')]
     def library(package, signatures):
         return dict(package=package, dependencies=[] if package == core else [core],
-                    sources=[dict(file=str(p), modules=[p.stem], signatures=signatures)
-                             for p in sorted((ROOT / 'core' / package['name']).glob('*.hirsel'))])
+                    sources=library_sources(ROOT / 'core' / package['name'], signatures))
     return dict(core=core, packages=[library(core, True), library(std, False),
                 dict(package=app, dependencies=[core, std], sources=[dict(file=str(source), modules=['main'], signatures=False)])])
 

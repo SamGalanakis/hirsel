@@ -4,9 +4,12 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'core/tools'))
+from std_native import library_sources
 
 
 def main():
@@ -29,8 +32,7 @@ def main():
     for name, dependencies in [('core', []), ('std', [core])]:
         packages.append({
             'package': {'name':name, 'version':'1'}, 'dependencies':dependencies,
-            'sources':[{'file':str(path), 'modules':list(path.relative_to(ROOT/'core'/name).with_suffix('').parts), 'signatures':name == 'core'}
-                       for path in sorted((ROOT/'core'/name).glob('*.hirsel')) + (sorted((ROOT/'core/std/sim').glob('*.hirsel')) if name == 'std' else [])],
+            'sources': library_sources(ROOT/'core'/name, name == 'core'),
         })
     uses_runner = args.session_only or args.admission_only or args.migration_only
     if uses_runner:

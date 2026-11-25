@@ -224,6 +224,7 @@ store@1/store/test_l62_tiered_point_path src=69da8f14d55fd20d sig=4dca89ecd4522f
 store@1/store/test_l63_branch_split_reuses_cold_divider src=a04496328fcff499 sig=870a555538e916a3 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l63_caught_miss_reruns_and_commits_once src=56921219dbde0821 sig=793c3afc91c01825 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l63_change_pages_between_cold_snapshots src=b4038479346b735e sig=6bb8d5acd6d0c01c run=aa75ab2775f5e821 bug=- oracle=- rows=pending
+store@1/store/test_l63_change_pages_between_large_cold_snapshots src=17c4c3d63050fcb3 sig=46c039c43323a575 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/test_l63_missed_attempt_fallback_commits_nothing src=25ebb8c9348e42d2 sig=f05e40f48dbc33a8 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l63_parked_call_reruns_at_moved_head src=cce4442c3ab80627 sig=14bf14ac0c52cd07 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l63_parked_rerun_takes_moved_prior src=e7460458c9e8cde5 sig=ca2e43ce20b1e3c6 run=aa75ab2775f5e821 bug=- oracle=- rows=pending

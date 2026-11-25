@@ -436,6 +436,9 @@ limit = 536870912
 [tests.runs."store@1/store/test_l63_change_pages_between_cold_snapshots"]
 limit = 536870912
 
+[tests.runs."store@1/store/test_l63_change_pages_between_large_cold_snapshots"]
+limit = 536870912
+
 [tests.runs."store@1/store/test_l63_seeded_call_schedule"]
 limit = 536870912
 

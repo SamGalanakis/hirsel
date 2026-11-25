@@ -786,3 +786,92 @@ fn test_l63_seeded_call_schedule(d: Dir, c: Clock, r: Random, tasks: Tasks, seed
     l63_schedule(mut db, (take rows, take marks), seed)?
     close(take db)
 }
+
+// The hand-derived diff of a large table: each `(key, row)` in key order,
+// with None for a deletion.
+fn l63_check_rows(seen: List[Change], rows_handle: Table[u64, u32], expected: List[(u64, Option[u32])], why: String) -> Result[(), Error] {
+    if list.len(seen) != list.len(expected) {
+        fail(clone(why))
+    }
+    for at in 0u64 .. list.len(expected) {
+        let (key, row) = expected[at]
+        match row {
+            Some(value) => l62_check_span_row(seen[at], rows_handle, key, value)?,
+            None => if seen[at].tree_key != log_key(rows_handle.id, key)? || seen[at].value != None {
+                fail(clone(why))
+            },
+        }
+    }
+    Ok(())
+}
+
+// L63 (j) on a table of more than one level: 20,000 Cold rows (key 2k holds
+// k), reopened, against a commit that deletes 0, 20000 and 39998, puts 3 = 7,
+// 20001 = 9 and 39999 = 11, changes 30000 to 1 and rewrites 10000 with its
+// own value 5000. Each direction's diff is the edit set, read whole and one
+// change per page; the rewrite is no change. It is red when the diff skips a
+// changed leaf under an unchanged-looking parent or reports an equal row.
+@test
+fn test_l63_change_pages_between_large_cold_snapshots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = l70_open_options(300000000u64)?
+    {
+        let mut db = open(tasks, directory, c, r, options)?
+        let (rows, _) = law_pair(mut db, "rows", std.codec.key_u64(), std.codec.of_u32(), "marks", std.codec.key_u64(), std.codec.of_u32())?
+        set_residency(mut db, rows.id, Tiered)?
+        for batch in 0u64 .. 10 {
+            let Committed(_) = run(mut db, Some(10000000), (copy_env(rows), batch), fn(mut tx: Tx, env: (Table[u64, u32], u64)) -> Result[(), Error] {
+                for at in 0u64 .. 2000 {
+                    let k = env.1 * 2000 + at
+                    put(mut tx, env.0, 2 * k, int.truncate(k))?
+                }
+                Ok(())
+            })? else {
+                fail("L63 (j): the large table's rows commit")
+            }
+        }
+        let cut = checkpoint(mut db)?
+        durable(mut db, cut)?
+        close(take db)?
+    }
+    let mut db = open(tasks, directory, c, r, options)?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let base = snapshot(db)
+    let Committed(_) = run(mut db, Some(1048576u64), copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        let _ = delete(mut tx, handle, 0u64)?
+        put(mut tx, handle, 3u64, 7u32)?
+        put(mut tx, handle, 10000u64, 5000u32)?
+        let _ = delete(mut tx, handle, 20000u64)?
+        put(mut tx, handle, 20001u64, 9u32)?
+        put(mut tx, handle, 30000u64, 1u32)?
+        let _ = delete(mut tx, handle, 39998u64)?
+        put(mut tx, handle, 39999u64, 11u32)
+    })? else {
+        fail("L63 (j): the large table's edits commit")
+    }
+    let target = snapshot(db)
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let whole = Limits(rows: 64, byte_limit: VALUE_LIMIT + 1048576)
+    let single = Limits(rows: 1, byte_limit: 1)
+    let mut forward: List[(u64, Option[u32])] = list.new()
+    list.push(mut forward, (0u64, None))
+    list.push(mut forward, (3u64, Some(7u32)))
+    list.push(mut forward, (20000u64, None))
+    list.push(mut forward, (20001u64, Some(9u32)))
+    list.push(mut forward, (30000u64, Some(1u32)))
+    list.push(mut forward, (39998u64, None))
+    list.push(mut forward, (39999u64, Some(11u32)))
+    let mut backward: List[(u64, Option[u32])] = list.new()
+    list.push(mut backward, (0u64, Some(0u32)))
+    list.push(mut backward, (3u64, None))
+    list.push(mut backward, (20000u64, Some(10000u32)))
+    list.push(mut backward, (20001u64, None))
+    list.push(mut backward, (30000u64, Some(15000u32)))
+    list.push(mut backward, (39998u64, Some(19999u32)))
+    list.push(mut backward, (39999u64, None))
+    l63_check_rows(l63_paged_changes(read_handle, base, target, whole)?, rows, forward, "L63 (j): the large forward diff is the edit set")?
+    l63_check_rows(l63_paged_changes(read_handle, base, target, single)?, rows, forward, "L63 (j): the large forward diff resumed one change at a time")?
+    l63_check_rows(l63_paged_changes(read_handle, target, base, whole)?, rows, backward, "L63 (j): the large backward diff undoes the edit set")?
+    l63_check_rows(l63_paged_changes(read_handle, target, base, single)?, rows, backward, "L63 (j): the large backward diff resumed one change at a time")?
+    close(take db)
+}

@@ -889,8 +889,18 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
         if read_le(raw, 76, 4) != 15729066 + final_item {
             return false
         }
-    } else if list.len(result.unwrap(disk_read_file(d, path, 72))) != 72 {
-        return false
+    } else {
+        // §3.3b: the segment is its Direct creation block, the header and zeros
+        // to 4096; the refused frame wrote nothing past the header.
+        let raw = result.unwrap(disk_read_file(d, path, 4096))
+        if list.len(raw) != 4096 {
+            return false
+        }
+        for byte in list.slice(raw, 72, 4096) {
+            if byte != 0u8 {
+                return false
+            }
+        }
     }
     let reopened = result.unwrap(open(tasks, d, c, r, options))
     if reopened.heads[0].head != (if accepted {

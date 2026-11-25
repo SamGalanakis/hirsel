@@ -1,0 +1,845 @@
+// Laws for docs/spec/sframe.md (SFRAME-14). Inputs are built here from the RFCs and codec
+// specs, not with the code under test; oracle.py gives the generated vectors.
+fn nibble(c: u8) -> u8 {
+    if c >= b'a' {
+        c - b'a' + 10u8
+    } else {
+        c - b'0'
+    }
+}
+
+fn unhex(s: String) -> Bytes {
+    let hex = string.as_bytes(s)
+    let mut out: Bytes = list.with_capacity(list.len(hex) / 2)
+    for i in 0u64 .. list.len(hex) / 2 {
+        list.push(mut out, nibble(hex[2 * i]) * 16u8 + nibble(hex[2 * i + 1]))
+    }
+    out
+}
+
+fn check(ok: bool, take what: String) {
+    if !ok {
+        fail(take what)
+    }
+}
+
+fn room(n: u64) -> Bytes {
+    list.with_capacity(n)
+}
+
+fn copy_of(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    out
+}
+
+fn base_of(seed: u8) -> Bytes {
+    let mut out: Bytes = list.with_capacity(16)
+    for i in 0u64 .. 16 {
+        let x: u8 = int.truncate(i)
+        list.push(mut out, x ^ seed)
+    }
+    out
+}
+
+fn counting() -> Bytes {
+    base_of(0)
+}
+
+fn steps(base: Bytes, k: u64) -> Bytes {
+    let mut b = copy_of(base)
+    for _ in 0u64 .. k {
+        b = sframe.ratchet_key(b)
+    }
+    b
+}
+
+fn suite() -> sframe.Suite {
+    Aes128GcmSha256_128()
+}
+
+// splitmix64, so every case is fixed by its seed.
+type Rng {
+    s: u64
+}
+
+fn roll(mut g: Rng) -> u64 {
+    g.s = int.wrapping_add(g.s, 0x9e3779b97f4a7c15)
+    let mut z = g.s
+    z = int.wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9)
+    z = int.wrapping_mul(z ^ (z >> 27), 0x94d049bb133111eb)
+    z ^ (z >> 31)
+}
+
+fn below(mut g: Rng, n: u64) -> u64 {
+    roll(mut g) % n
+}
+
+fn byte_of(mut g: Rng) -> u8 {
+    let x: u8 = int.truncate(roll(mut g))
+    x
+}
+
+// Bytes heavy in 00, 01, 02 and 03, where the escapes have work to do.
+fn zeroish(mut g: Rng, n: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(n)
+    for _ in 0u64 .. n {
+        let pick = below(mut g, 8)
+        let x: u8 = if pick < 3 {
+            0u8
+        } else if pick < 6 {
+            int.truncate(pick - 2)
+        } else {
+            byte_of(mut g)
+        }
+        list.push(mut out, x)
+    }
+    out
+}
+
+fn sender_at(framing: ranges.Framing, id: u64, ctr: u64, take base: Bytes, l: sframe.Limits) -> sframe.Sender {
+    let mut s = result.unwrap(sframe.sender(suite(), framing, Fixed(id), take base, sframe.Mark(ctr, volume: 0), l))
+    let _ = result.unwrap(sframe.reserve(mut s, 1 << 20, 1 << 34))
+    take s
+}
+
+fn ratchet_sender(generation: u64, bits: u8, step: u64, take base: Bytes, l: sframe.Limits) -> sframe.Sender {
+    let scheme: sframe.Scheme = Ratcheted(sframe.Ratchet(generation, bits, step))
+    let mut s = result.unwrap(sframe.sender(suite(), Rfc, scheme, take base, sframe.Mark(ctr: 0, volume: 0), l))
+    let _ = result.unwrap(sframe.reserve(mut s, 1 << 20, 1 << 34))
+    take s
+}
+
+fn receiver_for(framing: ranges.Framing, id: u64, take base: Bytes, floor: u64, l: sframe.Limits) -> sframe.Receiver {
+    let mut r = result.unwrap(sframe.receiver(suite(), framing, l))
+    result.unwrap(sframe.install(mut r, id, take base, floor))
+    take r
+}
+
+fn tampered(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
+    match r {
+        Error(Discarded(Tampered)) => true,
+        _ => false,
+    }
+}
+
+fn malformed(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
+    match r {
+        Error(Discarded(Malformed)) => true,
+        _ => false,
+    }
+}
+
+fn no_key(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
+    match r {
+        Error(NoKey(_)) => true,
+        _ => false,
+    }
+}
+
+fn opened(r: Result[sframe.Opened, sframe.OpenError]) -> bool {
+    match r {
+        Ok(_) => true,
+        _ => false,
+    }
+}
+
+fn open_ok(r: Result[sframe.Opened, sframe.OpenError]) -> sframe.Opened {
+    match r {
+        Ok(o) => o,
+        Error(NoKey(_)) => fail("open: NoKey"),
+        Error(Discarded(Malformed)) => fail("open: Malformed"),
+        Error(Discarded(Tampered)) => fail("open: Tampered"),
+        Error(Discarded(Replayed)) => fail("open: Replayed"),
+        Error(Discarded(TooOld)) => fail("open: TooOld"),
+        Error(Discarded(TooFar)) => fail("open: TooFar"),
+        Error(Capacity(_)) => fail("open: Capacity"),
+    }
+}
+
+fn seal_rfc(mut s: sframe.Sender, metadata: Bytes, plain: Bytes) -> Bytes {
+    let mut out = room(list.len(plain) + 64)
+    let _ = result.unwrap(sframe.seal(mut s, metadata, plain, mut out))
+    out
+}
+
+fn open_rfc(mut r: sframe.Receiver, metadata: Bytes, frame: Bytes) -> Result[sframe.Opened, sframe.OpenError] {
+    let mut out = room(list.len(frame))
+    sframe.open(mut r, metadata, frame, mut out)
+}
+
+fn open_any(mut r: sframe.Receiver, framing: ranges.Framing, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[sframe.Opened, sframe.OpenError] {
+    match framing {
+        Rfc => sframe.open(mut r, metadata, frame, mut out),
+        Ranged(_) => sframe.open_ranged(mut r, metadata, frame, mut out),
+    }
+}
+
+fn seal_any(mut s: sframe.Sender, framing: ranges.Framing, layout: ranges.Layout, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[sframe.Sealed, sframe.SframeError] {
+    match framing {
+        Rfc => sframe.seal(mut s, metadata, frame, mut out),
+        Ranged(_) => sframe.seal_ranged(mut s, layout, metadata, frame, mut out),
+    }
+}
+
+// The codecs' escape and unescape, from H.264 §7.4.1.1, so inputs are built independently.
+fn escape_codec(body: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(2 * list.len(body) + 1)
+    let mut zeros: u64 = 0
+    for x in body {
+        if zeros >= 2 && x <= 3u8 {
+            list.push(mut out, 3u8)
+            zeros = 0
+        }
+        list.push(mut out, x)
+        zeros = if x == 0u8 {
+            zeros + 1
+        } else {
+            0
+        }
+    }
+    if zeros >= 2 {
+        list.push(mut out, 3u8)
+    }
+    out
+}
+
+fn unescape_codec(body: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(body))
+    let mut zeros: u64 = 0
+    for x in body {
+        if zeros >= 2 && x == 3u8 {
+            zeros = 0
+        } else {
+            list.push(mut out, x)
+            zeros = if x == 0u8 {
+                zeros + 1
+            } else {
+                0
+            }
+        }
+    }
+    out
+}
+
+// An Annex B frame from working NAL bodies, each behind a 4-byte start code.
+fn annexb(bodies: List[Bytes]) -> Bytes {
+    let mut out: Bytes = list.new()
+    for b in bodies {
+        list.append(mut out, b"\x00\x00\x00\x01")
+        list.append(mut out, escape_codec(b))
+    }
+    out
+}
+
+fn layout_of(pairs: List[u64]) -> ranges.Layout {
+    let mut rs: List[ranges.Range] = list.new()
+    for i in 0u64 .. list.len(pairs) / 2 {
+        list.push(mut rs, ranges.Range(at: pairs[2 * i], len: pairs[2 * i + 1]))
+    }
+    ranges.Layout(ranges: rs)
+}
+
+fn layout2(a: u64, b: u64) -> ranges.Layout {
+    let mut rs: List[ranges.Range] = list.new()
+    list.push(mut rs, ranges.Range(at: a, len: b))
+    ranges.Layout(ranges: rs)
+}
+
+fn layout4(a: u64, b: u64, c: u64, d: u64) -> ranges.Layout {
+    let mut rs: List[ranges.Range] = list.new()
+    list.push(mut rs, ranges.Range(at: a, len: b))
+    list.push(mut rs, ranges.Range(at: c, len: d))
+    ranges.Layout(ranges: rs)
+}
+
+fn layout6(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> ranges.Layout {
+    let mut rs: List[ranges.Range] = list.new()
+    list.push(mut rs, ranges.Range(at: a, len: b))
+    list.push(mut rs, ranges.Range(at: c, len: d))
+    list.push(mut rs, ranges.Range(at: e, len: f))
+    ranges.Layout(ranges: rs)
+}
+
+fn nals1(take a: Bytes) -> List[Bytes] {
+    let mut v: List[Bytes] = list.new()
+    list.push(mut v, take a)
+    v
+}
+
+fn nals2(take a: Bytes, take b: Bytes) -> List[Bytes] {
+    let mut v = nals1(take a)
+    list.push(mut v, take b)
+    v
+}
+
+fn nals4(take a: Bytes, take b: Bytes, take c: Bytes, take d: Bytes) -> List[Bytes] {
+    let mut v = nals2(take a, take b)
+    list.push(mut v, take c)
+    list.push(mut v, take d)
+    v
+}
+
+fn nals5(take a: Bytes, take b: Bytes, take c: Bytes, take d: Bytes, take e: Bytes) -> List[Bytes] {
+    let mut v = nals4(take a, take b, take c, take d)
+    list.push(mut v, take e)
+    v
+}
+
+fn same_layout(a: ranges.Layout, b: ranges.Layout) -> bool {
+    if list.len(a.ranges) != list.len(b.ranges) {
+        return false
+    }
+    for i in 0u64 .. list.len(a.ranges) {
+        if a.ranges[i].at != b.ranges[i].at || a.ranges[i].len != b.ranges[i].len {
+            return false
+        }
+    }
+    true
+}
+
+// A random Annex B frame meeting the input rules, with its working length and start offsets.
+type Annex {
+    frame: Bytes,
+    work: u64,
+    starts: List[u64]
+}
+
+fn random_annex(mut g: Rng, nals: u64, most: u64) -> Annex {
+    let mut bodies: List[Bytes] = list.new()
+    let mut starts: List[u64] = list.new()
+    let mut work: u64 = 0
+    for _ in 0u64 .. nals {
+        let len = 1 + below(mut g, most)
+        let mut body = zeroish(mut g, len)
+        if body[list.len(body) - 1] == 0u8 {
+            list.push(mut body, 0x41u8)
+        }
+        list.push(mut starts, work)
+        work += 4 + list.len(body)
+        list.push(mut bodies, take body)
+    }
+    Annex(frame: annexb(bodies), work, starts)
+}
+
+// A canonical layout over n bytes covering each start code and a few random spans.
+fn random_layout(mut g: Rng, n: u64, starts: List[u64], spans: u64) -> ranges.Layout {
+    let mut marks: List[bool] = list.new()
+    list.fill(mut marks, n, false)
+    for p in starts {
+        for i in p .. p + 4 {
+            marks[i] = true
+        }
+    }
+    if n > 0 {
+        for _ in 0u64 .. spans {
+            let at = below(mut g, n)
+            let end = at + 1 + below(mut g, 12)
+            let mut i = at
+            while i < n && i < end {
+                marks[i] = true
+                i += 1
+            }
+        }
+    }
+    let mut pairs: List[u64] = list.new()
+    let mut i: u64 = 0
+    while i < n {
+        if marks[i] {
+            let mut j = i
+            while j < n && marks[j] {
+                j += 1
+            }
+            list.push(mut pairs, i)
+            list.push(mut pairs, j - i)
+            i = j
+        } else {
+            i += 1
+        }
+    }
+    layout_of(pairs)
+}
+
+// ---------------------------------------------------------------- V1
+/// bug: a wrong length field, KID and CTR in the wrong order, or a non-minimal header accepted.
+/// oracle: RFC 9605 Appendix C.1 (289 cases) and hand-made non-minimal and short headers.
+@test
+fn header_vectors() -> Result[(), ()] {
+    for c in header_cases() {
+        let want = unhex(c.header)
+        let h = sframe.Header(kid: c.kid, ctr: c.ctr)
+        let mut out = room(17)
+        let n = result.unwrap(sframe.encode_header(h, mut out))
+        check(out == want && n == list.len(want) && sframe.header_len(h) == n, "encode_header differs from C.1")
+        match sframe.decode_header(want, 0) {
+            Ok((d, len)) => check(d.kid == c.kid && d.ctr == c.ctr && len == n, "decode_header differs from C.1"),
+            Error(_) => fail("a C.1 header is refused"),
+        }
+        for cut in 0u64 .. list.len(want) {
+            match sframe.decode_header(copy_of(list.slice(want, 0, cut)), 0) {
+                Error(Short) => {},
+                _ => fail("a strict prefix of a C.1 header is not Short"),
+            }
+        }
+    }
+    for bad in["8005", "0800", "900001", "8100ff", "090007", "a0000005"] {
+        match sframe.decode_header(unhex(bad), 0) {
+            Error(Malformed) => {},
+            _ => fail("a non-minimal header is not Malformed"),
+        }
+    }
+    match sframe.decode_header(unhex("8805"), 0) {
+        Error(Short) => {},
+        _ => fail("88 05 is not Short"),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- V2
+/// bug: a wrong label, the salt XORed at the little end, metadata left out of the AAD, or the sink and library HKDF disagreeing.
+/// oracle: RFC 9605 Appendix C.3 (AES_128_GCM_SHA256_128, KID 0x123, CTR 0x4567).
+@test
+fn rfc_c3() -> Result[(), ()] {
+    let base = unhex("000102030405060708090a0b0c0d0e0f")
+    check(sframe.salt_of(base, 0x123) == unhex("75234edefe07819026751816"), "sframe_salt differs from C.3")
+    let mut s = result.unwrap(sframe.sender(suite(), Rfc, Fixed(0x123), copy_of(base), sframe.Mark(ctr: 0x4567, volume: 0), sframe.limits()))
+    let _ = result.unwrap(sframe.reserve(mut s, 1, 16))
+    let metadata = unhex("4945544620534672616d65205747")
+    let plain = unhex("64726166742d696574662d736672616d652d656e63")
+    let want = unhex("9901234567b7412c2513a1b66dbb48841bbaf17f598751176ad847681a69c6d0b091c07018ce4adb34eb")
+    let mut out = room(64)
+    let sealed = result.unwrap(sframe.seal(mut s, metadata, plain, mut out))
+    check(out == want && sealed.len == list.len(want) && sealed.ctr == 0x4567, "C.3 ciphertext differs")
+    let mut r = receiver_for(Rfc, 0x123, copy_of(base), 0, sframe.limits())
+    let mut changed = copy_of(metadata)
+    changed[0] = changed[0] ^ 1u8
+    check(tampered(open_rfc(mut r, changed, want)), "changed metadata is not Tampered")
+    let mut back = room(64)
+    let o = result.unwrap(sframe.open(mut r, metadata, want, mut back))
+    check(back == plain && o.kid == 0x123 && o.ctr == 0x4567 && o.len == list.len(plain), "C.3 open differs")
+    Ok(())
+}
+
+// ---------------------------------------------------------------- R1
+fn framing_of(k: u64) -> ranges.Framing {
+    if k == 0 {
+        Rfc
+    } else if k == 1 {
+        Ranged(Bare)
+    } else {
+        Ranged(AnnexB)
+    }
+}
+
+// KIDs and CTRs at the header-length edges.
+fn edge(mut g: Rng) -> u64 {
+    let pick = below(mut g, 8)
+    if pick == 0 {
+        below(mut g, 8)
+    } else if pick == 1 {
+        7 + below(mut g, 2)
+    } else if pick == 2 {
+        255 + below(mut g, 2)
+    } else if pick == 3 {
+        (1 << 56) - 1 + below(mut g, 2)
+    } else if pick == 4 {
+        0xfffffffffffffff0
+    } else {
+        roll(mut g) >> below(mut g, 64)
+    }
+}
+
+/// bug: a framing, layout, escape or scatter bug that loses or moves bytes.
+/// oracle: the round trip is the identity; ranged frames also equal oracle.py's bytes for 32 fixed cases.
+@test
+fn round_trip() -> Result[(), ()] {
+    let mut g = Rng(s: 9605)
+    let l = sframe.limits()
+    for case in 0u64 .. 300 {
+        let kind = case % 3
+        let framing = framing_of(kind)
+        let id = edge(mut g)
+        let ctr = edge(mut g) % 0xfffffffffff00000
+        let big = case % 45 < 3
+        let mut frame: Bytes = list.new()
+        let mut layout = ranges.none()
+        if kind == 2 {
+            let most: u64 = if big {
+                21000
+            } else {
+                300
+            }
+            let count = 1 + below(mut g, 16)
+            let a = random_annex(mut g, count, most)
+            let spans = below(mut g, 5)
+            layout = random_layout(mut g, a.work, a.starts, spans)
+            frame = copy_of(a.frame)
+        } else {
+            let n: u64 = if big {
+                65536
+            } else {
+                below(mut g, 600)
+            }
+            frame = zeroish(mut g, n)
+            if kind == 1 {
+                let spans = below(mut g, 5)
+                layout = random_layout(mut g, n, list.new(), spans)
+            }
+        }
+        let md_len = below(mut g, 12)
+        let metadata = zeroish(mut g, md_len)
+        let key = byte_of(mut g)
+        let mut s = sender_at(framing, id, ctr, base_of(key), l)
+        let most_out = ranges.wire_bound(framing, 2 * list.len(frame) + 64)
+        let mut out = room(most_out + 1)
+        list.push(mut out, 0xeeu8)
+        let done = result.unwrap(seal_any(mut s, framing, layout, metadata, frame, mut out))
+        check(done.len == list.len(out) - 1 && done.ctr == ctr && done.kid == id, "Sealed does not describe the appended bytes")
+        let wire = copy_of(list.slice(out, 1, list.len(out)))
+        let mut r = receiver_for(framing, id, base_of(key), 0, l)
+        let mut back = room(2 * list.len(frame) + 16)
+        let o = open_ok(open_any(mut r, framing, metadata, wire, mut back))
+        check(back == frame && o.len == list.len(frame) && o.ctr == ctr, "open of seal is not the frame")
+    }
+    for c in ranged_cases() {
+        let framing: ranges.Framing = if c.annexb {
+            Ranged(AnnexB)
+        } else {
+            Ranged(Bare)
+        }
+        let frame = unhex(c.frame)
+        let want = unhex(c.wire)
+        let metadata = unhex(c.metadata)
+        let mut s = sender_at(framing, c.kid, c.ctr, unhex(c.base), l)
+        let mut out = room(2 * list.len(want) + 64)
+        let done = result.unwrap(sframe.seal_ranged(mut s, c.layout, metadata, frame, mut out))
+        check(out == want && done.len == list.len(want), "seal_ranged differs from oracle.py")
+        let mut r = receiver_for(framing, c.kid, unhex(c.base), 0, l)
+        let mut back = room(2 * list.len(frame) + 16)
+        let _ = result.unwrap(sframe.open_ranged(mut r, metadata, want, mut back))
+        check(back == frame, "open_ranged of an oracle.py frame differs")
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- T1
+fn tamper_case(framing: ranges.Framing) {
+    let mut g = Rng(s: 2649)
+    let l = sframe.limits()
+    let mut frame: Bytes = list.new()
+    let mut layout = ranges.none()
+    match framing {
+        Rfc => {
+            frame = zeroish(mut g, 40)
+        },
+        Ranged(Bare) => {
+            frame = zeroish(mut g, 40)
+            layout = layout6(0, 3, 10, 2, 20, 5)
+        },
+        Ranged(AnnexB) => {
+            let mut bodies: List[Bytes] = list.new()
+            for _ in 0u64 .. 3 {
+                let mut b = zeroish(mut g, 11)
+                list.push(mut b, 0x41u8)
+                list.push(mut bodies, take b)
+            }
+            frame = annexb(bodies)
+            layout = layout6(0, 6, 16, 4, 32, 5)
+        },
+    }
+    let metadata = unhex("0a0b0c")
+    let mut s = sender_at(framing, 300, 70000, counting(), l)
+    let mut out = room(256)
+    let _ = result.unwrap(seal_any(mut s, framing, layout, metadata, frame, mut out))
+    let mut r = receiver_for(framing, 300, counting(), 0, l)
+    for i in 0u64 .. 8 * list.len(out) {
+        let mut bad = copy_of(out)
+        let flip: u8 = int.truncate(1u64 << (i % 8))
+        bad[i / 8] = bad[i / 8] ^ flip
+        let mut back = room(256)
+        check(!opened(open_any(mut r, framing, metadata, bad, mut back)), "a one-bit flip opens")
+    }
+    let mut back = room(256)
+    check(tampered(open_any(mut r, framing, unhex("0a0b0d"), out, mut back)), "changed metadata is not Tampered")
+    let mut again = room(256)
+    let _ = result.unwrap(open_any(mut r, framing, metadata, out, mut again))
+    check(again == frame, "the genuine frame does not open after the flips")
+}
+
+/// bug: a header, ciphertext, tag, clear byte, layout or L not authenticated.
+/// oracle: AEAD integrity (RFC 9605 §4.4.3): only the sealed bytes open.
+@test
+fn tamper_rejection() -> Result[(), ()] {
+    tamper_case(Rfc)
+    tamper_case(Ranged(Bare))
+    tamper_case(Ranged(AnnexB))
+    Ok(())
+}
+
+// ---------------------------------------------------------------- T2
+/// bug: enc(layout) left out of the AAD.
+/// oracle: a constructed relayout: [c][x] with ciphertext byte c, relaid from {(0,1)} to {(1,1)}.
+@test
+fn layout_binding() -> Result[(), ()] {
+    let l = sframe.limits()
+    let frame = unhex("4142")
+    let layout = layout2(0, 1)
+    let mut s = sender_at(Ranged(Bare), 1, 0, counting(), l)
+    let mut tries: u64 = 0
+    loop {
+        let mut out = room(64)
+        let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", frame, mut out))
+        tries += 1
+        check(tries < 5000, "no ciphertext byte equal to the clear byte")
+        if out[1] == 0x41u8 {
+            let n = list.len(out)
+            check(out[n - 5] == 1u8 && out[n - 4] == 0u8 && out[n - 3] == 1u8, "enc({(0,1)}) is not 01 00 01")
+            out[n - 4] = 1u8
+            let mut r = receiver_for(Ranged(Bare), 1, counting(), 0, l)
+            let mut back = room(64)
+            check(tampered(sframe.open_ranged(mut r, b"", out, mut back)), "a relaid frame is not Tampered")
+            return Ok(())
+        }
+    }
+}
+
+// ---------------------------------------------------------------- W1
+type Model {
+    floor: u64,
+    top: Option[u64],
+    seen: Map[u64, bool]
+}
+
+fn model_accepts(m: Model, size: u64, jump: u64, ctr: u64) -> bool {
+    if ctr < m.floor {
+        return false
+    }
+    if let Some(_) = map.get(m.seen, ctr) {
+        return false
+    }
+    match m.top {
+        None => true,
+        Some(top) => if ctr > top {
+            jump == 0 || ctr - top <= jump
+        } else {
+            top - ctr < size
+        },
+    }
+}
+
+fn model_mark(mut m: Model, ctr: u64) {
+    map.insert(mut m.seen, ctr, true)
+    match m.top {
+        None => {
+            m.top = Some(ctr)
+        },
+        Some(top) => if ctr > top {
+            m.top = Some(ctr)
+        },
+    }
+}
+
+fn frame_at(ctr: u64, l: sframe.Limits) -> Bytes {
+    let mut s = sender_at(Rfc, 5, ctr, base_of(3), l)
+    seal_rfc(mut s, b"", b"w1")
+}
+
+fn window_step(mut r: sframe.Receiver, mut m: Model, size: u64, jump: u64, ctr: u64, l: sframe.Limits) {
+    let frame = frame_at(ctr, l)
+    let mut forged = copy_of(frame)
+    let n = list.len(forged)
+    forged[n - 1] = forged[n - 1] ^ 0x80u8
+    check(!opened(open_rfc(mut r, b"", forged)), "a forged frame opens")
+    let want = model_accepts(m, size, jump, ctr)
+    check(opened(open_rfc(mut r, b"", frame)) == want, "the window and the model disagree")
+    if want {
+        model_mark(mut m, ctr)
+    }
+}
+
+fn top_of(m: Model) -> u64 {
+    match m.top {
+        Some(t) => t,
+        None => fail("no frame accepted"),
+    }
+}
+
+/// bug: the window marked before the tag check, an off-by-one at W, a shift that drops bits on a large gap, a floor not applied, or jump off by one.
+/// oracle: a set model: accepted iff unseen, at or above the floor, ctr > highest - W and, with jump, ctr <= highest + jump.
+@test
+fn replay_window() -> Result[(), ()] {
+    let mut g = Rng(s: 7)
+    for size in[64u64, 100u64, 128u64] {
+        for jumping in[false, true] {
+            let jump: u64 = if jumping {
+                2 * size
+            } else {
+                0
+            }
+            let floor: u64 = 1000 + below(mut g, 50)
+            let l = sframe.Limits(frame: 4096, window: size, keys: 4, ranges: 4, jump)
+            let mut r = receiver_for(Rfc, 5, base_of(3), floor, l)
+            let mut m = Model(floor, top: None, seen: map.new())
+            let mut at: u64 = floor - 20
+            for _ in 0u64 .. 150 {
+                let pick = below(mut g, 10)
+                let ctr = if pick < 5 {
+                    at + below(mut g, 8)
+                } else if pick < 7 {
+                    at - below(mut g, 3 * size)
+                } else if pick < 8 {
+                    at + below(mut g, 1 << 20)
+                } else {
+                    at
+                }
+                window_step(mut r, mut m, size, jump, ctr, l)
+                if let Some(t) = m.top {
+                    at = t
+                }
+            }
+            let top = top_of(m)
+            for back in[size + 1, size, size - 1] {
+                window_step(mut r, mut m, size, jump, top - back, l)
+            }
+            if jumping {
+                window_step(mut r, mut m, size, jump, top + jump + 1, l)
+                window_step(mut r, mut m, size, jump, top + jump, l)
+            }
+            let high = top_of(m)
+            let mut forged = frame_at(high + 1000, l)
+            let n = list.len(forged)
+            forged[n - 1] = forged[n - 1] ^ 1u8
+            check(!opened(open_rfc(mut r, b"", forged)), "a forged frame opens")
+            check(opened(open_rfc(mut r, b"", frame_at(high + 1, l))), "a forged frame moved the window")
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- K1
+/// bug: step mod 2^bits computed as step mod bits, a wrong ratchet label, or base taken as step 0's key.
+/// oracle: Python hmac over RFC 9605 §5.1: base_key[1] for base 00..0f.
+@test
+fn ratchet_steps() -> Result[(), ()] {
+    let l = sframe.limits()
+    let one = unhex("fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87")
+    check(sframe.ratchet_key(counting()) == one, "base_key[1] differs from RFC 9605 §5.1")
+    let follow = sframe.Follow(generation: 5, bits: 2, step: 0, forward: 1, keep: 1, floor: 0)
+    {
+        let mut s = ratchet_sender(5, 2, 1, copy_of(one), l)
+        let mut r = result.unwrap(sframe.receiver(suite(), Rfc, l))
+        result.unwrap(sframe.install_ratcheted(mut r, follow, counting()))
+        check(sframe.current_kid(s) == 21, "step 1's KID is not 5<<2|1")
+        check(opened(open_rfc(mut r, b"", seal_rfc(mut s, b"", b"k1"))), "a step-1 sender and a step-0 receiver disagree")
+    }
+    let mut s = ratchet_sender(5, 2, 0, counting(), l)
+    let mut r = result.unwrap(sframe.receiver(suite(), Rfc, l))
+    result.unwrap(sframe.install_ratcheted(mut r, follow, counting()))
+    for want in[21u64, 22u64, 23u64, 20u64, 21u64] {
+        result.unwrap(sframe.ratchet(mut s))
+        let _ = result.unwrap(sframe.reserve(mut s, 4, 1024))
+        check(sframe.current_kid(s) == want, "a ratcheted KID has the wrong low bits")
+        let o = result.unwrap(open_rfc(mut r, b"", seal_rfc(mut s, b"", b"k1")))
+        check(o.kid == want, "a ratcheted frame opens under another KID")
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- K2
+fn step_frame(step: u64, ctr: u64, l: sframe.Limits) -> Bytes {
+    let scheme: sframe.Scheme = Ratcheted(sframe.Ratchet(generation: 3, bits: 4, step))
+    let mut s = result.unwrap(sframe.sender(suite(), Rfc, scheme, steps(counting(), step), sframe.Mark(ctr, volume: 0), l))
+    let _ = result.unwrap(sframe.reserve(mut s, 1, 1024))
+    seal_rfc(mut s, b"", b"k2")
+}
+
+/// bug: a candidate committed before the open, a forward step past the bound, the jumped-from step evicted, or advance losing retained steps.
+/// oracle: SFRAME-8's bounds: 1 <= d <= forward, keep steps retained, keep >= forward, keep + 1 + forward <= 2^bits.
+@test
+fn forward_bounds() -> Result[(), ()] {
+    let l = sframe.limits()
+    let follow = sframe.Follow(generation: 3, bits: 4, step: 5, forward: 2, keep: 2, floor: 0)
+    let mut r = result.unwrap(sframe.receiver(suite(), Rfc, l))
+    result.unwrap(sframe.install_ratcheted(mut r, follow, steps(counting(), 5)))
+    let mut forged = step_frame(7, 0, l)
+    let n = list.len(forged)
+    forged[n - 1] = forged[n - 1] ^ 1u8
+    check(tampered(open_rfc(mut r, b"", forged)), "a forged d = forward frame is not Tampered")
+    check(no_key(open_rfc(mut r, b"", step_frame(8, 0, l))), "a forged frame moved the current step")
+    check(opened(open_rfc(mut r, b"", step_frame(5, 0, l))), "the current step does not open")
+    check(opened(open_rfc(mut r, b"", step_frame(7, 1, l))), "a genuine d = forward frame does not open")
+    check(opened(open_rfc(mut r, b"", step_frame(5, 1, l))), "the jumped-from step was evicted")
+    check(opened(open_rfc(mut r, b"", step_frame(6, 0, l))), "a step passed over does not open")
+    let unsound =[sframe.Follow(generation: 1, bits: 4, step: 0, forward: 2, keep: 1, floor: 0), sframe.Follow(generation: 9, bits: 2, step: 0, forward: 2, keep: 2, floor: 0)]
+    for bad in unsound {
+        let mut q = result.unwrap(sframe.receiver(suite(), Rfc, l))
+        match sframe.install_ratcheted(mut q, bad, counting()) {
+            Error(Invalid) => {},
+            _ => fail("an unsound Follow is accepted"),
+        }
+    }
+    result.unwrap(sframe.advance(mut r, 4, 3, 8, steps(counting(), 8), 0))
+    check(opened(open_rfc(mut r, b"", step_frame(6, 1, l))), "advance dropped a step within keep")
+    check(opened(open_rfc(mut r, b"", step_frame(7, 2, l))), "advance dropped the previous step")
+    check(no_key(open_rfc(mut r, b"", step_frame(5, 2, l))), "advance kept a step past keep")
+    check(no_key(open_rfc(mut r, b"", step_frame(13, 0, l))), "a frame forward + 3 steps ahead has a key")
+    result.unwrap(sframe.advance(mut r, 4, 3, 13, steps(counting(), 13), 0))
+    check(opened(open_rfc(mut r, b"", step_frame(13, 0, l))), "advance does not re-key a lagging receiver")
+    Ok(())
+}
+
+// ---------------------------------------------------------------- S1
+fn seal_result(mut s: sframe.Sender, plain: Bytes, spare: u64) -> Result[sframe.Sealed, sframe.SframeError] {
+    let mut out = room(spare)
+    sframe.seal(mut s, b"", plain, mut out)
+}
+
+/// bug: a refusal that consumes a CTR, a reused CTR, a seal past the reservation, or exhaustion off by one.
+/// oracle: SFRAME-5's ceilings: CTR < 2^64 - 1, volume <= 2^34, and a seal only below the reserved Mark.
+@test
+fn sender_counters() -> Result[(), ()] {
+    let l = sframe.limits()
+    let mut s = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), sframe.Mark(ctr: 0, volume: 0), l))
+    match seal_result(mut s, b"abc", 64) {
+        Error(Unreserved) => {},
+        _ => fail("a fresh sender seals"),
+    }
+    let mark = result.unwrap(sframe.reserve(mut s, 10, 1000))
+    check(mark.ctr == 10 && mark.volume == 1000, "the ceiling is not the reservation")
+    match seal_result(mut s, b"abc", 19) {
+        Error(Capacity(c)) => check(c.requested == 20 && c.available == 19, "Capacity names the wrong sizes"),
+        _ => fail("a short spare is not Capacity"),
+    }
+    check(result.unwrap(seal_result(mut s, b"abc", 20)).ctr == 0, "a Capacity refusal consumed a CTR")
+    {
+        let mut resumed = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), mark, l))
+        let _ = result.unwrap(sframe.reserve(mut resumed, 1, 1000))
+        check(result.unwrap(seal_result(mut resumed, b"abc", 64)).ctr == 10, "a resumed sender does not start at its ceiling")
+    }
+    for _ in 1u64 .. 10 {
+        let _ = result.unwrap(seal_result(mut s, b"abc", 64))
+    }
+    match seal_result(mut s, b"abc", 64) {
+        Error(Unreserved) => {},
+        _ => fail("a seal past the reserved CTR"),
+    }
+    {
+        let mut last = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), sframe.Mark(ctr: 0xfffffffffffffffe, volume: 0), l))
+        let _ = result.unwrap(sframe.reserve(mut last, 5, 100))
+        check(result.unwrap(seal_result(mut last, b"", 64)).ctr == 0xfffffffffffffffe, "the last CTR is refused")
+        match seal_result(mut last, b"", 64) {
+            Error(Exhausted) => {},
+            _ => fail("CTR 2^64 - 1 is used"),
+        }
+    }
+    {
+        let mut full = result.unwrap(sframe.sender(suite(), Rfc, Fixed(1), counting(), sframe.Mark(ctr: 0, volume: (1 << 34) - 2), l))
+        let _ = result.unwrap(sframe.reserve(mut full, 5, 2))
+        let _ = result.unwrap(seal_result(mut full, b"", 64))
+        match seal_result(mut full, b"", 64) {
+            Error(Exhausted) => {},
+            _ => fail("a seal past the volume limit"),
+        }
+    }
+    Ok(())
+}

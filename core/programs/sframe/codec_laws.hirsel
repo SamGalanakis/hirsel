@@ -1,0 +1,362 @@
+// Laws L1, G1, A1 and G2 for docs/spec/sframe.md (SFRAME-14), part of module laws; the shared
+// helpers are in laws.hirsel.
+// ---------------------------------------------------------------- L1
+/// bug: the seal's spare checked against the unescaped length, an unbounded open input, or an underflow on a short frame.
+/// oracle: SFRAME-9's bounds counted by hand: bound(AnnexB, n) = n + n/2 + 1 and T(l) = 16 + 17 + 5 + 10 l.ranges + 2.
+@test
+fn ranged_lengths() -> Result[(), ()] {
+    let l = sframe.limits()
+    // SC + 40 x 41: n = 44, trailer 16 + 1 + 3 + 2 = 22, so the bound is 66 + 33 + 1 = 100.
+    let mut body: Bytes = list.new()
+    list.fill(mut body, 40, 0x41u8)
+    let frame = annexb(nals1(copy_of(body)))
+    let mut s = sender_at(Ranged(AnnexB), 1, 0, counting(), l)
+    let mut short = room(99)
+    match sframe.seal_ranged(mut s, layout2(0, 4), b"", frame, mut short) {
+        Error(Capacity(c)) => check(c.requested == 100 && c.available == 99 && list.len(short) == 0, "Capacity does not name the wire bound"),
+        _ => fail("a spare under the wire bound is not Capacity"),
+    }
+    let mut out = room(100)
+    check(result.unwrap(sframe.seal_ranged(mut s, layout2(0, 4), b"", frame, mut out)).ctr == 0, "a Capacity refusal consumed a CTR")
+    // 1000 zero bytes then 41, wholly clear: the wire escape adds one 03 per two zeros.
+    let mut zeros: Bytes = list.new()
+    list.fill(mut zeros, 1000, 0u8)
+    list.push(mut zeros, 0x41u8)
+    let zframe = annexb(nals1(copy_of(zeros)))
+    let mut zout = room(4096)
+    let z = result.unwrap(sframe.seal_ranged(mut s, layout2(0, 1005), b"", zframe, mut zout))
+    check(z.len >= 4 + 1500 && z.len <= ranges.wire_bound(Ranged(AnnexB), 1005 + 16 + 1 + 4 + 2), "an all-zero frame does not reach 3n/2")
+    let mut r = receiver_for(Ranged(AnnexB), 1, counting(), 0, l)
+    let mut zback = room(4096)
+    let _ = open_ok(sframe.open_ranged(mut r, b"", zout, mut zback))
+    check(zback == zframe, "an all-zero frame does not round-trip")
+    // Bare, l.frame 64 and 4 ranges: the open bound is 64 + 80 = 144; a frame f bytes long seals to f + 20.
+    let small = sframe.Limits(frame: 64, window: 64, keys: 4, ranges: 4, jump: 0)
+    let wide = sframe.Limits(frame: 400, window: 64, keys: 4, ranges: 4, jump: 0)
+    let mut b = sender_at(Ranged(Bare), 2, 0, counting(), wide)
+    let mut rb = receiver_for(Ranged(Bare), 2, counting(), 0, small)
+    for f in[124u64, 125u64] {
+        let mut plain: Bytes = list.new()
+        list.fill(mut plain, f, 0x55u8)
+        let mut sealed = room(f + 64)
+        let _ = result.unwrap(sframe.seal_ranged(mut b, ranges.none(), b"", plain, mut sealed))
+        check(list.len(sealed) == f + 20, "a Bare frame's trailer is not 20 bytes")
+        let mut back = room(512)
+        let got = sframe.open_ranged(mut rb, b"", sealed, mut back)
+        if f == 124 {
+            check(opened(got), "a frame at the open bound is refused")
+        } else {
+            check(malformed(got) && list.len(back) == 0, "a frame over the open bound is not Malformed")
+        }
+    }
+    for n in 0u64 .. 20 {
+        let mut tiny: Bytes = list.new()
+        list.fill(mut tiny, n, 0x02u8)
+        let mut back = room(64)
+        check(malformed(sframe.open_ranged(mut rb, b"", tiny, mut back)), "a frame under 20 bytes is not Malformed")
+    }
+    let mut plain: Bytes = list.new()
+    list.fill(mut plain, 30, 0x66u8)
+    let mut sealed = room(128)
+    let _ = result.unwrap(sframe.seal_ranged(mut b, ranges.none(), b"", plain, mut sealed))
+    let n = list.len(sealed)
+    for tail in[0u64, 1u64, n - 17, 0xffffu64] {
+        let mut bad = copy_of(sealed)
+        bad[n - 2] = int.truncate(tail >> 8)
+        bad[n - 1] = int.truncate(tail)
+        let mut back = room(128)
+        check(malformed(sframe.open_ranged(mut rb, b"", bad, mut back)) && list.len(back) == 0, "a bad L is not Malformed")
+    }
+    let mut under = room(29)
+    match sframe.open_ranged(mut rb, b"", sealed, mut under) {
+        Error(Capacity(c)) => check(c.requested == 30, "the open bound is not the body length"),
+        _ => fail("a spare under the open bound is not Capacity"),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- G1
+/// bug: a wrong VP8 keyframe bit, a start code left out, a parameter set encrypted, a PPS id cut by a wrong ue(v) length, a wrong H.265 header length, or an SPS Chrome would rewrite accepted.
+/// oracle: RFC 6386 §9.1; H.264 §7.3.3 and §9.1 and H.265 §7.3.6.1 counted by hand; libwebrtc's sps_vui_rewriter_unittest.cc modes.
+@test
+fn codec_ranges() -> Result[(), ()] {
+    let l = sframe.limits()
+    check(same_layout(ranges.vp8(unhex("50420000009d012a8002e001")), layout2(0, 10)), "a VP8 keyframe is not {(0,10)}")
+    check(same_layout(ranges.vp8(unhex("31aa000102")), layout2(0, 3)), "a VP8 interframe is not {(0,3)}")
+    check(same_layout(ranges.vp8(unhex("5042")), layout2(0, 2)), "a 2-byte VP8 frame is not {(0,2)}")
+    let sps = unescape_codec(fake_sps_optimal())
+    // SPS 14 + PPS 4 + SEI 6 + IDR 7, each after a 4-byte start code. The IDR's ue(v)s are
+    // 1 + 7 + 17 = 25 bits, so its header and 4 bytes are clear.
+    let au = annexb(nals4(copy_of(sps), unhex("68ce3c80"), unhex("060502aabb80"), unhex("65880096c0aabb")))
+    match ranges.h264(au, l) {
+        Ok(got) => check(same_layout(got, layout4(0, 31, 36, 9)), "H.264 ranges differ from the hand count"),
+        Error(_) => fail("an H.264 access unit is refused"),
+    }
+    // VPS, SPS, PPS whole; IDR_W_RADL with 2 flag bits and pps 0 (3 bits); TRAIL_R with 1 flag bit and pps 70 (13 bits).
+    let hevc = annexb(nals5(unhex("40010c01ff"), unhex("42010101"), unhex("4401c172"), unhex("2601a01122"), unhex("0201811c5566")))
+    match ranges.h265(hevc, l) {
+        Ok(got) => check(same_layout(got, layout4(0, 32, 34, 8)), "H.265 ranges differ from the hand count"),
+        Error(_) => fail("an H.265 access unit is refused"),
+    }
+    for mode in[fake_sps_novui(), fake_sps_norestriction(), fake_sps_suboptimal()] {
+        let frame = annexb(nals1(unescape_codec(mode)))
+        match ranges.h264(frame, l) {
+            Error(Unstable) => {},
+            _ => fail("an SPS libwebrtc rewrites is not Unstable"),
+        }
+        let mut fixed = room(256)
+        let _ = result.unwrap(ranges.normalize_h264(frame, mut fixed))
+        check(fixed == annexb(nals1(copy_of(sps))), "normalize_h264 differs from libwebrtc's rewrite")
+    }
+    match ranges.h264(annexb(nals1(copy_of(sps))), l) {
+        Ok(got) => check(same_layout(got, layout2(0, 18)), "the optimal SPS is not whole"),
+        Error(_) => fail("the optimal SPS is refused"),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- A1
+const LONGEST: u64 = 8
+
+fn symbol(d: u64) -> u8 {
+    if d == 4 {
+        0x41u8
+    } else {
+        int.truncate(d)
+    }
+}
+
+fn digit(x: u8) -> u64 {
+    if x == 0x41u8 {
+        4
+    } else {
+        int.widen(x)
+    }
+}
+
+fn power5(n: u64) -> u64 {
+    let mut p: u64 = 1
+    for _ in 0u64 .. n {
+        p *= 5
+    }
+    p
+}
+
+// The index of a string over the alphabet among all strings of length at most LONGEST.
+fn index_of(b: Bytes) -> u64 {
+    let mut v: u64 = 0
+    for x in b {
+        v = v * 5 + digit(x)
+    }
+    (power5(list.len(b)) - 1) / 4 + v
+}
+
+fn string_of(n: u64, v: u64) -> Bytes {
+    let mut out: Bytes = list.new()
+    list.fill(mut out, n, 0u8)
+    let mut x = v
+    let mut i = n
+    while i > 0 {
+        i -= 1
+        out[i] = symbol(x % 5)
+        x = x / 5
+    }
+    out
+}
+
+fn has_emulation(b: Bytes) -> bool {
+    let n = list.len(b)
+    for i in 2u64 .. n {
+        if b[i - 2] == 0u8 && b[i - 1] == 0u8 && b[i] <= 2u8 {
+            return true
+        }
+    }
+    n > 0 && b[n - 1] == 0u8
+}
+
+fn wire_of(body: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(2 * list.len(body) + 2)
+    ranges.wire_escape(body, 0, list.len(body), mut out)
+    out
+}
+
+fn image_has(image: List[u64], i: u64) -> bool {
+    (image[i / 64] >> (i % 64)) & 1 == 1
+}
+
+/// bug: an emulation left in the wire, a boundary taken from the sealed bytes, a non-injective tail rule (03 appended only after a final 00), or a non-canonical stream accepted.
+/// oracle: exhaustive enumeration over 00 01 02 03 41 up to length 8, and named cases from SFRAME-9.
+@test
+fn annexb_escaping() -> Result[(), ()] {
+    let total = (power5(LONGEST + 1) - 1) / 4
+    let mut image: List[u64] = list.new()
+    list.fill(mut image, total / 64 + 1, 0)
+    for n in 0u64 .. LONGEST + 1 {
+        for v in 0u64 .. power5(n) {
+            let body = string_of(n, v)
+            let w = wire_of(body)
+            check(!has_emulation(w), "the wire escape leaves an emulation")
+            let mut back: Bytes = list.with_capacity(list.len(w))
+            check(ranges.wire_unescape(w, 0, list.len(w), mut back) && back == body, "wire unescape of wire escape is not the body")
+            if list.len(w) <= LONGEST {
+                let i = index_of(w)
+                check(!image_has(image, i), "two bodies share a wire form")
+                image[i / 64] = image[i / 64] | (1u64 << (i % 64))
+            }
+        }
+    }
+    for n in 0u64 .. LONGEST + 1 {
+        for v in 0u64 .. power5(n) {
+            let w = string_of(n, v)
+            let mut back: Bytes = list.with_capacity(n)
+            let ok = ranges.wire_unescape(w, 0, n, mut back)
+            check(ok == image_has(image, (power5(n) - 1) / 4 + v), "wire unescape accepts exactly the image")
+        }
+    }
+    check(wire_of(unhex("4100")) == unhex("410003"), "a body ending in one 00 is not 41 00 03")
+    check(wire_of(unhex("410003")) == unhex("41000303"), "a body ending 00 03 is not 41 00 03 03")
+    let l = sframe.limits()
+    // A clear NAL ending 00 03, then a secret one.
+    {
+        let frame = annexb(nals2(unhex("410003"), unhex("4243")))
+        let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+        let mut out = room(256)
+        let _ = result.unwrap(sframe.seal_ranged(mut s, layout2(0, 12), b"", frame, mut out))
+        let mut r = receiver_for(Ranged(AnnexB), 4, counting(), 0, l)
+        let mut back = room(256)
+        let _ = open_ok(sframe.open_ranged(mut r, b"", out, mut back))
+        check(back == frame, "a clear NAL ending 00 03 does not round-trip")
+    }
+    // L = 256: a 1-byte header and a 255-byte layout of 127 ranges.
+    {
+        let mut pairs: List[u64] = list.new()
+        list.push(mut pairs, 0)
+        list.push(mut pairs, 4)
+        for i in 0u64 .. 126 {
+            list.push(mut pairs, 5 + 2 * i)
+            list.push(mut pairs, 1)
+        }
+        let layout = layout_of(pairs)
+        check(ranges.layout_len(layout) == 255, "the 127-range layout is not 255 bytes")
+        let mut frame: Bytes = list.new()
+        list.fill(mut frame, 300, 0x41u8)
+        let mut s = sender_at(Ranged(Bare), 4, 0, counting(), l)
+        let mut out = room(1024)
+        let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", frame, mut out))
+        let n = list.len(out)
+        check(out[n - 2] == 1u8 && out[n - 1] == 0u8, "L is not 256")
+        let mut r = receiver_for(Ranged(Bare), 4, counting(), 0, l)
+        let mut back = room(1024)
+        let _ = result.unwrap(sframe.open_ranged(mut r, b"", out, mut back))
+        check(back == frame, "an L = 256 frame does not round-trip")
+    }
+    // Two all-secret 32 KiB NALs, sealed under successive CTRs until the ciphertext holds 00 00 0x (x <= 3).
+    {
+        let mut g = Rng(s: 11)
+        let mut a: Bytes = list.new()
+        let mut b: Bytes = list.new()
+        for _ in 0u64 .. 32768 {
+            list.push(mut a, 0x41u8 | (byte_of(mut g) & 0x0eu8))
+            list.push(mut b, 0x51u8 | (byte_of(mut g) & 0x0eu8))
+        }
+        let frame = annexb(nals2(copy_of(a), copy_of(b)))
+        let layout = layout4(0, 4, 32772, 4)
+        let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+        let mut r = receiver_for(Ranged(AnnexB), 4, counting(), 0, l)
+        let mut found = false
+        let mut tries: u64 = 0
+        while !found {
+            tries += 1
+            check(tries < 400, "no ciphertext with an emulation")
+            let mut out = room(200000)
+            let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", frame, mut out))
+            let Some(nals) = ranges.unwire(out) else {
+                fail("a sealed frame does not split")
+            }
+            check(list.len(nals.starts) == 2, "a sealed frame's NAL count changed")
+            for i in 2u64 .. list.len(nals.work) {
+                if nals.work[i - 2] == 0u8 && nals.work[i - 1] == 0u8 && nals.work[i] <= 3u8 {
+                    found = true
+                }
+            }
+            if found {
+                let mut back = room(200000)
+                let _ = result.unwrap(sframe.open_ranged(mut r, b"", out, mut back))
+                check(back == frame, "a frame with an escaped ciphertext does not round-trip")
+            }
+        }
+    }
+    // 3-byte start codes and trailing zeros: refused by seal_ranged, rewritten by normalize_h264.
+    {
+        let raw = unhex("000001414200000000014300")
+        let mut s = sender_at(Ranged(AnnexB), 4, 0, counting(), l)
+        let mut out = room(256)
+        match sframe.seal_ranged(mut s, layout2(0, 4), b"", raw, mut out) {
+            Error(Invalid) => {},
+            _ => fail("a raw Annex B frame is sealed"),
+        }
+        let mut fixed = room(256)
+        let _ = result.unwrap(ranges.normalize_h264(raw, mut fixed))
+        check(fixed == unhex("0000000141420000000143"), "normalize_h264 does not rewrite start codes and trailing zeros")
+        let mut fixed5 = room(256)
+        let _ = result.unwrap(ranges.normalize_h265(raw, mut fixed5))
+        check(fixed5 == fixed, "normalize_h265 does not rewrite start codes and trailing zeros")
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- G2
+fn g2_normalized_key() -> Bytes {
+    let mut found: Bytes = list.new()
+    for c in g2_cases() {
+        if c.kind == "normalized" && list.len(found) == 0 {
+            found = unhex(c.plain)
+        }
+    }
+    found
+}
+
+/// bug: a range rule that leaves bytes Chrome's packetizer, depacketizer or SPS rewriter change inside the ciphertext's clear part, a seal that differs from the reference seal, or a normalize_h264 that differs from Chromium's receive-side SPS rewrite.
+/// oracle: frames sealed by oracle.py and carried through headless Chromium 153's H.264 send and receive path (capture.mjs), with Chromium's own unsealed rewrite of a libx264 B-frame stream.
+@test
+fn chromium_round_trip() -> Result[(), ()] {
+    let l = sframe.limits()
+    let framing: ranges.Framing = Ranged(AnnexB)
+    let target = g2_normalized_key()
+    check(list.len(target) > 0, "the capture holds no normalized keyframe")
+    for c in g2_cases() {
+        let plain = unhex(c.plain)
+        let sent = unhex(c.sent)
+        let received = unhex(c.received)
+        let mut r = receiver_for(framing, 1, g2_base(), 0, l)
+        let mut out = room(ranges.wire_bound(framing, list.len(received)))
+        if c.kind == "raw" {
+            check(received != sent, "Chromium did not rewrite the raw libx264 SPS")
+            // The rewrite changes a clear range's length, so the layout no longer parses.
+            check(malformed(sframe.open_ranged(mut r, b"", received, mut out)), "a rewritten frame is not Malformed")
+            match ranges.h264(plain, l) {
+                Error(Unstable) => {},
+                _ => fail("an SPS Chromium rewrites is not Unstable"),
+            }
+            let mut fixed = room(list.len(plain) + 64)
+            let _ = result.unwrap(ranges.normalize_h264(plain, mut fixed))
+            check(fixed == target, "normalize_h264 differs from Chromium's rewrite")
+        } else {
+            check(received == sent, "Chromium changed a sealed frame")
+            let layout = result.unwrap(ranges.h264(plain, l))
+            let mut s = sender_at(framing, 1, c.ctr, g2_base(), l)
+            let mut ours = room(ranges.wire_bound(framing, list.len(plain) + 64))
+            let _ = result.unwrap(sframe.seal_ranged(mut s, layout, b"", plain, mut ours))
+            check(ours == sent, "the seal differs from oracle.py's")
+            let _ = open_ok(sframe.open_ranged(mut r, b"", received, mut out))
+            check(out == plain, "the received frame does not open to its plaintext")
+        }
+    }
+    let mut fixed = room(list.len(g2_libx264_key()) + 64)
+    let _ = result.unwrap(ranges.normalize_h264(g2_libx264_key(), mut fixed))
+    check(fixed == target, "normalize_h264 of libx264's raw output differs from Chromium's rewrite")
+    let mut again = room(list.len(target) + 64)
+    let _ = result.unwrap(ranges.normalize_h264(g2_chrome_rewrite(), mut again))
+    check(again == target, "normalize_h264 changes Chromium's own rewrite beyond start codes and trailing zeros")
+    Ok(())
+}

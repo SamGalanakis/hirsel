@@ -1,0 +1,194 @@
+// The ranged framing's seal and open (docs/spec/sframe.md SFRAME-9), part of module sframe.
+// ---------------------------------------------------------------- the ranged framing (SFRAME-9)
+fn is_annexb(f: ranges.Framing) -> bool {
+    match f {
+        Ranged(AnnexB) => true,
+        _ => false,
+    }
+}
+
+fn clear_len(layout: ranges.Layout) -> u64 {
+    let mut n: u64 = 0
+    for r in layout.ranges {
+        n += r.len
+    }
+    n
+}
+
+// Appends the bytes of `work[0, n)` inside the layout to `clear` and those outside to `hidden`.
+fn gather(work: Bytes, n: u64, layout: ranges.Layout, mut clear: Bytes, mut hidden: Bytes) {
+    let mut pos: u64 = 0
+    for r in layout.ranges {
+        list.append(mut hidden, list.slice(work, pos, r.at))
+        list.append(mut clear, list.slice(work, r.at, r.at + r.len))
+        pos = r.at + r.len
+    }
+    list.append(mut hidden, list.slice(work, pos, n))
+}
+
+// Writes `fill`'s bytes, in order, over the positions of `body[0, n)` outside the layout.
+fn scatter(mut body: Bytes, n: u64, layout: ranges.Layout, fill: Bytes) {
+    let mut pos: u64 = 0
+    let mut src: u64 = 0
+    for r in layout.ranges {
+        let k = r.at - pos
+        list.copy_from_slice(mut body, pos, list.slice(fill, src, src + k))
+        src += k
+        pos = r.at + r.len
+    }
+    list.copy_from_slice(mut body, pos, list.slice(fill, src, src + (n - pos)))
+}
+
+fn bare_nals(frame: Bytes) -> Result[ranges.Nals, Capacity] {
+    let mut work: Bytes = list.new()
+    list.try_reserve(mut work, list.len(frame))?
+    list.append(mut work, frame)
+    Ok(ranges.Nals(work: take work, starts: list.new()))
+}
+
+// Each NAL of `body[0, n)` with its start code, through `escape`.
+fn emit_nals(nals: ranges.Nals, body: Bytes, n: u64, wire: bool, mut out: Bytes) {
+    let count = list.len(nals.starts)
+    for k in 0u64 .. count {
+        let lo = nals.starts[k] + 4
+        // The last NAL runs to `n`: on seal it carries the trailer, on open it stops before it.
+        let hi = if k + 1 < count {
+            nals.starts[k + 1]
+        } else {
+            n
+        }
+        list.append(mut out, b"\x00\x00\x00\x01")
+        if wire {
+            ranges.wire_escape(body, lo, hi, mut out)
+        } else {
+            ranges.codec_escape(body, lo, hi, mut out)
+        }
+    }
+}
+
+pub fn seal_ranged(mut s: Sender, layout: ranges.Layout, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Sealed, SframeError] {
+    if is_rfc(s.framing) {
+        return Error(Framing)
+    }
+    if list.len(frame) > s.limits.frame {
+        return Error(Invalid)
+    }
+    let annexb = is_annexb(s.framing)
+    let nals = if annexb {
+        match ranges.working(frame) {
+            Ok(take x) => take x,
+            Error(_) => return Error(Invalid),
+        }
+    } else {
+        bare_nals(frame) ?=> |c| Capacity(c)
+    }
+    let n = list.len(nals.work)
+    if !ranges.canonical(layout, n, s.limits.ranges) || (annexb && !ranges.starts_clear(nals, layout)) {
+        return Error(Invalid)
+    }
+    let h = Header(kid: s.kid, ctr: s.next)
+    let hlen = header_len(h)
+    let elen = ranges.layout_len(layout)
+    let shown = clear_len(layout)
+    let hidden_len = n - shown
+    let cost = 1 + blocks(hidden_len) + blocks(hlen + elen + shown + list.len(metadata))
+    admit(s, cost)?
+    let trailer = TAG + hlen + elen + 2
+    short_of(out, ranges.wire_bound(s.framing, n + trailer)) ?=> |c| Capacity(c)
+    let mut aad: Bytes = list.new()
+    list.try_reserve(mut aad, hlen + elen + shown + list.len(metadata)) ?=> |c| Capacity(c)
+    let mut hidden: Bytes = list.new()
+    list.try_reserve(mut hidden, hidden_len) ?=> |c| Capacity(c)
+    let mut sealed: Bytes = list.new()
+    list.try_reserve(mut sealed, hidden_len + TAG) ?=> |c| Capacity(c)
+    let mut body: Bytes = list.new()
+    list.try_reserve(mut body, n + trailer) ?=> |c| Capacity(c)
+    let _ = encode_header(h, mut aad) ?=> |c| Capacity(c)
+    ranges.encode_layout(layout, mut aad)
+    gather(nals.work, n, layout, mut aad, mut hidden)
+    list.append(mut aad, metadata)
+    let iv = nonce(s.salt, h.ctr)
+    match secret.aead_seal(s.key, Aes128Gcm, iv, aad, hidden, mut sealed) {
+        Ok(_) => {},
+        Error(_) => fail("sframe: the AEAD sink refused after admission"),
+    }
+    list.append(mut body, nals.work)
+    scatter(mut body, n, layout, sealed)
+    list.append(mut body, list.slice(sealed, hidden_len, hidden_len + TAG))
+    list.append(mut body, list.slice(aad, 0, hlen + elen))
+    let l16: u16 = int.narrow(hlen + elen)
+    list.put_word_be(mut body, l16)
+    let start = list.len(out)
+    if annexb {
+        emit_nals(nals, body, list.len(body), true, mut out)
+    } else {
+        list.append(mut out, body)
+    }
+    spend(mut s, cost)
+    Ok(Sealed(kid: h.kid, ctr: h.ctr, len: list.len(out) - start))
+}
+
+pub fn open_ranged(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError] {
+    if is_rfc(r.framing) {
+        return Error(Discarded(Malformed))
+    }
+    if list.len(frame) > ranges.wire_bound(r.framing, r.limits.frame + ranges.trailer_bound(r.limits)) {
+        return Error(Discarded(Malformed))
+    }
+    let annexb = is_annexb(r.framing)
+    let nals = if annexb {
+        match ranges.unwire(frame) {
+            Some(take x) => take x,
+            None => return Error(Discarded(Malformed)),
+        }
+    } else {
+        bare_nals(frame) ?=> |c| Capacity(c)
+    }
+    let n = list.len(nals.work)
+    if n < 20 {
+        return Error(Discarded(Malformed))
+    }
+    let tail: u64 = (w8(nals.work[n - 2]) << 8) | w8(nals.work[n - 1])
+    if tail < 2 || n < tail + 18 {
+        return Error(Discarded(Malformed))
+    }
+    let hstart = n - 2 - tail
+    let body_len = hstart - TAG
+    let (h, hlen) = decode_header(nals.work, hstart) ?=> |_| Discarded(Malformed)
+    if hlen >= tail {
+        return Error(Discarded(Malformed))
+    }
+    let Some(layout) = ranges.decode_layout(nals.work, hstart + hlen, n - 2, body_len, r.limits.ranges) else {
+        return Error(Discarded(Malformed))
+    }
+    if annexb && !ranges.starts_clear(nals, layout) {
+        return Error(Discarded(Malformed))
+    }
+    let room = spare(out)
+    let need = ranges.wire_bound(r.framing, body_len)
+    if room < need {
+        return Error(Capacity(Capacity(requested: need, available: room)))
+    }
+    let shown = clear_len(layout)
+    let mut aad: Bytes = list.new()
+    list.try_reserve(mut aad, tail + shown + list.len(metadata)) ?=> |c| Capacity(c)
+    let mut sealed: Bytes = list.new()
+    list.try_reserve(mut sealed, body_len - shown + TAG) ?=> |c| Capacity(c)
+    list.append(mut aad, list.slice(nals.work, hstart, n - 2))
+    gather(nals.work, body_len, layout, mut aad, mut sealed)
+    list.append(mut aad, metadata)
+    list.append(mut sealed, list.slice(nals.work, body_len, hstart))
+    let mut plain: Bytes = list.new()
+    open_core(mut r, h, aad, sealed, room, mut plain)?
+    let mut body: Bytes = list.new()
+    list.try_reserve(mut body, body_len) ?=> |c| Capacity(c)
+    list.append(mut body, list.slice(nals.work, 0, body_len))
+    scatter(mut body, body_len, layout, plain)
+    let start = list.len(out)
+    if annexb {
+        emit_nals(nals, body, body_len, false, mut out)
+    } else {
+        list.append(mut out, body)
+    }
+    Ok(Opened(kid: h.kid, ctr: h.ctr, len: list.len(out) - start))
+}

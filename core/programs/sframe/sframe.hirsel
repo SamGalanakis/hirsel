@@ -1,0 +1,856 @@
+// RFC 9605 SFrame for AES_128_GCM_SHA256_128 (docs/spec/sframe.md).
+pub type Suite = Aes128GcmSha256_128()
+
+pub fn suite_id(s: Suite) -> u16 {
+    match s {
+        Aes128GcmSha256_128() => 4,
+    }
+}
+
+pub type Header {
+    kid: u64,
+    ctr: u64
+}
+
+pub type HeaderError = Short | Malformed
+
+pub type Ratchet {
+    generation: u64,
+    bits: u8,
+    step: u64
+}
+
+pub type Scheme = Fixed(u64) | Ratcheted(Ratchet)
+
+pub type Follow {
+    generation: u64,
+    bits: u8,
+    step: u64,
+    forward: u8,
+    keep: u8,
+    floor: u64
+}
+
+pub type Limits {
+    frame: u64,
+    window: u64,
+    keys: u64,
+    ranges: u64,
+    jump: u64
+}
+
+pub fn limits() -> Limits {
+    Limits(frame: 4194304, window: 128, keys: 16, ranges: 256, jump: 0)
+}
+
+pub type SframeError = Invalid | Framing | Unreserved | Exhausted | Keys | Secret(SecretError) | Capacity(Capacity)
+
+pub type Discard: key = Malformed | Replayed | TooOld | TooFar | Tampered
+
+pub type OpenError = NoKey(u64) | Discarded(Discard) | Capacity(Capacity)
+
+pub type Sealed {
+    kid: u64,
+    ctr: u64,
+    len: u64
+}
+
+pub type Opened {
+    kid: u64,
+    ctr: u64,
+    len: u64
+}
+
+pub type Mark {
+    ctr: u64,
+    volume: u64
+}
+
+const CTR_LIMIT: u64 = 0xffffffffffffffff
+
+const VOLUME_LIMIT: u64 = 1 << 34
+
+const TAG: u64 = 16
+
+// ---------------------------------------------------------------- header (SFRAME-3)
+fn w8(x: u8) -> u64 {
+    int.widen(x)
+}
+
+fn value_len(x: u64) -> u64 {
+    if x < 8 {
+        return 0
+    }
+    let mut n: u64 = 1
+    while n < 8 && (x >> (8 * n)) != 0 {
+        n += 1
+    }
+    n
+}
+
+pub fn header_len(h: Header) -> u64 {
+    1 + value_len(h.kid) + value_len(h.ctr)
+}
+
+fn spare(out: Bytes) -> u64 {
+    list.capacity(out) - list.len(out)
+}
+
+fn short_of(out: Bytes, n: u64) -> Result[(), Capacity] {
+    let room = spare(out)
+    if room < n {
+        return Error(Capacity(requested: n, available: room))
+    }
+    Ok(())
+}
+
+fn put_value(mut out: Bytes, x: u64, n: u64) {
+    let mut i = n
+    while i > 0 {
+        i -= 1
+        let b: u8 = int.truncate(x >> (8 * i))
+        list.push(mut out, b)
+    }
+}
+
+pub fn encode_header(h: Header, mut out: Bytes) -> Result[u64, Capacity] {
+    let k = value_len(h.kid)
+    let c = value_len(h.ctr)
+    short_of(out, 1 + k + c)?
+    let high: u64 = if k == 0 {
+        h.kid
+    } else {
+        8 | (k - 1)
+    }
+    let low: u64 = if c == 0 {
+        h.ctr
+    } else {
+        8 | (c - 1)
+    }
+    let config: u8 = int.narrow((high << 4) | low)
+    list.push(mut out, config)
+    put_value(mut out, h.kid, k)
+    put_value(mut out, h.ctr, c)
+    Ok(1 + k + c)
+}
+
+fn read_value(b: Bytes, at: u64, n: u64) -> Result[u64, HeaderError] {
+    if b[at] == 0 {
+        return Error(Malformed)
+    }
+    let mut x: u64 = 0
+    for i in 0u64 .. n {
+        x = (x << 8) | w8(b[at + i])
+    }
+    if x < 8 {
+        return Error(Malformed)
+    }
+    Ok(x)
+}
+
+pub fn decode_header(b: Bytes, at: u64) -> Result[(Header, u64), HeaderError] {
+    let end = list.len(b)
+    if at >= end {
+        return Error(Short)
+    }
+    let config: u64 = w8(b[at])
+    let k: u64 = if config & 128 != 0 {
+        ((config >> 4) & 7) + 1
+    } else {
+        0
+    }
+    let c: u64 = if config & 8 != 0 {
+        (config & 7) + 1
+    } else {
+        0
+    }
+    if end - at < 1 + k + c {
+        return Error(Short)
+    }
+    let id = if k == 0 {
+        (config >> 4) & 7
+    } else {
+        read_value(b, at + 1, k)?
+    }
+    let ctr = if c == 0 {
+        config & 7
+    } else {
+        read_value(b, at + 1 + k, c)?
+    }
+    Ok((Header(kid: id, ctr), 1 + k + c))
+}
+
+// ---------------------------------------------------------------- key schedule (SFRAME-4)
+fn inline_bytes(x: Inline[u8, 32], n: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(n)
+    let _ = bytebuf.append_inline(mut out, x, 0, n)
+    take out
+}
+
+fn extract(base: Bytes) -> Bytes {
+    inline_bytes(std.hmac.sha256(b"", base), 32)
+}
+
+// HKDF-Expand for one block: the first n (at most 32) bytes of HMAC(prk, info || 01).
+fn expand(prk: Bytes, info: Bytes, n: u64) -> Bytes {
+    let mut h = std.hmac.start(prk)
+    std.hmac.add(mut h, info, 0, list.len(info))
+    std.hmac.add_byte(mut h, 1)
+    inline_bytes(std.hmac.finish(h), n)
+}
+
+fn label(prefix: Bytes, id: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(prefix) + 10)
+    list.append(mut out, prefix)
+    list.put_word_be(mut out, id)
+    list.put_word_be(mut out, 4u16)
+    take out
+}
+
+pub fn ratchet_key(base: Bytes) -> Bytes {
+    expand(extract(base), b"SFrame 1.0 Ratchet", 32)
+}
+
+pub fn salt_of(base: Bytes, id: u64) -> Bytes {
+    expand(extract(base), label(b"SFrame 1.0 Secret salt ", id), 12)
+}
+
+type Slot {
+    key: Secret,
+    salt: Bytes,
+    window: Window
+}
+
+type KeyPair {
+    key: Secret,
+    salt: Bytes
+}
+
+fn derive(base: Bytes, id: u64, uses: String) -> Result[KeyPair, SframeError] {
+    let mut owned: Bytes = list.new()
+    list.try_reserve(mut owned, list.len(base)) ?=> |c| Capacity(c)
+    list.append(mut owned, base)
+    let parent = match secret.seal(take owned, "kdf") {
+        Ok(take s) => take s,
+        Error((e, _)) => return Error(Secret(e)),
+    }
+    let key = secret.derive_hkdf_sha256(parent, b"", label(b"SFrame 1.0 Secret key ", id), 16, uses) ?=> |e| Secret(e)
+    Ok(KeyPair(key: take key, salt: salt_of(base, id)))
+}
+
+fn check_base(base: Bytes) -> Result[(), SframeError] {
+    let n = list.len(base)
+    if n < 16 || n > 64 {
+        return Error(Invalid)
+    }
+    Ok(())
+}
+
+fn check_limits(l: Limits) -> Result[(), SframeError] {
+    if l.frame < 1 || l.frame > (1 << 30) || l.window < 64 || l.window > 4096 || l.keys < 1 || l.keys > 256 || l.ranges > 1024 || (l.jump != 0 && l.jump < l.window) {
+        return Error(Invalid)
+    }
+    Ok(())
+}
+
+fn nonce(salt: Bytes, ctr: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(12)
+    list.append(mut out, salt)
+    for i in 0u64 .. 8 {
+        let b: u8 = int.truncate(ctr >> (8 * (7 - i)))
+        out[4 + i] = out[4 + i] ^ b
+    }
+    take out
+}
+
+fn blocks(n: u64) -> u64 {
+    (n + 15) / 16
+}
+
+// ---------------------------------------------------------------- sender (SFRAME-5, SFRAME-8)
+pub opaque type Sender {
+    suite: Suite,
+    framing: ranges.Framing,
+    limits: Limits,
+    ratcheted: bool,
+    generation: u64,
+    bits: u8,
+    step: u64,
+    base: Bytes,
+    kid: u64,
+    key: Secret,
+    salt: Bytes,
+    next: u64,
+    volume: u64,
+    ceiling: Mark
+}
+
+fn ratchet_kid(generation: u64, bits: u8, step: u64) -> u64 {
+    let b: u64 = w8(bits)
+    (generation << b) | (step & ((1 << b) - 1))
+}
+
+fn check_generation(generation: u64, bits: u8) -> Result[(), SframeError] {
+    if bits < 1 || bits > 16 {
+        return Error(Invalid)
+    }
+    let b: u64 = w8(bits)
+    if generation >> (64 - b) != 0 {
+        return Error(Invalid)
+    }
+    Ok(())
+}
+
+pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take base: Bytes, from: Mark, l: Limits) -> Result[Sender, SframeError] {
+    check_limits(l)?
+    check_base(base)?
+    let (ratcheted, generation, bits, step, id) = match scheme {
+        Fixed(k) => (false, 0u64, 0u8, 0u64, k),
+        Ratcheted(r) => {
+            check_generation(r.generation, r.bits)?
+            (true, r.generation, r.bits, r.step, ratchet_kid(r.generation, r.bits, r.step))
+        },
+    }
+    let KeyPair(key: take key, salt: take salt) = derive(base, id, "aead(aes128-gcm)")?
+    let kept = if ratcheted {
+        take base
+    } else {
+        list.new()
+    }
+    Ok(Sender(suite, framing, limits: l, ratcheted, generation, bits, step, base: take kept, kid: id, key: take key, salt: take salt, next: from.ctr, volume: from.volume, ceiling: from))
+}
+
+pub fn current_kid(s: Sender) -> u64 {
+    s.kid
+}
+
+pub fn next_ctr(s: Sender) -> u64 {
+    s.next
+}
+
+pub fn reserve(mut s: Sender, frames: u64, volume: u64) -> Result[Mark, SframeError] {
+    if s.next >= CTR_LIMIT || s.volume >= VOLUME_LIMIT {
+        return Error(Exhausted)
+    }
+    let ctr = int.saturating_add(s.next, frames)
+    let units = int.saturating_add(s.volume, volume)
+    let top_ctr = if ctr > CTR_LIMIT {
+        CTR_LIMIT
+    } else {
+        ctr
+    }
+    let top_volume = if units > VOLUME_LIMIT {
+        VOLUME_LIMIT
+    } else {
+        units
+    }
+    if top_ctr > s.ceiling.ctr {
+        s.ceiling.ctr = top_ctr
+    }
+    if top_volume > s.ceiling.volume {
+        s.ceiling.volume = top_volume
+    }
+    Ok(s.ceiling)
+}
+
+pub fn ratchet(mut s: Sender) -> Result[(), SframeError] {
+    if !s.ratcheted {
+        return Error(Invalid)
+    }
+    if s.step == CTR_LIMIT {
+        return Error(Exhausted)
+    }
+    let next_base = ratchet_key(s.base)
+    let id = ratchet_kid(s.generation, s.bits, s.step + 1)
+    let KeyPair(key: take key, salt: take salt) = derive(next_base, id, "aead(aes128-gcm)")?
+    s.base = take next_base
+    s.step += 1
+    s.kid = id
+    s.key = take key
+    s.salt = take salt
+    s.next = 0
+    s.volume = 0
+    s.ceiling = Mark(ctr: 0, volume: 0)
+    Ok(())
+}
+
+// The refusals every seal makes before any work, in SFRAME-5's order after Framing and Invalid.
+fn admit(s: Sender, cost: u64) -> Result[(), SframeError] {
+    if s.next >= CTR_LIMIT || cost > VOLUME_LIMIT - s.volume {
+        return Error(Exhausted)
+    }
+    if s.next >= s.ceiling.ctr || s.volume + cost > s.ceiling.volume {
+        return Error(Unreserved)
+    }
+    Ok(())
+}
+
+fn spend(mut s: Sender, cost: u64) {
+    s.next += 1
+    s.volume += cost
+}
+
+fn is_rfc(f: ranges.Framing) -> bool {
+    match f {
+        Rfc => true,
+        Ranged(_) => false,
+    }
+}
+
+pub fn seal(mut s: Sender, metadata: Bytes, plain: Bytes, mut out: Bytes) -> Result[Sealed, SframeError] {
+    if !is_rfc(s.framing) {
+        return Error(Framing)
+    }
+    if list.len(plain) > s.limits.frame {
+        return Error(Invalid)
+    }
+    let h = Header(kid: s.kid, ctr: s.next)
+    let hlen = header_len(h)
+    let cost = 1 + blocks(list.len(plain)) + blocks(hlen + list.len(metadata))
+    admit(s, cost)?
+    let total = hlen + list.len(plain) + TAG
+    short_of(out, total) ?=> |c| Capacity(c)
+    let mut aad: Bytes = list.new()
+    list.try_reserve(mut aad, hlen + list.len(metadata)) ?=> |c| Capacity(c)
+    let _ = encode_header(h, mut aad) ?=> |c| Capacity(c)
+    list.append(mut aad, metadata)
+    let iv = nonce(s.salt, h.ctr)
+    let start = list.len(out)
+    list.append(mut out, list.slice(aad, 0, hlen))
+    match secret.aead_seal(s.key, Aes128Gcm, iv, aad, plain, mut out) {
+        Ok(_) => {},
+        Error(_) => {
+            list.truncate(mut out, start)
+            fail("sframe: the AEAD sink refused after admission")
+        },
+    }
+    spend(mut s, cost)
+    Ok(Sealed(kid: h.kid, ctr: h.ctr, len: list.len(out) - start))
+}
+
+// ---------------------------------------------------------------- replay window (SFRAME-7)
+type Window {
+    floor: u64,
+    top: Option[u64],
+    bits: List[u64]
+}
+
+fn window(size: u64, floor: u64) -> Result[Window, Capacity] {
+    let words = (size + 63) / 64
+    let mut bits: List[u64] = list.new()
+    list.try_reserve(mut bits, words)?
+    list.fill(mut bits, words, 0)
+    Ok(Window(floor, top: None, bits: take bits))
+}
+
+fn bit_set(w: Window, i: u64) -> bool {
+    (w.bits[i / 64] >> (i % 64)) & 1 != 0
+}
+
+fn check_window(w: Window, size: u64, jump: u64, ctr: u64) -> Result[(), Discard] {
+    if ctr < w.floor {
+        return Error(TooOld)
+    }
+    if let Some(top) = w.top {
+        if ctr > top {
+            if jump != 0 && ctr - top > jump {
+                return Error(TooFar)
+            }
+            return Ok(())
+        }
+        let behind = top - ctr
+        if behind >= size {
+            return Error(TooOld)
+        }
+        if bit_set(w, behind) {
+            return Error(Replayed)
+        }
+    }
+    Ok(())
+}
+
+fn shift(mut bits: List[u64], d: u64) {
+    let words = list.len(bits)
+    if d >= words * 64 {
+        for i in 0u64 .. words {
+            bits[i] = 0
+        }
+        return
+    }
+    let whole = d / 64
+    let part = d % 64
+    let mut i = words
+    while i > 0 {
+        i -= 1
+        let mut v: u64 = 0
+        if i >= whole {
+            let src = i - whole
+            v = bits[src] << part
+            if part > 0 && src >= 1 {
+                v = v | (bits[src - 1] >> (64 - part))
+            }
+        }
+        bits[i] = v
+    }
+}
+
+fn mark(mut w: Window, ctr: u64) {
+    let behind: u64 = match w.top {
+        None => {
+            w.top = Some(ctr)
+            0
+        },
+        Some(top) => if ctr > top {
+            shift(mut w.bits, ctr - top)
+            w.top = Some(ctr)
+            0
+        } else {
+            top - ctr
+        },
+    }
+    w.bits[behind / 64] = w.bits[behind / 64] | (1u64 << (behind % 64))
+}
+
+// ---------------------------------------------------------------- receiver (SFRAME-6, SFRAME-8)
+type Generation {
+    first: u64,
+    bits: u8,
+    forward: u8,
+    keep: u8,
+    step: u64,
+    base: Bytes
+}
+
+type Claim {
+    first: u64,
+    bits: u8
+}
+
+pub opaque type Receiver {
+    suite: Suite,
+    framing: ranges.Framing,
+    limits: Limits,
+    slots: Map[u64, Slot],
+    generations: Map[u64, Generation],
+    claims: List[Claim],
+    used: u64
+}
+
+pub fn receiver(suite: Suite, framing: ranges.Framing, l: Limits) -> Result[Receiver, SframeError] {
+    check_limits(l)?
+    Ok(Receiver(suite, framing, limits: l, slots: map.new(), generations: map.new(), claims: list.new(), used: 0))
+}
+
+fn claimed(r: Receiver, id: u64) -> Option[Claim] {
+    for c in r.claims {
+        let b: u64 = w8(c.bits)
+        if id >> b == c.first >> b {
+            return Some(c)
+        }
+    }
+    None
+}
+
+fn new_slot(base: Bytes, id: u64, size: u64, floor: u64) -> Result[Slot, SframeError] {
+    let KeyPair(key: take key, salt: take salt) = derive(base, id, "open(aes128-gcm)")?
+    let w = window(size, floor) ?=> |c| Capacity(c)
+    Ok(Slot(key: take key, salt: take salt, window: take w))
+}
+
+fn put_slot(mut r: Receiver, id: u64, take slot: Slot) -> Result[(), SframeError] {
+    map.try_reserve(mut r.slots, 1) ?=> |c| Capacity(c)
+    map.insert(mut r.slots, id, take slot)
+    Ok(())
+}
+
+pub fn install(mut r: Receiver, id: u64, take base: Bytes, floor: u64) -> Result[(), SframeError] {
+    check_base(base)?
+    if let Some(_) = map.get(r.slots, id) {
+        return Error(Invalid)
+    }
+    if let Some(_) = claimed(r, id) {
+        return Error(Invalid)
+    }
+    if r.used + 1 > r.limits.keys {
+        return Error(Keys)
+    }
+    let slot = new_slot(base, id, r.limits.window, floor)?
+    put_slot(mut r, id, take slot)?
+    r.used += 1
+    Ok(())
+}
+
+pub fn install_ratcheted(mut r: Receiver, f: Follow, take base: Bytes) -> Result[(), SframeError] {
+    check_base(base)?
+    check_generation(f.generation, f.bits)?
+    let span: u64 = 1 << w8(f.bits)
+    let forward: u64 = w8(f.forward)
+    let keep: u64 = w8(f.keep)
+    if forward < 1 || forward > 16 || keep < forward || keep > 16 || keep + 1 + forward > span {
+        return Error(Invalid)
+    }
+    let first = f.generation << w8(f.bits)
+    let mut overlap = false
+    for c in r.claims {
+        let b: u64 = if c.bits > f.bits {
+            w8(c.bits)
+        } else {
+            w8(f.bits)
+        }
+        if c.first >> b == first >> b {
+            overlap = true
+        }
+    }
+    if overlap {
+        return Error(Invalid)
+    }
+    let last = first | (span - 1)
+    // A fixed key inside the claimed range: refuse. The table is small, so probe the claim.
+    if span <= 65536 {
+        for low in 0u64 .. span {
+            if let Some(_) = map.get(r.slots, first | low) {
+                return Error(Invalid)
+            }
+        }
+    }
+    let _ = last
+    if r.used + keep + 1 > r.limits.keys {
+        return Error(Keys)
+    }
+    let id = ratchet_kid(f.generation, f.bits, f.step)
+    let slot = new_slot(base, id, r.limits.window, f.floor)?
+    list.try_reserve(mut r.claims, 1) ?=> |c| Capacity(c)
+    map.try_reserve(mut r.generations, 1) ?=> |c| Capacity(c)
+    put_slot(mut r, id, take slot)?
+    list.push(mut r.claims, Claim(first, bits: f.bits))
+    map.insert(mut r.generations, first, Generation(first, bits: f.bits, forward: f.forward, keep: f.keep, step: f.step, base: take base))
+    r.used += keep + 1
+    Ok(())
+}
+
+// Release the held steps of a generation outside [low, high].
+fn release_steps(mut r: Receiver, first: u64, bits: u8, old_low: u64, old_high: u64, low: u64, high: u64) {
+    let mut step = old_low
+    while step <= old_high {
+        if step < low || step > high {
+            let _ = map.remove(mut r.slots, ratchet_kid(first >> w8(bits), bits, step))
+        }
+        if step == CTR_LIMIT {
+            return
+        }
+        step += 1
+    }
+}
+
+fn held_low(step: u64, keep: u8) -> u64 {
+    let k: u64 = w8(keep)
+    if step >= k {
+        step - k
+    } else {
+        0
+    }
+}
+
+pub fn advance(mut r: Receiver, bits: u8, generation: u64, step: u64, take base: Bytes, floor: u64) -> Result[(), SframeError] {
+    check_base(base)?
+    check_generation(generation, bits)?
+    let first = generation << w8(bits)
+    let (current, keep) = match map.get(r.generations, first) {
+        Some(g) => if g.bits == bits {
+            (g.step, g.keep)
+        } else {
+            return Error(Invalid)
+        },
+        None => return Error(Invalid),
+    }
+    if step <= current {
+        return Error(Invalid)
+    }
+    let id = ratchet_kid(generation, bits, step)
+    let slot = new_slot(base, id, r.limits.window, floor)?
+    let low = held_low(step, keep)
+    release_steps(mut r, first, bits, held_low(current, keep), current, low, step - 1)
+    map.insert(mut r.slots, id, take slot)
+    set_base(mut r, first, step, take base)
+    Ok(())
+}
+
+fn set_base(mut r: Receiver, first: u64, step: u64, take base: Bytes) {
+    let Some(take g) = map.remove(mut r.generations, first) else {
+        return
+    }
+    let Generation(first: at, bits, forward, keep, step: _, base: _) = take g
+    map.insert(mut r.generations, first, Generation(first: at, bits, forward, keep, step, base: take base))
+}
+
+pub fn remove(mut r: Receiver, id: u64) -> bool {
+    if let Some(_) = claimed(r, id) {
+        return false
+    }
+    match map.remove(mut r.slots, id) {
+        Some(_) => {
+            r.used -= 1
+            true
+        },
+        None => false,
+    }
+}
+
+pub fn remove_generation(mut r: Receiver, bits: u8, generation: u64) -> bool {
+    if bits < 1 || bits > 16 {
+        return false
+    }
+    let first = generation << w8(bits)
+    let Some(g) = map.remove(mut r.generations, first) else {
+        return false
+    }
+    if g.bits != bits {
+        map.insert(mut r.generations, first, take g)
+        return false
+    }
+    release_steps(mut r, first, bits, held_low(g.step, g.keep), g.step, 1, 0)
+    let mut kept: List[Claim] = list.new()
+    for c in r.claims {
+        if c.first != first {
+            list.push(mut kept, c)
+        }
+    }
+    r.claims = take kept
+    r.used -= w8(g.keep) + 1
+    true
+}
+
+// Where a frame's key comes from: a held slot, or a forward candidate d steps past the current one.
+type Found = Held | Candidate(first: u64, d: u64)
+
+fn locate(r: Receiver, id: u64) -> Result[Found, OpenError] {
+    if let Some(_) = map.get(r.slots, id) {
+        return Ok(Held)
+    }
+    let Some(c) = claimed(r, id) else {
+        return Error(NoKey(id))
+    }
+    let Some(g) = map.get(r.generations, c.first) else {
+        return Error(NoKey(id))
+    }
+    let b: u64 = w8(g.bits)
+    let span: u64 = 1 << b
+    let low = id & (span - 1)
+    let d = (low + span - (g.step & (span - 1))) & (span - 1)
+    if d >= 1 && d <= w8(g.forward) && g.step <= CTR_LIMIT - d {
+        return Ok(Candidate(first: c.first, d))
+    }
+    Error(NoKey(id))
+}
+
+fn candidate_base(g: Generation, d: u64) -> Bytes {
+    let mut base = ratchet_key(g.base)
+    let mut i: u64 = 1
+    while i < d {
+        base = ratchet_key(base)
+        i += 1
+    }
+    take base
+}
+
+// The authenticated open shared by both framings: the window, capacity, AEAD and commit steps of SFRAME-6.
+// `header` is the header bytes, `aad` the whole AAD, `sealed` the ciphertext and tag.
+fn open_core(mut r: Receiver, h: Header, aad: Bytes, sealed: Bytes, room: u64, mut plain: Bytes) -> Result[(), OpenError] {
+    let found = locate(r, h.kid)?
+    let size = r.limits.window
+    let jump = r.limits.jump
+    let need = list.len(sealed) - TAG
+    match found {
+        Held => {
+            {
+                let slot = option.unwrap(map.get(r.slots, h.kid))
+                check_window(slot.window, size, jump, h.ctr) ?=> |d| Discarded(d)
+            }
+            if room < need {
+                return Error(Capacity(Capacity(requested: need, available: room)))
+            }
+            list.try_reserve(mut plain, need) ?=> |c| Capacity(c)
+            {
+                let slot = option.unwrap(map.get(r.slots, h.kid))
+                let iv = nonce(slot.salt, h.ctr)
+                let _ = secret.aead_open(slot.key, Aes128Gcm, iv, aad, sealed, mut plain) ?=> |_| Discarded(Tampered)
+            }
+            let _ = map.update(mut r.slots, h.kid, scoped fn(mut slot: Slot) -> () {
+                mark(mut slot.window, h.ctr)
+            })
+            Ok(())
+        },
+        Candidate(first, d) => {
+            if room < need {
+                return Error(Capacity(Capacity(requested: need, available: room)))
+            }
+            list.try_reserve(mut plain, need) ?=> |c| Capacity(c)
+            let (base, bits, step, keep) = {
+                let g = option.unwrap(map.get(r.generations, first))
+                (candidate_base(g, d), g.bits, g.step, g.keep)
+            }
+            let mut slot = match new_slot(base, h.kid, size, 0) {
+                Ok(take s) => take s,
+                Error(Capacity(c)) => return Error(Capacity(c)),
+                Error(_) => return Error(Discarded(Tampered)),
+            }
+            check_window(slot.window, size, jump, h.ctr) ?=> |e| Discarded(e)
+            {
+                let iv = nonce(slot.salt, h.ctr)
+                let _ = secret.aead_open(slot.key, Aes128Gcm, iv, aad, sealed, mut plain) ?=> |_| Discarded(Tampered)
+            }
+            mark(mut slot.window, h.ctr)
+            commit(mut r, first, bits, step, keep, d, take base, take slot)
+            Ok(())
+        },
+    }
+}
+
+fn commit(mut r: Receiver, first: u64, bits: u8, step: u64, keep: u8, d: u64, take base: Bytes, take slot: Slot) {
+    let to = step + d
+    let low = held_low(to, keep)
+    release_steps(mut r, first, bits, held_low(step, keep), step, low, to - 1)
+    // Intermediate steps the retained set now covers get their keys from the old base.
+    let mut walk = {
+        let g = option.unwrap(map.get(r.generations, first))
+        ratchet_key(g.base)
+    }
+    let generation = first >> w8(bits)
+    let mut i = step + 1
+    while i < to {
+        if i >= low {
+            match new_slot(walk, ratchet_kid(generation, bits, i), r.limits.window, 0) {
+                Ok(take s) => map.insert(mut r.slots, ratchet_kid(generation, bits, i), take s),
+                Error(_) => {},
+            }
+        }
+        walk = ratchet_key(walk)
+        i += 1
+    }
+    map.insert(mut r.slots, ratchet_kid(generation, bits, to), take slot)
+    set_base(mut r, first, to, take base)
+}
+
+pub fn open(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError] {
+    if !is_rfc(r.framing) {
+        return Error(Discarded(Malformed))
+    }
+    let n = list.len(frame)
+    if n > r.limits.frame + 17 + TAG {
+        return Error(Discarded(Malformed))
+    }
+    let (h, hlen) = decode_header(frame, 0) ?=> |_| Discarded(Malformed)
+    if n - hlen < TAG {
+        return Error(Discarded(Malformed))
+    }
+    let mut aad: Bytes = list.new()
+    list.try_reserve(mut aad, hlen + list.len(metadata)) ?=> |c| Capacity(c)
+    list.append(mut aad, list.slice(frame, 0, hlen))
+    list.append(mut aad, metadata)
+    let start = list.len(out)
+    let room = spare(out)
+    let mut plain: Bytes = list.new()
+    open_core(mut r, h, aad, list.slice(frame, hlen, n), room, mut plain)?
+    list.append(mut out, plain)
+    Ok(Opened(kid: h.kid, ctr: h.ctr, len: list.len(out) - start))
+}

@@ -1,0 +1,879 @@
+// Clear-range layouts, the Annex B escapes and the codec range rules (docs/spec/sframe.md SFRAME-9, SFRAME-10).
+pub type Escape = Bare | AnnexB
+
+pub type Framing = Rfc | Ranged(Escape)
+
+pub type Range {
+    at: u64,
+    len: u64
+}
+
+pub type Layout {
+    ranges: List[Range]
+}
+
+pub type RangeError = Malformed | TooMany | Unstable | Capacity(Capacity)
+
+// The working form of an Annex B frame: every start code as `00 00 00 01`, every NAL body
+// unescaped, and the working-form offset of each start code.
+pub type Nals {
+    work: Bytes,
+    starts: List[u64]
+}
+
+const LIMB: u64 = 1 << 32
+
+// ---------------------------------------------------------------- lengths
+pub fn wire_bound(f: Framing, n: u64) -> u64 {
+    match f {
+        Ranged(AnnexB) => n + n / 2 + 1,
+        _ => n,
+    }
+}
+
+// T(l): tag, longest header, longest layout and L.
+pub fn trailer_bound(l: sframe.Limits) -> u64 {
+    16 + 17 + 5 + 10 * l.ranges + 2
+}
+
+// ---------------------------------------------------------------- layouts
+pub fn none() -> Layout {
+    Layout(ranges: list.new())
+}
+
+pub fn canonical(layout: Layout, n: u64, most: u64) -> bool {
+    if list.len(layout.ranges) > most {
+        return false
+    }
+    let mut end: u64 = 0
+    let mut first = true
+    for r in layout.ranges {
+        if r.len < 1 || r.len >= LIMB || r.at < end || (!first && r.at == end) || r.at - end >= LIMB {
+            return false
+        }
+        if r.at > n || r.len > n - r.at {
+            return false
+        }
+        end = r.at + r.len
+        first = false
+    }
+    true
+}
+
+fn put_uleb(mut out: Bytes, v: u64) {
+    let mut x = v
+    while x >= 128 {
+        let b: u8 = int.truncate((x & 127) | 128)
+        list.push(mut out, b)
+        x = x >> 7
+    }
+    let last: u8 = int.truncate(x)
+    list.push(mut out, last)
+}
+
+fn uleb_len(v: u64) -> u64 {
+    let mut n: u64 = 1
+    let mut x = v
+    while x >= 128 {
+        x = x >> 7
+        n += 1
+    }
+    n
+}
+
+pub fn layout_len(layout: Layout) -> u64 {
+    let mut n = uleb_len(list.len(layout.ranges))
+    let mut end: u64 = 0
+    for r in layout.ranges {
+        n += uleb_len(r.at - end) + uleb_len(r.len)
+        end = r.at + r.len
+    }
+    n
+}
+
+// enc(layout): the count, then each range's gap and length, all minimal ULEB128.
+pub fn encode_layout(layout: Layout, mut out: Bytes) {
+    put_uleb(mut out, list.len(layout.ranges))
+    let mut end: u64 = 0
+    for r in layout.ranges {
+        put_uleb(mut out, r.at - end)
+        put_uleb(mut out, r.len)
+        end = r.at + r.len
+    }
+}
+
+fn get_uleb(b: Bytes, mut at: u64, end: u64) -> Option[u64] {
+    let mut v: u64 = 0
+    let mut shift: u64 = 0
+    while at < end && shift < 35 {
+        let x: u64 = int.widen(b[at])
+        at += 1
+        v = v | ((x & 127) << shift)
+        if x & 128 == 0 {
+            if x == 0 && shift > 0 {
+                return None
+            }
+            if v >= LIMB {
+                return None
+            }
+            return Some(v)
+        }
+        shift += 7
+    }
+    None
+}
+
+// Decodes a layout filling exactly [lo, hi), canonical for a body of n bytes.
+pub fn decode_layout(b: Bytes, lo: u64, hi: u64, n: u64, most: u64) -> Option[Layout] {
+    let mut at = lo
+    let count = get_uleb(b, mut at, hi)?
+    if count > most {
+        return None
+    }
+    let mut rs: List[Range] = list.with_capacity(count)
+    let mut end: u64 = 0
+    for _ in 0u64 .. count {
+        let gap = get_uleb(b, mut at, hi)?
+        let len = get_uleb(b, mut at, hi)?
+        list.push(mut rs, Range(at: end + gap, len))
+        end = end + gap + len
+    }
+    if at != hi {
+        return None
+    }
+    let layout = Layout(ranges: take rs)
+    if !canonical(layout, n, most) {
+        return None
+    }
+    Some(layout)
+}
+
+// ---------------------------------------------------------------- escapes
+// The interior rule: an `03` after every `00 00` that a byte <= 03 follows. Answers the zero run at the end.
+fn interior(src: Bytes, lo: u64, hi: u64, mut out: Bytes) -> u64 {
+    let mut zeros: u64 = 0
+    for i in lo .. hi {
+        let x = src[i]
+        if zeros >= 2 && x <= 3 {
+            list.push(mut out, 3u8)
+            zeros = 0
+        }
+        list.push(mut out, x)
+        zeros = if x == 0 {
+            zeros + 1
+        } else {
+            0
+        }
+    }
+    zeros
+}
+
+// The wire escape of one NAL body: the interior rule, then one more `03` when the result
+// ends in `00` followed by zero or more `03`.
+pub fn wire_escape(src: Bytes, lo: u64, hi: u64, mut out: Bytes) {
+    let start = list.len(out)
+    let _ = interior(src, lo, hi, mut out)
+    let mut k = list.len(out)
+    while k > start && out[k - 1] == 3 {
+        k -= 1
+    }
+    if k > start && out[k - 1] == 0 {
+        list.push(mut out, 3u8)
+    }
+}
+
+// The codecs' own escape: the interior rule, and an `03` after a final `00 00`.
+pub fn codec_escape(src: Bytes, lo: u64, hi: u64, mut out: Bytes) {
+    if interior(src, lo, hi, mut out) >= 2 {
+        list.push(mut out, 3u8)
+    }
+}
+
+// Removes the `03` of every `00 00 03`, as H.264 §7.4.1.1 and libwebrtc's ParseRbsp do.
+fn unescape(src: Bytes, lo: u64, hi: u64, mut out: Bytes) {
+    let mut zeros: u64 = 0
+    for i in lo .. hi {
+        let x = src[i]
+        if zeros >= 2 && x == 3 {
+            zeros = 0
+        } else {
+            list.push(mut out, x)
+            zeros = if x == 0 {
+                zeros + 1
+            } else {
+                0
+            }
+        }
+    }
+}
+
+// The wire unescape of one NAL body [lo, hi). Appends the body and answers true only when
+// `w` is the wire escape of it; otherwise appends nothing.
+pub fn wire_unescape(w: Bytes, lo: u64, hi: u64, mut out: Bytes) -> bool {
+    if hi > lo && w[hi - 1] == 0 {
+        return false
+    }
+    let mut k = hi
+    while k > lo && w[k - 1] == 3 {
+        k -= 1
+    }
+    let end = if k < hi && k > lo && w[k - 1] == 0 {
+        hi - 1
+    } else {
+        hi
+    }
+    let mark = list.len(out)
+    unescape(w, lo, end, mut out)
+    let mut again: Bytes = list.with_capacity(hi - lo)
+    wire_escape(out, mark, list.len(out), mut again)
+    if again != list.slice(w, lo, hi) {
+        list.truncate(mut out, mark)
+        return false
+    }
+    true
+}
+
+// ---------------------------------------------------------------- Annex B splitting
+fn is_start(b: Bytes, i: u64) -> bool {
+    i + 4 <= list.len(b) && b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 0 && b[i + 3] == 1
+}
+
+fn push_start(mut nals: Nals) {
+    list.push(mut nals.starts, list.len(nals.work))
+    list.append(mut nals.work, b"\x00\x00\x00\x01")
+}
+
+// The working form of a sender's frame under the input rules of SFRAME-9: a leading 4-byte
+// start code, no 3-byte start code, no body ending in `00`, every body canonically escaped.
+pub fn working(frame: Bytes) -> Result[Nals, RangeError] {
+    let n = list.len(frame)
+    if !is_start(frame, 0) {
+        return Error(Malformed)
+    }
+    let mut nals = Nals(work: list.with_capacity(n), starts: list.new())
+    let mut i: u64 = 0
+    while i < n {
+        push_start(mut nals)
+        let lo = i + 4
+        let mut hi = n
+        let mut j = lo
+        while j + 3 <= n {
+            if frame[j] == 0 && frame[j + 1] == 0 && frame[j + 2] == 1 {
+                if j == lo || frame[j - 1] != 0 {
+                    return Error(Malformed)
+                }
+                hi = j - 1
+                break
+            }
+            j += 1
+        }
+        if hi > lo && frame[hi - 1] == 0 {
+            return Error(Malformed)
+        }
+        let mark = list.len(nals.work)
+        unescape(frame, lo, hi, mut nals.work)
+        let mut again: Bytes = list.with_capacity(hi - lo)
+        codec_escape(nals.work, mark, list.len(nals.work), mut again)
+        if again != list.slice(frame, lo, hi) {
+            return Error(Malformed)
+        }
+        i = hi
+    }
+    Ok(nals)
+}
+
+// The working form of a received frame: split at `00 00 00 01`, each body wire-unescaped.
+pub fn unwire(frame: Bytes) -> Option[Nals] {
+    let n = list.len(frame)
+    if !is_start(frame, 0) {
+        return None
+    }
+    let mut nals = Nals(work: list.with_capacity(n), starts: list.new())
+    let mut i: u64 = 0
+    while i < n {
+        push_start(mut nals)
+        let lo = i + 4
+        let mut hi = n
+        let mut j = lo
+        while j + 4 <= n {
+            if is_start(frame, j) {
+                hi = j
+                break
+            }
+            j += 1
+        }
+        if !wire_unescape(frame, lo, hi, mut nals.work) {
+            return None
+        }
+        i = hi
+    }
+    Some(nals)
+}
+
+pub fn nal_end(nals: Nals, k: u64) -> u64 {
+    if k + 1 < list.len(nals.starts) {
+        nals.starts[k + 1]
+    } else {
+        list.len(nals.work)
+    }
+}
+
+// Every start code lies inside a clear range.
+pub fn starts_clear(nals: Nals, layout: Layout) -> bool {
+    let mut r: u64 = 0
+    let count = list.len(layout.ranges)
+    for p in nals.starts {
+        while r < count && layout.ranges[r].at + layout.ranges[r].len < p + 4 {
+            r += 1
+        }
+        if r >= count || layout.ranges[r].at > p {
+            return false
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------- range building
+fn add(mut rs: List[Range], at: u64, len: u64) {
+    let n = list.len(rs)
+    if n > 0 && rs[n - 1].at + rs[n - 1].len == at {
+        rs[n - 1] = Range(at: rs[n - 1].at, len: rs[n - 1].len + len)
+        return
+    }
+    list.push(mut rs, Range(at, len))
+}
+
+fn finish(take rs: List[Range], l: sframe.Limits) -> Result[Layout, RangeError] {
+    if list.len(rs) > l.ranges {
+        return Error(TooMany)
+    }
+    Ok(Layout(ranges: take rs))
+}
+
+pub fn vp8(frame: Bytes) -> Layout {
+    let n = list.len(frame)
+    if n == 0 {
+        return none()
+    }
+    let want: u64 = if frame[0] & 1 == 0 {
+        10
+    } else {
+        3
+    }
+    let k = if want < n {
+        want
+    } else {
+        n
+    }
+    let mut rs: List[Range] = list.new()
+    list.push(mut rs, Range(at: 0, len: k))
+    Layout(ranges: take rs)
+}
+
+// ---------------------------------------------------------------- bit reading (over unescaped bytes)
+type Bits {
+    at: u64,
+    end: u64
+}
+
+fn bits_of(lo: u64, hi: u64) -> Bits {
+    Bits(at: lo * 8, end: hi * 8)
+}
+
+fn bit(b: Bytes, mut r: Bits) -> Option[u64] {
+    if r.at >= r.end {
+        return None
+    }
+    let x: u64 = int.widen(b[r.at / 8])
+    let v = (x >> (7 - r.at % 8)) & 1
+    r.at += 1
+    Some(v)
+}
+
+fn read(b: Bytes, mut r: Bits, n: u64) -> Option[u64] {
+    let mut v: u64 = 0
+    for _ in 0u64 .. n {
+        v = (v << 1) | bit(b, mut r)?
+    }
+    Some(v)
+}
+
+// ue(v), H.264 §9.1, with libwebrtc's 32-bit reader bound.
+fn ue(b: Bytes, mut r: Bits) -> Option[u64] {
+    let mut zeros: u64 = 0
+    while bit(b, mut r)? == 0 {
+        zeros += 1
+        if zeros > 31 {
+            return None
+        }
+    }
+    let rest = read(b, mut r, zeros)?
+    Some((1u64 << zeros) - 1 + rest)
+}
+
+fn se_step(b: Bytes, mut r: Bits) -> Option[(bool, u64)] {
+    let k = ue(b, mut r)?
+    if k % 2 == 1 {
+        Some((false, (k + 1) / 2))
+    } else {
+        Some((true, k / 2))
+    }
+}
+
+// ---------------------------------------------------------------- H.264 SPS (§7.3.2.1.1, Annex E.1.1)
+// Bit positions in the SPS RBSP (after the NAL header) and the values libwebrtc reads.
+type Sps {
+    vui_at: u64,
+    vui: bool,
+    restrict_at: u64,
+    restricted: bool,
+    tail_at: u64,
+    end_at: u64,
+    max_ref: u64,
+    reorder: u64,
+    dec_buf: u64
+}
+
+fn scaling_list(b: Bytes, mut r: Bits, size: u64) -> Option[()] {
+    let mut last: u64 = 8
+    let mut next: u64 = 8
+    for _ in 0u64 .. size {
+        if next != 0 {
+            let (negative, m) = se_step(b, mut r)?
+            if (negative && m > 128) || (!negative && m > 127) {
+                return None
+            }
+            next = if negative {
+                (last + 256 - m) % 256
+            } else {
+                (last + m) % 256
+            }
+        }
+        if next != 0 {
+            last = next
+        }
+    }
+    Some(())
+}
+
+fn hrd(b: Bytes, mut r: Bits) -> Option[()] {
+    let count = ue(b, mut r)?
+    let _ = read(b, mut r, 8)?
+    let mut i: u64 = 0
+    while i <= count {
+        let _ = ue(b, mut r)?
+        let _ = ue(b, mut r)?
+        let _ = bit(b, mut r)?
+        i += 1
+    }
+    let _ = read(b, mut r, 20)?
+    Some(())
+}
+
+fn high_profile(p: u64) -> bool {
+    p == 100 || p == 110 || p == 122 || p == 244 || p == 44 || p == 83 || p == 86 || p == 118 || p == 128 || p == 138 || p == 139 || p == 134
+}
+
+// Parses an SPS RBSP [lo, hi) as libwebrtc's ParseSpsUpToVui and CopyAndRewriteVui read it.
+fn parse_sps(b: Bytes, lo: u64, hi: u64) -> Option[Sps] {
+    let mut r = bits_of(lo, hi)
+    let profile = read(b, mut r, 8)?
+    let _ = read(b, mut r, 16)?
+    let _ = ue(b, mut r)?
+    if high_profile(profile) {
+        let chroma = ue(b, mut r)?
+        if chroma == 3 {
+            let _ = bit(b, mut r)?
+        }
+        let _ = ue(b, mut r)?
+        let _ = ue(b, mut r)?
+        let _ = bit(b, mut r)?
+        if bit(b, mut r)? == 1 {
+            let count: u64 = if chroma == 3 {
+                12
+            } else {
+                8
+            }
+            for i in 0u64 .. count {
+                if bit(b, mut r)? == 1 {
+                    let size: u64 = if i < 6 {
+                        16
+                    } else {
+                        64
+                    }
+                    scaling_list(b, mut r, size)?
+                }
+            }
+        }
+    }
+    if ue(b, mut r)? > 12 {
+        return None
+    }
+    let poc = ue(b, mut r)?
+    if poc == 0 {
+        if ue(b, mut r)? > 12 {
+            return None
+        }
+    } else if poc == 1 {
+        let _ = bit(b, mut r)?
+        let _ = ue(b, mut r)?
+        let _ = ue(b, mut r)?
+        let cycle = ue(b, mut r)?
+        for _ in 0u64 .. cycle {
+            let _ = ue(b, mut r)?
+        }
+    }
+    let max_ref = ue(b, mut r)?
+    let _ = bit(b, mut r)?
+    let _ = ue(b, mut r)?
+    let _ = ue(b, mut r)?
+    if bit(b, mut r)? == 0 {
+        let _ = bit(b, mut r)?
+    }
+    let _ = bit(b, mut r)?
+    if bit(b, mut r)? == 1 {
+        for _ in 0u64 .. 4 {
+            let _ = ue(b, mut r)?
+        }
+    }
+    let vui_at = r.at
+    if bit(b, mut r)? == 0 {
+        return Some(Sps(vui_at, vui: false, restrict_at: r.at, restricted: false, tail_at: r.at, end_at: r.at, max_ref, reorder: 0, dec_buf: 0))
+    }
+    if bit(b, mut r)? == 1 {
+        if read(b, mut r, 8)? == 255 {
+            let _ = read(b, mut r, 32)?
+        }
+    }
+    if bit(b, mut r)? == 1 {
+        let _ = bit(b, mut r)?
+    }
+    if bit(b, mut r)? == 1 {
+        let _ = read(b, mut r, 4)?
+        if bit(b, mut r)? == 1 {
+            let _ = read(b, mut r, 24)?
+        }
+    }
+    if bit(b, mut r)? == 1 {
+        let _ = ue(b, mut r)?
+        let _ = ue(b, mut r)?
+    }
+    if bit(b, mut r)? == 1 {
+        let _ = read(b, mut r, 65)?
+    }
+    let nal_hrd = bit(b, mut r)?
+    if nal_hrd == 1 {
+        hrd(b, mut r)?
+    }
+    let vcl_hrd = bit(b, mut r)?
+    if vcl_hrd == 1 {
+        hrd(b, mut r)?
+    }
+    if nal_hrd == 1 || vcl_hrd == 1 {
+        let _ = bit(b, mut r)?
+    }
+    let _ = bit(b, mut r)?
+    let restrict_at = r.at
+    if bit(b, mut r)? == 0 {
+        return Some(Sps(vui_at, vui: true, restrict_at, restricted: false, tail_at: r.at, end_at: r.at, max_ref, reorder: 0, dec_buf: 0))
+    }
+    let _ = bit(b, mut r)?
+    for _ in 0u64 .. 4 {
+        let _ = ue(b, mut r)?
+    }
+    let tail_at = r.at
+    let reorder = ue(b, mut r)?
+    let dec_buf = ue(b, mut r)?
+    Some(Sps(vui_at, vui: true, restrict_at, restricted: true, tail_at, end_at: r.at, max_ref, reorder, dec_buf))
+}
+
+// libwebrtc's incoming SpsVuiRewriter changes exactly these SPSs (no colour space given).
+fn unstable(s: Sps) -> bool {
+    !s.vui || !s.restricted || s.reorder != 0 || s.dec_buf > s.max_ref
+}
+
+// ---------------------------------------------------------------- bit writing
+type BitOut {
+    octets: Bytes,
+    n: u64
+}
+
+fn put_bit(mut w: BitOut, v: u64) {
+    if w.n % 8 == 0 {
+        list.push(mut w.octets, 0u8)
+    }
+    if v != 0 {
+        let i = w.n / 8
+        let m: u8 = int.truncate(128u64 >> (w.n % 8))
+        w.octets[i] = w.octets[i] | m
+    }
+    w.n += 1
+}
+
+fn put_bits(mut w: BitOut, v: u64, n: u64) {
+    let mut i = n
+    while i > 0 {
+        i -= 1
+        put_bit(mut w, (v >> i) & 1)
+    }
+}
+
+fn put_ue(mut w: BitOut, v: u64) {
+    let x = v + 1
+    let mut len: u64 = 0
+    while (x >> len) > 1 {
+        len += 1
+    }
+    put_bits(mut w, 0, len)
+    put_bits(mut w, x, len + 1)
+}
+
+fn copy_bits(b: Bytes, from: u64, to: u64, mut w: BitOut) {
+    let mut i = from
+    while i < to {
+        let x: u64 = int.widen(b[i / 8])
+        put_bit(mut w, (x >> (7 - i % 8)) & 1)
+        i += 1
+    }
+}
+
+fn put_restriction(mut w: BitOut, max_ref: u64) {
+    put_bit(mut w, 1)
+    put_ue(mut w, 2)
+    put_ue(mut w, 1)
+    put_ue(mut w, 16)
+    put_ue(mut w, 16)
+    put_ue(mut w, 0)
+    put_ue(mut w, max_ref)
+}
+
+// libwebrtc's ParseAndRewriteSps with no colour space, over an SPS RBSP, as RBSP bytes.
+fn rewrite_rbsp(rbsp: Bytes, s: Sps) -> Bytes {
+    let mut w = BitOut(octets: list.with_capacity(list.len(rbsp) + 64), n: 0)
+    copy_bits(rbsp, 0, s.vui_at, mut w)
+    put_bit(mut w, 1)
+    if !s.vui {
+        put_bits(mut w, 0, 3)
+        put_bits(mut w, 0, 5)
+        put_bit(mut w, 1)
+        put_restriction(mut w, s.max_ref)
+    } else {
+        copy_bits(rbsp, s.vui_at + 1, s.restrict_at, mut w)
+        put_bit(mut w, 1)
+        if !s.restricted {
+            put_restriction(mut w, s.max_ref)
+        } else {
+            copy_bits(rbsp, s.restrict_at + 1, s.tail_at, mut w)
+            put_ue(mut w, 0)
+            put_ue(mut w, s.max_ref)
+        }
+    }
+    copy_bits(rbsp, s.end_at, list.len(rbsp) * 8, mut w)
+    let BitOut(octets: take octets, n: _) = take w
+    take octets
+}
+
+// ---------------------------------------------------------------- codec rules
+fn h264_kind(nals: Nals, lo: u64) -> Result[u64, RangeError] {
+    let nal = media_bits.h264.nal(list.slice(nals.work, lo, lo + 1)) ?=> |_| Malformed
+    Ok(int.widen(nal.kind))
+}
+
+// Bits of first_mb_in_slice, slice_type and pic_parameter_set_id (H.264 §7.3.3).
+fn h264_prefix(b: Bytes, mut r: Bits) -> Option[u64] {
+    let first = r.at
+    for _ in 0u64 .. 3 {
+        let _ = ue(b, mut r)?
+    }
+    Some(r.at - first)
+}
+
+// Bits of the leading flags and slice_pic_parameter_set_id (H.265 §7.3.6.1).
+fn h265_prefix(b: Bytes, mut r: Bits, flags: u64) -> Option[u64] {
+    let first = r.at
+    let _ = read(b, mut r, flags)?
+    let _ = ue(b, mut r)?
+    Some(r.at - first)
+}
+
+pub fn h264(frame: Bytes, l: sframe.Limits) -> Result[Layout, RangeError] {
+    let nals = working(frame)?
+    let mut rs: List[Range] = list.new()
+    let count = list.len(nals.starts)
+    for k in 0u64 .. count {
+        let p = nals.starts[k]
+        let lo = p + 4
+        let hi = nal_end(nals, k)
+        add(mut rs, p, 4)
+        if hi == lo {
+            return Error(Malformed)
+        }
+        let kind = h264_kind(nals, lo)?
+        if kind == 7 {
+            let Some(s) = parse_sps(nals.work, lo + 1, hi) else {
+                return Error(Malformed)
+            }
+            if unstable(s) {
+                return Error(Unstable)
+            }
+            add(mut rs, lo, hi - lo)
+        } else if kind == 8 {
+            add(mut rs, lo, hi - lo)
+        } else if kind == 1 || kind == 5 {
+            let mut r = bits_of(lo + 1, hi)
+            let Some(used) = h264_prefix(nals.work, mut r) else {
+                return Error(Malformed)
+            }
+            add(mut rs, lo, 1 + (used + 7) / 8)
+        } else {
+            add(mut rs, lo, 1)
+        }
+        if list.len(rs) > l.ranges + 1 {
+            return Error(TooMany)
+        }
+    }
+    finish(take rs, l)
+}
+
+pub fn h265(frame: Bytes, l: sframe.Limits) -> Result[Layout, RangeError] {
+    let nals = working(frame)?
+    let mut rs: List[Range] = list.new()
+    let count = list.len(nals.starts)
+    for k in 0u64 .. count {
+        let p = nals.starts[k]
+        let lo = p + 4
+        let hi = nal_end(nals, k)
+        add(mut rs, p, 4)
+        if hi < lo + 2 {
+            return Error(Malformed)
+        }
+        let nal = media_bits.hevc.nal(list.slice(nals.work, lo, lo + 2)) ?=> |_| Malformed
+        let kind: u64 = int.widen(nal.kind)
+        if kind >= 32 && kind <= 34 {
+            add(mut rs, lo, hi - lo)
+        } else if kind <= 9 || (kind >= 16 && kind <= 21) {
+            let mut r = bits_of(lo + 2, hi)
+            let flags: u64 = if kind >= 16 {
+                2
+            } else {
+                1
+            }
+            let Some(used) = h265_prefix(nals.work, mut r, flags) else {
+                return Error(Malformed)
+            }
+            add(mut rs, lo, 2 + (used + 7) / 8)
+        } else {
+            add(mut rs, lo, 2)
+        }
+        if list.len(rs) > l.ranges + 1 {
+            return Error(TooMany)
+        }
+    }
+    finish(take rs, l)
+}
+
+// ---------------------------------------------------------------- normalizing
+// Splits a raw Annex B frame at its 3- and 4-byte start codes. Answers each body's
+// [lo, hi) with trailing zero bytes stripped; a body of zeros only is dropped.
+fn raw_bodies(frame: Bytes) -> Result[List[Range], RangeError] {
+    let n = list.len(frame)
+    let mut marks: List[u64] = list.new()
+    let mut j: u64 = 0
+    while j + 3 <= n {
+        if frame[j] == 0 && frame[j + 1] == 0 && frame[j + 2] == 1 {
+            list.push(mut marks, j)
+            j += 3
+        } else {
+            j += 1
+        }
+    }
+    if list.len(marks) == 0 {
+        return Error(Malformed)
+    }
+    for i in 0u64 .. marks[0] {
+        if frame[i] != 0 {
+            return Error(Malformed)
+        }
+    }
+    let mut bodies: List[Range] = list.new()
+    let count = list.len(marks)
+    for k in 0u64 .. count {
+        let lo = marks[k] + 3
+        let mut hi = if k + 1 < count {
+            marks[k + 1]
+        } else {
+            n
+        }
+        while hi > lo && frame[hi - 1] == 0 {
+            hi -= 1
+        }
+        if hi > lo {
+            list.push(mut bodies, Range(at: lo, len: hi - lo))
+        }
+    }
+    Ok(bodies)
+}
+
+fn emit(frame: Bytes, body: Range, mut tmp: Bytes) {
+    list.append(mut tmp, b"\x00\x00\x00\x01")
+    list.append(mut tmp, list.slice(frame, body.at, body.at + body.len))
+}
+
+fn deliver(tmp: Bytes, mut out: Bytes) -> Result[u64, RangeError] {
+    let room = list.capacity(out) - list.len(out)
+    let n = list.len(tmp)
+    if room < n {
+        return Error(Capacity(Capacity(requested: n, available: room)))
+    }
+    list.append(mut out, tmp)
+    Ok(n)
+}
+
+// An SPS body as libwebrtc's receiver would leave it: rewritten when unstable, re-escaped
+// with WriteRbsp, and without trailing zero bytes.
+fn stable_sps(frame: Bytes, body: Range, mut tmp: Bytes) -> Result[(), RangeError] {
+    let lo = body.at
+    let hi = body.at + body.len
+    let mut rbsp: Bytes = list.with_capacity(body.len)
+    unescape(frame, lo + 1, hi, mut rbsp)
+    let Some(s) = parse_sps(rbsp, 0, list.len(rbsp)) else {
+        return Error(Malformed)
+    }
+    if !unstable(s) {
+        emit(frame, body, mut tmp)
+        return Ok(())
+    }
+    let rewritten = rewrite_rbsp(rbsp, s)
+    list.append(mut tmp, b"\x00\x00\x00\x01")
+    let start = list.len(tmp)
+    list.push(mut tmp, frame[lo])
+    let _ = interior(rewritten, 0, list.len(rewritten), mut tmp)
+    let mut end = list.len(tmp)
+    while end > start + 1 && tmp[end - 1] == 0 {
+        end -= 1
+    }
+    list.truncate(mut tmp, end)
+    Ok(())
+}
+
+pub fn normalize_h264(frame: Bytes, mut out: Bytes) -> Result[u64, RangeError] {
+    let bodies = raw_bodies(frame)?
+    let mut tmp: Bytes = list.with_capacity(list.len(frame) + 64 * list.len(bodies))
+    for body in bodies {
+        if frame[body.at] & 31 == 7 {
+            stable_sps(frame, body, mut tmp)?
+        } else {
+            emit(frame, body, mut tmp)
+        }
+    }
+    deliver(tmp, mut out)
+}
+
+pub fn normalize_h265(frame: Bytes, mut out: Bytes) -> Result[u64, RangeError] {
+    let bodies = raw_bodies(frame)?
+    let mut tmp: Bytes = list.with_capacity(list.len(frame) + list.len(bodies))
+    for body in bodies {
+        emit(frame, body, mut tmp)
+    }
+    deliver(tmp, mut out)
+}

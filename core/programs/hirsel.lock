@@ -122,6 +122,11 @@ source = "member:search"
 edges = ["std@1", "store@1"]
 
 [[package]]
+id = "sframe@1"
+source = "member:sframe"
+edges = ["media_bits@1", "std@1"]
+
+[[package]]
 id = "spatial@1"
 source = "member:spatial"
 edges = ["std@1", "store@1"]

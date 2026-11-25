@@ -1,6 +1,8 @@
 # SFrame: end-to-end media encryption
 
-Version note (2026-11-25, sframe-c9a-spec-2642 v2): amended after the crypto attack
+Version note (2026-11-25, sframe-c9a-spec-2642 v3): v3 is the text as built. It names the
+built API (`current_kid`, `wire_bound`, the `ranges` helpers), and its law G2 covers H.264 only,
+because headless Chromium 153 has no H.265 encoder. v2 was amended after the crypto attack
 (sframe-attack-2649). The Annex B escape is now a bijection (SFRAME-9), H.264 parameter sets
 are made stable against Chrome's receive-side SPS rewrite (SFRAME-10), a ratcheted `base` is
 the key at its step and a receiver can be advanced (SFRAME-8), ranged capacity and length rules
@@ -10,7 +12,7 @@ to SFRAME-13, the C9a item of the SOTA video-calls plan. The sections end with
 [decisions](#decisions), [build laws](#build-laws), [cost targets](#cost-targets) and
 [build slices](#build-slices).
 
-This text defines a new package, `core/programs/sframe/` <!-- doc-ref: planned -->. It is a pure library implementing
+This text defines the package `core/programs/sframe/`. It is a pure library implementing
 [RFC 9605](https://www.rfc-editor.org/rfc/rfc9605) (SFrame) with the cipher suite
 `AES_128_GCM_SHA256_128` (0x0004). It covers:
 
@@ -121,7 +123,7 @@ keys, seal and open, window, ratchet) and `ranges` (layouts, escaping, codec rul
 
 ```hirsel unbuilt
 // module sframe
-pub type Suite = Aes128GcmSha256_128
+pub type Suite = Aes128GcmSha256_128()
 pub fn suite_id(s: Suite) -> u16                     // 0x0004
 
 pub type Header { kid: u64, ctr: u64 }
@@ -146,7 +148,7 @@ pub type Mark { ctr: u64, volume: u64 }
 
 pub type Sender
 pub fn sender(suite: Suite, framing: ranges.Framing, scheme: Scheme, take base: Bytes, from: Mark, l: Limits) -> Result[Sender, SframeError]
-pub fn kid(s: Sender) -> u64
+pub fn current_kid(s: Sender) -> u64
 pub fn next_ctr(s: Sender) -> u64
 pub fn reserve(mut s: Sender, frames: u64, volume: u64) -> Result[Mark, SframeError]
 pub fn ratchet(mut s: Sender) -> Result[(), SframeError]
@@ -163,7 +165,9 @@ pub fn remove_generation(mut r: Receiver, bits: u8, generation: u64) -> bool
 pub fn open(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError]
 pub fn open_ranged(mut r: Receiver, metadata: Bytes, frame: Bytes, mut out: Bytes) -> Result[Opened, OpenError]
 
-pub fn ssrc_key(base: Bytes, ssrc: u32, mut out: Bytes) -> Result[u64, Capacity]   // SFRAME-11
+pub fn ratchet_key(base: Bytes) -> Bytes                // RFC 9605 §5.1's next base key
+pub fn salt_of(base: Bytes, kid: u64) -> Bytes          // sframe_salt (SFRAME-4)
+pub fn ssrc_key(base: Bytes, ssrc: u32, mut out: Bytes) -> Result[u64, Capacity]   // SFRAME-11, built with P1
 
 // module ranges
 pub type Escape = Bare | AnnexB
@@ -171,8 +175,21 @@ pub type Framing = Rfc | Ranged(Escape)
 pub type Range { at: u64, len: u64 }
 pub type Layout { ranges: List[Range] }
 pub type RangeError = Malformed | TooMany | Unstable | Capacity(Capacity)
-pub fn bound(f: Framing, n: u64) -> u64                 // worst wire length of n working bytes
+pub type Nals { work: Bytes, starts: List[u64] }          // an Annex B frame's working form
+pub fn wire_bound(f: Framing, n: u64) -> u64            // worst wire length of n working bytes
+pub fn trailer_bound(l: sframe.Limits) -> u64           // T(l)
 pub fn none() -> Layout
+pub fn canonical(layout: Layout, n: u64, most: u64) -> bool
+pub fn layout_len(layout: Layout) -> u64
+pub fn encode_layout(layout: Layout, mut out: Bytes)
+pub fn decode_layout(b: Bytes, lo: u64, hi: u64, n: u64, most: u64) -> Option[Layout]
+pub fn wire_escape(src: Bytes, lo: u64, hi: u64, mut out: Bytes)
+pub fn codec_escape(src: Bytes, lo: u64, hi: u64, mut out: Bytes)
+pub fn wire_unescape(w: Bytes, lo: u64, hi: u64, mut out: Bytes) -> bool
+pub fn working(frame: Bytes) -> Result[Nals, RangeError]   // a sender's frame, input rules checked
+pub fn unwire(frame: Bytes) -> Option[Nals]                 // a received frame
+pub fn nal_end(nals: Nals, k: u64) -> u64
+pub fn starts_clear(nals: Nals, layout: Layout) -> bool
 pub fn vp8(frame: Bytes) -> Layout
 pub fn h264(frame: Bytes, l: sframe.Limits) -> Result[Layout, RangeError]
 pub fn h265(frame: Bytes, l: sframe.Limits) -> Result[Layout, RangeError]
@@ -486,7 +503,7 @@ encoding `enc(layout)` is ULEB128 of the range count, then for each range ULEB12
 `len`. `gap` is the distance from the end of the previous range, or from 0 for the first.
 Every ULEB128 is minimal, and every value is below `2^32`.
 
-**Lengths.** `bound(f, n)` is the longest wire form of `n` working-form bytes: `n` for `Rfc`
+**Lengths.** `wire_bound(f, n)` is the longest wire form of `n` working-form bytes: `n` for `Rfc`
 and `Ranged(Bare)`, and `n + n/2 + 1` (integer division) for `Ranged(AnnexB)`, because the
 escape adds at most one byte per two zeros and one at a NAL's end. `T(l)` is the longest
 trailer, `16 + 17 + 5 + 10·l.ranges + 2`: the tag, the longest header, the longest layout
@@ -504,7 +521,7 @@ steps:
      `l.frame`, or, under `AnnexB`, `frame` breaks a rule of [Annex B frames](#annex-b-frames);
    - then `Exhausted` and `Unreserved`, as in SFRAME-5;
    - then `Capacity` when the spare of `out` is shorter than
-     `bound(framing, len(working form) + len(trailer))`, with that bound as `requested`.
+     `wire_bound(framing, len(working form) + len(trailer))`, with that bound as `requested`.
      The exact wire length depends on the ciphertext, which does not exist yet, so the check
      is against the bound. Nothing can refuse after the AEAD call, so a refusal never spends a
      CTR and no CTR is ever sealed twice.
@@ -525,7 +542,7 @@ steps:
 **Opening.** `open_ranged(mut r, metadata, frame, mut out)`. Every refusal before step 5 is
 `Discarded(Malformed)` unless named otherwise, with nothing appended and no state changed:
 
-1. `frame` is longer than `bound(framing, l.frame + T(l))`. This bounds every pre-authentication
+1. `frame` is longer than `wire_bound(framing, l.frame + T(l))`. This bounds every pre-authentication
    pass by `l.frame` and `l.ranges`, and two receivers with equal limits accept the same
    frames.
 2. Under `AnnexB`, find the start codes and unescape each NAL with the wire rule. A NAL that
@@ -536,7 +553,7 @@ steps:
    exactly at `L` and be canonical for a body of `n − 2 − L − 16` bytes. Under `AnnexB`, each
    start code found in step 2 must lie inside a clear range. The 16 bytes before the header
    are the tag.
-4. `Capacity(c)` when the spare of `out` is shorter than `bound(framing, len(body))`, with
+4. `Capacity(c)` when the spare of `out` is shorter than `wire_bound(framing, len(body))`, with
    that bound as `requested`. The output is re-escaped plaintext, whose length is not known
    before authentication.
 5. Then apply SFRAME-6 from step 2, to the reconstructed RFC ciphertext
@@ -689,22 +706,30 @@ sender computes one, because the receiver reads the layout from the trailer.
   clear keyframe bytes and the RTP stream reveal anyway. SEI, AUD and the other NALs are
   encrypted beyond their headers, which keeps SEI user data private. LiveKit leaves leading SEI
   clear; this text does not.
-- **Browser evidence (law G2).** The H.264 and H.265 rules are checked against Chromium itself:
+- **Browser evidence (law G2).** The H.264 rule is checked against Chromium itself:
   a capture script drives headless Chromium through a loopback peer connection with
   `RTCRtpScriptTransform` on both ends, sets each sender frame's data to a given byte string,
   and records what the receiver's transform is handed. A Chrome-to-Chrome capture cannot see
   M1-class failures, because Chrome's own sender has already normalized, so the capture sends
   frames from a non-libwebrtc encoder (`ffmpeg`'s `libx264` with B-frames, whose SPS meets a
   rewrite condition) as well as Chrome's own:
-  - Chrome's own H.264 and H.265 frames, sealed by `oracle.py` with the rules here, arrive
-    unchanged and open.
+  - Chrome's own H.264 frames, sealed by `oracle.py` with the rules here, arrive unchanged
+    and open.
   - The native frames sealed without normalizing arrive with their SPS rewritten and are
-    `Tampered`, and `h264` refuses them as `Unstable`. This is the failure the gate exists to
-    see.
+    discarded: `Malformed` when the rewrite changes the SPS length, as `libx264`'s does,
+    since the trailer's ranges no longer meet the start codes, and `Tampered` otherwise.
+    `h264` refuses them as `Unstable`. This is the failure the gate exists to see.
   - The same frames after `normalize_h264` arrive unchanged and open, and `normalize_h264`'s
     SPS equals the SPS Chrome produced from the raw one, trailing zeros aside.
   - If Chrome inserts or drops NALs (for example out-of-band `sprop-parameter-sets`, which
     Hirsel's SDP never signals), the codec's rule is re-gated like B3.
+  - H.265 is not captured: headless Chromium 153 offers no H.265 encoder, so no H.265 frame can
+    be sent. Its rule rests on G1 and on libwebrtc's H.265 depacketizer, which rewrites
+    nothing. A Chromium build with an H.265 encoder adds those cases to G2.
+  - The capture (`capture.mjs`, run by `oracle.py g2`) uses Chromium's fake camera, and the
+    receiver's transform records frames without decoding them. It never calls
+    `generateKeyFrame()`, which stops Chromium 153's encoder; the receiver's keyframe requests
+    bring keyframes instead.
 - **Deferred.** VP9 and AV1 are not in the first build (slice B3). Neither is known to need
   ranges, and VP9 may need none; the B3 capture decides:
   - libwebrtc's VP9 packetizer takes its descriptor from encoder metadata.
@@ -907,7 +932,8 @@ Each decision gives its reason and how hard it is to reverse.
 ## Build laws
 
 Each law names the bug it alone catches, its oracle, and a seeded bug that turns it red.
-The harness is `core/programs/sframe/laws.hirsel` <!-- doc-ref: planned --> (module `laws`). Vectors are in
+The harness is `core/programs/sframe/laws.hirsel` and, for L1, G1, A1 and G2,
+`core/programs/sframe/codec_laws.hirsel` (module `laws`). Vectors are in
 `vectors.hirsel`, generated from the RFC text and the JSON at `025d568`. Ranged-framing vectors
 are generated by `oracle.py`, an independent Python reference written from SFRAME-9 over
 `cryptography`'s `AESGCM` and the stdlib `hmac`, which never imports Hirsel output.
@@ -923,9 +949,9 @@ are generated by `oracle.py`, an independent Python reference written from SFRAM
 | **K1** ratchet | a wrong ratchet label, length or salt, a wrong KID mask, or `base` taken as step 0's key | Python `hmac` over RFC 9605 §5.1 for base `00..0f` gives `base_key[1] = fb75d8d5782da6c6cbf18ac43eca5da9e47f7e6ac7926a78e486226bd2af0f87`. A sender made at step 1 with that key and a receiver installed at step 0 with `00..0f` and `forward = 1` agree. A sender with `bits = 2` ratchets five times; its KIDs are `g<<2 \| 1, 2, 3, 0, 1`, and the receiver opens each frame in order | `step mod 2^bits` computed as `step mod bits` |
 | **K2** forward bounds | a candidate committed before authentication, a forward step past the bound, the jumped-from step evicted, or `advance` losing retained steps | A forged frame at `d = forward` leaves `s` unchanged, and a genuine frame at the old step still opens. `d = forward + 1` is `NoKey`. A genuine member frame at `s + forward` commits and the real step `s` still opens. `install_ratcheted` with `keep < forward` or `keep + 1 + forward > 2^bits` is `Invalid`. A receiver behind by `forward + 3` steps is `NoKey`, then opens after `advance`, and a frame at a step still within `keep` opens too | the candidate committed before the open |
 | **S1** sender counters | a refusal that consumes a CTR, a reused CTR, a seal past the reservation, or exhaustion off by one | `Capacity` from a short spare, then a successful seal with the same `ctr`. A fresh sender is `Unreserved` until `reserve`. A sender resumed from a stored ceiling seals first at that ceiling's CTR, never below. A sender from `Mark(2^64 − 2, 0)` seals once, then `Exhausted`. A volume one block below the limit seals, and one over is `Exhausted` | CTR advanced before the `Capacity` check |
-| **L1** ranged lengths | a capacity known only after the AEAD call, an unbounded or mismatched input bound, or an underflow on a short frame | `seal_ranged` with a spare one byte under `bound(AnnexB, n + trailer)` is `Capacity` with that bound as `requested`, and the next seal at the bound uses the same CTR. A frame of all-zero working bytes reaches the bound's order (`3n/2`) on the wire and opens. `open_ranged` refuses, as `Malformed` and with nothing appended, a frame one byte over `bound(l.frame + T(l))`, every frame shorter than 20 bytes, and `L` values 0, 1, `n − 17` and `0xffff`. A spare one byte under the open bound is `Capacity` | the seal's spare checked against the unescaped length |
+| **L1** ranged lengths | a capacity known only after the AEAD call, an unbounded or mismatched input bound, or an underflow on a short frame | `seal_ranged` with a spare one byte under `wire_bound(AnnexB, n + trailer)` is `Capacity` with that bound as `requested`, and the next seal at the bound uses the same CTR. A frame of all-zero working bytes reaches the bound's order (`3n/2`) on the wire and opens. `open_ranged` refuses, as `Malformed` and with nothing appended, a frame one byte over `wire_bound(l.frame + T(l))`, every frame shorter than 20 bytes, and `L` values 0, 1, `n − 17` and `0xffff`. A spare one byte under the open bound is `Capacity` | the seal's spare checked against the unescaped length |
 | **G1** codec ranges | a wrong VP8 keyframe bit, a start code left out, a parameter set encrypted, a PPS id cut by a wrong `ue(v)` length, a wrong H.265 header length, or an SPS Chrome would rewrite accepted | Hand-built frames: a VP8 keyframe and an interframe (RFC 6386 §9.1) give `{(0,10)}` and `{(0,3)}`, and a 2-byte frame gives `{(0,2)}`. An H.264 access unit SPS, PPS, SEI, IDR slice (`first_mb 0`, `slice_type 7`, `pps_id 300`: 1 + 7 + 17 = 25 bits of `ue(v)`, so 4 bytes after the NAL header) gives ranges counted by hand from H.264 §7.3.3 and Exp-Golomb §9.1. The same for H.265 with 2-byte headers. libwebrtc's four `sps_vui_rewriter_unittest.cc` SPS modes (no VUI, no bitstream restriction, suboptimal restriction, optimal) give `Unstable` three times and a layout once | the PPS id's `ue(v)` read as a fixed 8 bits |
-| **G2** Chromium round trip | a rule that Chrome's depacketizer breaks: an SPS rewritten, a NAL dropped or added, a start code changed, or a slice header that fails libwebrtc's parse | Vectors captured from headless Chromium 153 (loopback, `RTCRtpScriptTransform`, the capture script in the package): Chrome's own H.264 and H.265 keyframes and delta frames, and `libx264` frames with B-frames, each sealed by `oracle.py`. The receiver-side bytes of Chrome's frames and of normalized `libx264` frames equal the sent bytes and open. The raw `libx264` frames arrive changed and are `Tampered`, and `h264` refuses them as `Unstable`. `normalize_h264` of the raw SPS equals Chrome's rewrite of it, trailing zeros aside | `normalize_h264` that leaves `max_dec_frame_buffering` unchanged |
+| **G2** Chromium round trip | a rule that Chrome's depacketizer breaks: an SPS rewritten, a NAL dropped or added, a start code changed, or a slice header that fails libwebrtc's parse | Vectors captured from headless Chromium 153 (loopback, `RTCRtpScriptTransform`, the capture script in the package): Chrome's own H.264 keyframe and delta frames, and `libx264` frames with B-frames, each sealed by `oracle.py` (H.265 is not captured: SFRAME-10). The receiver-side bytes of Chrome's frames and of normalized `libx264` frames equal the sent bytes, equal `seal_ranged` over `h264`'s layout, and open to their plaintext. The raw `libx264` keyframe arrives with its SPS rewritten and is `Malformed`, and `h264` refuses it as `Unstable`. `normalize_h264` of the raw frame equals Chrome's rewrite of it, start codes and trailing zeros aside | `normalize_h264` that keeps `num_reorder_frames` |
 | **A1** Annex B escaping | an emulation left in the wire, a boundary taken from the sealed bytes, a non-injective tail rule, or a non-canonical stream accepted | Exhaustive over every body of length 0 to 8 on the alphabet `00 01 02 03 41`: wire unescape of wire escape is the identity, the escaped body never contains `00 00 0x` (`x ≤ 2`) and never ends in `00`, and no two bodies share a wire form. Exhaustive over every wire string of length 0 to 8 on the same alphabet: unescape accepts it exactly when it is the escape of some body. Named cases: a body ending in a single `00`, a clear NAL ending `00 03`, and a trailer with `L = 256` round-trip. A sealed frame whose ciphertext contains `00 00 01` keeps its NAL count. 3-byte start codes and trailing zeros are refused by `seal_ranged` and rewritten by `normalize_h264` | a wire tail rule that appends `03` only after a final `00` |
 
 No law repeats TLS-5's AEAD or HKDF vectors (AE2, KD laws). V2 and R1 reach the sinks only

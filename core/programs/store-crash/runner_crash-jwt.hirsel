@@ -2,13 +2,13 @@
 // openssl key and token per run and passes the JWKS document and the token; after two bound
 // calls and a checkpoint it searches every store file for the token's payload and signature
 // segments, the key's x and y and a marker claim.
-// The place's bind G (RUNNER-SPEC v2.70): the verifier's handle, which its bind mint copies.
+// The place's bind G (RUNNER-SPEC v2.70): the verifier's grant, which its bind mint shares.
 type JwtGrant: send {
-    seed: Latest[jwtbind.Seed]
+    jwt: jwtbind.Grant
 }
 
 fn jwt_bind_mint(s: JwtGrant, _h: (), _bind: ()) -> Result[JwtGrant, Capacity] {
-    Ok(JwtGrant(seed: latest.handle(s.seed)))
+    Ok(JwtGrant(jwt: jwtbind.share(s.jwt)))
 }
 
 // The crash place's entries, on a place whose G is the bind G.
@@ -19,7 +19,7 @@ fn jwt_place(mut r: runner.Registry[JwtGrant, Hd]) -> Result[(), runner.Register
 }
 
 fn jwt_bound(g: JwtGrant, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
-    jwtbind.bind(latest.read(g.seed), credential)
+    jwtbind.bind(g.jwt, credential)
 }
 
 type JwtClient: send {
@@ -89,7 +89,7 @@ pub fn no_jwt_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: 
         Ok(take v) => take v,
         Error(_) => fail("L68: the fixture JWKS was refused"),
     }
-    let given: runner.Grants[JwtGrant, (), JwtGrant] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: JwtGrant(seed: jwtbind.seed(v)), mint: jwt_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
+    let given: runner.Grants[JwtGrant, (), JwtGrant] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: JwtGrant(jwt: jwtbind.grant(v)), mint: jwt_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
     let binds = runner.grant_task(tasks, (), take given)
     let session_wire = runner.grant_binds_of(binds, runner.wire(code.describe(jwt_bound), jwtbind.BIND_BYTES, jwtbind.BIND_STEPS))
     let mut db = result.unwrap(store.open(tasks, d, c, r, options()))

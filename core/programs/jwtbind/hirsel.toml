@@ -21,3 +21,6 @@ dirs = ["."]
 
 [tests.runs."jwtbind@1/jwtbind/jwt_default_place"]
 limit = 1342177280
+
+[tests.runs."jwtbind@1/jwtbind/jwt_hmac_bind"]
+limit = 1342177280

@@ -66,6 +66,32 @@ const BEFORE_MS: u64 = 1767225599000u64
 
 const MS: u64 = 1000000u64
 
+// L71's HS256 tokens, made once by Python's hmac, hashlib and base64 (no JWT library) over the
+// hand-written claims {"iss":"hirsel-test","aud":"place","sub":"user-42","exp":1767225660}.
+// Header {"alg":"HS256","kid":"k1"} unless named: H_K1 tagged with K1; H_K1_BY_K2 the same
+// header tagged with K2; H_RS256 header {"alg":"RS256","kid":"k1"} tagged with K1; H_K2 kid "k2"
+// tagged with K2; H_NO_KID header {"alg":"HS256"} tagged with K1; H_K3 kid "k3" tagged with K1.
+const H_K1: String = "eyJhbGciOiJIUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJoaXJzZWwtdGVzdCIsImF1ZCI6InBsYWNlIiwic3ViIjoidXNlci00MiIsImV4cCI6MTc2NzIyNTY2MH0.LdbCkFINZa3F4NeSz9V4L8HnYS4W8bKr5KI3tUWsm3w"
+
+const H_K1_BY_K2: String = "eyJhbGciOiJIUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJoaXJzZWwtdGVzdCIsImF1ZCI6InBsYWNlIiwic3ViIjoidXNlci00MiIsImV4cCI6MTc2NzIyNTY2MH0.p6AewfwR-iWW5kT5qW6BMe9u8BKek8hLNeMSDPfwUfk"
+
+const H_RS256: String = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0.eyJpc3MiOiJoaXJzZWwtdGVzdCIsImF1ZCI6InBsYWNlIiwic3ViIjoidXNlci00MiIsImV4cCI6MTc2NzIyNTY2MH0.N3-4hKG1ck9l47D_hiV2oFVbPj-WXv_MzR3o4-pigj0"
+
+const H_K2: String = "eyJhbGciOiJIUzI1NiIsImtpZCI6ImsyIn0.eyJpc3MiOiJoaXJzZWwtdGVzdCIsImF1ZCI6InBsYWNlIiwic3ViIjoidXNlci00MiIsImV4cCI6MTc2NzIyNTY2MH0.KeLZ-mb4cc4oFPbWbUGdEiN7G-9bgtdsgbCMcZhh0XY"
+
+const H_NO_KID: String = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJoaXJzZWwtdGVzdCIsImF1ZCI6InBsYWNlIiwic3ViIjoidXNlci00MiIsImV4cCI6MTc2NzIyNTY2MH0.GsU0JN_DvcVb0ZgqWRtQ1-mP0gZCckcSgWdkODsq_X8"
+
+const H_K3: String = "eyJhbGciOiJIUzI1NiIsImtpZCI6ImszIn0.eyJpc3MiOiJoaXJzZWwtdGVzdCIsImF1ZCI6InBsYWNlIiwic3ViIjoidXNlci00MiIsImV4cCI6MTc2NzIyNTY2MH0.blia6l3iiTI0mW-33Gnln8YXqMBvo4V-fNiEdpQBPF4"
+
+const K1: String = "hirsel-bind-check-key-32-bytes!!"
+
+const K2: String = "hirsel-bind-check-key2-32-bytes!"
+
+// L71's virtual wall, E − 60 s, and the expiry (exp + 60) × 1000 of its tokens at leeway 60.
+const HMAC_NOW_MS: u64 = 1767225600000u64
+
+const HMAC_END_MS: u64 = 1767225720000u64
+
 fn place_issuer() -> Issuer {
     issuer_defaults(string.from(ISS), string.from(AUD), 9u8, std.jwt.allow(Es256))
 }
@@ -74,8 +100,27 @@ fn public_set(doc: String) -> std.jwt.PublicKeys {
     result.unwrap(std.jwt.jwks_public(doc))
 }
 
-fn seed_of(take i: Issuer, c: Clock, doc: String, good: u64, confirmed: u64) -> Seed {
-    Seed(issuer: take i, clock: c, keys: Some(public_set(doc)), good_until_mono_ns: good, confirmed_until_mono_ns: confirmed)
+// A Grant over one published seed and no Mac keys, as an asymmetric verifier's grant is.
+fn grant_of(take s: Seed) -> Grant {
+    Grant(seed: latest.new(arc.new(take s)), mac: list.new())
+}
+
+fn seed_of(take i: Issuer, c: Clock, doc: String, good: u64, confirmed: u64) -> Grant {
+    grant_of(Seed(issuer: take i, clock: c, keys: Some(public_set(doc)), good_until_mono_ns: good, confirmed_until_mono_ns: confirmed))
+}
+
+fn mac_issuer(take allow: std.jwt.Allow) -> Issuer {
+    issuer_defaults(string.from("hirsel-test"), string.from("place"), 9u8, take allow)
+}
+
+fn mac_key(kid: String, take raw: Bytes, uses: String) -> MacKey {
+    MacKey(kid: string.from(kid), key: result.unwrap(secret.seal(take raw, uses)))
+}
+
+fn mac_keys(take k: MacKey) -> List[MacKey] {
+    let mut keys: List[MacKey] = list.new()
+    list.push(mut keys, take k)
+    take keys
 }
 
 fn with_prefix(prefix: String, token: String) -> Bytes {
@@ -84,7 +129,7 @@ fn with_prefix(prefix: String, token: String) -> Bytes {
     take b
 }
 
-fn try_bind(s: Seed, token: String) -> Result[runner.BoundCaller, runner.BindRefusal] {
+fn try_bind(s: Grant, token: String) -> Result[runner.BoundCaller, runner.BindRefusal] {
     bind(s, with_prefix("", token))
 }
 
@@ -110,21 +155,21 @@ fn unavailable(take r: Result[runner.BoundCaller, runner.BindRefusal]) -> bool {
 }
 
 // The runner's bind child (runner-binding.hirsel): a task spawned with BIND_BYTES that owns the
-// snapshot and the credential, running the binding under bound steps BIND_STEPS.
+// bind's G and the credential, running the binding under bound steps BIND_STEPS.
 type BoundJob: send {
-    seed: Arc[Seed],
+    grant: Grant,
     credential: Bytes
 }
 
 fn bound_child(take job: BoundJob) -> Result[Result[runner.BoundCaller, runner.BindRefusal], OutOfTime] {
-    let BoundJob(seed: snapshot, credential: take credential) = take job
+    let BoundJob(grant: take g, credential: take credential) = take job
     bound steps BIND_STEPS {
-        bind(snapshot, credential)
+        bind(g, credential)
     }
 }
 
-fn bind_bounded(tasks: Tasks, snapshot: Arc[Seed], token: String) -> bool waits {
-    let job = BoundJob(seed: arc.share(snapshot), credential: clone(string.as_bytes(token)))
+fn bind_bounded(tasks: Tasks, g: Grant, token: String) -> bool waits {
+    let job = BoundJob(grant: share(g), credential: clone(string.as_bytes(token)))
     let run: fn(take BoundJob) -> Result[Result[runner.BoundCaller, runner.BindRefusal], OutOfTime] waits = bound_child
     let Ok(child) = task.try_spawn(tasks, bytes BIND_BYTES, take job, run) else {
         return false
@@ -207,13 +252,13 @@ fn jwt_caller_map(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     small.max_token = string.byte_len(T_BASE) - 1u64
     let m = seed_of(take small, c, JWKS_K1, 0xffffffffffffffffu64, 0xffffffffffffffffu64)
     check(rejected(try_bind(m, T_BASE)), "L65: a token over max_token is refused")
-    // bind is a binding runner.wire takes, for a place whose bind G is the verifier's Seed.
+    // bind is a binding runner.wire takes, for a place whose bind G is the verifier's Grant.
     let v = match verifier(place_issuer(), Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
         Ok(take v) => take v,
         Error(_) => return Error(()),
     }
-    let _wired: runner.Wire[Seed] = runner.wire(code.describe(bind), BIND_BYTES, BIND_STEPS)
-    let _handle: Latest[Seed] = seed(v)
+    let _wired: runner.Wire[Grant] = runner.wire(code.describe(bind), BIND_BYTES, BIND_STEPS)
+    let _grant: Grant = grant(v)
     let mut rsa = issuer_defaults(string.from(ISS), string.from(AUD), 9u8, std.jwt.allow(Rs256))
     rsa.max_token = std.jwt.MAX_TOKEN
     let w = match verifier(take rsa, Static(string.from(JWKS_RSA)), n, System, c, r, tasks) {
@@ -231,7 +276,7 @@ fn jwt_caller_map(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
 fn jwt_unavailable_seed(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     let (c, take h) = provide.clock(0u64, BEFORE_MS)
     let mut hand = take h
-    let none = Seed(issuer: place_issuer(), clock: c, keys: None, good_until_mono_ns: 0xffffffffffffffffu64, confirmed_until_mono_ns: 0xffffffffffffffffu64)
+    let none = grant_of(Seed(issuer: place_issuer(), clock: c, keys: None, good_until_mono_ns: 0xffffffffffffffffu64, confirmed_until_mono_ns: 0xffffffffffffffffu64))
     check(unavailable(try_bind(none, T_BASE)), "L67: no verified set is Unavailable")
     // Confirmed until 67 s, good until 120 s.
     let s = seed_of(place_issuer(), c, JWKS_K1, 120000u64 * MS, 67000u64 * MS)
@@ -295,10 +340,129 @@ fn jwt_config_refused(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
         _ => false
     }, "L69: a Static set with no key is refused")
     let ok = match verifier(place_issuer(), Static(string.from(JWKS_K1)), n, System, c, r, tasks) {
-        Ok(take v) => binds_as(try_bind(latest.read(seed(v)), T_BASE), b"user-42", BASE_END_MS),
+        Ok(take v) => binds_as(try_bind(grant(v), T_BASE), b"user-42", BASE_END_MS),
         Error(_) => false,
     }
     check(ok, "L69: a valid Static configuration binds")
+    // (v2.70) A Mac source. RFC 7518 §3.2: an HS256 key is at least 32 bytes, an HS384 one 48.
+    check(match verifier(mac_issuer(std.jwt.allow(Hs256)), Mac(mac_keys(mac_key("k1", a_times(32u64), "mac"))), n, System, c, r, tasks) {
+        Error(KeyUse) => true,
+        _ => false
+    }, "L69: a mac-use key, which can make a tag, is refused")
+    check(match verifier(mac_issuer(std.jwt.allow(Hs256)), Mac(mac_keys(mac_key("k1", a_times(31u64), "verify"))), n, System, c, r, tasks) {
+        Error(ShortKey) => true,
+        _ => false
+    }, "L69: a 31-byte key under HS256 is refused")
+    check(match verifier(mac_issuer(std.jwt.allow(Hs384)), Mac(mac_keys(mac_key("k1", a_times(47u64), "verify"))), n, System, c, r, tasks) {
+        Error(ShortKey) => true,
+        _ => false
+    }, "L69: a 47-byte key under HS384 is refused")
+    let mut longer: List[std.jwt.Alg] = list.new()
+    list.push(mut longer, Hs512)
+    check(match verifier(mac_issuer(std.jwt.Allow(first: Hs256, rest: take longer)), Mac(mac_keys(mac_key("k1", a_times(32u64), "verify"))), n, System, c, r, tasks) {
+        Error(ShortKey) => true,
+        _ => false
+    }, "L69: a 32-byte key is refused when HS512 is also allowed")
+    let mut mixed: List[std.jwt.Alg] = list.new()
+    list.push(mut mixed, Es256)
+    check(match verifier(mac_issuer(std.jwt.Allow(first: Hs256, rest: take mixed)), Mac(mac_keys(mac_key("k1", a_times(32u64), "verify"))), n, System, c, r, tasks) {
+        Error(Asymmetric) => true,
+        _ => false
+    }, "L69: ES256 in a Mac issuer's allow is refused")
+    check(match verifier(mac_issuer(std.jwt.allow(Hs256)), Mac(list.new()), n, System, c, r, tasks) {
+        Error(MacKeys) => true,
+        _ => false
+    }, "L69: an empty Mac list is refused")
+    let mut five: List[MacKey] = list.new()
+    for i in 1u64 .. 6u64 {
+        let mut kid = string.from("k")
+        string.push_u64(mut kid, i)
+        list.push(mut five, mac_key(kid, a_times(32u64), "verify"))
+    }
+    check(match verifier(mac_issuer(std.jwt.allow(Hs256)), Mac(take five), n, System, c, r, tasks) {
+        Error(MacKeys) => true,
+        _ => false
+    }, "L69: five Mac keys are refused")
+    let mut repeated = mac_keys(mac_key("k1", a_times(32u64), "verify"))
+    list.push(mut repeated, mac_key("k1", a_times(48u64), "verify"))
+    check(match verifier(mac_issuer(std.jwt.allow(Hs256)), Mac(take repeated), n, System, c, r, tasks) {
+        Error(MacKeys) => true,
+        _ => false
+    }, "L69: a repeated kid is refused")
+    check(match verifier(mac_issuer(std.jwt.allow(Hs256)), Mac(mac_keys(mac_key("k1", a_times(32u64), "verify"))), n, System, c, r, tasks) {
+        Ok(_) => true,
+        _ => false
+    }, "L69: a 32-byte verify key under HS256 is accepted")
+    check(match verifier(mac_issuer(std.jwt.allow(Hs384)), Mac(mac_keys(mac_key("k1", a_times(48u64), "verify"))), n, System, c, r, tasks) {
+        Ok(_) => true,
+        _ => false
+    }, "L69: a 48-byte verify key under HS384 is accepted")
+    let _ = take hand
+    Ok(())
+}
+
+// L71 jwt_hmac_bind (v2.70): Python-hmac HS256 tokens bind at a Mac issuer; another key's tag
+// and an RS256 header are Rejected; with {k1, k2} the kid picks the key, a missing kid is
+// AmbiguousKey and an unknown one Rejected, never Unavailable. The last case binds one over a
+// Hello, through a place whose bind mint shares the Grant's sealed key into each bind.
+type MacGrant: send {
+    jwt: Grant
+}
+
+fn mac_bind_mint(s: MacGrant, _h: (), _bind: ()) -> Result[MacGrant, Capacity] {
+    Ok(MacGrant(jwt: share(s.jwt)))
+}
+
+fn mac_bound(g: MacGrant, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    bind(g.jwt, credential)
+}
+
+fn mac_place(mut r: runner.Registry[MacGrant, ()]) -> Result[(), runner.RegisterError] {
+    Ok(())
+}
+
+@test
+fn jwt_hmac_bind(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (c, take hand) = provide.clock(0u64, HMAC_NOW_MS)
+    let Ok(one) = verifier(mac_issuer(std.jwt.allow(Hs256)), Mac(mac_keys(mac_key("k1", clone(string.as_bytes(K1)), "verify"))), n, System, c, r, tasks) else {
+        fail("L71: the Mac issuer {k1} was refused")
+    }
+    let g = grant(one)
+    check(binds_as(try_bind(g, H_K1), b"user-42", HMAC_END_MS), "L71: a Python-hmac HS256 token binds Caller(9, user-42) as a Hello credential")
+    check(binds_as(bind(g, with_prefix("Bearer ", H_K1)), b"user-42", HMAC_END_MS), "L71: the same token binds the same Caller after Bearer, as over HTTP")
+    check(rejected(try_bind(g, H_K1_BY_K2)), "L71: the same claims tagged with another key are Rejected")
+    check(rejected(try_bind(g, H_RS256)), "L71: an RS256 header at a Mac issuer is Rejected")
+    let mut both = mac_keys(mac_key("k1", clone(string.as_bytes(K1)), "verify"))
+    list.push(mut both, mac_key("k2", clone(string.as_bytes(K2)), "verify"))
+    let Ok(two) = verifier(mac_issuer(std.jwt.allow(Hs256)), Mac(take both), n, System, c, r, tasks) else {
+        fail("L71: the Mac issuer {k1, k2} was refused")
+    }
+    let g2 = grant(two)
+    check(binds_as(try_bind(g2, H_K2), b"user-42", HMAC_END_MS), "L71: kid k2 picks k2 and binds")
+    check(binds_as(try_bind(g2, H_K1), b"user-42", HMAC_END_MS), "L71: kid k1 picks k1 and binds")
+    check(rejected(try_bind(g2, H_K1_BY_K2)), "L71: kid k1 over k2's tag is Rejected: keys are never tried in turn")
+    check(rejected(try_bind(g2, H_NO_KID)), "L71: no kid with two keys is Rejected (AmbiguousKey)")
+    check(rejected(try_bind(g2, H_K3)), "L71: an unknown kid at a Mac issuer is Rejected, never Unavailable")
+    // The place runs on the virtual clock, so the runner's expiry test reads the wall the bind read.
+    let given: runner.Grants[MacGrant, (), MacGrant] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: MacGrant(jwt: grant(two)), mint: mac_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
+    let mut session = runner.wire_defaults(65536u64)
+    session.n_pool = 4194304u64
+    let settings: runner.PlaceConfig[MacGrant, (), MacGrant] = runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(mac_place), n_place: 1048576u64, on_migrate: None, schema: code.describe(no_schema), session: session, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.wire(code.describe(mac_bound), BIND_BYTES, BIND_STEPS)), grants: Some(take given), triggers: None, idle: None)
+    let Ok(place) = runner.fixture.start(take settings, 5000u64) else {
+        fail("L71: the Mac place did not start")
+    }
+    let Ok(client) = runner.fixture.client(place, Some(clone(string.as_bytes(H_K2))), 5000u64) else {
+        fail("L71: a Hello with a k2 token was not welcomed")
+    }
+    let welcome = runner.fixture.bound_caller(client)
+    check(welcome.issuer == 9u8 && welcome.subject == b"user-42", "L71: a Hello binds Caller(9, user-42) through the bind mint's shared key")
+    runner.fixture.close(take client)
+    check(match runner.fixture.end(take place, 5000u64) {
+        Ok(Stopped(None)) => true,
+        _ => false
+    }, "L71: the Mac place stops cleanly")
+    let _ = take one
+    let _ = take two
     let _ = take hand
     Ok(())
 }
@@ -379,8 +543,8 @@ fn loopback_source(take url: String) -> RemoteSource {
     RemoteSource(url: take url, every_ms: 60000u64, stale_ms: 120000u64, fetch_ms: 1000u64)
 }
 
-fn current(v: Verifier) -> Arc[Seed] {
-    latest.read(seed(v))
+fn current(v: Verifier) -> Grant {
+    grant(v)
 }
 
 fn pending(seen: Receiver[u64]) -> bool {
@@ -473,17 +637,17 @@ fn jwt_unavailable_remote(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] wai
 // §3 "Binding"). An owner sized FLOOR + n_granted alone cannot spawn the child, so the
 // session never welcomes the token's Caller(9, user-42).
 type DefaultGrant: send {
-    seed: Latest[Seed]
+    jwt: Grant
 }
 
 fn default_bind_mint(s: DefaultGrant, _h: (), _bind: ()) -> Result[DefaultGrant, Capacity] {
-    Ok(DefaultGrant(seed: latest.handle(s.seed)))
+    Ok(DefaultGrant(jwt: share(s.jwt)))
 }
 
 // T_BASE expired on the wall clock the place runs on, and an expired result closes 1008, so
 // this binding keeps jwtbind's Caller and drops its expiry: the law is the owner's room.
 fn default_bound(g: DefaultGrant, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
-    let verified = bind(latest.read(g.seed), credential)?
+    let verified = bind(g.jwt, credential)?
     Ok(runner.BoundCaller(caller: clone(verified.caller), expires_at_ms: None))
 }
 
@@ -506,7 +670,7 @@ fn jwt_default_place(clock: Clock, r: Random, tasks: Tasks, n: Net) -> Result[()
     // wire_defaults but for the pool, which the test's limit cannot hold; n_granted stays 0.
     let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
-    let given: runner.Grants[DefaultGrant, (), DefaultGrant] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: DefaultGrant(seed: seed(v)), mint: default_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
+    let given: runner.Grants[DefaultGrant, (), DefaultGrant] = runner.Grants(attempt: None, call: None, claim: None, bind: Some(runner.Mint(seed: DefaultGrant(jwt: grant(v)), mint: default_bind_mint, mint_bytes: 4096u64, mint_steps: runner.DEFAULT_STEPS)))
     let settings: runner.PlaceConfig[DefaultGrant, (), DefaultGrant] = runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(default_place), n_place: 1048576u64, on_migrate: None, schema: code.describe(no_schema), session: session, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: clock, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.wire(code.describe(default_bound), BIND_BYTES, BIND_STEPS)), grants: Some(take given), triggers: None, idle: None)
     let Ok(place) = runner.fixture.start(take settings, 5000u64) else {
         fail("the default place did not start")

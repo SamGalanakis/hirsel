@@ -25,6 +25,7 @@ pub fn sign_jws(s: Signer, header: String, payload: Bytes) -> Result[String, Err
 pub fn sign_jwt(s: Signer, claims: String) -> Result[String, Error]
 pub fn jwk(text: String) -> Result[Key, Error]
 pub fn jwks(text: String) -> Result[KeySet, Error]
+pub fn key_set(take keys: List[Key]) -> KeySet
 pub fn jwks_public(text: String) -> Result[PublicKeys, Error]
 pub fn public_len(keys: PublicKeys) -> u64
 ```
@@ -92,6 +93,9 @@ header has been fully admitted, and claims are read only after the signature ver
   `sig`, whose `key_ops` lacks `verify`, or whose `kty`, `crv` or `alg` this module does
   not use is skipped by `jwks` (RFC 7517 §5) and is `UnsupportedKey` from `jwk`.
   Duplicate `key_ops` entries or operations inconsistent with `use` give `BadKey`.
+- `key_set` makes a `KeySet` of keys the caller built, in order, such as several
+  `with_kid(hmac_key(s), kid)` keys. It checks nothing itself: `find` refuses a repeated
+  or missing `kid` when a token selects among them (invariant 5).
 - `jwks_public` applies the same parsing rules and retains RSA, EC P-256 and
   Ed25519 verification keys. An `oct` member gives `UnsupportedKey` for the
   whole set, even when its algorithm or use would otherwise exclude it.

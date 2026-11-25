@@ -620,14 +620,12 @@ fn finish_jwt(take jws: Jws, r: Rules) -> Result[Jwt, Error] {
 /// Verifies a JWT with one key: the signature as verify_jws, then the claims
 /// against r. Claims are read only after the signature verifies.
 pub fn verify_jwt(token: String, r: Rules, k: Key) -> Result[Jwt, Error] {
-    let jws = verify_jws(token, r.allow, k)?
-    finish_jwt(take jws, r)
+    finish_jwt(verify_jws(token, r.allow, k)?, r)
 }
 
 /// verify_jwt with the key of set that the header's kid picks.
 pub fn verify_jwt_in(token: String, r: Rules, keys: KeySet) -> Result[Jwt, Error] {
-    let jws = verify_jws_in(token, r.allow, keys)?
-    finish_jwt(take jws, r)
+    finish_jwt(verify_jws_in(token, r.allow, keys)?, r)
 }
 
 /// Verifies a JWT with the public key selected by find's kid rule.
@@ -639,8 +637,7 @@ pub fn verify_jwt_public(token: String, r: Rules, keys: PublicKeys) -> Result[Jw
     })?
     let k = view keys.keys[i]
     let good = verify_public_signature(k.material, k.alg, token, parts)?
-    let jws = checked_jws(take parts, good)?
-    finish_jwt(take jws, r)
+    finish_jwt(checked_jws(take parts, good)?, r)
 }
 
 fn sign_bytes(s: Signer, input: Bytes) -> Result[Bytes, Error] {
@@ -985,6 +982,11 @@ pub fn jwks_public(text: String) -> Result[PublicKeys, Error] {
         jwk_public_key(take j, pin)
     })?
     Ok(PublicKeys(keys: take keys))
+}
+
+/// A set of keys the caller built, such as sealed HMAC keys, in order for find.
+pub fn key_set(take keys: List[Key]) -> KeySet {
+    KeySet(keys: take keys)
 }
 
 /// The number of usable keys in the set.

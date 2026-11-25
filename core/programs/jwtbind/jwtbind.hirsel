@@ -1,8 +1,15 @@
-// Module jwtbind (RUNNER-SPEC §15): a place's session binding over std.jwt. It verifies
-// asymmetric JWTs from one issuer against a public key set that is static or fetched by one
-// refresher task, and maps a verified token to Caller(issuer byte, sub). It names no product,
-// provider or claim beyond RFC 7519's registered claims.
-pub type Source: send = Static(String) | Remote(RemoteSource)
+// Module jwtbind (RUNNER-SPEC §15): a place's session binding over std.jwt. It verifies JWTs
+// from one issuer, either asymmetric ones against a public key set that is static or fetched by
+// one refresher task, or HMAC ones against verify-only sealed keys, and maps a verified token to
+// Caller(issuer byte, sub). It names no product, provider or claim beyond RFC 7519's registered
+// claims.
+pub type Source: send = Static(String) | Remote(RemoteSource) | Mac(List[MacKey])
+
+// A sealed HMAC key named by kid. Its only use is verify (TLS-5), so the place cannot mint.
+pub type MacKey: send {
+    kid: String,
+    key: Secret
+}
 
 pub type RemoteSource: send {
     url: String,
@@ -31,13 +38,21 @@ pub type Seed: shareable + send {
 }
 
 // Why verifier refused its configuration (§15.2). A misconfigured place does not start.
-pub type ConfigError: send = EmptyIss | EmptyAud | IssuerNumber | Hmac | Leeway | MaxToken | MaxLife | Document(std.jwt.Error) | NoUsableKey | NotHttps | Every | Stale | FetchMs | Full(Capacity)
+pub type ConfigError: send = EmptyIss | EmptyAud | IssuerNumber | Hmac | Asymmetric | MacKeys | KeyUse | ShortKey | Leeway | MaxToken | MaxLife | Document(std.jwt.Error) | NoUsableKey | NotHttps | Every | Stale | FetchMs | Full(Capacity)
+
+// The jwtbind part of a place's bind G (§15.1): the verifier's seed handle and, for a Mac
+// issuer, its keys. A bind mint copies it per bind with share.
+pub type Grant: send {
+    seed: Latest[Seed],
+    mac: List[MacKey]
+}
 
 // The published seed and, for a Remote source, the refresher. Dropping a Verifier cancels its
 // refresher (CONC-8), so a place keeps it for as long as it serves.
 pub opaque type Verifier {
     root: Latest[Seed],
-    refresher: Option[Task[()]]
+    refresher: Option[Task[()]],
+    mac: List[MacKey]
 }
 
 // J4 (§15.9) measured one bind of an RS256 token over an RSA-8192 key, through a spawned child
@@ -65,6 +80,9 @@ const FETCH_MAX_MS: u64 = 30000u64
 const RETRY_FIRST_MS: u64 = 5000u64
 
 const NEVER: u64 = 0xffffffffffffffffu64
+
+// GUESS: keys a Mac issuer holds at once; two cover a rotation's overlap (§15.2).
+const MAC_KEYS_MAX: u64 = 4u64
 
 // GUESS: the refresher's pool (one connection), a MAX_JWKS body and its parsed set.
 const REFRESH_BYTES: u64 = 16777216u64
@@ -99,14 +117,6 @@ fn check_issuer(i: Issuer) -> Result[(), ConfigError] {
     if i.issuer < 2u8 {
         return Error(IssuerNumber)
     }
-    if is_hmac(i.allow.first) {
-        return Error(Hmac)
-    }
-    for a in i.allow.rest {
-        if is_hmac(a) {
-            return Error(Hmac)
-        }
-    }
     if i.leeway_s > MAX_LEEWAY_S {
         return Error(Leeway)
     }
@@ -117,6 +127,87 @@ fn check_issuer(i: Issuer) -> Result[(), ConfigError] {
         return Error(MaxLife)
     }
     Ok(())
+}
+
+// An issuer is asymmetric or symmetric, never both (§15.2 "Keys"): every algorithm in allow
+// must be HMAC exactly when the source is Mac.
+fn check_family(allow: std.jwt.Allow, mac: bool) -> Result[(), ConfigError] {
+    let refusal = if mac {
+        Asymmetric
+    } else {
+        Hmac
+    }
+    if is_hmac(allow.first) != mac {
+        return Error(refusal)
+    }
+    for a in allow.rest {
+        if is_hmac(a) != mac {
+            return Error(refusal)
+        }
+    }
+    Ok(())
+}
+
+// RFC 7518 §3.2: an HMAC key at least as long as the hash, which is also the tag's length.
+fn mac_alg(a: std.jwt.Alg) -> (JwsMacAlg, u64) {
+    match a {
+        Hs384 => (Sha384, 48u64),
+        Hs512 => (Sha512, 64u64),
+        _ => (Sha256, 32u64),
+    }
+}
+
+// The runtime's own answers decide: a key that can make a tag, or cannot verify, is KeyUse;
+// one an allowed algorithm calls short is ShortKey.
+fn check_mac_key(key: Secret, allow: std.jwt.Allow) -> Result[(), ConfigError] {
+    let (first, _) = mac_alg(allow.first)
+    match secret.jws_hmac_sign(key, first, b"") {
+        Error(Denied) => (),
+        _ => return Error(KeyUse),
+    }
+    let mut algs: List[std.jwt.Alg] = list.with_capacity(1u64 + list.len(allow.rest))
+    list.push(mut algs, allow.first)
+    list.append(mut algs, allow.rest)
+    for a in algs {
+        let (alg, size) = mac_alg(a)
+        let mut zero: Bytes = list.with_capacity(size)
+        list.fill(mut zero, size, 0u8)
+        match secret.jws_hmac_verify(key, alg, b"", zero) {
+            Ok(_) => (),
+            Error(Denied) => return Error(KeyUse),
+            Error(ShortKey) => return Error(ShortKey),
+        }
+    }
+    Ok(())
+}
+
+fn check_mac(keys: List[MacKey], allow: std.jwt.Allow) -> Result[(), ConfigError] {
+    let n = list.len(keys)
+    if n == 0u64 || n > MAC_KEYS_MAX {
+        return Error(MacKeys)
+    }
+    for i in 0u64 .. n {
+        if string.byte_len(keys[i].kid) == 0u64 {
+            return Error(MacKeys)
+        }
+        for j in 0u64 .. i {
+            if keys[j].kid == keys[i].kid {
+                return Error(MacKeys)
+            }
+        }
+    }
+    for k in keys {
+        check_mac_key(k.key, allow)?
+    }
+    Ok(())
+}
+
+fn share_keys(keys: List[MacKey]) -> List[MacKey] {
+    let mut out: List[MacKey] = list.with_capacity(list.len(keys))
+    for k in keys {
+        list.push(mut out, MacKey(kid: clone(k.kid), key: secret.share(k.key)))
+    }
+    take out
 }
 
 fn check_remote(r: RemoteSource) -> Result[(), ConfigError] {
@@ -149,26 +240,42 @@ fn usable(text: String) -> Result[std.jwt.PublicKeys, ConfigError] {
 }
 
 // Checks the configuration, then publishes a Static set once, or starts the refresher and
-// waits for its first fetch (bounded by fetch_ms) for a Remote one.
+// waits for its first fetch (bounded by fetch_ms) for a Remote one. A Mac issuer publishes one
+// seed with no public set, valid for ever, and keeps its keys for grant.
 pub fn verifier(take issuer: Issuer, take source: Source, net: Net, take trust: Trust, clock: Clock, random: Random, tasks: Tasks) -> Result[Verifier, ConfigError] waits {
     check_issuer(issuer)?
+    let mac = match source {
+        Mac(_) => true,
+        _ => false,
+    }
+    check_family(issuer.allow, mac)?
     match take source {
         Static(take text) => {
             let keys = usable(text)?
             let root = latest.new(arc.new(Seed(issuer: take issuer, clock: clock, keys: Some(take keys), good_until_mono_ns: NEVER, confirmed_until_mono_ns: NEVER)))
-            Ok(Verifier(root: take root, refresher: None))
+            Ok(Verifier(root: take root, refresher: None, mac: list.new()))
         },
         Remote(take r) => {
             check_remote(r)?
             let (v, _) = start_remote(take issuer, take r, net, take trust, clock, random, tasks, false)?
             Ok(take v)
         },
+        Mac(take keys) => {
+            check_mac(keys, issuer.allow)?
+            let root = latest.new(arc.new(Seed(issuer: take issuer, clock: clock, keys: None, good_until_mono_ns: NEVER, confirmed_until_mono_ns: NEVER)))
+            Ok(Verifier(root: take root, refresher: None, mac: take keys))
+        },
     }
 }
 
-// The verifier's handle, which a bind mint copies into its G.
-pub fn seed(v: Verifier) -> Latest[Seed] {
-    latest.handle(v.root)
+// The verifier's part of a place's bind G, which the place puts in its bind mint's seed.
+pub fn grant(v: Verifier) -> Grant {
+    Grant(seed: latest.handle(v.root), mac: share_keys(v.mac))
+}
+
+// A bind mint's per-bind copy of a Grant: a latest.handle and a secret.share of each key.
+pub fn share(g: Grant) -> Grant {
+    Grant(seed: latest.handle(g.seed), mac: share_keys(g.mac))
 }
 
 type Refresher: send {
@@ -202,7 +309,7 @@ fn start_remote(take issuer: Issuer, take source: RemoteSource, net: Net, take t
     } else {
         None
     }
-    Ok((Verifier(root: take root, refresher: Some(take refresher)), take watched))
+    Ok((Verifier(root: take root, refresher: Some(take refresher), mac: list.new()), take watched))
 }
 
 fn ms_ns(ms: u64) -> u64 {
@@ -337,12 +444,27 @@ fn typ_matches(want: Option[String], got: Option[String]) -> bool {
     }
 }
 
+// A Mac issuer's keys as a std.jwt set, each picked by its kid.
+fn mac_set(keys: List[MacKey]) -> std.jwt.KeySet {
+    let mut out: List[std.jwt.Key] = list.with_capacity(list.len(keys))
+    for k in keys {
+        list.push(mut out, std.jwt.with_kid(std.jwt.hmac_key(secret.share(k.key)), clone(k.kid)))
+    }
+    std.jwt.key_set(take out)
+}
+
 // §15.3. The first refusal is the answer; only a missing or stale set and a kid miss on an
-// unconfirmed set are Unavailable.
-pub fn bind(s: Seed, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+// unconfirmed public set are Unavailable.
+pub fn bind(g: Grant, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    let s = latest.read(g.seed)
     let wall_ms = host.wall_ms(s.clock)
     let mono_ns = host.mono_ns(s.clock)
-    let Some(keys) = view s.keys else {
+    let mac = list.len(g.mac) > 0u64
+    let missing = match view s.keys {
+        Some(_) => false,
+        None => true,
+    }
+    if missing && !mac {
         return Error(Unavailable)
     }
     if mono_ns >= s.good_until_mono_ns {
@@ -362,9 +484,14 @@ pub fn bind(s: Seed, credential: Bytes) -> Result[runner.BoundCaller, runner.Bin
     }
     let now_secs = wall_ms / 1000u64
     let rules = std.jwt.Rules(allow: clone(s.issuer.allow), now_secs: now_secs, leeway_secs: s.issuer.leeway_s, iss: Some(clone(s.issuer.iss)), aud: Some(clone(s.issuer.aud)), require_exp: true)
-    let jwt = match std.jwt.verify_jwt_public(token, rules, keys) {
+    let verified = match view s.keys {
+        Some(keys) => std.jwt.verify_jwt_public(token, rules, keys),
+        None => std.jwt.verify_jwt_in(token, rules, mac_set(g.mac)),
+    }
+    let jwt = match take verified {
         Ok(take j) => take j,
-        Error(NoKey) => return if mono_ns < s.confirmed_until_mono_ns {
+        // A Mac issuer's keys never change, so its kid miss is always Rejected.
+        Error(NoKey) => return if mac || mono_ns < s.confirmed_until_mono_ns {
             Error(Rejected)
         } else {
             Error(Unavailable)

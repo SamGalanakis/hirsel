@@ -1,10 +1,24 @@
 const DEV_FIXTURE_RELEASE: u64 = 0u64
 
+// The held run's due time, in the units of `store.CallInfo.at`. It is in the
+// past, so the run can start; the dev law checks that an activation keeps it.
+const DEV_FIXTURE_DUE: u64 = 7u64
+
 type DevFixtureTable = store.Table[u64, u64]
 
-fn dev_fixture_schema(mut declaration: store.Declare) -> Result[DevFixtureTable, store.Error] {
-    let table = store.declare_table(mut declaration, "dev_data", std.codec.key_u64(), std.codec.of_u64())?
-    store.finish(mut declaration, take table)
+type DevFixtureTables: shareable + send {
+    data: DevFixtureTable,
+    held: store.Table[u64, triggers.Id],
+    triggers: triggers.Tables
+}
+
+fn dev_fixture_schema(mut declaration: store.Declare) -> Result[DevFixtureTables, store.Error] {
+    let tables = triggers.declare_tables(mut declaration)?
+    let id_codec: std.codec.Codec[triggers.Id] = std.codec.of()
+    let held_table = store.declare_table(mut declaration, "dev_held", std.codec.key_u64(), id_codec)?
+    let data = store.declare_table(mut declaration, "dev_data", std.codec.key_u64(), std.codec.of_u64())?
+    let held = store.finish(mut declaration, take held_table)?
+    Ok(DevFixtureTables(data: store.finish(mut declaration, take data)?, held: held, triggers: take tables))
 }
 
 fn dev_fixture_migrate(mut _migration: store.Migration) -> Result[(), store.Error] waits {
@@ -17,44 +31,166 @@ fn dev_fixture_migrate(mut _migration: store.Migration) -> Result[(), store.Erro
     Ok(())
 }
 
-fn dev_fixture_read(tx: store.Tx, table: DevFixtureTable, take _input: ()) -> Result[Answer[u64], Capacity] {
-    let value = option.unwrap(result.unwrap(store.fetch(tx, table, 0u64)))
+fn dev_fixture_read(tx: store.Tx, h: DevFixtureTables, take _input: ()) -> Result[Answer[u64], Capacity] {
+    let value = option.unwrap(result.unwrap(store.fetch(tx, h.data, 0u64)))
     Ok(Answer(value: value + DEV_FIXTURE_RELEASE, covers: covers()))
 }
 
-fn dev_fixture_registration(mut target_registry: Registry[(), DevFixtureTable]) -> Result[(), RegisterError] {
+// The held run: an attempt returns 1000 times the release it ran on plus its
+// attempt number, so its outcome names both.
+// A run's grant carries its attempt's context; a wire bind's carries nothing.
+type DevFixtureGrant: send = Run(TriggerContext) | Bound
+
+fn dev_fixture_run(g: DevFixtureGrant, caller: Caller, take unused: u64) -> Result[u64, Capacity] waits {
+    let Run(ctx) = view g else {
+        fail("dev fixture: a run without its attempt's context")
+    }
+    match trigger_boundary(ctx) {
+        Ok(()) => Ok(DEV_FIXTURE_RELEASE * 1000u64 + triggers.number(trigger_attempt(ctx))),
+        _ => fail("dev fixture: unexpected boundary result"),
+    }
+}
+
+fn dev_fixture_grant(seed: (), unused_handles: DevFixtureTables, ctx: TriggerContext) -> Result[DevFixtureGrant, Capacity] {
+    Ok(Run(share_trigger_context(ctx)))
+}
+
+fn dev_fixture_bind(seed: (), unused_handles: DevFixtureTables, unused: ()) -> Result[DevFixtureGrant, Capacity] {
+    Ok(Bound)
+}
+
+fn dev_fixture_caller(unused: DevFixtureGrant, supplied: Bytes) -> Result[BoundCaller, BindRefusal] {
+    ingress.caller((), supplied)
+}
+
+fn dev_fixture_entries() -> triggers.Entries {
+    let mut listed = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut listed, result.unwrap(triggers.granted(code.describe(dev_fixture_run)))))
+    take listed
+}
+
+fn dev_fixture_registration(mut target_registry: Registry[DevFixtureGrant, DevFixtureTables]) -> Result[(), RegisterError] {
+    use_trigger_tables(mut target_registry, fn(h: DevFixtureTables) -> triggers.Tables {
+        clone(h.triggers)
+    })
     query(mut target_registry, code.describe(dev_fixture_read), slots(), 65536u64, DEFAULT_STEPS)?
     let key = {
         let export = target_registry.exported[0u64]
         entry_key(view export.described.identity, export.args_fp, export.result_fp)
     }
-    bind(mut target_registry, HttpBinding(op: "read", method: Get, path: "/read", entry: take key, fields: list.new(), mode: Read, ok_status: 200u16, error_status: 422u16, body_max: 0u64, arg_max: 4096u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))
+    bind(mut target_registry, HttpBinding(op: "read", method: Get, path: "/read", entry: take key, fields: list.new(), mode: Read, ok_status: 200u16, error_status: 422u16, body_max: 0u64, arg_max: 4096u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))?
+    granted(mut target_registry, code.describe(dev_fixture_run), 131072u64, DEFAULT_STEPS)
 }
 
-fn dev_fixture_fetch(mut tx: store.Tx, table: DevFixtureTable) -> Result[u64, store.Error] {
-    Ok(option.unwrap(store.fetch(tx, table, 0u64)?))
+fn dev_fixture_fetch(mut tx: store.Tx, h: DevFixtureTables) -> Result[u64, store.Error] {
+    Ok(option.unwrap(store.fetch(tx, h.data, 0u64)?))
 }
 
-fn dev_fixture_write(mut tx: store.Tx, table: DevFixtureTable) -> Result[(), store.Error] {
-    store.put(mut tx, table, 0u64, 271828u64)
+fn dev_fixture_write(mut tx: store.Tx, h: DevFixtureTables) -> Result[(), store.Error] {
+    store.put(mut tx, h.data, 0u64, 271828u64)
+}
+
+fn dev_fixture_open(d: Dir, c: Clock, random: Random, tasks: Tasks) -> (store.Db, DevFixtureTables) waits {
+    let options = result.unwrap(store.sized(Directory, 134217728u64))
+    let mut db = result.unwrap(store.open(tasks, d, c, random, options))
+    let h = result.unwrap(open_place_schema(mut db, code.describe(dev_fixture_schema)))
+    (take db, take h)
 }
 
 fn dev_fixture_seed(d: Dir, c: Clock, random: Random, tasks: Tasks) waits {
-    let options = result.unwrap(store.sized(Directory, 134217728u64))
-    let mut db = result.unwrap(store.open(tasks, d, c, random, options))
-    let table = result.unwrap(open_place_schema(mut db, code.describe(dev_fixture_schema)))
-    if let Committed(_) = result.unwrap(store.run(mut db, None, table, dev_fixture_write)) {} else {
+    let (take opened, h) = dev_fixture_open(d, c, random, tasks)
+    let mut db = take opened
+    if let Committed(_) = result.unwrap(store.run(mut db, None, h, dev_fixture_write)) {} else {
         fail("fixture write did not commit")
     }
     result.unwrap(store.close(take db))
 }
 
+// Writes one granted run due at DEV_FIXTURE_DUE and starts its attempt 1 under
+// a stamp no release has, as a run cut by a drain is left `Running`.
+fn dev_fixture_seed_held(d: Dir, c: Clock, random: Random, tasks: Tasks) waits {
+    let (take opened, h) = dev_fixture_open(d, c, random, tasks)
+    let mut db = take opened
+    let listed = dev_fixture_entries()
+    let written = store.run(mut db, None, (store.copy_env(h), store.copy_env(listed)), fn(mut tx, env) -> Result[triggers.Id, triggers.Error] {
+        let id = triggers.write(mut tx, env.0.triggers, env.1, triggers.granted(code.describe(dev_fixture_run)) ?=> |_| MissingEntry, 0u64, At(DEV_FIXTURE_DUE))?
+        store.put(mut tx, env.0.held, 0u64, id) ?=> Store
+        Ok(id)
+    })
+    let id = result.unwrap(trigger_commit(take written)).value
+    let Some(take pending) = result.unwrap(triggers.pending_at(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.triggers, id)) else {
+        fail("dev fixture: the held row is missing")
+    }
+    let mut stamp: Bytes = list.with_capacity(32u64)
+    list.fill(mut stamp, 32u64, 7u8)
+    let started = store.run(mut db, None, (store.copy_env(h.triggers), store.copy_env(pending), store.copy_env(stamp)), fn(mut tx, env) -> Result[u64, triggers.Error] {
+        let Body(first) = triggers.start(mut tx, env.0, env.1, env.2)? else {
+            return Error(StaleAttempt)
+        }
+        Ok(triggers.number(first))
+    })
+    if result.unwrap(trigger_commit(take started)).value != 1u64 {
+        fail("dev fixture: the held run did not start attempt 1")
+    }
+    result.unwrap(store.close(take db))
+}
+
+fn push_flag(mut line: String, name: String, value: bool) {
+    string.push(mut line, name)
+    string.push(mut line, if value {
+        "true "
+    } else {
+        "false "
+    })
+}
+
+// Prints the held run's row, or its outcome once a head has finished it. The
+// argument is the hex identity digest the row's stamp is compared with.
+fn dev_fixture_print_held(d: Dir, c: Clock, random: Random, tasks: Tasks, errors: Stderr, identity: String) waits {
+    let Some(image) = std.hex.decode(clone(string.as_bytes(identity))) else {
+        fail("dev fixture: the identity is not hex")
+    }
+    let (take db, h) = dev_fixture_open(d, c, random, tasks)
+    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let snap = store.snapshot(db)
+    let Some(id) = result.unwrap(store.get(read_handle, snap, h.held, 0u64)) else {
+        fail("dev fixture: no held run was seeded")
+    }
+    let mut line = string.from("held ")
+    match result.unwrap(triggers.pending_at(read_handle, snap, h.triggers, id)) {
+        Some(take row) => {
+            push_flag(mut line, "waiting=", triggers.waiting(row))
+            push_flag(mut line, "parked=", match triggers.parked_by(row) {
+                Some(_) => true,
+                None => false,
+            })
+            push_flag(mut line, "cancel=", triggers.cancelling(row))
+            push_flag(mut line, "stamped=", triggers.stamped(row, image))
+            string.push(mut line, "attempt=")
+            string.push_u64(mut line, triggers.attempts(row))
+            string.push(mut line, " due=")
+            string.push_u64(mut line, triggers.due_time(row))
+        },
+        None => match result.unwrap(triggers.outcome(read_handle, snap, h.triggers, id)) {
+            Some(Returned(take value)) => {
+                let codec: std.codec.Codec[u64] = std.codec.of()
+                string.push(mut line, "returned=")
+                string.push_u64(mut line, result.unwrap(std.codec.decode(codec, value)))
+            },
+            Some(_) => string.push(mut line, "ended other"),
+            None => string.push(mut line, "missing"),
+        },
+    }
+    string.push(mut line, "\n")
+    let _ = stderr.write(errors, line)
+    result.unwrap(store.close(take db))
+}
+
 // Prints the value this release's read reports, so a law can tell OLD from NEW.
 fn dev_fixture_print(d: Dir, c: Clock, random: Random, tasks: Tasks, errors: Stderr) waits {
-    let options = result.unwrap(store.sized(Directory, 134217728u64))
-    let mut db = result.unwrap(store.open(tasks, d, c, random, options))
-    let table = result.unwrap(open_place_schema(mut db, code.describe(dev_fixture_schema)))
-    let Committed(done) = result.unwrap(store.run(mut db, None, table, dev_fixture_fetch)) else {
+    let (take opened, h) = dev_fixture_open(d, c, random, tasks)
+    let mut db = take opened
+    let Committed(done) = result.unwrap(store.run(mut db, None, h, dev_fixture_fetch)) else {
         fail("fixture read did not commit")
     }
     let mut line = string.from("fixture value ")
@@ -70,15 +206,27 @@ pub fn dev_fixture(d: Dir, n: Net, c: Clock, random: Random, tasks: Tasks, a: Ar
             dev_fixture_seed(d, c, random, tasks)
             return Ok(())
         }
+        if action == "seed-held" {
+            dev_fixture_seed_held(d, c, random, tasks)
+            return Ok(())
+        }
         if action == "read-fixture" {
             dev_fixture_print(d, c, random, tasks, errors)
+            return Ok(())
+        }
+        if action == "read-held" {
+            let Some(identity) = args.get(a, 1u64) else {
+                fail("read-held needs NEW's identity in hex")
+            }
+            dev_fixture_print_held(d, c, random, tasks, errors, string.from(identity))
             return Ok(())
         }
     }
     let reg = code.describe(dev_fixture_registration)
     let schema = code.describe(dev_fixture_schema)
     main(a, process, errors, tasks, c, reg, schema, scoped fn(take stop: Receiver[()]) -> Result[Ended, MainError] waits {
-        let configured: PlaceConfig[(), DevFixtureTable, ()] = PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: launch_selection(a) ?=> Usage, place: reg, n_place: 1048576u64, on_migrate: Some(code.describe(dev_fixture_migrate)), schema: schema, session: wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), grants: None, triggers: None, idle: None)
+        let grants: Grants[DevFixtureGrant, DevFixtureTables, ()] = Grants(attempt: Some(Mint(seed: (), mint: dev_fixture_grant, mint_bytes: 65536u64, mint_steps: DEFAULT_STEPS)), call: None, claim: None, bind: Some(Mint(seed: (), mint: dev_fixture_bind, mint_bytes: 4096u64, mint_steps: DEFAULT_STEPS)))
+        let configured: PlaceConfig[DevFixtureGrant, DevFixtureTables, ()] = PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: launch_selection(a) ?=> Usage, place: reg, n_place: 1048576u64, on_migrate: Some(code.describe(dev_fixture_migrate)), schema: schema, session: wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(wire(code.describe(dev_fixture_caller), 4096u64, 65536u64)), grants: Some(take grants), triggers: Some(TriggerConfig(entries: dev_fixture_entries(), author: store.Caller(issuer: 0u8, subject: list.new()))), idle: None)
         Ok(operate_report(take configured, take stop, result.unwrap(status_root()), None, errors) ?=> Start)
     })
 }

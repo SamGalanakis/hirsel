@@ -182,11 +182,11 @@ impl Options {
                 "--fresh starts a dev-owned store; it cannot be combined with --store".into(),
             );
         }
-        if options
-            .arguments
-            .iter()
-            .any(|arg| arg == "--hirsel-install" || arg.starts_with("--hirsel-activation="))
-        {
+        if options.arguments.iter().any(|arg| {
+            arg == "--hirsel-install"
+                || arg.starts_with("--hirsel-activation=")
+                || arg.starts_with("--hirsel-held")
+        }) {
             return Err("dev chooses the store activation; remove the launch selection from the program arguments".into());
         }
         if !options.listen.ip().is_loopback() {

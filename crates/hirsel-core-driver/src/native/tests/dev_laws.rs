@@ -621,3 +621,71 @@ fn package_dev_s1_store_ownership() {
         b"user file"
     );
 }
+
+// RUNNER-SPEC §14.6 "Who supplies a fate": `hirsel dev` passes `Release` on every
+// install it runs into its store. Release leaves a held row `Waiting` with NEW's
+// identity digest as its stamp, `cancel` false, and its attempt and due time
+// unchanged; NEW's head then runs attempt n + 1 on NEW's code, once.
+#[test]
+fn package_dev_releases_held_runs() {
+    let fixture = Fixture::new();
+    fixture.prepare_faults();
+    let mut old = fixture.dev("old", &[]);
+    old.wait_for("hirsel dev listening on ");
+    let old_image = fixture.executable(&fixture.state()[2]["active"]);
+    old.stop();
+    let seeded = Command::new(&old_image).arg("seed-held").output().unwrap();
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+
+    // A hot redeploy: the loop serves OLD, then the source changes under it.
+    let (mut live, cut) = fixture.fault("held-live", "hold-after");
+    live.wait_for("hirsel dev listening on ");
+    fixture.release(2);
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while !cut.exists() {
+        let log = live.log();
+        assert!(
+            !log.contains("migration refused") && Instant::now() < deadline,
+            "the held run's install did not commit:\n{log}"
+        );
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    live.interrupt_at(&cut);
+    fixture.wait_unlocked();
+
+    // The install committed and NEW's head has not started: read the settled row.
+    let new_ref = fixture.state()[2]["pending"]["new"].clone();
+    let new_image = fixture.executable(&new_ref);
+    let identity: Vec<u8> = serde_json::from_value(new_ref["identity"].clone()).unwrap();
+    let identity = crate::call::hex(&identity);
+    let held = |image: &Path| {
+        let read = Command::new(image)
+            .args(["read-held", &identity])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&read.stderr).into_owned();
+        assert!(read.status.success(), "{stderr}");
+        stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("held "))
+            .unwrap_or_else(|| panic!("no held line: {stderr}"))
+            .to_owned()
+    };
+    assert_eq!(
+        held(&new_image),
+        "waiting=true parked=false cancel=false stamped=true attempt=1 due=7"
+    );
+
+    // Dev recovers through a plain reopen of NEW, which serves, and installs nothing again.
+    let mut recovered = fixture.dev("held-recovered", &[]);
+    recovered.wait_for("hirsel dev listening on ");
+    assert_eq!(
+        fixture.state()[2]["active"]["identity"],
+        new_ref["identity"]
+    );
+    assert!(!recovered.stop().contains("installed activation"));
+}

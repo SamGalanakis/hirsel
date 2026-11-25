@@ -90,5 +90,6 @@ OPENAT2_TEST_CASES = {
         "native::tests::run_tape_replays_process_stop",
         "native::tests::dev_laws::package_dev_s1_persistence_and_fencing",
         "native::tests::dev_laws::package_dev_s1_store_ownership",
+        "native::tests::dev_laws::package_dev_releases_held_runs",
     ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("native::tests::")],
 }

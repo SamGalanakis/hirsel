@@ -315,10 +315,11 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
     } else {
         p.n_place
     }
+    // Only dev launches a predecessor install, and it releases (RUNNER-SPEC v2.74 G1).
     let install = match launch.install {
         Some(version) => Some(InstallAt(version, fate.none())),
         None => match launch.predecessor {
-            Some(_) => Some(InstallFrom(fate.none())),
+            Some(_) => Some(InstallFrom(fate.Fates(all: Some(Release), entries: list.new()))),
             None => None
         },
     }
@@ -352,9 +353,8 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
         return operate_prepare(take p, take options, n_place, attempt, image, held)
     }
     if let Some(selection) = install {
-        // A hosted install child has no deploy request and so no fates: a held
-        // run refuses it `Unsettled`, and a hand install names the fate
-        // (RUNNER-SPEC CHANGES-v2.72).
+        // A hosted `InstallAt` has no fates, so a held run refuses it `Unsettled`
+        // (RUNNER-SPEC CHANGES-v2.72); dev's `InstallFrom` releases.
         return finish_install(operate_install(take p, take options, selection, n_place))
     }
     let installing = match p.selection {

@@ -491,11 +491,8 @@ request fingerprint hold. A program's own entry may use
 `triggers.request_cancel` or `triggers.release` in a transaction. Passing a
 revision to release changes the stamp and clears the hold together. The next
 start keeps the trigger identity and increments the attempt. A deploy or install
-settles every run it would hold in its own activation commit, as the operator's
-`--held` fate directs: `release` restamps the run so that it continues on the new
-code, and `cancel` ends it `Cancelled`. A run therefore stays parked only when a
-`Request` hold is made on the code that is already running (RUNNER-SPEC §14.6
-"The activation fate").
+settles each run it would hold in its own activation commit, by the fate its
+operator gives (see "Held runs" below).
 
 The store step library gives a granted trigger a confined process body.
 Include `steps.declare_tables` in the place migration and `steps.register` in the
@@ -524,3 +521,53 @@ triggers together. If the callback returns a typed error, the transaction
 keeps the error result and rolls back the callback's writes. A park uses this
 form to commit its state and a fresh `At(T)` trigger, then returns from the
 process.
+### Held runs
+
+A new activation (a deploy, a standalone install or a `hirsel dev` rebuild) would
+**hold** a run that the old code started: without a fate, NEW's next start of the run
+parks it under a `Revision` hold. The activation therefore settles each held run in its
+own commit, by a fate (RUNNER-SPEC §14.6 "The activation fate").
+
+A row is held when its cancel is not requested and either it is parked, or it is a
+granted run that started under a revision stamp other than NEW's identity digest. A
+row that has not started, or whose cancel is requested, is not held. A held run whose
+entry NEW no longer has is still held: once released, NEW's head consumes it `Gone`
+with no body run. The trigger report lists the rows as `held`, `cancelling`, `gone`,
+`changed` and `unchanged`.
+
+The fates are `runner.fate.HeldFate = Release | Cancel`, given as
+`Fates(all, entries)`. Each `EntryFate(path, fate)` in `entries` names one entry
+path, and that element wins over `all`. Both fates rewrite the row in the activation
+commit. The row keeps its identity, argument, due time and attempt counter, and its
+state is `Waiting`, so no attempt stays current:
+
+- `Release` stamps the run with NEW's identity digest and leaves `cancel` false.
+  NEW's head then runs attempt n + 1 on NEW's code, once. The run's recorded steps
+  stay valid: each finished step returns its recorded result.
+- `Cancel` sets `cancel`, and NEW's head commits the terminal `Cancelled` at the
+  row's due time, as after `triggers.request_cancel`.
+
+**There is no default.** An activation that finds a held row with no fate, or an
+`entries` path that names no pending row and no entry of OLD or NEW, is refused
+`Unsettled` before it publishes a cut. Nothing changes: a deploy fails with OLD
+still serving, and a standalone install exits 1 with the report on stderr. An
+activation with no held row needs no fate.
+
+Who supplies the fate:
+
+| Activation | Fate |
+|---|---|
+| `hirsel deploy` | `--held release\|cancel` and `--held-entry PATH=release\|cancel`, sent on Begin's `held` field |
+| A standalone install | the place arguments `--hirsel-held=release\|cancel`<!-- doc-ref: external --> and `--hirsel-held-entry=PATH=release\|cancel`<!-- doc-ref: external -->, next to `--hirsel-install` |
+| `hirsel dev` | always `Release` on every install into the store it supervises; dev refuses `--hirsel-held` among the program arguments |
+| A hosted install child, a harness proposal | none, so a held run fails `Unsettled` and an operator settles it |
+
+A released run can be held again. NEW's body runs from the top, and at a step whose
+recorded request differs from NEW's request the step library parks it under a
+`Request` hold stamped with NEW's digest. The trigger report cannot predict this.
+The next activation's fate settles it, or the program does with `triggers.release`
+or `triggers.request_cancel`. The report keys each `held` group by
+`hold = Cut | Revision(same_code) | Request(same_code)`. Releasing a
+`Request(same_code: true)` group again on unchanged code reaches the same hold
+again.
+

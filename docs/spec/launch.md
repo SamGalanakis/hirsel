@@ -692,8 +692,11 @@ this argv order, so the allowance is inside the private prefix:
 
 The store's `Dir` grant takes the first grant position whatever `--dir` values the user
 supplies. The compiler's store is a separate directory and is never the place's store. Dev's
-install passes `--hirsel-held=release`<!-- doc-ref: external -->, so a run in flight across a
-rebuild continues on the new code (RUNNER-SPEC §14.6 "The activation fate").
+install releases every held run, so a run in flight across a rebuild continues on the new code
+at its next attempt (RUNNER-SPEC §14.6 "The activation fate"). The fate rides on the install
+launch itself: the runner maps dev's predecessor install to the fates `all: Release`. So dev
+passes no `--hirsel-held`<!-- doc-ref: external --> word and refuses one among the program arguments, as it refuses a
+launch selection.
 
 **Identity.** Dev compares identity digests (RUNNER-SPEC §6 "One identity") computed from
 `Describe` by a driver port of the runner's `identity_digest`. The port's oracle is a vector set
@@ -778,7 +781,8 @@ Rules:
    expected store ID (launch word 14), which the install checks. That install answers
    `PlaceInstalled(v, _)`, `PlaceInstallRefused(cause)`, or nothing when uncertain, and the
    launcher accepts `PlaceInstalled` without a target version. Dev never uses `InstallAt`,
-   whose target is the store's commit head, which advances with every commit. Then:
+   whose target is the store's commit head, which advances with every commit. The install
+   settles every held run `Release` in its activation commit. Then:
    - `PlaceInstalled(v)`: start NEW with a plain reopen; it must reply `PlaceOpened` at `v`;
    - `PlaceInstallRefused(cause)`: rule 7;
    - no reply, a nonzero exit without a reply, or a dead child: rule 8.

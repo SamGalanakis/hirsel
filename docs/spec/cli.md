@@ -23,6 +23,47 @@ executable and detached debug file in the user's content store
 filesystem has none; a stored executable that fails its check is linked again,
 never run.
 
+### Remote cache
+
+A build or test request can also read a remote cache, configured in
+`$XDG_CONFIG_HOME/hirsel/config.toml` (default `~/.config/hirsel`):
+
+```toml
+[cache.remote]
+url = "https://cache.example.test"  # http:// or https://
+trusted = ["<64 hex digits: an Ed25519 public key>"]  # default: none
+signing-key = "/path/to/builder.pk8"  # optional: PKCS#8 Ed25519; uploads
+```
+
+An unknown field in `[cache.remote]` is an error. The remote is a plain HTTP
+store: `GET`, `HEAD` and `PUT` of `o/<sha256>` blobs and of
+`r/<key id>/<key>` signed records, where a key id is
+`hirsel.builder-key.v1` over the public key. The trust rules:
+
+- A blob is used only when its bytes hash (SHA-256) to the name it was fetched
+  under. Reads from the local store keep their xxh3 check.
+- A record is used only when it is signed by a key in `trusted`, names the
+  requested key and is of the requested kind. `trusted` is empty by default,
+  so a remote with no listed key is never read. A received record is kept in
+  the local store's `r/<key id>/` and checked again on every read; removing a
+  key from `trusted` withdraws every record it signed.
+- Only three kinds travel: release std sides (one manifest record and one
+  pack of their blobs), object records (release program parts and the unit
+  objects of a development build), and Cranelift development instances. No kind exists for an executable, a test verdict or coverage;
+  a coverage build and a program with foreign grants (FFI-8) neither read nor
+  write the remote.
+- Without `signing-key` the remote is read-only. With it, the request uploads
+  what it built itself in the background (blobs first, then the record signed
+  with that key) and waits for the uploads before it exits. A received record
+  is never signed again.
+- Received records never enter `k/`. The launcher and the runner host open no
+  remote, so they reuse only mappings this host produced, and an executable
+  linked over received content is stored under a link key apart from one
+  linked over none.
+- A remote that fails a request is not asked again for 60 seconds, and a name
+  it lacks is not asked for again for 10 minutes, so a dead remote costs one
+  timeout (2 s to connect, 20 s per read), not one per object.
+
 Native binaries from both backends include `.eh_frame` unwind
 information. Native builds write detached DWARF alongside the executable.
 `--debug-lines on` also embeds DWARF. Failure positions are available in

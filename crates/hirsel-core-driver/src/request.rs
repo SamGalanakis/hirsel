@@ -142,6 +142,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         ))?;
         return conclude(Outcome::Exit(0));
     }
+    crate::store::remote::begin()?; // The launcher and host returned above.
     let mut package_mode = crate::package_lock::Mode::default();
     let mut package_store = None;
     let mut pack_out = None;

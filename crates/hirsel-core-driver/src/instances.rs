@@ -158,6 +158,8 @@ pub(crate) struct Records {
     pub digest: ContentHash,
     pub store: Store,
     pub library: Option<Store>,
+    /// The remote cache this build reads and offers instances to.
+    pub remote: Option<std::sync::Arc<crate::store::remote::Remote>>,
 }
 impl Records {
     /// An instance's key: `hirsel.core-instance.v2` over the encoded
@@ -725,13 +727,9 @@ impl CheckProduct {
                 instances.keys.insert(key.clone(), (instance_key, location));
                 let hit = match expand.damaged.contains(key) {
                     true => None,
-                    false => {
-                        crate::native_object::load_instance(records.store(location), instance_key)
-                            .map_err(|e| input(e.to_string()))?
-                            .filter(|r| {
-                                r.identity == *key && r.own == own && r.env == records.digest
-                            })
-                    }
+                    false => (records.load(location, instance_key))
+                        .map_err(|e| input(e.to_string()))?
+                        .filter(|r| r.identity == *key && r.own == own && r.env == records.digest),
                 };
                 if let Some(record) = hit {
                     observe(key, "hit");

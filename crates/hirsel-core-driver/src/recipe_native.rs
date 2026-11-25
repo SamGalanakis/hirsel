@@ -1348,7 +1348,7 @@ fn object<'m>(
     instance: &Identity,
     module: impl FnOnce() -> Result<Cow<'m, Module>, NativeStop>,
 ) -> Result<ObjectProduct, NativeStop> {
-    let found = crate::native_object::load_shared(store, key)?;
+    let found = crate::store::remote::load_shared(store, options, key)?;
     let (held, debug, compiled) = match found {
         Some((bare, debug, bytes)) => ((bare, bytes), debug, false),
         None => {
@@ -1358,7 +1358,7 @@ fn object<'m>(
                     definition: instance.definition.clone(),
                     message,
                 })?;
-            let bare = crate::native_object::publish(store, key, &object)?;
+            let bare = crate::store::remote::publish(store, options, key, &object)?;
             let debug = object.debug.map(Arc::new);
             ((bare, object.bytes.into()), debug, true)
         }

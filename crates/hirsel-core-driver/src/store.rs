@@ -34,6 +34,10 @@ mod blob;
 pub(crate) mod collect;
 #[path = "layer.rs"]
 mod layer;
+#[path = "remote.rs"]
+pub(crate) mod remote;
+#[path = "signed.rs"]
+pub(crate) mod signed;
 
 /// The most bytes one `write` hands the page cache. The kernel sizes the
 /// folios it allocates for a buffered write to the write's length, so one
@@ -99,7 +103,8 @@ pub(crate) const VERSION: u32 = 44;
 /// `MAGIC`, `VERSION` and the frame's origin.
 pub(crate) const HEADER: usize = 44;
 /// The origin of a mapping this machine made. A record signed by another
-/// builder carries that builder's key id and lives apart from these.
+/// builder carries that builder's key id and lives apart from these
+/// (`signed`): a store reads only frames of its own origin.
 const LOCAL: [u8; 32] = [0; 32];
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;
@@ -295,6 +300,9 @@ pub struct Store {
     /// The read-only layer reads try first (`layer`): an image's shipped
     /// objects.
     shipped: Option<Arc<Path>>,
+    /// The principal whose mappings this store's frames carry: `LOCAL`, or
+    /// the key id of the builder a std side was received from.
+    origin: [u8; 32],
 }
 
 pub(crate) fn default_path(directory: &Path) -> PathBuf {
@@ -357,6 +365,7 @@ impl Store {
             image: false,
             cas: None,
             shipped: None,
+            origin: LOCAL,
         };
         store.sweep()?;
         Ok(store)
@@ -546,7 +555,7 @@ impl Store {
     /// payload and length bytes, computed once while framing.
     pub(crate) fn frame(payload: &[u8]) -> (ContentHash, Vec<u8>) {
         let mut bytes = Vec::with_capacity(HEADER + payload.len() + TRAILER);
-        bytes.extend_from_slice(&Self::header());
+        bytes.extend_from_slice(&header(LOCAL));
         bytes.extend_from_slice(payload);
         hirsel_core_front::cost_scope!("non-check", "archive write and digest");
         bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
@@ -563,7 +572,7 @@ impl Store {
     /// file by a rename and a reader sees one whole frame or none. The
     /// frame is written around the borrowed payload without copying it.
     pub(crate) fn put_keyed(&self, key: ContentHash, payload: &[u8]) -> io::Result<()> {
-        let header = Self::header();
+        let header = header(self.origin);
         let mut trailer = [0; TRAILER];
         trailer[..8].copy_from_slice(&(payload.len() as u64).to_le_bytes());
         {
@@ -579,12 +588,10 @@ impl Store {
         wrote("record");
         Ok(())
     }
-    fn header() -> [u8; HEADER] {
-        let mut header = [0; HEADER];
-        header[..8].copy_from_slice(MAGIC);
-        header[8..12].copy_from_slice(&VERSION.to_le_bytes());
-        header[12..].copy_from_slice(&LOCAL);
-        header
+    /// This store with its frames carrying `origin` (`signed`).
+    pub(crate) fn origin(mut self, origin: ContentHash) -> Self {
+        self.origin = origin.0;
+        self
     }
     /// The hash of exactly a module's serialization (`IR`).
     pub(crate) fn ir_hash(ir: &[u8]) -> ContentHash {
@@ -784,7 +791,7 @@ impl Store {
         if size < HEADER + TRAILER
             || &bytes[..8] != MAGIC
             || bytes[8..12] != VERSION.to_le_bytes()
-            || bytes[12..HEADER] != LOCAL
+            || bytes[12..HEADER] != self.origin
         {
             return Ok(None);
         }
@@ -841,6 +848,14 @@ impl Store {
         wrote("selection");
         Ok(())
     }
+}
+
+fn header(origin: [u8; 32]) -> [u8; HEADER] {
+    let mut header = [0; HEADER];
+    header[..8].copy_from_slice(MAGIC);
+    header[8..12].copy_from_slice(&VERSION.to_le_bytes());
+    header[12..].copy_from_slice(&origin);
+    header
 }
 
 #[cfg(test)]

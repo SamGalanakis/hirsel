@@ -215,6 +215,25 @@ pub fn sign(
     }
 }
 
+/// The public key of the Ed25519 PKCS#8 private key `pkcs8`.
+pub fn ed25519_public(pkcs8: &[u8]) -> Result<[u8; 32], KeyFailure> {
+    use signature::KeyPair;
+    let key = signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(pkcs8)
+        .map_err(|_| KeyFailure::Invalid)?;
+    key.public_key()
+        .as_ref()
+        .try_into()
+        .map_err(|_| KeyFailure::Invalid)
+}
+
+/// A fresh Ed25519 private key, as PKCS#8 v2, from the host's randomness.
+pub fn ed25519_generate() -> Vec<u8> {
+    signature::Ed25519KeyPair::generate_pkcs8(&rand::SystemRandom::new())
+        .expect("the host's randomness")
+        .as_ref()
+        .to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

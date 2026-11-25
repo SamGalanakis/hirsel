@@ -43,6 +43,8 @@ pub(super) const RECORDS: &str = "k";
 pub(super) const BLOBS: &str = "o";
 /// Fallback std sides, each a content store.
 const SIDES: &str = "s";
+/// Signed records received from a remote cache, by signer (`signed`).
+pub(super) const REMOTE: &str = "r";
 /// The layout stamp: the format a store's files were written in.
 const LAYOUT: &str = "layout";
 /// The per-user store's directory name; the dead directories of older
@@ -96,7 +98,7 @@ impl Store {
             _pin: None,
         });
         if !stamped(root)? {
-            for directory in [RECORDS, SIDES] {
+            for directory in [RECORDS, SIDES, REMOTE] {
                 store.retire(&root.join(directory))?;
             }
             if root.file_name().is_some_and(|name| name == USER)
@@ -292,8 +294,16 @@ fn maintain(root: &Path, capacity: u64, written: u64) -> io::Result<()> {
 pub(crate) fn sweep(root: &Path, capacity: u64) -> io::Result<u64> {
     let mut entries = Vec::new();
     let mut size = 0;
-    for directory in [RECORDS, BLOBS, SIDES] {
-        let Some(shards) = present(fs::read_dir(root.join(directory)))? else {
+    let signers = present(fs::read_dir(root.join(REMOTE)))?
+        .into_iter()
+        .flatten();
+    let signers = signers.filter_map(Result::ok).filter(|e| hex_name(e, 64));
+    let directories = [RECORDS, BLOBS, SIDES].map(|d| (root.join(d), d == SIDES));
+    for (directory, sides) in directories
+        .into_iter()
+        .chain(signers.map(|e| (e.path(), false)))
+    {
+        let Some(shards) = present(fs::read_dir(&directory))? else {
             continue;
         };
         for shard in shards {
@@ -314,7 +324,7 @@ pub(crate) fn sweep(root: &Path, capacity: u64) -> io::Result<u64> {
                     continue;
                 };
                 let side = metadata.is_dir();
-                if side != (directory == SIDES) || !(side || metadata.is_file()) {
+                if side != sides || !(side || metadata.is_file()) {
                     continue;
                 }
                 let path = entry.path();

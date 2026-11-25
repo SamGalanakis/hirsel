@@ -42,6 +42,7 @@
 use super::*;
 use super::{recipe_build::Unit, release::LentBodies};
 use crate::native::{NativeOptions, NativeStop, ObjectProduct};
+use crate::store::remote::{self, Remote};
 use hirsel_core_ir::step_contexts::Summary;
 use hirsel_core_ir::{Callee, FuncId, Identity, Param, source::NativeObject};
 use serde::{Deserialize, Serialize};
@@ -270,8 +271,9 @@ pub(crate) fn std_side(
             })
             .collect(),
     };
-    let shared = Store::cas(&options.cas)?;
-    let (store, key, record, lowered) = lower(&generator, kin, side_units, &shared, Vec::new())?;
+    let (shared, remote) = (Store::cas(&options.cas)?, remote::for_build(options));
+    let (store, key, record, lowered) =
+        lower(&generator, kin, side_units, &shared, Vec::new(), remote)?;
     side(&store, key, record, lowered)
 }
 
@@ -491,7 +493,7 @@ impl PrebuiltStd {
             recording: false,
         };
         let kin = generator.kin()?;
-        let (_, key, _, _) = lower(&generator, kin, self.units, &self.store, self.modules)?;
+        let (_, key, _, _) = lower(&generator, kin, self.units, &self.store, self.modules, None)?;
         self.store.put_keyed(prebuilt_name(kin)?, &encode(&key)?)?;
         Ok(())
     }
@@ -505,6 +507,7 @@ fn lower(
     side: SideUnits,
     cache: &Store,
     modules: Vec<ModuleRoots>,
+    remote: Option<std::sync::Arc<Remote>>,
 ) -> Result<(Store, ContentHash, StdRecord, u64), NativeStop> {
     let SideUnits {
         roots: requested,
@@ -522,6 +525,13 @@ fn lower(
         cache.side(key)?
     };
     if let Some(record) = load_record(&store, key, kin)? {
+        remote.iter().for_each(|r| r.offer_side(&store, key));
+        return Ok((store, key, record, 0));
+    }
+    let received = remote.as_deref().map(|r| r.std_side(cache, key));
+    if let Some(store) = received.transpose()?.flatten()
+        && let Some(record) = load_record(&store, key, kin)?
+    {
         return Ok((store, key, record, 0));
     }
     let lent_key = lent_name(key)?;
@@ -587,6 +597,7 @@ fn lower(
         store.put_keyed_blob(lent_key, &lent)?;
     }
     store.put_keyed(key, &encode(&record)?)?;
+    remote.iter().for_each(|r| r.offer_side(&store, key));
     let lowered = record.units.len() as u64;
     Ok((store, key, record, lowered))
 }

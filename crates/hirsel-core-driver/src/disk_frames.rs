@@ -105,3 +105,178 @@ fn damaged_disk_bytes_are_a_miss() {
         .unwrap();
     assert!(*loaded.bytes == image && loaded.debug == debug);
 }
+
+/// A loopback HTTP cache: `GET`, `HEAD` and `PUT` of the paths in `files`,
+/// one request per connection. Its base URL.
+type Files = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>;
+fn remote_fixture(files: Files) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut reader = BufReader::new(stream.unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut words = line.split_whitespace();
+            let (method, path) = (words.next().unwrap().to_owned(), words.next().unwrap());
+            let path = path.trim_start_matches('/').to_owned();
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header.trim().is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let mut files = files.lock().unwrap();
+            let (status, body) = match (method.as_str(), files.get(&path)) {
+                ("PUT", _) => {
+                    files.insert(path, body);
+                    ("200 OK", Vec::new())
+                }
+                ("GET", Some(bytes)) => ("200 OK", bytes.clone()),
+                ("HEAD", Some(_)) => ("200 OK", Vec::new()),
+                _ => ("404 Not Found", Vec::new()),
+            };
+            let mut stream = reader.into_inner();
+            let head = format!(
+                "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            if method != "HEAD" {
+                stream.write_all(&body).unwrap();
+            }
+        }
+    });
+    url
+}
+
+/// A remote cache's bytes and records against the signed-record frame
+/// (`store::signed`): a part record signed by a listed key, whose object
+/// blob the remote serves under its SHA-256, is a hit whose object is the
+/// builder's bytes. A blob whose bytes are another's (same length), a record
+/// with no signature or a zero one, one signed by a key the user did not
+/// list (under its own id, or claiming the listed key's), and one validly
+/// signed by the listed key for any kind tag but the requested one (no tag
+/// exists for an executable or a test verdict, so tags 4 and 5 are among
+/// them) are misses that keep no blob in `o/`, and no record in `r/` but
+/// the listed key's record whose blob was refused. Bug: a read that
+/// uses received bytes before hashing them, or a record before checking
+/// its signer, signature and kind.
+#[test]
+fn remote_bytes_and_records_are_used_only_when_they_check() {
+    use crate::store::remote::{Config, Remote};
+    use crate::store::signed::{self, Builder, Kind};
+    use hirsel_core_net::key_wrap;
+    let listed = key_wrap::ed25519_generate();
+    let unlisted = key_wrap::ed25519_generate();
+    let builder = |pkcs8: &[u8]| Builder::new(key_wrap::ed25519_public(pkcs8).unwrap());
+    let sign = |pkcs8: &[u8], signer: ContentHash, tag: u8, key, blobs: &[_], payload: &[u8]| {
+        let mut bytes = signed::unsigned(Kind::Object, key, signer, blobs, payload);
+        bytes[12] = tag;
+        let message = signed::message(&bytes);
+        let alg = key_wrap::SignAlg::Ed25519;
+        bytes.extend(key_wrap::sign(alg, pkcs8, &message, key_wrap::SigningRandom::Host).unwrap());
+        bytes
+    };
+    let source = tempfile::tempdir().unwrap();
+    let source = Store::cas(source.path()).unwrap();
+    let object = b"\x7fELF the builder's part".to_vec();
+    let other = b"\x7fELF a stranger's parts".to_vec();
+    assert_eq!(object.len(), other.len());
+    let native = |bytes: &[u8]| hirsel_core_ir::source::NativeObject {
+        bytes: bytes.to_vec(),
+        debug: None,
+        coverage: None,
+    };
+    let key = ContentHash::of_bytes(b"a release part's key");
+    let bare = crate::native_object::publish(&source, key, &native(&object)).unwrap();
+    let payload = source.get(key).unwrap().unwrap();
+    let blobs = [(bare.address, object.len() as u64)];
+    let id = builder(&listed).id;
+    let good = sign(&listed, id, Kind::Object as u8, key, &blobs, &payload);
+    let unsigned = signed::unsigned(Kind::Object, key, id, &blobs, &payload);
+    let hex = crate::request::hex;
+    // Each case is a fresh remote and a fresh local store: what the remote
+    // serves at the record's and the blob's paths, and whether it is a hit.
+    let case = |name: &str, signer: ContentHash, record: &[u8], blob: &[u8], hit: bool| {
+        let kept_record = hit || blob != object;
+        let files = Files::default();
+        let record_path = format!("r/{}/{}", hex(signer), hex(key));
+        files.lock().unwrap().insert(record_path, record.to_vec());
+        let blob_path = format!("o/{}", hex(bare.address));
+        files.lock().unwrap().insert(blob_path, blob.to_vec());
+        let config = Config {
+            url: remote_fixture(files),
+            trusted: vec![
+                builder(&listed)
+                    .public
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+            ],
+            signing_key: None,
+        };
+        let remote = Remote::new(config).unwrap().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let store = Store::cas(local.path()).unwrap();
+        let read = remote.object(&store, key).unwrap();
+        let blobs = crate::store::collect::blobs(local.path()).len();
+        let records = std::fs::read_dir(local.path().join("r")).map_or(0, |d| d.count());
+        assert_eq!(records, kept_record as usize, "{name}: records kept");
+        match hit {
+            true => {
+                let (read_bare, read) = read.unwrap_or_else(|| panic!("{name}: a miss"));
+                assert!(read_bare == bare && read.bytes == object, "{name}");
+                assert!(
+                    store
+                        .signed(Kind::Object, key, &[builder(&listed)])
+                        .unwrap()
+                        .is_some()
+                );
+            }
+            false => assert!(read.is_none() && blobs == 0, "{name}: used or kept"),
+        }
+    };
+    case("signed by the listed key", id, &good, &object, true);
+    case("another blob's bytes", id, &good, &other, false);
+    case("no signature", id, &unsigned, &object, false);
+    case(
+        "a zero signature",
+        id,
+        &[&unsigned[..], &[0; 64]].concat(),
+        &object,
+        false,
+    );
+    let stranger = builder(&unlisted).id;
+    let by_stranger = sign(
+        &unlisted,
+        stranger,
+        Kind::Object as u8,
+        key,
+        &blobs,
+        &payload,
+    );
+    case("an unlisted signer", stranger, &by_stranger, &object, false);
+    let claimed = sign(&unlisted, id, Kind::Object as u8, key, &blobs, &payload);
+    case(
+        "an unlisted key claiming the listed id",
+        id,
+        &claimed,
+        &object,
+        false,
+    );
+    for tag in (0..=u8::MAX).filter(|&tag| tag != Kind::Object as u8) {
+        let forbidden = sign(&listed, id, tag, key, &blobs, &payload);
+        case(&format!("kind tag {tag}"), id, &forbidden, &object, false);
+    }
+}

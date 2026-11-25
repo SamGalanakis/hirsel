@@ -121,7 +121,19 @@ pub(crate) fn path(store: &Store, address: ContentHash) -> std::path::PathBuf {
 /// The object stored under `key` when every part checks; the link hands its
 /// checked bytes to the linker.
 pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, NativeObject)>> {
-    let Some((object, debug)) = record(store, key)? else {
+    match store.get(key)? {
+        Some(payload) => load_payload(store, &payload),
+        None => Ok(None),
+    }
+}
+
+/// The object a record's `payload` names, its blobs read from `store`: a
+/// part record, local or a listed builder's (`crate::remote`).
+pub(crate) fn load_payload(
+    store: &Store,
+    payload: &[u8],
+) -> io::Result<Option<(Bare, NativeObject)>> {
+    let Some((object, debug)) = root(store, payload)? else {
         return Ok(None);
     };
     let Some(bytes) = store.get_blob(object)? else {
@@ -141,10 +153,13 @@ pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, 
 /// the object blob it names and its decoded debug rows, when every part
 /// checks.
 fn record(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, Option<NativeDebug>)>> {
-    let Some(bytes) = store.get(key)? else {
-        return Ok(None);
-    };
-    let Some(root) = decode::<Root>(&bytes).filter(|root| root.schema == SCHEMA) else {
+    match store.get(key)? {
+        Some(bytes) => root(store, &bytes),
+        None => Ok(None),
+    }
+}
+fn root(store: &Store, bytes: &[u8]) -> io::Result<Option<(Bare, Option<NativeDebug>)>> {
+    let Some(root) = decode::<Root>(bytes).filter(|root| root.schema == SCHEMA) else {
         return Ok(None);
     };
     let debug = match root.debug {
@@ -239,18 +254,31 @@ pub(crate) fn publish_instance(
 /// checks against its rows. Anything else is a miss; the blobs it names are
 /// checked when they are read.
 pub(crate) fn load_instance(store: &Store, key: ContentHash) -> io::Result<Option<Instance>> {
-    let Some(bytes) = store.get(key)? else {
-        return Ok(None);
-    };
-    let Some(record) = decode::<Instance>(&bytes) else {
-        return Ok(None);
-    };
+    Ok(store.get(key)?.as_deref().and_then(instance))
+}
+
+/// The instance record `payload` holds, local or a listed builder's
+/// (`crate::remote`), when it decodes and every closure's hash checks.
+pub(crate) fn instance(payload: &[u8]) -> Option<Instance> {
+    let record = decode::<Instance>(payload)?;
     let sound = record.schema == INSTANCE_SCHEMA
         && record
             .closures
             .iter()
             .all(|c| hirsel_core_ir::Closure::new(c.rows.clone()).hash == c.hash);
-    Ok(sound.then_some(record))
+    sound.then_some(record)
+}
+
+/// The blobs a part record's (`instance` false) or an instance record's
+/// payload names, which travel with it to a remote cache.
+pub(crate) fn blobs(payload: &[u8], instance: bool) -> Option<Vec<Bare>> {
+    let (object, debug) = match instance {
+        true => self::instance(payload).map(|r| (r.object, r.debug))?,
+        false => decode::<Root>(payload)
+            .filter(|root| root.schema == SCHEMA)
+            .map(|root| (root.object, root.debug))?,
+    };
+    Some([object].into_iter().chain(debug).collect())
 }
 
 /// Stored debug rows by their blob; a damaged or foreign blob is none.

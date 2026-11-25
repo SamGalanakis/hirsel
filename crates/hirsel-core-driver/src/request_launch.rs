@@ -78,8 +78,10 @@ pub(super) fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::
         if !matches!(outcome, Outcome::Test(_)) {
             crate::resident::answer(&outcome);
         }
+        crate::store::remote::finish();
         return Ok(outcome);
     }
+    crate::store::remote::finish();
     match outcome {
         Outcome::Exit(code) => std::process::exit(code),
         Outcome::Test(session) => std::process::exit(session.conclude()),

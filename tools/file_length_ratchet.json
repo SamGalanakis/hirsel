@@ -202,9 +202,9 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1801,
-    "raise_revision": 13,
-    "reason": "cli-s2-prims-2712"
+    "lines": 1802,
+    "raise_revision": 14,
+    "reason": "cas-s5-remote-2798"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2649,
@@ -217,9 +217,9 @@
     "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-driver/src/std_release.rs": {
-    "lines": 1167,
-    "raise_revision": 5,
-    "reason": "coverage-c3-followups-2623"
+    "lines": 1168,
+    "raise_revision": 7,
+    "reason": "cas-s5-remote-2798"
   },
   "crates/hirsel-core-driver/src/test_run.rs": {
     "lines": 1004

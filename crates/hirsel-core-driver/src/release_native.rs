@@ -93,6 +93,8 @@ struct SharedParts<'a, G> {
     /// The digest of a coverage unit's map fragment ([`part_key`]).
     coverage: Option<ContentHash>,
     shared: &'a Store,
+    /// The remote cache a part this host lacks is read from.
+    remote: Option<&'a crate::store::remote::Remote>,
     parts: &'a mut Vec<ContentHash>,
     held: &'a mut Vec<Held>,
     failure: &'a mut Option<io::Error>,
@@ -115,7 +117,12 @@ impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
     fn part(&mut self, _: &str, machine: &str, ir: &[u8; 32]) -> bool {
         let loaded = part_key(self.generator, machine, ir, self.coverage).and_then(|key| {
             self.parts.push(key);
-            Ok(crate::native_object::load(self.shared, key)?.map(|loaded| (key, loaded)))
+            let local = crate::native_object::load(self.shared, key)?;
+            let loaded = match (local, self.remote) {
+                (None, Some(remote)) => remote.object(self.shared, key)?,
+                (local, _) => local,
+            };
+            Ok(loaded.map(|loaded| (key, loaded)))
         });
         match loaded {
             Ok(Some((key, (bare, object)))) => {
@@ -385,6 +392,7 @@ pub(super) fn emit_release_image(
     let mut core = Some((modules, facts));
     // Every part, whichever program reached it, is in the content store.
     let shared = store;
+    let remote = crate::store::remote::for_build(options);
     let emit = |message: String| NativeStop::Emit {
         definition: entry.clone(),
         message,
@@ -448,6 +456,7 @@ pub(super) fn emit_release_image(
                 .map(|f| crate::native::key("hirsel.core-release-part-coverage.v1", f))
                 .transpose()?,
             shared,
+            remote: remote.as_deref(),
             parts: &mut parts,
             held: &mut held,
             failure: &mut failure,
@@ -507,6 +516,9 @@ pub(super) fn emit_release_image(
                 false => {
                     let object = made.next().expect("a missed part was generated");
                     let bare = crate::native_object::publish(shared, key, &object)?;
+                    if let Some(remote) = &remote {
+                        remote.offer(crate::store::signed::Kind::Object, shared, key);
+                    }
                     (key, bare, object, true)
                 }
             });

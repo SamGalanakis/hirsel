@@ -410,6 +410,7 @@ pub(crate) fn native_inputs(
             env,
             store: Store::cas(&options.cas)?,
             library: library.clone(),
+            remote: crate::store::remote::for_build(options),
         })
     } else {
         None
@@ -701,8 +702,7 @@ impl CheckProduct {
                     items: module.items.clone(),
                     closures: fields.closures.clone(),
                 };
-                let (bare, debug) =
-                    crate::native_object::publish_instance(store, object_key, &object, record)?;
+                let (bare, debug) = records.offer(store, object_key, &object, record)?;
                 if let Some(table) = &mut table {
                     table.push(
                         instances,
@@ -1494,10 +1494,10 @@ fn link_objects(
         options,
         link_mode,
     )?;
-    let link_key = match assembly {
+    let link_key = crate::store::remote::bind(match assembly {
         Some(assembly) => key("hirsel.recipe-final-link.v4", &assembly)?,
         None => key("hirsel.core-executable.v10", &(build, entry_plan))?,
-    };
+    });
     let store = Store::cas(&options.cas)?;
     let coverage = options
         .coverage

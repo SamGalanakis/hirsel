@@ -189,7 +189,7 @@ pub type Status: send {
     failing: List[Failing],
 }
 
-type Tables {
+pub opaque type Tables {
     groups: store.Table[String, GroupRow],
     activations: store.Table[(u64, u64), Bytes],
     wake: store.Table[String, WakeRow],
@@ -371,55 +371,39 @@ fn due_key() -> std.codec.Key[DueKey] {
     std.codec.key_make(code.describe(put_due), code.describe(take_due), code.describe(due_schema))
 }
 
-fn created(take r: Result[store.Ticket, store.Error]) -> Result[(), store.Error] {
-    match take r {
-        Ok(_) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take e) => Error(take e)
-    }
+fn declared[K, V](mut d: store.Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] {
+    let table = store.declare_table(mut d, name, take key, take value)?
+    store.finish(mut d, take table)
 }
 
-fn make_tables(mut db: store.Db) -> Result[Tables, store.Error] waits {
-    let groups: std.codec.Codec[GroupRow] = std.codec.of()
-    let wake_codec: std.codec.Codec[WakeRow] = std.codec.of()
-    let deploys: std.codec.Codec[DeployRow] = std.codec.of()
-    let requests: std.codec.Codec[RequestRow] = std.codec.of()
-    let quotas: std.codec.Codec[Quota] = std.codec.of()
-    let usage: std.codec.Codec[Usage] = std.codec.of()
-    let config_codec: std.codec.Codec[Config] = std.codec.of()
-    let meta: std.codec.Codec[Meta] = std.codec.of()
-    let retired: std.codec.Codec[Retired] = std.codec.of()
-    let pins: std.codec.Codec[Pin] = std.codec.of()
-    created(store.create_table(mut db, store.spec("platform.groups", std.codec.key_string(), groups)))?
-    created(store.create_table(mut db, store.spec("platform.activations", activation_key(), std.codec.of_bytes())))?
-    created(store.create_table(mut db, store.spec("platform.wake", std.codec.key_string(), wake_codec)))?
-    created(store.create_table(mut db, store.spec("platform.dirty", std.codec.key_string(), std.codec.of_u64())))?
-    created(store.create_table(mut db, store.spec("platform.due", due_key(), std.codec.of_u8())))?
-    created(store.create_table(mut db, store.spec("platform.deploys", std.codec.key_string(), deploys)))?
-    created(store.create_table(mut db, store.spec("platform.requests", std.codec.key_bytes(), requests)))?
-    created(store.create_table(mut db, store.spec("platform.active", std.codec.key_string(), std.codec.of_bytes())))?
-    created(store.create_table(mut db, store.spec("platform.pins", std.codec.key_bytes(), pins)))?
-    created(store.create_table(mut db, store.spec("platform.quotas", std.codec.key_string(), quotas)))?
-    created(store.create_table(mut db, store.spec("platform.usage", std.codec.key_string(), usage)))?
-    created(store.create_table(mut db, store.spec("platform.config", std.codec.key_u64(), config_codec)))?
-    created(store.create_table(mut db, store.spec("platform.meta", std.codec.key_u64(), meta)))?
-    created(store.create_table(mut db, store.spec("platform.retired", std.codec.key_string(), retired)))?
+// The host's tables, declared into the caller's declaration: one store may hold the host
+// beside the caller's own tables, and the caller seals once before `open`.
+pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
     Ok(Tables(
-        groups: store.table(mut db, "platform.groups", std.codec.key_string(), std.codec.of())?,
-        activations: store.table(mut db, "platform.activations", activation_key(), std.codec.of_bytes())?,
-        wake: store.table(mut db, "platform.wake", std.codec.key_string(), std.codec.of())?,
-        dirty: store.table(mut db, "platform.dirty", std.codec.key_string(), std.codec.of_u64())?,
-        due: store.table(mut db, "platform.due", due_key(), std.codec.of_u8())?,
-        deploys: store.table(mut db, "platform.deploys", std.codec.key_string(), std.codec.of())?,
-        requests: store.table(mut db, "platform.requests", std.codec.key_bytes(), std.codec.of())?,
-        active: store.table(mut db, "platform.active", std.codec.key_string(), std.codec.of_bytes())?,
-        pins: store.table(mut db, "platform.pins", std.codec.key_bytes(), std.codec.of())?,
-        quotas: store.table(mut db, "platform.quotas", std.codec.key_string(), std.codec.of())?,
-        usage: store.table(mut db, "platform.usage", std.codec.key_string(), std.codec.of())?,
-        config: store.table(mut db, "platform.config", std.codec.key_u64(), std.codec.of())?,
-        meta: store.table(mut db, "platform.meta", std.codec.key_u64(), std.codec.of())?,
-        retired: store.table(mut db, "platform.retired", std.codec.key_string(), std.codec.of())?,
+        groups: declared(mut d, "platform.groups", std.codec.key_string(), std.codec.of())?,
+        activations: declared(mut d, "platform.activations", activation_key(), std.codec.of_bytes())?,
+        wake: declared(mut d, "platform.wake", std.codec.key_string(), std.codec.of())?,
+        dirty: declared(mut d, "platform.dirty", std.codec.key_string(), std.codec.of_u64())?,
+        due: declared(mut d, "platform.due", due_key(), std.codec.of_u8())?,
+        deploys: declared(mut d, "platform.deploys", std.codec.key_string(), std.codec.of())?,
+        requests: declared(mut d, "platform.requests", std.codec.key_bytes(), std.codec.of())?,
+        active: declared(mut d, "platform.active", std.codec.key_string(), std.codec.of_bytes())?,
+        pins: declared(mut d, "platform.pins", std.codec.key_bytes(), std.codec.of())?,
+        quotas: declared(mut d, "platform.quotas", std.codec.key_string(), std.codec.of())?,
+        usage: declared(mut d, "platform.usage", std.codec.key_string(), std.codec.of())?,
+        config: declared(mut d, "platform.config", std.codec.key_u64(), std.codec.of())?,
+        meta: declared(mut d, "platform.meta", std.codec.key_u64(), std.codec.of())?,
+        retired: declared(mut d, "platform.retired", std.codec.key_string(), std.codec.of())?,
     ))
+}
+
+// A store holding only the host: declares its tables, seals, and opens.
+pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher.Request]), Refused] waits {
+    let mut db = take opened
+    let mut d = st(store.declare(db, Migrate))?
+    let t = st(declare_tables(mut d))?
+    let _ = st(store.seal(mut db, take d))?
+    open_declared(take db, take t, first)
 }
 
 fn st[T](take r: Result[T, store.Error]) -> Result[T, Refused] {
@@ -483,7 +467,7 @@ pub fn sync_failed(h: Host) -> bool {
 
 // Opens the host on its store: creates the catalog on first use, and returns the host
 // with the `Hello` that starts its control session.
-pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher.Request]), Refused] waits {
+pub fn open_declared(take opened: store.Db, take t: Tables, first: Config) -> Result[(Host, List[launcher.Request]), Refused] waits {
     if first.max_places == 0u64 {
         return Error(Missing("max_places"))
     }
@@ -491,7 +475,6 @@ pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher
         return Error(Missing("idle_ms"))
     }
     let mut db = take opened
-    let t = st(make_tables(mut db))?
     let made = store.run(mut db, None, (store.copy_env(first), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
         if let None = st(store.fetch(tx, call_env.1 .config, 0u64))? {
             st(store.put(mut tx, call_env.1 .config, 0u64, call_env.0))?

@@ -5,8 +5,10 @@
 // Tiered row and then ranges a Memory table reads the Memory rows. The
 // expected rows come from the fixture's generator and the body's own edits.
 
-fn tx_read_bucket(v: u64) -> Result[u64, Capacity] {
-    Ok(v % 4)
+fn tx_read_bucket(_k: u64, v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v % 4)
+    Ok(take keys)
 }
 
 const TX_READ_ROWS: u64 = 600
@@ -17,10 +19,14 @@ type TxReadHandles: shareable + send {
     plain: Table[u64, u64]
 }
 
-fn tx_read_handles(mut db: Db) -> Result[TxReadHandles, Error] waits {
-    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let ix = bind_table_index(mut db, rows, "i", code.describe(tx_read_bucket), std.codec.key_u64())?
-    let plain = table(mut db, "plain", std.codec.key_u64(), std.codec.of_u64())?
+fn tx_read_handles(mut db: Db, mode: Mode) -> Result[TxReadHandles, Error] waits {
+    let mut d = declare(db, mode)?
+    let mut declared = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let ix = index(mut d, mut declared, "i", Many, code.describe(tx_read_bucket), std.codec.key_u64())?
+    let rows = finish(mut d, take declared)?
+    let declared_plain = declare_table(mut d, "plain", std.codec.key_u64(), std.codec.of_u64())?
+    let plain = finish(mut d, take declared_plain)?
+    let _ = seal(mut db, take d)?
     Ok(TxReadHandles(rows: take rows, ix: take ix, plain: take plain))
 }
 
@@ -28,11 +34,7 @@ fn tx_read_handles(mut db: Db) -> Result[TxReadHandles, Error] waits {
 // class-3 pack. The index and the "plain" table stay Memory.
 fn tx_read_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
-    let _ = create_table(mut db, spec("plain", std.codec.key_u64(), std.codec.of_u64()))?
-    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let _ = create_index(mut db, rows, "i", code.describe(tx_read_bucket), std.codec.key_u64())?
-    let handles = tx_read_handles(mut db)?
+    let handles = tx_read_handles(mut db, Migrate)?
     let Committed(_) = run(mut db, None, copy_env(handles), fn(mut tx: Tx, env: TxReadHandles) -> Result[(), Error] {
         for key in 0u64 .. TX_READ_ROWS {
             put(mut tx, env.rows, key, key)?
@@ -44,7 +46,7 @@ fn tx_read_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Res
     })? else {
         fail("Tx reads: fixture puts commit")
     }
-    let id = prefix(rows.id)?
+    let id = prefix(handles.rows.id)?
     let mut tree = share_page_tree(db.heads[0u64].roots.collections)
     let (take root, take descriptor) = {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
@@ -205,7 +207,7 @@ fn test_tiered_tx_reads_see_staged_overlay_and_cold_rows(d: Dir, c: Clock, r: Ra
     let floor = 182375272u64
     tx_read_fixture(d, c, r, tasks, floor)?
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let handles = tx_read_handles(mut db)?
+    let handles = tx_read_handles(mut db, Open)?
     // The edits are staged in the same body that reads them.
     let edited = match run(mut db, Some(10000000), copy_env(handles), fn(mut tx: Tx, env: TxReadHandles) -> Result[u64, Error] {
         put(mut tx, env.rows, 7u64, 1007u64)?
@@ -236,14 +238,14 @@ fn test_tiered_tx_reads_see_staged_overlay_and_cold_rows(d: Dir, c: Clock, r: Ra
     close(take db)?
     // The journaled edits reopen as a replay overlay over the Cold tree.
     let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let again = tx_read_handles(mut replayed)?
+    let again = tx_read_handles(mut replayed, Open)?
     tx_read_look(replayed, again)?
     let _ = checkpoint(mut replayed)?
     tx_read_run(mut replayed, again)?
     close(take replayed)?
     // After the fold cut, every row is Cold.
     let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let folded = tx_read_handles(mut cold)?
+    let folded = tx_read_handles(mut cold, Open)?
     tx_read_run(mut cold, folded)?
     tx_read_look(cold, folded)?
     close(take cold)

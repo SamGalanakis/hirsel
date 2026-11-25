@@ -63,7 +63,7 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     let mut incumbent = open_authority(tasks, object_authority(take first, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
-    let _ = create_table(mut incumbent, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut incumbent, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut incumbent, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let value = bucket_m2_pack_value()
     let outcome = run(mut incumbent, None, (copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
@@ -200,7 +200,7 @@ fn object_reclaim_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let mut candidate = string.into_bytes(string.from("x"))
     history_create(mut witness, orphan, mut candidate, mut workspace.compare, deadline)?
     history_create(mut witness, future, mut candidate, mut workspace.compare, deadline)?
-    let _ = create_table(mut writer, spec("kept", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut writer, "kept", std.codec.key_u64(), std.codec.of_u64())?
     reclaim_barrier(writer)?
     let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
     let current = history_decode_head(workspace.witness)?
@@ -265,7 +265,7 @@ fn object_reclaim_retry_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim, o
     let (take initial_mark, _) = history_checkpoint(mut witness, old.head, deadline)?
     let mut candidate = string.into_bytes(string.from("x"))
     history_create(mut witness, orphan, mut candidate, mut workspace.compare, deadline)?
-    let _ = create_table(mut writer, spec("kept", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut writer, "kept", std.codec.key_u64(), std.codec.of_u64())?
     result.unwrap(std.sim.s3.requested(sim.endpoint, "DELETE", orphan, RECLAIM_DELETE_ATTEMPTS))
     if !journal_turn(writer)? {
         fail("the journal dropped a reclaim whose delete failed")

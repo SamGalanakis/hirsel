@@ -54,7 +54,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 512
     let mut db = open(tasks, path, c, r, options)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     scrub_fill(mut db, t, 2000, 0)?
     let _ = checkpoint(mut db)?
@@ -142,7 +142,7 @@ fn disk_test_scrub_damage_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 512
     let mut db = open(tasks, path, c, r, options)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     scrub_fill(mut db, t, 2000, 0)?
     let _ = checkpoint(mut db)?
@@ -181,7 +181,7 @@ fn disk_test_scrub_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 512
     let mut db = open(tasks, path, c, r, options)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     scrub_fill(mut db, t, 2000, 0)?
     let _ = checkpoint(mut db)?

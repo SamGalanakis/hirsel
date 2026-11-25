@@ -254,7 +254,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let ours = digest_for("d")
     let theirs = digest_for("e")
     let mut before = result.unwrap(open(tasks, dir, c, r, options))
-    result.unwrap(create_table(mut before, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut before, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let first = match result.unwrap(admit_law_stream(mut before, s, 0, ours)) {
         Admitted(t) => ticket(t),
         _ => return false
@@ -483,7 +483,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let mut options = journal_crash_options()
     options.resident_limit = 4194304
     let mut db = result.unwrap(open(tasks, dir, c, r, options))
-    result.unwrap(create_table(mut db, spec("steps", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, t, 1, 10) {
         return false
@@ -597,7 +597,7 @@ fn journal_ack_options() -> Options {
 
 pub fn journal_law_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = result.unwrap(open(tasks, disk_test_directory(d), c, r, journal_ack_options()))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let br = main_branch(db)
     for k in 0u64 .. 8 {
@@ -690,7 +690,7 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     let empty = result.unwrap(checkpoint(mut db))
     result.unwrap(durable(mut db, empty))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     for k in 0u64 .. 3 {
         if !typed_put(mut db, t, k, k + 10) {
@@ -747,7 +747,7 @@ fn journal_test_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
 // out by hand. Rewriting row2 to the same value emits no Change.
 pub fn journal_law_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     for k in 0u64 .. 3 {
         if !typed_put(mut db, t, k, (k + 1) * 10) {
@@ -850,7 +850,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
     let mut options = journal_crash_options()
     options.resident_limit = 134217728
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let done = result.unwrap(run(mut db, None, final_item, fn(mut tx, call_env) -> Result[u64, Error] {
         for k in 0u64 .. 16 {
             let size = if k == 15 {

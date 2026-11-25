@@ -6,7 +6,7 @@
 fn typed_error_tail_case(d: Dir, c: Clock, r: Random, tasks: Tasks, bounded: bool) -> (u64, u64, u64, u64) waits {
     let dir = disk_test_directory(d)
     let mut db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let seeded = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 1, 10)?
@@ -70,7 +70,7 @@ fn disk_test_typed_error_drops_frame_tail(d: Dir, c: Clock, r: Random, tasks: Ta
 
 pub fn law_typed_indexes(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     for k in 0u64 .. 24 {
         if !typed_put(mut db, t, k, k + 1) {
@@ -79,25 +79,12 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
     }
     let frozen = snapshot(db)
     let sh = view t
-    result.unwrap(create_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let stale = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
-        put(mut tx, call_env, 1, 99)
-    })
-    match take stale {
-        Ok(Aborted(Undone(value: Stale(_), ticket: None))) => {},
-        _ => return false
-    }
-    let ix = result.unwrap(bind_table_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
-    result.unwrap(create_index(mut db, t, "quotient", code.describe(quotient), std.codec.key_u64()))
-    let _ = result.unwrap(bind_table_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let incomplete = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
-        put(mut tx, call_env, 1, 99)
-    })
-    match take incomplete {
-        Ok(Aborted(Undone(value: Stale(_), ticket: None))) => {},
-        _ => return false
-    }
-    let _ = result.unwrap(bind_table_index(mut db, t, "quotient", code.describe(quotient), std.codec.key_u64()))
+    let mut d = result.unwrap(declare(db, Migrate))
+    let mut declared = result.unwrap(declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let ix = result.unwrap(index(mut d, mut declared, "bucket", Many, code.describe(bucket), std.codec.key_u64()))
+    let _ = result.unwrap(index(mut d, mut declared, "quotient", Many, code.describe(quotient), std.codec.key_u64()))
+    let _ = result.unwrap(finish(mut d, take declared))
+    let _ = result.unwrap(seal(mut db, take d))
     if !typed_put(mut db, t, 1, 99) {
         return false
     }
@@ -249,7 +236,7 @@ fn schema_snapshot_bytes[V](read_handle: Reader, s: Snapshot, sh: Table[u64, V],
 // Wrong implementation: overwrite the old schema, or treat a fingerprint match as identity.
 pub fn law_schema_numbers(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), old_codec())))
+    result.unwrap(law_table(mut db, "accounts", std.codec.key_u64(), old_codec()))
     let old = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), old_codec()))
     let first = run(mut db, None, old, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 1, OldAccount(balance: 10))
@@ -364,10 +351,7 @@ fn with_value(c: Change, number: u8, rest: u64) -> Change {
 
 pub fn law_published_value(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), old_codec())))
-    result.unwrap(create_table(mut db, spec("other", std.codec.key_u64(), std.codec.of_u64())))
-    let old = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), old_codec()))
-    let other = result.unwrap(table(mut db, "other", std.codec.key_u64(), std.codec.of_u64()))
+    let (old, other) = result.unwrap(law_pair(mut db, "accounts", std.codec.key_u64(), old_codec(), "other", std.codec.key_u64(), std.codec.of_u64()))
     let empty = snapshot(db)
     if !typed_put(mut db, other, 1, 5) {
         return false
@@ -462,32 +446,41 @@ fn test_schema_numbers(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-fn old_balance(v: OldAccount) -> Result[u64, Capacity] {
-    Ok(v.balance)
+fn old_balance(_k: u64, v: OldAccount) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v.balance)
+    Ok(take keys)
 }
 
-fn twice_balance(v: OldAccount) -> Result[u64, Capacity] {
-    Ok(v.balance * 2)
+fn twice_balance(_k: u64, v: OldAccount) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v.balance * 2)
+    Ok(take keys)
 }
 
-fn new_bonus(v: NewAccount) -> Result[u64, Capacity] {
-    Ok(v.bonus)
+fn new_bonus(_k: u64, v: NewAccount) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v.bonus)
+    Ok(take keys)
 }
 
 // L31 (b): Capacity from the extractor on the second row, k2 (balance 9).
-fn bonus_refuses(v: NewAccount) -> Result[u64, Capacity] {
+fn bonus_refuses(_k: u64, v: NewAccount) -> Result[List[u64], Capacity] {
     if v.balance == 9 {
-        Error(Capacity(requested: 1, available: 0))
-    } else {
-        Ok(v.bonus)
+        return Error(Capacity(requested: 1, available: 0))
     }
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v.bonus)
+    Ok(take keys)
 }
 
-// L31 (b): an index key of 5000 bytes, past the 4096-byte key limit.
-fn wide_key(v: NewAccount) -> Result[Bytes, Capacity] {
+// L31 (b): a 5000-byte index key, past the key limit.
+fn wide_key(_k: u64, v: NewAccount) -> Result[List[Bytes], Capacity] {
     let mut raw: Bytes = list.new()
     list.fill(mut raw, 5000, int.truncate(v.balance))
-    Ok(take raw)
+    let mut keys: List[Bytes] = list.new()
+    list.push(mut keys, take raw)
+    Ok(take keys)
 }
 
 fn keep_new(k: u64, v: NewAccount) -> Result[Option[(u64, NewAccount)], Capacity] {
@@ -509,10 +502,28 @@ fn bonus_order(s: Snapshot, ix: Index[u64, u64, NewAccount, ()]) -> Result[u64, 
     Ok(keys)
 }
 
-fn new_spec(name: String, index_name: String) -> TableSpec[u64, NewAccount] {
-    let mut s = spec(string.from(name), std.codec.key_u64(), new_codec())
-    result.unwrap(with_index(mut s, index_name, code.describe(new_bonus), std.codec.key_u64()))
-    s
+// L31: t moves from Old to New under the same name, keys kept.
+fn migrate_upgrade(mut m: Migration) -> Result[(), Error] {
+    migrate_table(mut m, "t", std.codec.key_u64(), old_codec(), "t", std.codec.key_u64(), new_codec(), upgrade)
+}
+
+fn migrate_keep_new(mut m: Migration) -> Result[(), Error] {
+    migrate_table(mut m, "t", std.codec.key_u64(), new_codec(), "t", std.codec.key_u64(), new_codec(), keep_new)
+}
+
+fn migrate_collapse(mut m: Migration) -> Result[(), Error] {
+    migrate_table(mut m, "t", std.codec.key_u64(), new_codec(), "t", std.codec.key_u64(), new_codec(), collapse)
+}
+
+// One migration of t with the single index `index_name`, sealed or refused
+// whole.
+fn try_migrate[J](mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits], index_name: String, by: StaticFn[fn(u64, NewAccount) -> Result[List[J], Capacity]], take index_key: std.codec.Key[J]) -> Result[(Table[u64, NewAccount], Index[J, u64, NewAccount, ()]), Error] waits {
+    let mut d = declare_migration(db, tasks, configure)?
+    let mut declared = declare_table(mut d, "t", std.codec.key_u64(), new_codec())?
+    let ix = index(mut d, mut declared, index_name, Many, by, index_key)?
+    let t = finish(mut d, take declared)?
+    let _ = seal(mut db, take d)?
+    Ok((take t, take ix))
 }
 
 // L31 by hand, AB1's trace with Old {balance} for Old {a} and New {balance,
@@ -524,25 +535,15 @@ fn new_spec(name: String, index_name: String) -> TableSpec[u64, NewAccount] {
 // Stale(1) and Stale(2) against v3 and read M at v2, where the new handles
 // are Stale(3). A New put k3 = (5, 50) joins by_b first. (b) A migrate whose
 // extractor refuses k2 is Full, one whose index key is 5000 bytes is
-// Limit(Key), one whose f sends two rows to one key is Exists, and a spec
-// repeating an index name is Exists; each leaves v4, the catalog and by_b as
+// Limit(Key), and one whose f sends two rows to one key is Exists; each leaves v4, the catalog and by_b as
 // they were. (c) A table declared with two indexes is one commit, and both
 // hold the first put. Wrong implementations caught: a migrate that keeps
 // from's indexes (by_a still listed); one that installs rows past a failed
 // index build (b is Ok); a reused schema number (the entry lists 0).
-pub fn law_migrate(c: Clock) -> bool waits {
+pub fn law_migrate(c: Clock, tasks: Tasks) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    let mut declared = spec("t", std.codec.key_u64(), old_codec())
-    result.unwrap(with_index(mut declared, "by_a", code.describe(old_balance), std.codec.key_u64()))
-    match with_index(mut declared, "by_a", code.describe(twice_balance), std.codec.key_u64()) {
-        Error(Exists(_)) => {},
-        _ => return false
-    }
-    result.unwrap(create_table(mut db, take declared))
-    let mut t = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
-    let ix_a = result.unwrap(bind_table_index(mut db, t, "by_a", code.describe(old_balance), std.codec.key_u64()))
-    let mut writer = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
-    let _ = result.unwrap(bind_table_index(mut db, writer, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let (t, ix_a) = result.unwrap(law_indexed(mut db, "t", std.codec.key_u64(), old_codec(), "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let writer = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
     let first = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 1, OldAccount(balance: 7))?
         put(mut tx, call_env, 2, OldAccount(balance: 9))
@@ -557,16 +558,11 @@ pub fn law_migrate(c: Clock) -> bool waits {
     if version(before) != 2 || t.id != 1 || ix_a.id != 2 {
         return false
     }
-    result.unwrap(migrate(mut db, take t, new_spec("t", "by_b"), upgrade))
+    let (nt, ix_b) = result.unwrap(try_migrate(mut db, tasks, code.describe(migrate_upgrade), "by_b", code.describe(new_bonus), std.codec.key_u64()))
     let now = snapshot(db)
-    if version(now) != 3 {
+    if version(now) != 3 || nt.id != 3 {
         return false
     }
-    let mut nt = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
-    if version(snapshot(db)) != 3 || nt.id != 3 {
-        return false
-    }
-    let ix_b = result.unwrap(bind_table_index(mut db, nt, "by_b", code.describe(new_bonus), std.codec.key_u64()))
     let meta = result.unwrap(catalog_entry(db, nt.catalog_key))
     if ix_b.id != 4 || list.len(meta.schemas) != 1 || meta.schemas[0].number != 1 || meta.next != 2 {
         return false
@@ -641,21 +637,15 @@ pub fn law_migrate(c: Clock) -> bool waits {
         return false
     }
     // (b) each refusal leaves v4, ids, catalog and by_b as they were.
-    let mut refusing = spec("t", std.codec.key_u64(), new_codec())
-    result.unwrap(with_index(mut refusing, "by_r", code.describe(bonus_refuses), std.codec.key_u64()))
-    match migrate(mut db, take nt, take refusing, keep_new) {
+    match try_migrate(mut db, tasks, code.describe(migrate_keep_new), "by_r", code.describe(bonus_refuses), std.codec.key_u64()) {
         Error(Full(_)) => {},
         _ => return false
     }
-    let mut wide = spec("t", std.codec.key_u64(), new_codec())
-    result.unwrap(with_index(mut wide, "by_w", code.describe(wide_key), std.codec.key_bytes()))
-    let again = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
-    match migrate(mut db, take again, take wide, keep_new) {
+    match try_migrate(mut db, tasks, code.describe(migrate_keep_new), "by_w", code.describe(wide_key), std.codec.key_bytes()) {
         Error(Limit(Key)) => {},
         _ => return false
     }
-    let third = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
-    match migrate(mut db, take third, new_spec("t", "by_b"), collapse) {
+    match try_migrate(mut db, tasks, code.describe(migrate_collapse), "by_b", code.describe(new_bonus), std.codec.key_u64()) {
         Error(Exists(_)) => {},
         _ => return false
     }
@@ -667,16 +657,18 @@ pub fn law_migrate(c: Clock) -> bool waits {
         return false
     }
     // (c) two indexes, one commit.
-    let mut both = spec("w", std.codec.key_u64(), old_codec())
-    result.unwrap(with_index(mut both, "by_a", code.describe(old_balance), std.codec.key_u64()))
-    result.unwrap(with_index(mut both, "by_twice", code.describe(twice_balance), std.codec.key_u64()))
-    result.unwrap(create_table(mut db, take both))
+    let mut d = result.unwrap(declare(db, Migrate))
+    let mut kept = result.unwrap(declare_table(mut d, "t", std.codec.key_u64(), new_codec()))
+    let _ = result.unwrap(index(mut d, mut kept, "by_b", Many, code.describe(new_bonus), std.codec.key_u64()))
+    let _ = result.unwrap(finish(mut d, take kept))
+    let mut both = result.unwrap(declare_table(mut d, "w", std.codec.key_u64(), old_codec()))
+    let wa = result.unwrap(index(mut d, mut both, "by_a", Many, code.describe(old_balance), std.codec.key_u64()))
+    let wt = result.unwrap(index(mut d, mut both, "by_twice", Many, code.describe(twice_balance), std.codec.key_u64()))
+    let w = result.unwrap(finish(mut d, take both))
+    let _ = result.unwrap(seal(mut db, take d))
     if version(snapshot(db)) != 5 {
         return false
     }
-    let mut w = result.unwrap(table(mut db, "w", std.codec.key_u64(), old_codec()))
-    let wa = result.unwrap(bind_table_index(mut db, w, "by_a", code.describe(old_balance), std.codec.key_u64()))
-    let wt = result.unwrap(bind_table_index(mut db, w, "by_twice", code.describe(twice_balance), std.codec.key_u64()))
     let put_w = result.unwrap(run(mut db, None, w, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 1, OldAccount(balance: 3))
     }))
@@ -698,8 +690,8 @@ pub fn law_migrate(c: Clock) -> bool waits {
 }
 
 @test
-fn test_migrate(c: Clock) -> Result[(), ()] waits {
-    if law_migrate(c) {
+fn test_migrate(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    if law_migrate(c, tasks) {
         Ok(())
     } else {
         Error(())
@@ -709,7 +701,7 @@ fn test_migrate(c: Clock) -> Result[(), ()] waits {
 // Initial ids and epochs are input validity rules, not B-tree invariants.
 pub fn law_catalog_invalid(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let mut meta = result.unwrap(catalog_entry(db, t.catalog_key))
     if meta.id != 1 || meta.epoch != 1 || meta.next != 1 || meta.schemas[0].number != 0 {
@@ -746,12 +738,13 @@ fn test_catalog_invalid(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-fn reject_999(v: u64) -> Result[u64, Capacity] {
+fn reject_999(_k: u64, v: u64) -> Result[List[u64], Capacity] {
     if v == 999 || v == 1999 {
-        Error(Capacity(requested: 1, available: 0))
-    } else {
-        Ok(v)
+        return Error(Capacity(requested: 1, available: 0))
     }
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v)
+    Ok(take keys)
 }
 
 fn write_state(tx: Tx) -> (u64, u64, u64, Option[u64], u64, bool) {
@@ -787,34 +780,22 @@ fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_lim
     }
 }
 
-fn reject_old_index_value(value: u64) -> Result[u64, Capacity] {
-    if value == 99 {
-        return Error(Capacity(requested: 1, available: 0))
-    }
-    Ok(value)
-}
-
-// Catch an error from a new extractor, an old extractor and the last index
-// frame check, then commit. Preserve the old row, index keys and ID watermark.
+// Catch an error from a new extractor and the last index frame check, then commit. Preserve the old row, index keys and ID watermark.
 pub fn law_index_refusal(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, t, 1, 99) {
         return false
     }
-    result.unwrap(create_index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))
-    result.unwrap(create_index(mut db, t, "b", code.describe(quotient), std.codec.key_u64()))
-    result.unwrap(create_index(mut db, t, "c", code.describe(reject_999), std.codec.key_u64()))
-    let a = result.unwrap(bind_table_index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))
-    let b = result.unwrap(bind_table_index(mut db, t, "b", code.describe(quotient), std.codec.key_u64()))
-    let _ = result.unwrap(bind_table_index(mut db, t, "c", code.describe(reject_999), std.codec.key_u64()))
+    let mut d = result.unwrap(declare(db, Migrate))
+    let mut declared = result.unwrap(declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let a = result.unwrap(index(mut d, mut declared, "a", Many, code.describe(bucket), std.codec.key_u64()))
+    let b = result.unwrap(index(mut d, mut declared, "b", Many, code.describe(quotient), std.codec.key_u64()))
+    let _ = result.unwrap(index(mut d, mut declared, "c", Many, code.describe(reject_999), std.codec.key_u64()))
+    let _ = result.unwrap(finish(mut d, take declared))
+    let _ = result.unwrap(seal(mut db, take d))
     if !check_index_put_refusal(mut db, t, 999, false) || !check_index_put_refusal(mut db, t, 1999, false) || !check_index_put_refusal(mut db, t, 100, true) {
-        return false
-    }
-    let (_, take catalog_index) = result.unwrap(read_catalog_index(db.store, db.heads[0].roots.catalog, t, "c", code.describe(reject_999), std.codec.key_u64()))
-    register_index(mut db.indexes, bind_index(t, catalog_index, code.describe(reject_old_index_value), std.codec.key_u64()))
-    if !check_index_put_refusal(mut db, t, 100, false) {
         return false
     }
     let mut first = result.unwrap(find(result.unwrap(reader(db, 0u64)), snapshot(db), a, Included(3), Included(3)))
@@ -863,13 +844,14 @@ fn validation_refusal[K, V](mut tx: Tx, t: Table[K, V], key: K, value: V, expect
 pub fn law_put_validation(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     let refusing = std.codec.make(code.describe(write_validation_encode), code.describe(write_validation_decode), code.describe(write_validation_schema), 8)
-    result.unwrap(create_table(mut db, spec("refusing", std.codec.key_u64(), refusing)))
-    let mut t = result.unwrap(table(mut db, "refusing", std.codec.key_u64(), refusing))
-    result.unwrap(create_index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))
-    let _ = result.unwrap(bind_table_index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))
     let byte_codec = std.codec.of_bytes()
-    result.unwrap(create_table(mut db, spec("bytes", std.codec.key_bytes(), byte_codec)))
-    let byte_table = result.unwrap(table(mut db, "bytes", std.codec.key_bytes(), byte_codec))
+    let mut d = result.unwrap(declare(db, Migrate))
+    let mut declared = result.unwrap(declare_table(mut d, "refusing", std.codec.key_u64(), refusing))
+    let _ = result.unwrap(index(mut d, mut declared, "a", Many, code.describe(bucket), std.codec.key_u64()))
+    let t = result.unwrap(finish(mut d, take declared))
+    let bytes_declared = result.unwrap(declare_table(mut d, "bytes", std.codec.key_bytes(), byte_codec))
+    let byte_table = result.unwrap(finish(mut d, take bytes_declared))
+    let _ = result.unwrap(seal(mut db, take d))
     let outcome = result.unwrap(run(mut db, None, (copy_env(t), copy_env(byte_table)), fn(mut tx, call_env) -> Result[bool, Error] {
         if !validation_refusal(mut tx, call_env.0, 1u64, 999u64, Value) {
             return Ok(false)
@@ -937,19 +919,10 @@ fn is_foreign[T](take r: Result[T, Error]) -> bool {
 fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
     let mut a = test_db(c, 1073741824)
     let mut b = memory_at(c, other_id, result.unwrap(sized(Memory, 1074790400u64)))
-    result.unwrap(create_table(mut a, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-    let mut t = result.unwrap(table(mut a, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    result.unwrap(create_index(mut a, t, "i", code.describe(bucket), std.codec.key_u64()))
-    let ix = result.unwrap(bind_table_index(mut a, t, "i", code.describe(bucket), std.codec.key_u64()))
+    let (t, ix) = result.unwrap(law_indexed(mut a, "rows", std.codec.key_u64(), std.codec.of_u64(), "i", code.describe(bucket), std.codec.key_u64()))
     let sh = view t
     let other = snapshot(b)
     if !is_foreign(get(result.unwrap(reader(b, 0u64)), other, sh, 1)) || !is_foreign(scan(result.unwrap(reader(b, 0u64)), other, sh, Unbounded, Unbounded)) || !is_foreign(find(result.unwrap(reader(b, 0u64)), other, ix, Unbounded, Unbounded)) {
-        return false
-    }
-    if !is_foreign(create_index(mut b, t, "i", code.describe(bucket), std.codec.key_u64())) {
-        return false
-    }
-    if !is_foreign(bind_table_index(mut b, t, "i", code.describe(bucket), std.codec.key_u64())) {
         return false
     }
     let commit_ticket = Ticket(store: a.store, open: 0, mark: Journal(0, 0, 0))

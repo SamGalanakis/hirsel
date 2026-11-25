@@ -151,7 +151,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let table_handle = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let sh = view table_handle
     let id = db.store
@@ -379,7 +379,7 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let sh = view t
     let before = db.file_seq
@@ -627,7 +627,7 @@ pub fn journal_law_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
     let mut options = journal_crash_options()
     options.resident_limit = 4194304
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let early = snapshot(db)
     for k in 0u64 .. 100 {
@@ -685,7 +685,7 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     options.pack_bytes = 1048576
     let mut db = deploy_result(open(tasks, source, c, r, options))?
     db.fence = 1
-    deploy_result(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))?
+    deploy_result(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
     if !typed_put(mut db, rows, 1, 11) {
         return Error(ExportMismatch)
@@ -760,7 +760,7 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 1048576
     let mut db = open(tasks, child, c, r, options)?
-    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     reserve_pinned_data(mut db, rows, 100000)
     let held = snapshot(db)
@@ -799,7 +799,7 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
 // L50 B5. A Bytes value has a four-byte length and two-byte schema tag.
 // A 994-byte input therefore contributes 78 + 1000 bytes per stored version.
 fn fork_history(mut db: Db) -> Result[Branch, Error] waits {
-    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let mut value: Bytes = list.with_capacity(994)
     list.fill(mut value, 994, 0u8)
@@ -963,7 +963,7 @@ fn fork_skipped_id(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Erro
     let mut options = journal_crash_options()
     options.resident_limit = 447
     let mut db = open(tasks, d, c, r, options)?
-    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if !typed_put(mut db, rows, 1, 1) {
         return Error(Foreign)

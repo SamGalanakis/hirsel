@@ -757,21 +757,17 @@ fn forward_host(take f: Forward) -> () waits {
     }
 }
 
-fn created(take r: Result[store.Ticket, store.Error]) -> Result[(), store.Error] {
-    match take r {
-        Ok(_) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take e) => Error(take e)
-    }
+fn declared[K, V](mut d: store.Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] {
+    let table = store.declare_table(mut d, name, take key, take value)?
+    store.finish(mut d, take table)
 }
 
-fn open_sessions(mut db: store.Db) -> Result[Sessions, store.Error] waits {
-    let c_key: std.codec.Codec[Bytes] = std.codec.of()
-    let c_id: std.codec.Codec[u64] = std.codec.of()
-    created(store.create_table(mut db, store.spec("local.sessions", std.codec.key_u64(), c_key)))?
-    created(store.create_table(mut db, store.spec("local.keys", std.codec.key_bytes(), c_id)))?
-    created(store.create_table(mut db, store.spec("local.meta", std.codec.key_u64(), c_id)))?
-    let catalog = Catalog(sessions: store.table(mut db, "local.sessions", std.codec.key_u64(), std.codec.of())?, keys: store.table(mut db, "local.keys", std.codec.key_bytes(), std.codec.of())?, meta: store.table(mut db, "local.meta", std.codec.key_u64(), std.codec.of())?)
+// The host store holds the session catalog beside the host's tables: one declaration.
+fn open_sessions(mut db: store.Db) -> Result[(Sessions, platform.Tables), store.Error] waits {
+    let mut d = store.declare(db, Migrate)?
+    let catalog = Catalog(sessions: declared(mut d, "local.sessions", std.codec.key_u64(), std.codec.of())?, keys: declared(mut d, "local.keys", std.codec.key_bytes(), std.codec.of())?, meta: declared(mut d, "local.meta", std.codec.key_u64(), std.codec.of())?)
+    let tables = platform.declare_tables(mut d)?
+    let _ = store.seal(mut db, take d)?
     let snap = store.snapshot(db)
     let next_id = match store.get(result.unwrap(store.reader(db, 0u64)), snap, catalog.meta, NEXT_ID)? {
         Some(n) => n,
@@ -784,7 +780,7 @@ fn open_sessions(mut db: store.Db) -> Result[Sessions, store.Error] waits {
         map.insert(mut by_key, clone(key), id)
         map.insert(mut by_id, id, clone(key))
     }
-    Ok(Sessions(catalog: take catalog, by_id: take by_id, by_key: take by_key, next_id: next_id))
+    Ok((Sessions(catalog: take catalog, by_id: take by_id, by_key: take by_key, next_id: next_id), take tables))
 }
 
 fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: store.Options, first: platform.Config) -> Result[(platform.Host, Sessions, List[launcher.Request]), Refused] waits {
@@ -796,14 +792,14 @@ fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: sto
         Ok(take v) => take v,
         Error(_) => return Error(Failed(string.from("host store")))
     }
-    let sessions = match open_sessions(mut db) {
+    let (sessions, tables) = match open_sessions(mut db) {
         Ok(take v) => take v,
         Error(_) => {
             let _ = store.close(take db);
             return Error(Failed(string.from("host catalog")))
         }
     }
-    match platform.open(take db, first) {
+    match platform.open_declared(take db, take tables, first) {
         Ok((take h, take hello)) => Ok((take h, take sessions, take hello)),
         Error(r) => Error(refused_of(r)),
     }

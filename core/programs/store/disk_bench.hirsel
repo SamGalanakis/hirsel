@@ -5,11 +5,32 @@ type DiskAccount: send + codec {
     owner: String
 }
 
-fn disk_bench_bucket(a: DiskAccount) -> Result[u64, Capacity] { Ok(a.id % 4) }
+fn disk_bench_bucket(_k: u64, a: DiskAccount) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, a.id % 4)
+    Ok(take keys)
+}
 
 fn disk_bench_upgrade(key: u64, a: DiskAccount) -> Result[Option[(u64, DiskAccount)], Capacity] {
     let changed = DiskAccount(id: a.id, balance: a.balance + 1, owner: clone(a.owner))
     Ok(Some((key, take changed)))
+}
+
+fn disk_bench_migration(mut m: Migration) -> Result[(), Error] {
+    let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
+    migrate_table(mut m, "accounts", std.codec.key_u64(), dictionary, "migrated", std.codec.key_u64(), dictionary, disk_bench_upgrade)
+}
+
+// accounts rewritten into migrated, with bucket when indexed, in one commit.
+fn disk_bench_migrate(mut db: Db, tasks: Tasks, indexed: bool) -> Result[Ticket, Error] waits {
+    let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
+    let mut d = declare_migration(db, tasks, code.describe(disk_bench_migration))?
+    let mut declared = declare_table(mut d, "migrated", std.codec.key_u64(), dictionary)?
+    if indexed {
+        let _ = index(mut d, mut declared, "bucket", Many, code.describe(disk_bench_bucket), std.codec.key_u64())?
+    }
+    let _ = finish(mut d, take declared)?
+    seal(mut db, take d)
 }
 
 fn disk_bench_put(mut db: Db, t: Table[u64, DiskAccount], key: u64, balance: u64) waits {
@@ -51,7 +72,7 @@ fn disk_bench_journal(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, mo
     let mut options = result.unwrap(sized(Directory, 2147483648u64))
     let mut db = result.unwrap(open(tasks, child, c, r, options))
     let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
-    result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), dictionary)))
+    result.unwrap(law_table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let mut n = 0u64
     while n < 64 {
@@ -146,7 +167,7 @@ fn disk_bench_burst(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, widt
     options.journal_limit = options.checkpoint_bytes + FRAME_LIMIT
     let mut db = result.unwrap(open(tasks, child, c, r, options))
     let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
-    result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), dictionary)))
+    result.unwrap(law_table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let mut n = 0u64
     while db.file_end - 72 < 8388608 {
@@ -232,11 +253,12 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     // The journal worker allowance and resident limit keep their defaults.
     let mut db = result.unwrap(open(tasks, child, c, r, options))
     let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
-    result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), dictionary)))
-    let mut t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
-    if indexed {
-        result.unwrap(create_index(mut db, t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
-        let _ = result.unwrap(bind_table_index(mut db, t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
+    let t = if indexed {
+        let (rows, _) = result.unwrap(law_indexed(mut db, "accounts", std.codec.key_u64(), dictionary, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
+        rows
+    } else {
+        result.unwrap(law_table(mut db, "accounts", std.codec.key_u64(), dictionary))
+        result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
     }
     let catalog_cost = db.resident
     for k in 0u64 .. n { disk_bench_put(mut db, t, k, k) }
@@ -247,15 +269,6 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     if db.resident != catalog_cost + n * per_row { fail("disk bench account") }
     let first_pack = disk_bench_next_pack(child)
     let original_shape: Table[u64, DiskAccount] = clone(t)
-    let migration = if migrating {
-        let mut target = spec("migrated", std.codec.key_u64(), dictionary)
-        if indexed {
-            result.unwrap(with_index(mut target, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
-        }
-        Some(take target)
-    } else {
-        None
-    }
     let original_head = db.heads[0].head
     if mode == "R6" {
         for i in 0u64 .. 64 {
@@ -283,8 +296,8 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     } else if mode == "R6" {
         timing = Some(CutTiming(pause_ns: 0, removal_ns: 0, removal_attempts: 0, drain_groups: 0))
         let _ = result.unwrap(disk_cut_timed(mut holder[0], NoHolderChange, seal_page_manifest_file, mut timing))
-    } else if let Some(take target) = take migration {
-        let cut = result.unwrap(migrate(mut holder[0], take t, take target, disk_bench_upgrade))
+    } else if migrating {
+        let cut = result.unwrap(disk_bench_migrate(mut holder[0], tasks, indexed))
         result.unwrap(durable(mut holder[0], cut))
     }
     let elapsed = host.mono_ns(c) - started

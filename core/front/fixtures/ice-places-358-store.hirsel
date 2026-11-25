@@ -58,11 +58,10 @@ fn run(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Result[()
     let Some(path) = args.get(argv, 0) else { return Error(Usage) }
     let text = match std.file.read_string(d, path) { Ok(take s) => s, Error(_) => return Error(Unreadable) }
     let mut db = store.memory(clock, rand, result.unwrap(store.sized(Memory, 1074790400u64)))
-    match store.create_table(mut db, store.spec("kv", std.codec.key_u64(), std.codec.of_u64())) {
-        Ok(_) => {},
-        Error(_) => return Error(Setup)
-    }
-    let t = match store.table(mut db, "kv", std.codec.key_u64(), std.codec.of_u64()) {
+    let t = match store.bind_declaration(mut db, Migrate, fn(mut d) -> Result[store.Table[u64, u64], store.Error] {
+        let declared = store.declare_table(mut d, "kv", std.codec.key_u64(), std.codec.of_u64())?
+        store.finish(mut d, take declared)
+    }) {
         Ok(take t) => t,
         Error(_) => return Error(Setup)
     }

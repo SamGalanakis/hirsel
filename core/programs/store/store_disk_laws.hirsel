@@ -2,10 +2,7 @@ fn law_leaf_range_stop(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     let format = std.codec.key_u64()
     let dictionary = std.codec.of_u64()
-    result.unwrap(create_table(mut db, spec("leaves", format, dictionary)))
-    result.unwrap(create_table(mut db, spec("neighbor", format, dictionary)))
-    let t = result.unwrap(table(mut db, "leaves", format, dictionary))
-    let neighbor = result.unwrap(table(mut db, "neighbor", format, dictionary))
+    let (t, neighbor) = result.unwrap(law_pair(mut db, "leaves", format, dictionary, "neighbor", format, dictionary))
     if !typed_put(mut db, neighbor, 0, 10) {
         return false
     }
@@ -178,7 +175,7 @@ fn test_memory_no_frame_limit(c: Clock) -> Result[(), Error] {
 // Subtracting a re-encode of the resolved old value would add nothing.
 pub fn law_stored_size(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("sizes", std.codec.key_u64(), old_codec())))
+    result.unwrap(law_table(mut db, "sizes", std.codec.key_u64(), old_codec()))
     let old = result.unwrap(table(mut db, "sizes", std.codec.key_u64(), old_codec()))
     let first = result.unwrap(run(mut db, None, old, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 1, OldAccount(balance: 10))
@@ -846,7 +843,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let sh = view t
     let at_one = snapshot(db)
@@ -904,7 +901,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     let settle_dir = disk_test_directory(d)
     options.resident_limit = 544
     let mut sdb = result.unwrap(open(tasks, settle_dir, c, r, options))
-    result.unwrap(create_table(mut sdb, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut sdb, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let st = result.unwrap(table(mut sdb, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut sdb, st, 1, 1) {
         return false

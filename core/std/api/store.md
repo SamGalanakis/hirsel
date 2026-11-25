@@ -260,7 +260,7 @@ The rows take one new schema number, the source entry's `next`; numbers are neve
 reused. A Capacity from `f` or an extractor, or a build past the ceiling, is `Full`;
 an oversized key is `Limit(Key)`; two rows with one new key, or a target name naming
 another live table, is `Exists`; a unique duplicate is `Conflict`. Each refusal changes
-nothing. A handle or pin older than the migrate is `Stale`. `drop_table(mut m, name)`
+nothing. A handle or pin older than the migrate is `Stale`. `drop_named_table(mut m, name)`
 and `rename_table(mut m, from, to)` are the other `Migration` operations; they are how
 a table leaves the declaration.
 
@@ -297,7 +297,7 @@ STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
 - **Per-collection roots.** `Roots` is `{collections, streams, catalog}`, where
   `collections` maps a table or index id to a `CollectionRoot` with its root
   `PagePtr`, exact row count and row charge, and the map leaf owns that root
-  page. `count` over a whole table is O(1) after the lookup. `drop_table` removes
+  page. `count` over a whole table is O(1) after the lookup. `drop_named_table` removes
   the table's and its indexes' map entries in one schema commit (AP7).
 - **Keys.** Read sets, `Change`, `Resume`, covers and COMMIT ops carry the
   logical key (`id u32 BE ‖ encoded key`). Pages store only the suffix past the

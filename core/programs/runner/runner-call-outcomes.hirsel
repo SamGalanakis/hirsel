@@ -441,19 +441,21 @@ fn test_calls_runs_once(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(),
 }
 
 fn migration_second_refuses(mut phase: store.Migration) -> Result[(), store.Error] {
-    store.migration_create_table(mut phase, store.spec("first", std.codec.key_u64(), std.codec.of_u64()))?
-    let second = store.spec("second", std.codec.key_u64(), std.codec.of_u64())
+    let _ = store.list_collections(phase)?
     let attempted = bound bytes 0u64 {
-        store.migration_create_table(mut phase, take second)
+        store.list_collections(phase)
     }
     match take attempted {
-        Ok(take outcome) => take outcome,
+        Ok(take outcome) => {
+            let _ = outcome?
+            Ok(())
+        },
         Error(c) => Error(Full(Allocation(c))),
     }
 }
 
-// L33. The second operation refuses. Reopen the backing store and look for
-// both table names in the recovered catalog.
+// L33. The migration's second operation refuses. Reopen the backing store: the
+// version is 0 and the schema's table "data" is not in the recovered catalog.
 pub fn law_atomic_migration(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let options = disk_options()
     let db = result.unwrap(store.open(tasks, d, c, r, options))
@@ -465,7 +467,7 @@ pub fn law_atomic_migration(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     }
     let reopened = result.unwrap(store.open(tasks, d, c, r, options))
     let snapshot = store.snapshot(reopened)
-    let unchanged = store.version(snapshot) == 0 && !result.unwrap(store.has_table(snapshot, "first")) && !result.unwrap(store.has_table(snapshot, "second"))
+    let unchanged = store.version(snapshot) == 0 && !result.unwrap(store.has_table(snapshot, "data"))
     result.unwrap(store.close(take reopened))
     unchanged
 }

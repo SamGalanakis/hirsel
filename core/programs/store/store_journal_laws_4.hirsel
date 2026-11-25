@@ -6,7 +6,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     options.checkpoint_bytes = 4096
     options.journal_limit = 16781392
     let mut first = open(tasks, d, c, r, options)?
-    let _ = create_table(mut first, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut first, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut first, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     close(take first)?
     options.create = false
@@ -117,7 +117,7 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     options.checkpoint_bytes = 4096
     options.journal_limit = 16781392
     let mut created = result.unwrap(open(tasks, directory, c, r, options))
-    result.unwrap(create_table(mut created, spec("rows", std.codec.key_u64(), std.codec.of_bytes())))
+    result.unwrap(law_table(mut created, "rows", std.codec.key_u64(), std.codec.of_bytes()))
     let rows = result.unwrap(table(mut created, "rows", std.codec.key_u64(), std.codec.of_bytes()))
     result.unwrap(close(take created))
     options.create = false
@@ -222,7 +222,7 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
 pub fn journal_law_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let options = journal_crash_options()
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, t, 7, 70) {
         return false
@@ -305,7 +305,7 @@ fn steps_point(reads: List[Read]) -> bool {
 
 pub fn law_step_bounds(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("steps", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
     let before = db.heads[0].head
     let live_bytes = db.resident
@@ -572,7 +572,7 @@ pub fn law_refused_reply(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     let mut options = journal_crash_options()
     options.resident_limit = 134217728
     let mut journal = result.unwrap(open(tasks, disk_test_directory(d), c, r, options))
-    result.unwrap(create_table(mut journal, spec("rows", std.codec.key_u64(), std.codec.of_bytes())))
+    result.unwrap(law_table(mut journal, "rows", std.codec.key_u64(), std.codec.of_bytes()))
     let frame = refused_reply(mut journal, true)
     result.unwrap(close(take journal))
     let mut in_memory = raw_test_db(c, 1073741824)
@@ -796,7 +796,7 @@ fn disk_window_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out:
     let mut options = disk_crash_options("window")
     if phase == "init" {
         let mut db = open(tasks, d, c, r, options) ?=> |_| Exit(status: 71)
-        let _ = create_table(mut db, spec("window", std.codec.key_u64(), std.codec.of_bytes())) ?=> |_| Exit(status: 71)
+        let _ = law_table(mut db, "window", std.codec.key_u64(), std.codec.of_bytes()) ?=> |_| Exit(status: 71)
         close(take db) ?=> |_| Exit(status: 71)
         return Ok(())
     }
@@ -882,7 +882,7 @@ fn stream_quota_reopen_lost_response(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     options.streams_per_caller_max = 1u64
     options.streams_max = 1u64
     let mut before = result.unwrap(open(tasks, dir, c, r, options))
-    result.unwrap(create_table(mut before, spec("effects", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut before, "effects", std.codec.key_u64(), std.codec.of_u64()))
     let birth = keyed_time(before)
     let caller = Caller(issuer: 2u8, subject: clone(b"shared"))
     let first = StreamKey(caller: clone(caller), id: StreamId(t: birth, n: 1u64))

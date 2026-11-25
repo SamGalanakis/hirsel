@@ -1,0 +1,65 @@
+// Shared law helpers: each declares a whole application schema through
+// Declare, or drops it through a migration, in one schema commit.
+// Laws: declare `name` as the store's whole application schema, through
+// Declare in Migrate, in one schema commit.
+fn law_table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Ticket, Error] waits {
+    let mut d = declare(db, Migrate)?
+    let declared = declare_table(mut d, name, key, value)?
+    let _ = finish(mut d, take declared)?
+    seal(mut db, take d)
+}
+
+// Laws: declare tables `first` and `second` as the store's whole application
+// schema, in one schema commit.
+fn law_pair[K1, V1, K2, V2](mut db: Db, first: String, take first_key: std.codec.Key[K1], take first_value: std.codec.Codec[V1], second: String, take second_key: std.codec.Key[K2], take second_value: std.codec.Codec[V2]) -> Result[(Table[K1, V1], Table[K2, V2]), Error] waits {
+    let mut d = declare(db, Migrate)?
+    let one = declare_table(mut d, first, first_key, first_value)?
+    let a = finish(mut d, take one)?
+    let two = declare_table(mut d, second, second_key, second_value)?
+    let b = finish(mut d, take two)?
+    let _ = seal(mut db, take d)?
+    Ok((take a, take b))
+}
+
+// Laws: a `hirsel.` table, staged the way activation stages the runner's
+// system tables, in one schema commit.
+fn law_system_table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] waits {
+    let mut plan = schema_plan(db)
+    let t = stage_system_table(mut plan, name, key, value)?
+    let _ = publish_schema_plan(mut db, take plan)?
+    Ok(take t)
+}
+
+// Laws: declare `name` with the one Many index `index_name` as the store's
+// whole application schema, in one schema commit.
+fn law_indexed[J, K, V](mut db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V], index_name: String, by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take index_key: std.codec.Key[J]) -> Result[(Table[K, V], Index[J, K, V, ()]), Error] waits {
+    let mut d = declare(db, Migrate)?
+    let mut declared = declare_table(mut d, name, key, value)?
+    let ix = index(mut d, mut declared, index_name, Many, by, index_key)?
+    let t = finish(mut d, take declared)?
+    let _ = seal(mut db, take d)?
+    Ok((take t, take ix))
+}
+
+fn law_drop_tables(mut m: Migration) -> Result[(), Error] {
+    for item in list_collections(m)? {
+        if let Table() = item.kind {
+            drop_named_table(mut m, item.name)?
+        }
+    }
+    Ok(())
+}
+
+// Laws: drop every application table in one schema commit, through a
+// migration.
+fn law_drop(mut db: Db, tasks: Tasks) -> Result[Ticket, Error] waits {
+    let d = declare_migration(db, tasks, code.describe(law_drop_tables))?
+    seal(mut db, take d)
+}
+
+// An index extractor shared by the schema and fork laws: v / 4.
+fn quotient(_k: u64, v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v / 4)
+    Ok(take keys)
+}

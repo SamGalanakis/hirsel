@@ -109,11 +109,17 @@ pub fn finish_migration(db: Db, take d: Declare) -> Result[StagedMigration, Erro
     Ok(staged_migration(db, take plan, true))
 }
 
+// A Preparation is read from a disk store's export, and its catalog is
+// installed back into that disk store, so its declaration is versioned like
+// the disk store's own: an unchanged index keeps its code.revision and is
+// not rebuilt.
 pub fn declare_export(source: Preparation, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]]) -> Result[Declare, Error] waits {
-    match configure {
-        Some(callback) => declare_migration(source.db, tasks, callback),
-        None => declare(source.db, Migrate),
+    let mut d = match configure {
+        Some(callback) => declare_migration(source.db, tasks, callback)?,
+        None => declare(source.db, Migrate)?,
     }
+    d.versioned = true
+    Ok(take d)
 }
 
 pub fn finish_export_declaration(source: Preparation, take d: Declare) -> Result[StagedMigration, Error] {
@@ -168,7 +174,7 @@ fn declare_table_inner[K, V](mut d: Declare, name: String, take key: std.codec.K
     let handle = match d.mode {
         Migrate => {
             if !exists {
-                stage_create_table(mut d.plan, spec(named(name)?, key, value))?
+                stage_create_table(mut d.plan, name, key, value)?
             }
             stage_table(mut d.plan, name, key, value)?
         },
@@ -248,28 +254,6 @@ fn codec_revision(mut out: Bytes, take revision: Option[Bytes]) -> Result[(), Er
     let Some(part) = revision else { return Error(Missing("revision")) }
     list.append(mut out, part)
     Ok(())
-}
-
-pub fn declare_single_index[J, K, V](mut d: Declare, t: TableDecl[K, V], name: String,
-    by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
-    active_table(d, t)?
-    d.failed = true
-    declaration_name(name)?
-    let lookup_key = catalog_index_key(t.handle.id, name)?
-    if let Migrate = d.mode {
-        let missing = match get_page_row(d.plan.roots.catalog, lookup_key) { None => true, Some(_) => false }
-        if missing { let _ = stage_create_index(mut d.plan, t.handle, name, by, key)? }
-    }
-    let (take address, take record) = read_catalog_index(d.plan.store, d.plan.roots.catalog, t.handle, name, by, key)?
-    if map.contains(d.indexes, record.id) { return Error(Exists(named(name)?)) }
-    let handle: Index[J, K, V, ()] = catalog_index_handle(d.plan.roots.catalog, t.handle, record, take address, key, None, std.codec.of_unit())?
-    match d.mode {
-        Follower => (),
-        _ => list.push(mut d.plan.bindings, bind_index(t.handle, record, by, key)),
-    }
-    map.insert(mut d.indexes, record.id, ())
-    d.failed = false
-    Ok(take handle)
 }
 
 pub fn index[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
@@ -488,7 +472,7 @@ pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take from_key
     declaration_name(from)?
     declaration_name(to)?
     let prior = catalog_handle(m.plan.store, m.plan.roots.catalog, named(from)?, from_key, from_value)?
-    stage_migrate(mut m.plan, take prior, spec(named(to)?, to_key, to_value), convert)
+    stage_migrate(mut m.plan, take prior, to, to_key, to_value, convert)
 }
 
 pub fn drop_named_table(mut m: Migration, name: String) -> Result[(), Error] {

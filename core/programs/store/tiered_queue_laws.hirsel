@@ -1,8 +1,18 @@
 // `appended` appends of 48 bytes in a Tiered Log whose tree the cut emits Cold.
 fn l87_cold_log(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, appended: u64, width: u64) -> Result[Log[Bytes], Error] waits {
+    l87_cold_log_padded(d, c, r, tasks, floor, appended, width, false)
+}
+
+// With `padded`, the schema also declares the Memory table "padding": a store
+// holding a Tiered collection refuses any later Migrate (§13.10).
+fn l87_cold_log_padded(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, appended: u64, width: u64, padded: bool) -> Result[Log[Bytes], Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     let mut declaring = declare(db, Migrate)?
     let events = declare_log(mut declaring, "events", std.codec.of_bytes())?
+    if padded {
+        let padding = declare_table(mut declaring, "padding", std.codec.key_u64(), std.codec.of_bytes())?
+        let _ = finish(mut declaring, take padding)?
+    }
     let _ = seal(mut db, take declaring)?
     let fixture: Log[Bytes] = clone(events)
     let Committed(_) = run(mut db, None, copy_env((fixture, appended, width)), fn(mut tx: Tx, env: (Log[Bytes], u64, u64)) -> Result[(), Error] {

@@ -169,8 +169,10 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     result.unwrap(std.codec.encode(frames, call_frame, mut payload))
 
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
-    let table = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
+    let table = result.unwrap(store.bind_declaration(mut db, Migrate, fn(mut d) -> Result[store.Table[u64, u32], store.Error] {
+        let declared = store.declare_table(mut d, "data", std.codec.key_u64(), std.codec.of_u32())?
+        store.finish(mut d, take declared)
+    }))
     let mut entries: Registry[(), store.Table[u64, u32]] = registry()
     let add = code.describe(pool_durable_add)
     result.unwrap(transact(mut entries, add, 65536u64, DEFAULT_STEPS))

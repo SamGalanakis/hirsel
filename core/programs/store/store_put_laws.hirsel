@@ -258,7 +258,7 @@ pub fn law_reads_ranges(c: Clock) -> bool waits {
     }
     let mut db = test_db(c, 1073741824)
     let cv = std.codec.of_u64()
-    result.unwrap(create_table(mut db, spec("range-law", std.codec.key_u64(), cv)))
+    result.unwrap(law_table(mut db, "range-law", std.codec.key_u64(), cv))
     let t = result.unwrap(table(mut db, "range-law", std.codec.key_u64(), cv))
     let sh = view t
     for k in 0u64 .. 6 {
@@ -745,10 +745,6 @@ fn index_catalog(db: Db, id: u32) -> Result[List[Catalog], Error] {
     index_catalog_in(db.heads[0].roots.catalog, id)
 }
 
-fn quotient(v: u64) -> Result[u64, Capacity] {
-    Ok(v / 4)
-}
-
 fn typed_value(s: Snapshot, t: Table[u64, u64], k: u64) -> u64 waits {
     match result.unwrap(get(law_reader(s), s, t, k)) {
         None => 0,
@@ -783,7 +779,7 @@ fn layered_reads(tx: Tx, sh: Table[u64, String], big: String) -> Result[bool, Er
 
 pub fn law_callback_shares_staged(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_string())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_string()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_string()))
     let mut raw: Bytes = list.with_capacity(1000)
     list.fill(mut raw, 1000, 97u8)
@@ -893,7 +889,7 @@ fn retention_returned(mut db: Db, t: Table[u64, u64], steps: u64) -> bool waits 
 
 fn retention_threshold(c: Clock, retained: bool) -> u64 waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let seeded = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
         for k in 1u64 .. 65 {

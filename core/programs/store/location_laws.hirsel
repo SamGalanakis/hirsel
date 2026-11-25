@@ -368,10 +368,7 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     options.pack_bytes = 3500
     let mut db = open(tasks, d, c, r, options)?
     let codec = std.codec.of_bytes()
-    create_table(mut db, spec("rows", std.codec.key_u64(), codec))?
-    create_table(mut db, spec("inline", std.codec.key_u64(), codec))?
-    let rows = table(mut db, "rows", std.codec.key_u64(), codec)?
-    let inline = table(mut db, "inline", std.codec.key_u64(), codec)?
+    let (rows, inline) = law_pair(mut db, "rows", std.codec.key_u64(), codec, "inline", std.codec.key_u64(), codec)?
     let mut large_value: Bytes = list.with_capacity(1100)
     list.fill(mut large_value, 1100, 31u8)
     law_location_commit(run(mut db, None, (copy_env(rows), copy_env(large_value)), fn(mut tx, call_env) -> Result[(), Error] {

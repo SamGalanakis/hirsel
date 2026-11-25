@@ -1,15 +1,14 @@
 // L17 and L33. The rewrite, its index and the extra table are published at
-// one version by the migration phase.
+// one version: the migration phase rewrites rows, and crash_schema declares
+// by_v and added in the same declaration.
 fn crash_migration(mut phase: Migration) -> Result[(), Error] {
-    let t = migration_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let mut declared = spec("rows", std.codec.key_u64(), std.codec.of_u64())
-    with_index(mut declared, "by_v", code.describe(crash_value), std.codec.key_u64())?
-    migration_migrate(mut phase, take t, take declared, crash_thousand)?
-    migration_create_table(mut phase, spec("added", std.codec.key_u64(), std.codec.of_u64()))
+    migrate_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64(), "rows", std.codec.key_u64(), std.codec.of_u64(), crash_thousand)
 }
 
-fn crash_value(v: u64) -> Result[u64, Capacity] {
-    Ok(v)
+fn crash_value(_k: u64, v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v)
+    Ok(take keys)
 }
 
 fn crash_thousand(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
@@ -112,8 +111,13 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         let listed = list.len(index_catalog(db, t.id)?)
         let mut whole = false
         if moved && listed == 1 && db.heads[0].head == 98 {
-            let mut indexed = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-            let ix = bind_table_index(mut db, indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
+            let mut decl = declare(db, Open)?
+            let mut indexed = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
+            let ix = index(mut decl, mut indexed, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+            let _ = finish(mut decl, take indexed)?
+            let added_decl = declare_table(mut decl, "added", std.codec.key_u64(), std.codec.of_u64())?
+            let _ = finish(mut decl, take added_decl)?
+            let _ = seal(mut db, take decl)?
             let mut rows = find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Unbounded, Unbounded)?
             let mut expect = 0u64
             whole = true
@@ -168,19 +172,6 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     Ok(good)
 }
 
-fn install_old(mut phase: Migration) -> Result[(), Error] {
-    migration_create_table(mut phase, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
-    migration_create_table(mut phase, spec("other", std.codec.key_u64(), std.codec.of_u64()))
-}
-
-fn install_next(mut phase: Migration) -> Result[(), Error] {
-    crash_migration(mut phase)?
-    let second = migration_table(mut phase, "other", std.codec.key_u64(), std.codec.of_u64())?
-    let mut replacement = spec("other", std.codec.key_u64(), std.codec.of_u64())
-    with_index(mut replacement, "empty", code.describe(crash_value), std.codec.key_u64())?
-    migration_migrate(mut phase, take second, take replacement, crash_thousand)
-}
-
 fn install_target_value(target: PreparedTarget, _witness: Inline[u8, 32]) -> Result[Bytes, DeployError] {
     deploy_result(copied(target.release))
 }
@@ -193,7 +184,7 @@ fn install_fixture_bytes(n: u64, b: u8) -> Bytes {
 
 fn crash_install_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, disk_crash_options("install"))?
-    let mut staging = stage_migration(db, tasks, code.describe(install_old))?
+    let mut staging = install_old(db)?
     let description = install_fixture_bytes(32u64, 65u8)
     stage_activation(mut staging, 1u64, None, description, std.codec.of_bytes(), description)?
     install_activation(mut db, take staging)?
@@ -218,7 +209,7 @@ fn crash_install_prepared(mut db: Db, d: Dir, c: Clock, tasks: Tasks, attempt: B
 
 fn crash_import(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes, image: u8, journal_cap: u64) -> Result[Inline[u8, 32], DeployError] waits {
     let source = open_export(scratch, c, attempt, disk_crash_options("install"))?
-    let staged = deploy_result(stage_export_migration(source, tasks, code.describe(install_next)))?
+    let staged = deploy_result(stage_next(source, tasks))?
     let header = PreparedTarget(describe: install_fixture_bytes(32u64, image), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: journal_cap)
     write_prepared(source, staged, scratch, take header)?
     let checked = validate_prepared(scratch)?
@@ -359,7 +350,7 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }
     let (scratch_schema, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
     let stale_schema = crash_import(mut db, scratch_schema, c, tasks, attempt, 66u8, 16781392u64)?
-    let _ = deploy_result(create_table(mut db, spec("kept", std.codec.key_u64(), std.codec.of_u64())))?
+    let _ = deploy_result(law_table(mut db, "kept", std.codec.key_u64(), std.codec.of_u64()))?
     match crash_apply(mut db, attempt, stale_schema) {
         Error(Drift) => (),
         _ => fail("cutover accepted an intervening schema commit"),
@@ -432,7 +423,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
         if list.len(index_catalog(db, other.id)?) != 1 || page_row_count(db.heads[0].roots.streams) != 0u64 {
             return Ok(false)
         }
-        let _ = create_table(mut db, spec("after", std.codec.key_u64(), std.codec.of_u64()))?
+        let _ = declare_after(mut db)?
         let after = system_table(db, "after", std.codec.key_u64(), std.codec.of_u64())?
         if after.id != 10u32 {
             return Ok(false)
@@ -626,7 +617,7 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
         fail("read-only open of an empty directory must refuse")
     }
     let mut db = open(tasks, child, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let opened_rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if !typed_put(mut db, opened_rows, 7, 70) {
         fail("could not commit first row")
@@ -844,16 +835,24 @@ fn index_build_open(d: Dir, c: Clock, r: Random, tasks: Tasks, create: bool) -> 
     let mut options = disk_crash_options("index-build")
     options.create = create
     let mut db = open(tasks, d, c, r, options)?
-    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let ix = bind_table_index(mut db, t, "by_v", code.describe(crash_value), std.codec.key_u64())?
+    let (t, ix) = index_build_schema(mut db, Open)?
     Ok((take db, t, take ix))
+}
+
+// rows with by_v, declared in one schema: Migrate adds by_v, Open binds it.
+fn index_build_schema(mut db: Db, mode: Mode) -> Result[(Table[u64, u64], Index[u64, u64, u64, ()]), Error] waits {
+    let mut d = declare(db, mode)?
+    let mut declared = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let ix = index(mut d, mut declared, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let t = finish(mut d, take declared)?
+    let _ = seal(mut db, take d)?
+    Ok((t, take ix))
 }
 
 fn index_build_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     disk_crash_init(d, c, r, tasks, "index-build")?
     let mut db = open(tasks, d, c, r, disk_crash_options("index-build"))?
-    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let _ = create_index(mut db, t, "by_v", code.describe(crash_value), std.codec.key_u64())?
+    let _ = index_build_schema(mut db, Migrate)?
     let _ = checkpoint(mut db)?
     close(take db)
 }

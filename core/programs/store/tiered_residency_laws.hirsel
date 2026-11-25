@@ -16,7 +16,7 @@ fn residency_value(key: u64) -> Bytes {
 }
 
 fn residency_rows(mut db: Db, row_count: u64) -> Result[Table[u64, Bytes], Error] waits {
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let fixture: Table[u64, Bytes] = clone(rows)
     let Committed(_) = run(mut db, None, copy_env((fixture, row_count)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64)) -> Result[(), Error] {

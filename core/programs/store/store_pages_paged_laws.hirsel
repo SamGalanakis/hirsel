@@ -120,7 +120,7 @@ fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 4096
     let mut db = open(tasks, dir, c, r, options)?
-    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let seq = db.file_seq
     let mut wide: Bytes = list.with_capacity(914)

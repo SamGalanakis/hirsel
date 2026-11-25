@@ -34,33 +34,6 @@ fn declared_index_registry(take bindings: List[IndexRegistration]) -> IndexRegis
     take registry
 }
 
-type RegisteredDecoder[J, V]: send {
-    table: u32,
-    id: u32,
-    decoders: Arc[Readers[V]],
-    by: StaticFn[fn(V) -> Result[J, Capacity]],
-    key: std.codec.Key[J]
-}
-
-fn extract_registered[J, V](decoder: RegisteredDecoder[J, V], raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
-    let value = row_value(decoder.decoders, decoder.table, raw)?
-    let index_key = capacity((code.callable(decoder.by))(value))?
-    let mut encoded = prefixed(decoder.id, list.len(primary) + 8, false)?
-    std.codec.encode_key(decoder.key, index_key, mut encoded)
-    list.append(mut encoded, primary)
-    let mut keys: List[Bytes] = list.new()
-    list.push(mut keys, take encoded)
-    Ok(IndexValue(keys: take keys, payload: list.new()))
-}
-
-fn bind_index[J, K, V](t: Table[K, V], record: Catalog, by: StaticFn[fn(V) -> Result[J, Capacity]], key: std.codec.Key[J]) -> IndexRegistration {
-    let decoder = RegisteredDecoder(table: t.id, id: record.id, decoders: arc.share(t.readers), by: by, key: key)
-    let extract: own[send] fn(Bytes, Bytes) -> Result[IndexValue, Error] = fn(raw: Bytes, primary: Bytes) -> Result[IndexValue, Error] {
-        extract_registered(decoder, raw, primary)
-    }
-    index_registration(t, record, take extract)
-}
-
 type IndexProjection[K, V, P]: send {
     by: StaticFn[fn(K, V) -> Result[P, Capacity]],
     codec: std.codec.Codec[P],
@@ -163,18 +136,6 @@ fn unique_owner_end(raw: Bytes) -> Result[u64, Error] {
         return Error(malformed(at))
     }
     Ok(at + width)
-}
-
-fn stage_versioned_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J], take revision: Bytes) -> Result[IndexRegistration, Error] {
-    let k = catalog_index_key(t.id, name)?
-    if let Some(_) = get_page_row(plan.roots.catalog, k) {
-        return Error(Exists(named(name)?))
-    }
-    let record = Catalog(kind: 2, id: plan.next_table, owner: t.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)),
-        schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision, index_kind: Many, payload_schemas: list.new(), projection: None, state: Backfilling(None))
-    let schema_binding = bind_index(t, record, by, key)
-    stage_index_build(mut plan, t, k, name, take record, schema_binding.index, true)?
-    Ok(take schema_binding)
 }
 
 fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes,

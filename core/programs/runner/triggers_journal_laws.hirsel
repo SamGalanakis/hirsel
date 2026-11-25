@@ -79,3 +79,77 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
 fn journal_test_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if journal_law_trigger_revision(d, c, r, tasks) { Ok(()) } else { Error(()) }
 }
+
+// The `due` index of a store written before this release: its keys run in reverse due order.
+fn law_old_due(_id: Id, row: SubRow) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, 1000u64 - row.due)
+    Ok(take keys)
+}
+
+fn law_old_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
+    let value: std.codec.Codec[SubRow] = std.codec.of()
+    let terminal: std.codec.Codec[Terminal] = std.codec.of()
+    let mut pending = store.declare_table(mut d, rows_name(), id_key(), value)?
+    let due = store.index(mut d, mut pending, "due", Many, code.describe(law_old_due), std.codec.key_u64())?
+    let rows = store.finish(mut d, take pending)?
+    let completed = store.declare_table(mut d, outcomes_name(), id_key(), terminal)?
+    let outcomes = store.finish(mut d, take completed)?
+    Ok(Tables(rows: take rows, due: take due, outcomes: take outcomes))
+}
+
+// A release whose `due` extractor differs reaches a disk store only as a Migrate
+// declaration (a deploy), which rebuilds `due` in its one commit; a restart declares in
+// Open, commits nothing, and refuses an extractor that differs from the stored one. A
+// deploy that kept the old entries answers the due-5 row first; a restart that rebuilt
+// moves the version.
+pub fn journal_law_due_rebuild(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let dir = law_directory(d)
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, law_options()))
+    let old = result.unwrap(store.bind_declaration(mut db, Migrate, law_old_tables))
+    let target: Entry[u64] = result.unwrap(granted(code.describe(sample_granted)))
+    let mut allowed = empty_entries()
+    result.unwrap(allow(mut allowed, target))
+    let wrote = store.run(mut db, None, (store.copy_env(old), store.copy_env(target), store.copy_env(allowed)), fn(mut tx, call_env) -> Result[(), Error] {
+        let _ = write(mut tx, call_env.0, call_env.2, call_env.1, 0u64, At(5u64))?
+        let _ = write(mut tx, call_env.0, call_env.2, call_env.1, 1u64, At(3u64))?
+        Ok(())
+    })
+    let written = done(take wrote)
+    result.unwrap(store.durable(mut db, written.ticket))
+    if due_time(option.unwrap(first(db, old))) != 5u64 {
+        return false
+    }
+    let before = store.version(store.snapshot(db))
+    let mut deploy = result.unwrap(store.declare(db, Migrate))
+    let deployed = result.unwrap(declare_tables(mut deploy))
+    let sealed = result.unwrap(store.seal(mut db, take deploy))
+    result.unwrap(store.durable(mut db, sealed))
+    if store.version(store.snapshot(db)) != before + 1u64 {
+        return false
+    }
+    if due_time(option.unwrap(first(db, deployed))) != 3u64 {
+        return false
+    }
+    result.unwrap(store.close(take db))
+    let mut reopened = result.unwrap(store.open(tasks, dir, c, r, law_options()))
+    let at = store.version(store.snapshot(reopened))
+    let t = result.unwrap(store.bind_declaration(mut reopened, Open, declare_tables))
+    let kept = store.version(store.snapshot(reopened)) == at && due_time(option.unwrap(first(reopened, t))) == 3u64
+    let refused = match store.bind_declaration(mut reopened, Open, law_old_tables) {
+        Error(Changed(_)) => true,
+        _ => false,
+    }
+    let unmoved = store.version(store.snapshot(reopened)) == at
+    result.unwrap(store.close(take reopened))
+    kept && refused && unmoved
+}
+
+@test
+fn journal_test_due_rebuild(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_due_rebuild(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

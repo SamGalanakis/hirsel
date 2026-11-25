@@ -20,11 +20,6 @@ fn table_name() -> String {
     "harness.mcp_catalog"
 }
 
-fn table_spec() -> store.TableSpec[String, Remote] {
-    let row_codec: std.codec.Codec[Remote] = std.codec.of()
-    store.spec(table_name(), std.codec.key_string(), row_codec)
-}
-
 pub fn declare_catalog(mut d: store.Declare) -> Result[store.Table[String, Remote], store.Error] {
     let row_codec: std.codec.Codec[Remote] = std.codec.of()
     let table = store.declare_table(mut d, table_name(), std.codec.key_string(), row_codec)?

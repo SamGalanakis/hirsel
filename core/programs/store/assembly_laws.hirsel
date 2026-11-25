@@ -1,16 +1,17 @@
 // Store regression laws appended by the store and runner test drivers.
 // Store identity/catalog rules: write, read, drop and recreate twice. Each
 // iteration must find exactly its newly written (1, i), so the result is true.
-fn assembly_bucket(v: u64) -> Result[u64, Capacity] {
-    Ok(v % 4)
+fn assembly_bucket(_k: u64, v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v % 4)
+    Ok(take keys)
 }
 
-pub fn law_assembly_indexed_recreate(c: Clock, r: Random) -> bool waits {
+pub fn law_assembly_indexed_recreate(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    result.unwrap(store.create_table(mut db, store.spec("t", std.codec.key_u64(), std.codec.of_u64())))
-    let mut t = result.unwrap(store.table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
-    result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
-    let mut ix = result.unwrap(bind_table_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
+    let (first, first_ix) = result.unwrap(law_indexed(mut db, "t", std.codec.key_u64(), std.codec.of_u64(), "i", code.describe(assembly_bucket), std.codec.key_u64()))
+    let mut t = first
+    let mut ix = first_ix
     for i in 0u64 .. 2 {
         let done = store.run(mut db, None, (copy_env(t), copy_env(i)), fn(mut tx, call_env) -> Result[(), store.Error] {
             store.put(mut tx, call_env.0, 1, call_env.1)
@@ -26,18 +27,17 @@ pub fn law_assembly_indexed_recreate(c: Clock, r: Random) -> bool waits {
         if result.unwrap(store.next(law_reader(rows.capture), mut rows)) != Some((1u64, i)) {
             return false
         }
-        result.unwrap(store.drop_table(mut db, take t))
-        result.unwrap(store.create_table(mut db, store.spec("t", std.codec.key_u64(), std.codec.of_u64())))
-        t = result.unwrap(store.table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
-        result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
-        ix = result.unwrap(bind_table_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
+        result.unwrap(law_drop(mut db, tasks))
+        let (again, again_ix) = result.unwrap(law_indexed(mut db, "t", std.codec.key_u64(), std.codec.of_u64(), "i", code.describe(assembly_bucket), std.codec.key_u64()))
+        t = again
+        ix = again_ix
     }
     true
 }
 
 @test
-fn test_assembly_indexed_recreate(c: Clock, r: Random) -> Result[(), ()] waits {
-    if law_assembly_indexed_recreate(c, r) {
+fn test_assembly_indexed_recreate(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_assembly_indexed_recreate(c, r, tasks) {
         Ok(())
     } else {
         Error(())
@@ -168,12 +168,10 @@ fn page_empty(take page: Page[u64, u64]) -> bool {
     }
 }
 
-pub fn law_keyset_pages(c: Clock) -> bool waits {
+pub fn law_keyset_pages(c: Clock, tasks: Tasks) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("pages", std.codec.key_u64(), std.codec.of_u64())))
-    let mut original = result.unwrap(table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
-    result.unwrap(create_index(mut db, original, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let ix = result.unwrap(bind_table_index(mut db, original, "bucket", code.describe(bucket), std.codec.key_u64()))
+    result.unwrap(law_table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
+    let (original, ix) = result.unwrap(law_indexed(mut db, "pages", std.codec.key_u64(), std.codec.of_u64(), "bucket", code.describe(bucket), std.codec.key_u64()))
     let sh: Table[u64, u64] = clone(original)
     let written = run(mut db, None, original, fn(mut tx, call_env) -> Result[(), Error] {
         let inserted: Inline[(u64, u64), 7] = [(5, 13), (3, 9), (7, 3), (1, 8), (6, 6), (2, 5), (4, 2)]
@@ -210,11 +208,9 @@ pub fn law_keyset_pages(c: Clock) -> bool waits {
         return false
     }
 
-    result.unwrap(drop_table(mut db, take original))
-    result.unwrap(create_table(mut db, spec("pages", std.codec.key_u64(), std.codec.of_u64())))
-    let mut newer = result.unwrap(table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
-    result.unwrap(create_index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let fresh_ix = result.unwrap(bind_table_index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
+    result.unwrap(law_drop(mut db, tasks))
+    result.unwrap(law_table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
+    let (newer, fresh_ix) = result.unwrap(law_indexed(mut db, "pages", std.codec.key_u64(), std.codec.of_u64(), "bucket", code.describe(bucket), std.codec.key_u64()))
     let fresh_shape = view newer
     let current = snapshot(db)
     match scan_next(result.unwrap(reader(db, 0u64)), current, fresh_shape, page_token(result.unwrap(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded, one))), one) {
@@ -236,8 +232,8 @@ pub fn law_keyset_pages(c: Clock) -> bool waits {
 }
 
 @test
-fn test_keyset_pages(c: Clock) -> Result[(), ()] waits {
-    if law_keyset_pages(c) { Ok(()) } else { Error(()) }
+fn test_keyset_pages(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    if law_keyset_pages(c, tasks) { Ok(()) } else { Error(()) }
 }
 
 fn settle_fault_at(mut tx: Tx, attempted_at: u64) -> Result[Bytes, Bytes] {

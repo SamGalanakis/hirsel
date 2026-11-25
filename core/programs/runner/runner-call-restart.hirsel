@@ -55,8 +55,7 @@ fn disk_options() -> store.Options {
 
 fn drained(take fresh: store.Db, tasks: Tasks, birth: u64) -> bool waits {
     let mut db = take fresh
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let _ = result.unwrap(store.bind_declaration(mut db, Migrate, schema))
     let (to, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(8u64)
     let first = drain_send(to, "held", birth, 0u64, 40u64)
     let fifo = drain_send(to, "held", birth, 1u64, 41u64)

@@ -135,7 +135,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let dir = disk_test_directory(d)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut db = open(tasks, dir, c, r, options)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let baseline = db.resident
     let start = db.file_end
     let seq = db.file_seq
@@ -348,7 +348,7 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let directory = disk_test_directory(d)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut db = open(tasks, directory, c, r, options)?
-    let _ = create_table(mut db, spec("big", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut db, "big", std.codec.key_u64(), std.codec.of_bytes())?
     let baseline = db.resident
     let logical = logical_key(1, key_word(7))?
     let width = 12582912u64
@@ -445,7 +445,7 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     let directory = disk_test_directory(d)
     let mut options = journal_crash_options()
     let mut db = open(tasks, directory, c, r, options)?
-    let _ = create_table(mut db, spec("warm", std.codec.key_u64(), std.codec.of_u32()))?
+    let _ = law_table(mut db, "warm", std.codec.key_u64(), std.codec.of_u32())?
     let baseline = db.resident
     retained_fixture_write(mut db, 1, 1)?
     retained_fixture_write(mut db, 2, 2)?

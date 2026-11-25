@@ -158,7 +158,7 @@ fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
 pub fn disk_law_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = disk_test_directory(d)
     let mut db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
-    result.unwrap(create_table(mut db, spec("info", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "info", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "info", std.codec.key_u64(), std.codec.of_u64()))
     if !set_row(mut db, t, 9, 7) {
         return false

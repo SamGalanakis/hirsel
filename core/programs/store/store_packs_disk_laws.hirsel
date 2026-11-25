@@ -228,7 +228,7 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     options.pack_bytes = 4096
     let mut db = open(tasks, directory, c, r, options)?
     let codec = std.codec.of_bytes()
-    let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
+    let _ = law_table(mut db, "values", std.codec.key_u64(), codec)?
     let t = table(mut db, "values", std.codec.key_u64(), codec)?
     let old_blob_pack = disk_state(db).pages.next_pack
     let initial = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
@@ -341,7 +341,7 @@ fn check_blob_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks, cutoff: u64) 
     options.create = false
     let codec = std.codec.of_bytes()
     let mut db = open(tasks, d, c, r, options)?
-    let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
+    let _ = law_table(mut db, "values", std.codec.key_u64(), codec)?
     let shape_table = table(mut db, "values", std.codec.key_u64(), codec)?
     let mut inline_value: Bytes = list.with_capacity(cutoff - 6)
     list.fill(mut inline_value, cutoff - 6, 13u8)

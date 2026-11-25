@@ -460,7 +460,7 @@ pub fn decode(b: &[u8]) -> Account {
 }
 
 /// A store with table "accounts" (id 1) and `indexes` indexes named i0, i1, i2 (ids 2 onward, each
-/// raising the table's schema epoch by one, as `create_index` does). Returns the Db and the Table.
+/// raising the table's schema epoch by one, as an index declaration does). Returns the Db and the Table.
 pub fn open(indexes: &[fn(&Account) -> u64]) -> (Db, Table) {
     let mut ids = 0;
     let epoch = 1 + indexes.len() as u64;

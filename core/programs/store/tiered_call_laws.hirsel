@@ -5,10 +5,7 @@
 fn l63_call_fixture(d: Dir, c: Clock, tasks: Tasks, call: scoped[view] fn(mut Db, (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits) -> Result[(), Error] waits {
     let fixtures = disk_test_directory(d)
     let mut db = test_db(c, 2147483648)
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
-    let _ = create_table(mut db, spec("marks", std.codec.key_u64(), std.codec.of_u32()))?
-    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
-    let marks = table(mut db, "marks", std.codec.key_u64(), std.codec.of_u32())?
+    let (rows, marks) = law_pair(mut db, "rows", std.codec.key_u64(), std.codec.of_u32(), "marks", std.codec.key_u64(), std.codec.of_u32())?
     let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
         put(mut tx, handle, 1u64, 10u32)?
         put(mut tx, handle, 3u64, 30u32)?

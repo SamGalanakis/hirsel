@@ -58,7 +58,7 @@ fn bounded_law_pages(s: Snapshot, first: u64, until: u64, rows: u64, byte_limit:
 @test
 fn projector_bounded(c: Clock) -> Result[(), ()] waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("source", std.codec.key_u64(), std.codec.of_bytes())))
+    result.unwrap(law_table(mut db, "source", std.codec.key_u64(), std.codec.of_bytes()))
     let t = result.unwrap(table(mut db, "source", std.codec.key_u64(), std.codec.of_bytes()))
     let committed = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
         for k in 0u64 .. 12 {

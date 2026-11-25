@@ -155,7 +155,7 @@ fn bucket_law_value(k: u64) -> Bytes {
 fn bucket_law_rows_table(mut db: Db) -> Result[Table[u64, Bytes], Error] waits {
     match table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes()) {
         Error(Missing(_)) => {
-            create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+            law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
             table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())
         },
         other => other,
@@ -635,7 +635,7 @@ fn bucket_m2_pack_value() -> Bytes {
 
 fn bucket_m2_seed_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let data = bucket_m2_pack_value()
     let outcome = run(mut db, None, (copy_env(rows), copy_env(data)), fn(mut tx, call_env) -> Result[(), Error] {

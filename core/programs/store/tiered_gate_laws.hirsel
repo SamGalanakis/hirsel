@@ -526,13 +526,16 @@ fn gate_crash_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, t
 fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
     let floor = 182375272u64
     let width = 1100u64
-    let events = l87_cold_log(d, c, r, tasks, floor, 300, width)?
+    let retry = match crash {
+        RetryAfterRename => true,
+        _ => false,
+    }
+    let events = l87_cold_log_padded(d, c, r, tasks, floor, 300, width, retry)?
     // The retry arm also keeps a Memory table, so that deleting most of its
     // rows before the compaction cut leaves a sparse Memory pack: relocation
     // enters the cut's candidate, and AP16 redoes the refused attempt.
     let padding = if let RetryAfterRename = crash {
         let mut padded = open(tasks, d, c, r, l70_open_options(floor)?)?
-        let _ = create_table(mut padded, spec("padding", std.codec.key_u64(), std.codec.of_bytes()))?
         let fixture = table(mut padded, "padding", std.codec.key_u64(), std.codec.of_bytes())?
         let Committed(_) = run(mut padded, Some(100000000), copy_env(fixture), fn(mut tx: Tx, env: Table[u64, Bytes]) -> Result[(), Error] {
             for key in 0u64 .. 64 {

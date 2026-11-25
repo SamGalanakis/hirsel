@@ -44,7 +44,7 @@ fn granted_open_commit(take input: GrantedOpen) -> Result[(), Error] waits {
         fail("§1.1: fixed writer state at genesis")
     }
     let codec = std.codec.of_bytes()
-    let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
+    let _ = law_table(mut db, "values", std.codec.key_u64(), codec)?
     let t = table(mut db, "values", std.codec.key_u64(), codec)?
     let saved = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
         let mut value: Bytes = list.with_capacity(64)

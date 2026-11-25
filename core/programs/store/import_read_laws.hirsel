@@ -323,15 +323,48 @@ type RewriteLawRow: codec + send {
     body: u64
 }
 
-fn rewrite_law_due(row: RewriteLawRow) -> Result[u64, Capacity] {
-    Ok(row.due)
+fn rewrite_law_due(_k: u64, row: RewriteLawRow) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, row.due)
+    Ok(take keys)
 }
 
-fn rewrite_law_schema(mut migration: Migration) -> Result[(), Error] {
-    let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
-    let rows = migration_table(mut migration, "rewrite", std.codec.key_u64(), codec)?
-    let _ = migration_index(mut migration, rows, "due", code.describe(rewrite_law_due), std.codec.key_u64())?
+// A migration that changes nothing: the staging carries only rewrites.
+fn rewrite_law_schema(mut _migration: Migration) -> Result[(), Error] {
     Ok(())
+}
+
+// rewrite with its due index, declared in `mode`.
+fn rewrite_law_declare(mut db: Db, mode: Mode) -> Result[(Table[u64, RewriteLawRow], Index[u64, u64, RewriteLawRow, ()]), Error] waits {
+    let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
+    let mut d = declare(db, mode)?
+    let mut declared = declare_table(mut d, "rewrite", std.codec.key_u64(), codec)?
+    let due = index(mut d, mut declared, "due", Many, code.describe(rewrite_law_due), std.codec.key_u64())?
+    let rows = finish(mut d, take declared)?
+    let _ = seal(mut db, take d)?
+    Ok((take rows, take due))
+}
+
+// rewrite and its due index declared unchanged in `d`, so a staged rewrite
+// is checked against due.
+fn rewrite_law_declared(mut d: Declare) -> Result[(), Error] {
+    let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
+    let mut declared = declare_table(mut d, "rewrite", std.codec.key_u64(), codec)?
+    let _ = index(mut d, mut declared, "due", Many, code.describe(rewrite_law_due), std.codec.key_u64())?
+    let _ = finish(mut d, take declared)?
+    Ok(())
+}
+
+fn rewrite_law_stage(db: Db, tasks: Tasks) -> Result[StagedMigration, Error] waits {
+    let mut d = declare_migration(db, tasks, code.describe(rewrite_law_schema))?
+    rewrite_law_declared(mut d)?
+    finish_migration(db, take d)
+}
+
+fn rewrite_law_stage_export(source: Preparation, tasks: Tasks) -> Result[StagedMigration, Error] waits {
+    let mut d = declare_export(source, tasks, None)?
+    rewrite_law_declared(mut d)?
+    finish_export_declaration(source, take d)
 }
 
 fn rewrite_law_refusals(mut staged: StagedMigration, rows: Table[u64, RewriteLawRow]) -> () {
@@ -347,8 +380,7 @@ fn rewrite_law_refusals(mut staged: StagedMigration, rows: Table[u64, RewriteLaw
 
 fn rewrite_law_replace(mut migration: Migration) -> Result[(), Error] {
     let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
-    let rows = migration_table(mut migration, "rewrite", std.codec.key_u64(), codec)?
-    migration_migrate(mut migration, take rows, spec("rewrite", std.codec.key_u64(), codec), fn(k: u64, row: RewriteLawRow) -> Result[Option[(u64, RewriteLawRow)], Capacity] {
+    migrate_table(mut migration, "rewrite", std.codec.key_u64(), codec, "rewrite", std.codec.key_u64(), codec, fn(k: u64, row: RewriteLawRow) -> Result[Option[(u64, RewriteLawRow)], Capacity] {
         Ok(Some((k, clone(row))))
     })
 }
@@ -411,17 +443,15 @@ fn rewrite_law_import_refused(mut db: Db, scratch: Dir, base: u64) -> () waits {
     }
 }
 
-fn rewrite_law_replace_indexed(mut migration: Migration) -> Result[(), Error] {
+// rewrite_law_replace's migration with the due index declared on the new
+// table, staged from the export.
+fn rewrite_law_replace_indexed(source: Preparation, tasks: Tasks) -> Result[StagedMigration, Error] waits {
     let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
-    let rows = migration_table(mut migration, "rewrite", std.codec.key_u64(), codec)?
-    let mut to = spec("rewrite", std.codec.key_u64(), codec)
-    with_index(mut to, "due", code.describe(rewrite_law_due), std.codec.key_u64())?
-    migration_migrate(mut migration, take rows, take to, fn(k: u64, row: RewriteLawRow) -> Result[Option[(u64, RewriteLawRow)], Capacity] {
-        Ok(Some((k, clone(row))))
-    })?
-    let replaced = migration_table(mut migration, "rewrite", std.codec.key_u64(), codec)?
-    let _ = migration_index(mut migration, replaced, "due", code.describe(rewrite_law_due), std.codec.key_u64())?
-    Ok(())
+    let mut d = declare_export(source, tasks, Some(code.describe(rewrite_law_replace)))?
+    let mut declared = declare_table(mut d, "rewrite", std.codec.key_u64(), codec)?
+    let _ = index(mut d, mut declared, "due", Many, code.describe(rewrite_law_due), std.codec.key_u64())?
+    let _ = finish(mut d, take declared)?
+    finish_export_declaration(source, take d)
 }
 
 // L51 (e″), v2.103: a rewrite on a table the staging replaces edits the staged
@@ -432,7 +462,7 @@ fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows
     let attempt = install_fixture_bytes(16, 9)
     let (scratch, base) = crash_install_prepared(mut db, d, c, tasks, attempt)?
     let source = open_export(scratch, c, attempt, disk_crash_options("install"))?
-    let mut staged = deploy_result(stage_export_migration(source, tasks, code.describe(rewrite_law_replace_indexed)))?
+    let mut staged = deploy_result(rewrite_law_replace_indexed(source, tasks))?
     let rows = deploy_result(catalog_handle(source.db.store, staged.plan.roots.catalog, "rewrite", std.codec.key_u64(), codec))?
     if rows.id == old_rows.id {
         fail("L51(e″): the staging did not replace the table")
@@ -461,8 +491,7 @@ fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows
         fail("L51(e″): wrong staged-range activation version")
     }
     let current = snapshot(db)
-    let new_rows = deploy_result(table(mut db, "rewrite", std.codec.key_u64(), codec))?
-    let due = deploy_result(bind_table_index(mut db, new_rows, "due", code.describe(rewrite_law_due), std.codec.key_u64()))?
+    let (new_rows, due) = deploy_result(rewrite_law_declare(mut db, Open))?
     let read = deploy_result(reader(db, 0))?
     if let Some(row) = deploy_result(get(read, prior, old_rows, 1))? {
         if row.due != 10 || row.body != 5 {
@@ -492,18 +521,14 @@ fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows
 fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
     let mut db = deploy_result(open(tasks, disk_test_directory(d), c, r, disk_crash_options("install")))?
     let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
-    let mut spec_rows = spec("rewrite", std.codec.key_u64(), codec)
-    deploy_result(with_index(mut spec_rows, "due", code.describe(rewrite_law_due), std.codec.key_u64()))?
-    let _ = deploy_result(create_table(mut db, take spec_rows))?
-    let rows = deploy_result(table(mut db, "rewrite", std.codec.key_u64(), codec))?
-    let due = deploy_result(bind_table_index(mut db, rows, "due", code.describe(rewrite_law_due), std.codec.key_u64()))?
+    let (rows, due) = deploy_result(rewrite_law_declare(mut db, Migrate))?
     let Committed(_) = result.unwrap(run(mut db, None, copy_env(rows), fn(mut tx: Tx, t: Table[u64, RewriteLawRow]) -> Result[(), Error] {
         put(mut tx, t, 1, RewriteLawRow(due: 10, body: 1))?
         put(mut tx, t, 2, RewriteLawRow(due: 20, body: 2))
     })) else {
         fail("L51(e″): seed rows")
     }
-    let mut standalone = deploy_result(stage_migration(db, tasks, code.describe(rewrite_law_schema)))?
+    let mut standalone = deploy_result(rewrite_law_stage(db, tasks))?
     rewrite_law_refusals(mut standalone, rows)
     deploy_result(stage_rewrite(mut standalone, rows, 1, RewriteLawRow(due: 10, body: 4)))?
     deploy_result(install_activation(mut db, take standalone))?
@@ -517,7 +542,7 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let replacement = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
     rewrite_law_append(scratch, replacement, exported_rows.id, (1u64, None), false)?
     rewrite_law_import_refused(mut db, scratch, base)
-    let mut staged = deploy_result(stage_export_migration(source, tasks, code.describe(rewrite_law_schema)))?
+    let mut staged = deploy_result(rewrite_law_stage_export(source, tasks))?
     rewrite_law_refusals(mut staged, exported_rows)
     write_prepared(source, staged, scratch, rewrite_law_target())?
     let empty = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?

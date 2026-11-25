@@ -836,17 +836,27 @@ fn row_is(r: SubRow, key: Bytes, value: Bytes) -> bool {
     }
 }
 
-pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+// 257 pad tables, so accounts' table id takes two bytes, then accounts at schema 0.
+fn padded_accounts(mut d: store.Declare) -> Result[store.Table[u64, Old], store.Error] {
     for i in 0i64 .. 257i64 {
         let mut name = string.from("pad")
         string.push_i64(mut name, i)
-        let _ = result.unwrap(store.create_table(mut db, store.spec(take name, std.codec.key_u64(), std.codec.of_u64())))
+        let pad = store.declare_table(mut d, take name, std.codec.key_u64(), std.codec.of_u64())?
+        let _ = store.finish(mut d, take pad)?
     }
+    old_accounts(mut d)
+}
+
+fn old_accounts(mut d: store.Declare) -> Result[store.Table[u64, Old], store.Error] {
     let oc: std.codec.Codec[Old] = std.codec.make(code.describe(old_put), code.describe(old_take), code.describe(old_schema), 8u64)
+    let accounts = store.declare_table(mut d, "accounts", std.codec.key_u64(), oc)?
+    store.finish(mut d, take accounts)
+}
+
+pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let old = result.unwrap(store.bind_declaration(mut db, Migrate, padded_accounts))
     let nc: std.codec.Codec[New] = std.codec.make(code.describe(new_put), code.describe(new_take), code.describe(new_schema), 16u64)
-    let _ = result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), oc)))
-    let old = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), oc))
     let first = store.run(mut db, None, old, fn(mut tx, call_env) -> Result[(), store.Error] {
         store.put(mut tx, call_env, 1u64, Old(balance: 10u64))
     })
@@ -901,10 +911,8 @@ fn projection_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
 
 fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let oc: std.codec.Codec[Old] = std.codec.make(code.describe(old_put), code.describe(old_take), code.describe(old_schema), 8u64)
     let nc: std.codec.Codec[New] = std.codec.make(code.describe(new_put), code.describe(faulting_new_take), code.describe(new_schema), 16u64)
-    let _ = result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), oc)))
-    let old = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), oc))
+    let old = result.unwrap(store.bind_declaration(mut db, Migrate, old_accounts))
     let _ = result.unwrap(store.run(mut db, None, (store.copy_env(balance), store.copy_env(old)), fn(mut tx, call_env) -> Result[(), store.Error] {
         store.put(mut tx, call_env.1, 1u64, Old(balance: call_env.0))
     }))

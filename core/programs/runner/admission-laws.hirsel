@@ -340,8 +340,10 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
 
 fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
     let mut db = take backing
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
-    let data = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
+    let data = result.unwrap(store.bind_declaration(mut db, Migrate, fn(mut d) -> Result[store.Table[u64, u32], store.Error] {
+        let declared = store.declare_table(mut d, "data", std.codec.key_u64(), std.codec.of_u32())?
+        store.finish(mut d, take declared)
+    }))
     let caller = option.unwrap(anonymous_caller(random))
     let t = store.keyed_time(db)
     let stream = store.StreamKey(caller: clone(caller), id: store.StreamId(t: t, n: 77u64))

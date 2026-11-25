@@ -129,14 +129,11 @@ fn refusal_attach_descriptors(mut db: Db, memory_id: u32, tiered_id: u32) -> Res
 }
 
 fn refusal_drop(mut phase: Migration) -> Result[(), Error] {
-    let source = migration_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    migration_drop_table(mut phase, take source)
+    drop_named_table(mut phase, "rows")
 }
 
 fn refusal_migrate(mut phase: Migration) -> Result[(), Error] {
-    let source = migration_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let target = spec("renamed", std.codec.key_u64(), std.codec.of_u64())
-    migration_migrate(mut phase, take source, take target, fn(_key: u64, _value: u64) -> Result[Option[(u64, u64)], Capacity] {
+    migrate_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64(), "renamed", std.codec.key_u64(), std.codec.of_u64(), fn(_key: u64, _value: u64) -> Result[Option[(u64, u64)], Capacity] {
         fail("L70(c): migration body ran")
     })
 }
@@ -161,10 +158,12 @@ fn tiered_l70_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let store_dir = disk_test_directory(d)
     let scratch = disk_test_directory(d)
     let mut db = open(tasks, store_dir, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
-    let rows = spec("rows", std.codec.key_u64(), std.codec.of_u64())
-    let other = spec("other", std.codec.key_u64(), std.codec.of_u64())
-    let _ = create_table(mut db, take rows)?
-    let final_item = create_table(mut db, take other)?
+    let mut decl = declare(db, Migrate)?
+    let rows = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take rows)?
+    let other = declare_table(mut decl, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut decl, take other)?
+    let final_item = seal(mut db, take decl)?
     durable(mut db, final_item)?
     let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let other_handle = table(mut db, "other", std.codec.key_u64(), std.codec.of_u64())?

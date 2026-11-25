@@ -15,7 +15,7 @@ fn l70_open_options(resident: u64) -> Result[Options, Error] {
 fn test_l70_tiered_open_at_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
         put(mut tx, handle, 1u64, 10u32)?
@@ -125,7 +125,7 @@ fn l70_reexecute_cold_read(mut db: Db, rows: Table[u64, u32]) -> Result[(), Erro
 fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
         put(mut tx, handle, 1u64, 10u32)?
@@ -195,7 +195,7 @@ fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks
 // Rows 1→10, 3→30 and 5→50 in a Tiered table whose root is Cold on disk.
 fn l68_cold_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
         put(mut tx, handle, 1u64, 10u32)?

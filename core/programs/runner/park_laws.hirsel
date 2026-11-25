@@ -15,6 +15,17 @@ fn park_law_old(mut d: store.Declare) -> Result[(triggers.Tables, park.Tables[u6
     Ok((take pending, take tables))
 }
 
+fn park_law_v2(id: park.ParkId, value: u64) -> Result[Option[(park.ParkId, ParkLawState)], Capacity] {
+    Ok(Some((id, ParkLawState(value: value, label: "v2"))))
+}
+
+// park-law.state's values move from u64 to ParkLawState.
+fn park_law_upgrade(mut m: store.Migration) -> Result[(), store.Error] {
+    let old_codec: std.codec.Codec[u64] = std.codec.of()
+    let next_codec: std.codec.Codec[ParkLawState] = std.codec.of()
+    store.migrate_table(mut m, "park-law.state", park.key(), old_codec, "park-law.state", park.key(), next_codec, park_law_v2)
+}
+
 fn park_law_schema(mut d: store.Declare) -> Result[ParkLawHandles, store.Error] {
     let pending = triggers.declare_tables(mut d)?
     let parks: park.Tables[ParkLawState] = park.declare_tables(mut d, "park-law.state", clone(pending))?
@@ -89,12 +100,9 @@ fn promise_resumes_once(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
         Ok((parked, park.park_id(promise)))
     })
     let (parked, promise) = park_law_commit(mut db, take asked)
-    let old_table = park.state_table(before)
-    let next_codec: std.codec.Codec[ParkLawState] = std.codec.of()
-    let next = store.spec("park-law.state", park.key(), next_codec)
-    let migrated = result.unwrap(store.migrate(mut db, take old_table, take next, fn(id, value) -> Result[Option[(park.ParkId, ParkLawState)], Capacity] {
-        Ok(Some((id, ParkLawState(value: value, label: "v2"))))
-    }))
+    let mut upgrade = result.unwrap(store.declare_migration(db, tasks, code.describe(park_law_upgrade)))
+    let _ = result.unwrap(park_law_schema(mut upgrade))
+    let migrated = result.unwrap(store.seal(mut db, take upgrade))
     result.unwrap(store.durable(mut db, migrated))
     result.unwrap(store.close(take db))
     let mut reopened = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))

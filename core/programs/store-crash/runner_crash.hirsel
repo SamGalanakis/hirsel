@@ -28,13 +28,9 @@ type Hd: shareable + send {
 
 type Calls = runner.Registry[(), Hd]
 
-fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let codec: std.codec.Codec[u64] = std.codec.of()
-    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
-        Ok(()) => Ok(()),
-        Error(Exists(_)) => Ok(()),
-        Error(take problem) => Error(take problem),
-    }
+// `schema` declares data; the install needs no rewrite.
+fn migrate(mut _phase: store.Migration) -> Result[(), store.Error] {
+    Ok(())
 }
 
 fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
@@ -647,19 +643,9 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
             return
         }
         let _ = result.unwrap(install_data(mut db))
-        let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.activation", std.codec.key_u8(), codec)))
         let release_codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
-        let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.releases", std.codec.key_u64(), release_codec)))
-        let table = result.unwrap(store.table(mut db, "hirsel.runner.activation", std.codec.key_u8(), codec))
-        let written = result.unwrap(store.run(mut db, None, (store.copy_env(old_previous), store.copy_env(old_current), store.copy_env(table)), fn(mut tx, call_env) -> Result[(), store.Error] {
-            store.put(mut tx, call_env.2, 0u8, call_env.1)?
-            store.put(mut tx, call_env.2, 1u8, call_env.0)
-        }))
-        if let Committed(done) = written {
-            result.unwrap(store.durable(mut db, done.ticket))
-        } else {
-            fail("activation: failed to seed both rows")
-        }
+        let seeded = result.unwrap(store.fixture_unfenced_activation(mut db, old_previous, old_current, release_codec))
+        result.unwrap(store.durable(mut db, seeded))
         result.unwrap(store.close(take db))
         return
     }
@@ -668,7 +654,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let base = if genesis {
         0u64
     } else {
-        4u64
+        2u64
     }
     let mut chosen: runner.Selection = if genesis {
         Current(0u64)

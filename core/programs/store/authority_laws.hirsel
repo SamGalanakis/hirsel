@@ -17,7 +17,7 @@ fn log_level_uses_host_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let host_level = level(db, "host")?
     let mem = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
     let memory_level = level(mem, "memory")?
-    let schema = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let schema = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if let Error(Foreign) = durable_at(mut db, schema, memory_level) {} else {
         fail("a level from another store was accepted")
     }
@@ -30,7 +30,7 @@ fn log_level_uses_host_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
 fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let mut db = open(tasks, directory, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let committed = run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 7, 70)
@@ -98,7 +98,7 @@ fn log_follower_refuses_expired_catch_up(d: Dir, c: Clock, r: Random, tasks: Tas
     let directory = disk_test_directory(d)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut writer = open(tasks, directory, c, r, options)?
-    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     close(take writer)?
     let mut ids = followers()
     let plan = follower_law_plan(Directory, options)

@@ -1,0 +1,51 @@
+// The install laws' schemas: crash_schema declares by_v and added beside
+// crash_migration's rewrite, and install_old and stage_next stage the two
+// installs of store_crash_laws.
+fn crash_schema(mut d: Declare) -> Result[(), Error] {
+    let mut rows = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = index(mut d, mut rows, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let _ = finish(mut d, take rows)?
+    let added = declare_table(mut d, "added", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut d, take added)?
+    Ok(())
+}
+
+// The first install: rows and other, staged for an activation.
+fn install_old(db: Db) -> Result[StagedMigration, Error] {
+    let mut d = declare(db, Migrate)?
+    let rows = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut d, take rows)?
+    let other = declare_table(mut d, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut d, take other)?
+    finish_migration(db, take d)
+}
+
+fn install_next(mut phase: Migration) -> Result[(), Error] {
+    crash_migration(mut phase)?
+    migrate_table(mut phase, "other", std.codec.key_u64(), std.codec.of_u64(), "other", std.codec.key_u64(), std.codec.of_u64(), crash_thousand)
+}
+
+// The next install from an export: install_next's rewrites, crash_schema, and
+// other with the index `empty`.
+fn stage_next(source: Preparation, tasks: Tasks) -> Result[StagedMigration, Error] waits {
+    let mut d = declare_export(source, tasks, Some(code.describe(install_next)))?
+    crash_schema(mut d)?
+    let mut other = declare_table(mut d, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = index(mut d, mut other, "empty", Many, code.describe(crash_value), std.codec.key_u64())?
+    let _ = finish(mut d, take other)?
+    finish_export_declaration(source, take d)
+}
+
+// The installed schema with the new table "after": the read phase's later
+// Migrate must declare every table stage_next installed.
+fn declare_after(mut db: Db) -> Result[Table[u64, u64], Error] waits {
+    let mut d = declare(db, Migrate)?
+    crash_schema(mut d)?
+    let mut other = declare_table(mut d, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = index(mut d, mut other, "empty", Many, code.describe(crash_value), std.codec.key_u64())?
+    let _ = finish(mut d, take other)?
+    let after = declare_table(mut d, "after", std.codec.key_u64(), std.codec.of_u64())?
+    let t = finish(mut d, take after)?
+    let _ = seal(mut db, take d)?
+    Ok(t)
+}

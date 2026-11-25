@@ -123,10 +123,7 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, net: Net, argv: Args) ->
         10u64
     }
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let mut declaration = result.unwrap(store.declare(db, Open))
-    let h = match schema(mut declaration) {
+    let h = match store.bind_declaration(mut db, Migrate, schema) {
         Ok(take h) => take h,
         Error(_) => return Error(Exit(status: 5)),
     }

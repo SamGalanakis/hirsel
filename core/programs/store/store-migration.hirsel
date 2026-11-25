@@ -63,13 +63,6 @@ fn keep_schema(mut plan: SchemaPlan, take roots: Roots, live_bytes: u64, next_ta
     Ok(())
 }
 
-fn application_name(name: String) -> Result[(), Error] {
-    if std.string.starts_with(name, "hirsel.") {
-        return Error(Exists("reserved"))
-    }
-    Ok(())
-}
-
 type MigrationJob: send {
     plan: SchemaPlan,
     tiered: bool,

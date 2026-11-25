@@ -1877,60 +1877,6 @@ pub opaque type Index[J, K, V, P]: shareable + send {
     public: bool
 }
 
-// AB1: a table declared whole, for create_table and migrate. Each index keeps
-// what the catalog stores (name, `code.identity` of `by`, key schema) and the
-// erased extractor that builds its entries from V rows.
-type IndexSpec[V]: send {
-    name: String,
-    by: Bytes,
-    key: Bytes,
-    extract: own[send] fn(V, Option[u32], Bytes) -> Result[Bytes, Capacity]
-}
-
-pub opaque type TableSpec[K, V]: send {
-    name: String,
-    key: std.codec.Key[K],
-    value: std.codec.Codec[V],
-    indexes: List[IndexSpec[V]]
-}
-
-pub fn spec[K, V](take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> TableSpec[K, V] {
-    TableSpec(name: take name, key: key, value: value, indexes: list.new())
-}
-
-// Encode the index key straight into the row key, between the optional
-// collection prefix and the encoded primary key.
-fn erase[J, V](by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[own[send] fn(V, Option[u32], Bytes) -> Result[Bytes, Capacity], Error] {
-    let made: own[send] fn(V, Option[u32], Bytes) -> Result[Bytes, Capacity] = fn(v: V, collection: Option[u32], primary: Bytes) -> Result[Bytes, Capacity] {
-        let j = (code.callable(by))(v)?
-        let mut raw: Bytes = match collection {
-            Some(id) => {
-                let mut row: Bytes = list.with_capacity(12 + list.len(primary))
-                list.put_word_be(mut row, id)
-                take row
-            },
-            None => list.new(),
-        }
-        std.codec.encode_key(key, j, mut raw)
-        list.append(mut raw, primary)
-        Ok(take raw)
-    }
-    Ok(take made)
-}
-
-pub fn with_index[J, K, V](mut s: TableSpec[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[(), Error] {
-    let owned = checked_name(name)?
-    for ix in s.indexes {
-        if same_name(ix.name, owned) {
-            return Error(Exists(take owned))
-        }
-    }
-    let schema = std.codec.key_schema(key) ?=> |_| Schema(0)
-    let extract = erase(by, key)?
-    let declared = IndexSpec(name: take owned, by: copied(code.identity(by))?, key: take schema, extract: take extract)
-    Ok(list.push(mut s.indexes, take declared))
-}
-
 type PageRows[K, V]: send {
     cursor: PageRange,
     data: PageTree,
@@ -2231,51 +2177,23 @@ pub fn system_table[K, V](db: Db, name: String, take key: std.codec.Key[K], take
     catalog_handle(db.store, db.heads[0].roots.catalog, named(name)?, take key, take value)
 }
 
-// AB1: the table and every index `s` declares, in one schema commit. The
-// table takes the next id and its indexes the ids after it, in `s`'s order.
-pub fn create_table[K, V](mut db: Db, take s: TableSpec[K, V]) -> Result[Ticket, Error] waits {
-    healthy(db)?
-    let mut plan = schema_plan(db)
-    stage_create_table(mut plan, take s)?
-    publish_schema_plan(mut db, take plan)
-}
-
-pub fn migration_create_table[K, V](mut phase: Migration, take s: TableSpec[K, V]) -> Result[(), Error] {
-    application_name(s.name)?
-    for ix in s.indexes {
-        application_name(ix.name)?
-    }
-    stage_create_table(mut phase.plan, take s)
-}
-
-fn stage_create_table[K, V](mut plan: SchemaPlan, take s: TableSpec[K, V]) -> Result[(), Error] {
-    let k = table_key(s.name)?
+fn stage_create_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[(), Error] {
+    let k = table_key(name)?
     if let Some(_) = get_page_row(plan.roots.catalog, k) {
-        return Error(Exists(named(s.name)?))
+        return Error(Exists(named(name)?))
     }
-    let schema = std.codec.schema(s.value) ?=> |_| Schema(0)
+    let schema = std.codec.schema(value) ?=> |_| Schema(0)
     let mut schemas: List[ValueSchema] = list.new()
     let fp = std.codec.fingerprint_of(schema)
     list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))
     let id = plan.next_table
-    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(s.key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public)
+    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public)
     let raw = encode_catalog(c)?
-    let mut live_bytes = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
+    let live_bytes = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
     let base = share_roots(plan.roots)
     let mut roots = catalog_insert(mut plan.next_node, base, k, raw)?
     define_store_collection(mut roots.collections, id, 1, mut plan.next_node)?
-    live_bytes = int.saturating_add(live_bytes, 126)
-    let mut index_id = id + 1
-    for ix in s.indexes {
-        let ik = catalog_index_key(id, ix.name)?
-        let entry_raw = encode_catalog(Catalog(kind: 2, id: index_id, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public))?
-        live_bytes = catalog_recharge(live_bytes, plan.roots, ik, entry_raw, plan.retained)
-        roots = catalog_insert(mut plan.next_node, roots, ik, entry_raw)?
-        define_store_collection(mut roots.collections, index_id, 2, mut plan.next_node)?
-        live_bytes = int.saturating_add(live_bytes, 126)
-        index_id += 1
-    }
-    keep_schema(mut plan, take roots, live_bytes, index_id)
+    keep_schema(mut plan, take roots, int.saturating_add(live_bytes, 126), id + 1)
 }
 
 fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16, schema: Bytes) -> Result[Arc[Readers[V]], Error] {
@@ -2317,11 +2235,6 @@ pub fn table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take va
         let _ = publish_schema_plan(mut db, take plan)?
     }
     Ok(take target)
-}
-
-pub fn migration_table[K, V](mut phase: Migration, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    application_name(name)?
-    stage_table(mut phase.plan, name, take key, take value)
 }
 
 fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
@@ -2389,58 +2302,6 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, take name: String,
     Error(Schema(int.widen(c.next)))
 }
 
-pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Ticket, Error] waits {
-    healthy(db)?
-    let mut plan = schema_plan(db)
-    let _ = stage_create_index(mut plan, t, name, by, take key)?
-    publish_schema_plan(mut db, take plan)
-}
-
-pub fn migration_create_index[J, K, V](mut phase: Migration, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[(), Error] {
-    application_name(name)?
-    capacity(list.try_reserve(mut phase.plan.bindings, 1))?
-    let registered = stage_create_index(mut phase.plan, t, name, by, take key)?
-    list.push(mut phase.plan.bindings, take registered)
-    Ok(())
-}
-
-fn stage_create_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[IndexRegistration, Error] {
-    stage_versioned_index(mut plan, t, name, by, key, list.new())
-}
-
-fn bind_table_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
-    healthy(db)?
-    let catalog = view db.heads[0].roots.catalog
-    let (take k, take c) = read_catalog_index(db.store, catalog, t, name, by, key)?
-    let handle: Index[J, K, V, ()] = catalog_index_handle(catalog, t, c, take k, key, None, std.codec.of_unit())?
-    register_index(mut db.indexes, bind_index(t, c, by, key))
-    Ok(take handle)
-}
-
-pub fn migration_index[J, K, V](mut phase: Migration, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
-    application_name(name)?
-    let catalog = view phase.plan.roots.catalog
-    let (take k, take c) = read_catalog_index(phase.plan.store, catalog, t, name, by, key)?
-    let handle: Index[J, K, V, ()] = catalog_index_handle(catalog, t, c, take k, key, None, std.codec.of_unit())?
-    list.push(mut phase.plan.bindings, bind_index(t, c, by, key))
-    Ok(take handle)
-}
-
-fn read_catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], key: std.codec.Key[J]) -> Result[(Bytes, Catalog), Error] {
-    if !same(store_id, t.store) {
-        return Error(Foreign)
-    }
-    let k = catalog_index_key(t.id, name)?
-    let c = match get_page_row(catalog, k) {
-        Some(raw) => decode_catalog(raw)?,
-        None => return Error(Missing(named(name)?))
-    }
-    if c.key != (std.codec.key_schema(key) ?=> |_| Schema(0)) || c.by != code.identity(by) || c.owner != t.id {
-        return Error(Schema(0))
-    }
-    Ok((take k, take c))
-}
-
 fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J],
     take payload: Option[Arc[Readers[P]]], payload_codec: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
     let public = match get_page_row(catalog, k) {
@@ -2449,30 +2310,6 @@ fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalo
     }
     Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?,
         table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: c.index_kind, payload: take payload, payload_codec: payload_codec, public: public))
-}
-
-pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
-    require_memory_collections(store_has_tiered(db), Migrate)?
-    healthy(db)?
-    let mut plan = schema_plan(db)
-    stage_drop_table(mut plan, take t)?
-    publish_schema_plan(mut db, take plan)
-}
-
-pub fn migration_drop_table[K, V](mut phase: Migration, take t: Table[K, V]) -> Result[(), Error] {
-    require_memory_collections(phase.tiered, Migrate)?
-    stage_drop_table(mut phase.plan, take t)
-}
-
-fn stage_drop_table[K, V](mut plan: SchemaPlan, take t: Table[K, V]) -> Result[(), Error] {
-    if !same(plan.store, t.store) {
-        return Error(Foreign)
-    }
-    let meta = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
-    if meta.id != t.id {
-        return Error(Stale(t.id))
-    }
-    stage_drop_table_key(mut plan, t.catalog_key, t.id)
 }
 
 fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32) -> Result[(), Error] {
@@ -2572,33 +2409,16 @@ fn sort_bulk_rows(mut rows: List[std.page.Row]) -> Result[(), Error] {
     Ok(())
 }
 
-type CatalogWrite {
-    key: Bytes,
-    value: Bytes
-}
-
 // AP13. Collect and admit the encoded workspace, sort the destination
 // records, then build the table and each index bottom up.
-fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes) -> Result[Built, Error] {
+fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes) -> Result[Built, Error] {
     let mut roots = take base
-    let schema = std.codec.schema(to.value) ?=> |_| Schema(0)
+    let schema = std.codec.schema(to_value) ?=> |_| Schema(0)
     let fp = std.codec.fingerprint_of(schema)
     let mut schemas: List[ValueSchema] = list.new()
     list.push(mut schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
-    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to.key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public))?
-    let mut edits: List[CatalogWrite] = list.new()
-    list.push(mut edits, CatalogWrite(key: copied(target)?, value: take table_raw))
-    let mut slot_order = 1u32
-    for ix in to.indexes {
-        let ik = catalog_index_key(id, ix.name)?
-        let raw = encode_catalog(Catalog(kind: 2, id: id + slot_order, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public))?
-        list.push(mut edits, CatalogWrite(key: take ik, value: take raw))
-        slot_order += 1
-    }
-    let mut live_bytes = int.saturating_add(start, 126 * list.len(edits))
-    for edit in edits {
-        live_bytes = int.saturating_add(live_bytes, entry(edit.key, edit.value))
-    }
+    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to_key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None, state: Public))?
+    let mut live_bytes = int.saturating_add(start, 126 + entry(target, table_raw))
     let mut workspace = live_bytes
     over_ceiling(workspace, ceiling)?
     let Some(source_root) = std.page.collection_child(source.root, prefix(from.id)?) else {
@@ -2618,16 +2438,16 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
         }
         let (take k, take v, source_width) = found?
         if let Some((k2, v2)) = capacity(f(k, v))? {
-            let encoded = encode_key(to.key, k2)?
+            let encoded = encode_key(to_key, k2)?
             if list.len(encoded) > 4092 {
                 return Error(Limit(Key))
             }
             // The source row's width sizes the buffer, so an upgrade that keeps
             // the row's size encodes it with no regrowth.
-            let width = order.max(source_width, 2 + std.codec.least(to.value))
+            let width = order.max(source_width, 2 + std.codec.least(to_value))
             let mut raw: Bytes = list.with_capacity(order.min(width, VALUE_LIMIT))
             capacity(le(mut raw, int.widen(number), 2))?
-            std.codec.encode(to.value, v2, mut raw) ?=> |_| Limit(Value)
+            std.codec.encode(to_value, v2, mut raw) ?=> |_| Limit(Value)
             if list.len(raw) > VALUE_LIMIT {
                 return Error(Limit(Value))
             }
@@ -2641,34 +2461,11 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
     sort_bulk_rows(mut new_rows)?
     for slot in 1u64 .. list.len(new_rows) {
         if new_rows[slot - 1].key == new_rows[slot].key {
-            return Error(Exists(named(to.name)?))
+            return Error(Exists(named(to_name)?))
         }
-    }
-    let mut indexes: List[List[std.page.Row]] = list.with_capacity(list.len(to.indexes))
-    for ix in to.indexes {
-        let mut index_rows: List[std.page.Row] = list.with_capacity(list.len(new_rows))
-        for row in new_rows {
-            let value = decoded(std.codec.decode(to.value, list.slice(row.value, 2, list.len(row.value))))?
-            let indexed = capacity((ix.extract)(value, None, row.key))?
-            if list.len(indexed) > 4092 {
-                return Error(Limit(Key))
-            }
-            let charge = 62 + round8(4 + list.len(indexed))
-            workspace = int.saturating_add(workspace, charge + 8)
-            over_ceiling(workspace, ceiling)?
-            live_bytes = int.saturating_add(live_bytes, charge)
-            list.push(mut index_rows, std.page.Row(key: take indexed, value: list.new(), charge: charge))
-        }
-        sort_bulk_rows(mut index_rows)?
-        list.push(mut indexes, take index_rows)
     }
     let written = list.len(new_rows)
     bulk_store_collection(mut roots.collections, id, 1, new_rows, mut ids)?
-    let mut index_id = id + 1
-    for rows in indexes {
-        bulk_store_collection(mut roots.collections, index_id, 2, rows, mut ids)?
-        index_id += 1
-    }
     let former = remove_store_collection(mut roots.collections, from.id, mut ids)?
     if !retained {
         live_bytes = int.saturating_sub(live_bytes, former)
@@ -2694,9 +2491,7 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
         }
     }
     remove_store_row(mut roots.catalog, from.catalog_key, mut ids)?
-    for edit in edits {
-        roots = catalog_insert(mut ids, roots, edit.key, edit.value)?
-    }
+    roots = catalog_insert(mut ids, roots, target, table_raw)?
     if !retained {
         live_bytes = one_page_account(roots)
     }
@@ -2718,30 +2513,7 @@ fn catalog_insert(mut ids: u64, roots: Roots, k: Bytes, v: Bytes) -> Result[Root
     Ok(take edited)
 }
 
-// AB1: rewrite `from` as the table `to` declares, in one schema commit at
-// version + 1. The table and each index get new ids (I3), so every handle
-// made before is Stale against later state and still reads older Snapshots
-// and pins. The rows take one new schema number, the source entry's next, so
-// no number is ever reused (L17); all older numbers retire. A rename is a
-// migrate whose `f` keeps every row.
-pub fn migrate[K, V, K2, V2](mut db: Db, take from: Table[K, V], take to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[Ticket, Error] waits {
-    require_memory_collections(store_has_tiered(db), Migrate)?
-    healthy(db)?
-    let mut plan = schema_plan(db)
-    stage_migrate(mut plan, take from, take to, f)?
-    publish_schema_plan(mut db, take plan)
-}
-
-pub fn migration_migrate[K, V, K2, V2](mut phase: Migration, take from: Table[K, V], take to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
-    require_memory_collections(phase.tiered, Migrate)?
-    application_name(to.name)?
-    for ix in to.indexes {
-        application_name(ix.name)?
-    }
-    stage_migrate(mut phase.plan, take from, take to, f)
-}
-
-fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], take to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
+fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], to_name: String, to_key: std.codec.Key[K2], to_value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
     if !same(plan.store, from.store) {
         return Error(Foreign)
     }
@@ -2749,10 +2521,10 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], tak
     if meta.id != from.id {
         return Error(Stale(from.id))
     }
-    let target = table_key(to.name)?
+    let target = table_key(to_name)?
     if !same_bytes(target, from.catalog_key) {
         if let Some(_) = get_page_row(plan.roots.catalog, target) {
-            return Error(Exists(named(to.name)?))
+            return Error(Exists(named(to_name)?))
         }
     }
     if meta.next == 65535 {
@@ -2760,24 +2532,22 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], tak
     }
     let olds = index_catalog_in(plan.roots.catalog, from.id)?
     let id = plan.next_table
-    let total_count: u32 = int.truncate(list.len(to.indexes))
     let base = share_roots(plan.roots)
     let mut ids = plan.next_node
-    let built = migrate_build(plan.roots.collections, take base, mut ids, plan.live, plan.ceiling, plan.retained, from, olds, to, f, id, meta.next, target)
+    let built = migrate_build(plan.roots.collections, take base, mut ids, plan.live, plan.ceiling, plan.retained, from, olds, to_name, to_key, to_value, f, id, meta.next, target)
     plan.next_node = ids
     let Built(roots: take roots, live: live_bytes, read, written) = built?
-    keep_schema(mut plan, take roots, live_bytes, id + 1 + total_count)?
+    keep_schema(mut plan, take roots, live_bytes, id + 1)?
     if let Some(mut backfills) = plan.preview {
-        list.push(mut backfills, MigrationBackfill(table: clone(to.name), index: None, read: read, written: written, outcome: Filled))
-        for ix in to.indexes {
-            list.push(mut backfills, MigrationBackfill(table: clone(to.name), index: Some(clone(ix.name)), read: written, written: written, outcome: Filled))
-        }
+        list.push(mut backfills, MigrationBackfill(table: named(to_name)?, index: None, read: read, written: written, outcome: Filled))
     }
     Ok(())
 }
 
-fn bucket(v: u64) -> Result[u64, Capacity] {
-    Ok(v % 4)
+fn bucket(_k: u64, v: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, v % 4)
+    Ok(take keys)
 }
 
 fn typed_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
@@ -5444,8 +5214,10 @@ fn reserve_pinned_data(mut db: Db, t: Table[u64, u64], rows: u64) -> () {
 
 fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-    let source = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let mut d = result.unwrap(declare(db, Migrate))
+    let declared = result.unwrap(declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let source = result.unwrap(finish(mut d, take declared))
+    let _ = result.unwrap(seal(mut db, take d))
     reserve_pinned_data(mut db, source, rows)
     let base = snapshot(db)
     result.unwrap(pin(mut db, "reserve", base))
@@ -5460,18 +5232,14 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     let request = request_digest(label, label)
     let stream = StreamKey(caller: Caller(issuer: 2u8, subject: take label), id: StreamId(t: keyed_time(db), n: 0u64))
     let admission = result.unwrap(admit(mut db, stream, 0, request))
-    let Admitted(take complete) = take admission else {
-        return false
-    }
+    let Admitted(take complete) = take admission else { return false }
     db.ceiling = db.resident
     let unsettled = db.changes
     if db.settled == unsettled {
         return false
     }
     let cut = db.checkpointed
-    let Some(grant) = call_reserves(plan) else {
-        return false
-    }
+    let Some(grant) = call_reserves(plan) else { return false }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
     let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()

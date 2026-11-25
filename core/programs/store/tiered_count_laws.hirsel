@@ -66,7 +66,7 @@ fn l62_snapshot_counts(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error
 fn test_l62_tiered_count_uses_overlay_and_interior(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     let fixtures = disk_test_directory(d)
     let mut db = test_db(c, 2147483648)
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
     let table_id = rows_handle.id
     l62_prepare_count_snapshot(mut db, fixtures, table_id)?

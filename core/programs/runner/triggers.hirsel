@@ -112,15 +112,17 @@ fn id_key() -> std.codec.Key[Id] {
     std.codec.key_make(code.describe(put_id), code.describe(take_id), code.describe(id_schema))
 }
 
-fn row_due(row: SubRow) -> Result[u64, Capacity] {
-    Ok(row.due)
+fn row_due(_id: Id, row: SubRow) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, row.due)
+    Ok(take keys)
 }
 
 pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
     let value: std.codec.Codec[SubRow] = std.codec.of()
     let terminal: std.codec.Codec[Terminal] = std.codec.of()
-    let pending = store.declare_table(mut d, rows_name(), id_key(), value)?
-    let due = store.declare_single_index(mut d, pending, "due", code.describe(row_due), std.codec.key_u64())?
+    let mut pending = store.declare_table(mut d, rows_name(), id_key(), value)?
+    let due = store.index(mut d, mut pending, "due", Many, code.describe(row_due), std.codec.key_u64())?
     let rows = store.finish(mut d, take pending)?
     let completed = store.declare_table(mut d, outcomes_name(), id_key(), terminal)?
     let outcomes = store.finish(mut d, take completed)?

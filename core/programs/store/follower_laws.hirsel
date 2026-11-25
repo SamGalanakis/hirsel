@@ -185,7 +185,7 @@ fn follower_steps_log_floor(d: Dir, c: Clock, r: Random, tasks: Tasks, budget: u
     let directory = disk_test_directory(d)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut writer = open(tasks, directory, c, r, options)?
-    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 32 {
         if !typed_put(mut writer, rows, k, k + 1) {
@@ -307,7 +307,7 @@ fn follower_overlap_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Re
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     let mut writer = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 1101)?, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
-    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if !typed_put(mut writer, rows, 1, 10) {
         fail("L85: the first row was refused")
@@ -358,7 +358,7 @@ fn log_follower_overlap_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     let directory = disk_test_directory(d)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut writer = open(tasks, directory, c, r, options)?
-    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if !typed_put(mut writer, rows, 1, 10) {
         fail("L85: the log row was refused")

@@ -389,7 +389,7 @@ fn object_export_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     options.retain = 1
     options.head_poll_ms = 10000
     let mut writer = open_authority(tasks, take first, c, r, options) ?=> |Refusal(error: take problem, ..)| Store(take problem)
-    let mut staged = deploy_result(stage_migration(writer, tasks, code.describe(install_old)))?
+    let mut staged = deploy_result(install_old(writer))?
     let description = install_fixture_bytes(32, 65)
     deploy_result(stage_activation(mut staged, 1, None, description, std.codec.of_bytes(), description))?
     deploy_result(install_bound_activation(mut writer, take staged, 1, description))?
@@ -443,7 +443,7 @@ fn stage_object_preparation(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, at
     let pending = begin_export_copy(mut db, scratch, clone(attempt), 1)?
     let image = export_copy(take pending)?
     let source = open_export(image.dir, c, attempt, disk_crash_options("install"))?
-    let staged = deploy_result(stage_export_migration(source, tasks, code.describe(install_next)))?
+    let staged = deploy_result(stage_next(source, tasks))?
     let target = PreparedTarget(describe: install_fixture_bytes(32, 66), release: install_fixture_bytes(32, 67), digest: install_fixture_bytes(32, 68), resident_limit: resident, pack_bytes: 1048576, checkpoint_bytes: 4096, journal_limit: 16781392)
     write_prepared(source, staged, image.dir, take target)?
     let checked = validate_prepared(image.dir)?
@@ -460,7 +460,7 @@ fn object_prepared_install_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: B
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     let mut writer = open_authority(tasks, take original, c, r, options) ?=> |Refusal(error: take problem, ..)| Store(take problem)
-    let mut staged = deploy_result(stage_migration(writer, tasks, code.describe(install_old)))?
+    let mut staged = deploy_result(install_old(writer))?
     let description = install_fixture_bytes(32, 65)
     deploy_result(stage_activation(mut staged, 1, None, description, std.codec.of_bytes(), description))?
     deploy_result(install_bound_activation(mut writer, take staged, 1, description))?
@@ -499,11 +499,11 @@ fn object_prepared_install_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: B
     let view_reader = deploy_result(follower_reader(observer, 0))?
     let mut schema = declare_follower(observer)
     let releases = deploy_result(declare_release_table(mut schema, std.codec.of_bytes()))?
-    let declared_rows = deploy_result(declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64()))?
-    let _ = deploy_result(declare_single_index(mut schema, declared_rows, "by_v", code.describe(crash_value), std.codec.key_u64()))?
+    let mut declared_rows = deploy_result(declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = deploy_result(index(mut schema, mut declared_rows, "by_v", Many, code.describe(crash_value), std.codec.key_u64()))?
     let migrated = deploy_result(finish(mut schema, take declared_rows))?
-    let other = deploy_result(declare_table(mut schema, "other", std.codec.key_u64(), std.codec.of_u64()))?
-    let _ = deploy_result(declare_single_index(mut schema, other, "empty", code.describe(crash_value), std.codec.key_u64()))?
+    let mut other = deploy_result(declare_table(mut schema, "other", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = deploy_result(index(mut schema, mut other, "empty", Many, code.describe(crash_value), std.codec.key_u64()))?
     let _ = deploy_result(finish(mut schema, take other))?
     let added = deploy_result(declare_table(mut schema, "added", std.codec.key_u64(), std.codec.of_u64()))?
     let _ = deploy_result(finish(mut schema, take added))?
@@ -532,7 +532,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let mut held = take opened
     let id = held.head.store
     let mut draft = memory_at(sim.time, id, result.unwrap(sized(Memory, 1074790400u64)))
-    let _ = create_table(mut draft, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut draft, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut draft, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let value = bucket_m2_pack_value()
     let wrote = run(mut draft, None, (copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
@@ -585,7 +585,7 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
-    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 9 {
         let committed = run(mut writer, None, (copy_env(rows), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {

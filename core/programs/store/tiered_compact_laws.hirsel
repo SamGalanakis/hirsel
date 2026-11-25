@@ -219,7 +219,7 @@ fn compact_cold_table(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, row
 
 fn compact_cold_table_of(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, row_count: u64, width: u64) -> Result[Table[u64, Bytes], Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let fixture: Table[u64, Bytes] = clone(rows)
     let Committed(_) = run(mut db, None, copy_env((fixture, row_count, width)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, u64)) -> Result[(), Error] {

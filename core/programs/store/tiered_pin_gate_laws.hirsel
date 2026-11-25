@@ -445,7 +445,7 @@ fn gate_l88_hot_slots(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCras
     let floor = 182375272u64
     let options = gate_l88_options(floor)?
     let mut db = open(tasks, d, c, r, options)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     set_residency(mut db, rows.id, Tiered)?
     let fixture: Table[u64, Bytes] = clone(rows)

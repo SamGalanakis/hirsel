@@ -91,7 +91,7 @@ fn claim_terminal_credit_survives_reopen(d: Dir, c: Clock, r: Random, tasks: Tas
     options.checkpoint_bytes = 4096
     options.journal_limit = 16781392
     let mut db = open(tasks, directory, c, r, options)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let digest = request_digest(b"charge", b"args")
     let policy = claim_law_policy()
@@ -218,7 +218,7 @@ fn claim_served_body_and_record_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks
     let mut options = journal_crash_options()
     options.resident_limit = 134217728
     let mut db = open(tasks, directory, c, r, options)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let digest = request_digest(b"charge", b"args")
     let policy = claim_law_policy()
@@ -571,7 +571,7 @@ fn claim_crash_phase(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, pha
     options.create = phase == "init"
     let mut db = open(tasks, d, c, r, options)?
     if phase == "init" {
-        let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+        let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     } else {
         let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
         if !claim_crash_expect(db, floor, rows)? {
@@ -807,7 +807,7 @@ fn claim_reserve_fill(mut db: Db, rows: Table[u64, Bytes], c: Clock, first_slot:
 @test
 fn claim_terminal_reserve_is_per_claim(c: Clock) -> Result[(), Error] waits {
     let mut db = test_db(c, 41943040)
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let digest = request_digest(b"charge", b"args")
     let policy = claim_law_policy()

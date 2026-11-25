@@ -106,8 +106,10 @@ fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucke
     let owner = store.follower_owner(service)?
     options.head_poll_ms = 10000
     let mut bare = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 1), c, rnd, options) ?=> |store.Refusal(error: take problem, ..)| take problem
-    let _ = store.create_table(mut bare, store.spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
-    let rows = store.table(mut bare, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = store.bind_declaration(mut bare, Migrate, fn(mut d) -> Result[store.Table[u64, u64], store.Error] {
+        let fresh = store.declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        store.finish(mut d, take fresh)
+    })?
     for k in 0u64 .. 9 {
         let wrote = store.run(mut bare, None, (store.copy_env(rows), k), fn(mut tx, env) -> Result[(), store.Error] { store.put(mut tx, env.0, env.1, env.1) })?
         if let Committed(_) = wrote {} else { fail("T1 bucket fixture put was refused") }

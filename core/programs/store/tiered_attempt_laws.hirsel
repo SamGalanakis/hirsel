@@ -87,7 +87,7 @@ const FETCH_MANY_ROWS: u64 = 4096
 
 fn fetch_many_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, t: Table[u64, u64]) -> Result[(), Error] {
         for key in 0u64 .. FETCH_MANY_ROWS {
@@ -113,7 +113,7 @@ fn blob_row_value(key: u64) -> Bytes {
 
 fn blob_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let _ = create_table(mut db, spec("blobs", std.codec.key_u64(), std.codec.of_bytes()))?
+    let _ = law_table(mut db, "blobs", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "blobs", std.codec.key_u64(), std.codec.of_bytes())?
     for first in 0u64 .. BLOB_ROWS / 64 {
         let Committed(_) = run(mut db, None, (copy_env(rows), first), fn(mut tx: Tx, env: (Table[u64, Bytes], u64)) -> Result[(), Error] {

@@ -142,7 +142,7 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     options.resident_limit = 710
     let mut db = deploy_result(open(tasks, disk_test_directory(d), c, r, options))?
     db.fence = 1
-    deploy_result(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32())))?
+    deploy_result(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32()))?
     let rows = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32()))?
     let initial = deploy_result(run(mut db, None, rows, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 1, 1u32)?
@@ -190,7 +190,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     for refuse in[false, true] {
         let child = disk_test_directory(d)
         let mut db = open(tasks, child, c, r, options)?
-        create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+        law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
         let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
         if !typed_put(mut db, rows, 1, 11) || disk_state(db).uncovered != 77 {
             return Error(Foreign)
@@ -245,7 +245,7 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     options.resident_limit = 33554432
     options.pack_bytes = 1024
     let mut db = open(tasks, child, c, r, options)?
-    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let mut values: List[std.page.Row] = list.with_capacity(12000)
     for key in 0u64 .. 12000 {
@@ -363,7 +363,7 @@ pub fn journal_law_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool
     let mut options = journal_crash_options()
     options.group_commits = 1
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    let commit_ticket = result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let commit_ticket = result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(durable(mut db, commit_ticket))
     let rows = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let good = result.unwrap(journal_place_idle(d, tasks, mut db, rows, None))
@@ -443,7 +443,7 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
     })) {
         return false
     }
-    if !journal_is_poisoned(create_table(mut db, spec("later", std.codec.key_u64(), std.codec.of_u64()))) {
+    if !journal_is_poisoned(law_table(mut db, "later", std.codec.key_u64(), std.codec.of_u64())) {
         return false
     }
     if !journal_is_poisoned(checkpoint(mut db)) {
@@ -862,7 +862,7 @@ pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
     let orphan_end = recovery_sync || scenario == "orphan-end"
     if phase == "init" {
         let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
-        result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+        result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
         if orphan_end {
             let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
             let written = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
@@ -969,7 +969,7 @@ pub fn journal_law_options(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     options.group_commits = 1
     options.group_bytes = 1
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, t, 1, 11) || !typed_put(mut db, t, 2, 22) {
         return false

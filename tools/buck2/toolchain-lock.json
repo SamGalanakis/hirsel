@@ -34,6 +34,12 @@
       "url": "https://github.com/hermeticbuild/rust-redist/releases/download/1.99.0/rust-std-1.99.0-aarch64-unknown-linux-gnu.tar.zst"
     },
     {
+      "archive_prefix": "rust-std-1.99.0-aarch64-apple-darwin/rust-std-aarch64-apple-darwin",
+      "name": "rust-std-darwin",
+      "sha256": "c5a0a75dd8a65f8cacc84ae975c398faf72ea56aed059ed24915e95fa63381dc",
+      "url": "https://github.com/hermeticbuild/rust-redist/releases/download/1.99.0/rust-std-1.99.0-aarch64-apple-darwin.tar.zst"
+    },
+    {
       "archive_prefix": "rust-src-1.99.0/rust-src",
       "name": "rust-src",
       "sha256": "9128e68f0cac5c7666a72209cbca8c3f0a6e2e17725350b92ddbdbb9b31ae797",

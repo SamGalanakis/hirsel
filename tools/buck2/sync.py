@@ -638,7 +638,7 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/core/**", "core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-abi", data=["crates/hirsel-llvm/Cargo.toml"], selection=["core::target_tests::linux_c_results_execute_with_mixed_fields_padding_and_hfas", "core::tests::lazy_component_preserves_exact_core_objects", "--exact"]))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-failure", data=Raw('glob(["crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-llvm/Cargo.toml"]'), selection=["core::target_tests::checked_arithmetic_preserves_status_context_and_cause_copies", "--exact"]))
-    out.append("\n" + call("hirsel_core_runtime_archives", name="core-llvm-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_llvm_runtime_fixture.a"))
+    out.append("\n" + call("hirsel_core_runtime_archives", name="core-llvm-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_llvm_runtime_fixture.a", shipped=False))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-runtime", data=Raw('glob(["core/core/**", "core/front/cases/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**"]) + ["crates/hirsel-llvm/Cargo.toml"]'), selection=["core::tests::aarch64_memory_custody_and_calls_match_the_evaluator", "core::tests::aarch64_caller_sites_follow_core_generated_direct_and_indirect_inheritance", "core::tests::aarch64_consuming_growth_keeps_the_carrier_and_original_payer_on_refusal", "core::tests::aarch64_consuming_growth_host_memory_refusal_is_a_reported_run_stop", "core::tests::aarch64_carrier_twins_match_the_evaluator_in_program_builds", "core::tests::aarch64_cancelled_child_inside_isolate_passes_through_and_refunds_cell", "core::tests::host_abi::aarch64_c_boundary_poison_bits", "--exact", "--ignored", "--nocapture"], runtime="//:core-llvm-runtime-fixtures[aarch64]"))
 
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-program-llvm-aarch64-runtime", data=Raw('glob(["core/core/**", "core/front/**", "crates/hirsel-core-rt/include/**"])'), selection=["aarch64_", "--ignored", "--nocapture"], runtime="//:core-llvm-runtime-fixtures[aarch64]", binary="hirsel-core-program-tests-test-llvm_source", cwd="crates/hirsel-core-program-tests"))
@@ -701,12 +701,12 @@ def first_party(meta: dict) -> str:
         manifest_dir="crates/hirsel-llvm", package_name="hirsel-llvm", version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-scripted-runtime-pic", library=":hirsel-core-rt-native-fixture"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-scripted-record-runtime-pic", library=":hirsel-core-rt-record-native-fixture"))
-    out.append("\n" + call("hirsel_core_runtime_archives", name="core-scripted-runtime-archives", library=":hirsel-core-rt-native-fixture", archive_name="libhirsel_core_rt.a"))
+    out.append("\n" + call("hirsel_core_runtime_archives", name="core-scripted-runtime-archives", library=":hirsel-core-rt-native-fixture", archive_name="libhirsel_core_rt.a", shipped=False))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-native-runtime-fixture-pic", library=":core-llvm-runtime-fixture"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-runtime-pic", library=":hirsel-core-rt"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-record-runtime-pic", library=":hirsel-core-rt-record"))
     out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-observed-runtime-pic", library=":hirsel-core-rt-observed"))
-    out.append("\n" + call("hirsel_core_runtime_archives", name="core-cranelift-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_cranelift_fixture.a"))
+    out.append("\n" + call("hirsel_core_runtime_archives", name="core-cranelift-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_cranelift_fixture.a", shipped=False))
     if unguarded:
         raise SystemExit("these binary and test roots do not install the memory guard; add "
                          "`hirsel_guard::install!();` (`#[cfg(test)]` in a library): " + ", ".join(unguarded))

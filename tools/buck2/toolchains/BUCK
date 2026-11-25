@@ -7,10 +7,35 @@ load(":llvm.bzl", "llvm_cxx_tools", "llvm_tree", "source_files")
 load(":rust.bzl", "rust_toolchain", "trace_std")
 
 # Both trees are ignored local state that tools/buck2/bootstrap.py installs.
-RUST_FILES = {p.removeprefix("rust-files/"): p for p in glob(["rust-files/**"], exclude = ["rust-files/lib/rustlib/src/**"])}
+RUST_FILES = {p.removeprefix("rust-files/"): p for p in glob(["rust-files/**"], exclude = [
+    "rust-files/lib/rustlib/src/**",
+    "rust-files/lib/rustlib/aarch64-apple-darwin/**",
+])}
 RUST_TARGET = select({
-    "prelude//cpu:arm64": "aarch64-unknown-linux-gnu",
-    "DEFAULT": "x86_64-unknown-linux-gnu",
+    "prelude//os:macos": "aarch64-apple-darwin",
+    "DEFAULT": select({
+        "prelude//cpu:arm64": "aarch64-unknown-linux-gnu",
+        "DEFAULT": "x86_64-unknown-linux-gnu",
+    }),
+})
+
+# aarch64-apple-darwin is cross-built for the runtime archives only
+# (root//tools/buck2:runtime-darwin). Its floor is the link kit's DARWIN_FLOOR
+# (tools/buck2/native-toolchain/link_kit.py): rustc stamps it into every object
+# through MACOSX_DEPLOYMENT_TARGET, clang through its --target.
+DARWIN_FLOOR = "26.0"
+
+# The Darwin target's std (toolchain-lock.json rust-std-darwin) joins only the
+# Darwin sysroot. Every Darwin build is a runtime build, whose std is
+# :trace-std, so the prebuilt libstd is left out and only its dependencies remain.
+DARWIN_STD = {p.removeprefix("rust-files/"): p for p in glob(
+    ["rust-files/lib/rustlib/aarch64-apple-darwin/lib/*"],
+    exclude = ["rust-files/lib/rustlib/aarch64-apple-darwin/lib/libstd-*"],
+)}
+
+TARGET_STD = select({
+    "prelude//os:macos": DARWIN_STD,
+    "DEFAULT": {},
 })
 
 trace_std(
@@ -18,8 +43,12 @@ trace_std(
     srcs = RUST_FILES,
     std_sources = "rust-files/lib/rustlib/src/rust/library",
     target_triple = RUST_TARGET,
+    target_std = TARGET_STD,
     script = "raw_backtrace_std.py",
-    panic_image = "panic_image.rs",
+    panic_image = select({
+        "prelude//os:macos": "panic_image_darwin.rs",
+        "DEFAULT": "panic_image.rs",
+    }),
     exec_compatible_with = ["root//tools/buck2:pool_1_1048576"],
 )
 
@@ -27,6 +56,11 @@ rust_toolchain(
     name = "rust",
     srcs = RUST_FILES,
     target_triple = RUST_TARGET,
+    target_std = TARGET_STD,
+    deployment_target = select({
+        "prelude//os:macos": DARWIN_FLOOR,
+        "DEFAULT": None,
+    }),
     runtime_std = select({
         "root//tools/buck2:profile_runtime": ":trace-std",
         "DEFAULT": None,
@@ -84,12 +118,26 @@ llvm_cxx_tools(
     arm = "root//tools/buck2/native-toolchain:arm",
 )
 
+# Darwin C: the pinned clang for the floor, with no SDK. Its only system header
+# is darwin-include's TargetConditionals.h; libSystem's names come from the link
+# kit's stubs at link time.
+llvm_cxx_tools(
+    name = "cxx_tools_darwin",
+    tree = ":clang",
+    fixed_build_date = "fixed-build-date",
+    darwin_target = "arm64-apple-macos" + DARWIN_FLOOR,
+    darwin_include = "darwin-include",
+)
+
 cxx_tools_info_toolchain(
     name = "cxx",
-    # Choose before the tools' execution transition discards the target CPU.
+    # Choose before the tools' execution transition discards the target OS and CPU.
     cxx_tools_info = select({
-        "prelude//cpu:arm64": ":cxx_tools_arm",
-        "DEFAULT": ":cxx_tools",
+        "prelude//os:macos": ":cxx_tools_darwin",
+        "DEFAULT": select({
+            "prelude//cpu:arm64": ":cxx_tools_arm",
+            "DEFAULT": ":cxx_tools",
+        }),
     }),
     visibility = ["PUBLIC"],
 )

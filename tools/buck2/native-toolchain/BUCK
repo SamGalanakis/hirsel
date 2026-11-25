@@ -37,6 +37,7 @@ unpack_toolchain(
 export_file(name = "unpack.py")
 export_file(name = "link_kit.py", visibility = ["PUBLIC"])
 export_file(name = "darwin_sync_ban.py", visibility = ["PUBLIC"])
+export_file(name = "darwin_import_law.py", visibility = ["PUBLIC"])
 toolchain_proof(name = "proof", tools = [":llvm", ":arm", ":qemu", ":valgrind", ":kit"], script = "proof.sh")
 export_file(name = "environment.tsv", visibility = ["PUBLIC"])
 

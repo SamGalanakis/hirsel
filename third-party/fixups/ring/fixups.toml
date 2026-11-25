@@ -1,5 +1,5 @@
 # ring 0.17.14 build.rs RING_SRCS and ASM_TARGETS, using the published
-# pregenerated ELF assembly and symbol-prefix headers (no Perl/build script).
+# pregenerated ELF and Mach-O (ios64) assembly and symbol-prefix headers (no Perl/build script).
 buildscript.run = false
 
 [['cfg(target_arch = "x86_64")'.cxx_library]]
@@ -39,7 +39,7 @@ headers = ["include/**/*.h", "crypto/**/*.h", "third_party/fiat/**/*.h", "pregen
 include_paths = ["include", "pregenerated"]
 compiler_flags = ["-O3", "-std=c11", "-fvisibility=hidden", "-DNDEBUG"]
 
-[['cfg(target_arch = "aarch64")'.cxx_library]]
+[['cfg(all(target_arch = "aarch64", target_os = "linux"))'.cxx_library]]
 name = "ring-core-aarch64"
 srcs = [
   "crypto/curve25519/curve25519.c",
@@ -71,3 +71,38 @@ include_paths = ["include", "pregenerated"]
 # ring build.rs configure_cc: clang-only mode without a target sysroot.
 # Its crypto/internal.h uses portable memory routines; clang supplies stdint.
 compiler_flags = ["--target=aarch64-unknown-linux-gnu", "-nostdlibinc", "-DRING_CORE_NOSTDLIBINC=1", "-O3", "-std=c11", "-fvisibility=hidden", "-DNDEBUG"]
+
+# The Darwin runtime archives (tools/buck2/defs.bzl RUNTIME_TARGETS): RING_SRCS
+# for aarch64 with ASM_TARGETS' Apple perlasm format, ios64. The toolchain's
+# Darwin clang has no SDK (tools/buck2/toolchains/BUCK cxx_tools_darwin), so
+# ring builds as configure_cc's sysroot-less mode does.
+[['cfg(all(target_arch = "aarch64", target_os = "macos"))'.cxx_library]]
+name = "ring-core-aarch64-darwin"
+srcs = [
+  "crypto/curve25519/curve25519.c",
+  "crypto/fipsmodule/aes/aes_nohw.c",
+  "crypto/fipsmodule/bn/montgomery.c",
+  "crypto/fipsmodule/bn/montgomery_inv.c",
+  "crypto/fipsmodule/ec/ecp_nistz.c",
+  "crypto/fipsmodule/ec/gfp_p256.c",
+  "crypto/fipsmodule/ec/gfp_p384.c",
+  "crypto/fipsmodule/ec/p256-nistz.c",
+  "crypto/fipsmodule/ec/p256.c",
+  "crypto/limbs/limbs.c",
+  "crypto/mem.c",
+  "crypto/poly1305/poly1305.c",
+  "pregenerated/aesv8-armx-ios64.S",
+  "pregenerated/aesv8-gcm-armv8-ios64.S",
+  "pregenerated/armv8-mont-ios64.S",
+  "pregenerated/chacha-armv8-ios64.S",
+  "pregenerated/chacha20_poly1305_armv8-ios64.S",
+  "pregenerated/ghash-neon-armv8-ios64.S",
+  "pregenerated/ghashv8-armx-ios64.S",
+  "pregenerated/p256-armv8-asm-ios64.S",
+  "pregenerated/sha256-armv8-ios64.S",
+  "pregenerated/sha512-armv8-ios64.S",
+  "pregenerated/vpaes-armv8-ios64.S"
+]
+headers = ["include/**/*.h", "crypto/**/*.h", "third_party/fiat/**/*.h", "pregenerated/**/*.h"]
+include_paths = ["include", "pregenerated"]
+compiler_flags = ["-DRING_CORE_NOSTDLIBINC=1", "-O3", "-std=c11", "-fvisibility=hidden", "-DNDEBUG"]

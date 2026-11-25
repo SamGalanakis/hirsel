@@ -23,6 +23,10 @@ import rust_environment
 
 FIRST_PARTY = {'hirsel_library', 'hirsel_binary', 'hirsel_test', 'hirsel_build_script'}
 EXTERNAL = {'third_party_rust_library', 'third_party_rust_binary', 'third_party_buildscript_run'}
+# Reindeer platforms (third-party/reindeer.toml) that only the runtime archives
+# build for: Linux cross-builds the Darwin runtime (tools/buck2/defs.bzl
+# RUNTIME_TARGETS), and nothing else is configured for Darwin.
+CROSS_ONLY_PLATFORMS = {'macos-arm64'}
 
 
 class PlatformValue:
@@ -323,12 +327,25 @@ class Resolution:
                     if platform in variants:
                         raise ValueError(f'duplicate Cargo compilation context: {role(unit)} on {platform}')
                     variants[platform] = keys[index]
-        families = {}
-        for context, variants in roles.items():
+        def family(variants):
             # Even identical Rust edges can have different native fixups on
             # host and target. Do not let a host unit overwrite target variants.
-            families[context] = hashlib.sha256(
-                json.dumps(['target', sorted(variants.items())]).encode()).hexdigest()
+            return hashlib.sha256(json.dumps(['target', sorted(variants.items())]).encode()).hexdigest()
+
+        # A family is named by its variants on the platforms that build the
+        # whole workspace. A cross-only platform's variant joins the family it
+        # pairs with, so adding one renames no Linux target. Where two families
+        # agree on every naming platform but not on a cross-only one, both are
+        # named by all their variants; a family seen only cross-only is named
+        # by that variant.
+        named = {}
+        for context, variants in roles.items():
+            naming = {p: k for p, k in variants.items() if p not in CROSS_ONLY_PLATFORMS} or variants
+            named.setdefault(family(naming), set()).add(family(variants))
+        families = {}
+        for context, variants in roles.items():
+            naming = family({p: k for p, k in variants.items() if p not in CROSS_ONLY_PLATFORMS} or variants)
+            families[context] = naming if len(named[naming]) == 1 else family(variants)
         result = {}
         for platform, graph in graphs.items():
             keys, units = projections[platform]

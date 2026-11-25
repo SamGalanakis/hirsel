@@ -18,6 +18,12 @@ execution-platform = true
 target = "aarch64-unknown-linux-gnu"
 execution-platform = false
 
+# Only the Darwin runtime archives build here (tools/buck2/cargo_units.py
+# CROSS_ONLY_PLATFORMS).
+[platform.macos-arm64]
+target = "aarch64-apple-darwin"
+execution-platform = false
+
 [buck]
 file_name = "BUCK"
 platform_compatibility_on_all_targets = true

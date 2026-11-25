@@ -217,3 +217,10 @@ pub(crate) fn background_thread() {
     // SAFETY: plain syscall on the calling thread with a valid parameter.
     unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &idle) };
 }
+
+/// The CPU this thread is running on, for the unit observer's trace lines.
+#[cfg(feature = "testing")]
+pub(crate) fn cpu() -> u32 {
+    // SAFETY: sched_getcpu takes no pointers and has no program-visible effect.
+    unsafe { libc::sched_getcpu() as u32 }
+}

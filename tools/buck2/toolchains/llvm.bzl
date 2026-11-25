@@ -32,6 +32,16 @@ def _tools(ctx):
         )
         clang = cmd_args(clang, flags)
         clangxx = cmd_args(clangxx, flags)
+    if ctx.attrs.darwin_target:
+        # No SDK: -nostdlibinc keeps the build host's headers out, and the one
+        # Apple header the runtime's C needs is darwin_include's.
+        flags = cmd_args(
+            "--target=" + ctx.attrs.darwin_target,
+            "-nostdlibinc",
+            cmd_args("-isystem", ctx.attrs.darwin_include),
+        )
+        clang = cmd_args(clang, flags)
+        clangxx = cmd_args(clangxx, flags)
     return [
         DefaultInfo(),
         CxxToolsInfo(
@@ -54,5 +64,7 @@ def _tools(ctx):
 llvm_cxx_tools = rule(impl = _tools, attrs = {
     "tree": attrs.exec_dep(),
     "arm": attrs.option(attrs.exec_dep(), default = None),
+    "darwin_target": attrs.option(attrs.string(), default = None),
+    "darwin_include": attrs.option(attrs.source(allow_directory = True), default = None),
     "fixed_build_date": attrs.source(),
 })

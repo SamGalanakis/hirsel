@@ -316,3 +316,11 @@ pub(crate) fn background_thread() {
     // SAFETY: affects only the calling thread.
     unsafe { libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG) };
 }
+
+/// The CPU this thread is running on, for the unit observer's trace lines:
+/// `u32::MAX`, the observer's "not recorded", until pthread_cpu_number_np is on
+/// the libSystem allowlist.
+#[cfg(feature = "testing")]
+pub(crate) fn cpu() -> u32 {
+    u32::MAX
+}

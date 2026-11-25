@@ -67,8 +67,7 @@ pub(super) fn enabled() -> bool {
 }
 
 fn cpu() -> u32 {
-    // SAFETY: sched_getcpu takes no pointers and has no program-visible effect.
-    unsafe { libc::sched_getcpu() as u32 }
+    crate::host::sys::cpu()
 }
 
 pub(super) fn queued(unit: &Unit) {

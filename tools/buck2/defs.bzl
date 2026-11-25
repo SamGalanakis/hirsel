@@ -744,9 +744,20 @@ def hirsel_build_script(name, crate_root, srcs, deps, inputs, features, manifest
     )
 
 RUNTIME_TARGETS = {
+    "aarch64-apple-darwin": "root//tools/buck2:runtime-darwin",
     "aarch64-unknown-linux-gnu": "root//tools/buck2:runtime-aarch64",
     "x86_64-unknown-linux-gnu": "root//tools/buck2:runtime-x86_64",
 }
+
+def runtime_target_key(triple):
+    """A runtime target's name in aliases and sub-targets.
+
+    Linux targets keep their architecture, so `[x86_64]` and `[aarch64]` mean
+    Linux; any other target is named by its whole triple.
+    """
+    if triple.endswith("-unknown-linux-gnu"):
+        return triple.split("-")[0]
+    return triple
 
 def _pic_staticlib_archive(library):
     # The prelude's staticlib subtarget requests a non-PIC archive. Its native
@@ -810,14 +821,17 @@ _pic_staticlib = rule(
 def hirsel_pic_staticlib(name, library):
     _pic_staticlib(name = name, library = library, visibility = ["PUBLIC"])
 
-def hirsel_core_runtime_archives(name, library, archive_name):
-    """The Core runtime, in its own archive namespace on both targets.
+def hirsel_core_runtime_archives(name, library, archive_name, shipped = True):
+    """The Core runtime, in its own archive namespace on every runtime target.
 
-    Use the library's Cargo-resolved dependencies.
+    Use the library's Cargo-resolved dependencies. A test fixture's archives
+    (`shipped = False`) link only into tests, so the Darwin import law, which
+    holds what a shipped program may import, does not cover them; the Darwin
+    sync ban covers every archive.
     """
     archives = {}
     for triple, platform in RUNTIME_TARGETS.items():
-        configured = name + "-" + triple.split("-")[0]
+        configured = name + "-" + runtime_target_key(triple)
         native.configured_alias(name = configured, actual = library, platform = platform)
         archives[triple] = ":" + configured
     _core_runtime_archives(name = name, archives = archives, archive_name = archive_name,
@@ -830,11 +844,19 @@ def hirsel_core_runtime_archives(name, library, archive_name):
             request = [str(value) for value in test_request("darwin-sync-ban")],
             exec_compatible_with = [budget_constraint(test_budget_name("darwin-sync-ban"))],
         )
+    if darwin and shipped:
+        _darwin_import_law(
+            name = name + "-darwin-import-law", archives = ":" + name,
+            paths = [triple + "/" + archive_name for triple in darwin],
+            request = [str(value) for value in test_request("darwin-import-law")],
+            exec_compatible_with = [budget_constraint(test_budget_name("darwin-import-law"))],
+        )
 
-def _darwin_sync_ban_impl(ctx):
+def _darwin_law(ctx, kit):
+    # A law over the Darwin archives: `<law> KIT LLVM ARCHIVE...`.
     tree = ctx.attrs.archives[DefaultInfo].default_outputs[0]
     command = cmd_args(
-        "python3", ctx.attrs._law, ctx.attrs._kit, ctx.attrs._llvm[DefaultInfo].default_outputs[0],
+        "python3", ctx.attrs._law, kit, ctx.attrs._llvm[DefaultInfo].default_outputs[0],
         [cmd_args(tree, "/", path, delimiter = "") for path in ctx.attrs.paths],
     )
     return [DefaultInfo(), ExternalRunnerTestInfo(
@@ -848,7 +870,7 @@ def _darwin_sync_ban_impl(ctx):
 # archive references fsync or fdatasync. It runs on Linux over the archive
 # itself, so it holds for members no Linux test links.
 _darwin_sync_ban = rule(
-    impl = _darwin_sync_ban_impl,
+    impl = lambda ctx: _darwin_law(ctx, ctx.attrs._kit),
     attrs = {
         "archives": attrs.dep(),
         "paths": attrs.list(attrs.string()),
@@ -860,13 +882,29 @@ _darwin_sync_ban = rule(
     },
 )
 
+# The Darwin import law (macOS S7): each Darwin runtime archive, linked from its
+# `_hirsel*` roots with -dead_strip against the link kit's stubs, imports only
+# names on Hirsel's Darwin allowlists. It runs on Linux with the kit's Mach-O
+# ld.lld, so a Darwin import is checked before any Mac links one.
+_darwin_import_law = rule(
+    impl = lambda ctx: _darwin_law(ctx, ctx.attrs._kit[DefaultInfo].default_outputs[0]),
+    attrs = {
+        "archives": attrs.dep(),
+        "paths": attrs.list(attrs.string()),
+        "request": attrs.list(attrs.string()),
+        "_law": attrs.source(default = "//tools/buck2/native-toolchain:darwin_import_law.py"),
+        "_kit": attrs.dep(default = "//tools/buck2/native-toolchain:kit"),
+        "_llvm": attrs.dep(default = "//tools/buck2/native-toolchain:llvm"),
+    },
+)
+
 def _core_runtime_archives_impl(ctx):
     entries = {}
     views = {}
     for triple, dep in ctx.attrs.archives.items():
         archive = _runtime_without_debug(ctx, dep, triple + "/" + ctx.attrs.archive_name)
         entries[triple + "/" + ctx.attrs.archive_name] = archive
-        views[triple.split("-")[0]] = [DefaultInfo(default_output = archive)]
+        views[runtime_target_key(triple)] = [DefaultInfo(default_output = archive)]
     return [DefaultInfo(default_output = ctx.actions.symlinked_dir(ctx.label.name, entries), sub_targets = views)]
 
 _core_runtime_archives = rule(

@@ -30,6 +30,7 @@ REQUIRED = (
     "bin/rustfmt",
     "lib/rustlib/x86_64-unknown-linux-gnu/lib",
     "lib/rustlib/aarch64-unknown-linux-gnu/lib",
+    "lib/rustlib/aarch64-apple-darwin/lib",
     "lib/rustlib/src/rust/library/std/src/lib.rs",
 )
 

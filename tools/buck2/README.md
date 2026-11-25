@@ -380,14 +380,31 @@ would change consumer input digests under an identical build-script action key.
 `//:hirsel-core-rt-archives` builds the core runtime's static PIC archive for each
 target from Buck2's `RustLinkInfo` and strips its debug sections
 (`runtime_parts.py`), so compiled Hirsel programs link one self-contained
-`libhirsel_core_rt.a`. Its views `[x86_64]` and `[aarch64]` hold one archive each;
-the aggregate holds both for the workspace build and the toolchain bundle.
+`libhirsel_core_rt.a`. Its views `[x86_64]` and `[aarch64]` hold one Linux archive
+each and `[aarch64-apple-darwin]` the macOS one (`RUNTIME_TARGETS` in `defs.bzl`);
+the aggregate holds all three for the workspace build, and the toolchain bundle
+takes the two Linux views.
+
+The Darwin archives are cross-built here, in `//tools/buck2:runtime-darwin`, and
+nothing else is configured for Darwin: third-party crates build for it through
+Reindeer's `macos-arm64` platform, which `cargo_units.py` keeps out of Linux
+target names (`CROSS_ONLY_PLATFORMS`). Two laws run on Linux over every Darwin
+archive set. `<set>-darwin-sync-ban` refuses a member that references `fsync` or
+`fdatasync` (STORE-SPEC §3.3c). `<set>-darwin-import-law` links the archive from
+its `_hirsel*` roots with `-dead_strip` against the link kit's stubs, so a
+reachable import off `tools/native-toolchain/darwin/*.symbols` fails the link.
 
 ## Toolchains and execution
 
-- Rust: the official 1.99.0 components (rustc, std for x86-64 and AArch64,
-  clippy, rustfmt), byte-identical to the rustup ones, from
-  `hermeticbuild/rust-redist`.
+- Rust: the official 1.99.0 components (rustc, std for x86-64 and AArch64
+  Linux and AArch64 macOS, clippy, rustfmt), byte-identical to the rustup ones,
+  from `hermeticbuild/rust-redist`. Only the Darwin sysroot holds the macOS
+  std, without its prebuilt libstd: every Darwin build is a runtime build, whose
+  std is `toolchains//:trace-std`. Darwin rustc runs with
+  `MACOSX_DEPLOYMENT_TARGET` at the link kit's floor (26.0).
+- Darwin C: the pinned clang with `--target=arm64-apple-macos26.0` and no SDK
+  (`cxx_tools_darwin`); its one Apple header is Hirsel's
+  `toolchains/darwin-include/TargetConditionals.h`.
 - C and linking: clang 23.1.5 from the pinned LLVM tree
   (`tools/native-toolchain/llvm-23.lock`), built in manylinux_2_28. The tree
   contains stock libLLVM for the build tools and the optimized engine for Hirsel.

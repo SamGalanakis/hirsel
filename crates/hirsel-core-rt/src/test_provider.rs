@@ -58,6 +58,11 @@ pub mod crash {
 
     struct Damage(u64);
 
+    /// A damage seed with this bit set names one explicit subset of a Direct
+    /// write's candidate sectors: bit i of the low 62 bits lands candidate i.
+    /// Seeds without it keep their patterns (none, all, first, last, alternate).
+    pub const SECTOR_SUBSET: u64 = 1 << 62;
+
     /// What a damaged restart kept of one file's pending bytes.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Image {
@@ -76,10 +81,11 @@ pub mod crash {
             z ^ (z >> 31)
         }
 
-        fn file(&mut self, durable: &mut Vec<u8>, live: &[u8], direct: Option<u64>) {
+        /// Returns the number of candidate sectors of a Direct file.
+        fn file(&mut self, durable: &mut Vec<u8>, live: &[u8], direct: Option<u64>) -> usize {
             const SECTOR: usize = 512;
             if durable == live {
-                return;
+                return 0;
             }
             if let Some(mask) = direct {
                 // An O_DIRECT write lands as any subset of its sectors, below
@@ -100,6 +106,7 @@ pub mod crash {
                 let mut end = old_len;
                 for (index, &at) in candidates.iter().enumerate() {
                     let lands = match mask {
+                        _ if mask & SECTOR_SUBSET != 0 => index < 62 && mask >> index & 1 == 1,
                         0 => false,
                         1 => true,
                         2 => index == 0,
@@ -115,7 +122,7 @@ pub mod crash {
                 }
                 image.truncate(end);
                 *durable = image;
-                return;
+                return candidates.len();
             }
             let pending = &live[durable.len()..];
             let (written, zero_fill) = if pending.is_empty() {
@@ -144,6 +151,7 @@ pub mod crash {
             if zero_fill {
                 durable.resize(durable_len + pending.len(), 0);
             }
+            0
         }
     }
 
@@ -256,8 +264,9 @@ pub mod crash {
         }
 
         /// Returns, for each inode whose pending bytes were damaged, whether
-        /// its image kept the old bytes, took the new ones, or a mix.
-        pub fn restart_damaged(&mut self, cut: u64, seed: u64) -> Vec<Image> {
+        /// its image kept the old bytes, took the new ones, or a mix, and for
+        /// a Direct inode its candidate sector count.
+        pub fn restart_damaged(&mut self, cut: u64, seed: u64) -> Vec<(Image, Option<usize>)> {
             let mut damage = Damage(seed ^ cut.wrapping_mul(0xd1342543de82ef95));
             let mut images = Vec::new();
             for change in std::mem::take(&mut self.pending_names) {
@@ -274,15 +283,23 @@ pub mod crash {
                     && durable != live
                 {
                     let old = durable.clone();
-                    let mask = self.direct.contains(&inode).then_some(seed % 5);
-                    damage.file(durable, live, mask);
-                    images.push(if *durable == old {
+                    let mask =
+                        self.direct
+                            .contains(&inode)
+                            .then_some(if seed & SECTOR_SUBSET != 0 {
+                                seed
+                            } else {
+                                seed % 5
+                            });
+                    let candidates = damage.file(durable, live, mask);
+                    let image = if *durable == old {
                         Image::Old
                     } else if durable == live {
                         Image::New
                     } else {
                         Image::Partial
-                    });
+                    };
+                    images.push((image, mask.map(|_| candidates)));
                 }
             }
             self.restart();

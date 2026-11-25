@@ -368,3 +368,62 @@ fn journal_test_segment(d: Dir) -> Result[(), ()] waits {
         Error(())
     }
 }
+
+// BL2 (case (a), L86, row 6a): wide groups over tail blocks. Each commit
+// puts TAIL_PUTS rows in one transaction, so its group spans several
+// 512-byte sectors of the block it starts in: behind the creation HEADER at
+// 72 for each segment's first group, behind acked frames for the rest, and
+// one group crosses into the next block so the tail is copied before the
+// group after it. The cut after commit 1 makes j-(n + 1)'s first group wide.
+// Commit k is head k + 2 and puts key 1000k + i = 1000k + i + 10.
+const TAIL_PUTS: u64 = 48
+
+const TAIL_COMMITS: u64 = 7
+
+fn journal_tail_write(take writer: Db, t: Table[u64, u64], out: Stdout) -> Result[(), Error] waits {
+    let mut db = take writer
+    for k in 0u64 .. TAIL_COMMITS {
+        let committed = run(mut db, None, (copy_env(t), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
+            for i in 0u64 .. TAIL_PUTS {
+                put(mut tx, call_env.0, 1000 * call_env.1 + i, 1000 * call_env.1 + i + 10)?
+            }
+            Ok(())
+        })?
+        let commit_ticket = match take committed {
+            Committed(done) => done.ticket,
+            _ => fail("BL2: a wide commit was refused")
+        }
+        durable(mut db, commit_ticket)?
+        journal_note(out, db.heads[0].head)
+        if k == 1 {
+            let cut = checkpoint(mut db)?
+            durable(mut db, cut)?
+            journal_note(out, db.heads[0].head)
+        }
+    }
+    close(take db)
+}
+
+// The commit law (acked ⊆ recovered ⊆ issued): the head lies in
+// [minimum, TAIL_COMMITS + 1] and holds exactly commits 0 .. head - 2.
+fn journal_tail_read(db: Db, t: Table[u64, u64], minimum: u64) -> Result[bool, Error] waits {
+    let head = db.heads[0].head
+    if head < 1 || head > TAIL_COMMITS + 1 || head < minimum {
+        return Ok(false)
+    }
+    let sh = view t
+    for k in 0u64 .. TAIL_COMMITS {
+        for i in 0u64 .. TAIL_PUTS {
+            let key = 1000 * k + i
+            let expected = if k + 2 <= head {
+                Some(key + 10)
+            } else {
+                None
+            }
+            if get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, key)? != expected {
+                return Ok(false)
+            }
+        }
+    }
+    Ok(true)
+}

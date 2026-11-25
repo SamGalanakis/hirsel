@@ -505,6 +505,9 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
     if let Some(fork_case) = journal_fork_case(scenario) {
         return journal_crash_fork_write(take db, t, out, fork_case)
     }
+    if scenario == "journal-tail" {
+        return journal_tail_write(take db, t, out)
+    }
     if scenario == "journal-place-idle" {
         if !journal_place_idle(d, tasks, mut db, t, Some(out))? {
             fail("exact-cap reply left a stale END while idle")
@@ -770,6 +773,11 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if let Some(fork_case) = journal_fork_case(scenario) {
         let valid = journal_crash_fork_read(mut db, t, minimum, fork_case)?
+        close(take db)?
+        return Ok(valid)
+    }
+    if scenario == "journal-tail" {
+        let valid = journal_tail_read(db, t, minimum)?
         close(take db)?
         return Ok(valid)
     }

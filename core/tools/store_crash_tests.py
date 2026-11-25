@@ -14,7 +14,7 @@ from case_progress import run_case
 SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches', 'migrate', 'install', 'read-only', 'window', 'index-build')
 WINDOW_FAILURES = ('window-chunk-failure', 'window-sync-failure')
 JOURNAL_SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place-split',
-                     'journal-place-idle', 'journal-fork')
+                     'journal-place-idle', 'journal-fork', 'journal-tail')
 # STORE-SPEC §3.3b: a Direct extension (creation block or window step) and a
 # Direct overwrite of the zeroed window keep any subset of their sectors; a
 # Durable END rewrite's one sector straddles EOF and keeps old or new bytes.
@@ -205,6 +205,49 @@ def sector_images(executable, scenarios, engine, env):
         if wanted not in seen[kind]:
             print(f'{engine} {kind}: no {wanted} image in {sorted(seen[kind])}', flush=True)
             failed += 1
+    return failed
+
+
+# test_provider.rs SECTOR_SUBSET: the seed's low bits name the candidate
+# sectors that land.
+SECTOR_SUBSET = 1 << 62
+TAIL_MAX_SECTORS = 12
+
+
+def tail_subsets(executable, scenario, engine, env):
+    """BL2 case (a): every subset of a group write's sectors over a tail block
+    recovers under the commit law. A tail block holds the HEADER (a segment's
+    first group, at 72) or acked frames, so a lost sector must not reach them."""
+    _, trace = count_cuts(executable, scenario, engine, dict(env, HIRSEL_W2_TRACE_CUTS='1'))
+    writes = [(int(cut), int(first)) for cut, _, first in
+              re.findall(r'^w2-direct ([0-9]+) (\S+) ([0-9]+)$', trace, re.M) if int(first) % 4096]
+    failed = 0
+    wide = {'fresh': 0, 'acked': 0}
+    runs = 0
+    for cut, first in writes:
+        probe = subprocess.run([str(executable), scenario, str(cut), '0', '0'], env=env, capture_output=True,
+                               text=True, timeout=300)
+        counts = re.findall(r'^w2-candidates ([0-9]+)$', probe.stderr, re.M)
+        if probe.returncode or len(counts) != 1 or not 1 <= int(counts[0]) <= TAIL_MAX_SECTORS:
+            print(f'{scenario} cut {cut}: candidate sectors {counts} (exit {probe.returncode})\n{probe.stderr}',
+                  flush=True)
+            failed += 1
+            continue
+        sectors = int(counts[0])
+        if sectors >= 3:
+            wide['fresh' if first % 4096 == 72 else 'acked'] += 1
+        for mask in range(1 << sectors):
+            command = [str(executable), scenario, str(cut), '0', str(SECTOR_SUBSET | mask)]
+            ran = subprocess.run(command, env=env, capture_output=True, text=True, timeout=300)
+            runs += 1
+            if ran.returncode:
+                print(f'{shlex.join(command)} exited {ran.returncode}\n{ran.stdout}{ran.stderr}', flush=True)
+                failed += 1
+    print(f'{engine} {scenario}: {runs} tail-block subsets over {len(writes)} group writes, wide {wide}',
+          flush=True)
+    if not all(wide.values()):
+        print(f'{engine} {scenario}: no wide group over a fresh and an acked tail block {wide}', flush=True)
+        failed += 1
     return failed
 
 

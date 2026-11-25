@@ -14,7 +14,7 @@ import tempfile
 
 from std_native import ROOT, Evaluator
 from store_tests import crash_inputs
-from store_crash_tests import JOURNAL_SCENARIOS as SCENARIOS, checked, late_writes, run_crashes, sector_images
+from store_crash_tests import JOURNAL_SCENARIOS as SCENARIOS, checked, late_writes, run_crashes, sector_images, tail_subsets
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_514_238_519
@@ -49,6 +49,8 @@ def provider_checks(executable, engine, env):
     # from each sector image it can leave.
     if sector_images(executable, ('journal', 'journal-rotate'), engine, env):
         raise RuntimeError(f'{engine}: sector images broke the commit law or were vacuous')
+    if tail_subsets(executable, 'journal-tail', engine, env):
+        raise RuntimeError(f'{engine}: a tail-block sector subset broke the commit law or none was wide')
     rows.append(dict(scenario='sector-images', passed=True))
     # Drift guard 4: syncs and END opens per §3.2, checked by store_crash.c.
     checked([str(executable), 'journal-sync-count', 'count'], env, engine=engine)

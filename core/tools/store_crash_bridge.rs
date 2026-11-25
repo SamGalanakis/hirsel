@@ -145,6 +145,19 @@ impl Bridge {
                 Op::SyncDir => "sync-dir",
             };
             eprintln!("w2-cut {} {kind}", self.events + 1);
+            // BL2: where a Direct write first changes the durable image. A
+            // group over a tail block starts past a block boundary (72 for a
+            // fresh segment's first group, behind its creation HEADER).
+            if let Op::Write(name, bytes) = &op
+                && self.fs.is_direct(name)
+                && let Some(inode) = self.fs.inode(name)
+            {
+                let durable = self.fs.durable_inode(inode);
+                let first = (0..bytes.len()).find(|&at| durable.get(at) != Some(&bytes[at]));
+                if let Some(first) = first {
+                    eprintln!("w2-direct {} {name} {first}", self.events + 1);
+                }
+            }
         }
         self.fs.issue(&op);
         if self.phase == 1 {
@@ -761,8 +774,11 @@ pub unsafe extern "C" fn store_crash_phase(p: *mut c_void, phase: u64) {
             assert!(bridge.late.as_ref().unwrap().pending.is_some());
         } else if let Some(seed) = bridge.damage_seed.take() {
             assert_eq!(bridge.events, bridge.cut, "damage cut was not reached");
-            for image in bridge.fs.restart_damaged(bridge.cut, seed) {
+            for (image, candidates) in bridge.fs.restart_damaged(bridge.cut, seed) {
                 eprintln!("w2-image {image:?}");
+                if let Some(count) = candidates {
+                    eprintln!("w2-candidates {count}");
+                }
             }
         } else if phase != 3 || !bridge.checkpoint_reopen {
             bridge.fs.restart();

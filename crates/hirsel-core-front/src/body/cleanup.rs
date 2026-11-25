@@ -495,13 +495,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n).unwrap();
         let after = self.value(Ty::Scalar(Scalar::U64));
+        // The head's `index < end` proves this fits; a failing add would be
+        // an implicit failure inside a caller's live frame obligation.
         self.inst(
-            Inst::Binary {
+            Inst::IntArith {
                 result: after,
-                op: BinaryOp::Add,
+                flag: None,
+                op: hirsel_core_ir::ArithOp::Add,
+                mode: hirsel_core_ir::ArithMode::Wrapping,
                 left: index,
                 right: one,
-                fail: None,
             },
             n,
         );

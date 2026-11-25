@@ -1,0 +1,23 @@
+type TakeWindow = TakeWindow(String, String)
+
+// `for take w in take ws` drops the windows a loop does not reach by walking the
+// rest after it (FAIL-12). Walking advances an index the head already proved below
+// the length, so it cannot overflow. Here the `break` leaves TakeWindow("f", "gh")
+// for that walk while the pushes into `counts` hold a frame obligation. Round 0 takes
+// "ab" and "cde", so `counts` is [2, 3] and the result is 2 + 3 = 5. A walk that
+// advanced with a failing add, given no failure edge, failed implicitly inside the
+// live obligation, and the evaluator would not run the function at all.
+// expect: run take_rest_in_frame() = 5
+fn take_rest_in_frame() -> u64 {
+    let mut ws: List[TakeWindow] = list.new()
+    list.push(mut ws, TakeWindow("ab", "cde"))
+    list.push(mut ws, TakeWindow("f", "gh"))
+    let mut counts: List[u64] = list.new()
+    for take w in take ws {
+        let TakeWindow(take name, take rest) = take w
+        list.push(mut counts, string.byte_len(name))
+        list.push(mut counts, string.byte_len(rest))
+        break
+    }
+    counts[0u64] + counts[1u64]
+}

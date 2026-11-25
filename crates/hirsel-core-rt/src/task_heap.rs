@@ -4,12 +4,14 @@
 //!
 //! Only the custodian changes open free lists. Foreign workers publish
 //! returned slots, and an outstanding slot pins its page until collection.
+mod dedicated;
 mod returns;
 pub(crate) mod slabs;
 
 use crate::{abi_layout::own_prefix, limit::Payer};
+use dedicated::DedicatedCache;
 use std::cell::{Cell, UnsafeCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::ptr::{self, NonNull};
@@ -80,8 +82,7 @@ pub(crate) fn purge() {
         let mut cache = heap.cache().lock().unwrap();
         cache.listed = false;
         cache.purge_slabs();
-        while !cache.dedicated.retained.is_empty() {
-            let oldest = cache.dedicated.remove_retained(0);
+        while let Some(oldest) = cache.dedicated.remove_oldest() {
             cache.dedicated.purge(oldest);
         }
     }
@@ -671,17 +672,6 @@ struct PageCache {
     listed: bool,
 }
 
-#[derive(Default)]
-struct DedicatedCache {
-    clean: VecDeque<PagePointer>,
-    /// Empty pages with resident backing, oldest first.
-    retained: VecDeque<PagePointer>,
-    retained_bytes: usize,
-    /// Backing that can be resident in live mappings, including reuse slack.
-    demand: usize,
-    peak_demand: usize,
-}
-
 impl State {
     const fn empty() -> Self {
         Self {
@@ -908,130 +898,6 @@ impl PageCache {
             // SAFETY: the cache exclusively owns these empty, unlisted slabs.
             unsafe { Page::dispose(page) };
         }
-    }
-}
-
-impl DedicatedCache {
-    /// When backing grows, return older stock above the live high-water mark.
-    /// Reusing a reservation can bring back a later phase of the same
-    /// workload, so leave room for its other extents.
-    #[inline(never)]
-    fn add_live(&mut self, from: usize, to: usize, grew: bool, reused_reservation: bool) {
-        self.demand = self.demand - from + to;
-        self.peak_demand = self.peak_demand.max(self.demand);
-        if !grew {
-            return;
-        }
-        let margin = if reused_reservation {
-            (self.peak_demand / 6).min(DEDICATED_REUSE_MARGIN)
-        } else {
-            0
-        };
-        while !self.retained.is_empty()
-            && self.demand + self.retained_bytes > self.peak_demand + margin
-        {
-            let oldest = self.remove_retained(0);
-            self.purge(oldest);
-        }
-    }
-
-    fn take(&mut self, class: Class) -> Option<PagePointer> {
-        let needed = class.stride.checked_next_multiple_of(page_bytes())?;
-        let fit = |page: PagePointer| {
-            // SAFETY: the heap owns these empty pages and their mappings.
-            let (backing, payload) = unsafe {
-                let page = page.as_ref();
-                (page.backing.dedicated(), (*page.slots.get()).first)
-            };
-            let extent = backing.extent(payload);
-            (extent >= needed
-                && payload.addr().get() & (class.align - 1) == 0
-                && backing.headroom(payload) >= own_prefix(class.kind))
-            .then(|| (backing.used.get(), backing.born.get(), backing.grown.get()))
-        };
-        // Preserve the reservation for a repeated growth sequence. Only
-        // extents that have not grown since their last purge can serve a
-        // different starting size. Among those, prefer the smallest resident
-        // fit, so buffers that cycle through varying sizes keep reusing their
-        // warm extents instead of evicting them for fresh ones.
-        let mut best = None;
-        let mut best_used = usize::MAX;
-        for (index, &page) in self.retained.iter().enumerate().rev() {
-            if let Some((used, born, grown)) = fit(page) {
-                if born == class.stride {
-                    best = Some(index);
-                    break;
-                }
-                if !grown
-                    && used >= needed
-                    && used < best_used
-                    && used / DEDICATED_REUSE_WASTE <= needed
-                {
-                    best = Some(index);
-                    best_used = used;
-                }
-            }
-        }
-        let page = if let Some(index) = best {
-            self.remove_retained(index)
-        } else {
-            let index = self
-                .clean
-                .iter()
-                .copied()
-                .position(|page| fit(page).is_some())?;
-            self.clean.swap_remove_back(index).unwrap()
-        };
-        // SAFETY: the page has been taken off the cache and has no live slots.
-        unsafe {
-            let header = page.as_ref();
-            let payload = (*header.slots.get()).first;
-            let backing = header.backing.dedicated();
-            if backing.extend(payload, class.stride) {
-                Some(page)
-            } else {
-                Page::destroy(page);
-                None
-            }
-        }
-    }
-
-    /// Move an emptied page's backing from live demand to retained stock.
-    fn retain(&mut self, page: PagePointer) {
-        // SAFETY: this heap owns the empty page, its mapping and its key.
-        let bytes = unsafe {
-            let page = page.as_ref();
-            page.backing.dedicated().backed((*page.slots.get()).first)
-        };
-        self.demand -= bytes;
-        self.retained_bytes += bytes;
-        self.retained.push_back(page);
-    }
-
-    fn remove_retained(&mut self, index: usize) -> PagePointer {
-        let page = self.retained.remove(index).unwrap();
-        // SAFETY: this heap exclusively owns the removed empty page.
-        self.retained_bytes -= unsafe {
-            let page = page.as_ref();
-            page.backing.dedicated().backed((*page.slots.get()).first)
-        };
-        page
-    }
-
-    fn purge(&mut self, page: PagePointer) {
-        // SAFETY: the heap owns this empty page and its separate descriptor.
-        let header = unsafe { page.as_ref() };
-        let payload = unsafe { (*header.slots.get()).first };
-        if !header.backing.dedicated().discard_used(payload) {
-            // SAFETY: the page is empty and detached from both queues.
-            unsafe { Page::destroy(page) };
-            return;
-        }
-        if self.clean.len() == EMPTY_DEDICATED_LIMIT {
-            // SAFETY: this removes the cache's only reference to the empty page.
-            unsafe { Page::destroy(self.clean.pop_front().unwrap()) };
-        }
-        self.clean.push_back(page);
     }
 }
 
@@ -1299,7 +1165,7 @@ impl Heap {
                 .dedicated
                 .clean
                 .into_iter()
-                .chain(cache.dedicated.retained)
+                .chain(cache.dedicated.retained.into_values())
                 .chain(cache.slabs)
             {
                 // SAFETY: detached from the cache, with no outstanding slots.

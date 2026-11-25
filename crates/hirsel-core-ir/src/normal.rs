@@ -55,6 +55,7 @@ pub(crate) fn decoded_closure_hash(
 pub const VERSION: u16 = 4;
 const BODY_MAGIC: &[u8] = b"HIRBODY\0\x04\x00";
 pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v4";
+pub const ANNEX_HASH_DOMAIN: &str = "hirsel.code-annex.v2";
 const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x02\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
@@ -628,7 +629,7 @@ impl Annex {
     }
 
     pub fn hash(&self) -> ContentHash {
-        ContentHash::of_parts("hirsel.code-annex.v2", [&self.encode()[..]])
+        ContentHash::of_parts(ANNEX_HASH_DOMAIN, [&self.encode()[..]])
     }
 }
 

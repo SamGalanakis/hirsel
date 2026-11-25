@@ -488,7 +488,10 @@ end. Decoding and re-encoding a body gives the same bytes. Its
 **body hash** is `H("hirsel.code-body.v4", body)`. Positions and hints go to the body's
 **annex** instead, in the body's order: each entry names a position of that body, and an annex
 whose entries do not match its body's instructions, terminators and calls in number and kind is
-malformed. The annex is hashed under `hirsel.code-annex.v1` and never enters an address.
+malformed. Each terminator's entry also says whether it is a source decision (a coverage site,
+[docs/coverage.md](../coverage.md)); only an anchored branch or switch can be one. The annex
+starts with `HIRANNEX`, a zero byte and its version 2 as a 16-bit little-endian number, is
+hashed under `hirsel.code-annex.v2` and never enters an address.
 
 **Groups.** Addresses are computed for each build from the whole reach of its program, after
 the reach walk, from each instance's body hash and the ordered identities of its slots. They are
@@ -543,7 +546,8 @@ The domains `hirsel.code-annex.v1`, `hirsel.code-group.v1`, `hirsel.code-address
 this section, and `hirsel.code-body.v3` by the 2026-11-22 version, which retires
 `hirsel.code-body.v2`; `hirsel.code-body.v4` by the 2026-11-25 version retires
 `hirsel.code-body.v3`. A change to the normal form or to a group's encoding takes a new version
-and a new domain. It never reuses an old one.
+and a new domain. It never reuses an old one. `hirsel.code-annex.v2` by the 2026-11-25
+version (coverage-gen-anchors-2579) retires `hirsel.code-annex.v1`.
 
 Version note (2026-11-21, code-address attacks): the traversal now follows every instruction's
 failure target; slots are the functions retained code can run, and type hooks are metadata;

@@ -340,8 +340,8 @@
     "reason": "macos-s9-target-consts-2508"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
-    "lines": 1303,
-    "raise_revision": 2,
+    "lines": 1304,
+    "raise_revision": 3,
     "reason": "coverage-gen-anchors-2579"
   },
   "crates/hirsel-core-ir/src/returnable.rs": {

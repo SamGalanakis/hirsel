@@ -144,7 +144,9 @@ today, so every arm is `yes` or `no`.
   `list.try_reserve`, `int.checked_add`, `int.narrow`), indexing and field reads, `==` on
   non-scalar values, and capacity and limit admissions. These keep their expression's
   anchor for debug lines and law rows, but are not decisions;
-- failure edges of steps, address checks, drops, SIMD, arithmetic and calls.
+- failure edges of steps, address checks, drops, SIMD, arithmetic and calls;
+- an `if` or `match` on a target constant (`target.os`, `target.arch`). It is lowered to a
+  switch on the target, and the arms other targets take are never reachable on this one.
 
 A failure the source handles appears as an arm of the `match` or `?` that handles it. A
 failure the source does not handle has no arm to cover.

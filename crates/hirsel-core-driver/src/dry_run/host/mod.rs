@@ -7,6 +7,6 @@ mod darwin;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
-pub(super) use darwin::clone_file;
+pub(super) use darwin::{clone_file, release_command};
 #[cfg(target_os = "linux")]
-pub(super) use linux::clone_file;
+pub(super) use linux::{clone_file, release_command};

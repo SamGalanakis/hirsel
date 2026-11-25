@@ -1495,8 +1495,8 @@ fn link_objects(
         link_mode,
     )?;
     let link_key = match assembly {
-        Some(assembly) => key("hirsel.recipe-final-link.v3", &assembly)?,
-        None => key("hirsel.core-executable.v9", &(build, entry_plan))?,
+        Some(assembly) => key("hirsel.recipe-final-link.v4", &assembly)?,
+        None => key("hirsel.core-executable.v10", &(build, entry_plan))?,
     };
     let store = Store::cas(&options.cas)?;
     let coverage = options

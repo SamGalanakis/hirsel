@@ -77,7 +77,7 @@ pub(super) fn emit(
     let net_rules = f.address(data.net_rules);
     let net_rules_len = f.constant((plan.net_rules.len() + plan.unix_roots.len()) as u64);
     let target_data = data::bytes(f.object, None, triple.as_bytes().to_vec(), 1)?;
-    let target = f.address(target_data);
+    let target_address = f.address(target_data);
     let target_len = f.constant(triple.len() as u64);
     let directory_ops = if plan.directories.is_empty() {
         f.constant(0)
@@ -157,6 +157,9 @@ pub(super) fn emit(
         .declare_data("hirsel_code_revision", Linkage::Import, false, false)
         .map_err(error)?;
     let revision = f.address(revision);
+    let launch_word = launch_config::emit(f.object, target.object_format(), plan.place)?;
+    let launch_word = f.address(launch_word);
+    let place = f.load(I64, launch_word, 0);
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -169,7 +172,7 @@ pub(super) fn emit(
         (abi::OS_CONFIG_PARAMETERS_LEN, parameters_len),
         (abi::OS_CONFIG_NET_RULES, net_rules),
         (abi::OS_CONFIG_NET_RULES_LEN, net_rules_len),
-        (abi::OS_CONFIG_TARGET, target),
+        (abi::OS_CONFIG_TARGET, target_address),
         (abi::OS_CONFIG_TARGET_LEN, target_len),
         (abi::OS_CONFIG_DIRECTORY_OPS, directory_ops),
         (abi::OS_CONFIG_PROCESS_OPS, process_ops),
@@ -198,7 +201,7 @@ pub(super) fn emit(
         ),
         (abi::OS_CONFIG_EXEC_OPS, exec_ops),
         (abi::OS_CONFIG_REVISION, revision),
-        (abi::OS_CONFIG_PLACE, f.constant(u64::from(plan.place))),
+        (abi::OS_CONFIG_PLACE, place),
     ] {
         f.store(value, config, offset);
     }

@@ -347,6 +347,55 @@ fn place_words_are_plain_arguments_to_a_program() {
 }
 
 #[test]
+#[ignore = "explicit native integration target"]
+fn dry_run_refuses_a_plain_program_without_running_it() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    std::fs::create_dir(&store).unwrap();
+    std::fs::write(store.join("LOCK"), []).unwrap();
+    let source = r#"pub fn main(output: Stderr) -> Result[(), Exit] waits {
+        result.unwrap(stderr.write(output, "plain program entered\n"))
+        Ok(())
+    }"#;
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted());
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = 1 << grant_kind("Stderr").unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &options).unwrap();
+    let direct = Command::new(&built.executable)
+        .arg("--hirsel-dry-run")
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(direct.status.success(), "{direct:?}");
+    assert_eq!(direct.stderr, b"plain program entered\n");
+
+    let (status, stdout, stderr) = process::tape_request(
+        &[
+            "dry-run".into(),
+            "--exe".into(),
+            built.executable.display().to_string(),
+            "--store".into(),
+            store.display().to_string(),
+        ],
+        dir.path(),
+    );
+    assert_eq!(status, Some(104), "{stdout}{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(
+        stderr,
+        format!("hirsel: {} is not a place\n", built.executable.display())
+    );
+}
+
+#[test]
 fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
     use crate::package_content::{archive_digest, hex};
     use hirsel_core_net::exec::{PinnedImage, Request};

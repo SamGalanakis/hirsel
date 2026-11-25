@@ -11,13 +11,14 @@ use std::{
     io::{self, Read, Seek},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 type Error = Box<dyn std::error::Error>;
 
 /// Exit status for a store held by a running writer, as `store backup` uses.
 const HELD: i32 = 75;
+const NOT_A_PLACE: i32 = 104;
 
 pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     let name = invocation.command.name;
@@ -59,6 +60,16 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     if name != "dry-run" && !invocation.arguments.is_empty() {
         return Err(format!("usage: hirsel {usage}").into());
     }
+    let executable = std::path::absolute(executable)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&executable)
+        .map_err(|error| format!("{}: {error}", executable.display()))?;
+    if !file.metadata()?.is_file() || !crate::native_entry::launch_config::is_place(&file) {
+        eprintln!("hirsel: {} is not a place", executable.display());
+        return Ok(NOT_A_PLACE);
+    }
     // A dry run and a verify read a clone and never write the store. A repair
     // writes it in place, so it needs the store stopped.
     let image = tempfile::tempdir()?;
@@ -79,7 +90,7 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     };
 
     let mut report = tempfile::tempfile()?;
-    let status = Command::new(std::path::absolute(executable)?)
+    let status = host::release_command(&file, &executable)
         .arg(flag)
         .arg(target)
         .args(invocation.arguments)

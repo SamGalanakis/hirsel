@@ -5,7 +5,12 @@ use std::{
     io,
     os::{fd::AsRawFd, unix::ffi::OsStrExt},
     path::Path,
+    process::Command,
 };
+
+pub(crate) fn release_command(_file: &File, executable: &Path) -> Command {
+    Command::new(executable)
+}
 
 /// Create `to` as a copy of `from`: an APFS clone (`fclonefileat`), else a
 /// byte copy into a new file, as Linux does without reflinks.

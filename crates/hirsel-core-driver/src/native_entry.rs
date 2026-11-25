@@ -19,6 +19,7 @@ mod adapter;
 mod code;
 mod data;
 mod foreign;
+pub(crate) mod launch_config;
 mod report;
 mod sites;
 mod start;

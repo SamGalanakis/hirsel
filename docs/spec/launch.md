@@ -147,7 +147,10 @@ from the first argument after the prefix, and only in a place: `--hirsel-dry-run
 `--hirsel-store-verify <dir>`<!-- doc-ref: external -->, `--hirsel-store-repair <dir>`<!-- doc-ref: external --> (launch word 20, below) and
 `--hirsel-prepare`<!-- doc-ref: external --> (below). The linker bakes a `place` bit into the executable's launch
 configuration when the program reaches the `runner` package, which holds every reader of these
-words. In an executable without it they are ordinary `Args`: the program keeps its own
+words. `hirsel dry-run`, `hirsel store verify --release` and `hirsel store repair --release` read
+the bit from the executable before touching the store or starting the program. If the bit is
+clear or absent, the command names the executable on stderr and exits 104. In a directly launched
+executable without the bit these words are ordinary `Args`: the program keeps its own
 directories and its standard output, and receives the words as written. A malformed private
 option in the prefix is refused before user code: the process writes `not started: ` and the
 reason to standard error and exits 103. A launch that gives `--hirsel-n-place`<!-- doc-ref: external -->

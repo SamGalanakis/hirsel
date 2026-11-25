@@ -155,7 +155,16 @@ A backup opens the store as its writer, so a store another process holds exits 7
 changed. A store a place serves is backed up through its host, which is not built yet. A
 restored store keeps its source's identity: restore replaces a lost store and does not clone one.
 An interrupted restore leaves a directory that no `open` accepts; remove it and run the restore
-again. Exit status: 0 done, 1 refused (the refusal is on stderr) or, for `verify DIR`, a scrub fault, 2 usage, 75 held. The `--release` forms exit as the release does when it refuses to start (nonzero, `store verify found N problems` on stderr).
+again. The `--release` forms exit as the release does when it refuses to start (nonzero,
+`store verify found N problems` on stderr).
+
+| Exit status | Meaning |
+|---|---|
+| 0 | Done |
+| 1 | Refused with a reason on stderr, or `verify DIR` found a scrub fault |
+| 2 | Usage |
+| 75 | A writer holds the store |
+| 104 | `dry-run` or a `--release` form refused the named executable because it is not a place |
 
 ## Coverage
 

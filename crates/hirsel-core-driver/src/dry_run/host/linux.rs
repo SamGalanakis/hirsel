@@ -1,5 +1,18 @@
 //! The driver's Linux host mechanisms.
-use std::{fs::File, io, os::fd::AsRawFd, path::Path};
+use std::{
+    fs::File,
+    io,
+    os::{fd::AsRawFd, unix::process::CommandExt},
+    path::Path,
+    process::Command,
+};
+
+/// Keep the checked image across an atomic replacement of its path.
+pub(crate) fn release_command(file: &File, executable: &Path) -> Command {
+    let mut command = Command::new(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    command.arg0(executable);
+    command
+}
 
 /// Create `to` as a copy of `from`: a reflink (`FICLONE`) where the file
 /// system shares extents, else a byte copy into the same new inode.

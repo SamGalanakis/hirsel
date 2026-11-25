@@ -1,0 +1,252 @@
+// RTC-5's control order and RTC-7's fence: the fence table, the tag check, and what
+// a revoke and a suspend do on a unit.
+// ---- RTC-7: the fence table and the tag check ----
+fn entry_of(r: Router, ri: u64, id: u64) -> Option[u64] {
+    for i in 0u64 .. list.len(r.rooms[ri].ids) {
+        if r.rooms[ri].ids[i] == id {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// Whether generation `g` of a participant of `room` is at or below its fence.
+pub fn fenced(r: Router, room: peer.RoomId, g: peer.Gen) -> bool {
+    let Some(ri) = room_at(r, room) else {
+        return false
+    }
+    let Gen(id: id, epoch: epoch) = g
+    let Some(e) = entry_of(r, ri, id) else {
+        return false
+    }
+    match r.rooms[ri].fenced[e] {
+        Some(f) => epoch <= f,
+        None => false,
+    }
+}
+
+fn suspended(r: Router, room: peer.RoomId) -> bool {
+    match room_at(r, room) {
+        Some(ri) => r.rooms[ri].suspended,
+        None => false,
+    }
+}
+
+/// RTC-7's check of one queue entry: its `src` or `dst` is fenced, or its room is
+/// suspended and it carries a `src` (media or repair).
+pub fn dead(r: Router, t: peer.Tag) -> bool {
+    if fenced(r, t.room, t.dst) {
+        return true
+    }
+    match t.src {
+        Some(g) => fenced(r, t.room, g) || suspended(r, t.room),
+        None => false,
+    }
+}
+
+/// Remove every entry of `out` that `dead` names (RTC-7 step 2, and the send step's
+/// recheck). The bytes stay where they are; only the entries go. It answers how many
+/// went.
+pub fn purge(r: Router, mut out: peer.Outbox) -> u64 {
+    let n = list.len(out.pkts)
+    let mut kept = 0u64
+    for i in 0u64 .. n {
+        if !dead(r, out.tags[i]) {
+            if kept != i {
+                out.pkts[kept] = out.pkts[i]
+                out.tags[kept] = out.tags[i]
+            }
+            kept += 1
+        }
+    }
+    list.truncate(mut out.pkts, kept)
+    list.truncate(mut out.tags, kept)
+    n - kept
+}
+
+// ---- The control order ----
+/// The unit that applies `c` first: the home of the session it touches. A change
+/// that touches no session goes first to this unit.
+pub fn first(r: Router, c: Change) -> u16 {
+    let (room, who) = match c {
+        Admit(who: _, home: h) => return h,
+        Publish(room: room, who: w, ..) => (room, w),
+        Subscribe(room: room, who: w, ..) => (room, w),
+        Retarget(room: room, who: w, ..) => (room, w),
+        Rebind(room: room, who: w, ..) => (room, w),
+        Unsubscribe(room: room, who: w, ..) => (room, w),
+        Leave(room: room, who: w) => (room, w),
+        _ => return r.unit,
+    }
+    match seat_at(r, room, who) {
+        Some(si) => r.roster[si].home,
+        None => r.unit,
+    }
+}
+
+/// Apply one change of the control order to this unit. The first unit checks it
+/// in full; once it answers `Ok`, every other unit applies the same change, with a
+/// publication's `Shape` taken from the first unit's answer.
+pub fn apply(mut r: Router, now: u64, take c: Change, mut out: peer.Outbox) -> Result[Answer, RouterError] {
+    match take c {
+        Open(room: room, limits: limits) => {
+            open(mut r, room, limits)?
+            Ok(Done)
+        },
+        // A refused admission drops the session its home unit parked for it, so a
+        // refused or fenced join leaves nothing that answers its credentials.
+        Admit(who: who, home: home) => {
+            if let Error(e) = admit(mut r, who, home) {
+                if home == r.unit {
+                    unpark(mut r, who)
+                }
+                return Error(e)
+            }
+            Ok(Done)
+        },
+        Publish(room: room, who: who, section: section, id: id, shape: shape) => {
+            let made = add_publication(mut r, room, who, section, id, shape)?
+            Ok(Shaped(id: id, shape: made))
+        },
+        Subscribe(room: room, who: who, p: p, section: section, target: target) => {
+            add_down(mut r, room, who, p, section, target, now, mut out)?
+            Ok(Done)
+        },
+        Retarget(room: room, who: who, p: p, target: target) => {
+            retarget(mut r, room, who, p, target, now, mut out)?
+            Ok(Done)
+        },
+        Rebind(room: room, who: who, from: from, to: to, target: target) => {
+            move_down(mut r, room, who, from, to, target, now, mut out)?
+            Ok(Done)
+        },
+        Unsubscribe(room: room, who: who, p: p) => {
+            remove_down(mut r, room, who, p)?
+            Ok(Done)
+        },
+        Leave(room: room, who: who) => {
+            let Some(si) = seat_at(r, room, who) else {
+                return Error(NoParticipant)
+            }
+            drop_seat(mut r, si, true, mut out)
+            Ok(Done)
+        },
+        Revoke(room: room, id: id, epoch: epoch) => {
+            fence(mut r, room, id, epoch, mut out)?
+            Ok(Done)
+        },
+        Suspend(room: room, on: on) => {
+            hold(mut r, room, on, mut out)?
+            Ok(Done)
+        },
+    }
+}
+
+// ---- Revoke and suspend on a unit ----
+fn fence(mut r: Router, room: peer.RoomId, id: u64, epoch: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        return Error(NoRoom)
+    }
+    let Some(e) = entry_of(r, ri, id) else {
+        return Error(NoParticipant)
+    }
+    let raised = match r.rooms[ri].fenced[e] {
+        Some(f) if f >= epoch => f,
+        _ => epoch,
+    }
+    r.rooms[ri].fenced[e] = Some(raised)
+    let barred: peer.Gen = Gen(id: id, epoch: raised)
+    // Steps 1 and 3: the sessions at or below the fence close without notice, their
+    // rows go, and every down-track of their publications and of their subscriptions ends.
+    let mut i = 0u64
+    while i < list.len(r.roster) {
+        let Gen(id: sid, epoch: sep) = r.roster[i].who.gen
+        if r.roster[i].who.room == room && sid == id && sep <= raised {
+            drop_seat(mut r, i, false, mut out)
+        } else {
+            i += 1
+        }
+    }
+    // Step 2: a down-track that stays, rebound away from the fenced publisher, drops
+    // that publisher's paced entries when its pacer lets them out; and every entry of
+    // `out` the fence covers goes.
+    for m in 0u64 .. list.len(r.members) {
+        if r.members[m].who.room == room {
+            peer.bar(mut r.members[m].session, barred)
+        }
+    }
+    let _ = purge(r, mut out)
+    Ok(())
+}
+
+// RTC-7 Suspend and resume: routing stops for the room, and every queued entry with
+// a `src` goes from `out` and from the room's pacers. Ingress stays up.
+fn hold(mut r: Router, room: peer.RoomId, on: bool, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        return Error(NoRoom)
+    }
+    r.rooms[ri].suspended = on
+    if on {
+        for d in 0u64 .. list.len(r.downs) {
+            if r.downs[d].room != room || r.downs[d].home != r.unit {
+                continue
+            }
+            if let Some(mi) = member_at(r, room, r.downs[d].sub) {
+                peer.unpace(mut r.members[mi].session, r.downs[d].track)
+            }
+        }
+        let _ = purge(r, mut out)
+    }
+    Ok(())
+}
+
+fn drop_seat(mut r: Router, si: u64, notify: bool, mut out: peer.Outbox) {
+    let who = r.roster[si].who
+    let mut i = 0u64
+    while i < list.len(r.publications) {
+        if r.publications[i].room == who.room && r.publications[i].owner == who.gen {
+            let id = r.publications[i].id
+            let mut d = 0u64
+            while d < list.len(r.downs) {
+                if r.downs[d].room == who.room && r.downs[d].publication == id {
+                    end_down(mut r, d)
+                } else {
+                    d += 1
+                }
+            }
+            for k in 0u64 .. list.len(r.downs) {
+                if r.downs[k].room == who.room && r.downs[k].previous == Some(id) {
+                    settle(mut r, k)
+                }
+            }
+            let _ = list.remove(mut r.publications, i)
+        } else {
+            i += 1
+        }
+    }
+    let mut d = 0u64
+    while d < list.len(r.downs) {
+        if r.downs[d].room == who.room && r.downs[d].sub == who.gen {
+            end_down(mut r, d)
+        } else {
+            d += 1
+        }
+    }
+    let mut w = 0u64
+    while w < list.len(r.rows) {
+        if r.rows[w].room == who.room && r.rows[w].who == who.gen {
+            let _ = list.remove(mut r.rows, w)
+        } else {
+            w += 1
+        }
+    }
+    let Some(s) = seat_at(r, who.room, who.gen) else {
+        return
+    }
+    let _ = list.remove(mut r.roster, s)
+    if let Some(mi) = member_at(r, who.room, who.gen) {
+        let m = list.remove(mut r.members, mi)
+        let Member(who: _, session: take session) = take m
+        peer.close(take session, notify, mut out)
+    }
+}

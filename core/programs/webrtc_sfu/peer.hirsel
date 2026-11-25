@@ -238,7 +238,10 @@ pub opaque type PeerSession {
     pacer: rtp.pacer.Pacer[Paced],
     slab: List[Bytes],
     free: List[u32],
-    unpaced: List[Paced]
+    unpaced: List[Paced],
+    // Publishers fenced in the room (RTC-7), each at its highest revoked epoch: a
+    // paced entry from one is dropped when the pacer lets it out.
+    barred: List[Gen]
 }
 
 const EMPTY: u64 = 0xffffffffffffffff
@@ -409,7 +412,7 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
         list.push(mut slab, take b)
         list.push(mut free, int.narrow(n - 1 - i))
     }
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced)
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new())
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.word, 2) ?=> |c| Capacity(c)
     let fresh = draw(mut p)
@@ -512,6 +515,39 @@ pub fn session_limits(p: PeerSession) -> PeerLimits {
 
 pub fn who(p: PeerSession) -> Participant {
     p.who
+}
+
+/// Whether `ufrag` is the session's own ICE username fragment, the part of a
+/// Binding request's USERNAME before its colon (RFC 8445 section 7.2.2).
+pub fn named(p: PeerSession, ufrag: Bytes) -> bool {
+    !p.closed && list.compare_bytes(p.agreed.local.ice_ufrag, ufrag) == Equal
+}
+
+/// Fence publisher `id` at `epoch` and below in this session (RTC-7 step 2): every
+/// entry of its media the pacer still holds is dropped when it is let out.
+pub fn bar(mut p: PeerSession, g: Gen) {
+    let Gen(id: id, epoch: epoch) = g
+    for i in 0u64 .. list.len(p.barred) {
+        let Gen(id: b, epoch: e) = p.barred[i]
+        if b == id {
+            if epoch > e {
+                p.barred[i] = g
+            }
+            return
+        }
+    }
+    list.push(mut p.barred, g)
+}
+
+fn barred(p: PeerSession, src: Gen) -> bool {
+    let Gen(id: id, epoch: epoch) = src
+    for g in p.barred {
+        let Gen(id: b, epoch: e) = g
+        if b == id && epoch <= e {
+            return true
+        }
+    }
+    false
 }
 
 pub fn control_ssrc(p: PeerSession) -> u32 {

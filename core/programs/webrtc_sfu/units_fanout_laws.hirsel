@@ -1,0 +1,360 @@
+// ---- RTC-5 fan-out across real units over sim.udp (W8) ----
+const MARK_F: u8 = 0xd1
+
+// The publisher's first source sequence number (`join_unit` gives id 1 1000).
+const FIRST_SRC: u16 = 1000
+
+/// One subscriber's leg: its browser index, unit, own MID, payload types and
+/// extension IDs, and the down-track's SSRCs.
+type FanLeg {
+    i: u64,
+    unit: u16,
+    mid: Bytes,
+    pt: u8,
+    rtx_pt: u8,
+    mid_id: u8,
+    twcc_id: u8,
+    ssrc: u32,
+    rtx: u32
+}
+
+fn pub_offer() -> Bytes {
+    let mut b = minimal_head(b" a")
+    list.append(mut b, minimal_video(b"96 97", b"a", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtcp-fb:96 nack\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n")
+    take b
+}
+
+fn decimal(n: u8) -> Bytes {
+    let mut b: Bytes = list.new()
+    if n >= 100 {
+        list.push(mut b, 48 + n / 100)
+    }
+    if n >= 10 {
+        list.push(mut b, 48 + (n / 10) % 10)
+    }
+    list.push(mut b, 48 + n % 10)
+    b
+}
+
+fn leg_offer(mid: Bytes, pt: u8, rtx_pt: u8, mid_id: u8, twcc_id: u8) -> Bytes {
+    let mut bundle: Bytes = b" "
+    list.append(mut bundle, mid)
+    let mut b = minimal_head(bundle)
+    recv_section(mut b, mid, decimal(pt), decimal(rtx_pt), decimal(mid_id), decimal(twcc_id))
+    take b
+}
+
+// The plaintext payload the publisher wrote for source sequence number `seq`.
+fn source_body(seq: u16) -> Bytes {
+    let mut body = vp8_key()
+    list.push(mut body, MARK_F)
+    list.push(mut body, int.truncate(seq >> 8))
+    list.push(mut body, int.truncate(seq))
+    list.push(mut body, MARK_F)
+    body
+}
+
+fn got_of(s: Seen) -> Got {
+    Got(h: result.unwrap(rtp.header.parse(s.pkt)), pkt: clone(s.pkt))
+}
+
+fn be16(n: u16) -> Bytes {
+    let mut b: Bytes = list.new()
+    list.push(mut b, int.truncate(n >> 8))
+    list.push(mut b, int.truncate(n))
+    b
+}
+
+// A leg's own MID on its own ID and its own transport number on its own ID, and
+// nothing on the publisher's IDs 1 and 3.
+fn expect_exts(g: Got, leg: FanLeg, tn: u16, take what: String) {
+    let mid = ext_value(g, leg.mid_id, Mid)
+    let seq = ext_value(g, leg.twcc_id, TransportSeq)
+    let mid_ok = match mid {
+        Some(m) => same(m, leg.mid),
+        None => false,
+    }
+    let seq_ok = match seq {
+        Some(t) => same(t, be16(tn)),
+        None => false,
+    }
+    if !mid_ok || !seq_ok || ext_value(g, 1, Mid) != None || ext_value(g, 3, TransportSeq) != None {
+        fail(take what)
+    }
+}
+
+// NTP 32.32 for `at` ns (RFC 5905 section 6), by hand.
+fn ntp_of(at: u64) -> u64 {
+    ((at / 1000000000) << 32) | (((at % 1000000000) << 32) / 1000000000)
+}
+
+fn fanout_run(net: Net, clock: Clock) waits {
+    let mut h = hall(net, clock, 7600)
+    let room = room_id()
+    let _ = ok_or_say(call(mut h, Open(room: room, limits: room_limits())), "open")
+    let (bp, a) = join_unit(mut h, 0, 7610, pub_offer(), gen_of(1), addr_of(1), b"ufragpub", MARK_F)
+    let _ = ok_or_say(a, "the publisher was not admitted")
+    let mut legs: List[FanLeg] = list.new()
+    for (id, unit, mid, pt, mid_id) in[(2u64, 0u16, b"s1", 100u8, 4u8), (3u64, 0u16, b"s2", 102u8, 6u8), (4u64, 1u16, b"s3", 104u8, 8u8), (5u64, 1u16, b"s4", 106u8, 10u8)] {
+        let n: u32 = int.narrow(id)
+        let mut ufrag: Bytes = b"ufragsub"
+        list.append(mut ufrag, decimal(int.narrow(id)))
+        let (i, joined) = join_unit(mut h, unit, 7620 + 10 * id, leg_offer(mid, pt, pt + 1, mid_id, mid_id + 1), gen_of(id), addr_of(n), ufrag, 0)
+        let _ = ok_or_say(joined, "a subscriber was not admitted")
+        list.push(mut legs, FanLeg(i: i, unit: unit, mid: copy_of(mid), pt: pt, rtx_pt: pt + 1, mid_id: mid_id, twcc_id: mid_id + 1, ssrc: 0, rtx: 0))
+    }
+    let pa = published(ok_or_say(call(mut h, Publish(room: room, who: gen_of(1), section: 0, id: PublicationId(0), shape: None)), "publish"))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    for k in 0u64 .. 4 {
+        let who = h.peers[legs[k].i].c.who
+        let _ = ok_or_say(call(mut h, Subscribe(room: room, who: who, p: pa, section: 0, target: base)), "subscribe")
+        let tracks = if legs[k].unit == 0 {
+            router.track_ssrcs(units.router_of(h.w.u0), room, who, pa)
+        } else {
+            router.track_ssrcs(units.router_of(h.w.u1), room, who, pa)
+        }
+        let (m, x) = option.unwrap(tracks)
+        legs[k].ssrc = m
+        legs[k].rtx = x
+    }
+    // 20 packets, one each 20 ms.
+    let media_before = units.counts(h.w.u1).media
+    let start = list.len(h.seen)
+    for _ in 0u64 .. 20 {
+        speak(mut h, bp)
+        for _ in 0u64 .. 4 {
+            tick(mut h)
+        }
+    }
+    if units.counts(h.w.u1).media - media_before != 20 {
+        fail("unit 1 did not take exactly one Media message per packet for its two subscribers")
+    }
+    // Every leg: 20 packets, numbered on from its first, stamped 3,000 apart from its
+    // first, on its own payload type, MID and extension IDs, transport numbers 0 to
+    // 19 on its own transport, each opening to the publisher's payload.
+    let mut firsts: List[(u16, u32)] = list.new()
+    for leg in legs {
+        let mut k = 0u16
+        let mut first: (u16, u32) = (0, 0)
+        for s in list.slice(h.seen, start, list.len(h.seen)) {
+            if s.to != h.peers[leg.i].c.at || s.kind != KIND_RTP {
+                continue
+            }
+            if s.ssrc != leg.ssrc {
+                fail("a leg got RTP on another SSRC than its down-track's")
+            }
+            let g = got_of(s)
+            if k == 0 {
+                first = (g.h.seq, g.h.ts)
+            }
+            let (s0, t0) = first
+            let wide: u32 = int.widen(k)
+            if g.h.seq != plus(s0, k) || g.h.ts != later(t0, 3000 * wide) || g.h.pt != leg.pt || !g.h.marker {
+                fail("a rewritten header is not the hand-derived one")
+            }
+            expect_exts(g, leg, k, "a leg carries another MID, extension ID or transport number than its own")
+            if !same(payload_of(g), source_body(FIRST_SRC + k)) {
+                fail("a leg's packet does not open to the publisher's payload")
+            }
+            k += 1
+        }
+        if k != 20 {
+            fail("a leg did not get exactly the 20 packets")
+        }
+        list.push(mut firsts, first)
+    }
+    // A NACK from a unit-1 subscriber for its sixth packet: unit 1 asks unit 0, unit 0
+    // replies, and the leg gets RFC 4588 RTX on its own RTX SSRC and payload type,
+    // carrying the packet's number, timestamp and payload, on its next transport number.
+    let s3: FanLeg = clone(legs[2])
+    let (n3, t3) = firsts[2]
+    let asks = units.counts(h.w.u0).asks
+    let replies = units.counts(h.w.u1).replies
+    let ask = nack(mut h.peers[s3.i].c.cs, s3.ssrc, plus(n3, 5))
+    let at_nack = list.len(h.seen)
+    send_from(mut h, s3.i, ask)
+    for _ in 0u64 .. 4 {
+        tick(mut h)
+    }
+    if units.counts(h.w.u0).asks - asks != 1 || units.counts(h.w.u1).replies - replies != 1 {
+        fail("the NACK was not answered through one RepairAsk and one RepairReply")
+    }
+    let mut repairs = 0u64
+    for s in list.slice(h.seen, at_nack, list.len(h.seen)) {
+        if s.to == h.peers[s3.i].c.at && s.kind == KIND_RTP && s.ssrc == s3.rtx {
+            let g = got_of(s)
+            let body = payload_of(g)
+            let osn: u16 = list.word_be(body, 0)
+            if g.h.pt != s3.rtx_pt || osn != plus(n3, 5) || g.h.ts != later(t3, 15000) || !same(list.slice(body, 2, list.len(body)), source_body(FIRST_SRC + 5)) {
+                fail("the repair is not RTX of the sixth packet")
+            }
+            expect_exts(g, s3, 20, "the repair carries another MID or transport number than the leg's next")
+            repairs += 1
+        }
+    }
+    if repairs != 1 {
+        fail("the NACK was not answered with exactly one repair")
+    }
+    // Each down-track's SR after the media: its SSRC, packet and octet counts, NTP
+    // time and RTP timestamp match what that leg was sent (RFC 3550 section 6.4.1).
+    let reports = list.len(h.seen)
+    for _ in 0u64 .. 240 {
+        tick(mut h)
+    }
+    for leg in legs {
+        let mut packets = 0u32
+        let mut octets = 0u32
+        let mut last_ts = 0u32
+        let mut last_at = 0u64
+        let mut checked = false
+        for s in list.slice(h.seen, start, list.len(h.seen)) {
+            if s.to == h.peers[leg.i].c.at && s.kind == KIND_RTP && s.ssrc == leg.ssrc {
+                let g = got_of(s)
+                packets += 1
+                let body: u32 = int.truncate(list.len(g.pkt) - g.h.end)
+                octets += body
+                last_ts = g.h.ts
+                last_at = s.at
+            }
+            if s.to == h.peers[leg.i].c.at && s.kind == KIND_RTCP && s.ssrc == leg.ssrc && list.len(s.pkt) >= 28 && s.pkt[1] == 200 && packets == 20 {
+                let ntp: u64 = list.word_be(s.pkt, 8)
+                let ts: u32 = list.word_be(s.pkt, 16)
+                let count: u32 = list.word_be(s.pkt, 20)
+                let size: u32 = list.word_be(s.pkt, 24)
+                let d = s.at - last_at
+                let elapsed: u32 = int.truncate((d / 1000000000) * 90000 + ((d % 1000000000) * 90000) / 1000000000)
+                if ntp != ntp_of(s.at) || ts != later(last_ts, elapsed) || count != packets || size != octets {
+                    fail("a down-track's SR does not match the media its leg was sent")
+                }
+                checked = true
+            }
+        }
+        if !checked || reports == list.len(h.seen) {
+            fail("a down-track sent no SR after its media")
+        }
+    }
+    close_hall(take h)
+}
+
+/// bug: post one `Media` per subscriber instead of per unit, leak the publisher's
+/// MID, payload type, extension IDs or transport numbers into a leg, number a leg on
+/// another leg's transport, answer a unit-1 NACK without going through the
+/// publisher's unit, or send an SR under another SSRC or with counts or timestamps
+/// from another leg.
+/// oracle: RTC-4 and RTC-5 by hand, from captures at each unit's writer opened by
+/// each leg's own SRTP end: the k-th packet of a leg is its first number plus k and
+/// its first timestamp plus 3,000 k on the leg's own payload type, MID and IDs,
+/// with transport number k on the leg's own transport, and opens to the source
+/// body of number 1000 + k. Unit 1 takes 20 `Media` for 20 packets. Each SR has the
+/// leg's SSRC, 20 packets and their payload octets, NTP of its send time, and the
+/// last timestamp plus 90 kHz of the time since (RFC 3550 section 6.4.1). The NACK
+/// costs one `RepairAsk` and one `RepairReply` and yields one RFC 4588 repair on
+/// transport number 20.
+@test
+fn fanout_across_units(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 7600)
+    fanout_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}
+
+// ---- RTC-5 the unit loop on real sockets ----
+const LOOPBACK: Addr = Addr(ip: V4(0x7f000001), port: 0)
+
+// Everything waiting at browser `i`'s socket: each datagram's source and bytes.
+fn socket_drain(mut h: Hall, i: u64) -> List[(Addr, Bytes)] waits {
+    let mut got: List[(Addr, Bytes)] = list.new()
+    let mut rx: Bytes = list.with_capacity(65536)
+    let mut batch: List[UdpPacket] = list.with_capacity(64)
+    while true {
+        list.clear(mut rx)
+        list.clear(mut batch)
+        let now = host.mono_ns(h.clock)
+        let n = match host.udp_recv(mut h.peers[i].sock, mut rx, mut batch, At(h.clock, now + 2 * MS)) {
+            Ok(n) => n,
+            Error(_) => 0,
+        }
+        if n == 0 {
+            break
+        }
+        for j in 0u64 .. n {
+            let UdpPacket(peer: from, at, len, truncated: _, ecn: _) = batch[j]
+            list.push(mut got, (from, copy_of(list.slice(rx, at, at + len))))
+        }
+    }
+    got
+}
+
+fn loopback_run(net: Net, clock: Clock) waits {
+    let mut h = hall_at(net, clock, 7700, LOOPBACK, LOOPBACK, LOOPBACK)
+    // The subscriber's SRTP end opens what its socket receives, so the tap does not.
+    units.seam(mut h.w.u1, 0, false)
+    let room = room_id()
+    let _ = ok_or_say(call(mut h, Open(room: room, limits: room_limits())), "open")
+    let (bp, a) = join_unit(mut h, 0, 7710, pub_offer(), gen_of(1), LOOPBACK, b"ufragpub", MARK_F)
+    let _ = ok_or_say(a, "the publisher was not admitted")
+    let (bs, b) = join_unit(mut h, 1, 7720, leg_offer(b"s1", 100, 101, 4, 5), gen_of(2), LOOPBACK, b"ufragsub2", 0)
+    let _ = ok_or_say(b, "the subscriber was not admitted")
+    let pa = published(ok_or_say(call(mut h, Publish(room: room, who: gen_of(1), section: 0, id: PublicationId(0), shape: None)), "publish"))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let who = h.peers[bs].c.who
+    let _ = ok_or_say(call(mut h, Subscribe(room: room, who: who, p: pa, section: 0, target: base)), "subscribe")
+    let (ssrc, _) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, who, pa))
+    let _ = socket_drain(mut h, bs)
+    // Bursts of three, so the units' receive and send batches hold several datagrams.
+    for _ in 0u64 .. 4 {
+        for _ in 0u64 .. 3 {
+            speak(mut h, bp)
+        }
+        for _ in 0u64 .. 4 {
+            tick(mut h)
+        }
+    }
+    check_from(mut h, bs, b"ufragsub2", 77)
+    for _ in 0u64 .. 4 {
+        tick(mut h)
+    }
+    // Every datagram comes from unit 1's bound address; the twelve packets arrive in
+    // order and open to the publisher's numbers 1000 to 1011; the check is answered.
+    let mut k = 0u16
+    let mut answered = 0u64
+    for (from, d) in socket_drain(mut h, bs) {
+        if from != h.addrs[1] {
+            fail("a datagram reached the subscriber from another address than its unit's socket")
+        }
+        let kind = kind_of(d)
+        if kind == KIND_STUN {
+            answered += 1
+        }
+        if kind != KIND_RTP {
+            continue
+        }
+        let mut s = Seen(unit: 1, to: h.peers[bs].c.at, kind: kind, ssrc: 0, seq: 0, pt: 0, mark: 0, n: 0, after: false, at: 0, pkt: list.new())
+        look(mut h.peers[bs].c.cs, d, mut s)
+        if s.kind != KIND_RTP || s.ssrc != ssrc || s.pt != 100 || s.mark != MARK_F || s.n != FIRST_SRC + k {
+            fail("a packet on the subscriber's socket is not the next forwarded one")
+        }
+        k += 1
+    }
+    if k != 12 {
+        fail("the subscriber's socket did not receive the twelve packets")
+    }
+    if answered != 1 {
+        fail("the subscriber's check was not answered once on its socket")
+    }
+    close_hall(take h)
+}
+
+/// bug: a unit loop that works against `std.sim.udp` but not a kernel socket: it
+/// sends from or to an address other than the bound one, drops or reorders a
+/// batch, or never reads what arrived.
+/// oracle: RFC 3550 and RFC 8445 by hand on 127.0.0.1: every datagram the
+/// subscriber's socket receives has its unit's bound address as source, its twelve
+/// RTP packets, sent in bursts of three, open under its SRTP end to the
+/// publisher's numbers 1000 to 1011 in order, and its one check gets one STUN answer.
+@test
+fn units_on_loopback(net: Net, clock: Clock) -> Result[(), router.RouterError] waits {
+    loopback_run(net, clock)
+    Ok(())
+}

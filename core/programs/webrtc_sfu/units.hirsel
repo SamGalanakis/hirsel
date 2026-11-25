@@ -1,0 +1,535 @@
+// RTC-5 units and RTC-7's fence across them (webrtc spec, slice S5). Every media unit
+// runs one Router over its own socket; unit 0 is the control unit, which makes every
+// control call. A unit's steps are separate functions so a test can interleave them
+// (W14); `turn` runs them in RTC-5's order over a real socket.
+/// The doors of one unit, which every other unit holds: its control inbox, its media
+/// inbox and the address of its socket, where doorbells go.
+pub type Doors: cross {
+    control: Client[router.Control],
+    media: Client[router.Carried],
+    addr: Addr
+}
+
+/// What a unit counts beyond its Router: the messages it took from its media inbox
+/// by kind, doorbells from addresses that are not a sibling's, media messages
+/// dropped because the receiving inbox was full, datagrams `udp_send` refused one
+/// by one, and datagrams the socket truncated.
+pub type UnitCounts: key {
+    // Messages taken from the media inbox, by kind.
+    media: u64,
+    asks: u64,
+    replies: u64,
+    forged: u64,
+    full: u64,
+    refused: u64,
+    truncated: u64
+}
+
+/// One datagram a unit passed to `udp_send` and the kernel committed, with its tag
+/// and bytes (the test seam's tap; W15, W8).
+pub type Sent {
+    to: Addr,
+    tag: peer.Tag,
+    data: Bytes
+}
+
+pub type Event = Fenced(peer.Participant)
+
+pub opaque type Unit {
+    r: router.Router,
+    index: u16,
+    doors: List[Doors],
+    control: Inbox[router.Control],
+    media: Inbox[router.Carried],
+    // Every queued datagram not yet committed by `udp_send`. What a partial send
+    // left is the uncommitted suffix; the send step purges all of it each time.
+    out: peer.Outbox,
+    rx: Bytes,
+    batch: List[UdpPacket],
+    slot: Bytes,
+    // A bit per unit this unit posted to in this turn: their doorbells.
+    rung: u64,
+    // Acknowledgements the control unit's full inbox refused, in order.
+    acks: List[router.Control],
+    counts: UnitCounts,
+    // The test seam: at most `limit` datagrams per `udp_send` (0: no limit), and
+    // the tap of what each call committed when `tapping`.
+    limit: u64,
+    tapping: bool,
+    tap: List[Sent],
+    // The control unit's call in flight: its change, the unit that applies it first,
+    // whether that unit has answered, the units it still waits on and the answer.
+    seq: u64,
+    change: Option[router.Change],
+    home: u16,
+    rest: bool,
+    waiting: u64,
+    answer: Option[Result[router.Answer, router.RouterError]],
+    events: List[Event]
+}
+
+pub const UNIT_WAIT_NS: u64 = 50000000
+
+const INBOX: u64 = 1024
+
+/// One unit's inboxes and doors. `addr` is the address of the socket it will run on.
+pub fn inboxes(addr: Addr) -> Result[(Doors, Inbox[router.Control], Inbox[router.Carried]), router.RouterError] {
+    let c: Result[(Client[router.Control], Inbox[router.Control]), Capacity] = conn.new(INBOX, bytes 1048576)
+    let (control, take control_in) = c ?=> |x| Capacity(x)
+    let m: Result[(Client[router.Carried], Inbox[router.Carried]), Capacity] = conn.new(INBOX, bytes 4194304)
+    let (media, take media_in) = m ?=> |x| Capacity(x)
+    Ok((Doors(control: control, media: media, addr: addr), take control_in, take media_in))
+}
+
+/// Unit `index` of `list.len(doors)` units, over its own inboxes. `doors` names every
+/// unit's doors in unit order, its own included.
+pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[router.Control], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64) -> Result[Unit, router.RouterError] {
+    if list.len(doors) > 64 {
+        return Error(Limit(64))
+    }
+    let out = peer.outbox(out_bytes, out_packets) ?=> |take e| Peer(e)
+    let mut rx: Bytes = list.new()
+    list.try_reserve(mut rx, 65536) ?=> |c| Capacity(c)
+    let mut batch: List[UdpPacket] = list.new()
+    list.try_reserve(mut batch, 64) ?=> |c| Capacity(c)
+    let mut slot: Bytes = list.new()
+    list.try_reserve(mut slot, 1536) ?=> |c| Capacity(c)
+    let mut all: List[Doors] = list.new()
+    for d in doors {
+        list.push(mut all, Doors(control: conn.client(d.control), media: conn.client(d.media), addr: d.addr))
+    }
+    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), seq: 0, change: None, home: 0, rest: false, waiting: 0, answer: None, events: list.new()))
+}
+
+pub fn router_of(u: Unit) -> View[router.Router] in u {
+    view u.r
+}
+
+pub fn counts(u: Unit) -> UnitCounts {
+    u.counts
+}
+
+/// The datagrams queued and not yet committed: the uncommitted suffix after a
+/// partial send, and whatever the unit queued since.
+pub fn queued(u: Unit) -> View[peer.Outbox] in u {
+    view u.out
+}
+
+/// The test seam (RTC-7, W14 and W15): commit at most `limit` datagrams per
+/// `udp_send`, 0 for no limit, and record what each send committed.
+pub fn seam(mut u: Unit, limit: u64, tapping: bool) {
+    u.limit = limit
+    u.tapping = tapping
+}
+
+/// Take what the tap recorded since the last call.
+pub fn take_tap(mut u: Unit) -> List[Sent] {
+    replace(mut u.tap, list.new())
+}
+
+/// Take the events since the last call: `Fenced` after a revoke returns (RTC-7).
+pub fn take_events(mut u: Unit) -> List[Event] {
+    replace(mut u.events, list.new())
+}
+
+/// Park a session opened on this unit, its home, until a control call admits it.
+pub fn park(mut u: Unit, take session: peer.PeerSession) -> Result[(), router.RouterError] {
+    router.park(mut u.r, take session)
+}
+
+// ---- The control order (RTC-5), on the control unit ----
+/// Start a control call on the control unit, unit 0: the change goes to the unit
+/// that applies it first, and once that unit answers `Ok`, to every other unit. A
+/// publication's id is the control unit's to hand out. `finished` answers it.
+pub fn begin(mut u: Unit, now: u64, take c: router.Change) -> Result[(), router.RouterError] {
+    if u.index != 0 {
+        return Error(Exists)
+    }
+    if let Some(_) = u.change {
+        return Error(Exists)
+    }
+    let change: router.Change = match c {
+        Publish(room: room, who: who, section: section, id: _, shape: _) => Publish(room: room, who: who, section: section, id: router.next_publication(mut u.r), shape: None),
+        other => other,
+    }
+    let home = router.first(u.r, change)
+    u.seq += 1
+    let seq = u.seq
+    u.change = Some(change)
+    u.home = home
+    u.rest = false
+    u.answer = None
+    if home == 0 {
+        u.waiting = 1
+        let a = router.apply(mut u.r, now, change, mut u.out)
+        answered(mut u, now, seq, 0, take a)
+    } else {
+        let shift: u64 = int.widen(home)
+        u.waiting = 1 << shift
+        order(mut u, home, seq, change)
+    }
+    Ok(())
+}
+
+/// The answer of the control call in flight, once every unit it waits on has
+/// acknowledged it; a call `finished` answers is over. A revoke's answer is followed
+/// by `Event.Fenced` (RTC-7).
+pub fn finished(mut u: Unit) -> Option[Result[router.Answer, router.RouterError]] {
+    if u.waiting != 0 {
+        return None
+    }
+    let Some(change) = u.change else {
+        return None
+    }
+    let Some(take a) = replace(mut u.answer, None) else {
+        return None
+    }
+    u.change = None
+    if let Ok(_) = a {
+        if let Revoke(room: room, id: id, epoch: epoch) = change {
+            list.push(mut u.events, Fenced(peer.Participant(gen: Gen(id: id, epoch: epoch), room: room)))
+        }
+    }
+    Some(take a)
+}
+
+fn order(mut u: Unit, to: u16, seq: u64, c: router.Change) {
+    let i: u64 = int.widen(to)
+    let _ = conn.try_send(u.doors[i].control, Order(seq: seq, change: c))
+    u.rung = u.rung | (1 << i)
+}
+
+// One unit's answer to the call in flight.
+fn answered(mut u: Unit, now: u64, seq: u64, from: u16, take a: Result[router.Answer, router.RouterError]) {
+    let Some(change) = u.change else {
+        return
+    }
+    if u.seq != seq {
+        return
+    }
+    let shift: u64 = int.widen(from)
+    let bit: u64 = 1 << shift
+    u.waiting = u.waiting & ~bit
+    if u.rest {
+        // A unit after the first refused a change the first accepted: their states
+        // differ, which the control order rules out, so the call answers the refusal.
+        if let Error(_) = a {
+            u.answer = Some(take a)
+        }
+        return
+    }
+    u.rest = true
+    let shape = match a {
+        Ok(Shaped(id: _, shape: s)) => Some(s),
+        Ok(Done) => None,
+        Error(_) => {
+            u.answer = Some(take a)
+            return
+        },
+    }
+    u.answer = Some(take a)
+    let given: router.Change = match change {
+        Publish(room: room, who: who, section: section, id: id, shape: _) => Publish(room: room, who: who, section: section, id: id, shape: shape),
+        other => other,
+    }
+    let home = u.home
+    let n: u64 = list.len(u.doors)
+    for i in 0u64 .. n {
+        let k: u16 = int.narrow(i)
+        if k == home {
+            continue
+        }
+        if k == 0 {
+            let _ = router.apply(mut u.r, now, given, mut u.out)
+        } else {
+            u.waiting = u.waiting | (1 << i)
+            order(mut u, k, seq, given)
+        }
+    }
+}
+
+// ---- A unit's steps (RTC-5, A turn) ----
+/// Take every control message waiting: a fence point. Each `Order` is applied in
+/// control order, purging the queue it fences (RTC-7 step 2), and acknowledged.
+pub fn take_control(mut u: Unit, now: u64) {
+    retry_acks(mut u)
+    while true {
+        match conn.try_receive(u.control) {
+            Ok(Order(seq: seq, change: c)) => {
+                let a = router.apply(mut u.r, now, c, mut u.out)
+                let _ = router.purge(u.r, mut u.out)
+                ack(mut u, seq, take a)
+            },
+            Ok(Ack(seq: seq, unit: k, answer: take a)) => answered(mut u, now, seq, k, take a),
+            Error(_) => break,
+        }
+    }
+}
+
+fn ack(mut u: Unit, seq: u64, take a: Result[router.Answer, router.RouterError]) {
+    let index = u.index
+    list.push(mut u.acks, Ack(seq: seq, unit: index, answer: take a))
+    retry_acks(mut u)
+}
+
+fn retry_acks(mut u: Unit) {
+    while list.len(u.acks) != 0 {
+        let a = list.remove(mut u.acks, 0)
+        match conn.try_send(u.doors[0].control, take a) {
+            Ok(()) => {
+                u.rung = u.rung | 1
+            },
+            Error(Full(take back)) => {
+                list.insert(mut u.acks, 0, take back)
+                return
+            },
+            Error(Closed(_)) => (),
+        }
+    }
+}
+
+/// Take every media-inbox message waiting, each checked against the fences when it
+/// is taken (RTC-7 step 4).
+pub fn take_media(mut u: Unit, now: u64) -> Result[(), router.RouterError] {
+    while true {
+        match conn.try_receive(u.media) {
+            Ok(take m) => {
+                match m.carry {
+                    Media(room: _, publication: _, src: _, m: _, handle: _) => {
+                        u.counts.media += 1
+                    },
+                    Ask(room: _, publication: _, src: _, dst: _, ask: _) => {
+                        u.counts.asks += 1
+                    },
+                    Reply(room: _, publication: _, src: _, dst: _, ask: _) => {
+                        u.counts.replies += 1
+                    },
+                    _ => {},
+                }
+                router.accept(mut u.r, now, take m, mut u.out)?
+            },
+            Error(_) => break,
+        }
+    }
+    deal(mut u)
+    Ok(())
+}
+
+/// Route one datagram that `from` sent to this unit's socket.
+pub fn take_datagram(mut u: Unit, now: u64, from: Addr, data: Bytes) -> Result[(), router.RouterError] {
+    if list.len(data) == 0 {
+        if !sibling(u, from) {
+            u.counts.forged += 1
+        }
+        return Ok(())
+    }
+    list.clear(mut u.slot)
+    list.try_reserve(mut u.slot, list.len(data)) ?=> |c| Capacity(c)
+    list.append(mut u.slot, data)
+    let result = router.deliver(mut u.r, now, from, mut u.slot, mut u.out)
+    deal(mut u)
+    result
+}
+
+fn sibling(u: Unit, from: Addr) -> bool {
+    for d in u.doors {
+        if d.addr == from {
+            return true
+        }
+    }
+    false
+}
+
+/// Drive every session's timers; the earliest deadline.
+pub fn take_timers(mut u: Unit, now: u64) -> Option[u64] {
+    let wake = router.poll(mut u.r, now, mut u.out)
+    deal(mut u)
+    wake
+}
+
+// Send what the router posted to the other units' media inboxes. A full inbox drops
+// the message, which is media and repair only, and counts it.
+fn deal(mut u: Unit) {
+    let posts = router.take_posts(mut u.r)
+    for take p in posts {
+        let router.Post(to: to, carried: take m) = take p
+        let i: u64 = int.widen(to)
+        if i >= list.len(u.doors) || to == u.index {
+            continue
+        }
+        match conn.try_send(u.doors[i].media, take m) {
+            Ok(()) => {
+                u.rung = u.rung | (1 << i)
+            },
+            Error(_) => {
+                u.counts.full += 1
+            },
+        }
+    }
+}
+
+/// The send step's first half: drop every queued datagram the fences cover (RTC-7
+/// step 2: `out` and the uncommitted suffix alike), and answer how many to pass to
+/// `udp_send`.
+pub fn ready(mut u: Unit) -> u64 {
+    let _ = router.purge(u.r, mut u.out)
+    let n = list.len(u.out.pkts)
+    if u.limit != 0 && n > u.limit {
+        u.limit
+    } else {
+        n
+    }
+}
+
+/// The send step's second half: the first `k` datagrams were committed. What
+/// remains is the uncommitted suffix, compacted to the front of the outbox.
+pub fn committed(mut u: Unit, k: u64) {
+    advance(mut u, k, true)
+}
+
+fn advance(mut u: Unit, k: u64, sent: bool) {
+    if sent && u.tapping {
+        for i in 0u64 .. k {
+            let UdpTx(to, at, len, ecn: _) = u.out.pkts[i]
+            list.push(mut u.tap, Sent(to: to, tag: u.out.tags[i], data: copy_out(u.out.data, at, len)))
+        }
+    }
+    let n = list.len(u.out.pkts)
+    let mut w = 0u64
+    let mut kept = 0u64
+    for i in k .. n {
+        let UdpTx(to, at, len, ecn) = u.out.pkts[i]
+        if at != w {
+            list.copy_within(mut u.out.data, at, w, len)
+        }
+        u.out.pkts[kept] = UdpTx(to: to, at: w, len: len, ecn: ecn)
+        u.out.tags[kept] = u.out.tags[i]
+        w += len
+        kept += 1
+    }
+    list.truncate(mut u.out.data, w)
+    list.truncate(mut u.out.pkts, kept)
+    list.truncate(mut u.out.tags, kept)
+}
+
+// The units this turn posted to, cleared.
+fn doorbells(mut u: Unit) -> List[Addr] {
+    let mut to: List[Addr] = list.new()
+    for i in 0u64 .. list.len(u.doors) {
+        if (u.rung >> i) & 1 == 1 && i != int.widen(u.index) {
+            list.push(mut to, u.doors[i].addr)
+        }
+    }
+    u.rung = 0
+    to
+}
+
+// ---- A turn over a socket ----
+/// One turn (RTC-5): the control inbox, the media inbox, one `udp_recv` batch that
+/// waits until `until`, the control inbox again before any of it is routed, the
+/// datagrams, the timers, then the send step and the doorbells. It answers the
+/// earliest deadline.
+pub fn turn(mut u: Unit, clock: Clock, mut sock: UdpSocket, until: u64) -> Result[Option[u64], router.RouterError] waits {
+    let start = host.mono_ns(clock)
+    take_control(mut u, start)
+    take_media(mut u, start)?
+    list.clear(mut u.rx)
+    list.clear(mut u.batch)
+    let got = match host.udp_recv(mut sock, mut u.rx, mut u.batch, At(clock, until)) {
+        Ok(n) => n,
+        Error(_) => 0,
+    }
+    let now = host.mono_ns(clock)
+    take_control(mut u, now)
+    for i in 0u64 .. got {
+        let UdpPacket(peer: from, at, len, truncated, ecn: _) = u.batch[i]
+        if truncated {
+            u.counts.truncated += 1
+            continue
+        }
+        let data = copy_out(u.rx, at, len)
+        let _ = take_datagram(mut u, now, from, data)
+    }
+    let wake = take_timers(mut u, now)
+    send(mut u, clock, mut sock, now)
+    Ok(wake)
+}
+
+fn copy_out(rx: Bytes, at: u64, len: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(len)
+    list.append(mut b, list.slice(rx, at, at + len))
+    b
+}
+
+/// The send step over a socket: purge, `udp_send` (a partial commit keeps the rest
+/// as the uncommitted suffix), then one doorbell per unit posted to.
+pub fn send(mut u: Unit, clock: Clock, mut sock: UdpSocket, now: u64) waits {
+    let n = ready(mut u)
+    if n != 0 {
+        let deadline = now + UNIT_WAIT_NS
+        let sent = host.udp_send(mut sock, u.out.data, list.slice(u.out.pkts, 0, n), At(clock, deadline))
+        match sent {
+            Ok(k) => committed(mut u, k),
+            Error(TimedOut) => committed(mut u, 0),
+            // One bad datagram refuses the whole call: send them one by one, and drop
+            // and count the ones refused.
+            Error(_) => singly(mut u, clock, mut sock, deadline, n),
+        }
+    }
+    let bells = doorbells(mut u)
+    if list.len(bells) != 0 {
+        let empty: Bytes = list.new()
+        let mut tx: List[UdpTx] = list.new()
+        for a in bells {
+            list.push(mut tx, UdpTx(to: a, at: 0, len: 0, ecn: 0))
+        }
+        let _ = host.udp_send(mut sock, empty, tx, At(clock, now + UNIT_WAIT_NS))
+    }
+}
+
+fn singly(mut u: Unit, clock: Clock, mut sock: UdpSocket, deadline: u64, n: u64) waits {
+    for _ in 0u64 .. n {
+        let sent = host.udp_send(mut sock, u.out.data, list.slice(u.out.pkts, 0, 1), At(clock, deadline))
+        match sent {
+            Ok(1) => advance(mut u, 1, true),
+            Ok(_) => return,
+            Error(TimedOut) => return,
+            Error(_) => {
+                u.counts.refused += 1
+                advance(mut u, 1, false)
+            },
+        }
+    }
+}
+
+/// A unit's loop (RTC-5): `turns` turns, each waiting until the earliest deadline or
+/// 50 ms, whichever comes first.
+pub fn run(mut u: Unit, clock: Clock, mut sock: UdpSocket, turns: u64) -> Result[(), router.RouterError] waits {
+    let mut wake: Option[u64] = None
+    for _ in 0u64 .. turns {
+        let now = host.mono_ns(clock)
+        let cap = now + UNIT_WAIT_NS
+        let until = match wake {
+            Some(t) if t < cap => t,
+            _ => cap,
+        }
+        wake = turn(mut u, clock, mut sock, until)?
+    }
+    Ok(())
+}
+
+/// A control call on the control unit over its socket: begin it, then turn until
+/// every unit it waits on has acknowledged it.
+pub fn call(mut u: Unit, clock: Clock, mut sock: UdpSocket, take c: router.Change) -> Result[router.Answer, router.RouterError] waits {
+    let now = host.mono_ns(clock)
+    begin(mut u, now, take c)?
+    send(mut u, clock, mut sock, now)
+    while true {
+        if let Some(a) = finished(mut u) {
+            return a
+        }
+        let at = host.mono_ns(clock)
+        let _ = turn(mut u, clock, mut sock, at + UNIT_WAIT_NS)?
+    }
+    Error(NoRoom)
+}

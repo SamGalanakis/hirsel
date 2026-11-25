@@ -1,0 +1,323 @@
+// ---- RTC-7 revoke across real units over sim.udp (W15) ----
+const MARK_X: u8 = 0xc1
+
+const MARK_Y: u8 = 0xc2
+
+const MARK_Z: u8 = 0xc3
+
+// Browser indexes in the hall: X the revoked participant and Z an unrelated one on
+// unit 1, Y on unit 2, and a probe from an address no session knows.
+const BX: u64 = 0
+
+const BY: u64 = 1
+
+const BZ: u64 = 2
+
+const BPROBE: u64 = 3
+
+/// Which repair W15 holds across the acknowledgement: one carrying X's packet to a
+/// subscriber on another unit, or one carrying another publisher's packet to X.
+type Held: key = Publishing | Subscribing
+
+fn revoke_limits() -> router.RoomLimits {
+    router.RoomLimits(participants: 6, ids: 6, publications: 8, down_tracks: 8, audio_forward: 0, pause_delay_ms: 5000)
+}
+
+fn admitted(r: (u64, Result[router.Answer, router.RouterError]), take what: String) -> u64 {
+    let (i, a) = r
+    let _ = ok_or_say(a, take what)
+    i
+}
+
+fn shaped(a: Result[router.Answer, router.RouterError]) -> router.PublicationId {
+    published(ok_or_say(a, "publish"))
+}
+
+/// Everyone speaks every 20 ms (each fourth tick) for `ticks` ticks.
+fn talk(mut h: Hall, ticks: u64, x_too: bool) waits {
+    for t in 0u64 .. ticks {
+        if t % 4 == 0 {
+            if x_too {
+                speak(mut h, BX)
+            }
+            speak(mut h, BY)
+            speak(mut h, BZ)
+        }
+        tick(mut h)
+    }
+}
+
+fn holds(h: Hall, k: u16, x: peer.Gen) -> (bool, bool) {
+    let q = if k == 1 {
+        units.queued(h.w.u1)
+    } else {
+        units.queued(h.w.u2)
+    }
+    let mut from_x = false
+    let mut to_x = false
+    for t in q.tags {
+        if t.src == Some(x) {
+            from_x = true
+        }
+        if t.dst == x {
+            to_x = true
+        }
+    }
+    (from_x, to_x)
+}
+
+fn revoke_run(net: Net, clock: Clock, held: Held) waits {
+    let mut h = hall(net, clock, 7400)
+    let room = room_id()
+    let _ = ok_or_say(call(mut h, Open(room: room, limits: revoke_limits())), "open")
+    let x: peer.Gen = Gen(id: 1, epoch: 1)
+    let two = unit_offer(2, b"96", b"97", b"1", b"3")
+    let one_recv = unit_offer(1, b"96", b"97", b"1", b"3")
+    let _ = admitted(join_unit(mut h, 1, 7410, two, x, addr_of(1), b"ufragx1", MARK_X), "X was not admitted")
+    let _ = admitted(join_unit(mut h, 2, 7420, one_recv, gen_of(2), addr_of(2), b"ufragy1", MARK_Y), "Y was not admitted")
+    let _ = admitted(join_unit(mut h, 1, 7430, two, gen_of(3), addr_of(3), b"ufragz1", MARK_Z), "Z was not admitted")
+    // The probe: a browser end at an address no session has, never admitted.
+    {
+        let who = peer.Participant(gen: gen_of(9), room: room)
+        let Rig(p: take p, c: _, cs: take cs, out: _) = established_as(7490, one_recv, who, addr_of(9), 64, b"ufragp9")
+        drop(take p)
+        let (take sock, _) = result.unwrap(host.udp_bind(h.net, addr_of(9), SOCK))
+        list.push(mut h.peers, Peer(c: Client(who: gen_of(9), at: addr_of(9), cs: take cs), sock: take sock, home: U1, ssrc: 0x51000009, seq: 9000, mark: 0))
+    }
+    let pa = shaped(call(mut h, Publish(room: room, who: x, section: 0, id: PublicationId(0), shape: None)))
+    let py = shaped(call(mut h, Publish(room: room, who: gen_of(2), section: 0, id: PublicationId(0), shape: None)))
+    let pz = shaped(call(mut h, Publish(room: room, who: gen_of(3), section: 0, id: PublicationId(0), shape: None)))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    // X subscribes to Y's and Z's publications; Y to X's; Z to X's and Y's.
+    for (who, p, section) in[(x, py, 1u8), (x, pz, 2u8), (gen_of(2), pa, 1u8), (gen_of(3), pa, 1u8), (gen_of(3), py, 2u8)] {
+        let _ = ok_or_say(call(mut h, Subscribe(room: room, who: who, p: p, section: section, target: base)), "subscribe")
+    }
+    let (x_py, _) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, x, py))
+    let (x_pz, _) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, x, pz))
+    let (y_pa, y_pa_rtx) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u2), room, gen_of(2), pa))
+    let (z_pa, z_pa_rtx) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, gen_of(3), pa))
+    let (z_py, _) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, gen_of(3), py))
+    let y_start = h.peers[BY].seq
+    // 100 ms of everyone's media, and a check of X's ufrag answered while X is in.
+    talk(mut h, 20, true)
+    if marked_to(h, addr_of(2), y_pa, MARK_X) == 0 || marked_to(h, addr_of(3), z_pa, MARK_X) == 0 || marked_to(h, addr_of(1), x_py, MARK_Y) == 0 || marked_to(h, addr_of(1), x_pz, MARK_Z) == 0 || marked_to(h, addr_of(3), z_py, MARK_Y) == 0 {
+        fail("media did not reach every subscriber before the revoke")
+    }
+    let before = list.len(h.seen)
+    check_from(mut h, BX, b"ufragx1", 1)
+    tick(mut h)
+    if stun_to(h, addr_of(1), before) != 1 {
+        fail("a check of X's ufrag was not answered while X was in")
+    }
+    // The held repair and the held suffix. Unit 1's writer commits one datagram a
+    // call until the revoke returns, so what X sends and receives waits in its suffix.
+    units.seam(mut h.w.u1, 1, true)
+    for _ in 0u64 .. 4 {
+        for _ in 0u64 .. 2 {
+            speak(mut h, BX)
+            speak(mut h, BZ)
+        }
+        tick(mut h)
+    }
+    let stale_unit = if held == Publishing {
+        // Y asks for X's packet: unit 2 asks unit 1, which answers; the reply waits
+        // in unit 2's media inbox until after unit 2 has taken the revoke.
+        let ask = nack(mut h.peers[BY].c.cs, y_pa, last_seq(h, addr_of(2), y_pa))
+        send_from(mut h, BY, ask)
+        step_unit(mut h, 2)
+        for _ in 0u64 .. 2 {
+            speak(mut h, BX)
+            speak(mut h, BZ)
+        }
+        step_unit(mut h, 1)
+        2u16
+    } else {
+        // X asks for Y's packet: unit 1 asks unit 2, which answers; the reply waits
+        // in unit 1's media inbox until after unit 1 has taken the revoke.
+        let ask = nack(mut h.peers[BX].c.cs, x_py, last_seq(h, addr_of(1), x_py))
+        send_from(mut h, BX, ask)
+        for _ in 0u64 .. 2 {
+            speak(mut h, BX)
+            speak(mut h, BZ)
+        }
+        step_unit(mut h, 1)
+        step_unit(mut h, 2)
+        1u16
+    }
+    let (from_x, to_x) = holds(h, 1, x)
+    if !from_x || !to_x {
+        fail("unit 1's suffix did not hold X's media and media to X at the revoke")
+    }
+    let stale = unit_router(h, stale_unit).stale
+    let misses = unit_router(h, 3 - stale_unit).ring_misses
+    if misses != 0 {
+        fail("the held repair missed the publisher's ring")
+    }
+    begin_call(mut h, Revoke(room: room, id: 1, epoch: 1), true)
+    step_unit(mut h, stale_unit)
+    if unit_router(h, stale_unit).stale <= stale {
+        fail("the held repair was not taken after the fence")
+    }
+    while !h.after {
+        if h.calling == 0 {
+            fail("the revoke never returned")
+        }
+        talk(mut h, 1, true)
+    }
+    if let Some(take a) = replace(mut h.answer, None) {
+        let _ = result.unwrap(a)
+    }
+    units.seam(mut h.w.u1, 0, true)
+    let events = units.take_events(mut h.w.u0)
+    if list.len(events) != 1 {
+        fail("the revoke did not raise one Fenced event")
+    }
+    // 200 ms of further input: X keeps sending from its old 5-tuple (media, then a
+    // DTLS record and a check of its old ufrag), and the probe checks X's ufrag from
+    // a new address. Each is dropped and counted unknown.
+    let unknown = unit_router(h, 1).unknown
+    let after_at = list.len(h.seen)
+    let y_after = h.peers[BY].seq
+    let mut lost = 0u64
+    for t in 0u64 .. 40 {
+        if t % 4 == 0 {
+            speak(mut h, BX)
+            speak(mut h, BY)
+            speak(mut h, BZ)
+            lost += 1
+        }
+        if t == 9 {
+            send_from(mut h, BX, b"\x17\xfe\xfd\x00\x01\x00\x00\x00\x00\x00\x07\x00\x04abcd")
+            lost += 1
+        }
+        if t == 13 {
+            check_from(mut h, BX, b"ufragx1", 2)
+            lost += 1
+        }
+        if t == 17 {
+            check_from(mut h, BPROBE, b"ufragx1", 3)
+            lost += 1
+        }
+        tick(mut h)
+    }
+    for _ in 0u64 .. 8 {
+        tick(mut h)
+    }
+    if unit_router(h, 1).unknown - unknown != lost {
+        fail("X's old 5-tuple or old ufrag was not dropped and counted exactly")
+    }
+    for i in 0u64 .. list.len(h.seen) {
+        let s = h.seen[i]
+        if !s.after {
+            continue
+        }
+        if s.to == addr_of(1) || s.to == addr_of(9) {
+            fail("a datagram went to the revoked session or answered its old ufrag")
+        }
+        if s.kind == KIND_RTP && (s.mark == MARK_X || s.ssrc == y_pa || s.ssrc == y_pa_rtx || s.ssrc == z_pa || s.ssrc == z_pa_rtx) {
+            fail("a packet of the revoked participant's publication went out")
+        }
+        if s.kind == KIND_SHUT {
+            fail("a subscriber could not open a packet")
+        }
+        if (s.kind == KIND_RTP || s.kind == KIND_RTCP) && (s.ssrc == x_py || s.ssrc == x_pz) {
+            fail("a datagram carried a revoked down-track's SSRC")
+        }
+    }
+    // Z got every packet Y sent, before, during and after the revoke, exactly once.
+    let sent: u64 = int.widen(int.wrapping_sub(h.peers[BY].seq, y_start))
+    let mut got: List[u8] = list.new()
+    list.fill(mut got, sent, 0u8)
+    for s in h.seen {
+        if s.to == addr_of(3) && s.kind == KIND_RTP && s.ssrc == z_py && s.mark == MARK_Y {
+            let k: u64 = int.widen(int.wrapping_sub(s.n, y_start))
+            if k >= sent {
+                fail("Z got a packet Y never sent")
+            }
+            got[k] += 1
+        }
+    }
+    for k in 0u64 .. sent {
+        if got[k] != 1 {
+            fail("an unrelated participant's media stopped or doubled across the revoke")
+        }
+    }
+    if int.wrapping_sub(h.peers[BY].seq, y_after) != 10 || after_at == list.len(h.seen) {
+        fail("the 200 ms after the revoke carried no input")
+    }
+    // A join at the fenced epoch is refused; its session goes.
+    let (x3, at_fence) = join_unit(mut h, 1, 7450, two, x, addr_of(12), b"ufragx3", MARK_X)
+    if let Error(Fenced) = at_fence {} else {
+        fail("a join at the fenced epoch was not Fenced")
+    }
+    let at3 = list.len(h.seen)
+    check_from(mut h, x3, b"ufragx3", 4)
+    tick(mut h)
+    tick(mut h)
+    if stun_to(h, addr_of(12), at3) != 0 {
+        fail("a refused join's session answered its ufrag")
+    }
+    // One epoch higher succeeds, with new credentials: its ufrag is answered, X's old
+    // one is not.
+    let x2: peer.Gen = Gen(id: 1, epoch: 2)
+    let i2 = admitted(join_unit(mut h, 1, 7460, two, x2, addr_of(11), b"ufragx2", MARK_X), "a join one epoch above the fence was refused")
+    let at2 = list.len(h.seen)
+    check_from(mut h, i2, b"ufragx2", 5)
+    tick(mut h)
+    check_from(mut h, i2, b"ufragx1", 6)
+    tick(mut h)
+    tick(mut h)
+    if stun_to(h, addr_of(11), at2) != 1 {
+        fail("the new epoch's ufrag, and only it, was not answered")
+    }
+    // A repeated revoke changes nothing: the new epoch still answers.
+    let _ = result.unwrap(call(mut h, Revoke(room: room, id: 1, epoch: 1)))
+    let again = list.len(h.seen)
+    check_from(mut h, i2, b"ufragx2", 7)
+    tick(mut h)
+    tick(mut h)
+    if stun_to(h, addr_of(11), again) != 1 {
+        fail("a repeated revoke changed the new epoch's session")
+    }
+    let _ = result.unwrap(call(mut h, Leave(room: room, who: x2)))
+    // Churn ids 4 to 6 through the room; the room has then reserved all six.
+    for id in 4u64 .. 7u64 {
+        let n: u32 = int.narrow(id)
+        let _ = admitted(join_unit(mut h, 2, 7500 + id, one_recv, gen_of(id), addr_of(n), b"ufragc4", 0), "a churned id was not admitted")
+        let _ = result.unwrap(call(mut h, Leave(room: room, who: gen_of(id))))
+    }
+    let (_, unseen) = join_unit(mut h, 2, 7510, one_recv, gen_of(7), addr_of(7), b"ufragc7", 0)
+    if let Error(Limit(6)) = unseen {} else {
+        fail("one more unseen id was not Limit(ids)")
+    }
+    let (_, oldest) = join_unit(mut h, 1, 7520, two, x, addr_of(13), b"ufragx4", MARK_X)
+    if let Error(Fenced) = oldest {} else {
+        fail("the oldest fenced epoch was not still Fenced after the churn")
+    }
+    close_hall(take h)
+}
+
+/// bug: a unit keeps sending a revoked participant's media, repairs or down-tracks
+/// after the revoke returns (from `out`, the uncommitted suffix, a pacer, or a
+/// `RepairReply` taken after the fence), keeps its 5-tuple routed or its ufrag
+/// answered, admits a join at or below the fence, frees a fenced id's entry on
+/// churn, or lets a refused join's session linger; or the fence stops an unrelated
+/// participant's media.
+/// oracle: RTC-7 by hand, from captures at each unit's writer read by the browsers'
+/// own SRTP ends. After the call returns, for 200 ms: nothing goes to X's address or
+/// to the probe, no RTP carries X's mark byte or a down-track SSRC of X's publication
+/// or of X's own, and u1 counts exactly the ten media packets, one DTLS record and
+/// two checks X's old credentials sent as unknown. Every packet Y sends reaches Z
+/// once. A join at epoch 1 is `Fenced`; at epoch 2 its ufrag is answered and X's old
+/// one is not; a second revoke at epoch 1 changes nothing; after ids 4 to 6 churn
+/// through a room of six ids, id 7 is `Limit(6)` and epoch 1 is still `Fenced`. Run
+/// with each held repair direction, each shown taken after the fence (`stale`).
+@test
+fn revoke_stops_everything(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    for held in[Publishing, Subscribing] {
+        let (net, clock, take served) = sim_net(tasks, 7400)
+        revoke_run(net, clock, held)
+        result.unwrap(task.join(take served))
+    }
+    Ok(())
+}

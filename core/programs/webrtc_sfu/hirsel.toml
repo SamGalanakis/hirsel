@@ -22,11 +22,14 @@ turn = { major = 1, path = "../turn" }
 "peer_egress.hirsel" = "peer"
 "router.hirsel" = "router"
 "router_route.hirsel" = "router"
+"router_fence.hirsel" = "router"
+"units.hirsel" = "units"
 "signal.hirsel" = "signal"
 "signal_turn.hirsel" = "signal"
 
 [tests]
 limit = 67108864
+grants = ["Tasks", "Clock", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 127.0.0.0/8 0-65535"]
 
 [tests.sources]
 "laws.hirsel" = "laws"
@@ -35,5 +38,9 @@ limit = 67108864
 "router_keyframe_laws.hirsel" = "laws"
 "router_rebind_laws.hirsel" = "laws"
 "relay_laws.hirsel" = "laws"
+"units_laws.hirsel" = "laws"
+"units_net_laws.hirsel" = "laws"
+"units_revoke_laws.hirsel" = "laws"
+"units_fanout_laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"

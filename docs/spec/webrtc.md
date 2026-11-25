@@ -1423,6 +1423,44 @@ W19, blocks, because those are soundness reds.
   amend). W9 waits for captured or reference simulcast and SVC packets. The re-offer after an
   SSRC collision (RTC-4) waits for the renegotiation path. Each is an open red on S4's ticket.
 
+**S5 decisions.** Gaps the spec left open, decided while S5 was built
+(`core/programs/webrtc_sfu/units.hirsel`, `router_fence.hirsel`):
+
+- **Control unit.** Unit 0 is the control unit, and it is also a media unit. It makes
+  every control call: `units.begin` starts one, `units.finished` answers it once every unit
+  has acknowledged, and `units.call` blocks on both over the unit's socket. One call is in
+  flight at a time.
+- **Apply order.** A change is applied home unit first, then to the others. A change the
+  home unit refuses goes no further. `Event.Fenced` is raised on the control unit once a
+  revoke has returned.
+- **Sessions.** An opened `PeerSession` is parked on its home unit (`units.park`), and
+  `Admit` moves it into the room. An admission that is refused, for example `Fenced`,
+  unparks the session, so a refused join holds nothing. S6 and S7 build sessions inside
+  their unit from cross-unit inputs. Join-from-offer has no owner yet: S7 decides it.
+- **One outbox, no separate suffix.** A unit keeps one persistent outbox. `udp_send`
+  commits a prefix, and the rest stays queued as the uncommitted suffix. A purge runs at
+  `apply`, at the control drain and at `ready` (the send step). Every queued datagram's tag is
+  rechecked there against the fence, so nothing can survive in a copy outside the queue.
+- **Layers behind the send-step purge.** The recheck of a `Media` or `RepairReply` against
+  `src` and `dst`, the `RepairAsk` refusal for a fenced publisher, and the pacer's bar on a
+  rebound-away publisher's entries each repeat a removal the send-step purge already makes.
+  W14 and W15 stay green with any one of them removed (the S5 report lists the seeded runs).
+  They stay as second layers, and no law claims them.
+- **Demux.** A unit resolves a datagram by its 5-tuple row, and a STUN check by its named
+  ufrag among admitted members (`named`). Parked sessions are never consulted.
+- **Messages.** `Media` carries the publisher's plaintext once per remote unit with a
+  down-track of the publication, shared between those units. It carries no speaking flag
+  until S6. `RepairAsk` goes to the publication's home unit, and `RepairReply` comes back
+  with the ring's payload. A unit counts each kind it takes (`UnitCounts`).
+- **Doorbells.** After a send step, a unit sends one empty datagram to each unit it posted
+  to. A doorbell from an address that is not a sibling's is counted `forged` and ignored.
+- **Test seam.** `units.seam(u, limit, tapping)` caps each `udp_send` at `limit` datagrams,
+  which makes a partial commit. With `tapping`, the unit records every committed datagram,
+  with its tag and bytes. In the laws, all units run as values in one task.
+- **Real sockets.** `units_on_loopback` runs three units and two browsers over
+  127.0.0.1 sockets bound at port 0. The units' doors name the addresses the binds return.
+- **Not built in S5.** `close_room` across units is not built.
+
 **Follow-ups this spec names.**
 
 - **F1** (runner): on main. `room_client` is a Hirsel-side `hirsel.4` room client, so a Hirsel

@@ -1,0 +1,391 @@
+// ---- Units over sim.udp: the harness W8 and W15 share ----
+// Every unit runs `units.turn` over its own simulated socket, and every browser has
+// a socket of its own. One task drives them all in turn, so each datagram a unit
+// writes is captured at its writer (the tap) in the order it was committed.
+const SOCK: UdpOptions = UdpOptions(slots: 256, slot_bytes: 1536)
+
+const KIND_RTP: u8 = 0
+
+const KIND_RTCP: u8 = 1
+
+const KIND_STUN: u8 = 2
+
+const KIND_OTHER: u8 = 3
+
+// RTP its addressee's harness end could not open.
+const KIND_SHUT: u8 = 4
+
+/// A browser: its harness end, socket, the unit it sends to, and the media it sends
+/// on its sending section (SSRC, next sequence number, the payload's mark byte).
+type Peer {
+    c: Client,
+    sock: UdpSocket,
+    home: Addr,
+    ssrc: u32,
+    seq: u16,
+    mark: u8
+}
+
+/// One datagram a unit's writer committed, as its addressee's harness end read it.
+/// For RTP: the opened header and, from the payload's last four bytes, the mark and
+/// the source sequence number the publisher wrote there. For RTCP: the first
+/// packet's sender SSRC, which SRTCP leaves in the clear.
+type Seen {
+    unit: u16,
+    to: Addr,
+    kind: u8,
+    ssrc: u32,
+    seq: u16,
+    pt: u8,
+    mark: u8,
+    n: u16,
+    // Whether the revoke had returned when it was committed, and when it was.
+    after: bool,
+    at: u64,
+    // The opened RTP or RTCP plaintext.
+    pkt: Bytes
+}
+
+type Hall {
+    w: Units,
+    s0: UdpSocket,
+    s1: UdpSocket,
+    s2: UdpSocket,
+    // The units' socket addresses.
+    addrs: List[Addr],
+    clock: Clock,
+    net: Net,
+    peers: List[Peer],
+    seen: List[Seen],
+    // The control call in flight: 0 none, 1 a call, 2 a revoke.
+    calling: u8,
+    answer: Option[Result[router.Answer, router.RouterError]],
+    after: bool
+}
+
+fn hall(net: Net, clock: Clock, seed: u64) -> Hall waits {
+    hall_at(net, clock, seed, U0, U1, U2)
+}
+
+// The hall over three sockets bound at `a0`, `a1` and `a2`; the units' doors name
+// the addresses the binds return, so a port 0 bind on loopback works too.
+fn hall_at(net: Net, clock: Clock, seed: u64, a0: Addr, a1: Addr, a2: Addr) -> Hall waits {
+    let (take s0, b0) = result.unwrap(host.udp_bind(net, a0, SOCK))
+    let (take s1, b1) = result.unwrap(host.udp_bind(net, a1, SOCK))
+    let (take s2, b2) = result.unwrap(host.udp_bind(net, a2, SOCK))
+    let mut w = three_units_at(seed, b0, b1, b2)
+    units.seam(mut w.u0, 0, true)
+    units.seam(mut w.u1, 0, true)
+    units.seam(mut w.u2, 0, true)
+    let mut addrs: List[Addr] = list.new()
+    list.push(mut addrs, b0)
+    list.push(mut addrs, b1)
+    list.push(mut addrs, b2)
+    Hall(w: take w, s0: take s0, s1: take s1, s2: take s2, addrs: take addrs, clock: clock, net: net, peers: list.new(), seen: list.new(), calling: 0, answer: None, after: false)
+}
+
+// A browser offer: a sending video section `a` (VP8 96, RTX 97, TWCC on 3), and
+// `recvs` receiving sections `c` and `d` with the given payload types and IDs.
+fn unit_offer(recvs: u64, pt: Bytes, rtx: Bytes, mid_id: Bytes, twcc_id: Bytes) -> Bytes {
+    let mut b = if recvs == 2 {
+        minimal_head(b" a c d")
+    } else {
+        minimal_head(b" a c")
+    }
+    list.append(mut b, minimal_video(b"96 97", b"a", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtcp-fb:96 nack\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n")
+    recv_section(mut b, b"c", pt, rtx, mid_id, twcc_id)
+    if recvs == 2 {
+        recv_section(mut b, b"d", pt, rtx, mid_id, twcc_id)
+    }
+    take b
+}
+
+// A publisher packet: a VP8 keyframe, then `mark`, the source sequence number and
+// `mark` again, which a forwarded packet and an RTX repair both end with.
+fn tagged(mut cs: srtp.Session, ssrc: u32, seq: u16, mark: u8) -> Bytes {
+    let mut body = vp8_key()
+    list.push(mut body, mark)
+    list.push(mut body, int.truncate(seq >> 8))
+    list.push(mut body, int.truncate(seq))
+    list.push(mut body, mark)
+    let wide: u32 = int.widen(seq)
+    media_carrying(mut cs, ssrc, seq, 3000 * wide, b"a", 96, body)
+}
+
+fn kind_of(d: Bytes) -> u8 {
+    if list.len(d) < 2 {
+        return KIND_OTHER
+    }
+    let b = d[0]
+    if b < 4 {
+        KIND_STUN
+    } else if b >= 128 && b <= 191 {
+        if d[1] >= 192 && d[1] <= 223 {
+            KIND_RTCP
+        } else {
+            KIND_RTP
+        }
+    } else {
+        KIND_OTHER
+    }
+}
+
+fn look(mut cs: srtp.Session, d: Bytes, mut s: Seen) {
+    let mut b = copy_of(d)
+    let Ok(o) = srtp.unprotect_rtp(mut cs, mut b) else {
+        s.kind = KIND_SHUT
+        return
+    }
+    list.truncate(mut b, o.length)
+    let h = result.unwrap(rtp.header.parse(b))
+    s.ssrc = h.ssrc
+    s.seq = h.seq
+    s.pt = h.pt
+    let end = list.len(b)
+    if end >= h.end + 4 && b[end - 1] == b[end - 4] {
+        s.mark = b[end - 1]
+        s.n = list.word_be(b, end - 3)
+    }
+    s.pkt = take b
+}
+
+fn look_rtcp(mut cs: srtp.Session, d: Bytes, mut s: Seen) {
+    let mut b = copy_of(d)
+    if let Ok(n) = srtp.unprotect_rtcp(mut cs, mut b) {
+        list.truncate(mut b, n)
+        s.pkt = take b
+    }
+}
+
+// Take what unit `k`'s writer committed since the last call, read as its addressees
+// read it.
+fn harvest(mut h: Hall, k: u16) {
+    let tap = if k == 0 {
+        units.take_tap(mut h.w.u0)
+    } else if k == 1 {
+        units.take_tap(mut h.w.u1)
+    } else {
+        units.take_tap(mut h.w.u2)
+    }
+    for take sent in tap {
+        let units.Sent(to: to, tag: _, data: take d) = take sent
+        let mut s = Seen(unit: k, to: to, kind: kind_of(d), ssrc: 0, seq: 0, pt: 0, mark: 0, n: 0, after: h.after, at: host.mono_ns(h.clock), pkt: list.new())
+        if s.kind == KIND_RTCP && list.len(d) >= 8 {
+            s.ssrc = list.word_be(d, 4)
+            for i in 0u64 .. list.len(h.peers) {
+                if h.peers[i].c.at == to {
+                    look_rtcp(mut h.peers[i].c.cs, d, mut s)
+                }
+            }
+        }
+        if s.kind == KIND_RTP {
+            s.kind = KIND_SHUT
+            for i in 0u64 .. list.len(h.peers) {
+                if h.peers[i].c.at == to {
+                    s.kind = KIND_RTP
+                    look(mut h.peers[i].c.cs, d, mut s)
+                }
+            }
+        }
+        list.push(mut h.seen, take s)
+    }
+}
+
+/// One turn of unit `k` over its socket, which takes only what has arrived, then its
+/// capture; on the control unit, the call in flight's answer once it has one.
+fn step_unit(mut h: Hall, k: u16) waits {
+    // A deadline already past answers at once, before the network has been asked;
+    // one nanosecond on lets the socket take what has arrived.
+    let now = host.mono_ns(h.clock) + 1
+    if k == 0 {
+        let _ = result.unwrap(units.turn(mut h.w.u0, h.clock, mut h.s0, now))
+    } else if k == 1 {
+        let _ = result.unwrap(units.turn(mut h.w.u1, h.clock, mut h.s1, now))
+    } else {
+        let _ = result.unwrap(units.turn(mut h.w.u2, h.clock, mut h.s2, now))
+    }
+    harvest(mut h, k)
+    if k == 0 && h.calling != 0 {
+        if let Some(take a) = units.finished(mut h.w.u0) {
+            if h.calling == 2 {
+                h.after = true
+            }
+            h.calling = 0
+            h.answer = Some(take a)
+        }
+    }
+}
+
+/// Every unit turns once, then 5 ms pass.
+fn tick(mut h: Hall) waits {
+    step_unit(mut h, 1)
+    step_unit(mut h, 2)
+    step_unit(mut h, 0)
+    let now = host.mono_ns(h.clock)
+    host.sleep_until(h.clock, now + 5 * MS)
+}
+
+fn begin_call(mut h: Hall, take c: router.Change, fence: bool) {
+    let now = host.mono_ns(h.clock)
+    result.unwrap(units.begin(mut h.w.u0, now, take c))
+    h.calling = if fence {
+        2u8
+    } else {
+        1u8
+    }
+    h.answer = None
+}
+
+fn wait_answer(mut h: Hall) -> Result[router.Answer, router.RouterError] waits {
+    for _ in 0u64 .. 16 {
+        if let Some(take a) = replace(mut h.answer, None) {
+            return take a
+        }
+        tick(mut h)
+    }
+    fail("a control call did not finish")
+}
+
+/// A control call, every unit turning until it has returned.
+fn call(mut h: Hall, take c: router.Change) -> Result[router.Answer, router.RouterError] waits {
+    begin_call(mut h, take c, false)
+    wait_answer(mut h)
+}
+
+/// A browser joining on unit `k`: its session opened there with ICE ufrag `ufrag`,
+/// its socket bound at `at`, then `Admit` through the control order. It answers the
+/// browser's index and the admission's answer.
+fn join_unit(mut h: Hall, k: u16, seed: u64, offer: Bytes, g: peer.Gen, at: Addr, ufrag: Bytes, mark: u8) -> (u64, Result[router.Answer, router.RouterError]) waits {
+    let who = peer.Participant(gen: g, room: room_id())
+    let (take sock, local_at) = result.unwrap(host.udp_bind(h.net, at, SOCK))
+    let Rig(p: take p, c: _, cs: take cs, out: _) = established_as(seed, offer, who, local_at, 64, ufrag)
+    if k == 0 {
+        result.unwrap(units.park(mut h.w.u0, take p))
+    } else if k == 1 {
+        result.unwrap(units.park(mut h.w.u1, take p))
+    } else {
+        result.unwrap(units.park(mut h.w.u2, take p))
+    }
+    let Gen(id: id, epoch: _) = g
+    let index = list.len(h.peers)
+    let small: u32 = int.narrow(id)
+    let small_seq: u16 = int.narrow(id)
+    list.push(mut h.peers, Peer(c: Client(who: g, at: local_at, cs: take cs), sock: take sock, home: h.addrs[k], ssrc: 0x51000000 + small, seq: 1000 * small_seq, mark: mark))
+    let a = call(mut h, Admit(who: who, home: k))
+    (index, a)
+}
+
+/// Browser `i` sends `data` to its unit.
+fn send_from(mut h: Hall, i: u64, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.new()
+    list.push(mut tx, UdpTx(to: h.peers[i].home, at: 0, len: list.len(data), ecn: 0))
+    let now = host.mono_ns(h.clock)
+    let sent = host.udp_send(mut h.peers[i].sock, data, tx, At(h.clock, now + 50 * MS))
+    if let Ok(1) = sent {} else {
+        fail("a browser socket did not send")
+    }
+}
+
+/// Browser `i` sends its next media packet.
+fn speak(mut h: Hall, i: u64) waits {
+    let seq = h.peers[i].seq
+    h.peers[i].seq = int.wrapping_add(seq, 1u16)
+    let pkt = tagged(mut h.peers[i].c.cs, h.peers[i].ssrc, seq, h.peers[i].mark)
+    send_from(mut h, i, pkt)
+}
+
+/// Browser `i` sends an ICE connectivity check of the server ufrag `ufrag`.
+fn check_from(mut h: Hall, i: u64, ufrag: Bytes, txn: u64) waits {
+    let mut pkt: Bytes = list.with_capacity(576)
+    list.fill(mut pkt, 576, 0)
+    let mut scratch: Bytes = list.with_capacity(576)
+    list.fill(mut scratch, 576, 0)
+    let check = stun_ice.Check(role: stun_ice.IceRole(role: Controlling, tie: 7), priority: 0x6e0001ff, nominate: false)
+    let k = result.unwrap(stun_ice.binding_request(stun_ice.Transaction(high: 9, low: txn), username(ufrag), Some(check), Sha1, true, server_pwd(), mut pkt, mut scratch))
+    send_from(mut h, i, list.slice(pkt, 0, k))
+}
+
+/// The STUN datagrams captured to `to` from capture `from` on.
+fn stun_to(h: Hall, to: Addr, from: u64) -> u64 {
+    let mut n = 0u64
+    for i in from .. list.len(h.seen) {
+        if h.seen[i].to == to && h.seen[i].kind == KIND_STUN {
+            n += 1
+        }
+    }
+    n
+}
+
+/// The last sequence number captured to `to` on `ssrc`.
+fn last_seq(h: Hall, to: Addr, ssrc: u32) -> u16 {
+    let mut i = list.len(h.seen)
+    while i > 0 {
+        i -= 1
+        if h.seen[i].to == to && h.seen[i].kind == KIND_RTP && h.seen[i].ssrc == ssrc {
+            return h.seen[i].seq
+        }
+    }
+    fail("nothing was captured on a down-track")
+}
+
+/// How many RTP packets captured to `to` on `ssrc` carried `mark`.
+fn marked_to(h: Hall, to: Addr, ssrc: u32, mark: u8) -> u64 {
+    let mut n = 0u64
+    for s in h.seen {
+        if s.to == to && s.kind == KIND_RTP && s.ssrc == ssrc && s.mark == mark {
+            n += 1
+        }
+    }
+    n
+}
+
+fn unit_router(h: Hall, k: u16) -> router.Counts {
+    if k == 0 {
+        router.counts(units.router_of(h.w.u0))
+    } else if k == 1 {
+        router.counts(units.router_of(h.w.u1))
+    } else {
+        router.counts(units.router_of(h.w.u2))
+    }
+}
+
+/// End the run: release every socket, so the sim server finds the run idle and stops.
+fn close_hall(take h: Hall) {
+    let Hall(w: take w, s0: take s0, s1: take s1, s2: take s2, peers: take peers, ..) = take h
+    drop(take w)
+    drop(take s0)
+    drop(take s1)
+    drop(take s2)
+    drop(take peers)
+}
+
+/// A simulated network with no loss and no delay, and the task serving it.
+fn sim_net(tasks: Tasks, seed: u64) -> (Net, Clock, Task[()]) {
+    let (network, take port) = provide.net(bytes 1048576)
+    let (take driver, clock) = std.sim.world.new(seed, 0, 0)
+    let server = std.sim.udp.Server(config: std.sim.udp.defaults(), plan: std.sim.world.plan(seed), world: take driver, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take server, std.sim.udp.serve)
+    (network, clock, take served)
+}
+
+fn ok_or_say(a: Result[router.Answer, router.RouterError], take what: String) -> router.Answer {
+    match a {
+        Ok(v) => v,
+        Error(e) => {
+            let mut m = string.from(what)
+            string.push(mut m, match e {
+                NoRoom => ": NoRoom",
+                NoParticipant => ": NoParticipant",
+                NoPublication => ": NoPublication",
+                Fenced => ": Fenced",
+                Suspended => ": Suspended",
+                Exists => ": Exists",
+                Limit(_) => ": Limit",
+                Peer(_) => ": Peer",
+                Capacity(_) => ": Capacity",
+            })
+            fail(take m)
+        },
+    }
+}

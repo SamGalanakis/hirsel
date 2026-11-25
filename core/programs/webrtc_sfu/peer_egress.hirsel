@@ -372,12 +372,13 @@ fn drain(mut p: PeerSession, now: u64, mut out: Outbox) -> Option[u64] {
 }
 
 // Write the header of a packet the pacer let out, with the next transport number,
-// and seal it. A packet whose SSRC a collision retired since it was queued is dropped.
+// and seal it. A packet whose SSRC a collision retired since it was queued, or whose
+// publisher a fence barred, is dropped.
 fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), PeerError] {
     let at: u64 = int.widen(q.slot)
     list.push(mut p.free, q.slot)
     let t: u64 = int.widen(q.track)
-    if p.closed || t >= list.len(p.tracks) {
+    if p.closed || t >= list.len(p.tracks) || barred(p, q.src) {
         return Ok(())
     }
     let ssrc = if q.media {
@@ -403,6 +404,18 @@ fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), P
         rtp.stats.on_sent(mut p.tracks[t].sent, len)
     }
     Ok(())
+}
+
+/// End a down-track the router removed (RTC-7 step 3): its `Rewrite` closes, so
+/// every later packet answers `Drop`, its egress history is cleared and its paced
+/// packets are taken out unsent.
+pub fn end_track(mut p: PeerSession, track: u16) {
+    let t: u64 = int.widen(track)
+    if t < list.len(p.tracks) {
+        rtp.rewrite.close(mut p.tracks[t].rewrite)
+        let _ = rtp.history.clear(mut p.tracks[t].history)
+    }
+    unpace(mut p, track)
 }
 
 /// Take a down-track's packets out of the pacer unsent: at a collision, and when the

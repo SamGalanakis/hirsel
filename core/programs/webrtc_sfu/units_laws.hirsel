@@ -1,0 +1,474 @@
+// ---- RTC-5 units and RTC-7's fence across them (W14) ----
+const U0: Addr = Addr(ip: V4(0xc0000201), port: 6000)
+
+const U1: Addr = Addr(ip: V4(0xc0000201), port: 6001)
+
+const U2: Addr = Addr(ip: V4(0xc0000201), port: 6002)
+
+// The last payload byte of each publisher's packets, which RTC-5 forwards unchanged.
+const MARK_P: u8 = 0xa1
+
+const MARK_O: u8 = 0xb2
+
+/// One datagram a model writer handed to `udp_send`, and whether the control call
+/// had returned when it did.
+type Wire {
+    to: Addr,
+    data: Bytes,
+    after: bool
+}
+
+type Units {
+    u0: units.Unit,
+    u1: units.Unit,
+    u2: units.Unit
+}
+
+fn three_units(seed: u64) -> Units {
+    three_units_at(seed, U0, U1, U2)
+}
+
+// Three units whose doors name the given socket addresses.
+fn three_units_at(seed: u64, a0: Addr, a1: Addr, a2: Addr) -> Units {
+    let (d0, take c0, take m0) = result.unwrap(units.inboxes(a0))
+    let (d1, take c1, take m1) = result.unwrap(units.inboxes(a1))
+    let (d2, take c2, take m2) = result.unwrap(units.inboxes(a2))
+    let mut doors: List[units.Doors] = list.new()
+    list.push(mut doors, take d0)
+    list.push(mut doors, take d1)
+    list.push(mut doors, take d2)
+    let u0 = result.unwrap(units.unit(provide.random(seed), 0, doors, take c0, take m0, 65536, 64))
+    let u1 = result.unwrap(units.unit(provide.random(seed + 1), 1, doors, take c1, take m1, 65536, 64))
+    let u2 = result.unwrap(units.unit(provide.random(seed + 2), 2, doors, take c2, take m2, 65536, 64))
+    Units(u0: take u0, u1: take u1, u2: take u2)
+}
+
+/// A model writer: purge, hand the first `limit` queued datagrams (all when 0) to the
+/// log as `udp_send` would, and keep the rest as the uncommitted suffix. With `hold`,
+/// it also keeps its own copy of that suffix, as a writer that retries without the
+/// recheck would.
+fn write(mut u: units.Unit, now: u64, limit: u64, after: bool, mut log: List[Wire], mut held: List[Wire], hold: bool) {
+    let _ = units.take_timers(mut u, now)
+    let n = units.ready(mut u)
+    let k = if limit != 0 && limit < n {
+        limit
+    } else {
+        n
+    }
+    {
+        let q = units.queued(u)
+        for i in 0u64 .. n {
+            let UdpTx(to, at, len, ecn: _) = q.pkts[i]
+            let w = Wire(to: to, data: copy_of(list.slice(q.data, at, at + len)), after: after)
+            if i < k {
+                list.push(mut log, take w)
+            } else if hold {
+                list.push(mut held, take w)
+            }
+        }
+    }
+    units.committed(mut u, k)
+}
+
+fn drain(mut u: units.Unit, now: u64) {
+    units.take_control(mut u, now)
+    result.unwrap(units.take_media(mut u, now))
+}
+
+/// Run a control call to its end, every unit turning and writing everything.
+fn settle(mut w: Units, now: u64, take c: router.Change, mut log: List[Wire]) -> router.Answer {
+    result.unwrap(units.begin(mut w.u0, now, take c))
+    let mut held: List[Wire] = list.new()
+    for _ in 0u64 .. 8 {
+        drain(mut w.u1, now)
+        drain(mut w.u2, now)
+        drain(mut w.u0, now)
+        write(mut w.u1, now, 0, false, mut log, mut held, false)
+        write(mut w.u2, now, 0, false, mut log, mut held, false)
+        write(mut w.u0, now, 0, false, mut log, mut held, false)
+        if let Some(a) = units.finished(mut w.u0) {
+            return result.unwrap(a)
+        }
+    }
+    fail("a control call did not finish")
+}
+
+/// Quiesce: every unit takes its messages and writes, `rounds` times.
+fn quiesce(mut w: Units, now: u64, rounds: u64, after: bool, mut log: List[Wire]) {
+    let mut held: List[Wire] = list.new()
+    for _ in 0u64 .. rounds {
+        drain(mut w.u0, now)
+        drain(mut w.u1, now)
+        drain(mut w.u2, now)
+        write(mut w.u0, now, 0, after, mut log, mut held, false)
+        write(mut w.u1, now, 0, after, mut log, mut held, false)
+        write(mut w.u2, now, 0, after, mut log, mut held, false)
+    }
+}
+
+/// A browser on a unit: its participant, address and SRTP end.
+fn unit_browser(mut u: units.Unit, seed: u64, id: u64, pacer: u32) -> Client {
+    let at = addr_of(int.narrow(id))
+    let who = peer.Participant(gen: gen_of(id), room: room_id())
+    let Rig(p: take p, c: _, cs: take cs, out: _) = established_with(seed, session_offer(), who, at, pacer)
+    result.unwrap(units.park(mut u, take p))
+    Client(who: gen_of(id), at: at, cs: take cs)
+}
+
+fn admit_on(mut w: Units, c: Client, home: u16, mut log: List[Wire]) {
+    let _ = settle(mut w, 0, Admit(who: peer.Participant(gen: c.who, room: room_id()), home: home), mut log)
+}
+
+fn published(a: router.Answer) -> router.PublicationId {
+    match a {
+        Shaped(id: id, shape: _) => id,
+        Done => fail("a publish answered no publication"),
+    }
+}
+
+// A publisher packet: VP8 keyframe bytes, then filler ending in `mark`.
+fn marked(mut cs: srtp.Session, seq: u16, mark: u8, big: bool) -> Bytes {
+    let mut body = vp8_key()
+    let size = if big {
+        738u64
+    } else {
+        24u64
+    }
+    while list.len(body) < size {
+        list.push(mut body, mark)
+    }
+    let wide: u32 = int.widen(seq)
+    media_carrying(mut cs, MEDIA_SSRC, seq, 3000 * wide, b"a", 96, body)
+}
+
+/// The scenario W14 runs: who the revoke or suspend is for.
+type Case: key = Publisher | Subscriber | Suspend | Rebound
+
+/// One model run: three units (0 the control unit, 1 holding the publisher P and
+/// the subscriber Q, 2 holding the subscriber S), and the harness ends of P, Q, S
+/// and, in `Rebound`, a second publisher O that Q was rebound to.
+type World {
+    w: Units,
+    p: Client,
+    q: Client,
+    s: Client,
+    o: Client,
+    pa: router.PublicationId,
+    q_ssrc: u32,
+    s_ssrc: u32,
+    s_first: u16,
+    log: List[Wire],
+    held: List[Wire],
+    returned: bool,
+    now: u64
+}
+
+fn world(seed: u64, case: Case) -> World {
+    let mut log: List[Wire] = list.new()
+    let mut w = three_units(seed)
+    let room = room_id()
+    let _ = settle(mut w, 0, Open(room: room, limits: room_limits()), mut log)
+    let p = unit_browser(mut w.u1, seed + 10, 1, 64)
+    let q = unit_browser(mut w.u1, seed + 20, 2, 4)
+    let s = unit_browser(mut w.u2, seed + 30, 3, 64)
+    let o = unit_browser(mut w.u1, seed + 40, 4, 64)
+    admit_on(mut w, p, 1, mut log)
+    admit_on(mut w, q, 1, mut log)
+    admit_on(mut w, s, 2, mut log)
+    admit_on(mut w, o, 1, mut log)
+    let pa = published(settle(mut w, 0, Publish(room: room, who: p.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let oa = published(settle(mut w, 0, Publish(room: room, who: o.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let _ = settle(mut w, 0, Subscribe(room: room, who: q.who, p: pa, section: 2, target: base), mut log)
+    let _ = settle(mut w, 0, Subscribe(room: room, who: s.who, p: pa, section: 2, target: base), mut log)
+    let (q_ssrc, _) = option.unwrap(router.track_ssrcs(units.router_of(w.u1), room, q.who, pa))
+    let (s_ssrc, _) = option.unwrap(router.track_ssrcs(units.router_of(w.u2), room, s.who, pa))
+    let mut made = World(w: take w, p: take p, q: take q, s: take s, o: take o, pa: pa, q_ssrc: q_ssrc, s_ssrc: s_ssrc, s_first: 0, log: take log, held: list.new(), returned: false, now: 10 * MS)
+    // Warm-up: packet 10 reaches both subscribers, so S can NACK it.
+    let first = marked(mut made.p.cs, 10, MARK_P, false)
+    result.unwrap(units.take_datagram(mut made.w.u1, made.now, made.p.at, first))
+    quiesce(mut made.w, made.now, 2, false, mut made.log)
+    made.s_first = first_seq(mut made.s, made.log, s_ssrc)
+    list.clear(mut made.log)
+    if case == Rebound {
+        // Q's 4-slot pacer holds a burst of P's 750-byte packets (RTP-10: 8 ms
+        // each), then Q is rebound from P to O while they wait.
+        made.now += 20 * MS
+        for k in 0u16 .. 4u16 {
+            let big = marked(mut made.p.cs, 11 + k, MARK_P, true)
+            result.unwrap(units.take_datagram(mut made.w.u1, made.now, made.p.at, big))
+        }
+        let _ = settle(mut made.w, made.now, Rebind(room: room, who: made.q.who, from: pa, to: oa, target: base), mut made.log)
+        let key = marked(mut made.o.cs, 50, MARK_O, false)
+        result.unwrap(units.take_datagram(mut made.w.u1, made.now, made.o.at, key))
+        list.clear(mut made.log)
+    }
+    made
+}
+
+// The first sequence number S's track sent: from S's harness end, opening its log.
+fn first_seq(mut c: Client, log: List[Wire], ssrc: u32) -> u16 {
+    for wire in log {
+        if wire.to != c.at || rtcp_like(wire.data) {
+            continue
+        }
+        let mut b = copy_of(wire.data)
+        let Ok(opened) = srtp.unprotect_rtp(mut c.cs, mut b) else {
+            continue
+        }
+        list.truncate(mut b, opened.length)
+        let h = result.unwrap(rtp.header.parse(b))
+        if h.ssrc == ssrc {
+            return h.seq
+        }
+    }
+    fail("S never got the warm-up packet")
+}
+
+fn rtcp_like(b: Bytes) -> bool {
+    list.len(b) < 2 || (b[1] >= 192 && b[1] <= 223) || (b[0] & 0xc0) != 0x80
+}
+
+// The model's steps. Each unit's own order: unit 1 a1..a4, unit 2 b1, b2, the
+// control unit c1, c2.
+const A: u8 = 0
+
+const B: u8 = 1
+
+const C: u8 = 2
+
+fn model_step(mut x: World, case: Case, who: u8, k: u64, negative: bool) {
+    x.now += 9 * MS
+    let now = x.now
+    let room = room_id()
+    if who == A {
+        match k {
+            // Unit 1 takes two of P's datagrams, routes them to Q and posts `Media`
+            // to unit 2 for S.
+            0 => {
+                for seq in 30u16 .. 32u16 {
+                    let pkt = marked(mut x.p.cs, seq, MARK_P, false)
+                    result.unwrap(units.take_datagram(mut x.w.u1, now, x.p.at, pkt))
+                }
+            },
+            // Its `udp_send` commits only the first datagram.
+            1 => write(mut x.w.u1, now, 1, x.returned, mut x.log, mut x.held, negative),
+            // A fence point: control, then the media inbox (`RepairAsk` answered).
+            2 => drain(mut x.w.u1, now),
+            // Messages again, then the retry of the suffix and the write.
+            _ => {
+                drain(mut x.w.u1, now)
+                if negative {
+                    let after = x.returned
+                    for take h in replace(mut x.held, list.new()) {
+                        let Wire(to, data: take d, after: _) = take h
+                        list.push(mut x.log, Wire(to: to, data: take d, after: after))
+                    }
+                }
+                write(mut x.w.u1, now, 0, x.returned, mut x.log, mut x.held, false)
+            },
+        }
+    } else if who == B {
+        match k {
+            // S NACKs its first packet; unit 2's egress history hits and posts
+            // `RepairAsk` to unit 1.
+            0 => {
+                let n = nack(mut x.s.cs, x.s_ssrc, x.s_first)
+                result.unwrap(units.take_datagram(mut x.w.u2, now, x.s.at, n))
+            },
+            // Its messages (`Media`, `RepairReply`), each checked when taken, then
+            // the write.
+            _ => {
+                drain(mut x.w.u2, now)
+                write(mut x.w.u2, now, 0, x.returned, mut x.log, mut x.held, false)
+            },
+        }
+    } else {
+        match k {
+            0 => {
+                let change: router.Change = match case {
+                    Publisher => Revoke(room: room, id: 1, epoch: 1),
+                    Rebound => Revoke(room: room, id: 1, epoch: 1),
+                    Subscriber => Revoke(room: room, id: 3, epoch: 1),
+                    Suspend => Suspend(room: room, on: true),
+                }
+                result.unwrap(units.begin(mut x.w.u0, now, change))
+            },
+            _ => poll_control(mut x, now),
+        }
+    }
+}
+
+fn poll_control(mut x: World, now: u64) {
+    units.take_control(mut x.w.u0, now)
+    if let Some(a) = units.finished(mut x.w.u0) {
+        let _ = result.unwrap(a)
+        x.returned = true
+    }
+}
+
+// Whether a datagram the writers handed over after the call returned breaks RTC-7.
+fn breaks(mut x: World, case: Case, wire: Wire) -> Option[String] {
+    if !wire.after {
+        return None
+    }
+    let fenced_to = match case {
+        Publisher => x.p.at,
+        Rebound => x.p.at,
+        Subscriber => x.s.at,
+        Suspend => U0,
+    }
+    if wire.to == fenced_to {
+        return Some("a datagram went to the fenced session after the call returned")
+    }
+    if rtcp_like(wire.data) {
+        return None
+    }
+    let mut b = copy_of(wire.data)
+    let opened = if wire.to == x.q.at {
+        srtp.unprotect_rtp(mut x.q.cs, mut b)
+    } else if wire.to == x.s.at {
+        srtp.unprotect_rtp(mut x.s.cs, mut b)
+    } else {
+        return None
+    }
+    let Ok(o) = opened else {
+        return Some("a subscriber's harness end could not open a datagram")
+    }
+    if case == Suspend {
+        return Some("RTP went out in a suspended room after the call returned")
+    }
+    let fenced_publisher = case == Publisher || case == Rebound
+    if fenced_publisher && o.length != 0 && b[o.length - 1] == MARK_P {
+        return Some("the fenced publisher's media went out after the call returned")
+    }
+    None
+}
+
+// Every interleaving of `a` steps of unit 1, `b` of unit 2 and `c` of the control
+// unit that keeps each unit's own order.
+fn schedules(a: u64, b: u64, c: u64, mut at: Bytes, mut all: List[Bytes]) {
+    if a == 0 && b == 0 && c == 0 {
+        list.push(mut all, copy_of(at))
+        return
+    }
+    for (who, left) in[(A, a), (B, b), (C, c)] {
+        if left == 0 {
+            continue
+        }
+        list.push(mut at, who)
+        if who == A {
+            schedules(a - 1, b, c, mut at, mut all)
+        } else if who == B {
+            schedules(a, b - 1, c, mut at, mut all)
+        } else {
+            schedules(a, b, c - 1, mut at, mut all)
+        }
+        let _ = list.pop(mut at)
+    }
+}
+
+/// Run one schedule, then let every unit take its messages, retry and write until
+/// the call has returned and two more rounds after it. The first RTC-7 break.
+fn run_schedule(seed: u64, case: Case, order: Bytes, negative: bool) -> Option[String] {
+    let mut x = world(seed, case)
+    let mut done: List[u64] = list.new()
+    list.fill(mut done, 3, 0u64)
+    for who in order {
+        let i: u64 = int.widen(who)
+        model_step(mut x, case, who, done[i], negative)
+        done[i] += 1
+    }
+    let mut rounds = 0u64
+    while !x.returned || rounds < 2 {
+        if rounds > 8 {
+            fail("the control call never returned")
+        }
+        x.now += 9 * MS
+        let now = x.now
+        drain(mut x.w.u1, now)
+        drain(mut x.w.u2, now)
+        poll_control(mut x, now)
+        let after = x.returned
+        write(mut x.w.u1, now, 0, after, mut x.log, mut x.held, false)
+        write(mut x.w.u2, now, 0, after, mut x.log, mut x.held, false)
+        write(mut x.w.u0, now, 0, after, mut x.log, mut x.held, false)
+        if after {
+            rounds += 1
+        }
+    }
+    let log = replace(mut x.log, list.new())
+    for wire in log {
+        if let Some(why) = breaks(mut x, case, wire) {
+            return Some(why)
+        }
+    }
+    None
+}
+
+fn case_number(case: Case) -> u64 {
+    match case {
+        Publisher => 0,
+        Subscriber => 1,
+        Suspend => 2,
+        Rebound => 3,
+    }
+}
+
+fn enumerate(case: Case, negative: bool) -> u64 {
+    let mut all: List[Bytes] = list.new()
+    let mut at: Bytes = list.new()
+    schedules(4, 2, 2, mut at, mut all)
+    if list.len(all) != 420 {
+        fail("the schedule count is not 8! / (4! 2! 2!)")
+    }
+    let mut broken = 0u64
+    let mut index = 0u64
+    for order in all {
+        index += 1
+        match run_schedule(7100, case, order, negative) {
+            Some(why) => {
+                if !negative {
+                    let mut m = string.from(why)
+                    string.push(mut m, " (case ")
+                    string.push_u64(mut m, case_number(case))
+                    string.push(mut m, ", schedule ")
+                    for who in order {
+                        let n: u64 = int.widen(who)
+                        string.push_u64(mut m, n)
+                    }
+                    string.push(mut m, ")")
+                    fail(take m)
+                }
+                broken += 1
+                return broken
+            },
+            None => (),
+        }
+    }
+    broken
+}
+
+/// bug: a unit acknowledges a revoke or suspend before its queues are purged, purges
+/// `out` but not the uncommitted suffix of a partial `udp_send`, or lets a paced
+/// entry of a publisher the down-track was rebound away from out of the pacer while
+/// the send step does not purge it either. The `Media`/`RepairReply` recheck, the
+/// `RepairAsk` refusal for a fenced publisher, the pacer bar and the return only after
+/// every acknowledgement are second layers behind the send-step purge: removing one
+/// alone stays green here (seeded runs in the S5 report).
+/// oracle: RTC-7 by hand, read off the wire bytes, not the tags: once the control call
+/// has returned, no datagram goes to a fenced session's address, no RTP a subscriber's
+/// own SRTP end opens carries the fenced publisher's marker byte, and no RTP goes out
+/// in a suspended room. All 8!/(4!2!2!) = 420 interleavings of the three units' steps
+/// are run per case. A writer that keeps its own copy of the suffix across the
+/// acknowledgement and retries it unchecked must break the invariant in some of them.
+@test
+fn revoke_fence_schedules() -> Result[(), router.RouterError] {
+    for case in[Publisher, Subscriber, Suspend, Rebound] {
+        let _ = enumerate(case, false)
+    }
+    if enumerate(Publisher, true) == 0 {
+        fail("the negative control's held suffix broke no schedule")
+    }
+    Ok(())
+}

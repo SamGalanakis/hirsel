@@ -17,6 +17,8 @@ fn item() -> Cross {
         bytes: 16,
         owners: ITEM_OWNERS.as_ptr(),
         count: 1,
+        at: 0,
+        len: 16,
     }
 }
 /// The helper's input: the root's client.
@@ -26,6 +28,8 @@ fn input() -> Cross {
         bytes: 8,
         owners: INPUT_OWNERS.as_ptr(),
         count: 1,
+        at: 0,
+        len: 8,
     }
 }
 fn plain(bytes: u64) -> Cross {
@@ -33,6 +37,8 @@ fn plain(bytes: u64) -> Cross {
         bytes,
         owners: ptr::null(),
         count: 0,
+        at: 0,
+        len: bytes,
     }
 }
 

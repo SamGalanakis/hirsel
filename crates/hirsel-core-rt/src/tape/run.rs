@@ -167,10 +167,20 @@ fn format_io_error(e: IoError) -> String {
     }
 }
 
-fn report_truncation(stderr: i32, at: u64, err: IoError) {
-    let line = format!("record: truncated at {at}: {}\n", format_io_error(err));
-    // SAFETY: the launcher keeps stderr open for the duration of the run.
-    unsafe { crate::os::diagnostic(stderr, line.as_ptr(), line.len()) };
+/// One line per truncated stream, by spawn-index path compared numerically.
+fn report_truncation(stderr: i32) {
+    use super::writer::Cut;
+    for (path, at, why) in super::writer::take_cuts() {
+        let why = match why {
+            Cut::Io(err) => format_io_error(err),
+            Cut::Queue => "the recording queue is full".to_owned(),
+            Cut::Entry(what) => what.to_owned(),
+        };
+        let unit = super::writer::unit_name(&path);
+        let line = format!("record: truncated at {at} in {unit}: {why}\n");
+        // SAFETY: the launcher keeps stderr open for the duration of the run.
+        unsafe { crate::os::diagnostic(stderr, line.as_ptr(), line.len()) };
+    }
 }
 
 fn stopped(run: &mut Run, message: impl std::fmt::Display) -> u8 {
@@ -710,8 +720,7 @@ unsafe fn run_recording<const UNITS: bool>(
         #[cfg(feature = "prof")]
         let _profile = crate::prof::Run::start();
         super::writer::start();
-        // A recorded run is its root alone: helper units run on their own
-        // threads and are not recorded (see units.rs, "A unit recording").
+        // Each helper unit's recorder writes its own stream of this file.
         let status = run_taped(
             input,
             names,
@@ -725,9 +734,7 @@ unsafe fn run_recording<const UNITS: bool>(
             record_id,
         );
         super::writer::flush();
-        for (at, err) in super::writer::take_failures() {
-            report_truncation((*input).stderr_fd, at, err);
-        }
+        report_truncation((*input).stderr_fd);
         status
     }
 }
@@ -915,8 +922,9 @@ unsafe fn run_taped(
             run.replay = Some(replay);
             process::hirsel_core_run(&config, invoke)
         };
+        // The recording launch reports it with every other stream's.
         if let Some((at, err)) = run.record_truncated {
-            report_truncation(run.stderr, at, err);
+            super::writer::cut(Vec::new(), at, super::writer::Cut::Io(err));
         }
         run.stop.unwrap_or(status)
     }

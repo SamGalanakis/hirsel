@@ -61,3 +61,16 @@ fn held(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64, out: &mut 
         _ => {}
     }
 }
+
+/// Where a task entry's `x` sits in its wrapped input `(f, x)` of row `ty`:
+/// its offset and its bytes. A recorder writes those bytes as the entry's
+/// value (docs/recording.md, "Helper stream header").
+pub fn entry_span(shapes: &[Row], recipes: &[RecipeRow], ty: TypeRef) -> [u64; 2] {
+    match (&shapes[ty.index()].body, &recipes[ty.index()].layout) {
+        (Body::Record(fields), Layout::Fixed(fixed)) if fields.len() == 2 => [
+            fixed.offsets[0][1],
+            field_size(shapes, recipes, &fields[1].ty).0,
+        ],
+        _ => [0, 0],
+    }
+}

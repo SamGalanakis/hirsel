@@ -20,8 +20,10 @@ mod dispatch;
 mod error;
 mod exec;
 mod file;
+pub(crate) mod helper;
 mod managed;
 mod record_delivery;
+mod recorder;
 mod retirement;
 pub(crate) use retirement::{Retirement, ServedPool, register_udp_retirements, served_udp_pools};
 mod replay_delivery;
@@ -130,6 +132,10 @@ impl Sink {
 
 struct Recorder {
     sink: Sink,
+    /// The stream number every block's head carries: 0 for the root.
+    stream: u32,
+    /// The helpers this unit's spawns started, numbering the next one's index.
+    spawns: u64,
     /// The writer's queue was full at a block: the recording ends there with
     /// a TRUNCATED marker and records nothing more.
     truncated: bool,
@@ -199,6 +205,9 @@ struct Live {
 
     /// The previous value of each clock op on each object (section 5.4).
     clocks: BTreeMap<(u8, u64), u64>,
+    /// Record: each grant's kind and stored snapshot by ordinal, which a
+    /// helper's entry writes for a capability it holds.
+    grants: BTreeMap<usize, (u8, Vec<u8>)>,
     recorder: Option<Recorder>,
     replayer: Option<Replayer>,
 }
@@ -437,159 +446,6 @@ impl Live {
         unsafe {
             crate::os::diagnostic(abort.stderr, line.as_ptr(), line.len());
             libc::_exit(1);
-        }
-    }
-}
-
-impl Recorder {
-    /// Keep period-two CHOOSE runs in a REPEAT. Seals fall between frames,
-    /// including between a frame and its DATA continuations. Frames encode
-    /// straight into the block being filled, after its reserved head.
-    fn frame(&mut self, f: &Frame) -> Result<(), IoError> {
-        if self.truncated || self.failed.is_some() {
-            return Ok(());
-        }
-        if let Frame::Choose { gap, index } = *f {
-            let choose = Some((gap, index));
-            if self.chooses[(self.repeat % 2) as usize] == choose {
-                self.repeat += 1;
-            } else {
-                self.flush_repeat();
-                put_choose(&mut self.buffer, gap, index);
-                self.chooses = [self.chooses[1], choose];
-            }
-        } else {
-            self.flush_repeat();
-            self.chooses = [None, None];
-            let mut left = match f {
-                Frame::Done { out, .. } | Frame::Op { out, .. } => out.payload.len(),
-                Frame::Grant {
-                    kind: crate::entry::EXEC,
-                    args: Some(snapshot),
-                    ..
-                } => snapshot.len(),
-                _ => 0,
-            };
-            self.room(left);
-            let mut rest = Vec::new();
-            self.encoder.frame_into(f, &mut self.buffer, &mut rest);
-            for data in rest {
-                left = left.saturating_sub(PAYLOAD_CHUNK);
-                self.frames += 1;
-                if self.full() {
-                    let _ = self.close(0);
-                    if self.truncated || self.failed.is_some() {
-                        return Ok(());
-                    }
-                    self.room(left);
-                }
-                format::put_data(&mut self.buffer, data);
-            }
-        }
-        self.frames += 1;
-        if matches!(f, Frame::End { .. }) {
-            let _ = self.close(format::END);
-        } else if self.full() {
-            let _ = self.close(0);
-        }
-        Ok(())
-    }
-
-    fn full(&self) -> bool {
-        self.buffer.len() - BLOCK_HEAD >= CLOSE_AT || self.frames >= CLOSE_FRAMES
-    }
-
-    fn empty(&self) -> bool {
-        self.buffer.len() == BLOCK_HEAD
-    }
-
-    /// Make room for a frame carrying `payload` bytes, as much of it as the
-    /// block can take, in one allocation: a recycled block buffer when the
-    /// block is empty and the payload is large, else one reservation. A
-    /// recorder holds no buffer between blocks (closing hands it off), so an
-    /// idle unit's recording costs no block of memory.
-    fn room(&mut self, payload: usize) {
-        let need = payload.min(CLOSE_AT + PAYLOAD_CHUNK) + 64;
-        if self.buffer.capacity() - self.buffer.len() >= need {
-            return;
-        }
-        if self.empty() && need > 4096 {
-            let spare = writer::spare();
-            if spare.capacity() >= BLOCK_HEAD + need {
-                self.buffer = Self::fresh(spare);
-                return;
-            }
-        }
-        self.buffer.reserve(need);
-    }
-
-    /// A block buffer with its head reserved.
-    fn fresh(mut b: Vec<u8>) -> Vec<u8> {
-        b.clear();
-        b.resize(BLOCK_HEAD, 0);
-        b
-    }
-
-    fn flush_repeat(&mut self) {
-        if self.repeat != 0 {
-            put_repeat(&mut self.buffer, self.repeat);
-            self.repeat = 0;
-            self.chooses = [None, None];
-        }
-    }
-
-    fn close(&mut self, flags: u8) -> Result<(), IoError> {
-        if self.truncated || self.failed.is_some() {
-            return Ok(());
-        }
-        self.flush_repeat();
-        self.chooses = [None, None];
-        let block_frames = self.frames as u64;
-        self.frames = 0;
-        let seq = self.seq;
-        self.seq += 1;
-        self.encoder.new_block();
-        format::seal(&self.tape_id, flags, seq, &mut self.buffer);
-        TAPE_COUNTS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        TAPE_COUNTS[1].fetch_add(
-            self.buffer.len() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        let t0 = std::time::Instant::now();
-        let r = match &self.sink {
-            Sink::Provider(f) => {
-                let r = f.write(&self.buffer);
-                self.buffer = Self::fresh(Vec::new());
-                r
-            }
-            Sink::Writer(stream) => {
-                let b = std::mem::replace(&mut self.buffer, Self::fresh(Vec::new()));
-                if !writer::push(stream, b, block_frames, seq == 0) {
-                    self.truncated = true;
-                    self.buffer = Vec::new();
-                    let mut marker = Self::fresh(Vec::new());
-                    format::seal(&self.tape_id, format::TRUNCATED, seq, &mut marker);
-                    writer::mark(stream, marker);
-                }
-                Ok(())
-            }
-            Sink::Closed => Err(IoError { tag: 5, code: 0 }),
-        };
-        TAPE_COUNTS[C_WORKER_NS].fetch_add(
-            t0.elapsed().as_nanos() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        match r {
-            Ok(()) => {
-                if matches!(self.sink, Sink::Provider(_)) {
-                    self.written_frames += block_frames;
-                }
-                Ok(())
-            }
-            Err(e) => {
-                self.failed = Some((self.written_frames, e));
-                Err(e)
-            }
         }
     }
 }
@@ -1083,6 +939,8 @@ impl Tape {
                 };
                 let mut recorder = Recorder {
                     sink,
+                    stream: 0,
+                    spawns: 0,
                     truncated: false,
                     tape_id: header.tape_id,
                     encoder: Encoder::default(),
@@ -1115,6 +973,7 @@ impl Tape {
                     typed_resources: BTreeMap::new(),
                     udp_retirements: BTreeMap::new(),
                     clocks: BTreeMap::new(),
+                    grants: BTreeMap::new(),
                     recorder: Some(recorder),
                     replayer: None,
                 };
@@ -1163,6 +1022,7 @@ impl Tape {
                     typed_resources: BTreeMap::new(),
                     udp_retirements: BTreeMap::new(),
                     clocks: BTreeMap::new(),
+                    grants: BTreeMap::new(),
                     recorder: None,
                     replayer: Some(Replayer {
                         reader: FrameReader::new(source, blocks),
@@ -1348,6 +1208,10 @@ impl Tape {
             inner,
             open_resource: false,
         });
+        if live.mode == Mode::Record {
+            live.grants
+                .insert(live.objects.len(), (kind, stored.clone()));
+        }
         let h = handle(generation, live.objects.len());
         Ok((self.cell.provider, h, stored))
     }
@@ -1425,9 +1289,12 @@ fn finish(
     let mut truncated = None;
     if let Some(rec) = live.recorder.as_mut() {
         if !rec.truncated && rec.failed.is_none() {
-            if let Some(e) = end {
+            let gap = live.schedule.events - live.schedule.last;
+            if rec.stream != 0 && deadlock.is_some() {
+                let _ = rec.frame(&helper::deadlock(gap, live.schedule.events));
+            } else if let Some(e) = end {
                 let _ = rec.frame(&Frame::End {
-                    gap: live.schedule.events - live.schedule.last,
+                    gap,
                     ending: e.clone(),
                 });
             } else if !rec.empty() {

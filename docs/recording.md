@@ -329,9 +329,9 @@ recorded outcome.
 
 ## Unit recordings
 
-Specified 2026-11-24 (unit-tapes-spec-2339). **Not built.** Today a recorded run records
-its first unit alone in format 13. Slice U1 below makes the tape format 14 holding only the
-root stream. Helpers are recorded from U2, and replayed by stream from U4. Until U5,
+Specified 2026-11-24 (unit-tapes-spec-2339). Slices U1 and U2 are built: the tape is
+format 14, and each helper of a recorded run gets its own stream with its entry, host frames
+and `END`. Takes and unit operations come with U3, and helpers replay by stream from U4. Until U5,
 [CONC-15](spec/tasks.md#conc-15-units)'s Unbuilt list still applies. Everything else in
 this section is the end state those slices build.
 

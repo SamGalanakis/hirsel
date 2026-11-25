@@ -429,13 +429,13 @@ pub fn stream_block(
 
 /// Seal a block filled in place: `bytes` holds `BLOCK_HEAD` reserved bytes
 /// and then the payload. Writes the head and appends the check, giving the
-/// same bytes as `block`.
-pub fn seal(tape_id: &[u8; 16], flags: u8, seq: u64, bytes: &mut Vec<u8>) {
+/// same bytes as `stream_block`.
+pub fn seal(tape_id: &[u8; 16], flags: u8, stream: u32, seq: u64, bytes: &mut Vec<u8>) {
     let len = bytes.len() - BLOCK_HEAD;
     assert!(len <= MAX_LEN);
     bytes[0] = flags;
     bytes[1..4].copy_from_slice(&MAGIC);
-    bytes[4..8].fill(0);
+    bytes[4..8].copy_from_slice(&stream.to_le_bytes());
     bytes[8..16].copy_from_slice(&seq.to_le_bytes());
     bytes[16..20].copy_from_slice(&(len as u32).to_le_bytes());
     let check = xxh3(&[tape_id, bytes]);

@@ -39,25 +39,30 @@ impl FunctionEmitter<'_> {
         buffer
     }
     /// The runtime's `Cross` of a value of `ty` at `shift` bytes into a buffer
-    /// of `shift + size(ty)`: the buffer's bytes, then each owner row.
-    fn cross(&mut self, ty: TypeId, shift: u64) -> Value {
+    /// of `shift + size(ty)`: the buffer's bytes, the span of the value a
+    /// recorder writes (a task entry's `x` when `entry`), then each owner row.
+    fn cross(&mut self, ty: TypeId, shift: u64, entry: bool) -> Value {
         let (bytes, _) = self.place_layout(PlaceTy::Declared(ty));
-        let owners = hirsel_core_layout::cross::owners(
-            &self.module.types,
-            self.recipes,
-            hirsel_core_layout::TypeRef(ty.0),
-        );
-        let buffer = self.temp(Type::bytes(24 + 32 * owners.len() as u64));
-        let rows = self.offset(&buffer, 24);
+        let row = hirsel_core_layout::TypeRef(ty.0);
+        let owners = hirsel_core_layout::cross::owners(&self.module.types, self.recipes, row);
+        let [x_at, x_len] = if entry {
+            hirsel_core_layout::cross::entry_span(&self.module.types, self.recipes, row)
+        } else {
+            [0, bytes]
+        };
+        let buffer = self.temp(Type::bytes(40 + 32 * owners.len() as u64));
+        let rows = self.offset(&buffer, 40);
         self.store(&Type::I64, &int(bytes + shift), &buffer, 8);
         let at = self.offset(&buffer, 8);
         self.store(&Type::Ptr, &rows, &at, 8);
-        let at = self.offset(&buffer, 16);
-        self.store(&Type::I64, &int(owners.len() as u64), &at, 8);
+        for (offset, word) in [(16, owners.len() as u64), (24, x_at + shift), (32, x_len)] {
+            let at = self.offset(&buffer, offset);
+            self.store(&Type::I64, &int(word), &at, 8);
+        }
         for (i, row) in owners.iter().enumerate() {
             for (j, &n) in row.iter().enumerate() {
                 let n = if j == 0 { n + shift } else { n };
-                let at = self.offset(&buffer, (24 + i * 32 + j * 8) as u64);
+                let at = self.offset(&buffer, (40 + i * 32 + j * 8) as u64);
                 self.store(&Type::I64, &int(n), &at, 8);
             }
         }
@@ -676,8 +681,8 @@ impl FunctionEmitter<'_> {
             RtOp::SpawnUnit { x, r } => {
                 let (packed, offset) = self.task_input(x, &args[2], &args[1]);
                 let layout = self.value_descriptors(&[x, r], true);
-                let xc = self.cross(x, offset);
-                let rc = self.cross(r, 0);
+                let xc = self.cross(x, offset, true);
+                let rc = self.cross(r, 0, false);
                 self.native_call(
                     "hirsel_core_spawn_unit",
                     &[P, U, U, K],
@@ -695,7 +700,7 @@ impl FunctionEmitter<'_> {
                 )
             }
             RtOp::ConnNew { item } => {
-                let cross = self.cross(item, 0);
+                let cross = self.cross(item, 0, false);
                 let logical = hirsel_core_layout::field_size(
                     &self.module.types,
                     self.recipes,
@@ -830,7 +835,7 @@ impl FunctionEmitter<'_> {
                 self.native_call("hirsel_core_latest_handle", &[P], &[p(&args[0])])
             }
             RtOp::SharedNew { item } => {
-                let cross = self.cross(item, 0);
+                let cross = self.cross(item, 0, false);
                 self.native_call(
                     "hirsel_core_shared_new",
                     &[P, U],

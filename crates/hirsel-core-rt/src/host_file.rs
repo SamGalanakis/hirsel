@@ -137,6 +137,12 @@ fn next_id(next: &mut u64) -> u64 {
 pub(crate) struct Registry {
     owned: Mutex<Entries>,
     run: Arc<RunGrants>,
+    /// A recorded helper's own designation of each capability its entry
+    /// holds: the word, then its cell's provider and handle there, so its
+    /// operations reach its own stream (docs/recording.md, "Unit recordings").
+    /// The provider is a tape cell's, pinned for the process, by address.
+    #[cfg(feature = "record")]
+    unit_grants: BTreeMap<u64, (usize, u64)>,
 }
 
 /// Run-wide designations and their backing storage. Secret slots are released by
@@ -223,7 +229,13 @@ impl Registry {
         Self {
             owned: Mutex::default(),
             run: self.run.clone(),
+            #[cfg(feature = "record")]
+            unit_grants: BTreeMap::new(),
         }
+    }
+    #[cfg(feature = "record")]
+    pub(crate) fn designate_in_unit(&mut self, word: u64, provider: *const Provider, handle: u64) {
+        self.unit_grants.insert(word, (provider as usize, handle));
     }
 
     /// Pin a substitute Args vector and return its handle.
@@ -304,11 +316,19 @@ impl Registry {
         self.run.designations.lock().unwrap().grants[&handle].terminal
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
+        #[cfg(feature = "record")]
+        if let Some(&(provider, _)) = self.unit_grants.get(&handle) {
+            return provider as *const Provider;
+        }
         let file = Arc::as_ptr(&self.run.designations.lock().unwrap().grants[&handle]);
         // SAFETY: grants stay pinned until teardown.
         unsafe { &raw const (*file).provider }
     }
     pub(crate) fn grant_handle(&self, handle: u64) -> u64 {
+        #[cfg(feature = "record")]
+        if let Some(&(_, unit)) = self.unit_grants.get(&handle) {
+            return unit;
+        }
         self.run.designations.lock().unwrap().grants[&handle].handle
     }
     /// A virtual provider's live resource: a ClockHand or StopTrigger

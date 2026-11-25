@@ -6,14 +6,14 @@
 //! (units_lang.rs over the ledger, units_ledger.rs). A socket can move as an
 //! owned item over a connection.
 //!
-//! A unit recording (specified, not built): docs/recording.md, "Unit
-//! recordings". Each unit is its own stream in the tape: its entry, its host
-//! frames, a TAKE frame for every arrival it takes (at `take`,
-//! `take_single_item` and `release_take`), and its unit operations. Sends and
-//! spawns are checked at issue, and whether one is accepted is an input, so
-//! it is supplied from the stream. Each unit replays from its own stream
-//! alone. Today a recorded run (HIRSEL_RECORD) records its root alone, and its
-//! helpers are not recorded.
+//! A unit recording: docs/recording.md, "Unit recordings". Each unit is its
+//! own stream in the tape: its entry, its host frames, a TAKE frame for every
+//! arrival it takes (at `take`, `take_single_item` and `release_take`), and
+//! its unit operations. Sends and spawns are checked at issue, and whether one
+//! is accepted is an input, so it is supplied from the stream. Each unit
+//! replays from its own stream alone. Today (U2) each helper of a recorded run
+//! has its own stream: its entry, host frames and END (tape/helper.rs). Takes,
+//! unit operations and helper replay are not built.
 #[path = "unit_memory.rs"]
 mod memory;
 #[cfg(feature = "testing")]

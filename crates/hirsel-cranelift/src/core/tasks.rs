@@ -13,17 +13,20 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl Function<'_, '_, '_> {
-    /// A `Cross` stores the value bytes at `shift`, followed by its owner rows.
-    fn cross(&mut self, ty: TypeId, shift: u64) -> Result<Value> {
+    /// A `Cross` stores the value bytes at `shift`, the span of the value a
+    /// recorder writes (a task entry's `x` when `entry`), then its owner rows.
+    fn cross(&mut self, ty: TypeId, shift: u64, entry: bool) -> Result<Value> {
         let (bytes, _) = place::storage(self.input, self.layouts, PlaceTy::Declared(ty))?;
-        let owners = hirsel_core_layout::cross::owners(
-            &self.input.types,
-            self.layouts,
-            hirsel_core_layout::TypeRef(ty.0),
-        );
-        let at = self.own_slot((24 + owners.len() * 32) as u32);
-        let rows = self.b.ins().iadd_imm_s(at, 24);
-        let words = [bytes + shift, 0, owners.len() as u64];
+        let row = hirsel_core_layout::TypeRef(ty.0);
+        let owners = hirsel_core_layout::cross::owners(&self.input.types, self.layouts, row);
+        let [x_at, x_len] = if entry {
+            hirsel_core_layout::cross::entry_span(&self.input.types, self.layouts, row)
+        } else {
+            [0, bytes]
+        };
+        let at = self.own_slot((40 + owners.len() * 32) as u32);
+        let rows = self.b.ins().iadd_imm_s(at, 40);
+        let words = [bytes + shift, 0, owners.len() as u64, x_at + shift, x_len];
         for (j, &n) in words.iter().enumerate() {
             let value = if j == 1 {
                 rows
@@ -42,7 +45,7 @@ impl Function<'_, '_, '_> {
                     MemFlagsData::trusted(),
                     value,
                     at,
-                    (24 + i * 32 + j * 8) as i32,
+                    (40 + i * 32 + j * 8) as i32,
                 );
             }
         }
@@ -752,8 +755,8 @@ impl Function<'_, '_, '_> {
                 let bridge = self.b.ins().func_addr(types::I64, bridge);
                 let layout = self.own_slot(64);
                 let layout = self.describe(layout, &[x, r], true)?;
-                let xc = self.cross(x, offset)?;
-                let rc = self.cross(r, 0)?;
+                let xc = self.cross(x, offset, true)?;
+                let rc = self.cross(r, 0, false)?;
                 let values = self.c_call(
                     "hirsel_core_spawn_unit",
                     &[P, U, U, P, P, P, P, P, U],
@@ -777,7 +780,7 @@ impl Function<'_, '_, '_> {
                 3
             }
             RtOp::ConnNew { item } => {
-                let cross = self.cross(item, 0)?;
+                let cross = self.cross(item, 0, false)?;
                 let logical = hirsel_core_layout::field_size(
                     &self.input.types,
                     self.layouts,
@@ -916,7 +919,7 @@ impl Function<'_, '_, '_> {
                 2
             }
             RtOp::SharedNew { item } => {
-                let cross = self.cross(item, 0)?;
+                let cross = self.cross(item, 0, false)?;
                 let values = self.c_call(
                     "hirsel_core_shared_new",
                     &[P, P, P, U],

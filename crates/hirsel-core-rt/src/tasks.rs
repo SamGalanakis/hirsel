@@ -2857,7 +2857,7 @@ mod tape_tasks;
 #[cfg(feature = "record")]
 use tape_tasks::live_index;
 #[cfg(feature = "record")]
-pub(crate) use tape_tasks::{before_tape_frame, group_index};
+pub(crate) use tape_tasks::{attach_tape, before_tape_frame, detach_tape, group_index};
 
 /// `event` for a caller already inside its commit.
 #[inline(always)]
@@ -3200,37 +3200,6 @@ fn poll_timeout(deadline: Option<u64>) -> i32 {
             .div_ceil(1_000_000)
             .min(i32::MAX as u64) as i32
     })
-}
-
-#[cfg(feature = "record")]
-pub(crate) fn attach_tape(group: Group) {
-    let task = CURRENT.get();
-    if !task.is_null() {
-        // SAFETY: CURRENT pins the active task and run through the membership move.
-        unsafe {
-            let tapes = &mut (*(*task).run).tapes;
-            if let Some(old) = (*task).group
-                && let Some(members) = tapes.membership(old)
-            {
-                *members -= 1;
-            }
-            tapes.open(group);
-            *tapes.membership(group).unwrap() += 1;
-            (*task).group = Some(group);
-            (*task).replay = group.replaying();
-            (*task).arc_runtime |= (*task).replay;
-            (*task).arc_hooks = true;
-        }
-    }
-}
-
-#[cfg(feature = "record")]
-pub(crate) fn detach_tape(group: Group) {
-    let task = CURRENT.get();
-    if !task.is_null() {
-        // SAFETY: the active task owns the inventory through the tape close.
-        unsafe { (*(*task).run).tapes.close(group) };
-    }
 }
 
 pub(crate) fn current_id() -> u64 {
@@ -3865,9 +3834,16 @@ pub unsafe fn run_root(
             result_bytes,
             provider,
             None,
+            Default::default(),
         )
     }
 }
+
+/// The tape group a helper's root task records in, when its spawner records.
+#[cfg(feature = "record")]
+pub(crate) type UnitGroup = Option<Group>;
+#[cfg(not(feature = "record"))]
+pub(crate) type UnitGroup = ();
 
 /// # Safety
 /// As for `run_root`. A helper's caller keeps its unit for this run and owns it
@@ -3882,6 +3858,7 @@ pub(crate) unsafe fn run_root_with_unit(
     result_bytes: usize,
     provider: SchedulerProvider,
     unit: Option<&mut crate::units_lang::LangUnit>,
+    group: UnitGroup,
 ) -> u8 {
     crate::os_sync::check_fork();
     #[cfg(feature = "prof")]
@@ -3991,6 +3968,11 @@ pub(crate) unsafe fn run_root_with_unit(
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
     });
+    // A recorded helper's root task runs in its own tape group.
+    #[cfg(feature = "record")]
+    group.inspect(|&g| tape_tasks::join(&mut run.tapes, &mut root, g));
+    #[cfg(not(feature = "record"))]
+    let () = group;
     crate::backing_observation::observe!(
         allocate,
         (&*root as *const Task).cast(),

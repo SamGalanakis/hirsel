@@ -1938,7 +1938,7 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] {
             1 << 4,
             &["ok"],
             true,
-        ),
+        ), ("units", RL7_UNITS, (1 << 4) | (1 << grant_kind("Tasks").unwrap()) | (1 << grant_kind("Random").unwrap()), &[], false),
         (
             "cause_site",
             r#"
@@ -2087,7 +2087,7 @@ pub fn main(out: Stdout) -> Result[(), Exit] {
         "refused build emitted an executable"
     );
 }
-
+include!("recording_units_native.rs");
 /// Step 8.2 (RL2): divergence ends the replay at its hand-counted frame
 /// position with exit status 1 and no further program output.
 #[test]

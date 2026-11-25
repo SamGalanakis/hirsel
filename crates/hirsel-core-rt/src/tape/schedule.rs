@@ -231,6 +231,9 @@ pub(super) struct Schedule {
     selected: Option<u64>,
 }
 impl Schedule {
+    pub(super) fn chooser(&self) -> u8 {
+        self.chooser
+    }
     pub fn new(chooser: u8) -> Self {
         Self {
             events: 0,

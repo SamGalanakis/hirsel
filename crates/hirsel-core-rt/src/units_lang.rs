@@ -40,34 +40,14 @@ use std::{
 
 mod held;
 use held::Held;
+mod crossing;
+pub use crossing::Cross;
+use crossing::{TapeHelper, tape_group};
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
 type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
 fn map<K, V>() -> Map<K, V> {
     HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0))
-}
-
-/// The owners of a `cross` type, as the emitter writes them: per owner
-/// `[offset, kind, element bytes, element logical size]`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Cross {
-    pub bytes: u64,
-    pub owners: *const [u64; 4],
-    pub count: u64,
-}
-
-impl Cross {
-    pub(crate) fn owners(&self) -> &[[u64; 4]] {
-        if self.count == 0 {
-            return &[];
-        }
-        // SAFETY: the emitter's descriptor holds `count` rows for this call.
-        unsafe { std::slice::from_raw_parts(self.owners, self.count as usize) }
-    }
-    fn owned(&self) -> Vec<[u64; 4]> {
-        self.owners().to_vec()
-    }
 }
 
 fn round8(n: u64) -> u64 {
@@ -1260,6 +1240,11 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         tasks::before_commit();
         let u = unit();
         let (k, hctx) = u.ctx.spawn_unit();
+        let steps = crate::steps::remaining(&*context);
+        #[cfg(feature = "record")]
+        let tape = crate::tape::helper::spawn(context, n, steps, input, x);
+        #[cfg(not(feature = "record"))]
+        let tape = ();
         let data = pack(input, x.bytes, x.owners());
         let sockets = detach_sockets(context, input, socket_offsets(x.owners()));
         free_owners(None, input, x.owners());
@@ -1281,7 +1266,6 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         let run = (*context).run;
         let foreign = (*context).foreign;
         let map_keys = (*context).map_keys();
-        let steps = crate::steps::remaining(&*context);
         let registry = (*context)
             .host_files
             .as_ref()
@@ -1305,6 +1289,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             n,
             steps,
             shared,
+            tape,
         ));
         let start = move || {
             let job = job;
@@ -1325,10 +1310,11 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
                 n,
                 steps,
                 shared,
+                tape,
             ) = job.0;
             helper_main(
                 hctx, data, sockets, xb, xo, rb, ro, run, foreign, map_keys, registry, body,
-                layout, n, steps, shared,
+                layout, n, steps, shared, tape,
             );
         };
         // On the pool the helper is a unit beside its owner; without one it
@@ -1361,12 +1347,13 @@ fn helper_main(
     run: *const crate::process::Config,
     foreign: *const crate::foreign::Run,
     map_keys: crate::MapKeys,
-    registry: crate::host_file::Registry,
+    #[allow(unused_mut)] mut registry: crate::host_file::Registry,
     body: Body,
     layout: TaskLayout,
     n: u64,
     steps: Option<u64>,
     shared: Arc<HelperShared>,
+    tape: TapeHelper,
 ) {
     // SAFETY: this thread owns the helper's context and run for its life.
     unsafe {
@@ -1376,6 +1363,10 @@ fn helper_main(
         context.run = run;
         context.foreign = foreign;
         context.set_map_keys(map_keys);
+        #[cfg(feature = "record")]
+        if let Some(tape) = &tape {
+            tape.designate(&mut registry);
+        }
         let mut files = crate::host_file::Files::with_registry(registry);
         context.host_files = &mut files;
         if causes::task_start(&mut context).is_err() {
@@ -1413,6 +1404,7 @@ fn helper_main(
             layout.result.bytes,
             provider,
             Some(&mut lu),
+            tape_group(&tape),
         );
         // Each connection still retained has its last client in another unit;
         // the owner holds its charge from the end take on. Its own copy here
@@ -1438,6 +1430,11 @@ fn helper_main(
                 + lu.run_grants.drain(..).map(|held| held.bytes).sum::<u64>(),
             charges,
         };
+        #[cfg(feature = "record")]
+        if let Some(tape) = &tape {
+            let causes: Vec<_> = context.causes.iter().collect();
+            tape.end(failed != 0, &causes, result.as_ptr(), rb, &ro);
+        }
         let mut ret = Value::empty();
         if failed == 0 {
             let data = pack(result.as_ptr(), rb, &ro);
@@ -1451,6 +1448,8 @@ fn helper_main(
             .insert(Arc::as_ptr(&lu.ctx.port) as usize, ended);
         files.close_all(&mut context);
         drop(files);
+        // Its registry designated through the helper's sources until here.
+        drop(tape);
         drop(context);
         let LangUnit { ctx, .. } = *lu;
         ctx.end_helper(Some(ret), false);

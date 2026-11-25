@@ -64,3 +64,40 @@ fn tape_boundary(group: Group, ending: bool) {
         }
     }
 }
+
+#[cfg(feature = "record")]
+pub(crate) fn attach_tape(group: Group) {
+    let task = CURRENT.get();
+    if !task.is_null() {
+        // SAFETY: CURRENT pins the active task and run through the membership move.
+        unsafe {
+            let tapes = &mut (*(*task).run).tapes;
+            if let Some(old) = (*task).group
+                && let Some(members) = tapes.membership(old)
+            {
+                *members -= 1;
+            }
+            join(tapes, &mut *task, group);
+        }
+    }
+}
+
+/// Make `task` a member of `group`'s tape.
+#[cfg(feature = "record")]
+pub(super) fn join(tapes: &mut Tapes, task: &mut Task, group: Group) {
+    tapes.open(group);
+    *tapes.membership(group).unwrap() += 1;
+    task.group = Some(group);
+    task.replay = group.replaying();
+    task.arc_runtime |= task.replay;
+    task.arc_hooks = true;
+}
+
+#[cfg(feature = "record")]
+pub(crate) fn detach_tape(group: Group) {
+    let task = CURRENT.get();
+    if !task.is_null() {
+        // SAFETY: the active task owns the inventory through the tape close.
+        unsafe { (*(*task).run).tapes.close(group) };
+    }
+}

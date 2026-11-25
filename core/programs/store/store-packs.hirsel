@@ -382,6 +382,11 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queue: CutQ
     let mut deferred_root = arc.share(installed.deferred)
     let mut deferred_next = installed.deferred_next
     transfer_deferred_rows(mut deferred_root, mut deferred_next, queue.added, private_from, mut next_stamp, issued)?
+    // The installed rows this cut's compaction moved take their new values.
+    for (seq, row) in queue.rewritten {
+        let mut draw = reserve_list_edit(deferred_root, mut next_stamp, issued)?
+        page_result(std.page.insert(mut deferred_root, key_word(seq), deferred_free_value(row), None, 1024, private_from, mut draw))?
+    }
     for seq in queue.drained {
         let mut draw = reserve_list_edit(deferred_root, mut next_stamp, issued)?
         if !page_result(std.page.remove(mut deferred_root, key_word(seq), private_from, mut draw))? {

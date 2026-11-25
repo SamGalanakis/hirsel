@@ -154,9 +154,13 @@ fn drain_tiered_frees(cut: TieredPageSource, mut queue: TieredDeferredQueue, rew
 // the Cold frames the fold replaced, which step 2 files with the replaced
 // list; `kills` holds the drain's. `moved` holds the (pack, len) of each
 // Cold ancestor that compaction re-emitted, and `retiring` the packs whose
-// compaction probe this cut finished (T8 steps 6 and 7).
+// compaction probe this cut finished (T8 steps 6 and 7). `rewritten` holds
+// the installed rows this cut's compaction moved, at their own sequences,
+// with the values T8 step 3 writes; an added row carries its moved value in
+// `added`.
 type CutQueue: send {
     added: List[DeferredFree],
+    rewritten: List[(u64, DeferredFree)],
     drained: List[u64],
     kills: List[TieredDrainKill],
     folded: List[TieredDrainKill],
@@ -165,7 +169,7 @@ type CutQueue: send {
 }
 
 fn no_cut_queue() -> CutQueue {
-    CutQueue(added: list.new(), drained: list.new(), kills: list.new(), folded: list.new(), moved: list.new(), retiring: list.new())
+    CutQueue(added: list.new(), rewritten: list.new(), drained: list.new(), kills: list.new(), folded: list.new(), moved: list.new(), retiring: list.new())
 }
 
 fn queued_free(value: Bytes) -> DeferredFree {
@@ -195,21 +199,28 @@ fn drain_queue_row(cut: TieredPageSource, seq: u64, row: DeferredFree, mut queue
 
 // T8 step 4 (§13.6 "Deferred frees"): oldest first, up to `budget` pages of
 // the installed rows and then this cut's added rows, the first at `next_seq`.
-// A drained page's children join the end and may drain at this cut. Nothing
-// rewrites a row yet, because no compaction moves a Tiered frame.
-fn drain_cut_queue(cut: TieredPageSource, installed: Arc[std.page.Page], next_seq: u64, mut queue: CutQueue, budget: u64) -> Result[(), Error] waits {
+// A drained page's children join the end and may drain at this cut. A row
+// this cut's compaction moved (`moving`) stays queued under its new value,
+// so the drain never reads a frame the cut has just moved.
+fn drain_cut_queue(cut: TieredPageSource, installed: Arc[std.page.Page], next_seq: u64, mut queue: CutQueue, moving: Map[u64, TieredQueueMove], budget: u64) -> Result[(), Error] waits {
     let mut pages = 0u64
     let mut cursor = std.page.cursor_open(arc.share(installed), None, true, false)
     while pages < budget {
         let Some(row) = std.page.cursor_next(mut cursor) else {
             break
         }
-        drain_queue_row(cut, list.word_be(row.key, 0), queued_free(row.value), mut queue, mut pages)?
+        let seq: u64 = list.word_be(row.key, 0)
+        if map.contains(moving, seq) {
+            continue
+        }
+        drain_queue_row(cut, seq, queued_free(row.value), mut queue, mut pages)?
     }
     let mut at = 0u64
     while pages < budget && at < list.len(queue.added) {
-        let row: DeferredFree = clone(queue.added[at])
-        drain_queue_row(cut, next_seq + at, row, mut queue, mut pages)?
+        if !map.contains(moving, next_seq + at) {
+            let row: DeferredFree = clone(queue.added[at])
+            drain_queue_row(cut, next_seq + at, row, mut queue, mut pages)?
+        }
         at += 1
     }
     Ok(())

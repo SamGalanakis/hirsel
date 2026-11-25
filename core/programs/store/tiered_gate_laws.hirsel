@@ -11,7 +11,6 @@
 // - after the rename, the new generation recovers with the holder.
 // In every generation the walker over every published root finds each stamp
 // at exactly one (pack, offset), in a listed pack on disk (L88).
-
 fn gate_walk_roots(d: Dir, db: Db, roots: Roots, collection: u32, mut walk: CompactWalk) -> Result[(), Error] waits {
     match std.page.collection_slot(roots.collections.root, prefix(collection)?) {
         Some((ColdPage(root), _)) => compact_walk_frame(d, db, root, mut walk),
@@ -123,7 +122,11 @@ fn gate_pin_reads(db: Db, events: Log[Bytes], trim: u64, appended: u64) -> Resul
     }
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     for at in 0u64 .. appended {
-        let expected: Option[Bytes] = if at < trim { None } else { Some(compact_entry(at)) }
+        let expected: Option[Bytes] = if at < trim {
+            None
+        } else {
+            Some(compact_entry(at))
+        }
         if log_get(read_handle, held, events, at)? != expected {
             fail("L87: the pin reads its Snapshot's overlay")
         }
@@ -329,7 +332,11 @@ fn gate_reads_rows(db: Db, b: Branch, rows: Table[u64, Bytes], row_total: u64, g
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let s = snapshot_of(db, b)?
     for key in 0u64 .. row_total {
-        let wanted: Option[Bytes] = if map.contains(gone, key) { None } else { Some(compact_value_of(key, 0, 300)) }
+        let wanted: Option[Bytes] = if map.contains(gone, key) {
+            None
+        } else {
+            Some(compact_value_of(key, 0, 300))
+        }
         if get(read_handle, s, rows, key)? != wanted {
             fail("L87 (d): each branch reads its rows after the merge")
         }
@@ -354,7 +361,6 @@ fn gate_reads_rows(db: Db, b: Branch, rows: Table[u64, Bytes], row_total: u64, g
 // kill and queues no row: with `fold_owners` forced to own every head, the
 // cells and the queue are unchanged. So `child_records_inherited` is not
 // reachable through this fixture.
-
 // Opens the store and runs its next cut, crashed at `crash`'s row of the
 // §13.6 table; a crash before the rename is followed by the retried cut.
 fn gate_fold_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, pack: u64, before_live: u64, crash: GateCrash) -> Result[Db, Error] waits {
@@ -405,7 +411,6 @@ fn gate_merge_fork(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     let pack = top.pack
     let before_live = l69_pack_live(shaper, pack)
     close(take shaper)?
-
     // The suffix: main deletes L's first row, then FORK `beta`; crash.
     let mut writer = open(tasks, d, c, r, l69_options(floor)?)?
     gate_delete_rows(mut writer, rows, left.first, left.first + 1)?
@@ -414,7 +419,6 @@ fn gate_merge_fork(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     let (beta, _) = fork(mut writer, "beta", at_fork)?
     drop(take at_fork)
     close(take writer)?
-
     // The fold cut, crashed at the crash table's row, or not at all.
     let mut db = gate_fold_cut(d, c, r, tasks, floor, pack, before_live, crash)?
     let w0 = match map.get(disk_state(db).pages.lists.rows.forks, beta.id) {
@@ -503,8 +507,10 @@ fn gate_crash_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, t
 // retires; the queue keeps its rows in order, each of the same kind; the
 // walker from the rows reaches exactly the stamps it reached before, each
 // at one location in a pack the compaction wrote; and once `free_budget`
-// lets the drain run, it consumes every row and files every moved frame
-// dead, so no listed Tiered pack keeps live bytes. Seeded bugs
+// lets the drain run, a cut that moves the rows again drains none of them,
+// and with no probe the drain consumes every row and files every moved frame
+// dead, so no listed Tiered pack keeps live bytes. The fold cut compacts as
+// well, so the row it adds moves before it is written. Seeded bugs
 // `blob_in_leaf_only` (the Blob row is never matched, so its pack retires
 // under it) and `queue_row_by_map` (Y is not reached from Q).
 fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
@@ -527,10 +533,15 @@ fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
         fail("L87 (c): the whole-Log trim commits")
     }
     close(take db)?
-    let mut folding = open(tasks, d, c, r, l87_options(floor, 0)?)?
+    // The fold cut compacts too, so Q, a row the cut adds, moves before T8
+    // step 3 writes it, and is written at `deferred_next` with its new value.
+    let mut fold_options = l87_options(floor, 0)?
+    fold_options.probe_budget = 4096
+    fold_options.compact_permille = 1001
+    let mut folding = open(tasks, d, c, r, fold_options)?
     let _ = checkpoint(mut folding)?
+    let _ = gate_walk_queue(d, folding)?
     close(take folding)?
-
     let mut options = l87_options(floor, 0)?
     options.probe_budget = 4096
     options.compact_permille = 1001
@@ -540,8 +551,12 @@ fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
     let mut blobs = 0u64
     for (_, row) in before {
         match row.target {
-            TieredPage(_) => { pages += 1 },
-            TieredBlob(_) => { blobs += 1 },
+            TieredPage(_) => {
+                pages += 1
+            },
+            TieredBlob(_) => {
+                blobs += 1
+            },
         }
     }
     if pages < 2 || blobs < 1 {
@@ -595,10 +610,25 @@ fn gate_queue_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) 
         }
     }
     close(take cutting)?
-
+    // At `compact_permille` 1001 every fresh pack is selected again at each
+    // cut and every row moves again, and a drain takes no row its own cut
+    // moved (§13.6 "Deferred frees"): such a cut drains nothing.
+    let mut moving_options = l87_options(floor, 65536)?
+    moving_options.probe_budget = 4096
+    moving_options.compact_permille = 1001
+    let mut db_moving = open(tasks, d, c, r, moving_options)?
+    let _ = checkpoint(mut db_moving)?
+    if list.len(l87_queue(db_moving)?) != list.len(before) {
+        fail("L87 (c): the drain takes no row its cut moved")
+    }
+    let moved_again = gate_walk_queue(d, db_moving)?
+    if map.len(moved_again.places) != map.len(reached.places) {
+        fail("L87 (c): the rows reach the same frames after the move")
+    }
+    close(take db_moving)?
+    // With no probe, the drain consumes the queue.
     let mut draining = l87_options(floor, 65536)?
-    draining.probe_budget = 4096
-    draining.compact_permille = 1001
+    draining.probe_budget = 0
     let mut db_drained = open(tasks, d, c, r, draining)?
     let mut rounds = 0u64
     while std.page.count(std.page.image_of(disk_state(db_drained).pages.lists.deferred)) != 0 {

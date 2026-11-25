@@ -8,12 +8,14 @@
 // index retires the pack. Cursors are writer memory: a crash loses them and
 // the next cut restarts the probe (§13.6 "Progress").
 //
-// Not built yet: recount probes (`repair_cuts`); moving a frame that a queue
-// row reaches (the probe stops before that row until the drain consumes it);
-// moving deadlist cells with their frames, so a cell on a retiring pack is
+// Queue rows are their own roots (§13.6): a frame a `deferred_frees` row
+// reaches moves like any match, the row's copy is emitted outside every root,
+// and the row takes the new location (T8 step 3).
+//
+// Not built yet: recount probes (`repair_cuts`); moving deadlist cells with their frames, so a cell on a retiring pack is
 // deleted with it and its holder's later kill is not filed (an over-count);
-// and the mandatory-only retry still carries this cut's moves.
-
+// and the mandatory-only retry still carries this cut's moves, the queue
+// rows' rewrites included (T8 step 3 has it write each row's own value).
 type TieredCompaction: send {
     probes: Map[u64, TieredProbeCursor],
     // One share of each generation's read inventory. A Snapshot reads its
@@ -72,18 +74,36 @@ fn lease_cut_inventories(installed: TieredCompaction, roots: List[Roots]) -> Res
     Ok(take held)
 }
 
+// A queue row's value once this cut moved it: the copied page with its moved
+// path, or the copied BLOB with the reference it had.
+type TieredQueueValue: send = MovedQueuePage(std.page.Slot) | MovedQueueBlob(std.page.BlobRef, Arc[Bytes])
+
+// A queue row this cut's compaction moved. T2 emits its copy under the
+// collection, and a BLOB under the logical key, of the index row it matched.
+type TieredQueueMove: send {
+    branch_id: u32,
+    collection: u32,
+    key: Bytes,
+    value: TieredQueueValue
+}
+
 type TieredCompactWork {
     roots: List[Roots],
     next_stamp: u64,
     // (pack, len) of each Cold ancestor a move re-emitted, once per stamp.
     moved: List[(u64, u64)],
-    moved_stamps: Map[u64, ()]
+    moved_stamps: Map[u64, ()],
+    // The queue rows moved so far, by sequence: the installed rows' own and
+    // the added rows' at `deferred_next` onward. A later index row descends
+    // from the moved value.
+    queue: Map[u64, TieredQueueMove]
 }
 
 type TieredCompactStep {
     probes: Map[u64, TieredProbeCursor],
     retiring: List[u64],
-    moved: List[(u64, u64)]
+    moved: List[(u64, u64)],
+    queue: Map[u64, TieredQueueMove]
 }
 
 fn compact_load(source: TieredPageSource, edge: std.page.Slot) -> Result[Arc[std.page.Page], Error] waits {
@@ -183,20 +203,64 @@ fn compact_relocate(source: TieredPageSource, edge: std.page.Slot, path: TieredP
     compact_rebuild(page, at, Some(moved_child), None)
 }
 
-// One PACK_INDEX row. A frame that a queue row reaches stops the probe: the
-// drain still has to read it where it is. Otherwise every root that reaches
-// the frame takes a moved path.
-fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: List[DeferredFree], installed_queue: Arc[std.page.Page], seq: u64, row: PackIndexRow) -> Result[bool, Error] waits {
+fn compact_queue_page(source: TieredPageSource, slot: std.page.Slot, pack: u64, row: PackIndexRow, mut work: TieredCompactWork) -> Result[Option[TieredQueueValue], Error] waits {
+    let Some(path) = probe_tiered_path(source, slot, pack, row)? else {
+        return Ok(None)
+    }
+    let moved = compact_relocate(source, slot, path, 0, mut work)?
+    Ok(Some(MovedQueuePage(take moved)))
+}
+
+// §13.6 "Queue rows are their own roots": a Page row is compared and then
+// descended by the index row's key; a Blob row is compared. A match moves.
+fn compact_queue_row(mut work: TieredCompactWork, source: TieredPageSource, at: u64, queued: DeferredFree, pack: u64, row: PackIndexRow) -> Result[(), Error] waits {
+    let current: Option[TieredQueueValue] = match map.get(work.queue, at) {
+        Some(earlier) => Some(clone(earlier.value)),
+        None => None,
+    }
+    let found: Option[TieredQueueValue] = match take current {
+        Some(MovedQueuePage(take slot)) => compact_queue_page(source, slot, pack, row, mut work)?,
+        // A moved BLOB is Hot and names no frame.
+        Some(MovedQueueBlob(_, _)) => None,
+        None => match queued.target {
+            TieredPage(ptr) => compact_queue_page(source, ColdPage(ptr), pack, row, mut work)?,
+            TieredBlob(reference) => {
+                if probe_frame_matches(pack, row, TieredBlob(reference))? {
+                    let frame = fold_frame_at(source, TieredBlob(reference))?
+                    let TieredValue(body) = view frame.payload else {
+                        fail("store: a BLOB reference resolved to a PAGE")
+                    }
+                    let moved_body = disk_allocation(scoped fn() -> Result[Arc[Bytes], Error] {
+                        Ok(arc.new(copied(body)?))
+                    })?
+                    Some(MovedQueueBlob(reference, take moved_body))
+                } else {
+                    None
+                }
+            },
+        },
+    }
+    let Some(take value) = take found else {
+        return Ok(())
+    }
+    let key = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        copied(row.key)
+    })?
+    capacity(map.try_reserve(mut work.queue, 1))?
+    map.insert(mut work.queue, at, TieredQueueMove(branch_id: queued.branch_id, collection: row.collection, key: take key, value: take value))
+    Ok(())
+}
+
+// One PACK_INDEX row. Every queue row and every root that reaches the frame
+// takes a moved path. The added rows are numbered from `first_added`, the
+// installed `deferred_next`, as T8 step 3 will key them.
+fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: List[DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, seq: u64, row: PackIndexRow) -> Result[bool, Error] waits {
     let mut rows = std.page.cursor_open(arc.share(installed_queue), None, true, false)
     while let Some(queue_row) = std.page.cursor_next(mut rows) {
-        if let Some(_) = probe_deferred_root(source, queued_free(queue_row.value).target, seq, row)? {
-            return Ok(false)
-        }
+        compact_queue_row(mut work, source, list.word_be(queue_row.key, 0), queued_free(queue_row.value), seq, row)?
     }
-    for added in queued {
-        if let Some(_) = probe_deferred_root(source, added.target, seq, row)? {
-            return Ok(false)
-        }
+    for at in 0u64 .. list.len(queued) {
+        compact_queue_row(mut work, source, first_added + at, queued[at], seq, row)?
     }
     let key = prefix(row.collection)?
     for slot in 0u64 .. list.len(work.roots) {
@@ -219,7 +283,7 @@ fn compact_row(mut work: TieredCompactWork, source: TieredPageSource, queued: Li
     Ok(true)
 }
 
-fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installed_queue: Arc[std.page.Page], mut work: TieredCompactWork, mut probes: Map[u64, TieredProbeCursor], mut retiring: List[u64], budget: u64) -> Result[(), Error] waits {
+fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installed_queue: Arc[std.page.Page], first_added: u64, mut work: TieredCompactWork, mut probes: Map[u64, TieredProbeCursor], mut retiring: List[u64], budget: u64) -> Result[(), Error] waits {
     let mut packs_in_order: List[u64] = list.new()
     for (seq, _) in probes {
         capacity(list.try_reserve(mut packs_in_order, 1))?
@@ -239,7 +303,7 @@ fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installe
         let mut walk = take cursor
         let rows_before = walk.rows
         let finished = probe_tiered_index(source, seq, mut walk, left, mut work, scoped fn(mut state: TieredCompactWork, row: PackIndexRow) -> Result[bool, Error] waits {
-            compact_row(mut state, source, queued, installed_queue, seq, row)
+            compact_row(mut state, source, queued, installed_queue, first_added, seq, row)
         })?
         left = int.saturating_sub(left, walk.rows - rows_before)
         if finished {
@@ -292,7 +356,8 @@ fn select_compaction(installed: PageLocations, running: Map[u64, TieredProbeCurs
 // AP16 item 3 for Tiered packs, after the fold and the candidate queue's
 // added rows, before the drain. A refused allocation drops the cut's probe
 // progress: the installed cursors stand, nothing retires, and every root
-// is the one the cut staged before the probes ran.
+// is the one the cut staged before the probes ran, and no queue row is
+// rewritten.
 fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], queued: List[DeferredFree], mut next_stamp: u64) -> Result[TieredCompactStep, Error] waits {
     let installed = disk_state(db).pages
     let running: Map[u64, TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
@@ -302,7 +367,7 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
     let kept_probes: Map[u64, TieredProbeCursor] = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
         Ok(clone(running))
     })?
-    let unchanged = TieredCompactStep(probes: take kept_probes, retiring: list.new(), moved: list.new())
+    let unchanged = TieredCompactStep(probes: take kept_probes, retiring: list.new(), moved: list.new(), queue: map.new())
     if budget == 0 {
         return Ok(take unchanged)
     }
@@ -348,15 +413,15 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
         Error(Full(Allocation(_))) => return Ok(take unchanged),
         Error(take problem) => return Error(take problem),
     }
-    let mut work = TieredCompactWork(roots: replace(mut roots, list.new()), next_stamp: next_stamp, moved: list.new(), moved_stamps: map.new())
+    let mut work = TieredCompactWork(roots: replace(mut roots, list.new()), next_stamp: next_stamp, moved: list.new(), moved_stamps: map.new(), queue: map.new())
     let mut probes = take selected
     let mut retiring: List[u64] = list.new()
-    let ran = compact_probes(source, queued, installed.lists.deferred, mut work, mut probes, mut retiring, budget)
+    let ran = compact_probes(source, queued, installed.lists.deferred, installed.lists.deferred_next, mut work, mut probes, mut retiring, budget)
     next_stamp = work.next_stamp
     match ran {
         Ok(()) => {
             roots = replace(mut work.roots, list.new())
-            Ok(TieredCompactStep(probes: take probes, retiring: take retiring, moved: replace(mut work.moved, list.new())))
+            Ok(TieredCompactStep(probes: take probes, retiring: take retiring, moved: replace(mut work.moved, list.new()), queue: replace(mut work.queue, map.new())))
         },
         Error(Full(Allocation(_))) => {
             roots = take saved
@@ -364,4 +429,75 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
         },
         Error(take problem) => Error(take problem),
     }
+}
+
+fn queue_moves_in_order(moving: Map[u64, TieredQueueMove]) -> Result[List[u64], Error] {
+    let mut seqs: List[u64] = list.new()
+    capacity(list.try_reserve(mut seqs, map.len(moving)))?
+    for (at, _) in moving {
+        list.push(mut seqs, at)
+    }
+    list.sort(mut seqs, fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
+    Ok(take seqs)
+}
+
+// T2 for the moved queue rows: each copy is emitted once by stamp, outside
+// every root (§13.6 "Queue rows are their own roots").
+fn tiered_emit_queue(mut pending: TieredCutFrames, moving: Map[u64, TieredQueueMove]) -> Result[(), Error] {
+    for at in queue_moves_in_order(moving)? {
+        let Some(moved) = map.get(moving, at) else {
+            continue
+        }
+        match moved.value {
+            MovedQueuePage(slot) => tiered_emit_tree(mut pending, moved.collection, slot)?,
+            MovedQueueBlob(reference, body) => {
+                if !map.contains(pending.seen, reference.stamp) {
+                    let key = copied(moved.key)?
+                    let frame = PackFrame(stamp: reference.stamp, size: 8 + reference.len, body: BlobBody(arc.share(body)))
+                    capacity(map.try_reserve(mut pending.seen, 1))?
+                    capacity(list.try_reserve(mut pending.blobs, 1))?
+                    map.insert(mut pending.seen, reference.stamp, ())
+                    list.push(mut pending.blobs, TieredEmitFrame(collection: moved.collection, stamp_in_image: reference.stamp, key: take key, frame: take frame))
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+// Each moved row's value at its emitted location (T8 step 3): an added row's
+// in `added`, an installed row's in `rewritten`.
+fn settle_queue_moves(mut queue: CutQueue, moving: Map[u64, TieredQueueMove], emitted: Map[u64, std.page.PagePtr], first_added: u64) -> Result[(), Error] {
+    for at in queue_moves_in_order(moving)? {
+        let Some(moved) = map.get(moving, at) else {
+            continue
+        }
+        let target = match moved.value {
+            MovedQueuePage(slot) => {
+                let HotPage(page) = view slot else {
+                    fail("store: a moved queue row lost its copy")
+                }
+                let Some(place) = map.get(emitted, std.page.stamp(std.page.image_of(page))) else {
+                    fail("store: the cut omitted a moved queue page")
+                }
+                TieredPage(place)
+            },
+            MovedQueueBlob(reference, _) => {
+                let Some(place) = map.get(emitted, reference.stamp) else {
+                    fail("store: the cut omitted a moved queue BLOB")
+                }
+                TieredBlob(std.page.BlobRef(stamp: reference.stamp, len: reference.len, checksum: place.checksum, pack: place.pack, offset: place.offset, body: reference.body))
+            },
+        }
+        let row = DeferredFree(branch_id: moved.branch_id, target: take target)
+        if at >= first_added {
+            queue.added[at - first_added] = take row
+        } else {
+            capacity(list.try_reserve(mut queue.rewritten, 1))?
+            list.push(mut queue.rewritten, (at, take row))
+        }
+    }
+    Ok(())
 }

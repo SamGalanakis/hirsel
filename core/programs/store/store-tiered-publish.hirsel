@@ -158,13 +158,17 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     let folded = loaded || promoted || materialized
     let compacted = compact_cut(db, pager, mut roots, queued, mut next_stamp)?
     let leases = lease_cut_inventories(disk_state(db).pages.compaction, roots)?
-    let TieredCompactStep(probes: take probes, retiring: take retiring, moved: take moved) = take compacted
+    let TieredCompactStep(probes: take probes, retiring: take retiring, moved: take moved, queue: take moving) = take compacted
     let compaction = TieredCompaction(probes: take probes, held: take leases)
-    let mut queue = drain_cut(db, pager, take queued, take replaced, next_stamp)?
+    let mut queue = drain_cut(db, pager, take queued, take replaced, moving, next_stamp)?
     queue.moved = take moved
     queue.retiring = take retiring
-    let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = tiered_cut_frames_restamped(roots, disk_state(db).restamp, mut next_stamp)?
-    if list.len(pages) == 0 && !folded {
+    // The moved queue rows' copies follow the roots', so a stamp a root
+    // also moved keeps the one location the roots take.
+    let mut pending = tiered_cut_frames_restamped(roots, disk_state(db).restamp, mut next_stamp)?
+    tiered_emit_queue(mut pending, moving)?
+    let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = take pending
+    if list.len(pages) == 0 && list.len(blobs) == 0 && !folded {
         return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, materialized: materialized, queue: take queue, compaction: take compaction))
     }
     let blob_run = layout_tiered_packs(take blobs, 4, first_pack, cap)?
@@ -173,6 +177,7 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     let mut packs: List[TieredCutPack] = list.new()
     encode_tiered_run(id, blob_run, mut emitted, mut packs)?
     encode_tiered_run(id, page_run, mut emitted, mut packs)?
+    settle_queue_moves(mut queue, moving, emitted, disk_state(db).pages.lists.deferred_next)?
     let mut sealed: List[Roots] = list.new()
     capacity(list.try_reserve(mut sealed, list.len(roots)))?
     for held in roots {
@@ -184,8 +189,8 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
 
 // T8 step 4 reads queued pages through the installed inventory. A cut with
 // an empty queue, or a zero `free_budget`, reads nothing.
-fn drain_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], take added: List[DeferredFree], take folded: List[TieredDrainKill], next_stamp: u64) -> Result[CutQueue, Error] waits {
-    let mut queue = CutQueue(added: take added, drained: list.new(), kills: list.new(), folded: take folded, moved: list.new(), retiring: list.new())
+fn drain_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], take added: List[DeferredFree], take folded: List[TieredDrainKill], moving: Map[u64, TieredQueueMove], next_stamp: u64) -> Result[CutQueue, Error] waits {
+    let mut queue = CutQueue(added: take added, rewritten: list.new(), drained: list.new(), kills: list.new(), folded: take folded, moved: list.new(), retiring: list.new())
     let installed = disk_state(db).pages
     let budget = disk_state(db).options.free_budget
     if budget == 0 || (std.page.count(std.page.image_of(installed.lists.deferred)) == 0 && list.len(queue.added) == 0) {
@@ -198,7 +203,7 @@ fn drain_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], take added
     let drained = match recovered_tiered_inventory(installed.locations, None, db.checkpointed, next_stamp) {
         Ok(paging) => {
             let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
-            drain_cut_queue(source, installed.lists.deferred, installed.lists.deferred_next, mut queue, budget)
+            drain_cut_queue(source, installed.lists.deferred, installed.lists.deferred_next, mut queue, moving, budget)
         },
         Error(take problem) => Error(take problem),
     }

@@ -57,7 +57,6 @@ else:
  print(json.dumps({target: executables[target]}))
 '''.replace('FORMATTER', repr(str(wrapper))).replace('COMPILER', repr(str(compiler))))
         self.write('tools/buck2/sync.py', '')
-        self.write('tools/site_sync.py', '')
         self.write('tools/check_doc_refs.py', '')
         self.write('editors/tree-sitter-hirsel/check-local', '')
         self.write('core/std/API-INDEX.md', 'current')

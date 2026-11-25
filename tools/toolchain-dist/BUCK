@@ -10,4 +10,4 @@ export_file(name = "notices.py", visibility = ["PUBLIC"])
 
 # The notices gate reads these at their repository paths.
 [export_file(name = path, src = path, mode = "reference", visibility = ["PUBLIC"])
- for path in ["build", "notice-sources.json"] + glob(["licenses/**"])]
+ for path in ["build", "install.sh", "notice-sources.json"] + glob(["licenses/**"])]

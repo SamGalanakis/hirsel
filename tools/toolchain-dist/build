@@ -36,7 +36,7 @@ RUNTIME_TARGET = '//:hirsel-core-rt-archives'
 
 
 def check_glibc(prefix):
-    installer = (ROOT / 'site/install.sh').read_text()
+    installer = (ROOT / 'tools/toolchain-dist/install.sh').read_text()
     (floor,) = re.findall(r'^glibc_floor=(\d+\.\d+)$', installer, re.M)
     ceiling = (*map(int, floor.split('.')), 0)
     required = {'hirsel', 'lib/libLLVM.so.23.1', 'bin/ld.lld'}

@@ -3,8 +3,7 @@
 
 `--check` reports files that are not formatted and fails, as `cargo fmt --check`.
 rustfmt starts from each target's root file and follows its modules.
-Changed new-language sources are checked, never rewritten, and the primer's copies
-(tools/site_sync.py --check) must match docs/PRIMER.md. Documentation references
+Changed new-language sources are checked, never rewritten. Documentation references
 and the std operation index must match the code. Package law locks must be current:
 `hirsel laws check`, with the compiler built from this tree and std from core/, runs on
 each lock package a change since origin/main can move (core/tools/law_board.py).
@@ -165,9 +164,8 @@ def main():
     for edition, files in sorted(roots.items()):
         command = [str(RUSTFMT), '--edition', edition, *rustfmt_flags, *sorted(files)]
         status = subprocess.run(command, cwd=ROOT).returncode or status
-    site = subprocess.run([sys.executable, str(ROOT / 'tools/site_sync.py'), '--check'], cwd=ROOT)
-    if status or site.returncode:
-        return status or site.returncode
+    if status:
+        return status
     corpus = subprocess.run(
         [sys.executable, str(ROOT / 'editors/tree-sitter-hirsel/check-local')], cwd=ROOT)
     if corpus.returncode:

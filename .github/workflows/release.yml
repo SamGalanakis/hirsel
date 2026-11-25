@@ -108,7 +108,7 @@ jobs:
             tools/toolchain-dist/build --check-fresh /tmp/hirsel-prefix
             asset=hirsel-$RELEASE_TAG-x86_64-unknown-linux-gnu.tar.gz
             tar -czf "/release/$asset" -C /tmp/hirsel-prefix .
-            cp site/install.sh "/profiles/$PROFDATA.profdata" "/profiles/$FDATA.fdata" /release/
+            cp tools/toolchain-dist/install.sh "/profiles/$PROFDATA.profdata" "/profiles/$FDATA.fdata" /release/
             cd /release
             sha256sum "$asset" > SHA256SUMS
           '

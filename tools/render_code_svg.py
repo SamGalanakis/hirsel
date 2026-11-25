@@ -128,7 +128,7 @@ def ensure_binding(script_path: str) -> None:
             / "bin"
             / "python"
         )
-        if not python.is_file() or os.environ.get("SITE_HIGHLIGHT_REEXEC"):
+        if not python.is_file() or os.environ.get("RENDER_CODE_SVG_REEXEC"):
             sys.exit(
                 "render_code_svg: py-tree-sitter 0.25.2 missing; "
                 "run editors/tree-sitter-hirsel/check-local once"
@@ -136,7 +136,7 @@ def ensure_binding(script_path: str) -> None:
         os.execve(
             python,
             [str(python), script_path, *sys.argv[1:]],
-            dict(os.environ, SITE_HIGHLIGHT_REEXEC="1"),
+            dict(os.environ, RENDER_CODE_SVG_REEXEC="1"),
         )
 
 
@@ -375,7 +375,7 @@ def main() -> None:
             sys.exit(f"render_code_svg:\n{error}")
     if stale:
         rel = ", ".join(str(p.relative_to(ROOT)) for p in stale)
-        sys.exit(f"render_code_svg: stale SVG(s): {rel}; run tools/site_highlight.py")
+        sys.exit(f"render_code_svg: stale SVG(s): {rel}; run tools/render_code_svg.py")
 
 
 if __name__ == "__main__":

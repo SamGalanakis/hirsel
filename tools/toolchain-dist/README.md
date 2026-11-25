@@ -48,8 +48,8 @@ output each build every M1 program, which the profile never sees (it trains on
 the release std and cold LangArena only); the build fails unless each program's
 `.text` is byte-identical, and both sides' user CPU time is printed, ungated.
 The nightly board builds with `DIST_BOLT=off`, so it never measures this
-compiler; the benchmarks page says so. The compiler is rewritten with
-`--bolt-info=0`: BOLT's note records its command line, which names temporary
+compiler; the benchmarks page in the separate hirsel-site repository says so. The
+compiler is rewritten with `--bolt-info=0`: BOLT's note records its command line, which names temporary
 directories. Given one input and one profile, the rewrite is byte-identical.
 
 The release workflow has two stages. `train` runs `--train-profile` once and

@@ -96,8 +96,10 @@ hirsel run app --dir . --grant Stdout -- input.txt normal
 `--grant KIND` grants `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Process`, or
 `Tasks`, as well as parameterized rules for `Net` (TCP/UDP/TLS/Resolve and Unix-domain
 sockets, [Net sockets](spec/net.md)), `Env` ([Env](../core/std/api/env.md)), `Secret`,
-`Cred`, `Foreign`, and `Exec` (run `hirsel help run` for exact syntax). A missing grant is refused before native code is emitted, naming the parameter
-and the option it needs. Everything after `--` is passed to the program as `Args`.
+`Cred`, `Foreign`, and `Exec` (run `hirsel help run` for exact syntax). A run missing grants does not start (status 103) and names every
+ungranted parameter at once, one ``not started: grant `NAME` ...`` line each in parameter order;
+an ungranted `Foreign` interface is refused before native code is emitted, one
+`not granted: Foreign[D]` line per interface. Everything after `--` is passed to the program as `Args`.
 `run` exits with the program's status. A `main` that returns `Error(e)` writes
 `e` as Hirsel source after `error: `, with every `Secret` shown as `[secret]`; an
 `Exit` writes nothing ([PROG-3](spec/programs.md#prog-3-entry)). For every nonzero

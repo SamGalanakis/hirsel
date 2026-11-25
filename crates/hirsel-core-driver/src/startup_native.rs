@@ -75,6 +75,31 @@ fn startup_refusals(backend: Backend) {
         assert_eq!(std::fs::read_dir(&effects).unwrap().count(), 0);
     }
 
+    // Bug: the run stopped at the first missing grant, so each rebuild named one
+    // more. Three kinds, the Secret read before the others: every one is named,
+    // in parameter order.
+    let three = r#"pub fn main(files: Dir, key: Secret, output: Stdout) -> Result[(), Exit] waits {
+        result.unwrap(stdout.write(output, "entered\n"));
+        Ok(())
+    }"#;
+    let mut request = source_request(three, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let three = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(three.accepted());
+    options.directories = vec![];
+    options.grant_mask = 0;
+    options.output = dir.path().join("missing-three");
+    let built = three.build(&entry, &options).unwrap();
+    assert_not_started(
+        &Command::new(built.executable).output().unwrap(),
+        "not started: grant `files` is not in the run's configuration\n\
+         not started: grant `key` [secret] has no readable nonempty source\n\
+         not started: grant `output` is not in the run's configuration\n",
+    );
+
     let launcher_source = dir.path().join("host.c");
     let launcher = dir.path().join("host");
     std::fs::write(&launcher_source, include_str!("deny_openat2.c")).unwrap();

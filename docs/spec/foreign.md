@@ -304,7 +304,7 @@ definition identity ([PROG-9](programs.md#prog-9-code-descriptors)'s `package@ma
 On the command line it is written `--grant Foreign=sqlite@1/sqlite/Sqlite`, and in a package's
 test configuration it is the grant string `"Foreign=sqlite@1/sqlite/Sqlite"`. A run whose
 `Foreign[I]` parameter has no grant naming `I` does not start, and it reports
-`not granted: Foreign[D]` ([PROG-3](programs.md#prog-3-entry)). A `Foreign` grant whose `D`
+`not granted: Foreign[D]`, one line for each such interface in parameter order ([PROG-3](programs.md#prog-3-entry)). A `Foreign` grant whose `D`
 names no interface of the program is refused before the run as an unknown grant. In the
 release recipe a grant binding of kind `Foreign` holds `D` as its one value, followed by
 the SHA-256 and byte length of its interface's archive for the recipe target. The pin
@@ -314,7 +314,8 @@ interface. The manifest's `grants` list shows the binding as the string `Foreign
 The grant is explicit at launch (FFI-1). A test configuration's `"Foreign=D"` string says
 which tests take it, and `hirsel test` gives it to them only when its own command line also
 holds `--grant Foreign=D`; without that, each such test is not started and is reported failed
-with `not granted: Foreign[D]: pass --grant Foreign=D to hirsel test`, and the other tests run.
+with `not granted: Foreign[D]: pass --grant Foreign=D to hirsel test`, one line for each grant
+it is not given (`Exec` lines first, then `Foreign`, each in parameter order), and the other tests run.
 `hirsel deploy R` of a recipe with a `Foreign` binding is refused before admission, with
 `deploy: refused: the recipe grants Foreign=D; pass --grant Foreign=D`, unless the request
 holds `--grant Foreign=D` for each such binding. Its `foreign:` lines (FFI-1) are written

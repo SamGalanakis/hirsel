@@ -55,7 +55,7 @@ process early.
 | `Error(e)`, `E` not `Exit` | 1 | one line: `error: ` and the text of `e` |
 | failure | 101 | the cause chain, one line per cause, primary first: the cause and its site |
 | run stop ([FAIL-15](failure.md#fail-15-run-stops)), other than termination by the host | 102 | `run stop: ` and the stop's name |
-| not started ([CAP-4](capabilities.md#cap-4-entry-grants), [MEM-19](budgets.md#mem-19-limits)) | 103 | one line naming what could not be given |
+| not started ([CAP-4](capabilities.md#cap-4-entry-grants), [MEM-19](budgets.md#mem-19-limits)) | 103 | one line naming what could not be given; for grants, one line per parameter not granted, in parameter order |
 
 So 101 to 103 never come from an `Exit`. The stderr writes are the run's, not the
 program's, and come after cleanup; a failure in that cleanup is the run's outcome instead

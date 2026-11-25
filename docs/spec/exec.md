@@ -88,7 +88,8 @@ in its place:
 - `hirsel test` grants a test's configured `"Exec=FILE NAME"` only when its own command line
   holds the same string, and the policy that file gives there has the digest the test build
   was given. Otherwise that test is not started and is reported failed with
-  `not granted: Exec[NAME]: pass --grant 'Exec=FILE NAME' to hirsel test`, and the other tests
+  `not granted: Exec[NAME]: pass --grant 'Exec=FILE NAME' to hirsel test`, one line for each
+  grant it is not given ([FFI-4](foreign.md#ffi-4-the-foreign-capability)), and the other tests
   run.
 - `hirsel deploy` refuses a recipe with an `Exec` binding before admission unless the request
   holds the same `Exec=FILE NAME` string for that binding. It then loads the policy on the

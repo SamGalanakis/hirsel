@@ -3,6 +3,9 @@
 //! main's cleanup. Grant closure cannot allocate, admit or fail.
 #[path = "entry_launch.rs"]
 mod launch_options;
+#[path = "entry_startup.rs"]
+mod startup;
+pub(crate) use startup::{Missing, StartupError, report_startup};
 
 use crate::{
     Context,
@@ -341,42 +344,6 @@ fn receive_launch_image() -> io::Result<Option<[u8; 32]>> {
     Ok(Some(digest))
 }
 
-pub(crate) enum StartupError {
-    Io(io::Error),
-    /// A directory grant that could not be opened: its path as configured,
-    /// and the path it resolves to when that is relative.
-    Directory(std::path::PathBuf, io::Error),
-    MissingGrant(usize),
-    MissingSecret(usize),
-    NetRules,
-    UnixProbe(io::Error),
-    EnvPatterns,
-    EnvSecretOverlap(String),
-    UnsupportedHostOpenat2(io::Error),
-    Exec(String),
-}
-impl From<io::Error> for StartupError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-impl StartupError {
-    fn into_io(self) -> io::Error {
-        match self {
-            Self::Io(error)
-            | Self::Directory(_, error)
-            | Self::UnsupportedHostOpenat2(error)
-            | Self::UnixProbe(error) => error,
-            Self::Exec(reason) => io::Error::other(reason),
-            Self::MissingGrant(_)
-            | Self::MissingSecret(_)
-            | Self::NetRules
-            | Self::EnvPatterns
-            | Self::EnvSecretOverlap(_) => io::Error::from_raw_os_error(libc::EACCES),
-        }
-    }
-}
-
 unsafe fn load_env(
     input: &OsConfig,
     describe_mode: bool,
@@ -656,6 +623,7 @@ impl OsProcess {
             let mut metadata = Vec::new();
             let mut secrets = Vec::new();
             let mut creds = Vec::new();
+            let mut missing = Vec::new();
             if !describe_mode {
                 for i in 0..input.parameters_len {
                     let requirement = &*input.parameters.add(i);
@@ -671,7 +639,10 @@ impl OsProcess {
                                 requirement.index as u64,
                             )
                         };
-                        secrets.push(read().ok_or(StartupError::MissingSecret(i))?);
+                        match read() {
+                            Some(secret) => secrets.push(secret),
+                            None => missing.push(Missing::Secret(i)),
+                        }
                     } else if requirement.kind == CRED {
                         // The launcher checked each record; nothing is read
                         // from a credential source before a fetch.
@@ -682,7 +653,10 @@ impl OsProcess {
                             let views = *input.cred_grants.add(requirement.index);
                             crate::cred::Granted::read(views.map(|view| bytes(view)))
                         };
-                        creds.push(read().ok_or(StartupError::MissingGrant(i))?);
+                        match read() {
+                            Some(cred) => creds.push(cred),
+                            None => missing.push(Missing::Grant(i)),
+                        }
                     }
                 }
                 metadata.extend(secrets.iter().map(|secret| Grant {
@@ -822,22 +796,28 @@ impl OsProcess {
                 describe_out,
                 host,
             });
-            let mut probe = Some(probe);
             for n in 0..input.parameters_len {
                 let requirement = &*input.parameters.add(n);
-                let handle =
-                    hirsel_core_entry_grant(&process.config, requirement.kind, requirement.index);
-                if handle == 0 {
-                    return Err(StartupError::MissingGrant(n));
+                // The read above decided each Secret and Cred: once one is
+                // missing, a later one's ordinal no longer finds its row.
+                let read = !describe_mode && matches!(requirement.kind, SECRET | CRED);
+                match hirsel_core_entry_grant(&process.config, requirement.kind, requirement.index)
+                {
+                    0 if !read => missing.push(Missing::Grant(n)),
+                    0 => {}
+                    handle => process.grants.push(handle),
                 }
-                if requirement.kind == DIR && !describe_mode {
-                    if let Some(probe) = probe.take() {
-                        let designation = process._metadata[(handle - 1) as usize].handle;
-                        probe(process.os.as_ref().unwrap(), designation)
-                            .map_err(StartupError::UnsupportedHostOpenat2)?;
-                    }
-                }
-                process.grants.push(handle);
+            }
+            if !missing.is_empty() {
+                missing.sort_unstable_by_key(|m| match *m {
+                    Missing::Grant(n) | Missing::Secret(n) => n,
+                });
+                return Err(StartupError::Missing(missing));
+            }
+            if !describe_mode && let Some(n) = requirements.iter().position(|r| r.kind == DIR) {
+                let designation = process._metadata[(process.grants[n] - 1) as usize].handle;
+                probe(process.os.as_ref().unwrap(), designation)
+                    .map_err(StartupError::UnsupportedHostOpenat2)?;
             }
             process.config.grants = process.grants.as_ptr();
             process.config.grants_len = process.grants.len();
@@ -1192,69 +1172,6 @@ unsafe fn run_with_sources_and_probe(
             crate::process::NOT_STARTED
         }
     }
-}
-
-pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *const View) {
-    let mut line = b"not started: ".to_vec();
-    match error {
-        StartupError::UnixProbe(error) => {
-            line.extend_from_slice(format!("{error}\n").as_bytes());
-        }
-        StartupError::NetRules => {
-            line.extend_from_slice(b"Net requires --grant ");
-            line.extend_from_slice(hirsel_core_net::RULE_SYNTAX.as_bytes());
-            line.push(b'\n');
-        }
-        StartupError::EnvPatterns => {
-            line.extend_from_slice(hirsel_core_net::EnvPatterns::SYNTAX.as_bytes());
-            line.push(b'\n');
-        }
-        StartupError::EnvSecretOverlap(name) => {
-            line.extend_from_slice(
-                format!("Env grant covers Secret source variable {name:?}\n").as_bytes(),
-            );
-        }
-        StartupError::MissingGrant(index) => {
-            line.extend_from_slice(b"grant `");
-            // SAFETY: emitter supplies one valid UTF-8 name per main parameter.
-            line.extend_from_slice(unsafe { bytes(*names.add(index)) });
-            line.extend_from_slice(b"` is not in the run's configuration\n");
-        }
-        StartupError::MissingSecret(index) => {
-            line.extend_from_slice(b"grant `");
-            line.extend_from_slice(unsafe { bytes(*names.add(index)) });
-            line.extend_from_slice(b"` [secret] has no readable nonempty source\n");
-        }
-        StartupError::UnsupportedHostOpenat2(_) => {
-            line.extend_from_slice(
-                b"Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
-            );
-        }
-        StartupError::Exec(reason) => {
-            line.extend_from_slice(reason.as_bytes());
-            line.push(b'\n');
-        }
-        StartupError::Io(error) => {
-            line.extend_from_slice(
-                format!("host grants could not be configured: {error}\n").as_bytes(),
-            );
-        }
-        StartupError::Directory(path, error) => {
-            line.extend_from_slice(b"directory grant `");
-            line.extend_from_slice(path.as_os_str().as_bytes());
-            line.push(b'`');
-            if path.is_relative()
-                && let Ok(cwd) = std::env::current_dir()
-            {
-                line.extend_from_slice(b" (");
-                line.extend_from_slice(cwd.join(path).as_os_str().as_bytes());
-                line.push(b')');
-            }
-            line.extend_from_slice(format!(": {error}\n").as_bytes());
-        }
-    }
-    // SAFETY: the configured diagnostic fd and line live through this write.
-    unsafe { crate::os::diagnostic(stderr, line.as_ptr(), line.len()) };
 }
 
 #[cfg(test)]

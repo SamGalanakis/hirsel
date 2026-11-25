@@ -445,27 +445,35 @@ impl TestBatch<'_> {
                     .filter(|p| p.ty == "core@1/core/Exec")
                     .count();
                 if !self.replay {
-                    for grant in test_options.exec_grants.iter_mut().take(exec) {
+                    // Every grant this test's command line does not approve,
+                    // Exec then Foreign, each in parameter order.
+                    let mut refusals = Vec::new();
+                    for grant in test_options.exec_grants.iter().take(exec) {
                         if !options
                             .exec_grants
                             .iter()
                             .any(|approved| approved.request.text() == grant.request.text())
                         {
-                            return Err(NativeStop::Entry(grant.refusal()));
+                            refusals.push(grant.refusal());
                         }
+                    }
+                    for interface in decl.parameters.iter().filter_map(|p| p.foreign_interface()) {
+                        let refusal = format!(
+                            "not granted: Foreign[{interface}]: pass --grant Foreign={interface} to hirsel test"
+                        );
+                        if (!test_options.foreign_grants.contains(interface)
+                            || !options.foreign_grants.contains(interface))
+                            && !refusals.contains(&refusal)
+                        {
+                            refusals.push(refusal);
+                        }
+                    }
+                    if !refusals.is_empty() {
+                        return Err(NativeStop::Entry(refusals.join("\n")));
+                    }
+                    for grant in test_options.exec_grants.iter_mut().take(exec) {
                         grant.workdir = Some(std::env::current_dir()?);
                         grant.seal_policy()?;
-                    }
-                }
-                for parameter in &decl.parameters {
-                    if let Some(interface) = parameter.foreign_interface()
-                        && (!test_options.foreign_grants.contains(interface)
-                            || !options.foreign_grants.contains(interface))
-                        && !self.replay
-                    {
-                        return Err(NativeStop::Entry(format!(
-                            "not granted: Foreign[{interface}]: pass --grant Foreign={interface} to hirsel test"
-                        )));
                     }
                 }
             }

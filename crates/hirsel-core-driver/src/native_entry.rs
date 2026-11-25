@@ -149,7 +149,7 @@ impl<'a> Plan<'a> {
         let Layout::Fixed(layout) = &binding.recipe.layout else {
             return Err(NativeStop::Entry("Result needs fixed layout".into()));
         };
-        crate::native::recipe_build::refuse_unmatched_grants(
+        crate::native::recipe_grants::refuse_unmatched_grants(
             &identity,
             &binding.parameters,
             options,
@@ -160,12 +160,7 @@ impl<'a> Plan<'a> {
             .parameters
             .iter()
             .map(|p| {
-                let kind = if let Some(interface) = p.foreign_interface() {
-                    if !options.foreign_grants.contains(interface) {
-                        return Err(NativeStop::Entry(format!(
-                            "not granted: Foreign[{interface}]"
-                        )));
-                    }
+                let kind = if p.foreign_interface().is_some() {
                     let kind = grant_kind("Foreign").unwrap();
                     grant_mask |= 1 << kind;
                     kind

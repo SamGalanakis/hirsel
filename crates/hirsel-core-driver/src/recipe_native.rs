@@ -899,102 +899,17 @@ fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
     }
 }
 
-pub(crate) fn refuse_unmatched_grants(
-    entry: &str,
-    parameters: &[EntryParameter],
-    options: &NativeOptions,
-) -> Result<(), NativeStop> {
-    let mut counts = [0usize; GRANT_NAMES.len()];
-    for tag in parameters
-        .iter()
-        .filter_map(|p| p.ty.strip_prefix("core@1/core/").and_then(kind))
-    {
-        counts[usize::from(tag)] += 1;
-    }
-    let unmatched = GRANT_NAMES
-        .iter()
-        .enumerate()
-        .find(|&(tag, _)| options.grant_mask & (1 << tag) != 0 && counts[tag] == 0)
-        .map(|(_, name)| format!("--grant {name}"));
-    let unmatched = unmatched
-        .or_else(|| {
-            options
-                .directories
-                .get(counts[GrantKind::Dir as usize])
-                .map(|dir| format!("--dir {dir:?}"))
-        })
-        .or_else(|| {
-            options
-                .exec_grants
-                .get(counts[GrantKind::Exec as usize])
-                .map(|grant| format!("--grant Exec={}", grant.request.text()))
-        })
-        .or_else(|| {
-            options
-                .foreign_grants
-                .iter()
-                .find(|interface| {
-                    !parameters
-                        .iter()
-                        .any(|param| param.foreign_interface() == Some(interface.as_str()))
-                })
-                .map(|interface| format!("--grant Foreign={interface}"))
-        })
-        .or_else(|| {
-            ((!options.net_rules.is_empty() || !options.unix_roots.is_empty())
-                && counts[GrantKind::Net as usize] == 0)
-                .then(|| "--grant Net".to_owned())
-        })
-        .or_else(|| {
-            (options.env_patterns.is_some() && counts[GrantKind::Env as usize] == 0)
-                .then(|| "--grant Env".to_owned())
-        })
-        .or_else(|| {
-            options
-                .secret_grants
-                .iter()
-                .find(|grant| {
-                    !parameters
-                        .iter()
-                        .any(|p| p.name == grant.parameter && p.ty == "core@1/core/Secret")
-                })
-                .map(|grant| format!("--grant Secret:{}", grant.parameter))
-        })
-        .or_else(|| {
-            options
-                .cred_grants
-                .iter()
-                .find(|grant| {
-                    !parameters
-                        .iter()
-                        .any(|p| p.name == grant.parameter && p.ty == "core@1/core/Cred")
-                })
-                .map(|grant| format!("--grant Cred:{}", grant.parameter))
-        });
-    if let Some(grant) = unmatched {
-        return Err(NativeStop::Entry(format!(
-            "{grant} has no matching parameter of {entry}"
-        )));
-    }
-    Ok(())
-}
-
 fn bindings(
     entry: &DefPath,
     decl: &EntryDecl,
     options: &NativeOptions,
     mut archive: impl FnMut(&str) -> Result<ObjectRef, NativeStop>,
 ) -> Result<Vec<GrantBinding>, NativeStop> {
-    refuse_unmatched_grants(&entry.to_string(), &decl.parameters, options)?;
+    super::recipe_grants::refuse_unmatched_grants(&entry.to_string(), &decl.parameters, options)?;
     let mut next = [0usize; GRANT_NAMES.len()];
     let mut bound = Vec::new();
     for (ordinal, param) in decl.parameters.iter().enumerate() {
         if let Some(interface) = param.foreign_interface() {
-            if !options.foreign_grants.contains(interface) {
-                return Err(NativeStop::Entry(format!(
-                    "not granted: Foreign[{interface}]"
-                )));
-            }
             bound.push(GrantBinding {
                 ordinal: ordinal as u32,
                 kind: GrantKind::Foreign,

@@ -427,6 +427,34 @@ unsafe fn item_value(
 
 const CAPABILITY_ITEM: &str = "an item holds a handle whose snapshot this build does not write";
 
+/// A handle that arrives in a value, an item, a helper's entry or its result,
+/// as the receiving unit's snapshot: a client or `Shared` holder takes a new
+/// ordinal at its take, and a capability its grant's, designated in
+/// `designations` once the value is written.
+pub(super) fn arrive(
+    live: &mut Live,
+    generation: u32,
+    grants: &[Granted],
+    designations: &mut Vec<item_grants::Designation>,
+    kind: u64,
+    word: u64,
+) -> Result<Vec<u8>, &'static str> {
+    match kind {
+        CLIENT => {
+            let o = live.unit_object();
+            live.takes.clients.insert(word as usize, o);
+            client_snapshot(word, o)
+        }
+        SHARED => {
+            let o = live.unit_object();
+            live.takes.nodes.insert(word as usize, o);
+            shared_snapshot(word, o)
+        }
+        CAPABILITY => item_grants::arrived(live, generation, grants, word, designations),
+        _ => Err(CAPABILITY_ITEM),
+    }
+}
+
 /// A send, or why it is not recorded: `CONN_SEND` or `CONN_TRY_SEND` as an
 /// `OP` with its outcome, or a waiting `CONN_SEND`'s `ISSUE` (`waiting` its id).
 pub(crate) fn send(
@@ -506,7 +534,10 @@ pub(crate) enum Arrival<'a> {
     Settlement(u32, u8),
     HelperEnd {
         key: usize,
-        outcome: &'a Result<(u8, Vec<u8>), &'static str>,
+        outcome: &'a Result<super::helper::EndTake, &'static str>,
+        /// The owner's registry, where a capability in the result is
+        /// designated: reached only from the owner's thread.
+        registry: *mut crate::host_file::Registry,
         /// Kept connections and `Shared` nodes by address, with their amounts.
         survivors: &'a [(usize, u64)],
         /// Why other survivors cannot be named, if there are any.
@@ -541,22 +572,8 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 let generation = group.map_or(0, |g| g.generation);
                 let mut designations = Vec::new();
                 let value = ordinal(conn).zip(layout(conn)).map(|(ordinal, layout)| {
-                    // A client that arrives takes its ordinal at its take.
-                    let mut handle = |kind, word: u64| match kind {
-                        CLIENT => {
-                            let o = live.unit_object();
-                            live.takes.clients.insert(word as usize, o);
-                            client_snapshot(word, o)
-                        }
-                        SHARED => {
-                            let o = live.unit_object();
-                            live.takes.nodes.insert(word as usize, o);
-                            shared_snapshot(word, o)
-                        }
-                        CAPABILITY => {
-                            item_grants::arrived(live, generation, grants, word, &mut designations)
-                        }
-                        _ => Err(CAPABILITY_ITEM),
+                    let mut handle = |kind, word: u64| {
+                        arrive(live, generation, grants, &mut designations, kind, word)
                     };
                     // SAFETY: by the contract.
                     (ordinal, unsafe {
@@ -603,6 +620,7 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
             Arrival::HelperEnd {
                 key,
                 outcome,
+                registry,
                 survivors,
                 unnamed,
             } => {
@@ -612,14 +630,38 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 if let Some(why) = unnamed {
                     return live.cut(why);
                 }
-                let (kind, outcome) = match outcome {
-                    Ok(outcome) => outcome,
+                let end = match outcome {
+                    Ok(end) => end,
                     Err(why) => return live.cut(why),
                 };
                 body.push(4);
                 put_varint(&mut body, ordinal);
-                body.push(*kind);
-                body.extend_from_slice(outcome);
+                body.push(end.kind);
+                if end.handles.is_empty() {
+                    body.extend_from_slice(&end.body);
+                } else {
+                    // Each handle in the result takes its ordinal here, in the
+                    // order the helper wrote them, each 0 in its END.
+                    let generation = group.map_or(0, |g| g.generation);
+                    let mut designations = Vec::new();
+                    let mut ordinals = Vec::with_capacity(end.handles.len());
+                    for &(kind, word) in &end.handles {
+                        if let Err(why) =
+                            arrive(live, generation, &end.grants, &mut designations, kind, word)
+                        {
+                            return live.cut(why);
+                        }
+                        ordinals.push(live.objects.len() as u64);
+                    }
+                    let value = format::Value::decode(&end.body).expect("a written result");
+                    body.extend(value.with_ordinals(&ordinals));
+                    if let Some(group) =
+                        group.filter(|_| !designations.is_empty() && !registry.is_null())
+                    {
+                        // SAFETY: the owner's own registry (the arrival's contract).
+                        item_grants::designate(group, unsafe { &mut *registry }, &designations);
+                    }
+                }
                 // Each survivor by its address: a `Shared` node (kind 1),
                 // whose entry ends at its release, else a connection (kind
                 // 0). Written in (kind, stream, ordinal) order, which no

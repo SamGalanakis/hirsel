@@ -227,18 +227,30 @@ impl SendNote {
 /// The owner's helper-end `TAKE`, with the helper's outcome and the
 /// connections and `Shared` nodes it paid for that survive it.
 #[cfg(feature = "record")]
-pub(super) unsafe fn end_take(u: &mut LangUnit, key: usize, ended: &Ended) {
+pub(super) unsafe fn end_take(
+    u: &mut LangUnit,
+    key: usize,
+    ended: &Ended,
+    files: *mut crate::host_file::Files,
+) {
     let Some(outcome) = &ended.tape_end else {
         return;
     };
     let unnamed = (!ended.charges.is_empty())
         .then_some("a helper end keeps a Secret or UDP charge, which this build does not name");
+    let registry = if files.is_null() {
+        std::ptr::null_mut()
+    } else {
+        // SAFETY: the owner's host files, live while the owner runs.
+        unsafe { &raw mut (*files).registry }
+    };
     let arrival = Arrival::HelperEnd {
         key,
         outcome,
+        registry,
         survivors: &ended.survivors,
         unnamed,
     };
-    // SAFETY: an end take carries no item.
+    // SAFETY: an end take carries no item; its registry is the owner's.
     unsafe { tape::take(u.tape(), u.pumping, arrival) };
 }

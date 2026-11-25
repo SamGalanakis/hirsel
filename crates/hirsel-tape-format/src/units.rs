@@ -114,6 +114,28 @@ impl<'a> Value<'a> {
         canonical.extend_from_slice(&self.0[start..]);
         canonical
     }
+
+    /// This value with its snapshot ordinals, in the order they are written,
+    /// replaced by `ordinals`: the receiving unit's form of a value whose
+    /// sender wrote ordinal 0 in each.
+    pub fn with_ordinals(&self, ordinals: &[u64]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.0.len());
+        let mut start = 0;
+        let mut next = ordinals.iter();
+        scan_value(
+            &mut Cursor::new(self.0),
+            true,
+            |ordinal_start, ordinal_end| {
+                out.extend_from_slice(&self.0[start..ordinal_start]);
+                put_varint(&mut out, *next.next().expect("an ordinal per snapshot"));
+                start = ordinal_end;
+            },
+        )
+        .ok()
+        .expect("a checked value");
+        out.extend_from_slice(&self.0[start..]);
+        out
+    }
 }
 
 /// A crossed value without receiver-assigned snapshot ordinals.

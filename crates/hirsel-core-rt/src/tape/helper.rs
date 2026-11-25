@@ -62,7 +62,8 @@ impl Helper {
 
     /// Write the helper's `END` as `join` delivers it: its result, or its
     /// causes. Its scheduler has stopped, so no other frame follows. Returns
-    /// the outcome kind and body for the parent's end `TAKE`, or why it has none.
+    /// the outcome for the parent's end `TAKE`, or why it has none. The
+    /// result's capabilities resolve through `registry`, the helper's.
     /// # Safety
     /// `result` holds an initialized `R` of `bytes` bytes, with `owners`,
     /// when `failed` is false.
@@ -73,7 +74,10 @@ impl Helper {
         result: *const u8,
         bytes: u64,
         owners: &[[u64; 4]],
-    ) -> Result<(u8, Vec<u8>), &'static str> {
+        registry: &crate::host_file::Registry,
+    ) -> Result<EndTake, &'static str> {
+        let mut handles = Vec::new();
+        let mut grants = Vec::new();
         let body = if failed {
             let kind = if causes.first().is_some_and(|c| c.kind() == CANCELLED) {
                 2
@@ -90,22 +94,51 @@ impl Helper {
                 len: bytes,
             };
             // SAFETY: forwarded.
-            unsafe { value(result, &r, None, &mut |_, _| Err(RESULT_HANDLE)) }.map(|v| (0, v))
+            let words = unsafe { capability_words(result, &r, None) };
+            if !words.is_empty() {
+                grants = units::item_grants::resolve(registry, &words);
+            }
+            // Each handle is written as sent, ordinal 0; the owner's take
+            // gives each its ordinal there.
+            let mut handle = |kind, word: u64| {
+                handles.push((kind, word));
+                match kind {
+                    CLIENT => units::client_snapshot(word, 0),
+                    SHARED => units::shared_snapshot(word, 0),
+                    _ => units::item_grants::sent(&grants, word),
+                }
+            };
+            // SAFETY: forwarded.
+            unsafe { value(result, &r, None, &mut handle) }.map(|v| (0, v))
         };
+        // The END holds the result in canonical form.
         let body = body.and_then(|(kind, body)| {
-            HelperEnding::decode(kind, body.clone())
+            let canonical = if kind == 0 {
+                format::Value::decode(&body)
+                    .map_err(|_| NO_CAUSE)?
+                    .canonical()
+            } else {
+                body.clone()
+            };
+            HelperEnding::decode(kind, canonical)
                 .map(|ending| (kind, body, ending))
                 .map_err(|_| NO_CAUSE)
         });
+        let take = |kind, body| EndTake {
+            kind,
+            body,
+            handles,
+            grants,
+        };
         let Some(group) = self.group else {
-            return body.map(|(kind, body, _)| (kind, body));
+            return body.map(|(kind, body, _)| take(kind, body));
         };
         let mut state = group.cell.state.lock().unwrap();
         if state.generation != group.generation {
-            return body.map(|(kind, body, _)| (kind, body));
+            return body.map(|(kind, body, _)| take(kind, body));
         }
         let Some(live) = state.live.as_mut() else {
-            return body.map(|(kind, body, _)| (kind, body));
+            return body.map(|(kind, body, _)| take(kind, body));
         };
         let rec = live.recorder.as_mut().unwrap();
         let out = match body {
@@ -113,7 +146,7 @@ impl Helper {
                 let gap = live.schedule.events - live.schedule.last;
                 live.schedule.last = live.schedule.events;
                 let _ = rec.frame(&Frame::HelperEnd { gap, ending });
-                Ok((kind, body))
+                Ok(take(kind, body))
             }
             Err(why) => {
                 rec.cut(why);
@@ -127,8 +160,16 @@ impl Helper {
 }
 
 const NO_CAUSE: &str = "the helper failed without a cause its END can carry";
-const RESULT_HANDLE: &str =
-    "the result holds a capability or client, whose snapshot a helper's END does not write";
+
+/// A helper's outcome as its owner's end `TAKE` holds it: the outcome kind
+/// and body, a result's handles in the order written, each with ordinal 0
+/// until the take gives it the owner's, and its capabilities' grants.
+pub(crate) struct EndTake {
+    pub(super) kind: u8,
+    pub(super) body: Vec<u8>,
+    pub(super) handles: Vec<(u64, u64)>,
+    pub(super) grants: Vec<units::item_grants::Granted>,
+}
 
 /// The `END` a helper's stream ends with when its unit deadlocks.
 pub(super) fn deadlock(gap: u64, events: u64) -> Frame {
@@ -253,17 +294,7 @@ pub(crate) unsafe fn spawn(
     // SAFETY: forwarded; each capability word designates a grant of the run.
     let body = unsafe {
         entry(context, n, steps, input, x, &mut |kind, word| {
-            if kind == CLIENT {
-                let ordinal = live.unit_object();
-                live.takes.clients.insert(word as usize, ordinal);
-                return units::client_snapshot(word, ordinal);
-            }
-            if kind == SHARED {
-                let ordinal = live.unit_object();
-                live.takes.nodes.insert(word as usize, ordinal);
-                return units::shared_snapshot(word, ordinal);
-            }
-            units::item_grants::arrived(&mut live, generation, &granted, word, &mut grants)
+            units::arrive(&mut live, generation, &granted, &mut grants, kind, word)
         })
     };
     drop(state);

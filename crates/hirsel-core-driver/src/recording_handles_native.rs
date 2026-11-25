@@ -265,3 +265,121 @@ fn rl9_env_and_cred_cross_in_an_item_and_an_entry() {
         assert_eq!(fetches(&streams[1].1), [1], "{backend:?}: helper fetch");
     }
 }
+
+/// A helper takes a `Random` and a client in its entry and returns both;
+/// the root draws through the returned `Random` and sends through the
+/// returned client.
+const RL9_RESULT: &str = r#"
+fn keeper(take p: (Random, Client[u64])) -> (Random, Client[u64]) {
+    p
+}
+
+pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let (c, i): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(2, bytes 0))
+    let p: (Random, Client[u64]) = (r, take c)
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, take p, keeper))
+    let (back, client) = result.unwrap(task.join(take h))
+    let mut b: Bytes = list.with_capacity(8)
+    host.random(back, mut b)
+    result.unwrap(conn.try_send(client, 5))
+    if result.unwrap(conn.try_receive(i)) != 5 { return Error(Exit(status: 3)) }
+    result.unwrap(stdout.write(out, "result"))
+    Ok(())
+}
+"#;
+
+/// A helper's result that holds a capability and a client (recording.md,
+/// "Snapshots"), hand-derived before the first run. The root numbers its
+/// connection g+1 and client g+2 at `conn.new` and the helper g+3 at the
+/// spawn. The result `(Random, Client[u64])` is 16 plain bytes, both words
+/// zeroed, then two parts in offset order: the `Random`'s tag 5 snapshot
+/// (kind 3, no stored bytes) and the client's tag 0 snapshot (stream 0,
+/// connection g+1, `cap` 2, room 0).
+/// - The helper's `END` holds it in canonical form, no ordinals.
+/// - The root's end take: helper g+3, kind 0, the result with the `Random`
+///   numbered g+4 and the client g+5, no survivors.
+/// - The root's draw is a `RANDOM` on g+4, and its send through the returned
+///   client reaches inbox g+1: the item take of 5.
+///
+/// The takes of the run's end (the inbox's close and the releases) are not
+/// this law's.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_result_crosses_with_its_handles() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame, op};
+
+    // The result: 16 zeroed plain bytes, two parts in offset order: the
+    // `Random` (handle 1, tag 5, its ordinal, kind 3, no stored bytes) and
+    // the client (handle 1, tag 0, its ordinal, home stream 0, connection
+    // `conn`, `cap` 2, room 0). `ordinals` is empty in canonical form.
+    let result = |ordinals: &[u8], conn: u8| -> Vec<u8> {
+        let at = |i: usize| ordinals.get(i).map(|o| vec![*o]).unwrap_or_default();
+        [
+            vec![16],
+            vec![0; 16],
+            vec![2, 1, 5],
+            at(0),
+            vec![3, 0, 1, 0],
+            at(1),
+            vec![0; 4],
+            vec![conn, 2],
+            vec![0; 7],
+            vec![0; 8],
+        ]
+        .concat()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_with(
+            RL9_RESULT,
+            dir.path(),
+            "result",
+            backend,
+            "result",
+            &["Tasks", "Random", "Stdout"],
+        );
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
+        let root = &streams[0].1;
+        let g = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        let takes: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. }
+                    if matches!(body.arrival(), Arrival::Item(..) | Arrival::HelperEnd(..)) =>
+                {
+                    Some(body.bytes().to_vec())
+                }
+                _ => None,
+            })
+            .collect();
+        let end = [
+            vec![4, g + 3, 0],
+            result(&[g + 4, g + 5], g + 1),
+            vec![0],
+        ]
+        .concat();
+        let item = [vec![0, g + 1, 8, 5], vec![0; 7], vec![0]].concat();
+        assert_eq!(takes, [end, item], "{backend:?}: root takes");
+        let ending = streams[1]
+            .1
+            .iter()
+            .find_map(|f| match f {
+                Frame::HelperEnd { ending, .. } => Some(ending.body().to_vec()),
+                _ => None,
+            })
+            .expect("the helper's END");
+        assert_eq!(ending, result(&[], g + 1), "{backend:?}: END");
+        let draws: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op { op: o, object, .. } if *o == op::RANDOM => Some(*object),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(draws, [u64::from(g + 4)], "{backend:?}: draw");
+    }
+}

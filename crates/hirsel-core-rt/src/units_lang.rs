@@ -41,8 +41,10 @@ use std::{
 mod held;
 use held::Held;
 mod crossing;
+mod ending;
 pub use crossing::Cross;
 use crossing::{TapeHelper, tape_group};
+use ending::end_take;
 mod packing;
 pub(crate) mod takes;
 pub(crate) use packing::CrossSend;
@@ -1012,6 +1014,10 @@ pub struct HelperH {
     charge: Option<Held>,
     r_size: u64,
     result: ValueOut,
+    /// The owner's host files, whose registry designates a capability the
+    /// helper's result hands back.
+    #[cfg(feature = "record")]
+    files: *mut crate::host_file::Files,
 }
 
 #[derive(Clone)]
@@ -1036,7 +1042,7 @@ struct Ended {
     /// Its outcome as the owner's end `TAKE` holds it, when it is recorded:
     /// the kind and body, or why it has none.
     #[cfg(feature = "record")]
-    tape_end: Option<Result<(u8, Vec<u8>), &'static str>>,
+    tape_end: Option<Result<crate::tape::helper::EndTake, &'static str>>,
 }
 
 /// A tagged task handle names a helper.
@@ -1127,6 +1133,8 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
                 bytes: rx.bytes,
                 owners: rx.owned(),
             },
+            #[cfg(feature = "record")]
+            files: (*context).host_files,
         }));
         u.helpers.insert(k, h);
         #[cfg(feature = "record")]
@@ -1307,7 +1315,14 @@ fn helper_main(
             #[cfg(feature = "record")]
             tape_end: tape.as_ref().map(|tape| {
                 let causes: Vec<_> = context.causes.iter().collect();
-                tape.end(failed != 0, &causes, result.as_ptr(), rb, &ro)
+                tape.end(
+                    failed != 0,
+                    &causes,
+                    result.as_ptr(),
+                    rb,
+                    &ro,
+                    &files.registry,
+                )
             }),
         };
         let mut ret = Value::empty();
@@ -1344,37 +1359,6 @@ impl ResultsExt for std::sync::MutexGuard<'_, Option<HashMap<usize, Ended>>> {
     fn take(&mut self, k: usize) -> Option<Ended> {
         self.as_mut().and_then(|m| m.remove(&k))
     }
-}
-
-/// A helper's end take in its owner: the survivors' charges move into the
-/// owner's retained charges under their connections' keys. Run grants remain
-/// charged through the owner's end. The result size, its content and failure
-/// cells stay for the join, and the rest comes back now.
-/// # Safety
-/// The owner runs the take in a commit; the handle is live.
-unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
-    let results = RESULTS.lock().unwrap();
-    let ended = results
-        .as_ref()
-        .and_then(|m| m.get(&(Arc::as_ptr(&h.port) as usize)))
-        .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
-    #[cfg(feature = "record")]
-    takes::end_take(u, h.k, ended);
-    let held = h.charge.as_mut().unwrap();
-    for &(key, bytes) in &ended.survivors {
-        u.retained.insert(key, held.split(bytes));
-    }
-    if ended.run_grants != 0 {
-        u.run_grants.push(held.split(ended.run_grants));
-    }
-    crate::secret::take_over(&ended.charges, |bytes| held.partition(bytes));
-    let causes = ended
-        .causes
-        .iter()
-        .map(|cause| charge::CAUSE_CELL + cause.message_charge)
-        .sum::<u64>();
-    let keep = h.r_size + ended.result + causes;
-    drop(held.split(held.bytes.saturating_sub(keep)));
 }
 
 /// Wait for a helper's end take. Shielded waits ignore cancellation. `REC`

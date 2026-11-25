@@ -50,7 +50,7 @@ mod mem_prof;
 mod mem_sampler;
 pub mod net;
 pub mod os;
-pub mod os_exec;
+pub mod host;
 mod os_net;
 mod os_resolve;
 mod os_sync;

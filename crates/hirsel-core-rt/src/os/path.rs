@@ -1,5 +1,6 @@
 //! Confined path resolution and descriptor ownership for the OS provider.
 use super::syscall;
+use crate::host::path::{self as host, Refuse};
 use std::{
     ffi::{CStr, CString},
     io,
@@ -23,10 +24,10 @@ pub(super) fn open_directory(fd: i32, path: &[u8]) -> io::Result<OwnedFd> {
 }
 
 pub(super) fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
-    open_beneath(fd, path, flags, libc::RESOLVE_NO_MAGICLINKS)
+    open_beneath(fd, path, flags, Refuse::MagicLinks)
 }
 
-pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, resolve: u64) -> io::Result<OwnedFd> {
+pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, refuse: Refuse) -> io::Result<OwnedFd> {
     let mut short = [0; 64];
     let long;
     let path: &CStr = if path.len() < short.len() {
@@ -36,11 +37,7 @@ pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, resolve: u64) -> io
         long = CString::new(path)?;
         &long
     };
-    // SAFETY: open_how is an integer-only Linux UAPI structure.
-    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
-    how.flags = (flags | libc::O_CLOEXEC) as u64;
-    how.mode = if flags & libc::O_CREAT != 0 { 0o600 } else { 0 };
-    how.resolve = libc::RESOLVE_BENEATH | resolve;
+    let how = host::how(flags, refuse);
     if crate::units::uses_file_ring() {
         let entry = io_uring::opcode::OpenAt2::new(
             io_uring::types::Fd(fd),
@@ -53,20 +50,7 @@ pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, resolve: u64) -> io
         // SAFETY: OPENAT2 succeeded and transfers a fresh descriptor.
         return Ok(unsafe { OwnedFd::from_raw_fd(raw) });
     }
-    // SAFETY: Linux openat2 atomically enforces confinement, including symlinks.
-    // Unsupported hosts return Other(ENOSYS); no unconstrained fallback.
-    let raw = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            fd,
-            path.as_ptr(),
-            &how,
-            size_of::<libc::open_how>(),
-        )
-    };
-    syscall(raw as isize)?;
-    // SAFETY: successful openat2 transfers a fresh descriptor.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw as i32) })
+    host::open_beneath(fd, path, &how)
 }
 
 pub(super) fn close_file(fd: OwnedFd) -> io::Result<()> {
@@ -89,7 +73,7 @@ pub(super) fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
         None => (b".".as_slice(), path),
     };
     Ok((
-        beneath(fd, prefix, libc::O_PATH | libc::O_DIRECTORY)?,
+        beneath(fd, prefix, host::DIRECTORY_HANDLE)?,
         CString::new(name)?,
     ))
 }

@@ -2,6 +2,7 @@
 //! retain an O_PATH descriptor to the endpoint until the operation settles.
 use crate::{
     net::DENIED,
+    host::path::{DIRECTORY_HANDLE, LEAF_HANDLE, Refuse},
     os::{OsProvider, open_beneath},
     os_net::{Due, adopt_socket, deadline, error, retry, signal},
     provider::*,
@@ -61,7 +62,7 @@ pub(crate) unsafe fn configure_roots(
     for (label, path) in roots {
         let directory = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+            .custom_flags(DIRECTORY_HANDLE)
             .open(path)?;
         os.unix_roots.insert(label.to_owned(), directory.into());
     }
@@ -264,8 +265,8 @@ fn pinned_parent<'p>(root: BorrowedFd<'_>, path: &'p str) -> io::Result<(OwnedFd
     let dir = open_beneath(
         root.as_raw_fd(),
         parent.as_bytes(),
-        libc::O_PATH | libc::O_DIRECTORY,
-        libc::RESOLVE_NO_SYMLINKS,
+        DIRECTORY_HANDLE,
+        Refuse::Symlinks,
     )?;
     Ok((dir, name))
 }
@@ -276,8 +277,8 @@ pub(crate) fn pinned_socket(root: BorrowedFd<'_>, path: &str) -> io::Result<Owne
     let target = open_beneath(
         parent.as_raw_fd(),
         name.as_bytes(),
-        libc::O_PATH | libc::O_NOFOLLOW,
-        libc::RESOLVE_NO_SYMLINKS,
+        LEAF_HANDLE,
+        Refuse::Symlinks,
     )?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: both the pinned O_PATH descriptor and the result slot are live.

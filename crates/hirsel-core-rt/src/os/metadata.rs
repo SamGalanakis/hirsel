@@ -56,8 +56,8 @@ pub(super) fn enable_direct(fd: BorrowedFd<'_>, flags: i32) -> io::Result<()> {
         && usable(st.stx_dio_mem_align)
         && usable(st.stx_dio_offset_align)
     {
-        // SAFETY: fd is the exclusive live OFD returned by open.
-        let rc = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_DIRECT) };
+        // fd is the exclusive live OFD returned by open.
+        let rc = crate::host::sync::set_direct(fd.as_raw_fd(), flags);
         if rc < 0 {
             let error = io::Error::last_os_error();
             if !matches!(error.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP)) {

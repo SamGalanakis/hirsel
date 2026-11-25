@@ -1,5 +1,5 @@
 use super::{Grant, probe};
-use crate::os_exec::Supervisor;
+use crate::host::exec::Supervisor;
 use crate::{entry::StartupError, process::View};
 use hirsel_core_net::exec::Request;
 use std::os::unix::ffi::OsStrExt;

@@ -1414,7 +1414,7 @@ int main(int argc, char **argv) {
 }
 
 fn exec_supervisor_law(image: &std::path::Path) {
-    use crate::os_exec::{SetupStep, Signal, SpawnInput, Supervisor, Termination};
+    use crate::host::exec::{SetupStep, Signal, SpawnInput, Supervisor, Termination};
     use std::{
         ffi::CString,
         io::{Read, Write},
@@ -1422,7 +1422,7 @@ fn exec_supervisor_law(image: &std::path::Path) {
         sync::Arc,
     };
 
-    fn wait(process: &mut crate::os_exec::Process) -> Termination {
+    fn wait(process: &mut crate::host::exec::Process) -> Termination {
         let mut event = libc::pollfd {
             fd: process.pidfd(),
             events: libc::POLLIN,
@@ -2014,7 +2014,7 @@ fn exec_provider_law(image: &std::path::Path) {
         entry::{self, Grant as EntryGrant},
         exec::Grant,
         exec_runtime::{hirsel_core_exec_signal, hirsel_core_exec_spawn, hirsel_core_exec_wait},
-        os_exec::Supervisor,
+        host::exec::Supervisor,
     };
     use hirsel_core_net::exec::{Request as PolicyRequest, hex};
     use ring::digest::{SHA256, digest};

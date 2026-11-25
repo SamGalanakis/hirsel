@@ -18,7 +18,7 @@ const EXEC_HOST: &str =
 
 pub(crate) enum Grant {
     Native {
-        supervisor: Arc<crate::os_exec::Supervisor>,
+        supervisor: Arc<crate::host::exec::Supervisor>,
         profiles: Arc<BTreeMap<String, PinnedProfile>>,
         rules: ExecRules,
     },
@@ -62,7 +62,7 @@ impl Grant {
 
     fn prepare(
         policy: Policy,
-        supervisor: Arc<crate::os_exec::Supervisor>,
+        supervisor: Arc<crate::host::exec::Supervisor>,
     ) -> Result<(Self, Vec<String>), String> {
         let rules = policy.rules();
         let (profiles, lines) = policy.pin_images()?;
@@ -167,7 +167,7 @@ fn probe_clone() -> bool {
 pub(crate) fn probe() -> io::Result<()> {
     check_credentials().map_err(io::Error::other)?;
     let openat2 = File::open(".").and_then(|root| {
-        hirsel_core_net::unix::open_beneath(root.as_fd(), c".", libc::O_PATH | libc::O_DIRECTORY)
+        hirsel_core_net::unix::open_beneath(root.as_fd(), c".", crate::host::path::DIRECTORY_HANDLE)
     });
     if openat2.is_err() || !probe_clone() || hirsel_core_net::exec::probe_seals().is_err() {
         return Err(io::Error::other(EXEC_HOST));

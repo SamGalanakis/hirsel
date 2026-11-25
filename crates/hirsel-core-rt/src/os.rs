@@ -1,6 +1,9 @@
 //! Linux descriptor-relative host operations. No path is authorized by a prior
 //! canonicalization. openat2 resolves every traversal beneath its granted fd.
-use crate::provider::*;
+use crate::{
+    host::{self, clock},
+    provider::*,
+};
 
 mod listing;
 mod metadata;
@@ -145,7 +148,7 @@ impl OsProvider {
     pub(crate) fn probe_directory(&self, handle: u64) -> io::Result<()> {
         let directory = self.directory(handle);
         crate::units::off_slot(|| {
-            drop(beneath(directory, b".", libc::O_PATH | libc::O_DIRECTORY)?);
+            drop(beneath(directory, b".", host::path::DIRECTORY_HANDLE)?);
             Ok(())
         })
     }
@@ -189,7 +192,7 @@ impl OsProvider {
                     3 => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                     4 => libc::O_RDWR | libc::O_CREAT,
                     MODE_DURABLE | MODE_DIRECT => {
-                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_DSYNC
+                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | crate::host::sync::DURABLE_WRITE
                     }
                     _ => unreachable!(),
                 };
@@ -248,7 +251,7 @@ impl OsProvider {
             }
             STAT => {
                 let root = self.directory(request.handle);
-                let fd = beneath(root, path, libc::O_PATH | libc::O_NOFOLLOW)?;
+                let fd = beneath(root, path, host::path::LEAF_HANDLE)?;
                 let result = stat(fd.as_fd());
                 let _ = close_file(fd);
                 return result;
@@ -368,7 +371,7 @@ impl OsProvider {
                 // fdatasync makes file contents and the metadata required to
                 // read them back durable. A refusal is delivered as a host
                 // error; the store owns the poison/recovery policy.
-                syscall(unsafe { libc::fdatasync(fd) } as isize)?;
+                syscall(crate::host::sync::sync_data(fd) as isize)?;
             }
             ZERO_EXTENSION => {
                 let fd = self.directory(request.handle);
@@ -378,7 +381,7 @@ impl OsProvider {
             SYNC_DIR => {
                 let fd = self.directory(request.handle);
                 // fsync on a directory persists its entry updates.
-                syscall(unsafe { libc::fsync(fd) } as isize)?;
+                syscall(crate::host::sync::sync_directory(fd) as isize)?;
             }
             _ => unreachable!(),
         }
@@ -470,28 +473,11 @@ unsafe extern "C" fn clock_on_stack(state: *mut u8, request: *mut Request) -> Ou
 }
 #[inline(always)]
 unsafe fn read_clock(state: *mut u8, operation: u8) -> Option<Outcome> {
-    let (clock, wall) = if operation == WALL_MS {
-        (libc::CLOCK_REALTIME, true)
+    let value = if operation == WALL_MS {
+        clock::wall_ms()?
     } else {
-        (libc::CLOCK_MONOTONIC, false)
-    };
-    let mut now = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: valid writable timespec for a host clock.
-    if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
-        return None;
-    }
-    let value = if wall {
-        u64::try_from(i128::from(now.tv_sec) * 1000 + i128::from(now.tv_nsec) / 1_000_000).ok()?
-    } else {
-        let ns = u64::try_from(now.tv_sec)
-            .ok()?
-            .checked_mul(1_000_000_000)?
-            .checked_add(u64::try_from(now.tv_nsec).ok()?)?;
         // SAFETY: forwarded.
-        ns.saturating_sub(unsafe { epoch(state) })
+        clock::monotonic_ns().ok()?.saturating_sub(unsafe { epoch(state) })
     };
     Some(Outcome {
         value,
@@ -499,26 +485,8 @@ unsafe fn read_clock(state: *mut u8, operation: u8) -> Option<Outcome> {
     })
 }
 
-fn monotonic_clock_ns() -> io::Result<u64> {
-    let mut now = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: valid writable timespec for the host monotonic clock.
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let seconds =
-        u64::try_from(now.tv_sec).map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
-    let nanos =
-        u64::try_from(now.tv_nsec).map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
-    seconds
-        .checked_mul(1_000_000_000)
-        .and_then(|value| value.checked_add(nanos))
-        .ok_or_else(|| io::Error::from_raw_os_error(libc::EOVERFLOW))
-}
 pub(crate) fn monotonic_ns() -> u64 {
-    monotonic_clock_ns().unwrap_or(u64::MAX)
+    clock::monotonic_ns().unwrap_or(u64::MAX)
 }
 
 /// `wait` as a provider callback, for recognising the OS provider's own.
@@ -580,7 +548,7 @@ unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
 unsafe fn wall_wait(request: &Request) -> Wait {
     // SAFETY: the caller checked the eight-byte buffer.
     let at = unsafe { request.buffer.data.cast::<u64>().read_unaligned() };
-    let Some(now) = wall_clock_ms() else {
+    let Some(now) = clock::wall_ms() else {
         crate::process::stop(b"Clock")
     };
     if at <= now {
@@ -591,17 +559,6 @@ unsafe fn wall_wait(request: &Request) -> Wait {
         kind: WAIT_UNTIL,
         deadline_ns: monotonic_ns().saturating_add(remaining),
     }
-}
-fn wall_clock_ms() -> Option<u64> {
-    let mut now = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: valid writable timespec for the host wall clock.
-    if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) } != 0 {
-        return None;
-    }
-    u64::try_from(i128::from(now.tv_sec) * 1000 + i128::from(now.tv_nsec) / 1_000_000).ok()
 }
 /// `issue` as a provider callback, for recognising the OS provider's own.
 pub(crate) const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;

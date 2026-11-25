@@ -230,13 +230,11 @@ fn run() {
             fd,
             cell,
         } = job;
-        // SAFETY: the job owns its duplicate descriptor. One call, no retry.
-        let rc = unsafe {
-            if directory {
-                libc::fsync(fd.as_raw_fd())
-            } else {
-                libc::fdatasync(fd.as_raw_fd())
-            }
+        // The job owns its duplicate descriptor. One call, no retry.
+        let rc = if directory {
+            crate::host::sync::sync_directory(fd.as_raw_fd())
+        } else {
+            crate::host::sync::sync_data(fd.as_raw_fd())
         };
         // errno is this thread's and is read before anything else runs here.
         let errno = if rc < 0 {

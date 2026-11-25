@@ -1449,6 +1449,18 @@ fn http_client_https_round_trip(n: Net, c: Clock, address: Addr, token: Secret, 
     if !post_echo(mut client, "ok") {
         return false
     }
+    // Protected header with a plain-only Segments body (fetch/fetch_all POST shape).
+    let mut auth_json_fields: List[http_client.Header] = list.new()
+    list.push(mut auth_json_fields, http_client.Header(name: "Authorization", value: Protected(string.into_bytes("Bearer "), secret.share(token))))
+    list.push(mut auth_json_fields, http_client.Header(name: "Content-Type", value: Public(string.into_bytes("application/json"))))
+    let mut auth_json_body: List[http_client.Segment] = list.new()
+    list.push(mut auth_json_body, Plain(string.into_bytes("{\"ok\":")))
+    list.push(mut auth_json_body, Plain(string.into_bytes("true}")))
+    let auth_json = http_client.Request(method: "POST", target: "/json", headers: take auth_json_fields, body: Segments(take auth_json_body))
+    result.unwrap(http_client.start(mut client, auth_json, end))
+    if !post_echo(mut client, "ok") {
+        return false
+    }
     let mut fields: List[http_client.Header] = list.new()
     let bearer = string.into_bytes("Bearer ")
     let enabled = string.into_bytes("enabled")

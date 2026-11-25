@@ -364,23 +364,24 @@ fn send(mut output: WriteHalf, prefix: Bytes, body: Bytes, clock: Clock, deadlin
 fn send_head(mut c: Connection, headers: List[Header], body: Option[View[List[Segment]]], encoded: http_request.EncodedHead, marks: List[u64]) -> Result[(), Error] waits {
     let empty = string.as_bytes("")
     if encoded.secrets != 0 {
-        // One message: the head, any body, and every secret (TLS-5).
+        // One message: the head, any sealed body, and every secret (TLS-5).
         let secrets = http_request.secret_list(headers, body, encoded.secrets)
         // send_secret does not return a committed count on failure.
         c.head_committed = true
-        return write_result(tls.send_secret(mut c.output, c.encoding, secrets, marks, At(c.clock, c.deadline)))
-    }
-    let end = list.len(c.encoding)
-    let mut at = 0u64
-    while at < end {
-        check_deadline(mut c)?
-        match host.send_pair(mut c.output, list.slice(c.encoding, at, end), empty, At(c.clock, c.deadline)) {
-            Ok(0) => return Error(Write(Reset)),
-            Ok(n) => {
-                c.head_committed = true
-                at += n
-            },
-            Error(e) => return write_result(Error(e)),
+        write_result(tls.send_secret(mut c.output, c.encoding, secrets, marks, At(c.clock, c.deadline)))?
+    } else {
+        let end = list.len(c.encoding)
+        let mut at = 0u64
+        while at < end {
+            check_deadline(mut c)?
+            match host.send_pair(mut c.output, list.slice(c.encoding, at, end), empty, At(c.clock, c.deadline)) {
+                Ok(0) => return Error(Write(Reset)),
+                Ok(n) => {
+                    c.head_committed = true
+                    at += n
+                },
+                Error(e) => return write_result(Error(e)),
+            }
         }
     }
     if encoded.plain_body {
@@ -588,7 +589,7 @@ pub fn write_segments(mut c: Connection, segments: List[Segment]) -> Result[(), 
                 list.push(mut secrets, secret.share(credential))
             }
         }
-        write_result(tls.send_secret(mut c.output, c.encoding, secrets, marks, At(c.clock, c.deadline)))?
+        write_result(tls.send_secret(mut c.output, c.wire.head.raw, secrets, marks, At(c.clock, c.deadline)))?
     } else {
         send(mut c.output, c.wire.head.raw, string.as_bytes(""), c.clock, c.deadline)?
     }

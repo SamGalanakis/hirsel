@@ -4,25 +4,73 @@ pub type Binding: codec + key {
     table: u32
 }
 
+// One immutable generation: the fold of the source's changes in positions
+// (from, to]. The oldest starts at 0 and holds every row it saw; a later one
+// holds its range's puts and a mask per delete (§1.14). `rows` counts the
+// changes folded into it, a merge's being the sum of its inputs'.
+pub type Generation: codec + key {
+    id: u32,
+    from: u64,
+    to: u64,
+    rows: u64
+}
+
+// The newest position the generations cover, and the pin slot that holds it.
 pub type Image: codec + key {
-    generation: u32,
     position: u64,
     slot: u8
 }
 
+// An open fold into a new generation: the whole source at `target`, or, when
+// `delta`, its changes from the image's position to `target`.
 pub type Pass: codec + key {
     generation: u32,
+    delta: bool,
     target: u64,
+    rows: u64,
+    resume: Option[Bytes]
+}
+
+// An open merge of a contiguous run of generations, oldest first, into
+// `into`. `masks` is true unless the run starts at the oldest generation:
+// only then may a merge drop a delete's mask.
+pub type Merge: codec + key {
+    inputs: List[u32],
+    into: u32,
+    masks: bool,
     resume: Option[Bytes]
 }
 
 pub type Projection: codec + key {
     binding: Option[Binding],
     image: Option[Image],
+    generations: List[Generation],
     pass: Option[Pass],
-    retiring: Option[u32],
+    merge: Option[Merge],
+    retiring: List[u32],
     next: u32,
     again: bool
+}
+
+// What a reader reads: the generations, oldest first, and the position they
+// cover. A row's newest mention wins; the source's changes after `position`
+// are the tail.
+pub type Live {
+    generations: List[Generation],
+    position: u64
+}
+
+// `tail` is t, the backlog a step folds into a new generation; a smaller one
+// stays in the tail. A merge starts at the oldest generation whose rows are at
+// most `ratio` times the rows of the generations after it (§1.14
+// "Calibration").
+pub type Cadence {
+    tail: u64,
+    ratio: u64
+}
+
+pub fn cadence() -> Cadence {
+    Cadence(tail: 1, ratio: 1)
 }
 
 pub type Source = Local | Follower(Follower)
@@ -37,6 +85,7 @@ pub opaque type Projector[K, V] {
     input: Table[K, V],
     from: Source,
     reads: Reader,
+    cadence: Cadence,
     base: Option[Snapshot],
     target: Option[Snapshot],
     observed: Option[Projection]
@@ -49,17 +98,24 @@ pub type Delta[K, V] {
     value: Option[V]
 }
 
+// `apply` folds one change into a generation: a put, or a delete, which a
+// delta generation records as a mask. `merge` writes one page of a merge's
+// output and returns where the next page resumes, None when it is done.
+// `drop` deletes one page of a retired generation and returns whether rows
+// remain.
 pub type Fold[E: inert, K, V, A] {
     env: E,
     apply: fn(mut Tx, E, Delta[K, V]) -> Result[(), A],
+    merge: fn(mut Tx, E, Merge, Limits) -> Result[Option[Bytes], A],
     drop: fn(mut Tx, E, u32, Limits) -> Result[bool, A]
 }
 
-pub type Stepped = Updated(u64) | Paged(u64) | Published(u64) | Dropped(u32) | Reloaded | Idle
+pub type Stepped = Folded(u64) | Paged(u64) | Published(u64) | Merging | Merged(u32) | Dropped(u32) | Reloaded | Idle
 pub type ProjectError[A] = Store(Error) | Apply(A)
 
 fn projection_empty() -> Projection {
-    Projection(binding: None, image: None, pass: None, retiring: None, next: 0, again: false)
+    Projection(binding: None, image: None, generations: list.new(), pass: None, merge: None, retiring: list.new(), next: 0,
+        again: false)
 }
 
 fn projector_pin_name(name: String, slot: u8) -> String {
@@ -87,17 +143,24 @@ pub fn projection(mut d: Declare, name: String) -> Result[ProjectionDecl, Error]
 }
 
 pub fn projector[K, V](decl: ProjectionDecl, input: Table[K, V], take from: Source, take r: Reader) -> Projector[K, V] {
-    Projector(decl: clone(decl), input: clone(input), from: take from, reads: take r, base: None, target: None, observed: None)
+    Projector(decl: clone(decl), input: clone(input), from: take from, reads: take r, cadence: cadence(), base: None, target: None,
+        observed: None)
+}
+
+pub fn tuned[K, V](take p: Projector[K, V], c: Cadence) -> Projector[K, V] {
+    let mut out = take p
+    out.cadence = c
+    take out
 }
 
 pub fn binding[K, V](input: Table[K, V], b: Branch) -> Binding {
     Binding(store: input.store, branch: b.id, table: input.id)
 }
 
-pub fn live(row: Projection, b: Binding) -> Option[u32] {
+pub fn live(row: Projection, b: Binding) -> Option[Live] {
     if row.binding != Some(b) { return None }
     match row.image {
-        Some(image) => Some(image.generation),
+        Some(image) => Some(Live(generations: clone(row.generations), position: image.position)),
         None => None,
     }
 }
@@ -200,7 +263,80 @@ fn pin_projection_target[K, V](p: Projector[K, V], mut db: Db, row: Projection, 
     }
 }
 
-type ProjectionAction = SetProjection | ApplyPage(u32, u64, List[Change]) | DropGeneration(u32, Limits)
+// The generations cover (0, image] without a gap or an overlap: each starts
+// where the one before it ends, the oldest at 0 (§1.14).
+fn generations_contiguous(row: Projection) -> bool {
+    let Some(image) = row.image else { return list.len(row.generations) == 0 }
+    let mut at = 0u64
+    for k in 0u64 .. list.len(row.generations) {
+        let g = row.generations[k]
+        if g.from != at || g.to < g.from { return false }
+        at = g.to
+    }
+    list.len(row.generations) > 0 && at == image.position
+}
+
+// The oldest generation whose rows are at most `ratio` times the rows of the
+// generations after it starts the run to merge; the run ends at the newest.
+// So each generation holds more than `ratio` times the rows of all newer ones
+// together, and the count stays logarithmic in the rows folded (§1.14).
+fn merge_start(generations: List[Generation], ratio: u64) -> Option[u64] {
+    let m = list.len(generations)
+    if m < 2 { return None }
+    let mut newer = 0u64
+    let mut found: Option[u64] = None
+    for j in 0u64 .. m - 1 {
+        let k = m - 2 - j
+        newer = int.saturating_add(newer, generations[k + 1].rows)
+        if generations[k].rows <= int.saturating_mul(ratio, newer) { found = Some(k) }
+    }
+    found
+}
+
+// Replaces a finished merge's inputs, a contiguous span of the generations, by
+// the generation they merged into, and retires them, in one commit.
+fn publish_merge(mut row: Projection, merge: Merge) -> Result[(), Error] {
+    let span = list.len(merge.inputs)
+    let total = list.len(row.generations)
+    if span < 2 { return Error(malformed(0)) }
+    let mut start = total
+    for k in 0u64 .. total {
+        if row.generations[k].id == merge.inputs[0] {
+            start = k
+            break
+        }
+    }
+    if start == total || span > total - start { return Error(malformed(0)) }
+    let mut rows = 0u64
+    for j in 0u64 .. span {
+        if row.generations[start + j].id != merge.inputs[j] { return Error(malformed(0)) }
+        rows = int.saturating_add(rows, row.generations[start + j].rows)
+    }
+    let merged = Generation(id: merge.into, from: row.generations[start].from, to: row.generations[start + span - 1].to, rows: rows)
+    let mut kept: List[Generation] = list.new()
+    for k in 0u64 .. total {
+        if k == start { list.push(mut kept, merged) }
+        if k < start || k >= start + span { list.push(mut kept, row.generations[k]) }
+    }
+    row.generations = take kept
+    for j in 0u64 .. span { list.push(mut row.retiring, merge.inputs[j]) }
+    row.merge = None
+    if !generations_contiguous(row) { return Error(malformed(0)) }
+    Ok(())
+}
+
+fn without_generation(retiring: List[u32], generation: u32) -> List[u32] {
+    let mut kept: List[u32] = list.new()
+    let mut found = false
+    for k in 0u64 .. list.len(retiring) {
+        if !found && retiring[k] == generation {
+            found = true
+        } else { list.push(mut kept, retiring[k]) }
+    }
+    take kept
+}
+
+type ProjectionAction = SetProjection | ApplyPage(u32, u64, List[Change]) | MergePage(Limits) | DropGeneration(u32, Limits)
 
 type ProjectionWork[K, V, E: inert, A] {
     decl: ProjectionDecl,
@@ -234,9 +370,22 @@ fn write_projection[K, V, E: inert, A](mut tx: Tx, work: ProjectionWork[K, V, E,
         ApplyPage(generation, at, page_rows) => for change in page_rows {
             apply_projection_change(mut tx, work.input, work.fold, change, generation, at) ?=> ProjectionFailed
         },
+        MergePage(limits) => {
+            let opened: Option[Merge] = clone(work.replacement.merge)
+            let Some(take merge) = take opened else { return Error(ProjectionFailed(Store(malformed(0)))) }
+            let resumed = (work.fold.merge)(mut tx, work.fold.env, merge, limits) ?=> |problem| ProjectionFailed(Apply(take problem))
+            match take resumed {
+                Some(take key) => {
+                    let mut paged: Merge = clone(merge)
+                    paged.resume = Some(take key)
+                    replacement.merge = Some(take paged)
+                },
+                None => publish_merge(mut replacement, merge) ?=> |problem| ProjectionFailed(Store(take problem)),
+            }
+        },
         DropGeneration(generation, limits) => {
             let remaining = (work.fold.drop)(mut tx, work.fold.env, generation, limits) ?=> |problem| ProjectionFailed(Apply(take problem))
-            if !remaining { replacement.retiring = None }
+            if !remaining { replacement.retiring = without_generation(replacement.retiring, generation) }
         },
     }
     put(mut tx, work.decl.rows, work.decl.name, replacement) ?=> |problem| ProjectionFailed(Store(take problem))
@@ -270,12 +419,23 @@ fn forget_projector[K, V](mut p: Projector[K, V]) -> Stepped {
     Reloaded
 }
 
+// A pass that cannot continue retires its partial generation. A whole-source
+// pass is then started again; a delta's changes stay in the tail.
 fn discard_projection_pass[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, pass: Pass,
     fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
     let mut ready: Projection = clone(row)
     ready.pass = None
-    ready.retiring = Some(pass.generation)
-    ready.again = true
+    list.push(mut ready.retiring, pass.generation)
+    ready.again = row.again || !pass.delta
+    let _ = project_commit(mut p, mut db, row, take ready, SetProjection, fold)?
+    Ok(forget_projector(mut p))
+}
+
+fn discard_merge[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, merge: Merge,
+    fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
+    let mut ready: Projection = clone(row)
+    ready.merge = None
+    list.push(mut ready.retiring, merge.into)
     let _ = project_commit(mut p, mut db, row, take ready, SetProjection, fold)?
     Ok(forget_projector(mut p))
 }
@@ -293,42 +453,57 @@ fn rebind_projection[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row:
     if let Some(pass) = row.pass {
         return discard_projection_pass(mut p, mut db, row, pass, fold)
     }
-    if let Some(generation) = row.retiring {
-        return retire_projection(mut p, mut db, row, generation, limits, fold)
+    if let Some(merge) = row.merge {
+        return discard_merge(mut p, mut db, row, merge, fold)
+    }
+    if list.len(row.retiring) > 0 {
+        return retire_projection(mut p, mut db, row, row.retiring[0], limits, fold)
     }
     let mut ready: Projection = clone(row)
     ready.binding = Some(source_binding)
     ready.image = None
-    ready.retiring = match row.image {
-        Some(image) => Some(image.generation),
-        None => None,
-    }
+    for k in 0u64 .. list.len(row.generations) { list.push(mut ready.retiring, row.generations[k].id) }
+    ready.generations = list.new()
     let _ = project_commit(mut p, mut db, row, take ready, SetProjection, fold)?
     Ok(forget_projector(mut p))
 }
 
+// Folds one page of a pass into its generation. The last page publishes it:
+// a delta generation joins the newest end, a whole-source one replaces every
+// generation, and the pin moves to the target (§1.14).
 fn publish_projection_page[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, target: Snapshot,
-    generation: u32, take page: ChangePage, fold: Fold[E, K, V, A], opening: bool, rebuilding: bool) -> Result[Stepped, ProjectError[A]] waits {
+    generation: u32, take page: ChangePage, fold: Fold[E, K, V, A], opening: bool, delta: bool,
+    folded: u64) -> Result[Stepped, ProjectError[A]] waits {
     let ChangePage(changes: take page_rows, next: take resume, ..) = take page
     let at = version(target)
     let n = list.len(page_rows)
+    let rows = int.saturating_add(folded, n)
     let mut ready: Projection = clone(row)
     if opening {
         let Some(next_generation) = int.checked_add(row.next, 1u32) else { return Error(Store(Limit(Ids))) }
         ready.next = next_generation
-        ready.again = false
+        if !delta { ready.again = false }
     }
     let advanced: Stepped = if let Some(take key) = take resume {
-        ready.pass = Some(Pass(generation: generation, target: at, resume: Some(take key)))
+        ready.pass = Some(Pass(generation: generation, delta: delta, target: at, rows: rows, resume: Some(take key)))
         Paged(n)
     } else {
         let slot = pin_projection_target(p, mut db, row, target) ?=> Store
-        ready.image = Some(Image(generation: generation, position: at, slot: slot))
         ready.pass = None
-        if rebuilding {
-            ready.retiring = match row.image { Some(image) => Some(image.generation), None => None }
-            Published(at)
-        } else { Updated(n) }
+        if delta {
+            let Some(image) = row.image else { return Error(Store(malformed(0))) }
+            list.push(mut ready.generations, Generation(id: generation, from: image.position, to: at, rows: rows))
+        } else {
+            for k in 0u64 .. list.len(row.generations) { list.push(mut ready.retiring, row.generations[k].id) }
+            if let Some(merge) = row.merge { list.push(mut ready.retiring, merge.into) }
+            ready.merge = None
+            let mut only: List[Generation] = list.new()
+            list.push(mut only, Generation(id: generation, from: 0, to: at, rows: rows))
+            ready.generations = take only
+        }
+        ready.image = Some(Image(position: at, slot: slot))
+        if !generations_contiguous(ready) { return Error(Store(malformed(0))) }
+        if delta { Folded(rows) } else { Published(at) }
     }
     if !project_commit(mut p, mut db, row, take ready, ApplyPage(generation, at, take page_rows), fold)? {
         return Ok(forget_projector(mut p))
@@ -347,14 +522,66 @@ fn continue_projection[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, ro
     let Some(take target) = held_projection_target(mut p, source_binding, pass) ?=> Store else {
         return discard_projection_pass(mut p, mut db, row, pass, fold)
     }
-    let page = match projection_page(p, None, target, pass.resume, limits) {
+    let base: Option[Snapshot] = if pass.delta {
+        let Some(image) = row.image else { return Error(Store(malformed(0))) }
+        match borrowed_projection_base(mut p, db, source_binding, image) ?=> Store {
+            Some(take held) => Some(take held),
+            None => return discard_projection_pass(mut p, mut db, row, pass, fold),
+        }
+    } else { None }
+    let page = match projection_page(p, take base, target, pass.resume, limits) {
         Ok(take page) => take page,
         Error(Reclaimed(_)) => return discard_projection_pass(mut p, mut db, row, pass, fold),
         Error(take problem) => return Error(Store(take problem)),
     }
-    publish_projection_page(mut p, mut db, row, target, pass.generation, take page, fold, false, true)
+    publish_projection_page(mut p, mut db, row, target, pass.generation, take page, fold, false, pass.delta, pass.rows)
 }
 
+// One page of the open merge, or of a merge the cadence starts now. The page
+// that finishes it publishes the merged generation in the same commit.
+fn merge_projection[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, start: u64, limits: Limits,
+    fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
+    let mut ready: Projection = clone(row)
+    if row.merge == None {
+        let Some(next_generation) = int.checked_add(row.next, 1u32) else { return Error(Store(Limit(Ids))) }
+        let mut inputs: List[u32] = list.new()
+        for k in start .. list.len(row.generations) { list.push(mut inputs, row.generations[k].id) }
+        ready.merge = Some(Merge(inputs: take inputs, into: row.next, masks: start > 0, resume: None))
+        ready.next = next_generation
+    }
+    let into = match ready.merge {
+        Some(merge) => merge.into,
+        None => return Error(Store(malformed(0))),
+    }
+    if !project_commit(mut p, mut db, row, take ready, MergePage(limits), fold)? {
+        return Ok(forget_projector(mut p))
+    }
+    match p.observed {
+        Some(current) if current.merge == None => Ok(Merged(into)),
+        _ => Ok(Merging),
+    }
+}
+
+// With the tail below t: an open or due merge, then a retired generation's
+// drop, else nothing to do.
+fn tend_projection[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, row: Projection, limits: Limits,
+    fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
+    if row.merge != None {
+        return merge_projection(mut p, mut db, row, 0, limits, fold)
+    }
+    if let Some(start) = merge_start(row.generations, p.cadence.ratio) {
+        return merge_projection(mut p, mut db, row, start, limits, fold)
+    }
+    if list.len(row.retiring) > 0 {
+        return retire_projection(mut p, mut db, row, row.retiring[0], limits, fold)
+    }
+    Ok(Idle)
+}
+
+// One unit of work, in order: rebind, continue an open pass, fold a tail of t
+// changes or more into a new generation, merge, drop a retired generation. A
+// projection with no image, a lost base or a rebuild request folds the whole
+// source instead (§1.14).
 pub fn step[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, limits: Limits,
     fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits {
     page_limits(limits) ?=> Store
@@ -370,18 +597,19 @@ pub fn step[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, limits: Limit
         return continue_projection(mut p, mut db, row, source_binding, pass, limits, fold)
     }
     let target = project_target(mut p, db) ?=> Store
-    let mut new_pass = true
     if let Some(image) = row.image {
-        if let Some(take base) = borrowed_projection_base(mut p, db, source_binding, image) ?=> Store {
-            if version(base) == version(target) {
-                new_pass = row.again
-            } else {
+        if !row.again {
+            if let Some(take base) = borrowed_projection_base(mut p, db, source_binding, image) ?=> Store {
+                if version(base) == version(target) { return tend_projection(mut p, mut db, row, limits, fold) }
                 match projection_page(p, Some(take base), target, None, limits) {
-                    Ok(take page) => if let None = page.next {
-                        if list.len(page.changes) > 0 {
-                            return publish_projection_page(mut p, mut db, row, target, image.generation, take page, fold, false, false)
+                    Ok(take page) => {
+                        let due = match page.next {
+                            Some(_) => true,
+                            None => list.len(page.changes) >= p.cadence.tail && list.len(page.changes) > 0,
                         }
-                        new_pass = row.again
+                        if !due { return tend_projection(mut p, mut db, row, limits, fold) }
+                        if row.next == 4294967295u32 { return Error(Store(Limit(Ids))) }
+                        return publish_projection_page(mut p, mut db, row, target, row.next, take page, fold, true, true, 0)
                     },
                     Error(Reclaimed(_)) => (),
                     Error(take problem) => return Error(Store(take problem)),
@@ -389,13 +617,12 @@ pub fn step[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, limits: Limit
             }
         }
     }
-    if let Some(generation) = row.retiring {
-        return retire_projection(mut p, mut db, row, generation, limits, fold)
+    if list.len(row.retiring) > 0 {
+        return retire_projection(mut p, mut db, row, row.retiring[0], limits, fold)
     }
-    if !new_pass { return Ok(Idle) }
     if row.next == 4294967295u32 { return Error(Store(Limit(Ids))) }
     let page = projection_page(p, None, target, None, limits) ?=> Store
-    publish_projection_page(mut p, mut db, row, target, row.next, take page, fold, true, true)
+    publish_projection_page(mut p, mut db, row, target, row.next, take page, fold, true, false, 0)
 }
 
 pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error] waits {

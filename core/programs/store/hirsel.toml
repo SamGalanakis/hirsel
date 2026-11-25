@@ -126,6 +126,7 @@ dirs = ["."]
 "store_changes_laws.hirsel" = "store"
 "store_lookup_laws.hirsel" = "store"
 "store_declare_laws.hirsel" = "store"
+"store_projector_laws.hirsel" = "store"
 "store_changes_page_law.hirsel" = "store"
 "store_fork_laws.hirsel" = "store"
 "store_read_laws.hirsel" = "store"

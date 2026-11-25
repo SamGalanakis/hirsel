@@ -80,6 +80,8 @@ pub opaque type Rewrite {
     reported: bool,
     last_out_ts: i64,
     last_at_ns: u64,
+    // Whether the newest packet forwarded ended its frame, so padding may follow.
+    at_end: bool,
     switch_at: Option[u64]
 }
 
@@ -103,7 +105,7 @@ pub fn rewrite(clock: u32, ranges: u32, frames: u32, first_seq: u64, first_ts: u
     columns.try_reserve(mut frame_rows, f)?
     columns.fill(mut range_rows, r, Range(from: 0, offset: 0))
     columns.fill(mut frame_rows, f, Frame(gen: 0, ts: 0, id: 0, forward: false, max: 0, used: false))
-    Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), closed: false, live: false, source: 0, layer: 0, wanting: false, want_source: 0, want_layer: 0, current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, ranges: range_rows, range_count: 0, range_head: 0, frames: frame_rows, frame_next: 0, gen_frames: false, gen_ts_max: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, switch_at: None))
+    Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), closed: false, live: false, source: 0, layer: 0, wanting: false, want_source: 0, want_layer: 0, current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, ranges: range_rows, range_count: 0, range_head: 0, frames: frame_rows, frame_next: 0, gen_frames: false, gen_ts_max: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, at_end: false, switch_at: None))
 }
 
 pub fn target(mut r: Rewrite, t: Target) -> Result[(), TargetError] {
@@ -295,7 +297,7 @@ fn start_generation(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64
     r.source = source
 }
 
-fn emit(mut r: Rewrite, index: u64, offset: i64, ts: i64, at_ns: u64) -> Out {
+fn emit(mut r: Rewrite, index: u64, offset: i64, ts: i64, at_ns: u64, end: bool) -> Out {
     let i: i64 = int.narrow(index)
     let out: u64 = int.narrow(i - offset)
     let out_ts = ts - r.ts_offset
@@ -305,6 +307,7 @@ fn emit(mut r: Rewrite, index: u64, offset: i64, ts: i64, at_ns: u64) -> Out {
         return Late(out, wire)
     }
     r.next_out = out + 1
+    r.at_end = end
     if !r.sent || out_ts >= r.last_out_ts {
         r.last_out_ts = out_ts
         r.last_at_ns = at_ns
@@ -327,7 +330,7 @@ pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, p
             r.wanting = false
             add_frame(mut r, ts, u.frame, true, index)
             let offset = r.offset
-            return emit(mut r, index, offset, ts, at_ns)
+            return emit(mut r, index, offset, ts, at_ns, u.end)
         }
         if !other && index > r.highest_in && find_frame(r, ts, u.frame) == None {
             r.layer = r.want_layer
@@ -335,7 +338,7 @@ pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, p
             add_frame(mut r, ts, u.frame, true, index)
             r.highest_in = index
             let offset = r.offset
-            return emit(mut r, index, offset, ts, at_ns)
+            return emit(mut r, index, offset, ts, at_ns, u.end)
         }
     }
     if !r.live {
@@ -365,7 +368,7 @@ pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, p
         r.highest_in = index
         if send {
             let offset = r.offset
-            return emit(mut r, index, offset, ts, at_ns)
+            return emit(mut r, index, offset, ts, at_ns, u.end)
         }
         // Close it up: every later packet's offset grows by one.
         let offset = r.offset + 1
@@ -382,9 +385,35 @@ pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, p
         return Drop
     }
     match offset_at(r, index) {
-        Some(offset) => emit(mut r, index, offset, ts, at_ns),
+        Some(offset) => emit(mut r, index, offset, ts, at_ns, u.end),
         None => Drop
     }
+}
+
+/// Whether `pad` would answer a number now.
+pub fn paddable(r: Rewrite) -> bool {
+    !r.closed && r.live && r.sent && r.at_end
+}
+
+/// A padding-only packet in the outgoing stream (RTP-11 `pad`): the next outgoing
+/// number, at the timestamp of the last packet forwarded. Only a live stream whose
+/// newest forwarded packet ended its frame takes one, so padding never splits a
+/// frame's numbers; every later source packet's number moves up by one.
+pub fn pad(mut r: Rewrite) -> Option[(u64, u32)] {
+    if !paddable(r) {
+        return None
+    }
+    let out = r.next_out
+    r.next_out = out + 1
+    let from = r.highest_in + 1
+    let offset = r.offset - 1
+    if r.range_count != 0 && r.ranges.from[r.range_head] == from {
+        r.ranges.offset[r.range_head] = offset
+        r.offset = offset
+    } else {
+        push_range(mut r, from, offset)
+    }
+    Some((out, int.truncate(r.last_out_ts)))
 }
 
 pub fn on_sr(mut r: Rewrite, source: u32, info: rtcp.SenderInfo, at_ns: u64) {

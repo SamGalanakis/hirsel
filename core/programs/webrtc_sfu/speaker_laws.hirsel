@@ -42,7 +42,7 @@ fn voiced(mut cs: srtp.Session, n: u64, level: u8, v: bool) -> Bytes {
 }
 
 fn speaker_limits(n: u8) -> router.RoomLimits {
-    router.RoomLimits(participants: 16, ids: 16, publications: 8, down_tracks: 8, audio_forward: n, pause_delay_ms: 5000)
+    router.RoomLimits(participants: 16, ids: 16, publications: 8, down_tracks: 8, audio_forward: n, pause_delay_ms: 5000, pause: false)
 }
 
 // Round `k` of 20 ms packets falls at 10 ms + 20 ms k.

@@ -1,0 +1,389 @@
+// ---- RTC-6 probing laws (W24) ----
+// One publisher sends the simulcast encodings q, h and f to the router; one
+// subscriber, behind a token-bucket policer, receives a down-track and answers TWCC
+// feedback. The run is event driven: the router is polled at each publisher packet,
+// each feedback and each wake it asks for.
+// The publisher's encodings, each a VP8 keyframe whose payload ends in its own byte.
+const FILL_Q: u8 = 0x51
+
+const FILL_H: u8 = 0x52
+
+const FILL_F: u8 = 0x53
+
+// The policer on the subscriber's path: 2 Mbit/s, four 1,220-byte packets deep, as
+// rtp's net_laws.
+const POLICE_BPS: u64 = 2000000
+
+const POLICE_DEPTH: u64 = 4880
+
+// The subscriber's section: VP8 on 96, RTX on 97 when it offers RTX, MID on 1 and
+// TWCC on 3.
+const SUB_RTX_PT: u8 = 97
+
+const SUB_TWCC: u8 = 3
+
+// When the subscriber subscribes: after the 1 s rate window that closes at 1,000 ms.
+const SUBSCRIBE_AT: u64 = 1100
+
+// Packet sizes in bytes of q and h (every 20 ms) and f (every 10 ms); 0 sends none.
+type Shape {
+    q: u64,
+    h: u64,
+    f: u64
+}
+
+/// One packet the subscriber received past the policer: when, its header, and the
+/// encoding it carries (`FILL_Q`, `FILL_H`, `FILL_F`) or 0 for padding.
+type Heard {
+    at: u64,
+    h: rtp.header.Header,
+    fill: u8
+}
+
+type Probed {
+    r: router.Router,
+    out: peer.Outbox,
+    p: Client,
+    s: Client,
+    log: rtp.twcc.RecvLog,
+    // The policer's credit in bit-nanoseconds per second, refilled to `filled`.
+    credit: u64,
+    filled: u64,
+    media: u32,
+    seqs: List[u16],
+    heard: List[Heard]
+}
+
+fn probe_room(seed: u64, limits: router.RoomLimits, rtx: Bytes) -> Probed {
+    let mut r = router.router(provide.random(seed))
+    result.unwrap(router.open_room(mut r, room_id(), limits))
+    let out = result.unwrap(peer.outbox(262144, 256))
+    let p = admit(mut r, seed + 1, simulcast_offer(), 1)
+    let mut offer = minimal_head(b" d")
+    recv_section(mut offer, b"d", b"96", rtx, b"1", b"3")
+    let s = admit(mut r, seed + 2, offer, 2)
+    let mut seqs: List[u16] = list.new()
+    for k in 0u16 .. 3u16 {
+        list.push(mut seqs, 100 * k)
+    }
+    Probed(r: take r, out: take out, p: take p, s: take s, log: result.unwrap(rtp.twcc.recv_log(1024)), credit: POLICE_DEPTH * 8 * 1000000000, filled: 0, media: 0, seqs: take seqs, heard: list.new())
+}
+
+// The publisher's packet of encoding `e` (0 q, 1 h, 2 f) at `now`: `size` bytes up to
+// its payload's end (20 bytes of header with MID and RID), a keyframe filled with the
+// encoding's byte.
+fn publish_one(mut w: Probed, e: u64, size: u64, now: u64) {
+    let rids =[b"q", b"h", b"f"]
+    let fills =[FILL_Q, FILL_H, FILL_F]
+    let mut body = vp8_key()
+    while list.len(body) + 20 < size {
+        list.push(mut body, fills[e])
+    }
+    let seq = w.seqs[e]
+    w.seqs[e] = seq + 1
+    let ssrc = E0 + int.narrow(e)
+    let ts: u32 = int.truncate(now / MS * 90)
+    let packet = rid_media(mut w.p.cs, ssrc, seq, ts, rids[e], body)
+    feed(mut w.r, now, w.p.who, w.p.at, packet, mut w.out)
+}
+
+// Everything the router sent the subscriber since the last call arrives at `now`
+// through the policer; each RTP packet that passes is logged for TWCC and heard.
+fn arrive(mut w: Probed, now: u64) {
+    for tx in w.out.pkts {
+        let UdpTx(to, at, len, ecn: _) = tx
+        if to != w.s.at {
+            continue
+        }
+        w.credit = order.min(w.credit + (now - w.filled) * POLICE_BPS, POLICE_DEPTH * 8 * 1000000000)
+        w.filled = now
+        let cost = len * 8 * 1000000000
+        if cost > w.credit {
+            continue
+        }
+        w.credit -= cost
+        let mut b = copy_of(list.slice(w.out.data, at, at + len))
+        if (b[0] >> 6) != 2 || (b[1] >= 192 && b[1] <= 223) {
+            continue
+        }
+        let opened = match srtp.unprotect_rtp(mut w.s.cs, mut b) {
+            Ok(o) => o,
+            Error(_) => fail("the subscriber could not open a packet from the router"),
+        }
+        list.truncate(mut b, opened.length)
+        let h = result.unwrap(rtp.header.parse(b))
+        let g = Got(h: h, pkt: copy_of(b))
+        let Some(tn) = ext_value(g, SUB_TWCC, TransportSeq) else {
+            fail("a packet to the subscriber has no transport-wide sequence number")
+        }
+        rtp.twcc.on_packet(mut w.log, list.word_be(tn, 0), now)
+        // The payload ends before the padding (RFC 3550 section 5.1): padding-only
+        // packets have none and are heard as 0.
+        let body_end = if h.padded {
+            let pad: u64 = int.widen(b[list.len(b) - 1])
+            list.len(b) - pad
+        } else {
+            list.len(b)
+        }
+        let fill = if body_end > h.end {
+            b[body_end - 1]
+        } else {
+            0
+        }
+        if h.padded && fill != 0 {
+            fail("a padded packet to the subscriber carries a payload")
+        }
+        if fill != 0 && w.media == 0 {
+            w.media = h.ssrc
+        }
+        list.push(mut w.heard, Heard(at: now, h: h, fill: fill))
+    }
+    peer.clear_outbox(mut w.out)
+}
+
+// The subscriber's compound feedback at `now`: receiver report, CNAME and TWCC.
+fn feed_back(mut w: Probed, now: u64) {
+    let mut b: Bytes = list.with_capacity(1500)
+    let empty: List[rtp.rtcp.Block] = list.new()
+    let _ = result.unwrap(rtp.rtcp.write_rr(CLIENT_SSRC, view empty, mut b))
+    let _ = result.unwrap(rtp.rtcp.write_cname(CLIENT_SSRC, b"browser", mut b))
+    if result.unwrap(rtp.twcc.write(mut w.log, CLIENT_SSRC, w.media, 1200, mut b)) == 0 {
+        return
+    }
+    feed(mut w.r, now, w.s.who, w.s.at, sealed_rtcp(mut w.s.cs, take b), mut w.out)
+}
+
+// Run from 0 to `until` ms: the publisher sends `shape`, the subscriber subscribes
+// to `target` at `SUBSCRIBE_AT` and, when `feedback`, answers every 50 ms after.
+fn run(mut w: Probed, shape: Shape, target: router.Target, feedback: bool, until: u64) {
+    let room = room_id()
+    let pa = result.unwrap(router.publish(mut w.r, room, w.p.who, 0))
+    let sub = SUBSCRIBE_AT * MS
+    let end = until * MS
+    let mut subscribed = false
+    let mut next_pub = 0u64
+    let mut next_answer = sub + 50 * MS
+    let mut now = 0u64
+    while now < end {
+        if now == next_pub {
+            if now % (20 * MS) == 0 {
+                if shape.q != 0 {
+                    publish_one(mut w, 0, shape.q, now)
+                }
+                if shape.h != 0 {
+                    publish_one(mut w, 1, shape.h, now)
+                }
+            }
+            if shape.f != 0 {
+                publish_one(mut w, 2, shape.f, now)
+            }
+            next_pub += 10 * MS
+        }
+        if !subscribed && now == sub {
+            result.unwrap(router.subscribe(mut w.r, room, w.s.who, pa, 0, target, now, mut w.out))
+            subscribed = true
+        }
+        if feedback && now == next_answer {
+            feed_back(mut w, now)
+            next_answer += 50 * MS
+        }
+        // A session that transmitted answers `now`: poll again until it waits.
+        let mut wake = router.poll(mut w.r, now, mut w.out)
+        let mut again = 0u64
+        while wake == Some(now) && again < 64 {
+            wake = router.poll(mut w.r, now, mut w.out)
+            again += 1
+        }
+        arrive(mut w, now)
+        let mut next = order.min(next_pub, if subscribed {
+            next_answer
+        } else {
+            sub
+        })
+        if !feedback && subscribed {
+            next = next_pub
+        }
+        if let Some(t) = wake {
+            if t > now && t < next {
+                next = t
+            }
+        }
+        now = next
+    }
+}
+
+fn first_of(w: Probed, fill: u8) -> Option[u64] {
+    for x in w.heard {
+        if x.fill == fill {
+            return Some(x.at)
+        }
+    }
+    None
+}
+
+fn shape_ramp() -> Shape {
+    Shape(q: 300, h: 1250, f: 1250)
+}
+
+fn top_f() -> router.Target {
+    Layer(encoding: 2, spatial: 0, temporal: 0)
+}
+
+/// bug: never probe, so an estimate that starts below a down-track's target stays there and the leg sits on q for good; probe only on the start estimate and not again after the first result; drop the media packets of a running cluster from its members; or retry a cluster only after the 5 s gate when the last one raised the estimate.
+/// oracle: RTC-6 and RTP-9 by hand. Rates from packet sizes: q 300 B every 20 ms = 120,000, h 1,250 B every 20 ms = 500,000 and f 1,250 B every 10 ms = 1,000,000 bit/s. At subscribe (1,100 ms) the 300,000 start estimate takes q (the first step) and leaves 180,000, under h's step of 380,000, so the down-track is short of f and asks for 1,250,000 (f's rate plus a quarter). Without probing the estimate cannot rise: delay-based increase stops at 1.5 x the 120,000 acked + 10,000 = 190,000, under 300,000. Round 1 probes at min(1,250,000, 2 x 300,000) = 600,000; its result, read at the 50 ms feedback, is at least 0.98 x 600,000 = 588,000 (TWCC's 250 us arrival quantum over a 15 ms cluster), so h's step fits (588,000 - 120,000 >= 380,000) and f's does not. Round 2 starts at once since the estimate rose, at min(1,250,000, 2 x 588,000) >= 1,176,000, read at the next feedback as >= 1,152,000, so f's step of 500,000 fits beside h (1,152,000 - 500,000). Every f packet is a keyframe, so the switch lands within f's 10 ms; the policer's 2 Mbit/s passes the 1,176,000 cluster and f. Bound: 50 ms + 50 ms + 10 ms + one 50 ms feedback of slack = 160 ms after subscribe; after the switch the down-track forwards f only.
+@test
+fn probe_ramps_to_top_layer() -> Result[(), router.RouterError] {
+    let mut w = probe_room(2690, room_limits(), b"97")
+    run(mut w, shape_ramp(), top_f(), true, SUBSCRIBE_AT + 600)
+    let sub = SUBSCRIBE_AT * MS
+    let Some(f_at) = first_of(w, FILL_F) else {
+        fail("the down-track never reached f: the estimate stayed below its target")
+    }
+    if f_at > sub + 160 * MS {
+        fail("the down-track reached f later than two probe rounds and a keyframe after subscribe")
+    }
+    let Some(h_at) = first_of(w, FILL_H) else {
+        fail("the down-track skipped h: the first probe's 600,000 could not carry f")
+    }
+    if h_at > f_at {
+        fail("h came after f: the first probe was not capped at twice the estimate")
+    }
+    for x in w.heard {
+        if x.at > f_at + 20 * MS && x.fill != 0 && x.fill != FILL_F {
+            fail("the down-track left f after reaching it")
+        }
+    }
+    Ok(())
+}
+
+/// bug: pad without limit (the pacer's padding rate left at the target), send padding on the media SSRC or payload type when the leg has RTX, carry a media payload in padding, skip or reuse RTX sequence numbers, or start a new cluster inside RTP-9's 5 s retry gate after one that raised nothing.
+/// oracle: RTP-9, RTP-10 and RFC 4588 by hand. With q at 120,000 and the 300,000 start estimate the down-track is short of f, so one cluster at 600,000 bit/s starts at subscribe. Its probes are max(200, 600,000 / 8,000) = 200 bytes, one per 200 x 8 / 600,000 = 2.67 ms; the cluster ends at the first probe that is at least the 5th and at least 15 ms after the first, the 7th at 16 ms, or sooner when q's media fills slots; so 5 to 7 padding packets. With no feedback the cluster gives no result, expires after 1 s, and the next waits until 5 s after the first: nothing more pads in the 4 s run. Each padding packet goes on the leg's RTX payload type 97 and its own SSRC (not the media SSRC), with the P bit set and no payload before the pad count, on consecutive RTX sequence numbers.
+@test
+fn probe_padding_stays_in_budget() -> Result[(), router.RouterError] {
+    let mut w = probe_room(2700, room_limits(), b"97")
+    run(mut w, shape_ramp(), top_f(), false, SUBSCRIBE_AT + 4000)
+    let mut n = 0u64
+    let mut last: Option[u16] = None
+    for x in w.heard {
+        if x.fill != 0 {
+            continue
+        }
+        n += 1
+        if x.h.pt != SUB_RTX_PT || x.h.ssrc == w.media || x.h.ssrc == 0 {
+            fail("padding is not on the leg's RTX payload type and SSRC")
+        }
+        if !x.h.padded {
+            fail("a padding packet lacks the P bit")
+        }
+        if let Some(prev) = last {
+            if x.h.seq != int.wrapping_add(prev, 1u16) {
+                fail("padding skipped or reused an RTX sequence number")
+            }
+        }
+        last = Some(x.h.seq)
+    }
+    if n < 5 || n > 7 {
+        fail("padding is not one cluster of 5 to 7 probes")
+    }
+    if w.media == 0 {
+        fail("no media reached the subscriber")
+    }
+    Ok(())
+}
+
+fn pause_limits(pause: bool) -> router.RoomLimits {
+    router.RoomLimits(participants: 16, ids: 16, publications: 8, down_tracks: 8, audio_forward: 0, pause_delay_ms: 5000, pause: pause)
+}
+
+/// bug: let the opt-in pause also apply when the room does not declare it (2651's stall again), keep a paused leg out of the probe's want so it never resumes, or forward a paused leg's media.
+/// oracle: RTC-6 and LiveKit's allowPause by hand. q alone at 1,000 B every 20 ms = 400,000 bit/s, over the 300,000 start estimate. Without pause the first step is taken anyway, so q reaches the subscriber from its first packet after subscribe (within 20 ms). With pause the leg starts Off and asks for 400,000 + a quarter = 500,000; the cluster at min(500,000, 600,000) gives at least 0.98 x 500,000 = 490,000 at the 50 ms feedback, q fits, and its next keyframe (20 ms) resumes it: no media before the feedback, media within 50 + 20 + one 50 ms feedback of slack = 120 ms.
+@test
+fn probe_resumes_paused_leg() -> Result[(), router.RouterError] {
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let shape = Shape(q: 1000, h: 0, f: 0)
+    let sub = SUBSCRIBE_AT * MS
+    let mut kept = probe_room(2710, pause_limits(false), b"97")
+    run(mut kept, shape, base, true, SUBSCRIBE_AT + 300)
+    let Some(k_at) = first_of(kept, FILL_Q) else {
+        fail("without pause the base layer was not given")
+    }
+    if k_at > sub + 20 * MS {
+        fail("without pause the base layer waited for an estimate")
+    }
+    let mut paused = probe_room(2720, pause_limits(true), b"97")
+    run(mut paused, shape, base, true, SUBSCRIBE_AT + 300)
+    let Some(p_at) = first_of(paused, FILL_Q) else {
+        fail("the paused leg never resumed: no probe asked for its base layer")
+    }
+    if p_at < sub + 50 * MS {
+        fail("the paused leg sent media before a probe raised the estimate")
+    }
+    if p_at > sub + 120 * MS {
+        fail("the paused leg resumed later than one probe round and a keyframe")
+    }
+    Ok(())
+}
+
+/// bug: start a cluster that has no packet to pad on when the leg has no RTX, pad on another SSRC or payload type than the leg's media, pad inside a frame, or leave the next media packet's number where it was, so the subscriber sees padding reuse a media number or a gap it NACKs.
+/// oracle: RTP-11 `pad`, RFC 3550 section 5.1 and RTC-6 by hand. The leg negotiated no RTX, so padding goes on its media SSRC and payload type 96, with the P bit and no payload, at the timestamp of the media packet before it. Every q packet is a one-packet frame, so each number after the first forwarded q packet is free for padding; the cluster starts once one is forwarded (the q at 1,120 ms) and, as in the RTX case, sends 5 to 7 probes of 200 bytes at 600,000 bit/s. The media SSRC's numbers, media and padding together, run without a gap or a repeat from the first to the last heard, and each padding number follows a packet that ended a frame (marker set) or another padding packet. With no feedback the estimate stays at 300,000, so the leg stays on q and hears every q frame from 1,120 ms to 2,080 ms: 49.
+@test
+fn probe_pads_media_without_rtx() -> Result[(), router.RouterError] {
+    let mut w = probe_room(2730, room_limits(), b"")
+    run(mut w, shape_ramp(), top_f(), false, SUBSCRIBE_AT + 1000)
+    let mut seqs: List[u16] = list.new()
+    let mut pads = 0u64
+    for x in w.heard {
+        if x.h.ssrc != w.media {
+            fail("a packet went out on an SSRC other than the leg's media SSRC")
+        }
+        if x.fill == 0 {
+            pads += 1
+            if x.h.pt != 96 || !x.h.padded {
+                fail("padding is not on the media payload type with the P bit")
+            }
+        }
+        list.push(mut seqs, x.h.seq)
+    }
+    if pads < 5 || pads > 7 {
+        fail("padding is not one cluster of 5 to 7 probes")
+    }
+    if list.len(w.heard) - pads != 49 {
+        fail("a q frame was lost: padding took a number media needed")
+    }
+    // In number order, each number follows the last, and padding follows a frame end.
+    let first = seqs[0]
+    let n = list.len(seqs)
+    for k in 0u64 .. n {
+        let want = int.wrapping_add(first, int.truncate(k))
+        let mut found: Option[u64] = None
+        for j in 0u64 .. n {
+            if w.heard[j].h.seq == want {
+                if found != None {
+                    fail("two packets on the media SSRC share a number")
+                }
+                found = Some(j)
+            }
+        }
+        let Some(j) = found else {
+            fail("the media SSRC's numbers have a gap")
+        }
+        if w.heard[j].fill == 0 {
+            if k == 0 {
+                fail("padding came before any media")
+            }
+            let prev = int.wrapping_add(first, int.truncate(k - 1))
+            for i in 0u64 .. n {
+                if w.heard[i].h.seq == prev {
+                    let x = w.heard[i]
+                    if x.fill != 0 && !x.h.marker {
+                        fail("padding split a frame")
+                    }
+                    if x.h.ts != w.heard[j].h.ts {
+                        fail("padding does not carry the timestamp of the packet before it")
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

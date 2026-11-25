@@ -6,7 +6,7 @@ fn room_id() -> peer.RoomId {
 }
 
 fn room_limits() -> router.RoomLimits {
-    router.RoomLimits(participants: 16, ids: 16, publications: 8, down_tracks: 8, audio_forward: 0, pause_delay_ms: 5000)
+    router.RoomLimits(participants: 16, ids: 16, publications: 8, down_tracks: 8, audio_forward: 0, pause_delay_ms: 5000, pause: false)
 }
 
 fn gen_of(id: u64) -> peer.Gen {

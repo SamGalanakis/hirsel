@@ -6,7 +6,10 @@ rtp side of WebRTC review 2333 (findings 4 and 5). Amended by rtp-s8-rewrite-247
 RTP-11 gaps slice S9 (2362) found: `Unit.frame`, `Unit`'s home, the H.264 caller state, the
 target-number sentence, and AV1 without chains; and for the switch projection's rounding. Amended by webrtc-opus-red-c1-2652 (2026-11-25) for [RTP-13](#rtp-13-redundant-audio-red), RFC 2198
 redundant audio: the `red` module, its ring and the redundancy policy, the RTP-12 exception for a
-ring of depth 0, and the matching line of *Not taken in Wave 1*. Not yet built; the fences are `unbuilt`. The
+ring of depth 0, and the matching line of *Not taken in Wave 1*.
+Amended 2026-11-25 by webrtc-bwe-probe-2669: RTP-9 counts the media a pacer lets out during a
+cluster as members and allows probing on a media stream through RTP-11's new `pad`; RTP-10
+gains `cluster`. Not yet built; the fences are `unbuilt`. The
 section ends with the [build laws](#build-laws) and the [build slices](#build-slices).
 
 `rtp` is a pure Hirsel package at `core/programs/rtp/` <!-- doc-ref: planned -->. It holds the parts of a real-time
@@ -1015,11 +1018,16 @@ and `id` counting up from 0. The pacer sends at least 5 probes and keeps going u
 sent at least 15 ms after the first ([RTP-10](#rtp-10-pacer)), so the cluster spans 15 ms
 whatever the probe size. The caller hands it to the pacer
 ([RTP-10](#rtp-10-pacer)), which answers `Probe(id, pad)` per packet. The caller sends each
-as a padding-only RTX packet ([RTP-7](#rtp-7-retransmission-history-and-rtx)), assigns that
-datagram its own transport number, and tells the estimator with `probe_sent(id, index)`. The
-caller asks only for a transport that has a stream with RTX, because a probe on any other
-stream would reach a decoder. A cluster is outstanding until feedback covers its packets, or
-1 s passes.
+as a padding-only RTX packet ([RTP-7](#rtp-7-retransmission-history-and-rtx)), or, on a
+stream with no RTX, as a padding-only packet at the number RTP-11's `pad` answers, which is
+only ever after a frame's last packet (libwebrtc's `RTPSender::GeneratePadding` pads a media
+SSRC only after a marker), so no decoder sees padding inside a frame. It assigns that
+datagram its own transport number, and tells the estimator with `probe_sent(id, index)`.
+Every media packet the pacer lets out while the cluster runs (`pacer.cluster` answers its
+id) goes at the cluster's rate, so the caller reports it with `probe_sent` too, as
+libwebrtc's `PacingController` tags it; without it, media between probes would make the
+probes alone look slower than the cluster ran. A cluster is outstanding until feedback
+covers its packets, or 1 s passes.
 
 When feedback (`on_acked`) has reported at least 80% of the cluster's packets as received,
 the rates are measured on the **distinct received members** only, in send order, with
@@ -1042,6 +1050,8 @@ numbers rise in send order, so an index at or below the last member's, or an `id
 the outstanding cluster's, is ignored. The estimator ends the cluster by the pacer's rule, on
 the send times feedback reports: its last member is the first that is at least its
 `packets`-th and was sent at least `min_ns` after the first, and later members are ignored.
+Media members count toward `packets` here, so the estimator may end the cluster before the
+pacer's last probe, and those later probes are ignored.
 Feedback covers the cluster when every member up to its last has been reported, received or
 lost; the cluster is measured then, once, and is no longer outstanding. The 1 s runs from the
 `probe` that answered it, checked by `probe` and at the end of `on_acked`. The cluster rate is
@@ -1069,6 +1079,7 @@ pub opaque type Pacer[Q]
 pub fn pacer[Q](slots: u32, factor: f64, queue_limit_ns: u64, header: u32) -> Result[Pacer[Q], Capacity]
 pub fn set_rate[Q](mut p: Pacer[Q], target_bps: u64, padding_bps: u64)
 pub fn probe[Q](mut p: Pacer[Q], c: Cluster, now_ns: u64)
+pub fn cluster[Q](p: Pacer[Q]) -> Option[u32]
 pub fn push[Q](mut p: Pacer[Q], stream: u32, class: Class, size: u32, now_ns: u64, take q: Q) -> Result[(), Q]
 pub fn poll[Q](mut p: Pacer[Q], now_ns: u64) -> Next[Q]
 pub fn remove[Q](mut p: Pacer[Q], stream: u32, mut out: List[Q]) -> u64
@@ -1119,7 +1130,8 @@ keyframe does not leave as one burst that overflows a bottleneck queue (`str0m`
   both debts at 0. With a padding rate set and nothing else to answer, `poll` answers `Wait`
   at the later time both debts reach 0, not `Idle`, so the caller knows when to poll.
 - **Clusters.** `probe` replaces a running cluster. The cluster's first time is the `poll`
-  that answers its first probe.
+  that answers its first probe. `cluster` answers the running cluster's id, so the caller
+  can report the media it lets out meanwhile as members (RTP-9), and `None` once it ended.
 - `pacer` refuses 0 slots, and `2^32 − 1` slots, with `Capacity`.
 - The caller logs each probe's send time ([RTP-8](#rtp-8-transport-wide-sequence-numbers-and-feedback))
   as the `now` of the `poll` that answered it, so the estimator ends the cluster where the
@@ -1150,6 +1162,8 @@ pub fn on_sr(mut r: Rewrite, source: u32, info: SenderInfo, at_ns: u64)
 pub fn sr_timestamp(mut r: Rewrite, now_ns: u64) -> Option[u32]
 pub fn switch_index(r: Rewrite) -> Option[u64]
 pub fn pending(r: Rewrite) -> Option[u32]
+pub fn paddable(r: Rewrite) -> bool
+pub fn pad(mut r: Rewrite) -> Option[(u64, u32)]
 pub fn close(mut r: Rewrite)
 
 // module counter
@@ -1393,8 +1407,17 @@ whatever the source's width was.
   value. The egress history keeps each sent packet's own codec rewrite (RTP-7), so clearing
   the ring loses nothing a repair needs.
 
-Law: the outgoing indices of one stream increase by exactly one per forwarded packet,
-except across real upstream losses. A dropped or padding-only packet of the current
+**Padding.** `pad` gives a padding-only packet a place in the outgoing stream: it answers
+the next outgoing index and the outgoing timestamp of the newest packet forwarded, and every
+later source packet's index moves up by one, as a new range from the highest source index
+seen plus one. It answers `None` before anything was forwarded, on a closed stream, with no
+current layer, and when the newest packet forwarded did not end its frame (`Unit.end`), so
+padding never takes a number inside a frame. `paddable` answers whether `pad` would answer
+a number now. A late packet keeps its own place: its range is the one in force when its
+index was first seen.
+
+Law: the outgoing indices of one stream increase by exactly one per forwarded packet or
+padding `pad` answered, except across real upstream losses. A dropped or padding-only packet of the current
 generation leaves no gap, and no other source's packet changes an offset. A layer change
 happens only at a switch point, and the first eligible frame is never refused. The outgoing
 timestamp never goes back and follows the clock rules above to the tick. A late packet is

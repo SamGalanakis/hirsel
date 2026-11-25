@@ -228,16 +228,25 @@ fn id_of(p: PublicationId) -> u64 {
 // RTC-6's allocation for local member `mi`: the budget is its estimate less the rate
 // of every audio down-track, which is never lowered; every other down-track with a
 // target starts at `Off` and, in ascending publication id, round after round, is
-// raised one encoding when the step's cost fits what is left. The first step, to the
-// lowest encoding, is taken whether it fits or not (what is left is then 0), so the
-// budget never pauses a down-track. A down-track whose later step does not fit stays
-// where it is. Each down-track whose result changed, and `force`, is pointed at it.
+// raised one encoding when the step's cost fits what is left. Unless the room declares
+// pause, the first step, to the lowest encoding, is taken whether it fits or not (what
+// is left is then 0), so the budget never pauses a down-track. A down-track whose
+// later step does not fit stays where it is. Each down-track whose result changed, and
+// `force`, is pointed at it. When one stays below its target's encoding, the member's
+// `want` is the rate that carries every target plus a quarter, for `dynamics` to probe
+// toward; otherwise it is 0.
 fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
     let room = r.members[mi].who.room
     let who = r.members[mi].who.gen
     let estimate = peer.target_bps(r.members[mi].session)
     r.members[mi].estimate = estimate
     let mut budget: i64 = int.narrow(estimate)
+    let pause = match room_at(r, room) {
+        Some(ri) => r.rooms[ri].limits.pause,
+        None => false,
+    }
+    // The rate that carries every target: audio and each video target's encoding.
+    let mut needed: i64 = 0
     let mut video: Inline[u64, 64] =[0u64; 64]
     let mut level: Inline[u64, 64] =[0u64; 64]
     let mut stuck: Inline[bool, 64] =[false; 64]
@@ -251,7 +260,11 @@ fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.
         }
         if r.publications[pi].codec == Opus {
             budget -= rate_of(r, pi, 0)
+            needed += rate_of(r, pi, 0)
             continue
+        }
+        if let Layer(encoding: e, spatial: _, temporal: _) = r.downs[d].target {
+            needed += rate_of(r, pi, int.widen(e))
         }
         if n == 64 {
             continue
@@ -294,8 +307,9 @@ fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.
             } else {
                 rate_of(r, pi, at - 1)
             }
-            // The first step, to the lowest encoding, is always taken.
-            if at == 0 || cost <= budget {
+            // The first step, to the lowest encoding, is always taken unless the room
+            // declares pause.
+            if (at == 0 && !pause) || cost <= budget {
                 budget = if cost <= budget {
                     budget - cost
                 } else {
@@ -309,13 +323,24 @@ fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.
         }
     }
     let mut lowered: Inline[Target, 64] =[Off; 64]
+    let mut short = false
     for k in 0u64 .. n {
         let d = video[k]
+        if let Layer(encoding: top, spatial: _, temporal: _) = r.downs[d].target {
+            let wide: u64 = int.widen(top)
+            short = short || level[k] <= wide
+        }
         if level[k] != 0 {
             if let Layer(encoding: _, spatial: s, temporal: t) = r.downs[d].target {
                 lowered[k] = Layer(encoding: int.narrow(level[k] - 1), spatial: s, temporal: t)
             }
         }
+    }
+    r.members[mi].want = if short && needed > 0 {
+        let wide: u64 = int.narrow(needed)
+        wide + wide / 4
+    } else {
+        0
     }
     for d in 0u64 .. list.len(r.downs) {
         if r.downs[d].room != room || r.downs[d].sub != who || r.downs[d].home != r.unit {
@@ -642,6 +667,12 @@ fn dynamics(mut r: Router, now: u64, mut out: peer.Outbox) -> Result[Option[u64]
     for mi in 0u64 .. list.len(r.members) {
         if freed || peer.target_bps(r.members[mi].session) != r.members[mi].estimate {
             allocate(mut r, mi, None, now, mut out)?
+        }
+        // A member the estimate leaves short of a target probes toward what carries
+        // them all (RTC-6 probing); the session refuses while a cluster is out.
+        let asked = r.members[mi].want
+        if asked > r.members[mi].estimate {
+            wake = earliest(wake, peer.probe(mut r.members[mi].session, asked, now, mut out))
         }
     }
     if r.moved {

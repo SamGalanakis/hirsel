@@ -221,7 +221,12 @@ type Track {
     red: rtp.red.Policy,
     red_from: u64,
     nacked: u64,
-    forwarded: u64
+    forwarded: u64,
+    // Whether the router ended the track (RTC-7 step 3), and the timestamp and payload
+    // type of its last media packet sent, which its padding carries (RTC-6 probing).
+    ended: bool,
+    last_ts: u32,
+    last_pt: u8
 }
 
 type Section {
@@ -255,6 +260,12 @@ pub opaque type PeerSession {
     send_log: rtp.twcc.SendLog,
     bwe: rtp.bwe.Bwe,
     rtt: Option[u64],
+    // RTC-6 probing: the transport numbers assigned so far (the next one's extended
+    // index), the target when the last cluster started, and the earliest time another
+    // may start while the target has not risen above it.
+    numbered: u64,
+    probe_from: u64,
+    probe_next: u64,
     next_report: u64,
     next_feedback: u64,
     // Down-tracks a collision found on the RTP path, for the next `Control`.
@@ -314,6 +325,10 @@ const DD_LIMIT: u64 = 255
 const PACE_FACTOR: f64 = 2.5
 
 const QUEUE_LIMIT_NS: u64 = 2000000000
+
+// RTC-6 probing: a cluster that did not raise the target is retried after 5 s, as
+// libwebrtc's ProbeController repeats its periodic probe (kAlrPeriodicProbingInterval).
+const PROBE_RETRY_NS: u64 = 5000000000
 
 const RTP_HEADER: u32 = 12
 
@@ -453,7 +468,7 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
         list.push(mut slab, take b)
         list.push(mut free, int.narrow(n - 1 - i))
     }
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, numbered: 0, probe_from: 0, probe_next: 0, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None)
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.red, SLOT) ?=> |c| Capacity(c)
     list.try_reserve(mut p.word, 2) ?=> |c| Capacity(c)

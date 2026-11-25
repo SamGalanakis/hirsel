@@ -20,7 +20,7 @@ const BPROBE: u64 = 3
 type Held: key = Publishing | Subscribing
 
 fn revoke_limits() -> router.RoomLimits {
-    router.RoomLimits(participants: 6, ids: 6, publications: 8, down_tracks: 8, audio_forward: 0, pause_delay_ms: 5000)
+    router.RoomLimits(participants: 6, ids: 6, publications: 8, down_tracks: 8, audio_forward: 0, pause_delay_ms: 5000, pause: false)
 }
 
 fn admitted(r: (u64, Result[router.Answer, router.RouterError]), take what: String) -> u64 {

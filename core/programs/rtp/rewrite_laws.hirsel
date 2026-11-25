@@ -49,6 +49,34 @@ fn rewrite_continuity() -> Result[(), ()] {
     Ok(())
 }
 
+fn ends(start: bool, keyframe: bool) -> rewrite.Unit {
+    rewrite.Unit(start: start, end: true, keyframe: keyframe, needs: EVERY, switches: EVERY, frame: 0)
+}
+
+fn pads_as(got: Option[(u64, u32)], want: Option[(u64, u32)], take what: String) {
+    if got != want {
+        fail(take what)
+    }
+}
+
+/// bug: Pad before anything was forwarded or inside a frame, give padding a number media already holds or will take, leave the next media packet's number where it was, close up a real upstream loss behind padding, or stamp padding with another timestamp than the last packet forwarded.
+/// oracle: RTP-11 `pad` and RFC 3550 section 5.1, by hand. The first outgoing index is 4000; 300 opens a frame at source timestamp 50,000 (outgoing 0) and 301 ends it, so padding waits for 301 and then takes 4002 and 4003 at timestamp 0; 302 (source 53,000) is 4004 at 3,000, padding after it is 4005 at 3,000; 303 is lost, so 304 keeps a place for it: 4007.
+@test
+fn rewrite_pad() -> Result[(), ()] {
+    let mut r = result.unwrap(rewrite.rewrite(90000, 8, 8, 4000, 0))
+    result.unwrap(rewrite.target(mut r, Layer(source: 1, target: 0)))
+    pads_as(rewrite.pad(mut r), None, "padding before anything was forwarded")
+    expect(rewrite.on_packet(mut r, 1, 300, 50000, 0, false, key_unit()), Forward(4000, 0), "300")
+    pads_as(rewrite.pad(mut r), None, "padding inside 300's frame")
+    expect(rewrite.on_packet(mut r, 1, 301, 50000, MS, false, ends(false, false)), Forward(4001, 0), "301 ends the frame")
+    pads_as(rewrite.pad(mut r), Some((4002, 0)), "the first padding after the frame")
+    pads_as(rewrite.pad(mut r), Some((4003, 0)), "the second padding")
+    expect(rewrite.on_packet(mut r, 1, 302, 53000, 20 * MS, false, ends(true, false)), Forward(4004, 3000), "302 after two paddings")
+    pads_as(rewrite.pad(mut r), Some((4005, 3000)), "padding after 302")
+    expect(rewrite.on_packet(mut r, 1, 304, 59000, 60 * MS, false, ends(true, false)), Forward(4007, 9000), "304 after a lost 303")
+    Ok(())
+}
+
 /// bug: Seal a reordered packet on the media stream below an index already sealed, give it another index than its place, or close up a real upstream loss.
 /// oracle: TLS-8's sealer rule and RTP-11, by hand: 201 maps to 2001 but 2002 was sealed, so it is Late; 203 is lost, so 204 keeps its place at 2004.
 @test

@@ -16,7 +16,16 @@ Amended 2026-11-25 (webrtc-leg-stall-2651): RTC-6's allocation always takes a do
 first step, so the budget lowers a down-track to its lowest encoding but never pauses it
 (LiveKit's default, `allow_pause` off). The bandwidth pause turned a leg whose base layer
 measured above the 300 kbps start estimate `Off` about 1 s into a call, and with no probing
-and nothing sent on the leg no estimate could rise to resume it. The package is
+and nothing sent on the leg no estimate could rise to resume it.
+Amended 2026-11-25 (webrtc-bwe-probe-2669): RTC-6 probes. A subscriber whose estimate
+leaves a video down-track below its target's encoding asks rtp's `bwe.probe` (RTP-9) for
+the rate that carries every target plus a quarter, and the session's pacer sends the
+cluster as padding-only packets on the leg's RTX SSRC, or on its media SSRC at a frame end
+(RTP-11 `pad`) when it negotiated no RTX. A probe result raises the estimate and the
+allocator adds the next encoding, so a leg that starts at 300 kbps reaches its top layer in
+two probe rounds. A room may declare `pause` (LiveKit's `allow_pause`): a down-track whose
+lowest encoding does not fit then goes `Off`, and a probe resumes it. The default stays as
+2651 set it. W24 `probe_ramps_to_top_layer` and its companions are the laws. The package is
 `webrtc_sfu`, pure Hirsel under core/programs, with no `Foreign` code in its reach, so
 FFI-8 ([foreign](foreign.md)) replay and `hirsel test --sim` cover it end to end.
 Amended 2026-11-25 (webrtc-opus-red-c1-2652) for Opus RED: RTC-2 answers `red/48000/2` with
@@ -582,7 +591,7 @@ pub type RoomId = RoomId(u64)
 pub type Participant = Participant(room: RoomId, id: u64, epoch: u64)
 pub type PublicationId = PublicationId(u64)
 pub type Target = Off | Layer(encoding: u8, spatial: u8, temporal: u8)
-pub type RoomLimits = RoomLimits(participants: u16, ids: u16, publications: u16, down_tracks: u32, audio_forward: u8, pause_delay_ms: u32)
+pub type RoomLimits = RoomLimits(participants: u16, ids: u16, publications: u16, down_tracks: u32, audio_forward: u8, pause_delay_ms: u32, pause: bool)
 pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Unrepresentable | Peer(PeerError) | Capacity(Capacity)
 pub type Event = Answer(Participant, Bytes) | Offer(Participant, u64, Bytes) | Glare(Participant, u64) | Published(PublicationId, Participant, Media, u8) | Unpublished(PublicationId) | Layers(PublicationId, u8) | Speakers(RoomId, Inline[u64, 8], u8) | Fenced(Participant)
 
@@ -855,16 +864,46 @@ for that subscriber:
    the step fits in the remaining budget. A step is the next encoding at or below its
    target, lowest first, starting from `Off`, and costs that encoding's measured ingress
    rate minus the rate of the level it leaves. The first step, from `Off` to the lowest
-   encoding, is always taken; when it does not fit, the remaining budget becomes 0. A
+   encoding, is always taken unless the room declares `pause`; when it does not fit, the
+   remaining budget becomes 0. With `pause`, a first step that does not fit is not taken,
+   and the down-track stays `Off`. A
    down-track whose later step does not fit stays where it is for the rest of the
    computation. The others go on.
 5. The computation ends when a full round raises nothing.
 
-The budget therefore never pauses a video down-track: one the estimate cannot carry
-forwards its lowest encoding, at its target's own spatial and temporal layers, as
-LiveKit's allocator does with pause disallowed (its default). A leg that goes `Off` on a
-budget would send nothing, so its estimate could never rise without probing, which S4 does
-not do (2651). The result is deterministic and computable by hand.
+Without `pause` (the default) the budget therefore never pauses a video down-track: one
+the estimate cannot carry forwards its lowest encoding, at its target's own spatial and
+temporal layers, as LiveKit's allocator does with pause disallowed (its default). A leg
+that goes `Off` on a budget sends no media, so only a probe can raise its estimate (2651).
+The result is deterministic and computable by hand.
+
+**Probing.** When the computation leaves any video down-track of the subscriber below its
+target's encoding (`Off` included), the subscriber's **want** is `needed + needed / 4`,
+where `needed` is the rate of every audio down-track plus, for each video down-track with a
+`Layer` target, the measured rate of its target's encoding; otherwise the want is 0. The
+quarter is headroom for the measurement (TWCC's 250 µs arrival quantum). Each poll, a
+subscriber whose want exceeds its estimate asks its session to probe. The session asks
+rtp's `bwe.probe(want, now)` (RTP-9) and hands any cluster to its pacer (RTP-10), and
+starts none when:
+
+- it has no **pad track**, a live video down-track whose section negotiated TWCC and either
+  agreed RTX or, without RTX, can take RTP-11's `pad` now;
+- `bwe.probe` answers none (a cluster outstanding, the loss estimate decreasing, or the
+  want at or below the target);
+- a cluster started less than 5 s ago and the target has not risen since it started
+  (libwebrtc's `kAlrPeriodicProbingInterval`, so a link that cannot carry more is not
+  probed at every poll). A cluster that raised the target lets the next start at once.
+
+Each `Probe(id, pad)` the pacer answers goes out on the first pad track: on an RTX track an
+RFC 4588 padding-only packet (`rtx.write_probe`) at the track's next RTX sequence number and
+its last media timestamp; on a media track, at the number and timestamp RTP-11's `pad`
+answers, with the payload type of its last media packet, counted in the SR as a packet of
+no payload octets ([RFC 3550](https://www.rfc-editor.org/rfc/rfc3550) §6.4.1) and kept out
+of the egress history. Each carries the section's MID and the session's next transport
+number, and the session reports it with `bwe.probe_sent(id, index)`. A media packet the
+pacer lets out while the cluster runs is reported as a member too, as libwebrtc's
+`PacingController` tags it, since it goes at the cluster's rate. A result that raises the
+estimate moves it, and the next poll's allocation takes the next step.
 
 `current` moves to the effective target only at a switch point, by the rules of the map
 above, and only through `Rewrite`. A simulcast change (another encoding) happens at the
@@ -1420,6 +1459,17 @@ unless named otherwise.
   plain leg holds exactly its arrived primaries, and the observed loss lies in 5–15% or
   13–27%. W22's publisher sends RED; W23's sends plain Opus, so the RED leg's
   blocks are rebuilt from primaries the publisher never sent as RED.
+- **W24 `probe_ramps_to_top_layer`.** One publisher sends q (120 kbps), h (500 kbps) and f
+  (1 Mbps) as keyframes; one subscriber targets f behind a 2 Mbps token-bucket policer and
+  answers TWCC every 50 ms, from the 300 kbps start estimate. *Oracle:* by hand from RTC-6
+  and RTP-9: the first cluster at 600 kbps puts h within reach, the second at about
+  1.18 Mbps puts f within reach, so f arrives within 160 ms of subscribing and stays; on a
+  router that does not probe the leg stays on q. Its companions: `probe_padding_stays_in_budget`
+  (one cluster of 5 to 7 padding-only RTX packets with no payload, on consecutive RTX
+  numbers, and none more inside the 5 s retry gate; red on a pacer that pads at the target
+  rate), `probe_resumes_paused_leg` (without `pause` the base flows at once; with it the leg
+  waits for one probe round) and `probe_pads_media_without_rtx` (padding on the media SSRC
+  only after a frame end, its numbers gapless with the media's, no media frame lost).
 
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.
@@ -1466,7 +1516,7 @@ W19, blocks, because those are soundness reds.
 | **S3** PeerSession | RTC-3 over `stun_ice` Lite, the dtls lane's server, the srtp lane's contexts and the rtp lane's parsing; prefix `classify`; authenticated MID, SSRC and payload-type binding; inbound RTX; the 5-tuple table; the `Tag`ged outbox; RTC-4's SSRC generator, sealers, collision recovery, late-packet RTX, per-down-track egress history and NACK answers, per-down-track SRs | S1; dtls, srtp and rtp lanes' first slices; the rtp amend's RTP-7 history record and RTP-11 switch timeline | W4, W19 |
 | **S4** One-unit router | RTC-5 on a single unit: rooms, publications, down-tracks, fan-out in the subscriber's wire identity, transport sequence numbers at send, bounds and fence capacity; RTC-6's stable target maps, current and pending presentation, switch timeline, and negotiated keyframe requests with in-place intervals | S2, S3; the rtp amend's in-place `Keyframes` interval | W6, W7, W9, W10, W18 (W6 and W7 need the router's down-tracks and switches) |
 | **S5** Units and fence | the control order, doorbells, `Media`, `RepairAsk` and `RepairReply` messages with tags, the uncommitted suffix; RTC-7 with its test seam, `suspend` and `resume` | S4 | W8, W14, W15 |
-| **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S5 (remote units' masks) | W11, W12, W13 |
+| **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target with probing and the room's opt-in `pause`, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S5 (remote units' masks); rtp's RTP-9 probe, RTP-10 `cluster` and RTP-11 `pad` | W11, W12, W13, W24 |
 | **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness in its laws and by `room_client` (F1) in service | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
 | **S8** withdrawn | ICE-TCP is replaced by TURN over a stream (turn.md TURN-2, slice U8) | — | — |
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7 | the cost targets |
@@ -1538,7 +1588,8 @@ W19, blocks, because those are soundness reds.
   the pacer's next send. A let-out packet that cannot be queued (a full outbox) is dropped
   and counted `capacity`, and the drain goes on. `unpace` takes a down-track's entries out when the router ends
   the track and at a collision. An entry whose SSRC a collision has retired is dropped
-  when it is let out. S4 does not probe and sends no padding.
+  when it is let out. The pacer's `Probe` and `Pad` answers go out as RTC-6's probing
+  padding on the session's first pad track, and nothing pads without one.
 - **H.264 state per source.** RTP-11's `after_end` is a fact about a source, so the
   router keeps it per encoding: the newest index seen, its timestamp and its marker,
   moved only by a newer index and cleared when the stream restarts. Before any packet of
@@ -1762,9 +1813,9 @@ W12 and W13 in `speaker_laws.hirsel`):
   RTP-9 raises A only while A is below 1.5 times the acked rate plus 10 kbit/s, and S4
   sends no probes or padding. A leg that carries Opus and q at their nominal rates, about
   180 kbit/s, would hold A at the 300 kbit/s start, and h would never fit. libwebrtc
-  leaves that state by probing. `rtp.bwe.probe` and the pacer's clusters exist (RTP-9,
-  RTP-10), but `peer_egress` neither asks for a cluster nor sends the pacer's `Probe` and
-  `Pad` answers.
+  leaves that state by probing, and since 2669 so does the SFU: a leg short of its target
+  asks for a cluster and sends the pacer's `Probe` and `Pad` answers (RTC-6 **Probing.**,
+  W24), so the second question is now one for N1 on an unloaded host.
 - **Open: RTCP the session still drops.** Firefox sends lone RRs, with no SDES, which
   rtp.md's check refuses as `NoCname` in either mode, so that leg has no RTT. Chromium's
   sender reports for its simulcast SSRCs carry a zero-length CNAME, which is
@@ -1814,7 +1865,7 @@ switching and timelines.
 | LiveKit | Audio level: 400 ms window, -35 dBov threshold, 40 % activity, two-interval EMA (pkg/sfu/audio/audiolevel.go) | **ADAPTED** to exact integer arithmetic (RTC-6), so replay and every engine agree bit for bit. |
 | LiveKit | Forwarder with simulcast switching at keyframes and DD-driven SVC selection (pkg/sfu/forwarder.go, pkg/sfu/videolayerselector) | **ADOPTED** for switch points. Its dependency-descriptor selector is W9's cross-check for AV1 decode-target indexes. |
 | LiveKit and mediasoup | Late and repaired packets keep their source position: LiveKit's munger returns the earlier mapped sequence and refuses an unavailable mapping (pkg/sfu/rtpmunger.go); mediasoup's `SeqManager` maps input plus base and advances its high-water mark only for newer output, and restores each consumer's header before RTX (worker/src/RTC/SeqManager.cpp, RTP/RtpStreamSend.cpp) | **ADAPTED.** RTC-4 keeps source order and sends a late packet as RFC 4588 RTX, since TLS-8's sealer cannot seal below its highest index. The egress history records each subscriber's own rewrite, as mediasoup restores it. |
-| LiveKit | Bandwidth pause: with `allow_pause` set, a track the estimate cannot carry at its lowest layer is paused, and padding probes resume it (pkg/sfu/forwarder.go `ProvisionalAllocate`, streamallocator `maybeProbeWithPadding`); with it off, the default, the lowest layer is taken | **ADOPTED, pause off** in RTC-6's allocation (2651): the first step is always taken. Pausing needs probing to resume, which S4 does not do. |
+| LiveKit | Bandwidth pause: with `allow_pause` set, a track the estimate cannot carry at its lowest layer is paused, and padding probes resume it (pkg/sfu/forwarder.go `ProvisionalAllocate`, streamallocator `maybeProbeWithPadding`); with it off, the default, the lowest layer is taken | **ADOPTED** in RTC-6's allocation (2651, 2669): pause is off by default, so the first step is always taken; a room that declares `pause` gets LiveKit's opt-in behaviour, and RTC-6's probing resumes a paused leg. Padding goes on RTX, or on the media SSRC only after a frame's last packet, as libwebrtc's `RTPSender::GeneratePadding` does without RTX. |
 | Janus | Waits for a keyframe of the candidate substream before switching, and rebases sequence and timestamp from elapsed time when it has no SR (src/rtp.c) | **ADOPTED** as RTC-6's pending-source presentation and its no-SR fallback. |
 | LiveKit | NACK answered from a sequencer by resending on the media SSRC or RTX | **REPLACED** by RTX only (RTC-4). TLS-8 never seals twice and never seals below the highest index, so a media-SSRC resend would need sealed copies per subscriber. |
 | LiveKit | Single UDP port with a mux across the node, sessions found by ufrag then 5-tuple | **REPLACED** by one port per unit, so the home unit is a signaling choice and the kernel needs no steering. |

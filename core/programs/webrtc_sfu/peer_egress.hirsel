@@ -107,7 +107,7 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let frames = rtp.counter.counter(16, Translate, COUNTER_SLOTS) ?=> |c| Capacity(c)
     list.try_reserve(mut p.tracks, 1) ?=> |c| Capacity(c)
-    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0))
+    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0))
     Ok(int.narrow(list.len(p.tracks) - 1))
 }
 
@@ -188,6 +188,7 @@ fn leg_ext(mut p: PeerSession, now: u64, si: u64, size: u32, level: Option[u8], 
     }
     if p.sections[si].twcc {
         let number = rtp.twcc.assign(mut p.send_log, now, size)
+        p.numbered += 1
         list.clear(mut p.word)
         list.put_word_be(mut p.word, number)
         rtp.ext.put(mut p.ext, map, TransportSeq, p.word, 0, 2) ?=> |_| Rtp(Form)
@@ -421,19 +422,138 @@ fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pac
 // Send what the pacer lets out at `now` (RTP-10), at 2.5 times the estimate. The
 // answer is when it lets out the next packet, if one waits. A packet that cannot go
 // out (a full outbox) is dropped and counted, and the rest still go.
+//
+// While a probe cluster runs, every packet let out goes at the cluster's rate, so each
+// one numbered is a member of it (RTP-9 `probe_sent`), media and padding alike.
 fn drain(mut p: PeerSession, now: u64, mut out: Outbox) -> Option[u64] {
     rtp.pacer.set_rate(mut p.pacer, rtp.bwe.target(p.bwe), 0)
     loop {
-        match rtp.pacer.poll(mut p.pacer, now) {
+        let before = p.numbered
+        let (sent, cluster) = match rtp.pacer.poll(mut p.pacer, now) {
             Send(q) => {
-                if let Error(_) = emit(mut p, now, q, mut out) {
-                    p.drops.capacity += 1
-                }
+                let cluster = rtp.pacer.cluster(p.pacer)
+                (emit(mut p, now, q, mut out), cluster)
             },
+            Probe(id, pad) => (pad_out(mut p, now, pad, mut out), Some(id)),
+            Pad(pad) => (pad_out(mut p, now, pad, mut out), None),
             Wait(at) => return Some(at),
-            _ => return None,
+            Idle => return None,
+        }
+        if let Error(_) = sent {
+            p.drops.capacity += 1
+        }
+        if let Some(id) = cluster {
+            if p.numbered > before {
+                rtp.bwe.probe_sent(mut p.bwe, id, p.numbered - 1)
+            }
         }
     }
+}
+
+// The down-tracks padding may go on (RTC-6 probing): live video tracks whose section
+// numbers its packets for feedback (TWCC). Those with agreed RTX pad on their RTX
+// SSRC (RFC 4588) whatever their target, so a leg the budget paused can be probed;
+// the others pad on their media SSRC, when their last packet ended a frame (RTP-11
+// `pad`). Each is `(track, RTX payload type)`, RTX ones first.
+fn pad_tracks(p: PeerSession) -> List[(u64, Option[u8])] {
+    let mut rtx: List[(u64, Option[u8])] = list.new()
+    let mut media: List[(u64, Option[u8])] = list.new()
+    for t in 0u64 .. list.len(p.tracks) {
+        let track = p.tracks[t]
+        let si: u64 = int.widen(track.section)
+        if !track.video || track.ended || !p.sections[si].twcc {
+            continue
+        }
+        let pt: Option[u8] = if track.rtx_ssrc == 0 {
+            None
+        } else {
+            any_rtx_pt(p.sections[si].agreed)
+        }
+        match pt {
+            Some(_) => list.push(mut rtx, (t, pt)),
+            None if rtp.rewrite.paddable(track.rewrite) => list.push(mut media, (t, None)),
+            None => (),
+        }
+    }
+    list.append(mut rtx, media)
+    rtx
+}
+
+fn any_rtx_pt(a: sdp.Agreed) -> Option[u8] {
+    for f in a.formats {
+        if f.codec == Rtx {
+            return Some(f.pt)
+        }
+    }
+    None
+}
+
+// One padding-only packet (RFC 3550 section 5.1's P bit) of `pad` padding octets on
+// the first pad track that takes it: on an RTX track an RFC 4588 packet with no OSN
+// and no payload at its next RTX sequence number and its last media timestamp; on a
+// media track the next outgoing number of its stream, when its last packet ended a
+// frame (RTP-11 `pad`), counted as a packet of no payload octets (RFC 3550 section
+// 6.4.1) and kept out of its history, so a NACK for it answers nothing. It carries
+// the leg's MID and the next transport number, and no publisher's media, so its tag
+// names no source.
+fn pad_out(mut p: PeerSession, now: u64, pad: u8, mut out: Outbox) -> Result[(), PeerError] {
+    if p.closed {
+        return Ok(())
+    }
+    let Some(to) = p.path else {
+        return Ok(())
+    }
+    for (t, repair) in pad_tracks(p) {
+        let f = if let Some(rtx) = repair {
+            let f = rtp.header.Fields(marker: false, pt: rtx, seq: p.tracks[t].rtx_seq, ts: p.tracks[t].last_ts, ssrc: p.tracks[t].rtx_ssrc)
+            p.tracks[t].rtx_seq = int.wrapping_add(p.tracks[t].rtx_seq, 1u16)
+            f
+        } else {
+            let Some((index, ts)) = rtp.rewrite.pad(mut p.tracks[t].rewrite) else {
+                continue
+            }
+            p.tracks[t].highest = index
+            rtp.stats.on_sent(mut p.tracks[t].sent, 0)
+            rtp.header.Fields(marker: false, pt: p.tracks[t].last_pt, seq: int.truncate(index), ts: ts, ssrc: p.tracks[t].ssrc)
+        }
+        let si: u64 = int.widen(p.tracks[t].section)
+        let wide: u32 = int.widen(pad)
+        leg_ext(mut p, now, si, RTP_HEADER + wide, None, false)?
+        let _ = rtp.rtx.write_probe(f, view p.ext, pad, mut p.pkt) ?=> |take x| Rtp(x)
+        let tag = own_tag(p)
+        let mut b = replace(mut p.pkt, list.new())
+        let sealed = seal(mut p, false, mut b)
+        let queued = match sealed {
+            Ok(_) => queue(mut out, to, b, tag),
+            Error(take e) => Error(take e),
+        }
+        list.clear(mut b)
+        p.pkt = take b
+        return queued
+    }
+    Ok(())
+}
+
+/// RTC-6 probing: ask the estimate for a cluster toward `want_bps` (rtp RTP-9 `probe`)
+/// and hand it to the pacer, which lets it out as padding on the pad track. A session
+/// with no pad track, a cluster outstanding, or a loss estimate decreasing starts none;
+/// after a cluster that left the target where it was, the next waits 5 s. It answers
+/// the pacer's next send, as `poll` would.
+pub fn probe(mut p: PeerSession, want_bps: u64, now: u64, mut out: Outbox) -> Option[u64] {
+    if p.closed || !connected(p) || list.len(pad_tracks(p)) == 0 {
+        return None
+    }
+    let target = rtp.bwe.target(p.bwe)
+    if now < p.probe_next && target <= p.probe_from {
+        return None
+    }
+    let Some(c) = rtp.bwe.probe(mut p.bwe, want_bps, now) else {
+        return None
+    }
+    p.probe_from = target
+    p.probe_next = now + PROBE_RETRY_NS
+    rtp.pacer.probe(mut p.pacer, c, now)
+    drain(mut p, now, mut out)
 }
 
 // Write the header of a packet the pacer let out, with the next transport number,
@@ -471,6 +591,8 @@ fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), P
     seal_out(mut p, q.src, mut out)?
     if q.media {
         rtp.stats.on_sent(mut p.tracks[t].sent, len)
+        p.tracks[t].last_ts = q.fields.ts
+        p.tracks[t].last_pt = q.fields.pt
     }
     Ok(())
 }
@@ -483,6 +605,7 @@ pub fn end_track(mut p: PeerSession, track: u16) {
     if t < list.len(p.tracks) {
         rtp.rewrite.close(mut p.tracks[t].rewrite)
         let _ = rtp.history.clear(mut p.tracks[t].history)
+        p.tracks[t].ended = true
     }
     unpace(mut p, track)
 }

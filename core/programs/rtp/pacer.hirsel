@@ -119,6 +119,16 @@ pub fn probe[Q](mut p: Pacer[Q], c: bwe.Cluster, now_ns: u64) {
     p.cluster = Some(Active(id: c.id, rate: c.rate_bps, packets: c.packets, min_ns: c.min_ns, sent: 0, first_ns: now_ns, size: probe_size(c.rate_bps, p.header)))
 }
 
+// The id of the cluster the pacer is running, if one is: every packet it lets out
+// meanwhile goes at the cluster's rate, so a sender reports each as a member
+// (`bwe.probe_sent`), as libwebrtc's PacingController tags them.
+pub fn cluster[Q](p: Pacer[Q]) -> Option[u32] {
+    match p.cluster {
+        Some(c) => Some(c.id),
+        None => None,
+    }
+}
+
 pub fn push[Q](mut p: Pacer[Q], stream: u32, class: Class, size: u32, now_ns: u64, take q: Q) -> Result[(), Q] {
     if p.free == NIL {
         return Error(q)

@@ -10,7 +10,10 @@ pub type RoomLimits {
     publications: u16,
     down_tracks: u32,
     audio_forward: u8,
-    pause_delay_ms: u32
+    pause_delay_ms: u32,
+    // RTC-6: whether the budget may pause a video down-track whose lowest encoding does
+    // not fit (LiveKit's `allow_pause`); off, the lowest encoding is always taken.
+    pause: bool
 }
 
 pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Unrepresentable | Peer(peer.PeerError) | Capacity(Capacity)
@@ -152,8 +155,10 @@ type Seat {
 type Member {
     who: peer.Participant,
     session: peer.PeerSession,
-    // The bandwidth estimate the last allocation used (RTC-6).
-    estimate: u64
+    // The bandwidth estimate the last allocation used, and the rate it would take to
+    // carry every target, when the estimate left one short of its target (RTC-6).
+    estimate: u64,
+    want: u64
 }
 
 type Room {
@@ -390,7 +395,7 @@ pub fn park(mut r: Router, take session: peer.PeerSession) -> Result[(), RouterE
         }
     }
     list.try_reserve(mut r.parked, 1) ?=> |c| Capacity(c)
-    list.push(mut r.parked, Member(who: who, session: take session, estimate: 0))
+    list.push(mut r.parked, Member(who: who, session: take session, estimate: 0, want: 0))
     Ok(())
 }
 
@@ -398,7 +403,7 @@ fn unpark(mut r: Router, who: peer.Participant) {
     for i in 0u64 .. list.len(r.parked) {
         if r.parked[i].who.room == who.room && r.parked[i].who.gen == who.gen {
             let m = list.remove(mut r.parked, i)
-            let Member(who: _, session: take s, estimate: _) = take m
+            let Member(who: _, session: take s, estimate: _, want: _) = take m
             drop(take s)
             return
         }

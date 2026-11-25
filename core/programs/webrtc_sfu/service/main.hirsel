@@ -451,7 +451,7 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
     let Ok(root) = runner.status_root() else {
         return Error(Exit(status: 3u8))
     }
-    let (halt, stop) : (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (halt, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
     let place = Operated(config: take config, stop: take stop, status: latest.handle(root))
     let need = overhead + 1074790400u64 + 1048576u64
     let Ok(running) = task.try_spawn(tasks, bytes need + 16777216u64, take place, run_place) else {
@@ -472,7 +472,7 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
         return Error(Exit(status: 3u8))
     }
     list.fill(mut master_bytes, 32, 0)
-    let (revoke_to, revoked) : (Sender[webrtc_sfu.signal.RelayRevoke], Receiver[webrtc_sfu.signal.RelayRevoke]) = channel.new(256u64)
+    let (revoke_to, revoked): (Sender[webrtc_sfu.signal.RelayRevoke], Receiver[webrtc_sfu.signal.RelayRevoke]) = channel.new(256u64)
     let relay_start = RelayStart(net: n, clock: clock, random: random, out: out, turn: s.turn, master: take relay_master, nonce: take nonce, media_ip: media_ip, media_lo: s.media.port, media_hi: last, revokes: take revoked, until: until)
     let Ok(relaying) = task.try_spawn(tasks, bytes 67108864u64, take relay_start, relay_place) else {
         say(out, "the relay place does not fit")
@@ -499,7 +499,7 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
     for k in 0u16 .. s.units {
         list.push(mut binds, Addr(ip: s.media.ip, port: s.media.port + k))
     }
-    let limits = webrtc_sfu.router.RoomLimits(participants: 16, ids: 64, publications: 8, down_tracks: 64, audio_forward: s.audio_forward, pause_delay_ms: 1000)
+    let limits = webrtc_sfu.router.RoomLimits(participants: 16, ids: 64, publications: 8, down_tracks: 64, audio_forward: s.audio_forward, pause_delay_ms: 1000, pause: false)
     let service = webrtc_sfu.signal.Service(tasks, net: n, clock, random, dial: take dial, room: RoomId(1), limits: limits, embed: take embed, binds: binds, policy: webrtc_sfu.sdp.default_policy(), session: webrtc_sfu.peer.PeerLimits(sections: 16, down_tracks: 12, rtx_bytes: 1048576, pacer_packets: 256), unit_bytes: 67108864, until: until, relay: Some(webrtc_sfu.signal.RelayLink(master: take signal_master, plan: take plan, revokes: take revoke_to)))
     match webrtc_sfu.signal.serve(take service) {
         Ok(_) => (),

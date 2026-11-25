@@ -4,7 +4,6 @@ files, and the execution configuration.
 
     prepare.py           the remote-execution pool, or fail saying why
     prepare.py --local   every action on this host (`hirsel.execution = local`)
-    prepare.py --local --no-clean-stale   local distribution builds with fat LTO
 
 Runs bootstrap.py, which also regenerates stale build files, then the
 remote-execution hook: the executable named by `$HIRSEL_BUCK2_REMOTE_CONFIG`, or
@@ -86,7 +85,7 @@ def main():
 
 def configure():
     arguments = sys.argv[1:]
-    if arguments not in ([], ['--local'], ['--local', '--no-clean-stale']):
+    if arguments not in ([], ['--local']):
         print(__doc__, file=sys.stderr)
         return 2
     try:
@@ -98,11 +97,8 @@ def configure():
                    stdout=subprocess.DEVNULL, env=env)
     local = ROOT / '.buckconfig.local'
     if arguments:
-        config = LOCAL_CONFIG
-        if '--no-clean-stale' in arguments:
-            config += '\n[buck2]\nclean_stale_enabled = false\n'
-        if not local.is_file() or local.read_text() != config:
-            local.write_text(config)
+        if not local.is_file() or local.read_text() != LOCAL_CONFIG:
+            local.write_text(LOCAL_CONFIG)
         print('prepare: every action runs on this host (--local)', file=sys.stderr)
         return 0
     hook = remote_hook()

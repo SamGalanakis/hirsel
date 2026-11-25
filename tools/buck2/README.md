@@ -82,13 +82,32 @@ parser via `editors/tree-sitter-hirsel/check-local`.
 
 ## Stale outputs
 
-Each checkout's daemon prunes its own inactive outputs: a six-hour TTL, an
-hourly scan, and a six-minute initial delay. At 10% free disk or less, adaptive
-cleaning promotes the oldest inactive outputs until projected free space
-recovers, keeping anything accessed within one hour. Active artifacts stay
-protected, including under disk pressure. Lanes never delete another lane's
-`buck-out`. The policy is initialized at daemon startup; an existing daemon
-needs a restart.
+Buck2's scheduled stale sweep is off (`clean_stale_enabled = false`). In the
+pinned release it scans `buck-out` and deletes every path the materializer does
+not track, and the local executor drops a running action's outputs from the
+materializer before the action runs (`materializer.invalidate_many` in
+`executors/local.rs`), so a tick mid-build deleted in-flight outputs: rustc's
+`could not write output to .../extras/...` and `couldn't create a temp dir`,
+clang's `unable to rename temporary`. On 2026-11-25, 33 such failures in 15
+worktrees each followed a tick, and a strace of a repro daemon showed its own
+threads unlinking an in-flight `output_artifacts` directory. Buck2 releases from
+2026-11-01 skip the scheduled sweep while any command runs
+(`BackgroundCleanupGate`); re-enable the schedule only on such a pin.
+
+Reclaim space explicitly, with no build running in the checkout:
+
+```sh
+.buck2/bin/buck2 clean --stale --tracked-only
+```
+
+It applies the configured policy and walks only tracked artifacts: outputs not
+used for six hours; at 10% free disk or less, adaptive cleaning promotes the
+oldest inactive outputs until projected free space recovers, keeping anything
+accessed within one hour. Active artifacts stay protected, including under disk
+pressure. Untracked leftovers (outputs of actions a killed daemon never
+declared) are not reclaimed this way; deleting the worktree's `buck-out` is.
+Lanes never delete another lane's `buck-out`. The policy is read at daemon
+startup; an existing daemon needs a restart.
 
 The settings were checked against the exact `pins.json` source commit
 [`6507dd157a6f81a810c48583edf1758dd0c337c5`](https://github.com/facebook/buck2/tree/6507dd157a6f81a810c48583edf1758dd0c337c5),
@@ -122,15 +141,18 @@ are relative to that commit:
   current artifacts active (`deferred/command_processor.rs`); state loaded
   after a daemon restart begins inactive (`deferred/artifact_tree.rs`).
   `MaterializerSender::send` cancels a cleaning
-  scan before processing new materializer work (`deferred.rs`).
+  scan before processing new materializer work (`deferred.rs`), but that only
+  stops the scan between paths: the scheduled sweep
+  (`Op::CleanStaleRequest` in `deferred/command_processor.rs`) runs with
+  `tracked_only = false` and no check for commands in flight, so it still
+  deletes untracked in-flight outputs.
 - `--materializations none` controls which final outputs Buck places on disk.
   The host remote-config hook writes only `[buck2_re_client]` and `[hirsel]`.
 
-Six hours preserves recent rebase outputs without retaining days of hashes;
-hourly scans bound the delay, and six minutes gives an initial build time to
-declare its outputs. One hour under disk pressure retains recent reuse while
-reclaiming older inactive outputs. The policy cannot reclaim an active set
-kept alive in one daemon indefinitely.
+Six hours preserves recent rebase outputs without retaining days of hashes.
+One hour under disk pressure retains recent reuse while reclaiming older
+inactive outputs. The policy cannot reclaim an active set kept alive in one
+daemon indefinitely.
 
 Validation on 2026-10-20 used a disposable copy of `fs-watch-mmap/buck-out`,
 with a consistent read-only SQLite backup, in `buck-clean-stale`. After building

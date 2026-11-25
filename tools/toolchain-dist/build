@@ -258,9 +258,7 @@ def main():
     prepare = ['python3', 'tools/buck2/prepare.py']
     options = []
     if args.local:
-        # Buck's scheduled sweep can remove rustc's extra output directory
-        # before the single fat-LTO codegen unit writes its object.
-        prepare.extend(['--local', '--no-clean-stale'])
+        prepare.append('--local')
         options.append('--no-remote-cache')
     if args.num_threads is not None:
         options.extend(['--num-threads', str(args.num_threads)])

@@ -380,7 +380,7 @@ fn release_edit_is_the_cold_build() {
                 assert!(!fixtures.is_empty(), "debug release writes tail records");
                 let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
                 let tool = root.join(std::env::var_os("HIRSEL_TEST_TAIL_CONTEXT").expect(
-                    "HIRSEL_TEST_TAIL_CONTEXT names the tail-context tool; //:core-driver-native-pool supplies it",
+                    "HIRSEL_TEST_TAIL_CONTEXT names the tail-context tool; //:core-driver-native-shard-1 supplies it",
                 ));
                 let llvm = hirsel_llvm_lazy::llvm_library().unwrap();
                 let mut built_keys = 0;

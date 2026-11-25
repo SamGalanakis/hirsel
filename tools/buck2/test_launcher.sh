@@ -203,7 +203,7 @@ takes_value() {
 # spellings too, preserving all other arguments and literal filters after --.
 remaining=$#
 literal=false
-unset requested_logfile
+unset requested_logfile ignore_mode
 while [ "$remaining" -gt 0 ]; do
   argument=$1; shift; remaining=$((remaining - 1))
   if "$literal"; then set -- "$@" "$argument"; continue; fi
@@ -219,6 +219,13 @@ while [ "$remaining" -gt 0 ]; do
           requested_logfile=${argument#*=}
         fi
         continue
+      fi ;;
+    --ignored | --include-ignored)
+      # A target that bakes an ignore mode keeps it; libtest refuses a second.
+      # Filtered execution checks the completed bodies against the dealt names.
+      if [ -n "${HIRSEL_TEST_FILTER_CASES:-}" ]; then
+        [ "${ignore_mode+x}" != x ] || continue
+        ignore_mode=$argument
       fi ;;
     --test-threads | --test-threads=*)
       case "$argument" in

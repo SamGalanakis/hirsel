@@ -53,7 +53,7 @@ class Sweep(unittest.TestCase):
 
     def test_a_red_keeps_its_body_and_full_diagnostic(self):
         details = 'test native::tests::one ... FAILED\nfirst failing line\n'
-        row = SWEEP['summarize']([('core-driver-native-pool', result(details, 2))], 'core-driver-native')
+        row = SWEEP['summarize']([('core-driver-native-shard-1', result(details, 2))], 'core-driver-native')
         self.assertEqual(row['bodies'], 1)
         self.assertTrue(row['errors'])
         self.assertEqual(row['targets'][0]['details'], details)

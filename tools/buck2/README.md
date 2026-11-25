@@ -296,7 +296,7 @@ Target names follow Cargo's targets, all in the root package:
 | binary `<bin>` and its unit tests | `//:hirsel-x-bin-<bin>`, `//:hirsel-x-bin-<bin>-unittest` |
 | example `<ex>` | `//:hirsel-x-example-<ex>` |
 | build script | `//:hirsel-x-build-script` |
-| a host-routed openat2 suite | `//:<name>-openat2`, with `//:<name>-pool` for the rest |
+| a host-routed openat2 suite | `//:<name>-openat2`, with `//:<name>-shard-1` for the rest and `//:<name>-inventory` listing its cases |
 | a script check | `//:gate-<name>` or `//:test-<name>` |
 
 ## How the graph is made

@@ -954,15 +954,24 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
         data = data,
         files_env = files_env,
         cwd = "crates/hirsel-core-driver",
-        test_binary = "hirsel-core-driver-native",
         llvm = "root//tools/buck2/native-toolchain:llvm",
         llvm_libraries = "toolchains//:llvm-libraries",
         request = _request("hirsel-core-driver-unittest"),
         visibility = ["PUBLIC"],
     )
+    # The shape of hirsel_test's host-routed suites, so tools/test-filter and
+    # tools/consumers find this suite's shards and inventory by name.
     _rust_test(
-        name = name + "-pool",
+        name = name + "-shard-1",
         args = [case_filter, "--ignored"] + [arg for case in cases for arg in ["--skip", case]],
+        exec_compatible_with = _test_platform("hirsel-core-driver-unittest"),
+        pool = not TESTS_ON_HOST,
+        test_binary = name,
+        **common
+    )
+    _rust_test(
+        name = name + "-inventory",
+        args = ["--list"],
         exec_compatible_with = _test_platform("hirsel-core-driver-unittest"),
         pool = not TESTS_ON_HOST,
         **common
@@ -981,11 +990,12 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
             exec_compatible_with = [budget_constraint("host")],
             pool = False,
             extra_env = environment,
+            test_binary = name,
             **common
         )
     if cases:
         _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
-    _suite(name = name, tests = [":" + name + "-pool"] + host_targets)
+    _suite(name = name, tests = [":" + name + "-shard-1"] + host_targets)
 
 def hirsel_core_llvm_native_test(name, data, selection = None, runtime = "//:core-native-runtime-fixture-pic", binary = "hirsel-llvm-unittest", cwd = "crates/hirsel-llvm", extra_env = {}):
     """CoreIR executable agreement uses the core runtime, with no old std products."""

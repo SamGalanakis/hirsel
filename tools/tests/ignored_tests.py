@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # is //:core-llvm-aarch64-runtime's exact selection in tools/buck2/sync.py.
 AARCH64_RUNTIME = set(re.findall(r'"core::tests::(aarch64_\w+)"', next(
     line for line in (ROOT / 'tools/buck2/sync.py').read_text().splitlines() if 'name="core-llvm-aarch64-runtime"' in line)))
-# //:core-driver-native (its pool and openat2 shards) runs every ignored body under
+# //:core-driver-native (its shard-1 and openat2 shards) runs every ignored body under
 # native::tests::, which is native.rs's tests module and the files it include!s.
 _DRIVER = ROOT / 'crates/hirsel-core-driver/src'
 _DRIVER_TESTS = (_DRIVER / 'native.rs').read_text().split('\nmod tests {', 1)[1]

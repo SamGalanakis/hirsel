@@ -13,18 +13,6 @@
     <priority>0.95</priority>
   </url>
   <url>
-    <loc>https://hirsel.ai/docs/cookbook/</loc>
-    <lastmod>2026-11-25</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>https://hirsel.ai/docs/install/</loc>
-    <lastmod>2026-11-25</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
     <loc>https://hirsel.ai/docs/std/</loc>
     <lastmod>2026-11-25</lastmod>
     <changefreq>weekly</changefreq>

@@ -4,10 +4,9 @@
 Writes the left-sidebar documentation pages into a built site directory, reading the
 primer.md, cookbook.md, api-index.md and install.sh already in it. tools/site_build.py runs
 this on every build, so the pages are never committed and never go stale:
-  - docs/index.html          Walkthrough (60-second quickstart + docs/PRIMER.md)
-  - docs/cookbook/index.html 7 compiler-checked recipes (docs/COOKBOOK.md)
-  - docs/std/index.html      Filterable Standard Library index (core/std/API-INDEX.md)
-  - docs/install/index.html  Install & quickstart + inline install.sh source inspector
+  - docs/index.html      One page: install (with the install.sh source), the language
+                         (docs/PRIMER.md) and the cookbook (docs/COOKBOOK.md)
+  - docs/std/index.html  Filterable standard library index (core/std/API-INDEX.md)
 
 Usage: tools/site_docs.py --out-dir DIR [--release-tag TAG]
 """
@@ -21,7 +20,7 @@ import tempfile
 from pathlib import Path
 
 from render_code_svg import ensure_binding, load_grammar, tokenize_lines
-from site_docs_theme import COPY_ICON, GITHUB_REPO, OK_ICON, render_page
+from site_docs_theme import COPY_ICON, GITHUB_REPO, OK_ICON, render_page, render_sidebar
 
 
 # Same earth-toned capture classes as site/index.html (tools/site_highlight.py).
@@ -85,13 +84,13 @@ def slugify(text: str) -> str:
 
 def rewrite_human_href(url: str, ref: str) -> str:
     if url in ("PRIMER.md", "https://hirsel.ai/primer.md", "/primer.md"):
-        return "/docs/"
+        return "/docs/#language"
     if url in ("COOKBOOK.md", "https://hirsel.ai/cookbook.md", "/cookbook.md"):
-        return "/docs/cookbook/"
+        return "/docs/#cookbook"
     if url in ("https://hirsel.ai/api-index.md", "/api-index.md"):
         return "/docs/std/"
     if url in ("https://hirsel.ai/install.sh", "/install.sh"):
-        return "/docs/install/"
+        return "/docs/#install"
     if url.startswith("spec/"):
         return f"{GITHUB_REPO}/blob/{ref}/docs/{url}"
     if url.startswith("api/") or url == "API.md":
@@ -253,7 +252,7 @@ def render_markdown(
     query,
     ref: str,
     label: str,
-    extract_release_banner: bool = True,
+    used_ids: set[str],
 ) -> tuple[str, str, list[tuple[str, str]], str]:
     """Parse Markdown into (lead_html, body_html, toc, release_banner_html)."""
     lines = md_text.splitlines()
@@ -269,7 +268,7 @@ def render_markdown(
     release_banner_html = ""
     while idx < n and not lines[idx].strip():
         idx += 1
-    if extract_release_banner and idx < n and lines[idx].startswith("> "):
+    if idx < n and lines[idx].startswith("> "):
         bq_lines: list[str] = []
         while idx < n and lines[idx].startswith(">"):
             bq_lines.append(lines[idx][1:].lstrip())
@@ -295,7 +294,6 @@ def render_markdown(
 
     out: list[str] = []
     toc: list[tuple[str, str]] = []
-    used_ids: set[str] = set()
     prev_was_runnable = False
 
     def next_id(raw: str) -> str:
@@ -477,96 +475,102 @@ def render_markdown(
     return lead_html, "\n".join(out), toc, release_banner_html
 
 
-def quickstart_section_html(parser, query) -> str:
-    install_cmd = render_code_card(
-        ["curl -fsSL https://hirsel.ai/install.sh | sh"],
-        "sh",
-        parser,
-        query,
-        "quickstart-install",
+PART_IDS = ("install", "language", "cookbook")
+INSTALL_TOC = [
+    ("first-project", "Your first project"),
+    ("options", "Pin a version or uninstall"),
+    ("source", "Read the installer"),
+]
+
+
+def heading(tag: str, hid: str, text: str) -> str:
+    return f'<{tag} id="{hid}">{text}<a class="anchor" href="#{hid}" aria-label="Link to section">#</a></{tag}>'
+
+
+def part_open(no: int, pid: str, title: str, intro_html: str, banner_html: str = "") -> str:
+    banner = f'<div class="release-note">{banner_html}</div>' if banner_html else ""
+    first = " first" if no == 1 else ""
+    return (
+        f'<section class="part{first}" aria-labelledby="{pid}">'
+        f'<p class="part-no">{no:02d}</p>'
+        f'<h2 class="part-title" id="{pid}">{title}</h2>'
+        f'<p class="part-lead">{intro_html}</p>{banner}'
     )
-    run_cmd = render_code_card(
+
+
+def install_part_html(install_sh: str, ref: str, parser, query) -> str:
+    tag_example = ref if ref != "main" else "v0.1.0-pre"
+    card = lambda lines, lang, label: render_code_card(lines, lang, parser, query, label)
+    one_liner = card(["curl -fsSL https://hirsel.ai/install.sh | sh"], "sh", "install-one-liner")
+    quickstart = card(
         [
             "hirsel new hello && cd hello",
-            "hirsel check     # type, ownership, capability & bound checks",
-            "hirsel test      # run every @test in its own process",
-            "hirsel run       # build native binary and execute",
+            "hirsel check     # types, ownership, capabilities and bounds",
+            "hirsel test      # every @test in its own process",
+            "hirsel run       # build a native binary and run it",
+            "hirsel build --release -o hello",
         ],
         "sh",
-        parser,
-        query,
-        "quickstart-run",
+        "install-quickstart",
     )
-    return (
-        '<section class="quick" aria-labelledby="get-started">'
-        '<div class="quick-head">'
-        '<h2 id="get-started">Get started in 60 seconds</h2>'
-        '<a href="/docs/install/">Install options &amp; source &rarr;</a>'
-        "</div>"
-        '<p class="step-label">1. Install the toolchain</p>'
-        f"{install_cmd}"
-        '<p class="plat">Linux x86_64 &middot; glibc 2.28+ &middot; Apple Silicon macOS in progress</p>'
-        '<p class="step-label">2. Create, check, test, and run your first package</p>'
-        f"{run_cmd}"
-        '<div class="pillars">'
-        '<div class="pillar"><h3>Explicit capabilities</h3>'
-        "<p>Files, network, clocks, randomness, and stdout are ordinary parameters &mdash; never ambient globals.</p></div>"
-        '<div class="pillar"><h3>Logical byte budgets</h3>'
-        "<p>Every allocation charges against a deterministic limit. Overflow raises catchable <code>Capacity</code>.</p></div>"
-        '<div class="pillar"><h3>Deterministic replay</h3>'
-        "<p>Record any run externally with <code>--record</code> and replay it byte-for-byte with zero host grants.</p></div>"
-        "</div>"
-        "</section>"
+    options = card(
+        [
+            "# Pin a specific release tag",
+            f"HIRSEL_VERSION={tag_example} curl -fsSL https://hirsel.ai/install.sh | sh",
+            "",
+            "# Custom install directory (default: $HOME/.hirsel)",
+            "HIRSEL_INSTALL_DIR=/opt/hirsel curl -fsSL https://hirsel.ai/install.sh | sh",
+            "",
+            "# Skip editing shell rc files (.bashrc / .zshrc / fish)",
+            "curl -fsSL https://hirsel.ai/install.sh | sh -s -- --no-modify-path",
+        ],
+        "sh",
+        "install-options",
     )
-
-
-def build_walkthrough_page(primer_md: str, ref: str, parser, query) -> str:
-    lead_html, body_html, toc, release_banner = render_markdown(
-        primer_md, parser=parser, query=query, ref=ref, label="docs/PRIMER.md"
+    uninstall = card(
+        ["curl -fsSL https://hirsel.ai/install.sh | sh -s -- --uninstall"], "sh", "install-uninstall"
     )
-    full_toc = [("get-started", "Get started in 60s"), *toc]
-    full_body = quickstart_section_html(parser, query) + "\n" + body_html
-    eyebrow = f"Walkthrough · {ref}" if ref != "main" else "Walkthrough"
-    return render_page(
-        slug="/docs/",
-        title="Hirsel Walkthrough — Language Primer & Quickstart",
-        description="Learn Hirsel in one readable walkthrough: explicit capabilities, value semantics, regions, logical byte and step budgets, and deterministic replay.",
-        eyebrow=eyebrow,
-        heading="Hirsel walkthrough",
-        lead=lead_html,
-        body_html=full_body,
-        toc=full_toc,
-        active_page="walkthrough",
-        pager=(None, ("/docs/cookbook/", "Cookbook (7 recipes)")),
-        ref=ref,
-        markdown_alternate="/primer.md",
-        release_banner_html=release_banner,
-    )
-
-
-def build_cookbook_page(cookbook_md: str, ref: str, parser, query) -> str:
-    lead_html, body_html, toc, release_banner = render_markdown(
-        cookbook_md, parser=parser, query=query, ref=ref, label="docs/COOKBOOK.md"
-    )
-    eyebrow = f"Cookbook · 7 checked recipes · {ref}" if ref != "main" else "Cookbook · 7 checked recipes"
-    return render_page(
-        slug="/docs/cookbook/",
-        title="Hirsel Cookbook — Seven Compiler-Checked Recipes",
-        description="Seven complete, compiler-checked Hirsel recipes: CLI config, confined files and byte bounds, HTTP routing, Store transactions, task units, sim testing, and SIMD loops.",
-        eyebrow=eyebrow,
-        heading="Hirsel cookbook",
-        lead=lead_html,
-        body_html=body_html,
-        toc=toc,
-        active_page="cookbook",
-        pager=(("/docs/", "Walkthrough"), ("/docs/std/", "Standard library")),
-        ref=ref,
-        markdown_alternate="/cookbook.md",
-        release_banner_html=release_banner,
+    source = card(install_sh.splitlines(), "sh", "install-sh-source")
+    install_lines = len(install_sh.splitlines())
+    return "\n".join(
+        [
+            part_open(
+                1,
+                "install",
+                "Install",
+                "One self-contained native toolchain with Cranelift, LLVM, the simulator, the profiler "
+                "and recorded replay. The installer checks the release bundle against <code>SHA256SUMS</code> "
+                "and links <code>hirsel</code> into <code>~/.hirsel/bin</code> without touching system packages.",
+            ),
+            one_liner,
+            '<div class="info-grid">'
+            '<div class="info-card"><h3>Supported today</h3><p>Linux <code>x86_64</code> with <code>glibc 2.28+</code>.</p></div>'
+            '<div class="info-card"><h3>In progress</h3><p>Apple Silicon macOS (<code>aarch64-apple-darwin</code>). '
+            "Linux on musl is not yet supported.</p></div>"
+            "</div>",
+            heading("h2", "first-project", "Your first project"),
+            "<p><code>hirsel new</code> scaffolds a package with <code>hirsel.toml</code>, "
+            "<code>main.hirsel</code> and <code>tests.hirsel</code>:</p>",
+            quickstart,
+            "<h3>Generated <code>main.hirsel</code></h3>",
+            card(STARTER_MAIN.splitlines(), "hirsel", "install-starter-main"),
+            "<h3>Generated <code>tests.hirsel</code></h3>",
+            card(STARTER_TESTS.splitlines(), "hirsel", "install-starter-tests"),
+            heading("h2", "options", "Pin a version or uninstall"),
+            "<p>Pin a release, choose an install prefix, or leave your shell rc files alone:</p>",
+            options,
+            "<p>Remove every installed version and its PATH entries:</p>",
+            uninstall,
+            heading("h2", "source", "Read the installer"),
+            "<p>The installer served at <code class=\"w\">https://hirsel.ai/install.sh</code> is shown verbatim below.</p>",
+            f'<details class="source-drawer"><summary><span>Show <code>install.sh</code></span>'
+            f'<span class="hint">{install_lines} lines &middot; POSIX sh</span></summary>{source}</details>',
+            "</section>",
+        ]
     )
 
 
-def build_std_page(api_index_md: str, ref: str, parser, query) -> str:
+def build_std_page(api_index_md: str, ref: str, parser, query, groups) -> str:
     lines = api_index_md.splitlines()
     modules: list[tuple[str, str, bool, str, str]] = []
     total_modules = 0
@@ -679,126 +683,11 @@ def build_std_page(api_index_md: str, ref: str, parser, query) -> str:
             "<code class=\"w\">hirsel inspect --std --interface</code> for exact local signatures."
         ),
         body_html=body_html,
-        toc=toc,
-        active_page="std",
-        pager=(("/docs/cookbook/", "Cookbook"), ("/docs/install/", "Install & quickstart")),
+        nav_key="std",
+        sidebar_html=render_sidebar(groups, on_docs=False, std_toc=toc, ref=ref),
+        pager=(("/docs/", "Docs"), None),
         ref=ref,
-        markdown_alternate="/api-index.md",
-    )
-
-
-def build_install_page(install_sh: str, ref: str, parser, query) -> str:
-    tag_example = ref if ref != "main" else "v0.1.0-pre"
-    install_lines = len(install_sh.splitlines())
-
-    one_liner = render_code_card(
-        ["curl -fsSL https://hirsel.ai/install.sh | sh"],
-        "sh",
-        parser,
-        query,
-        "install-one-liner",
-    )
-    pin_cmd = render_code_card(
-        [
-            f"# Pin a specific release tag",
-            f"HIRSEL_VERSION={tag_example} curl -fsSL https://hirsel.ai/install.sh | sh",
-            "",
-            "# Custom install directory (default: $HOME/.hirsel)",
-            "HIRSEL_INSTALL_DIR=/opt/hirsel curl -fsSL https://hirsel.ai/install.sh | sh",
-            "",
-            "# Skip editing shell rc files (.bashrc / .zshrc / fish)",
-            "curl -fsSL https://hirsel.ai/install.sh | sh -s -- --no-modify-path",
-        ],
-        "sh",
-        parser,
-        query,
-        "install-options",
-    )
-    uninstall_cmd = render_code_card(
-        ["curl -fsSL https://hirsel.ai/install.sh | sh -s -- --uninstall"],
-        "sh",
-        parser,
-        query,
-        "install-uninstall",
-    )
-    quickstart_cmd = render_code_card(
-        [
-            "hirsel new hello && cd hello",
-            "hirsel check     # fast incremental check",
-            "hirsel test      # runs tests.hirsel in isolated processes",
-            "hirsel run       # compiles and runs main.hirsel",
-            "hirsel build --release -o hello",
-        ],
-        "sh",
-        parser,
-        query,
-        "install-quickstart",
-    )
-    starter_main_card = render_code_card(
-        STARTER_MAIN.splitlines(), "hirsel", parser, query, "install-starter-main"
-    )
-    starter_test_card = render_code_card(
-        STARTER_TESTS.splitlines(), "hirsel", parser, query, "install-starter-tests"
-    )
-    source_card = render_code_card(
-        install_sh.splitlines(), "sh", parser, query, "install-sh-source"
-    )
-
-    body_html = "\n".join(
-        [
-            '<h2 id="install">Install the toolchain<a class="anchor" href="#install" aria-label="Link to section">#</a></h2>',
-            "<p>Downloads the latest signed release bundle, verifies its SHA-256 checksum against <code>SHA256SUMS</code>, "
-            "and links <code>hirsel</code> into <code>~/.hirsel/bin</code> without touching system packages:</p>",
-            one_liner,
-            '<div class="info-grid">',
-            '  <div class="info-card"><h3>Supported today</h3><p>Linux <code>x86_64</code> with <code>glibc 2.28+</code>. Self-contained native toolchain including Cranelift, LLVM, and <code>ld.lld</code>.</p></div>',
-            '  <div class="info-card"><h3>In progress</h3><p>Apple Silicon macOS (<code>aarch64-apple-darwin</code>) native release binaries are in progress. Linux hosts on musl are not yet supported.</p></div>',
-            "</div>",
-            '<h2 id="options">Version pinning &amp; uninstall<a class="anchor" href="#options" aria-label="Link to section">#</a></h2>',
-            "<p>Pin a release, choose an install prefix, or opt out of shell PATH edits with environment variables and flags:</p>",
-            pin_cmd,
-            "<p>To remove every installed version and revert PATH entries cleanly:</p>",
-            uninstall_cmd,
-            '<h2 id="first-project">Your first project<a class="anchor" href="#first-project" aria-label="Link to section">#</a></h2>',
-            "<p><code>hirsel new</code> scaffolds a ready-to-run package with <code>hirsel.toml</code>, "
-            "<code>main.hirsel</code>, and <code>tests.hirsel</code>:</p>",
-            quickstart_cmd,
-            "<h3>Generated <code>main.hirsel</code></h3>",
-            starter_main_card,
-            "<h3>Generated <code>tests.hirsel</code></h3>",
-            starter_test_card,
-            "<p>Next, follow the <a href=\"/docs/\">Hirsel walkthrough</a> to add explicit capabilities "
-            "(<code>Stdout</code>, <code>Dir</code>, <code>Net</code>), byte budgets, and recorded replay.</p>",
-            '<h2 id="source">Inspect the installer<a class="anchor" href="#source" aria-label="Link to section">#</a></h2>',
-            "<p>Prefer to read the shell script before running it? The full installer served at "
-            "<code class=\"w\">https://hirsel.ai/install.sh</code> is shown verbatim below.</p>",
-            f'<details class="source-drawer"><summary><span>Inspect <code>install.sh</code> source</span>'
-            f'<span class="hint">{install_lines} lines &middot; POSIX sh</span></summary>{source_card}</details>',
-        ]
-    )
-
-    toc = [
-        ("install", "Install the toolchain"),
-        ("options", "Version pinning &amp; uninstall"),
-        ("first-project", "Your first project"),
-        ("source", "Inspect install.sh"),
-    ]
-    eyebrow = f"Install · {ref}" if ref != "main" else "Install & Quickstart"
-    return render_page(
-        slug="/docs/install/",
-        title="Install Hirsel — Toolchain Installer & Quickstart",
-        description="Install the Hirsel native compiler toolchain on Linux x86_64, pin versions, uninstall cleanly, and run your first Hirsel project in 60 seconds.",
-        eyebrow=eyebrow,
-        heading="Install Hirsel",
-        lead=(
-            "One self-contained native toolchain with Cranelift, LLVM, simulator, profiler, and deterministic replay. "
-            "Verified by SHA-256 and installed under <code>~/.hirsel</code>."
-        ),
-        body_html=body_html,
-        toc=toc,
-        active_page="install",
-        pager=(("/docs/std/", "Standard library"), ("/docs/", "Start the walkthrough")),
-        ref=ref,
+        markdown_alternates=["/api-index.md"],
     )
 
 
@@ -812,11 +701,52 @@ def build_docs_pages(
     parser,
     query,
 ) -> dict[str, str]:
+    used_ids = set(PART_IDS) | {hid for hid, _ in INSTALL_TOC}
+    primer_lead, primer_body, primer_toc, primer_banner = render_markdown(
+        primer_md, parser=parser, query=query, ref=ref, label="docs/PRIMER.md", used_ids=used_ids
+    )
+    cook_lead, cook_body, cook_toc, cook_banner = render_markdown(
+        cookbook_md, parser=parser, query=query, ref=ref, label="docs/COOKBOOK.md", used_ids=used_ids
+    )
+    groups = [
+        ("Install", "install", INSTALL_TOC),
+        ("Language", "language", primer_toc),
+        ("Cookbook", "cookbook", cook_toc),
+    ]
+    body = "\n".join(
+        [
+            install_part_html(install_sh, ref, parser, query),
+            part_open(2, "language", "Language", primer_lead, primer_banner),
+            primer_body,
+            "</section>",
+            part_open(3, "cookbook", "Cookbook", cook_lead, cook_banner),
+            cook_body,
+            "</section>",
+        ]
+    )
+    docs_page = render_page(
+        slug="/docs/",
+        title="Hirsel docs: install, language and cookbook",
+        description=(
+            "Install Hirsel, learn the language section by section, and build from "
+            f"{len(cook_toc)} compiler-checked recipes, all on one page."
+        ),
+        eyebrow=f"Docs · {ref}" if ref != "main" else "Docs",
+        heading="Hirsel docs",
+        lead=(
+            f"Install the toolchain, read the language in {len(primer_toc)} short sections, then build from "
+            f"{len(cook_toc)} compiler-checked recipes. Every <code>hirsel</code> block here is checked by CI."
+        ),
+        body_html=body,
+        nav_key="docs",
+        sidebar_html=render_sidebar(groups, on_docs=True, std_toc=[], ref=ref),
+        pager=(None, ("/docs/std/", "Standard library")),
+        ref=ref,
+        markdown_alternates=["/primer.md", "/cookbook.md"],
+    )
     return {
-        "docs/index.html": build_walkthrough_page(primer_md, ref, parser, query),
-        "docs/cookbook/index.html": build_cookbook_page(cookbook_md, ref, parser, query),
-        "docs/std/index.html": build_std_page(api_index_md, ref, parser, query),
-        "docs/install/index.html": build_install_page(install_sh, ref, parser, query),
+        "docs/index.html": docs_page,
+        "docs/std/index.html": build_std_page(api_index_md, ref, parser, query, groups),
     }
 
 

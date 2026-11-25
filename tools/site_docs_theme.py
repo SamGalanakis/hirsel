@@ -226,6 +226,9 @@ aside.sidebar .drawer-close svg{width:16px;height:16px}
 }
 .toc-sub a:hover,.toc-sub a:focus-visible{color:var(--ink)}
 .toc-sub a.active{color:var(--ink);font-weight:600;border-left-color:var(--red)}
+a.side-label{display:block;text-decoration:none;padding:4px 8px;margin:0 0 4px;border-radius:6px;transition:color var(--t-state) var(--ease)}
+a.side-label:hover,a.side-label:focus-visible{color:var(--ink)}
+a.side-label.active{color:var(--red)}
 .toc-sub a code{font-family:var(--mono);font-size:.92em;background:none;border:0;padding:0}
 .side-foot{margin-top:24px;padding-top:16px;border-top:1px solid var(--rule)}
 .side-foot a{
@@ -269,28 +272,15 @@ main.doc{
 }
 .release-note p{margin:0}
 
-/* 60-second quickstart card */
-.quick{
-  margin:0 0 38px;padding:22px 24px;border-radius:12px;
-  background:var(--paper);border:1px solid var(--rule);
+/* Parts of the one docs page: Install, Language, Cookbook */
+.part{margin-top:88px;padding-top:30px;border-top:2px solid var(--ink)}
+.part.first{margin-top:0;padding-top:0;border-top:0}
+.part-no{margin:0 0 6px;font:500 12px/1 var(--mono);letter-spacing:.08em;color:var(--red)}
+main.doc h2.part-title{
+  margin:0 0 12px;padding:0;border:0;
+  font-size:clamp(28px,3.6vw,36px);line-height:1.08;letter-spacing:-.03em;
 }
-.quick-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:14px}
-.quick-head h2{
-  margin:0;padding:0;border:0;font-family:var(--display);font-weight:400;font-synthesis:none;
-  font-size:21px;line-height:1.18;letter-spacing:-.025em;color:var(--ink);scroll-margin-top:80px;
-}
-.quick-head a{font-size:13.5px;font-weight:500;color:var(--mute);text-decoration:none;border-bottom:1px solid var(--rule)}
-.quick-head a:hover{color:var(--ink);border-bottom-color:var(--ink)}
-.quick .step-label{margin:14px 0 6px;font:600 12px/1.2 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--mute)}
-.quick .step-label:first-of-type{margin-top:0}
-.quick .plat{margin:6px 0 0;font-size:13px;color:var(--mute)}
-.quick .code-block{margin:6px 0 12px}
-.pillars{
-  display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;
-  margin-top:18px;padding-top:18px;border-top:1px solid var(--rule);
-}
-.pillar h3{margin:0 0 4px;font:600 14px/1.3 var(--sans);color:var(--ink)}
-.pillar p{margin:0;font-size:13.5px;line-height:1.48;color:var(--mute)}
+main.doc .part-lead{font-size:16.5px;line-height:1.6;color:var(--body);margin-bottom:22px}
 
 /* Prose */
 
@@ -492,8 +482,7 @@ td code{white-space:nowrap}
 @media (max-width:640px){
   .pill-copy .lbl{display:none}
   .pill-copy{padding:7px 9px}
-  .pillars,.info-grid,.doc-pager{grid-template-columns:1fr}
-  .quick{padding:18px 16px}
+  .info-grid,.doc-pager{grid-template-columns:1fr}
   main.doc{padding:22px 16px 64px}
   .code-block pre{font-size:12.5px;padding:12px 0}
   .code-block pre code{padding:0 14px}
@@ -583,8 +572,8 @@ if (sidebar) {
   sidebar.querySelectorAll('a').forEach(a => a.addEventListener('click', () => setDrawer(false)));
 }
 
-// Scroll-spy for left sidebar TOC: the active entry is the last heading above the top bar.
-const tocLinks = Array.from(document.querySelectorAll('.toc-sub a[href^="#"]'));
+// Scroll-spy for the sidebar: the active entry is the last part or section heading above the top bar.
+const tocLinks = Array.from(document.querySelectorAll('#sidebar a[href^="#"]'));
 const spy = tocLinks.map(a => [document.getElementById(a.getAttribute('href').slice(1)), a]).filter(p => p[0]);
 if (spy.length) {
   let current = null, queued = false;
@@ -598,9 +587,15 @@ if (spy.length) {
     if (current) current.classList.remove('active');
     current = next;
     current.classList.add('active');
+    // Keep the active entry in view inside the scrolling sidebar.
+    const r = current.getBoundingClientRect(), box = sidebar.getBoundingClientRect();
+    if (r.top < box.top + 12 || r.bottom > box.bottom - 12) sidebar.scrollTop += r.top - box.top - box.height / 3;
   };
   addEventListener('scroll', () => { if (!queued) { queued = true; requestAnimationFrame(update); } }, { passive: true });
   addEventListener('resize', update);
+  // A load with a #fragment jumps after this script runs and may fire no scroll event.
+  addEventListener('load', update);
+  addEventListener('hashchange', update);
   update();
 }
 
@@ -639,6 +634,53 @@ if (stdInput) {
 """
 
 
+def render_sidebar(
+    groups: list[tuple[str, str, list[tuple[str, str]]]],
+    *,
+    on_docs: bool,
+    std_toc: list[tuple[str, str]],
+    ref: str,
+) -> str:
+    """Sidebar for both pages: the /docs/ parts (Install, Language, Cookbook) with their
+    sections when on /docs/, then the reference links (standard library, spec)."""
+    spec_url = f"{GITHUB_REPO}/tree/{ref}/docs/spec"
+
+    def sub(items: list[tuple[str, str]]) -> str:
+        lis = "".join(
+            f'<li><a href="#{html.escape(anchor, quote=True)}">{text_html}</a></li>'
+            for anchor, text_html in items
+        )
+        return f'<ul class="toc-sub">{lis}</ul>'
+
+    if on_docs:
+        parts = "".join(
+            f'<div class="side-group"><a class="side-label" href="#{pid}">{label}</a>{sub(items)}</div>'
+            for label, pid, items in groups
+        )
+        std_entry = '<li><a class="side-page" href="/docs/std/"><span>Standard library</span><span class="tag">std</span></a></li>'
+    else:
+        links = "".join(
+            f'<li><a class="side-page" href="/docs/#{pid}"><span>{label}</span></a></li>'
+            for label, pid, _items in groups
+        )
+        parts = f'<div class="side-group"><p class="side-label">Docs</p><ul class="side-list">{links}</ul></div>'
+        std_entry = (
+            '<li><a class="side-page" href="/docs/std/" aria-current="page"><span>Standard library</span>'
+            f'<span class="tag">std</span></a>{sub(std_toc)}</li>'
+        )
+    return (
+        f'<aside class="sidebar" id="sidebar" aria-label="Documentation navigation">'
+        f'<div class="drawer-head"><span class="wm wmfont">hirsel docs</span>'
+        f'<button class="drawer-close" id="drawerClose" type="button" aria-label="Close navigation">{CLOSE_ICON}</button></div>'
+        f"{parts}"
+        f'<div class="side-group"><p class="side-label">Reference</p><ul class="side-list">{std_entry}'
+        f'<li><a class="side-page" href="{html.escape(spec_url, quote=True)}"><span>Language spec</span><span class="tag">&#8599;</span></a></li>'
+        f"</ul></div>"
+        f'<div class="side-foot"><a href="/"><span>&larr; Take a walk</span><span class="sub">The hill</span></a></div>'
+        f"</aside>"
+    )
+
+
 def render_page(
     *,
     slug: str,
@@ -648,15 +690,13 @@ def render_page(
     heading: str,
     lead: str,
     body_html: str,
-    toc: list[tuple[str, str]],
-    active_page: str,
+    nav_key: str,
+    sidebar_html: str,
     pager: tuple[tuple[str, str] | None, tuple[str, str] | None],
     ref: str,
-    markdown_alternate: str | None = None,
-    release_banner_html: str = "",
+    markdown_alternates: list[str],
 ) -> str:
     canonical = f"{ORIGIN}{slug}"
-    spec_url = f"{GITHUB_REPO}/tree/{ref}/docs/spec"
     crumb_items = [
         {"@type": "ListItem", "position": 1, "name": "Hirsel", "item": f"{ORIGIN}/"},
         {"@type": "ListItem", "position": 2, "name": "Docs", "item": f"{ORIGIN}/docs/"},
@@ -685,52 +725,14 @@ def render_page(
         ],
     }
 
-    alt_links = ['  <link rel="alternate" type="text/markdown" href="/llms.txt">']
-    if markdown_alternate:
-        alt_links.append(
-            f'  <link rel="alternate" type="text/markdown" href="{markdown_alternate}">'
-        )
-
-    top_nav_items = [
-        ("walkthrough", "/docs/", "Walkthrough"),
-        ("cookbook", "/docs/cookbook/", "Cookbook"),
-        ("std", "/docs/std/", "Std library"),
-        ("install", "/docs/install/", "Install"),
+    alt_links = [
+        f'  <link rel="alternate" type="text/markdown" href="{href}">'
+        for href in ["/llms.txt", *markdown_alternates]
     ]
+
     top_nav_html = "".join(
-        f'<a href="{href}"'
-        + (' aria-current="page"' if key == active_page else "")
-        + f">{label}</a>"
-        for key, href, label in top_nav_items
-    )
-
-    def side_entry(key: str, href: str, label: str, tag: str = "") -> str:
-        current = ' aria-current="page"' if key == active_page else ""
-        tag_html = f'<span class="tag">{html.escape(tag)}</span>' if tag else ""
-        sub_html = ""
-        if key == active_page and toc:
-            items = "".join(
-                f'<li><a href="#{html.escape(anchor, quote=True)}">{text_html}</a></li>'
-                for anchor, text_html in toc
-            )
-            sub_html = f'<ul class="toc-sub">{items}</ul>'
-        return f'<li><a class="side-page" href="{href}"{current}><span>{label}</span>{tag_html}</a>{sub_html}</li>'
-
-    sidebar_html = (
-        f'<aside class="sidebar" id="sidebar" aria-label="Documentation navigation">'
-        f'<div class="drawer-head"><span class="wm wmfont">hirsel docs</span>'
-        f'<button class="drawer-close" id="drawerClose" type="button" aria-label="Close navigation">{CLOSE_ICON}</button></div>'
-        f'<div class="side-group"><p class="side-label">Start</p><ul class="side-list">'
-        f'{side_entry("walkthrough", "/docs/", "Walkthrough")}'
-        f'{side_entry("install", "/docs/install/", "Install &amp; quickstart")}'
-        f'</ul></div>'
-        f'<div class="side-group"><p class="side-label">Guides &amp; Reference</p><ul class="side-list">'
-        f'{side_entry("cookbook", "/docs/cookbook/", "Cookbook", "7")}'
-        f'{side_entry("std", "/docs/std/", "Standard library", "std")}'
-        f'<li><a class="side-page" href="{html.escape(spec_url, quote=True)}"><span>Language spec</span><span class="tag">&#8599;</span></a></li>'
-        f'</ul></div>'
-        f'<div class="side-foot"><a href="/"><span>&larr; Walk the hill</span><span class="sub">Ambient view</span></a></div>'
-        f'</aside>'
+        f'<a href="{href}"' + (' aria-current="page"' if key == nav_key else "") + f">{label}</a>"
+        for key, href, label in (("docs", "/docs/", "Docs"), ("std", "/docs/std/", "Standard library"))
     )
 
     prev_item, next_item = pager
@@ -755,11 +757,10 @@ def render_page(
     footer_html = (
         f'<footer class="doc-footer">'
         f'<span>Hirsel &middot; {html.escape(ref_note)} &middot; Run <code>hirsel primer</code> from your binary for exact local authority.</span>'
-        f'<span><a href="/">Walk the hill</a> &middot; <a href="{GITHUB_REPO}">GitHub</a></span>'
+        f'<span><a href="/">Take a walk</a> &middot; <a href="{GITHUB_REPO}">GitHub</a></span>'
         f'</footer>'
     )
 
-    banner = f'<div class="release-note">{release_banner_html}</div>' if release_banner_html else ""
     escaped_title = html.escape(title, quote=True)
     escaped_desc = html.escape(description, quote=True)
 
@@ -806,7 +807,7 @@ def render_page(
             f'  <a class="brand" href="/" aria-label="Hirsel home">{RAM_MARK_SVG}<span class="wm wmfont">hirsel</span></a>',
             f'  <nav class="nav" aria-label="Documentation">{top_nav_html}</nav>',
             '  <div class="right">',
-            '    <a class="hill-link" href="/"><span class="dot" aria-hidden="true"></span>Walk the hill</a>',
+            '    <a class="hill-link" href="/"><span class="dot" aria-hidden="true"></span>Take a walk</a>',
             f'    <button class="pill-copy" id="copyAgent" type="button" title="Copy Hirsel docs and install links for coding agents" aria-live="polite">{COPY_ICON}{OK_ICON}<span class="lbl"><span class="idle">Copy for agents</span><span class="done" aria-hidden="true">Copied</span></span></button>',
             f'    <a class="gh" href="{GITHUB_REPO}" aria-label="Source on GitHub" title="Source on GitHub">{GITHUB_ICON}</a>',
             "  </div>",
@@ -821,7 +822,6 @@ def render_page(
             f"    <h1>{html.escape(heading)}</h1>",
             f'    <p class="lead">{lead}</p>',
             "  </div>",
-            banner,
             body_html,
             pager_html,
             footer_html,

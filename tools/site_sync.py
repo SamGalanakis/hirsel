@@ -46,8 +46,6 @@ SITEMAP_LASTMOD = "2026-11-25"
 SITEMAP_ENTRIES = (
     ("https://hirsel.ai/", "weekly", "1.0"),
     ("https://hirsel.ai/docs/", "weekly", "0.95"),
-    ("https://hirsel.ai/docs/cookbook/", "weekly", "0.9"),
-    ("https://hirsel.ai/docs/install/", "weekly", "0.9"),
     ("https://hirsel.ai/docs/std/", "weekly", "0.85"),
     ("https://hirsel.ai/llms.txt", "weekly", "0.5"),
     ("https://hirsel.ai/llms-full.txt", "weekly", "0.5"),

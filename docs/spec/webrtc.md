@@ -1594,10 +1594,10 @@ W12 and W13 in `speaker_laws.hirsel`):
 **N1 decisions.** Gaps the spec left open, decided while N1 was built (2626)
 
 - **Deployment.** `service/main.hirsel` runs the room place, `signal.serve` and the TURN
-  relay in one process on 127.0.0.1: the place listens on `--listen` (7800) and serves the
-  call page (`index.html`, the bundled `page.ts`) from its site directory, media units bind
-  `--media` and the next port (7810, 7811), and the relay listens on `--turn` (3478) over
-  UDP and TCP. The relay's `allow` is the media units' addresses (TURN-7). `run.py
+  relay in one process on 127.0.0.1: the place listens on its listen address (7800) and
+  serves the call page (`index.html`, the bundled `page.ts`) from its site directory, the
+  media units bind the media address and the next port (7810, 7811), and the relay listens
+  on the TURN address (3478) over UDP and TCP. The relay's `allow` is the media units' addresses (TURN-7). `run.py
   --build-only` builds it with `sdk ts` and esbuild; `run.py` alone also starts it.
 - **TURN credentials at admission.** `signal.relay(adapter, Relaying)` gives the adapter the
   master, the relay plan and randomness; each admission then gets `mint_session`'s ICE and

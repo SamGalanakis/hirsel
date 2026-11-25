@@ -741,10 +741,10 @@ fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: TargetLim
     over_ceiling(requested, target.resident)
 }
 
-// An import pin's cut reads back what it wrote before the pin publishes, so
-// every import pack an install settles was read once (AP21 "Settled packs at
-// a cut").
-fn validate_pin_manifest(d: Dir, id: StoreId, raw: Bytes, settled: SettledPacks) -> Result[(), Error] waits {
+// A cut made while an export lease is held reads back the packs it wrote
+// before it publishes, so every pack an install settles was read once while
+// OLD still serves (AP21 "Settled packs at a cut").
+fn validate_leased_cut(d: Dir, id: StoreId, raw: Bytes, settled: SettledPacks) -> Result[(), Error] waits {
     let (_, take manifest) = disk_allocation(scoped fn() -> Result[(StoreId, PageManifest), Error] {
         disk_read_page_manifest("MANIFEST.tmp", raw)
     })?
@@ -753,17 +753,17 @@ fn validate_pin_manifest(d: Dir, id: StoreId, raw: Bytes, settled: SettledPacks)
 }
 
 // A cut's AP21 check: an install proves NEW against the installed generation,
-// an import pin cut reads back its own packs, and other cuts are not walked.
-fn validate_cut_pages(d: Dir, id: StoreId, raw: Bytes, target: Option[TargetLimits], delta: HolderDelta, published: PageDisk) -> Result[(), Error] waits {
+// any other cut under an export lease (import pin cuts among them) reads back
+// its own packs, and a cut with no lease is not walked.
+fn validate_cut_pages(d: Dir, id: StoreId, raw: Bytes, target: Option[TargetLimits], lease: Option[Arc[ExportLease]], published: PageDisk) -> Result[(), Error] waits {
     let settled = SettledPacks(below: published.next_pack, locations: view published.locations)
     if let Some(wanted) = target {
         return validate_new_page_manifest(d, id, raw, wanted, settled)
     }
-    match delta {
-        AddPin(held) if held.owner == ImportPin => validate_pin_manifest(d, id, raw, settled),
-        ReplacePin(_, held) if held.owner == ImportPin => validate_pin_manifest(d, id, raw, settled),
-        _ => Ok(()),
+    if let Some(_) = lease {
+        return validate_leased_cut(d, id, raw, settled)
     }
+    Ok(())
 }
 
 fn publish_page_manifest_bytes(d: Dir, raw: Bytes) -> Result[(), Error] waits {

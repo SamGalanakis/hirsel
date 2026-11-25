@@ -195,7 +195,7 @@ store@1/store/test_fork_shared_head src=6ec999ebf833b1e2 sig=9e07ff9e3a3d7d5b ru
 store@1/store/test_frame_size src=b88fd42eacf70c23 sig=0595b0ee84e6694c run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frames src=e2a03facf79d4eb1 sig=67a87acd7c807068 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_build_law src=8e5a5ca8791ed210 sig=2dc86a359cc73a46 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_index_catch_up_law src=f9de5c254bccb3b7 sig=e339f83b6d3b2e6b run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/test_index_catch_up_law src=94df6a891c64299e sig=625507e78b9569dc run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_index_declaration_laws src=b35eb152d2afd356 sig=f3eab4b7ff60cc16 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_drift_counted src=5c32a907f7eb0e39 sig=93a200464e84b955 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_refusal src=36fd8913bd0d171f sig=ddfe64a54bd0d1a9 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

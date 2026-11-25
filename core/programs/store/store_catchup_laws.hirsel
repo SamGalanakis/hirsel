@@ -16,12 +16,21 @@
 // the export, and the child ships a fresh PREPARED that replaces the kept one.
 //
 // AP21 at the install reads only the packs the install cut writes (C-7's
-// settled packs). The damaged case flips the last payload byte of a leaf the
-// kept import reaches in a pack written before the install: the install still
+// settled packs), and every cut under the export lease reads back the packs it
+// wrote before it publishes. The checkpoint case damages the first pack a
+// checkpoint after the export copy writes (the first payload byte of its frame
+// at 72), after the pack is written and before the cut's check: the checkpoint
+// refuses with Checksum at that frame (disk_frame_bytes: the frame's check no
+// longer matches its bytes), OLD keeps serving, the next checkpoint rewrites
+// the pack, and the deploy follows and installs as in the other cases. The
+// settled case flips the last payload byte of a leaf the kept import reaches
+// in a pack after its one read-back, before the install: the install still
 // publishes, and the reopen's full AP21 refuses the store at that frame with
 // Checksum (check_page_pointer: the page's xxh3 no longer matches its parent's
 // pointer).
 const LCU_ROWS: u64 = 4000
+
+type LcuDamage = Undamaged | CheckpointPack | SettledLeaf
 
 fn lcu_unique_expected(id: u32, model: List[Option[u64]]) -> Result[List[(Bytes, u64)], Error] {
     let mut pairs: List[(u64, u64)] = list.new()
@@ -240,7 +249,7 @@ fn lcu_import_leaf(db: Db) -> Result[std.page.PagePtr, DeployError] {
     }
 }
 
-fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String, unique: bool, backfilling: bool, duplicate: bool, damaged: bool) -> Result[(), DeployError] waits {
+fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String, unique: bool, backfilling: bool, duplicate: bool, damage: LcuDamage) -> Result[(), DeployError] waits {
     let directory = disk_test_directory(d)
     let scratch = disk_test_directory(d)
     let options = disk_crash_options("install")
@@ -354,7 +363,27 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
         }
         return deploy_result(close(take reopened))
     }
-    if damaged {
+    if let CheckpointPack = damage {
+        state = lix_next(state)
+        deploy_result(lcu_round(mut db, t, 115u8, state, mut next_value, mut model))?
+        let name = deploy_result(paged_pack_path(disk_state(db).pages.next_pack))?
+        let refused = disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] waits {
+            let mut pack = disk_read_paged_file(directory, name, 67108864)?
+            pack[88] = pack[88] ^ 1u8
+            disk_write_synced(directory, name, pack)?
+            seal_page_manifest_file(mut raw, context, fence)
+        })
+        match refused {
+            Error(Corrupt(Fault(file: file, offset: at, why: Checksum))) if file == name && at == 72 => (),
+            _ => fail("L-IX catch-up: a checkpoint under the export lease reads back the pack it wrote"),
+        }
+        let _ = deploy_result(checkpoint(mut db))?
+        if !lcu_follow(mut db, scratch, exported.dir, attempt, mut source, mut staged)? {
+            fail("L-IX catch-up: OLD keeps serving the deploy after a refused checkpoint")
+        }
+        let _ = deploy_result(checkpoint(mut db))?
+    }
+    if let SettledLeaf = damage {
         let leaf = lcu_import_leaf(db)?
         let name = deploy_result(paged_pack_path(leaf.pack))?
         let mut raw = deploy_result(disk_read_paged_file(directory, name, 67108864))?
@@ -386,13 +415,14 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
 @test
 fn test_index_catch_up_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
     for seed in 0u64 .. 3 {
-        lcu_case(d, c, r, tasks, seed * 7919 + 1, "ss", false, false, false, false)?
-        lcu_case(d, c, r, tasks, seed * 7919 + 2, "scs", true, false, false, false)?
-        lcu_case(d, c, r, tasks, seed * 7919 + 3, "swbs", true, false, false, false)?
-        lcu_case(d, c, r, tasks, seed * 7919 + 4, "cs", false, true, false, false)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 1, "ss", false, false, false, Undamaged)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 2, "scs", true, false, false, Undamaged)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 3, "swbs", true, false, false, Undamaged)?
+        lcu_case(d, c, r, tasks, seed * 7919 + 4, "cs", false, true, false, Undamaged)?
     }
-    lcu_case(d, c, r, tasks, 5, "s", true, false, true, false)?
-    lcu_case(d, c, r, tasks, 6, "sc", false, false, false, true)
+    lcu_case(d, c, r, tasks, 5, "s", true, false, true, Undamaged)?
+    lcu_case(d, c, r, tasks, 6, "sc", false, false, false, SettledLeaf)?
+    lcu_case(d, c, r, tasks, 7, "s", true, false, false, CheckpointPack)
 }
 
 // The "catch-up" crash scenario (store_crash_tests.py). The write phase keeps

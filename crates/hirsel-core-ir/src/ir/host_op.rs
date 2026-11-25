@@ -164,6 +164,8 @@ pub enum HostOp {
     TlsAccept = hirsel_core_ids::host_op::TLS_ACCEPT as isize,
     /// TLS-9: a `Hello`'s server name, a view of its record.
     TlsServerName = 176,
+    /// A stream's terminal size, as `cols | rows << 16`, or 0 for none.
+    StreamSize = hirsel_core_ids::host_op::TERM_SIZE as isize,
 }
 
 mod name;
@@ -369,6 +371,7 @@ impl HostOp {
         HostOp::PortFill,
         HostOp::UdpFillPackets,
         HostOp::StreamTerminal,
+        HostOp::StreamSize,
         HostOp::NetJoin,
         HostOp::ScramSha256,
         HostOp::ScramFinalLen,
@@ -572,10 +575,10 @@ impl HostOp {
             | HostOp::PortNext => (vec![V(u64_)], outcome),
             HostOp::ProvideProcess => (vec![], outcome),
             HostOp::ProvideRandomTape => (vec![V(p)], outcome),
-            HostOp::ProvideStdout | HostOp::ProvideStderr => {
-                (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
+            HostOp::ProvideStdout | HostOp::ProvideStderr => (vec![V(u64_), V(u64_)], outcome),
+            HostOp::StreamTerminal | HostOp::StreamSize | HostOp::ExecSignal => {
+                (vec![V(u64_), V(u8_)], outcome)
             }
-            HostOp::StreamTerminal | HostOp::ExecSignal => (vec![V(u64_), V(u8_)], outcome),
             HostOp::CallWord | HostOp::CallSecret | HostOp::NetJoin => {
                 (vec![V(u64_), V(u64_)], outcome)
             }
@@ -856,6 +859,7 @@ impl HostOp {
                     | HostOp::PortFill
                     | HostOp::UdpFillPackets
                     | HostOp::StreamTerminal
+                    | HostOp::StreamSize
             )
     }
 }

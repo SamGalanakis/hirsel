@@ -373,7 +373,8 @@ enum VirtualCell {
     },
     Port {
         vocab: Vocab,
-        terminal: bool,
+        /// A stream port's terminal size word (`cols | rows << 16`); zero is no terminal.
+        size: u64,
         sealed: bool,
         /// The order of calls and Released notices.
         next: u64,
@@ -3067,7 +3068,7 @@ impl Machine<'_> {
                 };
                 let port = VirtualCell::Port {
                     vocab,
-                    terminal: vocab == Vocab::Stream && a[1] != 0,
+                    size: if vocab == Vocab::Stream { a[1] } else { 0 },
                     sealed: false,
                     next: 0,
                     calls: BTreeMap::new(),
@@ -3121,13 +3122,21 @@ impl Machine<'_> {
             HostOp::StreamTerminal => {
                 let terminal = match self.cell(a[0]) {
                     Some(c) => match self.host.world.cells[c] {
-                        VirtualCell::Port { terminal, .. } => terminal,
+                        VirtualCell::Port { size, .. } => size != 0,
                         _ => unreachable!(),
                     },
                     None => self.host.world.terminals[a[1] as usize],
                 };
                 ok(u64::from(terminal), 0)
             }
+            // A port answers its own size; the model world's host streams give none.
+            HostOp::StreamSize => match self.cell(a[0]) {
+                Some(c) => match self.host.world.cells[c] {
+                    VirtualCell::Port { size, .. } => ok(size, 0),
+                    _ => unreachable!(),
+                },
+                None => ok(0, 0),
+            },
             HostOp::PortNext => {
                 let c = (a[0] - SERVED_BASE) as usize;
                 return Some(self.port_next(t, c));

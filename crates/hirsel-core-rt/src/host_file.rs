@@ -35,10 +35,25 @@ struct Vector {
 #[cfg(feature = "record")]
 unsafe impl Send for Vector {}
 
+/// A stream grant's terminal: none, the descriptor behind its provider, or a
+/// virtual port's fixed word (bit 32 over `cols | rows << 16`, never zero).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Terminal {
+    No,
+    Live,
+    Fixed(u64),
+}
+
+impl Terminal {
+    pub(crate) fn of(live: bool) -> Self {
+        if live { Self::Live } else { Self::No }
+    }
+}
+
 struct DynamicGrant {
     provider: Provider,
     handle: u64,
-    terminal: bool,
+    terminal: Terminal,
 }
 
 // SAFETY: the provider descriptor is immutable and its state is only accessed
@@ -302,7 +317,7 @@ impl Registry {
             .unwrap()
     }
     pub(crate) fn grant(&self, provider: Provider, handle: u64) -> u64 {
-        self.grant_with_terminal(provider, handle, false)
+        self.grant_with_terminal(provider, handle, Terminal::No)
     }
     /// Grant an `Env` or `Cred` word whose handle is the run's own grant,
     /// noting its kind so a value that carries it can snapshot it.
@@ -316,7 +331,7 @@ impl Registry {
         &self,
         provider: Provider,
         handle: u64,
-        terminal: bool,
+        terminal: Terminal,
     ) -> u64 {
         let mut registry = self.run.designations.lock().unwrap();
         let id = DYNAMIC_GRANT | next_id(&mut registry.next);
@@ -330,7 +345,7 @@ impl Registry {
         );
         id
     }
-    pub(crate) fn grant_terminal(&self, handle: u64) -> bool {
+    pub(crate) fn grant_terminal(&self, handle: u64) -> Terminal {
         self.run.designations.lock().unwrap().grants[&handle].terminal
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {

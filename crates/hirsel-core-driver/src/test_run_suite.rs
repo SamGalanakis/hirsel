@@ -1,4 +1,5 @@
 include!("test_rules_native.rs");
+include!("xdg_dirs_native.rs");
 include!("test_run_native.rs");
 include!("test_run_coverage_native.rs");
 include!("test_run_coverage_tool.rs");

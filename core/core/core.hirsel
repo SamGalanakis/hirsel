@@ -118,6 +118,12 @@ pub opaque type Stdout
 
 pub opaque type Stderr
 
+// A terminal's size in character cells (`stdout.size`, `stderr.size`).
+pub type TermSize {
+    cols: u16,
+    rows: u16
+}
+
 pub opaque type Stdin
 
 pub opaque type Env

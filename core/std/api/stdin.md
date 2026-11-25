@@ -80,7 +80,8 @@ answer to choose colour, progress output or an interactive prompt, as Rust's
   redirected, closed or hung up after launch, or the terminal goes away, the answer does
   not change. Every copy of the capability gives the same answer.
 - **Authority.** The stream's own capability. Nothing else is observed: the call does not
-  read the descriptor, the terminal's size or its modes.
+  read the descriptor, the terminal's size or its modes. The size is its own query
+  ([Size](#size)).
 - **Charging.** The call is an ordinary core call: one step, nothing admitted, no wait,
   no failure.
 - **Replay.** The bit is part of the stream's entry grant, so it passes
@@ -89,9 +90,33 @@ answer to choose colour, progress output or an interactive prompt, as Rust's
   answers from it whatever its own descriptors are
   ([recording](../../../docs/recording.md#what-a-recording-holds)).
 - **Virtual streams.** `provide.stdout(bytes n, terminal)` and `provide.stderr(bytes n,
-  terminal)` take the bit when they are constructed, so a test chooses either answer
+  terminal)` take an `Option[TermSize]` when they are constructed: `None` is not a terminal
+  and `Some(size)` is a terminal of that size, so a test chooses either answer
   ([core](../../../docs/spec/core.md#provide)). The query is answered by the capability and
   never reaches the port. A model-world stream answers `false`.
+
+### Size
+
+`stdout.size(o)` and `stderr.size(e)` return `Option[TermSize]`, where
+`pub type TermSize { cols: u16, rows: u16 }` counts character cells. A program uses it to
+wrap help text or size a progress bar, as Rust's `terminal_size` and Go's `term.GetSize`
+are used. There is no `stdin.size`, and the run never opens `/dev/tty`.
+
+- **Answer.** `None` when the stream's terminal bit is `false`, when the descriptor gives no
+  size, or when either dimension is 0. Otherwise the size the descriptor reports at the
+  call: `ioctl(fd, TIOCGWINSZ)` on the stream's own descriptor, on Linux and Darwin alike,
+  with the request constant taken from libc. The size is read at each call, so a window
+  resized during the run answers its new size; there is no resize notification.
+- **Authority.** The stream's own capability, and nothing else.
+- **Charging.** One step, nothing admitted, no wait, no failure.
+- **Replay.** Unlike the bit, the size is not part of the grant. A call on a stream whose
+  bit is `false` answers `None` without reaching the provider and adds no frame. A call on a
+  terminal is one provider operation, so a recording holds one frame per call with its
+  answer, and a replay answers each call from its frame whatever its own descriptors are.
+- **Virtual streams.** `Some(TermSize(cols: c, rows: r))` given to `provide.stdout` or
+  `provide.stderr` is the size the stream answers for its whole life, and a zero dimension
+  is a terminal that answers `None`, as a descriptor's. The query never reaches the port.
+  A model-world stream answers `None`.
 
 ### Verification properties
 
@@ -99,5 +124,8 @@ answer to choose colour, progress output or an interactive prompt, as Rust's
 |---|---|---|
 | **Bit matches `isatty` per stream** | testing for a character device in place of a terminal, or reading one descriptor for all three | Run a program that writes the three bits to a file, natively on both backends. Case 1: stdin and stdout on the slave of a pty from `openpty`, stderr on a pipe (`true`, `true`, `false`). Case 2: stdin from `/dev/null`, stdout to a regular file, stderr on the pty (`false`, `false`, `true`). Covered in `crates/hirsel-core-driver/src/host/child.rs`. |
 | **Replay answers from the grant** | a replay that probes its own descriptors | Record case 1 above, then replay it with all three descriptors on pipes. The replay ends `Sealed`. |
-| **Virtual bit** | a constructor that ignores its argument, or a query that queues on the port | `provide.stdout(64, true)` gives `true` and `provide.stderr(64, false)` gives `false`, including after the `Served` end is dropped. The server's `provide.next` sees no call. Covered in `core/core/tests/provide.hirsel`. |
+| **Virtual bit** | a constructor that ignores its argument, or a query that queues on the port | `provide.stdout(64, Some(TermSize(cols: 80, rows: 24)))` gives `true` and `provide.stderr(64, None)` gives `false`, including after the `Served` end is dropped. The server's `provide.next` sees no call. Covered in `core/core/tests/provide.hirsel`. |
+| **Size matches `TIOCGWINSZ` per stream** | reading one descriptor for both streams, swapping the dimensions, or answering a size for a pipe | A program writes both sizes to a file, natively on both backends. Stdout and stderr on a pty whose window is set to 132 by 43 give `132x43` twice; both on pipes give `none` twice. Covered in `crates/hirsel-core-driver/src/terminal_fixture.rs`. |
+| **Replay answers the size from the tape** | a replay that queries its own descriptors, or a non-terminal query that records a frame | Record that program with stdout on the 132 by 43 pty and stderr on a pipe: one size frame. Replay it on pipes: it writes the recorded sizes and ends `Sealed`. A run with both streams piped records no size frame. Covered in `crates/hirsel-core-driver/src/terminal_fixture.rs`. |
+| **Virtual size** | a constructor that drops the size, or a query that queues on the port | `provide.stdout(64, Some(TermSize(cols: 100, rows: 30)))` answers that size, a zero dimension answers `None` on a terminal, and `None` answers `None`; no port sees a call. Covered in `core/core/tests/provide.hirsel`. |
 

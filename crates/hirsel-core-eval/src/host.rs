@@ -208,7 +208,8 @@ impl Machine<'_> {
             | HostOp::ProvideNet
             | HostOp::ProvideExec
             | HostOp::PortFill
-            | HostOp::StreamTerminal => {
+            | HostOp::StreamTerminal
+            | HostOp::StreamSize => {
                 unreachable!()
             }
             // The model world grants no Cred (TLS-7), so no call reaches here.

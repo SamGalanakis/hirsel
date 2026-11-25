@@ -165,7 +165,10 @@ execution produced that tape.
 **Terminal bits.** The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant carries one
 byte after its kind: 1 when the stream was a terminal at launch, 0 otherwise
 ([stdin](../core/std/api/stdin.md#terminals)). `is_terminal` reads it and adds no frames, and
-a replay answers from it without probing its own descriptors.
+a replay answers from it without probing its own descriptors. A terminal's size is not in
+the grant: each `stdout.size` or `stderr.size` call on a stream whose bit is 1 is one
+`TERM_SIZE` operation frame holding the answer, and a call on a stream whose bit is 0 adds
+none ([stdin](../core/std/api/stdin.md#size)).
 
 **Standard input and environment.** Each `stdin.read` issue holds the spare capacity of
 its buffer and its deadline. Its delivery holds the bytes in their original fragment

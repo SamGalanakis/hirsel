@@ -226,7 +226,7 @@ fn leveled_json_log_contract(tasks: Tasks) -> bool waits {
     list.append(mut encoded, b"\xff")
     trace.encode_line(mut encoded, 1, Debug, None, "", list.new())
     let appended = encoded == b"\xff{\"time\":\"1970-01-01T00:00:00.000000001Z\",\"level\":\"DEBUG\",\"msg\":\"\"}\n"
-    let (err, port) = provide.stderr(bytes 4096, false)
+    let (err, port) = provide.stderr(bytes 4096, None)
     let mut served = take port
     let child = task.spawn(tasks, bytes 65536, err, write_log_lines)
     let first = expect_log_write(mut served, string.as_bytes("{\"time\":\"2023-11-14T22:13:20.123002345Z\",\"level\":\"WARN\",\"msg\":\"quote \\\" slash \\\\ line\\nnext\",\"trace_id\":\"00000000000012340000000000abcdef\",\"span_id\":\"0000000000000009\",\"attributes\":{\"ahead\":\"Infinity\",\"attempt\":20,\"b\\\"ack\":\"-Infinity\",\"bytes\":\"/w==\",\"finite\":1e-6,\"min\":-9223372036854775808,\"msg\":true,\"nan\":\"NaN\",\"token\":\"[secret]\",\"z\":\"é\\u0001\"}}\n"), Done)

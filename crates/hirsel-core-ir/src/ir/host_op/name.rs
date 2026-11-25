@@ -158,6 +158,7 @@ impl HostOp {
             HostOp::PortFill => "port_fill",
             HostOp::UdpFillPackets => "udp_fill_packets",
             HostOp::StreamTerminal => "stream_is_terminal",
+            HostOp::StreamSize => "stream_size",
         }
     }
 }

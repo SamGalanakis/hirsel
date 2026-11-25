@@ -606,7 +606,11 @@ unsafe extern "C" fn invoke(
                             };
                             (*files).registry.host_grant(p, handle, entry::ENV)
                         } else {
-                            (*files).registry.grant_with_terminal(p, h, terminal)
+                            (*files).registry.grant_with_terminal(
+                                p,
+                                h,
+                                crate::host_file::Terminal::of(terminal),
+                            )
                         }
                     }
                     Err(f) => return stopped(run, f),

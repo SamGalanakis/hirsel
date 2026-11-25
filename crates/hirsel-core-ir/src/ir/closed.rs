@@ -53,4 +53,7 @@ pub const CLOSED: &[&str] = &[
     "provide.exec_reply",
     "provide.commit",
     "provide.reply",
+    "provide.stdout_port",
+    "provide.stderr_port",
+    "provide.size_word",
 ];

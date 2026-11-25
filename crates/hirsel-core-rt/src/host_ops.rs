@@ -85,6 +85,49 @@ pub unsafe extern "C" fn hirsel_core_host_io(
     }
 }
 
+/// `stdout.size`, `stderr.size`: zero for a stream that is not a terminal, a
+/// virtual port's own size without reaching it, else one TERM_SIZE through the
+/// grant's provider, which a tape records and a replay answers.
+///
+/// # Safety
+/// Context is running and handle designates a stream grant in this run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_stream_size(
+    context: *mut Context,
+    handle: u64,
+    kind: u8,
+    site: u64,
+) -> Outcome {
+    // SAFETY: operands designate a valid entry or run-owned virtual grant.
+    unsafe {
+        crate::process::deny_describe_capability(context);
+        let terminal = if handle & DYNAMIC_GRANT != 0 {
+            (*(*context).host_files).registry.grant_terminal(handle)
+        } else {
+            Terminal::of((*(*(*context).run).capabilities.add((handle - 1) as usize)).terminal)
+        };
+        let value = match terminal {
+            Terminal::No => 0,
+            Terminal::Fixed(size) => size,
+            Terminal::Live => {
+                let mut request = request(TERM_SIZE, kind, site, carrier(ptr::null_mut()));
+                let provider = hirsel_core_capability_provider(context, handle);
+                request.handle = hirsel_core_capability_handle(context, handle);
+                let outcome = drive(context, provider, &mut request, None);
+                if outcome.error.tag != 0 {
+                    0
+                } else {
+                    outcome.value
+                }
+            }
+        };
+        Outcome {
+            value,
+            ..Outcome::default()
+        }
+    }
+}
+
 /// Read a clock through the capability's provider.
 ///
 /// # Safety

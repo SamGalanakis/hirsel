@@ -104,6 +104,7 @@ pub(crate) fn cancellation_point(operation: u8) -> bool {
             | MEDIA_AGREEMENT
             | MEDIA_CAPTURE
             | SCRAM_VERIFY
+            | TERM_SIZE
             | crate::foreign::handles::RELEASE_WAIT_OP
     )
 }

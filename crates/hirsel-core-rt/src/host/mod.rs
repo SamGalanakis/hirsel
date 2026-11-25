@@ -13,3 +13,21 @@ use linux as provider;
 
 pub use provider::exec;
 pub(crate) use provider::{clock, file, path, stat::stat, sync, sys, unix};
+
+/// A terminal's size as `cols | rows << 16` from `TIOCGWINSZ`, zero when the
+/// descriptor answers no size or either dimension is zero. Linux and Darwin
+/// share the call; only the request constant differs, and libc names it.
+pub(crate) fn terminal_size(fd: i32) -> u64 {
+    if fd < 0 {
+        return 0;
+    }
+    // SAFETY: TIOCGWINSZ writes one winsize into the pointed-to struct.
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &raw mut size) } != 0
+        || size.ws_col == 0
+        || size.ws_row == 0
+    {
+        return 0;
+    }
+    u64::from(size.ws_col) | u64::from(size.ws_row) << 16
+}

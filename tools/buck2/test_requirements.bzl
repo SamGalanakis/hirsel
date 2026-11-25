@@ -54,8 +54,13 @@ OPENAT2_TEST_CASES = {
     ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("provider_tests::")],
     "hirsel-core-driver-unittest": [
         "terminal_fixture::terminal_bits_follow_each_granted_descriptor",
+        "terminal_fixture::terminal_size_follows_each_granted_descriptor",
+        "terminal_fixture::terminal_size_replays_from_the_tape_and_a_pipe_records_none",
     ],
     "core-driver-native": [
+        "native::tests::xdg_directory_is_resolved_created_and_granted",
+        "native::tests::xdg_shaped_relative_path_is_a_path",
+        "native::tests::xdg_directory_follows_symlinks_and_refuses_a_dangling_one",
         "native::tests::dir_cranelift_entry",
         "native::tests::dir_llvm_entry",
         "native::tests::host_operations_cranelift",

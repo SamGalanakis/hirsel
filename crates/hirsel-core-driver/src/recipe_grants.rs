@@ -40,7 +40,13 @@ pub(crate) fn grant_units(recipe: &Recipe) -> BTreeSet<String> {
                 }
                 units.insert(line);
             }
-            GrantKind::Dir | GrantKind::Net | GrantKind::Env | GrantKind::Foreign => {
+            GrantKind::Dir => units.extend(
+                grant
+                    .values
+                    .iter()
+                    .map(|v| format!("{name}={}", hirsel_core_ids::launch::dir_display(v))),
+            ),
+            GrantKind::Net | GrantKind::Env | GrantKind::Foreign => {
                 units.extend(grant.values.iter().map(|v| format!("{name}={v}")));
             }
             // The program's own arguments, which every release reads.
@@ -96,7 +102,7 @@ pub(crate) fn refuse_unmatched_grants(
             options
                 .directories
                 .get(counts[GrantKind::Dir as usize])
-                .map(|dir| format!("--dir {dir:?}"))
+                .map(|dir| format!("--dir {:?}", hirsel_core_ids::launch::dir_display(dir)))
         })
         .or_else(|| {
             options

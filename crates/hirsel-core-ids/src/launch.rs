@@ -17,6 +17,92 @@ pub const LAUNCH_IMAGE_ENV: &str = "HIRSEL_LAUNCH_IMAGE";
 /// its launch passes the directory as an inherited descriptor instead, so the
 /// executable does not depend on where it was built. No path contains NUL.
 pub const INHERITED_SLOT: &str = "\0";
+/// The launcher-resolved directory forms (launch.md, Launcher-resolved
+/// directories): each form's name, its base variable and the base's default
+/// under `$HOME`.
+pub const XDG_FORMS: [(&str, &str, &str); 4] = [
+    ("xdg-config", "XDG_CONFIG_HOME", ".config"),
+    ("xdg-cache", "XDG_CACHE_HOME", ".cache"),
+    ("xdg-data", "XDG_DATA_HOME", ".local/share"),
+    ("xdg-state", "XDG_STATE_HOME", ".local/state"),
+];
+
+/// A launcher-resolved directory: one of [`XDG_FORMS`] and the application's
+/// directory name under its base.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Xdg<'a> {
+    pub form: usize,
+    pub app: &'a str,
+}
+
+impl Xdg<'_> {
+    /// The slot the configuration bakes: NUL, the form, `:`, the app. No path
+    /// contains NUL, so a slot is told from a path by its kind, never by
+    /// reading a path string.
+    pub fn slot(&self) -> String {
+        format!("\0{}:{}", XDG_FORMS[self.form].0, self.app)
+    }
+}
+
+impl fmt::Display for Xdg<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", XDG_FORMS[self.form].0, self.app)
+    }
+}
+
+/// Whether `app` may name an application's directory:
+/// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. The first character excludes `.`, `..`,
+/// hidden names and anything shaped like a flag.
+pub fn valid_app(app: &str) -> bool {
+    let bytes = app.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes[1..]
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A `--dir` value as the configuration bakes it: a path as written, or an
+/// `xdg-*:<app>` form as its tagged slot. A path that starts like a form is
+/// written with a leading `./`.
+pub fn dir_slot(text: &str) -> Result<String, String> {
+    for (form, (name, ..)) in XDG_FORMS.iter().enumerate() {
+        if let Some(app) = text
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
+            if !valid_app(app) {
+                return Err(format!(
+                    "--dir {text:?}: the application name must match [A-Za-z0-9][A-Za-z0-9._-]{{0,63}} (a directory with this name is written ./{text})"
+                ));
+            }
+            return Ok(Xdg { form, app }.slot());
+        }
+    }
+    Ok(text.to_owned())
+}
+
+/// The launcher-resolved directory a baked slot names, or None for a path or
+/// an inherited slot. A tagged slot of no known form is `Some(Err)`.
+pub fn xdg_slot(slot: &[u8]) -> Option<Result<Xdg<'_>, ()>> {
+    let tagged = slot.strip_prefix(b"\0").filter(|rest| !rest.is_empty())?;
+    let parsed = std::str::from_utf8(tagged).ok().and_then(|text| {
+        let (name, app) = text.split_once(':')?;
+        let form = XDG_FORMS.iter().position(|(n, ..)| *n == name)?;
+        valid_app(app).then_some(Xdg { form, app })
+    });
+    Some(parsed.ok_or(()))
+}
+
+/// A baked directory slot as `--dir` writes it, for displays.
+pub fn dir_display(slot: &str) -> std::borrow::Cow<'_, str> {
+    match xdg_slot(slot.as_bytes()) {
+        Some(Ok(xdg)) => xdg.to_string().into(),
+        _ => slot.into(),
+    }
+}
+
 /// The descriptor of the first inherited slot. Directory slots come first in
 /// grant order, then each Exec binding's workdir; a slot sealed as a path
 /// still takes its number. Fds 3 to 7 belong to the launcher.

@@ -125,6 +125,7 @@ impl HostOp {
             Self::PortFill => "hirsel_core_port_fill",
             Self::UdpFillPackets => "hirsel_core_udp_fill_packets",
             Self::StreamTerminal => "hirsel_core_stream_is_terminal",
+            Self::StreamSize => "hirsel_core_stream_size",
             _ => unreachable!(),
         }
     }

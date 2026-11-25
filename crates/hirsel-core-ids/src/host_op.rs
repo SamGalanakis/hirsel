@@ -168,6 +168,9 @@ host_ops! {
     SCHEDULE_SFRAME_OPENER = 179,
     /// TLS-8 T16: advance a schedule one ratchet step.
     SCHEDULE_SFRAME_RATCHET = 180,
+    /// A granted terminal stream's size (`stdout.size`, `stderr.size`). The value is
+    /// `cols | rows << 16`, zero when the descriptor gives no size.
+    TERM_SIZE = 181,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

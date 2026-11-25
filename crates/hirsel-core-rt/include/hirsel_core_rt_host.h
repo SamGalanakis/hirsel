@@ -147,6 +147,7 @@ uint8_t hirsel_core_check_cancel(HirselCoreContext *, uint64_t site);
    Main takes one uint64_t per parameter. entry_grant returns zero when missing.
    Args uses the same u64 operand convention; args_len/get also take context. */
 HirselCoreHostOutcome hirsel_core_stream_is_terminal(HirselCoreContext *, uint64_t, uint8_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_stream_size(HirselCoreContext *, uint64_t, uint8_t, uint64_t);
 uint64_t hirsel_core_entry_grant(const HirselCoreProcessConfig *, uint8_t kind, size_t index);
 bool hirsel_core_entry_grants_present(const HirselCoreProcessConfig *, const HirselCoreEntryRequirement *, size_t);
 const HirselCoreProvider *hirsel_core_capability_provider(const HirselCoreContext *, uint64_t);
@@ -323,8 +324,8 @@ HirselCoreHostOutcome hirsel_core_process_trigger(HirselCoreContext *, uint64_t 
  * capability's grant and written = the Served key; next answers written 1 with
  * value = the Call key, or written 0 at quiescence; reply answers value 1 for
  * Withdrawn. */
-HirselCoreHostOutcome hirsel_core_provide_stdout(HirselCoreContext *, uint64_t n, bool terminal, uint64_t);
-HirselCoreHostOutcome hirsel_core_provide_stderr(HirselCoreContext *, uint64_t n, bool terminal, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_stdout(HirselCoreContext *, uint64_t n, uint64_t size, uint64_t);
+HirselCoreHostOutcome hirsel_core_provide_stderr(HirselCoreContext *, uint64_t n, uint64_t size, uint64_t);
 HirselCoreHostOutcome hirsel_core_port_next(HirselCoreContext *, uint64_t served, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_word(HirselCoreContext *, uint64_t call, uint64_t i, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_secret(HirselCoreContext *, uint64_t call, uint64_t index, uint64_t);

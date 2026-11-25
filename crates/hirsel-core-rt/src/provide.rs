@@ -1377,7 +1377,12 @@ fn empty_request(operation: u8, handle: u64, site: u64) -> Request {
 /// `Served` key; a refusal answers as `Cells::add`.
 /// # Safety
 /// Context is running.
-unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bool) -> Outcome {
+unsafe fn provide_port(
+    context: *mut Context,
+    n: u64,
+    vocab: Vocab,
+    terminal: crate::host_file::Terminal,
+) -> Outcome {
     // SAFETY: forwarded.
     let files = unsafe { files(context) };
     // A sealed port answers Closed (IoError tag 4), or for a Net Reset
@@ -1452,7 +1457,7 @@ pub unsafe extern "C" fn hirsel_core_provide_dir(
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_port(context, n, Vocab::Dir, false) }
+    unsafe { provide_port(context, n, Vocab::Dir, crate::host_file::Terminal::No) }
 }
 
 /// # Safety
@@ -1464,7 +1469,7 @@ pub unsafe extern "C" fn hirsel_core_provide_net(
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_port(context, n, Vocab::Net, false) }
+    unsafe { provide_port(context, n, Vocab::Net, crate::host_file::Terminal::No) }
 }
 
 /// # Safety
@@ -1476,7 +1481,7 @@ pub unsafe extern "C" fn hirsel_core_provide_exec(
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_port(context, n, Vocab::Exec, false) }
+    unsafe { provide_port(context, n, Vocab::Exec, crate::host_file::Terminal::No) }
 }
 
 /// A caller key's Net port, when `provider` (the socket's recorded one) is
@@ -1570,17 +1575,27 @@ pub(crate) fn release_socket(provider: &Provider, key: u64) -> bool {
     gone
 }
 
+/// A virtual stream's terminal from its word (`provide.size_word`): zero is
+/// not a terminal; otherwise bit 32 is set over `cols | rows << 16`.
+fn fixed(size: u64) -> crate::host_file::Terminal {
+    if size == 0 {
+        crate::host_file::Terminal::No
+    } else {
+        crate::host_file::Terminal::Fixed(size)
+    }
+}
+
 /// # Safety
 /// Context is running.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_provide_stdout(
     context: *mut Context,
     n: u64,
-    terminal: bool,
+    size: u64,
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_port(context, n, Vocab::Stream, terminal) }
+    unsafe { provide_port(context, n, Vocab::Stream, fixed(size)) }
 }
 
 /// # Safety
@@ -1589,11 +1604,11 @@ pub unsafe extern "C" fn hirsel_core_provide_stdout(
 pub unsafe extern "C" fn hirsel_core_provide_stderr(
     context: *mut Context,
     n: u64,
-    terminal: bool,
+    size: u64,
     _site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { provide_port(context, n, Vocab::Stream, terminal) }
+    unsafe { provide_port(context, n, Vocab::Stream, fixed(size)) }
 }
 
 /// `provide.next(mut s) -> Option[Call[Op]] waits`: `written` 1 and `value`

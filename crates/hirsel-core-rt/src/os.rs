@@ -745,6 +745,8 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
     match unsafe { (*request).operation } {
         // Waiting is owned by the scheduler; issue completes at once.
         SLEEP_UNTIL | SLEEP_UNTIL_WALL => return Outcome::default(),
+        // One ioctl on a granted stream; it never blocks.
+        TERM_SIZE => return unsafe { issue_now(state, request) },
         RANDOM => return random::issue(unsafe { &mut *request }),
         TRY_LOCK | TRY_LOCK_SHARED | UNLOCK => {
             // SAFETY: nonblocking flock completes in place.
@@ -781,6 +783,17 @@ unsafe fn issue_now(state: *mut u8, request: *mut Request) -> Outcome {
     match request.operation {
         STDOUT => write_request(os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd), request),
         STDERR => write_request(os.stderr_fd(), request),
+        TERM_SIZE => {
+            let fd = if request.mode == 2 {
+                os.stderr_fd()
+            } else {
+                os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd)
+            };
+            Outcome {
+                value: crate::host::terminal_size(fd),
+                ..Outcome::default()
+            }
+        }
         _ => {
             let issue_file = os.issue_file.unwrap();
             // SAFETY: the directory provider was installed before the run issued this request.

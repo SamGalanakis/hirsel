@@ -372,6 +372,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretAeadOpen
                     | HostOp::StdinRead
                     | HostOp::StreamTerminal
+                    | HostOp::StreamSize
                     | HostOp::EnvGet
                     | HostOp::EnvLen
                     | HostOp::EnvName

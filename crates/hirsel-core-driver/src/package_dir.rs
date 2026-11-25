@@ -256,7 +256,11 @@ pub(crate) fn path_rule(path: &str, suffix: &str) -> Result<(), String> {
 /// A manifest's `grants` and `dirs`, in `--grant` and `--dir` syntax.
 fn manifest_grants(path: &Path, grants: &[String], dirs: &[String]) -> io::Result<Grants> {
     let mut out = Grants {
-        directories: dirs.to_vec(),
+        directories: dirs
+            .iter()
+            .map(|dir| hirsel_core_ids::launch::dir_slot(dir))
+            .collect::<Result<_, _>>()
+            .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?,
         ..Grants::default()
     };
     for grant in grants {

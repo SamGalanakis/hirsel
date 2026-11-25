@@ -83,6 +83,14 @@ program code and has no host effect, and reports as
 [PROG-3](programs.md#prog-3-entry) says. Nothing else in a program receives authority from
 the host. A configuration is refused if it supplies a grant with no matching entry parameter.
 
+A `Dir` parameter is granted a path, or a directory the launcher resolves from the
+invoker's XDG base directories (`xdg-config:<app>`, `xdg-cache:<app>`, `xdg-data:<app>`,
+`xdg-state:<app>`; [launch](launch.md#launcher-resolved-directories)). The launcher creates
+such a directory when it is missing, and only as its last step before `main`, after every
+other grant above is given, so a run that does not start still has no host effect. A run
+whose resolved directory has no base, or whose existing path is not a directory, does not
+start.
+
 At native Unix launch, a standard stream may be absent. `EBADF` while acquiring its
 corresponding inherited descriptor (0 for `Stdin`, 1 for `Stdout`, 2 for `Stderr`)
 still allows the grant, with a false terminal bit. A read that needs input reports

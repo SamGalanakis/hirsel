@@ -85,6 +85,48 @@ no mismatch report. A differing available digest, target or `n_place` produces
 a developer diagnostic only. Compatibility is decided by entry identity and
 schema fingerprints; a mismatch never rejects a compatible call.
 
+## Launcher-resolved directories
+
+A `Dir` grant is a path, or one of four forms the launcher resolves at startup:
+`xdg-config:<app>`, `xdg-cache:<app>`, `xdg-data:<app>` and `xdg-state:<app>`. A CLI
+keeps its configuration, cache, data and state there without taking `Env` or knowing
+the invoker's home directory, as the XDG Base Directory specification lays them out.
+Each is an end-state grant source, as `env:` is for a `Secret`.
+
+- **Name.** `<app>` matches `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, so it is never `.`,
+  `..`, a hidden name, a path or a flag. `hirsel build`, `run` and `test` refuse
+  another name in `--dir` or in a manifest's `dirs`, and the launcher checks it again.
+- **Encoding.** The baked configuration tags a launcher-resolved directory as its own
+  kind of slot (NUL, the form, `:`, the name; no path contains NUL), so the launcher
+  never recognises one by reading a path. A relative directory whose name starts
+  like a form is written with `./`: `--dir ./xdg-config:foo` is that path. Displays
+  (`Dir=` in the release manifest, `--dir` in a refusal) write the form as `--dir`
+  takes it.
+- **Base.** For `xdg-config` it is `$XDG_CONFIG_HOME` when that is set and absolute,
+  else `$HOME/.config`; for `xdg-cache`, `$XDG_CACHE_HOME` or `$HOME/.cache`; for
+  `xdg-data`, `$XDG_DATA_HOME` or `$HOME/.local/share`; for `xdg-state`,
+  `$XDG_STATE_HOME` or `$HOME/.local/state`. A relative value is ignored, as the XDG
+  specification says, and `$HOME` too must be absolute. The directory is `<base>/<app>`.
+  When neither variable gives a base the run does not start (status 103), with the
+  line `not started: directory grant `<form>:<app>` needs $<VAR> or $HOME set to an
+  absolute path`. The program sees neither value unless it also holds an `Env` that
+  covers it. Darwin uses the same rule; there is no `~/Library` form.
+- **Symlinks.** Each component is followed, as a path grant's open is. Every existing
+  component must be a directory once followed: a symlink to a directory is that
+  directory, and a dangling symlink or a file is refused (status 103, the `directory
+  grant` line with the resolved path), with nothing created through it.
+- **Creation.** The missing components are created with `mkdirat`, mode 0700, and an
+  `EEXIST` counts as success. They are created last: after every other grant is
+  given and every refusal [CAP-4](capabilities.md#cap-4-entry-grants) names has
+  passed, just before `main`, so a run that does not start leaves no directory behind.
+  A replay, a describe launch and a launch whose directories are rebound (the dry
+  run and the prepare launch) create nothing.
+- **Recording.** The directory is the `Dir` grant's root, as a path grant's is; a
+  recording holds the grant, not where it was resolved.
+
+`tmp:` is not a form: a shared temporary directory needs a private per-run directory
+and its cleanup, which are their own design.
+
 ## Describe launch
 
 `runner.main` runs the supplied `place(mut Registry[G, H])` under
@@ -267,7 +309,8 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
   followed by the interface's definition path `D` (`Foreign=sqlite@1/sqlite/Sqlite`), `Exec=`
   followed by the profile file path and the profile names as `--grant` took them
   ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)), and
-  `Dir=` followed by the path `--dir` took. The strings are a display of the recipe's grant bindings
+  `Dir=` followed by the path or launcher-resolved form `--dir` took
+  ([launcher-resolved directories](#launcher-resolved-directories)). The strings are a display of the recipe's grant bindings
   (below), which say which parameter receives each one. A directory path stays as
   given. It is resolved against the launch's working directory at startup, which
   the manifest does not know.

@@ -222,6 +222,7 @@ impl FunctionEmitter<'_> {
             | HostOp::SecretAeadOpen
             | HostOp::StdinRead
             | HostOp::StreamTerminal
+            | HostOp::StreamSize
             | HostOp::EnvGet
             | HostOp::EnvLen
             | HostOp::EnvName

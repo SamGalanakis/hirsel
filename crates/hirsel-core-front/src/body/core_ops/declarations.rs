@@ -44,6 +44,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
         match k {
             Kernel::Stream(_)
             | Kernel::StreamTerminal(_)
+            | Kernel::StreamSize(_)
             | Kernel::Host(_)
             | Kernel::ArgsLen
             | Kernel::ArgsGet

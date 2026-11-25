@@ -1027,8 +1027,8 @@ pub type StreamReply = Done | WriteFailed(WriteError)
 
 pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
 pub fn net(bytes n: u64) -> (Net, Served[NetOp])
-pub fn stdout(bytes n: u64, terminal: bool) -> (Stdout, Served[StreamOp])
-pub fn stderr(bytes n: u64, terminal: bool) -> (Stderr, Served[StreamOp])
+pub fn stdout(bytes n: u64, terminal: Option[TermSize]) -> (Stdout, Served[StreamOp])
+pub fn stderr(bytes n: u64, terminal: Option[TermSize]) -> (Stderr, Served[StreamOp])
 pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 pub fn dir_op(c: Call[DirOp]) -> DirOp
 pub fn net_op(c: Call[NetOp]) -> NetOp
@@ -1101,11 +1101,13 @@ pub fn trigger(take t: StopTrigger)
   `UdpSocket` ids at the seal and later ones at their drop, since no server will take their
   `Released` ([NET-16](net.md#net-16-udp-sockets-and-batches)). `provide.next` returns `None` only at
   quiescence ([FAIL-15](failure.md#fail-15-run-stops)).
-- **Terminal bit.** `provide.stdout` and `provide.stderr` take the stream's terminal bit
-  explicitly, and `stdout.is_terminal` and `stderr.is_terminal` on the result return it for
-  the stream's whole life. It is answered by the capability itself, never queued on the port,
-  and a sealed port still answers it. There is no virtual `Stdin`; a model-world stream
-  answers `false`.
+- **Terminal.** `provide.stdout` and `provide.stderr` take the stream's terminal
+  explicitly: `None` is not a terminal, and `Some(size)` is a terminal of that size. For the
+  stream's whole life `stdout.is_terminal` and `stderr.is_terminal` on the result return
+  whether it is `Some`, and `stdout.size` and `stderr.size` return the size, or `None` when
+  either dimension is 0 ([Size](../../core/std/api/stdin.md#size)). Both are answered by the
+  capability itself, never queued on the port, and a sealed port still answers them. There
+  is no virtual `Stdin`; a model-world stream answers `false` and `None`.
 - **Net authority.** A `provide.net` `Net` permits every address, name and TLS name, and
   `net.narrow` narrows it. Its TLS handshakes are answered by its server, so it never
   authorizes a granted `Secret` ([TLS-5](tls.md#tls-5-secrets)). `net.join` reunites a

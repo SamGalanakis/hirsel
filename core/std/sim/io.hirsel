@@ -4,13 +4,13 @@ pub opaque type Captured: send {
 }
 
 /// Creates a Stdout stream and its collector.
-pub fn capture(bytes n: u64, terminal: bool) -> (Stdout, Captured) {
+pub fn capture(bytes n: u64, terminal: Option[TermSize]) -> (Stdout, Captured) {
     let (out, port) = provide.stdout(bytes n, terminal)
     (out, Captured(port: take port))
 }
 
 /// Creates a Stderr stream and its collector.
-pub fn capture_stderr(bytes n: u64, terminal: bool) -> (Stderr, Captured) {
+pub fn capture_stderr(bytes n: u64, terminal: Option[TermSize]) -> (Stderr, Captured) {
     let (err, port) = provide.stderr(bytes n, terminal)
     (err, Captured(port: take port))
 }

@@ -1,6 +1,6 @@
 //! Startup refusals: what stops a run before main, and their `not started: ` lines.
 use super::{DirectoryOperations, OsProvider, View, bytes, io};
-use hirsel_core_ids::launch::{FIRST_INHERITED_FD, INHERITED_SLOT};
+use hirsel_core_ids::launch::{FIRST_INHERITED_FD, INHERITED_SLOT, XDG_FORMS, xdg_slot};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
@@ -21,6 +21,8 @@ pub(crate) enum StartupError {
     /// A process argument that is not UTF-8, by its index in the process
     /// argv: the program name is 0 and private options are counted.
     NonUtf8Arg(usize),
+    /// A launcher-resolved directory with no base or an invalid name: its line.
+    Xdg(String),
 }
 /// One parameter of main that the run cannot grant, by its index.
 #[derive(Clone, Copy)]
@@ -42,7 +44,7 @@ impl StartupError {
             | Self::Directory(_, error)
             | Self::UnsupportedHostOpenat2(error)
             | Self::UnixProbe(error) => error,
-            Self::Exec(reason) => io::Error::other(reason),
+            Self::Exec(reason) | Self::Xdg(reason) => io::Error::other(reason),
             Self::NonUtf8Arg(_) => io::Error::from_raw_os_error(libc::EILSEQ),
             Self::Missing(_) | Self::NetRules | Self::EnvPatterns | Self::EnvSecretOverlap(_) => {
                 io::Error::from_raw_os_error(libc::EACCES)
@@ -92,7 +94,7 @@ pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *co
                 b"Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
             );
         }
-        StartupError::Exec(reason) => {
+        StartupError::Exec(reason) | StartupError::Xdg(reason) => {
             line.extend_from_slice(reason.as_bytes());
             line.push(b'\n');
         }
@@ -131,20 +133,91 @@ pub(crate) fn take_inherited(fd: i32) -> io::Result<OwnedFd> {
     // SAFETY: the launch transferred this slot's descriptor to the run.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
-/// Open the directory grant `index`, configured as `slot`: a path, or
-/// [`INHERITED_SLOT`] for the directory the launch passed at its descriptor.
+/// A directory grant at startup: open, or a launcher-resolved directory
+/// whose path is checked and which is created and opened only after every
+/// other grant is (launch.md, Launcher-resolved directories).
+pub(super) enum DirectoryGrant {
+    Open(u64),
+    Resolved(std::path::PathBuf),
+}
+
+/// Open the directory grant `index`, configured as `slot`: a path,
+/// [`INHERITED_SLOT`] for the directory the launch passed at its descriptor,
+/// or a launcher-resolved directory, which is only resolved and checked here.
 pub(super) fn grant_directory(
     os: &mut OsProvider,
     operations: &DirectoryOperations,
     slot: &[u8],
     index: usize,
-) -> Result<u64, StartupError> {
+) -> Result<DirectoryGrant, StartupError> {
     if slot == INHERITED_SLOT.as_bytes() {
         let fd = FIRST_INHERITED_FD + index as i32;
         return take_inherited(fd)
             .and_then(|dir| (operations.adopt)(os, dir))
+            .map(DirectoryGrant::Open)
             .map_err(|error| StartupError::Directory(format!("/dev/fd/{fd}").into(), error));
     }
+    if let Some(xdg) = xdg_slot(slot) {
+        let xdg = xdg.map_err(|()| {
+            StartupError::Xdg("a launcher-resolved directory grant names no known form".into())
+        })?;
+        let (_, variable, default) = XDG_FORMS[xdg.form];
+        let absolute = |name: &str| {
+            std::env::var_os(name)
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        let base = absolute(variable)
+            .or_else(|| absolute("HOME").map(|home| home.join(default)))
+            .ok_or_else(|| {
+                StartupError::Xdg(format!(
+                    "directory grant `{xdg}` needs ${variable} or $HOME set to an absolute path"
+                ))
+            })?;
+        let path = base.join(xdg.app);
+        check_resolved(&path).map_err(|error| StartupError::Directory(path.clone(), error))?;
+        return Ok(DirectoryGrant::Resolved(path));
+    }
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(slot));
-    (operations.grant)(os, path).map_err(|error| StartupError::Directory(path.to_owned(), error))
+    (operations.grant)(os, path)
+        .map(DirectoryGrant::Open)
+        .map_err(|error| StartupError::Directory(path.to_owned(), error))
+}
+
+/// Each existing component of a resolved directory, symlinks followed, is a
+/// directory; a dangling symlink is refused, so nothing is created through it.
+fn check_resolved(path: &std::path::Path) -> io::Result<()> {
+    for prefix in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        match std::fs::symlink_metadata(prefix) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+            Ok(_) if !std::fs::metadata(prefix)?.is_dir() => {
+                return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Create a resolved directory's missing components, mode 0700 (an existing
+/// one is success), and open it. The last step before main.
+pub(super) fn create_resolved(
+    os: &mut OsProvider,
+    operations: &DirectoryOperations,
+    path: &std::path::Path,
+) -> Result<u64, StartupError> {
+    let refused = |error| StartupError::Directory(path.to_owned(), error);
+    for prefix in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let name = std::ffi::CString::new(prefix.as_os_str().as_bytes())
+            .map_err(|_| refused(io::Error::from_raw_os_error(libc::EINVAL)))?;
+        // SAFETY: the name is a live NUL-terminated path.
+        if unsafe { libc::mkdirat(libc::AT_FDCWD, name.as_ptr(), 0o700) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EEXIST) {
+                return Err(refused(error));
+            }
+        }
+    }
+    (operations.grant)(os, path).map_err(refused)
 }

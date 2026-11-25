@@ -14,9 +14,32 @@ pub fn process() -> (Process, StopTrigger)
 // queued on the port; `next` takes the oldest, and returns None only once
 // every task waits. A Call's Op holds scalars: a data field is its byte
 // length, which `payload` appends to `out`.
-pub fn stdout(bytes n: u64, terminal: bool) -> (Stdout, Served[StreamOp])
+pub fn stdout(bytes n: u64, terminal: Option[TermSize]) -> (Stdout, Served[StreamOp]) {
+    stdout_port(bytes n, size_word(terminal))
+}
 
-pub fn stderr(bytes n: u64, terminal: bool) -> (Stderr, Served[StreamOp])
+// The port with its terminal word: zero for a stream that is not a terminal.
+fn stdout_port(bytes n: u64, size: u64) -> (Stdout, Served[StreamOp])
+
+pub fn stderr(bytes n: u64, terminal: Option[TermSize]) -> (Stderr, Served[StreamOp]) {
+    stderr_port(bytes n, size_word(terminal))
+}
+
+// The port with its terminal word: zero for a stream that is not a terminal.
+fn stderr_port(bytes n: u64, size: u64) -> (Stderr, Served[StreamOp])
+
+// A virtual stream's terminal word: 0 for None, else bit 32 with `cols | rows << 16`.
+// A zero dimension is a terminal that gives no size, as a descriptor's.
+fn size_word(terminal: Option[TermSize]) -> u64 {
+    match terminal {
+        Some(TermSize(cols: c, rows: r)) => {
+            let cols: u64 = int.widen(c)
+            let rows: u64 = int.widen(r)
+            4294967296 | cols | rows << 16
+        },
+        None => 0,
+    }
+}
 
 pub fn dir(bytes n: u64) -> (Dir, Served[DirOp])
 

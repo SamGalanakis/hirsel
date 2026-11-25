@@ -32,6 +32,7 @@ pub(crate) use declarations::{assert_declarations, assert_no_ambient_input};
 pub(crate) enum Kernel {
     Stream(HostOp),
     StreamTerminal(u8),
+    StreamSize(u8),
     CarrierMove,
     CarrierView,
     StringShorten,
@@ -441,6 +442,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     n,
                 )?;
                 self.runtime_nonzero(Ty::Scalar(Scalar::U64), value, n)
+            }
+            Kernel::StreamSize(stream) => {
+                let kind = self.konst(Ty::Scalar(Scalar::U8), stream.into(), n)?;
+                let [value, ..] = self.runtime_row(
+                    RtOp::Host(HostOp::StreamSize),
+                    &[Arg::Value(vals[0]?), Arg::Value(kind)],
+                    n,
+                )?;
+                Some(value)
             }
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
             Kernel::ReadOnlyDir => {

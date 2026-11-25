@@ -6,9 +6,9 @@
     "lines": 1018
   },
   "core/core/tests/provide.hirsel": {
-    "lines": 2383,
-    "raise_revision": 2,
-    "reason": "tls-accept-build-2679"
+    "lines": 2422,
+    "raise_revision": 3,
+    "reason": "cli-s2-prims-2712"
   },
   "core/programs/platform/platform.hirsel": {
     "lines": 3851,
@@ -202,9 +202,9 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1931,
-    "raise_revision": 12,
-    "reason": "run-cli-s1b-manifest-2710"
+    "lines": 1801,
+    "raise_revision": 13,
+    "reason": "cli-s2-prims-2712"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2649,
@@ -240,9 +240,9 @@
     "reason": "macos-s5-macho-2582"
   },
   "crates/hirsel-core-eval/src/lib.rs": {
-    "lines": 6593,
-    "raise_revision": 11,
-    "reason": "tls-accept-followups-2762"
+    "lines": 6602,
+    "raise_revision": 12,
+    "reason": "cli-s2-prims-2712"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2609,
@@ -256,9 +256,9 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 3328,
-    "raise_revision": 9,
-    "reason": "macos-s9-target-consts-2508"
+    "lines": 3236,
+    "raise_revision": 10,
+    "reason": "cli-s2-prims-2712"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
     "lines": 2851,
@@ -395,9 +395,9 @@
     "lines": 1441
   },
   "crates/hirsel-core-rt/src/entry.rs": {
-    "lines": 1194,
-    "raise_revision": 1,
-    "reason": "cli-s1a-launch-2709"
+    "lines": 1234,
+    "raise_revision": 2,
+    "reason": "cli-s2-prims-2712"
   },
   "crates/hirsel-core-rt/src/host_ops_tests.rs": {
     "lines": 1051
@@ -424,9 +424,9 @@
     "lines": 1013
   },
   "crates/hirsel-core-rt/src/provide.rs": {
-    "lines": 2075,
-    "raise_revision": 2,
-    "reason": "tls-accept-followups-2762"
+    "lines": 2090,
+    "raise_revision": 3,
+    "reason": "cli-s2-prims-2712"
   },
   "crates/hirsel-core-rt/src/provider_s0_tests.rs": {
     "lines": 2346

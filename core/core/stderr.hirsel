@@ -4,3 +4,18 @@ pub fn write(err: Stderr, s: String) -> Result[(), WriteError] waits
 pub fn write_bytes(err: Stderr, b: Bytes) -> Result[(), WriteError] waits
 
 pub fn is_terminal(e: Stderr) -> bool
+
+// The terminal's size, or None when the stream is not a terminal or gives no size.
+pub fn size(e: Stderr) -> Option[TermSize] {
+    let w = size_word(e)
+    let cols: u16 = int.truncate(w)
+    let rows: u16 = int.truncate(w >> 16)
+    if cols == 0 || rows == 0 {
+        None
+    } else {
+        Some(TermSize(cols: cols, rows: rows))
+    }
+}
+
+// `cols | rows << 16`, zero when the stream is not a terminal or gives no size.
+fn size_word(e: Stderr) -> u64

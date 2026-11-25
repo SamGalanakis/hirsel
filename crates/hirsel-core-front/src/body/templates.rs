@@ -1245,9 +1245,9 @@ mod tests {
 
     #[test]
     fn logical_and_storage_constants() {
-        let (index, modules) = crate::tests::program_inputs("fn size[T](x: T) -> u64 { 0 }");
+        let (index, modules) = crate::tests::program_inputs("fn heft[T](x: T) -> u64 { 0 }");
         let p = Program::declare(&index, &modules);
-        let f = p.fns.iter().position(|f| f.path.0.name == "size").unwrap();
+        let f = p.fns.iter().position(|f| f.path.0.name == "heft").unwrap();
         let mut emitter = Emitter::new();
         let check = p.check_lower(f, &mut emitter);
         assert!(

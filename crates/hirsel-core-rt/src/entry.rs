@@ -145,6 +145,7 @@ pub unsafe extern "C" fn hirsel_core_stream_is_terminal(
         crate::process::deny_describe_capability(context);
         if handle & crate::host_file::DYNAMIC_GRANT != 0 {
             (*(*context).host_files).registry.grant_terminal(handle)
+                != crate::host_file::Terminal::No
         } else {
             (*(*(*context).run).capabilities.add((handle - 1) as usize)).terminal
         }
@@ -551,6 +552,7 @@ impl OsProcess {
             };
             let directory_ops = input.directory_ops.as_ref();
             let mut dirs = Vec::new();
+            let mut resolved = Vec::new();
             if let Some(scratch) = isolated_store {
                 let operations =
                     directory_ops.ok_or_else(|| io::Error::from_raw_os_error(libc::EACCES))?;
@@ -563,7 +565,15 @@ impl OsProcess {
                     } else {
                         bytes(*input.directories.add(index))
                     };
-                    dirs.push(startup::grant_directory(&mut os, operations, slot, index)?);
+                    dirs.push(
+                        match startup::grant_directory(&mut os, operations, slot, index)? {
+                            startup::DirectoryGrant::Open(handle) => handle,
+                            startup::DirectoryGrant::Resolved(path) => {
+                                resolved.push((index, path));
+                                0
+                            }
+                        },
+                    );
                 }
             }
             drop(inherited_store);
@@ -813,9 +823,39 @@ impl OsProcess {
                 });
                 return Err(StartupError::Missing(missing));
             }
-            if !describe_mode && let Some(n) = requirements.iter().position(|r| r.kind == DIR) {
-                let designation = process._metadata[(process.grants[n] - 1) as usize].handle;
-                probe(process.os.as_ref().unwrap(), designation)
+            // The host check for Dir (openat2) runs on the first Dir parameter's
+            // root; when that is a launcher-resolved directory, it runs once the
+            // directory is opened, as nothing else can show it.
+            let probe_dir = (!describe_mode)
+                .then(|| requirements.iter().position(|r| r.kind == DIR))
+                .flatten()
+                .map(|n| (process.grants[n] - 1) as usize);
+            let mut probe = Some(probe);
+            if let Some(at) = probe_dir
+                && process._metadata[at].handle != 0
+            {
+                (probe.take().unwrap())(process.os.as_ref().unwrap(), process._metadata[at].handle)
+                    .map_err(StartupError::UnsupportedHostOpenat2)?;
+            }
+            // Every other grant is given: create and open the launcher-resolved
+            // directories, so a run that does not start leaves none behind.
+            for (index, path) in resolved {
+                let operations =
+                    directory_ops.ok_or_else(|| io::Error::from_raw_os_error(libc::EACCES))?;
+                let os = process.os.as_mut().unwrap();
+                let handle = startup::create_resolved(os, operations, &path)?;
+                let at = process
+                    ._metadata
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, grant)| grant.kind == DIR)
+                    .nth(index)
+                    .unwrap()
+                    .0;
+                process._metadata[at].handle = handle;
+            }
+            if let (Some(at), Some(probe)) = (probe_dir, probe) {
+                probe(process.os.as_ref().unwrap(), process._metadata[at].handle)
                     .map_err(StartupError::UnsupportedHostOpenat2)?;
             }
             process.config.grants = process.grants.as_ptr();

@@ -393,7 +393,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                     Some(DefPath::from_full(&value).ok_or("invalid --name definition path")?)
             }
             Opt::CoreProduct => core_product = Some(PathBuf::from(value)),
-            Opt::Dir => grants.directories.push(value),
+            Opt::Dir => grants
+                .directories
+                .push(hirsel_core_ids::launch::dir_slot(&value)?),
             Opt::Grant => grants.grant(&value)?,
             Opt::Filter => test_filter = Some(value),
             Opt::TestExact => test_exact
@@ -1113,6 +1115,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 // A test runs in a working directory of its own; a directory
                 // the command line names is the invoker's.
                 for directory in &mut grants.directories {
+                    if hirsel_core_ids::launch::xdg_slot(directory.as_bytes()).is_some() {
+                        continue;
+                    }
                     *directory = std::path::absolute(&*directory)?
                         .to_str()
                         .ok_or("directory path is not UTF-8")?

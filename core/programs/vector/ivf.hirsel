@@ -1,0 +1,722 @@
+// Form B of a vector index (OPTIMAL-STORE-ENDSTATE §III.3, Store 3.2): IVF
+// with RaBitQ codes, read by an integer FastScan kernel and reranked exactly
+// through fetch_many. A projector folds the source table into immutable
+// generations of cluster blocks (STORE-SPEC §1.14); a query reads the
+// generations, masks every key the tail names or a newer generation
+// mentions, and scores the tail's rows exactly from the rows themselves.
+// Vectors per FastScan block: one Simd[u8, 32] lane per vector.
+const BATCH: u64 = 32
+
+// Candidates reranked exactly, per hit asked for.
+const RERANK: u64 = 10
+
+// The u16 accumulators hold (padded / 4) groups of at most 60 each.
+const MAX_PADDED: u64 = 4096
+
+// Training reads at most this many rows per cluster, and runs this many
+// Lloyd rounds.
+const TRAIN_ROWS: u64 = 32
+
+const TRAIN_ROUNDS: u64 = 8
+
+// RaBitQ's confidence constant for the 1-bit error bound (Gao & Long 2024).
+const EPSILON0: f64 = 1.9
+
+// The seed of the rotation's random signs. It is fixed, so every query and
+// every encode of an index use one rotation.
+const ROTATION_SEED: u64 = 0x5241424954510001u64
+
+const READ_ROWS: u64 = 4096
+
+const READ_BYTES: u64 = 67108864
+
+pub type Shape {
+    dims: u64,
+    clusters: u32,
+    steps: u64
+}
+
+// A trained centroid set: `clusters` codes of `dims` elements, row-major.
+type Lineage: codec {
+    clusters: u32,
+    centroids: List[i8]
+}
+
+// The lineage a generation's codes were encoded under. None is the
+// untrained lineage: one cluster whose centroid is zero.
+type GenMeta: codec {
+    lineage: Option[u32]
+}
+
+// Up to 32 vectors of one cluster of one generation. `signs` is the sign
+// plane interleaved for the kernel: byte p * 32 + v holds the signs of
+// dimensions 8p .. 8p + 7 of vector v. `base`, `f` and `g` are the 1-bit
+// estimator's per-vector factors.
+type Block: codec {
+    keys: List[Bytes],
+    signs: Bytes,
+    pop: List[u32],
+    base: List[f64],
+    f: List[f64],
+    g: List[f64]
+}
+
+// A key's entry in one generation: where its codes sit, with the raw code
+// (so a merge can encode it under another lineage), its 4-bit code and the
+// ex estimator's factor. Masked is a delete.
+type Placed: codec {
+    cluster: u32,
+    blk: u32,
+    slot: u32,
+    raw: List[i8],
+    ex: Bytes,
+    h: f64
+}
+
+type Mention: codec = At(Placed) | Masked
+
+type IvfTables: shareable + send {
+    blocks: store.Table[(u32, u32, u32), Block],
+    mentions: store.Table[(u32, Bytes), Mention],
+    fill: store.Table[(u32, u32), u32],
+    gens: store.Table[u32, GenMeta],
+    lineages: store.Table[u32, Lineage],
+    rotated: store.Table[(u32, u32), List[i64]]
+}
+
+pub opaque type Ivf[K, V]: shareable + send {
+    tables: IvfTables,
+    source: store.Table[K, V],
+    decl: store.ProjectionDecl,
+    extract: StaticFn[fn(K, V) -> Result[List[i8], Capacity]],
+    metric: Metric,
+    dims: u64,
+    padded: u64,
+    clusters: u32,
+    name: String
+}
+
+fn padded_dims(dims: u64) -> u64 {
+    let mut p = 8u64
+    while p < dims {
+        p *= 2
+    }
+    p
+}
+
+fn sub_table[K, V](mut d: store.Declare, name: String, suffix: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] {
+    let mut full: String = clone(name)
+    string.push(mut full, suffix)
+    let decl = store.declare_table(mut d, full, take key, take value)?
+    store.finish(mut d, take decl)
+}
+
+// Declares form B over `source`: a projection `name` and its tables, and
+// registers the projector that the store's head steps. `code` returns a
+// row's vector, which must have `shape.dims` elements. Every commit that
+// folds rows is bounded at `shape.steps`, the training commit included; a
+// fold that overruns it stops, and the store's head turns the projector off.
+pub fn declare_ivf[K, V](mut d: store.Declare, source: store.Table[K, V], name: String, metric: Metric, extract: StaticFn[fn(K, V) -> Result[List[i8], Capacity]], shape: Shape) -> Result[Ivf[K, V], Error] {
+    if shape.dims == 0 || padded_dims(shape.dims) > MAX_PADDED || shape.clusters == 0 {
+        return Error(Shape(shape))
+    }
+    let padded = padded_dims(shape.dims)
+    let decl = store.projection(mut d, name) ?=> |e| Store(e)
+    let blocks: store.Table[(u32, u32, u32), Block] = sub_table(mut d, name, ".blocks", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
+    let mentions: store.Table[(u32, Bytes), Mention] = sub_table(mut d, name, ".mentions", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
+    let fill: store.Table[(u32, u32), u32] = sub_table(mut d, name, ".fill", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
+    let gens: store.Table[u32, GenMeta] = sub_table(mut d, name, ".gens", std.codec.key_u32(), std.codec.of()) ?=> |e| Store(e)
+    let lineages: store.Table[u32, Lineage] = sub_table(mut d, name, ".lineages", std.codec.key_u32(), std.codec.of()) ?=> |e| Store(e)
+    let rotated: store.Table[(u32, u32), List[i64]] = sub_table(mut d, name, ".rotated", std.codec.key_of(), std.codec.of_list()) ?=> |e| Store(e)
+    let tables = IvfTables(blocks: take blocks, mentions: take mentions, fill: take fill, gens: take gens, lineages: take lineages, rotated: take rotated)
+    let v: Ivf[K, V] = Ivf(tables: take tables, source: clone(source), decl: clone(decl), extract: extract, metric: metric, dims: shape.dims, padded: padded, clusters: shape.clusters, name: clone(name))
+    let fold: store.Fold[Ivf[K, V], K, V, store.Error] = store.Fold(env: clone(v), apply: code.describe(ivf_apply), merge: code.describe(ivf_merge), drop: code.describe(ivf_drop))
+    store.projector(mut d, decl, source, Local, fold, store.cadence(), shape.steps) ?=> |e| Store(e)
+    Ok(take v)
+}
+
+// The projection's name, for store.rebuild and store.project_step.
+pub fn ivf_name[K, V](v: Ivf[K, V]) -> String {
+    clone(v.name)
+}
+
+// ---- The rotation: three rounds of random signs and a Walsh-Hadamard
+// transform, in integers. Unnormalized, so each round scales the squared
+// norm by `padded` exactly.
+fn rotation_signs(padded: u64) -> List[i64] {
+    let mut out: List[i64] = list.with_capacity(3 * padded)
+    let mut state = ROTATION_SEED
+    let mut bits = 0u64
+    let mut left = 0u64
+    for _ in 0u64 .. 3 * padded {
+        if left == 0 {
+            state = store.splitmix64(state)
+            bits = state
+            left = 64
+        }
+        list.push(mut out, if bits & 1 == 1 {
+            -1i64
+        } else {
+            1i64
+        })
+        bits = bits >> 1
+        left -= 1
+    }
+    take out
+}
+
+fn hadamard(mut x: List[i64], n: u64) {
+    let mut h = 1u64
+    while h < n {
+        let mut i = 0u64
+        while i < n {
+            for j in i .. i + h {
+                let a = x[j]
+                let b = x[j + h]
+                x[j] = a + b
+                x[j + h] = a - b
+            }
+            i += 2 * h
+        }
+        h *= 2
+    }
+}
+
+fn rotate(signs: List[i64], padded: u64, take x: List[i64]) -> List[i64] {
+    let mut y = take x
+    for round in 0u64 .. 3 {
+        for j in 0u64 .. padded {
+            y[j] = y[j] * signs[round * padded + j]
+        }
+        hadamard(mut y, padded)
+    }
+    take y
+}
+
+fn widened(v: List[i8], padded: u64) -> List[i64] {
+    let mut out: List[i64] = list.with_capacity(padded)
+    for x in v {
+        list.push(mut out, int.widen(x))
+    }
+    while list.len(out) < padded {
+        list.push(mut out, 0i64)
+    }
+    take out
+}
+
+// ---- Lineages and the encoder.
+type Trained {
+    id: Option[u32],
+    clusters: u64,
+    centroids: List[i8]
+}
+
+fn untrained(dims: u64) -> Trained {
+    let mut zero: List[i8] = list.with_capacity(dims)
+    for _ in 0u64 .. dims {
+        list.push(mut zero, 0i8)
+    }
+    Trained(id: None, clusters: 1, centroids: take zero)
+}
+
+fn distance2(a: List[i8], at: u64, b: List[i8], dims: u64) -> i64 {
+    let mut total = 0i64
+    for j in 0u64 .. dims {
+        let x: i64 = int.widen(a[at + j])
+        let y: i64 = int.widen(b[j])
+        total += (x - y) * (x - y)
+    }
+    total
+}
+
+fn nearest(t: Trained, dims: u64, raw: List[i8]) -> u64 {
+    let mut best = 0u64
+    let mut best_d = distance2(t.centroids, 0, raw, dims)
+    for c in 1u64 .. t.clusters {
+        let here = distance2(t.centroids, c * dims, raw, dims)
+        if here < best_d {
+            best = c
+            best_d = here
+        }
+    }
+    best
+}
+
+type Encoded {
+    cluster: u32,
+    signs: Bytes,
+    pop: u32,
+    base: f64,
+    f: f64,
+    g: f64,
+    ex: Bytes,
+    h: f64
+}
+
+fn to_f64(x: i64) -> f64 {
+    float.from_int(x)
+}
+
+fn floor_i64(x: f64) -> i64 {
+    let converted: Result[i64, FloatError] = float.to_int(float.floor(x))
+    match converted {
+        Ok(n) => n,
+        Error(_) => 0i64,
+    }
+}
+
+// The RaBitQ code of one vector under lineage `t`: its nearest centroid,
+// the sign plane of its rotated residual, and an extended 4-bit code whose
+// rescale maximizes its cosine with the residual (Extended RaBitQ).
+fn encode(t: Trained, metric: Metric, dims: u64, padded: u64, rotation: List[i64], raw: List[i8]) -> Encoded {
+    let cluster = nearest(t, dims, raw)
+    let at = cluster * dims
+    let mut residual: List[i64] = list.with_capacity(padded)
+    let mut r2 = 0i64
+    let mut rc = 0i64
+    for j in 0u64 .. dims {
+        let c: i64 = int.widen(t.centroids[at + j])
+        let x: i64 = int.widen(raw[j])
+        r2 += (x - c) * (x - c)
+        rc += (x - c) * c
+        list.push(mut residual, x - c)
+    }
+    while list.len(residual) < padded {
+        list.push(mut residual, 0i64)
+    }
+    let o = rotate(rotation, padded, take residual)
+    let mut signs: Bytes = list.with_capacity(padded / 8)
+    let mut pop = 0u32
+    let mut sabs = 0i64
+    let mut top = 0i64
+    for p in 0u64 .. padded / 8 {
+        let mut byte = 0u8
+        for i in 0u64 .. 8 {
+            let x = o[p * 8 + i]
+            if x >= 0 {
+                byte = byte | (1u8 << int.narrow(i))
+                pop += 1
+            }
+            let a = int.abs(x)
+            sabs += a
+            if a > top {
+                top = a
+            }
+        }
+        list.push(mut signs, byte)
+    }
+    let base = match metric {
+        Dot => to_f64(rc),
+        L2 => 0.0 - to_f64(r2),
+    }
+    let mut ex: Bytes = list.with_capacity(padded / 2)
+    if r2 == 0 {
+        for _ in 0u64 .. padded / 2 {
+            list.push(mut ex, 0x88u8)
+        }
+        return Encoded(cluster: int.narrow(cluster), signs: take signs, pop: pop, base: base, f: 0.0, g: 0.0, ex: take ex, h: 0.0)
+    }
+    let n = to_f64(int.narrow(padded))
+    let r2f = to_f64(r2)
+    let f = r2f / to_f64(sabs)
+    let xo = to_f64(sabs) / (n * n * float.sqrt(r2f))
+    let spread = 1.0 - xo * xo
+    let g = float.sqrt(r2f) * EPSILON0 * float.sqrt(if float.lt(spread, 0.0) {
+        0.0
+    } else {
+        spread
+    }) / (xo * float.sqrt(n - 1.0))
+    // The rescale grid: the largest |coordinate| maps to 2.0 .. 8.0 code
+    // units in steps of 0.25; the first best cosine wins.
+    let mut best_codes: List[i64] = list.new()
+    let mut best_y = 0i64
+    let mut best_score = 0.0f64
+    let topf = to_f64(top)
+    for k in 0u64 .. 25 {
+        let s = (2.0 + 0.25 * to_f64(int.narrow(k))) / topf
+        let mut codes: List[i64] = list.with_capacity(padded)
+        let mut y = 0i64
+        let mut norm = 0i64
+        for j in 0u64 .. padded {
+            let mut u = floor_i64(s * to_f64(o[j])) + 8
+            if u < 0 {
+                u = 0
+            }
+            if u > 15 {
+                u = 15
+            }
+            let w = 2 * u - 15
+            y += w * o[j]
+            norm += w * w
+            list.push(mut codes, u)
+        }
+        let yf = to_f64(y)
+        let fit = yf * yf / to_f64(norm)
+        if y > 0 && (list.len(best_codes) == 0 || float.gt(fit, best_score)) {
+            best_codes = take codes
+            best_y = y
+            best_score = fit
+        }
+    }
+    for i in 0u64 .. padded / 2 {
+        let lo: u8 = int.narrow(best_codes[2 * i])
+        let hi: u8 = int.narrow(best_codes[2 * i + 1])
+        list.push(mut ex, lo | (hi << 4))
+    }
+    Encoded(cluster: int.narrow(cluster), signs: take signs, pop: pop, base: base, f: f, g: g, ex: take ex, h: r2f / to_f64(best_y))
+}
+
+// ---- Training: Lloyd's k-means over the first rows of the source in key
+// order, from the first `clusters` of them.
+fn train[K, V](tx: store.Tx, v: Ivf[K, V]) -> Result[Option[Lineage], store.Error] {
+    let clusters: u64 = int.widen(v.clusters)
+    let wanted = TRAIN_ROWS * clusters
+    let mut sample: List[List[i8]] = list.new()
+    {
+        let mut rows = store.range(tx, v.source, Unbounded, Unbounded)?
+        while list.len(sample) < wanted {
+            let Some((take key, take value)) = store.next_in(tx, mut rows)? else {
+                break
+            }
+            let raw = ivf_code(v, key, value)?
+            list.push(mut sample, take raw)
+        }
+    }
+    if list.len(sample) < 4 * clusters {
+        return Ok(None)
+    }
+    let dims = v.dims
+    let mut centroids: List[i8] = list.with_capacity(clusters * dims)
+    for c in 0u64 .. clusters {
+        for j in 0u64 .. dims {
+            list.push(mut centroids, sample[c][j])
+        }
+    }
+    let mut t = Trained(id: None, clusters: clusters, centroids: take centroids)
+    for _ in 0u64 .. TRAIN_ROUNDS {
+        let mut sums: List[i64] = list.with_capacity(clusters * dims)
+        let mut counts: List[i64] = list.with_capacity(clusters)
+        for _ in 0u64 .. clusters * dims {
+            list.push(mut sums, 0i64)
+        }
+        for _ in 0u64 .. clusters {
+            list.push(mut counts, 0i64)
+        }
+        for raw in sample {
+            let c = nearest(t, dims, raw)
+            counts[c] = counts[c] + 1
+            for j in 0u64 .. dims {
+                let x: i64 = int.widen(raw[j])
+                sums[c * dims + j] = sums[c * dims + j] + x
+            }
+        }
+        for c in 0u64 .. clusters {
+            let n = counts[c]
+            if n > 0 {
+                for j in 0u64 .. dims {
+                    // The mean rounded half away from zero; it stays in i8.
+                    let s = sums[c * dims + j]
+                    let mean = if s >= 0 {
+                        (2 * s + n) / (2 * n)
+                    } else {
+                        0 - (0 - 2 * s + n) / (2 * n)
+                    }
+                    t.centroids[c * dims + j] = int.narrow(mean)
+                }
+            }
+        }
+    }
+    let Trained(centroids: take trained, ..) = take t
+    Ok(Some(Lineage(clusters: v.clusters, centroids: take trained)))
+}
+
+fn ivf_code[K, V](v: Ivf[K, V], key: K, value: V) -> Result[List[i8], store.Error] {
+    let raw = match (code.callable(v.extract))(key, value) {
+        Ok(take raw) => take raw,
+        Error(c) => return Error(Full(Allocation(c))),
+    }
+    if list.len(raw) != v.dims {
+        return Error(Limit(Value))
+    }
+    Ok(take raw)
+}
+
+fn lineage_of[K, V](tx: store.Tx, v: Ivf[K, V], id: Option[u32]) -> Result[Trained, store.Error] {
+    let Some(at) = id else {
+        return Ok(untrained(v.dims))
+    }
+    let Some(found) = store.fetch(tx, v.tables.lineages, at)? else {
+        return Error(MigrationFault)
+    }
+    Ok(Trained(id: Some(at), clusters: int.widen(found.clusters), centroids: clone(found.centroids)))
+}
+
+// The lineage generation `generation` encodes under, chosen at its first
+// write: the newest trained lineage of the live generations; with none, a
+// new one trained from the source (stored under this generation's id) once
+// the source has enough rows; else the untrained one.
+fn generation_lineage[K, V](mut tx: store.Tx, v: Ivf[K, V], generation: u32) -> Result[Trained, store.Error] {
+    if let Some(meta) = store.fetch(tx, v.tables.gens, generation)? {
+        return lineage_of(tx, v, meta.lineage)
+    }
+    let row = store.projection_row(tx, v.decl)?
+    let mut chosen: Option[u32] = None
+    for j in 0u64 .. list.len(row.generations) {
+        let id = row.generations[list.len(row.generations) - 1 - j].id
+        if let Some(meta) = store.fetch(tx, v.tables.gens, id)? {
+            if let Some(_) = meta.lineage {
+                chosen = meta.lineage
+                break
+            }
+        }
+    }
+    if let None = chosen {
+        if let Some(take trained) = train(tx, v)? {
+            let rotation = rotation_signs(v.padded)
+            for c in 0u64 .. int.widen(trained.clusters) {
+                let mut centroid: List[i8] = list.with_capacity(v.dims)
+                for j in 0u64 .. v.dims {
+                    list.push(mut centroid, trained.centroids[c * v.dims + j])
+                }
+                let turned = rotate(rotation, v.padded, widened(centroid, v.padded))
+                store.put(mut tx, v.tables.rotated, (generation, int.narrow(c)), take turned)?
+            }
+            store.put(mut tx, v.tables.lineages, generation, take trained)?
+            chosen = Some(generation)
+        }
+    }
+    store.put(mut tx, v.tables.gens, generation, GenMeta(lineage: chosen))?
+    lineage_of(tx, v, chosen)
+}
+
+fn key_bytes[K, V](v: Ivf[K, V], key: K) -> Bytes {
+    let mut out: Bytes = list.new()
+    std.codec.encode_key(store.key_codec(v.source), key, mut out)
+    take out
+}
+
+// Appends one encoded vector to its cluster's last block of `generation`
+// and records the key's mention.
+fn append[K, V](mut tx: store.Tx, v: Ivf[K, V], generation: u32, take key: Bytes, take raw: List[i8], take encoded: Encoded) -> Result[(), store.Error] {
+    let Encoded(cluster: cluster, signs: take signs, pop: pop, base: base, f: f, g: g, ex: take ex, h: h) = take encoded
+    let filled = match store.fetch(tx, v.tables.fill, (generation, cluster))? {
+        Some(n) => n,
+        None => 0u32,
+    }
+    let blk = filled / 32
+    let slot = filled % 32
+    let pairs = v.padded / 8
+    let mut block = match store.fetch(tx, v.tables.blocks, (generation, cluster, blk))? {
+        Some(take found) => take found,
+        None => {
+            let mut plane: Bytes = list.with_capacity(pairs * BATCH)
+            for _ in 0u64 .. pairs * BATCH {
+                list.push(mut plane, 0u8)
+            }
+            Block(keys: list.new(), signs: take plane, pop: list.new(), base: list.new(), f: list.new(), g: list.new())
+        },
+    }
+    let at: u64 = int.widen(slot)
+    for p in 0u64 .. pairs {
+        block.signs[p * BATCH + at] = signs[p]
+    }
+    list.push(mut block.keys, clone(key))
+    list.push(mut block.pop, pop)
+    list.push(mut block.base, base)
+    list.push(mut block.f, f)
+    list.push(mut block.g, g)
+    store.put(mut tx, v.tables.blocks, (generation, cluster, blk), take block)?
+    store.put(mut tx, v.tables.fill, (generation, cluster), filled + 1)?
+    let placed = Placed(cluster: cluster, blk: blk, slot: slot, raw: take raw, ex: take ex, h: h)
+    store.put(mut tx, v.tables.mentions, (generation, key), At(take placed))
+}
+
+// The fold's apply: a put encodes the row into the generation; a delete is
+// a mask. A key a generation already mentions is left as it is, so a rerun
+// changes nothing.
+fn ivf_apply[K, V](mut tx: store.Tx, v: Ivf[K, V], delta: store.Delta[K, V]) -> Result[(), store.Error] {
+    let key = key_bytes(v, delta.key)
+    if let Some(_) = store.fetch(tx, v.tables.mentions, (delta.generation, clone(key)))? {
+        return Ok(())
+    }
+    let Some(value) = view delta.value else {
+        return store.put(mut tx, v.tables.mentions, (delta.generation, take key), Masked)
+    }
+    let raw = ivf_code(v, delta.key, value)?
+    let t = generation_lineage(mut tx, v, delta.generation)?
+    let e = encode(t, v.metric, v.dims, v.padded, rotation_signs(v.padded), raw)
+    append(mut tx, v, delta.generation, take key, take raw, take e)
+}
+
+fn successor(key: Bytes) -> Bytes {
+    let mut out: Bytes = clone(key)
+    list.push(mut out, 0u8)
+    take out
+}
+
+// The first `rows` keys at or above `low` that any input mentions, in key
+// order.
+fn merge_keys[K, V](tx: store.Tx, v: Ivf[K, V], inputs: List[u32], low: Bytes, rows: u64) -> Result[List[Bytes], store.Error] {
+    let mut keys: List[Bytes] = list.new()
+    for generation in inputs {
+        let mut cursor = store.range(tx, v.tables.mentions, Included((generation, clone(low))), Excluded((generation + 1, list.new())))?
+        for _ in 0u64 .. rows {
+            let Some(((_, take key), _)) = store.next_in(tx, mut cursor)? else {
+                break
+            }
+            list.push(mut keys, take key)
+        }
+    }
+    list.sort(mut keys, fn(a, b) -> Order {
+        list.compare_bytes(a, b)
+    })
+    let mut distinct: List[Bytes] = list.new()
+    for key in keys {
+        if list.len(distinct) == rows {
+            break
+        }
+        let n = list.len(distinct)
+        if n == 0 || list.compare_bytes(distinct[n - 1], key) != Equal {
+            list.push(mut distinct, clone(key))
+        }
+    }
+    Ok(take distinct)
+}
+
+// The fold's merge: each key's newest mention among the inputs, its vector
+// encoded again under the output's lineage; a mask only when `masks`.
+fn ivf_merge[K, V](mut tx: store.Tx, v: Ivf[K, V], merge: store.Merge, limits: store.Limits) -> Result[Option[Bytes], store.Error] {
+    let low: Bytes = match merge.resume {
+        Some(raw) => clone(raw),
+        None => list.new(),
+    }
+    let keys = merge_keys(tx, v, merge.inputs, low, limits.rows)?
+    let t = generation_lineage(mut tx, v, merge.into)?
+    let rotation = rotation_signs(v.padded)
+    for key in keys {
+        if let Some(_) = store.fetch(tx, v.tables.mentions, (merge.into, clone(key)))? {
+            continue
+        }
+        let mut newest: Option[Mention] = None
+        for j in 0u64 .. list.len(merge.inputs) {
+            let generation = merge.inputs[list.len(merge.inputs) - 1 - j]
+            if let Some(take found) = store.fetch(tx, v.tables.mentions, (generation, clone(key)))? {
+                newest = Some(take found)
+                break
+            }
+        }
+        match take newest {
+            Some(At(take placed)) => {
+                let Placed(raw: take raw, ..) = take placed
+                let e = encode(t, v.metric, v.dims, v.padded, rotation, raw)
+                append(mut tx, v, merge.into, clone(key), take raw, take e)?
+            },
+            Some(Masked) => if merge.masks {
+                store.put(mut tx, v.tables.mentions, (merge.into, clone(key)), Masked)?
+            },
+            None => return Error(MigrationFault),
+        }
+    }
+    let n = list.len(keys)
+    if n < limits.rows {
+        return Ok(None)
+    }
+    Ok(Some(successor(keys[n - 1])))
+}
+
+// The fold's drop: up to `limits.rows` rows of a retired generation, its
+// mentions first; then its blocks, fill counts and record, and the lineage
+// it trained once no other generation encodes under it.
+fn ivf_drop[K, V](mut tx: store.Tx, v: Ivf[K, V], generation: u32, limits: store.Limits) -> Result[bool, store.Error] {
+    let mut budget = limits.rows
+    let mut keys: List[(u32, Bytes)] = list.new()
+    {
+        let mut cursor = store.range(tx, v.tables.mentions, Included((generation, list.new())), Excluded((generation + 1, list.new())))?
+        while list.len(keys) < budget {
+            let Some((take key, _)) = store.next_in(tx, mut cursor)? else {
+                break
+            }
+            list.push(mut keys, take key)
+        }
+    }
+    for key in keys {
+        let _ = store.delete(mut tx, v.tables.mentions, clone(key))?
+    }
+    budget -= list.len(keys)
+    if budget == 0 {
+        return Ok(true)
+    }
+    let mut blocks: List[(u32, u32, u32)] = list.new()
+    {
+        let mut cursor = store.range(tx, v.tables.blocks, Included((generation, 0u32, 0u32)), Excluded((generation + 1, 0u32, 0u32)))?
+        while list.len(blocks) < budget {
+            let Some((key, _)) = store.next_in(tx, mut cursor)? else {
+                break
+            }
+            list.push(mut blocks, key)
+        }
+    }
+    for key in blocks {
+        let _ = store.delete(mut tx, v.tables.blocks, key)?
+    }
+    budget -= list.len(blocks)
+    if budget == 0 {
+        return Ok(true)
+    }
+    let mut fills: List[(u32, u32)] = list.new()
+    {
+        let mut cursor = store.range(tx, v.tables.fill, Included((generation, 0u32)), Excluded((generation + 1, 0u32)))?
+        while list.len(fills) < budget {
+            let Some((key, _)) = store.next_in(tx, mut cursor)? else {
+                break
+            }
+            list.push(mut fills, key)
+        }
+    }
+    for key in fills {
+        let _ = store.delete(mut tx, v.tables.fill, key)?
+    }
+    budget -= list.len(fills)
+    if budget == 0 {
+        return Ok(true)
+    }
+    let _ = store.delete(mut tx, v.tables.gens, generation)?
+    if let Some(_) = store.fetch(tx, v.tables.lineages, generation)? {
+        if lineage_in_use(tx, v, generation)? {
+            return Ok(false)
+        }
+        let _ = store.delete(mut tx, v.tables.lineages, generation)?
+        for c in 0u64 .. int.widen(v.clusters) {
+            let _ = store.delete(mut tx, v.tables.rotated, (generation, int.narrow(c)))?
+        }
+    }
+    Ok(false)
+}
+
+// Whether a generation the projection still names encodes under `lineage`.
+// A lineage outlives the generation that trained it while one does; the
+// last such generation's drop deletes it.
+fn lineage_in_use[K, V](tx: store.Tx, v: Ivf[K, V], lineage: u32) -> Result[bool, store.Error] {
+    let row = store.projection_row(tx, v.decl)?
+    let mut named: List[u32] = list.new()
+    for held in row.generations {
+        list.push(mut named, held.id)
+    }
+    for id in row.retiring {
+        list.push(mut named, id)
+    }
+    if let Some(pass) = row.pass {
+        list.push(mut named, pass.generation)
+    }
+    if let Some(merge) = view row.merge {
+        list.push(mut named, merge.into)
+    }
+    for id in named {
+        if let Some(meta) = store.fetch(tx, v.tables.gens, id)? {
+            if meta.lineage == Some(lineage) {
+                return Ok(true)
+            }
+        }
+    }
+    Ok(false)
+}

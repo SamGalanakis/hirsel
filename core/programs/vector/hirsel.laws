@@ -1,3 +1,4 @@
 hirsel.laws 1
-vector@1/tests/exact_top_k src=0eed9105ba5a1b92 sig=e751de714e44df81 run=b1818af2b24835d3 bug=8a267a043582b1eb oracle=- rows=pending
-vector@1/tests/extremes src=79cf2f09d701ed9e sig=9b1127c69f74a9bd run=b1818af2b24835d3 bug=23f308d3853b54a8 oracle=- rows=pending
+vector@1/tests/exact_top_k src=0eed9105ba5a1b92 sig=df306a432a176873 run=b1818af2b24835d3 bug=8a267a043582b1eb oracle=- rows=pending
+vector@1/tests/extremes src=79cf2f09d701ed9e sig=50a26da94f95b11f run=b1818af2b24835d3 bug=23f308d3853b54a8 oracle=- rows=pending
+vector@1/tests/ivf_recall src=babe3ee3bb8325a1 sig=466a762fba26bceb run=b1818af2b24835d3 bug=af7d673187ab27c8 oracle=- rows=pending

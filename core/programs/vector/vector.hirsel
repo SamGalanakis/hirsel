@@ -4,7 +4,9 @@
 // rows its transaction sees, and the store's builder backfills it.
 pub type Metric = Dot | L2
 
-pub type Error = Store(store.Error) | Dimensions(u64, u64)
+// Shape is a form B shape that cannot be built: no dimensions, more than
+// 4096 once padded to a power of two, or no clusters.
+pub type Error = Store(store.Error) | Dimensions(u64, u64) | Shape(Shape)
 
 pub type Hit[K] {
     key: K,

@@ -44,6 +44,12 @@ fn tail_bases(pins: List[Pin]) -> TailBases {
     Some(arc.new(take out))
 }
 
+/// The key codec of the table. Rows rank in the order of the bytes it
+/// writes, which is the order a package breaks ties in.
+pub fn key_codec[K, V](t: Table[K, V]) -> std.codec.Key[K] {
+    t.key
+}
+
 // One page of the tail, in source key order: each changed key with its row
 // in the Tx's view, or None where the Tx's view has no row. `next` is the
 // first unreturned key, which the next page passes as `resume`.

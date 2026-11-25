@@ -1,0 +1,365 @@
+// Form B's query (ivf.hirsel declares the index and folds it).
+// ---- The query.
+type Cand {
+    key: Bytes,
+    score: i64
+}
+
+type Est {
+    key: Bytes,
+    est: f64
+}
+
+fn cand_order(a: Cand, b: Cand) -> Order {
+    if a.score > b.score {
+        return Less
+    }
+    if a.score < b.score {
+        return Greater
+    }
+    list.compare_bytes(a.key, b.key)
+}
+
+fn est_before(a: Est, b: Est) -> bool {
+    if float.gt(a.est, b.est) {
+        return true
+    }
+    float.eq(a.est, b.est) && list.compare_bytes(a.key, b.key) == Less
+}
+
+// Keeps the `r` best estimates, best first: estimate descending, then key
+// bytes ascending.
+fn admit(mut best: List[Est], r: u64, take e: Est) {
+    let mut at = list.len(best)
+    while at > 0 && est_before(e, best[at - 1]) {
+        at -= 1
+    }
+    if at == r {
+        return
+    }
+    std.list.insert(mut best, at, take e)
+    if list.len(best) > r {
+        list.truncate(mut best, r)
+    }
+}
+
+fn hits_of[K, V](v: Ivf[K, V], mut cands: List[Cand], k: u64) -> Result[List[Hit[K]], Error] {
+    std.list.sort(mut cands, fn(a, b) -> Order {
+        cand_order(a, b)
+    })
+    let mut out: List[Hit[K]] = list.new()
+    for c in cands {
+        if list.len(out) == k {
+            break
+        }
+        let key = std.codec.decode_key(store.key_codec(v.source), c.key) ?=> |e| Store(Decode(e))
+        list.push(mut out, Hit(key: take key, score: c.score))
+    }
+    Ok(take out)
+}
+
+fn exact_code[K, V](v: Ivf[K, V], key: K, value: V) -> Result[List[i8], Error] {
+    let raw = match (code.callable(v.extract))(key, value) {
+        Ok(take raw) => take raw,
+        Error(c) => return Error(Store(Full(Allocation(c)))),
+    }
+    if list.len(raw) != v.dims {
+        return Error(Dimensions(v.dims, list.len(raw)))
+    }
+    Ok(take raw)
+}
+
+// Every row the Tx sees, scored exactly: the answer when the projection has
+// no image to read, or the Tx no pin at it.
+fn exact_scan[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64) -> Result[List[Hit[K]], Error] {
+    let mut best: List[Hit[K]] = list.new()
+    let mut rows = store.range(tx, v.source, Unbounded, Unbounded) ?=> |e| Store(e)
+    while let Some((take key, take value)) = (store.next_in(tx, mut rows) ?=> |e| Store(e)) {
+        let raw = exact_code(v, key, value)?
+        keep(mut best, k, Hit(key: take key, score: score(v.metric, q, raw)))
+    }
+    Ok(take best)
+}
+
+fn holds(sorted: List[Bytes], key: Bytes) -> bool {
+    match std.list.binary_search_by(sorted, fn(x) -> Order {
+        list.compare_bytes(x, key)
+    }) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+}
+
+// The FastScan kernel over one block: for each of its 32 vectors, the sum of
+// the query's 4-bit codes over the dimensions whose sign bit is set. Lane v
+// of the result is out[(v % 2) * 16 + v / 2].
+fn scan_block(signs: Bytes, luts: Bytes, pairs: u64, mut out: List[u16]) {
+    let low: Simd[u8, 32] = simd.splat(15)
+    let high: Simd[u8, 32] = simd.splat(16)
+    let mut all: Simd[u16, 16] = simd.splat(0)
+    let mut odd: Simd[u16, 16] = simd.splat(0)
+    let mut p = 0u64
+    while p < pairs {
+        let c: Simd[u8, 32] = list.lanes(signs, p * 32)
+        let t: Simd[u8, 32] = list.lanes(luts, p * 32)
+        let x: Simd[u16, 16] = simd.cast(simd.swizzle(t, c & low))
+        let y: Simd[u16, 16] = simd.cast(simd.swizzle(t, (c >> 4) | high))
+        all = simd.wrapping_add(all, x)
+        all = simd.wrapping_add(all, y)
+        odd = simd.wrapping_add(odd, x >> 8)
+        odd = simd.wrapping_add(odd, y >> 8)
+        p += 1
+    }
+    // The even vectors' sums are all - 256 * odd, exact because each is
+    // below 2^16.
+    let even = simd.wrapping_sub(all, odd << 8)
+    list.put_lanes(mut out, even, 16)
+    list.put_lanes(mut out, odd, 16)
+}
+
+// The query's residual against one cluster, rotated, and its 4-bit
+// quantization: q'_j ~ lo + delta * code_j.
+type Probe {
+    residual: List[i64],
+    luts: Bytes,
+    lo: f64,
+    delta: f64,
+    total: f64,
+    centre: f64,
+    norm: f64
+}
+
+fn probe_of(metric: Metric, q: List[i8], centroid: List[i8], at: u64, dims: u64, rotated_q: List[i64], rotated_c: List[i64], padded: u64) -> Probe {
+    let mut residual: List[i64] = list.with_capacity(padded)
+    let mut lo = rotated_q[0] - rotated_c[0]
+    let mut hi = lo
+    let mut total = 0i64
+    for j in 0u64 .. padded {
+        let x = rotated_q[j] - rotated_c[j]
+        if x < lo {
+            lo = x
+        }
+        if x > hi {
+            hi = x
+        }
+        total += x
+        list.push(mut residual, x)
+    }
+    let mut dot = 0i64
+    let mut d2 = 0i64
+    for j in 0u64 .. dims {
+        let a: i64 = int.widen(q[j])
+        let c: i64 = int.widen(centroid[at + j])
+        dot += a * c
+        d2 += (a - c) * (a - c)
+    }
+    let lof = to_f64(lo)
+    let delta = (to_f64(hi) - lof) / 15.0
+    let mut codes: List[u8] = list.with_capacity(padded)
+    for j in 0u64 .. padded {
+        let u = if float.eq(delta, 0.0) {
+            0i64
+        } else {
+            floor_i64((to_f64(residual[j]) - lof) / delta + 0.5)
+        }
+        list.push(mut codes, int.narrow(if u > 15 {
+            15i64
+        } else {
+            u
+        }))
+    }
+    let pairs = padded / 8
+    let mut luts: Bytes = list.with_capacity(pairs * 32)
+    for p in 0u64 .. pairs {
+        for half in 0u64 .. 2 {
+            for m in 0u64 .. 16 {
+                let mut s = 0u8
+                for i in 0u64 .. 4 {
+                    if (m >> i) & 1 == 1 {
+                        s += codes[p * 8 + half * 4 + i]
+                    }
+                }
+                list.push(mut luts, s)
+            }
+        }
+    }
+    Probe(residual: take residual, luts: take luts, lo: lof, delta: delta, total: to_f64(total), centre: match metric {
+        Dot => to_f64(dot),
+        L2 => 0.0 - to_f64(d2),
+    }, norm: float.sqrt(to_f64(d2)))
+}
+
+// The clusters of one lineage nearest the query, best first, at most
+// `probes` of them: by inner product for Dot, by distance for L2.
+fn nearest_clusters(metric: Metric, t: Trained, dims: u64, q: List[i8], probes: u64) -> List[u64] {
+    let mut ranked: List[(i64, u64)] = list.with_capacity(t.clusters)
+    for c in 0u64 .. t.clusters {
+        let mut s = 0i64
+        for j in 0u64 .. dims {
+            let a: i64 = int.widen(q[j])
+            let x: i64 = int.widen(t.centroids[c * dims + j])
+            match metric {
+                Dot => {
+                    s += a * x
+                },
+                L2 => {
+                    s -= (a - x) * (a - x)
+                },
+            }
+        }
+        list.push(mut ranked, (s, c))
+    }
+    std.list.sort(mut ranked, fn(a, b) -> Order {
+        if a.0 > b.0 {
+            Less
+        } else if a.0 < b.0 {
+            Greater
+        } else if a.1 < b.1 {
+            Less
+        } else if a.1 > b.1 {
+            Greater
+        } else {
+            Equal
+        }
+    })
+    let mut out: List[u64] = list.new()
+    for r in ranked {
+        if list.len(out) == probes {
+            break
+        }
+        list.push(mut out, r.1)
+    }
+    take out
+}
+
+// Whether a generation newer than position `from` of `ids` mentions `key`.
+fn shadowed[K, V](tx: store.Tx, v: Ivf[K, V], ids: List[u32], from: u64, key: Bytes) -> Result[bool, store.Error] {
+    for j in from + 1 .. list.len(ids) {
+        if let Some(_) = store.fetch(tx, v.tables.mentions, (ids[j], clone(key)))? {
+            return Ok(true)
+        }
+    }
+    Ok(false)
+}
+
+// The `k` rows nearest `q` among the rows `tx` sees, nearest first, with
+// exact scores; equal scores rank in increasing primary key order, as in
+// form A. Each generation is read in the `probes` clusters of its lineage
+// nearest `q`; the tail's rows are scored exactly. A candidate's 1-bit
+// upper bound prunes it against the 10 * k best extended estimates, and
+// those 10 * k are reranked exactly from their rows through fetch_many.
+// With no image to read, every row is scored exactly. A Tiered source is
+// refused with Store(Tiered(Tail)).
+pub fn query_ivf[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64, probes: u32) -> Result[List[Hit[K]], Error] {
+    if list.len(q) != v.dims {
+        return Error(Dimensions(list.len(q), v.dims))
+    }
+    let mut cands: List[Cand] = list.new()
+    let mut changed: List[Bytes] = list.new()
+    let mut resume: Option[Bytes] = None
+    loop {
+        let read = store.read_tail(tx, v.decl, v.source, take resume, store.Limits(rows: READ_ROWS, byte_limit: READ_BYTES)) ?=> |e| Store(e)
+        let Some(take page) = take read else {
+            return exact_scan(tx, v, q, k)
+        }
+        let store.Tail(rows: take found, next: take after) = take page
+        for (key, value) in found {
+            let encoded = key_bytes(v, key)
+            if let Some(present) = view value {
+                let raw = exact_code(v, key, present)?
+                list.push(mut cands, Cand(key: clone(encoded), score: score(v.metric, q, raw)))
+            }
+            list.push(mut changed, take encoded)
+        }
+        let Some(take at) = take after else {
+            break
+        }
+        resume = Some(take at)
+    }
+    if k == 0 {
+        return Ok(list.new())
+    }
+    let projection = store.projection_row(tx, v.decl) ?=> |e| Store(e)
+    let mut ids: List[u32] = list.new()
+    for held in projection.generations {
+        list.push(mut ids, held.id)
+    }
+    let rotation = rotation_signs(v.padded)
+    let rotated_q = rotate(rotation, v.padded, widened(q, v.padded))
+    let pairs = v.padded / 8
+    let r = RERANK * k
+    let mut best: List[Est] = list.new()
+    let mut lanes: List[u16] = list.with_capacity(BATCH)
+    let mut zero: List[i64] = list.with_capacity(v.padded)
+    for _ in 0u64 .. v.padded {
+        list.push(mut zero, 0i64)
+    }
+    for gi in 0u64 .. list.len(ids) {
+        let generation = ids[gi]
+        let Some(meta) = store.fetch(tx, v.tables.gens, generation) ?=> |e| Store(e) else {
+            continue
+        }
+        let t = lineage_of(tx, v, meta.lineage) ?=> |e| Store(e)
+        let m = match v.metric {
+            Dot => 1.0f64,
+            L2 => 2.0f64,
+        }
+        for cluster in nearest_clusters(v.metric, t, v.dims, q, int.widen(probes)) {
+            let c32: u32 = int.narrow(cluster)
+            let Some(filled) = store.fetch(tx, v.tables.fill, (generation, c32)) ?=> |e| Store(e) else {
+                continue
+            }
+            let rotated_c = match meta.lineage {
+                Some(lineage) => match store.fetch(tx, v.tables.rotated, (lineage, c32)) ?=> |e| Store(e) {
+                    Some(take found) => take found,
+                    None => return Error(Store(MigrationFault)),
+                },
+                None => clone(zero),
+            }
+            let probe = probe_of(v.metric, q, t.centroids, cluster * v.dims, v.dims, rotated_q, rotated_c, v.padded)
+            for blk in 0u32 .. (filled + 31) / 32 {
+                let Some(block) = store.fetch(tx, v.tables.blocks, (generation, c32, blk)) ?=> |e| Store(e) else {
+                    return Error(Store(MigrationFault))
+                }
+                list.truncate(mut lanes, 0)
+                scan_block(block.signs, probe.luts, pairs, mut lanes)
+                for slot in 0u64 .. list.len(block.keys) {
+                    let acc: u64 = int.widen(lanes[(slot % 2) * 16 + slot / 2])
+                    let pop: u64 = int.widen(block.pop[slot])
+                    let signed = 2.0 * probe.lo * to_f64(int.narrow(pop)) + 2.0 * probe.delta * to_f64(int.narrow(acc)) - probe.total
+                    let upper = probe.centre + block.base[slot] + m * (block.f[slot] * signed + block.g[slot] * probe.norm)
+                    if list.len(best) == r && !float.gt(upper, best[r - 1].est) {
+                        continue
+                    }
+                    let key = view block.keys[slot]
+                    if holds(changed, key) || (shadowed(tx, v, ids, gi, key) ?=> |e| Store(e)) {
+                        continue
+                    }
+                    let Some(At(placed)) = store.fetch(tx, v.tables.mentions, (generation, clone(key))) ?=> |e| Store(e) else {
+                        return Error(Store(MigrationFault))
+                    }
+                    let mut z = 0i64
+                    for i in 0u64 .. pairs * 4 {
+                        let b = placed.ex[i]
+                        let lo: i64 = int.widen(b & 15)
+                        let hi: i64 = int.widen(b >> 4)
+                        z += (2 * lo - 15) * probe.residual[2 * i] + (2 * hi - 15) * probe.residual[2 * i + 1]
+                    }
+                    admit(mut best, r, Est(key: clone(key), est: probe.centre + block.base[slot] + m * placed.h * to_f64(z)))
+                }
+            }
+        }
+    }
+    let mut keys: List[K] = list.with_capacity(list.len(best))
+    for e in best {
+        list.push(mut keys, std.codec.decode_key(store.key_codec(v.source), e.key) ?=> |x| Store(Decode(x)))
+    }
+    let rows = store.fetch_many(tx, v.source, keys) ?=> |e| Store(e)
+    for i in 0u64 .. list.len(keys) {
+        if let Some(row) = view rows[i] {
+            let raw = exact_code(v, keys[i], row)?
+            list.push(mut cands, Cand(key: clone(best[i].key), score: score(v.metric, q, raw)))
+        }
+    }
+    hits_of(v, mut cands, k)
+}

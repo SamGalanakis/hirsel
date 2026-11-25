@@ -304,3 +304,258 @@ fn extremes(clock: Clock, random: Random) -> Result[(), ()] waits {
     result.unwrap(store.close(take db))
     Ok(())
 }
+
+// Form B (ivf.hirsel) against form A on one table: 2048 rows of 32
+// dimensions around 16 centres, probed 4 clusters of 16 at a time.
+const IVF_ROWS: u64 = 2048
+
+const IVF_DIMS: u64 = 32
+
+const IVF_CENTRES: u64 = 16
+
+const IVF_QUERIES: u64 = 16
+
+const IVF_K: u64 = 10
+
+const IVF_PROBES: u32 = 4
+
+type Far = vector.Ivf[u64, List[i8]]
+
+type Model = List[Option[List[i8]]]
+
+fn open_far(clock: Clock, random: Random, metric: vector.Metric) -> (store.Db, Points, Near, Far) waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut d = result.unwrap(store.declare(db, Migrate))
+    let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
+    let mut decl = result.unwrap(store.declare_table(mut d, "points", std.codec.key_u64(), codes))
+    let near = result.unwrap(vector.declare(mut d, mut decl, "near", metric, code.describe(row_code)))
+    let points = result.unwrap(store.finish(mut d, take decl))
+    let shape = vector.Shape(dims: IVF_DIMS, clusters: 16, steps: 1099511627776u64)
+    let far = result.unwrap(vector.declare_ivf(mut d, points, "far", metric, code.describe(row_code), shape))
+    let _ = result.unwrap(store.seal(mut db, take d))
+    (take db, points, take near, take far)
+}
+
+fn far_run(mut db: store.Db, points: Points, far: Far, take steps: List[Step], q: List[i8], k: u64) -> Found waits {
+    let ran = result.unwrap(store.run(mut db, None, (store.copy_env(points), store.copy_env(far), take steps, store.copy_env(q), k), fn(mut tx, input) -> Result[Found, store.Error] {
+        for step in input.2 {
+            match step {
+                Put(key, c) => store.put(mut tx, input.0, key, clone(c))?,
+                Delete(key) => {
+                    let _ = store.delete(mut tx, input.0, key)?
+                },
+            }
+        }
+        Ok(vector.query_ivf(tx, input.1, input.3, input.4, IVF_PROBES))
+    }))
+    match take ran {
+        Committed(take done) => clone(done.value),
+        _ => fail("ivf law: the transaction did not commit"),
+    }
+}
+
+fn far_look(db: store.Db, far: Far, q: List[i8], k: u64) -> Found waits {
+    let read_handle = result.unwrap(store.reader(db, 0u64))
+    let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(far), store.copy_env(q), k), fn(tx, input) -> Found {
+        vector.query_ivf(tx, input.0, input.1, input.2, IVF_PROBES)
+    }))
+    match take looked {
+        Seen(take seen) => clone(seen.value),
+        _ => fail("ivf law: the look did not run"),
+    }
+}
+
+// Steps the projector until it is idle, and counts the merges it made.
+fn settle(mut db: store.Db, far: Far) -> u64 waits {
+    let mut merged = 0u64
+    for _ in 0u64 .. 4096 {
+        match store.project_step(mut db, vector.ivf_name(far), store.Limits(rows: 256, byte_limit: 16777216)) {
+            Ok(Idle) => return merged,
+            Ok(Merged(_)) => {
+                merged += 1
+            },
+            Ok(_) => (),
+            Error(_) => fail("ivf law: a projector step failed"),
+        }
+    }
+    fail("ivf law: the projector never went idle")
+}
+
+fn centre(c: u64) -> List[i8] {
+    let mut state = 0x5eed0000u64 + c
+    let mut out: List[i8] = list.new()
+    for _ in 0u64 .. IVF_DIMS {
+        let drawn: u8 = int.narrow(draw(mut state) % 161)
+        let x: i64 = int.widen(drawn)
+        list.push(mut out, int.narrow(x - 80))
+    }
+    take out
+}
+
+fn near_centre(c: u64, seed: u64) -> List[i8] {
+    let mut state = seed
+    let middle = centre(c)
+    let mut out: List[i8] = list.new()
+    for j in 0u64 .. IVF_DIMS {
+        let drawn: u8 = int.narrow(draw(mut state) % 49)
+        let noise: i64 = int.widen(drawn)
+        let base: i64 = int.widen(middle[j])
+        list.push(mut out, int.narrow(base + noise - 24))
+    }
+    take out
+}
+
+fn write_rows(mut db: store.Db, points: Points, far: Far, take steps: List[Step]) waits {
+    let q: List[i8] = list.new()
+    let _ = far_run(mut db, points, far, take steps, q, 0)
+}
+
+fn same_hits(a: List[vector.Hit[u64]], b: List[vector.Hit[u64]]) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    for i in 0u64 .. list.len(a) {
+        if a[i].key != b[i].key || a[i].score != b[i].score {
+            return false
+        }
+    }
+    true
+}
+
+fn far_query(i: u64) -> List[i8] {
+    near_centre(i % IVF_CENTRES, 0x9e3779b9u64 * (i + 1))
+}
+
+// One store state: for each query, form B through a run and through a look
+// gives one list, of distinct present rows at their exact scores, in rank
+// order; with `exact`, it is form A's list. Returns how many of its hits
+// score at least form A's k-th score, summed over the queries.
+fn far_state(mut db: store.Db, points: Points, near: Near, far: Far, metric: vector.Metric, model: Model, whole: bool) -> u64 waits {
+    let mut found = 0u64
+    for i in 0u64 .. IVF_QUERIES {
+        let q = far_query(i)
+        let Ok(a) = look_query(db, near, q, IVF_K) else {
+            fail("ivf law: form A refused a query")
+        }
+        let empty: List[Step] = list.new()
+        let Ok(b) = far_run(mut db, points, far, take empty, q, IVF_K) else {
+            fail("ivf law: form B refused a query in a run")
+        }
+        let Ok(seen) = far_look(db, far, q, IVF_K) else {
+            fail("ivf law: form B refused a query in a look")
+        }
+        if !same_hits(b, seen) {
+            fail("ivf law: a run and a look of one state answer differently")
+        }
+        if whole && !same_hits(a, b) {
+            fail("ivf law: form B with no image differs from form A")
+        }
+        if list.len(b) != list.len(a) {
+            fail("ivf law: form B returned another number of hits")
+        }
+        for j in 0u64 .. list.len(b) {
+            let Some(c) = view model[b[j].key] else {
+                fail("ivf law: form B returned an absent row")
+            }
+            if b[j].score != model_score(metric, q, c) {
+                fail("ivf law: a form B score is not the row's exact score")
+            }
+            if j > 0 && (b[j - 1].score < b[j].score || (b[j - 1].score == b[j].score && b[j - 1].key >= b[j].key)) {
+                fail("ivf law: form B's hits are out of rank order")
+            }
+            if b[j].score >= a[list.len(a) - 1].score {
+                found += 1
+            }
+        }
+    }
+    found
+}
+
+fn churn(mut model: Model, round: u64) -> List[Step] {
+    let mut steps: List[Step] = list.new()
+    let mut state = 0xc4u64 + round
+    for _ in 0u64 .. 192 {
+        let key = draw(mut state) % (IVF_ROWS + 64)
+        if draw(mut state) % 3 == 0 {
+            list.push(mut steps, Delete(key))
+            model[key] = None
+        } else {
+            let toward = draw(mut state) % IVF_CENTRES
+            let c = near_centre(toward, draw(mut state))
+            list.push(mut steps, Put(key, clone(c)))
+            model[key] = Some(take c)
+        }
+    }
+    take steps
+}
+
+fn recall_line(found: u64) {
+    // recall@10 of at least 0.95 over the queries
+    if found * 100 < 95 * IVF_K * IVF_QUERIES {
+        fail("ivf law: recall@10 against form A is below 0.95")
+    }
+}
+
+/// bug: a form B query that misses a row's newest generation mention, reads
+/// a masked or tail-changed key from an old generation, mis-scores a
+/// candidate, or prunes with a wrong 1-bit bound loses recall against form
+/// A, returns an absent row, or answers a run and a look differently.
+@test
+fn ivf_recall(clock: Clock, random: Random) -> Result[(), ()] waits {
+    let metrics: Inline[vector.Metric, 2] =[L2, Dot]
+    for metric in metrics {
+        let (take opened, points, near, far) = open_far(clock, random, metric)
+        let mut db = take opened
+        let mut model: Model = list.new()
+        for _ in 0u64 .. IVF_ROWS + 64 {
+            list.push(mut model, None)
+        }
+        for batch in 0u64 .. IVF_ROWS / 256 {
+            let mut steps: List[Step] = list.new()
+            for r in batch * 256 .. batch * 256 + 256 {
+                let c = near_centre(r % IVF_CENTRES, r + 1)
+                list.push(mut steps, Put(r, clone(c)))
+                model[r] = Some(take c)
+            }
+            write_rows(mut db, points, far, take steps)
+        }
+        // Before the first publication: every row is read exactly.
+        let _ = far_state(mut db, points, near, far, metric, model, true)
+        let _ = settle(mut db, far)
+        recall_line(far_state(mut db, points, near, far, metric, model, false))
+        // The tail: the first query's best row deleted, and another row
+        // moved onto the query itself, out of its cluster.
+        let q = far_query(0)
+        let Ok(top) = look_query(db, near, q, 1) else {
+            fail("ivf law: form A refused a query")
+        }
+        let moved = (top[0].key + 1) % IVF_ROWS
+        let mut steps: List[Step] = list.new()
+        list.push(mut steps, Delete(top[0].key))
+        list.push(mut steps, Put(moved, clone(q)))
+        model[top[0].key] = None
+        model[moved] = Some(clone(q))
+        write_rows(mut db, points, far, take steps)
+        recall_line(far_state(mut db, points, near, far, metric, model, false))
+        if let L2 = metric {
+            let Ok(hits) = far_look(db, far, q, IVF_K) else {
+                fail("ivf law: form B refused a query")
+            }
+            if hits[0].key != moved || hits[0].score != 0 {
+                fail("ivf law: a row moved in the tail is not read from the tail")
+            }
+        }
+        // Churn folded into delta generations, and merged.
+        let mut merged = 0u64
+        for round in 0u64 .. 4 {
+            write_rows(mut db, points, far, churn(mut model, round))
+            merged += settle(mut db, far)
+        }
+        if merged == 0 {
+            fail("ivf law: no merge ran")
+        }
+        recall_line(far_state(mut db, points, near, far, metric, model, false))
+        result.unwrap(store.close(take db))
+    }
+    Ok(())
+}

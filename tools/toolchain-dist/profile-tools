@@ -36,7 +36,7 @@ def main():
                     raise SystemExit('LLVM tools archive checksum mismatch')
             tree = Path(temporary) / 'tree'
             tree.mkdir()
-            subprocess.run(['tar', '--zstd', '-xf', str(archive), '-C', str(tree)], check=True)
+            subprocess.run(['tar', '-I', 'zstd', '-xf', str(archive), '-C', str(tree)], check=True)
             tree.rename(destination)
     print(tool)
 

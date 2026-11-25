@@ -581,7 +581,6 @@ fn reoffer_run(net: Net, clock: Clock) waits {
     if p != 2 || version != 2 {
         fail("the re-offer went to another peer or at another version than 2")
     }
-    let refused_at = list.len(r.h.seen)
     say_as(mut r, 2, Answer(version + 1, b"answer"))
     talk_through(mut r)
     let mut fenced_at = list.len(r.h.seen)
@@ -613,8 +612,8 @@ fn reoffer_run(net: Net, clock: Clock) waits {
     }
     for (a, b) in[(1u32, 3u32), (3u32, 1u32)] {
         let (ssrc, _) = down_track(r, a, b)
-        if !reaches_from(r.h, refused_at, a, ssrc, b) {
-            fail("media between peers 1 and 3 stopped at the refusal")
+        if !reaches_from(r.h, fenced_at, a, ssrc, b) {
+            fail("media between peers 1 and 3 stopped at the revoke")
         }
     }
     say_as(mut r, 2, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))

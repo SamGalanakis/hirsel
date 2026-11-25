@@ -127,7 +127,7 @@ fn read_fences(
                 *unbuilt += 1;
                 continue;
             }
-            "" | "ebnf" | "sh" | "text" => continue,
+            "" | "ebnf" | "json" | "sh" | "text" => continue,
             _ => panic!("{location}: unknown fence info string {info:?}"),
         };
         let signatures = mode == ParseMode::Signatures;
